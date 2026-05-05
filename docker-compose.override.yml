@@ -1,0 +1,28 @@
+# Dev local Mac. Auto-loaded by `docker compose up`.
+# Exposes infra ports on host so pnpm/uv host-native can connect.
+services:
+  postgres:
+    ports: ["5432:5432"]
+
+  redis:
+    ports: ["6379:6379"]
+
+  api:
+    ports: ["8000:8000"]
+    command: ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./apps/api:/app
+      - ./data/uploads:/data/uploads
+
+  worker:
+    volumes:
+      - ./apps/api:/app
+      - ./data/uploads:/data/uploads
+
+  web:
+    ports: ["3000:3000"]
+    command: ["pnpm", "dev", "--host", "0.0.0.0"]
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.nuxt

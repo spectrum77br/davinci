@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><title>{{ app_name }} — Código de acesso</title></head>
+<body style="font-family: -apple-system, system-ui, sans-serif; background:#0a0a0a; color:#e5e5e5; padding:32px;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+    <tr><td align="center">
+      <table role="presentation" width="480" cellspacing="0" cellpadding="0" border="0" style="background:#171717; border:1px solid #262626; border-radius:8px;">
+        <tr><td style="padding:24px;">
+          <h1 style="margin:0 0 8px; font-size:18px; color:#fafafa;">{{ app_name }}</h1>
+          <p style="margin:0 0 16px; color:#a3a3a3; font-size:14px;">Seu código de acesso</p>
+
+          <div style="background:#0a0a0a; border:1px solid #262626; border-radius:6px; padding:16px; margin-bottom:16px;">
+            <div style="font-size:12px; color:#737373; letter-spacing:0.05em; text-transform:uppercase;">Verifique o prefixo</div>
+            <div style="font-size:24px; font-weight:600; color:#22d3ee; letter-spacing:0.2em; font-family:monospace; margin-top:4px;">{{ prefix }}</div>
+            <div style="font-size:12px; color:#a3a3a3; margin-top:8px;">Antes de digitar o código abaixo, confirme que o e-mail recebido começa com este prefixo. Se não bater, NÃO digite nada.</div>
+          </div>
+
+          <div style="background:#0a0a0a; border:1px solid #262626; border-radius:6px; padding:16px;">
+            <div style="font-size:12px; color:#737373; letter-spacing:0.05em; text-transform:uppercase;">Código</div>
+            <div style="font-size:28px; font-weight:700; color:#fafafa; letter-spacing:0.25em; font-family:monospace; margin-top:4px;">{{ code }}</div>
+            <div style="font-size:12px; color:#a3a3a3; margin-top:8px;">Expira em {{ ttl_minutes }} minutos. Use uma única vez.</div>
+          </div>
+
+          <p style="margin:24px 0 0; font-size:12px; color:#737373;">
+            Se você não solicitou este código, ignore este e-mail.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

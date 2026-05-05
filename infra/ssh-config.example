@@ -1,0 +1,9 @@
+# Append to ~/.ssh/config on Mac after creating Hetzner VPS.
+# Replace <VPS_IP> with the actual IP address.
+
+Host davinci
+  HostName <VPS_IP>
+  User root
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  ServerAliveInterval 30

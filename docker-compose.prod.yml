@@ -1,0 +1,40 @@
+# Prod Hetzner. Use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+services:
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=davinci_davinci_net
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.email=${TRAEFIK_ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data/traefik/letsencrypt:/letsencrypt
+    networks: [davinci_net]
+
+  api:
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.davinci-api.rule=Host(`${DOMAIN_API}`)
+      - traefik.http.routers.davinci-api.entrypoints=websecure
+      - traefik.http.routers.davinci-api.tls.certresolver=le
+      - traefik.http.services.davinci-api.loadbalancer.server.port=8000
+
+  web:
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.davinci-web.rule=Host(`${DOMAIN_APP}`)
+      - traefik.http.routers.davinci-web.entrypoints=websecure
+      - traefik.http.routers.davinci-web.tls.certresolver=le
+      - traefik.http.services.davinci-web.loadbalancer.server.port=3000

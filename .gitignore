@@ -1,0 +1,35 @@
+.env
+.env.*
+!.env.example
+
+node_modules/
+.pnpm-store/
+.nuxt/
+.output/
+dist/
+
+__pycache__/
+*.pyc
+.venv/
+.python-version
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+data/
+!data/.gitkeep
+/opt/
+
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# Local agent / IDE state
+.agent/
+.claude/
+.cursor/
+
+# Tooling
+*.bak
+.envrc
