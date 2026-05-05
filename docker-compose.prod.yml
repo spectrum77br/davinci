@@ -34,6 +34,8 @@ services:
     image: traefik:v3.5
     restart: unless-stopped
     depends_on: [socket-proxy]
+    environment:
+      DOCKER_API_VERSION: "1.45"
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
