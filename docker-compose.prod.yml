@@ -12,66 +12,17 @@ networks:
     name: davinci_net
 
 services:
-  # Mediates Docker API with version negotiation. Traefik's bundled Docker SDK
-  # defaults to API v1.24 which Docker 29 daemons reject (MinAPIVersion=1.40).
-  socket-proxy:
-    image: wollomatic/socket-proxy:1
+  caddy:
+    image: caddy:2-alpine
     restart: unless-stopped
-    user: "0:0"
-    command:
-      - "-loglevel=info"
-      - "-allowfrom=traefik"
-      - "-listenip=0.0.0.0"
-      - "-allowGET=/(v\\d+\\.\\d+/)?(_ping|version|events|containers(/.*)?|networks(/.*)?|services(/.*)?|tasks(/.*)?|configs(/.*)?|nodes(/.*)?|info)(\\?.*)?"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks: [davinci_net]
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges]
-
-  traefik:
-    image: traefik:v3.5
-    restart: unless-stopped
-    depends_on: [socket-proxy]
     environment:
-      DOCKER_API_VERSION: "1.45"
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --providers.docker.endpoint=tcp://socket-proxy:2375
-      - --providers.docker.network=davinci_net
-      - --entrypoints.web.address=:80
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-      - --entrypoints.websecure.address=:443
-      - --certificatesresolvers.le.acme.email=${TRAEFIK_ACME_EMAIL}
-      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
-      - --certificatesresolvers.le.acme.httpchallenge=true
-      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      DOMAIN_APP: ${DOMAIN_APP}
+      ACME_EMAIL: ${TRAEFIK_ACME_EMAIL}
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./data/traefik/letsencrypt:/letsencrypt
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config
     networks: [davinci_net]
-
-  api:
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=davinci_net
-      - traefik.http.routers.davinci-api.rule=Host(`${DOMAIN_APP}`) && PathPrefix(`/api`)
-      - traefik.http.routers.davinci-api.entrypoints=websecure
-      - traefik.http.routers.davinci-api.tls.certresolver=le
-      - traefik.http.routers.davinci-api.priority=100
-      - traefik.http.services.davinci-api.loadbalancer.server.port=8000
-
-  web:
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=davinci_net
-      - traefik.http.routers.davinci-web.rule=Host(`${DOMAIN_APP}`)
-      - traefik.http.routers.davinci-web.entrypoints=websecure
-      - traefik.http.routers.davinci-web.tls.certresolver=le
-      - traefik.http.routers.davinci-web.priority=1
-      - traefik.http.services.davinci-web.loadbalancer.server.port=3000

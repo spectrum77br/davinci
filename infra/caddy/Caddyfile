@@ -1,0 +1,30 @@
+# DaVinci prod reverse proxy.
+# Single domain, path-based routing.
+#   /api/*  -> api:8000
+#   /*      -> web:3000  (Nuxt SSR)
+#
+# Caddy handles TLS automatically via Let's Encrypt HTTP-01.
+# Email used for ACME registration is set via {$ACME_EMAIL} env var.
+
+{
+	email {$ACME_EMAIL}
+	# auto_https on by default
+}
+
+{$DOMAIN_APP} {
+	encode zstd gzip
+
+	@api path /api /api/*
+	handle @api {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
