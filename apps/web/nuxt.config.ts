@@ -16,11 +16,17 @@ export default defineNuxtConfig({
     typeCheck: false,
   },
   runtimeConfig: {
+    // Server-only (SSR, middleware fetches). In prod set this to
+    // http://api:8000 so SSR talks to the api container directly,
+    // bypassing Traefik. In dev defaults to public apiUrl.
+    apiUrlInternal: process.env.API_URL_INTERNAL || process.env.API_URL || 'http://127.0.0.1:8001',
     turnstile: {
       secretKey: process.env.TURNSTILE_SECRET_KEY || '',
     },
     public: {
-      apiUrl: process.env.API_URL || 'http://localhost:8000',
+      // Client-visible. In prod use absolute origin (https://app.hadken.com)
+      // so $fetch works from browser. In dev a 127.0.0.1:8001 absolute URL.
+      apiUrl: process.env.API_URL || 'http://127.0.0.1:8001',
       turnstile: {
         siteKey: process.env.TURNSTILE_SITE_KEY || '',
       },

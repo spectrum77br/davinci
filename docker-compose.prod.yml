@@ -1,4 +1,16 @@
-# Prod Hetzner. Use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Prod (Hetzner). Run with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# Path-based routing on a single domain (DOMAIN_APP):
+#   /api/*  -> api service
+#   /*      -> web service
+# Postgres + Redis are NOT in this compose; api/worker connect to pre-existing
+# `pg18` + `redis7` containers via the external `davinci_net` network.
+
+networks:
+  davinci_net:
+    external: true
+    name: davinci_net
+
 services:
   traefik:
     image: traefik:v3.1
@@ -6,7 +18,7 @@ services:
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
-      - --providers.docker.network=davinci_davinci_net
+      - --providers.docker.network=davinci_net
       - --entrypoints.web.address=:80
       - --entrypoints.web.http.redirections.entrypoint.to=websecure
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
@@ -26,15 +38,19 @@ services:
   api:
     labels:
       - traefik.enable=true
-      - traefik.http.routers.davinci-api.rule=Host(`${DOMAIN_API}`)
+      - traefik.docker.network=davinci_net
+      - traefik.http.routers.davinci-api.rule=Host(`${DOMAIN_APP}`) && PathPrefix(`/api`)
       - traefik.http.routers.davinci-api.entrypoints=websecure
       - traefik.http.routers.davinci-api.tls.certresolver=le
+      - traefik.http.routers.davinci-api.priority=100
       - traefik.http.services.davinci-api.loadbalancer.server.port=8000
 
   web:
     labels:
       - traefik.enable=true
+      - traefik.docker.network=davinci_net
       - traefik.http.routers.davinci-web.rule=Host(`${DOMAIN_APP}`)
       - traefik.http.routers.davinci-web.entrypoints=websecure
       - traefik.http.routers.davinci-web.tls.certresolver=le
+      - traefik.http.routers.davinci-web.priority=1
       - traefik.http.services.davinci-web.loadbalancer.server.port=3000

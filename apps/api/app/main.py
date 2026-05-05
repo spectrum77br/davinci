@@ -33,12 +33,16 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 
+# In prod, web and api share the same origin (path-routing on app.hadken.com),
+# so CORS is largely a no-op. Still set allow_origins explicitly for any
+# cross-origin SSR fetches and to satisfy strict browsers.
+_DEV_ORIGINS = [
+    "http://localhost:3000", "http://127.0.0.1:3000",
+    "http://localhost:3001", "http://127.0.0.1:3001",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.app_url] if settings.is_prod else [
-        "http://localhost:3000", "http://127.0.0.1:3000",
-        "http://localhost:3001", "http://127.0.0.1:3001",
-    ],
+    allow_origins=[settings.app_url] if settings.is_prod else _DEV_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

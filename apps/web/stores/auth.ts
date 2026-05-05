@@ -25,9 +25,15 @@ export const useAuthStore = defineStore('auth', {
   actions: {
     async fetchMe() {
       const config = useRuntimeConfig()
+      // SSR: hit internal docker DNS (no Traefik hop). Client: hit same-origin.
+      const base = (import.meta.server
+        ? (config as any).apiUrlInternal
+        : config.public.apiUrl) as string
       try {
-        const r = await $fetch<AuthUser | null>(`${config.public.apiUrl}/api/auth/me`, {
+        const r = await $fetch<AuthUser | null>(`${base}/api/auth/me`, {
           credentials: 'include',
+          // SSR must propagate the user's cookies to the api
+          headers: import.meta.server ? useRequestHeaders(['cookie']) : undefined,
         })
         this.user = r
       } catch {

@@ -5,8 +5,11 @@ networks:
     driver: bridge
 
 services:
+  # Local-only DB/Redis. In prod, api/worker connect to pre-existing pg18 + redis7
+  # containers via the external `davinci_net` network (see docker-compose.prod.yml).
   postgres:
     image: postgres:18-alpine
+    profiles: [local]
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-davinci}
@@ -23,6 +26,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    profiles: [local]
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
@@ -40,9 +44,6 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file: .env
-    depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
     volumes:
       - ./data/uploads:/data/uploads
     healthcheck:
@@ -59,9 +60,6 @@ services:
     restart: unless-stopped
     command: ["uv", "run", "arq", "app.worker.WorkerSettings"]
     env_file: .env
-    depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
     volumes:
       - ./data/uploads:/data/uploads
     networks: [davinci_net]
