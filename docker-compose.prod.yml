@@ -13,10 +13,8 @@ networks:
 
 services:
   traefik:
-    image: traefik:v3.1
+    image: traefik:v3.5
     restart: unless-stopped
-    environment:
-      DOCKER_API_VERSION: "1.45"
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
