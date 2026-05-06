@@ -116,7 +116,50 @@ async def sync_all_run(
             await s.commit()
 
             orch = SyncOrchestrator(s, user_id=uid, job=job)
-            await orch.run(products)
+            report = await orch.run(products)
+
+            if (job.payload or {}).get("trigger") == "daily_sync":
+                await _notify_daily_sync_completed(s, uid, job, report)
+
+
+async def _notify_daily_sync_completed(s, user_id: UUID, job, report) -> None:
+    """Emit `daily_sync_completed` alert + optional Telegram message."""
+    us = await s.get(UserSettings, user_id)
+    if us is None or not us.notify_daily_sync:
+        return
+    severity = AlertSeverity.SUCCESS if report.fatal == 0 else AlertSeverity.WARNING
+    title = "Sync diário concluído"
+    msg = (
+        f"Total {report.total_links} links — "
+        f"{report.ok} ok, {report.skipped} skipped, "
+        f"{report.retryable} retry, {report.fatal} fatal, "
+        f"{report.requires_review} review."
+    )
+    await emit_alert(
+        s,
+        user_id=user_id,
+        type=AlertType.DAILY_SYNC_COMPLETED,
+        severity=severity,
+        title=title,
+        message=msg,
+        payload={
+            "job_id": str(job.id),
+            "total_links": report.total_links,
+            "ok": report.ok,
+            "skipped": report.skipped,
+            "retryable": report.retryable,
+            "fatal": report.fatal,
+            "requires_review": report.requires_review,
+        },
+        dedupe_key=f"daily_sync:{user_id}:{datetime.now(SP_TZ).date().isoformat()}",
+    )
+    if us.notify_telegram:
+        from app.services.telegram import TelegramClient
+        tg = TelegramClient()
+        await tg.safe_send(
+            f"<b>DaVinci — Sync diário</b>\n{msg}",
+            chat_id=us.telegram_chat_id,
+        )
 
 
 async def sync_product_run(
