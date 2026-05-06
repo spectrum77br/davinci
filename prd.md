@@ -576,6 +576,7 @@ Definidos em `apps/api/app/worker.py` via `cron(...)` no `WorkerSettings`.
 | `auto_import_link` | a cada 30min | Tenta linkar `listings` órfãs por SKU |
 | `alerts_cleanup` | diário 03:00 BRT | Deleta alerts > 60d **(novo)** |
 | `background_jobs_gc` | diário 03:30 BRT | Marca jobs `running` órfãos (sem heartbeat há > 5min) como `failed` **(novo)** |
+| `sync_logs_partition_gc` | mensal dia 15 03:00 UTC | Cria partição `sync_logs_yYYYYmMM` do mês N+1 (`CREATE TABLE IF NOT EXISTS PARTITION OF`); idempotente **(novo — Fase 5)** |
 
 ### 8.2 Long-running jobs (enfileirados sob demanda)
 
@@ -1036,24 +1037,32 @@ Assinatura imutável a partir daqui — sub-fases 4b implementam, não alteram.
 
 ### Fase 5 — Webhook Bling + scheduler (1 dia)
 
-**Backend**
-- [ ] `POST /api/webhooks/bling` valida assinatura, enfileira `sync_product` async
-- [ ] APScheduler jobs: `daily_sync_scheduler`, `low_stock_polling`, `shopee_token_refresh`, `bling_token_refresh`, `shopee_discrepancy_check`, `auto_import_link`, `alerts_cleanup`, `background_jobs_gc`
-- [ ] `GET /api/settings/webhook-url` retorna URL pronta para colar no Bling
+> **Implementada em 2026-05-06.** Detalhe completo: [`prd-fase5.md`](prd-fase5.md). Cron é **Arq cron** (não APScheduler) — a entrada original mencionava APScheduler mas o stack adotou Arq desde a Fase 1; nada novo a registrar lá.
 
-**Aceite:** mudo estoque no Bling, em < 5s vejo log de sync nos marketplaces.
+**Backend**
+- [x] `POST /api/webhooks/bling` valida HMAC SHA256 (`X-Bling-Signature`), dedup Redis 24h por `X-Bling-Delivery`, atualiza `products.stock` inline, enfileira `sync_product_run` para cada link ativo
+- [x] Função worker `sync_product_run` com `pg_advisory_xact_lock` granular por produto
+- [x] `SyncOrchestrator.run(only_link_ids=...)` aceita filtro de links
+- [x] Crons Arq: `daily_sync_scheduler`, `bling_token_refresh`, `shopee_token_refresh`, `shopee_discrepancy_check`, `background_jobs_gc`, `sync_logs_partition_gc`
+- [x] Stubs no-op registrados: `low_stock_polling`, `alerts_cleanup` (Fase 6), `auto_import_link` (Fase 8)
+- [x] `GET /api/settings/webhook-url` retorna URL + secret_hint + lista de eventos
+- [x] Migration `0007_user_settings_webhook` (table `user_settings` + enum value `webhook_unmatched`)
+
+**Aceite:** mudo estoque no Bling, em < 5s vejo log de sync nos marketplaces. (testes: 21 verdes — webhook 5 + crons 7 + settings 4 + regressão orchestrator 5.)
 
 ### Fase 6 — Alertas (0.5 dia)
 
-**Backend (router `alerts`)**
-- [ ] `GET /api/alerts?limit=` paginado
-- [ ] `GET /api/alerts/last-daily-sync`
-- [ ] `GET /api/alerts/unread-count`
-- [ ] `POST /api/alerts/{id}/read`
-- [ ] `POST /api/alerts/read-all`
+> **Implementada em 2026-05-06.** Migration `0008_alerts` (table `alerts` + enums `alert_type`/`alert_severity` + índice unread + UNIQUE parcial `(user_id, dedupe_key)` para colapsar repetidos). Crons `low_stock_polling` (a cada 2min) e `alerts_cleanup` (03:00 BRT, > 60d) agora populados. Orchestrator emite alertas em `REQUIRES_REVIEW` (B3 banido vs revisão) e `FATAL` (B5).
 
-**Frontend `pages/alerts.vue`**
-- [ ] Lista com badge severidade, marcar lido, contador no header
+**Backend (router `alerts`)**
+- [x] `GET /api/alerts?limit=&offset=&unread_only=` paginado
+- [x] `GET /api/alerts/last-daily-sync`
+- [x] `GET /api/alerts/unread-count`
+- [x] `POST /api/alerts/{id}/read`
+- [x] `POST /api/alerts/read-all`
+
+**Frontend `pages/alertas.vue`**
+- [x] Lista com badge severidade, marcar lido, contador no header (`AppTopbar` polling a cada 60s)
 
 **Aceite:** badge no header reflete unread; marcar como lido funciona.
 

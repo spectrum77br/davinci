@@ -92,7 +92,13 @@ async def _setup_schema():
         "sync_log_action": (
             "refresh_bling", "update_stock", "update_price",
             "store_status_change", "auto_link", "test_connection",
+            "webhook_unmatched",
         ),
+        "alert_type": (
+            "low_stock", "sync_failure", "listing_banned", "requires_review",
+            "daily_sync_completed", "token_expiring", "generic",
+        ),
+        "alert_severity": ("info", "warning", "error", "success"),
     }
     async with _test_engine.begin() as conn:
         await conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
@@ -116,6 +122,7 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 
 _CLEANUP_TABLES = (
+    "alerts",
     "sync_logs",
     "oauth_states",
     "cadastros_stores",
@@ -126,6 +133,7 @@ _CLEANUP_TABLES = (
     "integrations",
     "stores",
     "companies",
+    "user_settings",
     "users",
 )
 

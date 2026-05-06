@@ -74,6 +74,7 @@ class SyncLogAction(StrEnum):
     STORE_STATUS_CHANGE = "store_status_change"
     AUTO_LINK = "auto_link"
     TEST_CONNECTION = "test_connection"
+    WEBHOOK_UNMATCHED = "webhook_unmatched"
 
 
 class BackgroundJobType(StrEnum):
@@ -94,3 +95,20 @@ class BackgroundJobStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class AlertSeverity(StrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    SUCCESS = "success"
+
+
+class AlertType(StrEnum):
+    LOW_STOCK = "low_stock"
+    SYNC_FAILURE = "sync_failure"
+    LISTING_BANNED = "listing_banned"
+    REQUIRES_REVIEW = "requires_review"
+    DAILY_SYNC_COMPLETED = "daily_sync_completed"
+    TOKEN_EXPIRING = "token_expiring"
+    GENERIC = "generic"

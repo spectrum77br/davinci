@@ -30,6 +30,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    AlertSeverity,
+    AlertType,
     BackgroundJob,
     BackgroundJobStatus,
     Integration,
@@ -42,6 +44,7 @@ from app.models import (
     SyncLogAction,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.alerts import emit_alert
 from app.services.marketplaces.base import SyncResult, SyncStatus
 from app.services.marketplaces.bling import BlingClient, parse_bling_product
 from app.services.marketplaces.factory import client_for
@@ -205,6 +208,8 @@ class SyncOrchestrator:
             else None
         )
 
+        await self._emit_link_alerts(product, link, result)
+
         self.session.add(
             SyncLog(
                 user_id=self.user_id,
@@ -223,6 +228,62 @@ class SyncOrchestrator:
                 payload=result.payload,
             )
         )
+
+    async def _emit_link_alerts(
+        self, product: Product, link: ProductLink, result: SyncResult
+    ) -> None:
+        """B5/B3: surface banned (REQUIRES_REVIEW) and FATAL outcomes as alerts.
+        Dedupe per (product, link) so re-runs collapse."""
+        if result.status == SyncStatus.REQUIRES_REVIEW:
+            classification = (result.payload or {}).get("shopee_classification")
+            if classification == "banned" or link.platform == IntegrationPlatform.SHOPEE:
+                await emit_alert(
+                    self.session,
+                    user_id=self.user_id,
+                    type=AlertType.LISTING_BANNED,
+                    severity=AlertSeverity.ERROR,
+                    title=f"Anúncio banido — {link.platform.value}: {product.sku}",
+                    message=(result.error_detail or result.error_code or "")[:500] or None,
+                    payload={
+                        "product_id": str(product.id),
+                        "link_id": str(link.id),
+                        "platform": link.platform.value,
+                        "error_code": result.error_code,
+                    },
+                    dedupe_key=f"listing_banned:{link.id}",
+                )
+            else:
+                await emit_alert(
+                    self.session,
+                    user_id=self.user_id,
+                    type=AlertType.REQUIRES_REVIEW,
+                    severity=AlertSeverity.WARNING,
+                    title=f"Revisão necessária — {link.platform.value}: {product.sku}",
+                    message=(result.error_detail or result.error_code or "")[:500] or None,
+                    payload={
+                        "product_id": str(product.id),
+                        "link_id": str(link.id),
+                        "platform": link.platform.value,
+                        "error_code": result.error_code,
+                    },
+                    dedupe_key=f"requires_review:{link.id}",
+                )
+        elif result.status == SyncStatus.FATAL:
+            await emit_alert(
+                self.session,
+                user_id=self.user_id,
+                type=AlertType.SYNC_FAILURE,
+                severity=AlertSeverity.ERROR,
+                title=f"Falha sync — {link.platform.value}: {product.sku}",
+                message=(result.error_detail or result.error_code or "")[:500] or None,
+                payload={
+                    "product_id": str(product.id),
+                    "link_id": str(link.id),
+                    "platform": link.platform.value,
+                    "error_code": result.error_code,
+                },
+                dedupe_key=f"sync_failure:{link.id}",
+            )
 
     def _tally(self, s: SyncStatus) -> None:
         self.report.total_links += 1
@@ -247,19 +308,25 @@ class SyncOrchestrator:
         )
         await self.session.commit()
 
-    async def run(self, products: Iterable[Product]) -> OrchestratorReport:
+    async def run(
+        self,
+        products: Iterable[Product],
+        *,
+        only_link_ids: list[UUID] | None = None,
+    ) -> OrchestratorReport:
         if self.job is not None:
             self.job.status = BackgroundJobStatus.RUNNING
             self.job.started_at = datetime.now(UTC)
             await self.session.commit()
 
+        link_filter = set(only_link_ids) if only_link_ids else None
+
         processed = 0
         for product in products:
-            links = (
-                await self.session.execute(
-                    select(ProductLink).where(ProductLink.product_id == product.id)
-                )
-            ).scalars().all()
+            stmt = select(ProductLink).where(ProductLink.product_id == product.id)
+            if link_filter is not None:
+                stmt = stmt.where(ProductLink.id.in_(link_filter))
+            links = (await self.session.execute(stmt)).scalars().all()
             for link in links:
                 await self._process_link(product, link)
                 processed += 1

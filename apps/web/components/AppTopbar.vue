@@ -3,6 +3,13 @@ import { Search, Bell, LogOut, Sun, Moon } from 'lucide-vue-next'
 
 const auth = useAuthStore()
 const colorMode = useState<'light' | 'dark'>('color-mode', () => 'light')
+const { unread, refreshUnreadCount } = useAlerts()
+
+if (import.meta.client && auth.user) {
+  refreshUnreadCount()
+  const id = setInterval(refreshUnreadCount, 60_000)
+  onScopeDispose(() => clearInterval(id))
+}
 
 if (import.meta.client) {
   const stored = localStorage.getItem('theme') as 'light' | 'dark' | null
@@ -48,13 +55,17 @@ async function logout() {
         <Moon v-else class="size-[18px]" />
       </button>
 
-      <button
-        type="button"
+      <NuxtLink
+        to="/alertas"
         class="relative rounded-lg h-9 w-9 grid place-items-center text-muted-foreground hover:text-foreground hover:bg-muted"
+        :title="unread > 0 ? `${unread} não lidos` : 'Alertas'"
       >
         <Bell class="size-[18px]" />
-        <span class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary" />
-      </button>
+        <span
+          v-if="unread > 0"
+          class="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold grid place-items-center"
+        >{{ unread > 99 ? '99+' : unread }}</span>
+      </NuxtLink>
 
       <div class="mx-2 h-6 w-px bg-border" />
 

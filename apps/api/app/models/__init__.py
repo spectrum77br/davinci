@@ -1,9 +1,12 @@
+from app.models.alert import Alert
 from app.models.auth_code import AuthCode
 from app.models.base import Base
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.enums import (
     MARKETPLACES,
     PLATFORMS,
+    AlertSeverity,
+    AlertType,
     BackgroundJobStatus,
     BackgroundJobType,
     CadastroStatus,
@@ -20,8 +23,12 @@ from app.models.integration import Integration, OAuthState
 from app.models.product import BackgroundJob, Product, ProductLink
 from app.models.sync_log import SyncLog
 from app.models.user import User
+from app.models.user_settings import UserSettings
 
 __all__ = [
+    "Alert",
+    "AlertSeverity",
+    "AlertType",
     "AuthCode",
     "BackgroundJob",
     "BackgroundJobStatus",
@@ -47,5 +54,6 @@ __all__ = [
     "SyncLogAction",
     "User",
     "UserRole",
+    "UserSettings",
     "UserStatus",
 ]
