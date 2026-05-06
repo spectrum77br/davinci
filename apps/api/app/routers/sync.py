@@ -79,6 +79,34 @@ async def enqueue_sync_all(
     return JobCreatedOut(job_id=job.id)
 
 
+@router.post(
+    "/jobs/backfill-ml-stock",
+    response_model=JobCreatedOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def enqueue_backfill_ml_stock(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+) -> JobCreatedOut:
+    """One-shot repair (B2): re-fetch ML stock for links with stock=0 or
+    last_sync_at=NULL. No outbound push."""
+    job = BackgroundJob(
+        type=BackgroundJobType.BACKFILL_ML_STOCK,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={},
+    )
+    session.add(job)
+    await session.flush()
+
+    pool = await get_arq_pool()
+    arq = await pool.enqueue_job("ml_backfill_run", str(job.id), str(user.id))
+    if arq is not None:
+        job.arq_job_id = arq.job_id
+    await session.commit()
+    return JobCreatedOut(job_id=job.id)
+
+
 @router.post("/sync/product/{product_id}", response_model=JobOut)
 async def sync_product(
     product_id: UUID,

@@ -19,6 +19,7 @@ from app.models import (
 from app.services.advisory_lock import try_user_sync_lock
 from app.services.auto_link import run_auto_link
 from app.services.email import get_email_sender, render_otp_html
+from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.sync_orchestrator import SyncOrchestrator
 
 logger = structlog.get_logger()
@@ -104,6 +105,19 @@ async def sync_all_run(
             await orch.run(products)
 
 
+async def ml_backfill_run(
+    ctx: dict,
+    job_id: str,
+    user_id: str,
+) -> None:
+    async with session_scope() as s:
+        await run_backfill_ml_stock(
+            s,
+            job_id=UUID(job_id),
+            user_id=UUID(user_id),
+        )
+
+
 async def startup(ctx: dict) -> None:
     logger.info("worker_startup")
 
@@ -114,7 +128,13 @@ async def shutdown(ctx: dict) -> None:
 
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
-    functions = [send_otp_email, auth_codes_cleanup, auto_link_run, sync_all_run]
+    functions = [
+        send_otp_email,
+        auth_codes_cleanup,
+        auto_link_run,
+        sync_all_run,
+        ml_backfill_run,
+    ]
     cron_jobs = [
         cron(
             auth_codes_cleanup,

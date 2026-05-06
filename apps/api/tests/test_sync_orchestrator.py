@@ -208,8 +208,9 @@ async def test_orchestrator_bling_refresh_writes_stock(
 async def test_orchestrator_skips_unimplemented_platform(
     db: AsyncSession, user: User
 ) -> None:
+    # Use Shopee — adapter still pending in 4b.Shopee.
     _, store = await _make_company_store(db, user)
-    integ = await _make_integration(db, user, store, IntegrationPlatform.ML)
+    integ = await _make_integration(db, user, store, IntegrationPlatform.SHOPEE)
     p, link = await _make_product_with_link(
         db, user, integ, store, bling_product_id=99, initial_stock=5
     )
