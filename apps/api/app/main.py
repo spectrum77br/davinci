@@ -12,7 +12,9 @@ from app.routers import auth as auth_router
 from app.routers import cadastros as cadastros_router
 from app.routers import companies as companies_router
 from app.routers import integrations as integrations_router
+from app.routers import jobs as jobs_router
 from app.routers import oauth as oauth_router
+from app.routers import products as products_router
 from app.routers import stores as stores_router
 from app.routers import users as users_router
 from app.services.bootstrap import promote_owner_if_needed
@@ -66,6 +68,8 @@ app.include_router(stores_router.router)
 app.include_router(cadastros_router.router)
 app.include_router(integrations_router.router)
 app.include_router(oauth_router.router)
+app.include_router(products_router.router)
+app.include_router(jobs_router.router)
 
 
 @app.get("/api/health")

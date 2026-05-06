@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import structlog
 from arq import cron
@@ -8,6 +9,7 @@ from sqlalchemy import delete
 from app.config import get_settings
 from app.db import session_scope
 from app.models import AuthCode
+from app.services.auto_link import run_auto_link
 from app.services.email import get_email_sender, render_otp_html
 
 logger = structlog.get_logger()
@@ -38,6 +40,21 @@ async def auth_codes_cleanup(ctx: dict) -> None:
         logger.info("auth_codes_cleanup_done", deleted=result.rowcount or 0)
 
 
+async def auto_link_run(
+    ctx: dict,
+    job_id: str,
+    user_id: str,
+    integration_ids: list[str] | None,
+) -> None:
+    async with session_scope() as s:
+        await run_auto_link(
+            s,
+            job_id=UUID(job_id),
+            user_id=UUID(user_id),
+            integration_ids=[UUID(i) for i in (integration_ids or [])] or None,
+        )
+
+
 async def startup(ctx: dict) -> None:
     logger.info("worker_startup")
 
@@ -48,7 +65,7 @@ async def shutdown(ctx: dict) -> None:
 
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
-    functions = [send_otp_email, auth_codes_cleanup]
+    functions = [send_otp_email, auth_codes_cleanup, auto_link_run]
     cron_jobs = [
         cron(
             auth_codes_cleanup,

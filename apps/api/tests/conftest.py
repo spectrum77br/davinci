@@ -77,6 +77,17 @@ async def _setup_schema():
         "cadastro_tipo": ("fone", "email", "dominio"),
         "cadastro_status": ("active", "inactive", "excluded"),
         "integration_platform": ("bling", "ml", "shopee", "amazon"),
+        "link_sync_status": (
+            "ok", "skipped", "retryable", "fatal", "pending", "requires_review",
+        ),
+        "background_job_type": (
+            "sync_all", "sync_product", "auto_link", "audit",
+            "sync_bling_costs", "import_listings",
+            "import_bling_products", "push_prices_batch",
+        ),
+        "background_job_status": (
+            "pending", "running", "succeeded", "failed", "cancelled",
+        ),
     }
     async with _test_engine.begin() as conn:
         await conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
@@ -103,6 +114,9 @@ _CLEANUP_TABLES = (
     "oauth_states",
     "cadastros_stores",
     "cadastros",
+    "product_links",
+    "products",
+    "background_jobs",
     "integrations",
     "stores",
     "companies",

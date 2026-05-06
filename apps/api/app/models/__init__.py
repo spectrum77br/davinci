@@ -4,19 +4,26 @@ from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.enums import (
     MARKETPLACES,
     PLATFORMS,
+    BackgroundJobStatus,
+    BackgroundJobType,
     CadastroStatus,
     CadastroTipo,
     IntegrationPlatform,
+    LinkSyncStatus,
     Marketplace,
     StoreStatus,
     UserRole,
     UserStatus,
 )
 from app.models.integration import Integration, OAuthState
+from app.models.product import BackgroundJob, Product, ProductLink
 from app.models.user import User
 
 __all__ = [
     "AuthCode",
+    "BackgroundJob",
+    "BackgroundJobStatus",
+    "BackgroundJobType",
     "Base",
     "Cadastro",
     "CadastroStatus",
@@ -25,10 +32,13 @@ __all__ = [
     "Company",
     "Integration",
     "IntegrationPlatform",
+    "LinkSyncStatus",
     "MARKETPLACES",
     "Marketplace",
     "OAuthState",
     "PLATFORMS",
+    "Product",
+    "ProductLink",
     "Store",
     "StoreStatus",
     "User",
