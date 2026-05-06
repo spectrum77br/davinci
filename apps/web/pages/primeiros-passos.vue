@@ -31,7 +31,7 @@ const steps = [
     title: 'Configurar tabela de preços',
     body: 'Defina margens, kits e fórmula por canal.',
     cta: 'Ir para Tabela',
-    to: '/tabela-precos',
+    to: '/pricing/contas',
     done: false,
   },
   {

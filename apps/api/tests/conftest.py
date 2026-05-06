@@ -105,6 +105,12 @@ async def _setup_schema():
         "listing_request_status": (
             "pending", "in_progress", "completed", "rejected",
         ),
+        "department": ("celular", "mala", "eletro", "catalogo"),
+        "pricing_platform": (
+            "mercadolivre", "shopee", "temu", "amazon",
+            "aliexpress", "tiktok", "magalu",
+        ),
+        "cell_status": ("auto", "manual", "locked", "disabled"),
     }
     async with _test_engine.begin() as conn:
         await conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
@@ -131,6 +137,11 @@ _CLEANUP_TABLES = (
     "alerts",
     "listing_requests",
     "listings",
+    "pricing_overrides",
+    "pricing_products",
+    "pricing_accounts",
+    "audit_dismissed_skus",
+    "pricing_push_idempotency",
     "sync_logs",
     "oauth_states",
     "cadastros_stores",

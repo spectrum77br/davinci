@@ -11,11 +11,14 @@ from app.models.enums import (
     BackgroundJobType,
     CadastroStatus,
     CadastroTipo,
+    CellStatus,
+    Department,
     IntegrationPlatform,
     LinkSyncStatus,
     ListingRequestStatus,
     ListingStatus,
     Marketplace,
+    PricingPlatform,
     StoreStatus,
     SyncLogAction,
     UserRole,
@@ -23,6 +26,13 @@ from app.models.enums import (
 )
 from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
+from app.models.pricing import (
+    AuditDismissedSku,
+    PricingAccount,
+    PricingOverride,
+    PricingProduct,
+    PricingPushIdempotency,
+)
 from app.models.product import BackgroundJob, Product, ProductLink
 from app.models.sync_log import SyncLog
 from app.models.user import User
@@ -32,6 +42,7 @@ __all__ = [
     "Alert",
     "AlertSeverity",
     "AlertType",
+    "AuditDismissedSku",
     "AuthCode",
     "BackgroundJob",
     "BackgroundJobStatus",
@@ -41,7 +52,9 @@ __all__ = [
     "CadastroStatus",
     "CadastroStore",
     "CadastroTipo",
+    "CellStatus",
     "Company",
+    "Department",
     "Integration",
     "IntegrationPlatform",
     "LinkSyncStatus",
@@ -53,6 +66,11 @@ __all__ = [
     "Marketplace",
     "OAuthState",
     "PLATFORMS",
+    "PricingAccount",
+    "PricingOverride",
+    "PricingPlatform",
+    "PricingProduct",
+    "PricingPushIdempotency",
     "Product",
     "ProductLink",
     "Store",

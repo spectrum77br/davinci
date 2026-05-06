@@ -127,3 +127,27 @@ class AlertType(StrEnum):
     DAILY_SYNC_COMPLETED = "daily_sync_completed"
     TOKEN_EXPIRING = "token_expiring"
     GENERIC = "generic"
+
+
+class Department(StrEnum):
+    CELULAR = "celular"
+    MALA = "mala"
+    ELETRO = "eletro"
+    CATALOGO = "catalogo"
+
+
+class PricingPlatform(StrEnum):
+    ML = "mercadolivre"
+    SHOPEE = "shopee"
+    TEMU = "temu"
+    AMAZON = "amazon"
+    ALIEXPRESS = "aliexpress"
+    TIKTOK = "tiktok"
+    MAGALU = "magalu"
+
+
+class CellStatus(StrEnum):
+    AUTO = "auto"
+    MANUAL = "manual"
+    LOCKED = "locked"
+    DISABLED = "disabled"

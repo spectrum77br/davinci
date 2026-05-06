@@ -35,7 +35,7 @@ const sections: Section[] = [
     items: [
       { to: '/produtos', label: 'Produtos', icon: Package, resource: 'produtos' },
       { to: '/anuncios', label: 'Anúncios', icon: Megaphone, resource: 'anuncios' },
-      { to: '/tabela-precos', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
+      { to: '/pricing/contas', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
       { to: '/margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
     ],
   },

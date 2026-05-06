@@ -1,0 +1,187 @@
+from datetime import datetime
+from decimal import Decimal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+# --------------------------------------------------------------- pricing accounts
+
+class PricingAccountBase(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    platform: str
+    listing_type: str | None = None
+    department: str = "celular"
+    kit_number: int = Field(default=1, ge=1, le=5)
+    commission: Decimal | None = None
+    margin1: Decimal | None = None
+    shipping1: Decimal | None = None
+    margin2: Decimal | None = None
+    shipping2: Decimal | None = None
+    margin3: Decimal | None = None
+    shipping3: Decimal | None = None
+    margin4: Decimal | None = None
+    shipping4: Decimal | None = None
+    margin5: Decimal | None = None
+    shipping5: Decimal | None = None
+    server: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    shipping_address: str | None = None
+    return_address: str | None = None
+    observation: str | None = None
+    observation2: str | None = None
+    observation3: str | None = None
+    store_info_id: UUID | None = None
+    integration_id: UUID | None = None
+    sort_order: int = 0
+
+
+class PricingAccountCreate(PricingAccountBase):
+    password: str | None = None
+
+
+class PricingAccountPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    platform: str | None = None
+    listing_type: str | None = None
+    department: str | None = None
+    kit_number: int | None = Field(default=None, ge=1, le=5)
+    commission: Decimal | None = None
+    margin1: Decimal | None = None
+    shipping1: Decimal | None = None
+    margin2: Decimal | None = None
+    shipping2: Decimal | None = None
+    margin3: Decimal | None = None
+    shipping3: Decimal | None = None
+    margin4: Decimal | None = None
+    shipping4: Decimal | None = None
+    margin5: Decimal | None = None
+    shipping5: Decimal | None = None
+    server: str | None = None
+    email: str | None = None
+    password: str | None = None
+    phone: str | None = None
+    shipping_address: str | None = None
+    return_address: str | None = None
+    observation: str | None = None
+    observation2: str | None = None
+    observation3: str | None = None
+    store_info_id: UUID | None = None
+    integration_id: UUID | None = None
+    sort_order: int | None = None
+
+
+class PricingAccountOut(PricingAccountBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    user_id: UUID
+    has_password: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+# --------------------------------------------------------------- pricing products
+
+class PricingProductBase(BaseModel):
+    sku: str = Field(min_length=1, max_length=2048)
+    name: str = Field(min_length=1, max_length=512)
+    department: str = "celular"
+    product_type: int = 2
+    bling_cost_price: Decimal | None = None
+    cost_kit1: Decimal = Decimal("0")
+    cost_kit2: Decimal | None = None
+    cost_kit3: Decimal | None = None
+    cost_kit4: Decimal | None = None
+    description: str | None = None
+    model: str | None = None
+    ean: str | None = None
+    is_active: bool = True
+    in_catalog: bool = False
+    product_id: UUID | None = None
+
+
+class PricingProductCreate(PricingProductBase):
+    pass
+
+
+class PricingProductPatch(BaseModel):
+    sku: str | None = Field(default=None, min_length=1, max_length=2048)
+    name: str | None = Field(default=None, min_length=1, max_length=512)
+    department: str | None = None
+    product_type: int | None = None
+    bling_cost_price: Decimal | None = None
+    cost_kit1: Decimal | None = None
+    cost_kit2: Decimal | None = None
+    cost_kit3: Decimal | None = None
+    cost_kit4: Decimal | None = None
+    description: str | None = None
+    model: str | None = None
+    ean: str | None = None
+    is_active: bool | None = None
+    in_catalog: bool | None = None
+    product_id: UUID | None = None
+
+
+class PricingProductOut(PricingProductBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    user_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class PricingProductImportItem(BaseModel):
+    """Lenient row used by /products/import — empty SKUs are skipped, not rejected."""
+    sku: str = ""
+    name: str = ""
+    department: str = "celular"
+    product_type: int = 2
+    bling_cost_price: Decimal | None = None
+    cost_kit1: Decimal = Decimal("0")
+    cost_kit2: Decimal | None = None
+    cost_kit3: Decimal | None = None
+    cost_kit4: Decimal | None = None
+    description: str | None = None
+    model: str | None = None
+    ean: str | None = None
+    is_active: bool = True
+    in_catalog: bool = False
+    product_id: UUID | None = None
+
+
+class PricingProductImport(BaseModel):
+    """Bulk import payload (idempotent on (user_id, sku))."""
+    items: list[PricingProductImportItem]
+
+
+class PricingProductImportResult(BaseModel):
+    created: int
+    updated: int
+    skipped: int
+
+
+# -------------------------------------------------------------- pricing overrides
+
+class PricingOverrideBase(BaseModel):
+    pricing_product_id: UUID
+    pricing_account_id: UUID
+    price_override: Decimal | None = None
+    cell_status: str = "auto"
+
+
+class PricingOverrideUpsert(PricingOverrideBase):
+    pass
+
+
+class PricingOverrideCellStatus(BaseModel):
+    pricing_product_id: UUID
+    pricing_account_id: UUID
+    cell_status: str
+
+
+class PricingOverrideOut(PricingOverrideBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    user_id: UUID
+    created_at: datetime
+    updated_at: datetime
