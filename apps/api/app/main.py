@@ -9,6 +9,13 @@ from app.config import get_settings
 from app.db import engine
 from app.redis_client import redis
 from app.routers import auth as auth_router
+from app.routers import cadastros as cadastros_router
+from app.routers import companies as companies_router
+from app.routers import integrations as integrations_router
+from app.routers import oauth as oauth_router
+from app.routers import stores as stores_router
+from app.routers import users as users_router
+from app.services.bootstrap import promote_owner_if_needed
 from app.worker_pool import close_arq_pool
 
 logger = structlog.get_logger()
@@ -18,6 +25,10 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("startup", env=settings.env)
+    try:
+        await promote_owner_if_needed()
+    except Exception as e:
+        logger.warning("bootstrap_owner_failed", err=str(e))
     yield
     await close_arq_pool()
     await engine.dispose()
@@ -49,6 +60,12 @@ app.add_middleware(
 )
 
 app.include_router(auth_router.router)
+app.include_router(users_router.router)
+app.include_router(companies_router.router)
+app.include_router(stores_router.router)
+app.include_router(cadastros_router.router)
+app.include_router(integrations_router.router)
+app.include_router(oauth_router.router)
 
 
 @app.get("/api/health")

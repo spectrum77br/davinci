@@ -1,9 +1,10 @@
 import base64
+import json
 import os
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
 
 from app.config import get_settings
 
@@ -31,3 +32,23 @@ def decrypt(token: str) -> str:
     nonce, ct = raw[:12], raw[12:]
     aes = AESGCM(_KEY)
     return aes.decrypt(nonce, ct, None).decode()
+
+
+def encrypt_json(payload: dict) -> bytes:
+    """Encrypt a JSON-serializable dict to raw bytes (`nonce || ct`).
+
+    Used for `integrations.credentials` (BYTEA column).
+    """
+    aes = AESGCM(_KEY)
+    nonce = os.urandom(12)
+    pt = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    ct = aes.encrypt(nonce, pt, None)
+    return nonce + ct
+
+
+def decrypt_json(blob: bytes) -> dict:
+    if len(blob) <= 12:
+        raise ValueError("ciphertext_too_short")
+    aes = AESGCM(_KEY)
+    nonce, ct = blob[:12], blob[12:]
+    return json.loads(aes.decrypt(nonce, ct, None).decode())
