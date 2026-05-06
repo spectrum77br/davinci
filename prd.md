@@ -1082,11 +1082,16 @@ Assinatura imutável a partir daqui — sub-fases 4b implementam, não alteram.
 ### Fase 8 — Listings + auto-import (1 dia)
 
 **Backend (router `listings`)**
-- [ ] CRUD + `POST /api/listings/import` (background job)
-- [ ] `listing_requests` CRUD
+- [x] CRUD + `POST /api/listings/import` (background job) — implementado em 2026-05-06 (`apps/api/app/routers/listings.py`).
+- [x] `listing_requests` CRUD — mesmo router.
+- [x] Adapters `list_listings()` em `ShopeeClient` e `MercadoLivreClient`.
+- [x] Cron `auto_import_link` (a cada 30min) liga listings órfãs por SKU.
 
-**Frontend `pages/listings.vue`** (nova, ou parte de `Products`)
-- [ ] Tabela filtrável, busca, ações em massa
+**Frontend `pages/anuncios.vue`** (substitui mock antigo)
+- [x] Tabela filtrável (integração / canal / status / busca / sem produto vinculado), paginação — `apps/web/pages/anuncios.vue`.
+- [x] Modal "importar" → polling do `BackgroundJob` com summary final (`created/updated/skipped/linked`).
+- [x] Modal "vincular produto" — busca em `/api/products?search=`, PATCH `product_id`+`sku`.
+- [x] Tab "solicitações de anúncio" com CRUD de `listing_requests`.
 
 **Aceite:** importo anúncios da Shopee, auto-link encontra produtos por SKU.
 

@@ -14,6 +14,7 @@ from app.routers import cadastros as cadastros_router
 from app.routers import companies as companies_router
 from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
+from app.routers import listings as listings_router
 from app.routers import oauth as oauth_router
 from app.routers import products as products_router
 from app.routers import settings as settings_router
@@ -78,6 +79,7 @@ app.include_router(sync_router.router)
 app.include_router(webhooks_router.router)
 app.include_router(settings_router.router)
 app.include_router(alerts_router.router)
+app.include_router(listings_router.router)
 
 
 @app.get("/api/health")

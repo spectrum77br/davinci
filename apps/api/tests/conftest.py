@@ -99,6 +99,12 @@ async def _setup_schema():
             "daily_sync_completed", "token_expiring", "generic",
         ),
         "alert_severity": ("info", "warning", "error", "success"),
+        "listing_status": (
+            "active", "paused", "closed", "under_review", "inactive",
+        ),
+        "listing_request_status": (
+            "pending", "in_progress", "completed", "rejected",
+        ),
     }
     async with _test_engine.begin() as conn:
         await conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
@@ -123,6 +129,8 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 _CLEANUP_TABLES = (
     "alerts",
+    "listing_requests",
+    "listings",
     "sync_logs",
     "oauth_states",
     "cadastros_stores",

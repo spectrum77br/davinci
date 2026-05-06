@@ -27,6 +27,10 @@ from app.services.advisory_lock import try_user_sync_lock
 from app.services.alerts import emit_alert
 from app.services.auto_link import run_auto_link
 from app.services.email import get_email_sender, render_otp_html
+from app.services.listings_import import (
+    run_auto_import_link,
+    run_import_listings,
+)
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.ml_backfill import run_backfill_ml_stock
@@ -411,8 +415,29 @@ async def low_stock_polling(ctx: dict) -> None:
 
 
 async def auto_import_link(ctx: dict) -> None:
-    """Fase 8 — wired when `listings` table lands."""
-    logger.debug("auto_import_link_noop")
+    """Fase 8: scan listings whose product_id is null and a non-blank SKU
+    matches a product the user owns; attach product_id."""
+    async with session_scope() as s:
+        report = await run_auto_import_link(s)
+        logger.info("auto_import_link_done", **report)
+
+
+async def import_listings_run(
+    ctx: dict,
+    job_id: str,
+    user_id: str,
+    integration_id: str,
+    max_pages: int | None = None,
+) -> None:
+    """Fase 8: pull listings from a marketplace integration into local cache."""
+    async with session_scope() as s:
+        await run_import_listings(
+            s,
+            job_id=UUID(job_id),
+            user_id=UUID(user_id),
+            integration_id=UUID(integration_id),
+            max_pages=max_pages,
+        )
 
 
 # ---------------------------------------------------------------- lifecycle
@@ -441,6 +466,8 @@ class WorkerSettings:
         ml_backfill_run,
         alerts_cleanup,
         low_stock_polling,
+        import_listings_run,
+        auto_import_link,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -475,6 +502,7 @@ __all__ = [
     "background_jobs_gc",
     "bling_token_refresh",
     "daily_sync_scheduler",
+    "import_listings_run",
     "low_stock_polling",
     "ml_backfill_run",
     "shopee_discrepancy_check",

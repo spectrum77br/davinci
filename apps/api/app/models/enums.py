@@ -97,6 +97,21 @@ class BackgroundJobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ListingStatus(StrEnum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    CLOSED = "closed"
+    UNDER_REVIEW = "under_review"
+    INACTIVE = "inactive"
+
+
+class ListingRequestStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    REJECTED = "rejected"
+
+
 class AlertSeverity(StrEnum):
     INFO = "info"
     WARNING = "warning"

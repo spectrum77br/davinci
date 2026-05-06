@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -209,6 +210,123 @@ class ShopeeClient:
             return _http_error_to_result(e, qty_before)
 
         return _classify_response(r, qty_before, qty_after=qty)
+
+    async def list_listings(
+        self,
+        *,
+        item_status: tuple[str, ...] = ("NORMAL", "UNLIST", "BANNED"),
+        page_size: int = 50,
+        max_pages: int | None = None,
+    ) -> AsyncIterator[dict]:
+        """Yields one normalized listing dict per Shopee item.
+
+        Uses /api/v2/product/get_item_list to enumerate item ids per status,
+        then /api/v2/product/get_item_base_info in batches of 50 (Shopee cap)
+        to fetch title/sku/price/stock/image. Each yielded dict matches the
+        shape consumed by the listings import service.
+        """
+        for status_filter in item_status:
+            offset = 0
+            page_idx = 0
+            while True:
+                if max_pages is not None and page_idx >= max_pages:
+                    break
+                params = {
+                    "offset": offset,
+                    "page_size": page_size,
+                    "item_status": status_filter,
+                }
+                r = await self._request(
+                    "GET", "/api/v2/product/get_item_list", params=params
+                )
+                if r.status_code != 200:
+                    raise RuntimeError(
+                        f"shopee_list_failed status={r.status_code} body={r.text[:200]}"
+                    )
+                body = r.json() or {}
+                if body.get("error"):
+                    raise RuntimeError(
+                        f"shopee_list_error {body.get('error')}: {body.get('message')}"
+                    )
+                resp = body.get("response") or {}
+                items = resp.get("item") or []
+                if not items:
+                    break
+                ids = [int(it["item_id"]) for it in items if it.get("item_id")]
+                async for norm in self._fetch_base_info(ids, status_filter):
+                    yield norm
+                if not resp.get("has_next_page"):
+                    break
+                offset = int(resp.get("next_offset") or (offset + len(items)))
+                page_idx += 1
+
+    async def _fetch_base_info(
+        self, item_ids: list[int], status_filter: str
+    ) -> AsyncIterator[dict]:
+        for i in range(0, len(item_ids), 50):
+            chunk = item_ids[i : i + 50]
+            r = await self._request(
+                "GET",
+                "/api/v2/product/get_item_base_info",
+                params={"item_id_list": ",".join(str(x) for x in chunk)},
+            )
+            if r.status_code != 200:
+                logger.warning(
+                    "shopee_get_item_base_info_failed",
+                    status=r.status_code,
+                    body=r.text[:200],
+                )
+                continue
+            body = r.json() or {}
+            if body.get("error"):
+                logger.warning(
+                    "shopee_get_item_base_info_error",
+                    error=body.get("error"),
+                    msg=body.get("message"),
+                )
+                continue
+            resp = body.get("response") or {}
+            for it in resp.get("item_list") or []:
+                yield _normalize_shopee_item(it, status_filter)
+
+
+def _shopee_status_to_listing(item_status: str | None) -> str:
+    s = (item_status or "").upper()
+    if s == "NORMAL":
+        return "active"
+    if s == "UNLIST":
+        return "paused"
+    if s == "BANNED":
+        return "under_review"
+    if s == "DELETED":
+        return "closed"
+    return "inactive"
+
+
+def _normalize_shopee_item(it: dict, fallback_status: str) -> dict:
+    price_info = (it.get("price_info") or [{}])[0] if it.get("price_info") else {}
+    stock_info = (it.get("stock_info_v2") or {}).get("summary_info") or {}
+    raw_price = price_info.get("current_price") or price_info.get("original_price")
+    price_cents: int | None = None
+    if raw_price is not None:
+        try:
+            price_cents = int(round(float(raw_price) * 100))
+        except (TypeError, ValueError):
+            price_cents = None
+    images = it.get("image") or {}
+    img_list = images.get("image_url_list") or []
+    return {
+        "external_id": str(it.get("item_id") or ""),
+        "sku": (it.get("item_sku") or "").strip() or None,
+        "title": it.get("item_name") or "",
+        "description": it.get("description"),
+        "price": price_cents,
+        "stock": stock_info.get("total_available_stock"),
+        "status": _shopee_status_to_listing(it.get("item_status") or fallback_status),
+        "category": str(it.get("category_id")) if it.get("category_id") else None,
+        "thumbnail_url": img_list[0] if img_list else None,
+        "raw": it,
+    }
 
 
 # ---------------------------------------------------------------- helpers

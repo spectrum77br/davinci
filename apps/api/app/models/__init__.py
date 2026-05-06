@@ -13,6 +13,8 @@ from app.models.enums import (
     CadastroTipo,
     IntegrationPlatform,
     LinkSyncStatus,
+    ListingRequestStatus,
+    ListingStatus,
     Marketplace,
     StoreStatus,
     SyncLogAction,
@@ -20,6 +22,7 @@ from app.models.enums import (
     UserStatus,
 )
 from app.models.integration import Integration, OAuthState
+from app.models.listing import Listing, ListingRequest
 from app.models.product import BackgroundJob, Product, ProductLink
 from app.models.sync_log import SyncLog
 from app.models.user import User
@@ -42,6 +45,10 @@ __all__ = [
     "Integration",
     "IntegrationPlatform",
     "LinkSyncStatus",
+    "Listing",
+    "ListingRequest",
+    "ListingRequestStatus",
+    "ListingStatus",
     "MARKETPLACES",
     "Marketplace",
     "OAuthState",

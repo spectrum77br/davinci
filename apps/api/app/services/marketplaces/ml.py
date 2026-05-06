@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
@@ -287,7 +288,105 @@ class MercadoLivreClient:
         )
 
 
+    async def list_listings(
+        self,
+        *,
+        page_size: int = 50,
+        max_pages: int | None = None,
+    ) -> AsyncIterator[dict]:
+        """Yields one normalized listing dict per ML item.
+
+        Walks /users/{seller}/items/search to enumerate ids, then
+        /items?ids=...&attributes=... in batches of 20 (ML's multi-get cap)
+        to fetch listing details.
+        """
+        seller_id = self.creds.get("user_id")
+        if not seller_id:
+            r = await self._request("GET", "/users/me")
+            r.raise_for_status()
+            seller_id = (r.json() or {}).get("id")
+            if seller_id and self.creds.get("user_id") != seller_id:
+                self.creds["user_id"] = seller_id
+                if self._on_refresh:
+                    await self._on_refresh(self.creds)
+        if not seller_id:
+            return
+
+        offset = 0
+        page_idx = 0
+        while True:
+            if max_pages is not None and page_idx >= max_pages:
+                break
+            r = await self._request(
+                "GET",
+                f"/users/{seller_id}/items/search",
+                params={"limit": page_size, "offset": offset},
+            )
+            if r.status_code != 200:
+                raise RuntimeError(
+                    f"ml_search_failed status={r.status_code} body={r.text[:200]}"
+                )
+            data = r.json() or {}
+            ids = data.get("results") or []
+            if not ids:
+                break
+            for chunk_start in range(0, len(ids), 20):
+                chunk = ids[chunk_start : chunk_start + 20]
+                rr = await self._request(
+                    "GET",
+                    "/items",
+                    params={"ids": ",".join(chunk)},
+                )
+                if rr.status_code != 200:
+                    logger.warning(
+                        "ml_multiget_failed", status=rr.status_code, body=rr.text[:200]
+                    )
+                    continue
+                for entry in rr.json() or []:
+                    if entry.get("code") != 200:
+                        continue
+                    body = entry.get("body") or {}
+                    yield _normalize_ml_item(body)
+            paging = data.get("paging") or {}
+            total = int(paging.get("total") or 0)
+            offset += page_size
+            page_idx += 1
+            if offset >= total:
+                break
+
+
 # ---------------------------------------------------------------- helpers
+
+def _normalize_ml_item(body: dict) -> dict:
+    sku = (body.get("seller_custom_field") or "").strip()
+    if not sku:
+        for attr in body.get("attributes") or []:
+            if (attr.get("id") or "").upper() == "SELLER_SKU":
+                sku = (attr.get("value_name") or "").strip()
+                break
+    raw_price = body.get("price")
+    price_cents: int | None = None
+    if raw_price is not None:
+        try:
+            price_cents = int(round(float(raw_price) * 100))
+        except (TypeError, ValueError):
+            price_cents = None
+    status = (body.get("status") or "").lower() or "active"
+    return {
+        "external_id": str(body.get("id") or ""),
+        "sku": sku or None,
+        "title": body.get("title") or "",
+        "description": None,
+        "price": price_cents,
+        "stock": body.get("available_quantity"),
+        "status": status if status in {
+            "active", "paused", "closed", "under_review", "inactive"
+        } else "inactive",
+        "category": body.get("category_id"),
+        "thumbnail_url": body.get("thumbnail") or body.get("secure_thumbnail"),
+        "raw": body,
+    }
+
 
 def _resolve_variation(
     variations: list[dict],
