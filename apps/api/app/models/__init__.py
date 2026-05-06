@@ -12,11 +12,13 @@ from app.models.enums import (
     LinkSyncStatus,
     Marketplace,
     StoreStatus,
+    SyncLogAction,
     UserRole,
     UserStatus,
 )
 from app.models.integration import Integration, OAuthState
 from app.models.product import BackgroundJob, Product, ProductLink
+from app.models.sync_log import SyncLog
 from app.models.user import User
 
 __all__ = [
@@ -41,6 +43,8 @@ __all__ = [
     "ProductLink",
     "Store",
     "StoreStatus",
+    "SyncLog",
+    "SyncLogAction",
     "User",
     "UserRole",
     "UserStatus",

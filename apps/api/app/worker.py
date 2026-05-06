@@ -6,11 +6,20 @@ from arq import cron
 from arq.connections import RedisSettings
 from sqlalchemy import delete
 
+from sqlalchemy import and_, select
+
 from app.config import get_settings
 from app.db import session_scope
-from app.models import AuthCode
+from app.models import (
+    AuthCode,
+    BackgroundJob,
+    BackgroundJobStatus,
+    Product,
+)
+from app.services.advisory_lock import try_user_sync_lock
 from app.services.auto_link import run_auto_link
 from app.services.email import get_email_sender, render_otp_html
+from app.services.sync_orchestrator import SyncOrchestrator
 
 logger = structlog.get_logger()
 _settings = get_settings()
@@ -55,6 +64,46 @@ async def auto_link_run(
         )
 
 
+async def sync_all_run(
+    ctx: dict,
+    job_id: str,
+    user_id: str,
+    product_ids: list[str] | None,
+) -> None:
+    """Fase 4a: full sync run. Acquires per-user advisory lock; if busy, marks
+    job as `failed` with `error='sync_already_running'`."""
+    uid = UUID(user_id)
+    jid = UUID(job_id)
+
+    async with session_scope() as s:
+        async with try_user_sync_lock(s, uid) as acquired:
+            if not acquired:
+                job = await s.get(BackgroundJob, jid)
+                if job is not None:
+                    job.status = BackgroundJobStatus.FAILED
+                    job.error = "sync_already_running"
+                    job.finished_at = datetime.now(UTC)
+                logger.warning("sync_all_run_locked", user_id=user_id, job_id=job_id)
+                return
+
+            job = await s.get(BackgroundJob, jid)
+            if job is None:
+                logger.warning("sync_all_run_job_missing", job_id=job_id)
+                return
+
+            where = [Product.user_id == uid]
+            if product_ids:
+                where.append(Product.id.in_([UUID(p) for p in product_ids]))
+            products = (
+                await s.execute(select(Product).where(and_(*where)))
+            ).scalars().all()
+            job.total = len(products)
+            await s.commit()
+
+            orch = SyncOrchestrator(s, user_id=uid, job=job)
+            await orch.run(products)
+
+
 async def startup(ctx: dict) -> None:
     logger.info("worker_startup")
 
@@ -65,7 +114,7 @@ async def shutdown(ctx: dict) -> None:
 
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
-    functions = [send_otp_email, auth_codes_cleanup, auto_link_run]
+    functions = [send_otp_email, auth_codes_cleanup, auto_link_run, sync_all_run]
     cron_jobs = [
         cron(
             auth_codes_cleanup,

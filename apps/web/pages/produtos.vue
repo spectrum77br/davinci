@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted } from 'vue'
-import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X } from 'lucide-vue-next'
+import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X, Activity } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['auth', 'permission'], permission: { resource: 'produtos', action: 'view' } })
 
@@ -166,6 +166,33 @@ async function deleteLink(id: string) {
   await refreshAll()
 }
 
+// ---------------------------- Sync ----------------------------------------
+
+const syncingProduct = ref<Set<string>>(new Set())
+
+async function syncProduct(id: string) {
+  syncingProduct.value.add(id)
+  syncingProduct.value = new Set(syncingProduct.value)
+  try {
+    await api(`/api/sync/product/${id}`, { method: 'POST' })
+    await refreshAll()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    syncingProduct.value.delete(id)
+    syncingProduct.value = new Set(syncingProduct.value)
+  }
+}
+
+async function startSyncAll() {
+  activeJob.value = null
+  const r = await api<{ job_id: string }>('/api/jobs/sync-all', {
+    method: 'POST',
+    body: { integration_ids: null, product_ids: null },
+  })
+  startPolling(r.job_id)
+}
+
 // ---------------------------- Bling import ----------------------------------
 
 const importIntegration = ref<string>('')
@@ -277,6 +304,9 @@ const stats = computed(() => ({
         <Button v-if="canEdit" size="sm" variant="outline" @click="startAutoLink">
           <Link2 class="size-4 mr-1.5" /> auto-link
         </Button>
+        <Button v-if="canEdit" size="sm" @click="startSyncAll">
+          <Activity class="size-4 mr-1.5" /> sync all
+        </Button>
         <Button size="sm" variant="outline" @click="refreshAll">
           <RefreshCw class="size-4 mr-1.5" /> recarregar
         </Button>
@@ -360,6 +390,16 @@ const stats = computed(() => ({
                 </div>
               </td>
               <td class="text-right">
+                <Button
+                  v-if="canEdit"
+                  size="icon"
+                  variant="ghost"
+                  :disabled="syncingProduct.has(p.id)"
+                  :title="syncingProduct.has(p.id) ? 'sincronizando…' : 'sync produto'"
+                  @click="syncProduct(p.id)"
+                >
+                  <RefreshCw class="size-4" :class="syncingProduct.has(p.id) ? 'animate-spin' : ''" />
+                </Button>
                 <Button v-if="canDelete" size="icon" variant="ghost" @click="deleteOne(p.id)">
                   <Trash2 class="size-4" />
                 </Button>

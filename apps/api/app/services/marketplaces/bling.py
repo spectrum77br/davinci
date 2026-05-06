@@ -26,7 +26,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
-from app.services.marketplaces.base import TestResult
+from app.services.marketplaces.base import SyncResult, SyncStatus, TestResult
 
 logger = structlog.get_logger()
 
@@ -198,7 +198,7 @@ class BlingClient:
         r.raise_for_status()
         return r.json().get("data") or {}
 
-    async def update_stock(
+    async def update_stock_by_id(
         self,
         bling_product_id: int,
         qty: int,
@@ -206,11 +206,10 @@ class BlingClient:
         bling_store_id: int | None = None,
         operation: str = "B",
     ) -> dict:
-        """Stub for Fase 4 sync orchestrator (PRD §11 Fase 3 lists the signature).
+        """Raw Bling stock write. POST /Api/v3/estoques.
 
-        Bling endpoint: POST /Api/v3/estoques. When `bling_store_id` is provided it
-        is sent as `idLoja` so the change reflects on the correct channel inside Bling.
-        Body shape per Bling docs:
+        When `bling_store_id` is provided it is sent as `idLoja` so the change
+        reflects on the correct channel inside Bling. Body shape per Bling docs:
             { "produto": {"id": <id>}, "operacao": "B"|"S"|"E", "quantidade": <qty>,
               "deposito": {"id": <id>}, "idLoja": <int?> }
         """
@@ -224,6 +223,51 @@ class BlingClient:
         r = await self._request("POST", "/estoques", json=body)
         r.raise_for_status()
         return r.json().get("data") or {}
+
+    async def update_stock(
+        self,
+        link: Any,
+        qty: int,
+        *,
+        bling_store_id: int | None = None,
+    ) -> SyncResult:
+        """ABC-conformant wrapper. `link` is a `ProductLink` whose `external_id`
+        carries the Bling produto.id. See `services.marketplaces.base.MarketplaceClient`.
+        """
+        try:
+            bling_product_id = int(link.external_id)
+        except (TypeError, ValueError):
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="invalid_external_id",
+                error_detail=f"link.external_id={link.external_id!r}",
+            )
+        qty_before = link.stock
+        try:
+            data = await self.update_stock_by_id(
+                bling_product_id, qty, bling_store_id=bling_store_id
+            )
+        except BlingCloudflareError as e:
+            return SyncResult(
+                status=SyncStatus.RETRYABLE,
+                qty_before=qty_before,
+                error_code="bling_cloudflare",
+                error_detail=str(e),
+            )
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code if e.response is not None else None
+            return SyncResult(
+                status=SyncStatus.RETRYABLE if code in (429, 502, 503, 504) else SyncStatus.FATAL,
+                qty_before=qty_before,
+                error_code=f"http_{code}",
+                error_detail=e.response.text[:500] if e.response is not None else str(e),
+            )
+        return SyncResult(
+            status=SyncStatus.OK,
+            qty_before=qty_before,
+            qty_after=qty,
+            payload=data if isinstance(data, dict) else {},
+        )
 
     async def update_price(
         self,

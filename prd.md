@@ -940,9 +940,40 @@ Cobre `Products.tsx` (a maior página, ~1500 linhas) — quebrar em sub-tarefas.
 
 **Aceite:** importo 50 produtos do Bling, auto-link cria links em ML/Shopee, vejo progresso em tempo real, links visíveis na linha expandida.
 
-### Fase 4 — Sincronização e Sync Logs (2-3 dias)
+### Fase 4 — Sincronização e Sync Logs
 
-Cobre `SyncLogs.tsx` + ações de sync em `Products.tsx`.
+Fatiada para desacoplar plataforma de sync (orchestrator + UI + logs) de cada adapter de marketplace. Cutover parcial possível: liga marketplace por marketplace conforme cada sub-fase passa.
+
+#### Fase 4a — Plataforma de sync (1-2 dias)
+
+Schema, orchestrator, ABC fechada, UI/polling/logs. Adapter de saída funcional somente para Bling (refresh de `bling_stock` em `product_links`, sem push outbound — `BlingClient.update_stock` já existe da Fase 3 e fica disponível para sub-fases 4b).
+
+**Migration `0005_sync_logs`**
+- [ ] Cria `sync_logs` particionada por mês (Postgres declarative partitioning, `PARTITION BY RANGE (created_at)`)
+- [ ] Colunas: `id`, `user_id`, `job_id` FK→background_jobs NULL, `product_id` FK→products NULL, `product_link_id` FK→product_links NULL, `platform`, `action` (`refresh_bling`, `update_stock`, `update_price`, `store_status_change`, `auto_link`, ...), `status` (reaproveita `link_sync_status` enum), `qty_before`, `qty_after`, `error_code`, `error_detail`, `payload` JSONB, `created_at`
+- [ ] Cria partições para mês corrente + 2 próximos; job de cron (Fase 5) cria partições futuras
+- [ ] Índices `(user_id, created_at DESC)`, `(platform, status, created_at DESC)`, `(product_id, created_at DESC)`
+
+**Service `SyncOrchestrator` (skeleton)**
+- [ ] Loop produtos → `product_links` ativos → dispatch por `platform` via `client_for(...)`
+- [ ] Classifica resultado em `SyncResult{status: ok|skipped|retryable|fatal, qty_before, qty_after, error_code, error_detail}`
+- [ ] Persiste `SyncLog` por link processado, atualiza `product_link.last_sync_*`
+- [ ] Heartbeat em `background_jobs.last_heartbeat_at` a cada N links; escreve `details[]` truncado
+- [ ] Lock por `user_id` via `pg_advisory_lock` (mata `syncLock.ts`)
+- [ ] Adapter Bling: refresh-only (puxa `bling_stock` de `/produtos/{id}` → grava em `product_links.stock` e `products.stock`). Outbound `update_stock` Bling continua disponível mas só é exercitado quando 4b precisar (ex.: store com `bling_store_id` para empurrar canal certo)
+- [ ] Marketplaces ML/Shopee/Amazon/TikTok/Temu/Aliexpress não implementados → orchestrator marca `skipped` com `error_code='platform_not_implemented'`
+
+**ABC `MarketplaceClient` (fechada nesta fase)**
+
+```python
+class MarketplaceClient(Protocol):
+    async def test_connection(self) -> TestResult: ...
+    async def update_stock(
+        self, link: ProductLink, qty: int, *, bling_store_id: int | None = None
+    ) -> SyncResult: ...
+```
+
+Assinatura imutável a partir daqui — sub-fases 4b implementam, não alteram.
 
 **Backend (router `sync`)**
 - [ ] `POST /api/jobs/sync-all` (cria job `sync_all`)
@@ -952,18 +983,56 @@ Cobre `SyncLogs.tsx` + ações de sync em `Products.tsx`.
 - [ ] `GET /api/jobs/{job_id}` polling
 - [ ] Job persistido em `background_jobs`, atualiza `processed`, escreve `details[]`
 
-**Service `SyncOrchestrator`**
-- [ ] Para cada `product` → busca `product_links` ativos → chama `client.update_stock(qty=bling_stock)`
-- [ ] Quando o link aponta para uma `store` com `bling_store_id` preenchido E a operação é no Bling (atualizar estoque/preço de origem), passa `bling_store_id` para o `BlingClient` para que a alteração reflita no canal certo dentro do Bling
-- [ ] Classificação de erro: `ok | skipped | retryable | fatal`
-- [ ] Lock por `user_id` (substituir `syncLock.ts` por advisory lock Postgres `pg_advisory_lock`)
-- [ ] Resolve B1, B2, B3, B5 (testes!)
-
 **Frontend `pages/sync-logs.vue`**
 - [ ] Tabela com filtros plataforma/status/data/SKU
 - [ ] Drawer com diff antes/depois de estoque
+- [ ] Página `Products.tsx` ganha botão "Sync Bling" (refresh estoque) e "Sync All" (enfileira `sync_all`)
 
-**Aceite:** sync completo de 100 produtos × 3 marketplaces termina sem zerar estoque, logs gravados, polling reflete progresso.
+**Aceite 4a:** refresh de 500 SKU Bling termina, `sync_logs` particionada grava registros, advisory lock barra concorrência (segunda chamada retorna 409 ou agrega ao job em andamento), polling reflete progresso, links ML/Shopee/Amazon registrados como `skipped/platform_not_implemented` (não falham).
+
+#### Fase 4b.ML — Mercado Livre (2 dias) — **prioridade B1/B3**
+
+**Service `MercadoLivreClient`**
+- [ ] OAuth + refresh
+- [ ] `update_stock(link, qty, *, bling_store_id=None)`: nunca enviar `available_quantity=0` se `bling_stock>0` — guard com assert antes do PUT (B1)
+- [ ] Auto-fix `variation_id` por `seller_sku`: se variations mudaram, atualiza `product_links.variation_id`; se SKU também mudou, marca `last_sync_status='requires_review'` + alerta (B3)
+- [ ] Map de erros ML para `LinkSyncStatus` + `error_code`
+- [ ] Job one-shot `backfill_ml_stock`: roda sobre links com `stock=0`/`last_sync_at=NULL` (B2)
+- [ ] Test connection via `GET /users/me`
+
+**Testes regressivos**
+- [ ] `test_ml_update_stock_never_zeroes_when_bling_positive` (B1)
+- [ ] `test_ml_variation_remap_by_seller_sku` (B3)
+- [ ] `test_backfill_ml_stock_repopulates_links` (B2)
+
+**Aceite 4b.ML:** sync completo de 100 SKU Bling→ML termina sem zerar estoque, todos os links com `last_sync_at` populado, regressão B1/B2/B3 verde.
+
+#### Fase 4b.Shopee — Shopee (2 dias)
+
+**Service `ShopeeClient`**
+- [ ] OAuth (signed requests Shopee)
+- [ ] `update_stock(link, qty, *, bling_store_id=None)`
+- [ ] Map códigos Shopee → `LinkStatus` (`active`, `suspended`, `banned`, `unknown_error`); 403 banido vs 403 erro real ficam em buckets separados (B5)
+- [ ] Alerta dedicado para `banned` (canal "produto banido")
+
+**Testes regressivos**
+- [ ] `test_shopee_403_banned_vs_unknown` (B5)
+
+**Aceite 4b.Shopee:** sync 100 SKU Bling→Shopee, links banidos vão para `last_sync_status='requires_review'` + alerta, demais erros 403 vão para `retryable` ou `fatal` corretamente.
+
+#### Fase 4b.Amazon — Amazon SP-API (1-2 dias)
+
+**Service `AmazonClient`**
+- [ ] LWA + assinatura SP-API
+- [ ] `update_stock(link, qty, *, bling_store_id=None)` via Feeds API ou Listings API (decidir conforme volume)
+- [ ] Test connection
+
+**Aceite 4b.Amazon:** sync 100 SKU Bling→Amazon termina, logs gravados.
+
+#### Fase 4b.stubs — TikTok / Temu / Aliexpress (0.5 dia)
+
+- [ ] `TikTokClient`, `TemuClient`, `AliexpressClient` retornam `SyncResult(status=skipped, error_code='platform_not_implemented')` em `update_stock`; `test_connection` retorna `ok=False, detail='not_implemented'`
+- [ ] Permite criar `integration` desses tipos sem quebrar orchestrator (já tratado em 4a, sub-fase só promove os stubs a clients reais quando vier escopo)
 
 ### Fase 5 — Webhook Bling + scheduler (1 dia)
 

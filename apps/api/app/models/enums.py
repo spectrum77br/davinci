@@ -67,6 +67,15 @@ class LinkSyncStatus(StrEnum):
     REQUIRES_REVIEW = "requires_review"
 
 
+class SyncLogAction(StrEnum):
+    REFRESH_BLING = "refresh_bling"
+    UPDATE_STOCK = "update_stock"
+    UPDATE_PRICE = "update_price"
+    STORE_STATUS_CHANGE = "store_status_change"
+    AUTO_LINK = "auto_link"
+    TEST_CONNECTION = "test_connection"
+
+
 class BackgroundJobType(StrEnum):
     SYNC_ALL = "sync_all"
     SYNC_PRODUCT = "sync_product"
