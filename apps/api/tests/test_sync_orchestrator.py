@@ -208,15 +208,32 @@ async def test_orchestrator_bling_refresh_writes_stock(
 async def test_orchestrator_skips_unimplemented_platform(
     db: AsyncSession, user: User
 ) -> None:
-    # Use Shopee — adapter still pending in 4b.Shopee.
+    """Contract test for the 'platform not implemented' path: regardless of
+    which adapters are wired in factory.client_for, when one raises
+    HTTPException(501) the orchestrator must classify the link as SKIPPED
+    with error_code='platform_not_implemented'.
+
+    Verified by patching `client_for` to raise — independent of any
+    real-marketplace status. (Future TikTok/Temu/Aliexpress stubs land
+    through this same code path.)
+    """
+    from fastapi import HTTPException
+
     _, store = await _make_company_store(db, user)
     integ = await _make_integration(db, user, store, IntegrationPlatform.SHOPEE)
     p, link = await _make_product_with_link(
         db, user, integ, store, bling_product_id=99, initial_stock=5
     )
 
-    orch = SyncOrchestrator(db, user_id=user.id)
-    report = await orch.run([p])
+    def _raise_501(*args, **kwargs):
+        raise HTTPException(
+            501,
+            detail={"code": "platform_not_implemented", "platform": "stub"},
+        )
+
+    with patch("app.services.sync_orchestrator.client_for", side_effect=_raise_501):
+        orch = SyncOrchestrator(db, user_id=user.id)
+        report = await orch.run([p])
 
     await db.refresh(link)
 
