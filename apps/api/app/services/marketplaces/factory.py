@@ -7,6 +7,7 @@ from app.models import IntegrationPlatform
 from app.services.marketplaces.base import MarketplaceClient
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
+from app.services.marketplaces.shopee import ShopeeClient
 
 
 def client_for(
@@ -18,6 +19,8 @@ def client_for(
         return BlingClient(creds, on_token_refresh=on_token_refresh)
     if platform == IntegrationPlatform.ML:
         return MercadoLivreClient(creds, on_token_refresh=on_token_refresh)
+    if platform == IntegrationPlatform.SHOPEE:
+        return ShopeeClient(creds, on_token_refresh=on_token_refresh)
     raise HTTPException(501, detail={"code": "platform_not_implemented", "platform": platform.value})
 
 
