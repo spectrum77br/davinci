@@ -40,7 +40,9 @@ from app.redis_client import redis
 from app.security.cipher import encrypt_json
 
 WEBHOOK_SECRET = "test-bling-webhook-secret-1234567890"
-os.environ.setdefault("BLING_WEBHOOK_SECRET", WEBHOOK_SECRET)
+# Force-overwrite so an empty value loaded from .env via Docker env_file
+# doesn't shadow the test secret (setdefault leaves empty strings in place).
+os.environ["BLING_WEBHOOK_SECRET"] = WEBHOOK_SECRET
 get_settings.cache_clear()  # type: ignore[attr-defined]
 
 

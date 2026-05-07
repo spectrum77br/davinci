@@ -358,7 +358,8 @@ async def test_batch_service_sends_telegram_when_chat_configured(
 
     import os
 
-    os.environ.setdefault("TELEGRAM_BOT_TOKEN", "fake-token")
+    # Force-overwrite — env_file may inject an empty value that setdefault honors.
+    os.environ["TELEGRAM_BOT_TOKEN"] = "fake-token"
     from app.config import get_settings
 
     get_settings.cache_clear()  # type: ignore[attr-defined]
