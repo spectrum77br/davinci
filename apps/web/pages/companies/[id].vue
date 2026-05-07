@@ -8,7 +8,7 @@ import {
   type StoreStatus,
 } from '~/composables/useMarketplaces'
 
-definePageMeta({ middleware: ['auth', 'permission'], permission: { resource: 'empresa', action: 'view' } })
+definePageMeta({ middleware: ['permission'], permission: { resource: 'empresa', action: 'view' } })
 
 type StoreOut = {
   id: string

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Settings, Bell, Lock, Building2, KeyRound, Webhook, Save, Copy } from 'lucide-vue-next'
 
-definePageMeta({ middleware: ['auth'] })
+definePageMeta({})
 
 type SettingsOut = {
   daily_sync_enabled: boolean

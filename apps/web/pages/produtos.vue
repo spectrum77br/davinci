@@ -2,7 +2,7 @@
 import { ref, computed, onUnmounted } from 'vue'
 import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X, Activity } from 'lucide-vue-next'
 
-definePageMeta({ middleware: ['auth', 'permission'], permission: { resource: 'produtos', action: 'view' } })
+definePageMeta({ middleware: ['permission'], permission: { resource: 'produtos', action: 'view' } })
 
 type Integration = {
   id: string

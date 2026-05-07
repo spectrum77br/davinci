@@ -13,7 +13,7 @@ import {
 } from 'lucide-vue-next'
 
 definePageMeta({
-  middleware: ['auth', 'permission'],
+  middleware: ['permission'],
   permission: { resource: 'sincronizacoes', action: 'view' },
 })
 

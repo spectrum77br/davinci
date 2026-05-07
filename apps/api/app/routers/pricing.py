@@ -1268,6 +1268,67 @@ async def patch_store_info(
     return _store_info_out(row)
 
 
+@router.post("/store-info/{store_info_id}/department", response_model=PricingAccountOut)
+async def set_store_info_department(
+    store_info_id: UUID,
+    body: AccountSetDepartmentIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> PricingAccountOut:
+    """Bind a department to a store_info — auto-creates the matching
+    `pricing_accounts` row if absent (one per (store_info, department))."""
+    dept = _coerce_department(body.department)
+    if dept is None:
+        raise HTTPException(400, detail={"code": "invalid_department"})
+
+    info = (
+        await session.execute(
+            select(StoreInfo).where(
+                and_(
+                    StoreInfo.id == store_info_id,
+                    StoreInfo.user_id == user.id,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if info is None:
+        raise HTTPException(404, detail={"code": "store_info_not_found"})
+
+    try:
+        platform = PricingPlatform(info.platform)
+    except ValueError as e:
+        raise HTTPException(400, detail={"code": "store_info_platform_unsupported"}) from e
+
+    existing = (
+        await session.execute(
+            select(PricingAccount).where(
+                and_(
+                    PricingAccount.user_id == user.id,
+                    PricingAccount.store_info_id == store_info_id,
+                    PricingAccount.department == dept,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return _account_out(existing)
+
+    name = info.account_name or f"{info.platform} — {dept.value}"
+    row = PricingAccount(
+        user_id=user.id,
+        name=name,
+        platform=platform,
+        department=dept,
+        store_info_id=store_info_id,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return _account_out(row)
+
+
 @router.delete("/store-info/{store_info_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_store_info(
     store_info_id: UUID,

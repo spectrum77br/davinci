@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
   Package, Megaphone, DollarSign, Truck, RefreshCw, Undo2,
   Receipt, ListChecks, TrendingUp, ShieldCheck, Settings, Bell,
-  FileSearch, ChevronLeft, ChevronRight,
+  FileSearch, AlertTriangle, Store, ChevronLeft, ChevronRight,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -37,6 +37,7 @@ const sections: Section[] = [
       { to: '/anuncios', label: 'Anúncios', icon: Megaphone, resource: 'anuncios' },
       { to: '/pricing/contas', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
       { to: '/audit', label: 'Auditoria', icon: FileSearch, resource: 'auditoria' },
+      { to: '/discrepancias', label: 'Divergências', icon: AlertTriangle, resource: 'anuncios' },
       { to: '/margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
     ],
   },
@@ -62,6 +63,7 @@ const sections: Section[] = [
     items: [
       { to: '/companies', label: 'Empresas', icon: Building2, resource: 'empresa' },
       { to: '/cadastros', label: 'Cadastros', icon: ContactRound, resource: 'cadastro' },
+      { to: '/store-info', label: 'Lojas (info)', icon: Store, resource: 'tabela_precos' },
     ],
   },
   {

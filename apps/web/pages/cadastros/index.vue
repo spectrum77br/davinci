@@ -7,7 +7,7 @@ import {
   type Marketplace,
 } from '~/composables/useMarketplaces'
 
-definePageMeta({ middleware: ['auth', 'permission'], permission: { resource: 'cadastro', action: 'view' } })
+definePageMeta({ middleware: ['permission'], permission: { resource: 'cadastro', action: 'view' } })
 
 type CadastroOut = {
   id: string

@@ -13,6 +13,7 @@ from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import cadastros as cadastros_router
 from app.routers import companies as companies_router
+from app.routers import discrepancies as discrepancies_router
 from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
@@ -84,6 +85,7 @@ app.include_router(alerts_router.router)
 app.include_router(listings_router.router)
 app.include_router(pricing_router.router)
 app.include_router(audit_router.router)
+app.include_router(discrepancies_router.router)
 
 
 @app.get("/api/health")
