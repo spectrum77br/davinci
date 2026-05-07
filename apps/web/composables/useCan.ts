@@ -6,6 +6,7 @@ export type Resource =
   | 'tabela_precos'
   | 'tabela_precos_contas'
   | 'tabela_precos_produtos'
+  | 'auditoria'
   | 'conciliacao_frete'
   | 'sincronizacoes'
   | 'devolucoes'
@@ -24,6 +25,7 @@ export const RESOURCES: Resource[] = [
   'tabela_precos',
   'tabela_precos_contas',
   'tabela_precos_produtos',
+  'auditoria',
   'conciliacao_frete',
   'sincronizacoes',
   'devolucoes',
@@ -43,6 +45,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   tabela_precos: 'Tabela de Preços',
   tabela_precos_contas: 'Tabela Preços — Contas',
   tabela_precos_produtos: 'Tabela Preços — Produtos',
+  auditoria: 'Auditoria',
   conciliacao_frete: 'Conciliação Frete',
   sincronizacoes: 'Sincronizações',
   devolucoes: 'Devoluções',

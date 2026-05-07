@@ -1,4 +1,5 @@
 from app.models.alert import Alert
+from app.models.audit import AuditFinding, AuditRun, AuditUpload
 from app.models.auth_code import AuthCode
 from app.models.base import Base
 from app.models.company import Cadastro, CadastroStore, Company, Store
@@ -7,6 +8,8 @@ from app.models.enums import (
     PLATFORMS,
     AlertSeverity,
     AlertType,
+    AuditFindingStatus,
+    AuditRunStatus,
     BackgroundJobStatus,
     BackgroundJobType,
     CadastroStatus,
@@ -44,6 +47,11 @@ __all__ = [
     "AlertSeverity",
     "AlertType",
     "AuditDismissedSku",
+    "AuditFinding",
+    "AuditFindingStatus",
+    "AuditRun",
+    "AuditRunStatus",
+    "AuditUpload",
     "AuthCode",
     "BackgroundJob",
     "BackgroundJobStatus",

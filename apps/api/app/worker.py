@@ -25,6 +25,7 @@ from app.models import (
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.advisory_lock import try_user_sync_lock
 from app.services.alerts import emit_alert
+from app.services.audit.runner import run_audit
 from app.services.auto_link import run_auto_link
 from app.services.email import get_email_sender, render_otp_html
 from app.services.listings_import import (
@@ -474,6 +475,22 @@ async def sync_bling_costs_run(
         )
 
 
+async def audit_run(
+    ctx: dict,
+    job_id: str,
+    run_id: str,
+    user_id: str,
+) -> None:
+    """Fase 10: audit by spreadsheet — compares planilha vs expected price."""
+    async with session_scope() as s:
+        await run_audit(
+            s,
+            job_id=UUID(job_id),
+            run_id=UUID(run_id),
+            user_id=UUID(user_id),
+        )
+
+
 # ---------------------------------------------------------------- lifecycle
 
 
@@ -504,6 +521,7 @@ class WorkerSettings:
         auto_import_link,
         push_prices_batch_run,
         sync_bling_costs_run,
+        audit_run,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -531,6 +549,7 @@ class WorkerSettings:
 # Re-export for tests / introspection
 __all__ = [
     "WorkerSettings",
+    "audit_run",
     "auth_codes_cleanup",
     "auto_import_link",
     "auto_link_run",

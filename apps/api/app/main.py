@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.db import engine
 from app.redis_client import redis
 from app.routers import alerts as alerts_router
+from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import cadastros as cadastros_router
 from app.routers import companies as companies_router
@@ -82,6 +83,7 @@ app.include_router(settings_router.router)
 app.include_router(alerts_router.router)
 app.include_router(listings_router.router)
 app.include_router(pricing_router.router)
+app.include_router(audit_router.router)
 
 
 @app.get("/api/health")

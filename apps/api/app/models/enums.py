@@ -151,3 +151,19 @@ class CellStatus(StrEnum):
     MANUAL = "manual"
     LOCKED = "locked"
     DISABLED = "disabled"
+
+
+class AuditRunStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AuditFindingStatus(StrEnum):
+    OK = "ok"
+    PRICE_MISMATCH = "price_mismatch"
+    MISSING = "missing"
+    PAUSED = "paused"
+    EXTRA = "extra"
