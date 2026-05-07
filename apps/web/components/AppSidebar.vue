@@ -27,7 +27,7 @@ const sections: Section[] = [
   {
     items: [
       { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-      { to: '/primeiros-passos', label: 'Primeiros passos', icon: Rocket },
+      { to: '/onboarding', label: 'Primeiros passos', icon: Rocket },
     ],
   },
   {

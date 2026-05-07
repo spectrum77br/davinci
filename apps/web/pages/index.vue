@@ -1,63 +1,197 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import {
-  DollarSign, ShoppingCart, Package, AlertTriangle, RefreshCw,
-  ArrowUpRight, Activity, Truck,
+  Package, Plug, AlertTriangle, RefreshCw,
+  ArrowUpRight, Activity, Tag, Truck, CheckCircle2,
 } from 'lucide-vue-next'
 
+type Channel = { platform: string; listings: number; linked: number }
+type RecentSync = {
+  id: string
+  type: string
+  status: string
+  total: number
+  processed: number
+  started_at: string | null
+  finished_at: string | null
+}
+type DashboardOut = {
+  kpis: {
+    products_total: number
+    products_active: number
+    integrations_total: number
+    integrations_connected: number
+    listings_total: number
+    listings_linked: number
+    alerts_unread: number
+  }
+  channels: Channel[]
+  recent_syncs: RecentSync[]
+  onboarding: { key: string; done: boolean }[]
+  needs_onboarding: boolean
+}
+type AlertOut = {
+  id: string
+  type: string
+  severity: 'info' | 'warning' | 'critical' | string
+  title: string
+  message: string | null
+  created_at: string
+  read_at: string | null
+}
+type AlertList = { items: AlertOut[]; total: number; unread: number }
+
 const config = useRuntimeConfig()
+const { api } = useApi()
+
 const { data: health } = await useFetch<{ status: string; postgres: string; redis: string }>(
   `${config.public.apiUrl}/api/health`,
   { server: false, default: () => ({ status: 'unknown', postgres: '?', redis: '?' }) },
 )
 
-const kpis = [
-  { label: 'Faturamento (30d)', value: 'R$ 482.910', delta: 12.4, hint: 'vs. 30d anteriores', icon: DollarSign },
-  { label: 'Pedidos', value: '3.241', delta: 8.1, hint: '127 hoje', icon: ShoppingCart },
-  { label: 'SKUs ativos', value: '1.873', delta: -1.2, hint: '14 sem estoque', icon: Package },
-  { label: 'Margem média', value: '18,6%', delta: 2.3, hint: 'após taxas + frete', icon: Activity },
-]
+const { data, refresh, pending } = await useAsyncData('dashboard', () => api<DashboardOut>('/api/dashboard'))
+const { data: alertData } = await useAsyncData('dashboard-alerts', () =>
+  api<AlertList>('/api/alerts?limit=5&unread_only=true'),
+)
 
-const channels = [
-  { name: 'Mercado Livre', share: 42, sales: 'R$ 202.823', orders: 1364, color: 'bg-amber-400' },
-  { name: 'Shopee',        share: 28, sales: 'R$ 135.214', orders: 891,  color: 'bg-orange-500' },
-  { name: 'Amazon',        share: 14, sales: 'R$ 67.607',  orders: 412,  color: 'bg-yellow-600' },
-  { name: 'Magalu',        share: 9,  sales: 'R$ 43.461',  orders: 281,  color: 'bg-blue-500' },
-  { name: 'TikTok Shop',   share: 7,  sales: 'R$ 33.804',  orders: 293,  color: 'bg-pink-500' },
-]
+const PLATFORM_LABELS: Record<string, string> = {
+  bling: 'Bling',
+  ml: 'Mercado Livre',
+  shopee: 'Shopee',
+  amazon: 'Amazon',
+  magalu: 'Magalu',
+  tiktok: 'TikTok Shop',
+}
+const PLATFORM_COLORS: Record<string, string> = {
+  bling: 'bg-sky-500',
+  ml: 'bg-amber-400',
+  shopee: 'bg-orange-500',
+  amazon: 'bg-yellow-600',
+  magalu: 'bg-blue-500',
+  tiktok: 'bg-pink-500',
+}
 
-const recentSyncs = [
-  { id: 1, scope: 'Bling — Aguiar',    kind: 'pedidos',  ok: 87,  err: 0, at: '2 min', dur: '12s' },
-  { id: 2, scope: 'ML — Luno',         kind: 'anúncios', ok: 142, err: 3, at: '14 min', dur: '38s' },
-  { id: 3, scope: 'Shopee — Jlas',     kind: 'pedidos',  ok: 56,  err: 0, at: '22 min', dur: '9s' },
-  { id: 4, scope: 'Bling — custos',    kind: 'produtos', ok: 1873, err: 0, at: '1 h',   dur: '2m 14s' },
-  { id: 5, scope: 'Amazon — Eron',     kind: 'pedidos',  ok: 0,   err: 12, at: '3 h',   dur: 'falhou' },
-]
+const kpis = computed(() => {
+  const k = data.value?.kpis
+  if (!k) return []
+  return [
+    {
+      label: 'Produtos ativos',
+      value: k.products_active.toLocaleString('pt-BR'),
+      hint: `${k.products_total.toLocaleString('pt-BR')} no catálogo`,
+      icon: Package,
+    },
+    {
+      label: 'Integrações',
+      value: `${k.integrations_connected}/${k.integrations_total || 0}`,
+      hint: 'conectadas',
+      icon: Plug,
+    },
+    {
+      label: 'Anúncios vinculados',
+      value: k.listings_linked.toLocaleString('pt-BR'),
+      hint: `${k.listings_total.toLocaleString('pt-BR')} importados`,
+      icon: Tag,
+    },
+    {
+      label: 'Alertas',
+      value: k.alerts_unread.toLocaleString('pt-BR'),
+      hint: 'não lidos',
+      icon: Activity,
+    },
+  ]
+})
 
-const alerts = [
-  { tone: 'danger',  title: 'Token Bling expirou', body: 'Conta Aguiar — reconectar OAuth.' },
-  { tone: 'warning', title: '14 SKUs sem estoque',  body: 'celular categoria — checar reposição.' },
-  { tone: 'info',    title: 'Nova devolução',       body: 'pedido #ML-298311 — solicitação cliente.' },
-]
+const channels = computed(() => {
+  const list = data.value?.channels ?? []
+  const total = list.reduce((acc, c) => acc + c.listings, 0)
+  return list.map((c) => ({
+    platform: c.platform,
+    label: PLATFORM_LABELS[c.platform] ?? c.platform,
+    color: PLATFORM_COLORS[c.platform] ?? 'bg-muted-foreground',
+    listings: c.listings,
+    linked: c.linked,
+    share: total > 0 ? Math.round((c.listings / total) * 100) : 0,
+  }))
+})
 
-function alertClass(t: string) {
-  if (t === 'danger') return 'pill-danger'
-  if (t === 'warning') return 'pill-warning'
+const recentSyncs = computed(() => data.value?.recent_syncs ?? [])
+const alerts = computed(() => alertData.value?.items ?? [])
+
+function alertClass(sev: string) {
+  if (sev === 'critical') return 'pill-danger'
+  if (sev === 'warning') return 'pill-warning'
   return 'pill-info'
 }
+
+function alertGlyph(sev: string) {
+  if (sev === 'critical') return '!'
+  if (sev === 'warning') return '⚠'
+  return 'i'
+}
+
+function formatRelative(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso).getTime()
+  const diff = Math.max(0, Date.now() - d)
+  const m = Math.floor(diff / 60_000)
+  if (m < 1) return 'agora'
+  if (m < 60) return `${m} min`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h} h`
+  return `${Math.floor(h / 24)} d`
+}
+
+function formatDuration(s: RecentSync): string {
+  if (!s.started_at) return '—'
+  const start = new Date(s.started_at).getTime()
+  const end = s.finished_at ? new Date(s.finished_at).getTime() : Date.now()
+  const ms = Math.max(0, end - start)
+  const sec = Math.floor(ms / 1000)
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60)
+  return `${m}m ${sec - m * 60}s`
+}
+
+function syncTypeLabel(t: string): string {
+  return t.replace(/_/g, ' ')
+}
+
+const onboardingComplete = computed(() => {
+  const o = data.value?.onboarding ?? []
+  return o.length > 0 && o.every((s) => s.done)
+})
 </script>
 
 <template>
   <div class="space-y-6">
-    <PageHeader title="Dashboard" description="Visão geral das contas, vendas e sincronizações.">
+    <PageHeader title="Dashboard" description="Visão geral do catálogo, integrações e sincronizações.">
       <template #actions>
-        <Button size="sm" variant="outline">
-          <RefreshCw class="size-4 mr-1.5" /> recarregar
-        </Button>
-        <Button size="sm">
-          últimos 30 dias
+        <Button size="sm" variant="outline" :disabled="pending" @click="refresh()">
+          <RefreshCw class="size-4 mr-1.5" :class="pending && 'animate-spin'" />
+          Atualizar
         </Button>
       </template>
     </PageHeader>
+
+    <NuxtLink
+      v-if="!onboardingComplete && data"
+      to="/onboarding"
+      class="block rounded-xl border bg-amber-500/5 border-amber-500/30 px-4 py-3 hover:bg-amber-500/10 transition"
+    >
+      <div class="flex items-center gap-3">
+        <div class="size-9 rounded-lg bg-amber-500/15 text-amber-600 grid place-items-center">
+          <CheckCircle2 class="size-5" />
+        </div>
+        <div class="min-w-0 flex-1">
+          <div class="font-medium text-sm">Termine a configuração inicial</div>
+          <div class="text-xs text-muted-foreground">
+            {{ data.onboarding.filter((s) => s.done).length }} de {{ data.onboarding.length }} passos concluídos.
+          </div>
+        </div>
+        <ArrowUpRight class="size-4 text-muted-foreground" />
+      </div>
+    </NuxtLink>
 
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
       <StatCard v-for="k in kpis" :key="k.label" v-bind="k" />
@@ -66,19 +200,21 @@ function alertClass(t: string) {
     <div class="grid lg:grid-cols-3 gap-4">
       <div class="lg:col-span-2 rounded-xl border bg-card p-5">
         <div class="flex items-center mb-4">
-          <h2 class="font-semibold">Vendas por canal</h2>
-          <span class="ml-2 text-xs text-muted-foreground">últimos 30 dias</span>
+          <h2 class="font-semibold">Anúncios por canal</h2>
           <NuxtLink to="/anuncios" class="ml-auto text-xs text-primary inline-flex items-center hover:underline">
             ver anúncios <ArrowUpRight class="size-3 ml-0.5" />
           </NuxtLink>
         </div>
 
-        <div class="space-y-4">
-          <div v-for="c in channels" :key="c.name" class="space-y-1.5">
+        <div v-if="channels.length === 0" class="py-8 text-center text-sm text-muted-foreground">
+          Nenhum anúncio importado ainda.
+        </div>
+        <div v-else class="space-y-4">
+          <div v-for="c in channels" :key="c.platform" class="space-y-1.5">
             <div class="flex items-center text-sm">
-              <span class="font-medium">{{ c.name }}</span>
-              <span class="ml-auto tabular-nums text-muted-foreground">{{ c.orders }} pedidos</span>
-              <span class="ml-3 tabular-nums font-semibold w-28 text-right">{{ c.sales }}</span>
+              <span class="font-medium">{{ c.label }}</span>
+              <span class="ml-auto tabular-nums text-muted-foreground">{{ c.linked }}/{{ c.listings }} vinculados</span>
+              <span class="ml-3 tabular-nums font-semibold w-12 text-right">{{ c.share }}%</span>
             </div>
             <div class="h-2 rounded-full bg-muted overflow-hidden">
               <div class="h-full rounded-full" :class="c.color" :style="{ width: c.share + '%' }" />
@@ -91,17 +227,18 @@ function alertClass(t: string) {
         <div class="flex items-center">
           <AlertTriangle class="size-4 text-amber-500 mr-1.5" />
           <h2 class="font-semibold">Alertas</h2>
-          <span class="pill pill-muted ml-auto">{{ alerts.length }}</span>
+          <span class="pill pill-muted ml-auto">{{ alertData?.unread ?? 0 }}</span>
         </div>
-        <ul class="space-y-3">
-          <li v-for="(a, i) in alerts" :key="i" class="flex gap-3">
-            <span :class="alertClass(a.tone)">{{ a.tone === 'danger' ? '!' : a.tone === 'warning' ? '⚠' : 'i' }}</span>
+        <ul v-if="alerts.length > 0" class="space-y-3">
+          <li v-for="a in alerts" :key="a.id" class="flex gap-3">
+            <span :class="alertClass(a.severity)">{{ alertGlyph(a.severity) }}</span>
             <div class="min-w-0">
               <div class="text-sm font-medium leading-tight">{{ a.title }}</div>
-              <div class="text-xs text-muted-foreground">{{ a.body }}</div>
+              <div v-if="a.message" class="text-xs text-muted-foreground">{{ a.message }}</div>
             </div>
           </li>
         </ul>
+        <div v-else class="py-2 text-sm text-muted-foreground">Sem alertas.</div>
         <div class="pt-2 border-t">
           <div class="flex items-center text-xs text-muted-foreground">
             <span>API</span>
@@ -125,27 +262,38 @@ function alertClass(t: string) {
           ver todas <ArrowUpRight class="size-3 ml-0.5" />
         </NuxtLink>
       </div>
-      <table class="w-full text-sm">
+      <div v-if="recentSyncs.length === 0" class="p-6 text-center text-sm text-muted-foreground">
+        Nenhuma sincronização ainda.
+      </div>
+      <table v-else class="w-full text-sm">
         <thead>
           <tr class="bg-muted/40 text-left text-xs text-muted-foreground">
-            <th class="px-5 py-2 font-medium">Escopo</th>
-            <th class="px-3 py-2 font-medium">Tipo</th>
-            <th class="px-3 py-2 font-medium text-right">OK</th>
-            <th class="px-3 py-2 font-medium text-right">Erros</th>
+            <th class="px-5 py-2 font-medium">Tipo</th>
+            <th class="px-3 py-2 font-medium">Status</th>
+            <th class="px-3 py-2 font-medium text-right">Processados</th>
+            <th class="px-3 py-2 font-medium text-right">Total</th>
             <th class="px-3 py-2 font-medium">Duração</th>
             <th class="px-5 py-2 font-medium text-right">Quando</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="r in recentSyncs" :key="r.id" class="border-t hover:bg-muted/30">
-            <td class="px-5 py-2.5 font-medium">{{ r.scope }}</td>
-            <td class="px-3 py-2.5 text-muted-foreground">{{ r.kind }}</td>
-            <td class="px-3 py-2.5 text-right tabular-nums">{{ r.ok }}</td>
-            <td class="px-3 py-2.5 text-right tabular-nums">
-              <span :class="r.err > 0 ? 'text-red-600 font-medium' : 'text-muted-foreground'">{{ r.err }}</span>
+            <td class="px-5 py-2.5 font-medium">{{ syncTypeLabel(r.type) }}</td>
+            <td class="px-3 py-2.5">
+              <span
+                class="text-xs px-1.5 py-0.5 rounded"
+                :class="{
+                  'bg-emerald-500/10 text-emerald-600': r.status === 'success',
+                  'bg-red-500/10 text-red-600': r.status === 'failed',
+                  'bg-amber-500/10 text-amber-600': r.status === 'running',
+                  'bg-muted text-muted-foreground': !['success', 'failed', 'running'].includes(r.status),
+                }"
+              >{{ r.status }}</span>
             </td>
-            <td class="px-3 py-2.5 text-muted-foreground">{{ r.dur }}</td>
-            <td class="px-5 py-2.5 text-right text-muted-foreground">{{ r.at }} atrás</td>
+            <td class="px-3 py-2.5 text-right tabular-nums">{{ r.processed }}</td>
+            <td class="px-3 py-2.5 text-right tabular-nums text-muted-foreground">{{ r.total }}</td>
+            <td class="px-3 py-2.5 text-muted-foreground">{{ formatDuration(r) }}</td>
+            <td class="px-5 py-2.5 text-right text-muted-foreground">{{ formatRelative(r.started_at) }} atrás</td>
           </tr>
         </tbody>
       </table>
