@@ -495,6 +495,8 @@ async def audit_run(
 
 
 async def startup(ctx: dict) -> None:
+    from app.services.sentry import init_sentry
+    init_sentry(component="worker")
     logger.info("worker_startup")
 
 

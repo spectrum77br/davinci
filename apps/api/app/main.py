@@ -18,6 +18,7 @@ from app.routers import discrepancies as discrepancies_router
 from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
+from app.routers import metrics as metrics_router
 from app.routers import oauth as oauth_router
 from app.routers import pricing as pricing_router
 from app.routers import products as products_router
@@ -27,10 +28,12 @@ from app.routers import sync as sync_router
 from app.routers import users as users_router
 from app.routers import webhooks as webhooks_router
 from app.services.bootstrap import promote_owner_if_needed
+from app.services.sentry import init_sentry
 from app.worker_pool import close_arq_pool
 
 logger = structlog.get_logger()
 settings = get_settings()
+init_sentry(component="api")
 
 
 @asynccontextmanager
@@ -47,12 +50,42 @@ async def lifespan(app: FastAPI):
     logger.info("shutdown")
 
 
+_OPENAPI_TAGS = [
+    {"name": "auth", "description": "Email-OTP login + JWT session."},
+    {"name": "users", "description": "User accounts, RBAC, admin operations."},
+    {"name": "companies", "description": "Tenant companies (razão social / CNPJ)."},
+    {"name": "stores", "description": "Marketplaces lojas attached to a company."},
+    {"name": "cadastros", "description": "Cadastros (telefone / e-mail / domínio)."},
+    {"name": "integrations", "description": "Marketplace integrations + OAuth credentials."},
+    {"name": "oauth", "description": "OAuth callback handlers."},
+    {"name": "products", "description": "Local catalog (products + product_links)."},
+    {"name": "sync", "description": "Triggered syncs and sync_logs."},
+    {"name": "jobs", "description": "Background job status and enqueue."},
+    {"name": "webhooks", "description": "Inbound marketplace webhooks (Bling first)."},
+    {"name": "alerts", "description": "User alerts feed."},
+    {"name": "listings", "description": "Cached marketplace listings."},
+    {"name": "pricing", "description": "Catálogo, regras, push de preços, auditorias."},
+    {"name": "audit", "description": "Audit by spreadsheet — runs, items, fixes."},
+    {"name": "discrepancies", "description": "Cross-platform stock divergences."},
+    {"name": "dashboard", "description": "Onboarding + KPIs do dashboard."},
+    {"name": "settings", "description": "User preferences (Telegram, daily sync, etc)."},
+    {"name": "metrics", "description": "Observability — counts, latency, error codes."},
+]
+
 app = FastAPI(
     title="DaVinci API",
     version="0.1.0",
+    description=(
+        "REST backend for the DaVinci stock-sync platform. Routes are grouped by "
+        "domain via OpenAPI tags. Authentication is cookie-based JWT issued by "
+        "the email-OTP flow under `/api/auth`."
+    ),
     lifespan=lifespan,
     docs_url="/api/docs",
+    redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
+    openapi_tags=_OPENAPI_TAGS,
+    contact={"name": "DaVinci", "url": "https://app.hadken.com"},
 )
 
 # In prod, web and api share the same origin (path-routing on app.hadken.com),
@@ -88,6 +121,7 @@ app.include_router(pricing_router.router)
 app.include_router(audit_router.router)
 app.include_router(discrepancies_router.router)
 app.include_router(dashboard_router.router)
+app.include_router(metrics_router.router)
 
 
 @app.get("/api/health")

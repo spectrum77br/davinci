@@ -48,6 +48,7 @@ from app.services.alerts import emit_alert
 from app.services.marketplaces.base import SyncResult, SyncStatus
 from app.services.marketplaces.bling import BlingClient, parse_bling_product
 from app.services.marketplaces.factory import client_for
+from app.services.metrics import time_sync
 
 logger = structlog.get_logger()
 
@@ -173,31 +174,36 @@ class SyncOrchestrator:
         store = await self._get_store(link.store_id)
         bling_store_id = store.bling_store_id if store is not None else None  # type: ignore[attr-defined]
 
-        if link.platform == IntegrationPlatform.BLING:
-            action = SyncLogAction.REFRESH_BLING
-            result = await self._refresh_bling(product, link)
-        else:
-            action = SyncLogAction.UPDATE_STOCK
-            try:
-                integration = await self._get_integration(link.integration_id)
-                client = await self._client(integration)
-                qty = product.stock
-                result = await client.update_stock(  # type: ignore[union-attr]
-                    link, qty, bling_store_id=bling_store_id
-                )
-            except HTTPException as e:
-                code = "platform_not_implemented" if e.status_code == 501 else "http_error"
-                result = SyncResult(
-                    status=SyncStatus.SKIPPED,
-                    error_code=code,
-                    error_detail=str(e.detail)[:500],
-                )
-            except Exception as e:  # noqa: BLE001
-                result = SyncResult(
-                    status=SyncStatus.FATAL,
-                    error_code="orchestrator_exception",
-                    error_detail=str(e)[:500],
-                )
+        async with time_sync(link.platform.value) as bucket:
+            if link.platform == IntegrationPlatform.BLING:
+                action = SyncLogAction.REFRESH_BLING
+                result = await self._refresh_bling(product, link)
+            else:
+                action = SyncLogAction.UPDATE_STOCK
+                try:
+                    integration = await self._get_integration(link.integration_id)
+                    client = await self._client(integration)
+                    qty = product.stock
+                    result = await client.update_stock(  # type: ignore[union-attr]
+                        link, qty, bling_store_id=bling_store_id
+                    )
+                except HTTPException as e:
+                    code = "platform_not_implemented" if e.status_code == 501 else "http_error"
+                    result = SyncResult(
+                        status=SyncStatus.SKIPPED,
+                        error_code=code,
+                        error_detail=str(e.detail)[:500],
+                    )
+                except Exception as e:  # noqa: BLE001
+                    result = SyncResult(
+                        status=SyncStatus.FATAL,
+                        error_code="orchestrator_exception",
+                        error_detail=str(e)[:500],
+                    )
+
+            bucket.set(result.status.value)
+            if result.error_code:
+                bucket.error(result.error_code)
 
         self._tally(result.status)
         link.last_sync_status = _status_to_link_status(result.status)

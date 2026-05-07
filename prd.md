@@ -1165,12 +1165,14 @@ Cobre `Audit.tsx`.
 
 ### Fase 13 — Hardening, testes, observabilidade (2 dias)
 
-- [ ] Testes unitários services críticos (`SyncOrchestrator`, `MercadoLivreClient.update_stock` — cobre B1)
-- [ ] Testes de integração contra fixtures dos marketplaces (responses gravados)
-- [ ] Testes E2E Playwright para fluxos chave (login, importar produto, sync, push de preço)
-- [ ] Métricas: contagem de syncs, latência por marketplace, erros por código
-- [ ] Sentry/equivalente para erros não tratados
-- [ ] Documentação OpenAPI publicada
+> **Implementada em 2026-05-07.**
+
+- [x] Testes unitários services críticos (`SyncOrchestrator`, `MercadoLivreClient.update_stock` — cobre B1) — `tests/test_sync_orchestrator.py`, `tests/test_ml_client.py`
+- [x] Testes de integração contra fixtures dos marketplaces (responses gravados via `respx`) — `tests/test_phase13_integration.py`, `tests/test_ml_client.py`, `tests/test_shopee_client.py`, `tests/test_amazon_client.py`
+- [x] Testes E2E Playwright para fluxos chave (login, importar produto, sync, push de preço) — `apps/web/playwright.config.ts` + `apps/web/e2e/*.spec.ts`
+- [x] Métricas: contagem de syncs, latência por marketplace, erros por código — `app/services/metrics.py` + `app/routers/metrics.py` (`GET /api/metrics`, admin only)
+- [x] Sentry/equivalente para erros não tratados — `app/services/sentry.py` + init no `main.py` e `worker.py` (no-op se `SENTRY_DSN` vazio)
+- [x] Documentação OpenAPI publicada — `/api/docs` (Swagger), `/api/redoc`, `/api/openapi.json`; tags + descrição enriquecidas no `main.py`
 
 ### Fase 14 — Cutover (0.5 dia)
 
