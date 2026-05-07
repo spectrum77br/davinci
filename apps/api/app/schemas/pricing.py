@@ -185,3 +185,45 @@ class PricingOverrideOut(PricingOverrideBase):
     user_id: UUID
     created_at: datetime
     updated_at: datetime
+
+
+# ----------------------------------------------------------------- push + grid
+
+class PricingPushIn(BaseModel):
+    pricing_account_id: UUID
+    pricing_product_id: UUID
+
+
+class PricingPushBatchIn(BaseModel):
+    items: list[PricingPushIn]
+
+
+class PricingPushItemOut(BaseModel):
+    pricing_account_id: UUID
+    pricing_product_id: UUID
+    ok: bool
+    code: str
+    detail: str | None = None
+    price: Decimal | None = None
+    item_id: str | None = None
+    variation_id: str | None = None
+    cached: bool = False
+
+
+class PricingPushOut(BaseModel):
+    results: list[PricingPushItemOut]
+
+
+class PricingGridCell(BaseModel):
+    pricing_account_id: UUID
+    pricing_product_id: UUID
+    price: Decimal | None = None
+    source: str  # computed | override | locked | disabled | missing_inputs
+    cell_status: str = "auto"
+    has_override: bool = False
+
+
+class PricingGridOut(BaseModel):
+    accounts: list[PricingAccountOut]
+    products: list[PricingProductOut]
+    cells: list[PricingGridCell]

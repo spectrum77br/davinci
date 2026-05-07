@@ -10,7 +10,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import and_, delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +31,8 @@ from app.schemas.pricing import (
     PricingAccountCreate,
     PricingAccountOut,
     PricingAccountPatch,
+    PricingGridCell,
+    PricingGridOut,
     PricingOverrideCellStatus,
     PricingOverrideOut,
     PricingOverrideUpsert,
@@ -39,8 +41,13 @@ from app.schemas.pricing import (
     PricingProductImportResult,
     PricingProductOut,
     PricingProductPatch,
+    PricingPushBatchIn,
+    PricingPushItemOut,
+    PricingPushOut,
 )
 from app.security.cipher import encrypt
+from app.services.pricing.calc import calculate
+from app.services.pricing.push import push_one
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
@@ -540,6 +547,111 @@ async def remove_override(
         raise HTTPException(404, detail={"code": "override_not_found"})
     await session.commit()
     return None
+
+
+# =============================================================================
+# Push (9b) — single + batch, idempotency via header
+# =============================================================================
+
+@router.post("/push", response_model=PricingPushOut)
+async def push_prices(
+    body: PricingPushBatchIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> PricingPushOut:
+    if not body.items:
+        return PricingPushOut(results=[])
+
+    results: list[PricingPushItemOut] = []
+    for i, item in enumerate(body.items):
+        # Per-item key when batch has >1 entry — keeps each (acct,prod) replay-safe.
+        key = (
+            f"{idempotency_key}:{i}" if idempotency_key and len(body.items) > 1
+            else idempotency_key
+        )
+        outcome = await push_one(
+            session,
+            user=user,
+            account_id=item.pricing_account_id,
+            product_id=item.pricing_product_id,
+            idempotency_key=key,
+        )
+        results.append(
+            PricingPushItemOut(
+                pricing_account_id=item.pricing_account_id,
+                pricing_product_id=item.pricing_product_id,
+                ok=outcome.ok,
+                code=outcome.code,
+                detail=outcome.detail,
+                price=outcome.price,
+                item_id=outcome.item_id,
+                variation_id=outcome.variation_id,
+                cached=outcome.cached,
+            )
+        )
+    await session.commit()
+    return PricingPushOut(results=results)
+
+
+# =============================================================================
+# Grid (9b) — matrix produtos × contas com preço calculado
+# =============================================================================
+
+@router.get("/grid", response_model=PricingGridOut)
+async def get_grid(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "view"))
+    ],
+    department: str | None = Query(None),
+) -> PricingGridOut:
+    dept = _coerce_department(department)
+
+    accounts_stmt = select(PricingAccount).where(PricingAccount.user_id == user.id)
+    products_stmt = select(PricingProduct).where(PricingProduct.user_id == user.id)
+    if dept is not None:
+        accounts_stmt = accounts_stmt.where(PricingAccount.department == dept)
+        products_stmt = products_stmt.where(PricingProduct.department == dept)
+    accounts = (
+        await session.execute(
+            accounts_stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
+        )
+    ).scalars().all()
+    products = (
+        await session.execute(products_stmt.order_by(PricingProduct.sku))
+    ).scalars().all()
+
+    overrides = (
+        await session.execute(
+            select(PricingOverride).where(PricingOverride.user_id == user.id)
+        )
+    ).scalars().all()
+    by_pair = {(o.pricing_product_id, o.pricing_account_id): o for o in overrides}
+
+    cells: list[PricingGridCell] = []
+    for prod in products:
+        for acc in accounts:
+            ovr = by_pair.get((prod.id, acc.id))
+            outcome = calculate(acc, prod, ovr)
+            cells.append(
+                PricingGridCell(
+                    pricing_account_id=acc.id,
+                    pricing_product_id=prod.id,
+                    price=outcome.price,
+                    source=outcome.source,
+                    cell_status=(ovr.cell_status.value if ovr else "auto"),
+                    has_override=ovr is not None,
+                )
+            )
+
+    return PricingGridOut(
+        accounts=[_account_out(a) for a in accounts],
+        products=[PricingProductOut.model_validate(p) for p in products],
+        cells=cells,
+    )
 
 
 # =============================================================================

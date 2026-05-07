@@ -173,7 +173,7 @@ class MercadoLivreClient:
 
     async def update_stock(
         self,
-        link: "ProductLink",
+        link: ProductLink,
         qty: int,
         *,
         bling_store_id: int | None = None,  # ignored on ML side
@@ -287,6 +287,45 @@ class MercadoLivreClient:
             payload={"item_id": item_id},
         )
 
+    async def update_price(
+        self,
+        item_id: str,
+        price: float,
+        *,
+        variation_id: str | None = None,
+    ) -> SyncResult:
+        """Push price to a single ML listing (or one of its variations).
+
+        Phase 9b — pricing push. Caller already resolved
+        `(item_id, variation_id)` from `pricing_overrides`/listings tables.
+        Returns a SyncResult so the orchestrator/log layer can stay generic.
+        """
+        if price <= 0:
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                error_code="invalid_price",
+                error_detail=f"price={price}",
+            )
+        body: dict[str, Any]
+        if variation_id:
+            body = {"variations": [{"id": int(variation_id), "price": price}]}
+        else:
+            body = {"price": price}
+        try:
+            r = await self._request("PUT", f"/items/{item_id}", json=body)
+        except httpx.HTTPError as e:
+            return _map_http_error(e, None, "ml_put_price_failed")
+        if r.status_code >= 400:
+            return _map_status_error(r, None, "ml_put_price_status")
+        return SyncResult(
+            status=SyncStatus.OK,
+            qty_after=None,
+            payload={
+                "item_id": item_id,
+                "variation_id": variation_id,
+                "price": price,
+            },
+        )
 
     async def list_listings(
         self,

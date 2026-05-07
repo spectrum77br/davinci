@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff, Star } from 'lucide-vue-next'
+import { Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff, Star, Send, Lock, Ban, Pencil } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -358,6 +358,200 @@ async function toggleCatalog(p: PricingProduct) {
   }
 }
 
+// =========================================================== overrides state
+
+type GridCell = {
+  pricing_account_id: string
+  pricing_product_id: string
+  price: string | number | null
+  source: string
+  cell_status: 'auto' | 'manual' | 'locked' | 'disabled'
+  has_override: boolean
+}
+
+type GridResponse = {
+  accounts: Account[]
+  products: PricingProduct[]
+  cells: GridCell[]
+}
+
+type PushResult = {
+  pricing_account_id: string
+  pricing_product_id: string
+  ok: boolean
+  code: string
+  detail: string | null
+  price: string | null
+  item_id: string | null
+  variation_id: string | null
+  cached: boolean
+}
+
+const grid = ref<GridResponse | null>(null)
+const gridLoading = ref(false)
+const gridErr = ref<string | null>(null)
+const filterDeptOverrides = ref<string>('')
+const editingCell = ref<{ accId: string; prodId: string } | null>(null)
+const editValue = ref<string>('')
+const pushing = ref(false)
+const lastPushResults = ref<PushResult[]>([])
+
+async function loadGrid() {
+  gridLoading.value = true
+  gridErr.value = null
+  try {
+    const qs = filterDeptOverrides.value ? `?department=${filterDeptOverrides.value}` : ''
+    grid.value = await api<GridResponse>(`/api/pricing/grid${qs}`)
+  } catch (e: any) {
+    gridErr.value = e?.data?.detail?.code ?? 'load_failed'
+  } finally {
+    gridLoading.value = false
+  }
+}
+
+const cellMap = computed(() => {
+  const m = new Map<string, GridCell>()
+  for (const c of grid.value?.cells ?? []) {
+    m.set(`${c.pricing_product_id}::${c.pricing_account_id}`, c)
+  }
+  return m
+})
+
+function cellOf(prodId: string, accId: string): GridCell | undefined {
+  return cellMap.value.get(`${prodId}::${accId}`)
+}
+
+function cellLabel(c: GridCell | undefined): string {
+  if (!c) return '—'
+  if (c.source === 'disabled') return '∅'
+  if (c.price == null) return '—'
+  return Number(c.price).toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  })
+}
+
+function cellTone(c: GridCell | undefined): string {
+  if (!c) return ''
+  if (c.source === 'disabled') return 'bg-muted/50 text-muted-foreground'
+  if (c.source === 'locked') return 'bg-amber-50 text-amber-900'
+  if (c.source === 'override') return 'bg-blue-50 text-blue-900'
+  if (c.source === 'missing_inputs') return 'bg-red-50 text-red-900'
+  return ''
+}
+
+function startEdit(c: GridCell) {
+  editingCell.value = {
+    accId: c.pricing_account_id,
+    prodId: c.pricing_product_id,
+  }
+  editValue.value = c.price != null ? String(c.price) : ''
+}
+
+function cancelEdit() {
+  editingCell.value = null
+  editValue.value = ''
+}
+
+async function saveOverride() {
+  if (!editingCell.value) return
+  const { accId, prodId } = editingCell.value
+  const val = editValue.value.trim()
+  try {
+    if (val === '') {
+      await api(
+        `/api/pricing/overrides?pricing_product_id=${prodId}&pricing_account_id=${accId}`,
+        { method: 'DELETE' },
+      ).catch((e) => {
+        if (e?.response?.status !== 404) throw e
+      })
+    } else {
+      await api(`/api/pricing/overrides`, {
+        method: 'PUT',
+        body: {
+          pricing_product_id: prodId,
+          pricing_account_id: accId,
+          price_override: Number(val),
+          cell_status: 'manual',
+        },
+      })
+    }
+    cancelEdit()
+    await loadGrid()
+  } catch (e: any) {
+    gridErr.value = e?.data?.detail?.code ?? 'save_failed'
+  }
+}
+
+async function setCellStatus(c: GridCell, status: 'auto' | 'locked' | 'disabled') {
+  try {
+    await api(`/api/pricing/overrides/cell-status`, {
+      method: 'PUT',
+      body: {
+        pricing_product_id: c.pricing_product_id,
+        pricing_account_id: c.pricing_account_id,
+        cell_status: status,
+      },
+    })
+    await loadGrid()
+  } catch (e: any) {
+    gridErr.value = e?.data?.detail?.code ?? 'status_failed'
+  }
+}
+
+async function pushCell(c: GridCell) {
+  pushing.value = true
+  lastPushResults.value = []
+  try {
+    const r = await api<{ results: PushResult[] }>(`/api/pricing/push`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': `cell:${c.pricing_product_id}:${c.pricing_account_id}:${Date.now()}` },
+      body: {
+        items: [
+          {
+            pricing_account_id: c.pricing_account_id,
+            pricing_product_id: c.pricing_product_id,
+          },
+        ],
+      },
+    })
+    lastPushResults.value = r.results
+  } catch (e: any) {
+    gridErr.value = e?.data?.detail?.code ?? 'push_failed'
+  } finally {
+    pushing.value = false
+  }
+}
+
+async function pushAccountColumn(accId: string) {
+  if (!grid.value) return
+  if (!confirm(`Disparar push para todos os produtos desta conta?`)) return
+  pushing.value = true
+  lastPushResults.value = []
+  try {
+    const items = grid.value.products
+      .map((p) => ({ pricing_account_id: accId, pricing_product_id: p.id }))
+      .filter((it) => {
+        const c = cellOf(it.pricing_product_id, it.pricing_account_id)
+        return c && c.price != null && c.source !== 'locked' && c.source !== 'disabled'
+      })
+    if (!items.length) {
+      gridErr.value = 'no_eligible_cells'
+      return
+    }
+    const r = await api<{ results: PushResult[] }>(`/api/pricing/push`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': `col:${accId}:${Date.now()}` },
+      body: { items },
+    })
+    lastPushResults.value = r.results
+  } catch (e: any) {
+    gridErr.value = e?.data?.detail?.code ?? 'push_failed'
+  } finally {
+    pushing.value = false
+  }
+}
+
 // =============================================================== boot
 
 watch(
@@ -365,6 +559,7 @@ watch(
   async (t) => {
     if (t === 'contas') await loadAccounts()
     else if (t === 'produtos') await loadProducts()
+    else if (t === 'overrides') await loadGrid()
   },
   { immediate: true },
 )
@@ -374,6 +569,9 @@ watch(filterDeptContas, () => {
 })
 watch([filterDeptProdutos, filterCatalog], () => {
   if (tab.value === 'produtos') loadProducts()
+})
+watch(filterDeptOverrides, () => {
+  if (tab.value === 'overrides') loadGrid()
 })
 </script>
 
@@ -702,11 +900,159 @@ watch([filterDeptProdutos, filterCatalog], () => {
       </Teleport>
     </section>
 
-    <!-- ============================================== STUBS 9b/9c/9d -->
+    <!-- ============================================== OVERRIDES -->
+    <section v-else-if="tab === 'overrides'" class="space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <select v-model="filterDeptOverrides" class="input input-sm">
+          <option value="">Todos departamentos</option>
+          <option v-for="d in DEPARTMENTS" :key="d.value" :value="d.value">{{ d.label }}</option>
+        </select>
+        <button class="btn btn-sm" @click="loadGrid" :disabled="gridLoading">
+          <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': gridLoading }" />
+          Recarregar
+        </button>
+        <span v-if="pushing" class="text-sm text-muted-foreground flex items-center gap-1">
+          <Loader2 class="h-3 w-3 animate-spin" /> enviando…
+        </span>
+      </div>
+
+      <div v-if="gridErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
+        <AlertCircle class="h-4 w-4" /> {{ gridErr }}
+      </div>
+
+      <div v-if="lastPushResults.length" class="rounded border bg-muted/30 px-3 py-2 text-sm">
+        <div class="font-medium mb-1">Resultado do push:</div>
+        <ul class="space-y-0.5 max-h-40 overflow-y-auto">
+          <li
+            v-for="(r, idx) in lastPushResults"
+            :key="idx"
+            class="flex items-center gap-2"
+            :class="r.ok ? 'text-emerald-700' : 'text-red-700'"
+          >
+            <span class="font-mono text-xs">{{ r.code }}</span>
+            <span v-if="r.cached" class="text-xs px-1 rounded bg-amber-100 text-amber-900">cached</span>
+            <span v-if="r.price">{{ Number(r.price).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) }}</span>
+            <span v-if="r.detail" class="text-xs text-muted-foreground">{{ r.detail }}</span>
+          </li>
+        </ul>
+      </div>
+
+      <div class="overflow-auto rounded border max-h-[70vh]">
+        <table class="text-xs">
+          <thead class="bg-muted/50 sticky top-0 z-10">
+            <tr>
+              <th class="sticky left-0 bg-muted/50 px-2 py-2 text-left min-w-[160px]">Produto</th>
+              <th
+                v-for="acc in grid?.accounts ?? []"
+                :key="acc.id"
+                class="px-2 py-2 text-left min-w-[110px]"
+              >
+                <div class="flex items-center gap-1">
+                  <span class="truncate">{{ acc.name }}</span>
+                  <button
+                    class="btn btn-xs"
+                    title="Push para todos produtos desta conta"
+                    @click="pushAccountColumn(acc.id)"
+                  >
+                    <Send class="h-3 w-3" />
+                  </button>
+                </div>
+                <div class="text-[10px] text-muted-foreground">{{ acc.platform }} · kit {{ acc.kit_number }}</div>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="gridLoading && !grid">
+              <td colspan="999" class="p-6 text-center text-muted-foreground">
+                <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
+              </td>
+            </tr>
+            <tr v-else-if="!grid?.products.length">
+              <td colspan="999" class="p-6 text-center text-muted-foreground">
+                Nenhum produto. Crie/importe produtos na aba Produtos.
+              </td>
+            </tr>
+            <tr v-for="prod in grid?.products ?? []" :key="prod.id" class="border-t hover:bg-muted/20">
+              <td class="sticky left-0 bg-background px-2 py-1 text-xs whitespace-nowrap">
+                <div class="font-mono truncate max-w-[160px]" :title="prod.sku">{{ prod.sku }}</div>
+                <div class="text-[10px] text-muted-foreground truncate max-w-[160px]" :title="prod.name">{{ prod.name }}</div>
+              </td>
+              <td
+                v-for="acc in grid?.accounts ?? []"
+                :key="acc.id"
+                class="px-1 py-1 border-l"
+                :class="cellTone(cellOf(prod.id, acc.id))"
+              >
+                <template v-if="editingCell && editingCell.accId === acc.id && editingCell.prodId === prod.id">
+                  <div class="flex items-center gap-1">
+                    <input
+                      v-model="editValue"
+                      type="number"
+                      step="0.01"
+                      class="input input-xs w-20"
+                      @keydown.enter="saveOverride"
+                      @keydown.escape="cancelEdit"
+                    />
+                    <button class="btn btn-xs btn-primary" @click="saveOverride">
+                      <Save class="h-3 w-3" />
+                    </button>
+                    <button class="btn btn-xs" @click="cancelEdit">
+                      <X class="h-3 w-3" />
+                    </button>
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="flex items-center justify-between gap-1">
+                    <span>{{ cellLabel(cellOf(prod.id, acc.id)) }}</span>
+                    <div class="flex items-center gap-0.5 opacity-60 hover:opacity-100">
+                      <button
+                        v-if="cellOf(prod.id, acc.id)"
+                        class="p-0.5 hover:bg-muted rounded"
+                        title="Editar override"
+                        @click="startEdit(cellOf(prod.id, acc.id)!)"
+                      >
+                        <Pencil class="h-3 w-3" />
+                      </button>
+                      <button
+                        v-if="cellOf(prod.id, acc.id)"
+                        class="p-0.5 hover:bg-muted rounded"
+                        :title="cellOf(prod.id, acc.id)?.cell_status === 'locked' ? 'Destravar' : 'Travar'"
+                        @click="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'locked' ? 'auto' : 'locked')"
+                      >
+                        <Lock class="h-3 w-3" />
+                      </button>
+                      <button
+                        v-if="cellOf(prod.id, acc.id)"
+                        class="p-0.5 hover:bg-muted rounded"
+                        :title="cellOf(prod.id, acc.id)?.cell_status === 'disabled' ? 'Habilitar' : 'Desabilitar'"
+                        @click="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'disabled' ? 'auto' : 'disabled')"
+                      >
+                        <Ban class="h-3 w-3" />
+                      </button>
+                      <button
+                        v-if="cellOf(prod.id, acc.id) && cellOf(prod.id, acc.id)?.price"
+                        class="p-0.5 hover:bg-emerald-100 rounded text-emerald-700"
+                        title="Push esta célula"
+                        :disabled="pushing"
+                        @click="pushCell(cellOf(prod.id, acc.id)!)"
+                      >
+                        <Send class="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                </template>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============================================== STUBS 9c/9d -->
     <section v-else class="rounded border border-dashed p-12 text-center text-muted-foreground">
       <p class="text-lg font-medium">Tab "{{ tab }}" — em construção</p>
       <p class="text-sm mt-2">
-        Esta aba chega na sub-fase 9{{ tab === 'overrides' ? 'b' : tab === 'auditoria' ? 'd' : 'd' }}.
+        Esta aba chega na sub-fase 9{{ tab === 'auditoria' ? 'd' : 'd' }}.
       </p>
     </section>
   </div>
