@@ -523,32 +523,122 @@ async function pushCell(c: GridCell) {
   }
 }
 
-async function pushAccountColumn(accId: string) {
-  if (!grid.value) return
-  if (!confirm(`Disparar push para todos os produtos desta conta?`)) return
-  pushing.value = true
-  lastPushResults.value = []
-  try {
-    const items = grid.value.products
-      .map((p) => ({ pricing_account_id: accId, pricing_product_id: p.id }))
-      .filter((it) => {
-        const c = cellOf(it.pricing_product_id, it.pricing_account_id)
-        return c && c.price != null && c.source !== 'locked' && c.source !== 'disabled'
+// 9c — batch push via Arq job + progress polling.
+type BatchJob = {
+  id: string
+  type: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  total: number
+  processed: number
+  result?: { summary?: { total: number; ok: number; failed: number; cached: number } }
+  error?: string | null
+}
+
+const activeJob = ref<BatchJob | null>(null)
+const BATCH_THRESHOLD = 5
+
+async function pushItemsBatch(
+  items: { pricing_account_id: string; pricing_product_id: string }[],
+  keyHint: string,
+) {
+  if (!items.length) {
+    gridErr.value = 'no_eligible_cells'
+    return
+  }
+  // Small batches still go through synchronous /push for instant feedback.
+  if (items.length <= BATCH_THRESHOLD) {
+    pushing.value = true
+    lastPushResults.value = []
+    try {
+      const r = await api<{ results: PushResult[] }>(`/api/pricing/push`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': `${keyHint}:${Date.now()}` },
+        body: { items },
       })
-    if (!items.length) {
-      gridErr.value = 'no_eligible_cells'
-      return
+      lastPushResults.value = r.results
+    } catch (e: any) {
+      gridErr.value = e?.data?.detail?.code ?? 'push_failed'
+    } finally {
+      pushing.value = false
     }
-    const r = await api<{ results: PushResult[] }>(`/api/pricing/push`, {
+    return
+  }
+
+  // Large batch → enqueue, poll status.
+  pushing.value = true
+  activeJob.value = null
+  try {
+    const created = await api<{ job_id: string }>(`/api/pricing/push-batch`, {
       method: 'POST',
-      headers: { 'Idempotency-Key': `col:${accId}:${Date.now()}` },
+      headers: { 'Idempotency-Key': `${keyHint}:${Date.now()}` },
       body: { items },
     })
-    lastPushResults.value = r.results
+    await pollJob(created.job_id)
   } catch (e: any) {
     gridErr.value = e?.data?.detail?.code ?? 'push_failed'
   } finally {
     pushing.value = false
+  }
+}
+
+async function pollJob(jobId: string, attempts = 0): Promise<void> {
+  try {
+    const job = await api<BatchJob>(`/api/jobs/${jobId}`)
+    activeJob.value = job
+    if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
+      await loadGrid()
+      return
+    }
+  } catch (e: any) {
+    if (attempts > 60) {
+      gridErr.value = 'job_poll_timeout'
+      return
+    }
+  }
+  await new Promise((r) => setTimeout(r, 1500))
+  return pollJob(jobId, attempts + 1)
+}
+
+async function pushAccountColumn(accId: string) {
+  if (!grid.value) return
+  if (!confirm(`Disparar push para todos os produtos desta conta?`)) return
+  const items = grid.value.products
+    .map((p) => ({ pricing_account_id: accId, pricing_product_id: p.id }))
+    .filter((it) => {
+      const c = cellOf(it.pricing_product_id, it.pricing_account_id)
+      return c && c.price != null && c.source !== 'locked' && c.source !== 'disabled'
+    })
+  await pushItemsBatch(items, `col:${accId}`)
+}
+
+async function pushAllVisible() {
+  if (!grid.value) return
+  const items: { pricing_account_id: string; pricing_product_id: string }[] = []
+  for (const p of grid.value.products) {
+    for (const a of grid.value.accounts) {
+      const c = cellOf(p.id, a.id)
+      if (c && c.price != null && c.source !== 'locked' && c.source !== 'disabled') {
+        items.push({ pricing_account_id: a.id, pricing_product_id: p.id })
+      }
+    }
+  }
+  if (!confirm(`Push ${items.length} célula(s)?`)) return
+  await pushItemsBatch(items, 'all-visible')
+}
+
+async function sendManualReport() {
+  const text = prompt('Texto do relatório (HTML do Telegram):', activeJob.value
+    ? `Push job ${activeJob.value.id}\nstatus: ${activeJob.value.status}\nok: ${activeJob.value.result?.summary?.ok ?? 0} / ${activeJob.value.total}`
+    : 'Sem dados')
+  if (!text) return
+  try {
+    await api(`/api/pricing/push-report`, {
+      method: 'POST',
+      body: { summary: text },
+    })
+    alert('Enviado.')
+  } catch (e: any) {
+    gridErr.value = e?.data?.detail?.code ?? 'report_failed'
   }
 }
 
@@ -911,9 +1001,39 @@ watch(filterDeptOverrides, () => {
           <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': gridLoading }" />
           Recarregar
         </button>
+        <button class="btn btn-sm" :disabled="pushing || !grid?.cells.length" @click="pushAllVisible">
+          <Send class="h-4 w-4" /> Push tudo
+        </button>
+        <button class="btn btn-sm" :disabled="pushing" @click="sendManualReport">
+          Enviar relatório
+        </button>
         <span v-if="pushing" class="text-sm text-muted-foreground flex items-center gap-1">
           <Loader2 class="h-3 w-3 animate-spin" /> enviando…
         </span>
+      </div>
+
+      <div v-if="activeJob" class="rounded border bg-muted/40 px-3 py-2 text-sm">
+        <div class="flex items-center justify-between">
+          <span class="font-medium">Job #{{ activeJob.id.slice(0, 8) }}</span>
+          <span :class="{
+            'text-amber-700': activeJob.status === 'running' || activeJob.status === 'pending',
+            'text-emerald-700': activeJob.status === 'succeeded',
+            'text-red-700': activeJob.status === 'failed' || activeJob.status === 'cancelled',
+          }">{{ activeJob.status }}</span>
+        </div>
+        <div class="mt-1 h-1.5 bg-muted rounded overflow-hidden">
+          <div class="h-full bg-primary transition-all" :style="{
+            width: activeJob.total ? `${Math.round((activeJob.processed / activeJob.total) * 100)}%` : '0%',
+          }" />
+        </div>
+        <div class="text-xs text-muted-foreground mt-1">
+          {{ activeJob.processed }} / {{ activeJob.total }}
+          <span v-if="activeJob.result?.summary">
+            · ok {{ activeJob.result.summary.ok }} · falhas {{ activeJob.result.summary.failed }}
+            · cached {{ activeJob.result.summary.cached }}
+          </span>
+          <span v-if="activeJob.error" class="text-red-600 ml-1">{{ activeJob.error }}</span>
+        </div>
       </div>
 
       <div v-if="gridErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">

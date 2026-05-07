@@ -227,3 +227,26 @@ class PricingGridOut(BaseModel):
     accounts: list[PricingAccountOut]
     products: list[PricingProductOut]
     cells: list[PricingGridCell]
+
+
+# ----------------------------------------------------------------- catalog (9c)
+
+class PricingCatalogListingItem(BaseModel):
+    """ML catalog listing as seen by the pricing module — slimmer than the
+    full Listing schema; only carries what the pricing UI needs."""
+    id: UUID
+    integration_id: UUID
+    external_id: str
+    sku: str | None = None
+    title: str
+    price: int | None = None
+    status: str
+    in_catalog: bool = True
+
+
+# ----------------------------------------------------------------- bulk push (9c)
+
+class PricingPushReportIn(BaseModel):
+    """Manual report send (PRD pricing.sendPushReport)."""
+    summary: str
+    chat_id: str | None = None

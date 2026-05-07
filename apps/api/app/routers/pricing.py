@@ -19,8 +19,13 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
     AuditDismissedSku,
+    BackgroundJob,
+    BackgroundJobStatus,
+    BackgroundJobType,
     CellStatus,
     Department,
+    IntegrationPlatform,
+    Listing,
     PricingAccount,
     PricingOverride,
     PricingPlatform,
@@ -31,6 +36,7 @@ from app.schemas.pricing import (
     PricingAccountCreate,
     PricingAccountOut,
     PricingAccountPatch,
+    PricingCatalogListingItem,
     PricingGridCell,
     PricingGridOut,
     PricingOverrideCellStatus,
@@ -44,10 +50,14 @@ from app.schemas.pricing import (
     PricingPushBatchIn,
     PricingPushItemOut,
     PricingPushOut,
+    PricingPushReportIn,
 )
+from app.schemas.products import JobCreatedOut
 from app.security.cipher import encrypt
 from app.services.pricing.calc import calculate
 from app.services.pricing.push import push_one
+from app.services.telegram import TelegramClient, TelegramConfigError
+from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
@@ -652,6 +662,269 @@ async def get_grid(
         products=[PricingProductOut.model_validate(p) for p in products],
         cells=cells,
     )
+
+
+# =============================================================================
+# Catalog (9c) — push isolado (B14) + listings filtradas
+# =============================================================================
+
+@router.get("/catalog-listings", response_model=list[PricingCatalogListingItem])
+async def list_catalog_listings(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "view"))
+    ],
+    integration_id: Annotated[UUID | None, Query()] = None,
+) -> list[PricingCatalogListingItem]:
+    """Lista listings ML elegíveis para catálogo. Cruza com pricing_products
+    via SKU para incluir só os que estão marcados como `in_catalog=True`."""
+    in_catalog_skus = (
+        await session.execute(
+            select(PricingProduct.sku).where(
+                and_(
+                    PricingProduct.user_id == user.id,
+                    PricingProduct.in_catalog.is_(True),
+                )
+            )
+        )
+    ).scalars().all()
+    if not in_catalog_skus:
+        return []
+
+    stmt = select(Listing).where(
+        and_(
+            Listing.user_id == user.id,
+            Listing.platform == IntegrationPlatform.ML,
+            Listing.sku.in_(in_catalog_skus),
+        )
+    )
+    if integration_id is not None:
+        stmt = stmt.where(Listing.integration_id == integration_id)
+
+    rows = (await session.execute(stmt.order_by(Listing.title))).scalars().all()
+    return [
+        PricingCatalogListingItem(
+            id=r.id,
+            integration_id=r.integration_id,
+            external_id=r.external_id,
+            sku=r.sku,
+            title=r.title,
+            price=r.price,
+            status=r.status.value if hasattr(r.status, "value") else r.status,
+            in_catalog=True,
+        )
+        for r in rows
+    ]
+
+
+@router.post("/push-catalog", response_model=PricingPushOut)
+async def push_catalog_prices(
+    body: PricingPushBatchIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> PricingPushOut:
+    """B14 — push exclusivo do canal catálogo. Refuse silently any item whose
+    product não está em catálogo OU cuja conta não tem `department=catalogo`."""
+    if not body.items:
+        return PricingPushOut(results=[])
+
+    # Validate every item belongs to a catalog account + product first.
+    prod_ids = {it.pricing_product_id for it in body.items}
+    acc_ids = {it.pricing_account_id for it in body.items}
+    products_by_id = {
+        p.id: p
+        for p in (
+            await session.execute(
+                select(PricingProduct).where(
+                    and_(
+                        PricingProduct.user_id == user.id,
+                        PricingProduct.id.in_(prod_ids),
+                    )
+                )
+            )
+        ).scalars().all()
+    }
+    accounts_by_id = {
+        a.id: a
+        for a in (
+            await session.execute(
+                select(PricingAccount).where(
+                    and_(
+                        PricingAccount.user_id == user.id,
+                        PricingAccount.id.in_(acc_ids),
+                    )
+                )
+            )
+        ).scalars().all()
+    }
+
+    results: list[PricingPushItemOut] = []
+    for i, item in enumerate(body.items):
+        prod = products_by_id.get(item.pricing_product_id)
+        acc = accounts_by_id.get(item.pricing_account_id)
+        if prod is None:
+            results.append(
+                PricingPushItemOut(
+                    pricing_account_id=item.pricing_account_id,
+                    pricing_product_id=item.pricing_product_id,
+                    ok=False,
+                    code="product_not_found",
+                )
+            )
+            continue
+        if acc is None:
+            results.append(
+                PricingPushItemOut(
+                    pricing_account_id=item.pricing_account_id,
+                    pricing_product_id=item.pricing_product_id,
+                    ok=False,
+                    code="account_not_found",
+                )
+            )
+            continue
+        if not prod.in_catalog:
+            results.append(
+                PricingPushItemOut(
+                    pricing_account_id=item.pricing_account_id,
+                    pricing_product_id=item.pricing_product_id,
+                    ok=False,
+                    code="not_in_catalog",
+                    detail="produto sem flag in_catalog; use POST /api/pricing/push",
+                )
+            )
+            continue
+        dept_val = acc.department.value if hasattr(acc.department, "value") else acc.department
+        if dept_val != "catalogo":
+            results.append(
+                PricingPushItemOut(
+                    pricing_account_id=item.pricing_account_id,
+                    pricing_product_id=item.pricing_product_id,
+                    ok=False,
+                    code="account_not_catalog",
+                    detail="conta com department != catalogo; use POST /api/pricing/push",
+                )
+            )
+            continue
+
+        key = (
+            f"{idempotency_key}:cat:{i}"
+            if idempotency_key and len(body.items) > 1
+            else (f"{idempotency_key}:cat" if idempotency_key else None)
+        )
+        outcome = await push_one(
+            session,
+            user=user,
+            account_id=item.pricing_account_id,
+            product_id=item.pricing_product_id,
+            idempotency_key=key,
+        )
+        results.append(
+            PricingPushItemOut(
+                pricing_account_id=item.pricing_account_id,
+                pricing_product_id=item.pricing_product_id,
+                ok=outcome.ok,
+                code=outcome.code,
+                detail=outcome.detail,
+                price=outcome.price,
+                item_id=outcome.item_id,
+                variation_id=outcome.variation_id,
+                cached=outcome.cached,
+            )
+        )
+    await session.commit()
+    return PricingPushOut(results=results)
+
+
+# =============================================================================
+# Bulk push job (9c) — Arq
+# =============================================================================
+
+@router.post(
+    "/push-batch",
+    response_model=JobCreatedOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def enqueue_push_batch(
+    body: PricingPushBatchIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    notify_telegram: bool = Query(True),
+) -> JobCreatedOut:
+    if not body.items:
+        raise HTTPException(400, detail={"code": "empty_batch"})
+
+    items = [
+        {
+            "pricing_account_id": str(it.pricing_account_id),
+            "pricing_product_id": str(it.pricing_product_id),
+        }
+        for it in body.items
+    ]
+    job = BackgroundJob(
+        type=BackgroundJobType.PUSH_PRICES_BATCH,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={
+            "count": len(items),
+            "idempotency_prefix": idempotency_key,
+            "notify_telegram": notify_telegram,
+        },
+        total=len(items),
+    )
+    session.add(job)
+    await session.flush()
+
+    pool = await get_arq_pool()
+    arq = await pool.enqueue_job(
+        "push_prices_batch_run",
+        str(job.id),
+        str(user.id),
+        items,
+        idempotency_key,
+        notify_telegram,
+    )
+    if arq is not None:
+        job.arq_job_id = arq.job_id
+    await session.commit()
+    return JobCreatedOut(job_id=job.id)
+
+
+# =============================================================================
+# Manual Telegram report (9c)
+# =============================================================================
+
+@router.post("/push-report", status_code=status.HTTP_204_NO_CONTENT)
+async def send_push_report(
+    body: PricingPushReportIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> None:
+    chat_id = body.chat_id
+    if not chat_id:
+        from app.models import UserSettings  # local import — avoids cycle
+
+        st = (
+            await session.execute(
+                select(UserSettings).where(UserSettings.user_id == user.id)
+            )
+        ).scalar_one_or_none()
+        chat_id = st.telegram_chat_id if st else None
+    try:
+        cli = TelegramClient(default_chat_id=chat_id)
+        await cli.send_message(body.summary)
+    except TelegramConfigError as e:
+        raise HTTPException(
+            400,
+            detail={"code": "telegram_not_configured", "reason": str(e)},
+        ) from e
 
 
 # =============================================================================

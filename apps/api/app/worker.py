@@ -34,6 +34,7 @@ from app.services.listings_import import (
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.ml_backfill import run_backfill_ml_stock
+from app.services.pricing.batch import run_push_prices_batch
 from app.services.sync_orchestrator import SyncOrchestrator
 from app.worker_pool import get_arq_pool
 
@@ -440,6 +441,26 @@ async def import_listings_run(
         )
 
 
+async def push_prices_batch_run(
+    ctx: dict,
+    job_id: str,
+    user_id: str,
+    items: list[dict],
+    idempotency_prefix: str | None = None,
+    notify_telegram: bool = True,
+) -> None:
+    """Fase 9c: bulk push de preços (sequencial, respeita rate-limit do client)."""
+    async with session_scope() as s:
+        await run_push_prices_batch(
+            s,
+            job_id=UUID(job_id),
+            user_id=UUID(user_id),
+            items=items,
+            idempotency_prefix=idempotency_prefix,
+            notify_telegram=notify_telegram,
+        )
+
+
 # ---------------------------------------------------------------- lifecycle
 
 
@@ -468,6 +489,7 @@ class WorkerSettings:
         low_stock_polling,
         import_listings_run,
         auto_import_link,
+        push_prices_batch_run,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -505,6 +527,7 @@ __all__ = [
     "import_listings_run",
     "low_stock_polling",
     "ml_backfill_run",
+    "push_prices_batch_run",
     "shopee_discrepancy_check",
     "shopee_token_refresh",
     "send_otp_email",
