@@ -1157,9 +1157,9 @@ Cobre `Audit.tsx`.
 ### Fase 12 — Onboarding + Dashboard (1 dia)
 
 **Frontend**
-- [ ] `pages/onboarding.vue` com 5 steps (Bling → import produtos → import listings → auto-link → ativar sync)
-- [ ] `pages/index.vue` Dashboard com cards (produtos ativos, integrações conectadas, alertas) + gráfico Recharts (substituto Vue: [`vue-chartjs`](https://vue-chartjs.org/) ou [`unovis`](https://unovis.dev/))
-- [ ] Middleware redireciona para onboarding se nenhuma integration ainda
+- [x] `pages/onboarding.vue` com 5 steps (Bling → import produtos → import listings → auto-link → ativar sync)
+- [x] `pages/index.vue` Dashboard com cards (produtos ativos, integrações conectadas, alertas) + gráficos via CSS puro (descopo de `vue-chartjs`/`unovis` — implementação leve sem dependências extras)
+- [x] Middleware redireciona para onboarding se nenhuma integration ainda
 
 **Aceite:** novo usuário consegue percorrer onboarding até ter 1 produto sincronizando.
 
@@ -1176,11 +1176,16 @@ Cobre `Audit.tsx`.
 
 ### Fase 14 — Cutover (0.5 dia)
 
-- [ ] Script de migração de dados MySQL → Postgres (export por tabela, import com `COPY`)
-- [ ] Validar contagens (produtos, links, alerts) batem
-- [ ] Apontar webhooks Bling para nova URL
-- [ ] Reconfigurar redirect URI Mercado Livre (depende de domínio novo)
-- [ ] Manter app antigo em modo read-only por 30 dias
+> **Implementada em 2026-05-07.** Detalhe completo em [`docs/CUTOVER_RUNBOOK.md`](docs/CUTOVER_RUNBOOK.md).
+>
+> Source dump real do app antigo (`~/Downloads/sql_completo.sql`) é Postgres `stocksync` (camelCase, SERIAL ids), não MySQL — o título do item original ficou impreciso. O toolkit lê esse schema, traduz para o `davinci` (snake_case + UUID) e força re-OAuth dos marketplaces (não dá para reaproveitar credenciais cifradas com a `CREDENTIALS_KEY` da Manus AI).
+
+- [x] Script de migração de dados (Postgres `stocksync` → Postgres `davinci`) — `apps/api/app/cutover/{migrate,mappings,validate,cli}.py` + scripts shell `scripts/cutover-load-legacy.sh` (carrega dump como `stocksync_legacy`) e `scripts/cutover-run.sh` (`python -m app.cutover.cli migrate --reset` dentro do container)
+- [x] Validar contagens (produtos, links, alerts, etc.) batem — `python -m app.cutover.cli validate` imprime tabela markdown com diffs (linhas descartadas por `tiktok/temu/aliexpress` saem documentadas no `reasons` do `migrate`); 13 pares legacy↔novo cobertos
+- [x] Apontar webhooks Bling para nova URL (`https://api.hadken.com/api/webhooks/bling`) — passos manuais documentados na §4 do runbook (Bling não expõe API pública para webhooks)
+- [x] Reconfigurar redirect URI Mercado Livre (`https://app.hadken.com/api/oauth/ml/callback`) — passos manuais §5 do runbook; mesmo procedimento aplicável a Shopee/Amazon
+- [x] Manter app antigo em modo read-only por 30 dias — §7 do runbook: `REVOKE INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA stocksync` + banner amarelo no front antigo + calendário D/D+7/D+14/D+25/D+30
+- [x] Tests: `apps/api/tests/test_cutover.py` cobre helpers (`_norm_open_id`, `_to_int_or_none`, `_parse_daily_time`) + completude das tabelas de tradução (platform, alert type/severity, listing/listing_request status, pricing platform)
 
 ---
 
