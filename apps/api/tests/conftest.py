@@ -142,6 +142,7 @@ _CLEANUP_TABLES = (
     "pricing_accounts",
     "audit_dismissed_skus",
     "pricing_push_idempotency",
+    "store_info",
     "sync_logs",
     "oauth_states",
     "cadastros_stores",

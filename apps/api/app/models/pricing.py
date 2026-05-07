@@ -185,6 +185,34 @@ class AuditDismissedSku(Base):
     )
 
 
+class StoreInfo(Base, TimestampMixin):
+    __tablename__ = "store_info"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    platform: Mapped[str] = mapped_column(String(64), nullable=False)
+    segment: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    freight: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    cpf_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    account_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    server: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cnpj: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    observation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shipping_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    return_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+
+
 class PricingPushIdempotency(Base):
     __tablename__ = "pricing_push_idempotency"
 

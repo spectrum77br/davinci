@@ -35,6 +35,7 @@ from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.pricing.batch import run_push_prices_batch
+from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.sync_orchestrator import SyncOrchestrator
 from app.worker_pool import get_arq_pool
 
@@ -461,6 +462,18 @@ async def push_prices_batch_run(
         )
 
 
+async def sync_bling_costs_run(
+    ctx: dict,
+    job_id: str,
+    user_id: str,
+) -> None:
+    """Fase 9d: pulls precoCusto from Bling /produtos/{id} into pricing_products."""
+    async with session_scope() as s:
+        await run_sync_bling_costs(
+            s, job_id=UUID(job_id), user_id=UUID(user_id)
+        )
+
+
 # ---------------------------------------------------------------- lifecycle
 
 
@@ -490,6 +503,7 @@ class WorkerSettings:
         import_listings_run,
         auto_import_link,
         push_prices_batch_run,
+        sync_bling_costs_run,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -528,6 +542,7 @@ __all__ = [
     "low_stock_polling",
     "ml_backfill_run",
     "push_prices_batch_run",
+    "sync_bling_costs_run",
     "shopee_discrepancy_check",
     "shopee_token_refresh",
     "send_otp_email",

@@ -32,6 +32,7 @@ from app.models.pricing import (
     PricingOverride,
     PricingProduct,
     PricingPushIdempotency,
+    StoreInfo,
 )
 from app.models.product import BackgroundJob, Product, ProductLink
 from app.models.sync_log import SyncLog
@@ -74,6 +75,7 @@ __all__ = [
     "Product",
     "ProductLink",
     "Store",
+    "StoreInfo",
     "StoreStatus",
     "SyncLog",
     "SyncLogAction",

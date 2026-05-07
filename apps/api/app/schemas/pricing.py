@@ -250,3 +250,91 @@ class PricingPushReportIn(BaseModel):
     """Manual report send (PRD pricing.sendPushReport)."""
     summary: str
     chat_id: str | None = None
+
+
+# ----------------------------------------------------------------- audit (9d)
+
+class SkuAuditRow(BaseModel):
+    sku: str
+    listing_count: int
+    platforms: list[str] = []
+    integration_ids: list[str] = []
+    sample_titles: list[str] = []
+    dismissed: bool = False
+
+
+# ---------------------------------------------------------- competitor (9d)
+
+class CompetitorPriceRow(BaseModel):
+    item_id: str
+    title: str
+    price: float
+    currency: str
+    permalink: str
+    seller_id: int | None = None
+    condition: str | None = None
+    sold_quantity: int | None = None
+    available_quantity: int | None = None
+    thumbnail: str | None = None
+
+
+# ----------------------------------------------------------------- store_info (9d)
+
+class StoreInfoBase(BaseModel):
+    platform: str = Field(min_length=1, max_length=64)
+    segment: str | None = None
+    freight: str | None = None
+    cpf_name: str | None = None
+    account_name: str | None = None
+    server: str | None = None
+    cnpj: str | None = None
+    email: str | None = None
+    observation: str | None = None
+    shipping_address: str | None = None
+    return_address: str | None = None
+    phone: str | None = None
+    link: str | None = None
+    sort_order: int = 0
+
+
+class StoreInfoCreate(StoreInfoBase):
+    password: str | None = None
+
+
+class StoreInfoPatch(BaseModel):
+    platform: str | None = None
+    segment: str | None = None
+    freight: str | None = None
+    cpf_name: str | None = None
+    account_name: str | None = None
+    server: str | None = None
+    cnpj: str | None = None
+    email: str | None = None
+    observation: str | None = None
+    shipping_address: str | None = None
+    return_address: str | None = None
+    phone: str | None = None
+    password: str | None = None
+    link: str | None = None
+    sort_order: int | None = None
+
+
+class StoreInfoOut(StoreInfoBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    user_id: UUID
+    has_password: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------- auto-match (9d)
+
+class AutoMatchResult(BaseModel):
+    matched: int
+    skipped: int
+    accounts: list[UUID] = []
+
+
+class AccountSetDepartmentIn(BaseModel):
+    department: str

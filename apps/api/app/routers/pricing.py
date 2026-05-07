@@ -24,15 +24,20 @@ from app.models import (
     BackgroundJobType,
     CellStatus,
     Department,
+    Integration,
     IntegrationPlatform,
     Listing,
     PricingAccount,
     PricingOverride,
     PricingPlatform,
     PricingProduct,
+    StoreInfo,
     User,
 )
 from app.schemas.pricing import (
+    AccountSetDepartmentIn,
+    AutoMatchResult,
+    CompetitorPriceRow,
     PricingAccountCreate,
     PricingAccountOut,
     PricingAccountPatch,
@@ -51,10 +56,16 @@ from app.schemas.pricing import (
     PricingPushItemOut,
     PricingPushOut,
     PricingPushReportIn,
+    SkuAuditRow,
+    StoreInfoCreate,
+    StoreInfoOut,
+    StoreInfoPatch,
 )
 from app.schemas.products import JobCreatedOut
 from app.security.cipher import encrypt
+from app.services.pricing.audit import scan_missing_skus
 from app.services.pricing.calc import calculate
+from app.services.pricing.competitor import search_competitors
 from app.services.pricing.push import push_one
 from app.services.telegram import TelegramClient, TelegramConfigError
 from app.worker_pool import get_arq_pool
@@ -928,8 +939,22 @@ async def send_push_report(
 
 
 # =============================================================================
-# SKU Audit (read-only stub for 9a; dismiss/undismiss + scan ship in 9d)
+# SKU Audit (9d) — scan + dismiss/undismiss
 # =============================================================================
+
+@router.get("/sku-audit", response_model=list[SkuAuditRow])
+async def get_sku_audit(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "view"))
+    ],
+    include_dismissed: Annotated[bool, Query()] = False,
+) -> list[SkuAuditRow]:
+    rows = await scan_missing_skus(
+        session, user_id=user.id, include_dismissed=include_dismissed
+    )
+    return [SkuAuditRow(**r) for r in rows]
+
 
 @router.get("/sku-audit/dismissed", response_model=list[str])
 async def list_dismissed_skus(
@@ -944,3 +969,322 @@ async def list_dismissed_skus(
         )
     ).scalars().all()
     return list(rows)
+
+
+@router.post("/sku-audit/{sku}/dismiss", status_code=status.HTTP_204_NO_CONTENT)
+async def dismiss_sku(
+    sku: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> None:
+    existing = (
+        await session.execute(
+            select(AuditDismissedSku).where(
+                and_(
+                    AuditDismissedSku.user_id == user.id,
+                    AuditDismissedSku.sku == sku,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        session.add(AuditDismissedSku(user_id=user.id, sku=sku))
+        await session.commit()
+    return None
+
+
+@router.post("/sku-audit/{sku}/undismiss", status_code=status.HTTP_204_NO_CONTENT)
+async def undismiss_sku(
+    sku: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> None:
+    await session.execute(
+        delete(AuditDismissedSku).where(
+            and_(
+                AuditDismissedSku.user_id == user.id,
+                AuditDismissedSku.sku == sku,
+            )
+        )
+    )
+    await session.commit()
+    return None
+
+
+# =============================================================================
+# Competitor (9d) — ML public search com cache 5min
+# =============================================================================
+
+@router.get("/competitor-prices", response_model=list[CompetitorPriceRow])
+async def competitor_prices(
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "view"))
+    ],
+    q: Annotated[str, Query(min_length=1, max_length=200)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+) -> list[CompetitorPriceRow]:
+    del user  # auth-only dep
+    entries = await search_competitors(q, limit=limit)
+    return [
+        CompetitorPriceRow(
+            item_id=e.item_id,
+            title=e.title,
+            price=e.price,
+            currency=e.currency,
+            permalink=e.permalink,
+            seller_id=e.seller_id,
+            condition=e.condition,
+            sold_quantity=e.sold_quantity,
+            available_quantity=e.available_quantity,
+            thumbnail=e.thumbnail,
+        )
+        for e in entries
+    ]
+
+
+# =============================================================================
+# Bling cost sync (9d) — Arq job
+# =============================================================================
+
+@router.post(
+    "/jobs/sync-bling-costs",
+    response_model=JobCreatedOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def enqueue_sync_bling_costs(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos_produtos", "edit"))
+    ],
+) -> JobCreatedOut:
+    job = BackgroundJob(
+        type=BackgroundJobType.SYNC_BLING_COSTS,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={},
+    )
+    session.add(job)
+    await session.flush()
+
+    pool = await get_arq_pool()
+    arq = await pool.enqueue_job(
+        "sync_bling_costs_run", str(job.id), str(user.id)
+    )
+    if arq is not None:
+        job.arq_job_id = arq.job_id
+    await session.commit()
+    return JobCreatedOut(job_id=job.id)
+
+
+# =============================================================================
+# Auto-match (9d) — link pricing_accounts to integrations by platform
+# =============================================================================
+
+PRICING_TO_INTEG_PLATFORM = {
+    "mercadolivre": IntegrationPlatform.ML,
+    "shopee": IntegrationPlatform.SHOPEE,
+    "amazon": IntegrationPlatform.AMAZON,
+}
+
+
+@router.post("/accounts/auto-match", response_model=AutoMatchResult)
+async def auto_match_accounts(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos_contas", "edit"))
+    ],
+) -> AutoMatchResult:
+    """Tries to fill `pricing_accounts.integration_id` when null by matching:
+      1. pricing_account.platform → integration.platform
+      2. account.name (case-insensitive substring) ↔ integration.name
+    First plain-platform match wins when a single integration exists.
+    """
+    accounts = (
+        await session.execute(
+            select(PricingAccount).where(
+                and_(
+                    PricingAccount.user_id == user.id,
+                    PricingAccount.integration_id.is_(None),
+                )
+            )
+        )
+    ).scalars().all()
+    integrations = (
+        await session.execute(
+            select(Integration).where(Integration.user_id == user.id)
+        )
+    ).scalars().all()
+
+    by_platform: dict[IntegrationPlatform, list[Integration]] = {}
+    for integ in integrations:
+        by_platform.setdefault(integ.platform, []).append(integ)
+
+    matched: list = []
+    skipped = 0
+    for acc in accounts:
+        plat_val = acc.platform.value if hasattr(acc.platform, "value") else acc.platform
+        target_plat = PRICING_TO_INTEG_PLATFORM.get(plat_val)
+        if target_plat is None:
+            skipped += 1
+            continue
+        candidates = by_platform.get(target_plat) or []
+        if not candidates:
+            skipped += 1
+            continue
+        chosen: Integration | None = None
+        if len(candidates) == 1:
+            chosen = candidates[0]
+        else:
+            tokens = [
+                t for t in (acc.name or "").lower().split() if len(t) >= 3
+            ]
+            for c in candidates:
+                cname = (c.name or "").lower()
+                if any(t in cname for t in tokens):
+                    chosen = c
+                    break
+        if chosen is None:
+            skipped += 1
+            continue
+        acc.integration_id = chosen.id
+        matched.append(acc.id)
+
+    await session.commit()
+    return AutoMatchResult(matched=len(matched), skipped=skipped, accounts=matched)
+
+
+@router.post("/accounts/{account_id}/department", response_model=PricingAccountOut)
+async def set_account_department(
+    account_id: UUID,
+    body: AccountSetDepartmentIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos_contas", "edit"))
+    ],
+) -> PricingAccountOut:
+    dept = _coerce_department(body.department)
+    if dept is None:
+        raise HTTPException(400, detail={"code": "invalid_department"})
+    row = (
+        await session.execute(
+            select(PricingAccount).where(
+                and_(
+                    PricingAccount.id == account_id,
+                    PricingAccount.user_id == user.id,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "account_not_found"})
+    row.department = dept
+    await session.commit()
+    await session.refresh(row)
+    return _account_out(row)
+
+
+# =============================================================================
+# Store info (9d) — CRUD com password cifrado
+# =============================================================================
+
+def _store_info_out(row: StoreInfo) -> StoreInfoOut:
+    out = StoreInfoOut.model_validate(row)
+    out.has_password = bool(row.password_enc)
+    return out
+
+
+@router.get("/store-info", response_model=list[StoreInfoOut])
+async def list_store_info(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "view"))
+    ],
+) -> list[StoreInfoOut]:
+    rows = (
+        await session.execute(
+            select(StoreInfo)
+            .where(StoreInfo.user_id == user.id)
+            .order_by(StoreInfo.sort_order, StoreInfo.platform)
+        )
+    ).scalars().all()
+    return [_store_info_out(r) for r in rows]
+
+
+@router.post(
+    "/store-info",
+    response_model=StoreInfoOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_store_info(
+    body: StoreInfoCreate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> StoreInfoOut:
+    data = body.model_dump(exclude={"password"})
+    row = StoreInfo(user_id=user.id, **data)
+    if body.password:
+        row.password_enc = encrypt(body.password)
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return _store_info_out(row)
+
+
+@router.patch("/store-info/{store_info_id}", response_model=StoreInfoOut)
+async def patch_store_info(
+    store_info_id: UUID,
+    body: StoreInfoPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> StoreInfoOut:
+    row = (
+        await session.execute(
+            select(StoreInfo).where(
+                and_(
+                    StoreInfo.id == store_info_id,
+                    StoreInfo.user_id == user.id,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "store_info_not_found"})
+    data = body.model_dump(exclude_unset=True)
+    if "password" in data:
+        pwd = data.pop("password")
+        row.password_enc = encrypt(pwd) if pwd else None
+    for k, v in data.items():
+        setattr(row, k, v)
+    await session.commit()
+    await session.refresh(row)
+    return _store_info_out(row)
+
+
+@router.delete("/store-info/{store_info_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_store_info(
+    store_info_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "delete"))
+    ],
+) -> None:
+    res = await session.execute(
+        delete(StoreInfo).where(
+            and_(
+                StoreInfo.id == store_info_id,
+                StoreInfo.user_id == user.id,
+            )
+        )
+    )
+    if res.rowcount == 0:
+        raise HTTPException(404, detail={"code": "store_info_not_found"})
+    await session.commit()
+    return None

@@ -642,6 +642,105 @@ async function sendManualReport() {
   }
 }
 
+// =================================================== audit (9d)
+
+type AuditRow = {
+  sku: string
+  listing_count: number
+  platforms: string[]
+  integration_ids: string[]
+  sample_titles: string[]
+  dismissed: boolean
+}
+
+const auditRows = ref<AuditRow[]>([])
+const auditLoading = ref(false)
+const auditErr = ref<string | null>(null)
+const auditIncludeDismissed = ref(false)
+
+async function loadAudit() {
+  auditLoading.value = true
+  auditErr.value = null
+  try {
+    const qs = auditIncludeDismissed.value ? '?include_dismissed=true' : ''
+    auditRows.value = await api<AuditRow[]>(`/api/pricing/sku-audit${qs}`)
+  } catch (e: any) {
+    auditErr.value = e?.data?.detail?.code ?? 'load_failed'
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+async function dismissSku(sku: string) {
+  try {
+    await api(`/api/pricing/sku-audit/${encodeURIComponent(sku)}/dismiss`, { method: 'POST' })
+    await loadAudit()
+  } catch (e: any) {
+    auditErr.value = e?.data?.detail?.code ?? 'dismiss_failed'
+  }
+}
+
+async function undismissSku(sku: string) {
+  try {
+    await api(`/api/pricing/sku-audit/${encodeURIComponent(sku)}/undismiss`, { method: 'POST' })
+    await loadAudit()
+  } catch (e: any) {
+    auditErr.value = e?.data?.detail?.code ?? 'undismiss_failed'
+  }
+}
+
+async function syncBlingCosts() {
+  if (!confirm('Disparar sync de custos Bling para todos os produtos?')) return
+  try {
+    const r = await api<{ job_id: string }>(`/api/pricing/jobs/sync-bling-costs`, {
+      method: 'POST',
+    })
+    activeJob.value = null
+    await pollJob(r.job_id)
+    alert('Sync concluído.')
+  } catch (e: any) {
+    auditErr.value = e?.data?.detail?.code ?? 'sync_failed'
+  }
+}
+
+// =================================================== competitor (9d)
+
+type CompetitorRow = {
+  item_id: string
+  title: string
+  price: number
+  currency: string
+  permalink: string
+  seller_id: number | null
+  condition: string | null
+  sold_quantity: number | null
+  available_quantity: number | null
+  thumbnail: string | null
+}
+
+const competitorQuery = ref('')
+const competitorRows = ref<CompetitorRow[]>([])
+const competitorLoading = ref(false)
+const competitorErr = ref<string | null>(null)
+
+async function searchCompetitor() {
+  const q = competitorQuery.value.trim()
+  if (!q) {
+    competitorRows.value = []
+    return
+  }
+  competitorLoading.value = true
+  competitorErr.value = null
+  try {
+    const params = new URLSearchParams({ q, limit: '20' })
+    competitorRows.value = await api<CompetitorRow[]>(`/api/pricing/competitor-prices?${params}`)
+  } catch (e: any) {
+    competitorErr.value = e?.data?.detail?.code ?? 'search_failed'
+  } finally {
+    competitorLoading.value = false
+  }
+}
+
 // =============================================================== boot
 
 watch(
@@ -650,6 +749,7 @@ watch(
     if (t === 'contas') await loadAccounts()
     else if (t === 'produtos') await loadProducts()
     else if (t === 'overrides') await loadGrid()
+    else if (t === 'auditoria') await loadAudit()
   },
   { immediate: true },
 )
@@ -662,6 +762,9 @@ watch([filterDeptProdutos, filterCatalog], () => {
 })
 watch(filterDeptOverrides, () => {
   if (tab.value === 'overrides') loadGrid()
+})
+watch(auditIncludeDismissed, () => {
+  if (tab.value === 'auditoria') loadAudit()
 })
 </script>
 
@@ -1168,12 +1271,148 @@ watch(filterDeptOverrides, () => {
       </div>
     </section>
 
-    <!-- ============================================== STUBS 9c/9d -->
-    <section v-else class="rounded border border-dashed p-12 text-center text-muted-foreground">
-      <p class="text-lg font-medium">Tab "{{ tab }}" — em construção</p>
-      <p class="text-sm mt-2">
-        Esta aba chega na sub-fase 9{{ tab === 'auditoria' ? 'd' : 'd' }}.
+    <!-- ============================================== AUDITORIA -->
+    <section v-else-if="tab === 'auditoria'" class="space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <button class="btn btn-sm" :disabled="auditLoading" @click="loadAudit">
+          <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': auditLoading }" />
+          Recarregar
+        </button>
+        <label class="flex items-center gap-1 text-sm">
+          <input v-model="auditIncludeDismissed" type="checkbox" />
+          Incluir dispensados
+        </label>
+        <button class="btn btn-sm" @click="syncBlingCosts">
+          Sync custos Bling
+        </button>
+      </div>
+
+      <p class="text-sm text-muted-foreground">
+        SKUs presentes em <code>listings</code> mas ausentes em <code>pricing_products</code>.
+        Importe ou dispense.
       </p>
+
+      <div v-if="auditErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
+        <AlertCircle class="h-4 w-4" /> {{ auditErr }}
+      </div>
+
+      <div v-if="activeJob && activeJob.type === 'sync_bling_costs'" class="rounded border bg-muted/40 px-3 py-2 text-sm">
+        Sync custos: {{ activeJob.processed }} / {{ activeJob.total }} ({{ activeJob.status }})
+      </div>
+
+      <div class="overflow-x-auto rounded border">
+        <table class="w-full text-sm">
+          <thead class="bg-muted/50 text-left">
+            <tr>
+              <th class="px-3 py-2">SKU</th>
+              <th class="px-3 py-2 text-right">Listings</th>
+              <th class="px-3 py-2">Plataformas</th>
+              <th class="px-3 py-2">Amostra de títulos</th>
+              <th class="px-3 py-2">Status</th>
+              <th class="px-3 py-2 w-28"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="auditLoading && !auditRows.length">
+              <td class="px-3 py-6 text-center text-muted-foreground" colspan="6">
+                <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
+              </td>
+            </tr>
+            <tr v-else-if="!auditRows.length">
+              <td class="px-3 py-6 text-center text-muted-foreground" colspan="6">
+                Nenhum SKU pendente.
+              </td>
+            </tr>
+            <tr v-for="r in auditRows" :key="r.sku" class="border-t hover:bg-muted/20">
+              <td class="px-3 py-2 font-mono text-xs">{{ r.sku }}</td>
+              <td class="px-3 py-2 text-right">{{ r.listing_count }}</td>
+              <td class="px-3 py-2 text-xs">{{ r.platforms.join(', ') }}</td>
+              <td class="px-3 py-2 text-xs text-muted-foreground truncate max-w-md">
+                <div v-for="(t, i) in r.sample_titles" :key="i" class="truncate">{{ t }}</div>
+              </td>
+              <td class="px-3 py-2 text-xs">
+                <span v-if="r.dismissed" class="text-amber-700">dispensado</span>
+                <span v-else class="text-red-700">pendente</span>
+              </td>
+              <td class="px-3 py-2 text-right">
+                <button v-if="!r.dismissed" class="btn btn-xs" @click="dismissSku(r.sku)">
+                  <Ban class="h-3 w-3" /> Dispensar
+                </button>
+                <button v-else class="btn btn-xs" @click="undismissSku(r.sku)">
+                  Reverter
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============================================== CONCORRENCIA -->
+    <section v-else-if="tab === 'concorrencia'" class="space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <input
+          v-model="competitorQuery"
+          placeholder="busca ML (modelo, marca…)"
+          class="input input-sm w-80"
+          @keydown.enter="searchCompetitor"
+        />
+        <button class="btn btn-sm btn-primary" :disabled="competitorLoading" @click="searchCompetitor">
+          <Loader2 v-if="competitorLoading" class="h-4 w-4 animate-spin" />
+          <RefreshCw v-else class="h-4 w-4" />
+          Buscar
+        </button>
+        <span class="text-xs text-muted-foreground">cache 5 min · API pública ML</span>
+      </div>
+
+      <div v-if="competitorErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
+        <AlertCircle class="h-4 w-4" /> {{ competitorErr }}
+      </div>
+
+      <div class="overflow-x-auto rounded border">
+        <table class="w-full text-sm">
+          <thead class="bg-muted/50 text-left">
+            <tr>
+              <th class="px-3 py-2"></th>
+              <th class="px-3 py-2">Título</th>
+              <th class="px-3 py-2 text-right">Preço</th>
+              <th class="px-3 py-2 text-right">Vendas</th>
+              <th class="px-3 py-2 text-right">Estoque</th>
+              <th class="px-3 py-2">Condição</th>
+              <th class="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="competitorLoading && !competitorRows.length">
+              <td class="px-3 py-6 text-center text-muted-foreground" colspan="7">
+                <Loader2 class="inline h-4 w-4 animate-spin" /> buscando…
+              </td>
+            </tr>
+            <tr v-else-if="!competitorRows.length">
+              <td class="px-3 py-6 text-center text-muted-foreground" colspan="7">
+                Sem resultados.
+              </td>
+            </tr>
+            <tr v-for="r in competitorRows" :key="r.item_id" class="border-t hover:bg-muted/20">
+              <td class="px-3 py-1">
+                <img v-if="r.thumbnail" :src="r.thumbnail" alt="" class="h-10 w-10 object-cover rounded" />
+              </td>
+              <td class="px-3 py-2 truncate max-w-md">{{ r.title }}</td>
+              <td class="px-3 py-2 text-right font-medium">
+                {{ r.price.toLocaleString('pt-BR', { style: 'currency', currency: r.currency || 'BRL' }) }}
+              </td>
+              <td class="px-3 py-2 text-right text-muted-foreground">{{ r.sold_quantity ?? '—' }}</td>
+              <td class="px-3 py-2 text-right text-muted-foreground">{{ r.available_quantity ?? '—' }}</td>
+              <td class="px-3 py-2 text-xs">{{ r.condition ?? '—' }}</td>
+              <td class="px-3 py-2 text-right">
+                <a v-if="r.permalink" :href="r.permalink" target="_blank" rel="noopener" class="btn btn-xs">
+                  Abrir
+                </a>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
   </div>
 </template>
