@@ -245,6 +245,59 @@ function cellLabel(cell: Cell): string {
   return cell.alias || cell.company_apelido
 }
 
+function cap(s: string | null | undefined): string {
+  if (!s) return ''
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+const editingCell = ref<{ rowId: string; field: 'provedor' | 'codigo' | 'label' } | null>(null)
+const cellDraft = ref('')
+
+function startCellEdit(cad: CadastroOut, field: 'provedor' | 'codigo' | 'label') {
+  if (!canEdit.value) return
+  editingCell.value = { rowId: cad.id, field }
+  cellDraft.value = (cad as any)[field] || ''
+}
+
+function isEditingCell(cad: CadastroOut, field: 'provedor' | 'codigo' | 'label'): boolean {
+  return editingCell.value?.rowId === cad.id && editingCell.value?.field === field
+}
+
+async function saveCellEdit(cad: CadastroOut) {
+  if (!editingCell.value) return
+  const field = editingCell.value.field
+  const trimmed = cellDraft.value.trim()
+  const newVal: string | null = field === 'codigo' ? trimmed : (trimmed || null)
+  const current = (cad as any)[field] ?? null
+  if (newVal === current) {
+    editingCell.value = null
+    return
+  }
+  if (field === 'codigo' && !newVal) {
+    editingCell.value = null
+    return
+  }
+  try {
+    await api(`/api/cadastros/${cad.id}`, { method: 'PATCH', body: { [field]: newVal } })
+    editingCell.value = null
+    await refresh()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    editingCell.value = null
+  }
+}
+
+function cancelCellEdit() {
+  editingCell.value = null
+}
+
+const vFocus = {
+  mounted: (el: HTMLInputElement) => {
+    el.focus()
+    el.select()
+  },
+}
+
 function cellClass(cell: Cell): string {
   if (cell.store_status === 'inactive') return 'line-through text-muted-foreground'
   if (cell.store_status === 'closing') return 'bg-amber-500/10 text-amber-400'
@@ -316,22 +369,67 @@ async function submitResolve() {
       <table class="w-full text-sm">
         <thead class="bg-muted/40 text-left">
           <tr>
-            <th class="px-3 py-2">tipo</th>
-            <th class="px-3 py-2">provedor</th>
-            <th class="px-3 py-2">código</th>
-            <th class="px-3 py-2">label</th>
+            <th class="px-3 py-2">Tipo</th>
+            <th class="px-3 py-2">Provedor</th>
+            <th class="px-3 py-2">Código</th>
+            <th class="px-3 py-2">Label</th>
             <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
               {{ MARKETPLACE_SHORT[mk] }}
             </th>
-            <th v-if="canEdit" class="px-2 py-2 text-right">ações</th>
+            <th v-if="canEdit" class="px-2 py-2 text-right">Ações</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="row in filteredRows" :key="row.cadastro.id" class="border-t hover:bg-muted/20 group">
-            <td class="px-3 py-2">{{ row.cadastro.tipo }}</td>
-            <td class="px-3 py-2">{{ row.cadastro.provedor || '—' }}</td>
-            <td class="px-3 py-2 font-mono">{{ row.cadastro.codigo }}</td>
-            <td class="px-3 py-2 text-xs text-muted-foreground">{{ row.cadastro.label || '—' }}</td>
+            <td class="px-3 py-2">{{ cap(row.cadastro.tipo) }}</td>
+            <td class="px-3 py-2">
+              <input
+                v-if="isEditingCell(row.cadastro, 'provedor')"
+                v-model="cellDraft"
+                v-focus
+                class="w-full border rounded px-1 py-0.5 bg-background text-sm"
+                @blur="saveCellEdit(row.cadastro)"
+                @keydown.enter.prevent="saveCellEdit(row.cadastro)"
+                @keydown.esc.prevent="cancelCellEdit"
+              />
+              <span
+                v-else
+                :title="canEdit ? 'duplo-clique para editar' : ''"
+                @dblclick="startCellEdit(row.cadastro, 'provedor')"
+              >{{ row.cadastro.provedor || '—' }}</span>
+            </td>
+            <td class="px-3 py-2 font-mono">
+              <input
+                v-if="isEditingCell(row.cadastro, 'codigo')"
+                v-model="cellDraft"
+                v-focus
+                class="w-full border rounded px-1 py-0.5 bg-background text-sm font-mono"
+                @blur="saveCellEdit(row.cadastro)"
+                @keydown.enter.prevent="saveCellEdit(row.cadastro)"
+                @keydown.esc.prevent="cancelCellEdit"
+              />
+              <span
+                v-else
+                :title="canEdit ? 'duplo-clique para editar' : ''"
+                @dblclick="startCellEdit(row.cadastro, 'codigo')"
+              >{{ row.cadastro.codigo }}</span>
+            </td>
+            <td class="px-3 py-2 text-xs text-muted-foreground">
+              <input
+                v-if="isEditingCell(row.cadastro, 'label')"
+                v-model="cellDraft"
+                v-focus
+                class="w-full border rounded px-1 py-0.5 bg-background text-xs"
+                @blur="saveCellEdit(row.cadastro)"
+                @keydown.enter.prevent="saveCellEdit(row.cadastro)"
+                @keydown.esc.prevent="cancelCellEdit"
+              />
+              <span
+                v-else
+                :title="canEdit ? 'duplo-clique para editar' : ''"
+                @dblclick="startCellEdit(row.cadastro, 'label')"
+              >{{ row.cadastro.label || '—' }}</span>
+            </td>
             <td v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-xs">
               <div v-if="row.cells[mk]?.length" class="space-y-0.5">
                 <div
@@ -410,7 +508,7 @@ async function submitResolve() {
           <div>
             <Label>Tipo *</Label>
             <select v-model="draft.tipo" class="w-full border rounded px-2 py-1 bg-background">
-              <option v-for="t in TIPOS" :key="t" :value="t">{{ t }}</option>
+              <option v-for="t in TIPOS" :key="t" :value="t">{{ cap(t) }}</option>
             </select>
           </div>
           <div>
@@ -471,7 +569,7 @@ async function submitResolve() {
           <div>
             <Label>Tipo *</Label>
             <select v-model="editDraft.tipo" class="w-full border rounded px-2 py-1 bg-background">
-              <option v-for="t in TIPOS" :key="t" :value="t">{{ t }}</option>
+              <option v-for="t in TIPOS" :key="t" :value="t">{{ cap(t) }}</option>
             </select>
           </div>
           <div>
