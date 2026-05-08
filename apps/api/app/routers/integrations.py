@@ -207,17 +207,9 @@ async def test_integration(
     i = (await session.execute(select(Integration).where(Integration.id == integration_id))).scalar_one_or_none()
     if i is None:
         raise HTTPException(404, detail={"code": "integration_not_found"})
-    try:
-        creds = decrypt_json(i.credentials)
-        client = client_for(i.platform, creds, on_token_refresh=_make_token_save_callback(session, i))
-        result = await client.test_connection()
-    except Exception as e:  # noqa: BLE001
-        logger.exception("test_integration_failed", integration_id=str(integration_id))
-        raise HTTPException(500, detail={
-            "code": "test_failed",
-            "exc": type(e).__name__,
-            "msg": str(e)[:500],
-        }) from e
+    creds = decrypt_json(i.credentials)
+    client = client_for(i.platform, creds, on_token_refresh=_make_token_save_callback(session, i))
+    result = await client.test_connection()
     i.last_test_at = datetime.now(UTC)
     i.last_test_ok = result.ok
     i.last_error = None if result.ok else (result.detail or "")[:1000]
