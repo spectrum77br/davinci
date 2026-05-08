@@ -39,6 +39,24 @@ def _to_platform(v: str) -> IntegrationPlatform:
         raise HTTPException(400, detail={"code": "platform_invalid", "value": v}) from e
 
 
+async def _resolve_store(session: AsyncSession, i: Integration) -> Store | None:
+    """Resolve the linked store for an integration.
+
+    Source of truth is `stores.integration_id` (set by every write path including
+    the company-page "attach integration" patch). `integrations.store_id` may
+    lag — e.g. cutover-migrated rows have it NULL — so we always reverse-lookup
+    and fall back to the forward FK only if no reverse match exists.
+    """
+    s = (
+        await session.execute(select(Store).where(Store.integration_id == i.id))
+    ).scalar_one_or_none()
+    if s is None and i.store_id is not None:
+        s = (
+            await session.execute(select(Store).where(Store.id == i.store_id))
+        ).scalar_one_or_none()
+    return s
+
+
 async def _company_id_for(session: AsyncSession, store_id: UUID | None) -> UUID | None:
     if store_id is None:
         return None
@@ -46,11 +64,11 @@ async def _company_id_for(session: AsyncSession, store_id: UUID | None) -> UUID 
     return s.company_id if s else None
 
 
-def _to_out(i: Integration, company_id: UUID | None) -> IntegrationOut:
+def _to_out(i: Integration, company_id: UUID | None, store_id: UUID | None = None) -> IntegrationOut:
     return IntegrationOut(
         id=i.id,
         user_id=i.user_id,
-        store_id=i.store_id,
+        store_id=store_id if store_id is not None else i.store_id,
         company_id=company_id,
         platform=i.platform.value,
         name=i.name,
@@ -82,8 +100,8 @@ async def list_integrations(
     rows = (await session.execute(select(Integration).order_by(Integration.created_at.desc()))).scalars().all()
     out: list[IntegrationOut] = []
     for i in rows:
-        cid = await _company_id_for(session, i.store_id)
-        out.append(_to_out(i, cid))
+        s = await _resolve_store(session, i)
+        out.append(_to_out(i, s.company_id if s else None, s.id if s else None))
     return out
 
 
@@ -96,7 +114,8 @@ async def get_integration(
     i = (await session.execute(select(Integration).where(Integration.id == integration_id))).scalar_one_or_none()
     if i is None:
         raise HTTPException(404, detail={"code": "integration_not_found"})
-    return _to_out(i, await _company_id_for(session, i.store_id))
+    s = await _resolve_store(session, i)
+    return _to_out(i, s.company_id if s else None, s.id if s else None)
 
 
 @router.post("", response_model=IntegrationOut, status_code=status.HTTP_201_CREATED)
@@ -155,7 +174,8 @@ async def patch_integration(
         i.credentials = encrypt_json(existing)
     await session.commit()
     await session.refresh(i)
-    return _to_out(i, await _company_id_for(session, i.store_id))
+    s = await _resolve_store(session, i)
+    return _to_out(i, s.company_id if s else None, s.id if s else None)
 
 
 @router.delete("/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)

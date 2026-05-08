@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Company, Marketplace, Store, StoreStatus, User
+from app.models import Company, Integration, Marketplace, Store, StoreStatus, User
 from app.schemas.companies import StoreCreate, StoreOut, StorePatch
 
 logger = structlog.get_logger()
@@ -94,14 +94,33 @@ async def patch_store(
     data = body.model_dump(exclude_unset=True)
     if "status" in data and data["status"] is not None:
         data["status"] = _to_status(data["status"])
+    prev_integration_id = s.integration_id
     for k, v in data.items():
         setattr(s, k, v)
+    # Mirror the link on the integration side so projections that read
+    # integrations.store_id (and any reverse joins) stay in sync.
+    if "integration_id" in data and data["integration_id"] != prev_integration_id:
+        if prev_integration_id is not None:
+            old = (
+                await session.execute(select(Integration).where(Integration.id == prev_integration_id))
+            ).scalar_one_or_none()
+            if old is not None and old.store_id == s.id:
+                old.store_id = None
+        if data["integration_id"] is not None:
+            new = (
+                await session.execute(select(Integration).where(Integration.id == data["integration_id"]))
+            ).scalar_one_or_none()
+            if new is None:
+                raise HTTPException(404, detail={"code": "integration_not_found"})
+            new.store_id = s.id
     try:
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
         if "uq_stores_integration_id" in str(e.orig):
             raise HTTPException(409, detail={"code": "integration_already_linked"}) from e
+        if "uq_integrations_store_id" in str(e.orig):
+            raise HTTPException(409, detail={"code": "store_already_linked"}) from e
         raise
     await session.refresh(s)
     return StoreOut.model_validate(s)
@@ -130,6 +149,12 @@ async def unlink_integration(
     s = (await session.execute(select(Store).where(Store.id == store_id))).scalar_one_or_none()
     if s is None:
         raise HTTPException(404, detail={"code": "store_not_found"})
+    if s.integration_id is not None:
+        old = (
+            await session.execute(select(Integration).where(Integration.id == s.integration_id))
+        ).scalar_one_or_none()
+        if old is not None and old.store_id == s.id:
+            old.store_id = None
     s.integration_id = None
     await session.commit()
     await session.refresh(s)
