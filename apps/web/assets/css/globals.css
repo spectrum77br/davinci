@@ -110,4 +110,13 @@
     @apply px-3 py-2.5 text-sm border-b last:border-0;
   }
   .table-card tbody tr:hover td { @apply bg-muted/30; }
+
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md border border-input bg-background text-sm font-medium px-3 py-1.5 transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:pointer-events-none;
+  }
+  .btn-sm   { @apply px-2.5 py-1 text-xs; }
+  .btn-xs   { @apply px-1.5 py-0.5 text-[11px] gap-0.5; }
+  .btn-primary     { @apply bg-primary text-primary-foreground border-primary hover:bg-primary/90 hover:text-primary-foreground; }
+  .btn-destructive { @apply bg-destructive text-destructive-foreground border-destructive hover:bg-destructive/90 hover:text-destructive-foreground; }
+  .btn-ghost       { @apply border-transparent bg-transparent hover:bg-accent; }
 }

@@ -11,7 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_active_user
+from app.deps.auth import require_active_user, user_scope
 from app.models import (
     Alert,
     BackgroundJob,
@@ -37,7 +37,7 @@ async def list_alerts(
     offset: int = Query(0, ge=0),
     unread_only: bool = Query(False),
 ) -> AlertListOut:
-    base = select(Alert).where(Alert.user_id == user.id)
+    base = select(Alert).where(user_scope(Alert, user))
     if unread_only:
         base = base.where(Alert.read_at.is_(None))
     stmt = base.order_by(Alert.created_at.desc()).limit(limit).offset(offset)
@@ -45,14 +45,14 @@ async def list_alerts(
 
     total = (
         await session.execute(
-            select(func.count()).select_from(Alert).where(Alert.user_id == user.id)
+            select(func.count()).select_from(Alert).where(user_scope(Alert, user))
         )
     ).scalar_one()
     unread = (
         await session.execute(
             select(func.count())
             .select_from(Alert)
-            .where(Alert.user_id == user.id, Alert.read_at.is_(None))
+            .where(user_scope(Alert, user), Alert.read_at.is_(None))
         )
     ).scalar_one()
     return AlertListOut(
@@ -71,7 +71,7 @@ async def unread_count(
         await session.execute(
             select(func.count())
             .select_from(Alert)
-            .where(Alert.user_id == user.id, Alert.read_at.is_(None))
+            .where(user_scope(Alert, user), Alert.read_at.is_(None))
         )
     ).scalar_one()
     return UnreadCountOut(unread=n)
@@ -114,7 +114,7 @@ async def mark_read(
 ) -> AlertOut:
     a = (
         await session.execute(
-            select(Alert).where(Alert.id == alert_id, Alert.user_id == user.id)
+            select(Alert).where(Alert.id == alert_id, user_scope(Alert, user))
         )
     ).scalar_one_or_none()
     if a is None:
@@ -133,7 +133,7 @@ async def mark_all_read(
 ) -> MarkReadOut:
     result = await session.execute(
         update(Alert)
-        .where(Alert.user_id == user.id, Alert.read_at.is_(None))
+        .where(user_scope(Alert, user), Alert.read_at.is_(None))
         .values(read_at=datetime.now(UTC))
     )
     await session.commit()

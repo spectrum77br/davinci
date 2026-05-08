@@ -121,6 +121,33 @@ async function unlinkStoreIntegration(s: StoreOut) {
   }
 }
 
+const MK_TO_PLATFORM: Record<string, string> = {
+  ml: 'ml',
+  shopee: 'shopee',
+  amazon: 'amazon',
+}
+
+function availableIntegrationsFor(s: StoreOut): IntegrationRef[] {
+  const platform = MK_TO_PLATFORM[s.marketplace]
+  if (!platform) return []
+  return integrations.value.filter(i =>
+    i.platform === platform && (i.store_id == null || i.store_id === s.id)
+  )
+}
+
+async function attachIntegration(s: StoreOut, integrationId: string) {
+  if (!integrationId || integrationId === s.integration_id) return
+  try {
+    await api(`/api/stores/${s.id}`, {
+      method: 'PATCH',
+      body: { integration_id: integrationId },
+    })
+    await load()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || 'erro'
+  }
+}
+
 function storeFor(mk: Marketplace): StoreOut | null {
   return company.value?.stores.find(s => s.marketplace === mk) ?? null
 }
@@ -322,26 +349,45 @@ async function deleteCompany() {
                   />
                 </td>
                 <td class="px-3 py-2 text-xs">
-                  <span v-if="storeFor(mk)!.integration_id" class="text-green-400">conectada</span>
-                  <Button
-                    v-else-if="canEdit && OAUTH_PROVIDER[mk]"
-                    size="sm"
-                    variant="outline"
-                    class="h-7"
-                    @click="startOAuth(OAUTH_PROVIDER[mk]!, storeFor(mk)!.id)"
-                  >
-                    <LinkIcon class="size-3 mr-1" /> OAuth
-                  </Button>
-                  <span v-else class="text-muted-foreground">sem integração</span>
-                  <Button
-                    v-if="canEdit && storeFor(mk)!.integration_id"
-                    size="sm"
-                    variant="ghost"
-                    class="h-7 ml-1"
-                    @click="unlinkStoreIntegration(storeFor(mk)!)"
-                  >
-                    <Unlink class="size-3" />
-                  </Button>
+                  <div v-if="storeFor(mk)!.integration_id" class="flex items-center gap-1">
+                    <span class="text-green-400">
+                      {{ integrations.find(i => i.id === storeFor(mk)!.integration_id)?.name || 'conectada' }}
+                    </span>
+                    <Button
+                      v-if="canEdit"
+                      size="sm"
+                      variant="ghost"
+                      class="h-7"
+                      title="desvincular"
+                      @click="unlinkStoreIntegration(storeFor(mk)!)"
+                    >
+                      <Unlink class="size-3" />
+                    </Button>
+                  </div>
+                  <div v-else class="flex items-center gap-1 flex-wrap">
+                    <select
+                      v-if="canEdit && availableIntegrationsFor(storeFor(mk)!).length"
+                      class="border rounded px-1 text-xs bg-background h-7 max-w-44"
+                      @change="(e: any) => attachIntegration(storeFor(mk)!, e.target.value)"
+                    >
+                      <option value="">— vincular existente —</option>
+                      <option v-for="i in availableIntegrationsFor(storeFor(mk)!)" :key="i.id" :value="i.id">
+                        {{ i.name }}
+                      </option>
+                    </select>
+                    <Button
+                      v-if="canEdit && OAUTH_PROVIDER[mk]"
+                      size="sm"
+                      variant="outline"
+                      class="h-7"
+                      @click="startOAuth(OAUTH_PROVIDER[mk]!, storeFor(mk)!.id)"
+                    >
+                      <LinkIcon class="size-3 mr-1" /> OAuth novo
+                    </Button>
+                    <span v-if="!canEdit || (!OAUTH_PROVIDER[mk] && !availableIntegrationsFor(storeFor(mk)!).length)" class="text-muted-foreground">
+                      sem integração
+                    </span>
+                  </div>
                 </td>
                 <td class="px-3 py-2">
                   <Input

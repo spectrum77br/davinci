@@ -118,6 +118,9 @@ async def _set_search_path(conn: asyncpg.Connection, schema: str) -> None:
 
 
 async def migrate_users(ctx: CutoverContext) -> MigrationStats:
+    from app.config import get_settings
+    owner_open_id = get_settings().owner_open_id
+
     s = MigrationStats(table="users")
     rows = await ctx.src.fetch(
         f'SELECT id, "openId", name, email, role, status, "createdAt", "updatedAt", "lastSignedIn" '
@@ -133,6 +136,11 @@ async def migrate_users(ctx: CutoverContext) -> MigrationStats:
         new_id = _new_id()
         ctx.users[r["id"]] = new_id
         status = r["status"] if r["status"] in ("pending", "active", "suspended") else "active"
+        role = r["role"] or "user"
+        # Owner (spectrum77 / configured owner_open_id) is always admin+active.
+        if open_id == owner_open_id:
+            role = "admin"
+            status = "active"
         await ctx.dst.execute(
             f"INSERT INTO {ctx.target_schema}.users "
             "(id, open_id, email, name, role, status, permissions, last_login_at, "
@@ -143,7 +151,7 @@ async def migrate_users(ctx: CutoverContext) -> MigrationStats:
             open_id,
             r["email"],
             r["name"],
-            r["role"] or "user",
+            role,
             status,
             "{}",
             r["lastSignedIn"],
@@ -215,22 +223,32 @@ async def migrate_products(ctx: CutoverContext) -> MigrationStats:
         f"FROM {ctx.legacy_schema}.products ORDER BY id"
     )
     s.legacy_count = len(rows)
+    insert_sql = (
+        f"INSERT INTO {ctx.target_schema}.products "
+        "(id, user_id, sku, name, stock, min_stock, bling_product_id, "
+        " last_imported_at, created_at, updated_at) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"
+    )
+    # Dedupe by (user_uuid, sku) so ctx.products stays consistent with the DB.
+    by_key: dict[tuple[uuid.UUID, str], uuid.UUID] = {}
+    batch: list[tuple] = []
     for r in rows:
         user_uuid = ctx.users.get(r["userId"])
         if not user_uuid:
             s.skip("orphan_user")
             continue
+        sku = r["sku"] or f"legacy-{r['id']}"
+        key = (user_uuid, sku)
+        existing = by_key.get(key)
+        if existing is not None:
+            ctx.products[r["id"]] = existing
+            s.skip("dup_user_sku")
+            continue
         new_id = _new_id()
+        by_key[key] = new_id
         ctx.products[r["id"]] = new_id
-        await ctx.dst.execute(
-            f"INSERT INTO {ctx.target_schema}.products "
-            "(id, user_id, sku, name, stock, min_stock, bling_product_id, "
-            " last_imported_at, created_at, updated_at) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) "
-            "ON CONFLICT DO NOTHING",
-            new_id,
-            user_uuid,
-            r["sku"] or f"legacy-{r['id']}",
+        batch.append((
+            new_id, user_uuid, sku,
             r["name"] or f"legacy-{r['id']}",
             r["blingStock"] or 0,
             r["lowStockThreshold"] or 0,
@@ -238,8 +256,14 @@ async def migrate_products(ctx: CutoverContext) -> MigrationStats:
             r["lastSyncAt"],
             r["createdAt"],
             r["updatedAt"],
-        )
-        s.inserted += 1
+        ))
+        if len(batch) >= 2000:
+            await ctx.dst.executemany(insert_sql, batch)
+            s.inserted += len(batch)
+            batch = []
+    if batch:
+        await ctx.dst.executemany(insert_sql, batch)
+        s.inserted += len(batch)
     return s
 
 
@@ -252,6 +276,15 @@ async def migrate_product_links(ctx: CutoverContext) -> MigrationStats:
         f"FROM {ctx.legacy_schema}.product_links ORDER BY id"
     )
     s.legacy_count = len(rows)
+    insert_sql = (
+        f"INSERT INTO {ctx.target_schema}.product_links "
+        "(id, user_id, product_id, integration_id, store_id, platform, "
+        " external_id, variation_id, stock, last_sync_status, last_sync_at, "
+        " last_error, created_at, updated_at) "
+        "VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,$8,$9,$10,$11,$12,$13) "
+        "ON CONFLICT DO NOTHING"
+    )
+    batch: list[tuple] = []
     for r in rows:
         if r["platform"] in DROPPED_PLATFORMS:
             s.skip(f"platform_{r['platform']}_dropped")
@@ -268,29 +301,19 @@ async def migrate_product_links(ctx: CutoverContext) -> MigrationStats:
             continue
         new_id = _new_id()
         ctx.product_links[r["id"]] = new_id
-        last_status = LINK_SYNC_DEFAULT
-        last_error = r["suspendedReason"]
-        await ctx.dst.execute(
-            f"INSERT INTO {ctx.target_schema}.product_links "
-            "(id, user_id, product_id, integration_id, store_id, platform, "
-            " external_id, variation_id, stock, last_sync_status, last_sync_at, "
-            " last_error, created_at, updated_at) "
-            "VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-            new_id,
-            user_uuid,
-            prod_uuid,
-            intg_uuid,
-            platform,
-            r["externalId"],
-            r["variationId"],
-            r["stock"],
-            last_status,
-            r["lastSyncAt"],
-            last_error,
-            r["createdAt"],
-            r["updatedAt"],
-        )
-        s.inserted += 1
+        batch.append((
+            new_id, user_uuid, prod_uuid, intg_uuid, platform,
+            r["externalId"], r["variationId"], r["stock"],
+            LINK_SYNC_DEFAULT, r["lastSyncAt"], r["suspendedReason"],
+            r["createdAt"], r["updatedAt"],
+        ))
+        if len(batch) >= 2000:
+            await ctx.dst.executemany(insert_sql, batch)
+            s.inserted += len(batch)
+            batch = []
+    if batch:
+        await ctx.dst.executemany(insert_sql, batch)
+        s.inserted += len(batch)
     return s
 
 
@@ -442,6 +465,8 @@ async def migrate_alerts(ctx: CutoverContext) -> MigrationStats:
         f"FROM {ctx.legacy_schema}.alerts ORDER BY id"
     )
     s.legacy_count = len(rows)
+    payload_default = "{}"
+    batch: list[tuple] = []
     for r in rows:
         user_uuid = ctx.users.get(r["userId"])
         if not user_uuid:
@@ -450,22 +475,29 @@ async def migrate_alerts(ctx: CutoverContext) -> MigrationStats:
         atype = LEGACY_ALERT_TYPE.get(r["type"], "generic")
         sev = LEGACY_ALERT_SEVERITY.get(r["severity"], "info")
         read_at = r["createdAt"] if r["isRead"] else None
-        await ctx.dst.execute(
+        batch.append(
+            (_new_id(), user_uuid, atype, sev, r["title"], r["message"],
+             payload_default, read_at, r["createdAt"])
+        )
+        if len(batch) >= 2000:
+            await ctx.dst.executemany(
+                f"INSERT INTO {ctx.target_schema}.alerts "
+                "(id, user_id, type, severity, title, message, payload, read_at, "
+                " created_at) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)",
+                batch,
+            )
+            s.inserted += len(batch)
+            batch = []
+    if batch:
+        await ctx.dst.executemany(
             f"INSERT INTO {ctx.target_schema}.alerts "
             "(id, user_id, type, severity, title, message, payload, read_at, "
             " created_at) "
             "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)",
-            _new_id(),
-            user_uuid,
-            atype,
-            sev,
-            r["title"],
-            r["message"],
-            "{}",
-            read_at,
-            r["createdAt"],
+            batch,
         )
-        s.inserted += 1
+        s.inserted += len(batch)
     return s
 
 
@@ -549,25 +581,33 @@ async def migrate_pricing_products(ctx: CutoverContext) -> MigrationStats:
         f"FROM {ctx.legacy_schema}.pricing_products ORDER BY id"
     )
     s.legacy_count = len(rows)
+    by_key: dict[tuple[uuid.UUID, str], uuid.UUID] = {}
     for r in rows:
         user_uuid = ctx.users.get(r["userId"])
         if not user_uuid:
             s.skip("orphan_user")
             continue
+        sku = r["sku"]
+        key = (user_uuid, sku)
+        existing = by_key.get(key)
+        if existing is not None:
+            ctx.pricing_products[r["id"]] = existing
+            s.skip("dup_user_sku")
+            continue
         prod_uuid = ctx.products.get(r["productId"]) if r["productId"] else None
         new_id = _new_id()
+        by_key[key] = new_id
         ctx.pricing_products[r["id"]] = new_id
         await ctx.dst.execute(
             f"INSERT INTO {ctx.target_schema}.pricing_products "
             "(id, user_id, product_id, sku, name, department, product_type, "
             " bling_cost_price, cost_kit1, cost_kit2, cost_kit3, cost_kit4, "
             " description, model, ean, is_active, in_catalog, created_at, updated_at) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,FALSE,$17,$18) "
-            "ON CONFLICT (user_id, sku) DO NOTHING",
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,FALSE,$17,$18)",
             new_id,
             user_uuid,
             prod_uuid,
-            r["sku"],
+            sku,
             r["name"],
             r["department"] or "celular",
             r["productType"] or 2,
@@ -578,7 +618,7 @@ async def migrate_pricing_products(ctx: CutoverContext) -> MigrationStats:
             r["costKit4"],
             r["description"],
             r["model"],
-            r["ean"],
+            (r["ean"] or "")[:64] or None,
             bool(r["isActive"]),
             r["createdAt"],
             r["updatedAt"],
@@ -734,8 +774,15 @@ TARGET_TABLES_TO_RESET = [
 
 
 async def reset_target(conn: asyncpg.Connection, schema: str) -> None:
+    """Wipe legacy-derived tables but preserve xlsx-seeded tables (companies,
+    cadastros, stores, cadastros_stores). TRUNCATE CASCADE would drag those
+    along via FK, so we use ordered DELETE + nullify the FK to users."""
+    # Nullify FK from xlsx-seeded tables to users so DELETE on users succeeds
+    # via ON DELETE SET NULL (no cascade truncate).
+    await conn.execute(f"UPDATE {schema}.companies SET responsavel_id = NULL")
+    await conn.execute(f"UPDATE {schema}.cadastros SET responsavel_id = NULL")
     for t in TARGET_TABLES_TO_RESET:
-        await conn.execute(f"TRUNCATE TABLE {schema}.{t} RESTART IDENTITY CASCADE")
+        await conn.execute(f"DELETE FROM {schema}.{t}")
 
 
 async def run_cutover(
@@ -746,8 +793,16 @@ async def run_cutover(
     clear_credentials: bool = True,
     reset: bool = False,
 ) -> list[MigrationStats]:
-    src = await asyncpg.connect(legacy_url)
-    dst = await asyncpg.connect(target_url)
+    src = await asyncpg.connect(
+        legacy_url,
+        server_settings={"tcp_keepalives_idle": "30"},
+        timeout=60,
+    )
+    dst = await asyncpg.connect(
+        target_url,
+        server_settings={"tcp_keepalives_idle": "30"},
+        timeout=60,
+    )
     try:
         await _set_search_path(src, legacy_schema)
         await _set_search_path(dst, target_schema)
@@ -761,17 +816,18 @@ async def run_cutover(
             src=src,
             dst=dst,
         )
-        async with dst.transaction():
-            for fn in MIGRATIONS:
+        # Per-table transaction so a tunnel drop mid-run only loses one table.
+        for fn in MIGRATIONS:
+            async with dst.transaction():
                 stats = await fn(ctx)
-                ctx.stats.append(stats)
-                log.info(
-                    "migrated %s: %d/%d (skipped %d)",
-                    stats.table,
-                    stats.inserted,
-                    stats.legacy_count,
-                    stats.skipped,
-                )
+            ctx.stats.append(stats)
+            log.info(
+                "migrated %s: %d/%d (skipped %d)",
+                stats.table,
+                stats.inserted,
+                stats.legacy_count,
+                stats.skipped,
+            )
         return ctx.stats
     finally:
         await src.close()

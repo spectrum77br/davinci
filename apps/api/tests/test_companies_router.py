@@ -130,3 +130,53 @@ async def test_cadastro_grid_with_alias(client, make_user, auth_as):
     cells = row["cells"]["ml"]
     labels = sorted(c["alias"] or c["company_apelido"] for c in cells)
     assert labels == ["aguiar", "aguiar2"]
+
+
+@pytest.mark.asyncio
+async def test_cadastro_resolve_raw_link(client, make_user, auth_as, db):
+    from sqlalchemy import text as _text
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    r = await client.post("/api/companies", json={"razao_social": "AGUIAR", "apelido": "aguiar"})
+    c1 = r.json()["id"]
+    s1 = (await client.post(
+        "/api/stores", json={"company_id": c1, "marketplace": "ml", "status": "active"}
+    )).json()["id"]
+
+    r = await client.post(
+        "/api/cadastros",
+        json={"tipo": "fone", "codigo": "11999999999"},
+    )
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+
+    # Seed raw_links via direct SQL (xlsx populate path produces these).
+    await db.execute(
+        _text("UPDATE davinci_test.cadastros SET raw_links = '{\"ml\": \"aguiar\"}'::jsonb WHERE id = CAST(:i AS uuid)"),
+        {"i": cid},
+    )
+    await db.commit()
+
+    r = await client.post(
+        f"/api/cadastros/{cid}/raw-links/ml/resolve",
+        json={"store_id": s1, "alias": "aguiar"},
+    )
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["raw_links"] == {}
+
+    # Marketplace mismatch: use a shopee store_id but resolve under "ml" → 400.
+    s2 = (await client.post(
+        "/api/stores", json={"company_id": c1, "marketplace": "shopee", "status": "active"}
+    )).json()["id"]
+    await db.execute(
+        _text("UPDATE davinci_test.cadastros SET raw_links = '{\"ml\": \"x\"}'::jsonb WHERE id = CAST(:i AS uuid)"),
+        {"i": cid},
+    )
+    await db.commit()
+    r = await client.post(
+        f"/api/cadastros/{cid}/raw-links/ml/resolve",
+        json={"store_id": s2},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "marketplace_mismatch"

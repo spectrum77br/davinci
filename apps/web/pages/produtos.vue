@@ -97,20 +97,26 @@ const error = ref<string | null>(null)
 const showImport = ref(false)
 const showAutoLink = ref(false)
 
+type UserSettings = { daily_sync_enabled: boolean }
+const autoSyncEnabled = ref<boolean>(false)
+const togglingAutoSync = ref(false)
+
 async function refreshAll() {
   loading.value = true
   error.value = null
   try {
-    const [pg, integ] = await Promise.all([
+    const [pg, integ, settings] = await Promise.all([
       api<ProductPage>(`/api/products?page=${page.value}&page_size=${pageSize}` +
         (search.value ? `&search=${encodeURIComponent(search.value)}` : '') +
         (filtroIntegration.value ? `&integration_id=${filtroIntegration.value}` : '') +
         (onlyLowStock.value ? `&low_stock=true` : '')),
       api<Integration[]>('/api/integrations'),
+      api<UserSettings>('/api/settings'),
     ])
     items.value = pg.items
     total.value = pg.total
     integrations.value = integ
+    autoSyncEnabled.value = settings.daily_sync_enabled
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -118,6 +124,23 @@ async function refreshAll() {
   }
 }
 await refreshAll()
+
+async function toggleAutoSync() {
+  if (togglingAutoSync.value) return
+  togglingAutoSync.value = true
+  const next = !autoSyncEnabled.value
+  try {
+    await api<UserSettings>('/api/settings', {
+      method: 'PATCH',
+      body: { daily_sync_enabled: next },
+    })
+    autoSyncEnabled.value = next
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    togglingAutoSync.value = false
+  }
+}
 
 const integrationById = computed(() => Object.fromEntries(integrations.value.map(i => [i.id, i])))
 const blingIntegrations = computed(() => integrations.value.filter(i => i.platform === 'bling'))
@@ -298,6 +321,22 @@ const stats = computed(() => ({
   <div class="space-y-5">
     <PageHeader title="Produtos" description="SKUs do Bling, custos e links por canal.">
       <template #actions>
+        <label
+          v-if="canEdit"
+          class="flex items-center gap-2 text-xs px-3 py-1.5 rounded-md border bg-background cursor-pointer select-none"
+          :title="autoSyncEnabled ? 'Desligar sync automático diário' : 'Ligar sync automático diário'"
+        >
+          <input
+            type="checkbox"
+            :checked="autoSyncEnabled"
+            :disabled="togglingAutoSync"
+            class="accent-primary"
+            @change="toggleAutoSync"
+          />
+          <span :class="autoSyncEnabled ? 'text-foreground' : 'text-muted-foreground'">
+            sync automático {{ autoSyncEnabled ? 'on' : 'off' }}
+          </span>
+        </label>
         <Button v-if="canEdit" size="sm" variant="outline" @click="openImport">
           <Download class="size-4 mr-1.5" /> importar Bling
         </Button>

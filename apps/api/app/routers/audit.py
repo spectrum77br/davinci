@@ -13,7 +13,7 @@ from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import require_permission, user_scope
 from app.models import (
     AuditFinding,
     AuditFindingStatus,
@@ -107,7 +107,7 @@ async def list_uploads(
     rows = (
         await session.execute(
             select(AuditUpload)
-            .where(AuditUpload.user_id == user.id)
+            .where(user_scope(AuditUpload, user))
             .order_by(AuditUpload.created_at.desc())
             .limit(50)
         )
@@ -124,7 +124,7 @@ async def delete_upload(
     row = (
         await session.execute(
             select(AuditUpload).where(
-                and_(AuditUpload.id == upload_id, AuditUpload.user_id == user.id)
+                and_(AuditUpload.id == upload_id, user_scope(AuditUpload, user))
             )
         )
     ).scalar_one_or_none()
@@ -149,7 +149,7 @@ async def parse_sheet(
     upload = (
         await session.execute(
             select(AuditUpload).where(
-                and_(AuditUpload.id == body.upload_id, AuditUpload.user_id == user.id)
+                and_(AuditUpload.id == body.upload_id, user_scope(AuditUpload, user))
             )
         )
     ).scalar_one_or_none()
@@ -167,7 +167,7 @@ async def parse_sheet(
 
     accounts = (
         await session.execute(
-            select(PricingAccount).where(PricingAccount.user_id == user.id)
+            select(PricingAccount).where(user_scope(PricingAccount, user))
         )
     ).scalars().all()
     by_lower_name = {(a.name or "").strip().lower(): a.id for a in accounts}
@@ -203,7 +203,7 @@ async def create_run(
     upload = (
         await session.execute(
             select(AuditUpload).where(
-                and_(AuditUpload.id == body.upload_id, AuditUpload.user_id == user.id)
+                and_(AuditUpload.id == body.upload_id, user_scope(AuditUpload, user))
             )
         )
     ).scalar_one_or_none()
@@ -218,7 +218,7 @@ async def create_run(
         await session.execute(
             select(PricingAccount.id).where(
                 and_(
-                    PricingAccount.user_id == user.id,
+                    user_scope(PricingAccount, user),
                     PricingAccount.id.in_(account_ids),
                 )
             )
@@ -266,7 +266,7 @@ async def list_runs(
     rows = (
         await session.execute(
             select(AuditRun)
-            .where(AuditRun.user_id == user.id)
+            .where(user_scope(AuditRun, user))
             .order_by(AuditRun.created_at.desc())
             .limit(limit)
         )
@@ -283,7 +283,7 @@ async def get_run(
     row = (
         await session.execute(
             select(AuditRun).where(
-                and_(AuditRun.id == run_id, AuditRun.user_id == user.id)
+                and_(AuditRun.id == run_id, user_scope(AuditRun, user))
             )
         )
     ).scalar_one_or_none()
@@ -306,7 +306,7 @@ async def list_findings(
     owned = (
         await session.execute(
             select(AuditRun.id).where(
-                and_(AuditRun.id == run_id, AuditRun.user_id == user.id)
+                and_(AuditRun.id == run_id, user_scope(AuditRun, user))
             )
         )
     ).scalar_one_or_none()
@@ -357,7 +357,7 @@ async def fix_one(
     f = (
         await session.execute(
             select(AuditFinding).where(
-                and_(AuditFinding.id == finding_id, AuditFinding.user_id == user.id)
+                and_(AuditFinding.id == finding_id, user_scope(AuditFinding, user))
             )
         )
     ).scalar_one_or_none()
@@ -376,14 +376,14 @@ async def fix_bulk(
     run_owned = (
         await session.execute(
             select(AuditRun.id).where(
-                and_(AuditRun.id == run_id, AuditRun.user_id == user.id)
+                and_(AuditRun.id == run_id, user_scope(AuditRun, user))
             )
         )
     ).scalar_one_or_none()
     if run_owned is None:
         raise HTTPException(404, detail={"code": "run_not_found"})
 
-    where = [AuditFinding.run_id == run_id, AuditFinding.user_id == user.id]
+    where = [AuditFinding.run_id == run_id, user_scope(AuditFinding, user)]
     if body.finding_ids:
         where.append(AuditFinding.id.in_(body.finding_ids))
     if body.status_in:
@@ -457,7 +457,7 @@ async def delete_run(
 ) -> None:
     res = await session.execute(
         delete(AuditRun).where(
-            and_(AuditRun.id == run_id, AuditRun.user_id == user.id)
+            and_(AuditRun.id == run_id, user_scope(AuditRun, user))
         )
     )
     if res.rowcount == 0:

@@ -20,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import require_permission, user_scope
 from app.models import IntegrationPlatform, Listing, Product, User
 
 logger = structlog.get_logger()
@@ -73,7 +73,7 @@ async def list_discrepancies(
         )
         .join(Product, Product.id == Listing.product_id)
         .where(
-            Listing.user_id == user.id,
+            user_scope(Listing, user),
             Listing.product_id.is_not(None),
             Listing.stock.is_not(None),
             diff_expr >= max(min_diff, 1),

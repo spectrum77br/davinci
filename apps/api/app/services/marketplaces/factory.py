@@ -1,14 +1,16 @@
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Awaitable, Callable
 
 from fastapi import HTTPException
 
 from app.models import IntegrationPlatform
-from app.services.marketplaces.base import MarketplaceClient
 from app.services.marketplaces.amazon import AmazonClient
+from app.services.marketplaces.base import MarketplaceClient
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
+from app.services.marketplaces.temu import TemuClient
+from app.services.marketplaces.tiktok import TikTokClient
 
 
 def client_for(
@@ -24,6 +26,10 @@ def client_for(
         return ShopeeClient(creds, on_token_refresh=on_token_refresh)
     if platform == IntegrationPlatform.AMAZON:
         return AmazonClient(creds, on_token_refresh=on_token_refresh)
+    if platform == IntegrationPlatform.TIKTOK:
+        return TikTokClient(creds, on_token_refresh=on_token_refresh)
+    if platform == IntegrationPlatform.TEMU:
+        return TemuClient(creds, on_token_refresh=on_token_refresh)
     raise HTTPException(501, detail={"code": "platform_not_implemented", "platform": platform.value})
 
 

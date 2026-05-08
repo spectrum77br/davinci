@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import require_permission, user_scope
 from app.models import (
     AuditDismissedSku,
     BackgroundJob,
@@ -120,7 +120,7 @@ async def list_accounts(
     department: str | None = Query(None),
     platform: str | None = Query(None),
 ) -> list[PricingAccountOut]:
-    stmt = select(PricingAccount).where(PricingAccount.user_id == user.id)
+    stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
     if department:
         stmt = stmt.where(PricingAccount.department == _coerce_department(department))
     if platform:
@@ -168,7 +168,7 @@ async def patch_account(
             select(PricingAccount).where(
                 and_(
                     PricingAccount.id == account_id,
-                    PricingAccount.user_id == user.id,
+                    user_scope(PricingAccount, user),
                 )
             )
         )
@@ -205,7 +205,7 @@ async def delete_account(
         delete(PricingAccount).where(
             and_(
                 PricingAccount.id == account_id,
-                PricingAccount.user_id == user.id,
+                user_scope(PricingAccount, user),
             )
         )
     )
@@ -229,7 +229,7 @@ async def list_products(
     in_catalog: bool | None = Query(None),
     is_active: bool | None = Query(None),
 ) -> list[PricingProductOut]:
-    stmt = select(PricingProduct).where(PricingProduct.user_id == user.id)
+    stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
     if department:
         stmt = stmt.where(PricingProduct.department == _coerce_department(department))
     if in_catalog is not None:
@@ -282,7 +282,7 @@ async def patch_product(
             select(PricingProduct).where(
                 and_(
                     PricingProduct.id == product_id,
-                    PricingProduct.user_id == user.id,
+                    user_scope(PricingProduct, user),
                 )
             )
         )
@@ -320,7 +320,7 @@ async def delete_product(
         delete(PricingProduct).where(
             and_(
                 PricingProduct.id == product_id,
-                PricingProduct.user_id == user.id,
+                user_scope(PricingProduct, user),
             )
         )
     )
@@ -346,7 +346,7 @@ async def toggle_catalog(
             select(PricingProduct).where(
                 and_(
                     PricingProduct.id == product_id,
-                    PricingProduct.user_id == user.id,
+                    user_scope(PricingProduct, user),
                 )
             )
         )
@@ -372,7 +372,7 @@ async def import_products(
 
     existing = (
         await session.execute(
-            select(PricingProduct).where(PricingProduct.user_id == user.id)
+            select(PricingProduct).where(user_scope(PricingProduct, user))
         )
     ).scalars().all()
     by_sku = {row.sku: row for row in existing}
@@ -411,7 +411,7 @@ async def list_overrides(
     ],
     department: str | None = Query(None),
 ) -> list[PricingOverrideOut]:
-    stmt = select(PricingOverride).where(PricingOverride.user_id == user.id)
+    stmt = select(PricingOverride).where(user_scope(PricingOverride, user))
     if department:
         dept = _coerce_department(department)
         stmt = stmt.join(
@@ -437,7 +437,7 @@ async def upsert_override(
             select(PricingProduct).where(
                 and_(
                     PricingProduct.id == body.pricing_product_id,
-                    PricingProduct.user_id == user.id,
+                    user_scope(PricingProduct, user),
                 )
             )
         )
@@ -449,7 +449,7 @@ async def upsert_override(
             select(PricingAccount).where(
                 and_(
                     PricingAccount.id == body.pricing_account_id,
-                    PricingAccount.user_id == user.id,
+                    user_scope(PricingAccount, user),
                 )
             )
         )
@@ -463,7 +463,7 @@ async def upsert_override(
                 and_(
                     PricingOverride.pricing_product_id == body.pricing_product_id,
                     PricingOverride.pricing_account_id == body.pricing_account_id,
-                    PricingOverride.user_id == user.id,
+                    user_scope(PricingOverride, user),
                 )
             )
         )
@@ -504,7 +504,7 @@ async def set_cell_status(
                 and_(
                     PricingOverride.pricing_product_id == body.pricing_product_id,
                     PricingOverride.pricing_account_id == body.pricing_account_id,
-                    PricingOverride.user_id == user.id,
+                    user_scope(PricingOverride, user),
                 )
             )
         )
@@ -516,7 +516,7 @@ async def set_cell_status(
                 select(PricingProduct.id).where(
                     and_(
                         PricingProduct.id == body.pricing_product_id,
-                        PricingProduct.user_id == user.id,
+                        user_scope(PricingProduct, user),
                     )
                 )
             )
@@ -526,7 +526,7 @@ async def set_cell_status(
                 select(PricingAccount.id).where(
                     and_(
                         PricingAccount.id == body.pricing_account_id,
-                        PricingAccount.user_id == user.id,
+                        user_scope(PricingAccount, user),
                     )
                 )
             )
@@ -560,7 +560,7 @@ async def remove_override(
             and_(
                 PricingOverride.pricing_product_id == pricing_product_id,
                 PricingOverride.pricing_account_id == pricing_account_id,
-                PricingOverride.user_id == user.id,
+                user_scope(PricingOverride, user),
             )
         )
     )
@@ -631,8 +631,8 @@ async def get_grid(
 ) -> PricingGridOut:
     dept = _coerce_department(department)
 
-    accounts_stmt = select(PricingAccount).where(PricingAccount.user_id == user.id)
-    products_stmt = select(PricingProduct).where(PricingProduct.user_id == user.id)
+    accounts_stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
+    products_stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
     if dept is not None:
         accounts_stmt = accounts_stmt.where(PricingAccount.department == dept)
         products_stmt = products_stmt.where(PricingProduct.department == dept)
@@ -647,7 +647,7 @@ async def get_grid(
 
     overrides = (
         await session.execute(
-            select(PricingOverride).where(PricingOverride.user_id == user.id)
+            select(PricingOverride).where(user_scope(PricingOverride, user))
         )
     ).scalars().all()
     by_pair = {(o.pricing_product_id, o.pricing_account_id): o for o in overrides}
@@ -693,7 +693,7 @@ async def list_catalog_listings(
         await session.execute(
             select(PricingProduct.sku).where(
                 and_(
-                    PricingProduct.user_id == user.id,
+                    user_scope(PricingProduct, user),
                     PricingProduct.in_catalog.is_(True),
                 )
             )
@@ -704,7 +704,7 @@ async def list_catalog_listings(
 
     stmt = select(Listing).where(
         and_(
-            Listing.user_id == user.id,
+            user_scope(Listing, user),
             Listing.platform == IntegrationPlatform.ML,
             Listing.sku.in_(in_catalog_skus),
         )
@@ -751,7 +751,7 @@ async def push_catalog_prices(
             await session.execute(
                 select(PricingProduct).where(
                     and_(
-                        PricingProduct.user_id == user.id,
+                        user_scope(PricingProduct, user),
                         PricingProduct.id.in_(prod_ids),
                     )
                 )
@@ -764,7 +764,7 @@ async def push_catalog_prices(
             await session.execute(
                 select(PricingAccount).where(
                     and_(
-                        PricingAccount.user_id == user.id,
+                        user_scope(PricingAccount, user),
                         PricingAccount.id.in_(acc_ids),
                     )
                 )
@@ -924,7 +924,7 @@ async def send_push_report(
 
         st = (
             await session.execute(
-                select(UserSettings).where(UserSettings.user_id == user.id)
+                select(UserSettings).where(user_scope(UserSettings, user))
             )
         ).scalar_one_or_none()
         chat_id = st.telegram_chat_id if st else None
@@ -965,7 +965,7 @@ async def list_dismissed_skus(
 ) -> list[str]:
     rows = (
         await session.execute(
-            select(AuditDismissedSku.sku).where(AuditDismissedSku.user_id == user.id)
+            select(AuditDismissedSku.sku).where(user_scope(AuditDismissedSku, user))
         )
     ).scalars().all()
     return list(rows)
@@ -983,7 +983,7 @@ async def dismiss_sku(
         await session.execute(
             select(AuditDismissedSku).where(
                 and_(
-                    AuditDismissedSku.user_id == user.id,
+                    user_scope(AuditDismissedSku, user),
                     AuditDismissedSku.sku == sku,
                 )
             )
@@ -1006,7 +1006,7 @@ async def undismiss_sku(
     await session.execute(
         delete(AuditDismissedSku).where(
             and_(
-                AuditDismissedSku.user_id == user.id,
+                user_scope(AuditDismissedSku, user),
                 AuditDismissedSku.sku == sku,
             )
         )
@@ -1107,7 +1107,7 @@ async def auto_match_accounts(
         await session.execute(
             select(PricingAccount).where(
                 and_(
-                    PricingAccount.user_id == user.id,
+                    user_scope(PricingAccount, user),
                     PricingAccount.integration_id.is_(None),
                 )
             )
@@ -1115,7 +1115,7 @@ async def auto_match_accounts(
     ).scalars().all()
     integrations = (
         await session.execute(
-            select(Integration).where(Integration.user_id == user.id)
+            select(Integration).where(user_scope(Integration, user))
         )
     ).scalars().all()
 
@@ -1174,7 +1174,7 @@ async def set_account_department(
             select(PricingAccount).where(
                 and_(
                     PricingAccount.id == account_id,
-                    PricingAccount.user_id == user.id,
+                    user_scope(PricingAccount, user),
                 )
             )
         )
@@ -1207,7 +1207,7 @@ async def list_store_info(
     rows = (
         await session.execute(
             select(StoreInfo)
-            .where(StoreInfo.user_id == user.id)
+            .where(user_scope(StoreInfo, user))
             .order_by(StoreInfo.sort_order, StoreInfo.platform)
         )
     ).scalars().all()
@@ -1250,7 +1250,7 @@ async def patch_store_info(
             select(StoreInfo).where(
                 and_(
                     StoreInfo.id == store_info_id,
-                    StoreInfo.user_id == user.id,
+                    user_scope(StoreInfo, user),
                 )
             )
         )
@@ -1288,7 +1288,7 @@ async def set_store_info_department(
             select(StoreInfo).where(
                 and_(
                     StoreInfo.id == store_info_id,
-                    StoreInfo.user_id == user.id,
+                    user_scope(StoreInfo, user),
                 )
             )
         )
@@ -1305,7 +1305,7 @@ async def set_store_info_department(
         await session.execute(
             select(PricingAccount).where(
                 and_(
-                    PricingAccount.user_id == user.id,
+                    user_scope(PricingAccount, user),
                     PricingAccount.store_info_id == store_info_id,
                     PricingAccount.department == dept,
                 )
@@ -1341,7 +1341,7 @@ async def delete_store_info(
         delete(StoreInfo).where(
             and_(
                 StoreInfo.id == store_info_id,
-                StoreInfo.user_id == user.id,
+                user_scope(StoreInfo, user),
             )
         )
     )

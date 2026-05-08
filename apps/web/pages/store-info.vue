@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { Plus, RefreshCw, Trash2, X, Pencil } from 'lucide-vue-next'
+import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -29,33 +28,20 @@ type StoreInfo = {
   updated_at: string
 }
 
-type Draft = {
-  platform: string
-  segment: string
-  freight: string
-  cpf_name: string
-  account_name: string
-  server: string
-  cnpj: string
-  email: string
-  phone: string
-  link: string
-  shipping_address: string
-  return_address: string
-  observation: string
-  password: string
-  sort_order: number
-}
-
 const PLATFORMS = [
-  { value: 'mercadolivre', label: 'Mercado Livre' },
+  { value: 'mercadolivre', label: 'ML' },
   { value: 'shopee', label: 'Shopee' },
   { value: 'amazon', label: 'Amazon' },
   { value: 'aliexpress', label: 'AliExpress' },
   { value: 'temu', label: 'Temu' },
   { value: 'tiktok', label: 'TikTok' },
   { value: 'magalu', label: 'Magalu' },
+  { value: 'shein', label: 'Shein' },
 ]
+
+function platformLabel(p: string) {
+  return PLATFORMS.find((x) => x.value === p)?.label ?? p
+}
 
 const DEPARTMENTS = [
   { value: 'celular', label: 'Celular' },
@@ -71,22 +57,8 @@ const canDelete = useCan('tabela_precos', 'delete')
 const items = ref<StoreInfo[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
-
-const editing = ref<StoreInfo | null>(null)
-const showForm = ref(false)
-const saving = ref(false)
-const formError = ref<string | null>(null)
-
-function emptyDraft(): Draft {
-  return {
-    platform: 'mercadolivre',
-    segment: '', freight: '', cpf_name: '', account_name: '',
-    server: '', cnpj: '', email: '', phone: '', link: '',
-    shipping_address: '', return_address: '', observation: '',
-    password: '', sort_order: 0,
-  }
-}
-const draft = ref<Draft>(emptyDraft())
+const filterPlatform = ref<string>('all')
+const search = ref('')
 
 async function load() {
   loading.value = true
@@ -102,259 +74,492 @@ async function load() {
 
 await load()
 
-function openNew() {
+const sorted = computed(() => {
+  let list = [...items.value].sort(
+    (a, b) => a.sort_order - b.sort_order || a.platform.localeCompare(b.platform),
+  )
+  if (filterPlatform.value !== 'all') {
+    list = list.filter((s) => s.platform === filterPlatform.value)
+  }
+  const q = search.value.trim().toLowerCase()
+  if (q) {
+    list = list.filter(
+      (s) =>
+        (s.account_name || '').toLowerCase().includes(q) ||
+        (s.cpf_name || '').toLowerCase().includes(q) ||
+        (s.email || '').toLowerCase().includes(q) ||
+        (s.cnpj || '').toLowerCase().includes(q) ||
+        s.platform.toLowerCase().includes(q),
+    )
+  }
+  return list
+})
+
+// =========================================================== inline edit
+
+const editing = ref<{ id: string; field: string } | null>(null)
+const editValue = ref<string>('')
+const editInputRef = ref<HTMLInputElement | HTMLSelectElement | null>(null)
+function setEditInputRef(el: any) {
+  if (el) editInputRef.value = el
+}
+const flashed = ref<Set<string>>(new Set())
+
+function isEditing(id: string, field: string) {
+  return editing.value?.id === id && editing.value?.field === field
+}
+
+function isFlashed(id: string, field: string) {
+  return flashed.value.has(`${id}::${field}`)
+}
+
+function flash(id: string, field: string) {
+  const k = `${id}::${field}`
+  flashed.value.add(k)
+  setTimeout(() => flashed.value.delete(k), 1200)
+}
+
+async function startEdit(row: StoreInfo, field: string) {
+  if (!canEdit.value) return
+  editing.value = { id: row.id, field }
+  const raw = (row as any)[field]
+  editValue.value = raw == null ? '' : String(raw)
+  await nextTick()
+  const el = editInputRef.value
+  if (el) {
+    el.focus()
+    if ('select' in el) (el as HTMLInputElement).select?.()
+  }
+}
+
+function cancelEdit() {
   editing.value = null
-  draft.value = emptyDraft()
-  formError.value = null
-  showForm.value = true
+  editValue.value = ''
 }
 
-function openEdit(row: StoreInfo) {
-  editing.value = row
-  draft.value = {
-    platform: row.platform,
-    segment: row.segment || '',
-    freight: row.freight || '',
-    cpf_name: row.cpf_name || '',
-    account_name: row.account_name || '',
-    server: row.server || '',
-    cnpj: row.cnpj || '',
-    email: row.email || '',
-    phone: row.phone || '',
-    link: row.link || '',
-    shipping_address: row.shipping_address || '',
-    return_address: row.return_address || '',
-    observation: row.observation || '',
-    password: '',
-    sort_order: row.sort_order,
+async function commitEdit() {
+  if (!editing.value) return
+  const { id, field } = editing.value
+  const row = items.value.find((x) => x.id === id)
+  if (!row) return cancelEdit()
+
+  const raw = editValue.value.trim()
+  const payload: Record<string, unknown> = {}
+
+  if (field === 'platform') {
+    if (!raw) return cancelEdit()
+    payload.platform = raw
+  } else if (field === 'sort_order') {
+    const n = parseInt(raw)
+    if (Number.isNaN(n)) return cancelEdit()
+    payload.sort_order = n
+  } else if (field === 'password') {
+    payload.password = raw || null
+  } else {
+    payload[field] = raw || null
   }
-  formError.value = null
-  showForm.value = true
-}
 
-function payloadFromDraft() {
-  const body: Record<string, unknown> = { platform: draft.value.platform, sort_order: draft.value.sort_order }
-  for (const k of [
-    'segment','freight','cpf_name','account_name','server','cnpj','email',
-    'phone','link','shipping_address','return_address','observation',
-  ] as const) {
-    const v = (draft.value[k] || '').trim()
-    if (v) body[k] = v
-  }
-  if (draft.value.password) body.password = draft.value.password
-  return body
-}
-
-async function save() {
-  saving.value = true
-  formError.value = null
   try {
-    if (editing.value) {
-      await api(`/api/pricing/store-info/${editing.value.id}`, {
-        method: 'PATCH', body: payloadFromDraft(),
-      })
-    } else {
-      await api('/api/pricing/store-info', { method: 'POST', body: payloadFromDraft() })
-    }
-    showForm.value = false
-    await load()
+    const updated = await api<StoreInfo>(`/api/pricing/store-info/${id}`, {
+      method: 'PATCH',
+      body: payload,
+    })
+    Object.assign(row, updated)
+    flash(id, field)
   } catch (e: any) {
-    formError.value = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
-    saving.value = false
+    cancelEdit()
   }
 }
+
+// =========================================================== add row
+
+const showAdd = ref(false)
+const newRow = reactive({ platform: 'mercadolivre', account_name: '' })
+const adding = ref(false)
+
+function openAdd() {
+  newRow.platform = 'mercadolivre'
+  newRow.account_name = ''
+  showAdd.value = true
+  nextTick(() => {
+    const el = document.getElementById('new-store-account') as HTMLInputElement | null
+    el?.focus()
+  })
+}
+
+async function submitNew() {
+  if (!newRow.platform) return
+  adding.value = true
+  try {
+    const body: Record<string, unknown> = { platform: newRow.platform }
+    if (newRow.account_name) body.account_name = newRow.account_name
+    const created = await api<StoreInfo>('/api/pricing/store-info', {
+      method: 'POST',
+      body,
+    })
+    items.value.push(created)
+    showAdd.value = false
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    adding.value = false
+  }
+}
+
+// =========================================================== delete
 
 async function remove(row: StoreInfo) {
-  if (!confirm(`Excluir loja ${row.account_name || row.platform}?`)) return
+  if (!confirm(`Excluir loja "${row.account_name || row.platform}"?`)) return
   try {
     await api(`/api/pricing/store-info/${row.id}`, { method: 'DELETE' })
-    await load()
+    items.value = items.value.filter((x) => x.id !== row.id)
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   }
 }
 
-async function setDepartment(row: StoreInfo, department: string) {
-  if (!department) return
+// =========================================================== bind dept
+
+async function setDepartment(row: StoreInfo, ev: Event) {
+  const v = (ev.target as HTMLSelectElement).value
+  if (!v) return
   try {
     await api(`/api/pricing/store-info/${row.id}/department`, {
-      method: 'POST', body: { department },
+      method: 'POST',
+      body: { department: v },
     })
+    flash(row.id, 'department')
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    ;(ev.target as HTMLSelectElement).value = ''
   }
 }
 
-const sorted = computed(() =>
-  [...items.value].sort((a, b) =>
-    (a.sort_order - b.sort_order) || a.platform.localeCompare(b.platform),
-  ),
-)
+// =========================================================== password reveal
+
+const revealed = ref<Set<string>>(new Set())
+function toggleReveal(id: string) {
+  if (revealed.value.has(id)) revealed.value.delete(id)
+  else revealed.value.add(id)
+}
+
+async function copyText(text: string) {
+  await navigator.clipboard.writeText(text)
+}
 </script>
 
 <template>
   <div class="space-y-4">
     <PageHeader
-      title="Lojas (info)"
-      description="Cadastros de lojas externas — usados pela tabela de preços e relatórios."
+      title="Lojas"
+      description="Cadastros completos das lojas — clique em qualquer célula para editar"
     >
       <template #actions>
+        <select v-model="filterPlatform" class="border rounded px-2 py-1 text-sm bg-background">
+          <option value="all">Todas plataformas</option>
+          <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
+        </select>
+        <input
+          v-model="search"
+          placeholder="buscar conta, CPF, e-mail, CNPJ…"
+          class="border rounded px-2 py-1 text-sm bg-background w-64"
+        />
         <Button size="sm" variant="ghost" :disabled="loading" @click="load">
-          <RefreshCw class="size-4 mr-1" /> recarregar
+          <RefreshCw class="size-4 mr-1" :class="{ 'animate-spin': loading }" /> recarregar
         </Button>
-        <Button v-if="canEdit" size="sm" @click="openNew">
+        <Button v-if="canEdit" size="sm" :disabled="showAdd" @click="openAdd">
           <Plus class="size-4 mr-1" /> Nova loja
         </Button>
       </template>
     </PageHeader>
 
-    <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
+    <div v-if="error" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
+      <AlertCircle class="h-4 w-4" /> {{ error }}
+    </div>
 
-    <div class="border rounded-md overflow-x-auto">
-      <table class="w-full text-sm">
-        <thead class="bg-muted/40 text-left">
+    <div class="border rounded-lg overflow-auto max-h-[calc(100vh-220px)]">
+      <table class="w-full text-sm border-collapse">
+        <thead class="sticky top-0 bg-muted z-10">
           <tr>
-            <th class="px-3 py-2">plataforma</th>
-            <th class="px-3 py-2">conta</th>
-            <th class="px-3 py-2">segmento</th>
-            <th class="px-3 py-2">CNPJ</th>
-            <th class="px-3 py-2">e-mail</th>
-            <th class="px-3 py-2">criar conta de preço</th>
-            <th class="px-3 py-2 text-right">ações</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Plataforma</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Conta</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[100px]">Segmento</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Frete</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Servidor</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">CNPJ</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">E-mail</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Telefone</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Senha</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">Link</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">End. Envio</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">End. Devolução</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">Observação</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-32">Vincular dept</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Ord</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in sorted" :key="row.id" class="border-t hover:bg-muted/20">
-            <td class="px-3 py-2">{{ row.platform }}</td>
-            <td class="px-3 py-2">{{ row.account_name || '—' }}</td>
-            <td class="px-3 py-2 text-muted-foreground">{{ row.segment || '—' }}</td>
-            <td class="px-3 py-2 font-mono text-xs">{{ row.cnpj || '—' }}</td>
-            <td class="px-3 py-2 text-xs">{{ row.email || '—' }}</td>
-            <td class="px-3 py-2">
-              <select
-                v-if="canEdit"
-                class="border rounded px-2 py-1 text-xs bg-background"
-                :disabled="!canEdit"
-                @change="(e: Event) => {
-                  const v = (e.target as HTMLSelectElement).value
-                  if (v) {
-                    setDepartment(row, v)
-                    ;(e.target as HTMLSelectElement).value = ''
-                  }
-                }"
-              >
-                <option value="">selecionar dept…</option>
-                <option v-for="d in DEPARTMENTS" :key="d.value" :value="d.value">{{ d.label }}</option>
-              </select>
-              <span v-else class="text-xs text-muted-foreground">—</span>
-            </td>
-            <td class="px-3 py-2 text-right">
-              <Button v-if="canEdit" size="sm" variant="ghost" @click="openEdit(row)">
-                <Pencil class="size-4" />
-              </Button>
-              <Button v-if="canDelete" size="sm" variant="ghost" class="text-red-500" @click="remove(row)">
-                <Trash2 class="size-4" />
-              </Button>
+          <tr v-if="loading && !items.length">
+            <td colSpan="17" class="text-center py-6 text-muted-foreground">
+              <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
-          <tr v-if="!loading && sorted.length === 0">
-            <td colspan="7" class="px-3 py-8 text-center text-muted-foreground">
-              nenhuma loja cadastrada
+          <tr v-else-if="!sorted.length && !showAdd">
+            <td colSpan="17" class="text-center py-8 text-muted-foreground">Nenhuma loja cadastrada.</td>
+          </tr>
+
+          <!-- add row -->
+          <tr v-if="showAdd" class="bg-blue-50/40 dark:bg-blue-900/10">
+            <td class="border border-border px-1 py-1">
+              <select v-model="newRow.platform" class="w-full text-xs border rounded px-1 py-1 bg-background">
+                <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
+              </select>
+            </td>
+            <td class="border border-border px-1 py-1">
+              <input
+                id="new-store-account"
+                v-model="newRow.account_name"
+                type="text" placeholder="Nome da conta"
+                class="w-full text-xs border rounded px-1.5 py-1 bg-background"
+                @keydown.enter="submitNew"
+                @keydown.escape="showAdd = false"
+              />
+            </td>
+            <td v-for="i in 12" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
+            <td class="border border-border px-1 py-1 text-center">
+              <div class="flex gap-0.5 justify-center">
+                <button class="p-1 text-emerald-600 hover:bg-emerald-50 rounded" :disabled="adding" @click="submitNew">
+                  <Loader2 v-if="adding" class="h-3 w-3 animate-spin" />
+                  <Check v-else class="h-3 w-3" />
+                </button>
+                <button class="p-1 text-destructive hover:bg-destructive/10 rounded" @click="showAdd = false">
+                  <X class="h-3 w-3" />
+                </button>
+              </div>
+            </td>
+          </tr>
+
+          <!-- data rows -->
+          <tr v-for="row in sorted" :key="row.id" class="hover:bg-accent/30">
+            <!-- platform -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'platform'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'platform'),
+              }"
+              @click="!isEditing(row.id, 'platform') && startEdit(row, 'platform')"
+            >
+              <select
+                v-if="isEditing(row.id, 'platform')"
+                :ref="setEditInputRef"
+                v-model="editValue"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @change="commitEdit" @keydown.escape.prevent="cancelEdit"
+              >
+                <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
+              </select>
+              <span v-else>{{ platformLabel(row.platform) }}</span>
+            </td>
+            <!-- text fields -->
+            <template
+              v-for="f in [
+                'account_name', 'segment', 'freight', 'cpf_name', 'server', 'cnpj', 'email', 'phone',
+              ]"
+              :key="f"
+            >
+              <td
+                class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+                :class="{
+                  'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, f),
+                  'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, f),
+                  'font-mono': f === 'cnpj' || f === 'phone',
+                }"
+                @click="!isEditing(row.id, f) && startEdit(row, f)"
+              >
+                <input
+                  v-if="isEditing(row.id, f)"
+                  :ref="setEditInputRef"
+                  v-model="editValue" type="text"
+                  class="w-full text-xs bg-transparent outline-none"
+                  :class="{ 'font-mono': f === 'cnpj' || f === 'phone' }"
+                  @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+                />
+                <span v-else :class="{ 'text-muted-foreground': !((row as any)[f]) }">
+                  {{ (row as any)[f] || '—' }}
+                </span>
+              </td>
+            </template>
+            <!-- password -->
+            <td class="border border-border px-2 py-1.5 text-xs">
+              <div class="flex items-center gap-1 group">
+                <span
+                  class="cursor-pointer truncate flex-1 font-mono"
+                  :class="{
+                    'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'password'),
+                    'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'password'),
+                    'text-muted-foreground': !row.has_password,
+                  }"
+                  @click="!isEditing(row.id, 'password') && startEdit(row, 'password')"
+                >
+                  <input
+                    v-if="isEditing(row.id, 'password')"
+                    :ref="setEditInputRef"
+                    v-model="editValue" type="text"
+                    class="w-full text-xs bg-transparent outline-none font-mono"
+                    @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+                  />
+                  <template v-else>
+                    {{ row.has_password ? (revealed.has(row.id) ? '••••' : '••••••••') : '—' }}
+                  </template>
+                </span>
+                <button
+                  v-if="row.has_password && !isEditing(row.id, 'password')"
+                  class="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 hover:bg-muted rounded"
+                  :title="revealed.has(row.id) ? 'Ocultar' : 'Mostrar (placeholder, senha cifrada)'"
+                  @click="toggleReveal(row.id)"
+                >
+                  <EyeOff v-if="revealed.has(row.id)" class="h-3 w-3" />
+                  <Eye v-else class="h-3 w-3" />
+                </button>
+              </div>
+            </td>
+            <!-- link -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'link'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'link'),
+              }"
+              @click="!isEditing(row.id, 'link') && startEdit(row, 'link')"
+            >
+              <input
+                v-if="isEditing(row.id, 'link')"
+                :ref="setEditInputRef"
+                v-model="editValue" type="text"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+              />
+              <div v-else class="flex items-center gap-1">
+                <span :class="{ 'text-muted-foreground': !row.link, 'text-blue-600 dark:text-blue-400 truncate flex-1': !!row.link }">
+                  {{ row.link || '—' }}
+                </span>
+                <a
+                  v-if="row.link"
+                  :href="row.link.startsWith('http') ? row.link : `https://${row.link}`"
+                  target="_blank" rel="noopener" class="shrink-0"
+                  @click.stop
+                >
+                  <ExternalLink class="h-3 w-3 text-muted-foreground" />
+                </a>
+              </div>
+            </td>
+            <!-- shipping_address -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'shipping_address'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'shipping_address'),
+              }"
+              @click="!isEditing(row.id, 'shipping_address') && startEdit(row, 'shipping_address')"
+            >
+              <input
+                v-if="isEditing(row.id, 'shipping_address')"
+                :ref="setEditInputRef"
+                v-model="editValue" type="text"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+              />
+              <span v-else :class="{ 'text-muted-foreground': !row.shipping_address }">
+                {{ row.shipping_address || '—' }}
+              </span>
+            </td>
+            <!-- return_address -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'return_address'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'return_address'),
+              }"
+              @click="!isEditing(row.id, 'return_address') && startEdit(row, 'return_address')"
+            >
+              <input
+                v-if="isEditing(row.id, 'return_address')"
+                :ref="setEditInputRef"
+                v-model="editValue" type="text"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+              />
+              <span v-else :class="{ 'text-muted-foreground': !row.return_address }">
+                {{ row.return_address || '—' }}
+              </span>
+            </td>
+            <!-- observation -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'observation'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'observation'),
+              }"
+              @click="!isEditing(row.id, 'observation') && startEdit(row, 'observation')"
+            >
+              <input
+                v-if="isEditing(row.id, 'observation')"
+                :ref="setEditInputRef"
+                v-model="editValue" type="text"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+              />
+              <span v-else :class="{ 'text-muted-foreground': !row.observation }">
+                {{ row.observation || '—' }}
+              </span>
+            </td>
+            <!-- bind dept -->
+            <td class="border border-border px-1 py-1 text-center">
+              <select
+                v-if="canEdit"
+                class="border rounded px-1 py-0.5 text-xs bg-background"
+                @change="(e) => setDepartment(row, e)"
+              >
+                <option value="">+ dept…</option>
+                <option v-for="d in DEPARTMENTS" :key="d.value" :value="d.value">{{ d.label }}</option>
+              </select>
+              <Check v-if="isFlashed(row.id, 'department')" class="inline h-3 w-3 text-emerald-600 ml-1" />
+            </td>
+            <!-- sort_order -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
+              :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'sort_order') }"
+              @click="!isEditing(row.id, 'sort_order') && startEdit(row, 'sort_order')"
+            >
+              <input
+                v-if="isEditing(row.id, 'sort_order')"
+                :ref="setEditInputRef"
+                v-model="editValue" type="number"
+                class="w-full text-xs bg-transparent outline-none text-center"
+                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+              />
+              <span v-else>{{ row.sort_order }}</span>
+            </td>
+            <!-- delete -->
+            <td class="border border-border px-1 py-1 text-center">
+              <button
+                v-if="canDelete"
+                class="p-1 text-destructive hover:bg-destructive/10 rounded"
+                :title="`Excluir ${row.account_name || row.platform}`"
+                @click="remove(row)"
+              >
+                <Trash2 class="h-3 w-3" />
+              </button>
             </td>
           </tr>
         </tbody>
       </table>
-    </div>
-
-    <div
-      v-if="showForm"
-      class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
-      @click.self="showForm = false"
-    >
-      <div class="bg-background border rounded-lg w-full max-w-3xl p-5 space-y-4 max-h-[90vh] overflow-auto">
-        <div class="flex items-center">
-          <h2 class="text-lg font-semibold">
-            {{ editing ? 'Editar loja' : 'Nova loja' }}
-          </h2>
-          <Button class="ml-auto" size="sm" variant="ghost" @click="showForm = false">
-            <X class="size-4" />
-          </Button>
-        </div>
-
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <Label>Plataforma *</Label>
-            <select v-model="draft.platform" class="w-full border rounded px-2 py-1 bg-background">
-              <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
-            </select>
-          </div>
-          <div>
-            <Label>Nome da conta</Label>
-            <Input v-model="draft.account_name" />
-          </div>
-          <div>
-            <Label>Segmento</Label>
-            <Input v-model="draft.segment" />
-          </div>
-          <div>
-            <Label>Frete</Label>
-            <Input v-model="draft.freight" />
-          </div>
-          <div>
-            <Label>CPF / responsável</Label>
-            <Input v-model="draft.cpf_name" />
-          </div>
-          <div>
-            <Label>CNPJ</Label>
-            <Input v-model="draft.cnpj" />
-          </div>
-          <div>
-            <Label>Servidor</Label>
-            <Input v-model="draft.server" />
-          </div>
-          <div>
-            <Label>E-mail</Label>
-            <Input v-model="draft.email" />
-          </div>
-          <div>
-            <Label>Telefone</Label>
-            <Input v-model="draft.phone" />
-          </div>
-          <div>
-            <Label>Link</Label>
-            <Input v-model="draft.link" />
-          </div>
-          <div class="col-span-2">
-            <Label>Endereço de envio</Label>
-            <Input v-model="draft.shipping_address" />
-          </div>
-          <div class="col-span-2">
-            <Label>Endereço de devolução</Label>
-            <Input v-model="draft.return_address" />
-          </div>
-          <div class="col-span-2">
-            <Label>Observação</Label>
-            <Input v-model="draft.observation" />
-          </div>
-          <div>
-            <Label>Senha {{ editing ? '(deixe em branco p/ manter)' : '' }}</Label>
-            <Input v-model="draft.password" type="password" />
-          </div>
-          <div>
-            <Label>Ordem</Label>
-            <Input v-model.number="draft.sort_order" type="number" />
-          </div>
-        </div>
-
-        <div v-if="formError" class="text-sm text-red-500">erro: {{ formError }}</div>
-        <div class="flex justify-end gap-2">
-          <Button variant="ghost" :disabled="saving" @click="showForm = false">cancelar</Button>
-          <Button :disabled="saving || !draft.platform" @click="save">
-            {{ saving ? 'salvando…' : editing ? 'Salvar' : 'Criar' }}
-          </Button>
-        </div>
-      </div>
     </div>
   </div>
 </template>

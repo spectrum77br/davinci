@@ -19,7 +19,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_active_user, require_permission
+from app.deps.auth import require_active_user, require_permission, user_scope
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
@@ -116,7 +116,7 @@ async def sync_product(
     product = (
         await session.execute(
             select(Product).where(
-                and_(Product.id == product_id, Product.user_id == user.id)
+                and_(Product.id == product_id, user_scope(Product, user))
             )
         )
     ).scalar_one_or_none()
@@ -157,7 +157,7 @@ async def list_sync_logs(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> SyncLogPage:
-    where = [SyncLog.user_id == user.id]
+    where = [user_scope(SyncLog, user)]
     if platform:
         where.append(SyncLog.platform == platform)
     if status_:
@@ -172,7 +172,7 @@ async def list_sync_logs(
         where.append(
             SyncLog.product_id.in_(
                 select(Product.id).where(
-                    and_(Product.user_id == user.id, Product.sku == sku)
+                    and_(user_scope(Product, user), Product.sku == sku)
                 )
             )
         )
@@ -209,7 +209,7 @@ async def sync_logs_stats(
             select(SyncLog.platform, SyncLog.status, func.count())
             .where(
                 and_(
-                    SyncLog.user_id == user.id,
+                    user_scope(SyncLog, user),
                     SyncLog.created_at >= cutoff,
                 )
             )

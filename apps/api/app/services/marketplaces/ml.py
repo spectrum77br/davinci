@@ -96,19 +96,26 @@ class MercadoLivreClient:
             r.raise_for_status()
             return _normalize_token(r.json())
 
+    def _client_creds(self) -> tuple[str, str]:
+        """Per-integration client_id/secret when present, else env fallback."""
+        s = get_settings()
+        cid = str(self.creds.get("client_id") or s.ml_client_id or "")
+        csec = str(self.creds.get("client_secret") or s.ml_client_secret or "")
+        return cid, csec
+
     async def refresh(self) -> None:
         rt = self.creds.get("refresh_token")
         if not rt:
             raise RuntimeError("missing refresh_token")
-        s = get_settings()
+        cid, csec = self._client_creds()
         async with httpx.AsyncClient(timeout=20.0) as c:
             r = await c.post(
                 ML_TOKEN_URL,
                 headers={"Accept": "application/json"},
                 data={
                     "grant_type": "refresh_token",
-                    "client_id": s.ml_client_id,
-                    "client_secret": s.ml_client_secret,
+                    "client_id": cid,
+                    "client_secret": csec,
                     "refresh_token": rt,
                 },
             )

@@ -74,7 +74,7 @@ async def _setup_schema():
         "store_status": (
             "active", "inactive", "closing", "banned", "pending", "under_review",
         ),
-        "cadastro_tipo": ("fone", "email", "dominio"),
+        "cadastro_tipo": ("fone", "email", "dominio", "servidor"),
         "cadastro_status": ("active", "inactive", "excluded"),
         "integration_platform": ("bling", "ml", "shopee", "amazon"),
         "link_sync_status": (

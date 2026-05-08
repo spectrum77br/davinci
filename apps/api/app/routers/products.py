@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import require_permission, user_scope
 from app.models import (
     Integration,
     IntegrationPlatform,
@@ -86,8 +86,8 @@ async def list_products(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> ProductPage:
-    stmt = select(Product).where(Product.user_id == user.id)
-    count_stmt = select(func.count()).select_from(Product).where(Product.user_id == user.id)
+    stmt = select(Product).where(user_scope(Product, user))
+    count_stmt = select(func.count()).select_from(Product).where(user_scope(Product, user))
     if search:
         like = f"%{search}%"
         cond = or_(Product.sku.ilike(like), Product.name.ilike(like))
@@ -134,7 +134,7 @@ async def get_product(
 ) -> ProductOut:
     p = (
         await session.execute(
-            select(Product).where(and_(Product.id == product_id, Product.user_id == user.id))
+            select(Product).where(and_(Product.id == product_id, user_scope(Product, user)))
         )
     ).scalar_one_or_none()
     if p is None:
@@ -188,7 +188,7 @@ async def patch_product(
 ) -> ProductOut:
     p = (
         await session.execute(
-            select(Product).where(and_(Product.id == product_id, Product.user_id == user.id))
+            select(Product).where(and_(Product.id == product_id, user_scope(Product, user)))
         )
     ).scalar_one_or_none()
     if p is None:
@@ -211,7 +211,7 @@ async def delete_product(
     user: Annotated[User, Depends(require_permission("produtos", "delete"))],
 ) -> None:
     res = await session.execute(
-        delete(Product).where(and_(Product.id == product_id, Product.user_id == user.id))
+        delete(Product).where(and_(Product.id == product_id, user_scope(Product, user)))
     )
     if res.rowcount == 0:
         raise HTTPException(404, detail={"code": "product_not_found"})
@@ -227,7 +227,7 @@ async def bulk_delete_products(
 ) -> dict:
     res = await session.execute(
         delete(Product).where(
-            and_(Product.id.in_(body.ids), Product.user_id == user.id)
+            and_(Product.id.in_(body.ids), user_scope(Product, user))
         )
     )
     await session.commit()
@@ -243,7 +243,7 @@ async def list_product_links(
     integration_id: UUID | None = Query(None),
     product_id: UUID | None = Query(None),
 ) -> list[ProductLinkOut]:
-    stmt = select(ProductLink).where(ProductLink.user_id == user.id)
+    stmt = select(ProductLink).where(user_scope(ProductLink, user))
     if integration_id:
         stmt = stmt.where(ProductLink.integration_id == integration_id)
     if product_id:
@@ -262,7 +262,7 @@ async def delete_product_link(
 ) -> None:
     res = await session.execute(
         delete(ProductLink).where(
-            and_(ProductLink.id == link_id, ProductLink.user_id == user.id)
+            and_(ProductLink.id == link_id, user_scope(ProductLink, user))
         )
     )
     if res.rowcount == 0:
@@ -313,7 +313,7 @@ async def bling_import(
         await session.execute(
             select(Product).where(
                 and_(
-                    Product.user_id == user.id,
+                    user_scope(Product, user),
                     Product.bling_product_id.in_(body.bling_product_ids),
                 )
             )
@@ -358,7 +358,7 @@ async def bling_import(
                         await session.execute(
                             select(Product).where(
                                 and_(
-                                    Product.user_id == user.id,
+                                    user_scope(Product, user),
                                     Product.sku == norm["sku"],
                                 )
                             )

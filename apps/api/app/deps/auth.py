@@ -66,3 +66,18 @@ def require_permission(resource: str, action: Literal["view", "edit", "delete"])
         return user
 
     return dep
+
+
+def user_scope(model, user):
+    """SQLAlchemy where-predicate scoping rows to the current user.
+
+    Admins see everything; everyone else sees only their own rows.
+    Apply as: stmt.where(user_scope(Product, user)).
+    """
+    from sqlalchemy import true
+
+    from app.models.enums import UserRole
+
+    if user.role == UserRole.ADMIN:
+        return true()
+    return model.user_id == user.id

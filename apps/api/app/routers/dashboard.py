@@ -19,7 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_active_user
+from app.deps.auth import require_active_user, user_scope
 from app.models import (
     Alert,
     BackgroundJob,
@@ -81,14 +81,14 @@ async def get_dashboard(
 ) -> DashboardOut:
     products_total = (
         await session.execute(
-            select(func.count()).select_from(Product).where(Product.user_id == user.id)
+            select(func.count()).select_from(Product).where(user_scope(Product, user))
         )
     ).scalar_one()
     products_active = (
         await session.execute(
             select(func.count())
             .select_from(Product)
-            .where(Product.user_id == user.id, Product.stock > 0)
+            .where(user_scope(Product, user), Product.stock > 0)
         )
     ).scalar_one()
 
@@ -96,7 +96,7 @@ async def get_dashboard(
         await session.execute(
             select(func.count())
             .select_from(Integration)
-            .where(Integration.user_id == user.id)
+            .where(user_scope(Integration, user))
         )
     ).scalar_one()
     integrations_connected = (
@@ -104,7 +104,7 @@ async def get_dashboard(
             select(func.count())
             .select_from(Integration)
             .where(
-                Integration.user_id == user.id,
+                user_scope(Integration, user),
                 Integration.last_test_ok.is_(True),
             )
         )
@@ -112,14 +112,14 @@ async def get_dashboard(
 
     listings_total = (
         await session.execute(
-            select(func.count()).select_from(Listing).where(Listing.user_id == user.id)
+            select(func.count()).select_from(Listing).where(user_scope(Listing, user))
         )
     ).scalar_one()
     listings_linked = (
         await session.execute(
             select(func.count())
             .select_from(Listing)
-            .where(Listing.user_id == user.id, Listing.product_id.is_not(None))
+            .where(user_scope(Listing, user), Listing.product_id.is_not(None))
         )
     ).scalar_one()
 
@@ -127,7 +127,7 @@ async def get_dashboard(
         await session.execute(
             select(func.count())
             .select_from(Alert)
-            .where(Alert.user_id == user.id, Alert.read_at.is_(None))
+            .where(user_scope(Alert, user), Alert.read_at.is_(None))
         )
     ).scalar_one()
 
@@ -138,7 +138,7 @@ async def get_dashboard(
                 func.count().label("listings"),
                 func.count(Listing.product_id).label("linked"),
             )
-            .where(Listing.user_id == user.id)
+            .where(user_scope(Listing, user))
             .group_by(Listing.platform)
         )
     ).all()
@@ -180,7 +180,7 @@ async def get_dashboard(
             select(func.count())
             .select_from(Integration)
             .where(
-                Integration.user_id == user.id,
+                user_scope(Integration, user),
                 Integration.platform == IntegrationPlatform.BLING,
             )
         )
@@ -190,7 +190,7 @@ async def get_dashboard(
         await session.execute(
             select(func.count())
             .select_from(ProductLink)
-            .where(ProductLink.user_id == user.id)
+            .where(user_scope(ProductLink, user))
         )
     ).scalar_one() > 0
     has_products = products_total > 0

@@ -16,7 +16,7 @@ from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import require_permission, user_scope
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
@@ -60,8 +60,8 @@ async def list_listings(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> ListingPage:
-    stmt = select(Listing).where(Listing.user_id == user.id)
-    count_stmt = select(func.count()).select_from(Listing).where(Listing.user_id == user.id)
+    stmt = select(Listing).where(user_scope(Listing, user))
+    count_stmt = select(func.count()).select_from(Listing).where(user_scope(Listing, user))
 
     if integration_id:
         stmt = stmt.where(Listing.integration_id == integration_id)
@@ -118,7 +118,7 @@ async def get_listing(
     row = (
         await session.execute(
             select(Listing).where(
-                and_(Listing.id == listing_id, Listing.user_id == user.id)
+                and_(Listing.id == listing_id, user_scope(Listing, user))
             )
         )
     ).scalar_one_or_none()
@@ -137,7 +137,7 @@ async def patch_listing(
     row = (
         await session.execute(
             select(Listing).where(
-                and_(Listing.id == listing_id, Listing.user_id == user.id)
+                and_(Listing.id == listing_id, user_scope(Listing, user))
             )
         )
     ).scalar_one_or_none()
@@ -154,7 +154,7 @@ async def patch_listing(
         prod = (
             await session.execute(
                 select(Product).where(
-                    and_(Product.id == data["product_id"], Product.user_id == user.id)
+                    and_(Product.id == data["product_id"], user_scope(Product, user))
                 )
             )
         ).scalar_one_or_none()
@@ -175,7 +175,7 @@ async def delete_listing(
 ) -> None:
     res = await session.execute(
         delete(Listing).where(
-            and_(Listing.id == listing_id, Listing.user_id == user.id)
+            and_(Listing.id == listing_id, user_scope(Listing, user))
         )
     )
     if res.rowcount == 0:
@@ -199,7 +199,7 @@ async def enqueue_import(
             select(Integration).where(
                 and_(
                     Integration.id == body.integration_id,
-                    Integration.user_id == user.id,
+                    user_scope(Integration, user),
                 )
             )
         )
@@ -250,7 +250,7 @@ async def list_listing_requests(
     user: Annotated[User, Depends(require_permission("anuncios", "view"))],
     status_filter: str | None = Query(None, alias="status"),
 ) -> list[ListingRequestOut]:
-    stmt = select(ListingRequest).where(ListingRequest.user_id == user.id)
+    stmt = select(ListingRequest).where(user_scope(ListingRequest, user))
     if status_filter:
         try:
             s_enum = ListingRequestStatus(status_filter)
@@ -305,7 +305,7 @@ async def patch_listing_request(
             select(ListingRequest).where(
                 and_(
                     ListingRequest.id == request_id,
-                    ListingRequest.user_id == user.id,
+                    user_scope(ListingRequest, user),
                 )
             )
         )
@@ -337,7 +337,7 @@ async def delete_listing_request(
         delete(ListingRequest).where(
             and_(
                 ListingRequest.id == request_id,
-                ListingRequest.user_id == user.id,
+                user_scope(ListingRequest, user),
             )
         )
     )

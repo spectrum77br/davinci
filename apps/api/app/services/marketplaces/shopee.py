@@ -95,12 +95,17 @@ class ShopeeClient:
         s = get_settings()
         return SHOPEE_TEST_BASE if s.shopee_use_sandbox else SHOPEE_LIVE_BASE
 
+    def _partner(self) -> tuple[int, bytes]:
+        """Per-integration partner_id/partner_key when present, else env fallback."""
+        s = get_settings()
+        pid = int(self.creds.get("partner_id") or s.shopee_partner_id or 0)
+        pkey = str(self.creds.get("partner_key") or s.shopee_partner_key or "").encode()
+        return pid, pkey
+
     def _sign(self, path: str, timestamp: int) -> tuple[str, int]:
         """Returns (signature, partner_id) for the given path. Signed shape:
         partner_id|path|timestamp|access_token|shop_id  (HMAC-SHA256 hex)."""
-        s = get_settings()
-        partner_id = int(s.shopee_partner_id or 0)
-        partner_key = (s.shopee_partner_key or "").encode()
+        partner_id, partner_key = self._partner()
         msg = f"{partner_id}{path}{timestamp}{self.access_token}{self.shop_id}".encode()
         sig = hmac.new(partner_key, msg, hashlib.sha256).hexdigest()
         return sig, partner_id
@@ -111,9 +116,7 @@ class ShopeeClient:
             raise RuntimeError("missing refresh_token")
         path = "/api/v2/auth/access_token/get"
         ts = int(time.time())
-        s = get_settings()
-        partner_id = int(s.shopee_partner_id or 0)
-        partner_key = (s.shopee_partner_key or "").encode()
+        partner_id, partner_key = self._partner()
         # Refresh sign uses partner_id|path|timestamp (no token, no shop_id).
         msg = f"{partner_id}{path}{ts}".encode()
         sig = hmac.new(partner_key, msg, hashlib.sha256).hexdigest()
