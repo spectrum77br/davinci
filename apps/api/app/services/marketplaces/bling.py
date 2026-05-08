@@ -101,15 +101,22 @@ class BlingClient:
             r.raise_for_status()
             return _normalize_token(r.json())
 
+    def _client_creds(self) -> tuple[str, str]:
+        """Per-integration client_id/secret when present, else env fallback."""
+        s = get_settings()
+        cid = str(self.creds.get("client_id") or s.bling_client_id or "")
+        csec = str(self.creds.get("client_secret") or s.bling_client_secret or "")
+        return cid, csec
+
     async def refresh(self) -> None:
         rt = self.creds.get("refresh_token")
         if not rt:
             raise RuntimeError("missing refresh_token")
-        s = get_settings()
+        cid, csec = self._client_creds()
         async with httpx.AsyncClient(timeout=20.0) as c:
             r = await c.post(
                 BLING_TOKEN_URL,
-                auth=(s.bling_client_id, s.bling_client_secret),
+                auth=(cid, csec),
                 headers={
                     "Accept": "application/json",
                     "Content-Type": "application/x-www-form-urlencoded",
@@ -293,9 +300,10 @@ class BlingClient:
 
     async def test_connection(self) -> TestResult:
         try:
-            r = await self._request("GET", "/usuarios/me")
+            r = await self._request("GET", "/produtos", params={"pagina": 1, "limite": 1})
             if r.status_code == 200:
-                return TestResult(ok=True, info=r.json().get("data"))
+                data = r.json().get("data") or []
+                return TestResult(ok=True, info={"sample_count": len(data)})
             return TestResult(ok=False, detail=f"status={r.status_code} body={r.text[:200]}")
         except httpx.HTTPError as e:
             return TestResult(ok=False, detail=f"http_error: {e}")
