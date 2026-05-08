@@ -125,6 +125,13 @@ type Store = {
   apelido_override: string | null; integration_id: string | null
 }
 
+type EditingIntegration = {
+  id: string
+  name: string
+  platform: Platform
+  store_id: string | null
+}
+
 const props = defineProps<{
   open: boolean
   prefillStoreId?: string | null
@@ -132,12 +139,16 @@ const props = defineProps<{
   lockStore?: boolean
   stores?: Store[]
   companies?: Company[]
+  editing?: EditingIntegration | null
 }>()
 
 const emit = defineEmits<{
   (e: 'update:open', v: boolean): void
   (e: 'created', integrationId: string): void
+  (e: 'updated', integrationId: string): void
 }>()
+
+const isEdit = computed(() => !!props.editing)
 
 const { api } = useApi()
 const auth = useAuthStore()
@@ -183,23 +194,33 @@ watch(() => draft.value.platform, resetDraftCreds)
 watch(() => props.open, async (open) => {
   if (!open) return
   await loadIfNeeded()
-  const platform: Platform = props.prefillPlatform || 'bling'
-  draft.value = {
-    store_id: props.prefillStoreId || '',
-    platform,
-    name: defaultName.value,
-    creds: {},
+  if (props.editing) {
+    draft.value = {
+      store_id: props.editing.store_id || '',
+      platform: props.editing.platform,
+      name: props.editing.name,
+      creds: {},
+    }
+  } else {
+    const platform: Platform = props.prefillPlatform || 'bling'
+    draft.value = {
+      store_id: props.prefillStoreId || '',
+      platform,
+      name: defaultName.value,
+      creds: {},
+    }
   }
   resetDraftCreds()
   createErr.value = null
 }, { immediate: true })
 
 const requiredOk = computed(() => {
+  if (isEdit.value) return draft.value.name.trim().length > 0
   if (!draft.value.store_id) return false
   return currentSpec.value.fields.every(f => !f.required || (draft.value.creds[f.key] || '').trim() !== '')
 })
 
-async function createIntegration() {
+async function submitForm() {
   creating.value = true
   createErr.value = null
   try {
@@ -208,16 +229,26 @@ async function createIntegration() {
       const v = (draft.value.creds[f.key] || '').trim()
       if (v) creds[f.key] = v
     }
-    const r = await api<{ id: string }>('/api/integrations', {
-      method: 'POST',
-      body: {
-        store_id: draft.value.store_id,
-        platform: draft.value.platform,
-        name: draft.value.name || defaultName.value || `${draft.value.platform}-manual`,
-        credentials: creds,
-      },
-    })
-    emit('created', r.id)
+    if (isEdit.value && props.editing) {
+      const body: Record<string, unknown> = { name: draft.value.name }
+      if (Object.keys(creds).length) body.credentials = creds
+      const r = await api<{ id: string }>(`/api/integrations/${props.editing.id}`, {
+        method: 'PATCH',
+        body,
+      })
+      emit('updated', r.id)
+    } else {
+      const r = await api<{ id: string }>('/api/integrations', {
+        method: 'POST',
+        body: {
+          store_id: draft.value.store_id,
+          platform: draft.value.platform,
+          name: draft.value.name || defaultName.value || `${draft.value.platform}-manual`,
+          credentials: creds,
+        },
+      })
+      emit('created', r.id)
+    }
     emit('update:open', false)
   } catch (e: any) {
     createErr.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -236,8 +267,12 @@ function close() {
     <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-4 max-h-[90vh] overflow-y-auto">
       <div class="flex items-start">
         <div>
-          <h2 class="text-lg font-semibold">Nova Integração</h2>
-          <p class="text-sm text-muted-foreground">Configure as credenciais de acesso à API do marketplace.</p>
+          <h2 class="text-lg font-semibold">{{ isEdit ? 'Editar Integração' : 'Nova Integração' }}</h2>
+          <p class="text-sm text-muted-foreground">
+            {{ isEdit
+              ? 'Atualize o nome e/ou substitua credenciais (campos vazios = manter atual).'
+              : 'Configure as credenciais de acesso à API do marketplace.' }}
+          </p>
         </div>
         <Button class="ml-auto" size="sm" variant="ghost" @click="close">
           <X class="size-4" />
@@ -249,14 +284,14 @@ function close() {
           <Label>Plataforma</Label>
           <select
             v-model="draft.platform"
-            :disabled="!!prefillPlatform"
+            :disabled="!!prefillPlatform || isEdit"
             class="w-full border rounded px-2 py-1 bg-background"
           >
             <option v-for="p in PLATFORMS" :key="p" :value="p">{{ PLATFORM_LABELS[p] }}</option>
           </select>
         </div>
 
-        <div v-if="!lockStore">
+        <div v-if="!lockStore && !isEdit">
           <Label>Loja <span class="text-red-500">*</span></Label>
           <select v-model="draft.store_id" class="w-full border rounded px-2 py-1 bg-background">
             <option value="">— selecione —</option>
@@ -286,12 +321,12 @@ function close() {
         <div v-for="f in currentSpec.fields" :key="f.key">
           <Label>
             {{ f.label }}
-            <span v-if="f.required" class="text-red-500">*</span>
+            <span v-if="f.required && !isEdit" class="text-red-500">*</span>
           </Label>
           <Input
             v-model="draft.creds[f.key]"
             :type="f.type === 'password' ? 'password' : 'text'"
-            :placeholder="f.placeholder || ''"
+            :placeholder="isEdit ? '(em branco = manter atual)' : (f.placeholder || '')"
           />
         </div>
 
@@ -303,8 +338,8 @@ function close() {
       <div v-if="createErr" class="text-sm text-red-500">erro: {{ createErr }}</div>
       <div class="flex justify-end gap-2">
         <Button variant="outline" :disabled="creating" @click="close">Cancelar</Button>
-        <Button :disabled="creating || !requiredOk" @click="createIntegration">
-          {{ creating ? 'salvando…' : 'Salvar Integração' }}
+        <Button :disabled="creating || !requiredOk" @click="submitForm">
+          {{ creating ? 'salvando…' : (isEdit ? 'Salvar Alterações' : 'Salvar Integração') }}
         </Button>
       </div>
     </div>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { Plus, RefreshCw, Trash2, Zap } from 'lucide-vue-next'
+import { Pencil, Plus, RefreshCw, Trash2, Zap } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'empresa', action: 'view' } })
 
@@ -98,6 +98,16 @@ async function testIntegration(i: Integration) {
   }
 }
 
+const editing = ref<Integration | null>(null)
+function openEdit(i: Integration) {
+  editing.value = i
+  showNew.value = true
+}
+function onModalClose(open: boolean) {
+  showNew.value = open
+  if (!open) editing.value = null
+}
+
 async function deleteIntegration(i: Integration) {
   if (!confirm(`Excluir integração ${i.name}?`)) return
   try {
@@ -170,6 +180,9 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
             <Button size="sm" variant="outline" :disabled="testingId === i.id" @click="testIntegration(i)">
               <Zap class="size-3 mr-1" /> {{ testingId === i.id ? 'testando…' : 'testar' }}
             </Button>
+            <Button v-if="canEdit" size="sm" variant="ghost" title="editar" @click="openEdit(i)">
+              <Pencil class="size-3" />
+            </Button>
             <Button v-if="canDelete" size="sm" variant="ghost" @click="deleteIntegration(i)">
               <Trash2 class="size-3" />
             </Button>
@@ -183,10 +196,13 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
     </div>
 
     <IntegrationFormModal
-      v-model:open="showNew"
+      :open="showNew"
       :stores="stores"
       :companies="companies"
+      :editing="editing"
+      @update:open="onModalClose"
       @created="refresh"
+      @updated="refresh"
     />
   </div>
 </template>
