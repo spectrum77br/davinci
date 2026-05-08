@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { Pencil, Plus, RefreshCw, Trash2, Zap } from 'lucide-vue-next'
+import { SquarePen, Plus, RefreshCw, Trash2, Zap } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'empresa', action: 'view' } })
 
@@ -181,7 +181,7 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
               <Zap class="size-3 mr-1" /> {{ testingId === i.id ? 'testando…' : 'testar' }}
             </Button>
             <Button v-if="canEdit" size="sm" variant="ghost" title="editar" @click="openEdit(i)">
-              <Pencil class="size-3" />
+              <SquarePen class="size-4" />
             </Button>
             <Button v-if="canDelete" size="sm" variant="ghost" @click="deleteIntegration(i)">
               <Trash2 class="size-3" />
