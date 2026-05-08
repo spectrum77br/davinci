@@ -160,10 +160,11 @@ async function unlinkStore(cadastroId: string, storeId: string, label: string) {
 
 const editing = ref<CadastroOut | null>(null)
 const editDraft = ref({ tipo: 'fone', provedor: '', codigo: '', label: '', obs: '' })
+const editLinks = ref<Record<string, { selected: boolean; alias: string }>>({})
 const editSubmitting = ref(false)
 const editErr = ref<string | null>(null)
 
-function openEdit(cad: CadastroOut) {
+async function openEdit(cad: CadastroOut) {
   editing.value = cad
   editDraft.value = {
     tipo: cad.tipo,
@@ -173,6 +174,25 @@ function openEdit(cad: CadastroOut) {
     obs: cad.obs || '',
   }
   editErr.value = null
+  // load current links
+  const links: Record<string, { selected: boolean; alias: string }> = {}
+  for (const s of stores.value) links[s.id] = { selected: false, alias: '' }
+  try {
+    const detail = await api<{ stores: { store_id: string; alias: string | null }[] }>(`/api/cadastros/${cad.id}`)
+    for (const l of detail.stores) {
+      if (!links[l.store_id]) links[l.store_id] = { selected: false, alias: '' }
+      links[l.store_id].selected = true
+      links[l.store_id].alias = l.alias || ''
+    }
+  } catch (e: any) {
+    editErr.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+  editLinks.value = links
+}
+
+function toggleEditStore(id: string) {
+  const l = editLinks.value[id]
+  if (l) l.selected = !l.selected
 }
 
 async function submitEdit() {
@@ -188,6 +208,10 @@ async function submitEdit() {
       obs: editDraft.value.obs || null,
     }
     await api(`/api/cadastros/${editing.value.id}`, { method: 'PATCH', body })
+    const links = Object.entries(editLinks.value)
+      .filter(([, v]) => v.selected)
+      .map(([store_id, v]) => ({ store_id, alias: v.alias || null }))
+    await api(`/api/cadastros/${editing.value.id}/stores`, { method: 'PUT', body: { links } })
     editing.value = null
     await refresh()
   } catch (e: any) {
@@ -467,6 +491,31 @@ async function submitResolve() {
           <Label>Observação</Label>
           <Input v-model="editDraft.obs" />
         </div>
+
+        <div>
+          <Label>Vincular a lojas</Label>
+          <div class="border rounded p-2 max-h-64 overflow-auto space-y-2 mt-1">
+            <div v-for="(group, apelido) in storesByCompanyMk" :key="apelido">
+              <div class="text-xs font-semibold text-muted-foreground">{{ apelido }}</div>
+              <div v-for="s in group" :key="s.id" class="flex items-center gap-2 text-xs px-2 py-0.5">
+                <input
+                  type="checkbox"
+                  :checked="editLinks[s.id]?.selected"
+                  @change="toggleEditStore(s.id)"
+                />
+                <span class="flex-1">{{ MARKETPLACE_SHORT[s.marketplace as Marketplace] }} — {{ s.apelido_override || apelido }}</span>
+                <Input
+                  v-if="editLinks[s.id]?.selected"
+                  v-model="editLinks[s.id].alias"
+                  placeholder="alias"
+                  class="h-6 w-32 text-xs"
+                />
+              </div>
+            </div>
+            <div v-if="!stores.length" class="text-xs text-muted-foreground">nenhuma loja cadastrada</div>
+          </div>
+        </div>
+
         <div v-if="editErr" class="text-sm text-red-500">erro: {{ editErr }}</div>
         <div class="flex justify-end gap-2">
           <Button variant="ghost" :disabled="editSubmitting" @click="editing = null">cancelar</Button>
