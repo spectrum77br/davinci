@@ -18,6 +18,7 @@ type CadastroOut = {
   label: string | null
   status: string
   obs: string | null
+  raw_links: Record<string, string>
 }
 
 type Cell = {
@@ -52,7 +53,7 @@ const showNew = ref(false)
 
 const canEdit = useCan('cadastro', 'edit')
 
-const TIPOS = ['fone', 'email', 'dominio']
+const TIPOS = ['fone', 'email', 'dominio', 'servidor']
 
 async function refresh() {
   loading.value = true
@@ -163,6 +164,43 @@ function cellClass(cell: Cell): string {
   if (cell.store_status === 'banned') return 'text-red-400'
   return ''
 }
+
+const resolving = ref<{ cadastroId: string; marketplace: string; rawValue: string } | null>(null)
+const resolveStoreId = ref<string>('')
+const resolveAlias = ref<string>('')
+const resolveSubmitting = ref(false)
+const resolveErr = ref<string | null>(null)
+
+const storesForResolveMk = computed<StoreOut[]>(() => {
+  if (!resolving.value) return []
+  return stores.value.filter(s => s.marketplace === resolving.value!.marketplace)
+})
+
+function openResolve(cadastroId: string, marketplace: string, rawValue: string) {
+  resolving.value = { cadastroId, marketplace, rawValue }
+  resolveStoreId.value = ''
+  resolveAlias.value = rawValue
+  resolveErr.value = null
+}
+
+async function submitResolve() {
+  if (!resolving.value || !resolveStoreId.value) return
+  resolveSubmitting.value = true
+  resolveErr.value = null
+  try {
+    const { cadastroId, marketplace } = resolving.value
+    await api(`/api/cadastros/${cadastroId}/raw-links/${marketplace}/resolve`, {
+      method: 'POST',
+      body: { store_id: resolveStoreId.value, alias: resolveAlias.value || null },
+    })
+    resolving.value = null
+    await refresh()
+  } catch (e: any) {
+    resolveErr.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    resolveSubmitting.value = false
+  }
+}
 </script>
 
 <template>
@@ -221,6 +259,16 @@ function cellClass(cell: Cell): string {
                   {{ cellLabel(cell) }}
                 </div>
               </div>
+              <button
+                v-else-if="row.cadastro.raw_links?.[mk]"
+                type="button"
+                class="text-amber-400/80 italic underline-offset-2 hover:underline disabled:no-underline disabled:cursor-default"
+                :disabled="!canEdit"
+                :title="canEdit ? 'clique para vincular a uma loja' : 'sem permissão para vincular'"
+                @click="canEdit && openResolve(row.cadastro.id, mk, row.cadastro.raw_links[mk])"
+              >
+                {{ row.cadastro.raw_links[mk] }}
+              </button>
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
@@ -286,6 +334,47 @@ function cellClass(cell: Cell): string {
           <Button variant="ghost" :disabled="creating" @click="showNew = false">cancelar</Button>
           <Button :disabled="creating || !draft.codigo" @click="createCadastro">
             {{ creating ? 'criando…' : 'Criar' }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="resolving" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="resolving = null">
+      <div class="bg-background border rounded-lg w-full max-w-md p-5 space-y-4">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold">
+            Vincular {{ MARKETPLACE_SHORT[resolving.marketplace as Marketplace] }} → loja
+          </h2>
+          <Button class="ml-auto" size="sm" variant="ghost" @click="resolving = null">
+            <X class="size-4" />
+          </Button>
+        </div>
+        <div class="text-xs text-muted-foreground">
+          Valor original na planilha: <span class="font-mono">{{ resolving.rawValue }}</span>
+        </div>
+        <div>
+          <Label>Loja</Label>
+          <select v-model="resolveStoreId" class="w-full border rounded px-2 py-1 bg-background text-sm">
+            <option value="">— selecione —</option>
+            <option v-for="s in storesForResolveMk" :key="s.id" :value="s.id">
+              {{ companyById[s.company_id]?.apelido || '?' }}
+              <template v-if="s.apelido_override"> ({{ s.apelido_override }})</template>
+              — {{ s.status }}
+            </option>
+          </select>
+          <div v-if="!storesForResolveMk.length" class="text-xs text-muted-foreground mt-1">
+            nenhuma loja cadastrada nesse marketplace
+          </div>
+        </div>
+        <div>
+          <Label>Alias (opcional)</Label>
+          <Input v-model="resolveAlias" :placeholder="resolving.rawValue" />
+        </div>
+        <div v-if="resolveErr" class="text-sm text-red-500">erro: {{ resolveErr }}</div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" :disabled="resolveSubmitting" @click="resolving = null">cancelar</Button>
+          <Button :disabled="resolveSubmitting || !resolveStoreId" @click="submitResolve">
+            {{ resolveSubmitting ? 'vinculando…' : 'Vincular' }}
           </Button>
         </div>
       </div>
