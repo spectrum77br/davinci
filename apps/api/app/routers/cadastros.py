@@ -26,6 +26,7 @@ from app.schemas.companies import (
     CadastroGridStoreCell,
     CadastroOut,
     CadastroPatch,
+    CadastroRawLinkResolve,
     CadastroStoreLink,
     CadastroStoresPut,
 )
@@ -209,3 +210,48 @@ async def put_cadastro_stores(
     out = CadastroDetailOut.model_validate(c)
     out.stores = [CadastroStoreLink(store_id=sid, alias=a) for sid, a in desired.items()]
     return out
+
+
+@router.post("/{cadastro_id}/raw-links/{marketplace}/resolve", response_model=CadastroOut)
+async def resolve_raw_link(
+    cadastro_id: UUID,
+    marketplace: str,
+    body: CadastroRawLinkResolve,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("cadastro", "edit"))],
+) -> CadastroOut:
+    c = (await session.execute(select(Cadastro).where(Cadastro.id == cadastro_id))).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "cadastro_not_found"})
+
+    store = (
+        await session.execute(select(Store).where(Store.id == body.store_id))
+    ).scalar_one_or_none()
+    if store is None:
+        raise HTTPException(400, detail={"code": "store_not_found"})
+    if store.marketplace.value != marketplace:
+        raise HTTPException(
+            400,
+            detail={"code": "marketplace_mismatch", "expected": marketplace, "got": store.marketplace.value},
+        )
+
+    existing_link = (
+        await session.execute(
+            select(CadastroStore).where(
+                CadastroStore.cadastro_id == c.id,
+                CadastroStore.store_id == body.store_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing_link is None:
+        session.add(CadastroStore(cadastro_id=c.id, store_id=body.store_id, alias=body.alias))
+    else:
+        existing_link.alias = body.alias
+
+    new_raw = dict(c.raw_links or {})
+    new_raw.pop(marketplace, None)
+    c.raw_links = new_raw
+
+    await session.commit()
+    await session.refresh(c)
+    return CadastroOut.model_validate(c)

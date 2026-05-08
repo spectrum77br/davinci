@@ -170,6 +170,11 @@ class CadastroStoresPut(BaseModel):
     links: list[CadastroStoreLink]
 
 
+class CadastroRawLinkResolve(BaseModel):
+    store_id: UUID
+    alias: str | None = None
+
+
 class CadastroOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
@@ -180,6 +185,7 @@ class CadastroOut(BaseModel):
     label: str | None = None
     status: str
     obs: str | None = None
+    raw_links: dict[str, str] = {}
     created_at: datetime
     updated_at: datetime
 

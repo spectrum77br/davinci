@@ -40,6 +40,7 @@ class CadastroTipo(StrEnum):
     FONE = "fone"
     EMAIL = "email"
     DOMINIO = "dominio"
+    SERVIDOR = "servidor"
 
 
 class CadastroStatus(StrEnum):
@@ -53,6 +54,8 @@ class IntegrationPlatform(StrEnum):
     ML = "ml"
     SHOPEE = "shopee"
     AMAZON = "amazon"
+    TIKTOK = "tiktok"
+    TEMU = "temu"
 
 
 PLATFORMS: tuple[str, ...] = tuple(p.value for p in IntegrationPlatform)
