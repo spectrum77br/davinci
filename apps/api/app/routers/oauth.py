@@ -54,8 +54,7 @@ async def oauth_start(
     store = (await session.execute(select(Store).where(Store.id == store_id))).scalar_one_or_none()
     if store is None:
         raise HTTPException(404, detail={"code": "store_not_found"})
-    if store.integration_id is not None:
-        raise HTTPException(409, detail={"code": "store_already_linked"})
+    # Existing integration is allowed: callback re-uses it and refreshes credentials.
 
     state = token_urlsafe(32)
     expires = datetime.now(UTC) + timedelta(minutes=STATE_TTL_MIN)

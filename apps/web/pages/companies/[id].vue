@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
-import { ArrowLeft, Save, Trash2, Link as LinkIcon, Unlink } from 'lucide-vue-next'
+import { ref, computed, watch } from 'vue'
+import { ArrowLeft, Save, Trash2, Plus, Unlink } from 'lucide-vue-next'
 import {
   MARKETPLACES,
   MARKETPLACE_LABELS,
@@ -51,13 +51,15 @@ const canDelete = useCan('empresa', 'delete')
 
 const STORE_STATUSES: StoreStatus[] = ['active', 'inactive', 'closing', 'banned', 'pending', 'under_review']
 
-// Marketplace → OAuth provider name. Null = no OAuth yet.
-const OAUTH_PROVIDER: Record<string, string | null> = {
-  ml: 'mercadolivre',
+// Marketplace → integration platform (for the manual creds modal).
+const MK_TO_INTEGRATION_PLATFORM: Record<string, 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | null> = {
+  ml: 'ml',
   shopee: 'shopee',
   amazon: 'amazon',
-  // Bling is multi-channel and lives at the company level — we surface it via "Bling integration".
-  site: null, aliexpress: null, temu: null, tiktok: null, shein: null, magalu: null,
+  tiktok: 'tiktok',
+  temu: 'temu',
+  // Bling is multi-channel and lives at the company level — we surface it separately.
+  site: null, aliexpress: null, shein: null, magalu: null,
 }
 
 type IntegrationRef = { id: string; platform: string; name: string; store_id: string | null }
@@ -103,13 +105,16 @@ async function load() {
 }
 await load()
 
-async function startOAuth(provider: string, storeId: string) {
-  try {
-    const r = await api<{ url: string }>(`/api/oauth/${provider}/start?store_id=${storeId}`)
-    window.location.href = r.url
-  } catch (e: any) {
-    error.value = e?.data?.detail?.code || 'erro'
-  }
+const showNewIntegration = ref(false)
+const newIntegrationStoreId = ref<string | null>(null)
+const newIntegrationPlatform = ref<'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | null>(null)
+
+function openNewIntegration(s: StoreOut) {
+  const platform = MK_TO_INTEGRATION_PLATFORM[s.marketplace]
+  if (!platform) return
+  newIntegrationStoreId.value = s.id
+  newIntegrationPlatform.value = platform
+  showNewIntegration.value = true
 }
 
 async function unlinkStoreIntegration(s: StoreOut) {
@@ -376,15 +381,15 @@ async function deleteCompany() {
                       </option>
                     </select>
                     <Button
-                      v-if="canEdit && OAUTH_PROVIDER[mk]"
+                      v-if="canEdit && MK_TO_INTEGRATION_PLATFORM[mk]"
                       size="sm"
                       variant="outline"
                       class="h-7"
-                      @click="startOAuth(OAUTH_PROVIDER[mk]!, storeFor(mk)!.id)"
+                      @click="openNewIntegration(storeFor(mk)!)"
                     >
-                      <LinkIcon class="size-3 mr-1" /> OAuth novo
+                      <Plus class="size-3 mr-1" /> Nova integração
                     </Button>
-                    <span v-if="!canEdit || (!OAUTH_PROVIDER[mk] && !availableIntegrationsFor(storeFor(mk)!).length)" class="text-muted-foreground">
+                    <span v-if="!canEdit || (!MK_TO_INTEGRATION_PLATFORM[mk] && !availableIntegrationsFor(storeFor(mk)!).length)" class="text-muted-foreground">
                       sem integração
                     </span>
                   </div>
@@ -420,6 +425,14 @@ async function deleteCompany() {
         Conecte uma integração Bling em qualquer loja desta empresa para habilitar o select "Loja no Bling".
       </p>
     </section>
+
+    <IntegrationFormModal
+      v-model:open="showNewIntegration"
+      :prefill-store-id="newIntegrationStoreId"
+      :prefill-platform="newIntegrationPlatform"
+      lock-store
+      @created="load"
+    />
   </div>
   <div v-else-if="loading" class="text-muted-foreground">carregando…</div>
   <div v-else class="text-red-500">erro: {{ error || 'não encontrado' }}</div>

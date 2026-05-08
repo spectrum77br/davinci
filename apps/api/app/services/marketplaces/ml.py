@@ -65,6 +65,9 @@ class MercadoLivreClient:
         return int(self.creds.get("expires_at") or 0)
 
     def _expired(self, skew: int = 30) -> bool:
+        # expires_at == 0 means unknown — trust access_token until ML returns 401.
+        if self.expires_at == 0:
+            return False
         return self.expires_at - skew <= int(time.time())
 
     @staticmethod
@@ -108,6 +111,8 @@ class MercadoLivreClient:
         if not rt:
             raise RuntimeError("missing refresh_token")
         cid, csec = self._client_creds()
+        if not cid or not csec:
+            raise RuntimeError("missing client_id or client_secret")
         async with httpx.AsyncClient(timeout=20.0) as c:
             r = await c.post(
                 ML_TOKEN_URL,
@@ -119,7 +124,10 @@ class MercadoLivreClient:
                     "refresh_token": rt,
                 },
             )
-            r.raise_for_status()
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"ml_refresh_failed status={r.status_code} body={r.text[:300]}"
+                )
             self.creds.update(_normalize_token(r.json(), prev=self.creds))
         if self._on_refresh:
             await self._on_refresh(self.creds)
