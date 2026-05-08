@@ -323,6 +323,13 @@ function openResolve(cadastroId: string, marketplace: string, rawValue: string) 
   resolveErr.value = null
 }
 
+function onResolveStoreChange() {
+  if (!resolveStoreId.value) return
+  const s = stores.value.find(x => x.id === resolveStoreId.value)
+  if (!s) return
+  resolveAlias.value = s.apelido_override || companyById.value[s.company_id]?.apelido || resolveAlias.value
+}
+
 async function submitResolve() {
   if (!resolving.value || !resolveStoreId.value) return
   resolveSubmitting.value = true
@@ -639,7 +646,7 @@ async function submitResolve() {
         </div>
         <div>
           <Label>Loja</Label>
-          <select v-model="resolveStoreId" class="w-full border rounded px-2 py-1 bg-background text-sm">
+          <select v-model="resolveStoreId" class="w-full border rounded px-2 py-1 bg-background text-sm" @change="onResolveStoreChange">
             <option value="">— selecione —</option>
             <option v-for="s in storesForResolveMk" :key="s.id" :value="s.id">
               {{ companyById[s.company_id]?.apelido || '?' }}
