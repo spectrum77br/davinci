@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { Plus, RefreshCw, X } from 'lucide-vue-next'
+import { Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 import {
   MARKETPLACES,
   MARKETPLACE_SHORT,
@@ -144,6 +144,69 @@ async function updateAlias(cadastroId: string, storeId: string, currentAlias: st
   }
 }
 
+async function unlinkStore(cadastroId: string, storeId: string, label: string) {
+  if (!confirm(`desvincular "${label}" deste cadastro?`)) return
+  try {
+    const detail = await api<{ stores: { store_id: string; alias: string | null }[] }>(`/api/cadastros/${cadastroId}`)
+    const links = detail.stores
+      .filter(l => l.store_id !== storeId)
+      .map(l => ({ store_id: l.store_id, alias: l.alias }))
+    await api(`/api/cadastros/${cadastroId}/stores`, { method: 'PUT', body: { links } })
+    await refresh()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || 'erro'
+  }
+}
+
+const editing = ref<CadastroOut | null>(null)
+const editDraft = ref({ tipo: 'fone', provedor: '', codigo: '', label: '', obs: '' })
+const editSubmitting = ref(false)
+const editErr = ref<string | null>(null)
+
+function openEdit(cad: CadastroOut) {
+  editing.value = cad
+  editDraft.value = {
+    tipo: cad.tipo,
+    provedor: cad.provedor || '',
+    codigo: cad.codigo,
+    label: cad.label || '',
+    obs: cad.obs || '',
+  }
+  editErr.value = null
+}
+
+async function submitEdit() {
+  if (!editing.value) return
+  editSubmitting.value = true
+  editErr.value = null
+  try {
+    const body: Record<string, any> = {
+      tipo: editDraft.value.tipo,
+      codigo: editDraft.value.codigo,
+      provedor: editDraft.value.provedor || null,
+      label: editDraft.value.label || null,
+      obs: editDraft.value.obs || null,
+    }
+    await api(`/api/cadastros/${editing.value.id}`, { method: 'PATCH', body })
+    editing.value = null
+    await refresh()
+  } catch (e: any) {
+    editErr.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    editSubmitting.value = false
+  }
+}
+
+async function deleteCadastro(cad: CadastroOut) {
+  if (!confirm(`apagar cadastro ${cad.codigo}? esta ação é irreversível.`)) return
+  try {
+    await api(`/api/cadastros/${cad.id}`, { method: 'DELETE' })
+    await refresh()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || 'erro'
+  }
+}
+
 const storesByCompanyMk = computed(() => {
   const out: Record<string, StoreOut[]> = {}
   for (const s of stores.value) {
@@ -236,10 +299,11 @@ async function submitResolve() {
             <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
               {{ MARKETPLACE_SHORT[mk] }}
             </th>
+            <th v-if="canEdit" class="px-2 py-2 text-right">ações</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in filteredRows" :key="row.cadastro.id" class="border-t hover:bg-muted/20">
+          <tr v-for="row in filteredRows" :key="row.cadastro.id" class="border-t hover:bg-muted/20 group">
             <td class="px-3 py-2">{{ row.cadastro.tipo }}</td>
             <td class="px-3 py-2">{{ row.cadastro.provedor || '—' }}</td>
             <td class="px-3 py-2 font-mono">{{ row.cadastro.codigo }}</td>
@@ -249,14 +313,28 @@ async function submitResolve() {
                 <div
                   v-for="cell in row.cells[mk]"
                   :key="cell.store_id"
+                  class="flex items-center gap-1 group/cell"
                   :class="cellClass(cell)"
-                  :title="canEdit ? 'duplo-clique para editar alias' : ''"
-                  @dblclick="canEdit && (() => {
-                    const v = prompt('alias', cell.alias || '')
-                    if (v !== null) updateAlias(row.cadastro.id, cell.store_id, cell.alias, v)
-                  })()"
                 >
-                  {{ cellLabel(cell) }}
+                  <span
+                    class="flex-1"
+                    :title="canEdit ? 'duplo-clique para editar alias' : ''"
+                    @dblclick="canEdit && (() => {
+                      const v = prompt('alias', cell.alias || '')
+                      if (v !== null) updateAlias(row.cadastro.id, cell.store_id, cell.alias, v)
+                    })()"
+                  >
+                    {{ cellLabel(cell) }}
+                  </span>
+                  <button
+                    v-if="canEdit"
+                    type="button"
+                    class="opacity-0 group-hover/cell:opacity-100 text-muted-foreground hover:text-red-400 transition"
+                    title="desvincular"
+                    @click="unlinkStore(row.cadastro.id, cell.store_id, cellLabel(cell))"
+                  >
+                    <X class="size-3" />
+                  </button>
                 </div>
               </div>
               <button
@@ -270,9 +348,27 @@ async function submitResolve() {
                 {{ row.cadastro.raw_links[mk] }}
               </button>
             </td>
+            <td v-if="canEdit" class="px-2 py-2 text-right whitespace-nowrap">
+              <button
+                type="button"
+                class="text-muted-foreground hover:text-foreground p-1"
+                title="editar campos"
+                @click="openEdit(row.cadastro)"
+              >
+                <Pencil class="size-4" />
+              </button>
+              <button
+                type="button"
+                class="text-muted-foreground hover:text-red-400 p-1"
+                title="apagar cadastro"
+                @click="deleteCadastro(row.cadastro)"
+              >
+                <Trash2 class="size-4" />
+              </button>
+            </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
-            <td :colspan="13" class="px-3 py-6 text-center text-muted-foreground">nenhum cadastro</td>
+            <td :colspan="canEdit ? 14 : 13" class="px-3 py-6 text-center text-muted-foreground">nenhum cadastro</td>
           </tr>
         </tbody>
       </table>
@@ -334,6 +430,48 @@ async function submitResolve() {
           <Button variant="ghost" :disabled="creating" @click="showNew = false">cancelar</Button>
           <Button :disabled="creating || !draft.codigo" @click="createCadastro">
             {{ creating ? 'criando…' : 'Criar' }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="editing" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="editing = null">
+      <div class="bg-background border rounded-lg w-full max-w-2xl p-5 space-y-4 max-h-[90vh] overflow-auto">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold">Editar cadastro</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" @click="editing = null">
+            <X class="size-4" />
+          </Button>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <Label>Tipo *</Label>
+            <select v-model="editDraft.tipo" class="w-full border rounded px-2 py-1 bg-background">
+              <option v-for="t in TIPOS" :key="t" :value="t">{{ t }}</option>
+            </select>
+          </div>
+          <div>
+            <Label>Provedor</Label>
+            <Input v-model="editDraft.provedor" placeholder="tim, vivo, …" />
+          </div>
+          <div>
+            <Label>Código *</Label>
+            <Input v-model="editDraft.codigo" required />
+          </div>
+          <div>
+            <Label>Label</Label>
+            <Input v-model="editDraft.label" />
+          </div>
+        </div>
+        <div>
+          <Label>Observação</Label>
+          <Input v-model="editDraft.obs" />
+        </div>
+        <div v-if="editErr" class="text-sm text-red-500">erro: {{ editErr }}</div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" :disabled="editSubmitting" @click="editing = null">cancelar</Button>
+          <Button :disabled="editSubmitting || !editDraft.codigo" @click="submitEdit">
+            {{ editSubmitting ? 'salvando…' : 'Salvar' }}
           </Button>
         </div>
       </div>
