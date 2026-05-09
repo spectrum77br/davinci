@@ -241,9 +241,20 @@ async function setDepartment(row: StoreInfo, ev: Event) {
 // =========================================================== password reveal
 
 const revealed = ref<Set<string>>(new Set())
-function toggleReveal(id: string) {
-  if (revealed.value.has(id)) revealed.value.delete(id)
-  else revealed.value.add(id)
+const revealedPasswords = ref<Map<string, string>>(new Map())
+async function toggleReveal(id: string) {
+  if (revealed.value.has(id)) {
+    revealed.value.delete(id)
+    revealedPasswords.value.delete(id)
+    return
+  }
+  try {
+    const r = await api<{ password: string }>(`/api/pricing/store-info/${id}/password`)
+    revealedPasswords.value.set(id, r.password)
+    revealed.value.add(id)
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
 }
 
 async function copyText(text: string) {
@@ -415,13 +426,13 @@ async function copyText(text: string) {
                     @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
                   />
                   <template v-else>
-                    {{ row.has_password ? (revealed.has(row.id) ? '••••' : '••••••••') : '—' }}
+                    {{ row.has_password ? (revealed.has(row.id) ? (revealedPasswords.get(row.id) || '••••') : '••••••••') : '—' }}
                   </template>
                 </span>
                 <button
                   v-if="row.has_password && !isEditing(row.id, 'password')"
                   class="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 hover:bg-muted rounded"
-                  :title="revealed.has(row.id) ? 'Ocultar' : 'Mostrar (placeholder, senha cifrada)'"
+                  :title="revealed.has(row.id) ? 'Ocultar' : 'Mostrar senha'"
                   @click="toggleReveal(row.id)"
                 >
                   <EyeOff v-if="revealed.has(row.id)" class="h-3 w-3" />

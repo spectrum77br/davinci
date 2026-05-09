@@ -62,7 +62,7 @@ from app.schemas.pricing import (
     StoreInfoPatch,
 )
 from app.schemas.products import JobCreatedOut
-from app.security.cipher import encrypt
+from app.security.cipher import decrypt, encrypt
 from app.services.pricing.audit import scan_missing_skus
 from app.services.pricing.calc import calculate
 from app.services.pricing.competitor import search_competitors
@@ -1266,6 +1266,36 @@ async def patch_store_info(
     await session.commit()
     await session.refresh(row)
     return _store_info_out(row)
+
+
+@router.get("/store-info/{store_info_id}/password")
+async def reveal_store_info_password(
+    store_info_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> dict[str, str]:
+    row = (
+        await session.execute(
+            select(StoreInfo).where(
+                and_(
+                    StoreInfo.id == store_info_id,
+                    user_scope(StoreInfo, user),
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "store_info_not_found"})
+    if not row.password_enc:
+        raise HTTPException(404, detail={"code": "no_password"})
+    logger.info(
+        "store_info.password_revealed",
+        user_id=str(user.id),
+        store_info_id=str(store_info_id),
+    )
+    return {"password": decrypt(row.password_enc)}
 
 
 @router.post("/store-info/{store_info_id}/department", response_model=PricingAccountOut)
