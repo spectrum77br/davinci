@@ -406,6 +406,65 @@ async def alerts_cleanup(ctx: dict) -> None:
         logger.info("alerts_cleanup_done", deleted=result.rowcount or 0)
 
 
+async def failed_jobs_alert_scan(ctx: dict) -> None:
+    """Emit `sync_failure` alert per BackgroundJob that finished failed in
+    the last 10 minutes. Dedupe key per job id keeps it idempotent across
+    runs. Telegrams the user when `user_settings.notify_telegram` is on."""
+    cutoff = datetime.now(UTC) - timedelta(minutes=10)
+    async with session_scope() as s:
+        rows = (
+            await s.execute(
+                select(BackgroundJob).where(
+                    BackgroundJob.status == BackgroundJobStatus.FAILED,
+                    BackgroundJob.finished_at.is_not(None),
+                    BackgroundJob.finished_at >= cutoff,
+                )
+            )
+        ).scalars().all()
+        emitted = 0
+        for job in rows:
+            dedupe = f"sync_failure:job:{job.id}"
+            title = f"Sync falhou: {job.type.value}"
+            err = job.error or "unknown"
+            payload = job.payload or {}
+            trigger = payload.get("trigger") or payload.get("event") or job.type.value
+            msg = (
+                f"Job {job.type.value} terminou em failed após retries. "
+                f"Trigger: {trigger}. Erro: {err}."
+            )
+            a = await emit_alert(
+                s,
+                user_id=job.created_by,
+                type=AlertType.SYNC_FAILURE,
+                severity=AlertSeverity.ERROR,
+                title=title,
+                message=msg,
+                payload={
+                    "job_id": str(job.id),
+                    "job_type": job.type.value,
+                    "error": err,
+                    "trigger": trigger,
+                    "delivery_id": payload.get("delivery_id"),
+                    "product_id": payload.get("product_id"),
+                },
+                dedupe_key=dedupe,
+            )
+            if a is None:
+                continue
+            emitted += 1
+            us = await s.get(UserSettings, job.created_by)
+            if us is not None and us.notify_telegram:
+                from app.services.telegram import TelegramClient
+                tg = TelegramClient()
+                await tg.safe_send(
+                    f"<b>DaVinci — Sync failure</b>\n{msg}",
+                    chat_id=us.telegram_chat_id,
+                )
+        logger.info(
+            "failed_jobs_alert_scan_done", scanned=len(rows), emitted=emitted
+        )
+
+
 async def low_stock_polling(ctx: dict) -> None:
     """Emit one alert per product whose `stock < min_stock` (min_stock>0).
     Dedupe key collapses repeats inside the same UTC day."""
@@ -563,6 +622,7 @@ class WorkerSettings:
         cron(sync_logs_partition_gc, day=15, hour=3, minute=0, run_at_startup=False),
         # Stubs — registered so wiring later doesn't need a worker redeploy.
         cron(alerts_cleanup, hour=6, minute=0, run_at_startup=False),  # 03:00 BRT
+        cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),
         cron(auto_import_link, minute={0, 30}, run_at_startup=False),
     ]
@@ -586,6 +646,7 @@ __all__ = [
     "background_jobs_gc",
     "bling_token_refresh",
     "daily_sync_scheduler",
+    "failed_jobs_alert_scan",
     "import_listings_run",
     "ingest_bling_order_run",
     "low_stock_polling",
