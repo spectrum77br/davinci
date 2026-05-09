@@ -27,6 +27,7 @@ from app.services.advisory_lock import try_user_sync_lock
 from app.services.alerts import emit_alert
 from app.services.audit.runner import run_audit
 from app.services.auto_link import run_auto_link
+from app.services.bling_orders import run_ingest_bling_order
 from app.services.email import get_email_sender, render_otp_html
 from app.services.listings_import import (
     run_auto_import_link,
@@ -210,6 +211,31 @@ async def ml_backfill_run(
             s,
             job_id=UUID(job_id),
             user_id=UUID(user_id),
+        )
+
+
+async def ingest_bling_order_run(
+    ctx: dict,
+    bling_order_id: int,
+    user_id: str,
+    event: str | None = None,
+) -> None:
+    """Fase 5b: ingest a Bling pedido de venda triggered by webhook.
+
+    Per-order advisory lock keeps concurrent webhook deliveries serialized
+    for the same order while still allowing parallelism across orders.
+    """
+    uid = UUID(user_id)
+    lock_key = f"ingest_bling_order:{bling_order_id}"
+    async with session_scope() as s:
+        await s.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key}
+        )
+        await run_ingest_bling_order(
+            s,
+            bling_order_id=int(bling_order_id),
+            user_id=uid,
+            event=event,
         )
 
 
@@ -517,6 +543,7 @@ class WorkerSettings:
         sync_all_run,
         sync_product_run,
         ml_backfill_run,
+        ingest_bling_order_run,
         alerts_cleanup,
         low_stock_polling,
         import_listings_run,
@@ -560,6 +587,7 @@ __all__ = [
     "bling_token_refresh",
     "daily_sync_scheduler",
     "import_listings_run",
+    "ingest_bling_order_run",
     "low_stock_polling",
     "ml_backfill_run",
     "push_prices_batch_run",

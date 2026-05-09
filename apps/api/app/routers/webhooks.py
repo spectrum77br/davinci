@@ -139,6 +139,74 @@ async def _resolve_product(
     return None
 
 
+async def _resolve_bling_user_id(session: AsyncSession) -> UUID | None:
+    """Pick first user owning a Bling integration. Single-tenant attribution
+    — webhook payloads don't identify the DaVinci user, only the Bling account.
+    Mirrors the pattern used for unmatched product webhooks below."""
+    from app.models import Integration  # local import avoids cycle at module load
+    integ = (
+        await session.execute(
+            select(Integration).where(
+                Integration.platform == IntegrationPlatform.BLING
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    return integ.user_id if integ is not None else None
+
+
+async def _handle_pedido_event(
+    session: AsyncSession,
+    *,
+    parsed: dict[str, Any],
+    event: str,
+    delivery_key: str,
+) -> dict[str, Any]:
+    dados = parsed.get("dados") or parsed.get("data") or {}
+    if not isinstance(dados, dict):
+        dados = {}
+    raw_id = dados.get("id")
+    try:
+        bling_order_id = int(raw_id) if raw_id is not None else None
+    except (TypeError, ValueError):
+        bling_order_id = None
+    if bling_order_id is None:
+        return {"ack": True, "ignored": "missing_order_id", "delivery_id": delivery_key}
+
+    user_id = await _resolve_bling_user_id(session)
+    if user_id is None:
+        logger.warning(
+            "bling_pedido_webhook_no_integration",
+            bling_event=event,
+            bling_order_id=bling_order_id,
+        )
+        return {
+            "ack": True,
+            "ignored": "no_bling_integration",
+            "delivery_id": delivery_key,
+        }
+
+    pool = await get_arq_pool()
+    arq = await pool.enqueue_job(
+        "ingest_bling_order_run",
+        bling_order_id,
+        str(user_id),
+        event,
+    )
+    logger.info(
+        "bling_pedido_webhook_accepted",
+        bling_event=event,
+        bling_order_id=bling_order_id,
+        arq_job_id=arq.job_id if arq is not None else None,
+        delivery_id=delivery_key,
+    )
+    return {
+        "ack": True,
+        "kind": "pedido",
+        "bling_order_id": bling_order_id,
+        "delivery_id": delivery_key,
+    }
+
+
 @router.post("/bling")
 async def receive_bling_webhook(
     request: Request,
@@ -160,6 +228,14 @@ async def receive_bling_webhook(
             parsed = {}
     except json.JSONDecodeError:
         return {"ack": True, "ignored": "invalid_json"}
+
+    if x_bling_event and x_bling_event.startswith("pedido."):
+        return await _handle_pedido_event(
+            session,
+            parsed=parsed,
+            event=x_bling_event,
+            delivery_key=delivery_key,
+        )
 
     sku, bling_product_id, stock, bling_store_id = _extract_payload(parsed)
     product = await _resolve_product(

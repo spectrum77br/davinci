@@ -205,6 +205,11 @@ class BlingClient:
         r.raise_for_status()
         return r.json().get("data") or {}
 
+    async def get_order(self, bling_order_id: int) -> dict:
+        r = await self._request("GET", f"/pedidos/vendas/{bling_order_id}")
+        r.raise_for_status()
+        return r.json().get("data") or {}
+
     async def update_stock_by_id(
         self,
         bling_product_id: int,

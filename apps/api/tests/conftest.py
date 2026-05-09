@@ -149,6 +149,7 @@ _CLEANUP_TABLES = (
     "cadastros",
     "product_links",
     "products",
+    "bling_orders",
     "background_jobs",
     "integrations",
     "stores",
