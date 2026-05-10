@@ -184,7 +184,13 @@ class SyncOrchestrator:
             payload={"source": "bling_refresh"},
         )
 
-    async def _process_link(self, product: Product, link: ProductLink) -> None:
+    async def _process_link(
+        self,
+        product: Product,
+        link: ProductLink,
+        *,
+        skip_non_bling: bool = False,
+    ) -> SyncResult:
         store = await self._get_store(link.store_id)
         bling_store_id = store.bling_store_id if store is not None else None  # type: ignore[attr-defined]
 
@@ -192,6 +198,13 @@ class SyncOrchestrator:
             if link.platform == IntegrationPlatform.BLING:
                 action = SyncLogAction.REFRESH_BLING
                 result = await self._refresh_bling(product, link)
+            elif skip_non_bling:
+                action = SyncLogAction.UPDATE_STOCK
+                result = SyncResult(
+                    status=SyncStatus.SKIPPED,
+                    error_code="bling_refresh_failed_no_push",
+                    error_detail="local stock stale; refusing to push to marketplace",
+                )
             else:
                 action = SyncLogAction.UPDATE_STOCK
                 try:
@@ -248,6 +261,7 @@ class SyncOrchestrator:
                 payload=result.payload,
             )
         )
+        return result
 
     async def _emit_link_alerts(
         self, product: Product, link: ProductLink, result: SyncResult
@@ -347,8 +361,18 @@ class SyncOrchestrator:
             if link_filter is not None:
                 stmt = stmt.where(ProductLink.id.in_(link_filter))
             links = (await self.session.execute(stmt)).scalars().all()
-            for link in links:
-                await self._process_link(product, link)
+            bling_links = [l for l in links if l.platform == IntegrationPlatform.BLING]
+            other_links = [l for l in links if l.platform != IntegrationPlatform.BLING]
+            bling_failed = False
+            for link in bling_links:
+                r = await self._process_link(product, link)
+                if r.status in (SyncStatus.FATAL, SyncStatus.RETRYABLE):
+                    bling_failed = True
+                processed += 1
+                if processed % HEARTBEAT_EVERY == 0:
+                    await self._heartbeat(processed)
+            for link in other_links:
+                await self._process_link(product, link, skip_non_bling=bling_failed)
                 processed += 1
                 if processed % HEARTBEAT_EVERY == 0:
                     await self._heartbeat(processed)
