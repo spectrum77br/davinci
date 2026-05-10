@@ -27,6 +27,8 @@ from app.models import (
     LinkSyncStatus,
     Product,
     ProductLink,
+    User,
+    UserRole,
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import (
@@ -84,15 +86,14 @@ async def run_refresh_bling_stock(
     job.last_heartbeat_at = _now()
     await session.commit()
 
+    user = await session.get(User, user_id)
+    is_admin = user is not None and user.role == UserRole.ADMIN
+
+    integ_where = [Integration.platform == IntegrationPlatform.BLING]
+    if not is_admin:
+        integ_where.append(Integration.user_id == user_id)
     integrations = (
-        await session.execute(
-            select(Integration).where(
-                and_(
-                    Integration.user_id == user_id,
-                    Integration.platform == IntegrationPlatform.BLING,
-                )
-            )
-        )
+        await session.execute(select(Integration).where(and_(*integ_where)))
     ).scalars().all()
 
     if not integrations:
@@ -122,14 +123,14 @@ async def run_refresh_bling_stock(
             )
             client = await _build_client(session, integ)
 
+            link_where = [
+                ProductLink.integration_id == integ.id,
+                ProductLink.platform == IntegrationPlatform.BLING,
+            ]
+            if not is_admin:
+                link_where.append(ProductLink.user_id == user_id)
             existing_links_q = await session.execute(
-                select(ProductLink).where(
-                    and_(
-                        ProductLink.user_id == user_id,
-                        ProductLink.integration_id == integ.id,
-                        ProductLink.platform == IntegrationPlatform.BLING,
-                    )
-                )
+                select(ProductLink).where(and_(*link_where))
             )
             link_by_external = {
                 str(l.external_id): l for l in existing_links_q.scalars().all()

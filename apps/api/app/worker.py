@@ -21,6 +21,8 @@ from app.models import (
     Integration,
     IntegrationPlatform,
     Product,
+    User,
+    UserRole,
     UserSettings,
 )
 from app.security.cipher import decrypt_json, encrypt_json
@@ -117,12 +119,17 @@ async def sync_all_run(
                 logger.warning("sync_all_run_job_missing", job_id=job_id)
                 return
 
-            where = [Product.user_id == uid]
+            user = await s.get(User, uid)
+            is_admin = user is not None and user.role == UserRole.ADMIN
+            where: list = []
+            if not is_admin:
+                where.append(Product.user_id == uid)
             if product_ids:
                 where.append(Product.id.in_([UUID(p) for p in product_ids]))
-            products = (
-                await s.execute(select(Product).where(and_(*where)))
-            ).scalars().all()
+            stmt = select(Product)
+            if where:
+                stmt = stmt.where(and_(*where))
+            products = (await s.execute(stmt)).scalars().all()
             job.total = len(products)
             await s.commit()
 
