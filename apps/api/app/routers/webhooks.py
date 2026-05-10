@@ -276,8 +276,7 @@ async def receive_bling_webhook(
     if not x_bling_event:
         logger.warning(
             "bling_webhook_missing_event_header",
-            all_headers={k: v for k, v in dict(request.headers).items()},
-            body_prefix=body[:200].decode("utf-8", errors="replace"),
+            body_full=body[:2000].decode("utf-8", errors="replace"),
         )
 
     delivery_key = x_bling_delivery or hashlib.sha256(body).hexdigest()
