@@ -38,10 +38,22 @@ type IntegrationRef = {
 
 const STORE_INFO_TO_INTEGRATION_PLATFORM: Record<string, string> = {
   mercadolivre: 'ml',
+  ml: 'ml',
   shopee: 'shopee',
   amazon: 'amazon',
   tiktok: 'tiktok',
   temu: 'temu',
+}
+
+const PLATFORM_ALIASES: Record<string, string> = {
+  ml: 'mercadolivre',
+  mercadolivre: 'mercadolivre',
+}
+
+function normPlatform(p: string | null | undefined): string {
+  if (!p) return ''
+  const lower = p.toLowerCase()
+  return PLATFORM_ALIASES[lower] ?? lower
 }
 
 const PLATFORMS = [
@@ -56,7 +68,7 @@ const PLATFORMS = [
 ]
 
 function platformLabel(p: string) {
-  return PLATFORMS.find((x) => x.value === p)?.label ?? p
+  return PLATFORMS.find((x) => x.value === normPlatform(p))?.label ?? p
 }
 
 const DEPARTMENTS = [
@@ -102,7 +114,7 @@ function integrationFor(row: StoreInfo): IntegrationRef | null {
 }
 
 function availableIntegrationsFor(row: StoreInfo): IntegrationRef[] {
-  const plat = STORE_INFO_TO_INTEGRATION_PLATFORM[row.platform]
+  const plat = STORE_INFO_TO_INTEGRATION_PLATFORM[normPlatform(row.platform)]
   if (!plat) return []
   return integrations.value.filter((i) => i.platform === plat)
 }
@@ -139,7 +151,8 @@ const sorted = computed(() => {
     (a, b) => a.sort_order - b.sort_order || a.platform.localeCompare(b.platform),
   )
   if (filterPlatform.value !== 'all') {
-    list = list.filter((s) => s.platform === filterPlatform.value)
+    const want = normPlatform(filterPlatform.value)
+    list = list.filter((s) => normPlatform(s.platform) === want)
   }
   const q = search.value.trim().toLowerCase()
   if (q) {
