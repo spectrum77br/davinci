@@ -99,7 +99,10 @@ class BlingClient:
                 },
             )
             r.raise_for_status()
-            return _normalize_token(r.json())
+            creds = _normalize_token(r.json())
+            creds["client_id"] = s.bling_client_id
+            creds["client_secret"] = s.bling_client_secret
+            return creds
 
     def _client_creds(self) -> tuple[str, str]:
         """Per-integration client_id/secret when present, else env fallback."""
