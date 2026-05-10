@@ -172,6 +172,7 @@ const sorted = computed(() => {
 
 const editing = ref<{ id: string; field: string } | null>(null)
 const editValue = ref<string>('')
+const editOriginal = ref<string>('')
 const editInputRef = ref<HTMLInputElement | HTMLSelectElement | null>(null)
 function setEditInputRef(el: any) {
   if (el) editInputRef.value = el
@@ -195,8 +196,15 @@ function flash(id: string, field: string) {
 async function startEdit(row: StoreInfo, field: string) {
   if (!canEdit.value) return
   editing.value = { id: row.id, field }
-  const raw = (row as any)[field]
-  editValue.value = raw == null ? '' : String(raw)
+  let initial: string
+  if (field === 'password') {
+    initial = revealedPasswords.value.get(row.id) ?? ''
+  } else {
+    const raw = (row as any)[field]
+    initial = raw == null ? '' : String(raw)
+  }
+  editValue.value = initial
+  editOriginal.value = initial
   await nextTick()
   const el = editInputRef.value
   if (el) {
@@ -208,6 +216,7 @@ async function startEdit(row: StoreInfo, field: string) {
 function cancelEdit() {
   editing.value = null
   editValue.value = ''
+  editOriginal.value = ''
 }
 
 async function commitEdit() {
@@ -215,6 +224,10 @@ async function commitEdit() {
   const { id, field } = editing.value
   const row = items.value.find((x) => x.id === id)
   if (!row) return cancelEdit()
+
+  if (editValue.value === editOriginal.value) {
+    return cancelEdit()
+  }
 
   const raw = editValue.value.trim()
   const payload: Record<string, unknown> = {}
