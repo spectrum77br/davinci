@@ -31,6 +31,7 @@ from app.services.alerts import emit_alert
 from app.services.audit.runner import run_audit
 from app.services.auto_link import run_auto_link
 from app.services.bling_orders import run_ingest_bling_order
+from app.services.bling_product_create import run_auto_create_product_from_bling
 from app.services.email import get_email_sender, render_otp_html
 from app.services.listings_import import (
     _create_product_links_for_matched,
@@ -172,6 +173,7 @@ async def _notify_daily_sync_completed(s, user_id: UUID, job, report) -> None:
             "requires_review": report.requires_review,
         },
         dedupe_key=f"daily_sync:{user_id}:{datetime.now(SP_TZ).date().isoformat()}",
+        notify_telegram=False,
     )
     if us.notify_telegram:
         from app.services.telegram import TelegramClient
@@ -237,6 +239,22 @@ async def refresh_bling_stock_run(
         await run_refresh_bling_stock(
             s,
             job_id=UUID(job_id),
+            user_id=UUID(user_id),
+        )
+
+
+async def auto_create_product_from_bling_run(
+    ctx: dict,
+    bling_product_id: int,
+    user_id: str,
+) -> None:
+    """Lazily create a local Product from a Bling webhook for a product we
+    never imported. Single-tenant attribution: the caller resolves the user
+    by the Bling integration owner."""
+    async with session_scope() as s:
+        await run_auto_create_product_from_bling(
+            s,
+            bling_product_id=int(bling_product_id),
             user_id=UUID(user_id),
         )
 
@@ -483,6 +501,7 @@ async def failed_jobs_alert_scan(ctx: dict) -> None:
                     "product_id": payload.get("product_id"),
                 },
                 dedupe_key=dedupe,
+                notify_telegram=False,
             )
             if a is None:
                 continue
@@ -566,6 +585,7 @@ async def webhook_signature_alert_scan(ctx: dict) -> None:
             message=msg,
             payload={"sig_fail_count": count, "hour_bucket": hour_bucket},
             dedupe_key=f"webhook_bling_sig_fail:{hour_bucket}",
+            notify_telegram=False,
         )
         if a is None:
             return
@@ -739,6 +759,7 @@ class WorkerSettings:
         ml_backfill_run,
         refresh_bling_stock_run,
         ingest_bling_order_run,
+        auto_create_product_from_bling_run,
         alerts_cleanup,
         low_stock_polling,
         import_listings_run,

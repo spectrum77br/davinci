@@ -303,8 +303,10 @@ async def receive_bling_webhook(
     )
 
     if product is None:
-        # No matching product — Bling may emit events for products we never imported.
-        # Pick any user owning a Bling integration to attribute the log; fallback skip.
+        # No matching product — Bling may emit events for products we never
+        # imported. Attribute audit to a Bling integration owner. When we have
+        # a bling_product_id, enqueue an auto-create job so the next webhook
+        # for the same product matches.
         anchor_link = (
             await session.execute(
                 select(ProductLink).where(
@@ -312,6 +314,9 @@ async def receive_bling_webhook(
                 ).limit(1)
             )
         ).scalar_one_or_none()
+        owner_user_id: UUID | None = (
+            anchor_link.user_id if anchor_link is not None else None
+        )
         if anchor_link is not None:
             session.add(
                 SyncLog(
@@ -321,7 +326,7 @@ async def receive_bling_webhook(
                     status=LinkSyncStatus.SKIPPED,
                     error_code="webhook_unmatched",
                     payload={
-                        "event": x_bling_event,
+                        "event": bling_event,
                         "delivery_id": delivery_key,
                         "sku": sku,
                         "bling_product_id": bling_product_id,
@@ -329,13 +334,33 @@ async def receive_bling_webhook(
                 )
             )
             await session.commit()
+        auto_create_enqueued = False
+        if owner_user_id is not None and bling_product_id is not None:
+            # Redis dedupe: collapse repeated webhooks for the same Bling
+            # product into one create job per 5 minutes.
+            dedupe_key = f"auto_create_product:{owner_user_id}:{bling_product_id}"
+            first = await redis.set(dedupe_key, "1", nx=True, ex=300)
+            if first:
+                pool = await get_arq_pool()
+                await pool.enqueue_job(
+                    "auto_create_product_from_bling_run",
+                    int(bling_product_id),
+                    str(owner_user_id),
+                )
+                auto_create_enqueued = True
         logger.info(
             "bling_webhook_unmatched",
-            bling_event=x_bling_event,
+            bling_event=bling_event,
             sku=sku,
             bling_product_id=bling_product_id,
+            auto_create_enqueued=auto_create_enqueued,
         )
-        return {"ack": True, "matched": False, "delivery_id": delivery_key}
+        return {
+            "ack": True,
+            "matched": False,
+            "delivery_id": delivery_key,
+            "auto_create_enqueued": auto_create_enqueued,
+        }
 
     if stock is not None:
         product.stock = stock
@@ -361,7 +386,7 @@ async def receive_bling_webhook(
         total=len(link_ids),
         payload={
             "trigger": "webhook_bling",
-            "event": x_bling_event,
+            "event": bling_event,
             "delivery_id": delivery_key,
             "product_id": str(product_id),
             "link_ids": link_ids,
@@ -386,7 +411,7 @@ async def receive_bling_webhook(
 
     logger.info(
         "bling_webhook_accepted",
-        bling_event=x_bling_event,
+        bling_event=bling_event,
         product_id=str(product_id),
         job_id=str(job.id),
         links=len(link_ids),
