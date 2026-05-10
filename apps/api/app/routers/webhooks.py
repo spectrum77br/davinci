@@ -284,9 +284,6 @@ async def receive_bling_webhook(
     except json.JSONDecodeError:
         return {"ack": True, "ignored": "invalid_json"}
 
-    # Bling v1 webhooks carry `event` inside the JSON body, not in a header
-    # (legacy deliveries still set X-Bling-Event). Body wins when present so
-    # current Bling deliveries route correctly.
     body_event = parsed.get("event") if isinstance(parsed.get("event"), str) else None
     bling_event = body_event or x_bling_event
 
