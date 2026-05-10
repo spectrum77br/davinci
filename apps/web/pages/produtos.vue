@@ -96,6 +96,7 @@ const error = ref<string | null>(null)
 
 const showImport = ref(false)
 const showAutoLink = ref(false)
+const showSyncAll = ref(false)
 
 type UserSettings = { daily_sync_enabled: boolean }
 const autoSyncEnabled = ref<boolean>(false)
@@ -208,12 +209,18 @@ async function syncProduct(id: string) {
 }
 
 async function startSyncAll() {
+  showSyncAll.value = true
   activeJob.value = null
-  const r = await api<{ job_id: string }>('/api/jobs/sync-all', {
-    method: 'POST',
-    body: { integration_ids: null, product_ids: null },
-  })
-  startPolling(r.job_id)
+  try {
+    const r = await api<{ job_id: string }>('/api/jobs/sync-all', {
+      method: 'POST',
+      body: { integration_ids: null, product_ids: null },
+    })
+    startPolling(r.job_id)
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    showSyncAll.value = false
+  }
 }
 
 // ---------------------------- Bling import ----------------------------------
@@ -613,6 +620,42 @@ const stats = computed(() => ({
               </li>
             </ul>
             <Button v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed'" class="w-full" variant="outline" @click="showAutoLink = false">
+              fechar
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sync all modal -->
+    <div v-if="showSyncAll" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showSyncAll = false">
+      <div class="bg-background rounded-lg shadow-lg w-[min(600px,95vw)]">
+        <div class="flex items-center justify-between border-b p-3">
+          <h3 class="font-semibold">Sincronização</h3>
+          <button @click="showSyncAll = false"><X class="size-4" /></button>
+        </div>
+        <div class="p-3 space-y-3">
+          <div v-if="!activeJob" class="text-sm text-muted-foreground">iniciando…</div>
+          <div v-else class="space-y-2">
+            <div class="flex justify-between text-sm">
+              <span>Status: <strong>{{ activeJob.status }}</strong></span>
+              <span class="tabular-nums">{{ activeJob.processed }} / {{ activeJob.total }}</span>
+            </div>
+            <div class="h-2 bg-muted rounded overflow-hidden">
+              <div
+                class="h-full bg-emerald-500 transition-all"
+                :style="`width: ${activeJob.total > 0 ? (activeJob.processed / activeJob.total) * 100 : 0}%`"
+              />
+            </div>
+            <div v-if="activeJob.error" class="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+              {{ activeJob.error }}
+            </div>
+            <ul class="max-h-48 overflow-auto text-xs space-y-1">
+              <li v-for="(d, idx) in activeJob.details" :key="idx" class="font-mono text-muted-foreground">
+                {{ JSON.stringify(d) }}
+              </li>
+            </ul>
+            <Button v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed'" class="w-full" variant="outline" @click="showSyncAll = false">
               fechar
             </Button>
           </div>
