@@ -33,6 +33,8 @@ from app.services.auto_link import run_auto_link
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.email import get_email_sender, render_otp_html
 from app.services.listings_import import (
+    _create_product_links_for_matched,
+    _link_by_sku,
     run_auto_import_link,
     run_import_listings,
 )
@@ -592,10 +594,31 @@ async def low_stock_polling(ctx: dict) -> None:
 
 async def auto_import_link(ctx: dict) -> None:
     """Fase 8: scan listings whose product_id is null and a non-blank SKU
-    matches a product the user owns; attach product_id."""
+    matches a product the user owns; attach product_id.
+
+    Kept as a safety-net cron in case a hook enqueue is dropped (Redis
+    outage, etc). Hooks via `app.services.relink_hook.trigger_user_relink`
+    do the day-to-day work."""
     async with session_scope() as s:
         report = await run_auto_import_link(s)
         logger.info("auto_import_link_done", **report)
+
+
+async def user_relink_run(ctx: dict, user_id: str) -> None:
+    """Per-user relink + product_link promotion. Enqueued by
+    `trigger_user_relink` from write paths (product create/patch/import,
+    listing patch). Idempotent — re-running is a no-op."""
+    uid = UUID(user_id)
+    async with session_scope() as s:
+        linked = await _link_by_sku(s, user_id=uid)
+        promoted = await _create_product_links_for_matched(s, user_id=uid)
+        await s.commit()
+        logger.info(
+            "user_relink_done",
+            user_id=user_id,
+            linked=linked,
+            product_links=promoted,
+        )
 
 
 async def import_listings_run(
@@ -699,6 +722,7 @@ class WorkerSettings:
         push_prices_batch_run,
         sync_bling_costs_run,
         audit_run,
+        user_relink_run,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -715,7 +739,9 @@ class WorkerSettings:
         cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),
         cron(webhook_signature_alert_scan, minute={5, 35}, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),
-        cron(auto_import_link, minute={0, 30}, run_at_startup=False),
+        # Safety-net only — hooks via app.services.relink_hook handle the
+        # day-to-day work. Runs at 02:00 and 14:00 UTC.
+        cron(auto_import_link, hour={2, 14}, minute=0, run_at_startup=False),
     ]
     max_jobs = 10
     job_timeout = 1800
@@ -753,5 +779,6 @@ __all__ = [
     "webhook_signature_alert_scan",
     "sync_logs_partition_gc",
     "sync_product_run",
+    "user_relink_run",
     "_next_month_partition_bounds",
 ]

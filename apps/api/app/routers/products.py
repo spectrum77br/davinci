@@ -30,6 +30,7 @@ from app.schemas.products import (
     ProductPatch,
 )
 from app.security.cipher import decrypt_json
+from app.services.relink_hook import trigger_user_relink
 from app.services.marketplaces.bling import (
     BLING_PRODUCTS_PAGE_SIZE,
     BlingClient,
@@ -176,6 +177,7 @@ async def create_product(
         raise
     await session.commit()
     await session.refresh(p)
+    await trigger_user_relink(user.id)
     return _to_product_out(p, [])
 
 
@@ -194,10 +196,13 @@ async def patch_product(
     if p is None:
         raise HTTPException(404, detail={"code": "product_not_found"})
     data = body.model_dump(exclude_unset=True)
+    sku_changed = "sku" in data and data["sku"] != p.sku
     for k, v in data.items():
         setattr(p, k, v)
     await session.commit()
     await session.refresh(p)
+    if sku_changed:
+        await trigger_user_relink(user.id)
     links = (
         await session.execute(select(ProductLink).where(ProductLink.product_id == p.id))
     ).scalars().all()
@@ -406,4 +411,6 @@ async def bling_import(
             updated += 1
 
     await session.commit()
+    if imported > 0 or updated > 0:
+        await trigger_user_relink(user.id)
     return BlingImportSummary(imported=imported, updated=updated, skipped_no_sku=skipped)

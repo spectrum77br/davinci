@@ -160,10 +160,15 @@ async def patch_listing(
         ).scalar_one_or_none()
         if prod is None:
             raise HTTPException(404, detail={"code": "product_not_found"})
+    sku_changed = "sku" in data and data["sku"] != row.sku
+    product_id_changed = "product_id" in data and data["product_id"] != row.product_id
     for k, v in data.items():
         setattr(row, k, v)
     await session.commit()
     await session.refresh(row)
+    if sku_changed or product_id_changed:
+        from app.services.relink_hook import trigger_user_relink
+        await trigger_user_relink(row.user_id)
     return ListingOut.model_validate(row)
 
 
