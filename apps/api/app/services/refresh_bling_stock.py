@@ -110,6 +110,17 @@ async def run_refresh_bling_stock(
         "integrations": len(integrations),
     }
 
+    # Match Bling products to local products by Product.bling_product_id
+    # (canonical), not by ProductLink — many tenants don't maintain a Bling
+    # self-link and rely on the column instead.
+    prod_where = [Product.bling_product_id.is_not(None)]
+    if not is_admin:
+        prod_where.append(Product.user_id == user_id)
+    products = (
+        await session.execute(select(Product).where(and_(*prod_where)))
+    ).scalars().all()
+    product_by_bpid = {int(p.bling_product_id): p for p in products if p.bling_product_id is not None}
+
     try:
         for integ in integrations:
             await _append_detail(
@@ -123,18 +134,16 @@ async def run_refresh_bling_stock(
             )
             client = await _build_client(session, integ)
 
-            link_where = [
+            bling_link_where = [
                 ProductLink.integration_id == integ.id,
                 ProductLink.platform == IntegrationPlatform.BLING,
             ]
             if not is_admin:
-                link_where.append(ProductLink.user_id == user_id)
-            existing_links_q = await session.execute(
-                select(ProductLink).where(and_(*link_where))
-            )
-            link_by_external = {
-                str(l.external_id): l for l in existing_links_q.scalars().all()
-            }
+                bling_link_where.append(ProductLink.user_id == user_id)
+            bling_links = (
+                await session.execute(select(ProductLink).where(and_(*bling_link_where)))
+            ).scalars().all()
+            bling_link_by_external = {str(l.external_id): l for l in bling_links}
 
             page = 1
             while True:
@@ -152,19 +161,19 @@ async def run_refresh_bling_stock(
                     new_stock = parsed.get("stock")
                     if bpid is None or new_stock is None:
                         continue
-                    link = link_by_external.get(str(bpid))
-                    if link is None:
+                    product = product_by_bpid.get(int(bpid))
+                    if product is None:
                         page_missing += 1
                         continue
-                    link.stock = int(new_stock)
-                    link.last_sync_status = LinkSyncStatus.OK
-                    link.last_sync_at = _now()
-                    link.last_error = None
-                    product = await session.get(Product, link.product_id)
-                    if product is not None:
-                        product.stock = int(new_stock)
-                        if parsed.get("min_stock") is not None:
-                            product.min_stock = int(parsed["min_stock"])
+                    product.stock = int(new_stock)
+                    if parsed.get("min_stock") is not None:
+                        product.min_stock = int(parsed["min_stock"])
+                    bling_link = bling_link_by_external.get(str(bpid))
+                    if bling_link is not None:
+                        bling_link.stock = int(new_stock)
+                        bling_link.last_sync_status = LinkSyncStatus.OK
+                        bling_link.last_sync_at = _now()
+                        bling_link.last_error = None
                     page_updated += 1
 
                 summary["updated"] += page_updated
