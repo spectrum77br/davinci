@@ -9,6 +9,7 @@ from sqlalchemy import and_, delete, or_, select, text, update
 
 from app.config import get_settings
 from app.db import session_scope
+from app.redis_client import redis
 from app.models import (
     Alert,
     AlertSeverity,
@@ -474,6 +475,61 @@ async def failed_jobs_alert_scan(ctx: dict) -> None:
         )
 
 
+WEBHOOK_SIG_FAIL_ALERT_THRESHOLD = 10
+
+
+async def webhook_signature_alert_scan(ctx: dict) -> None:
+    """If webhook signature failures pile up, the inline stock-update path is
+    silently broken (wrong header alias, rotated secret, etc). Read the
+    rolling 1h Redis counter populated by the webhook router; alert+telegram
+    once per hour while the counter stays elevated."""
+    try:
+        raw = await redis.get("webhook:bling:sig_fail_count")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("webhook_sig_alert_redis_failed", err=str(e))
+        return
+    count = int(raw) if raw else 0
+    if count < WEBHOOK_SIG_FAIL_ALERT_THRESHOLD:
+        return
+
+    async with session_scope() as s:
+        from app.models import Integration as _Integ
+        owner = (
+            await s.execute(
+                select(_Integ.user_id).where(
+                    _Integ.platform == IntegrationPlatform.BLING
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if owner is None:
+            return
+        hour_bucket = datetime.now(UTC).strftime("%Y%m%d%H")
+        msg = (
+            f"{count} webhooks Bling rejeitados por assinatura na última hora. "
+            f"Estoque pode estar desatualizado. Conferir BLING_WEBHOOK_SECRET e header alias."
+        )
+        a = await emit_alert(
+            s,
+            user_id=owner,
+            type=AlertType.GENERIC,
+            severity=AlertSeverity.ERROR,
+            title="Webhook Bling: assinatura inválida",
+            message=msg,
+            payload={"sig_fail_count": count, "hour_bucket": hour_bucket},
+            dedupe_key=f"webhook_bling_sig_fail:{hour_bucket}",
+        )
+        if a is None:
+            return
+        us = await s.get(UserSettings, owner)
+        if us is not None and us.notify_telegram:
+            from app.services.telegram import TelegramClient
+            tg = TelegramClient()
+            await tg.safe_send(
+                f"<b>DaVinci — Webhook Bling</b>\n{msg}",
+                chat_id=us.telegram_chat_id,
+            )
+
+
 async def low_stock_polling(ctx: dict) -> None:
     """Emit one alert per product whose `stock < min_stock` (min_stock>0).
     Dedupe key collapses repeats inside the same UTC day."""
@@ -633,6 +689,7 @@ class WorkerSettings:
         # Stubs — registered so wiring later doesn't need a worker redeploy.
         cron(alerts_cleanup, hour=6, minute=0, run_at_startup=False),  # 03:00 BRT
         cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),
+        cron(webhook_signature_alert_scan, minute={5, 35}, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),
         cron(auto_import_link, minute={0, 30}, run_at_startup=False),
     ]
@@ -668,6 +725,7 @@ __all__ = [
     "shopee_token_refresh",
     "send_otp_email",
     "sync_all_run",
+    "webhook_signature_alert_scan",
     "sync_logs_partition_gc",
     "sync_product_run",
     "_next_month_partition_bounds",
