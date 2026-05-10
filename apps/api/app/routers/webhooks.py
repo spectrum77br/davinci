@@ -212,11 +212,12 @@ async def receive_bling_webhook(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     x_bling_signature: Annotated[str | None, Header(alias="X-Bling-Signature")] = None,
+    x_bling_signature_256: Annotated[str | None, Header(alias="X-Bling-Signature-256")] = None,
     x_bling_event: Annotated[str | None, Header(alias="X-Bling-Event")] = None,
     x_bling_delivery: Annotated[str | None, Header(alias="X-Bling-Delivery")] = None,
 ) -> dict[str, Any]:
     body = await request.body()
-    _verify_bling_signature(body, x_bling_signature)
+    _verify_bling_signature(body, x_bling_signature_256 or x_bling_signature)
 
     delivery_key = x_bling_delivery or hashlib.sha256(body).hexdigest()
     if not await _claim_delivery(delivery_key):
