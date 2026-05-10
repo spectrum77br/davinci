@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted } from 'vue'
-import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X, Activity } from 'lucide-vue-next'
+import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X, Activity, Boxes } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'produtos', action: 'view' } })
 
@@ -97,6 +97,7 @@ const error = ref<string | null>(null)
 const showImport = ref(false)
 const showAutoLink = ref(false)
 const showSyncAll = ref(false)
+const showRefreshStock = ref(false)
 
 type UserSettings = { daily_sync_enabled: boolean }
 const autoSyncEnabled = ref<boolean>(false)
@@ -221,6 +222,38 @@ async function startSyncAll() {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
     showSyncAll.value = false
   }
+}
+
+async function startRefreshBlingStock() {
+  showRefreshStock.value = true
+  activeJob.value = null
+  try {
+    const r = await api<{ job_id: string }>('/api/jobs/refresh-bling-stock', {
+      method: 'POST',
+    })
+    startPolling(r.job_id)
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    showRefreshStock.value = false
+  }
+}
+
+function formatDetail(d: Record<string, any>): string {
+  const at = typeof d.at === 'string' ? d.at.slice(11, 19) : ''
+  if (d.action === 'refresh_bling' || d.action === 'update_stock') {
+    const qty = d.qty_before != null || d.qty_after != null
+      ? ` ${d.qty_before ?? '—'}→${d.qty_after ?? '—'}`
+      : ''
+    const err = d.error_code ? ` · ${d.error_code}${d.error_detail ? ': ' + d.error_detail : ''}` : ''
+    return `${at} [${d.platform}] ${d.sku || d.product_id || ''} ${d.action}${qty} → ${d.status}${err}`
+  }
+  if (d.page != null) {
+    return `${at} [bling page ${d.page}] fetched ${d.fetched ?? 0}, updated ${d.updated ?? 0}, sem-link ${d.missing_local ?? 0}`
+  }
+  if (d.phase === 'start') {
+    return `${at} [${d.platform || 'bling'}] iniciando integração ${d.integration_id?.slice(0, 8) || ''}…`
+  }
+  return `${at} ${JSON.stringify(d)}`
 }
 
 // ---------------------------- Bling import ----------------------------------
@@ -349,6 +382,9 @@ const stats = computed(() => ({
         </Button>
         <Button v-if="canEdit" size="sm" variant="outline" @click="startAutoLink">
           <Link2 class="size-4 mr-1.5" /> auto-link
+        </Button>
+        <Button v-if="canEdit" size="sm" variant="outline" @click="startRefreshBlingStock">
+          <Boxes class="size-4 mr-1.5" /> estoque Bling
         </Button>
         <Button v-if="canEdit" size="sm" @click="startSyncAll">
           <Activity class="size-4 mr-1.5" /> sync all
@@ -629,7 +665,7 @@ const stats = computed(() => ({
 
     <!-- Sync all modal -->
     <div v-if="showSyncAll" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showSyncAll = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(600px,95vw)]">
+      <div class="bg-background rounded-lg shadow-lg w-[min(720px,95vw)]">
         <div class="flex items-center justify-between border-b p-3">
           <h3 class="font-semibold">Sincronização</h3>
           <button @click="showSyncAll = false"><X class="size-4" /></button>
@@ -650,12 +686,54 @@ const stats = computed(() => ({
             <div v-if="activeJob.error" class="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-700">
               {{ activeJob.error }}
             </div>
-            <ul class="max-h-48 overflow-auto text-xs space-y-1">
-              <li v-for="(d, idx) in activeJob.details" :key="idx" class="font-mono text-muted-foreground">
-                {{ JSON.stringify(d) }}
+            <ul class="max-h-72 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
+              <li v-for="(d, idx) in activeJob.details" :key="idx" class="text-muted-foreground whitespace-pre-wrap">
+                {{ formatDetail(d) }}
+              </li>
+              <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
+                aguardando primeiro link…
               </li>
             </ul>
             <Button v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed'" class="w-full" variant="outline" @click="showSyncAll = false">
+              fechar
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Refresh Bling stock modal -->
+    <div v-if="showRefreshStock" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showRefreshStock = false">
+      <div class="bg-background rounded-lg shadow-lg w-[min(720px,95vw)]">
+        <div class="flex items-center justify-between border-b p-3">
+          <h3 class="font-semibold">Atualizar estoque do Bling</h3>
+          <button @click="showRefreshStock = false"><X class="size-4" /></button>
+        </div>
+        <div class="p-3 space-y-3">
+          <div v-if="!activeJob" class="text-sm text-muted-foreground">iniciando… (paginação 100 produtos por página)</div>
+          <div v-else class="space-y-2">
+            <div class="flex justify-between text-sm">
+              <span>Status: <strong>{{ activeJob.status }}</strong></span>
+              <span class="tabular-nums">{{ activeJob.processed }} produtos</span>
+            </div>
+            <div v-if="activeJob.result && Object.keys(activeJob.result).length" class="text-xs text-muted-foreground">
+              integrações: {{ (activeJob.result as any).integrations ?? 0 }} ·
+              páginas: {{ (activeJob.result as any).pages ?? 0 }} ·
+              atualizados: {{ (activeJob.result as any).updated ?? 0 }} ·
+              sem-link local: {{ (activeJob.result as any).missing_local ?? 0 }}
+            </div>
+            <div v-if="activeJob.error" class="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+              {{ activeJob.error }}
+            </div>
+            <ul class="max-h-72 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
+              <li v-for="(d, idx) in activeJob.details" :key="idx" class="text-muted-foreground whitespace-pre-wrap">
+                {{ formatDetail(d) }}
+              </li>
+              <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
+                buscando primeira página…
+              </li>
+            </ul>
+            <Button v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed'" class="w-full" variant="outline" @click="showRefreshStock = false">
               fechar
             </Button>
           </div>

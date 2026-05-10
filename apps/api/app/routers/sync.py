@@ -107,6 +107,36 @@ async def enqueue_backfill_ml_stock(
     return JobCreatedOut(job_id=job.id)
 
 
+@router.post(
+    "/jobs/refresh-bling-stock",
+    response_model=JobCreatedOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def enqueue_refresh_bling_stock(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+) -> JobCreatedOut:
+    """Manual quick path: pull stock from Bling /produtos page-by-page (100)
+    and write to local products + product_links. No marketplace push."""
+    job = BackgroundJob(
+        type=BackgroundJobType.REFRESH_BLING_STOCK,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={},
+    )
+    session.add(job)
+    await session.flush()
+
+    pool = await get_arq_pool()
+    arq = await pool.enqueue_job(
+        "refresh_bling_stock_run", str(job.id), str(user.id)
+    )
+    if arq is not None:
+        job.arq_job_id = arq.job_id
+    await session.commit()
+    return JobCreatedOut(job_id=job.id)
+
+
 @router.post("/sync/product/{product_id}", response_model=JobOut)
 async def sync_product(
     product_id: UUID,

@@ -38,6 +38,7 @@ from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.ml_backfill import run_backfill_ml_stock
+from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.sync_orchestrator import SyncOrchestrator
@@ -210,6 +211,21 @@ async def ml_backfill_run(
 ) -> None:
     async with session_scope() as s:
         await run_backfill_ml_stock(
+            s,
+            job_id=UUID(job_id),
+            user_id=UUID(user_id),
+        )
+
+
+async def refresh_bling_stock_run(
+    ctx: dict,
+    job_id: str,
+    user_id: str,
+) -> None:
+    """Manual stock-only refresh: paginates Bling /produtos and writes stock
+    to local product_links + products. No marketplace push."""
+    async with session_scope() as s:
+        await run_refresh_bling_stock(
             s,
             job_id=UUID(job_id),
             user_id=UUID(user_id),
@@ -667,6 +683,7 @@ class WorkerSettings:
         sync_all_run,
         sync_product_run,
         ml_backfill_run,
+        refresh_bling_stock_run,
         ingest_bling_order_run,
         alerts_cleanup,
         low_stock_polling,
@@ -719,6 +736,7 @@ __all__ = [
     "low_stock_polling",
     "ml_backfill_run",
     "ml_token_refresh",
+    "refresh_bling_stock_run",
     "push_prices_batch_run",
     "sync_bling_costs_run",
     "shopee_discrepancy_check",

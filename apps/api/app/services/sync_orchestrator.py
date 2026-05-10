@@ -53,6 +53,7 @@ from app.services.metrics import time_sync
 logger = structlog.get_logger()
 
 HEARTBEAT_EVERY = 25
+DETAILS_MAX = 500
 
 
 @dataclass(slots=True)
@@ -243,6 +244,21 @@ class SyncOrchestrator:
 
         await self._emit_link_alerts(product, link, result)
 
+        await self._append_detail(
+            {
+                "product_id": str(product.id),
+                "sku": product.sku,
+                "platform": link.platform.value,
+                "external_id": link.external_id,
+                "action": action.value,
+                "status": result.status.value,
+                "qty_before": result.qty_before,
+                "qty_after": result.qty_after,
+                "error_code": result.error_code,
+                "error_detail": (result.error_detail or "")[:200] or None,
+            }
+        )
+
         self.session.add(
             SyncLog(
                 user_id=self.user_id,
@@ -331,6 +347,19 @@ class SyncOrchestrator:
             self.report.fatal += 1
         elif s == SyncStatus.REQUIRES_REVIEW:
             self.report.requires_review += 1
+
+    async def _append_detail(self, entry: dict) -> None:
+        if self.job is None:
+            return
+        entry = {"at": datetime.now(UTC).isoformat(), **entry}
+        current = list(self.job.details or [])
+        current.append(entry)
+        if len(current) > DETAILS_MAX:
+            current = current[-DETAILS_MAX:]
+        self.job.details = current
+        self.job.processed = (self.job.processed or 0) + 1
+        self.job.last_heartbeat_at = datetime.now(UTC)
+        await self.session.commit()
 
     async def _heartbeat(self, processed: int) -> None:
         if self.job is None:

@@ -90,6 +90,7 @@ class BackgroundJobType(StrEnum):
     IMPORT_BLING_PRODUCTS = "import_bling_products"
     PUSH_PRICES_BATCH = "push_prices_batch"
     BACKFILL_ML_STOCK = "backfill_ml_stock"
+    REFRESH_BLING_STOCK = "refresh_bling_stock"
 
 
 class BackgroundJobStatus(StrEnum):
