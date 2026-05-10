@@ -57,13 +57,27 @@ async def _bump_sig_failure(reason: str) -> None:
         logger.warning("webhook_sig_counter_failed", err=str(e), reason=reason)
 
 
-async def _verify_bling_signature(body: bytes, header: str | None) -> None:
+async def _verify_bling_signature(
+    body: bytes,
+    header: str | None,
+    *,
+    headers_seen: dict[str, str] | None = None,
+) -> None:
     s = get_settings()
     secret = (s.bling_webhook_secret or "").encode()
     if not secret:
         raise HTTPException(503, detail={"code": "webhook_secret_missing"})
     if not header:
         await _bump_sig_failure("missing_signature")
+        logger.warning(
+            "bling_webhook_sig_missing",
+            body_len=len(body),
+            body_sha256_prefix=hashlib.sha256(body).hexdigest()[:12],
+            bling_headers={
+                k: v for k, v in (headers_seen or {}).items()
+                if k.lower().startswith("x-bling")
+            },
+        )
         raise HTTPException(401, detail={"code": "missing_signature"})
     sig = header.strip()
     if sig.startswith("sha256="):
@@ -71,6 +85,18 @@ async def _verify_bling_signature(body: bytes, header: str | None) -> None:
     expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, sig):
         await _bump_sig_failure("bad_signature")
+        logger.warning(
+            "bling_webhook_sig_mismatch",
+            body_len=len(body),
+            body_sha256_prefix=hashlib.sha256(body).hexdigest()[:12],
+            secret_len=len(secret),
+            received_prefix=sig[:8],
+            expected_prefix=expected[:8],
+            bling_headers={
+                k: v for k, v in (headers_seen or {}).items()
+                if k.lower().startswith("x-bling")
+            },
+        )
         raise HTTPException(401, detail={"code": "bad_signature"})
 
 
@@ -231,7 +257,11 @@ async def receive_bling_webhook(
     x_bling_delivery: Annotated[str | None, Header(alias="X-Bling-Delivery")] = None,
 ) -> dict[str, Any]:
     body = await request.body()
-    await _verify_bling_signature(body, x_bling_signature_256 or x_bling_signature)
+    await _verify_bling_signature(
+        body,
+        x_bling_signature_256 or x_bling_signature,
+        headers_seen=dict(request.headers),
+    )
 
     delivery_key = x_bling_delivery or hashlib.sha256(body).hexdigest()
     if not await _claim_delivery(delivery_key):
