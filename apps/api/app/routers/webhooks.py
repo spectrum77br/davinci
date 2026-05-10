@@ -47,12 +47,22 @@ DEDUPE_TTL_SECONDS = 86_400
 
 SIG_FAIL_COUNTER_KEY = "webhook:bling:sig_fail_count"
 SIG_FAIL_COUNTER_TTL = 3600
+SIG_FAIL_SNAPSHOT_KEY = "webhook:bling:sig_fail_last"
+SIG_FAIL_SNAPSHOT_TTL = 7200
 
 
-async def _bump_sig_failure(reason: str) -> None:
+async def _bump_sig_failure(
+    reason: str, snapshot: dict[str, Any] | None = None
+) -> None:
     try:
         await redis.incr(SIG_FAIL_COUNTER_KEY)
         await redis.expire(SIG_FAIL_COUNTER_KEY, SIG_FAIL_COUNTER_TTL)
+        if snapshot is not None:
+            await redis.set(
+                SIG_FAIL_SNAPSHOT_KEY,
+                json.dumps({"reason": reason, **snapshot}, default=str),
+                ex=SIG_FAIL_SNAPSHOT_TTL,
+            )
     except Exception as e:  # noqa: BLE001
         logger.warning("webhook_sig_counter_failed", err=str(e), reason=reason)
 
@@ -67,36 +77,36 @@ async def _verify_bling_signature(
     secret = (s.bling_webhook_secret or "").encode()
     if not secret:
         raise HTTPException(503, detail={"code": "webhook_secret_missing"})
+    bling_headers = {
+        k: v for k, v in (headers_seen or {}).items()
+        if k.lower().startswith("x-bling")
+    }
+    body_sha256_prefix = hashlib.sha256(body).hexdigest()[:12]
     if not header:
-        await _bump_sig_failure("missing_signature")
-        logger.warning(
-            "bling_webhook_sig_missing",
-            body_len=len(body),
-            body_sha256_prefix=hashlib.sha256(body).hexdigest()[:12],
-            bling_headers={
-                k: v for k, v in (headers_seen or {}).items()
-                if k.lower().startswith("x-bling")
-            },
-        )
+        snap = {
+            "body_len": len(body),
+            "body_sha256_prefix": body_sha256_prefix,
+            "secret_len": len(secret),
+            "bling_headers": bling_headers,
+        }
+        await _bump_sig_failure("missing_signature", snap)
+        logger.warning("bling_webhook_sig_missing", **snap)
         raise HTTPException(401, detail={"code": "missing_signature"})
     sig = header.strip()
     if sig.startswith("sha256="):
         sig = sig[len("sha256=") :]
     expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, sig):
-        await _bump_sig_failure("bad_signature")
-        logger.warning(
-            "bling_webhook_sig_mismatch",
-            body_len=len(body),
-            body_sha256_prefix=hashlib.sha256(body).hexdigest()[:12],
-            secret_len=len(secret),
-            received_prefix=sig[:8],
-            expected_prefix=expected[:8],
-            bling_headers={
-                k: v for k, v in (headers_seen or {}).items()
-                if k.lower().startswith("x-bling")
-            },
-        )
+        snap = {
+            "body_len": len(body),
+            "body_sha256_prefix": body_sha256_prefix,
+            "secret_len": len(secret),
+            "received_prefix": sig[:8],
+            "expected_prefix": expected[:8],
+            "bling_headers": bling_headers,
+        }
+        await _bump_sig_failure("bad_signature", snap)
+        logger.warning("bling_webhook_sig_mismatch", **snap)
         raise HTTPException(401, detail={"code": "bad_signature"})
 
 

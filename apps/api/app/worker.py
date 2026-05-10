@@ -508,14 +508,23 @@ async def webhook_signature_alert_scan(ctx: dict) -> None:
     silently broken (wrong header alias, rotated secret, etc). Read the
     rolling 1h Redis counter populated by the webhook router; alert+telegram
     once per hour while the counter stays elevated."""
+    import json as _json
     try:
         raw = await redis.get("webhook:bling:sig_fail_count")
+        snap_raw = await redis.get("webhook:bling:sig_fail_last")
     except Exception as e:  # noqa: BLE001
         logger.warning("webhook_sig_alert_redis_failed", err=str(e))
         return
     count = int(raw) if raw else 0
     if count < WEBHOOK_SIG_FAIL_ALERT_THRESHOLD:
         return
+
+    snap: dict = {}
+    if snap_raw:
+        try:
+            snap = _json.loads(snap_raw) or {}
+        except Exception:  # noqa: BLE001
+            snap = {}
 
     async with session_scope() as s:
         from app.models import Integration as _Integ
@@ -533,6 +542,21 @@ async def webhook_signature_alert_scan(ctx: dict) -> None:
             f"{count} webhooks Bling rejeitados por assinatura na última hora. "
             f"Estoque pode estar desatualizado. Conferir BLING_WEBHOOK_SECRET e header alias."
         )
+        diag_lines: list[str] = []
+        if snap:
+            diag_lines.append(f"reason: {snap.get('reason', '?')}")
+            diag_lines.append(f"secret_len: {snap.get('secret_len', '?')}")
+            diag_lines.append(f"body_len: {snap.get('body_len', '?')}")
+            if snap.get("received_prefix") or snap.get("expected_prefix"):
+                diag_lines.append(
+                    f"hmac: recv={snap.get('received_prefix', '?')} "
+                    f"vs exp={snap.get('expected_prefix', '?')}"
+                )
+            bh = snap.get("bling_headers") or {}
+            if isinstance(bh, dict) and bh:
+                diag_lines.append("headers: " + ", ".join(sorted(bh.keys())))
+            else:
+                diag_lines.append("headers: (none x-bling-*)")
         a = await emit_alert(
             s,
             user_id=owner,
@@ -549,10 +573,10 @@ async def webhook_signature_alert_scan(ctx: dict) -> None:
         if us is not None and us.notify_telegram:
             from app.services.telegram import TelegramClient
             tg = TelegramClient()
-            await tg.safe_send(
-                f"<b>DaVinci — Webhook Bling</b>\n{msg}",
-                chat_id=us.telegram_chat_id,
-            )
+            tg_msg = f"<b>DaVinci — Webhook Bling</b>\n{msg}"
+            if diag_lines:
+                tg_msg += "\n\n<b>Diag última falha:</b>\n<pre>" + "\n".join(diag_lines) + "</pre>"
+            await tg.safe_send(tg_msg, chat_id=us.telegram_chat_id)
 
 
 async def low_stock_polling(ctx: dict) -> None:
