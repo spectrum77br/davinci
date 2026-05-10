@@ -141,6 +141,7 @@ async def sync_product(
         orch = SyncOrchestrator(session, user_id=user.id, job=job)
         await orch.run([product])
 
+    await session.refresh(job)
     return JobOut.model_validate(job, from_attributes=True)
 
 
