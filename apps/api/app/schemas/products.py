@@ -161,3 +161,18 @@ class JobOut(BaseModel):
 
 class JobCreatedOut(BaseModel):
     job_id: UUID
+
+
+class JobPage(BaseModel):
+    items: list[JobOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class JobStats(BaseModel):
+    pending: int
+    running: int
+    succeeded: int
+    failed: int
+    cancelled: int
