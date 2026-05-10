@@ -126,7 +126,15 @@ class BlingClient:
                 },
                 data={"grant_type": "refresh_token", "refresh_token": rt},
             )
-            r.raise_for_status()
+            if r.status_code >= 400:
+                logger.warning(
+                    "bling_refresh_http_error",
+                    status=r.status_code,
+                    body=r.text[:500],
+                    client_id_prefix=cid[:8],
+                    rt_prefix=rt[:8],
+                )
+                r.raise_for_status()
             self.creds.update(_normalize_token(r.json(), prev=self.creds))
         if self._on_refresh:
             await self._on_refresh(self.creds)

@@ -309,11 +309,12 @@ async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_
             try:
                 creds = decrypt_json(it.credentials)
 
-                async def _persist(new_creds: dict, _it=it) -> None:
+                async def _persist(new_creds: dict, _it=it, _s=s) -> None:
                     _it.credentials = encrypt_json(new_creds)
                     exp = new_creds.get("expires_at")
                     if exp:
                         _it.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
+                    await _s.commit()
 
                 if platform == IntegrationPlatform.BLING:
                     client = BlingClient(creds, on_token_refresh=_persist)
