@@ -22,6 +22,8 @@ import structlog
 from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import text as sa_text
+
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
@@ -138,6 +140,51 @@ async def _upsert_listing(
     return "updated"
 
 
+async def _create_product_links_for_matched(
+    session: AsyncSession, *, user_id: UUID | None = None
+) -> int:
+    """Promote matched `listings` into `product_links` rows.
+
+    A listing carries the (product, integration, external_id, sku, title,
+    stock) tuple. The orchestrator only pushes stock per `product_link`, so
+    a listing matched via `_link_by_sku` is invisible to sync_all until a
+    corresponding row exists in `product_links`. Skip rows that already
+    exist for (user_id, integration_id, platform, external_id).
+    """
+    params: dict = {}
+    user_filter = ""
+    if user_id is not None:
+        user_filter = "AND l.user_id = :uid"
+        params["uid"] = str(user_id)
+
+    sql = sa_text(
+        f"""
+        INSERT INTO davinci.product_links (
+            id, user_id, product_id, integration_id, store_id, platform,
+            external_id, external_sku, listing_title, stock, price,
+            last_sync_status, last_sync_at, created_at, updated_at
+        )
+        SELECT
+            gen_random_uuid(), l.user_id, l.product_id, l.integration_id,
+            i.store_id, l.platform, l.external_id, l.sku, l.title,
+            l.stock, NULL, 'pending', NULL, NOW(), NOW()
+        FROM davinci.listings l
+        JOIN davinci.integrations i ON i.id = l.integration_id
+        WHERE l.product_id IS NOT NULL
+          {user_filter}
+          AND NOT EXISTS (
+              SELECT 1 FROM davinci.product_links pl
+              WHERE pl.user_id = l.user_id
+                AND pl.integration_id = l.integration_id
+                AND pl.platform = l.platform
+                AND pl.external_id = l.external_id
+          )
+        """
+    )
+    r = await session.execute(sql, params)
+    return r.rowcount or 0
+
+
 async def _link_by_sku(session: AsyncSession, *, user_id: UUID) -> int:
     """Single-pass auto-link: set listings.product_id where sku matches.
 
@@ -205,7 +252,7 @@ async def run_import_listings(
         await session.commit()
         return
 
-    summary = {"created": 0, "updated": 0, "skipped": 0, "linked": 0}
+    summary = {"created": 0, "updated": 0, "skipped": 0, "linked": 0, "product_links": 0}
     try:
         kwargs: dict[str, Any] = {}
         if max_pages is not None:
@@ -221,6 +268,9 @@ async def run_import_listings(
 
         # Auto-link in the same job so the user sees linked counts up-front.
         summary["linked"] = await _link_by_sku(session, user_id=user_id)
+        summary["product_links"] = await _create_product_links_for_matched(
+            session, user_id=user_id
+        )
 
         job.total = (
             summary["created"] + summary["updated"] + summary["skipped"]
@@ -255,5 +305,13 @@ async def run_auto_import_link(session: AsyncSession) -> dict[str, int]:
     total_linked = 0
     for (uid,) in rows:
         total_linked += await _link_by_sku(session, user_id=uid)
+    # Promote every newly-matched (and any historical orphan) listing into a
+    # product_link row. Single global pass — the helper's NOT EXISTS guard
+    # makes it idempotent across users.
+    total_product_links = await _create_product_links_for_matched(session)
     await session.commit()
-    return {"users_scanned": len(rows), "linked": total_linked}
+    return {
+        "users_scanned": len(rows),
+        "linked": total_linked,
+        "product_links": total_product_links,
+    }
