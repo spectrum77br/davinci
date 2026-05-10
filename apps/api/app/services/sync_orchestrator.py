@@ -19,6 +19,8 @@ unimplemented platforms — orchestrator catches that and writes `skipped`.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Iterable
@@ -26,8 +28,10 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import session_scope
 
 from app.models import (
     AlertSeverity,
@@ -54,6 +58,7 @@ logger = structlog.get_logger()
 
 HEARTBEAT_EVERY = 25
 DETAILS_MAX = 500
+SYNC_ALL_CONCURRENCY = 8
 
 
 @dataclass(slots=True)
@@ -352,13 +357,34 @@ class SyncOrchestrator:
         if self.job is None:
             return
         entry = {"at": datetime.now(UTC).isoformat(), **entry}
-        current = list(self.job.details or [])
-        current.append(entry)
-        if len(current) > DETAILS_MAX:
-            current = current[-DETAILS_MAX:]
-        self.job.details = current
-        self.job.processed = (self.job.processed or 0) + 1
-        self.job.last_heartbeat_at = datetime.now(UTC)
+        # Atomic JSONB append + counter bump so concurrent sub-orchestrators
+        # (run_parallel) never lose detail entries to read-modify-write races.
+        # The trim-to-DETAILS_MAX happens inside the same UPDATE so the list
+        # never grows unbounded.
+        await self.session.execute(
+            text(
+                """
+                UPDATE davinci.background_jobs
+                SET details = CASE
+                        WHEN jsonb_array_length(COALESCE(details, '[]'::jsonb)) >= :max
+                        THEN (
+                            SELECT COALESCE(jsonb_agg(d), '[]'::jsonb)
+                            FROM jsonb_array_elements(
+                                COALESCE(details, '[]'::jsonb) || :entry::jsonb
+                            ) WITH ORDINALITY t(d, ord)
+                            WHERE ord > jsonb_array_length(
+                                COALESCE(details, '[]'::jsonb) || :entry::jsonb
+                            ) - :max
+                        )
+                        ELSE COALESCE(details, '[]'::jsonb) || :entry::jsonb
+                    END,
+                    processed = COALESCE(processed, 0) + 1,
+                    last_heartbeat_at = NOW()
+                WHERE id = :jid
+                """
+            ),
+            {"jid": str(self.job.id), "entry": json.dumps(entry), "max": DETAILS_MAX},
+        )
         await self.session.commit()
 
     async def _heartbeat(self, processed: int) -> None:
@@ -423,6 +449,122 @@ class SyncOrchestrator:
             await self.session.commit()
         logger.info(
             "sync_orchestrator_done",
+            **(self.job.result if self.job else asdict(self.report)),
+        )
+        return self.report
+
+    async def run_parallel(
+        self,
+        product_ids: list[UUID],
+        *,
+        only_link_ids: list[UUID] | None = None,
+        concurrency: int = SYNC_ALL_CONCURRENCY,
+    ) -> OrchestratorReport:
+        """Parallel variant of `run()` for sync_all-style runs.
+
+        Each product is processed inside its own AsyncSession (SQLAlchemy
+        sessions are not safe to share across tasks) and the per-link
+        bookkeeping (`details`, `processed`, `last_heartbeat_at`) writes to
+        the job row via atomic JSONB SQL — so a semaphore-capped fan-out
+        is safe.
+
+        The job ORM object on this orchestrator is updated only for
+        start/finish bookkeeping. Per-link mutations happen in the sub-
+        sessions and are immediately visible to other tasks via the DB.
+        """
+        if self.job is not None:
+            self.job.status = BackgroundJobStatus.RUNNING
+            self.job.started_at = datetime.now(UTC)
+            self.job.total = len(product_ids)
+            await self.session.commit()
+        # Detach the job from the parent session so sub-sessions don't
+        # contend on the same row in cached ORM state. Sub-orchestrators
+        # rely on atomic SQL for job writes.
+        job_id = self.job.id if self.job is not None else None
+        user_id = self.user_id
+        sem = asyncio.Semaphore(concurrency)
+        link_filter = set(only_link_ids) if only_link_ids else None
+
+        async def process_one(pid: UUID) -> OrchestratorReport | None:
+            async with sem:
+                try:
+                    async with session_scope() as sub_s:
+                        p = await sub_s.get(Product, pid)
+                        if p is None:
+                            return None
+                        stmt = select(ProductLink).where(
+                            ProductLink.product_id == p.id
+                        )
+                        if link_filter is not None:
+                            stmt = stmt.where(ProductLink.id.in_(link_filter))
+                        links = (await sub_s.execute(stmt)).scalars().all()
+
+                        sub_job = (
+                            await sub_s.get(BackgroundJob, job_id)
+                            if job_id is not None
+                            else None
+                        )
+                        sub_orch = SyncOrchestrator(
+                            sub_s, user_id=user_id, job=sub_job
+                        )
+
+                        bling_links = [
+                            l for l in links
+                            if l.platform == IntegrationPlatform.BLING
+                        ]
+                        other_links = [
+                            l for l in links
+                            if l.platform != IntegrationPlatform.BLING
+                        ]
+                        bling_failed = False
+                        for link in bling_links:
+                            r = await sub_orch._process_link(p, link)
+                            if r.status in (
+                                SyncStatus.FATAL,
+                                SyncStatus.RETRYABLE,
+                            ):
+                                bling_failed = True
+                        for link in other_links:
+                            await sub_orch._process_link(
+                                p, link, skip_non_bling=bling_failed
+                            )
+                        await sub_s.commit()
+                        return sub_orch.report
+                except Exception as e:  # noqa: BLE001
+                    logger.exception(
+                        "sync_parallel_product_failed",
+                        product_id=str(pid),
+                        err=str(e),
+                    )
+                    return None
+
+        tasks = [process_one(pid) for pid in product_ids]
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+
+        for r in results:
+            if r is None:
+                continue
+            self.report.total_links += r.total_links
+            self.report.ok += r.ok
+            self.report.skipped += r.skipped
+            self.report.retryable += r.retryable
+            self.report.fatal += r.fatal
+            self.report.requires_review += r.requires_review
+
+        if self.job is not None:
+            self.job.status = BackgroundJobStatus.SUCCEEDED
+            self.job.finished_at = datetime.now(UTC)
+            self.job.result = {
+                "total_links": self.report.total_links,
+                "ok": self.report.ok,
+                "skipped": self.report.skipped,
+                "retryable": self.report.retryable,
+                "fatal": self.report.fatal,
+                "requires_review": self.report.requires_review,
+            }
+            await self.session.commit()
+        logger.info(
+            "sync_orchestrator_parallel_done",
             **(self.job.result if self.job else asdict(self.report)),
         )
         return self.report

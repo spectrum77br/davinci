@@ -136,8 +136,9 @@ async def sync_all_run(
             job.total = len(products)
             await s.commit()
 
+            pids = [p.id for p in products]
             orch = SyncOrchestrator(s, user_id=uid, job=job)
-            report = await orch.run(products)
+            report = await orch.run_parallel(pids)
 
             if (job.payload or {}).get("trigger") == "daily_sync":
                 await _notify_daily_sync_completed(s, uid, job, report)
