@@ -452,7 +452,7 @@ async def run_ingest_bling_order(
     logger.info(
         "bling_order_ingested",
         bling_order_id=bling_order_id,
-        event=event,
+        bling_event=event,
         rows=n,
         refresh_jobs=len(jobs),
     )
