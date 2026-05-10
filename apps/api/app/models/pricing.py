@@ -208,6 +208,11 @@ class StoreInfo(Base, TimestampMixin):
     phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     sort_order: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )

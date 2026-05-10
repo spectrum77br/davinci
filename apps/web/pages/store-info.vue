@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle } from 'lucide-vue-next'
+import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle, Unlink, Link2 } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -22,10 +22,26 @@ type StoreInfo = {
   return_address: string | null
   phone: string | null
   link: string | null
+  integration_id: string | null
   sort_order: number
   has_password: boolean
   created_at: string
   updated_at: string
+}
+
+type IntegrationRef = {
+  id: string
+  platform: string
+  name: string
+  store_id: string | null
+}
+
+const STORE_INFO_TO_INTEGRATION_PLATFORM: Record<string, string> = {
+  mercadolivre: 'ml',
+  shopee: 'shopee',
+  amazon: 'amazon',
+  tiktok: 'tiktok',
+  temu: 'temu',
 }
 
 const PLATFORMS = [
@@ -55,6 +71,7 @@ const canEdit = useCan('tabela_precos', 'edit')
 const canDelete = useCan('tabela_precos', 'delete')
 
 const items = ref<StoreInfo[]>([])
+const integrations = ref<IntegrationRef[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const filterPlatform = ref<string>('all')
@@ -64,7 +81,12 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    items.value = await api<StoreInfo[]>('/api/pricing/store-info')
+    const [storeInfo, integs] = await Promise.all([
+      api<StoreInfo[]>('/api/pricing/store-info'),
+      api<IntegrationRef[]>('/api/integrations').catch(() => [] as IntegrationRef[]),
+    ])
+    items.value = storeInfo
+    integrations.value = integs
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -73,6 +95,44 @@ async function load() {
 }
 
 await load()
+
+function integrationFor(row: StoreInfo): IntegrationRef | null {
+  if (!row.integration_id) return null
+  return integrations.value.find((i) => i.id === row.integration_id) || null
+}
+
+function availableIntegrationsFor(row: StoreInfo): IntegrationRef[] {
+  const plat = STORE_INFO_TO_INTEGRATION_PLATFORM[row.platform]
+  if (!plat) return []
+  return integrations.value.filter((i) => i.platform === plat)
+}
+
+async function attachIntegration(row: StoreInfo, integrationId: string) {
+  if (!integrationId || integrationId === row.integration_id) return
+  try {
+    const updated = await api<StoreInfo>(`/api/pricing/store-info/${row.id}`, {
+      method: 'PATCH',
+      body: { integration_id: integrationId },
+    })
+    Object.assign(row, updated)
+    flash(row.id, 'account_name')
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
+
+async function unlinkIntegration(row: StoreInfo) {
+  try {
+    const updated = await api<StoreInfo>(`/api/pricing/store-info/${row.id}`, {
+      method: 'PATCH',
+      body: { integration_id: null },
+    })
+    Object.assign(row, updated)
+    flash(row.id, 'account_name')
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
 
 const sorted = computed(() => {
   let list = [...items.value].sort(
@@ -377,10 +437,63 @@ async function copyText(text: string) {
               </select>
               <span v-else>{{ platformLabel(row.platform) }}</span>
             </td>
+            <!-- account_name + integration link -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'account_name'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'account_name'),
+              }"
+            >
+              <input
+                v-if="isEditing(row.id, 'account_name')"
+                :ref="setEditInputRef"
+                v-model="editValue" type="text"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+              />
+              <div v-else class="flex items-center gap-1 group min-w-0">
+                <span
+                  class="cursor-pointer truncate flex-1"
+                  :class="{ 'text-muted-foreground': !row.account_name }"
+                  :title="row.account_name || ''"
+                  @click="startEdit(row, 'account_name')"
+                >
+                  {{ row.account_name || '—' }}
+                </span>
+                <span
+                  v-if="integrationFor(row)"
+                  class="shrink-0 inline-flex items-center gap-0.5 px-1 py-0.5 rounded bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-[10px] max-w-[100px]"
+                  :title="`integração: ${integrationFor(row)!.name}`"
+                >
+                  <Link2 class="h-2.5 w-2.5 shrink-0" />
+                  <span class="truncate">{{ integrationFor(row)!.name }}</span>
+                </span>
+                <button
+                  v-if="row.integration_id && canEdit"
+                  class="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-muted rounded shrink-0"
+                  title="Desvincular integração"
+                  @click.stop="unlinkIntegration(row)"
+                >
+                  <Unlink class="h-3 w-3" />
+                </button>
+                <select
+                  v-else-if="canEdit && availableIntegrationsFor(row).length"
+                  class="opacity-0 group-hover:opacity-100 transition-opacity border rounded text-[10px] bg-background px-0.5 py-0 h-5 max-w-[80px] shrink-0"
+                  @change="(e: any) => { attachIntegration(row, e.target.value); e.target.value = '' }"
+                  @click.stop
+                >
+                  <option value="">+ vincular…</option>
+                  <option v-for="i in availableIntegrationsFor(row)" :key="i.id" :value="i.id">
+                    {{ i.name }}
+                  </option>
+                </select>
+              </div>
+            </td>
             <!-- text fields -->
             <template
               v-for="f in [
-                'account_name', 'segment', 'freight', 'cpf_name', 'server', 'cnpj', 'email', 'phone',
+                'segment', 'freight', 'cpf_name', 'server', 'cnpj', 'email', 'phone',
               ]"
               :key="f"
             >

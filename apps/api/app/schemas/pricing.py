@@ -294,6 +294,7 @@ class StoreInfoBase(BaseModel):
     return_address: str | None = None
     phone: str | None = None
     link: str | None = None
+    integration_id: UUID | None = None
     sort_order: int = 0
 
 
@@ -316,6 +317,7 @@ class StoreInfoPatch(BaseModel):
     phone: str | None = None
     password: str | None = None
     link: str | None = None
+    integration_id: UUID | None = None
     sort_order: int | None = None
 
 
