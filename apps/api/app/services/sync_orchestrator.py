@@ -163,6 +163,20 @@ class SyncOrchestrator:
             )
         link.stock = int(new_stock)
         product.stock = int(new_stock)
+        if parsed.get("min_stock") is not None:
+            product.min_stock = int(parsed["min_stock"])
+        if parsed.get("category"):
+            product.category = parsed["category"]
+        if parsed.get("observation"):
+            product.observation = parsed["observation"]
+        if parsed.get("bling_cost_price") is not None:
+            product.bling_cost_price = parsed["bling_cost_price"]
+        if parsed.get("price") is not None:
+            product.price = parsed["price"]
+        if parsed.get("name"):
+            product.name = parsed["name"]
+        if parsed.get("image_url"):
+            product.image_url = parsed["image_url"]
         return SyncResult(
             status=SyncStatus.OK,
             qty_before=qty_before,

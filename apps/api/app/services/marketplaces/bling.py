@@ -322,27 +322,46 @@ class BlingClient:
 def parse_bling_product(raw: dict) -> dict:
     """Normalize Bling `/produtos` item to the shape used by `BlingPreviewItem`.
 
-    Bling fields (v3): id, nome, codigo (sku), preco, estoque{saldoVirtualTotal},
-    preco_custo (varies by endpoint), imagemURL.
+    Bling fields (v3): id, nome, codigo (sku), preco, estoque{saldoVirtualTotal,minimo},
+    preco_custo (varies by endpoint), imagemURL, categoria{descricao}, observacoes.
     """
     estoque = raw.get("estoque") or {}
     if isinstance(estoque, dict):
         stock = estoque.get("saldoVirtualTotal")
         if stock is None:
             stock = estoque.get("disponivel") or estoque.get("saldoFisicoTotal")
+        min_stock = estoque.get("minimo")
     else:
         stock = None
+        min_stock = None
     sku = (raw.get("codigo") or "").strip() or None
     cost = raw.get("precoCusto") or raw.get("preco_custo")
+    if cost is None:
+        # Bling v3 GET /produtos/{id}: precoCusto lives under fornecedor.precoCusto
+        fornecedor = raw.get("fornecedor") or {}
+        if isinstance(fornecedor, dict):
+            cost = fornecedor.get("precoCusto") or fornecedor.get("precoCompra")
     image = raw.get("imagemURL") or raw.get("midia", {}).get("imagem", {}).get("url")
+    categoria = raw.get("categoria") or {}
+    if isinstance(categoria, dict):
+        category = categoria.get("descricao") or categoria.get("nome")
+    else:
+        category = None
+    observation = raw.get("observacoes")
+    if observation is not None:
+        observation = str(observation).strip() or None
     return {
         "bling_product_id": int(raw["id"]),
         "sku": sku,
         "name": raw.get("nome") or raw.get("descricao") or "",
         "cost_price": cost,
+        "bling_cost_price": cost,
         "price": raw.get("preco"),
         "stock": int(stock) if stock is not None else None,
+        "min_stock": int(min_stock) if min_stock is not None else None,
         "image_url": image,
+        "category": category,
+        "observation": observation,
     }
 
 

@@ -339,12 +339,16 @@ async def bling_import(
                 user_id=user.id,
                 sku=norm["sku"],
                 name=norm["name"] or norm["sku"],
+                category=norm["category"],
                 cost_price=norm["cost_price"],
+                bling_cost_price=norm["bling_cost_price"],
                 price=norm["price"],
                 stock=norm["stock"] or 0,
+                min_stock=norm["min_stock"] or 0,
                 bling_product_id=int(bid),
                 integration_id=integ.id,
                 image_url=norm["image_url"],
+                observation=norm["observation"],
                 last_imported_at=datetime.now(UTC),
             )
             session.add(p)
@@ -367,10 +371,16 @@ async def bling_import(
                     if existing is not None:
                         existing.bling_product_id = int(bid)
                         existing.name = norm["name"] or existing.name
-                        existing.cost_price = norm["cost_price"]
+                        existing.bling_cost_price = norm["bling_cost_price"]
                         existing.price = norm["price"]
                         if norm["stock"] is not None:
                             existing.stock = norm["stock"]
+                        if norm["min_stock"] is not None:
+                            existing.min_stock = norm["min_stock"]
+                        if norm["category"]:
+                            existing.category = norm["category"]
+                        if norm["observation"]:
+                            existing.observation = norm["observation"]
                         existing.image_url = norm["image_url"] or existing.image_url
                         existing.integration_id = integ.id
                         existing.last_imported_at = datetime.now(UTC)
@@ -380,10 +390,16 @@ async def bling_import(
             imported += 1
         else:
             p.name = norm["name"] or p.name
-            p.cost_price = norm["cost_price"]
+            p.bling_cost_price = norm["bling_cost_price"]
             p.price = norm["price"]
             if norm["stock"] is not None:
                 p.stock = norm["stock"]
+            if norm["min_stock"] is not None:
+                p.min_stock = norm["min_stock"]
+            if norm["category"]:
+                p.category = norm["category"]
+            if norm["observation"]:
+                p.observation = norm["observation"]
             p.image_url = norm["image_url"] or p.image_url
             p.integration_id = integ.id
             p.last_imported_at = datetime.now(UTC)

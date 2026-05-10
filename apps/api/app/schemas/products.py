@@ -108,9 +108,13 @@ class BlingPreviewItem(BaseModel):
     sku: str | None
     name: str
     cost_price: Decimal | None = None
+    bling_cost_price: Decimal | None = None
     price: Decimal | None = None
     stock: int | None = None
+    min_stock: int | None = None
     image_url: str | None = None
+    category: str | None = None
+    observation: str | None = None
 
 
 class BlingPreviewOut(BaseModel):
