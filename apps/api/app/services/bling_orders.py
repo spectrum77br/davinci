@@ -18,13 +18,21 @@ from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    BackgroundJob,
+    BackgroundJobStatus,
+    BackgroundJobType,
     BlingOrder,
     Integration,
     IntegrationPlatform,
+    LinkSyncStatus,
+    Product,
+    ProductLink,
     Store,
+    UserSettings,
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import BlingClient
+from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
 
@@ -214,6 +222,169 @@ async def mark_order_excluido(
     return len(rows)
 
 
+async def _resolve_local_product(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    sku: str | None,
+    bling_product_id: int | None,
+) -> Product | None:
+    if sku:
+        p = (
+            await session.execute(
+                select(Product).where(
+                    Product.user_id == user_id, Product.sku == sku
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if p is not None:
+            return p
+    if bling_product_id is not None:
+        p = (
+            await session.execute(
+                select(Product).where(
+                    Product.user_id == user_id,
+                    Product.bling_product_id == bling_product_id,
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if p is not None:
+            return p
+        link = (
+            await session.execute(
+                select(ProductLink).where(
+                    ProductLink.user_id == user_id,
+                    ProductLink.platform == IntegrationPlatform.BLING,
+                    ProductLink.external_id == str(bling_product_id),
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if link is not None:
+            return await session.get(Product, link.product_id)
+    return None
+
+
+async def _enqueue_stock_refresh_for_order(
+    session: AsyncSession,
+    *,
+    raw_order: dict[str, Any],
+    user_id: UUID,
+) -> tuple[list[tuple[UUID, UUID, list[str]]], list[dict[str, Any]]]:
+    """For each item in the order, resolve local Product and create a
+    SYNC_PRODUCT BackgroundJob so the stock refresh shows up in the jobs UI.
+    Returns (jobs_to_enqueue, notif_items)."""
+    itens = raw_order.get("itens") or []
+    if not isinstance(itens, list):
+        return [], []
+    seen_products: set[UUID] = set()
+    jobs: list[tuple[UUID, UUID, list[str]]] = []
+    notif: list[dict[str, Any]] = []
+    for item in itens:
+        if not isinstance(item, dict):
+            continue
+        produto = item.get("produto") or {}
+        if not isinstance(produto, dict):
+            produto = {}
+        sku_raw = item.get("codigo") or produto.get("codigo")
+        sku = (str(sku_raw).strip() or None) if sku_raw is not None else None
+        bling_pid = _int(produto.get("id"))
+        qty = _int(item.get("quantidade"))
+        desc = item.get("descricao") or produto.get("nome")
+        product = await _resolve_local_product(
+            session, user_id=user_id, sku=sku, bling_product_id=bling_pid
+        )
+        notif.append(
+            {
+                "sku": sku,
+                "desc": desc,
+                "qty": qty,
+                "matched": product is not None,
+            }
+        )
+        if product is None or product.id in seen_products:
+            continue
+        seen_products.add(product.id)
+        links = (
+            await session.execute(
+                select(ProductLink).where(
+                    ProductLink.product_id == product.id,
+                    ProductLink.last_sync_status.in_(
+                        [
+                            LinkSyncStatus.OK,
+                            LinkSyncStatus.PENDING,
+                            LinkSyncStatus.REQUIRES_REVIEW,
+                        ]
+                    ),
+                )
+            )
+        ).scalars().all()
+        link_ids = [str(l.id) for l in links]
+        job = BackgroundJob(
+            type=BackgroundJobType.SYNC_PRODUCT,
+            status=BackgroundJobStatus.PENDING,
+            created_by=user_id,
+            total=len(link_ids),
+            payload={
+                "trigger": "bling_pedido",
+                "bling_order_id": _int(raw_order.get("id")),
+                "product_id": str(product.id),
+                "link_ids": link_ids,
+                "sku": sku,
+            },
+        )
+        session.add(job)
+        await session.flush()
+        jobs.append((job.id, product.id, link_ids))
+    return jobs, notif
+
+
+async def _store_label(session: AsyncSession, bling_loja_id: int | None) -> str | None:
+    if bling_loja_id is None:
+        return None
+    row = (
+        await session.execute(
+            select(Store).where(Store.bling_store_id == bling_loja_id).limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return f"loja {bling_loja_id}"
+    return row.apelido_override or row.marketplace.value
+
+
+async def _notify_sale_telegram(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    raw_order: dict[str, Any],
+    notif_items: list[dict[str, Any]],
+) -> None:
+    us = await session.get(UserSettings, user_id)
+    if us is None or not us.notify_telegram:
+        return
+    loja = raw_order.get("loja") or {}
+    bling_loja_id = _int(loja.get("id")) if isinstance(loja, dict) else None
+    store_label = await _store_label(session, bling_loja_id)
+    numero = raw_order.get("numero")
+    total = _num(raw_order.get("total"))
+    lines = [f"<b>Venda Bling</b> — pedido <code>{numero}</code>"]
+    if store_label:
+        lines.append(f"Loja: {store_label}")
+    if total is not None:
+        lines.append(f"Total: R$ {total:.2f}")
+    for it in notif_items:
+        mark = "" if it["matched"] else " ⚠ não importado"
+        desc = (it.get("desc") or "")[:60]
+        sku = it.get("sku") or "—"
+        qty = it.get("qty")
+        qty_s = f"×{qty}" if qty is not None else ""
+        lines.append(f"• {sku} {qty_s} — {desc}{mark}")
+    from app.services.telegram import TelegramClient
+
+    await TelegramClient().safe_send(
+        "\n".join(lines), chat_id=us.telegram_chat_id
+    )
+
+
 async def run_ingest_bling_order(
     session: AsyncSession,
     *,
@@ -221,7 +392,10 @@ async def run_ingest_bling_order(
     user_id: UUID,
     event: str | None,
 ) -> dict[str, Any]:
-    """Worker entrypoint. Fetches order from Bling and upserts (or marks excluded)."""
+    """Worker entrypoint. Fetches order from Bling and upserts (or marks excluded).
+    For non-exclusion events, also enqueues a SYNC_PRODUCT job per matched SKU
+    so the sale-driven stock refresh is visible in the jobs UI, and optionally
+    sends a Telegram notification."""
     if event == "pedido.exclusao":
         n = await mark_order_excluido(session, bling_order_id)
         await session.commit()
@@ -247,11 +421,44 @@ async def run_ingest_bling_order(
         return {"ok": False, "error": "empty_order"}
 
     n = await upsert_order(session, raw)
+    jobs, notif_items = await _enqueue_stock_refresh_for_order(
+        session, raw_order=raw, user_id=user_id
+    )
     await session.commit()
+
+    if jobs:
+        pool = await get_arq_pool()
+        for job_id, product_id, link_ids in jobs:
+            arq = await pool.enqueue_job(
+                "sync_product_run",
+                str(job_id),
+                str(user_id),
+                str(product_id),
+                link_ids or None,
+            )
+            if arq is not None:
+                job = await session.get(BackgroundJob, job_id)
+                if job is not None:
+                    job.arq_job_id = arq.job_id
+        await session.commit()
+
+    try:
+        await _notify_sale_telegram(
+            session, user_id=user_id, raw_order=raw, notif_items=notif_items
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("bling_order_telegram_failed", err=str(e))
+
     logger.info(
         "bling_order_ingested",
         bling_order_id=bling_order_id,
         event=event,
         rows=n,
+        refresh_jobs=len(jobs),
     )
-    return {"ok": True, "rows": n, "deleted": False}
+    return {
+        "ok": True,
+        "rows": n,
+        "deleted": False,
+        "refresh_jobs": len(jobs),
+    }
