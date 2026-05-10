@@ -97,7 +97,10 @@ class MercadoLivreClient:
                 },
             )
             r.raise_for_status()
-            return _normalize_token(r.json())
+            creds = _normalize_token(r.json())
+            creds["client_id"] = s.ml_client_id
+            creds["client_secret"] = s.ml_client_secret
+            return creds
 
     def _client_creds(self) -> tuple[str, str]:
         """Per-integration client_id/secret when present, else env fallback."""

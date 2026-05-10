@@ -34,6 +34,7 @@ from app.services.listings_import import (
     run_import_listings,
 )
 from app.services.marketplaces.bling import BlingClient
+from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.pricing.batch import run_push_prices_batch
@@ -318,6 +319,8 @@ async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_
                     client = BlingClient(creds, on_token_refresh=_persist)
                 elif platform == IntegrationPlatform.SHOPEE:
                     client = ShopeeClient(creds, on_token_refresh=_persist)
+                elif platform == IntegrationPlatform.ML:
+                    client = MercadoLivreClient(creds, on_token_refresh=_persist)
                 else:
                     continue
                 await client.refresh()
@@ -343,6 +346,11 @@ async def bling_token_refresh(ctx: dict) -> None:
 async def shopee_token_refresh(ctx: dict) -> None:
     """Refresh Shopee tokens expiring within 6h (Shopee tokens last 4h)."""
     await _refresh_tokens_for(IntegrationPlatform.SHOPEE, expiring_within_s=6 * 3600)
+
+
+async def ml_token_refresh(ctx: dict) -> None:
+    """Refresh Mercado Livre tokens expiring within 2h (ML access tokens last 6h)."""
+    await _refresh_tokens_for(IntegrationPlatform.ML, expiring_within_s=2 * 3600)
 
 
 async def shopee_discrepancy_check(ctx: dict) -> None:
@@ -617,6 +625,7 @@ class WorkerSettings:
         cron(daily_sync_scheduler, minute=_FIVE_MIN, run_at_startup=False),
         cron(bling_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(shopee_token_refresh, hour={0, 4, 8, 12, 16, 20}, minute=0, run_at_startup=False),
+        cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(shopee_discrepancy_check, hour={1, 5, 9, 13, 17, 21}, minute=0, run_at_startup=False),
         cron(background_jobs_gc, hour=6, minute=30, run_at_startup=False),  # 03:30 BRT
         cron(sync_logs_partition_gc, day=15, hour=3, minute=0, run_at_startup=False),
@@ -651,6 +660,7 @@ __all__ = [
     "ingest_bling_order_run",
     "low_stock_polling",
     "ml_backfill_run",
+    "ml_token_refresh",
     "push_prices_batch_run",
     "sync_bling_costs_run",
     "shopee_discrepancy_check",
