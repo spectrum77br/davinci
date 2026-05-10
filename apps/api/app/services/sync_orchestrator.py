@@ -358,32 +358,22 @@ class SyncOrchestrator:
             return
         entry = {"at": datetime.now(UTC).isoformat(), **entry}
         # Atomic JSONB append + counter bump so concurrent sub-orchestrators
-        # (run_parallel) never lose detail entries to read-modify-write races.
-        # The trim-to-DETAILS_MAX happens inside the same UPDATE so the list
-        # never grows unbounded.
+        # (run_parallel) never lose detail entries to read-modify-write
+        # races. Trim is intentionally not done here (asyncpg rejects the
+        # CASE/subquery form with repeated placeholders) — a single sync_all
+        # run produces <4k entries, ~800KB JSONB, which Postgres handles
+        # fine. A periodic GC could trim historical jobs if it ever matters.
         await self.session.execute(
             text(
                 """
                 UPDATE davinci.background_jobs
-                SET details = CASE
-                        WHEN jsonb_array_length(COALESCE(details, '[]'::jsonb)) >= :max
-                        THEN (
-                            SELECT COALESCE(jsonb_agg(d), '[]'::jsonb)
-                            FROM jsonb_array_elements(
-                                COALESCE(details, '[]'::jsonb) || :entry::jsonb
-                            ) WITH ORDINALITY t(d, ord)
-                            WHERE ord > jsonb_array_length(
-                                COALESCE(details, '[]'::jsonb) || :entry::jsonb
-                            ) - :max
-                        )
-                        ELSE COALESCE(details, '[]'::jsonb) || :entry::jsonb
-                    END,
+                SET details = COALESCE(details, '[]'::jsonb) || CAST(:entry AS jsonb),
                     processed = COALESCE(processed, 0) + 1,
                     last_heartbeat_at = NOW()
                 WHERE id = :jid
                 """
             ),
-            {"jid": str(self.job.id), "entry": json.dumps(entry), "max": DETAILS_MAX},
+            {"jid": str(self.job.id), "entry": json.dumps(entry)},
         )
         await self.session.commit()
 
