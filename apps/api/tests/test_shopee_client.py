@@ -128,7 +128,8 @@ async def test_update_stock_ok(db: AsyncSession, user: User) -> None:
     assert route.called
     body = route.calls.last.request.content
     assert b'"item_id": 500' in body or b'"item_id":500' in body
-    assert b'"normal_stock": 12' in body or b'"normal_stock":12' in body
+    assert b'"seller_stock"' in body
+    assert b'"stock": 12' in body or b'"stock":12' in body
 
 
 # ---------------------------------------------------------------- B5 (banned)

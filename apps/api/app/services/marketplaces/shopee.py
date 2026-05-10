@@ -17,7 +17,10 @@ Credentials shape stored in `integrations.credentials`:
     }
 
 Stock update endpoint: POST /api/v2/product/update_stock
-  body: {"item_id": int, "stock_list": [{"model_id": int, "normal_stock": int}]}
+  body: {"item_id": int, "stock_list": [{"model_id": int,
+        "seller_stock": [{"stock": int}]}]}
+  Note: `normal_stock` was deprecated; Shopee now rejects it with
+  "invalid field seller_stock, value must Not Null".
 For listings without variations, `model_id=0` writes to the master.
 """
 
@@ -205,7 +208,9 @@ class ShopeeClient:
 
         body = {
             "item_id": item_id,
-            "stock_list": [{"model_id": model_id, "normal_stock": qty}],
+            "stock_list": [
+                {"model_id": model_id, "seller_stock": [{"stock": qty}]}
+            ],
         }
         try:
             r = await self._request("POST", "/api/v2/product/update_stock", json=body)
