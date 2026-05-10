@@ -396,7 +396,7 @@ async def run_ingest_bling_order(
     For non-exclusion events, also enqueues a SYNC_PRODUCT job per matched SKU
     so the sale-driven stock refresh is visible in the jobs UI, and optionally
     sends a Telegram notification."""
-    if event == "pedido.exclusao":
+    if event in ("pedido.exclusao", "order.deleted"):
         n = await mark_order_excluido(session, bling_order_id)
         await session.commit()
         logger.info(

@@ -273,12 +273,6 @@ async def receive_bling_webhook(
         headers_seen=dict(request.headers),
     )
 
-    if not x_bling_event:
-        logger.warning(
-            "bling_webhook_missing_event_header",
-            body_full=body[:2000].decode("utf-8", errors="replace"),
-        )
-
     delivery_key = x_bling_delivery or hashlib.sha256(body).hexdigest()
     if not await _claim_delivery(delivery_key):
         return {"ack": True, "duplicate": True, "delivery_id": delivery_key}
@@ -290,11 +284,19 @@ async def receive_bling_webhook(
     except json.JSONDecodeError:
         return {"ack": True, "ignored": "invalid_json"}
 
-    if x_bling_event and x_bling_event.startswith("pedido."):
+    # Bling v1 webhooks carry `event` inside the JSON body, not in a header
+    # (legacy deliveries still set X-Bling-Event). Body wins when present so
+    # current Bling deliveries route correctly.
+    body_event = parsed.get("event") if isinstance(parsed.get("event"), str) else None
+    bling_event = body_event or x_bling_event
+
+    if bling_event and (
+        bling_event.startswith("pedido.") or bling_event.startswith("order.")
+    ):
         return await _handle_pedido_event(
             session,
             parsed=parsed,
-            event=x_bling_event,
+            event=bling_event,
             delivery_key=delivery_key,
         )
 
