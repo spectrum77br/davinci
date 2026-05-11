@@ -124,6 +124,8 @@ class PricingProductPatch(BaseModel):
 
 class PricingProductOut(PricingProductBase):
     model_config = ConfigDict(from_attributes=True)
+    sku: str = Field(max_length=2048)
+    name: str = Field(max_length=512)
     id: UUID
     user_id: UUID
     created_at: datetime
