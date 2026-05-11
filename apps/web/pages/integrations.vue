@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { SquarePen, Plus, RefreshCw, Trash2, Zap } from 'lucide-vue-next'
+import { SquarePen, Plus, RefreshCw, Trash2, Zap, Search } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'empresa', action: 'view' } })
 
@@ -45,6 +45,7 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const testingId = ref<string | null>(null)
 const showNew = ref(false)
+const filter = ref('')
 
 const canEdit = useCan('empresa', 'edit')
 const canDelete = useCan('empresa', 'delete')
@@ -72,9 +73,29 @@ await refresh()
 const companyById = computed(() => Object.fromEntries(companies.value.map(c => [c.id, c])))
 const storeById = computed(() => Object.fromEntries(stores.value.map(s => [s.id, s])))
 
+const filtered = computed(() => {
+  const q = filter.value.trim().toLowerCase()
+  if (!q) return items.value
+  return items.value.filter(i => {
+    const store = i.store_id ? storeById.value[i.store_id] : null
+    const company = i.company_id ? companyById.value[i.company_id] : null
+    const hay = [
+      i.name,
+      i.platform,
+      PLATFORM_LABELS[i.platform],
+      i.status,
+      store?.marketplace,
+      store?.apelido_override,
+      company?.apelido,
+      company?.razao_social,
+    ].filter(Boolean).join(' ').toLowerCase()
+    return hay.includes(q)
+  })
+})
+
 const grouped = computed(() => {
   const map: Record<string, Integration[]> = {}
-  for (const i of items.value) {
+  for (const i of filtered.value) {
     const key = i.company_id || 'sem-empresa'
     map[key] ??= []
     map[key].push(i)
@@ -140,7 +161,16 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">
         <RefreshCw class="size-4 mr-1" /> recarregar
       </Button>
-      <Button v-if="canEdit" class="ml-auto" size="sm" @click="showNew = true">
+      <div class="relative ml-auto w-full sm:w-72">
+        <Search class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+        <input
+          v-model="filter"
+          type="search"
+          placeholder="filtrar integrações…"
+          class="w-full h-9 rounded-lg border bg-muted/40 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:bg-background"
+        />
+      </div>
+      <Button v-if="canEdit" size="sm" @click="showNew = true">
         <Plus class="size-4 mr-1" /> Nova (manual)
       </Button>
     </div>
@@ -193,6 +223,9 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
 
     <div v-if="!loading && items.length === 0" class="text-muted-foreground text-sm">
       nenhuma integração — conecte via OAuth na página da empresa, ou crie manualmente.
+    </div>
+    <div v-else-if="!loading && filtered.length === 0" class="text-muted-foreground text-sm">
+      nenhuma integração corresponde ao filtro “{{ filter }}”.
     </div>
 
     <IntegrationFormModal

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Search, Bell, LogOut, Sun, Moon } from 'lucide-vue-next'
+import { Bell, LogOut, Sun, Moon } from 'lucide-vue-next'
 
 const auth = useAuthStore()
 const colorMode = useState<'light' | 'dark'>('color-mode', () => 'light')
@@ -35,16 +35,6 @@ async function logout() {
 
 <template>
   <header class="h-14 sticky top-0 z-30 bg-background/80 backdrop-blur border-b flex items-center gap-3 px-5">
-    <div class="relative flex-1 max-w-md">
-      <Search class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-      <input
-        type="search"
-        placeholder="Buscar SKU, anúncio, conta…"
-        class="w-full h-9 rounded-lg border bg-muted/40 pl-9 pr-12 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:bg-background"
-      />
-      <span class="absolute right-2 top-1/2 -translate-y-1/2 kbd">⌘K</span>
-    </div>
-
     <div class="ml-auto flex items-center gap-1">
       <button
         type="button"
