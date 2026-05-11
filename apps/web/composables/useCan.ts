@@ -11,7 +11,6 @@ export type Resource =
   | 'sincronizacoes'
   | 'devolucoes'
   | 'reembolso'
-  | 'tarefas'
   | 'margem'
   | 'empresa'
   | 'cadastro'
@@ -30,7 +29,6 @@ export const RESOURCES: Resource[] = [
   'sincronizacoes',
   'devolucoes',
   'reembolso',
-  'tarefas',
   'margem',
   'empresa',
   'cadastro',
@@ -50,7 +48,6 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   sincronizacoes: 'Sincronizações',
   devolucoes: 'Devoluções',
   reembolso: 'Reembolso',
-  tarefas: 'Tarefas',
   margem: 'Margem',
   empresa: 'Empresa',
   cadastro: 'Cadastro',

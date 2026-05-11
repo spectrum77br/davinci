@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
   Package, Megaphone, DollarSign, Truck, RefreshCw, Undo2,
-  Receipt, ListChecks, TrendingUp, ShieldCheck, Settings, Bell,
+  Receipt, TrendingUp, ShieldCheck, Settings, Bell,
   FileSearch, AlertTriangle, Store, ChevronLeft, ChevronRight,
 } from 'lucide-vue-next'
 
@@ -53,7 +53,6 @@ const sections: Section[] = [
     label: 'Sistema',
     items: [
       { to: '/sincronizacoes', label: 'Sincronizações', icon: RefreshCw, resource: 'sincronizacoes' },
-      { to: '/tarefas', label: 'Tarefas', icon: ListChecks, resource: 'tarefas' },
       { to: '/integrations', label: 'Integrações', icon: Plug, resource: 'empresa' },
       { to: '/alertas', label: 'Alertas', icon: Bell },
     ],

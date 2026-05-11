@@ -13,7 +13,6 @@ Resource = Literal[
     "sincronizacoes",
     "devolucoes",
     "reembolso",
-    "tarefas",
     "margem",
     "empresa",
     "cadastro",
