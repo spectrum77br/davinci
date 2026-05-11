@@ -71,7 +71,23 @@ class AmazonClient:
 
     @property
     def expires_at(self) -> int:
-        return int(self.creds.get("expires_at") or 0)
+        raw = self.creds.get("expires_at")
+        if raw in (None, "", 0):
+            return 0
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, float):
+            return int(raw)
+        s = str(raw).strip()
+        if s.isdigit():
+            return int(s)
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            return int(dt.timestamp())
+        except ValueError:
+            return 0
 
     @property
     def base_url(self) -> str:
