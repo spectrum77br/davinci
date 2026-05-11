@@ -93,6 +93,7 @@ class BlingClient:
                 headers={
                     "Accept": "application/json",
                     "Content-Type": "application/x-www-form-urlencoded",
+                    "enable-jwt": "1",
                 },
                 data={
                     "grant_type": "authorization_code",
@@ -121,6 +122,7 @@ class BlingClient:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
+            "enable-jwt": "1",
         }
         auth = None
         cid, csec = self._client_creds()
