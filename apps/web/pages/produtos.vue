@@ -465,8 +465,9 @@ const stats = computed(() => ({
                     :key="l.id"
                     class="pill"
                     :class="l.last_sync_status === 'ok' ? 'pill-success' : l.last_sync_status === 'fatal' ? 'pill-danger' : 'pill-muted'"
+                    :title="l.platform"
                   >
-                    {{ l.platform }}
+                    {{ integrationById[l.integration_id]?.name || l.platform }}
                   </span>
                   <span v-if="p.links.length === 0" class="text-xs text-muted-foreground">—</span>
                 </div>
