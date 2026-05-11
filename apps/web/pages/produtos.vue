@@ -675,7 +675,12 @@ const stats = computed(() => ({
           <div v-else class="space-y-2">
             <div class="flex justify-between text-sm">
               <span>Status: <strong>{{ activeJob.status }}</strong></span>
-              <span class="tabular-nums">{{ activeJob.processed }} / {{ activeJob.total }}</span>
+              <span class="tabular-nums">
+                {{ activeJob.processed }} / {{ activeJob.total }} links
+                <span v-if="(activeJob.payload as any)?.total_products" class="text-muted-foreground">
+                  · {{ (activeJob.payload as any).total_products }} produtos
+                </span>
+              </span>
             </div>
             <div class="h-2 bg-muted rounded overflow-hidden">
               <div

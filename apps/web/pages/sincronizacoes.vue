@@ -132,8 +132,13 @@ function fmtPayloadHint(j: Job): string {
   if (j.type === 'import_listings') {
     return `integ ${(p.integration_id as string | undefined)?.slice(0, 8) ?? '?'}`
   }
-  if (j.type === 'sync_all' && r.total_links != null) {
-    return `${r.ok ?? 0} ok · ${r.fatal ?? 0} fatal · ${r.skipped ?? 0} skip`
+  if (j.type === 'sync_all') {
+    const prods = (p.total_products as number | undefined) ?? null
+    const tail = r.total_links != null
+      ? ` · ${r.ok ?? 0} ok · ${r.fatal ?? 0} fatal · ${r.skipped ?? 0} skip`
+      : ''
+    if (prods != null) return `${prods} produtos${tail}`
+    return tail.trim().replace(/^· /, '')
   }
   if (j.type === 'refresh_bling_stock' && r.updated != null) {
     return `${r.updated} updated · ${r.pages ?? 0} pages`
@@ -201,7 +206,7 @@ function fmtPayloadHint(j: Job): string {
             <td class="text-muted-foreground text-xs">{{ fmtRelative(j.started_at || j.created_at) }}</td>
             <td class="text-muted-foreground text-xs tabular-nums">{{ fmtDuration(j) }}</td>
             <td class="text-right tabular-nums text-xs">
-              <span v-if="j.total > 0">{{ j.processed }} / {{ j.total }}</span>
+              <span v-if="j.total > 0">{{ j.processed }} / {{ j.total }} links</span>
               <span v-else class="text-muted-foreground">—</span>
             </td>
             <td><span :class="pillClass(j.status)">{{ j.status }}</span></td>
