@@ -119,6 +119,53 @@ async function loadAccounts() {
   }
 }
 
+// =========================================================== integrations
+type Integration = { id: string; name: string; platform: string }
+const integrations = ref<Integration[]>([])
+
+async function loadIntegrations() {
+  try {
+    integrations.value = await api<Integration[]>('/api/integrations')
+  } catch {
+    integrations.value = []
+  }
+}
+
+const PRICING_TO_INTEG_PLATFORM: Record<string, string> = {
+  mercadolivre: 'ml',
+  shopee: 'shopee',
+  amazon: 'amazon',
+  tiktok: 'tiktok',
+  temu: 'temu',
+}
+
+function integrationsForPricingPlatform(p: string): Integration[] {
+  const target = PRICING_TO_INTEG_PLATFORM[p]
+  if (!target) return []
+  return integrations.value
+    .filter((i) => i.platform === target)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+function integrationName(id: string | null): string {
+  if (!id) return '—'
+  return integrations.value.find((i) => i.id === id)?.name ?? '—'
+}
+
+async function setAccountIntegration(acc: Account, integration_id: string | null) {
+  try {
+    const updated = await api<Account>(`/api/pricing/accounts/${acc.id}`, {
+      method: 'PATCH',
+      body: { integration_id },
+    })
+    Object.assign(acc, updated)
+    flash(acc.id, 'integration_id')
+  } catch (e: any) {
+    accountsErr.value = e?.data?.detail?.code ?? 'save_failed'
+  }
+}
+
 const accountsByDept = computed(() => {
   const m: Record<DeptKey, Account[]> = { celular: [], mala: [], eletro: [], catalogo: [] }
   for (const a of accounts.value) {
@@ -924,6 +971,7 @@ function fmtMoney(v: string | number | null) {
 
 await loadAccounts()
 await loadProducts()
+await loadIntegrations()
 
 watch(
   tab,
@@ -1017,6 +1065,7 @@ watch(department, async () => {
             <tr>
               <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Nome</th>
               <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[100px]">Plataforma</th>
+              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[160px]">Integração</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Kit</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Comissão</th>
               <th
@@ -1038,12 +1087,12 @@ watch(department, async () => {
           </thead>
           <tbody>
             <tr v-if="accountsLoading && !accounts.length">
-              <td colSpan="14" class="text-center py-6 text-muted-foreground">
+              <td colSpan="15" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!accountsCurrent.length && !showAddAcc">
-              <td colSpan="14" class="text-center py-6 text-muted-foreground">
+              <td colSpan="15" class="text-center py-6 text-muted-foreground">
                 Nenhuma conta neste departamento.
               </td>
             </tr>
@@ -1066,6 +1115,7 @@ watch(department, async () => {
                   <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
               </td>
+              <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1">
                 <input
                   v-model.number="newAcc.kit_number"
@@ -1141,6 +1191,28 @@ watch(department, async () => {
                   <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
                 <span v-else>{{ platformLabel(acc.platform) }}</span>
+              </td>
+              <!-- integration -->
+              <td
+                class="border border-border px-1 py-1 text-xs text-left"
+                :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'integration_id') }"
+              >
+                <select
+                  v-if="canEditContas && integrationsForPricingPlatform(acc.platform).length"
+                  :value="acc.integration_id ?? ''"
+                  class="w-full text-xs bg-transparent outline-none"
+                  @change="(e) => setAccountIntegration(acc, (e.target as HTMLSelectElement).value || null)"
+                >
+                  <option value="">—</option>
+                  <option
+                    v-for="i in integrationsForPricingPlatform(acc.platform)"
+                    :key="i.id"
+                    :value="i.id"
+                  >{{ i.name }}</option>
+                </select>
+                <span v-else :class="{ 'text-muted-foreground': !acc.integration_id }">
+                  {{ integrationName(acc.integration_id) }}
+                </span>
               </td>
               <!-- kit -->
               <td

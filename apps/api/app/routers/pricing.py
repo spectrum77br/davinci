@@ -1088,6 +1088,8 @@ PRICING_TO_INTEG_PLATFORM = {
     "mercadolivre": IntegrationPlatform.ML,
     "shopee": IntegrationPlatform.SHOPEE,
     "amazon": IntegrationPlatform.AMAZON,
+    "tiktok": IntegrationPlatform.TIKTOK,
+    "temu": IntegrationPlatform.TEMU,
 }
 
 
