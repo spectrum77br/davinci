@@ -97,28 +97,12 @@ async def _verify_bling_signature(
         sig = sig[len("sha256=") :]
     expected = hmac.new(secret, body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, sig):
-        import base64
-        alt_keys = {
-            "client_secret": (s.bling_client_secret or "").encode(),
-            "client_id": (s.bling_client_id or "").encode(),
-            "webhook_secret_lower": (s.bling_webhook_secret or "").lower().encode(),
-            "webhook_secret_upper": (s.bling_webhook_secret or "").upper().encode(),
-        }
-        alt_matches = {}
-        for name, k in alt_keys.items():
-            if not k:
-                continue
-            h = hmac.new(k, body, hashlib.sha256).hexdigest()
-            alt_matches[name] = {"prefix": h[:8], "match": hmac.compare_digest(h, sig)}
-        body_b64 = base64.b64encode(body).decode() if len(body) <= 4096 else None
         snap = {
             "body_len": len(body),
             "body_sha256_prefix": body_sha256_prefix,
-            "body_b64": body_b64,
             "secret_len": len(secret),
-            "received": sig,
-            "expected": expected,
-            "alt_matches": alt_matches,
+            "received_prefix": sig[:8],
+            "expected_prefix": expected[:8],
             "bling_headers": bling_headers,
         }
         await _bump_sig_failure("bad_signature", snap)
