@@ -114,6 +114,7 @@ async def _upsert_listing(
             platform=integ.platform,
             external_id=external_id,
             sku=sku,
+            listing_type=norm.get("listing_type"),
             title=title,
             description=norm.get("description"),
             price=norm.get("price"),
@@ -128,6 +129,7 @@ async def _upsert_listing(
         return "created"
 
     existing.sku = sku
+    existing.listing_type = norm.get("listing_type")
     existing.title = title
     existing.description = norm.get("description")
     existing.price = norm.get("price")
@@ -161,13 +163,13 @@ async def _create_product_links_for_matched(
         f"""
         INSERT INTO davinci.product_links (
             id, user_id, product_id, integration_id, store_id, platform,
-            external_id, external_sku, listing_title, stock, price,
+            external_id, external_sku, listing_title, listing_type, stock, price,
             last_sync_status, last_sync_at, created_at, updated_at
         )
         SELECT
             gen_random_uuid(), l.user_id, l.product_id, l.integration_id,
             i.store_id, l.platform, l.external_id, l.sku, l.title,
-            l.stock, NULL, 'pending', NULL, NOW(), NOW()
+            l.listing_type, l.stock, NULL, 'pending', NULL, NOW(), NOW()
         FROM davinci.listings l
         JOIN davinci.integrations i ON i.id = l.integration_id
         WHERE l.product_id IS NOT NULL

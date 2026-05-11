@@ -21,6 +21,7 @@ type ProductLink = {
   variation_id: string | null
   external_sku: string | null
   listing_title: string | null
+  listing_type: string | null
   stock: number | null
   price: string | null
   last_sync_status: string
@@ -146,6 +147,24 @@ async function toggleAutoSync() {
 
 const integrationById = computed(() => Object.fromEntries(integrations.value.map(i => [i.id, i])))
 const blingIntegrations = computed(() => integrations.value.filter(i => i.platform === 'bling'))
+
+type MarketCol = 'shopee' | 'amazon' | 'ml_classico' | 'ml_premium' | 'tiktok'
+
+function linkCol(l: ProductLink): MarketCol | null {
+  if (l.platform === 'shopee') return 'shopee'
+  if (l.platform === 'amazon') return 'amazon'
+  if (l.platform === 'tiktok') return 'tiktok'
+  if (l.platform === 'ml') {
+    const t = (l.listing_type || '').toLowerCase()
+    if (t === 'ml premium') return 'ml_premium'
+    return 'ml_classico'
+  }
+  return null
+}
+
+function linksFor(p: Product, col: MarketCol): ProductLink[] {
+  return p.links.filter(l => linkCol(l) === col)
+}
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
@@ -432,10 +451,14 @@ const stats = computed(() => ({
             <th class="w-8"></th>
             <th class="w-8"></th>
             <th>SKU</th>
-            <th>Nome</th>
-            <th class="text-right">Custo</th>
-            <th class="text-right">Estoque</th>
-            <th>Links</th>
+            <th>Produto</th>
+            <th class="text-center">Bling</th>
+            <th class="text-center">Shopee</th>
+            <th class="text-center">Amazon</th>
+            <th class="text-center">ML Clássico</th>
+            <th class="text-center">ML Premium</th>
+            <th class="text-center">TikTok</th>
+            <th class="text-center">Status</th>
             <th class="w-20"></th>
           </tr>
         </thead>
@@ -452,25 +475,32 @@ const stats = computed(() => ({
               </td>
               <td class="font-mono text-xs">{{ p.sku }}</td>
               <td class="font-medium">{{ p.name }}</td>
-              <td class="text-right tabular-nums">{{ brl(p.cost_price) }}</td>
-              <td class="text-right tabular-nums">
-                <span :class="p.stock === 0 ? 'text-red-600 font-medium' : p.stock < p.min_stock ? 'text-amber-600' : ''">
+              <td class="text-center tabular-nums font-semibold">
+                <span :class="p.stock === 0 ? 'text-red-600' : p.stock < p.min_stock ? 'text-amber-600' : ''">
                   {{ p.stock }}
                 </span>
               </td>
-              <td>
-                <div class="flex gap-1 flex-wrap">
-                  <span
-                    v-for="l in p.links"
-                    :key="l.id"
-                    class="pill"
-                    :class="l.last_sync_status === 'ok' ? 'pill-success' : l.last_sync_status === 'fatal' ? 'pill-danger' : 'pill-muted'"
-                    :title="l.platform"
-                  >
-                    {{ integrationById[l.integration_id]?.name || l.platform }}
-                  </span>
-                  <span v-if="p.links.length === 0" class="text-xs text-muted-foreground">—</span>
+              <td v-for="col in (['shopee','amazon','ml_classico','ml_premium','tiktok'] as const)" :key="col" class="text-center">
+                <div v-if="linksFor(p, col).length === 0" class="text-xs text-muted-foreground">—</div>
+                <div v-else class="flex flex-col gap-1 items-center">
+                  <div v-for="l in linksFor(p, col)" :key="l.id" class="leading-tight">
+                    <div
+                      class="font-semibold tabular-nums"
+                      :class="l.last_sync_status === 'fatal' ? 'text-red-600' : ''"
+                    >{{ l.stock ?? 0 }}</div>
+                    <div class="text-[10px] text-muted-foreground">
+                      {{ integrationById[l.integration_id]?.name || l.platform }}
+                    </div>
+                  </div>
                 </div>
+              </td>
+              <td class="text-center">
+                <span
+                  class="pill text-[10px]"
+                  :class="p.stock < p.min_stock ? 'pill-danger' : 'pill-success'"
+                >
+                  {{ p.stock < p.min_stock ? 'BAIXO' : 'OK' }}
+                </span>
               </td>
               <td class="text-right">
                 <Button
@@ -489,7 +519,7 @@ const stats = computed(() => ({
               </td>
             </tr>
             <tr v-if="expanded.has(p.id)" class="bg-muted/30">
-              <td colspan="8" class="p-3">
+              <td colspan="12" class="p-3">
                 <div v-if="p.links.length === 0" class="text-xs text-muted-foreground">
                   Sem links. Rode o auto-link para vincular este SKU aos canais.
                 </div>
@@ -497,6 +527,7 @@ const stats = computed(() => ({
                   <thead>
                     <tr class="text-left text-muted-foreground">
                       <th>Plataforma</th>
+                      <th>Tipo</th>
                       <th>Integração</th>
                       <th>External ID</th>
                       <th>Variação</th>
@@ -509,6 +540,7 @@ const stats = computed(() => ({
                   <tbody>
                     <tr v-for="l in p.links" :key="l.id">
                       <td>{{ l.platform }}</td>
+                      <td>{{ l.listing_type || '—' }}</td>
                       <td>{{ integrationById[l.integration_id]?.name || l.integration_id }}</td>
                       <td class="font-mono">{{ l.external_id }}</td>
                       <td>{{ l.variation_id || '—' }}</td>
@@ -531,7 +563,7 @@ const stats = computed(() => ({
             </tr>
           </template>
           <tr v-if="items.length === 0">
-            <td colspan="8" class="py-8 text-center text-sm text-muted-foreground">
+            <td colspan="12" class="py-8 text-center text-sm text-muted-foreground">
               Nenhum produto. Use "importar Bling" para começar.
             </td>
           </tr>

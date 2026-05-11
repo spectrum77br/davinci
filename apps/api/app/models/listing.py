@@ -7,6 +7,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
+    String,
     Text,
     text,
 )
@@ -52,6 +53,7 @@ class Listing(Base, TimestampMixin):
     )
     external_id: Mapped[str] = mapped_column(Text, nullable=False)
     sku: Mapped[str | None] = mapped_column(Text, nullable=True)
+    listing_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

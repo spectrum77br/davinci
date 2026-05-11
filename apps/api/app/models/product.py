@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     Numeric,
+    String,
     Text,
     text,
 )
@@ -99,6 +100,7 @@ class ProductLink(Base, TimestampMixin):
     variation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     external_sku: Mapped[str | None] = mapped_column(Text, nullable=True)
     listing_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    listing_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
     price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     last_sync_status: Mapped[LinkSyncStatus] = mapped_column(

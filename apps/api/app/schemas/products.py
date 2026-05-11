@@ -20,6 +20,7 @@ class ProductLinkOut(BaseModel):
     variation_id: str | None = None
     external_sku: str | None = None
     listing_title: str | None = None
+    listing_type: str | None = None
     stock: int | None = None
     price: Decimal | None = None
     last_sync_status: str

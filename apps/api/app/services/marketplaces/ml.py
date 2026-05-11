@@ -414,6 +414,19 @@ class MercadoLivreClient:
 
 # ---------------------------------------------------------------- helpers
 
+_ML_LISTING_TYPE_MAP = {
+    "gold_pro": "ml premium",
+    "gold_premium": "ml premium",
+    "gold_special": "ml classico",
+}
+
+
+def _map_ml_listing_type(listing_type_id: str | None) -> str | None:
+    if not listing_type_id:
+        return None
+    return _ML_LISTING_TYPE_MAP.get(listing_type_id.lower())
+
+
 def _normalize_ml_item(body: dict) -> dict:
     sku = (body.get("seller_custom_field") or "").strip()
     if not sku:
@@ -441,6 +454,7 @@ def _normalize_ml_item(body: dict) -> dict:
         } else "inactive",
         "category": body.get("category_id"),
         "thumbnail_url": body.get("thumbnail") or body.get("secure_thumbnail"),
+        "listing_type": _map_ml_listing_type(body.get("listing_type_id")),
         "raw": body,
     }
 
