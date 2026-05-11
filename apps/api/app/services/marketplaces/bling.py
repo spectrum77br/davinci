@@ -32,7 +32,7 @@ logger = structlog.get_logger()
 
 BLING_AUTH_URL = "https://www.bling.com.br/Api/v3/oauth/authorize"
 BLING_TOKEN_URL = "https://www.bling.com.br/Api/v3/oauth/token"
-BLING_API_BASE = "https://www.bling.com.br/Api/v3"
+BLING_API_BASE = "https://api.bling.com.br/Api/v3"
 
 # Default page size for `/produtos`. Bling caps at 100.
 BLING_PRODUCTS_PAGE_SIZE = 100
