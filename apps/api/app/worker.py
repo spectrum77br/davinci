@@ -137,13 +137,18 @@ async def sync_all_run(
             # Count links upfront so processed/total stays a real ratio
             # (the orchestrator bumps `processed` once per link). The
             # product count goes into payload so the UI can show both.
-            from sqlalchemy import func as sa_func
-            from app.models import ProductLink as _PL
-            link_total = (
-                await s.execute(
-                    select(sa_func.count()).select_from(_PL).where(_PL.product_id.in_(pids))
-                )
-            ).scalar_one() if pids else 0
+            if pids:
+                link_total = (
+                    await s.execute(
+                        text(
+                            "SELECT COUNT(*) FROM davinci.product_links "
+                            "WHERE product_id = ANY(:pids)"
+                        ),
+                        {"pids": [str(p) for p in pids]},
+                    )
+                ).scalar_one()
+            else:
+                link_total = 0
             job.total = int(link_total)
             job.payload = {**(job.payload or {}), "total_products": len(products)}
             await s.commit()
