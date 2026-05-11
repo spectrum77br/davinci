@@ -465,7 +465,9 @@ class SyncOrchestrator:
         if self.job is not None:
             self.job.status = BackgroundJobStatus.RUNNING
             self.job.started_at = datetime.now(UTC)
-            self.job.total = len(product_ids)
+            # Note: do not overwrite job.total here. The caller (e.g.
+            # sync_all_run worker) pre-counts links so processed/total
+            # stays a real ratio. If unset, leave it as-is.
             await self.session.commit()
         # Detach the job from the parent session so sub-sessions don't
         # contend on the same row in cached ORM state. Sub-orchestrators
