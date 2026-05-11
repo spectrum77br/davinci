@@ -59,6 +59,12 @@ logger = structlog.get_logger()
 HEARTBEAT_EVERY = 25
 DETAILS_MAX = 500
 SYNC_ALL_CONCURRENCY = 8
+# Webhook keeps local Bling stock fresh. Bulk re-fetch through /produtos/{id}
+# bursts Cloudflare's 3 req/s gate and triggers 429s across every Bling call
+# (including /oauth/token). Cache the per-link refresh so daily sync_all
+# doesn't pay that cost — single-product manual syncs still bypass via the
+# `force_bling_refresh=True` flag.
+BLING_REFRESH_TTL_SECONDS = 86_400
 
 
 @dataclass(slots=True)
@@ -88,10 +94,12 @@ class SyncOrchestrator:
         *,
         user_id: UUID,
         job: BackgroundJob | None = None,
+        force_bling_refresh: bool = False,
     ):
         self.session = session
         self.user_id = user_id
         self.job = job
+        self.force_bling_refresh = force_bling_refresh
         self.report = OrchestratorReport()
         self._client_cache: dict[UUID, object] = {}
         self._integration_cache: dict[UUID, Integration] = {}
@@ -135,6 +143,17 @@ class SyncOrchestrator:
     async def _refresh_bling(self, product: Product, link: ProductLink) -> SyncResult:
         """Bling refresh-only path. Pull stock from Bling, write back to local
         product + link. No outbound stock push in 4a."""
+        if not self.force_bling_refresh and link.last_sync_at is not None:
+            age = (datetime.now(UTC) - link.last_sync_at).total_seconds()
+            if age < BLING_REFRESH_TTL_SECONDS:
+                return SyncResult(
+                    status=SyncStatus.SKIPPED,
+                    qty_before=link.stock,
+                    qty_after=link.stock,
+                    error_code="bling_refresh_cached",
+                    error_detail=f"age={int(age)}s ttl={BLING_REFRESH_TTL_SECONDS}s",
+                    payload={"source": "bling_refresh_cached"},
+                )
         integration = await self._get_integration(link.integration_id)
         client = await self._client(integration)
         if not isinstance(client, BlingClient):
@@ -497,7 +516,10 @@ class SyncOrchestrator:
                             else None
                         )
                         sub_orch = SyncOrchestrator(
-                            sub_s, user_id=user_id, job=sub_job
+                            sub_s,
+                            user_id=user_id,
+                            job=sub_job,
+                            force_bling_refresh=self.force_bling_refresh,
                         )
 
                         bling_links = [
