@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     bling_client_secret: str = ""
     bling_redirect_uri: str = ""
     bling_webhook_secret: str = ""
+    bling_basic_auth: str = ""
 
     shopee_partner_id: str = ""
     shopee_partner_key: str = ""

@@ -17,9 +17,10 @@ def client_for(
     platform: IntegrationPlatform,
     creds: dict,
     on_token_refresh: Callable[[dict], Awaitable[None]] | None = None,
+    integration_id=None,
 ) -> MarketplaceClient:
     if platform == IntegrationPlatform.BLING:
-        return BlingClient(creds, on_token_refresh=on_token_refresh)
+        return BlingClient(creds, on_token_refresh=on_token_refresh, integration_id=integration_id)
     if platform == IntegrationPlatform.ML:
         return MercadoLivreClient(creds, on_token_refresh=on_token_refresh)
     if platform == IntegrationPlatform.SHOPEE:

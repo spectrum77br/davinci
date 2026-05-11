@@ -67,7 +67,7 @@ async def _build_client(session: AsyncSession, integ: Integration) -> BlingClien
             _it.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
         await _s.commit()
 
-    return BlingClient(creds, on_token_refresh=_persist)
+    return BlingClient(creds, on_token_refresh=_persist, integration_id=integ.id)
 
 
 async def run_refresh_bling_stock(

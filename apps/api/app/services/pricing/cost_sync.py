@@ -87,7 +87,7 @@ async def run_sync_bling_costs(
             integ.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
         await session.commit()
 
-    client = BlingClient(creds, on_token_refresh=_persist)
+    client = BlingClient(creds, on_token_refresh=_persist, integration_id=integ.id)
 
     # Index: product.sku → product.bling_product_id (only those linked).
     products = (

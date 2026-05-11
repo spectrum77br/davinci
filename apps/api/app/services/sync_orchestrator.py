@@ -128,7 +128,7 @@ class SyncOrchestrator:
                 integration.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
             await self.session.commit()
 
-        c = client_for(integration.platform, creds, on_token_refresh=_persist_refresh)
+        c = client_for(integration.platform, creds, on_token_refresh=_persist_refresh, integration_id=integration.id)
         self._client_cache[integration.id] = c
         return c
 

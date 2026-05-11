@@ -55,9 +55,11 @@ class BlingClient:
         self,
         creds: dict,
         on_token_refresh=None,
+        integration_id=None,
     ):
         self.creds = dict(creds)
         self._on_refresh = on_token_refresh
+        self._integration_id = integration_id
 
     @property
     def access_token(self) -> str | None:
@@ -115,15 +117,22 @@ class BlingClient:
         rt = self.creds.get("refresh_token")
         if not rt:
             raise RuntimeError("missing refresh_token")
+        s = get_settings()
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        auth = None
         cid, csec = self._client_creds()
+        if s.bling_basic_auth:
+            headers["Authorization"] = s.bling_basic_auth
+        else:
+            auth = (cid, csec)
         async with httpx.AsyncClient(timeout=20.0) as c:
             r = await c.post(
                 BLING_TOKEN_URL,
-                auth=(cid, csec),
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
+                auth=auth,
+                headers=headers,
                 data={"grant_type": "refresh_token", "refresh_token": rt},
             )
             if r.status_code >= 400:
@@ -135,7 +144,13 @@ class BlingClient:
                     rt_prefix=rt[:8],
                 )
                 r.raise_for_status()
-            self.creds.update(_normalize_token(r.json(), prev=self.creds))
+            new_creds = _normalize_token(r.json(), prev=self.creds)
+        # Persist FIRST via independent session — Bling already rotated RT,
+        # losing it here means permanent lockout. After durable write, update
+        # in-memory state and fire legacy callback (if any).
+        if self._integration_id is not None:
+            await _persist_bling_creds(self._integration_id, new_creds)
+        self.creds = new_creds
         if self._on_refresh:
             await self._on_refresh(self.creds)
 
@@ -385,3 +400,31 @@ def _normalize_token(payload: dict, prev: dict | None = None) -> dict:
     out["expires_at"] = int(time.time()) + expires_in
     out["_obtained_at"] = datetime.now(UTC).isoformat()
     return out
+
+
+async def _persist_bling_creds(integration_id, new_creds: dict) -> None:
+    """Write fresh Bling creds to DB via an independent session.
+
+    Bling rotates refresh_token on every refresh — if we don't durably store
+    the new pair right after the HTTP 200, the integration locks out
+    permanently. Independent session avoids being trapped by a caller's
+    failing transaction."""
+    from app.db import session_scope
+    from app.models import Integration
+    from app.security.cipher import encrypt_json
+    async with session_scope() as s:
+        it = await s.get(Integration, integration_id)
+        if it is None:
+            logger.error("bling_persist_integration_missing", integration_id=str(integration_id))
+            return
+        it.credentials = encrypt_json(new_creds)
+        exp = new_creds.get("expires_at")
+        if exp:
+            it.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
+        await s.commit()
+        logger.info(
+            "bling_persist_ok",
+            integration_id=str(integration_id),
+            new_rt_prefix=str(new_creds.get("refresh_token", ""))[:8],
+            expires_at=exp,
+        )

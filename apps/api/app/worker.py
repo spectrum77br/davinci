@@ -378,7 +378,7 @@ async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_
                     await _s.commit()
 
                 if platform == IntegrationPlatform.BLING:
-                    client = BlingClient(creds, on_token_refresh=_persist)
+                    client = BlingClient(creds, integration_id=it.id)
                 elif platform == IntegrationPlatform.SHOPEE:
                     client = ShopeeClient(creds, on_token_refresh=_persist)
                 elif platform == IntegrationPlatform.ML:

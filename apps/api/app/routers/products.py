@@ -72,7 +72,7 @@ async def _bling_client_for(
             integration.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
         await session.commit()
 
-    return BlingClient(creds, on_token_refresh=on_refresh)
+    return BlingClient(creds, on_token_refresh=on_refresh, integration_id=integration.id)
 
 
 # ------------------------------------------------------------------ products

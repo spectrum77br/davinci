@@ -208,7 +208,7 @@ async def test_integration(
     if i is None:
         raise HTTPException(404, detail={"code": "integration_not_found"})
     creds = decrypt_json(i.credentials)
-    client = client_for(i.platform, creds, on_token_refresh=_make_token_save_callback(session, i))
+    client = client_for(i.platform, creds, on_token_refresh=_make_token_save_callback(session, i), integration_id=i.id)
     result = await client.test_connection()
     i.last_test_at = datetime.now(UTC)
     i.last_test_ok = result.ok
@@ -229,7 +229,7 @@ async def list_bling_stores(
     if i.platform != IntegrationPlatform.BLING:
         raise HTTPException(400, detail={"code": "not_bling"})
     creds = decrypt_json(i.credentials)
-    client = BlingClient(creds, on_token_refresh=_make_token_save_callback(session, i))
+    client = BlingClient(creds, on_token_refresh=_make_token_save_callback(session, i), integration_id=i.id)
     lojas = await client.list_lojas()
     items = [
         BlingStoreOut(

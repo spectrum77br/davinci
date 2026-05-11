@@ -85,7 +85,7 @@ async def _build_client(session, integ: Integration) -> BlingClient:
             integ.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
         await session.commit()
 
-    return BlingClient(creds, on_token_refresh=on_refresh)
+    return BlingClient(creds, on_token_refresh=on_refresh, integration_id=integ.id)
 
 
 async def run(args: argparse.Namespace) -> int:
