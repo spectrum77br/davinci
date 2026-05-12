@@ -1,0 +1,46 @@
+import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import NotFound from "@/pages/NotFound";
+import { Route, Switch } from "wouter";
+import ErrorBoundary from "./components/ErrorBoundary";
+import { ThemeProvider } from "./contexts/ThemeContext";
+import Dashboard from "./pages/Dashboard";
+import Integrations from "./pages/Integrations";
+import Products from "./pages/Products";
+import SyncLogs from "./pages/SyncLogs";
+import Alerts from "./pages/Alerts";
+import Settings from "./pages/Settings";
+import Onboarding from "./pages/Onboarding";
+import Pricing from "./pages/Pricing";
+
+function Router() {
+  return (
+    <Switch>
+      <Route path={"/"} component={Dashboard} />
+      <Route path={"/integrations"} component={Integrations} />
+      <Route path={"/products"} component={Products} />
+      <Route path={"/logs"} component={SyncLogs} />
+      <Route path={"/alerts"} component={Alerts} />
+      <Route path={"/settings"} component={Settings} />
+      <Route path={"/onboarding"} component={Onboarding} />
+      <Route path={"/pricing"} component={Pricing} />
+      <Route path={"/404"} component={NotFound} />
+      <Route component={NotFound} />
+    </Switch>
+  );
+}
+
+function App() {
+  return (
+    <ErrorBoundary>
+      <ThemeProvider defaultTheme="light">
+        <TooltipProvider>
+          <Toaster />
+          <Router />
+        </TooltipProvider>
+      </ThemeProvider>
+    </ErrorBoundary>
+  );
+}
+
+export default App;
