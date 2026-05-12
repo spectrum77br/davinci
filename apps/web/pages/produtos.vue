@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onUnmounted } from 'vue'
-import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X, Activity, Boxes, Loader2 } from 'lucide-vue-next'
+import { Plus, Trash2, Download, RefreshCw, ChevronDown, ChevronRight, X, Loader2, Zap, Upload, Search } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'produtos', action: 'view' } })
 
@@ -89,7 +89,7 @@ const page = ref(1)
 const pageSize = 50
 const search = ref('')
 const filtroIntegration = ref<string>('')
-const stockFilter = ref<'' | 'low' | 'zero'>('')
+const stockFilter = ref<'' | 'low' | 'ok' | 'zero'>('')
 const expanded = ref<Set<string>>(new Set())
 const selected = ref<Set<string>>(new Set())
 const loading = ref(false)
@@ -146,6 +146,7 @@ async function refreshAll() {
         (filtroIntegration.value ? `&integration_id=${filtroIntegration.value}` : '') +
         (stockFilter.value === 'low' ? `&low_stock=true` : '') +
         (stockFilter.value === 'zero' ? `&zero_stock=true` : '')),
+        // 'ok' is handled client-side (filteredItems) to avoid backend changes
       api<Integration[]>('/api/integrations'),
       api<UserSettings>('/api/settings'),
     ])
@@ -199,7 +200,26 @@ function linksFor(p: Product, col: MarketCol): ProductLink[] {
   return p.links.filter(l => linkCol(l) === col)
 }
 
+function hasIntegrationsForCol(col: MarketCol): boolean {
+  if (col === 'amazon') return integrations.value.some((i) => i.platform === 'amazon')
+  if (col === 'tiktok') return integrations.value.some((i) => (i.platform as string) === 'tiktok')
+  return false
+}
+
+function manualLink(_p: Product, col: MarketCol) {
+  // Backend não expõe endpoint de criação manual de link.
+  // Disparamos auto-link (que tenta vincular pelo SKU) — única opção sem mexer no backend.
+  alert(`Vincular manualmente ainda não disponível. Use "Vincular Automático" na toolbar — ele tenta casar este SKU com anúncios da ${col === 'amazon' ? 'Amazon' : 'TikTok'} pelo nome/SKU.`)
+}
+
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+
+const filteredItems = computed(() => {
+  if (stockFilter.value === 'ok') {
+    return items.value.filter((p) => p.stock > 0 && p.stock >= p.min_stock)
+  }
+  return items.value
+})
 
 function toggleExpand(id: string) {
   if (expanded.value.has(id)) expanded.value.delete(id)
@@ -468,12 +488,6 @@ onUnmounted(() => {
   if (pollHandle) clearInterval(pollHandle)
 })
 
-const stats = computed(() => ({
-  total: total.value,
-  comStock: items.value.filter(p => p.stock > 0).length,
-  baixo: items.value.filter(p => p.stock < p.min_stock).length,
-  semSku: items.value.filter(p => !p.sku).length,
-}))
 </script>
 
 <template>
@@ -496,26 +510,32 @@ const stats = computed(() => ({
             sync automático {{ autoSyncEnabled ? 'on' : 'off' }}
           </span>
         </label>
-        <Button v-if="canEdit" size="sm" variant="outline" @click="openImport">
-          <Download class="size-4 mr-1.5" /> importar Bling
+        <Button
+          v-if="canEdit"
+          size="sm"
+          variant="outline"
+          class="border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+          @click="startAutoLink"
+        >
+          <Zap class="size-4 mr-1.5" /> Vincular Automático
+        </Button>
+        <Button v-if="canEdit" size="sm" variant="outline" @click="startSyncAll">
+          <RefreshCw class="size-4 mr-1.5" /> Sincronizar Todos
+        </Button>
+        <Button
+          v-if="canEdit"
+          size="sm"
+          variant="outline"
+          class="border-orange-300 text-orange-700 hover:bg-orange-50"
+          @click="openImport"
+        >
+          <Download class="size-4 mr-1.5" /> Importar do Bling
         </Button>
         <Button v-if="canEdit" size="sm" variant="outline" @click="showImportCsv = true">
-          <Download class="size-4 mr-1.5" /> Importar CSV
+          <Upload class="size-4 mr-1.5" /> Importar CSV
         </Button>
-        <Button v-if="canEdit" size="sm" variant="outline" @click="showNewProduct = true">
+        <Button v-if="canEdit" size="sm" @click="showNewProduct = true">
           <Plus class="size-4 mr-1.5" /> Novo Produto
-        </Button>
-        <Button v-if="canEdit" size="sm" variant="outline" @click="startAutoLink">
-          <Link2 class="size-4 mr-1.5" /> auto-link
-        </Button>
-        <Button v-if="canEdit" size="sm" variant="outline" @click="startRefreshBlingStock">
-          <Boxes class="size-4 mr-1.5" /> estoque Bling
-        </Button>
-        <Button v-if="canEdit" size="sm" @click="startSyncAll">
-          <Activity class="size-4 mr-1.5" /> sync all
-        </Button>
-        <Button size="sm" variant="outline" @click="refreshAll">
-          <RefreshCw class="size-4 mr-1.5" /> recarregar
         </Button>
       </template>
     </PageHeader>
@@ -524,31 +544,23 @@ const stats = computed(() => ({
       {{ error }}
     </div>
 
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-      <StatCard label="Total produtos" :value="stats.total" :icon="Package" />
-      <StatCard label="Com estoque" :value="stats.comStock" />
-      <StatCard label="Estoque baixo" :value="stats.baixo" tone="warning" />
-      <StatCard label="Sem SKU" :value="stats.semSku" tone="danger" :icon="ImageOff" />
-    </div>
-
-    <div class="flex flex-wrap gap-2 items-center">
-      <Input v-model="search" placeholder="buscar SKU ou nome…" class="w-72" @keyup.enter="refreshAll" />
-      <select v-model="filtroIntegration" class="h-9 rounded-md border bg-background px-2 text-sm" @change="refreshAll">
-        <option value="">
-          <span class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">Todas</span>
-        </option>
-        <option v-for="i in integrations" :key="i.id" :value="i.id">
-          <span :class="platformBadgeClass(i.platform)">{{ i.platform }}</span> — {{ i.name }}
-        </option>
-      </select>
-      <select v-model="stockFilter" class="h-9 rounded-md border bg-background px-2 text-sm" @change="refreshAll">
+    <div class="flex flex-wrap gap-3 items-center">
+      <div class="relative flex-1 min-w-[260px]">
+        <Search class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+        <Input v-model="search" placeholder="Buscar por nome, SKU ou título do anúncio..." class="pl-9" @keyup.enter="refreshAll" />
+      </div>
+      <select v-model="stockFilter" class="h-9 w-[180px] rounded-md border bg-background px-2 text-sm" @change="refreshAll">
         <option value="">Todo estoque</option>
         <option value="low">Estoque baixo</option>
+        <option value="ok">Estoque OK</option>
         <option value="zero">Sem estoque</option>
       </select>
-      <Button size="sm" @click="refreshAll">filtrar</Button>
+      <select v-model="filtroIntegration" class="h-9 w-[220px] rounded-md border bg-background px-2 text-sm" @change="refreshAll">
+        <option value="">Todas as contas</option>
+        <option v-for="i in integrations" :key="i.id" :value="i.id">[{{ i.platform }}] {{ i.name }}</option>
+      </select>
       <span class="ml-auto text-xs text-muted-foreground">
-        {{ items.length }} de {{ total }} produtos · pág {{ page }}/{{ totalPages }}
+        {{ filteredItems.length }} de {{ total }} produtos · pág {{ page }}/{{ totalPages }}
       </span>
       <Button v-if="canDelete && selected.size > 0" size="sm" variant="destructive" @click="bulkDelete">
         <Trash2 class="size-4 mr-1.5" /> excluir {{ selected.size }}
@@ -570,11 +582,11 @@ const stats = computed(() => ({
             <th class="text-center">ML Premium</th>
             <th class="text-center">TikTok</th>
             <th class="text-center">Status</th>
-            <th class="w-20"></th>
+            <th class="text-right w-24">Ações</th>
           </tr>
         </thead>
         <tbody>
-          <template v-for="p in items" :key="p.id">
+          <template v-for="p in filteredItems" :key="p.id">
             <tr>
               <td>
                 <input type="checkbox" :checked="selected.has(p.id)" @change="toggleSelect(p.id)" />
@@ -592,7 +604,15 @@ const stats = computed(() => ({
                 </span>
               </td>
               <td v-for="col in (['shopee','amazon','ml_classico','ml_premium','tiktok'] as const)" :key="col" class="text-center">
-                <div v-if="linksFor(p, col).length === 0" class="text-xs text-muted-foreground">—</div>
+                <template v-if="linksFor(p, col).length === 0">
+                  <button
+                    v-if="(col === 'amazon' || col === 'tiktok') && hasIntegrationsForCol(col)"
+                    class="text-[10px] text-blue-500 hover:text-blue-700 hover:underline cursor-pointer"
+                    :title="`Vincular manualmente à ${col === 'amazon' ? 'Amazon' : 'TikTok'}`"
+                    @click="manualLink(p, col)"
+                  >+ vincular</button>
+                  <span v-else class="text-xs text-muted-foreground">—</span>
+                </template>
                 <div v-else class="flex flex-col gap-1 items-center">
                   <div v-for="l in linksFor(p, col)" :key="l.id" class="leading-tight">
                     <div
@@ -614,19 +634,29 @@ const stats = computed(() => ({
                 </span>
               </td>
               <td class="text-right">
-                <Button
-                  v-if="canEdit"
-                  size="icon"
-                  variant="ghost"
-                  :disabled="syncingProduct.has(p.id)"
-                  :title="syncingProduct.has(p.id) ? 'sincronizando…' : 'sync produto'"
-                  @click="syncProduct(p.id)"
-                >
-                  <RefreshCw class="size-4" :class="syncingProduct.has(p.id) ? 'animate-spin' : ''" />
-                </Button>
-                <Button v-if="canDelete" size="icon" variant="ghost" @click="deleteOne(p.id)">
-                  <Trash2 class="size-4" />
-                </Button>
+                <div class="flex items-center justify-end gap-1">
+                  <Button
+                    v-if="canEdit"
+                    size="icon"
+                    variant="ghost"
+                    class="text-cyan-600 hover:text-cyan-700 hover:bg-cyan-50"
+                    :disabled="syncingProduct.has(p.id)"
+                    :title="syncingProduct.has(p.id) ? 'sincronizando…' : 'Sincronizar este SKU'"
+                    @click="syncProduct(p.id)"
+                  >
+                    <RefreshCw class="size-4" :class="syncingProduct.has(p.id) ? 'animate-spin' : ''" />
+                  </Button>
+                  <Button
+                    v-if="canDelete"
+                    size="icon"
+                    variant="ghost"
+                    class="text-red-600 hover:text-red-700 hover:bg-red-50"
+                    title="Excluir produto"
+                    @click="deleteOne(p.id)"
+                  >
+                    <Trash2 class="size-4" />
+                  </Button>
+                </div>
               </td>
             </tr>
             <tr v-if="expanded.has(p.id)" class="bg-muted/30">
