@@ -100,6 +100,10 @@ const showAutoLink = ref(false)
 const showSyncAll = ref(false)
 const showRefreshStock = ref(false)
 
+// SSH-style selection dialogs
+const selectedAutoLinkIds = ref<Set<string>>(new Set())
+const selectedSyncAllIds = ref<Set<string>>(new Set())
+
 // Feature 1: CSV import
 const showImportCsv = ref(false)
 const csvFile = ref<File | null>(null)
@@ -181,6 +185,7 @@ async function toggleAutoSync() {
 
 const integrationById = computed(() => Object.fromEntries(integrations.value.map(i => [i.id, i])))
 const blingIntegrations = computed(() => integrations.value.filter(i => i.platform === 'bling'))
+const marketplaceIntegrations = computed(() => integrations.value.filter(i => i.platform !== 'bling'))
 
 type MarketCol = 'shopee' | 'amazon' | 'ml_classico' | 'ml_premium' | 'tiktok'
 
@@ -208,8 +213,13 @@ function hasIntegrationsForCol(col: MarketCol): boolean {
 
 function manualLink(_p: Product, col: MarketCol) {
   // Backend não expõe endpoint de criação manual de link.
-  // Disparamos auto-link (que tenta vincular pelo SKU) — única opção sem mexer no backend.
-  alert(`Vincular manualmente ainda não disponível. Use "Vincular Automático" na toolbar — ele tenta casar este SKU com anúncios da ${col === 'amazon' ? 'Amazon' : 'TikTok'} pelo nome/SKU.`)
+  // Pré-selecionamos as integrações dessa plataforma no dialog de auto-link.
+  const platform = col === 'amazon' ? 'amazon' : 'tiktok'
+  selectedAutoLinkIds.value = new Set(
+    marketplaceIntegrations.value.filter((i) => (i.platform as string) === platform).map((i) => i.id),
+  )
+  activeJob.value = null
+  showAutoLink.value = true
 }
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
@@ -348,18 +358,33 @@ async function syncProduct(id: string) {
   }
 }
 
-async function startSyncAll() {
+function openSyncAllDialog() {
+  // Pre-select all marketplace integrations (matches SSH default behavior).
+  selectedSyncAllIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
+  activeJob.value = null
   showSyncAll.value = true
+}
+
+function toggleSelectedSyncAll(id: string) {
+  if (selectedSyncAllIds.value.has(id)) selectedSyncAllIds.value.delete(id)
+  else selectedSyncAllIds.value.add(id)
+  selectedSyncAllIds.value = new Set(selectedSyncAllIds.value)
+}
+
+async function runSyncAll() {
+  if (selectedSyncAllIds.value.size === 0) return
   activeJob.value = null
   try {
     const r = await api<{ job_id: string }>('/api/jobs/sync-all', {
       method: 'POST',
-      body: { integration_ids: null, product_ids: null },
+      body: {
+        integration_ids: Array.from(selectedSyncAllIds.value),
+        product_ids: null,
+      },
     })
     startPolling(r.job_id)
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
-    showSyncAll.value = false
   }
 }
 
@@ -450,20 +475,35 @@ async function runImport() {
 
 // ---------------------------- Auto-link ------------------------------------
 
-const autoLinkIntegration = ref<string>('')
 const activeJob = ref<Job | null>(null)
 let pollHandle: number | null = null
 
-async function startAutoLink() {
-  showAutoLink.value = true
+function openAutoLinkDialog() {
+  selectedAutoLinkIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
   activeJob.value = null
-  const r = await api<{ job_id: string }>('/api/jobs/auto-link', {
-    method: 'POST',
-    body: {
-      integration_ids: autoLinkIntegration.value ? [autoLinkIntegration.value] : null,
-    },
-  })
-  startPolling(r.job_id)
+  showAutoLink.value = true
+}
+
+function toggleSelectedAutoLink(id: string) {
+  if (selectedAutoLinkIds.value.has(id)) selectedAutoLinkIds.value.delete(id)
+  else selectedAutoLinkIds.value.add(id)
+  selectedAutoLinkIds.value = new Set(selectedAutoLinkIds.value)
+}
+
+async function runAutoLink() {
+  if (selectedAutoLinkIds.value.size === 0) return
+  activeJob.value = null
+  try {
+    const r = await api<{ job_id: string }>('/api/jobs/auto-link', {
+      method: 'POST',
+      body: {
+        integration_ids: Array.from(selectedAutoLinkIds.value),
+      },
+    })
+    startPolling(r.job_id)
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
 }
 
 function startPolling(jobId: string) {
@@ -515,11 +555,11 @@ onUnmounted(() => {
           size="sm"
           variant="outline"
           class="border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-          @click="startAutoLink"
+          @click="openAutoLinkDialog"
         >
           <Zap class="size-4 mr-1.5" /> Vincular Automático
         </Button>
-        <Button v-if="canEdit" size="sm" variant="outline" @click="startSyncAll">
+        <Button v-if="canEdit" size="sm" variant="outline" @click="openSyncAllDialog">
           <RefreshCw class="size-4 mr-1.5" /> Sincronizar Todos
         </Button>
         <Button
@@ -801,89 +841,246 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Auto-link modal -->
+    <!-- Vincular Automático dialog (SSH-style) -->
     <div v-if="showAutoLink" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showAutoLink = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(600px,95vw)]">
-        <div class="flex items-center justify-between border-b p-3">
-          <h3 class="font-semibold">Auto-link</h3>
+      <div class="bg-background rounded-lg shadow-lg w-[min(560px,95vw)] max-h-[85vh] flex flex-col">
+        <div class="flex items-center justify-between border-b p-4">
+          <div>
+            <h3 class="font-semibold flex items-center gap-2">
+              <Zap class="size-5 text-emerald-600" />
+              Vincular Anúncios Automaticamente
+            </h3>
+            <p class="text-xs text-muted-foreground mt-1">
+              Selecione as contas que deseja vincular e a plataforma vai buscar os anúncios e vincular automaticamente pelo SKU.
+            </p>
+          </div>
           <button @click="showAutoLink = false"><X class="size-4" /></button>
         </div>
-        <div class="p-3 space-y-3">
-          <div v-if="!activeJob" class="space-y-2">
-            <label class="block text-sm">Integração (opcional — vazio = todas)</label>
-            <select v-model="autoLinkIntegration" class="h-9 w-full rounded-md border bg-background px-2 text-sm">
-              <option value="">todas</option>
-              <option v-for="i in integrations" :key="i.id" :value="i.id">{{ i.platform }} — {{ i.name }}</option>
-            </select>
-            <Button class="w-full" @click="startAutoLink">iniciar auto-link</Button>
+
+        <!-- Selection phase -->
+        <div v-if="!activeJob" class="p-4 space-y-4 flex-1 overflow-y-auto">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="text-sm font-medium">Selecione as contas para vincular:</label>
+              <div class="flex gap-2">
+                <Button variant="ghost" size="sm" class="text-xs h-7 px-2" @click="selectedAutoLinkIds = new Set(marketplaceIntegrations.map(i => i.id))">Todas</Button>
+                <Button variant="ghost" size="sm" class="text-xs h-7 px-2" @click="selectedAutoLinkIds = new Set()">Nenhuma</Button>
+              </div>
+            </div>
+            <div class="rounded-lg border max-h-[280px] overflow-y-auto">
+              <p v-if="marketplaceIntegrations.length === 0" class="text-sm text-muted-foreground text-center py-4">
+                Nenhuma integração de marketplace conectada.
+              </p>
+              <label
+                v-for="(integ, idx) in marketplaceIntegrations"
+                :key="integ.id"
+                class="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 cursor-pointer transition-colors"
+                :class="idx !== marketplaceIntegrations.length - 1 ? 'border-b' : ''"
+              >
+                <input
+                  type="checkbox"
+                  :checked="selectedAutoLinkIds.has(integ.id)"
+                  @change="toggleSelectedAutoLink(integ.id)"
+                />
+                <span :class="platformBadgeClass(integ.platform)">{{ integ.platform }}</span>
+                <span class="text-sm truncate">{{ integ.name }}</span>
+              </label>
+            </div>
+            <p v-if="marketplaceIntegrations.length > 0" class="text-xs text-muted-foreground">
+              {{ selectedAutoLinkIds.size }} de {{ marketplaceIntegrations.length }} conta(s) selecionada(s)
+            </p>
           </div>
-          <div v-else class="space-y-2">
-            <div class="flex justify-between text-sm">
+
+          <div class="rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <p class="text-xs text-amber-700">
+              <strong>Importante:</strong> Os SKUs precisam ser idênticos entre o Bling e os marketplaces para a vinculação funcionar.
+            </p>
+          </div>
+        </div>
+
+        <!-- Progress phase -->
+        <div v-else class="p-4 space-y-3 flex-1 overflow-y-auto">
+          <div class="flex justify-between text-sm">
+            <span class="flex items-center gap-2">
+              <Loader2 v-if="activeJob.status === 'running' || activeJob.status === 'pending'" class="size-4 animate-spin text-emerald-600" />
               <span>Status: <strong>{{ activeJob.status }}</strong></span>
-              <span class="tabular-nums">{{ activeJob.processed }} / {{ activeJob.total }}</span>
-            </div>
-            <div class="h-2 bg-muted rounded overflow-hidden">
-              <div
-                class="h-full bg-emerald-500 transition-all"
-                :style="`width: ${activeJob.total > 0 ? (activeJob.processed / activeJob.total) * 100 : 0}%`"
-              />
-            </div>
-            <div v-if="activeJob.error" class="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-700">
-              {{ activeJob.error }}
-            </div>
-            <ul class="max-h-48 overflow-auto text-xs space-y-1">
-              <li v-for="(d, idx) in activeJob.details" :key="idx" class="font-mono text-muted-foreground">
-                {{ JSON.stringify(d) }}
-              </li>
-            </ul>
-            <Button v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed'" class="w-full" variant="outline" @click="showAutoLink = false">
-              fechar
-            </Button>
+            </span>
+            <span class="tabular-nums">{{ activeJob.processed }} / {{ activeJob.total }}</span>
           </div>
+          <div class="h-2 bg-muted rounded overflow-hidden">
+            <div
+              class="h-full bg-emerald-500 transition-all"
+              :style="`width: ${activeJob.total > 0 ? (activeJob.processed / activeJob.total) * 100 : 0}%`"
+            />
+          </div>
+          <div v-if="activeJob.result && Object.keys(activeJob.result).length" class="text-xs text-muted-foreground">
+            vinculados: {{ (activeJob.result as any).linked ?? (activeJob.result as any).synced ?? 0 }}
+            <span v-if="(activeJob.result as any).errors !== undefined"> · erros: {{ (activeJob.result as any).errors }}</span>
+          </div>
+          <div v-if="activeJob.error" class="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+            {{ activeJob.error }}
+          </div>
+          <ul class="max-h-48 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
+            <li v-for="(d, idx) in activeJob.details" :key="idx" class="text-muted-foreground whitespace-pre-wrap">
+              {{ formatDetail(d) }}
+            </li>
+            <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
+              processando…
+            </li>
+          </ul>
+        </div>
+
+        <!-- Footer -->
+        <div class="border-t p-3 flex gap-2 justify-end">
+          <Button v-if="!activeJob" variant="outline" @click="showAutoLink = false">Cancelar</Button>
+          <Button
+            v-if="!activeJob"
+            class="bg-emerald-600 hover:bg-emerald-700 text-white"
+            :disabled="selectedAutoLinkIds.size === 0"
+            @click="runAutoLink"
+          >
+            <Zap class="size-4 mr-1.5" />
+            Iniciar Vinculação ({{ selectedAutoLinkIds.size }})
+          </Button>
+          <Button
+            v-if="activeJob && (activeJob.status === 'succeeded' || activeJob.status === 'failed' || activeJob.status === 'cancelled')"
+            variant="outline"
+            @click="showAutoLink = false"
+          >
+            Fechar
+          </Button>
+          <Button
+            v-else-if="activeJob"
+            variant="outline"
+            @click="showAutoLink = false"
+          >
+            Minimizar
+          </Button>
         </div>
       </div>
     </div>
 
-    <!-- Sync all modal -->
+    <!-- Sincronizar Todos dialog (SSH-style) -->
     <div v-if="showSyncAll" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showSyncAll = false">
-      <div class="bg-background rounded-lg shadow-lg w-[min(720px,95vw)]">
-        <div class="flex items-center justify-between border-b p-3">
-          <h3 class="font-semibold">Sincronização</h3>
+      <div class="bg-background rounded-lg shadow-lg w-[min(560px,95vw)] max-h-[85vh] flex flex-col">
+        <div class="flex items-center justify-between border-b p-4">
+          <div>
+            <h3 class="font-semibold flex items-center gap-2">
+              <RefreshCw class="size-5 text-cyan-600" :class="activeJob?.status === 'running' || activeJob?.status === 'pending' ? 'animate-spin' : ''" />
+              Sincronizar Todos os Produtos
+            </h3>
+            <p class="text-xs text-muted-foreground mt-1">
+              {{ activeJob && (activeJob.status === 'running' || activeJob.status === 'pending')
+                ? 'Sincronização em andamento. Você pode fechar este dialog — o processo continua em segundo plano.'
+                : 'Selecione as contas/plataformas que deseja sincronizar. O estoque do Bling será enviado para as plataformas selecionadas.' }}
+            </p>
+          </div>
           <button @click="showSyncAll = false"><X class="size-4" /></button>
         </div>
-        <div class="p-3 space-y-3">
-          <div v-if="!activeJob" class="text-sm text-muted-foreground">iniciando…</div>
-          <div v-else class="space-y-2">
-            <div class="flex justify-between text-sm">
-              <span>Status: <strong>{{ activeJob.status }}</strong></span>
-              <span class="tabular-nums">
-                {{ activeJob.processed }} / {{ activeJob.total }} links
-                <span v-if="(activeJob.payload as any)?.total_products" class="text-muted-foreground">
-                  · {{ (activeJob.payload as any).total_products }} produtos
-                </span>
-              </span>
+
+        <!-- Selection phase -->
+        <div v-if="!activeJob" class="p-4 space-y-4 flex-1 overflow-y-auto">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <label class="text-sm font-medium">Selecione as contas:</label>
+              <div class="flex gap-2">
+                <Button variant="ghost" size="sm" class="text-xs h-7 px-2" @click="selectedSyncAllIds = new Set(marketplaceIntegrations.map(i => i.id))">Todas</Button>
+                <Button variant="ghost" size="sm" class="text-xs h-7 px-2" @click="selectedSyncAllIds = new Set()">Nenhuma</Button>
+              </div>
             </div>
-            <div class="h-2 bg-muted rounded overflow-hidden">
-              <div
-                class="h-full bg-emerald-500 transition-all"
-                :style="`width: ${activeJob.total > 0 ? (activeJob.processed / activeJob.total) * 100 : 0}%`"
-              />
+            <div class="rounded-lg border max-h-[280px] overflow-y-auto">
+              <p v-if="marketplaceIntegrations.length === 0" class="text-sm text-muted-foreground text-center py-4">
+                Nenhuma integração de marketplace conectada.
+              </p>
+              <label
+                v-for="(integ, idx) in marketplaceIntegrations"
+                :key="integ.id"
+                class="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 cursor-pointer transition-colors"
+                :class="idx !== marketplaceIntegrations.length - 1 ? 'border-b' : ''"
+              >
+                <input
+                  type="checkbox"
+                  :checked="selectedSyncAllIds.has(integ.id)"
+                  @change="toggleSelectedSyncAll(integ.id)"
+                />
+                <span :class="platformBadgeClass(integ.platform)">{{ integ.platform }}</span>
+                <span class="text-sm flex-1 truncate">{{ integ.name }}</span>
+              </label>
             </div>
-            <div v-if="activeJob.error" class="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-700">
-              {{ activeJob.error }}
-            </div>
-            <ul class="max-h-72 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
-              <li v-for="(d, idx) in activeJob.details" :key="idx" class="text-muted-foreground whitespace-pre-wrap">
-                {{ formatDetail(d) }}
-              </li>
-              <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
-                aguardando primeiro link…
-              </li>
-            </ul>
-            <Button v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed'" class="w-full" variant="outline" @click="showSyncAll = false">
-              fechar
-            </Button>
+            <p v-if="marketplaceIntegrations.length > 0" class="text-xs text-muted-foreground">
+              {{ selectedSyncAllIds.size }} de {{ marketplaceIntegrations.length }} conta(s) selecionada(s)
+            </p>
           </div>
+
+          <div class="rounded-lg border border-cyan-200 bg-cyan-50 p-3">
+            <p class="text-xs text-cyan-700">
+              <strong>Info:</strong> A sincronização é executada em segundo plano. Você pode fechar esta janela a qualquer momento.
+            </p>
+          </div>
+        </div>
+
+        <!-- Progress phase -->
+        <div v-else class="p-4 space-y-3 flex-1 overflow-y-auto">
+          <div class="flex justify-between text-sm">
+            <span class="flex items-center gap-2">
+              <Loader2 v-if="activeJob.status === 'running' || activeJob.status === 'pending'" class="size-4 animate-spin text-cyan-600" />
+              <span>Status: <strong>{{ activeJob.status }}</strong></span>
+            </span>
+            <span class="tabular-nums font-semibold text-cyan-600">
+              {{ activeJob.total > 0 ? Math.round((activeJob.processed / activeJob.total) * 100) : 0 }}%
+            </span>
+          </div>
+          <div class="h-2 bg-muted rounded overflow-hidden">
+            <div
+              class="h-full bg-cyan-500 transition-all"
+              :style="`width: ${activeJob.total > 0 ? (activeJob.processed / activeJob.total) * 100 : 0}%`"
+            />
+          </div>
+          <div class="flex justify-between text-xs text-muted-foreground">
+            <span>{{ activeJob.processed }} / {{ activeJob.total }} links</span>
+            <span v-if="activeJob.result && Object.keys(activeJob.result).length" class="flex gap-3">
+              <span class="text-emerald-600">✓ {{ (activeJob.result as any).ok ?? (activeJob.result as any).synced ?? 0 }}</span>
+              <span v-if="(activeJob.result as any).failed" class="text-red-600">✗ {{ (activeJob.result as any).failed }}</span>
+            </span>
+          </div>
+          <div v-if="activeJob.error" class="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-700">
+            {{ activeJob.error }}
+          </div>
+          <ul class="max-h-60 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
+            <li v-for="(d, idx) in activeJob.details" :key="idx" class="text-muted-foreground whitespace-pre-wrap">
+              {{ formatDetail(d) }}
+            </li>
+            <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
+              processando…
+            </li>
+          </ul>
+        </div>
+
+        <!-- Footer -->
+        <div class="border-t p-3 flex gap-2 justify-end">
+          <Button v-if="!activeJob" variant="outline" @click="showSyncAll = false">Cancelar</Button>
+          <Button
+            v-if="!activeJob"
+            :disabled="selectedSyncAllIds.size === 0"
+            @click="runSyncAll"
+          >
+            <RefreshCw class="size-4 mr-1.5" />
+            Sincronizar ({{ selectedSyncAllIds.size }} contas)
+          </Button>
+          <Button
+            v-if="activeJob && (activeJob.status === 'succeeded' || activeJob.status === 'failed' || activeJob.status === 'cancelled')"
+            variant="outline"
+            @click="showSyncAll = false"
+          >
+            Fechar
+          </Button>
+          <Button
+            v-else-if="activeJob"
+            variant="outline"
+            @click="showSyncAll = false"
+          >
+            Minimizar
+          </Button>
         </div>
       </div>
     </div>
