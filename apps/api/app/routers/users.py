@@ -36,6 +36,7 @@ def _to_out(u: User) -> UserOut:
         upseller=u.upseller,
         bling_login=u.bling_login,
         adspower=u.adspower,
+        duoke=u.duoke,
         permissions=u.permissions or {},
         last_login_at=u.last_login_at,
         disabled_at=u.disabled_at,
@@ -150,6 +151,7 @@ async def create_user(
         upseller=body.upseller,
         bling_login=body.bling_login,
         adspower=body.adspower,
+        duoke=body.duoke,
         role=UserRole.USER,
         status=UserStatus.PENDING,
         permissions=perms,
@@ -192,7 +194,7 @@ async def patch_user(
                 raise HTTPException(409, detail={"code": "last_admin"})
         u.status = new_status
 
-    for field in ("name", "tuta", "upseller", "bling_login", "adspower"):
+    for field in ("name", "tuta", "upseller", "bling_login", "adspower", "duoke"):
         if field in data:
             setattr(u, field, data[field])
 

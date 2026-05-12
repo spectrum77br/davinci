@@ -14,6 +14,7 @@ type UserRow = {
   upseller: string | null
   bling_login: string | null
   adspower: string | null
+  duoke: string | null
   last_login_at: string | null
   disabled_at: string | null
 }
@@ -51,6 +52,7 @@ const draft = ref({
   upseller: '',
   bling_login: '',
   adspower: '',
+  duoke: '',
 })
 const creating = ref(false)
 const createErr = ref<string | null>(null)
@@ -60,12 +62,12 @@ async function createUser() {
   createErr.value = null
   try {
     const body: Record<string, any> = { email: draft.value.email }
-    for (const k of ['name', 'tuta', 'upseller', 'bling_login', 'adspower'] as const) {
+    for (const k of ['name', 'tuta', 'upseller', 'bling_login', 'adspower', 'duoke'] as const) {
       if (draft.value[k]) body[k] = draft.value[k]
     }
     await api('/api/users', { method: 'POST', body })
     showNew.value = false
-    draft.value = { email: '', name: '', tuta: '', upseller: '', bling_login: '', adspower: '' }
+    draft.value = { email: '', name: '', tuta: '', upseller: '', bling_login: '', adspower: '', duoke: '' }
     await refresh()
   } catch (e: any) {
     createErr.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -116,6 +118,7 @@ function fmtDate(s: string | null) {
             <th class="px-3 py-2">Upseller</th>
             <th class="px-3 py-2">Bling</th>
             <th class="px-3 py-2">AdsPower</th>
+            <th class="px-3 py-2">Duoke</th>
             <th class="px-3 py-2">Role</th>
             <th class="px-3 py-2">Status</th>
             <th class="px-3 py-2">Último login</th>
@@ -134,6 +137,7 @@ function fmtDate(s: string | null) {
             <td class="px-3 py-2">{{ u.upseller || '—' }}</td>
             <td class="px-3 py-2">{{ u.bling_login || '—' }}</td>
             <td class="px-3 py-2">{{ u.adspower || '—' }}</td>
+            <td class="px-3 py-2">{{ u.duoke || '—' }}</td>
             <td class="px-3 py-2">
               <span class="text-xs px-2 py-0.5 rounded border" :class="u.role === 'admin' ? 'border-amber-400 text-amber-300' : ''">
                 {{ u.role }}
@@ -155,7 +159,7 @@ function fmtDate(s: string | null) {
             </td>
           </tr>
           <tr v-if="!loading && (list?.items?.length || 0) === 0">
-            <td colspan="10" class="px-3 py-6 text-center text-muted-foreground">nenhum usuário</td>
+            <td colspan="11" class="px-3 py-6 text-center text-muted-foreground">nenhum usuário</td>
           </tr>
         </tbody>
       </table>
@@ -195,6 +199,10 @@ function fmtDate(s: string | null) {
             <div>
               <Label>AdsPower</Label>
               <Input v-model="draft.adspower" />
+            </div>
+            <div>
+              <Label>Duoke</Label>
+              <Input v-model="draft.duoke" />
             </div>
           </div>
         </div>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ShieldCheck, Users as UsersIcon, ArrowRight } from 'lucide-vue-next'
-import { RESOURCES, RESOURCE_LABELS } from '~/composables/useCan'
+import { RESOURCE_GROUPS, RESOURCE_LABELS } from '~/composables/useCan'
 
 definePageMeta({ middleware: ['admin'] })
 
@@ -56,17 +56,24 @@ const roles: RoleSummary[] = [
           </tr>
         </thead>
         <tbody>
-          <tr v-for="r in RESOURCES" :key="r">
-            <td class="font-medium">{{ RESOURCE_LABELS[r] }}</td>
-            <td class="text-center text-muted-foreground tabular-nums">14 / 16</td>
-            <td class="text-center text-muted-foreground tabular-nums">8 / 16</td>
-            <td class="text-center text-muted-foreground tabular-nums">2 / 16</td>
-            <td class="text-right">
-              <NuxtLink to="/users" class="text-xs text-primary inline-flex items-center hover:underline">
-                editar usuários <ArrowRight class="size-3 ml-1" />
-              </NuxtLink>
-            </td>
-          </tr>
+          <template v-for="g in RESOURCE_GROUPS" :key="g.label">
+            <tr class="bg-muted/40">
+              <td colspan="5" class="px-3 py-1 text-[10px] uppercase tracking-[0.12em] font-semibold text-muted-foreground">
+                {{ g.label }}
+              </td>
+            </tr>
+            <tr v-for="r in g.resources" :key="r">
+              <td class="font-medium">{{ RESOURCE_LABELS[r] }}</td>
+              <td class="text-center text-muted-foreground tabular-nums">14 / 16</td>
+              <td class="text-center text-muted-foreground tabular-nums">8 / 16</td>
+              <td class="text-center text-muted-foreground tabular-nums">2 / 16</td>
+              <td class="text-right">
+                <NuxtLink to="/users" class="text-xs text-primary inline-flex items-center hover:underline">
+                  editar usuários <ArrowRight class="size-3 ml-1" />
+                </NuxtLink>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
     </div>

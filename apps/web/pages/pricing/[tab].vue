@@ -11,13 +11,12 @@ definePageMeta({
   permission: { resource: 'tabela_precos', action: 'view' },
 })
 
-type Tab = 'tabela' | 'contas' | 'produtos' | 'auditoria' | 'concorrencia'
+type Tab = 'tabela' | 'contas' | 'produtos' | 'concorrencia'
 
 const TABS: { key: Tab; label: string; icon: any }[] = [
   { key: 'tabela', label: 'Tabela de Preços', icon: DollarSign },
   { key: 'contas', label: 'Contas', icon: Settings2 },
   { key: 'produtos', label: 'Produtos', icon: Upload },
-  { key: 'auditoria', label: 'Auditoria', icon: AlertCircle },
   { key: 'concorrencia', label: 'Concorrência', icon: BarChart3 },
 ]
 
@@ -1176,65 +1175,6 @@ async function toggleCompare(prod: PricingProduct) {
   }
 }
 
-// =========================================================== audit
-
-type AuditRow = {
-  sku: string
-  listing_count: number
-  platforms: string[]
-  integration_ids: string[]
-  sample_titles: string[]
-  dismissed: boolean
-}
-
-const auditRows = ref<AuditRow[]>([])
-const auditLoading = ref(false)
-const auditErr = ref<string | null>(null)
-const auditIncludeDismissed = ref(false)
-
-async function loadAudit() {
-  auditLoading.value = true
-  auditErr.value = null
-  try {
-    const qs = auditIncludeDismissed.value ? '?include_dismissed=true' : ''
-    auditRows.value = await api<AuditRow[]>(`/api/pricing/sku-audit${qs}`)
-  } catch (e: any) {
-    auditErr.value = e?.data?.detail?.code ?? 'load_failed'
-  } finally {
-    auditLoading.value = false
-  }
-}
-
-async function dismissSku(sku: string) {
-  try {
-    await api(`/api/pricing/sku-audit/${encodeURIComponent(sku)}/dismiss`, { method: 'POST' })
-    await loadAudit()
-  } catch (e: any) {
-    auditErr.value = e?.data?.detail?.code ?? 'dismiss_failed'
-  }
-}
-
-async function undismissSku(sku: string) {
-  try {
-    await api(`/api/pricing/sku-audit/${encodeURIComponent(sku)}/undismiss`, { method: 'POST' })
-    await loadAudit()
-  } catch (e: any) {
-    auditErr.value = e?.data?.detail?.code ?? 'undismiss_failed'
-  }
-}
-
-async function syncBlingCosts() {
-  if (!confirm('Disparar sync de custos Bling para todos os produtos?')) return
-  try {
-    const r = await api<{ job_id: string }>('/api/pricing/jobs/sync-bling-costs', { method: 'POST' })
-    activeJob.value = null
-    await pollJob(r.job_id)
-    alert('Sync concluído.')
-  } catch (e: any) {
-    auditErr.value = e?.data?.detail?.code ?? 'sync_failed'
-  }
-}
-
 // =========================================================== competitor
 
 type CompetitorRow = {
@@ -1313,7 +1253,6 @@ watch(
   tab,
   async (t) => {
     if (t === 'tabela') await loadGrid()
-    else if (t === 'auditoria') await loadAudit()
   },
   { immediate: true },
 )
@@ -2322,82 +2261,6 @@ watch(department, async () => {
                     </div>
                   </div>
                 </template>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- ============================================ AUDITORIA -->
-    <section v-else-if="tab === 'auditoria'" class="space-y-3">
-      <div class="flex flex-wrap items-center gap-2">
-        <button class="btn btn-sm" :disabled="auditLoading" @click="loadAudit">
-          <RefreshCw class="h-4 w-4 mr-1" :class="{ 'animate-spin': auditLoading }" />
-          Recarregar
-        </button>
-        <label class="flex items-center gap-1 text-sm">
-          <input v-model="auditIncludeDismissed" type="checkbox" />
-          Incluir dispensados
-        </label>
-        <button class="btn btn-sm" @click="syncBlingCosts">
-          Sync custos Bling
-        </button>
-      </div>
-
-      <p class="text-sm text-muted-foreground">
-        SKUs presentes em <code>listings</code> mas ausentes em <code>pricing_products</code>. Importe ou dispense.
-      </p>
-
-      <div v-if="auditErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
-        <AlertCircle class="h-4 w-4" /> {{ auditErr }}
-      </div>
-
-      <div v-if="activeJob && activeJob.type === 'sync_bling_costs'" class="rounded border bg-muted/40 px-3 py-2 text-sm">
-        Sync custos: {{ activeJob.processed }} / {{ activeJob.total }} ({{ activeJob.status }})
-      </div>
-
-      <div class="overflow-x-auto rounded border">
-        <table class="w-full text-sm">
-          <thead class="bg-muted/50 text-left">
-            <tr>
-              <th class="px-3 py-2">SKU</th>
-              <th class="px-3 py-2 text-right">Listings</th>
-              <th class="px-3 py-2">Plataformas</th>
-              <th class="px-3 py-2">Amostra de títulos</th>
-              <th class="px-3 py-2">Status</th>
-              <th class="px-3 py-2 w-28"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="auditLoading && !auditRows.length">
-              <td class="px-3 py-6 text-center text-muted-foreground" colSpan="6">
-                <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
-              </td>
-            </tr>
-            <tr v-else-if="!auditRows.length">
-              <td class="px-3 py-6 text-center text-muted-foreground" colSpan="6">
-                Nenhum SKU pendente.
-              </td>
-            </tr>
-            <tr v-for="r in auditRows" :key="r.sku" class="border-t hover:bg-muted/20">
-              <td class="px-3 py-2 font-mono text-xs">{{ r.sku }}</td>
-              <td class="px-3 py-2 text-right">{{ r.listing_count }}</td>
-              <td class="px-3 py-2 text-xs">{{ r.platforms.join(', ') }}</td>
-              <td class="px-3 py-2 text-xs text-muted-foreground truncate max-w-md">
-                <div v-for="(t, i) in r.sample_titles" :key="i" class="truncate">{{ t }}</div>
-              </td>
-              <td class="px-3 py-2 text-xs">
-                <span v-if="r.dismissed" class="text-amber-700">dispensado</span>
-                <span v-else class="text-red-700">pendente</span>
-              </td>
-              <td class="px-3 py-2 text-right">
-                <button v-if="!r.dismissed" class="btn btn-xs" @click="dismissSku(r.sku)">
-                  <Ban class="h-3 w-3" /> Dispensar
-                </button>
-                <button v-else class="btn btn-xs" @click="undismissSku(r.sku)">
-                  Reverter
-                </button>
               </td>
             </tr>
           </tbody>

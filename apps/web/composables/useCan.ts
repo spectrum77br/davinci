@@ -6,7 +6,6 @@ export type Resource =
   | 'tabela_precos'
   | 'tabela_precos_contas'
   | 'tabela_precos_produtos'
-  | 'auditoria'
   | 'conciliacao_frete'
   | 'sincronizacoes'
   | 'devolucoes'
@@ -18,22 +17,42 @@ export type Resource =
 
 export type Action = 'view' | 'edit' | 'delete'
 
-export const RESOURCES: Resource[] = [
-  'produtos',
-  'anuncios',
-  'tabela_precos',
-  'tabela_precos_contas',
-  'tabela_precos_produtos',
-  'auditoria',
-  'conciliacao_frete',
-  'sincronizacoes',
-  'devolucoes',
-  'reembolso',
-  'margem',
-  'empresa',
-  'cadastro',
-  'permissoes',
+export type ResourceGroup = {
+  label: string
+  resources: Resource[]
+}
+
+export const RESOURCE_GROUPS: ResourceGroup[] = [
+  {
+    label: 'Operação',
+    resources: [
+      'produtos',
+      'anuncios',
+      'tabela_precos',
+      'tabela_precos_contas',
+      'tabela_precos_produtos',
+      'margem',
+    ],
+  },
+  {
+    label: 'Pós-venda',
+    resources: ['conciliacao_frete', 'devolucoes', 'reembolso'],
+  },
+  {
+    label: 'Sistema',
+    resources: ['sincronizacoes'],
+  },
+  {
+    label: 'Cadastros',
+    resources: ['empresa', 'cadastro'],
+  },
+  {
+    label: 'Admin',
+    resources: ['permissoes'],
+  },
 ]
+
+export const RESOURCES: Resource[] = RESOURCE_GROUPS.flatMap((g) => g.resources)
 
 export const ACTIONS: Action[] = ['view', 'edit', 'delete']
 
@@ -43,12 +62,11 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   tabela_precos: 'Tabela de Preços',
   tabela_precos_contas: 'Tabela Preços — Contas',
   tabela_precos_produtos: 'Tabela Preços — Produtos',
-  auditoria: 'Auditoria',
+  margem: 'Margem',
   conciliacao_frete: 'Conciliação Frete',
-  sincronizacoes: 'Sincronizações',
   devolucoes: 'Devoluções',
   reembolso: 'Reembolso',
-  margem: 'Margem',
+  sincronizacoes: 'Sincronizações',
   empresa: 'Empresa',
   cadastro: 'Cadastro',
   permissoes: 'Permissões',

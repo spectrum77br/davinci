@@ -16,6 +16,7 @@ class UserOut(BaseModel):
     upseller: str | None = None
     bling_login: str | None = None
     adspower: str | None = None
+    duoke: str | None = None
     permissions: dict
     last_login_at: datetime | None = None
     disabled_at: datetime | None = None
@@ -37,6 +38,7 @@ class UserCreate(BaseModel):
     upseller: str | None = None
     bling_login: str | None = None
     adspower: str | None = None
+    duoke: str | None = None
     permissions: Permissions | None = None
 
 
@@ -47,6 +49,7 @@ class UserPatch(BaseModel):
     upseller: str | None = None
     bling_login: str | None = None
     adspower: str | None = None
+    duoke: str | None = None
     status: str | None = Field(default=None, pattern="^(pending|active|suspended)$")
 
 

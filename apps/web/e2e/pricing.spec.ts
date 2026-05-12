@@ -8,9 +8,4 @@ test.describe('Pricing push', () => {
       page.getByRole('heading', { name: /pre[çc]os|tabela/i })
     ).toBeVisible()
   })
-
-  test('audit tab reachable', async ({ page }) => {
-    await page.goto('/pricing/auditoria')
-    await expect(page).toHaveURL(/\/pricing\/auditoria/)
-  })
 })

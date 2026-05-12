@@ -47,6 +47,7 @@ class User(Base, TimestampMixin):
     upseller: Mapped[str | None] = mapped_column(String(255), nullable=True)
     bling_login: Mapped[str | None] = mapped_column(String(255), nullable=True)
     adspower: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    duoke: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     permissions: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")

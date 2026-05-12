@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
   Package, Megaphone, DollarSign, Truck, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell,
-  FileSearch, AlertTriangle, Store, ChevronLeft, ChevronRight,
+  Store, ChevronLeft, ChevronRight,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -36,8 +36,6 @@ const sections: Section[] = [
       { to: '/produtos', label: 'Produtos', icon: Package, resource: 'produtos' },
       { to: '/anuncios', label: 'Anúncios', icon: Megaphone, resource: 'anuncios' },
       { to: '/pricing/contas', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
-      { to: '/audit', label: 'Auditoria', icon: FileSearch, resource: 'auditoria' },
-      { to: '/discrepancias', label: 'Divergências', icon: AlertTriangle, resource: 'anuncios' },
       { to: '/margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
     ],
   },

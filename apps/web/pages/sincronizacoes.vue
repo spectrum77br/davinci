@@ -27,7 +27,6 @@ const TYPE_LABELS: Record<string, string> = {
   sync_all: 'sync all',
   sync_product: 'sync produto',
   auto_link: 'auto-link',
-  audit: 'auditoria',
   sync_bling_costs: 'custos Bling',
   import_listings: 'import anúncios',
   import_bling_products: 'import produtos Bling',

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
 import { ArrowLeft, Save, Trash2 } from 'lucide-vue-next'
-import { ACTIONS, RESOURCES, RESOURCE_LABELS, type Action, type Resource } from '~/composables/useCan'
+import { ACTIONS, RESOURCES, RESOURCE_GROUPS, RESOURCE_LABELS, type Action, type Resource } from '~/composables/useCan'
 
 definePageMeta({ middleware: ['admin'] })
 
@@ -16,6 +16,7 @@ type UserDetail = {
   upseller: string | null
   bling_login: string | null
   adspower: string | null
+  duoke: string | null
   permissions: Partial<Record<Resource, Partial<ResourcePerm>>>
   disabled_at: string | null
 }
@@ -45,6 +46,7 @@ const form = reactive({
   upseller: '',
   bling_login: '',
   adspower: '',
+  duoke: '',
   status: 'pending' as 'pending' | 'active' | 'suspended',
 })
 
@@ -56,6 +58,7 @@ function resetForm() {
   form.upseller = user.value.upseller || ''
   form.bling_login = user.value.bling_login || ''
   form.adspower = user.value.adspower || ''
+  form.duoke = user.value.duoke || ''
   form.status = user.value.status
 }
 
@@ -114,7 +117,7 @@ async function saveCadastral() {
   error.value = null
   try {
     const body: Record<string, any> = {}
-    for (const k of ['name', 'tuta', 'upseller', 'bling_login', 'adspower'] as const) {
+    for (const k of ['name', 'tuta', 'upseller', 'bling_login', 'adspower', 'duoke'] as const) {
       body[k] = form[k] || null
     }
     body.email = form.email
@@ -213,6 +216,10 @@ async function removeUser() {
             <Input v-model="form.adspower" />
           </div>
           <div>
+            <Label>Duoke</Label>
+            <Input v-model="form.duoke" />
+          </div>
+          <div>
             <Label>Status</Label>
             <select v-model="form.status" class="w-full h-9 rounded-md border bg-background px-3 text-sm">
               <option value="pending">pending</option>
@@ -261,23 +268,30 @@ async function removeUser() {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="r in RESOURCES" :key="r" class="border-t">
-                <td class="px-3 py-2">{{ RESOURCE_LABELS[r] }}</td>
-                <td v-for="a in ACTIONS" :key="a" class="px-3 py-2 text-center">
-                  <input
-                    v-model="perms[r][a]"
-                    type="checkbox"
-                    :disabled="isAdminUser"
-                    @change="onChange(r, a)"
-                  />
-                </td>
-                <td class="px-3 py-2 text-center">
-                  <div v-if="!isAdminUser" class="flex justify-center gap-1 text-[10px]">
-                    <button class="underline text-muted-foreground hover:text-foreground" type="button" @click="setRow(r, true)">all</button>
-                    <button class="underline text-muted-foreground hover:text-foreground" type="button" @click="setRow(r, false)">none</button>
-                  </div>
-                </td>
-              </tr>
+              <template v-for="g in RESOURCE_GROUPS" :key="g.label">
+                <tr class="bg-muted/40 border-t">
+                  <td :colspan="ACTIONS.length + 2" class="px-3 py-1 text-[10px] uppercase tracking-[0.12em] font-semibold text-muted-foreground">
+                    {{ g.label }}
+                  </td>
+                </tr>
+                <tr v-for="r in g.resources" :key="r" class="border-t">
+                  <td class="px-3 py-2">{{ RESOURCE_LABELS[r] }}</td>
+                  <td v-for="a in ACTIONS" :key="a" class="px-3 py-2 text-center">
+                    <input
+                      v-model="perms[r][a]"
+                      type="checkbox"
+                      :disabled="isAdminUser"
+                      @change="onChange(r, a)"
+                    />
+                  </td>
+                  <td class="px-3 py-2 text-center">
+                    <div v-if="!isAdminUser" class="flex justify-center gap-1 text-[10px]">
+                      <button class="underline text-muted-foreground hover:text-foreground" type="button" @click="setRow(r, true)">all</button>
+                      <button class="underline text-muted-foreground hover:text-foreground" type="button" @click="setRow(r, false)">none</button>
+                    </div>
+                  </td>
+                </tr>
+              </template>
             </tbody>
           </table>
         </div>

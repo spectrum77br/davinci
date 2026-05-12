@@ -16,7 +16,6 @@ Stock Sync Hub é uma aplicação que orquestra sincronização de estoque entre
 
 - Precificação multinível por departamento/produto/conta (com push de preço)
 - Sincronização automática (cron diário + webhook em tempo real do Bling)
-- Auditoria via planilha Excel
 - Suporte a múltiplos anúncios por produto (variations / contas múltiplas)
 - Notificações via Telegram + alertas in-app
 - 7 background jobs
@@ -91,8 +90,6 @@ VPS única na **Hetzner Cloud** (recomendado: CCX13/CCX23 dedicado, Ubuntu 24.04
 | `worker` | Mesmo build do `api`, `command: arq app.worker.WorkerSettings` | — | — | Sem porta exposta |
 | `web` | Build `apps/web/Dockerfile` (Nuxt SSR Node) | 3000 | — | Labels Traefik: `app.davinci.<dominio>` |
 
-**Storage de uploads (audit):** **volume local** montado em `./data/uploads/` (mapeado para `/data/uploads` dentro do `api`). Cliente Python usa `aiofiles` + path local; abstração `Storage` mantida para troca futura por S3 sem mudar callsites. Sem MinIO.
-
 **Rede:** rede `davinci_net` interna; só `traefik` exposto em 80/443 públicas. `postgres`, `redis` ficam acessíveis apenas pelos containers `api` e `worker`. Em **dev local** o compose expõe `5432` e `6379` no host para conectar via DBeaver/psql.
 
 **Domínios prod (sugestão, ajustar):**
@@ -137,11 +134,7 @@ VPS única na **Hetzner Cloud** (recomendado: CCX13/CCX23 dedicado, Ubuntu 24.04
                  │  ┌────────┐ ┌────────┐                           │
                  │  │postgres│ │ redis  │◀── arq worker (mesmo      │
                  │  │  18    │ │   7    │    image, CMD diferente)  │
-                 │  └────┬───┘ └────────┘                           │
-                 │       │      ┌────────────────────┐              │
-                 │       └─────▶│ ./data/uploads     │ (volume host │
-                 │              │ (audit XLSX local) │  bind-mount) │
-                 │              └────────────────────┘              │
+                 │  └────────┘ └────────┘                           │
                  └──────────────────────────────────────────────────┘
                        ▲
                        │ ssh davinci (id_ed25519 do Mac)
@@ -184,12 +177,11 @@ Migração 1:1 do MySQL atual para Postgres, com normalizações pendentes.
 | 14 | `store_info` | `storeInfo` | mantém |
 | 15 | `background_jobs` | **NOVA** | id, type, status, total, processed, payload jsonb, result jsonb, error text, created_by, started_at, finished_at |
 | 16 | `oauth_states` | **NOVA** | state token assinado para callbacks OAuth (substitui `state` em memória) |
-| 17 | `audit_dismissed_skus` | derivada da audit | sku, user_id, dismissed_at |
-| 18 | `companies` | **NOVA** (aba Excel "empresas") | id, razao_social, apelido (a "conta"), responsavel_id FK→users (NULL ok), uf, cnpj UNIQUE, inscricao_estadual, site_url, obs, created/updated |
-| 19 | `stores` | **NOVA** (linhas × colunas marketplace do print) | id, company_id FK→companies CASCADE, marketplace enum (`ml`, `shopee`, `amazon`, `aliexpress`, `temu`, `tiktok`, `shein`, `magalu`, `site`), apelido_override TEXT NULL (NULL = usa `companies.apelido`), status enum (`active`, `inactive`, `closing`, `banned`, `pending`, `under_review`), integration_id FK→integrations NULL (vinculo OAuth quando conectada), **`bling_store_id` BIGINT NULL** (ID da loja correspondente no Bling — `loja.id` da API v3 do Bling; usado em `PUT /produtos/{id}/estoque?idLoja=...` e endpoints de preço para que a alteração reflita no canal certo dentro do Bling), notes TEXT (suporta obs como "shopee esta como marquezini"), created/updated. **UNIQUE (company_id, marketplace)**. Índices em `(integration_id)` e `(bling_store_id)` |
-| 20 | `cadastros` | **NOVA** (aba Excel "cadastro") | id, tipo enum (`fone`, futuramente `email`, `dominio`, etc.), provedor TEXT (tim, vivo, …), responsavel_id FK→users NULL, codigo TEXT (número/identificador), label TEXT (rótulo amigável), status enum (`active`, `inactive`, `excluded`), obs TEXT, created/updated. Índice em `(tipo, codigo)` |
-| 21 | `cadastros_stores` | **NOVA** (N:N entre cadastros e stores) | cadastro_id FK→cadastros CASCADE, store_id FK→stores CASCADE, alias TEXT NULL (suporta override por loja como "fils inativa", "farias"), assigned_at. PK composta `(cadastro_id, store_id)` |
-| 22 | `auth_codes` | **NOVA** (Email-OTP, ver §5.1) — substitui a versão simples (`code` em texto plano, sem nonce) que existe no schema atual `sql_completo.sql` | id, email TEXT NOT NULL, code_hash TEXT NOT NULL (bcrypt do código de 8 chars), prefix VARCHAR(4) NOT NULL (mostrado ao usuário antes do envio, anti-phishing), session_nonce TEXT NOT NULL (também salvo em cookie HttpOnly antes do envio), expires_at timestamptz NOT NULL, attempts INT DEFAULT 0, ip INET, user_agent TEXT, consumed_at timestamptz NULL, created_at. Índices: `(email, created_at DESC)`, `(expires_at)` para limpeza |
+| 17 | `companies` | **NOVA** (aba Excel "empresas") | id, razao_social, apelido (a "conta"), responsavel_id FK→users (NULL ok), uf, cnpj UNIQUE, inscricao_estadual, site_url, obs, created/updated |
+| 18 | `stores` | **NOVA** (linhas × colunas marketplace do print) | id, company_id FK→companies CASCADE, marketplace enum (`ml`, `shopee`, `amazon`, `aliexpress`, `temu`, `tiktok`, `shein`, `magalu`, `site`), apelido_override TEXT NULL (NULL = usa `companies.apelido`), status enum (`active`, `inactive`, `closing`, `banned`, `pending`, `under_review`), integration_id FK→integrations NULL (vinculo OAuth quando conectada), **`bling_store_id` BIGINT NULL** (ID da loja correspondente no Bling — `loja.id` da API v3 do Bling; usado em `PUT /produtos/{id}/estoque?idLoja=...` e endpoints de preço para que a alteração reflita no canal certo dentro do Bling), notes TEXT (suporta obs como "shopee esta como marquezini"), created/updated. **UNIQUE (company_id, marketplace)**. Índices em `(integration_id)` e `(bling_store_id)` |
+| 19 | `cadastros` | **NOVA** (aba Excel "cadastro") | id, tipo enum (`fone`, futuramente `email`, `dominio`, etc.), provedor TEXT (tim, vivo, …), responsavel_id FK→users NULL, codigo TEXT (número/identificador), label TEXT (rótulo amigável), status enum (`active`, `inactive`, `excluded`), obs TEXT, created/updated. Índice em `(tipo, codigo)` |
+| 20 | `cadastros_stores` | **NOVA** (N:N entre cadastros e stores) | cadastro_id FK→cadastros CASCADE, store_id FK→stores CASCADE, alias TEXT NULL (suporta override por loja como "fils inativa", "farias"), assigned_at. PK composta `(cadastro_id, store_id)` |
+| 21 | `auth_codes` | **NOVA** (Email-OTP, ver §5.1) — substitui a versão simples (`code` em texto plano, sem nonce) que existe no schema atual `sql_completo.sql` | id, email TEXT NOT NULL, code_hash TEXT NOT NULL (bcrypt do código de 8 chars), prefix VARCHAR(4) NOT NULL (mostrado ao usuário antes do envio, anti-phishing), session_nonce TEXT NOT NULL (também salvo em cookie HttpOnly antes do envio), expires_at timestamptz NOT NULL, attempts INT DEFAULT 0, ip INET, user_agent TEXT, consumed_at timestamptz NULL, created_at. Índices: `(email, created_at DESC)`, `(expires_at)` para limpeza |
 
 > **Tabelas adiadas (fora do escopo desta migração):** `margens`, `freight_recon` (conciliação de frete), `devolucoes`, `tarefas`, `reembolso`. Os recursos correspondentes existem no enum de permissões (§5.5) com `view/edit/delete = false` por padrão, prontos para quando as telas forem construídas — não bloqueiam o cutover.
 
@@ -447,12 +439,6 @@ Convenção: `/api/{recurso}` em REST. OpenAPI tags por router.
 | `settings.get/update` | `GET/PATCH /api/settings` |
 | `settings.webhookUrl` | `GET /api/settings/webhook-url` |
 | `listings.*` | `GET/POST/DELETE /api/listings*` |
-| `audit.uploadSpreadsheet` | `POST /api/audit/uploads` (multipart) |
-| `audit.parseSheet` | `POST /api/audit/parse` |
-| `audit.startAudit` | `POST /api/jobs/audit` |
-| `audit.fixPrice` | `POST /api/audit/fix-price` |
-| `audit.fixPrices` | `POST /api/audit/fix-prices` |
-| `discrepancies.list` | `GET /api/discrepancies` |
 | `pricing.getAccounts` | `GET /api/pricing/accounts?department=` |
 | `pricing.create/update/deleteAccount` | `POST/PATCH/DELETE /api/pricing/accounts[/{id}]` |
 | `pricing.autoMatchIntegrations` | `POST /api/pricing/accounts/auto-match` |
@@ -469,8 +455,6 @@ Convenção: `/api/{recurso}` em REST. OpenAPI tags por router.
 | `pricing.pushCatalogPrice` | `POST /api/pricing/push-catalog` |
 | `pricing.sendPushReport` | `POST /api/pricing/push-report` |
 | `pricing.testTelegram` | `POST /api/pricing/test-telegram` |
-| `pricing.getSkuAudit` | `GET /api/pricing/sku-audit` |
-| `pricing.dismiss/undismissAuditSku` | `POST /api/pricing/sku-audit/{sku}/dismiss` (e `/undismiss`) |
 | `pricing.fetchActualPrices` | `GET /api/pricing/actual-prices?integration_id=` |
 | `pricing.searchCompetitorPrices` | `GET /api/pricing/competitor-prices?q=` |
 | `pricing.syncBlingCosts` | `POST /api/jobs/sync-bling-costs` |
@@ -537,8 +521,7 @@ Convenção: cada página em `app/pages/`, layout default em `app/layouts/defaul
 | `SyncLogs.tsx` | `pages/sync-logs.vue` | `/sync-logs` |
 | `Alerts.tsx` | `pages/alerts.vue` | `/alerts` |
 | `Settings.tsx` | `pages/settings.vue` | `/settings` |
-| `Pricing.tsx` | `pages/pricing/[tab].vue` (tabs como rotas: contas/produtos/overrides/auditoria/concorrencia) | `/pricing/contas` etc. |
-| `Audit.tsx` | `pages/audit.vue` | `/audit` |
+| `Pricing.tsx` | `pages/pricing/[tab].vue` (tabs como rotas: contas/produtos/overrides/concorrencia) | `/pricing/contas` etc. |
 | `Onboarding.tsx` | `pages/onboarding.vue` (middleware redireciona se incompleto) | `/onboarding` |
 | **(nova)** Login OTP | `pages/login.vue` (2 etapas: email → código) | `/login` |
 | **(nova)** Pendente de aprovação | `pages/pending-approval.vue` | `/pending-approval` |
@@ -580,7 +563,7 @@ Definidos em `apps/api/app/worker.py` via `cron(...)` no `WorkerSettings`.
 
 ### 8.2 Long-running jobs (enfileirados sob demanda)
 
-Tipos: `sync_all`, `sync_product`, `auto_link`, `audit`, `sync_bling_costs`, `import_listings`, `import_bling_products`, `push_prices_batch`.
+Tipos: `sync_all`, `sync_product`, `auto_link`, `sync_bling_costs`, `import_listings`, `import_bling_products`, `push_prices_batch`.
 
 **Fluxo:**
 
@@ -596,7 +579,7 @@ Arq config global no `WorkerSettings`:
 
 ```python
 class WorkerSettings:
-    functions = [sync_all_user, sync_product, auto_link, audit_run, ...]
+    functions = [sync_all_user, sync_product, auto_link, ...]
     cron_jobs = [daily_sync_scheduler, low_stock_polling, ...]
     redis_settings = RedisSettings.from_dsn(env.REDIS_URL)
     max_jobs = 10                # concorrência por worker
@@ -701,7 +684,6 @@ Cada fase é entregável independente. Ordem permite ter algo rodando cedo.
 - [ ] Cliente Redis (`redis.asyncio`) + helpers de cache e rate limit
 - [ ] Arq `WorkerSettings` em `apps/api/app/worker.py` com cron jobs vazios
 - [ ] structlog + middleware de request id
-- [ ] Storage local: helper `LocalStorage` (path `/data/uploads`) com interface igual à futura S3 — guarda XLSX da auditoria
 
 **Frontend**
 - [ ] Nuxt 3 boot via `pnpm create nuxt apps/web`, layout default (sidebar placeholders)
@@ -1107,7 +1089,6 @@ Cobre `Pricing.tsx`. Quebrar por tab.
 - [ ] `pushCatalogPrice` (resolve B14)
 - [ ] `getCatalogListings`
 - [ ] `sendPushReport` (Telegram)
-- [ ] `getSkuAudit` + `dismiss`/`undismiss`
 - [ ] `fetchActualPrices`
 - [ ] `searchCompetitorPrices` (ML public API)
 - [ ] `POST /api/jobs/sync-bling-costs`
@@ -1116,42 +1097,18 @@ Cobre `Pricing.tsx`. Quebrar por tab.
 - [ ] Tab `contas` — tabela editável, ações em massa
 - [ ] Tab `produtos` — tabela com colunas Kit1-4, custo Bling, toggle catálogo
 - [ ] Tab `overrides` — tabela cruzada produto × conta com células editáveis (use `vue-virtual-scroller` para >1000 linhas)
-- [ ] Tab `auditoria` — SKUs em listings sem entrada em pricing_products, com dismiss/undismiss
 - [ ] Tab `concorrencia` — busca de preços ML
 - [ ] Botão "Push" por linha/coluna/seleção, modal de confirmação, progress, telegram report
 - [ ] UI de "Produtos sem SKU" (B6)
 
 **Aceite:** edito margem em 10 contas, vejo preços recalculados em real-time, faço push em 5 produtos x 3 contas, recebo report no Telegram, push duplicado por idempotency key não duplica.
 
-### Fase 10 — Auditoria por planilha (2 dias)
-
-Cobre `Audit.tsx`.
-
-**Backend (router `audit`)**
-- [ ] `POST /api/audit/uploads` (multipart, salva em volume local `/data/uploads/{user_id}/{uuid}.xlsx` via `LocalStorage`, retorna sheets)
-- [ ] `POST /api/audit/parse` (parse com `openpyxl`, devolve account map)
-- [ ] `POST /api/jobs/audit` (cria job tipo `audit`, processa SKU × conta)
-- [ ] `POST /api/audit/fix-price` e `/fix-prices`
-
-**Service `AuditRunner`**
-- [ ] Compara estoque/preço esperado (Bling + pricing) vs planilha
-- [ ] Classifica: `ok`, `price_mismatch`, `missing`, `paused`
-
-**Frontend `pages/audit.vue`**
-- [ ] Upload arquivo, escolher aba, preview
-- [ ] Disparar audit, polling progresso
-- [ ] Tabela de resultados com filtros, botão "Corrigir preço" (individual e em massa)
-
-**Aceite:** subo planilha de 5000 produtos, audit termina em < 10min, posso corrigir preços em massa.
-
-### Fase 11 — Discrepâncias + Store Info (0.5 dia)
+### Fase 11 — Store Info (0.5 dia)
 
 **Backend**
-- [ ] `GET /api/discrepancies`
 - [ ] `store_info` CRUD + `setDepartment` (cria `pricing_accounts` automaticamente)
 
 **Frontend**
-- [ ] Página `/discrepancies` simples
 - [ ] Página `/store-info` (CRUD)
 
 ### Fase 12 — Onboarding + Dashboard (1 dia)
@@ -1220,9 +1177,6 @@ POSTGRES_PASSWORD=<pwd>     # consumido pelo container postgres
 # Redis (compose, hostname interno)
 REDIS_URL=redis://redis:6379/0
 ARQ_REDIS_URL=redis://redis:6379/1   # banco separado para fila Arq
-
-# Storage local (audit uploads)
-UPLOADS_DIR=/data/uploads    # bind-mount de ./data/uploads do host
 
 # Traefik (prod)
 TRAEFIK_ACME_EMAIL=spectrum77@tuta.com
@@ -1296,8 +1250,7 @@ A migração está **pronta para cutover** quando:
 2. Bugs B1, B2, B3, B5, B6, B8, B11, B13, B15, B16 verificados resolvidos com teste regressivo.
 3. Sync diário roda 7 dias sem erro fatal.
 4. Push de preço processa 100 itens em < 5min.
-5. Auditoria de planilha 5k linhas < 10min.
-6. Migração de dados validada (contagens batem, amostragem manual de 20 produtos).
+5. Migração de dados validada (contagens batem, amostragem manual de 20 produtos).
 7. Webhooks Bling recebidos e processados em < 1s.
 8. Documentação OpenAPI completa, navegável em `/api/docs`.
 9. Testes E2E críticos verdes.
