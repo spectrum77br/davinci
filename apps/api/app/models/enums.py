@@ -155,6 +155,8 @@ class CellStatus(StrEnum):
     MANUAL = "manual"
     LOCKED = "locked"
     DISABLED = "disabled"
+    NA = "NA"
+    SV = "SV"
 
 
 class AuditRunStatus(StrEnum):

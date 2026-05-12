@@ -3,6 +3,7 @@ import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
   Star, Send, Lock, Ban, Check, Link2, Copy,
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
+  ChevronDown, Download, Undo2, Redo2, Search,
 } from 'lucide-vue-next'
 
 definePageMeta({
@@ -582,7 +583,7 @@ type GridCell = {
   pricing_product_id: string
   price: string | number | null
   source: string
-  cell_status: 'auto' | 'manual' | 'locked' | 'disabled'
+  cell_status: 'auto' | 'manual' | 'locked' | 'disabled' | 'NA' | 'SV'
   has_override: boolean
 }
 type GridResponse = {
@@ -609,6 +610,34 @@ const editingCell = ref<{ accId: string; prodId: string } | null>(null)
 const cellEditValue = ref<string>('')
 const pushing = ref(false)
 const lastPushResults = ref<PushResult[]>([])
+
+// ---------- Feature 3: obs editing in header
+const editingObsId = ref<string | null>(null)
+const obsValue = ref('')
+
+// ---------- Feature 4: undo/redo
+type UndoEntry = { prodId: string; accId: string; oldValue: string; newValue: string }
+const undoStack = ref<UndoEntry[]>([])
+const redoStack = ref<UndoEntry[]>([])
+
+// ---------- Feature 6: bling sync from grid
+const syncingBlingCosts = ref(false)
+
+// ---------- Feature 7: grid search
+const gridSearch = ref('')
+
+// ---------- Feature 8: push dropdown
+const showPushMenu = ref(false)
+const pushLabel = ref('')
+
+// ---------- Feature 11: keyboard nav
+const selectedCell = ref<{ row: number; col: number } | null>(null)
+
+// ---------- Feature 12: compare mode
+const compareProductIds = ref<Set<string>>(new Set())
+const actualPriceMap = ref<Record<string, Record<string, number | null>>>({})
+const competitorLoadingId = ref<string | null>(null)
+const compareToast = ref<string | null>(null)
 
 async function loadGrid() {
   gridLoading.value = true
@@ -637,17 +666,32 @@ function cellOf(prodId: string, accId: string): GridCell | undefined {
 
 function cellLabel(c: GridCell | undefined): string {
   if (!c) return '—'
+  if (c.cell_status === 'NA') return 'NA'
+  if (c.cell_status === 'SV') return 'SV'
   if (c.source === 'disabled') return '∅'
   if (c.price == null) return '—'
-  return Number(c.price).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+  return Number(c.price).toFixed(0)
 }
 
 function cellTone(c: GridCell | undefined): string {
   if (!c) return ''
+  if (c.cell_status === 'NA') return 'bg-gray-200 text-gray-500 font-semibold'
+  if (c.cell_status === 'SV') return 'bg-amber-100 text-amber-700 font-semibold'
   if (c.source === 'disabled') return 'bg-muted/50 text-muted-foreground'
   if (c.source === 'locked') return 'bg-amber-50 text-amber-900 dark:bg-amber-900/20 dark:text-amber-100'
   if (c.source === 'override') return 'bg-blue-50 text-blue-900 dark:bg-blue-900/20 dark:text-blue-100'
   if (c.source === 'missing_inputs') return 'bg-red-50 text-red-900 dark:bg-red-900/20 dark:text-red-100'
+  if (c.price != null) {
+    const prod = grid.value?.products.find(p => p.id === c.pricing_product_id)
+    const acc = grid.value?.accounts.find(a => a.id === c.pricing_account_id)
+    if (prod && acc) {
+      const price = Number(c.price)
+      const cost = getKitCost(prod, acc.kit_number)
+      const ms = getMarginShipping(acc, prod.product_type)
+      const shipping = ms ? Number(ms.shipping) : 0
+      if (price < cost + shipping) return 'bg-red-100 text-red-700 font-bold'
+    }
+  }
   return ''
 }
 
@@ -665,6 +709,8 @@ async function saveOverride() {
   if (!editingCell.value) return
   const { accId, prodId } = editingCell.value
   const val = cellEditValue.value.trim()
+  const oldCell = cellOf(prodId, accId)
+  const oldValue = oldCell?.price != null ? String(oldCell.price) : ''
   try {
     if (val === '') {
       await api(
@@ -684,6 +730,10 @@ async function saveOverride() {
         },
       })
     }
+    if (oldValue !== val) {
+      undoStack.value.push({ prodId, accId, oldValue, newValue: val })
+      redoStack.value = []
+    }
     cancelCellEdit()
     await loadGrid()
   } catch (e: any) {
@@ -691,7 +741,7 @@ async function saveOverride() {
   }
 }
 
-async function setCellStatus(c: GridCell, status: 'auto' | 'locked' | 'disabled') {
+async function setCellStatus(c: GridCell, status: 'auto' | 'locked' | 'disabled' | 'NA' | 'SV') {
   try {
     await api('/api/pricing/overrides/cell-status', {
       method: 'PUT',
@@ -837,6 +887,292 @@ async function sendManualReport() {
     alert('Enviado.')
   } catch (e: any) {
     gridErr.value = e?.data?.detail?.code ?? 'report_failed'
+  }
+}
+
+// =========================================================== grid extras (features)
+
+// Feature 1: account groups by platform + kit
+const accountGroups = computed<{ label: string; platform: string; accounts: Account[] }[]>(() => {
+  const groups: { label: string; platform: string; accounts: Account[] }[] = []
+  const accs = grid.value?.accounts ?? []
+  let currentKey = ''
+  for (const acc of accs) {
+    const key = `${acc.platform}-kit${acc.kit_number}`
+    const label = `${platformLabel(acc.platform)} kit ${acc.kit_number}`
+    if (key !== currentKey) {
+      groups.push({ label, platform: acc.platform, accounts: [acc] })
+      currentKey = key
+    } else {
+      groups[groups.length - 1].accounts.push(acc)
+    }
+  }
+  return groups
+})
+
+const firstAccountIdInGroup = computed<Set<string>>(() => {
+  const s = new Set<string>()
+  for (const g of accountGroups.value) {
+    if (g.accounts[0]) s.add(g.accounts[0].id)
+  }
+  return s
+})
+
+// Feature 7: grid search
+const filteredGridProducts = computed(() => {
+  const prods = grid.value?.products ?? []
+  const q = gridSearch.value.trim().toLowerCase()
+  if (!q) return prods
+  return prods.filter(p => p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
+})
+
+// Feature 9: negative margin helpers + counter
+function getKitCost(prod: PricingProduct, kitNumber: number): number {
+  const key = `cost_kit${Math.max(1, Math.min(4, kitNumber || 1))}` as keyof PricingProduct
+  const v = prod[key] ?? prod.cost_kit1
+  return Number(v ?? 0)
+}
+
+function getMarginShipping(acc: Account, productType: number): { margin: number; shipping: number } | null {
+  const t = Math.max(1, Math.min(5, productType || 1))
+  const margin = Number((acc as any)[`margin${t}`] || 0)
+  const shipping = Number((acc as any)[`shipping${t}`] || 0)
+  if (!margin && !shipping) return null
+  return { margin, shipping }
+}
+
+const negativeMarginCount = computed(() => {
+  if (!grid.value) return 0
+  let count = 0
+  for (const prod of grid.value.products) {
+    for (const acc of grid.value.accounts) {
+      const c = cellOf(prod.id, acc.id)
+      if (!c || c.price == null || c.source === 'disabled' || c.source === 'locked') continue
+      if (c.cell_status === 'NA' || c.cell_status === 'SV') continue
+      const price = Number(c.price)
+      const cost = getKitCost(prod, acc.kit_number)
+      const ms = getMarginShipping(acc, prod.product_type)
+      const shipping = ms ? Number(ms.shipping) : 0
+      if (price < cost + shipping) count++
+    }
+  }
+  return count
+})
+
+// Feature 13: platform color coding
+function platformBg(platform: string): string {
+  switch (platform) {
+    case 'shopee': return 'bg-orange-50/50'
+    case 'amazon': return 'bg-yellow-50/50'
+    case 'temu': return 'bg-purple-50/50'
+    case 'aliexpress': return 'bg-red-50/50'
+    case 'tiktok': return 'bg-pink-50/50'
+    case 'mercadolivre': return 'bg-blue-50/50'
+    default: return ''
+  }
+}
+function platformHeaderBg(platform: string): string {
+  switch (platform) {
+    case 'shopee': return 'bg-orange-50'
+    case 'amazon': return 'bg-yellow-50'
+    case 'temu': return 'bg-purple-50'
+    case 'aliexpress': return 'bg-red-50'
+    case 'tiktok': return 'bg-pink-50'
+    case 'mercadolivre': return 'bg-blue-50'
+    default: return 'bg-muted/50'
+  }
+}
+
+// Feature 3: header obs editing
+function startEditObs(accId: string, field: string, currentVal: string | null) {
+  editingObsId.value = `${accId}-${field}`
+  obsValue.value = currentVal || ''
+}
+
+async function commitObs(accId: string, field: string) {
+  editingObsId.value = null
+  const acc = (grid.value?.accounts ?? []).find(a => a.id === accId)
+  if (!acc) return
+  try {
+    const updated = await api<Account>(`/api/pricing/accounts/${accId}`, {
+      method: 'PATCH',
+      body: { [field]: obsValue.value.trim() || null },
+    })
+    Object.assign(acc, updated)
+    const local = accounts.value.find(a => a.id === accId)
+    if (local) Object.assign(local, updated)
+  } catch (e: any) {
+    gridErr.value = e?.data?.detail?.code ?? 'save_failed'
+  }
+}
+
+// Feature 4: undo/redo
+async function saveOverrideValue(prodId: string, accId: string, val: string) {
+  try {
+    if (!val) {
+      await api(
+        `/api/pricing/overrides?pricing_product_id=${prodId}&pricing_account_id=${accId}`,
+        { method: 'DELETE' },
+      ).catch((e: any) => {
+        if (e?.response?.status !== 404) throw e
+      })
+    } else {
+      await api('/api/pricing/overrides', {
+        method: 'PUT',
+        body: {
+          pricing_product_id: prodId,
+          pricing_account_id: accId,
+          price_override: Number(val),
+          cell_status: 'manual',
+        },
+      })
+    }
+    await loadGrid()
+  } catch (e: any) {
+    gridErr.value = e?.data?.detail?.code ?? 'save_failed'
+  }
+}
+
+function handleUndo() {
+  if (!undoStack.value.length) return
+  const entry = undoStack.value.pop()!
+  redoStack.value.push(entry)
+  saveOverrideValue(entry.prodId, entry.accId, entry.oldValue)
+}
+
+function handleRedo() {
+  if (!redoStack.value.length) return
+  const entry = redoStack.value.pop()!
+  undoStack.value.push(entry)
+  saveOverrideValue(entry.prodId, entry.accId, entry.newValue)
+}
+
+// Feature 5: Excel/CSV export
+function handleExportExcel() {
+  if (!grid.value) return
+  const accs = grid.value.accounts
+  const prods = filteredGridProducts.value
+  const headers = ['SKU', 'Produto', 'Bling', department.value === 'celular' ? 'Kit1' : 'Custo']
+  if (department.value === 'celular') headers.push('Kit2', 'Kit3', 'Kit4')
+  for (const acc of accs) headers.push(acc.name)
+  const rows = prods.map(p => {
+    const row: string[] = [
+      p.sku,
+      p.name,
+      String(Number(p.bling_cost_price || 0).toFixed(0)),
+      String(Number(p.cost_kit1 || 0).toFixed(0)),
+    ]
+    if (department.value === 'celular') {
+      row.push(
+        String(Number(p.cost_kit2 || 0).toFixed(0)),
+        String(Number(p.cost_kit3 || 0).toFixed(0)),
+        String(Number(p.cost_kit4 || 0).toFixed(0)),
+      )
+    }
+    for (const acc of accs) {
+      const c = cellOf(p.id, acc.id)
+      if (c?.cell_status === 'NA') row.push('NA')
+      else if (c?.cell_status === 'SV') row.push('SV')
+      else row.push(c?.price != null ? String(Number(c.price).toFixed(0)) : '')
+    }
+    return row
+  })
+  const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `tabela-precos-${department.value}-${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// Feature 6: Bling sync from grid
+async function syncBlingCostsFromGrid() {
+  syncingBlingCosts.value = true
+  try {
+    const r = await api<{ job_id: string }>('/api/pricing/jobs/sync-bling-costs', { method: 'POST' })
+    activeJob.value = null
+    await pollJob(r.job_id)
+    await loadGrid()
+  } catch (e: any) {
+    gridErr.value = e?.data?.detail?.code ?? 'sync_failed'
+  } finally {
+    syncingBlingCosts.value = false
+  }
+}
+
+// Feature 8: push dropdown helpers
+async function pushAllAndClose() {
+  showPushMenu.value = false
+  pushLabel.value = 'Todas'
+  try {
+    await pushAllVisible()
+  } finally {
+    pushLabel.value = ''
+  }
+}
+
+async function pushAccountAndClose(accId: string, accName: string) {
+  showPushMenu.value = false
+  pushLabel.value = accName
+  try {
+    await pushAccountColumn(accId)
+  } finally {
+    pushLabel.value = ''
+  }
+}
+
+// Feature 11: keyboard navigation in grid
+function handleGridKeyDown(e: KeyboardEvent) {
+  if (e.ctrlKey || e.metaKey) {
+    if (e.key.toLowerCase() === 'z') { e.preventDefault(); handleUndo(); return }
+    if (e.key.toLowerCase() === 'y') { e.preventDefault(); handleRedo(); return }
+  }
+  if (!selectedCell.value) return
+  if (editingCell.value) return
+  const { row, col } = selectedCell.value
+  const maxRow = filteredGridProducts.value.length - 1
+  const maxCol = (grid.value?.accounts.length ?? 0) - 1
+  switch (e.key) {
+    case 'ArrowUp': e.preventDefault(); if (row > 0) selectedCell.value = { row: row - 1, col }; break
+    case 'ArrowDown': e.preventDefault(); if (row < maxRow) selectedCell.value = { row: row + 1, col }; break
+    case 'ArrowLeft': e.preventDefault(); if (col > 0) selectedCell.value = { row, col: col - 1 }; break
+    case 'ArrowRight': e.preventDefault(); if (col < maxCol) selectedCell.value = { row, col: col + 1 }; break
+    case 'Enter': {
+      e.preventDefault()
+      const prod = filteredGridProducts.value[row]
+      const acc = (grid.value?.accounts ?? [])[col]
+      if (prod && acc) {
+        const c = cellOf(prod.id, acc.id)
+        if (c) startCellEdit(c)
+      }
+      break
+    }
+    case 'Escape': e.preventDefault(); selectedCell.value = null; break
+  }
+}
+
+// Feature 12: compare mode (placeholder until /api/pricing/actual-prices exists)
+async function toggleCompare(prod: PricingProduct) {
+  if (compareProductIds.value.has(prod.id)) {
+    compareProductIds.value.delete(prod.id)
+    compareProductIds.value = new Set(compareProductIds.value)
+    return
+  }
+  competitorLoadingId.value = prod.id
+  compareProductIds.value.add(prod.id)
+  compareProductIds.value = new Set(compareProductIds.value)
+  try {
+    const results = await api<Record<string, number | null>>(
+      `/api/pricing/actual-prices/${prod.id}?department=${department.value}`,
+    )
+    actualPriceMap.value[prod.id] = results
+  } catch {
+    compareToast.value = 'Comparação real ainda não disponível neste backend.'
+    setTimeout(() => { compareToast.value = null }, 2500)
+  } finally {
+    competitorLoadingId.value = null
   }
 }
 
@@ -1619,19 +1955,89 @@ watch(department, async () => {
     <!-- ============================================ TABELA DE PREÇOS (grid) -->
     <section v-else-if="tab === 'tabela'" class="space-y-3">
       <div class="flex flex-wrap items-center gap-2">
+        <div class="relative flex-1 min-w-[200px] max-w-sm">
+          <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <input
+            v-model="gridSearch"
+            placeholder="Buscar por SKU ou nome..."
+            class="border rounded pl-7 pr-2 py-1 text-sm bg-background w-full"
+          />
+        </div>
+        <button class="btn btn-sm" :disabled="!undoStack.length" title="Desfazer (Ctrl+Z)" @click="handleUndo">
+          <Undo2 class="h-4 w-4" />
+        </button>
+        <button class="btn btn-sm" :disabled="!redoStack.length" title="Refazer (Ctrl+Y)" @click="handleRedo">
+          <Redo2 class="h-4 w-4" />
+        </button>
+        <button class="btn btn-sm" :disabled="!grid?.products.length" @click="handleExportExcel">
+          <Download class="h-4 w-4 mr-1" /> Excel
+        </button>
+        <button
+          class="btn btn-sm text-green-700 border-green-300 hover:bg-green-50"
+          :disabled="syncingBlingCosts"
+          @click="syncBlingCostsFromGrid"
+        >
+          <Loader2 v-if="syncingBlingCosts" class="h-4 w-4 animate-spin mr-1" />
+          <RefreshCw v-else class="h-4 w-4 mr-1" />
+          Custo Bling
+        </button>
+        <div class="relative inline-block">
+          <button
+            class="btn btn-sm bg-blue-600 text-white hover:bg-blue-700"
+            :disabled="pushing || !grid?.cells.length"
+            @click="showPushMenu = !showPushMenu"
+          >
+            <Send class="h-4 w-4 mr-1" />
+            {{ pushLabel || 'Enviar' }}
+            <ChevronDown class="h-3 w-3 ml-1" />
+          </button>
+          <div
+            v-if="showPushMenu"
+            class="absolute right-0 mt-1 w-64 bg-background border rounded-md shadow-lg z-50 max-h-80 overflow-y-auto"
+          >
+            <button class="w-full text-left px-3 py-2 text-sm hover:bg-muted font-medium" @click="pushAllAndClose">
+              Enviar todas as contas
+            </button>
+            <div class="border-t" />
+            <template v-for="group in accountGroups" :key="group.label">
+              <div class="px-3 py-1 text-xs text-muted-foreground font-semibold bg-muted/30">
+                {{ group.label }}
+              </div>
+              <button
+                v-for="acc in group.accounts"
+                :key="acc.id"
+                class="w-full text-left px-3 py-1.5 text-sm hover:bg-muted flex justify-between items-center gap-2"
+                @click="pushAccountAndClose(acc.id, acc.name)"
+              >
+                <span class="truncate">{{ acc.name }}</span>
+                <span class="text-[10px] text-muted-foreground shrink-0">{{ acc.listing_type || acc.platform }}</span>
+              </button>
+            </template>
+          </div>
+        </div>
+        <button class="btn btn-sm" :disabled="pushing" @click="sendManualReport">
+          Enviar relatório
+        </button>
         <button class="btn btn-sm" :disabled="gridLoading" @click="loadGrid">
           <RefreshCw class="h-4 w-4 mr-1" :class="{ 'animate-spin': gridLoading }" />
           Recarregar
         </button>
-        <button class="btn btn-sm" :disabled="pushing || !grid?.cells.length" @click="pushAllVisible">
-          <Send class="h-4 w-4 mr-1" /> Push tudo
-        </button>
-        <button class="btn btn-sm" :disabled="pushing" @click="sendManualReport">
-          Enviar relatório
-        </button>
         <span v-if="pushing" class="text-sm text-muted-foreground flex items-center gap-1">
           <Loader2 class="h-3 w-3 animate-spin" /> enviando…
         </span>
+      </div>
+
+      <div
+        v-if="negativeMarginCount > 0"
+        class="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 flex items-center gap-2"
+      >
+        <AlertCircle class="h-4 w-4" />
+        <strong>{{ negativeMarginCount }}</strong>
+        combinação(ões) com margem negativa (preço &lt; custo + frete)
+      </div>
+
+      <div v-if="compareToast" class="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+        {{ compareToast }}
       </div>
 
       <div v-if="activeJob" class="rounded border bg-muted/40 px-3 py-2 text-sm">
@@ -1679,23 +2085,91 @@ watch(department, async () => {
         </ul>
       </div>
 
-      <div class="overflow-auto rounded border max-h-[70vh]">
-        <table class="text-xs">
-          <thead class="bg-muted/50 sticky top-0 z-10">
+      <div
+        class="overflow-auto rounded border max-h-[70vh] focus:outline-none"
+        tabindex="0"
+        @keydown="handleGridKeyDown"
+      >
+        <table class="text-xs border-collapse">
+          <thead class="bg-muted/50 sticky top-0 z-20">
+            <!-- Row 1: Platform groups -->
             <tr>
-              <th class="sticky left-0 bg-muted/50 px-2 py-2 text-left min-w-[160px]">Produto</th>
+              <th
+                class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30"
+                :colspan="department === 'celular' ? 6 : 3"
+              />
+              <th
+                v-for="group in accountGroups"
+                :key="`g-${group.label}`"
+                :colspan="group.accounts.length"
+                class="px-2 py-1 text-center text-[11px] font-semibold border-l-[3px] border-gray-500"
+                :class="platformHeaderBg(group.platform)"
+              >
+                {{ group.label }}
+              </th>
+            </tr>
+            <!-- Row 2: Account names + obs -->
+            <tr>
+              <th
+                class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30 align-bottom"
+                :colspan="department === 'celular' ? 6 : 3"
+              >
+                Produto
+              </th>
               <th
                 v-for="acc in grid?.accounts ?? []"
-                :key="acc.id"
-                class="px-2 py-2 text-left min-w-[110px]"
+                :key="`n-${acc.id}`"
+                class="px-1 py-1 text-left min-w-[110px] align-top"
+                :class="[platformHeaderBg(acc.platform), firstAccountIdInGroup.has(acc.id) ? 'border-l-[3px] border-gray-500' : 'border-l']"
               >
                 <div class="flex items-center gap-1">
-                  <span class="truncate">{{ acc.name }}</span>
-                  <button class="btn btn-xs" title="Push para todos produtos desta conta" @click="pushAccountColumn(acc.id)">
+                  <span class="text-xs font-semibold truncate" :title="acc.name">{{ acc.name }}</span>
+                  <button class="p-0.5 hover:bg-muted rounded shrink-0" title="Push para esta conta" @click="pushAccountColumn(acc.id)">
                     <Send class="h-3 w-3" />
                   </button>
                 </div>
-                <div class="text-[10px] text-muted-foreground">{{ platformLabel(acc.platform) }} · kit {{ acc.kit_number }}</div>
+                <template v-for="field in ['observation', 'observation2', 'observation3']" :key="field">
+                  <div v-if="editingObsId === `${acc.id}-${field}`">
+                    <input
+                      v-model="obsValue"
+                      class="w-full text-[9px] border rounded px-1 py-0.5 bg-background"
+                      @blur="commitObs(acc.id, field)"
+                      @keydown.enter="commitObs(acc.id, field)"
+                      @keydown.escape="editingObsId = null"
+                    />
+                  </div>
+                  <div
+                    v-else
+                    class="text-[9px] cursor-pointer truncate leading-tight"
+                    :class="(acc as any)[field] ? 'text-amber-700 font-medium' : 'text-muted-foreground/60 italic'"
+                    :title="(acc as any)[field] || field"
+                    @click="startEditObs(acc.id, field, (acc as any)[field])"
+                  >
+                    {{ (acc as any)[field] || (field === 'observation' ? 'obs1' : field === 'observation2' ? 'obs2' : 'obs3') }}
+                  </div>
+                </template>
+              </th>
+            </tr>
+            <!-- Row 3: Listing type + cost column headers -->
+            <tr>
+              <th class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30 min-w-[200px]">SKU / Nome</th>
+              <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-green-700 font-bold z-30 min-w-[56px]" :style="{ left: '200px' }">bling</th>
+              <template v-if="department === 'celular'">
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '256px' }">kit 1</th>
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '312px' }">kit 2</th>
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '368px' }">kit 3</th>
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '424px' }">kit 4</th>
+              </template>
+              <template v-else>
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '256px' }">custo</th>
+              </template>
+              <th
+                v-for="acc in grid?.accounts ?? []"
+                :key="`lt-${acc.id}`"
+                class="px-1 py-1 text-center text-[10px] text-muted-foreground"
+                :class="[platformHeaderBg(acc.platform), firstAccountIdInGroup.has(acc.id) ? 'border-l-[3px] border-gray-500' : 'border-l']"
+              >
+                {{ acc.listing_type || platformLabel(acc.platform) }}
               </th>
             </tr>
           </thead>
@@ -1705,21 +2179,73 @@ watch(department, async () => {
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
-            <tr v-else-if="!grid?.products.length">
+            <tr v-else-if="!filteredGridProducts.length">
               <td colSpan="999" class="p-6 text-center text-muted-foreground">
-                Nenhum produto. Crie/importe produtos na aba Produtos.
+                {{ grid?.products.length ? 'Nenhum produto corresponde à busca.' : 'Nenhum produto. Crie/importe produtos na aba Produtos.' }}
               </td>
             </tr>
-            <tr v-for="prod in grid?.products ?? []" :key="prod.id" class="border-t hover:bg-muted/20">
-              <td class="sticky left-0 bg-background px-2 py-1 text-xs whitespace-nowrap">
-                <div class="font-mono truncate max-w-[160px]" :title="prod.sku">{{ prod.sku }}</div>
-                <div class="text-[10px] text-muted-foreground truncate max-w-[160px]" :title="prod.name">{{ prod.name }}</div>
+            <tr
+              v-for="(prod, rowIdx) in filteredGridProducts"
+              :key="prod.id"
+              class="border-t hover:bg-muted/20 group"
+            >
+              <!-- Sticky: SKU + nome + compare toggle -->
+              <td class="sticky left-0 bg-background px-2 py-1 text-xs whitespace-nowrap z-10 min-w-[200px]">
+                <div class="flex items-center gap-1">
+                  <button
+                    class="p-0.5 rounded shrink-0 transition-opacity"
+                    :class="compareProductIds.has(prod.id) ? 'text-purple-600 bg-purple-100 opacity-100' : 'text-gray-400 hover:text-purple-600 opacity-0 group-hover:opacity-100'"
+                    title="Comparar com preço real"
+                    @click.stop="toggleCompare(prod)"
+                  >
+                    <Loader2 v-if="competitorLoadingId === prod.id" class="h-3 w-3 animate-spin" />
+                    <Eye v-else class="h-3 w-3" />
+                  </button>
+                  <div class="min-w-0">
+                    <div class="font-mono truncate max-w-[180px]" :title="prod.sku">{{ prod.sku }}</div>
+                    <div class="text-[10px] text-muted-foreground truncate max-w-[180px]" :title="prod.name">{{ prod.name }}</div>
+                  </div>
+                </div>
               </td>
+              <!-- Sticky cost: bling -->
               <td
-                v-for="acc in grid?.accounts ?? []"
+                class="sticky bg-green-50 text-green-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]"
+                :style="{ left: '200px' }"
+              >
+                {{ prod.bling_cost_price != null ? Number(prod.bling_cost_price).toFixed(0) : '—' }}
+              </td>
+              <!-- Sticky cost: kits or custo -->
+              <template v-if="department === 'celular'">
+                <td class="sticky bg-background text-blue-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '256px' }">
+                  {{ Number(prod.cost_kit1 || 0).toFixed(0) }}
+                </td>
+                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '312px' }">
+                  {{ prod.cost_kit2 != null ? Number(prod.cost_kit2).toFixed(0) : '—' }}
+                </td>
+                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '368px' }">
+                  {{ prod.cost_kit3 != null ? Number(prod.cost_kit3).toFixed(0) : '—' }}
+                </td>
+                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '424px' }">
+                  {{ prod.cost_kit4 != null ? Number(prod.cost_kit4).toFixed(0) : '—' }}
+                </td>
+              </template>
+              <template v-else>
+                <td class="sticky bg-background text-blue-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '256px' }">
+                  {{ Number(prod.cost_kit1 || 0).toFixed(0) }}
+                </td>
+              </template>
+              <!-- Account cells -->
+              <td
+                v-for="(acc, accIdx) in grid?.accounts ?? []"
                 :key="acc.id"
-                class="px-1 py-1 border-l"
-                :class="cellTone(cellOf(prod.id, acc.id))"
+                class="px-1 py-1"
+                :class="[
+                  cellTone(cellOf(prod.id, acc.id)),
+                  platformBg(acc.platform),
+                  firstAccountIdInGroup.has(acc.id) ? 'border-l-[3px] border-gray-500' : 'border-l',
+                  selectedCell?.row === rowIdx && selectedCell?.col === accIdx ? 'ring-2 ring-blue-500 ring-inset' : '',
+                ]"
+                @click="selectedCell = { row: rowIdx, col: accIdx }"
               >
                 <template v-if="editingCell && editingCell.accId === acc.id && editingCell.prodId === prod.id">
                   <div class="flex items-center gap-1">
@@ -1739,37 +2265,60 @@ watch(department, async () => {
                   </div>
                 </template>
                 <template v-else>
-                  <div class="flex items-center justify-between gap-1">
-                    <span>{{ cellLabel(cellOf(prod.id, acc.id)) }}</span>
-                    <div class="flex items-center gap-0.5 opacity-60 hover:opacity-100">
-                      <button v-if="cellOf(prod.id, acc.id)" class="p-0.5 hover:bg-muted rounded" title="Editar override" @click="startCellEdit(cellOf(prod.id, acc.id)!)">
-                        <Save class="h-3 w-3" />
-                      </button>
-                      <button
-                        v-if="cellOf(prod.id, acc.id)"
-                        class="p-0.5 hover:bg-muted rounded"
-                        :title="cellOf(prod.id, acc.id)?.cell_status === 'locked' ? 'Destravar' : 'Travar'"
-                        @click="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'locked' ? 'auto' : 'locked')"
-                      >
-                        <Lock class="h-3 w-3" />
-                      </button>
-                      <button
-                        v-if="cellOf(prod.id, acc.id)"
-                        class="p-0.5 hover:bg-muted rounded"
-                        :title="cellOf(prod.id, acc.id)?.cell_status === 'disabled' ? 'Habilitar' : 'Desabilitar'"
-                        @click="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'disabled' ? 'auto' : 'disabled')"
-                      >
-                        <Ban class="h-3 w-3" />
-                      </button>
-                      <button
-                        v-if="cellOf(prod.id, acc.id) && cellOf(prod.id, acc.id)?.price"
-                        class="p-0.5 hover:bg-emerald-100 rounded text-emerald-700"
-                        title="Push esta célula"
-                        :disabled="pushing"
-                        @click="pushCell(cellOf(prod.id, acc.id)!)"
-                      >
-                        <Send class="h-3 w-3" />
-                      </button>
+                  <div class="flex flex-col gap-0.5">
+                    <div class="flex items-center justify-between gap-1">
+                      <span>{{ cellLabel(cellOf(prod.id, acc.id)) }}</span>
+                      <div class="flex items-center gap-0.5 opacity-60 hover:opacity-100">
+                        <button v-if="cellOf(prod.id, acc.id)" class="p-0.5 hover:bg-muted rounded" title="Editar override" @click.stop="startCellEdit(cellOf(prod.id, acc.id)!)">
+                          <Save class="h-3 w-3" />
+                        </button>
+                        <button
+                          v-if="cellOf(prod.id, acc.id)"
+                          class="p-0.5 hover:bg-muted rounded"
+                          :title="cellOf(prod.id, acc.id)?.cell_status === 'locked' ? 'Destravar' : 'Travar'"
+                          @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'locked' ? 'auto' : 'locked')"
+                        >
+                          <Lock class="h-3 w-3" />
+                        </button>
+                        <button
+                          v-if="cellOf(prod.id, acc.id)"
+                          class="p-0.5 hover:bg-muted rounded"
+                          :title="cellOf(prod.id, acc.id)?.cell_status === 'disabled' ? 'Habilitar' : 'Desabilitar'"
+                          @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'disabled' ? 'auto' : 'disabled')"
+                        >
+                          <Ban class="h-3 w-3" />
+                        </button>
+                        <button
+                          v-if="cellOf(prod.id, acc.id)"
+                          class="px-1 py-0.5 hover:bg-muted rounded text-[9px] font-bold"
+                          :class="cellOf(prod.id, acc.id)?.cell_status === 'NA' ? 'text-gray-700 bg-gray-200' : 'text-gray-500'"
+                          title="Marcar NA"
+                          @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'NA' ? 'auto' : 'NA')"
+                        >NA</button>
+                        <button
+                          v-if="cellOf(prod.id, acc.id)"
+                          class="px-1 py-0.5 hover:bg-muted rounded text-[9px] font-bold"
+                          :class="cellOf(prod.id, acc.id)?.cell_status === 'SV' ? 'text-amber-700 bg-amber-100' : 'text-amber-600'"
+                          title="Marcar SV"
+                          @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'SV' ? 'auto' : 'SV')"
+                        >SV</button>
+                        <button
+                          v-if="cellOf(prod.id, acc.id) && cellOf(prod.id, acc.id)?.price"
+                          class="p-0.5 hover:bg-emerald-100 rounded text-emerald-700"
+                          title="Push esta célula"
+                          :disabled="pushing"
+                          @click.stop="pushCell(cellOf(prod.id, acc.id)!)"
+                        >
+                          <Send class="h-3 w-3" />
+                        </button>
+                      </div>
+                    </div>
+                    <div
+                      v-if="compareProductIds.has(prod.id) && actualPriceMap[prod.id]?.[acc.id] != null"
+                      class="text-[9px]"
+                      :class="actualPriceMap[prod.id][acc.id]! > Number(cellOf(prod.id, acc.id)?.price || 0) ? 'text-cyan-600' : 'text-purple-600'"
+                    >
+                      real: {{ actualPriceMap[prod.id][acc.id] }}
                     </div>
                   </div>
                 </template>
