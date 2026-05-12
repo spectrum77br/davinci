@@ -112,7 +112,7 @@ function fmtDate(s: string | null) {
     <div class="hidden md:block border rounded-md overflow-x-auto">
       <table class="w-full text-sm min-w-[900px]">
         <thead class="bg-muted/40 text-left">
-          <tr>
+          <tr class="whitespace-nowrap">
             <th class="px-3 py-2">Nome</th>
             <th class="px-3 py-2">E-mail</th>
             <th class="px-3 py-2 hidden lg:table-cell">Tuta</th>
@@ -127,13 +127,13 @@ function fmtDate(s: string | null) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="u in list?.items || []" :key="u.id" class="border-t hover:bg-muted/20">
+          <tr v-for="u in list?.items || []" :key="u.id" class="border-t hover:bg-muted/20 whitespace-nowrap">
             <td class="px-3 py-2">
               <NuxtLink :to="`/users/${u.id}`" class="hover:underline">
                 {{ u.name || '—' }}
               </NuxtLink>
             </td>
-            <td class="px-3 py-2 break-all">{{ u.email }}</td>
+            <td class="px-3 py-2 whitespace-nowrap">{{ u.email }}</td>
             <td class="px-3 py-2 hidden lg:table-cell">{{ u.tuta || '—' }}</td>
             <td class="px-3 py-2 hidden lg:table-cell">{{ u.upseller || '—' }}</td>
             <td class="px-3 py-2 hidden xl:table-cell">{{ u.bling_login || '—' }}</td>
