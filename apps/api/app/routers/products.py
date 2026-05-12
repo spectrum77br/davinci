@@ -435,65 +435,34 @@ async def csv_import(
     from decimal import Decimal, InvalidOperation
 
     raw = await file.read()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        try:
-            text = raw.decode("latin-1")
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(400, detail={"code": "csv_decode_failed"}) from e
-
-    # Detect delimiter (, or ;).
-    sample = text[:1024]
-    delim = ";" if sample.count(";") > sample.count(",") else ","
-    reader = csv.reader(io.StringIO(text), delimiter=delim)
-
+    text = raw.decode("utf-8-sig")
+    reader = csv.reader(io.StringIO(text))
     rows = list(reader)
     if not rows:
         raise HTTPException(400, detail={"code": "csv_empty"})
 
-    # Header is required. Recognize columns case-insensitively.
-    header = [h.strip().lower() for h in rows[0]]
-
-    def col(*names: str) -> int | None:
-        for n in names:
-            if n in header:
-                return header.index(n)
-        return None
-
-    i_sku = col("sku", "código", "codigo")
-    i_name = col("nome", "name", "produto")
-    i_cost = col("custo", "cost", "cost_price", "preço de custo")
-    i_stock = col("estoque", "stock")
-    i_min = col("estoque mínimo", "estoque minimo", "min_stock", "minimo")
-
-    if i_sku is None or i_name is None:
-        raise HTTPException(
-            400,
-            detail={"code": "csv_missing_headers", "required": ["SKU", "Nome"]},
-        )
-
+    # Expected columns (in order): SKU, Nome, Custo, Estoque, Estoque Mínimo.
+    # First row is treated as header and skipped.
     imported = 0
     updated = 0
     errors: list[str] = []
 
-    # Preload existing products by SKU for this user.
     existing = (
         await session.execute(select(Product).where(user_scope(Product, user)))
     ).scalars().all()
     by_sku = {p.sku: p for p in existing}
 
-    for idx, row in enumerate(rows[1:], start=2):  # idx is the file-line number (1-based, after header)
+    for idx, row in enumerate(rows[1:], start=2):
         if not row or all((c or "").strip() == "" for c in row):
             continue
 
-        def _get(i: int | None) -> str:
-            if i is None or i >= len(row):
+        def _get(i: int) -> str:
+            if i >= len(row):
                 return ""
             return (row[i] or "").strip()
 
-        sku = _get(i_sku)
-        name = _get(i_name)
+        sku = _get(0)
+        name = _get(1)
         if not sku:
             errors.append(f"linha {idx}: SKU vazio")
             continue
@@ -502,16 +471,16 @@ async def csv_import(
             continue
 
         try:
-            cost_raw = _get(i_cost).replace(",", ".")
+            cost_raw = _get(2)
             cost = Decimal(cost_raw) if cost_raw else None
         except InvalidOperation:
             errors.append(f"linha {idx}: custo inválido (SKU {sku})")
             continue
 
         try:
-            stock_raw = _get(i_stock)
+            stock_raw = _get(3)
             stock = int(stock_raw) if stock_raw else 0
-            min_raw = _get(i_min)
+            min_raw = _get(4)
             min_stock = int(min_raw) if min_raw else 0
         except ValueError:
             errors.append(f"linha {idx}: estoque inválido (SKU {sku})")
@@ -542,7 +511,7 @@ async def csv_import(
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
-        raise HTTPException(409, detail={"code": "csv_integrity_error", "msg": str(e.orig)}) from e
+        raise HTTPException(409, detail={"code": "csv_integrity_error"}) from e
 
     if imported > 0 or updated > 0:
         await trigger_user_relink(user.id)

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onUnmounted } from 'vue'
-import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X, Activity, Boxes, Loader2, FileUp } from 'lucide-vue-next'
+import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X, Activity, Boxes, Loader2 } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'produtos', action: 'view' } })
 
@@ -105,7 +105,6 @@ const showImportCsv = ref(false)
 const csvFile = ref<File | null>(null)
 const csvImporting = ref(false)
 const csvImportError = ref<string | null>(null)
-const csvImportResult = ref<{ imported: number; updated: number; errors: string[] } | null>(null)
 
 // Feature 2: New product
 const showNewProduct = ref(false)
@@ -120,22 +119,18 @@ const creatingProduct = ref(false)
 
 // Feature 4: platform badge helper
 function platformBadgeClass(platform: string): string {
-  const base = 'inline-block px-2 py-0.5 rounded text-xs font-medium'
+  const baseClass = 'inline-block px-2 py-0.5 rounded text-xs font-medium'
   switch (platform) {
-    case 'bling': return `${base} bg-green-100 text-green-700`
-    case 'shopee': return `${base} bg-orange-100 text-orange-700`
-    case 'amazon': return `${base} bg-yellow-100 text-yellow-700`
-    case 'ml': return `${base} bg-blue-100 text-blue-700`
-    case 'tiktok': return `${base} bg-pink-100 text-pink-700`
-    case 'temu': return `${base} bg-purple-100 text-purple-700`
-    case 'aliexpress': return `${base} bg-red-100 text-red-700`
-    default: return `${base} bg-gray-100 text-gray-700`
+    case 'bling': return `${baseClass} bg-green-100 text-green-700`
+    case 'shopee': return `${baseClass} bg-orange-100 text-orange-700`
+    case 'amazon': return `${baseClass} bg-yellow-100 text-yellow-700`
+    case 'ml': return `${baseClass} bg-blue-100 text-blue-700`
+    case 'tiktok': return `${baseClass} bg-pink-100 text-pink-700`
+    case 'temu': return `${baseClass} bg-purple-100 text-purple-700`
+    case 'aliexpress': return `${baseClass} bg-red-100 text-red-700`
+    default: return `${baseClass} bg-gray-100 text-gray-700`
   }
 }
-
-const selectedIntegration = computed(() =>
-  integrations.value.find((i) => i.id === filtroIntegration.value) || null,
-)
 
 type UserSettings = { daily_sync_enabled: boolean }
 const autoSyncEnabled = ref<boolean>(false)
@@ -260,7 +255,6 @@ async function submitCsvImport() {
   if (!csvFile.value) return
   csvImporting.value = true
   csvImportError.value = null
-  csvImportResult.value = null
   try {
     const formData = new FormData()
     formData.append('file', csvFile.value)
@@ -268,14 +262,9 @@ async function submitCsvImport() {
       '/api/products/import/csv',
       { method: 'POST', body: formData },
     )
-    csvImportResult.value = result
-    if (!result.errors.length) {
-      setTimeout(() => {
-        showImportCsv.value = false
-        csvFile.value = null
-        csvImportResult.value = null
-      }, 1500)
-    }
+    alert(`Importados: ${result.imported}, Atualizados: ${result.updated}`)
+    showImportCsv.value = false
+    csvFile.value = null
     await refreshAll()
   } catch (e: any) {
     csvImportError.value = e?.data?.detail?.code || e?.message || 'erro ao importar'
@@ -511,9 +500,9 @@ const stats = computed(() => ({
           <Download class="size-4 mr-1.5" /> importar Bling
         </Button>
         <Button v-if="canEdit" size="sm" variant="outline" @click="showImportCsv = true">
-          <FileUp class="size-4 mr-1.5" /> Importar CSV
+          <Download class="size-4 mr-1.5" /> Importar CSV
         </Button>
-        <Button v-if="canEdit" size="sm" variant="outline" @click="openNewProduct">
+        <Button v-if="canEdit" size="sm" variant="outline" @click="showNewProduct = true">
           <Plus class="size-4 mr-1.5" /> Novo Produto
         </Button>
         <Button v-if="canEdit" size="sm" variant="outline" @click="startAutoLink">
@@ -544,15 +533,14 @@ const stats = computed(() => ({
 
     <div class="flex flex-wrap gap-2 items-center">
       <Input v-model="search" placeholder="buscar SKU ou nome…" class="w-72" @keyup.enter="refreshAll" />
-      <div class="flex items-center gap-1">
-        <select v-model="filtroIntegration" class="h-9 rounded-md border bg-background px-2 text-sm" @change="refreshAll">
-          <option value="">Todas as contas</option>
-          <option v-for="i in integrations" :key="i.id" :value="i.id">[{{ i.platform }}] {{ i.name }}</option>
-        </select>
-        <span v-if="selectedIntegration" :class="platformBadgeClass(selectedIntegration.platform)">
-          {{ selectedIntegration.platform }}
-        </span>
-      </div>
+      <select v-model="filtroIntegration" class="h-9 rounded-md border bg-background px-2 text-sm" @change="refreshAll">
+        <option value="">
+          <span class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">Todas</span>
+        </option>
+        <option v-for="i in integrations" :key="i.id" :value="i.id">
+          <span :class="platformBadgeClass(i.platform)">{{ i.platform }}</span> — {{ i.name }}
+        </option>
+      </select>
       <select v-model="stockFilter" class="h-9 rounded-md border bg-background px-2 text-sm" @change="refreshAll">
         <option value="">Todo estoque</option>
         <option value="low">Estoque baixo</option>
@@ -909,30 +897,23 @@ const stats = computed(() => ({
       </div>
     </div>
 
-    <!-- CSV import modal (Feature 1) -->
+    <!-- CSV Import modal -->
     <div v-if="showImportCsv" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showImportCsv = false">
       <div class="bg-background rounded-lg shadow-lg w-[min(600px,95vw)] flex flex-col">
         <div class="flex items-center justify-between border-b p-3">
-          <h3 class="font-semibold">Importar produtos via CSV</h3>
+          <h3 class="font-semibold">Importar Produtos via CSV</h3>
           <button @click="showImportCsv = false"><X class="size-4" /></button>
         </div>
         <div class="p-4 space-y-3">
           <p class="text-sm text-muted-foreground">
-            Cabeçalhos aceitos (em qualquer ordem): <code>SKU, Nome, Custo, Estoque, Estoque mínimo</code>.
-            Separador <code>,</code> ou <code>;</code> é detectado automaticamente. SKUs existentes são atualizados.
+            Formato esperado: SKU, Nome, Custo, Estoque, Estoque Mínimo
           </p>
           <div v-if="csvImportError" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
             {{ csvImportError }}
           </div>
-          <div v-if="csvImportResult" class="rounded-md border bg-emerald-50 px-3 py-2 text-sm text-emerald-800 space-y-1">
-            <div>Importados: <strong>{{ csvImportResult.imported }}</strong> · Atualizados: <strong>{{ csvImportResult.updated }}</strong></div>
-            <ul v-if="csvImportResult.errors.length" class="mt-1 text-xs text-amber-700 space-y-0.5 max-h-32 overflow-auto">
-              <li v-for="(err, idx) in csvImportResult.errors" :key="idx">{{ err }}</li>
-            </ul>
-          </div>
           <input
             type="file"
-            accept=".csv,text/csv"
+            accept=".csv"
             class="block w-full text-sm border rounded px-3 py-2"
             @change="handleCsvUpload"
           />
