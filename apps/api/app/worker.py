@@ -55,6 +55,11 @@ _settings = get_settings()
 # Brasília is UTC-3 (no DST since 2019). Cron schedules run in UTC: BRT = UTC-3.
 SP_TZ = ZoneInfo("America/Sao_Paulo")
 
+# Daily `sync_all_run` only processes products at risk of stockout. Items
+# with `products.stock >= 10` are skipped — webhooks keep their stock fresh
+# inline anyway, and high-stock items rarely cause real-world divergence.
+SYNC_ALL_LOW_STOCK_THRESHOLD = 10
+
 
 async def send_otp_email(ctx: dict, *, email: str, prefix: str, code: str, ttl_minutes: int) -> None:
     sender = get_email_sender()
@@ -129,6 +134,13 @@ async def sync_all_run(
                 where.append(Product.user_id == uid)
             if product_ids:
                 where.append(Product.id.in_([UUID(p) for p in product_ids]))
+            else:
+                # Low-stock-only mode: full sync_all sweeps only items at
+                # risk of stockout. Hi-stock items rarely diverge between
+                # Bling and marketplaces; skipping them keeps the per-day
+                # call volume well under Bling's CF rate gate. Manual
+                # single-product sync (product_ids set) bypasses the filter.
+                where.append(Product.stock < SYNC_ALL_LOW_STOCK_THRESHOLD)
             stmt = select(Product)
             if where:
                 stmt = stmt.where(and_(*where))

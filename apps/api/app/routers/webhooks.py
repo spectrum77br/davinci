@@ -44,6 +44,13 @@ router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 
 DEDUPE_TTL_SECONDS = 86_400
 
+# Stock events for items with > this many units on hand are ack'd and
+# dropped. Keeps webhook fan-out focused on items near stockout. When stock
+# rises above the threshold, the local row will stay stale until stock comes
+# back into the watched range — accepted tradeoff since marketplace
+# under-stating high stock doesn't lose sales.
+WEBHOOK_HI_STOCK_THRESHOLD = 10
+
 
 SIG_FAIL_COUNTER_KEY = "webhook:bling:sig_fail_count"
 SIG_FAIL_COUNTER_TTL = 3600
@@ -295,6 +302,22 @@ async def receive_bling_webhook(
         )
 
     sku, bling_product_id, stock, bling_store_id = _extract_payload(parsed)
+
+    # Hi-stock filter: items with > WEBHOOK_HI_STOCK_THRESHOLD on hand are
+    # nowhere near stockout, so we skip the marketplace fan-out. Stock events
+    # for these still cost an arq job per active link and a few hundred
+    # marketplace pushes — none of that buys anything when stock goes from
+    # e.g. 200 to 198. The local product row stays stale until the next
+    # webhook brings stock below the threshold OR `sync_all_run` picks it up
+    # (sync_all itself filters to low-stock so the gap doesn't grow forever).
+    if stock is not None and stock > WEBHOOK_HI_STOCK_THRESHOLD:
+        return {
+            "ack": True,
+            "ignored": "hi_stock",
+            "stock": stock,
+            "delivery_id": delivery_key,
+        }
+
     product = await _resolve_product(
         session, sku=sku, bling_product_id=bling_product_id
     )
