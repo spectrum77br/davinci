@@ -170,7 +170,17 @@ class SyncOrchestrator:
                 error_detail=f"external_id={link.external_id!r}",
             )
         try:
-            raw = await client.get_product(bling_product_id)
+            smart = await client.get_product_stock_smart(
+                bling_product_id, sku=product.sku
+            )
+            raw = smart.get("raw") or {}
+            # If product was found via SKU search (deleted/inactive in Bling),
+            # update the link's external_id to point to the active product.
+            if smart.get("found_via") in ("sku_search", "sku_search_inactive"):
+                new_bling_id = smart.get("bling_product_id")
+                if new_bling_id:
+                    link.external_id = str(new_bling_id)
+                    product.bling_product_id = int(new_bling_id)
         except Exception as e:  # noqa: BLE001
             return SyncResult(
                 status=SyncStatus.RETRYABLE,
@@ -178,7 +188,7 @@ class SyncOrchestrator:
                 error_detail=str(e)[:500],
             )
         parsed = parse_bling_product(raw) if raw else {}
-        new_stock = parsed.get("stock")
+        new_stock = smart.get("stock") if smart.get("stock") is not None else parsed.get("stock")
         qty_before = link.stock
         if new_stock is None:
             return SyncResult(

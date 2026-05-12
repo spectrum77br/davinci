@@ -209,6 +209,67 @@ class AmazonClient:
 
         return _classify_response(r, qty_before, qty_after=qty, sku=sku)
 
+    async def update_price(
+        self,
+        sku: str,
+        price: float,
+        *,
+        currency: str = "BRL",
+    ) -> SyncResult:
+        """Push price to an Amazon listing via Listings Items API (PATCH).
+
+        Uses the same PATCH endpoint as update_stock, but patches
+        /attributes/purchasable_offer instead of fulfillment_availability.
+        """
+        sku = sku.strip()
+        if not sku:
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="invalid_sku",
+                error_detail="empty sku",
+            )
+        if not self.seller_id or not self.marketplace_id:
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="amazon_missing_creds",
+                error_detail="seller_id or marketplace_id absent",
+            )
+        if price <= 0:
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                error_code="invalid_price",
+                error_detail=f"price={price}",
+            )
+
+        path = f"/listings/2021-08-01/items/{self.seller_id}/{sku}"
+        body = {
+            "productType": "PRODUCT",
+            "patches": [
+                {
+                    "op": "replace",
+                    "path": "/attributes/purchasable_offer",
+                    "value": [
+                        {
+                            "marketplace_id": self.marketplace_id,
+                            "currency": currency,
+                            "our_price": [{"schedule": [{"value_with_tax": price}]}],
+                        }
+                    ],
+                }
+            ],
+        }
+        try:
+            r = await self._request(
+                "PATCH",
+                path,
+                params={"marketplaceIds": self.marketplace_id},
+                json=body,
+            )
+        except httpx.HTTPError as e:
+            return _http_error_to_result(e, None)
+
+        return _classify_price_response(r, sku, price)
+
 
 # ---------------------------------------------------------------- helpers
 
@@ -303,3 +364,52 @@ def _describe_issue(issue: dict) -> str:
 
 def _is_blocking_issue(issue: dict) -> bool:
     return (issue.get("severity") or "").upper() == "ERROR"
+
+
+def _classify_price_response(
+    r: httpx.Response, sku: str, price: float
+) -> SyncResult:
+    """Classify Amazon price update response (same structure as stock)."""
+    if r.status_code in {429, 502, 503, 504}:
+        return SyncResult(
+            status=SyncStatus.RETRYABLE,
+            error_code=f"http_{r.status_code}",
+            error_detail=r.text[:500],
+        )
+    if r.status_code in {401, 403}:
+        return SyncResult(
+            status=SyncStatus.FATAL,
+            error_code=f"amazon_auth_{r.status_code}",
+            error_detail=r.text[:500],
+        )
+    if r.status_code == 404:
+        return SyncResult(
+            status=SyncStatus.FATAL,
+            error_code="amazon_sku_not_found",
+            error_detail=f"sku={sku!r}",
+        )
+    try:
+        payload = r.json() or {}
+    except ValueError:
+        payload = {}
+    if r.status_code >= 400:
+        errors = payload.get("errors") or []
+        detail = "; ".join(_describe_error(e) for e in errors) or r.text[:500]
+        return SyncResult(
+            status=SyncStatus.FATAL,
+            error_code=f"amazon_http_{r.status_code}",
+            error_detail=detail[:500],
+        )
+    status = (payload.get("status") or "").upper()
+    issues = payload.get("issues") or []
+    if status == "INVALID" or any(_is_blocking_issue(i) for i in issues):
+        detail = "; ".join(_describe_issue(i) for i in issues) or "INVALID"
+        return SyncResult(
+            status=SyncStatus.FATAL,
+            error_code="amazon_invalid_patch",
+            error_detail=detail[:500],
+        )
+    return SyncResult(
+        status=SyncStatus.OK,
+        payload={"sku": sku, "price": price, "submission_id": payload.get("submissionId")},
+    )

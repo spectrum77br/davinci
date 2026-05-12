@@ -219,6 +219,208 @@ class ShopeeClient:
 
         return _classify_response(r, qty_before, qty_after=qty)
 
+    async def update_price(
+        self,
+        item_id: str,
+        price: float,
+        *,
+        variation_id: str | None = None,
+    ) -> SyncResult:
+        """Push price to a single Shopee listing.
+
+        If item has an active promotion, updates the promotion price instead.
+        Falls back to regular price update via /api/v2/product/update_price.
+        """
+        if price <= 0:
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                error_code="invalid_price",
+                error_detail=f"price={price}",
+            )
+        try:
+            iid = int(item_id)
+        except (TypeError, ValueError):
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="invalid_item_id",
+                error_detail=f"item_id={item_id!r}",
+            )
+
+        model_id = 0
+        if variation_id:
+            try:
+                model_id = int(variation_id)
+            except (TypeError, ValueError):
+                model_id = 0
+
+        # Try promotion price first
+        try:
+            promo = await self.get_item_promotion(iid)
+            if promo:
+                promo_id = promo.get("promotion_id")
+                if promo_id:
+                    ok = await self.update_promotion_price(
+                        promo_id, iid, model_id, price
+                    )
+                    if ok:
+                        return SyncResult(
+                            status=SyncStatus.OK,
+                            payload={
+                                "item_id": item_id,
+                                "model_id": model_id,
+                                "price": price,
+                                "via": "promotion",
+                            },
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "shopee_promo_price_fallback",
+                item_id=item_id,
+                error=str(e)[:200],
+            )
+
+        # Regular price update
+        body: dict[str, Any] = {
+            "item_id": iid,
+            "price_list": [{"model_id": model_id, "original_price": price}],
+        }
+        try:
+            r = await self._request("POST", "/api/v2/product/update_price", json=body)
+        except httpx.HTTPError as e:
+            return _http_error_to_result(e, None)
+        return _classify_price_response(r, item_id, model_id, price)
+
+    async def get_model_stock(
+        self, item_id: int, model_id: int = 0
+    ) -> int:
+        """Get current stock for a specific model of an item.
+
+        Uses /api/v2/product/get_item_base_info to read stock_info_v2.
+        For items with variations, reads model-level stock.
+        """
+        r = await self._request(
+            "GET",
+            "/api/v2/product/get_item_base_info",
+            params={"item_id_list": str(item_id)},
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"shopee_get_item_failed status={r.status_code}")
+
+        body = r.json() or {}
+        if body.get("error"):
+            raise RuntimeError(f"shopee_get_item_error: {body.get('message')}")
+
+        items = (body.get("response") or {}).get("item_list") or []
+        if not items:
+            raise RuntimeError(f"shopee_item_not_found: {item_id}")
+
+        item = items[0]
+
+        # If model_id == 0, return item-level stock
+        if model_id == 0:
+            stock_info = (item.get("stock_info_v2") or {}).get("summary_info") or {}
+            return int(stock_info.get("total_available_stock") or 0)
+
+        # For variations, need to get model-level stock
+        r2 = await self._request(
+            "GET",
+            "/api/v2/product/get_model_list",
+            params={"item_id": item_id},
+        )
+        if r2.status_code != 200:
+            # Fallback to item-level stock
+            stock_info = (item.get("stock_info_v2") or {}).get("summary_info") or {}
+            return int(stock_info.get("total_available_stock") or 0)
+
+        body2 = r2.json() or {}
+        models = (body2.get("response") or {}).get("model") or []
+        for m in models:
+            if int(m.get("model_id") or 0) == model_id:
+                stock_info_list = (m.get("stock_info_v2") or {}).get("seller_stock") or []
+                for s in stock_info_list:
+                    return int(s.get("stock") or 0)
+
+        # Model not found, return item-level
+        stock_info = (item.get("stock_info_v2") or {}).get("summary_info") or {}
+        return int(stock_info.get("total_available_stock") or 0)
+
+    async def get_item_promotion(
+        self, item_id: int
+    ) -> dict | None:
+        """Check if item has an active discount promotion.
+
+        Returns promotion info dict or None if no active promotion.
+        """
+        try:
+            r = await self._request(
+                "GET",
+                "/api/v2/discount/get_discount_list",
+                params={"discount_status": "ongoing", "page_no": 1, "page_size": 50},
+            )
+            if r.status_code != 200:
+                return None
+
+            body = r.json() or {}
+            if body.get("error"):
+                return None
+
+            discounts = (body.get("response") or {}).get("discount_list") or []
+            for discount in discounts:
+                discount_id = discount.get("discount_id")
+                if not discount_id:
+                    continue
+                # Check if this discount contains our item
+                r2 = await self._request(
+                    "GET",
+                    "/api/v2/discount/get_discount",
+                    params={"discount_id": discount_id},
+                )
+                if r2.status_code != 200:
+                    continue
+                body2 = r2.json() or {}
+                items = (body2.get("response") or {}).get("items") or []
+                for it in items:
+                    if int(it.get("item_id") or 0) == item_id:
+                        return {
+                            "promotion_id": discount_id,
+                            "item_id": item_id,
+                            "discount_info": discount,
+                        }
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def update_promotion_price(
+        self,
+        discount_id: int,
+        item_id: int,
+        model_id: int,
+        price: float,
+    ) -> bool:
+        """Update the promotion/discount price for a specific item/model.
+
+        Uses /api/v2/discount/update_discount_item.
+        """
+        model_list = [{"model_id": model_id, "model_promotion_price": price}]
+        body = {
+            "discount_id": discount_id,
+            "items": [{
+                "item_id": item_id,
+                "item_promotion_price": price,
+                "model_list": model_list if model_id else [],
+            }],
+        }
+        try:
+            r = await self._request(
+                "POST", "/api/v2/discount/update_discount_item", json=body
+            )
+            if r.status_code != 200:
+                return False
+            resp = r.json() or {}
+            return not resp.get("error")
+        except Exception:  # noqa: BLE001
+            return False
+
     async def list_listings(
         self,
         *,
@@ -420,6 +622,44 @@ def _classify_response(
         error_code=err or "shopee_unknown_error",
         error_detail=msg[:500] if msg else None,
         payload={"shopee_classification": "unknown"},
+    )
+
+
+def _classify_price_response(
+    r: httpx.Response, item_id: str, model_id: int, price: float
+) -> SyncResult:
+    """Classify Shopee price update response."""
+    if r.status_code in {429, 502, 503, 504}:
+        return SyncResult(
+            status=SyncStatus.RETRYABLE,
+            error_code=f"http_{r.status_code}",
+            error_detail=r.text[:500],
+        )
+    try:
+        payload = r.json() or {}
+    except ValueError:
+        return SyncResult(
+            status=SyncStatus.FATAL,
+            error_code="shopee_invalid_json",
+            error_detail=r.text[:500],
+        )
+    err = (payload.get("error") or "").strip()
+    if not err:
+        return SyncResult(
+            status=SyncStatus.OK,
+            payload={"item_id": item_id, "model_id": model_id, "price": price},
+        )
+    msg = (payload.get("message") or "").strip()
+    if err in _AUTH_CODES:
+        return SyncResult(
+            status=SyncStatus.FATAL,
+            error_code=err,
+            error_detail=msg[:500] if msg else None,
+        )
+    return SyncResult(
+        status=SyncStatus.RETRYABLE,
+        error_code=err or "shopee_price_error",
+        error_detail=msg[:500] if msg else None,
     )
 
 

@@ -44,12 +44,10 @@ router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 
 DEDUPE_TTL_SECONDS = 86_400
 
-# Stock events for items with > this many units on hand are ack'd and
-# dropped. Keeps webhook fan-out focused on items near stockout. When stock
-# rises above the threshold, the local row will stay stale until stock comes
-# back into the watched range — accepted tradeoff since marketplace
-# under-stating high stock doesn't lose sales.
-WEBHOOK_HI_STOCK_THRESHOLD = 10
+# Intelligent threshold: sales (stock going down) with stock > 5 are deferred
+# to daily sync. Restocks (stock going up) ALWAYS propagate immediately.
+# Stock = 0 ALWAYS propagates immediately.
+WEBHOOK_LOW_STOCK_LIMIT = 5
 
 
 SIG_FAIL_COUNTER_KEY = "webhook:bling:sig_fail_count"
@@ -304,24 +302,54 @@ async def receive_bling_webhook(
 
     sku, bling_product_id, stock, bling_store_id = _extract_payload(parsed)
 
-    # Hi-stock filter: items with > WEBHOOK_HI_STOCK_THRESHOLD on hand are
-    # nowhere near stockout, so we skip the marketplace fan-out. Stock events
-    # for these still cost an arq job per active link and a few hundred
-    # marketplace pushes — none of that buys anything when stock goes from
-    # e.g. 200 to 198. The local product row stays stale until the next
-    # webhook brings stock below the threshold OR `sync_all_run` picks it up
-    # (sync_all itself filters to low-stock so the gap doesn't grow forever).
-    if stock is not None and stock > WEBHOOK_HI_STOCK_THRESHOLD:
-        return {
-            "ack": True,
-            "ignored": "hi_stock",
-            "stock": stock,
-            "delivery_id": delivery_key,
-        }
-
+    # Resolve product first — needed for intelligent threshold logic
     product = await _resolve_product(
         session, sku=sku, bling_product_id=bling_product_id
     )
+
+    # ── Intelligent threshold logic (matches SSH behavior) ──
+    # Old approach: drop all webhooks with stock > 10.
+    # New approach:
+    #   - SALE (stock went down): only propagate if stock ≤ 5 (low stock)
+    #   - RESTOCK (stock went up): ALWAYS propagate immediately
+    #   - Stock = 0: ALWAYS propagate (force marketplaces to zero)
+    #   - Stock unchanged: skip (unless stock = 0)
+    if stock is not None and product is not None:
+        previous_stock = product.stock or 0
+        is_sale = stock < previous_stock
+        is_restock = stock > previous_stock
+        stock_unchanged = stock == previous_stock
+
+        # Always update local DB with latest stock from Bling
+        product.stock = stock
+
+        if is_sale and stock > WEBHOOK_LOW_STOCK_LIMIT:
+            # Sale but stock still high — defer to daily sync
+            await session.commit()
+            logger.info(
+                "bling_webhook_deferred_sale",
+                sku=sku,
+                previous=previous_stock,
+                current=stock,
+                delivery_id=delivery_key,
+            )
+            return {
+                "ack": True,
+                "deferred": "sale_hi_stock",
+                "stock": stock,
+                "previous": previous_stock,
+                "delivery_id": delivery_key,
+            }
+
+        if stock_unchanged and stock != 0:
+            # No change and not zero — skip
+            await session.commit()
+            return {
+                "ack": True,
+                "ignored": "stock_unchanged",
+                "stock": stock,
+                "delivery_id": delivery_key,
+            }
 
     if product is None:
         # No matching product — Bling may emit events for products we never

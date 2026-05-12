@@ -380,6 +380,91 @@ class BlingClient:
         r.raise_for_status()
         return r.json().get("data") or {}
 
+    async def get_product_stock_smart(
+        self,
+        bling_product_id: int,
+        sku: str | None = None,
+    ) -> dict:
+        """Smart stock fetch: if the product is deleted/inactive in Bling,
+        search by SKU to find the active replacement.
+
+        Returns dict with keys: stock, bling_product_id, found_via, raw
+        Raises RuntimeError if product cannot be resolved.
+        """
+        try:
+            raw = await self.get_product(bling_product_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404 and sku:
+                # Product deleted — try to find active one by SKU
+                active = await self.find_active_product_by_sku(sku)
+                if active:
+                    return {
+                        "stock": active.get("stock"),
+                        "bling_product_id": active.get("id"),
+                        "found_via": "sku_search",
+                        "raw": active,
+                    }
+                raise RuntimeError(
+                    f"Product {bling_product_id} deleted and no active product found for SKU {sku}"
+                ) from e
+            raise
+
+        parsed = parse_bling_product(raw)
+        situacao = (raw.get("situacao") or "").upper()
+
+        # If product is inactive/excluded, search by SKU
+        if situacao in ("I", "E", "INATIVO", "EXCLUIDO") and sku:
+            active = await self.find_active_product_by_sku(sku)
+            if active:
+                return {
+                    "stock": active.get("stock"),
+                    "bling_product_id": active.get("id"),
+                    "found_via": "sku_search_inactive",
+                    "raw": active,
+                }
+
+        return {
+            "stock": parsed.get("stock"),
+            "bling_product_id": bling_product_id,
+            "found_via": "direct",
+            "raw": raw,
+        }
+
+    async def find_active_product_by_sku(self, sku: str) -> dict | None:
+        """Search Bling for an active product matching the given SKU.
+
+        Bling's /produtos endpoint supports filtering by codigo (SKU).
+        Returns the first active product found, or None.
+        """
+        if not sku:
+            return None
+        try:
+            r = await self._request(
+                "GET",
+                "/produtos",
+                params={"codigo": sku, "pagina": 1, "limite": 5},
+            )
+            r.raise_for_status()
+            items = r.json().get("data") or []
+            for item in items:
+                situacao = (item.get("situacao") or "").upper()
+                if situacao in ("A", "ATIVO", ""):
+                    # Get full product details including stock
+                    item_id = item.get("id")
+                    if item_id:
+                        full = await self.get_product(int(item_id))
+                        parsed = parse_bling_product(full)
+                        return {
+                            "id": item_id,
+                            "sku": item.get("codigo") or sku,
+                            "stock": parsed.get("stock"),
+                            "name": item.get("nome"),
+                            "raw": full,
+                        }
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+
     async def test_connection(self) -> TestResult:
         try:
             r = await self._request("GET", "/produtos", params={"pagina": 1, "limite": 1})

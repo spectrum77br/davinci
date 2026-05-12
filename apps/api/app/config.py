@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     amazon_refresh_token: str = ""
     amazon_marketplace_id: str = ""
 
+    tiktok_app_key: str = ""
+    tiktok_app_secret: str = ""
+    tiktok_shop_cipher: str = ""
+    tiktok_access_token: str = ""
+    tiktok_refresh_token: str = ""
+
+    temu_app_key: str = ""
+    temu_app_secret: str = ""
+    temu_access_token: str = ""
+
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 

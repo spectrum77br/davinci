@@ -395,6 +395,9 @@ async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_
                     client = ShopeeClient(creds, on_token_refresh=_persist)
                 elif platform == IntegrationPlatform.ML:
                     client = MercadoLivreClient(creds, on_token_refresh=_persist)
+                elif platform == IntegrationPlatform.TIKTOK:
+                    from app.services.marketplaces.tiktok import TikTokClient
+                    client = TikTokClient(creds, on_token_refresh=_persist)
                 else:
                     continue
                 await client.refresh()
@@ -429,10 +432,31 @@ async def ml_token_refresh(ctx: dict) -> None:
     await _refresh_tokens_for(IntegrationPlatform.ML, expiring_within_s=2 * 3600)
 
 
+async def tiktok_token_refresh(ctx: dict) -> None:
+    """Refresh TikTok tokens expiring within 12h (TikTok AT lasts ~24h)."""
+    await _refresh_tokens_for(IntegrationPlatform.TIKTOK, expiring_within_s=12 * 3600)
+
+
 async def shopee_discrepancy_check(ctx: dict) -> None:
-    """Stub: real comparison lives with Fase 4b.Shopee follow-up. Keeps the
-    schedule registered so a later wiring doesn't need a worker redeploy."""
-    logger.debug("shopee_discrepancy_check_noop")
+    """Compare Shopee stock vs local DB and fix discrepancies.
+    Runs every 4h to catch phantom stock issues."""
+    from app.services.shopee_discrepancy_check import run_shopee_discrepancy_check
+    try:
+        result = await run_shopee_discrepancy_check()
+        logger.info("shopee_discrepancy_check_done", **result)
+    except Exception as e:  # noqa: BLE001
+        logger.error("shopee_discrepancy_check_failed", error=str(e))
+
+
+async def ml_discrepancy_check(ctx: dict) -> None:
+    """Compare Mercado Livre stock vs local DB and fix discrepancies.
+    Runs every 4h to catch phantom stock issues."""
+    from app.services.ml_discrepancy_check import run_ml_discrepancy_check
+    try:
+        result = await run_ml_discrepancy_check()
+        logger.info("ml_discrepancy_check_done", **result)
+    except Exception as e:  # noqa: BLE001
+        logger.error("ml_discrepancy_check_failed", error=str(e))
 
 
 async def background_jobs_gc(ctx: dict) -> None:
@@ -807,7 +831,9 @@ class WorkerSettings:
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         cron(shopee_token_refresh, hour={0, 4, 8, 12, 16, 20}, minute=0, run_at_startup=False),
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
+        cron(tiktok_token_refresh, hour={0, 6, 12, 18}, minute=45, run_at_startup=False),
         cron(shopee_discrepancy_check, hour={1, 5, 9, 13, 17, 21}, minute=0, run_at_startup=False),
+        cron(ml_discrepancy_check, hour={2, 6, 10, 14, 18, 22}, minute=30, run_at_startup=False),
         cron(background_jobs_gc, hour=6, minute=30, run_at_startup=False),  # 03:30 BRT
         cron(sync_logs_partition_gc, day=15, hour=3, minute=0, run_at_startup=False),
         # Stubs — registered so wiring later doesn't need a worker redeploy.

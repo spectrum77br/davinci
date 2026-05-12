@@ -36,6 +36,10 @@ from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.base import SyncResult, SyncStatus
 from app.services.marketplaces.factory import client_for
 from app.services.marketplaces.ml import MercadoLivreClient
+from app.services.marketplaces.shopee import ShopeeClient
+from app.services.marketplaces.amazon import AmazonClient
+from app.services.marketplaces.tiktok import TikTokClient
+from app.services.marketplaces.temu import TemuClient
 from app.services.pricing.calc import CalcOutcome, calculate
 
 if TYPE_CHECKING:
@@ -268,11 +272,19 @@ async def push_one(
             code="integration_not_found",
             price=outcome.price,
         )
-    if integration.platform != IntegrationPlatform.ML:
+    # All platforms are now supported
+    _SUPPORTED_PLATFORMS = {
+        IntegrationPlatform.ML,
+        IntegrationPlatform.SHOPEE,
+        IntegrationPlatform.AMAZON,
+        IntegrationPlatform.TIKTOK,
+        IntegrationPlatform.TEMU,
+    }
+    if integration.platform not in _SUPPORTED_PLATFORMS:
         return PushOutcome(
             ok=False,
             code="platform_not_implemented",
-            detail=f"phase 9b ships ML only; got {integration.platform.value}",
+            detail=f"platform {integration.platform.value} not supported for pricing push",
             price=outcome.price,
         )
 
@@ -299,16 +311,10 @@ async def push_one(
     client = client_for(
         integration.platform, creds, on_token_refresh=_persist_refresh
     )
-    if not isinstance(client, MercadoLivreClient):
-        return PushOutcome(
-            ok=False,
-            code="client_mismatch",
-            detail=f"expected MLClient, got {type(client).__name__}",
-        )
 
-    result: SyncResult = await client.update_price(
-        item_id=listing.external_id,
-        price=float(outcome.price),
+    # Dispatch update_price to the appropriate client
+    result: SyncResult = await _dispatch_price_update(
+        client, integration.platform, listing, float(outcome.price)
     )
     ok = result.status == SyncStatus.OK
     code = "ok" if ok else (result.error_code or result.status.value)
@@ -320,7 +326,7 @@ async def push_one(
         item_id=listing.external_id,
         variation_id=None,
         cached=False,
-        payload={"calc": outcome.inputs or {}, "ml": result.payload},
+        payload={"calc": outcome.inputs or {}, "push_result": result.payload},
     )
 
     if idempotency_key:
@@ -332,3 +338,90 @@ async def push_one(
             response.to_dict(),
         )
     return response
+
+
+async def _dispatch_price_update(
+    client,
+    platform: IntegrationPlatform,
+    listing: "Listing",
+    price: float,
+) -> SyncResult:
+    """Route price update to the correct client method based on platform.
+
+    Each marketplace has a slightly different update_price signature:
+    - ML: update_price(item_id, price, variation_id=...)
+    - Shopee: update_price(item_id, price, variation_id=...)
+    - Amazon: update_price(sku, price, currency=...)
+    - TikTok: update_price_with_activation(product_id, sku_ids, price)
+    - Temu: update_price(product_sku_id, price, currency=...)
+    """
+    try:
+        if platform == IntegrationPlatform.ML:
+            return await client.update_price(
+                item_id=listing.external_id,
+                price=price,
+            )
+        elif platform == IntegrationPlatform.SHOPEE:
+            return await client.update_price(
+                item_id=listing.external_id,
+                price=price,
+                variation_id=listing.sku,  # model_id stored in sku or raw_data
+            )
+        elif platform == IntegrationPlatform.AMAZON:
+            sku = listing.sku or listing.external_id
+            return await client.update_price(sku=sku, price=price)
+        elif platform == IntegrationPlatform.TIKTOK:
+            # TikTok needs product_id and sku_id
+            # external_id = product_id, sku from raw_data or listing.sku
+            sku_id = listing.sku or ""
+            try:
+                await client.update_price_with_activation(
+                    product_id=listing.external_id,
+                    sku_ids=sku_id,
+                    price=price,
+                )
+                return SyncResult(
+                    status=SyncStatus.OK,
+                    payload={"product_id": listing.external_id, "sku_id": sku_id, "price": price},
+                )
+            except RuntimeError as e:
+                return SyncResult(
+                    status=SyncStatus.FATAL,
+                    error_code="tiktok_price_error",
+                    error_detail=str(e)[:500],
+                )
+        elif platform == IntegrationPlatform.TEMU:
+            product_sku_id = listing.external_id
+            try:
+                await client.update_price(
+                    product_sku_id=product_sku_id,
+                    price=price,
+                )
+                return SyncResult(
+                    status=SyncStatus.OK,
+                    payload={"product_sku_id": product_sku_id, "price": price},
+                )
+            except RuntimeError as e:
+                return SyncResult(
+                    status=SyncStatus.FATAL,
+                    error_code="temu_price_error",
+                    error_detail=str(e)[:500],
+                )
+        else:
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="platform_not_implemented",
+                error_detail=f"No price push for {platform.value}",
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "pricing_push_dispatch_error",
+            platform=platform.value,
+            listing_id=str(listing.id),
+            error=str(e)[:500],
+        )
+        return SyncResult(
+            status=SyncStatus.FATAL,
+            error_code="push_dispatch_error",
+            error_detail=str(e)[:500],
+        )
