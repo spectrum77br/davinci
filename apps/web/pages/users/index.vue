@@ -93,13 +93,13 @@ function fmtDate(s: string | null) {
 
 <template>
   <div class="space-y-4">
-    <div class="flex items-center gap-3">
+    <div class="flex flex-wrap items-center gap-3">
       <h1 class="text-2xl font-semibold">Usuários</h1>
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">
         <RefreshCw class="size-4 mr-1" /> recarregar
       </Button>
-      <div class="ml-auto flex gap-2">
-        <Input v-model="q" placeholder="buscar e-mail/nome" class="w-64" @keydown.enter="refresh" />
+      <div class="w-full sm:w-auto sm:ml-auto flex flex-col sm:flex-row gap-2">
+        <Input v-model="q" placeholder="buscar e-mail/nome" class="w-full sm:w-64" @keydown.enter="refresh" />
         <Button size="sm" @click="showNew = true">
           <Plus class="size-4 mr-1" /> Novo usuário
         </Button>
@@ -108,20 +108,21 @@ function fmtDate(s: string | null) {
 
     <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
 
-    <div class="border rounded-md overflow-hidden">
-      <table class="w-full text-sm">
+    <!-- Desktop table -->
+    <div class="hidden md:block border rounded-md overflow-x-auto">
+      <table class="w-full text-sm min-w-[900px]">
         <thead class="bg-muted/40 text-left">
           <tr>
             <th class="px-3 py-2">Nome</th>
             <th class="px-3 py-2">E-mail</th>
-            <th class="px-3 py-2">Tuta</th>
-            <th class="px-3 py-2">Upseller</th>
-            <th class="px-3 py-2">Bling</th>
-            <th class="px-3 py-2">AdsPower</th>
-            <th class="px-3 py-2">Duoke</th>
+            <th class="px-3 py-2 hidden lg:table-cell">Tuta</th>
+            <th class="px-3 py-2 hidden lg:table-cell">Upseller</th>
+            <th class="px-3 py-2 hidden xl:table-cell">Bling</th>
+            <th class="px-3 py-2 hidden xl:table-cell">AdsPower</th>
+            <th class="px-3 py-2 hidden xl:table-cell">Duoke</th>
             <th class="px-3 py-2">Role</th>
             <th class="px-3 py-2">Status</th>
-            <th class="px-3 py-2">Último login</th>
+            <th class="px-3 py-2 hidden lg:table-cell">Último login</th>
             <th class="px-3 py-2 text-right">Ações</th>
           </tr>
         </thead>
@@ -132,12 +133,12 @@ function fmtDate(s: string | null) {
                 {{ u.name || '—' }}
               </NuxtLink>
             </td>
-            <td class="px-3 py-2">{{ u.email }}</td>
-            <td class="px-3 py-2">{{ u.tuta || '—' }}</td>
-            <td class="px-3 py-2">{{ u.upseller || '—' }}</td>
-            <td class="px-3 py-2">{{ u.bling_login || '—' }}</td>
-            <td class="px-3 py-2">{{ u.adspower || '—' }}</td>
-            <td class="px-3 py-2">{{ u.duoke || '—' }}</td>
+            <td class="px-3 py-2 break-all">{{ u.email }}</td>
+            <td class="px-3 py-2 hidden lg:table-cell">{{ u.tuta || '—' }}</td>
+            <td class="px-3 py-2 hidden lg:table-cell">{{ u.upseller || '—' }}</td>
+            <td class="px-3 py-2 hidden xl:table-cell">{{ u.bling_login || '—' }}</td>
+            <td class="px-3 py-2 hidden xl:table-cell">{{ u.adspower || '—' }}</td>
+            <td class="px-3 py-2 hidden xl:table-cell">{{ u.duoke || '—' }}</td>
             <td class="px-3 py-2">
               <span class="text-xs px-2 py-0.5 rounded border" :class="u.role === 'admin' ? 'border-amber-400 text-amber-300' : ''">
                 {{ u.role }}
@@ -150,8 +151,8 @@ function fmtDate(s: string | null) {
                 'border-red-500 text-red-400': u.status === 'suspended',
               }">{{ u.status }}</span>
             </td>
-            <td class="px-3 py-2 text-muted-foreground">{{ fmtDate(u.last_login_at) }}</td>
-            <td class="px-3 py-2 text-right space-x-2">
+            <td class="px-3 py-2 text-muted-foreground hidden lg:table-cell">{{ fmtDate(u.last_login_at) }}</td>
+            <td class="px-3 py-2 text-right space-x-2 whitespace-nowrap">
               <Button v-if="u.status === 'pending'" size="sm" variant="outline" @click="approve(u)">
                 Aprovar
               </Button>
@@ -163,6 +164,51 @@ function fmtDate(s: string | null) {
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- Mobile cards -->
+    <div class="md:hidden space-y-2">
+      <div
+        v-for="u in list?.items || []"
+        :key="u.id"
+        class="border rounded-md p-3 space-y-2 hover:bg-muted/20"
+      >
+        <div class="flex items-start gap-2">
+          <div class="flex-1 min-w-0">
+            <NuxtLink :to="`/users/${u.id}`" class="font-medium hover:underline block truncate">
+              {{ u.name || '—' }}
+            </NuxtLink>
+            <div class="text-xs text-muted-foreground break-all">{{ u.email }}</div>
+          </div>
+          <div class="flex flex-col items-end gap-1 shrink-0">
+            <span class="text-[10px] px-1.5 py-0.5 rounded border" :class="u.role === 'admin' ? 'border-amber-400 text-amber-300' : ''">
+              {{ u.role }}
+            </span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded border" :class="{
+              'border-green-500 text-green-400': u.status === 'active',
+              'border-amber-500 text-amber-400': u.status === 'pending',
+              'border-red-500 text-red-400': u.status === 'suspended',
+            }">{{ u.status }}</span>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+          <div><span class="text-muted-foreground">Tuta:</span> {{ u.tuta || '—' }}</div>
+          <div><span class="text-muted-foreground">Upseller:</span> {{ u.upseller || '—' }}</div>
+          <div><span class="text-muted-foreground">Bling:</span> {{ u.bling_login || '—' }}</div>
+          <div><span class="text-muted-foreground">AdsPower:</span> {{ u.adspower || '—' }}</div>
+          <div><span class="text-muted-foreground">Duoke:</span> {{ u.duoke || '—' }}</div>
+          <div><span class="text-muted-foreground">Último:</span> {{ fmtDate(u.last_login_at) }}</div>
+        </div>
+        <div class="flex flex-wrap gap-2 pt-1 border-t">
+          <Button v-if="u.status === 'pending'" size="sm" variant="outline" @click="approve(u)">
+            Aprovar
+          </Button>
+          <NuxtLink :to="`/users/${u.id}`" class="text-xs underline text-muted-foreground self-center">permissões</NuxtLink>
+        </div>
+      </div>
+      <div v-if="!loading && (list?.items?.length || 0) === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
+        nenhum usuário
+      </div>
     </div>
 
     <!-- New user modal -->
@@ -183,7 +229,7 @@ function fmtDate(s: string | null) {
             <Label>Nome</Label>
             <Input v-model="draft.name" />
           </div>
-          <div class="grid grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <Label>Tuta</Label>
               <Input v-model="draft.tuta" />

@@ -163,15 +163,15 @@ async function removeUser() {
 
 <template>
   <div v-if="user" class="space-y-6 max-w-5xl">
-    <div class="flex items-center gap-3">
+    <div class="flex flex-wrap items-center gap-2 sm:gap-3">
       <Button size="sm" variant="ghost" @click="router.push('/users')">
         <ArrowLeft class="size-4" />
       </Button>
-      <h1 class="text-2xl font-semibold">{{ user.name || user.email }}</h1>
-      <span class="text-xs px-2 py-0.5 rounded border ml-2">{{ user.role }}</span>
+      <h1 class="text-xl sm:text-2xl font-semibold break-all min-w-0">{{ user.name || user.email }}</h1>
+      <span class="text-xs px-2 py-0.5 rounded border">{{ user.role }}</span>
       <span class="text-xs px-2 py-0.5 rounded border">{{ user.status }}</span>
       <Button
-        class="ml-auto"
+        class="sm:ml-auto"
         size="sm"
         variant="outline"
         :disabled="isSelf || deleting"
@@ -190,7 +190,7 @@ async function removeUser() {
         <CardDescription>Role é read-only. Promoção a admin só via DB ou OWNER_OPEN_ID.</CardDescription>
       </CardHeader>
       <CardContent class="space-y-4">
-        <div class="grid grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <Label>Nome</Label>
             <Input v-model="form.name" />
@@ -250,8 +250,8 @@ async function removeUser() {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <div class="border rounded-md overflow-hidden">
-          <table class="w-full text-sm">
+        <div class="border rounded-md overflow-x-auto">
+          <table class="w-full text-sm min-w-[480px]">
             <thead class="bg-muted/40">
               <tr>
                 <th class="px-3 py-2 text-left">Recurso</th>
