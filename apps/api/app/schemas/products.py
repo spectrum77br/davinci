@@ -135,6 +135,12 @@ class BlingImportSummary(BaseModel):
     skipped_no_sku: list[int]
 
 
+class CsvImportSummary(BaseModel):
+    imported: int
+    updated: int
+    errors: list[str]
+
+
 # ---------- Auto-link job ----------
 
 class AutoLinkIn(BaseModel):

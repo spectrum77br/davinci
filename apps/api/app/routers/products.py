@@ -3,7 +3,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +23,7 @@ from app.schemas.products import (
     BlingPreviewItem,
     BlingPreviewOut,
     BulkDeleteIn,
+    CsvImportSummary,
     ProductCreate,
     ProductLinkOut,
     ProductOut,
@@ -84,6 +85,7 @@ async def list_products(
     search: str | None = Query(None),
     integration_id: UUID | None = Query(None),
     low_stock: bool = Query(False),
+    zero_stock: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> ProductPage:
@@ -99,6 +101,10 @@ async def list_products(
         count_stmt = count_stmt.where(Product.integration_id == integration_id)
     if low_stock:
         cond = Product.stock < Product.min_stock
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
+    if zero_stock:
+        cond = Product.stock == 0
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)
 
@@ -414,3 +420,130 @@ async def bling_import(
     if imported > 0 or updated > 0:
         await trigger_user_relink(user.id)
     return BlingImportSummary(imported=imported, updated=updated, skipped_no_sku=skipped)
+
+
+# ----------------------------------------------------------- CSV import
+
+@router.post("/products/import/csv", response_model=CsvImportSummary)
+async def csv_import(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+    file: UploadFile = File(...),
+) -> CsvImportSummary:
+    import csv
+    import io
+    from decimal import Decimal, InvalidOperation
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("latin-1")
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, detail={"code": "csv_decode_failed"}) from e
+
+    # Detect delimiter (, or ;).
+    sample = text[:1024]
+    delim = ";" if sample.count(";") > sample.count(",") else ","
+    reader = csv.reader(io.StringIO(text), delimiter=delim)
+
+    rows = list(reader)
+    if not rows:
+        raise HTTPException(400, detail={"code": "csv_empty"})
+
+    # Header is required. Recognize columns case-insensitively.
+    header = [h.strip().lower() for h in rows[0]]
+
+    def col(*names: str) -> int | None:
+        for n in names:
+            if n in header:
+                return header.index(n)
+        return None
+
+    i_sku = col("sku", "código", "codigo")
+    i_name = col("nome", "name", "produto")
+    i_cost = col("custo", "cost", "cost_price", "preço de custo")
+    i_stock = col("estoque", "stock")
+    i_min = col("estoque mínimo", "estoque minimo", "min_stock", "minimo")
+
+    if i_sku is None or i_name is None:
+        raise HTTPException(
+            400,
+            detail={"code": "csv_missing_headers", "required": ["SKU", "Nome"]},
+        )
+
+    imported = 0
+    updated = 0
+    errors: list[str] = []
+
+    # Preload existing products by SKU for this user.
+    existing = (
+        await session.execute(select(Product).where(user_scope(Product, user)))
+    ).scalars().all()
+    by_sku = {p.sku: p for p in existing}
+
+    for idx, row in enumerate(rows[1:], start=2):  # idx is the file-line number (1-based, after header)
+        if not row or all((c or "").strip() == "" for c in row):
+            continue
+
+        def _get(i: int | None) -> str:
+            if i is None or i >= len(row):
+                return ""
+            return (row[i] or "").strip()
+
+        sku = _get(i_sku)
+        name = _get(i_name)
+        if not sku:
+            errors.append(f"linha {idx}: SKU vazio")
+            continue
+        if not name:
+            errors.append(f"linha {idx}: nome vazio (SKU {sku})")
+            continue
+
+        try:
+            cost_raw = _get(i_cost).replace(",", ".")
+            cost = Decimal(cost_raw) if cost_raw else None
+        except InvalidOperation:
+            errors.append(f"linha {idx}: custo inválido (SKU {sku})")
+            continue
+
+        try:
+            stock_raw = _get(i_stock)
+            stock = int(stock_raw) if stock_raw else 0
+            min_raw = _get(i_min)
+            min_stock = int(min_raw) if min_raw else 0
+        except ValueError:
+            errors.append(f"linha {idx}: estoque inválido (SKU {sku})")
+            continue
+
+        existing_p = by_sku.get(sku)
+        if existing_p is None:
+            p = Product(
+                user_id=user.id,
+                sku=sku,
+                name=name,
+                cost_price=cost,
+                stock=stock,
+                min_stock=min_stock,
+            )
+            session.add(p)
+            by_sku[sku] = p
+            imported += 1
+        else:
+            existing_p.name = name
+            if cost is not None:
+                existing_p.cost_price = cost
+            existing_p.stock = stock
+            existing_p.min_stock = min_stock
+            updated += 1
+
+    try:
+        await session.commit()
+    except IntegrityError as e:
+        await session.rollback()
+        raise HTTPException(409, detail={"code": "csv_integrity_error", "msg": str(e.orig)}) from e
+
+    if imported > 0 or updated > 0:
+        await trigger_user_relink(user.id)
+    return CsvImportSummary(imported=imported, updated=updated, errors=errors)

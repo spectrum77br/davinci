@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue'
-import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X, Activity, Boxes } from 'lucide-vue-next'
+import { ref, reactive, computed, onUnmounted } from 'vue'
+import { Plus, Trash2, Download, RefreshCw, Package, ImageOff, ChevronDown, ChevronRight, Link2, X, Activity, Boxes, Loader2, FileUp } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'produtos', action: 'view' } })
 
@@ -89,7 +89,7 @@ const page = ref(1)
 const pageSize = 50
 const search = ref('')
 const filtroIntegration = ref<string>('')
-const onlyLowStock = ref(false)
+const stockFilter = ref<'' | 'low' | 'zero'>('')
 const expanded = ref<Set<string>>(new Set())
 const selected = ref<Set<string>>(new Set())
 const loading = ref(false)
@@ -99,6 +99,43 @@ const showImport = ref(false)
 const showAutoLink = ref(false)
 const showSyncAll = ref(false)
 const showRefreshStock = ref(false)
+
+// Feature 1: CSV import
+const showImportCsv = ref(false)
+const csvFile = ref<File | null>(null)
+const csvImporting = ref(false)
+const csvImportError = ref<string | null>(null)
+const csvImportResult = ref<{ imported: number; updated: number; errors: string[] } | null>(null)
+
+// Feature 2: New product
+const showNewProduct = ref(false)
+const newProduct = reactive({
+  sku: '',
+  name: '',
+  cost_price: '',
+  stock: 0,
+  min_stock: 0,
+})
+const creatingProduct = ref(false)
+
+// Feature 4: platform badge helper
+function platformBadgeClass(platform: string): string {
+  const base = 'inline-block px-2 py-0.5 rounded text-xs font-medium'
+  switch (platform) {
+    case 'bling': return `${base} bg-green-100 text-green-700`
+    case 'shopee': return `${base} bg-orange-100 text-orange-700`
+    case 'amazon': return `${base} bg-yellow-100 text-yellow-700`
+    case 'ml': return `${base} bg-blue-100 text-blue-700`
+    case 'tiktok': return `${base} bg-pink-100 text-pink-700`
+    case 'temu': return `${base} bg-purple-100 text-purple-700`
+    case 'aliexpress': return `${base} bg-red-100 text-red-700`
+    default: return `${base} bg-gray-100 text-gray-700`
+  }
+}
+
+const selectedIntegration = computed(() =>
+  integrations.value.find((i) => i.id === filtroIntegration.value) || null,
+)
 
 type UserSettings = { daily_sync_enabled: boolean }
 const autoSyncEnabled = ref<boolean>(false)
@@ -112,7 +149,8 @@ async function refreshAll() {
       api<ProductPage>(`/api/products?page=${page.value}&page_size=${pageSize}` +
         (search.value ? `&search=${encodeURIComponent(search.value)}` : '') +
         (filtroIntegration.value ? `&integration_id=${filtroIntegration.value}` : '') +
-        (onlyLowStock.value ? `&low_stock=true` : '')),
+        (stockFilter.value === 'low' ? `&low_stock=true` : '') +
+        (stockFilter.value === 'zero' ? `&zero_stock=true` : '')),
       api<Integration[]>('/api/integrations'),
       api<UserSettings>('/api/settings'),
     ])
@@ -208,6 +246,79 @@ async function deleteLink(id: string) {
   if (!confirm('Remover link?')) return
   await api(`/api/product-links/${id}`, { method: 'DELETE' })
   await refreshAll()
+}
+
+// ---------------------------- CSV import (Feature 1) ------------------------
+
+function handleCsvUpload(e: Event) {
+  const files = (e.target as HTMLInputElement).files
+  if (!files || files.length === 0) return
+  csvFile.value = files[0]
+}
+
+async function submitCsvImport() {
+  if (!csvFile.value) return
+  csvImporting.value = true
+  csvImportError.value = null
+  csvImportResult.value = null
+  try {
+    const formData = new FormData()
+    formData.append('file', csvFile.value)
+    const result = await api<{ imported: number; updated: number; errors: string[] }>(
+      '/api/products/import/csv',
+      { method: 'POST', body: formData },
+    )
+    csvImportResult.value = result
+    if (!result.errors.length) {
+      setTimeout(() => {
+        showImportCsv.value = false
+        csvFile.value = null
+        csvImportResult.value = null
+      }, 1500)
+    }
+    await refreshAll()
+  } catch (e: any) {
+    csvImportError.value = e?.data?.detail?.code || e?.message || 'erro ao importar'
+  } finally {
+    csvImporting.value = false
+  }
+}
+
+// ---------------------------- New product (Feature 2) ----------------------
+
+function openNewProduct() {
+  newProduct.sku = ''
+  newProduct.name = ''
+  newProduct.cost_price = ''
+  newProduct.stock = 0
+  newProduct.min_stock = 0
+  showNewProduct.value = true
+}
+
+async function submitNewProduct() {
+  if (!newProduct.sku.trim() || !newProduct.name.trim()) {
+    error.value = 'SKU e Nome são obrigatórios'
+    return
+  }
+  creatingProduct.value = true
+  try {
+    await api('/api/products', {
+      method: 'POST',
+      body: {
+        sku: newProduct.sku.trim(),
+        name: newProduct.name.trim(),
+        cost_price: newProduct.cost_price ? Number(newProduct.cost_price) : null,
+        stock: Number(newProduct.stock || 0),
+        min_stock: Number(newProduct.min_stock || 0),
+      },
+    })
+    showNewProduct.value = false
+    await refreshAll()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro ao criar produto'
+  } finally {
+    creatingProduct.value = false
+  }
 }
 
 // ---------------------------- Sync ----------------------------------------
@@ -399,6 +510,12 @@ const stats = computed(() => ({
         <Button v-if="canEdit" size="sm" variant="outline" @click="openImport">
           <Download class="size-4 mr-1.5" /> importar Bling
         </Button>
+        <Button v-if="canEdit" size="sm" variant="outline" @click="showImportCsv = true">
+          <FileUp class="size-4 mr-1.5" /> Importar CSV
+        </Button>
+        <Button v-if="canEdit" size="sm" variant="outline" @click="openNewProduct">
+          <Plus class="size-4 mr-1.5" /> Novo Produto
+        </Button>
         <Button v-if="canEdit" size="sm" variant="outline" @click="startAutoLink">
           <Link2 class="size-4 mr-1.5" /> auto-link
         </Button>
@@ -427,14 +544,20 @@ const stats = computed(() => ({
 
     <div class="flex flex-wrap gap-2 items-center">
       <Input v-model="search" placeholder="buscar SKU ou nome…" class="w-72" @keyup.enter="refreshAll" />
-      <select v-model="filtroIntegration" class="h-9 rounded-md border bg-background px-2 text-sm" @change="refreshAll">
-        <option value="">todas integrações</option>
-        <option v-for="i in integrations" :key="i.id" :value="i.id">{{ i.platform }} — {{ i.name }}</option>
+      <div class="flex items-center gap-1">
+        <select v-model="filtroIntegration" class="h-9 rounded-md border bg-background px-2 text-sm" @change="refreshAll">
+          <option value="">Todas as contas</option>
+          <option v-for="i in integrations" :key="i.id" :value="i.id">[{{ i.platform }}] {{ i.name }}</option>
+        </select>
+        <span v-if="selectedIntegration" :class="platformBadgeClass(selectedIntegration.platform)">
+          {{ selectedIntegration.platform }}
+        </span>
+      </div>
+      <select v-model="stockFilter" class="h-9 rounded-md border bg-background px-2 text-sm" @change="refreshAll">
+        <option value="">Todo estoque</option>
+        <option value="low">Estoque baixo</option>
+        <option value="zero">Sem estoque</option>
       </select>
-      <label class="flex items-center gap-1 text-sm">
-        <input v-model="onlyLowStock" type="checkbox" @change="refreshAll" />
-        estoque baixo
-      </label>
       <Button size="sm" @click="refreshAll">filtrar</Button>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ items.length }} de {{ total }} produtos · pág {{ page }}/{{ totalPages }}
@@ -572,9 +695,16 @@ const stats = computed(() => ({
     </div>
 
     <div class="flex justify-between items-center text-sm">
-      <Button size="sm" variant="outline" :disabled="page <= 1" @click="page--; refreshAll()">anterior</Button>
-      <span>página {{ page }} de {{ totalPages }}</span>
-      <Button size="sm" variant="outline" :disabled="page >= totalPages" @click="page++; refreshAll()">próxima</Button>
+      <div class="flex gap-1 items-center">
+        <Button size="sm" variant="outline" :disabled="page <= 1" title="Primeira página" @click="page = 1; refreshAll()">«</Button>
+        <Button size="sm" variant="outline" :disabled="page <= 1" title="Página anterior" @click="page--; refreshAll()">‹</Button>
+        <span class="px-2 py-1">página {{ page }} de {{ totalPages }}</span>
+        <Button size="sm" variant="outline" :disabled="page >= totalPages" title="Próxima página" @click="page++; refreshAll()">›</Button>
+        <Button size="sm" variant="outline" :disabled="page >= totalPages" title="Última página" @click="page = totalPages; refreshAll()">»</Button>
+      </div>
+      <span class="text-xs text-muted-foreground">
+        mostrando {{ total === 0 ? 0 : (page - 1) * pageSize + 1 }}-{{ Math.min(page * pageSize, total) }} de {{ total }} produtos
+      </span>
     </div>
 
     <!-- Import modal -->
@@ -773,6 +903,111 @@ const stats = computed(() => ({
             </ul>
             <Button v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed'" class="w-full" variant="outline" @click="showRefreshStock = false">
               fechar
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CSV import modal (Feature 1) -->
+    <div v-if="showImportCsv" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showImportCsv = false">
+      <div class="bg-background rounded-lg shadow-lg w-[min(600px,95vw)] flex flex-col">
+        <div class="flex items-center justify-between border-b p-3">
+          <h3 class="font-semibold">Importar produtos via CSV</h3>
+          <button @click="showImportCsv = false"><X class="size-4" /></button>
+        </div>
+        <div class="p-4 space-y-3">
+          <p class="text-sm text-muted-foreground">
+            Cabeçalhos aceitos (em qualquer ordem): <code>SKU, Nome, Custo, Estoque, Estoque mínimo</code>.
+            Separador <code>,</code> ou <code>;</code> é detectado automaticamente. SKUs existentes são atualizados.
+          </p>
+          <div v-if="csvImportError" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {{ csvImportError }}
+          </div>
+          <div v-if="csvImportResult" class="rounded-md border bg-emerald-50 px-3 py-2 text-sm text-emerald-800 space-y-1">
+            <div>Importados: <strong>{{ csvImportResult.imported }}</strong> · Atualizados: <strong>{{ csvImportResult.updated }}</strong></div>
+            <ul v-if="csvImportResult.errors.length" class="mt-1 text-xs text-amber-700 space-y-0.5 max-h-32 overflow-auto">
+              <li v-for="(err, idx) in csvImportResult.errors" :key="idx">{{ err }}</li>
+            </ul>
+          </div>
+          <input
+            type="file"
+            accept=".csv,text/csv"
+            class="block w-full text-sm border rounded px-3 py-2"
+            @change="handleCsvUpload"
+          />
+          <div class="flex gap-2 justify-end">
+            <Button variant="outline" @click="showImportCsv = false">Cancelar</Button>
+            <Button :disabled="!csvFile || csvImporting" @click="submitCsvImport">
+              <Loader2 v-if="csvImporting" class="size-4 mr-1 animate-spin" />
+              Importar
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- New product modal (Feature 2) -->
+    <div v-if="showNewProduct" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showNewProduct = false">
+      <div class="bg-background rounded-lg shadow-lg w-[min(600px,95vw)] flex flex-col">
+        <div class="flex items-center justify-between border-b p-3">
+          <h3 class="font-semibold">Novo Produto</h3>
+          <button @click="showNewProduct = false"><X class="size-4" /></button>
+        </div>
+        <div class="p-4 space-y-3">
+          <div>
+            <label class="text-sm font-medium">SKU *</label>
+            <input
+              v-model="newProduct.sku"
+              type="text"
+              placeholder="Ex: SKU001"
+              class="w-full border rounded px-2 py-1 text-sm bg-background"
+            />
+          </div>
+          <div>
+            <label class="text-sm font-medium">Nome *</label>
+            <input
+              v-model="newProduct.name"
+              type="text"
+              placeholder="Ex: iPhone 13 Pro"
+              class="w-full border rounded px-2 py-1 text-sm bg-background"
+            />
+          </div>
+          <div>
+            <label class="text-sm font-medium">Custo</label>
+            <input
+              v-model="newProduct.cost_price"
+              type="number"
+              step="0.01"
+              placeholder="0.00"
+              class="w-full border rounded px-2 py-1 text-sm bg-background"
+            />
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-sm font-medium">Estoque</label>
+              <input
+                v-model.number="newProduct.stock"
+                type="number"
+                min="0"
+                class="w-full border rounded px-2 py-1 text-sm bg-background"
+              />
+            </div>
+            <div>
+              <label class="text-sm font-medium">Estoque mínimo</label>
+              <input
+                v-model.number="newProduct.min_stock"
+                type="number"
+                min="0"
+                class="w-full border rounded px-2 py-1 text-sm bg-background"
+              />
+            </div>
+          </div>
+          <div class="flex gap-2 justify-end">
+            <Button variant="outline" @click="showNewProduct = false">Cancelar</Button>
+            <Button :disabled="creatingProduct" @click="submitNewProduct">
+              <Loader2 v-if="creatingProduct" class="size-4 mr-1 animate-spin" />
+              Criar
             </Button>
           </div>
         </div>
