@@ -118,6 +118,20 @@ class BlingClient:
         rt = self.creds.get("refresh_token")
         if not rt:
             raise RuntimeError("missing refresh_token")
+        # Cloudflare 1015 ban renews every time we hit /oauth/token while
+        # the IP is blocked, so once we see a 429 we stop calling the
+        # endpoint for CF_COOLDOWN_S. Without this, the cron, on-demand
+        # 401 retry, and webhook-driven sync jobs all keep refreshing the
+        # ban and the cooldown never expires.
+        from app.redis_client import redis as _redis
+        blocked = await _redis.get("bling:cf_cooldown_until")
+        if blocked is not None:
+            try:
+                ttl = int(blocked) - int(time.time())
+            except (TypeError, ValueError):
+                ttl = 0
+            if ttl > 0:
+                raise RuntimeError(f"bling_cf_cooldown_active ttl_s={ttl}")
         s = get_settings()
         headers = {
             "Accept": "application/json",
@@ -138,13 +152,25 @@ class BlingClient:
                 data={"grant_type": "refresh_token", "refresh_token": rt},
             )
             if r.status_code >= 400:
+                body_preview = r.text[:500]
                 logger.warning(
                     "bling_refresh_http_error",
                     status=r.status_code,
-                    body=r.text[:500],
+                    body=body_preview,
                     client_id_prefix=cid[:8],
                     rt_prefix=rt[:8],
                 )
+                if r.status_code == 429 and "cloudflare" in body_preview.lower():
+                    CF_COOLDOWN_S = 1800
+                    until = int(time.time()) + CF_COOLDOWN_S
+                    await _redis.set(
+                        "bling:cf_cooldown_until", str(until), ex=CF_COOLDOWN_S
+                    )
+                    logger.warning(
+                        "bling_cf_cooldown_armed",
+                        cooldown_s=CF_COOLDOWN_S,
+                        until_epoch=until,
+                    )
                 r.raise_for_status()
             new_creds = _normalize_token(r.json(), prev=self.creds)
         # Persist FIRST via independent session — Bling already rotated RT,
