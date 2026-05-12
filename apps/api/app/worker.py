@@ -401,8 +401,10 @@ async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_
 
 
 async def bling_token_refresh(ctx: dict) -> None:
-    """Refresh Bling tokens expiring within 1h."""
-    await _refresh_tokens_for(IntegrationPlatform.BLING, expiring_within_s=3600)
+    """Refresh Bling tokens expiring within 30min. Bling AT lasts 6h, so a
+    single refresh per cycle is enough; the hourly cron + 30min window means
+    at most one /oauth/token call per access token lifetime."""
+    await _refresh_tokens_for(IntegrationPlatform.BLING, expiring_within_s=1800)
 
 
 async def shopee_token_refresh(ctx: dict) -> None:
@@ -790,7 +792,7 @@ class WorkerSettings:
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
         # 06:00 UTC = 03:00 BRT — quiet window, also the daily-sync mass enqueue trigger.
         cron(daily_sync_scheduler, minute=_FIVE_MIN, run_at_startup=False),
-        cron(bling_token_refresh, minute={0, 30}, run_at_startup=False),
+        cron(bling_token_refresh, minute={15}, run_at_startup=False),
         cron(shopee_token_refresh, hour={0, 4, 8, 12, 16, 20}, minute=0, run_at_startup=False),
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(shopee_discrepancy_check, hour={1, 5, 9, 13, 17, 21}, minute=0, run_at_startup=False),

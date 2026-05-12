@@ -37,6 +37,27 @@ BLING_API_BASE = "https://api.bling.com.br/Api/v3"
 # Default page size for `/produtos`. Bling caps at 100.
 BLING_PRODUCTS_PAGE_SIZE = 100
 
+# Bling V3 Cloudflare gate is 3 req/s; keep one slot of headroom and cap at
+# 5 req/s globally. Limiter is shared across api/worker via Redis so parallel
+# arq jobs and webhook handlers can't burst past the cap.
+BLING_MAX_RPS = 5
+
+
+async def _acquire_bling_rate_slot() -> None:
+    """Token-bucket gate: consume one slot per second, sleep until one frees."""
+    from app.redis_client import redis as _redis
+    while True:
+        bucket = int(time.time())
+        key = f"bling:rate:{bucket}"
+        n = await _redis.incr(key)
+        if n == 1:
+            await _redis.expire(key, 2)
+        if n <= BLING_MAX_RPS:
+            return
+        # Over cap for this second — wait until the next one opens.
+        wait = max(0.0, (bucket + 1) - time.time()) + 0.01
+        await asyncio.sleep(wait)
+
 
 class BlingCloudflareError(RuntimeError):
     """Raised when Bling returns the Cloudflare HTML challenge instead of JSON."""
@@ -144,6 +165,7 @@ class BlingClient:
             headers["Authorization"] = s.bling_basic_auth
         else:
             auth = (cid, csec)
+        await _acquire_bling_rate_slot()
         async with httpx.AsyncClient(timeout=20.0) as c:
             r = await c.post(
                 BLING_TOKEN_URL,
@@ -195,6 +217,7 @@ class BlingClient:
         last_exc: Exception | None = None
         delay = 1.0
         for attempt in range(3):
+            await _acquire_bling_rate_slot()
             async with httpx.AsyncClient(timeout=30.0) as c:
                 r = await c.request(method, url, headers=headers, params=params, json=json)
             if r.status_code == 401 and attempt == 0:
