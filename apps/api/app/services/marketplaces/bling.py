@@ -401,9 +401,9 @@ def parse_bling_product(raw: dict) -> dict:
     """
     estoque = raw.get("estoque") or {}
     if isinstance(estoque, dict):
+        # Strictly virtual stock — physical excludes reserves/pending orders
+        # and would over-state availability for marketplaces.
         stock = estoque.get("saldoVirtualTotal")
-        if stock is None:
-            stock = estoque.get("disponivel") or estoque.get("saldoFisicoTotal")
         min_stock = estoque.get("minimo")
     else:
         stock = None

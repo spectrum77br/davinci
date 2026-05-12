@@ -134,14 +134,15 @@ def _extract_payload(parsed: dict[str, Any]) -> tuple[str | None, int | None, in
     stock: int | None = None
     estoque = dados.get("estoque") or {}
     if isinstance(estoque, dict):
-        for k in ("saldoVirtualTotal", "disponivel", "saldoFisicoTotal", "quantidade"):
-            v = estoque.get(k)
-            if v is not None:
-                try:
-                    stock = int(v)
-                    break
-                except (TypeError, ValueError):
-                    pass
+        # Strictly virtual stock. Physical (saldoFisicoTotal) counts reserved
+        # units that are no longer available to sell, so using it would push
+        # over-stated stock to the marketplace.
+        v = estoque.get("saldoVirtualTotal")
+        if v is not None:
+            try:
+                stock = int(v)
+            except (TypeError, ValueError):
+                stock = None
 
     bling_store_id: int | None = None
     loja = dados.get("loja") or {}
