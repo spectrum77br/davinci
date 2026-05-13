@@ -954,11 +954,18 @@ async def get_stock_map(
     user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
     department: Annotated[str | None, Query()] = None,
 ) -> dict[str, int]:
-    """Returns {pricing_product_id: stock_for_pricing_line}.
+    """Returns {pricing_product_id: total_stock}.
 
-    Stock is the MIN over all matched products (so a kit's bottleneck
-    component drives availability). Matching honors the celular base-SKU
-    rule (see `app.services.pricing.audit.match_pricing_to_product_keys`).
+    Algorithm (per spec):
+      1. Split pricing_product.sku by comma → list of bases.
+      2. For each base (celular): find products whose sku startswith
+         base + "." AND does NOT contain "+". Pick the single "simple"
+         representative — preferred order: shortest sku, then lex-min
+         (so `x043.ra` is picked over `x043.kit2`). Take its stock.
+         If no dotted variant exists, fall back to an exact `base` match.
+      3. For mala / eletro / catalogo: pieces are already simple SKUs;
+         use an exact case-insensitive lookup.
+      4. SUM contributions across pieces. Missing pieces contribute 0.
     """
     dept = _coerce_department(department)
     stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
@@ -979,34 +986,66 @@ async def get_stock_map(
             select(Product.sku, Product.stock).where(user_scope(Product, user))
         )
     ).all()
-    stock_by_key: dict[str, int] = {}
+
+    # Two indexes:
+    #   exact_stock[sku_lower] = stock (max on duplicate keys)
+    #   variant_pick[base]     = (preferred_sku, stock) — best simple variant
+    exact_stock: dict[str, int] = {}
+    variant_pick: dict[str, tuple[str, int]] = {}
     for sku, stock in product_rows:
         if not sku:
             continue
-        k = sku.strip().lower()
-        # Multiple product rows could share a key only by accident; take MAX
-        # so duplicates don't artificially shrink the bottleneck.
-        stock_by_key[k] = max(stock_by_key.get(k, 0), int(stock or 0))
-
-    matches = match_pricing_to_product_keys(pricing_rows, stock_by_key.keys())
+        skl = sku.strip().lower()
+        st = int(stock or 0)
+        exact_stock[skl] = max(exact_stock.get(skl, 0), st)
+        if "+" in skl or "." not in skl:
+            continue
+        base = skl.split(".", 1)[0]
+        if not base:
+            continue
+        cur = variant_pick.get(base)
+        if cur is None or (len(skl), skl) < (len(cur[0]), cur[0]):
+            variant_pick[base] = (skl, st)
 
     out: dict[str, int] = {}
     matched_pids = 0
+    matched_pieces_total = 0
     for pp in pricing_rows:
-        keys = matches.get(pp.id)
-        if not keys:
-            out[str(pp.id)] = 0
-            continue
-        out[str(pp.id)] = min(stock_by_key.get(k, 0) for k in keys)
-        matched_pids += 1
+        dept_v = pp.department.value if hasattr(pp.department, "value") else pp.department
+        total = 0
+        any_match = False
+        for piece in (pp.sku or "").split(","):
+            key = piece.strip().lower()
+            if not key:
+                continue
+            if dept_v == "celular":
+                hit = variant_pick.get(key)
+                if hit is not None:
+                    total += hit[1]
+                    any_match = True
+                    matched_pieces_total += 1
+                elif key in exact_stock:
+                    total += exact_stock[key]
+                    any_match = True
+                    matched_pieces_total += 1
+            else:
+                if key in exact_stock:
+                    total += exact_stock[key]
+                    any_match = True
+                    matched_pieces_total += 1
+        out[str(pp.id)] = total
+        if any_match:
+            matched_pids += 1
 
     logger.info(
         "pricing.stock_map",
         user_id=str(user.id),
         department=department,
         pricing_products=len(pricing_rows),
-        product_keys=len(stock_by_key),
+        product_skus=len(exact_stock),
+        celular_bases=len(variant_pick),
         matched_pricing_products=matched_pids,
+        matched_pieces=matched_pieces_total,
     )
     return out
 
