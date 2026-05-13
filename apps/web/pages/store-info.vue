@@ -32,11 +32,12 @@ type StoreInfo = {
   updated_at: string
 }
 
+// Tipo column shows only operational departments — catálogo is a separate
+// flag, not a "type", so it's filtered out of the badges.
 const DEPT_BADGE: Record<string, { label: string; cls: string }> = {
-  celular:  { label: 'Cel',    cls: 'bg-blue-500/15 text-blue-400 border-blue-500/40' },
-  mala:     { label: 'Mala',   cls: 'bg-amber-500/15 text-amber-400 border-amber-500/40' },
-  eletro:   { label: 'Eletro', cls: 'bg-purple-500/15 text-purple-400 border-purple-500/40' },
-  catalogo: { label: 'Cat',    cls: 'bg-green-500/15 text-green-400 border-green-500/40' },
+  celular: { label: 'Cel',    cls: 'bg-blue-500/15 text-blue-400 border-blue-500/40' },
+  mala:    { label: 'Mala',   cls: 'bg-amber-500/15 text-amber-400 border-amber-500/40' },
+  eletro:  { label: 'Eletro', cls: 'bg-purple-500/15 text-purple-400 border-purple-500/40' },
 }
 
 type IntegrationRef = {
@@ -337,55 +338,8 @@ async function remove(row: StoreInfo) {
   }
 }
 
-// =========================================================== bind dept
-
-const TIPO_OPTIONS = [
-  { slug: 'celular', label: 'Celular' },
-  { slug: 'mala',    label: 'Mala' },
-  { slug: 'eletro',  label: 'Eletro' },
-] as const
-
-const tipoPopoverFor = ref<string | null>(null)
-const tipoBusy = ref<Set<string>>(new Set())
-
-function openTipoPopover(rowId: string) {
-  if (!canEdit.value) return
-  tipoPopoverFor.value = rowId === tipoPopoverFor.value ? null : rowId
-}
-
-// Close the Tipo popover on any click outside the popover/cell.
-if (typeof window !== 'undefined') {
-  onMounted(() => {
-    const onDocClick = () => { tipoPopoverFor.value = null }
-    document.addEventListener('click', onDocClick)
-    onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
-  })
-}
-
-async function toggleDepartment(row: StoreInfo, slug: string, checked: boolean) {
-  const key = `${row.id}:${slug}`
-  if (tipoBusy.value.has(key)) return
-  tipoBusy.value.add(key)
-  try {
-    if (checked) {
-      await api(`/api/pricing/store-info/${row.id}/department`, {
-        method: 'POST',
-        body: { department: slug },
-      })
-    } else {
-      await api(
-        `/api/pricing/store-info/${row.id}/department/${encodeURIComponent(slug)}`,
-        { method: 'DELETE' },
-      )
-    }
-    flash(row.id, 'department')
-    await refresh()
-  } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
-  } finally {
-    tipoBusy.value.delete(key)
-  }
-}
+// Tipo cell is read-only — derived from `pricing_accounts` matched by
+// (platform, account_name). Editing happens via Tabela de Preços > Contas.
 
 // =========================================================== password reveal
 
@@ -712,52 +666,20 @@ async function copyText(text: string) {
                 {{ row.observation || '—' }}
               </span>
             </td>
-            <!-- Tipo (department badges from linked pricing_accounts; click to edit) -->
-            <td
-              class="border border-border px-1 py-1 text-center relative"
-              :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': tipoPopoverFor === row.id }"
-              :title="canEdit ? 'Vincular departamentos' : ''"
-              @click.stop="openTipoPopover(row.id)"
-            >
+            <!-- Tipo (read-only badges from linked pricing_accounts; catálogo excluded) -->
+            <td class="border border-border px-1 py-1 text-center">
               <div
-                v-if="row.departments && row.departments.length"
-                class="flex flex-wrap gap-0.5 justify-center cursor-pointer"
+                v-if="row.departments.some((d) => DEPT_BADGE[d])"
+                class="flex flex-wrap gap-0.5 justify-center"
               >
                 <span
-                  v-for="d in row.departments"
+                  v-for="d in row.departments.filter((x) => DEPT_BADGE[x])"
                   :key="d"
                   class="px-1.5 py-0.5 rounded border text-[10px] font-semibold"
-                  :class="(DEPT_BADGE[d]?.cls) || 'bg-muted text-muted-foreground border-muted'"
+                  :class="DEPT_BADGE[d].cls"
                 >
-                  {{ DEPT_BADGE[d]?.label || d }}
+                  {{ DEPT_BADGE[d].label }}
                 </span>
-              </div>
-              <span v-else class="text-muted-foreground cursor-pointer text-xs">—</span>
-              <!-- popover -->
-              <div
-                v-if="tipoPopoverFor === row.id"
-                class="absolute z-20 mt-1 left-1/2 -translate-x-1/2 w-36 rounded-md border bg-popover p-2 shadow-lg text-left"
-                @click.stop
-              >
-                <label
-                  v-for="opt in TIPO_OPTIONS"
-                  :key="opt.slug"
-                  class="flex items-center gap-2 py-1 cursor-pointer text-xs hover:bg-accent/50 px-1 rounded"
-                >
-                  <input
-                    type="checkbox"
-                    :checked="row.departments.includes(opt.slug)"
-                    :disabled="tipoBusy.has(`${row.id}:${opt.slug}`)"
-                    @change="(e) => toggleDepartment(row, opt.slug, (e.target as HTMLInputElement).checked)"
-                  />
-                  <span>{{ opt.label }}</span>
-                </label>
-                <button
-                  class="mt-1 w-full text-center text-[10px] text-muted-foreground hover:text-foreground py-0.5"
-                  @click="tipoPopoverFor = null"
-                >
-                  fechar
-                </button>
               </div>
             </td>
             <!-- Tab. Preço -->
