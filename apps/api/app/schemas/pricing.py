@@ -336,6 +336,10 @@ class StoreInfoOut(StoreInfoBase):
     id: UUID
     user_id: UUID
     has_password: bool = False
+    # Computed fields (mirroring the SSH "Tipo / Tab.Preço / Integração" badges)
+    departments: list[str] = []
+    has_pricing: bool = False
+    has_integration: bool = False
     created_at: datetime
     updated_at: datetime
 

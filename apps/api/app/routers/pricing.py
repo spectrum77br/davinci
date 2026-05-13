@@ -1384,9 +1384,15 @@ async def set_account_department(
 # Store info (9d) — CRUD com password cifrado
 # =============================================================================
 
-def _store_info_out(row: StoreInfo) -> StoreInfoOut:
+def _store_info_out(
+    row: StoreInfo,
+    departments: list[str] | None = None,
+) -> StoreInfoOut:
     out = StoreInfoOut.model_validate(row)
     out.has_password = bool(row.password_enc)
+    out.departments = sorted(departments or [])
+    out.has_pricing = bool(out.departments)
+    out.has_integration = row.integration_id is not None
     return out
 
 
@@ -1404,7 +1410,25 @@ async def list_store_info(
             .order_by(StoreInfo.sort_order, StoreInfo.platform)
         )
     ).scalars().all()
-    return [_store_info_out(r) for r in rows]
+    # Bulk-fetch the department set per store_info via pricing_accounts in one
+    # query (avoids N+1).
+    acc_rows = (
+        await session.execute(
+            select(PricingAccount.store_info_id, PricingAccount.department).where(
+                and_(
+                    user_scope(PricingAccount, user),
+                    PricingAccount.store_info_id.is_not(None),
+                )
+            )
+        )
+    ).all()
+    by_store: dict[UUID, set[str]] = {}
+    for sid, dept in acc_rows:
+        by_store.setdefault(sid, set()).add(dept.value if hasattr(dept, "value") else str(dept))
+    return [
+        _store_info_out(r, list(by_store.get(r.id, set())))
+        for r in rows
+    ]
 
 
 @router.post(

@@ -25,8 +25,18 @@ type StoreInfo = {
   integration_id: string | null
   sort_order: number
   has_password: boolean
+  departments: string[]
+  has_pricing: boolean
+  has_integration: boolean
   created_at: string
   updated_at: string
+}
+
+const DEPT_BADGE: Record<string, { label: string; cls: string }> = {
+  celular:  { label: 'Cel',    cls: 'bg-blue-500/15 text-blue-400 border-blue-500/40' },
+  mala:     { label: 'Mala',   cls: 'bg-amber-500/15 text-amber-400 border-amber-500/40' },
+  eletro:   { label: 'Eletro', cls: 'bg-purple-500/15 text-purple-400 border-purple-500/40' },
+  catalogo: { label: 'Cat',    cls: 'bg-green-500/15 text-green-400 border-green-500/40' },
 }
 
 type IntegrationRef = {
@@ -383,6 +393,9 @@ async function copyText(text: string) {
           <tr>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Plataforma</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Conta</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[110px]">Tipo</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Tab. Preço</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Integração</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[100px]">Segmento</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Frete</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
@@ -402,12 +415,12 @@ async function copyText(text: string) {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colSpan="17" class="text-center py-6 text-muted-foreground">
+            <td colSpan="20" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!sorted.length && !showAdd">
-            <td colSpan="17" class="text-center py-8 text-muted-foreground">Nenhuma loja cadastrada.</td>
+            <td colSpan="20" class="text-center py-8 text-muted-foreground">Nenhuma loja cadastrada.</td>
           </tr>
 
           <!-- add row -->
@@ -427,7 +440,7 @@ async function copyText(text: string) {
                 @keydown.escape="showAdd = false"
               />
             </td>
-            <td v-for="i in 12" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
+            <td v-for="i in 15" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
             <td class="border border-border px-1 py-1 text-center">
               <div class="flex gap-0.5 justify-center">
                 <button class="p-1 text-emerald-600 hover:bg-emerald-50 rounded" :disabled="adding" @click="submitNew">
@@ -515,6 +528,41 @@ async function copyText(text: string) {
                   </option>
                 </select>
               </div>
+            </td>
+            <!-- Tipo (department badges from linked pricing_accounts) -->
+            <td class="border border-border px-1 py-1 text-center">
+              <div v-if="row.departments && row.departments.length" class="flex flex-wrap gap-0.5 justify-center">
+                <span
+                  v-for="d in row.departments"
+                  :key="d"
+                  class="px-1.5 py-0.5 rounded border text-[10px] font-semibold"
+                  :class="(DEPT_BADGE[d]?.cls) || 'bg-muted text-muted-foreground border-muted'"
+                >
+                  {{ DEPT_BADGE[d]?.label || d }}
+                </span>
+              </div>
+            </td>
+            <!-- Tab. Preço -->
+            <td class="border border-border px-1 py-1 text-center">
+              <span
+                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold"
+                :class="row.has_pricing
+                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+                  : 'bg-muted text-muted-foreground border-border'"
+              >
+                {{ row.has_pricing ? 'sim' : '—' }}
+              </span>
+            </td>
+            <!-- Integração -->
+            <td class="border border-border px-1 py-1 text-center">
+              <span
+                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold"
+                :class="row.has_integration
+                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+                  : 'bg-muted text-muted-foreground border-border'"
+              >
+                {{ row.has_integration ? 'sim' : '—' }}
+              </span>
             </td>
             <!-- text fields -->
             <template
