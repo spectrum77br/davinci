@@ -2152,7 +2152,7 @@ watch(department, async () => {
             </tr>
             <!-- Row 3: Listing type + cost column headers -->
             <tr>
-              <th class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30 min-w-[200px]">SKU / Nome</th>
+              <th class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30 min-w-[200px]">Produto</th>
               <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-green-700 font-bold z-30 min-w-[56px]" :style="{ left: '200px' }">bling</th>
               <template v-if="department === 'celular'">
                 <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '256px' }">kit 1</th>
@@ -2202,8 +2202,7 @@ watch(department, async () => {
                     <Eye v-else class="h-3 w-3" />
                   </button>
                   <div class="min-w-0">
-                    <div class="font-mono font-bold text-xs truncate max-w-[180px]" :title="prod.sku">{{ prod.sku }}</div>
-                    <div class="text-[10px] text-muted-foreground truncate max-w-[180px]" :title="prod.name">{{ prod.name }}</div>
+                    <div class="text-xs truncate max-w-[180px]" :title="`${prod.sku} — ${prod.name}`">{{ prod.name }}</div>
                   </div>
                 </div>
               </td>
