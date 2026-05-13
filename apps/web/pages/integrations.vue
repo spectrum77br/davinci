@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { SquarePen, Plus, RefreshCw, Trash2, Zap, Search } from 'lucide-vue-next'
+import { SquarePen, Plus, RefreshCw, Trash2, Zap, Search, KeyRound } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'integracoes', action: 'view' } })
 
@@ -129,6 +129,21 @@ function onModalClose(open: boolean) {
   if (!open) editing.value = null
 }
 
+const tiktokAuthorizingId = ref<string | null>(null)
+async function authorizeTikTok(i: Integration) {
+  tiktokAuthorizingId.value = i.id
+  try {
+    const r = await api<{ url: string; state: string }>(
+      `/api/integrations/tiktok/start?integrationId=${i.id}&origin=${encodeURIComponent(window.location.origin)}`,
+    )
+    if (r?.url) window.location.href = r.url
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'tiktok_authorize_failed'
+  } finally {
+    tiktokAuthorizingId.value = null
+  }
+}
+
 async function deleteIntegration(i: Integration) {
   if (!confirm(`Excluir integração ${i.name}?`)) return
   try {
@@ -209,6 +224,17 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
           <div class="flex gap-2 pt-1 flex-wrap">
             <Button size="sm" variant="outline" :disabled="testingId === i.id" @click="testIntegration(i)">
               <Zap class="size-3 mr-1" /> {{ testingId === i.id ? 'testando…' : 'testar' }}
+            </Button>
+            <Button
+              v-if="canEdit && i.platform === 'tiktok'"
+              size="sm"
+              variant="outline"
+              :disabled="tiktokAuthorizingId === i.id"
+              title="Iniciar OAuth no TikTok Partner Center"
+              @click="authorizeTikTok(i)"
+            >
+              <KeyRound class="size-3 mr-1" />
+              {{ tiktokAuthorizingId === i.id ? 'redirecionando…' : 'Autorizar no TikTok' }}
             </Button>
             <Button v-if="canEdit" size="sm" variant="ghost" title="editar" @click="openEdit(i)">
               <SquarePen class="size-4" />

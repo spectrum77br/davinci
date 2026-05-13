@@ -65,15 +65,14 @@ const PLATFORM_SPECS: Record<Platform, PlatformSpec> = {
     hint: {
       tone: 'tiktok',
       lines: [
-        '**TikTok Shop:** Obtenha as credenciais no TikTok Shop Partner Center.',
-        'O App Key, App Secret e Shop Cipher são obtidos ao criar um app. O Access Token é gerado via autorização OAuth.',
+        '**TikTok Shop:** preencha App Key, App Secret e Service ID (TikTok Shop Partner Center).',
+        'Depois de salvar, clique em **Autorizar no TikTok** na página de Integrações para gerar Access Token e Shop Cipher via OAuth.',
       ],
     },
     fields: [
       { key: 'app_key', label: 'App Key', placeholder: 'App Key do TikTok Shop Partner Center', required: true },
       { key: 'app_secret', label: 'App Secret', type: 'password', required: true },
-      { key: 'access_token', label: 'Access Token', placeholder: 'Token de acesso da API', required: true },
-      { key: 'shop_cipher', label: 'Shop Cipher', placeholder: 'Cipher da loja (obtido via Auth)', required: true },
+      { key: 'service_id', label: 'Service ID', placeholder: 'ID do serviço no Partner Center', required: true },
     ],
   },
   temu: {
