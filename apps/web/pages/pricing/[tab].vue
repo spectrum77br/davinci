@@ -180,6 +180,54 @@ const accountsByDept = computed(() => {
 
 const accountsCurrent = computed(() => accountsByDept.value[department.value] ?? [])
 
+// SSH-style contas filters
+const contasSearch = ref('')
+const contasPlatformFilter = ref<string>('')
+
+const accountsFiltered = computed(() => {
+  const q = contasSearch.value.trim().toLowerCase()
+  const pf = contasPlatformFilter.value
+  return accountsCurrent.value.filter((a) => {
+    if (pf && a.platform !== pf) return false
+    if (!q) return true
+    return (
+      a.name.toLowerCase().includes(q) ||
+      (a.platform || '').toLowerCase().includes(q) ||
+      (a.email || '').toLowerCase().includes(q)
+    )
+  })
+})
+
+const accountsGrouped = computed<{ platform: string; label: string; rows: Account[] }[]>(() => {
+  const groups = new Map<string, Account[]>()
+  for (const a of accountsFiltered.value) {
+    const key = a.platform || 'outros'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(a)
+  }
+  const order = ['aliexpress', 'amazon', 'mercadolivre', 'shopee', 'tiktok', 'temu', 'magalu']
+  return Array.from(groups.entries())
+    .sort(([a], [b]) => {
+      const ia = order.indexOf(a)
+      const ib = order.indexOf(b)
+      if (ia === -1 && ib === -1) return a.localeCompare(b)
+      if (ia === -1) return 1
+      if (ib === -1) return -1
+      return ia - ib
+    })
+    .map(([platform, rows]) => ({
+      platform,
+      label: platformLabel(platform).toUpperCase(),
+      rows,
+    }))
+})
+
+const platformsPresentInDept = computed(() => {
+  const set = new Set<string>()
+  for (const a of accountsCurrent.value) set.add(a.platform)
+  return Array.from(set)
+})
+
 // =========================================================== products state
 
 type PricingProduct = {
@@ -1243,6 +1291,31 @@ function fmtMoney(v: string | number | null) {
   return n.toFixed(2)
 }
 
+function fmtBRL(v: string | number | null) {
+  if (v == null || v === '') return '—'
+  const n = Number(v)
+  if (Number.isNaN(n)) return '—'
+  return `R$ ${n.toFixed(0)}`
+}
+
+function tabelaName(p: PricingProduct): string {
+  const list = TYPE_HEADERS[(p.department as DeptKey)] ?? TYPE_HEADERS.celular
+  const t = Math.max(1, Math.min(5, p.product_type || 1))
+  return list[t - 1] ?? '—'
+}
+
+function tabelaBadgeClass(p: PricingProduct): string {
+  const t = Math.max(1, Math.min(5, p.product_type || 1))
+  switch (t) {
+    case 1: return 'bg-slate-100 text-slate-700'
+    case 2: return 'bg-blue-100 text-blue-700'
+    case 3: return 'bg-emerald-100 text-emerald-700'
+    case 4: return 'bg-orange-100 text-orange-700'
+    case 5: return 'bg-purple-100 text-purple-700'
+    default: return 'bg-gray-100 text-gray-700'
+  }
+}
+
 // =========================================================== boot
 
 await loadAccounts()
@@ -1330,6 +1403,25 @@ watch(department, async () => {
         </div>
       </div>
 
+      <!-- Filters: busca + plataforma + contador (SSH-style) -->
+      <div class="flex flex-wrap gap-2 items-center">
+        <input
+          v-model="contasSearch"
+          placeholder="Buscar conta..."
+          class="border rounded px-2 py-1 text-sm bg-background w-56"
+        />
+        <select
+          v-model="contasPlatformFilter"
+          class="border rounded px-2 py-1 text-sm bg-background h-8"
+        >
+          <option value="">Todas plataformas</option>
+          <option v-for="p in platformsPresentInDept" :key="p" :value="p">{{ platformLabel(p) }}</option>
+        </select>
+        <span class="ml-auto text-xs text-muted-foreground">
+          {{ accountsFiltered.length }} conta(s)
+        </span>
+      </div>
+
       <div v-if="accountsErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
         <AlertCircle class="h-4 w-4" /> {{ accountsErr }}
       </div>
@@ -1340,7 +1432,6 @@ watch(department, async () => {
             <tr>
               <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Nome</th>
               <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[100px]">Plataforma</th>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[160px]">Integração</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Kit</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Comissão</th>
               <th
@@ -1366,9 +1457,9 @@ watch(department, async () => {
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
-            <tr v-else-if="!accountsCurrent.length && !showAddAcc">
-              <td colSpan="15" class="text-center py-6 text-muted-foreground">
-                Nenhuma conta neste departamento.
+            <tr v-else-if="!accountsFiltered.length && !showAddAcc">
+              <td colSpan="20" class="text-center py-6 text-muted-foreground">
+                {{ accountsCurrent.length ? 'Nenhuma conta corresponde aos filtros.' : 'Nenhuma conta neste departamento.' }}
               </td>
             </tr>
 
@@ -1390,7 +1481,6 @@ watch(department, async () => {
                   <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
               </td>
-              <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1">
                 <input
                   v-model.number="newAcc.kit_number"
@@ -1422,9 +1512,15 @@ watch(department, async () => {
               </td>
             </tr>
 
-            <!-- data rows -->
-            <tr v-for="acc in accountsCurrent" :key="acc.id" class="hover:bg-accent/30">
-              <!-- name -->
+            <!-- data rows grouped by platform (SSH-style) -->
+            <template v-for="group in accountsGrouped" :key="group.platform">
+              <tr class="bg-muted/40">
+                <td colSpan="20" class="px-3 py-1.5 text-[11px] font-bold tracking-wider text-muted-foreground uppercase">
+                  {{ group.label }} · {{ group.rows.length }} CONTA(S)
+                </td>
+              </tr>
+              <tr v-for="acc in group.rows" :key="acc.id" class="hover:bg-accent/30">
+                <!-- name -->
               <td
                 class="border border-border px-2 py-1.5 text-xs cursor-pointer text-left"
                 :class="{
@@ -1466,28 +1562,6 @@ watch(department, async () => {
                   <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
                 <span v-else>{{ platformLabel(acc.platform) }}</span>
-              </td>
-              <!-- integration -->
-              <td
-                class="border border-border px-1 py-1 text-xs text-left"
-                :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'integration_id') }"
-              >
-                <select
-                  v-if="canEditContas && integrationsForPricingPlatform(acc.platform).length"
-                  :value="acc.integration_id ?? ''"
-                  class="w-full text-xs bg-transparent outline-none"
-                  @change="(e) => setAccountIntegration(acc, (e.target as HTMLSelectElement).value || null)"
-                >
-                  <option value="">—</option>
-                  <option
-                    v-for="i in integrationsForPricingPlatform(acc.platform)"
-                    :key="i.id"
-                    :value="i.id"
-                  >{{ i.name }}</option>
-                </select>
-                <span v-else :class="{ 'text-muted-foreground': !acc.integration_id }">
-                  {{ integrationName(acc.integration_id) }}
-                </span>
               </td>
               <!-- kit -->
               <td
@@ -1607,7 +1681,8 @@ watch(department, async () => {
                   <Trash2 class="h-3 w-3" />
                 </button>
               </td>
-            </tr>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
@@ -1645,31 +1720,29 @@ watch(department, async () => {
           <thead class="sticky top-0 bg-muted z-10">
             <tr>
               <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">SKU</th>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">Nome</th>
+              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">Produto</th>
               <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[100px]">EAN</th>
               <template v-if="department === 'mala'">
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Descrição</th>
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Modelo</th>
               </template>
-              <th class="text-right px-2 py-2 font-medium border-b border-border w-20">Custo Bling</th>
-              <th class="text-right px-2 py-2 font-medium border-b border-border w-20">Kit 1</th>
-              <th class="text-right px-2 py-2 font-medium border-b border-border w-20">Kit 2</th>
-              <th class="text-right px-2 py-2 font-medium border-b border-border w-20">Kit 3</th>
-              <th class="text-right px-2 py-2 font-medium border-b border-border w-20">Kit 4</th>
-              <th class="text-center px-2 py-2 font-medium border-b border-border w-16">Tipo</th>
+              <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 1</th>
+              <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 2</th>
+              <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 3</th>
+              <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 4</th>
+              <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Tabela</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-16">Catálogo</th>
-              <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Ativo</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="productsLoading && !products.length">
-              <td colSpan="14" class="text-center py-6 text-muted-foreground">
+              <td colSpan="15" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!productsCurrent.length && !showAddProd">
-              <td colSpan="14" class="text-center py-6 text-muted-foreground">
+              <td colSpan="15" class="text-center py-6 text-muted-foreground">
                 Nenhum produto neste departamento.
               </td>
             </tr>
@@ -1709,7 +1782,6 @@ watch(department, async () => {
                   <input v-model="newProd.model" type="text" placeholder="Modelo" class="w-full text-xs border rounded px-1.5 py-1 bg-background" />
                 </td>
               </template>
-              <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1">
                 <input v-model="newProd.cost_kit1" type="number" step="0.01" placeholder="0.00" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
@@ -1723,9 +1795,8 @@ watch(department, async () => {
                 <input v-model="newProd.cost_kit4" type="number" step="0.01" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
               <td class="border border-border px-1 py-1">
-                <input v-model.number="newProd.product_type" type="number" min="1" max="9" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-center" />
+                <input v-model.number="newProd.product_type" type="number" min="1" max="5" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-center" />
               </td>
-              <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center">
                 <div class="flex gap-0.5 justify-center">
@@ -1817,9 +1888,6 @@ watch(department, async () => {
                   <span v-else>{{ p.model || '—' }}</span>
                 </td>
               </template>
-              <td class="border border-border px-2 py-1.5 text-xs text-right text-muted-foreground">
-                {{ fmtMoney(p.bling_cost_price) }}
-              </td>
               <td
                 v-for="k in 4" :key="`kit-${k}`"
                 class="border border-border px-2 py-1.5 text-xs text-right cursor-pointer"
@@ -1836,7 +1904,7 @@ watch(department, async () => {
                   class="w-full text-xs bg-transparent outline-none text-right"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
-                <span v-else>{{ fmtMoney((p as any)[`cost_kit${k}`]) }}</span>
+                <span v-else>{{ fmtBRL((p as any)[`cost_kit${k}`]) }}</span>
               </td>
               <td
                 class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
@@ -1846,11 +1914,13 @@ watch(department, async () => {
                 <input
                   v-if="isEditing(p.id, 'product_type')"
                   :ref="setEditInputRef"
-                  v-model="editValue" type="number" min="1" max="9"
+                  v-model="editValue" type="number" min="1" max="5"
                   class="w-full text-xs bg-transparent outline-none text-center"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
-                <span v-else>{{ p.product_type }}</span>
+                <span v-else class="inline-block px-2 py-0.5 rounded text-[10px] font-medium" :class="tabelaBadgeClass(p)">
+                  {{ tabelaName(p) }}
+                </span>
               </td>
               <td class="border border-border px-1 py-1 text-center">
                 <button
@@ -1863,17 +1933,6 @@ watch(department, async () => {
                   <Star class="h-3.5 w-3.5" :fill="p.in_catalog ? 'currentColor' : 'none'" />
                 </button>
                 <span v-else>{{ p.in_catalog ? 'sim' : '—' }}</span>
-              </td>
-              <td class="border border-border px-1 py-1 text-center">
-                <button
-                  v-if="canEditProdutos"
-                  class="p-1 rounded"
-                  :title="p.is_active ? 'Ativo' : 'Inativo'"
-                  @click="toggleActive(p)"
-                >
-                  <Eye v-if="p.is_active" class="h-3.5 w-3.5 text-emerald-600" />
-                  <EyeOff v-else class="h-3.5 w-3.5 text-muted-foreground" />
-                </button>
               </td>
               <td class="border border-border px-1 py-1 text-center">
                 <button
@@ -2141,7 +2200,7 @@ watch(department, async () => {
                     <Eye v-else class="h-3 w-3" />
                   </button>
                   <div class="min-w-0">
-                    <div class="font-mono truncate max-w-[180px]" :title="prod.sku">{{ prod.sku }}</div>
+                    <div class="font-mono font-bold text-xs truncate max-w-[180px]" :title="prod.sku">{{ prod.sku }}</div>
                     <div class="text-[10px] text-muted-foreground truncate max-w-[180px]" :title="prod.name">{{ prod.name }}</div>
                   </div>
                 </div>
@@ -2210,14 +2269,6 @@ watch(department, async () => {
                       <div class="flex items-center gap-0.5 opacity-60 hover:opacity-100">
                         <button v-if="cellOf(prod.id, acc.id)" class="p-0.5 hover:bg-muted rounded" title="Editar override" @click.stop="startCellEdit(cellOf(prod.id, acc.id)!)">
                           <Save class="h-3 w-3" />
-                        </button>
-                        <button
-                          v-if="cellOf(prod.id, acc.id)"
-                          class="p-0.5 hover:bg-muted rounded"
-                          :title="cellOf(prod.id, acc.id)?.cell_status === 'locked' ? 'Destravar' : 'Travar'"
-                          @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'locked' ? 'auto' : 'locked')"
-                        >
-                          <Lock class="h-3 w-3" />
                         </button>
                         <button
                           v-if="cellOf(prod.id, acc.id)"
