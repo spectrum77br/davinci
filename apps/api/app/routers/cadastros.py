@@ -3,7 +3,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -16,6 +16,7 @@ from app.models import (
     CadastroTipo,
     Company,
     Store,
+    StoreInfo,
     User,
 )
 from app.schemas.companies import (
@@ -83,6 +84,13 @@ async def cadastros_grid(
     return CadastroGridOut(marketplaces=list(MARKETPLACES), rows=rows)
 
 
+_STOREINFO_FIELD_FOR_TIPO = {
+    CadastroTipo.FONE:     StoreInfo.phone,
+    CadastroTipo.EMAIL:    StoreInfo.email,
+    CadastroTipo.SERVIDOR: StoreInfo.server,
+}
+
+
 @router.get("/available", response_model=list[CadastroOut])
 async def list_available_cadastros(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -90,26 +98,43 @@ async def list_available_cadastros(
     tipo: str,
     marketplace: str,
 ) -> list[CadastroOut]:
-    """Cadastros (fone/email/...) of `tipo` that aren't already linked to any
-    Store on `marketplace`. Drives the dropdowns in the Empresas "Nova conta"
-    modal — keeps the user from picking a code that's already claimed.
+    """Cadastros (fone/email/...) of `tipo` that aren't in use on `marketplace`.
+
+    Two ways a code is considered "in use" — either is enough to hide it:
+      1. A `cadastros_stores` link points at a Store with that marketplace
+         (the explicit assignment path used by /cadastros).
+      2. A `store_info` row on that platform already carries this code in
+         the matching field (`phone` for fone, `email` for email, `server`
+         for servidor). Catches data entered directly via the Lojas page
+         that never went through cadastros_stores.
     """
     cad_tipo = _to_tipo(tipo)
-    busy = (
+    busy_via_link = (
         select(CadastroStore.cadastro_id)
         .join(Store, Store.id == CadastroStore.store_id)
         .where(Store.marketplace == marketplace)
     )
-    stmt = (
-        select(Cadastro)
-        .where(
-            Cadastro.tipo == cad_tipo,
-            Cadastro.status == CadastroStatus.ACTIVE,
-            Cadastro.id.notin_(busy),
-        )
-        .order_by(Cadastro.codigo)
+    field = _STOREINFO_FIELD_FOR_TIPO.get(cad_tipo)
+    busy_codigos: set[str] = set()
+    if field is not None:
+        rows = (
+            await session.execute(
+                select(field).where(
+                    StoreInfo.platform == marketplace,
+                    field.isnot(None),
+                    field != "",
+                )
+            )
+        ).scalars().all()
+        busy_codigos = {(r or "").strip().lower() for r in rows if r}
+    stmt = select(Cadastro).where(
+        Cadastro.tipo == cad_tipo,
+        Cadastro.status == CadastroStatus.ACTIVE,
+        Cadastro.id.notin_(busy_via_link),
     )
-    rows = (await session.execute(stmt)).scalars().all()
+    if busy_codigos:
+        stmt = stmt.where(func.lower(Cadastro.codigo).notin_(busy_codigos))
+    rows = (await session.execute(stmt.order_by(Cadastro.codigo))).scalars().all()
     return [CadastroOut.model_validate(c) for c in rows]
 
 
