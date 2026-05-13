@@ -11,8 +11,8 @@ and backfills it from the root parent's slug in `segments`. The `segment_id`
 column stays untouched so anything written against the new schema keeps
 working.
 
-Revision ID: 0023_readd_department
-Revises: 0022_user_duoke
+Revision ID: 0028_readd_department
+Revises: 0027_drop_pricing_department
 Create Date: 2026-05-13
 """
 
@@ -20,8 +20,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0023_readd_department"
-down_revision: str | None = "0022_user_duoke"
+revision: str = "0028_readd_department"
+down_revision: str | None = "0027_drop_pricing_department"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
