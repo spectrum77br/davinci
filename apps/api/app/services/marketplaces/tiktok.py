@@ -2,15 +2,24 @@
 
 Implements `MarketplaceClient` for TikTok Shop using API v202309.
 Supports: test_connection, update_stock, update_price, activate_product,
-search_products, and update_price_with_activation.
+search_products, update_price_with_activation, OAuth (authorize/exchange/
+refresh), and lazy access_token refresh before each request.
 
 Auth: HMAC-SHA256 signing per TikTok v202309 spec.
 Credentials shape stored in `integrations.credentials`:
     {
-      "app_key":      str,
-      "app_secret":   str,
-      "access_token": str,
-      "shop_cipher":  str,
+      "app_key":                 str,
+      "app_secret":              str,
+      "service_id":              str,   # filled at integration creation
+      "access_token":            str,
+      "refresh_token":           str,
+      "shop_cipher":             str,
+      "shop_name":               str,
+      "open_id":                 str,
+      "seller_name":             str,
+      "seller_base_region":      str,
+      "token_expires_at":        int,   # epoch seconds
+      "refresh_token_expires_at": int,  # epoch seconds
     }
 """
 from __future__ import annotations
@@ -33,6 +42,9 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 TIKTOK_BASE_URL = "https://open-api.tiktokglobalshop.com"
+TIKTOK_AUTH_BASE = "https://auth.tiktok-shops.com"
+TIKTOK_AUTHORIZE_BASE = "https://services.tiktokshop.com/open/authorize"
+TOKEN_REFRESH_BUFFER_SEC = 300  # refresh if expiring within 5 min
 
 
 class TikTokClient:
@@ -55,6 +67,154 @@ class TikTokClient:
     @property
     def shop_cipher(self) -> str:
         return str(self.creds.get("shop_cipher") or "").strip()
+
+    @property
+    def refresh_token_value(self) -> str:
+        return str(self.creds.get("refresh_token") or "").strip()
+
+    @property
+    def token_expires_at(self) -> int:
+        return int(self.creds.get("token_expires_at") or 0)
+
+    # ---------------------------------------------------------------- OAuth (static)
+
+    @staticmethod
+    def authorize_url(service_id: str, state: str) -> str:
+        """Builds TikTok Partner authorize URL. The TikTok Partner Center
+        receives the user, then redirects back to the app's configured
+        callback with `?code=...&state=...`.
+        """
+        if not service_id:
+            raise ValueError("service_id is required to build a TikTok authorize URL")
+        return (
+            f"{TIKTOK_AUTHORIZE_BASE}"
+            f"?service_id={service_id}&state={state}"
+        )
+
+    @staticmethod
+    async def exchange_code(code: str, app_key: str, app_secret: str) -> dict:
+        """Exchange an auth code for access+refresh tokens.
+
+        Returns the raw `data` dict from TikTok's response, augmented with
+        absolute expiry timestamps.
+        """
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(
+                f"{TIKTOK_AUTH_BASE}/api/v2/token/get",
+                params={
+                    "app_key": app_key,
+                    "app_secret": app_secret,
+                    "auth_code": code,
+                    "grant_type": "authorized_code",
+                },
+            )
+        r.raise_for_status()
+        body = r.json()
+        if body.get("code") != 0:
+            raise RuntimeError(f"TikTok token/get failed: {body.get('message')}")
+        data = body.get("data") or {}
+        now = int(time.time())
+        data["token_expires_at"] = now + int(data.get("access_token_expire_in") or 0)
+        data["refresh_token_expires_at"] = now + int(
+            data.get("refresh_token_expire_in") or 0
+        )
+        return data
+
+    @staticmethod
+    async def refresh_access_token(
+        refresh_token: str, app_key: str, app_secret: str
+    ) -> dict:
+        """Use a refresh_token to obtain a new access_token."""
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(
+                f"{TIKTOK_AUTH_BASE}/api/v2/token/refresh",
+                params={
+                    "app_key": app_key,
+                    "app_secret": app_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            )
+        r.raise_for_status()
+        body = r.json()
+        if body.get("code") != 0:
+            raise RuntimeError(f"TikTok token/refresh failed: {body.get('message')}")
+        data = body.get("data") or {}
+        now = int(time.time())
+        data["token_expires_at"] = now + int(data.get("access_token_expire_in") or 0)
+        data["refresh_token_expires_at"] = now + int(
+            data.get("refresh_token_expire_in") or 0
+        )
+        return data
+
+    @staticmethod
+    async def fetch_shop_info(
+        access_token: str, app_key: str, app_secret: str
+    ) -> dict:
+        """Fetches the authorized shop record (shop_cipher, shop_name, region).
+
+        Calls `/authorization/202309/shops` *without* a shop_cipher (the
+        endpoint that returns the cipher itself). Returns the first shop
+        in the response or an empty dict.
+        """
+        path = "/authorization/202309/shops"
+        ts = int(time.time())
+        params: dict[str, str] = {"app_key": app_key, "timestamp": str(ts)}
+        sign = _sign(app_secret, path, params)
+        params["sign"] = sign
+        params["access_token"] = access_token
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(
+                f"{TIKTOK_BASE_URL}{path}",
+                params=params,
+                headers={
+                    "x-tts-access-token": access_token,
+                    "content-type": "application/json",
+                },
+            )
+        r.raise_for_status()
+        body = r.json()
+        if body.get("code") != 0:
+            raise RuntimeError(f"TikTok shops fetch failed: {body.get('message')}")
+        shops = (body.get("data") or {}).get("shops") or []
+        return shops[0] if shops else {}
+
+    # ---------------------------------------------------------------- token freshness
+
+    async def _ensure_fresh_token(self) -> None:
+        """Refresh access_token before requests if it's near expiry.
+
+        Skipped when refresh_token or token_expires_at is missing (e.g. legacy
+        creds populated by the cutover migration without an absolute expiry).
+        """
+        exp = self.token_expires_at
+        rt = self.refresh_token_value
+        if not exp or not rt or not self.app_key or not self.app_secret:
+            return
+        if exp - int(time.time()) > TOKEN_REFRESH_BUFFER_SEC:
+            return
+        try:
+            data = await TikTokClient.refresh_access_token(
+                rt, self.app_key, self.app_secret
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("tiktok_refresh_failed", err=str(e))
+            return
+        # Merge the new tokens into our creds + notify the caller so it can
+        # persist them to the integration row.
+        self.creds.update(
+            {
+                "access_token": data.get("access_token") or self.creds.get("access_token"),
+                "refresh_token": data.get("refresh_token") or rt,
+                "token_expires_at": data["token_expires_at"],
+                "refresh_token_expires_at": data["refresh_token_expires_at"],
+            }
+        )
+        if self._on_refresh is not None:
+            try:
+                await self._on_refresh(self.creds)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("tiktok_refresh_callback_failed", err=str(e))
 
     # ---------------------------------------------------------------- signing
 
@@ -138,6 +298,7 @@ class TikTokClient:
     async def _get(
         self, path: str, extra_params: dict[str, str] | None = None
     ) -> dict:
+        await self._ensure_fresh_token()
         params = self._build_get_params(path, extra_params)
         async with httpx.AsyncClient(timeout=15.0) as c:
             r = await c.get(
@@ -158,6 +319,7 @@ class TikTokClient:
         body: dict | None = None,
         extra_params: dict[str, str] | None = None,
     ) -> dict:
+        await self._ensure_fresh_token()
         body_str = json.dumps(body or {}, separators=(",", ":"), ensure_ascii=False)
         params = self._build_post_params(path, body_str, extra_params)
         async with httpx.AsyncClient(timeout=15.0) as c:
@@ -484,6 +646,28 @@ class TikTokClient:
 
 
 # ---------------------------------------------------------------- helpers
+
+
+def _sign(
+    app_secret: str,
+    path: str,
+    query_params: dict[str, str],
+    body: str | None = None,
+) -> str:
+    """Module-level HMAC-SHA256 signer — also used by the OAuth helpers
+    that operate without an instantiated TikTokClient."""
+    filtered = {
+        k: v for k, v in query_params.items() if k not in ("sign", "access_token")
+    }
+    sign_string = path
+    for key in sorted(filtered.keys()):
+        sign_string += key + filtered[key]
+    if body:
+        sign_string += body
+    wrapped = app_secret + sign_string + app_secret
+    return hmac.new(
+        app_secret.encode(), wrapped.encode(), hashlib.sha256
+    ).hexdigest()
 
 
 def _tiktok_status_to_listing(status: str | None) -> str:

@@ -1,18 +1,22 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from secrets import token_urlsafe
 from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user, require_permission
 from app.models import (
     Integration,
     IntegrationPlatform,
+    OAuthState,
     Store,
     User,
 )
@@ -22,11 +26,13 @@ from app.schemas.integrations import (
     IntegrationCreate,
     IntegrationOut,
     IntegrationPatch,
+    OAuthStartOut,
     TestConnectionOut,
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces import client_for
 from app.services.marketplaces.bling import BlingClient
+from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
@@ -215,6 +221,132 @@ async def test_integration(
     i.last_error = None if result.ok else (result.detail or "")[:1000]
     await session.commit()
     return TestConnectionOut(ok=result.ok, detail=result.detail, info=result.info)
+
+
+# =============================================================================
+# TikTok Shop OAuth — integration-bound (each integration carries its own
+# app_key/app_secret/service_id; no global env credentials).
+# =============================================================================
+
+TIKTOK_STATE_TTL_MIN = 10
+
+
+@router.get("/tiktok/start", response_model=OAuthStartOut)
+async def tiktok_oauth_start(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("empresa", "edit"))],
+    integration_id: Annotated[UUID, Query(alias="integrationId")],
+    origin: Annotated[str | None, Query()] = None,
+) -> OAuthStartOut:
+    del origin  # accepted for FE compatibility; final redirect uses settings.app_url
+    integ = (
+        await session.execute(select(Integration).where(Integration.id == integration_id))
+    ).scalar_one_or_none()
+    if integ is None:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+    if integ.platform != IntegrationPlatform.TIKTOK:
+        raise HTTPException(400, detail={"code": "not_tiktok"})
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+    service_id = str(creds.get("service_id") or "").strip()
+    if not service_id:
+        raise HTTPException(400, detail={"code": "missing_service_id"})
+
+    state = token_urlsafe(32)
+    session.add(
+        OAuthState(
+            state=state,
+            platform=IntegrationPlatform.TIKTOK,
+            store_id=integ.store_id,
+            user_id=user.id,
+            code_verifier=str(integ.id),  # threads integration_id to callback
+            expires_at=datetime.now(UTC) + timedelta(minutes=TIKTOK_STATE_TTL_MIN),
+        )
+    )
+    await session.commit()
+    return OAuthStartOut(url=TikTokClient.authorize_url(service_id, state), state=state)
+
+
+@router.get("/tiktok/callback")
+async def tiktok_oauth_callback(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    code: Annotated[str, Query(...)],
+    state: Annotated[str, Query(...)],
+):
+    settings = get_settings()
+    row = (
+        await session.execute(select(OAuthState).where(OAuthState.state == state))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(400, detail={"code": "state_not_found"})
+    if row.consumed_at is not None:
+        raise HTTPException(400, detail={"code": "state_consumed"})
+    if row.expires_at < datetime.now(UTC):
+        raise HTTPException(400, detail={"code": "state_expired"})
+    if row.platform != IntegrationPlatform.TIKTOK:
+        raise HTTPException(400, detail={"code": "state_platform_mismatch"})
+
+    integ: Integration | None = None
+    if row.code_verifier:
+        try:
+            integ_id = UUID(row.code_verifier)
+        except ValueError:
+            integ_id = None
+        if integ_id is not None:
+            integ = (
+                await session.execute(select(Integration).where(Integration.id == integ_id))
+            ).scalar_one_or_none()
+    if integ is None:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+    app_key = str(creds.get("app_key") or "").strip()
+    app_secret = str(creds.get("app_secret") or "").strip()
+    if not app_key or not app_secret:
+        raise HTTPException(400, detail={"code": "missing_app_credentials"})
+
+    try:
+        tokens = await TikTokClient.exchange_code(code, app_key, app_secret)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("tiktok_exchange_failed", err=str(e), integration_id=str(integ.id))
+        raise HTTPException(400, detail={"code": "exchange_failed", "err": str(e)[:200]}) from e
+
+    access_token = str(tokens.get("access_token") or "").strip()
+    try:
+        shop = await TikTokClient.fetch_shop_info(access_token, app_key, app_secret)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("tiktok_shop_fetch_failed", err=str(e), integration_id=str(integ.id))
+        shop = {}
+
+    creds.update(
+        {
+            "access_token": access_token,
+            "refresh_token": tokens.get("refresh_token"),
+            "token_expires_at": tokens.get("token_expires_at"),
+            "refresh_token_expires_at": tokens.get("refresh_token_expires_at"),
+            "open_id": tokens.get("open_id"),
+            "seller_name": tokens.get("seller_name"),
+            "seller_base_region": tokens.get("seller_base_region"),
+            "shop_cipher": shop.get("cipher") or shop.get("shop_cipher"),
+            "shop_name": shop.get("name") or shop.get("shop_name"),
+        }
+    )
+    integ.credentials = encrypt_json(creds)
+    integ.token_expires_at = (
+        datetime.fromtimestamp(int(tokens["token_expires_at"]), tz=UTC)
+        if tokens.get("token_expires_at")
+        else None
+    )
+    integ.status = "active"
+    integ.last_error = None
+    row.consumed_at = datetime.now(UTC)
+    await session.commit()
+
+    company_id = await _company_id_for(session, integ.store_id)
+    suffix = f"/companies/{company_id}" if company_id else "/integrations"
+    return RedirectResponse(
+        f"{settings.app_url}{suffix}?oauth=ok&platform=tiktok",
+        status_code=302,
+    )
 
 
 @router.get("/{integration_id}/bling-stores", response_model=BlingStoresOut)
