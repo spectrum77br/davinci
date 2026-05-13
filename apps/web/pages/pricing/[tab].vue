@@ -66,7 +66,6 @@ const TYPE_HEADERS_FALLBACK: Record<string, string[]> = {
 }
 
 const TYPE_HEADERS = ref<Record<string, string[]>>({ ...TYPE_HEADERS_FALLBACK })
-const TYPE_MINS = ref<Record<string, (number | null)[]>>({})
 
 type SegmentRow = {
   id: string
@@ -75,7 +74,6 @@ type SegmentRow = {
   slug: string
   sort_order: number
   active: boolean
-  min_margin: string | number | null
 }
 
 async function loadSegments() {
@@ -92,24 +90,17 @@ async function loadSegments() {
       icon: DEPT_ICONS[r.slug] ?? Tags,
     }))
 
-    const nextHeaders: Record<string, string[]> = {}
-    const nextMins: Record<string, (number | null)[]> = {}
+    const next: Record<string, string[]> = {}
     for (const root of roots) {
       const children = rows
         .filter((r) => r.parent_id === root.id && r.active)
         .sort((a, b) => a.sort_order - b.sort_order)
-      if (children.length) {
-        nextHeaders[root.slug] = children.map((r) => r.name)
-        nextMins[root.slug] = children.map((r) =>
-          r.min_margin == null || r.min_margin === '' ? null : Number(r.min_margin),
-        )
-      } else {
-        nextHeaders[root.slug] = TYPE_HEADERS_FALLBACK[root.slug] ?? []
-        nextMins[root.slug] = (TYPE_HEADERS_FALLBACK[root.slug] ?? []).map(() => null)
-      }
+        .map((r) => r.name)
+      next[root.slug] = children.length
+        ? children
+        : (TYPE_HEADERS_FALLBACK[root.slug] ?? [])
     }
-    TYPE_HEADERS.value = nextHeaders
-    TYPE_MINS.value = nextMins
+    TYPE_HEADERS.value = next
   } catch {
     /* keep fallback */
   }
@@ -1603,12 +1594,12 @@ watch(department, async () => {
               <th
                 v-for="(label, i) in TYPE_HEADERS[department] ?? []"
                 :key="i"
-                colSpan="3"
+                colSpan="2"
                 class="text-center px-1 py-2 font-medium border-b border-border"
               >
                 <div class="text-[11px]">{{ label }}</div>
                 <div class="text-[10px] text-muted-foreground flex justify-center gap-3">
-                  <span>marg</span><span>frete</span><span>min</span>
+                  <span>marg</span><span>frete</span>
                 </div>
               </th>
               <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Obs 1</th>
@@ -1619,12 +1610,12 @@ watch(department, async () => {
           </thead>
           <tbody>
             <tr v-if="accountsLoading && !accounts.length">
-              <td colSpan="23" class="text-center py-6 text-muted-foreground">
+              <td colSpan="15" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!accountsFiltered.length && !showAddAcc">
-              <td colSpan="23" class="text-center py-6 text-muted-foreground">
+              <td colSpan="20" class="text-center py-6 text-muted-foreground">
                 {{ accountsCurrent.length ? 'Nenhuma conta corresponde aos filtros.' : 'Nenhuma conta neste departamento.' }}
               </td>
             </tr>
@@ -1663,7 +1654,7 @@ watch(department, async () => {
                   @keydown.enter="submitNewAcc"
                 />
               </td>
-              <td v-for="i in 15" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
+              <td v-for="i in 10" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td v-for="i in 3" :key="`obs-${i}`" class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center">
                 <div class="flex gap-0.5 justify-center">
@@ -1681,7 +1672,7 @@ watch(department, async () => {
             <!-- data rows grouped by platform (SSH-style) -->
             <template v-for="group in accountsGrouped" :key="group.platform">
               <tr class="bg-muted/40">
-                <td colSpan="23" class="px-3 py-1.5 text-[11px] font-bold tracking-wider text-muted-foreground uppercase">
+                <td colSpan="20" class="px-3 py-1.5 text-[11px] font-bold tracking-wider text-muted-foreground uppercase">
                   {{ group.label }} · {{ group.rows.length }} CONTA(S)
                 </td>
               </tr>
@@ -1809,9 +1800,6 @@ watch(department, async () => {
                     @keydown.escape.prevent="cancelEdit"
                   />
                   <span v-else>{{ fmtShipping((acc as any)[`shipping${t}`]) }}</span>
-                </td>
-                <td class="border border-border px-2 py-1.5 text-xs text-center text-muted-foreground tabular-nums">
-                  {{ fmtMargin(TYPE_MINS[department]?.[t - 1] ?? null) }}
                 </td>
               </template>
               <!-- obs 1/2/3 -->
