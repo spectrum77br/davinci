@@ -2,6 +2,11 @@
 import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle, Unlink, Link2 } from 'lucide-vue-next'
 
 definePageMeta({
+  // `/store-info.` (trailing period) shows up consistently in prod logs —
+  // browsers/copy-paste tend to inherit the period from surrounding text.
+  // Without an alias, Nuxt 404s and the error page itself crashes (Pinia
+  // SSR hydration bug, separate issue), surfacing as a hard 500.
+  alias: ['/store-info.', '/store-info/'],
   middleware: ['permission'],
   permission: { resource: 'lojas_info', action: 'view' },
 })
