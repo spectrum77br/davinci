@@ -29,6 +29,8 @@ from app.models import (
     Product,
     ProductLink,
 )
+from app.security.cipher import decrypt_json, encrypt_json
+from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
 
@@ -110,6 +112,121 @@ async def _link_bling_integration(
     return created, already
 
 
+async def _link_tiktok_integration(
+    session: AsyncSession,
+    job: BackgroundJob,
+    user_id: UUID,
+    integ: Integration,
+) -> tuple[int, int, int]:
+    """Returns (created, already_present, not_found).
+
+    Iterates `client.search_products` in pages of 100, matching each TikTok
+    SKU's `seller_sku` against the user's `products.sku` (case-insensitive).
+    For every match without an existing `product_links` row, creates one
+    with `platform=tiktok` and the TikTok product/sku ids in
+    `external_id` / `variation_id`.
+    """
+    # Build case-insensitive sku → product index for fast match.
+    products = (
+        await session.execute(
+            select(Product).where(Product.user_id == user_id)
+        )
+    ).scalars().all()
+    by_sku: dict[str, Product] = {}
+    for p in products:
+        sk = (p.sku or "").strip().lower()
+        if sk:
+            by_sku[sk] = p
+
+    existing_keys: set[tuple[UUID, str, str]] = set()
+    for link in (
+        await session.execute(
+            select(ProductLink).where(
+                and_(
+                    ProductLink.user_id == user_id,
+                    ProductLink.integration_id == integ.id,
+                    ProductLink.platform == IntegrationPlatform.TIKTOK,
+                )
+            )
+        )
+    ).scalars().all():
+        existing_keys.add(
+            (link.product_id, link.external_id or "", link.variation_id or "")
+        )
+
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+
+    async def _persist_refresh(new_creds: dict) -> None:
+        integ.credentials = encrypt_json(new_creds)
+        await session.commit()
+
+    client = TikTokClient(creds, on_token_refresh=_persist_refresh)
+
+    created = 0
+    already = 0
+    not_found = 0
+    page_token: str | None = None
+    page_idx = 0
+    while True:
+        page_idx += 1
+        try:
+            tk_products, page_token = await client.search_products(
+                page_size=100, page_token=page_token
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "auto_link_tiktok_search_failed",
+                integration_id=str(integ.id),
+                page=page_idx,
+                err=str(e)[:200],
+            )
+            break
+        if not tk_products:
+            break
+        for tp in tk_products:
+            product_id = (tp.get("product_id") or "").strip()
+            title = tp.get("title")
+            for sku in tp.get("skus") or []:
+                seller_sku = (sku.get("seller_sku") or "").strip()
+                sku_id = (sku.get("id") or "").strip()
+                if not seller_sku or not sku_id:
+                    continue
+                local = by_sku.get(seller_sku.lower())
+                if local is None:
+                    not_found += 1
+                    continue
+                key = (local.id, product_id, sku_id)
+                if key in existing_keys:
+                    already += 1
+                    continue
+                session.add(
+                    ProductLink(
+                        user_id=user_id,
+                        product_id=local.id,
+                        integration_id=integ.id,
+                        store_id=integ.store_id,
+                        platform=IntegrationPlatform.TIKTOK,
+                        external_id=product_id,
+                        variation_id=sku_id,
+                        external_sku=seller_sku,
+                        listing_title=title,
+                        stock=sku.get("stock"),
+                        last_sync_status=LinkSyncStatus.OK,
+                        last_sync_at=_now(),
+                    )
+                )
+                existing_keys.add(key)
+                created += 1
+                job.processed = (job.processed or 0) + 1
+                if created % 25 == 0:
+                    await _heartbeat(session, job)
+        if not page_token:
+            break
+
+    await session.commit()
+    return created, already, not_found
+
+
 async def run_auto_link(
     session: AsyncSession,
     *,
@@ -154,6 +271,26 @@ async def run_auto_link(
                         "result": "ok",
                         "created": created,
                         "already_present": already,
+                    },
+                )
+            elif integ.platform == IntegrationPlatform.TIKTOK:
+                created, already, not_found = await _link_tiktok_integration(
+                    session, job, user_id, integ
+                )
+                summary["created"] += created
+                summary["already_present"] += already
+                summary.setdefault("not_found", 0)
+                summary["not_found"] += not_found
+                await _append_detail(
+                    session,
+                    job,
+                    {
+                        "integration_id": str(integ.id),
+                        "platform": integ.platform.value,
+                        "result": "ok",
+                        "created": created,
+                        "already_present": already,
+                        "not_found": not_found,
                     },
                 )
             else:

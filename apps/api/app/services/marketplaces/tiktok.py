@@ -396,6 +396,10 @@ class TikTokClient:
 
         link.external_id = TikTok product_id
         link.variation_id = TikTok sku_id
+
+        On a "current status is not available" error (product deactivated on
+        TikTok side), the product is reactivated and the stock push retried
+        once after a 2-second delay.
         """
         del bling_store_id
         qty_before = link.stock
@@ -411,7 +415,7 @@ class TikTokClient:
             )
 
         try:
-            await self._update_product_stock(product_id, sku_id, qty)
+            await self._update_product_stock_with_activation(product_id, sku_id, qty)
             return SyncResult(
                 status=SyncStatus.OK,
                 qty_before=qty_before,
@@ -427,6 +431,41 @@ class TikTokClient:
                 error_code="tiktok_exception",
                 error_detail=str(e)[:500],
             )
+
+    async def _update_product_stock_with_activation(
+        self, product_id: str, sku_id: str, quantity: int
+    ) -> bool:
+        """Wraps `_update_product_stock` with auto-activation retry, mirroring
+        `update_price_with_activation`. TikTok rejects stock writes on
+        deactivated SKUs with a "current status is not available" message;
+        reactivating the product and waiting 2s usually unblocks the write.
+        """
+        try:
+            return await self._update_product_stock(product_id, sku_id, quantity)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            deactivated_keywords = (
+                "current status is not available",
+                "seller_deactivated",
+                "platform_deactivated",
+                "change the product to one of these statuses",
+            )
+            if not any(kw in msg for kw in deactivated_keywords):
+                raise
+            logger.info(
+                "tiktok_stock_retry_after_activate",
+                product_id=product_id,
+                sku_id=sku_id,
+            )
+            activated = await self.activate_product(product_id)
+            if not activated:
+                raise RuntimeError(
+                    f"Produto {product_id} desativado no TikTok e não foi possível reativá-lo."
+                ) from e
+            import asyncio
+
+            await asyncio.sleep(2)
+            return await self._update_product_stock(product_id, sku_id, quantity)
 
     # ---------------------------------------------------------------- stock operations
 
