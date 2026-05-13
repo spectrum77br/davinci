@@ -278,7 +278,7 @@ const productsByDept = computed(() => {
     if (m[k]) m[k].push(p)
   }
   for (const k of Object.keys(m) as DeptKey[]) {
-    m[k].sort((a, b) => a.sku.localeCompare(b.sku, 'pt-BR', { sensitivity: 'base', numeric: true }))
+    m[k].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }))
   }
   return m
 })
