@@ -1557,11 +1557,14 @@ async def list_store_info(
             .order_by(StoreInfo.sort_order, StoreInfo.platform)
         )
     ).scalars().all()
-    # Bulk-fetch the department set per store_info via pricing_accounts in one
-    # query (avoids N+1).
+    # Bulk-fetch the department set per store_info via pricing_accounts. After
+    # the segments refactor `department` lives only as a virtual field, so we
+    # resolve each account's `segment_id` to its root slug through the segment
+    # index (one extra query, no N+1).
+    roots_by_id, _, _ = await _segment_index(session)
     acc_rows = (
         await session.execute(
-            select(PricingAccount.store_info_id, PricingAccount.department).where(
+            select(PricingAccount.store_info_id, PricingAccount.segment_id).where(
                 and_(
                     user_scope(PricingAccount, user),
                     PricingAccount.store_info_id.is_not(None),
@@ -1570,8 +1573,10 @@ async def list_store_info(
         )
     ).all()
     by_store: dict[UUID, set[str]] = {}
-    for sid, dept in acc_rows:
-        by_store.setdefault(sid, set()).add(dept.value if hasattr(dept, "value") else str(dept))
+    for sid, seg_id in acc_rows:
+        slug = roots_by_id.get(seg_id)
+        if slug:
+            by_store.setdefault(sid, set()).add(slug)
     return [
         _store_info_out(r, list(by_store.get(r.id, set())))
         for r in rows
