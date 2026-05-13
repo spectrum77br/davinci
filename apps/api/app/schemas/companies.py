@@ -60,6 +60,7 @@ class CompanyPatch(BaseModel):
     inscricao_estadual: str | None = None
     site_url: str | None = None
     obs: str | None = None
+    enabled_marketplaces: list[str] | None = None
 
     @field_validator("cnpj", mode="before")
     @classmethod
@@ -80,6 +81,7 @@ class CompanyPatch(BaseModel):
 class CompanyOut(CompanyBase):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    enabled_marketplaces: list[str] = []
     created_at: datetime
     updated_at: datetime
 

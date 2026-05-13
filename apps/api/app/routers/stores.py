@@ -60,9 +60,20 @@ async def create_store(
     ).scalar_one_or_none()
     if company is None:
         raise HTTPException(404, detail={"code": "company_not_found"})
+    mk = _to_marketplace(body.marketplace)
+    # Gate: the marketplace has to be in `companies.enabled_marketplaces`. The
+    # default value seeded by 0033 contains every canonical marketplace, so
+    # legacy companies are unaffected; toggling one off makes the "+" cell
+    # render as a red X on the frontend and rejects writes here.
+    enabled = company.enabled_marketplaces or []
+    if mk.value not in enabled:
+        raise HTTPException(
+            403,
+            detail={"code": "marketplace_not_enabled", "marketplace": mk.value},
+        )
     s = Store(
         company_id=body.company_id,
-        marketplace=_to_marketplace(body.marketplace),
+        marketplace=mk,
         apelido_override=body.apelido_override,
         status=_to_status(body.status) if body.status else StoreStatus.PENDING,
         notes=body.notes,

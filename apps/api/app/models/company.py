@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, String, Text, UniqueConstraint, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -41,6 +41,17 @@ class Company(Base, TimestampMixin):
     inscricao_estadual: Mapped[str | None] = mapped_column(Text, nullable=True)
     site_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled_marketplaces: Mapped[list[str]] = mapped_column(
+        ARRAY(Text),
+        nullable=False,
+        server_default=text(
+            "ARRAY['ml','shopee','amazon','aliexpress','temu','tiktok','shein','magalu','site']::text[]"
+        ),
+        default=lambda: [
+            "ml", "shopee", "amazon", "aliexpress",
+            "temu", "tiktok", "shein", "magalu", "site",
+        ],
+    )
 
 
 class Store(Base, TimestampMixin):

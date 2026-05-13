@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, reactive } from 'vue'
 import { Plus, RefreshCw, X } from 'lucide-vue-next'
 import {
   MARKETPLACES,
@@ -30,6 +30,7 @@ type CompanyOut = {
   inscricao_estadual: string | null
   site_url: string | null
   obs: string | null
+  enabled_marketplaces: string[]
   created_at: string
   updated_at: string
 }
@@ -37,12 +38,21 @@ type CompanyOut = {
 type GridRow = { company: CompanyOut; stores: Record<string, GridStoreCell | null> }
 type GridOut = { marketplaces: string[]; rows: GridRow[] }
 
+type StoreInfoLite = {
+  id: string
+  account_name: string | null
+  cpf_name: string | null
+  platform: string
+}
+
 const { api } = useApi()
 const grid = ref<GridOut | null>(null)
+const storeInfos = ref<StoreInfoLite[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const filterMk = ref<string>('')
 const filterUf = ref<string>('')
+const filterResponsavel = ref<string>('')
 const search = ref<string>('')
 const showNew = ref(false)
 
@@ -52,7 +62,12 @@ async function refresh() {
   loading.value = true
   error.value = null
   try {
-    grid.value = await api<GridOut>('/api/companies/grid')
+    const [gridRes, storeRes] = await Promise.all([
+      api<GridOut>('/api/companies/grid'),
+      api<StoreInfoLite[]>('/api/pricing/store-info').catch(() => [] as StoreInfoLite[]),
+    ])
+    grid.value = gridRes
+    storeInfos.value = storeRes
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -61,11 +76,42 @@ async function refresh() {
 }
 await refresh()
 
+// Distinct cpf_name list (responsáveis), alphabetical, lowered for keys.
+const responsaveisOpts = computed(() => {
+  const set = new Set<string>()
+  for (const s of storeInfos.value) {
+    const n = (s.cpf_name || '').trim()
+    if (n) set.add(n)
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'))
+})
+
+// Companies linked to a given responsável: a company "has" the responsavel
+// when at least one of its store_info rows (matched by store_info.platform
+// + store.apelido_override or stores+apelido) shares the cpf_name. Pragmatic
+// match: company.apelido (lower) equals any store_info.account_name (lower)
+// linked to that responsavel. Falls back to true when no filter selected.
+const responsavelByCompany = computed(() => {
+  const filtered = filterResponsavel.value
+    ? storeInfos.value.filter((s) => (s.cpf_name || '').trim() === filterResponsavel.value)
+    : storeInfos.value
+  const namesByLower = new Set<string>()
+  for (const s of filtered) {
+    const n = (s.account_name || '').trim().toLowerCase()
+    if (n) namesByLower.add(n)
+  }
+  return namesByLower
+})
+
 const filteredRows = computed(() => {
   if (!grid.value) return []
   let rows = grid.value.rows
   if (filterUf.value) rows = rows.filter(r => (r.company.uf || '').toUpperCase() === filterUf.value.toUpperCase())
   if (filterMk.value) rows = rows.filter(r => r.stores[filterMk.value] != null)
+  if (filterResponsavel.value) {
+    const allowed = responsavelByCompany.value
+    rows = rows.filter(r => allowed.has((r.company.apelido || '').trim().toLowerCase()))
+  }
   if (search.value) {
     const q = search.value.toLowerCase()
     rows = rows.filter(r =>
@@ -136,17 +182,94 @@ async function commitEditObs(row: GridRow) {
   }
 }
 
-async function createStoreCell(companyId: string, mk: Marketplace) {
+// ---------- new account modal (Store + store_info) ----------
+const newAccountFor = ref<{ company: CompanyOut; mk: Marketplace } | null>(null)
+const newAccountForm = reactive({ phone: '', email: '', server: '' })
+const newAccountSaving = ref(false)
+const newAccountErr = ref<string | null>(null)
+
+function openNewAccount(row: GridRow, mk: Marketplace) {
   if (!canEdit.value) return
-  if (!confirm(`Criar loja em ${MARKETPLACE_SHORT[mk]} para esta empresa?`)) return
+  newAccountFor.value = { company: row.company, mk }
+  newAccountForm.phone = ''
+  newAccountForm.email = ''
+  newAccountForm.server = ''
+  newAccountErr.value = null
+}
+
+function closeNewAccount() {
+  if (newAccountSaving.value) return
+  newAccountFor.value = null
+}
+
+async function submitNewAccount() {
+  if (!newAccountFor.value) return
+  const { company, mk } = newAccountFor.value
+  const phone = newAccountForm.phone.trim()
+  const email = newAccountForm.email.trim()
+  const server = newAccountForm.server.trim()
+  if (!phone || !email || !server) {
+    newAccountErr.value = 'Fone, e-mail e servidor são obrigatórios.'
+    return
+  }
+  newAccountSaving.value = true
+  newAccountErr.value = null
   try {
+    // 1. Create the Store cell (gated by enabled_marketplaces server-side).
     await api('/api/stores', {
       method: 'POST',
-      body: { company_id: companyId, marketplace: mk, status: 'active' },
+      body: { company_id: company.id, marketplace: mk, status: 'active' },
     })
+    // 2. Mirror to store_info so the data shows up on the Lojas page.
+    //    Failure here is non-fatal — the Store still exists; user can fill
+    //    the fields manually later.
+    try {
+      await api('/api/pricing/store-info', {
+        method: 'POST',
+        body: {
+          platform: mk,
+          account_name: company.apelido,
+          phone,
+          email,
+          server,
+        },
+      })
+    } catch (e: any) {
+      // Surface as a warning but don't roll back.
+      error.value = `Loja criada, mas store_info falhou: ${e?.data?.detail?.code || e?.message || 'erro'}`
+    }
     await refresh()
+    closeNewAccount()
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || 'erro'
+    newAccountErr.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    newAccountSaving.value = false
+  }
+}
+
+async function createStoreCell(companyId: string, mk: Marketplace) {
+  // Kept for backward compat — the "+" button now opens the modal instead.
+  const row = grid.value?.rows.find((r) => r.company.id === companyId)
+  if (!row) return
+  openNewAccount(row, mk)
+}
+
+async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
+  if (!canEdit.value) return
+  const enabled = new Set(row.company.enabled_marketplaces || [])
+  const willEnable = !enabled.has(mk)
+  const verb = willEnable ? 'Liberar' : 'Bloquear'
+  if (!confirm(`${verb} ${MARKETPLACE_SHORT[mk]} para ${row.company.apelido}?`)) return
+  if (willEnable) enabled.add(mk)
+  else enabled.delete(mk)
+  try {
+    const updated = await api<CompanyOut>(`/api/companies/${row.company.id}`, {
+      method: 'PATCH',
+      body: { enabled_marketplaces: Array.from(enabled) },
+    })
+    row.company.enabled_marketplaces = updated.enabled_marketplaces
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
   }
 }
 </script>
@@ -164,6 +287,10 @@ async function createStoreCell(companyId: string, mk: Marketplace) {
         <select v-model="filterMk" class="border rounded px-2 text-sm bg-background">
           <option value="">todos marketplaces</option>
           <option v-for="mk in MARKETPLACES" :key="mk" :value="mk">{{ MARKETPLACE_SHORT[mk] }}</option>
+        </select>
+        <select v-model="filterResponsavel" class="border rounded px-2 text-sm bg-background">
+          <option value="">todos responsáveis</option>
+          <option v-for="r in responsaveisOpts" :key="r" :value="r">{{ r }}</option>
         </select>
         <Button v-if="canEdit" size="sm" @click="showNew = true">
           <Plus class="size-4 mr-1" /> Nova empresa
@@ -206,9 +333,19 @@ async function createStoreCell(companyId: string, mk: Marketplace) {
                   {{ STORE_STATUS_LABELS[row.stores[mk]!.status] }}
                 </span>
               </template>
+              <template v-else-if="!(row.company.enabled_marketplaces || []).includes(mk)">
+                <button
+                  v-if="canEdit"
+                  class="text-red-500 font-semibold"
+                  :title="`${MARKETPLACE_SHORT[mk]} bloqueado para esta empresa — clique para liberar`"
+                  @click="toggleMarketplaceEnabled(row, mk)"
+                >×</button>
+                <span v-else class="text-red-500" :title="`${MARKETPLACE_SHORT[mk]} bloqueado`">×</span>
+              </template>
               <button
                 v-else-if="canEdit"
                 class="text-muted-foreground hover:text-foreground"
+                :title="`Criar loja em ${MARKETPLACE_SHORT[mk]}`"
                 @click="createStoreCell(row.company.id, mk)"
               >+</button>
             </td>
@@ -245,6 +382,54 @@ async function createStoreCell(companyId: string, mk: Marketplace) {
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- Nova conta (Store + store_info) -->
+    <div
+      v-if="newAccountFor"
+      class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+      @click.self="closeNewAccount"
+    >
+      <div class="bg-background border rounded-lg w-full max-w-md p-5 space-y-4">
+        <div class="flex items-center">
+          <div>
+            <h2 class="text-lg font-semibold">Nova conta</h2>
+            <p class="text-xs text-muted-foreground">
+              {{ newAccountFor.company.apelido }} · {{ MARKETPLACE_SHORT[newAccountFor.mk] }}
+            </p>
+          </div>
+          <Button class="ml-auto" size="sm" variant="ghost" :disabled="newAccountSaving" @click="closeNewAccount">
+            <X class="size-4" />
+          </Button>
+        </div>
+        <div class="space-y-3">
+          <div>
+            <Label>Fone <span class="text-red-500">*</span></Label>
+            <Input v-model="newAccountForm.phone" :disabled="newAccountSaving" placeholder="11999999999" />
+          </div>
+          <div>
+            <Label>E-mail <span class="text-red-500">*</span></Label>
+            <Input v-model="newAccountForm.email" :disabled="newAccountSaving" placeholder="conta@dominio" />
+          </div>
+          <div>
+            <Label>Servidor <span class="text-red-500">*</span></Label>
+            <Input v-model="newAccountForm.server" :disabled="newAccountSaving" placeholder="ex: 76" />
+          </div>
+          <p class="text-xs text-muted-foreground">
+            Cria a loja e o registro correspondente em Lojas (info) — você pode editar os outros campos depois.
+          </p>
+        </div>
+        <div v-if="newAccountErr" class="text-sm text-red-500">erro: {{ newAccountErr }}</div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" :disabled="newAccountSaving" @click="closeNewAccount">cancelar</Button>
+          <Button
+            :disabled="newAccountSaving || !newAccountForm.phone.trim() || !newAccountForm.email.trim() || !newAccountForm.server.trim()"
+            @click="submitNewAccount"
+          >
+            {{ newAccountSaving ? 'criando…' : 'Criar conta' }}
+          </Button>
+        </div>
+      </div>
     </div>
 
     <div v-if="showNew" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="showNew = false">
