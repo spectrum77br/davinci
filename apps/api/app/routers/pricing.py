@@ -1199,7 +1199,7 @@ async def get_sales_map(
     """Returns {pricing_product_id: units_sold_in_last_N_days} from bling_orders.
 
     bling_orders is single-tenant (no user_scope). Cancelled / returned orders
-    excluded by `situacao` AND `devolvido` flag.
+    are excluded by `situacao`.
     Sales sum every matched product key — see celular base-SKU rule.
     """
     from datetime import UTC, datetime, timedelta
@@ -1232,7 +1232,6 @@ async def get_sales_map(
                     BlingOrder.item_codigo != "",
                     BlingOrder.data >= cutoff,
                     BlingOrder.situacao.notin_(excluded_situations),
-                    BlingOrder.devolvido.isnot(True),
                 )
             )
         )

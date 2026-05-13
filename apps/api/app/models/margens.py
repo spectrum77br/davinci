@@ -30,5 +30,6 @@ class Margens(Base):
     produtos: Mapped[str | None] = mapped_column(Text, nullable=True)
     custo: Mapped[float | None] = mapped_column(Float, nullable=True)
     margem: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margem_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str | None] = mapped_column(Text, nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -18,6 +18,7 @@ from app.routers import discrepancies as discrepancies_router
 from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
+from app.routers import margens as margens_router
 from app.routers import metrics as metrics_router
 from app.routers import oauth as oauth_router
 from app.routers import pricing as pricing_router
@@ -125,6 +126,7 @@ app.include_router(audit_router.router)
 app.include_router(discrepancies_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(metrics_router.router)
+app.include_router(margens_router.router)
 
 
 @app.get("/api/health")

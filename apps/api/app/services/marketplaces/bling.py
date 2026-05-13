@@ -287,6 +287,20 @@ class BlingClient:
         r.raise_for_status()
         return r.json().get("data") or {}
 
+    async def update_order_situacao(
+        self, bling_order_id: int, situacao_id: int
+    ) -> None:
+        """Move a Bling pedido to a target situacao.
+
+        Endpoint: PATCH /pedidos/vendas/{idPedido}/situacoes/{idSituacao}
+        Bling returns 204 on success.
+        """
+        r = await self._request(
+            "PATCH",
+            f"/pedidos/vendas/{bling_order_id}/situacoes/{situacao_id}",
+        )
+        r.raise_for_status()
+
     async def update_stock_by_id(
         self,
         bling_product_id: int,

@@ -1,7 +1,18 @@
 from datetime import date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, ForeignKey, Integer, Numeric, Text, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    Numeric,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -26,6 +37,12 @@ class BlingOrder(Base, TimestampMixin):
     totalprodutos: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     total: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     situacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    aprovado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     loja: Mapped[str | None] = mapped_column(Text, nullable=True)
     store_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -38,9 +55,7 @@ class BlingOrder(Base, TimestampMixin):
     taxacomissao: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     preco_custo: Mapped[float | None] = mapped_column(Float, nullable=True)
     item_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    item_index: Mapped[int | None] = mapped_column(
-        Integer, nullable=True, server_default=text("0")
-    )
+    item_index: Mapped[int | None] = mapped_column(Integer, nullable=True, server_default=text("0"))
     itemvalor: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     item_codigo: Mapped[str | None] = mapped_column(Text, nullable=True)
     item_produto_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -52,12 +67,6 @@ class BlingOrder(Base, TimestampMixin):
     categoria_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     categoria_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
     em_andamento_data: Mapped[date | None] = mapped_column(Date, nullable=True)
-    check_: Mapped[bool | None] = mapped_column(
-        "check", Boolean, nullable=True, server_default=text("false")
-    )
-    devolvido: Mapped[bool | None] = mapped_column(
-        Boolean, nullable=True, server_default=text("false")
-    )
     verificado: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, server_default=text("false")
     )
