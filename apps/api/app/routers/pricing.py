@@ -11,7 +11,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1768,6 +1768,68 @@ async def set_store_info_department(
     await session.commit()
     await session.refresh(row)
     return _account_out(row, roots_by_id)
+
+
+@router.delete(
+    "/store-info/{store_info_id}/department/{slug}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def unbind_store_info_department(
+    store_info_id: UUID,
+    slug: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> None:
+    """Removes the pricing_accounts that wire `store_info_id` to a root segment
+    matching `slug`. Mirrors the badge match in `list_store_info`: deletes
+    rows with FK `store_info_id` set, **plus** rows whose `(platform, name)`
+    matches the store_info entry — the SSH-style implicit name binding.
+    """
+    sid = await _resolve_root_segment_id(session, slug)
+    if sid is None:
+        raise HTTPException(400, detail={"code": "invalid_department"})
+    info = (
+        await session.execute(
+            select(StoreInfo).where(
+                and_(StoreInfo.id == store_info_id, user_scope(StoreInfo, user))
+            )
+        )
+    ).scalar_one_or_none()
+    if info is None:
+        raise HTTPException(404, detail={"code": "store_info_not_found"})
+
+    sname = (info.account_name or "").strip().lower()
+    splat_alias = _STORE_TO_PRICING_PLATFORM.get(
+        (info.platform or "").strip().lower(), (info.platform or "").strip().lower()
+    )
+    pricing_plat: PricingPlatform | None = None
+    try:
+        pricing_plat = PricingPlatform(splat_alias)
+    except ValueError:
+        pricing_plat = None
+
+    # Build the delete predicate: FK match OR (same platform + same name).
+    cond = PricingAccount.store_info_id == store_info_id
+    if sname and pricing_plat is not None:
+        cond = or_(
+            cond,
+            and_(
+                PricingAccount.platform == pricing_plat,
+                func.lower(PricingAccount.name) == sname,
+            ),
+        )
+    await session.execute(
+        delete(PricingAccount).where(
+            and_(
+                user_scope(PricingAccount, user),
+                PricingAccount.segment_id == sid,
+                cond,
+            )
+        )
+    )
+    await session.commit()
 
 
 @router.delete("/store-info/{store_info_id}", status_code=status.HTTP_204_NO_CONTENT)
