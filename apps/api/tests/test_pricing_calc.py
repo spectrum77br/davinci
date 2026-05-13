@@ -62,10 +62,11 @@ def _override(**kwargs) -> PricingOverride:
 
 
 def test_basic_formula():
-    # (cost + shipping) / (1 - commission - margin) = (100 + 5) / 0.7 = 150.00
+    # SSH: (cost * (1 + margin) + shipping) / (1 - commission)
+    # (100 * 1.20 + 5) / 0.90 = 125 / 0.90 = 138.888... → 138.89
     out = calculate(_account(), _product())
     assert out.source == "computed"
-    assert out.price == Decimal("150.00")
+    assert out.price == Decimal("138.89")
 
 
 def test_kit_resolves_correct_pair():
@@ -75,13 +76,13 @@ def test_kit_resolves_correct_pair():
         shipping2=Decimal("10.00"),
     )
     p = _product(cost_kit2=Decimal("80.00"))
-    # (80 + 10) / (1 - 0.10 - 0.30) = 90 / 0.6 = 150.00
+    # (80 * 1.30 + 10) / 0.90 = 114 / 0.90 = 126.666... → 126.67
     out = calculate(a, p)
-    assert out.price == Decimal("150.00")
+    assert out.price == Decimal("126.67")
 
 
 def test_kit_falls_back_to_kit1_when_kit_n_null():
-    # Default kit2 cost null → fall back to kit1=100
+    # Default kit2 cost null → fall back to kit1=100, same as basic
     a = _account(
         kit_number=2,
         margin2=Decimal("0.20"),
@@ -89,7 +90,7 @@ def test_kit_falls_back_to_kit1_when_kit_n_null():
     )
     p = _product(cost_kit2=None, cost_kit1=Decimal("100.00"))
     out = calculate(a, p)
-    assert out.price == Decimal("150.00")
+    assert out.price == Decimal("138.89")
 
 
 def test_kit_falls_back_when_kit_n_zero():
@@ -100,7 +101,7 @@ def test_kit_falls_back_when_kit_n_zero():
     )
     p = _product(cost_kit2=Decimal("0"), cost_kit1=Decimal("100.00"))
     out = calculate(a, p)
-    assert out.price == Decimal("150.00")
+    assert out.price == Decimal("138.89")
 
 
 def test_missing_commission_returns_missing_inputs():
@@ -118,13 +119,14 @@ def test_missing_margin_returns_missing_inputs():
 
 def test_missing_shipping_treats_as_zero():
     a = _account(shipping1=None)
-    # (100 + 0) / 0.7 = 142.857... → 142.86
+    # (100 * 1.20 + 0) / 0.90 = 120 / 0.90 = 133.333... → 133.33
     out = calculate(a, _product())
-    assert out.price == Decimal("142.86")
+    assert out.price == Decimal("133.33")
 
 
 def test_non_positive_denominator_fails():
-    a = _account(commission=Decimal("0.50"), margin1=Decimal("0.50"))
+    # New formula: only commission affects denominator (1 - commission).
+    a = _account(commission=Decimal("1.00"), margin1=Decimal("0.10"))
     out = calculate(a, _product())
     assert out.source == "missing_inputs"
     assert out.detail and "denominator" in out.detail
@@ -163,8 +165,8 @@ def test_override_disabled_returns_disabled():
 
 
 def test_rounding_half_up():
-    # cost=10, ship=0, comm=0, margin=0.04 → 10 / 0.96 = 10.4166... → 10.42
-    a = _account(commission=Decimal("0"), margin1=Decimal("0.04"), shipping1=Decimal("0"))
+    # New formula: (10 * 1.04 + 0) / 0.95 = 10.40 / 0.95 = 10.9473... → 10.95
+    a = _account(commission=Decimal("0.05"), margin1=Decimal("0.04"), shipping1=Decimal("0"))
     p = _product(cost_kit1=Decimal("10.00"))
     out = calculate(a, p)
-    assert out.price == Decimal("10.42")
+    assert out.price == Decimal("10.95")

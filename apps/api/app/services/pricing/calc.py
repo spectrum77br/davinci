@@ -12,8 +12,11 @@ Resolution order (highest precedence first):
 2. `override.price_override` set                     → use it as-is.
 3. Compute from cost + commission + margin + shipping.
 
-Compute formula:
-    price = (cost + shipping) / (1 - commission - margin)
+Compute formula (alinhada ao SSH):
+    price = (cost * (1 + margin) + shipping) / (1 - commission)
+
+Equivalent to the SSH wording:
+    price = (Custo × Margem + Frete + Custo) / (1 - Comissão)
 
 `cost` resolves to `product.cost_kit_{kit_number}` with fallback to
 `cost_kit1` when the kit-N cost is NULL or 0 (defaults aprovados).
@@ -132,16 +135,17 @@ def calculate(
     if shipping is None:
         shipping = Decimal("0")
 
-    denom = Decimal("1") - commission - margin
+    denom = Decimal("1") - commission
     if denom <= 0:
         return CalcOutcome(
             price=None,
             source="missing_inputs",
-            detail=f"non-positive denominator (commission+margin>=1): {denom}",
+            detail=f"non-positive denominator (commission>=1): {denom}",
             inputs=inputs,
         )
 
-    price = (cost + shipping) / denom
+    # SSH formula: (cost * (1 + margin) + shipping) / (1 - commission)
+    price = (cost * (Decimal("1") + margin) + shipping) / denom
     return CalcOutcome(
         price=price.quantize(_TWO, ROUND_HALF_UP),
         source="computed",

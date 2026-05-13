@@ -142,7 +142,7 @@ async def test_push_single_cell_success(
     auth_as(user_full)
     with respx.mock(base_url=ML_API_BASE) as router:
         put_route = router.put("/items/MLB1").mock(
-            return_value=Response(200, json={"id": "MLB1", "price": 150.0})
+            return_value=Response(200, json={"id": "MLB1", "price": 138.89})
         )
         r = await client.post(
             "/api/pricing/push",
@@ -163,12 +163,12 @@ async def test_push_single_cell_success(
         assert item["ok"] is True
         assert item["code"] == "ok"
         assert item["item_id"] == "MLB1"
-        assert Decimal(item["price"]) == Decimal("150.00")
+        assert Decimal(item["price"]) == Decimal("138.89")
         assert item["cached"] is False
         assert put_route.called
         # Verify body sent
         sent = put_route.calls[-1].request
-        assert b'"price":150' in sent.content
+        assert b'"price":138.89' in sent.content
 
 
 @pytest.mark.asyncio
@@ -351,4 +351,4 @@ async def test_grid_returns_computed_cells(
     assert len(body["cells"]) == 1
     cell = body["cells"][0]
     assert cell["source"] == "computed"
-    assert Decimal(cell["price"]) == Decimal("150.00")
+    assert Decimal(cell["price"]) == Decimal("138.89")
