@@ -1429,6 +1429,21 @@ PRICING_TO_INTEG_PLATFORM = {
     "temu": IntegrationPlatform.TEMU,
 }
 
+# `store_info.platform` uses short codes (ml, …); `pricing_accounts.platform`
+# uses the long form (mercadolivre, …). Used by `list_store_info` to wire
+# Tipo / Tab. Preço badges across the two tables.
+_STORE_TO_PRICING_PLATFORM = {
+    "ml": "mercadolivre",
+    "mercadolivre": "mercadolivre",
+    "shopee": "shopee",
+    "amazon": "amazon",
+    "tiktok": "tiktok",
+    "temu": "temu",
+    "aliexpress": "aliexpress",
+    "magalu": "magalu",
+    "shein": "shein",
+}
+
 
 @router.post("/accounts/auto-match", response_model=AutoMatchResult)
 async def auto_match_accounts(
@@ -1534,11 +1549,15 @@ async def set_account_department(
 def _store_info_out(
     row: StoreInfo,
     departments: list[str] | None = None,
+    has_pricing: bool | None = None,
 ) -> StoreInfoOut:
     out = StoreInfoOut.model_validate(row)
     out.has_password = bool(row.password_enc)
     out.departments = sorted(departments or [])
-    out.has_pricing = bool(out.departments)
+    # `has_pricing` is the strict-equality flag (an exact name+platform match
+    # in pricing_accounts). Falls back to "any department was matched" so
+    # callers that don't compute the strict variant still get a sensible value.
+    out.has_pricing = bool(has_pricing) if has_pricing is not None else bool(out.departments)
     out.has_integration = row.integration_id is not None
     return out
 
@@ -1557,30 +1576,51 @@ async def list_store_info(
             .order_by(StoreInfo.sort_order, StoreInfo.platform)
         )
     ).scalars().all()
-    # Match badges by `account_name` (case-insensitive), mirroring SSH:
-    # `pricing_accounts.store_info_id` is empty in prod (the FK column was
-    # never populated), so a JOIN on it returns nothing and every store would
-    # show "✕ Não". Use the textual name as the link instead.
+    # Wire badges to pricing_accounts by *(platform, account_name)* — that is
+    # how SSH does it. `pricing_accounts.store_info_id` is empty in prod
+    # (116/116 NULL), so a FK join returns nothing.
+    #
+    # Per-platform matching rules (mirrors SSH):
+    #   * Tipo            (`departments`)  — same platform AND
+    #                                         (exact OR prefix `<sname> `)
+    #   * Tab. Preço      (`has_pricing`)  — same platform AND exact match
+    #
+    # store_info platforms use short codes (`ml`, …); pricing_accounts uses
+    # the longer `mercadolivre`. Normalize both sides via PRICING_PLATFORM_ALIAS.
     roots_by_id, _, _ = await _segment_index(session)
     acc_rows = (
         await session.execute(
-            select(PricingAccount.name, PricingAccount.segment_id).where(
-                user_scope(PricingAccount, user)
-            )
+            select(PricingAccount.name, PricingAccount.platform, PricingAccount.segment_id)
+            .where(user_scope(PricingAccount, user))
         )
     ).all()
-    depts_by_name: dict[str, set[str]] = {}
-    for acct_name, seg_id in acc_rows:
-        key = (acct_name or "").strip().lower()
-        if not key:
-            continue
+    accs_normalized: list[tuple[str, str, str]] = []
+    for name, plat, seg_id in acc_rows:
         slug = roots_by_id.get(seg_id)
-        if slug:
-            depts_by_name.setdefault(key, set()).add(slug)
-    return [
-        _store_info_out(r, list(depts_by_name.get((r.account_name or "").strip().lower(), set())))
-        for r in rows
-    ]
+        if not slug:
+            continue
+        plat_val = plat.value if hasattr(plat, "value") else str(plat)
+        accs_normalized.append(((name or "").strip().lower(), plat_val.lower(), slug))
+
+    out_list: list[StoreInfoOut] = []
+    for r in rows:
+        sname = (r.account_name or "").strip().lower()
+        splat_alias = _STORE_TO_PRICING_PLATFORM.get(
+            (r.platform or "").strip().lower(), (r.platform or "").strip().lower()
+        )
+        depts: set[str] = set()
+        exact_hit = False
+        if sname:
+            for pname, pplat, pdept in accs_normalized:
+                if pplat != splat_alias or not pname:
+                    continue
+                if pname == sname:
+                    depts.add(pdept)
+                    exact_hit = True
+                elif pname.startswith(sname + " "):
+                    depts.add(pdept)
+        out_list.append(_store_info_out(r, list(depts), has_pricing=exact_hit))
+    return out_list
 
 
 @router.post(
