@@ -218,7 +218,9 @@ const accountsGrouped = computed<{ platform: string; label: string; rows: Accoun
     .map(([platform, rows]) => ({
       platform,
       label: platformLabel(platform).toUpperCase(),
-      rows,
+      rows: rows.slice().sort((a, b) =>
+        (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }),
+      ),
     }))
 })
 
@@ -276,7 +278,7 @@ const productsByDept = computed(() => {
     if (m[k]) m[k].push(p)
   }
   for (const k of Object.keys(m) as DeptKey[]) {
-    m[k].sort((a, b) => a.sku.localeCompare(b.sku))
+    m[k].sort((a, b) => a.sku.localeCompare(b.sku, 'pt-BR', { sensitivity: 'base', numeric: true }))
   }
   return m
 })
@@ -971,8 +973,12 @@ const firstAccountIdInGroup = computed<Set<string>>(() => {
 const filteredGridProducts = computed(() => {
   const prods = grid.value?.products ?? []
   const q = gridSearch.value.trim().toLowerCase()
-  if (!q) return prods
-  return prods.filter(p => p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
+  const filtered = q
+    ? prods.filter((p) => p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
+    : prods.slice()
+  return filtered.sort((a, b) =>
+    (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }),
+  )
 })
 
 // Feature 9: negative margin helpers + counter
