@@ -184,11 +184,14 @@ async function commitEditResp(apelido: string) {
   if (editingResp.value !== k) return
   const next = respValue.value.trim()
   const entry = respByApelido.value.get(k)
-  if (!entry || entry.ids.length === 0) {
+  if (next === (entry?.cpf || '')) {
     cancelEditResp()
     return
   }
-  if (next === (entry.cpf || '')) {
+  if (!entry || entry.ids.length === 0) {
+    // No store_info row exists yet — Responsável lives on store_info.cpf_name,
+    // so we can't persist it until at least one loja exists for this company.
+    error.value = `Crie uma loja para "${apelido}" antes de atribuir um responsável.`
     cancelEditResp()
     return
   }
@@ -401,14 +404,11 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
               class="px-3 py-2 text-xs max-w-40"
               :class="{
                 'cursor-pointer hover:bg-accent/30':
-                  canEdit
-                  && respByApelido.get(row.company.apelido.trim().toLowerCase())
-                  && editingResp !== row.company.apelido.trim().toLowerCase(),
+                  canEdit && editingResp !== row.company.apelido.trim().toLowerCase(),
               }"
               :title="respByApelido.get(row.company.apelido.trim().toLowerCase())?.cpf || ''"
               @click="
                 canEdit
-                && respByApelido.get(row.company.apelido.trim().toLowerCase())
                 && editingResp !== row.company.apelido.trim().toLowerCase()
                 && startEditResp(row.company.apelido)
               "
