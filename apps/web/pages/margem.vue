@@ -201,7 +201,7 @@ async function saveObs(row: Margem) {
             <th>SKU</th>
             <th>Produto</th>
             <th class="text-right">Custo</th>
-            <th class="text-right">Lucro</th>
+            <th class="text-right">Saldo</th>
             <th class="text-right">Margem</th>
             <th class="text-right">Margem mín.</th>
             <th>Status</th>
