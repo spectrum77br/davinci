@@ -86,6 +86,22 @@ const responsaveisOpts = computed(() => {
   return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'))
 })
 
+// Aggregate store_info per company.apelido for the Responsável column.
+// Returns the first non-empty cpf_name + the list of store_info ids that
+// share this account_name (so editing can fan out a PATCH to each).
+const respByApelido = computed(() => {
+  const m = new Map<string, { cpf: string; ids: string[] }>()
+  for (const s of storeInfos.value) {
+    const k = (s.account_name || '').trim().toLowerCase()
+    if (!k) continue
+    const e = m.get(k) || { cpf: '', ids: [] }
+    e.ids.push(s.id)
+    if (!e.cpf && s.cpf_name) e.cpf = s.cpf_name
+    m.set(k, e)
+  }
+  return m
+})
+
 // Companies linked to a given responsável: a company "has" the responsavel
 // when at least one of its store_info rows (matched by store_info.platform
 // + store.apelido_override or stores+apelido) shares the cpf_name. Pragmatic
@@ -146,6 +162,59 @@ async function createCompany() {
     createErr.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     creating.value = false
+  }
+}
+
+// ---------- inline Responsável edit ----------
+const editingResp = ref<string | null>(null) // apelido_lower being edited
+const respValue = ref('')
+const respSaving = ref(false)
+function startEditResp(apelido: string) {
+  if (!canEdit.value) return
+  const k = apelido.trim().toLowerCase()
+  editingResp.value = k
+  respValue.value = respByApelido.value.get(k)?.cpf || ''
+}
+function cancelEditResp() {
+  editingResp.value = null
+  respValue.value = ''
+}
+async function commitEditResp(apelido: string) {
+  const k = apelido.trim().toLowerCase()
+  if (editingResp.value !== k) return
+  const next = respValue.value.trim()
+  const entry = respByApelido.value.get(k)
+  if (!entry || entry.ids.length === 0) {
+    cancelEditResp()
+    return
+  }
+  if (next === (entry.cpf || '')) {
+    cancelEditResp()
+    return
+  }
+  respSaving.value = true
+  try {
+    // Fan out the patch: every store_info row sharing this account_name
+    // gets the same cpf_name. Mirrors how the Responsável filter aggregates.
+    await Promise.all(
+      entry.ids.map((id) =>
+        api(`/api/pricing/store-info/${id}`, {
+          method: 'PATCH',
+          body: { cpf_name: next || null },
+        }),
+      ),
+    )
+    // Patch in-memory so the cell updates without a full refresh.
+    for (const s of storeInfos.value) {
+      if ((s.account_name || '').trim().toLowerCase() === k) {
+        s.cpf_name = next || null
+      }
+    }
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    respSaving.value = false
+    cancelEditResp()
   }
 }
 
@@ -309,6 +378,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <th class="px-3 py-2">CNPJ</th>
             <th class="px-3 py-2">I.E.</th>
             <th class="px-3 py-2">conta</th>
+            <th class="px-3 py-2">Responsável</th>
             <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
               {{ MARKETPLACE_SHORT[mk] }}
             </th>
@@ -327,6 +397,41 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <td class="px-3 py-2 font-mono text-xs">{{ row.company.cnpj || '—' }}</td>
             <td class="px-3 py-2">{{ row.company.inscricao_estadual || '—' }}</td>
             <td class="px-3 py-2">{{ row.company.apelido }}</td>
+            <td
+              class="px-3 py-2 text-xs max-w-40"
+              :class="{
+                'cursor-pointer hover:bg-accent/30':
+                  canEdit
+                  && respByApelido.get(row.company.apelido.trim().toLowerCase())
+                  && editingResp !== row.company.apelido.trim().toLowerCase(),
+              }"
+              :title="respByApelido.get(row.company.apelido.trim().toLowerCase())?.cpf || ''"
+              @click="
+                canEdit
+                && respByApelido.get(row.company.apelido.trim().toLowerCase())
+                && editingResp !== row.company.apelido.trim().toLowerCase()
+                && startEditResp(row.company.apelido)
+              "
+            >
+              <input
+                v-if="editingResp === row.company.apelido.trim().toLowerCase()"
+                v-model="respValue"
+                type="text"
+                class="w-full text-xs bg-transparent outline-none border-b border-blue-500"
+                :disabled="respSaving"
+                autofocus
+                @blur="commitEditResp(row.company.apelido)"
+                @keydown.enter.prevent="commitEditResp(row.company.apelido)"
+                @keydown.escape.prevent="cancelEditResp"
+              />
+              <span
+                v-else
+                :class="{ 'text-muted-foreground': !respByApelido.get(row.company.apelido.trim().toLowerCase())?.cpf }"
+                class="block truncate"
+              >
+                {{ respByApelido.get(row.company.apelido.trim().toLowerCase())?.cpf || '—' }}
+              </span>
+            </td>
             <td v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
               <template v-if="row.stores[mk]">
                 <span :class="STORE_STATUS_CLASSES[row.stores[mk]!.status]">
@@ -378,7 +483,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
-            <td :colspan="14" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
+            <td :colspan="17" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
           </tr>
         </tbody>
       </table>
