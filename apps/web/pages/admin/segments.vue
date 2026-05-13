@@ -14,6 +14,7 @@ type Segment = {
   slug: string
   sort_order: number
   active: boolean
+  min_margin: string | null
   created_at: string
   updated_at: string
 }
@@ -54,7 +55,7 @@ function toggle(id: string) {
 
 // =========================================================== inline edit
 
-const editing = ref<{ id: string; field: 'name' } | null>(null)
+const editing = ref<{ id: string; field: 'name' | 'min_margin' } | null>(null)
 const editValue = ref<string>('')
 const editOriginal = ref<string>('')
 const editInputRef = ref<HTMLInputElement | null>(null)
@@ -69,11 +70,17 @@ function flash(id: string, f: string) {
   setTimeout(() => flashed.value.delete(k), 1200)
 }
 
-async function startEdit(seg: Segment, field: 'name') {
+async function startEdit(seg: Segment, field: 'name' | 'min_margin') {
   if (!canEdit.value) return
   editing.value = { id: seg.id, field }
   const raw = (seg as any)[field]
-  const initial = raw == null ? '' : String(raw)
+  // min_margin is stored as a fraction (0.15 = 15%); show as percent for editing.
+  let initial: string
+  if (field === 'min_margin') {
+    initial = raw == null ? '' : (Number(raw) * 100).toString()
+  } else {
+    initial = raw == null ? '' : String(raw)
+  }
   editValue.value = initial
   editOriginal.value = initial
   await nextTick()
@@ -93,8 +100,19 @@ async function commitEdit() {
   if (editValue.value === editOriginal.value) return cancelEdit()
   const raw = editValue.value.trim()
   const payload: Record<string, unknown> = {}
-  if (!raw && field === 'name') return cancelEdit()
-  payload[field] = raw || null
+  if (field === 'min_margin') {
+    if (!raw) {
+      payload.min_margin = null
+    } else {
+      const n = Number(raw)
+      if (!Number.isFinite(n)) return cancelEdit()
+      // UI accepts percent (15 → 0.15), DB stores fraction.
+      payload.min_margin = (n / 100).toFixed(4)
+    }
+  } else {
+    if (!raw && field === 'name') return cancelEdit()
+    payload[field] = raw || null
+  }
 
   try {
     await api(`/api/segments/${id}`, { method: 'PATCH', body: payload })
@@ -198,18 +216,19 @@ async function remove(seg: Segment, depth: number) {
         <thead class="sticky top-0 bg-muted z-10">
           <tr>
             <th class="text-left px-3 py-2 font-medium border-b border-border min-w-[280px]">Nome</th>
+            <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Margem Mín</th>
             <th class="text-center px-3 py-2 font-medium border-b border-border w-20">Ativo</th>
             <th class="text-center px-3 py-2 font-medium border-b border-border w-32">Ações</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !tree.length">
-            <td colspan="3" class="text-center py-6 text-muted-foreground">
+            <td colspan="4" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!tree.length && addingUnder === undefined">
-            <td colspan="3" class="text-center py-8 text-muted-foreground">Nenhum segmento.</td>
+            <td colspan="4" class="text-center py-8 text-muted-foreground">Nenhum segmento.</td>
           </tr>
 
           <template v-for="node in tree" :key="node.id">
@@ -253,7 +272,8 @@ async function remove(seg: Segment, depth: number) {
                 @keydown.escape="closeAdd"
               />
             </td>
-            <td class="border border-border text-xs text-muted-foreground px-3">—</td>
+            <td class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
+            <td class="border border-border text-xs text-muted-foreground px-3 text-center">—</td>
             <td class="border border-border px-1 py-1 text-center">
               <div class="flex gap-0.5 justify-center">
                 <button class="p-1 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 rounded" :disabled="adding" @click="submitAdd">

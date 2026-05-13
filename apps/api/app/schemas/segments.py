@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -26,6 +27,7 @@ class SegmentCreate(BaseModel):
     parent_id: UUID | None = None
     sort_order: int = 0
     active: bool = True
+    min_margin: Decimal | None = None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -58,6 +60,7 @@ class SegmentPatch(BaseModel):
     parent_id: UUID | None = None
     sort_order: int | None = None
     active: bool | None = None
+    min_margin: Decimal | None = None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -94,6 +97,7 @@ class SegmentOut(BaseModel):
     slug: str
     sort_order: int
     active: bool
+    min_margin: Decimal | None = None
     created_at: datetime
     updated_at: datetime
 

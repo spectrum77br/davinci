@@ -9,11 +9,12 @@ type Segment = {
   slug: string
   sort_order: number
   active: boolean
+  min_margin: string | null
   created_at: string
   updated_at: string
 }
 type TreeNode = Segment & { children: TreeNode[] }
-type EditField = 'name'
+type EditField = 'name' | 'min_margin'
 type Editing = { id: string; field: EditField } | null
 
 const props = defineProps<{
@@ -94,6 +95,38 @@ const open = computed(() => isOpen(props.node.id))
       </div>
     </td>
 
+    <!-- min_margin (subtypes only) -->
+    <td
+      class="border border-border px-3 py-1.5 text-xs text-right cursor-pointer"
+      :class="{
+        'ring-2 ring-blue-500 ring-inset bg-background': isEditing(node.id, 'min_margin'),
+        'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(node.id, 'min_margin'),
+      }"
+      @click="depth > 0 && !isEditing(node.id, 'min_margin') && emit('start-edit', node, 'min_margin')"
+    >
+      <input
+        v-if="isEditing(node.id, 'min_margin')"
+        :ref="setEditInputRef"
+        :value="editValue"
+        type="number"
+        step="0.1"
+        placeholder="%"
+        class="w-full text-xs bg-transparent outline-none text-right"
+        @input="(e: any) => emit('update:edit-value', e.target.value)"
+        @blur="emit('commit-edit')"
+        @keydown.enter.prevent="emit('commit-edit')"
+        @keydown.escape.prevent="emit('cancel-edit')"
+      />
+      <span v-else-if="depth === 0" class="text-muted-foreground">—</span>
+      <span v-else-if="node.min_margin === null" class="text-muted-foreground italic">—</span>
+      <span
+        v-else
+        :class="Number(node.min_margin) < 0 ? 'text-red-600 font-semibold' : ''"
+      >
+        {{ (Number(node.min_margin) * 100).toFixed(2).replace(/\.?0+$/, '') }}%
+      </span>
+    </td>
+
     <!-- active -->
     <td class="border border-border px-3 py-1.5 text-center">
       <button
@@ -149,7 +182,8 @@ const open = computed(() => isOpen(props.node.id))
         @keydown.escape="emit('close-add')"
       />
     </td>
-    <td class="border border-border text-xs text-muted-foreground px-3">—</td>
+    <td class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
+    <td class="border border-border text-xs text-muted-foreground px-3 text-center">—</td>
     <td class="border border-border px-1 py-1 text-center">
       <div class="flex gap-0.5 justify-center">
         <button class="p-1 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 rounded" :disabled="adding" @click="emit('submit-add')">

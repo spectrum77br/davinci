@@ -1,6 +1,7 @@
+from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, UniqueConstraint, text
+from sqlalchemy import Boolean, ForeignKey, Integer, Numeric, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,3 +33,4 @@ class Segment(Base, TimestampMixin):
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
+    min_margin: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
