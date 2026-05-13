@@ -130,11 +130,16 @@ const filteredRows = computed(() => {
   }
   if (search.value) {
     const q = search.value.toLowerCase()
-    rows = rows.filter(r =>
-      r.company.razao_social.toLowerCase().includes(q) ||
-      r.company.apelido.toLowerCase().includes(q) ||
-      (r.company.cnpj || '').includes(q)
-    )
+    const respMap = respByApelido.value
+    rows = rows.filter(r => {
+      const resp = (respMap.get(r.company.apelido.trim().toLowerCase())?.cpf || '').toLowerCase()
+      return (
+        r.company.razao_social.toLowerCase().includes(q) ||
+        r.company.apelido.toLowerCase().includes(q) ||
+        (r.company.cnpj || '').includes(q) ||
+        resp.includes(q)
+      )
+    })
   }
   return rows
 })
@@ -354,7 +359,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         <RefreshCw class="size-4 mr-1" /> recarregar
       </Button>
       <div class="ml-auto flex gap-2 flex-wrap">
-        <Input v-model="search" placeholder="razão social / apelido / CNPJ" class="w-64" />
+        <Input v-model="search" placeholder="razão social / apelido / CNPJ / responsável" class="w-64" />
         <Input v-model="filterUf" placeholder="UF" class="w-20" />
         <select v-model="filterMk" class="border rounded px-2 text-sm bg-background">
           <option value="">todos marketplaces</option>
