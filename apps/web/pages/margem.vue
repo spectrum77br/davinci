@@ -14,10 +14,12 @@ type Margem = {
   data: string | null
   pedido_bling: number | null
   pedido_plataforma: string | null
+  plataforma: string | null
   conta: string | null
   sku: string | null
   produtos: string | null
   custo: number | null
+  lucro: number | null
   margem: number | null
   margem_min: number | null
   status: MargensStatus
@@ -79,6 +81,7 @@ const filtered = computed(() => {
       (r) =>
         String(r.pedido_bling ?? '').includes(q) ||
         (r.pedido_plataforma || '').toLowerCase().includes(q) ||
+        (r.plataforma || '').toLowerCase().includes(q) ||
         (r.conta || '').toLowerCase().includes(q) ||
         (r.sku || '').toLowerCase().includes(q) ||
         (r.produtos || '').toLowerCase().includes(q),
@@ -188,15 +191,17 @@ async function saveObs(row: Margem) {
     </div>
 
     <div class="table-card overflow-x-auto">
-      <table class="w-full text-sm min-w-[1080px]">
+      <table class="w-full text-sm min-w-[1240px]">
         <thead>
           <tr>
             <th>Data</th>
             <th>Pedido</th>
+            <th>Plataforma</th>
             <th>Conta</th>
             <th>SKU</th>
             <th>Produto</th>
             <th class="text-right">Custo</th>
+            <th class="text-right">Lucro</th>
             <th class="text-right">Margem</th>
             <th class="text-right">Margem mín.</th>
             <th>Status</th>
@@ -205,12 +210,12 @@ async function saveObs(row: Margem) {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="10" class="text-center py-8 text-muted-foreground">
+            <td colspan="12" class="text-center py-8 text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!filtered.length">
-            <td colspan="10" class="text-center py-8 text-muted-foreground">
+            <td colspan="12" class="text-center py-8 text-muted-foreground">
               sem registros
             </td>
           </tr>
@@ -220,10 +225,12 @@ async function saveObs(row: Margem) {
               <div class="font-medium">{{ r.pedido_bling ?? '—' }}</div>
               <div v-if="r.pedido_plataforma" class="text-xs text-muted-foreground">{{ r.pedido_plataforma }}</div>
             </td>
+            <td class="uppercase text-xs text-muted-foreground">{{ r.plataforma || '—' }}</td>
             <td>{{ r.conta || '—' }}</td>
             <td class="font-mono text-xs">{{ r.sku || '—' }}</td>
             <td class="max-w-[280px] truncate" :title="r.produtos || ''">{{ r.produtos || '—' }}</td>
             <td class="text-right tabular-nums text-muted-foreground">{{ brl(r.custo) }}</td>
+            <td class="text-right tabular-nums font-medium" :class="r.lucro != null && r.lucro >= 0 ? 'text-emerald-500' : 'text-red-500'">{{ brl(r.lucro) }}</td>
             <td class="text-right tabular-nums font-medium" :class="r.margem != null && r.margem_min != null ? (r.margem >= r.margem_min ? 'text-emerald-500' : 'text-red-500') : (r.margem != null && r.margem >= 0 ? 'text-emerald-500' : 'text-red-500')">
               {{ pct(r.margem) }}
             </td>

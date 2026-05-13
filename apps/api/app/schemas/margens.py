@@ -16,10 +16,12 @@ class MargensOut(BaseModel):
     data: datetime | None = None
     pedido_bling: int | None = None
     pedido_plataforma: str | None = None
+    plataforma: str | None = None
     conta: str | None = None
     sku: str | None = None
     produtos: str | None = None
     custo: float | None = None
+    lucro: float | None = None
     margem: float | None = None
     margem_min: float | None = None
     status: MargensStatus = "Pendente"
