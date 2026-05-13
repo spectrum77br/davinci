@@ -103,6 +103,39 @@ async function createCompany() {
   }
 }
 
+// ---------- inline obs edit ----------
+const editingObs = ref<string | null>(null)
+const obsValue = ref('')
+const obsSaving = ref(false)
+function startEditObs(row: GridRow) {
+  if (!canEdit.value) return
+  editingObs.value = row.company.id
+  obsValue.value = row.company.obs || ''
+}
+function cancelEditObs() {
+  editingObs.value = null
+  obsValue.value = ''
+}
+async function commitEditObs(row: GridRow) {
+  if (editingObs.value !== row.company.id) return
+  const next = obsValue.value.trim()
+  const prev = row.company.obs || ''
+  if (next === prev.trim()) return cancelEditObs()
+  obsSaving.value = true
+  try {
+    await api(`/api/companies/${row.company.id}`, {
+      method: 'PATCH',
+      body: { obs: next || null },
+    })
+    row.company.obs = next || null
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    obsSaving.value = false
+    cancelEditObs()
+  }
+}
+
 async function createStoreCell(companyId: string, mk: Marketplace) {
   if (!canEdit.value) return
   if (!confirm(`Criar loja em ${MARKETPLACE_SHORT[mk]} para esta empresa?`)) return
@@ -140,11 +173,11 @@ async function createStoreCell(companyId: string, mk: Marketplace) {
 
     <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
 
-    <div class="border rounded-md overflow-x-auto">
+    <div class="border rounded-md overflow-auto max-h-[calc(100vh-220px)]">
       <table class="w-full text-sm">
-        <thead class="bg-muted/40 text-left">
+        <thead class="bg-muted text-left sticky top-0 z-10 shadow-[inset_0_-1px_0_var(--border)]">
           <tr>
-            <th class="px-3 py-2 sticky left-0 bg-muted/40">EMPRESA</th>
+            <th class="px-3 py-2 sticky left-0 bg-muted z-20">EMPRESA</th>
             <th class="px-3 py-2">UF</th>
             <th class="px-3 py-2">CNPJ</th>
             <th class="px-3 py-2">I.E.</th>
@@ -185,8 +218,26 @@ async function createStoreCell(companyId: string, mk: Marketplace) {
               </a>
               <span v-else class="text-muted-foreground">—</span>
             </td>
-            <td class="px-3 py-2 text-xs text-muted-foreground truncate max-w-48">
-              {{ row.company.obs || '—' }}
+            <td
+              class="px-3 py-2 text-xs max-w-48"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && editingObs !== row.company.id }"
+              :title="row.company.obs || ''"
+              @click="canEdit && editingObs !== row.company.id && startEditObs(row)"
+            >
+              <input
+                v-if="editingObs === row.company.id"
+                v-model="obsValue"
+                type="text"
+                class="w-full text-xs bg-transparent outline-none border-b border-blue-500"
+                :disabled="obsSaving"
+                autofocus
+                @blur="commitEditObs(row)"
+                @keydown.enter.prevent="commitEditObs(row)"
+                @keydown.escape.prevent="cancelEditObs"
+              />
+              <span v-else :class="{ 'text-muted-foreground': !row.company.obs }" class="block truncate">
+                {{ row.company.obs || '—' }}
+              </span>
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
