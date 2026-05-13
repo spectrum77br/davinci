@@ -14,7 +14,7 @@ import {
 
 definePageMeta({
   middleware: ['permission'],
-  permission: { resource: 'sincronizacoes', action: 'view' },
+  permission: { resource: 'sync_logs', action: 'view' },
 })
 
 type SyncLog = {

@@ -6,14 +6,19 @@ export type Resource =
   | 'tabela_precos'
   | 'tabela_precos_contas'
   | 'tabela_precos_produtos'
+  | 'tabela_precos_concorrencia'
+  | 'margem'
   | 'conciliacao_frete'
-  | 'sincronizacoes'
   | 'devolucoes'
   | 'reembolso'
-  | 'margem'
+  | 'sincronizacoes'
+  | 'sync_logs'
+  | 'integracoes'
+  | 'alertas'
   | 'empresa'
   | 'cadastro'
   | 'lojas_info'
+  | 'usuarios'
   | 'permissoes'
   | 'configuracoes'
 
@@ -33,6 +38,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
       'tabela_precos',
       'tabela_precos_contas',
       'tabela_precos_produtos',
+      'tabela_precos_concorrencia',
       'margem',
     ],
   },
@@ -42,7 +48,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     label: 'Sistema',
-    resources: ['sincronizacoes'],
+    resources: ['sincronizacoes', 'sync_logs', 'integracoes', 'alertas'],
   },
   {
     label: 'Cadastros',
@@ -50,7 +56,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     label: 'Admin',
-    resources: ['permissoes', 'configuracoes'],
+    resources: ['usuarios', 'permissoes', 'configuracoes'],
   },
 ]
 
@@ -64,14 +70,19 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   tabela_precos: 'Tabela de Preços',
   tabela_precos_contas: 'Tabela Preços — Contas',
   tabela_precos_produtos: 'Tabela Preços — Produtos',
+  tabela_precos_concorrencia: 'Tabela Preços — Concorrência',
   margem: 'Margem',
   conciliacao_frete: 'Conciliação Frete',
   devolucoes: 'Devoluções',
   reembolso: 'Reembolso',
   sincronizacoes: 'Sincronizações',
+  sync_logs: 'Sync Logs',
+  integracoes: 'Integrações',
+  alertas: 'Alertas',
   empresa: 'Empresa',
   cadastro: 'Cadastro',
   lojas_info: 'Lojas (info)',
+  usuarios: 'Usuários',
   permissoes: 'Permissões',
   configuracoes: 'Configurações',
 }

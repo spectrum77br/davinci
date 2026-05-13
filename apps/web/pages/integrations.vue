@@ -2,7 +2,7 @@
 import { ref, computed } from 'vue'
 import { SquarePen, Plus, RefreshCw, Trash2, Zap, Search } from 'lucide-vue-next'
 
-definePageMeta({ middleware: ['permission'], permission: { resource: 'empresa', action: 'view' } })
+definePageMeta({ middleware: ['permission'], permission: { resource: 'integracoes', action: 'view' } })
 
 type Platform = 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu'
 

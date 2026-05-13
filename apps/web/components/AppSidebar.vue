@@ -51,8 +51,8 @@ const sections: Section[] = [
     label: 'Sistema',
     items: [
       { to: '/sincronizacoes', label: 'Sincronizações', icon: RefreshCw, resource: 'sincronizacoes' },
-      { to: '/integrations', label: 'Integrações', icon: Plug, resource: 'empresa' },
-      { to: '/alertas', label: 'Alertas', icon: Bell },
+      { to: '/integrations', label: 'Integrações', icon: Plug, resource: 'integracoes' },
+      { to: '/alertas', label: 'Alertas', icon: Bell, resource: 'alertas' },
     ],
   },
   {

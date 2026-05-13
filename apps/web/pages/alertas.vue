@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { Bell, AlertTriangle, AlertCircle, Info, CheckCircle2 } from 'lucide-vue-next'
 
+definePageMeta({ middleware: ['permission'], permission: { resource: 'alertas', action: 'view' } })
+
 type Severity = 'info' | 'warning' | 'error' | 'success'
 
 const { items, unread, total, loading, refresh, markRead, markAllRead } = useAlerts()
