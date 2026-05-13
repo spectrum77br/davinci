@@ -370,7 +370,9 @@ class TikTokClient:
             data = r.json() if r.status_code == 200 else {}
             if data.get("code") == 0:
                 shops = data.get("data", {}).get("shops", [])
-                names = ", ".join(s.get("shop_name", "?") for s in shops)
+                names = ", ".join(
+                    (s.get("name") or s.get("shop_name") or "?") for s in shops
+                )
                 return TestResult(
                     ok=True,
                     detail=f"Lojas: {names or 'N/A'}",
