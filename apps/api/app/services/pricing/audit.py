@@ -1,23 +1,34 @@
-"""SKU audit (Fase 9d).
+"""SKU audit (Fase 9d) + shared SKU matching helpers.
 
-Scans `products` (the Bling-imported catalog) and surfaces three kinds of
-pendency for SKUs with stock > 0:
-  1. "Fora da tabela de preços" — SKU absent from any pricing_products.sku
-     (pricing_products.sku may be comma-separated, so each piece is checked).
-  2. "Sem anúncio" — no rows in product_links for that product.
-  3. "Custo divergente" — product is in pricing_products but bling_cost_price
-     differs (rounded to 2 decimals).
+Two separate concerns live here so callers don't need to duplicate the
+celular base-SKU matching logic:
 
-Operators can dismiss SKUs (audit_dismissed_skus) so resolved cases stop
-showing up.
+  * `match_pricing_to_product_keys` — for stock/sales maps.
+    Given a list of `pricing_products` and the set of all product SKU keys
+    (lowercased), returns `{pricing_product_id: set(matched_product_keys)}`.
+
+  * `find_pricing_for_product_sku` — for the audit (the inverse).
+    Given a product SKU and indexes built from the pricing list, returns the
+    PricingProduct that covers it (or None).
+
+Matching rules (per `pricing_product.department`):
+  - `celular`: each comma piece is treated as a *base* — products whose
+    SKU equals the base or starts with `base + '.'` are matched.
+    Example: pricing piece `dg078` matches products `dg078`, `dg078.pi`,
+    `dg078.ra`, etc.
+  - `mala` / `eletro` / others: exact case-insensitive match.
+  - `catalogo`: exact match, but pieces containing `+` are skipped (catálogo
+    composite SKUs only exist on the products side).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import and_, distinct, select
+import structlog
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -28,11 +39,107 @@ from app.models import (
     ProductLink,
 )
 
+logger = structlog.get_logger()
+
+
+def _dept_value(pp: PricingProduct) -> str:
+    d = pp.department
+    return d.value if hasattr(d, "value") else str(d)
+
 
 def _q2(v: Decimal | None) -> Decimal | None:
     if v is None:
         return None
     return Decimal(v).quantize(Decimal("0.01"))
+
+
+# ---------------------------------------------------------------------------
+# Shared matching helpers
+# ---------------------------------------------------------------------------
+
+
+def match_pricing_to_product_keys(
+    pricing_rows: Iterable[PricingProduct],
+    product_keys: Iterable[str],
+) -> dict[UUID, set[str]]:
+    """Returns {pricing_product_id: {matched product sku keys (lowercased)}}.
+
+    See module docstring for the per-department matching rules.
+    """
+    keys = {k.strip().lower() for k in product_keys if k}
+    by_base: dict[str, set[str]] = {}
+    by_exact: dict[str, set[str]] = {}
+    for k in keys:
+        by_exact.setdefault(k, set()).add(k)
+        base = k.split(".")[0]
+        if base:
+            by_base.setdefault(base, set()).add(k)
+
+    out: dict[UUID, set[str]] = {}
+    for pp in pricing_rows:
+        dept = _dept_value(pp)
+        matched: set[str] = set()
+        for piece in (pp.sku or "").split(","):
+            key = piece.strip().lower()
+            if not key:
+                continue
+            if dept == "catalogo" and "+" in key:
+                continue
+            if dept == "celular":
+                matched.update(by_base.get(key, set()))
+            else:
+                matched.update(by_exact.get(key, set()))
+        if matched:
+            out[pp.id] = matched
+    return out
+
+
+def build_product_lookup(
+    pricing_rows: Iterable[PricingProduct],
+) -> tuple[dict[str, PricingProduct], dict[str, PricingProduct]]:
+    """Returns (exact_map, celular_base_map) used by
+    `find_pricing_for_product_sku`. Exact map is filled for every department;
+    base map only for celular pieces.
+    """
+    exact_map: dict[str, PricingProduct] = {}
+    base_map: dict[str, PricingProduct] = {}
+    for pp in pricing_rows:
+        dept = _dept_value(pp)
+        for piece in (pp.sku or "").split(","):
+            key = piece.strip().lower()
+            if not key:
+                continue
+            if dept == "catalogo" and "+" in key:
+                continue
+            exact_map.setdefault(key, pp)
+            if dept == "celular":
+                base_map.setdefault(key, pp)
+    return exact_map, base_map
+
+
+def find_pricing_for_product_sku(
+    sku: str,
+    exact_map: dict[str, PricingProduct],
+    base_map: dict[str, PricingProduct],
+) -> PricingProduct | None:
+    """Resolves a products.sku to its covering PricingProduct (or None).
+
+    Order: exact → celular base. Caller must have built the maps via
+    `build_product_lookup`.
+    """
+    skl = sku.strip().lower()
+    if not skl:
+        return None
+    exact = exact_map.get(skl)
+    if exact is not None:
+        return exact
+    base = skl.split(".")[0]
+    return base_map.get(base)
+
+
+# ---------------------------------------------------------------------------
+# Audit (consumes the helpers above)
+# ---------------------------------------------------------------------------
 
 
 async def scan_missing_skus(
@@ -47,7 +154,6 @@ async def scan_missing_skus(
          integration_ids}
     sorted by issue priority (sem anúncio first, then divergente, then fora).
     """
-    # Pull catalog state first.
     products = (
         await session.execute(
             select(Product).where(
@@ -62,14 +168,8 @@ async def scan_missing_skus(
         )
     ).scalars().all()
 
-    sku_to_pricing: dict[str, PricingProduct] = {}
-    for pp in pricing_rows:
-        for piece in (pp.sku or "").split(","):
-            key = piece.strip().lower()
-            if key:
-                sku_to_pricing[key] = pp
+    exact_map, base_map = build_product_lookup(pricing_rows)
 
-    # Links + integrations to figure out "Sem anúncio" + show account names.
     link_rows = (
         await session.execute(
             select(ProductLink, Integration.name)
@@ -93,6 +193,7 @@ async def scan_missing_skus(
     )
 
     out: list[dict] = []
+    matched_count = 0
     for p in products:
         sku = (p.sku or "").strip()
         if not sku:
@@ -101,7 +202,9 @@ async def scan_missing_skus(
         if not include_dismissed and is_dismissed:
             continue
 
-        pp = sku_to_pricing.get(sku.lower())
+        pp = find_pricing_for_product_sku(sku, exact_map, base_map)
+        if pp is not None:
+            matched_count += 1
         accounts = sorted(set(links_by_pid.get(p.id, [])))
         issues: list[str] = []
 
@@ -132,7 +235,6 @@ async def scan_missing_skus(
                 "dismissed": is_dismissed,
                 "bling_cost": str(bling_cost) if bling_cost is not None else None,
                 "pricing_cost": str(pricing_cost) if pricing_cost is not None else None,
-                # Legacy fields kept so older clients don't break.
                 "listing_count": len(accounts),
                 "sample_titles": [p.name] if p.name else [],
                 "platforms": [],
@@ -151,8 +253,22 @@ async def scan_missing_skus(
         return (order, row["sku"])
 
     out.sort(key=_priority)
+
+    logger.info(
+        "pricing.audit.scan",
+        user_id=str(user_id),
+        products_with_stock=len(products),
+        pricing_products=len(pricing_rows),
+        products_matched_to_pricing=matched_count,
+        pendings=len(out),
+        include_dismissed=include_dismissed,
+    )
     return out
 
 
-# Keep the old name available for any other callers that might import it.
-__all__ = ["scan_missing_skus"]
+__all__ = [
+    "scan_missing_skus",
+    "match_pricing_to_product_keys",
+    "build_product_lookup",
+    "find_pricing_for_product_sku",
+]

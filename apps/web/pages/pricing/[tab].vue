@@ -274,6 +274,7 @@ type AuditPendingRow = {
 
 const auditRows = ref<AuditPendingRow[]>([])
 const auditLoading = ref(false)
+const auditLoaded = ref(false)
 const auditError = ref<string | null>(null)
 const auditShowDismissed = ref(false)
 const auditHidden = ref(false)
@@ -284,8 +285,10 @@ async function loadAudit() {
   try {
     const includeDismissed = '?include_dismissed=true'
     auditRows.value = await api<AuditPendingRow[]>(`/api/pricing/sku-audit${includeDismissed}`)
+    auditLoaded.value = true
   } catch (e: any) {
     auditError.value = e?.data?.detail?.code || 'audit_failed'
+    auditLoaded.value = true
   } finally {
     auditLoading.value = false
   }
@@ -1792,13 +1795,16 @@ watch(department, async () => {
     <section v-else-if="tab === 'produtos'" class="space-y-3">
       <!-- Pendências box (Custo divergente / Sem anúncio / Fora da tabela) -->
       <div
-        v-if="!auditHidden && (auditPending.length > 0 || auditDismissed.length > 0 || auditLoading)"
+        v-if="!auditHidden && (auditLoading || auditLoaded || auditError)"
         class="rounded border border-amber-300 bg-amber-50 p-3"
       >
         <div class="flex items-center justify-between">
           <div class="text-sm font-semibold text-amber-800 flex items-center gap-2">
             <AlertCircle class="h-4 w-4" />
             <span v-if="auditLoading">Verificando pendências…</span>
+            <span v-else-if="auditPending.length === 0 && auditDismissed.length === 0">
+              Nenhuma pendência encontrada.
+            </span>
             <span v-else>
               {{ auditPending.length }} produto(s) do Bling com pendências
               <span v-if="auditDismissed.length" class="font-normal text-amber-700">({{ auditDismissed.length }} dispensado(s))</span>

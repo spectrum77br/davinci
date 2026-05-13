@@ -65,7 +65,10 @@ from app.schemas.pricing import (
 )
 from app.schemas.products import JobCreatedOut
 from app.security.cipher import decrypt, encrypt
-from app.services.pricing.audit import scan_missing_skus
+from app.services.pricing.audit import (
+    match_pricing_to_product_keys,
+    scan_missing_skus,
+)
 from app.services.pricing.calc import calculate
 from app.services.pricing.competitor import search_competitors
 from app.services.pricing.push import push_one
@@ -945,88 +948,98 @@ async def send_push_report(
 # =============================================================================
 
 
-def _expand_pricing_skus(
-    pricing_products: list[PricingProduct],
-) -> dict[str, list[UUID]]:
-    """Map each individual SKU piece to the pricing_product_id(s) that include it.
-
-    pricing_products.sku may be comma-separated (e.g. "a001,a002,a003"). We
-    split, strip and lowercase to build a lookup.
-    """
-    by_sku: dict[str, list[UUID]] = {}
-    for pp in pricing_products:
-        for piece in (pp.sku or "").split(","):
-            key = piece.strip().lower()
-            if not key:
-                continue
-            by_sku.setdefault(key, []).append(pp.id)
-    return by_sku
-
-
 @router.get("/stock-map")
 async def get_stock_map(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
     department: Annotated[str | None, Query()] = None,
 ) -> dict[str, int]:
-    """Returns {pricing_product_id: total_stock} summing products.stock for
-    every SKU piece referenced by the pricing_product."""
+    """Returns {pricing_product_id: stock_for_pricing_line}.
+
+    Stock is the MIN over all matched products (so a kit's bottleneck
+    component drives availability). Matching honors the celular base-SKU
+    rule (see `app.services.pricing.audit.match_pricing_to_product_keys`).
+    """
     dept = _coerce_department(department)
     stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
     if dept is not None:
         stmt = stmt.where(PricingProduct.department == dept)
     pricing_rows = (await session.execute(stmt)).scalars().all()
     if not pricing_rows:
+        logger.info(
+            "pricing.stock_map.empty",
+            user_id=str(user.id),
+            department=department,
+            reason="no_pricing_products",
+        )
         return {}
 
-    sku_to_pids = _expand_pricing_skus(list(pricing_rows))
-    if not sku_to_pids:
-        return {}
-
-    # Pull product stock for every distinct sku piece (case-insensitive).
     product_rows = (
         await session.execute(
             select(Product.sku, Product.stock).where(user_scope(Product, user))
         )
     ).all()
-
-    stock_by_pid: dict[str, int] = {str(pp.id): 0 for pp in pricing_rows}
+    stock_by_key: dict[str, int] = {}
     for sku, stock in product_rows:
         if not sku:
             continue
-        key = sku.strip().lower()
-        pids = sku_to_pids.get(key)
-        if not pids:
+        k = sku.strip().lower()
+        # Multiple product rows could share a key only by accident; take MAX
+        # so duplicates don't artificially shrink the bottleneck.
+        stock_by_key[k] = max(stock_by_key.get(k, 0), int(stock or 0))
+
+    matches = match_pricing_to_product_keys(pricing_rows, stock_by_key.keys())
+
+    out: dict[str, int] = {}
+    matched_pids = 0
+    for pp in pricing_rows:
+        keys = matches.get(pp.id)
+        if not keys:
+            out[str(pp.id)] = 0
             continue
-        for pid in pids:
-            stock_by_pid[str(pid)] += int(stock or 0)
-    return stock_by_pid
+        out[str(pp.id)] = min(stock_by_key.get(k, 0) for k in keys)
+        matched_pids += 1
+
+    logger.info(
+        "pricing.stock_map",
+        user_id=str(user.id),
+        department=department,
+        pricing_products=len(pricing_rows),
+        product_keys=len(stock_by_key),
+        matched_pricing_products=matched_pids,
+    )
+    return out
 
 
 @router.get("/sales-map")
 async def get_sales_map(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
+    user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
     department: Annotated[str | None, Query()] = None,
     days: Annotated[int, Query(ge=1, le=365)] = 7,
 ) -> dict[str, int]:
     """Returns {pricing_product_id: units_sold_in_last_N_days} from bling_orders.
 
-    bling_orders is single-tenant so no user_scope is applied. Cancelled and
-    returned orders are excluded.
+    bling_orders is single-tenant (no user_scope). Cancelled / returned orders
+    excluded by `situacao` AND `devolvido` flag.
+    Sales sum every matched product key — see celular base-SKU rule.
     """
     from datetime import UTC, datetime, timedelta
 
     dept = _coerce_department(department)
 
-    pp_stmt = select(PricingProduct).where(user_scope(PricingProduct, _u))
+    pp_stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
     if dept is not None:
         pp_stmt = pp_stmt.where(PricingProduct.department == dept)
     pricing_rows = (await session.execute(pp_stmt)).scalars().all()
     if not pricing_rows:
-        return {}
-    sku_to_pids = _expand_pricing_skus(list(pricing_rows))
-    if not sku_to_pids:
+        logger.info(
+            "pricing.sales_map.empty",
+            user_id=str(user.id),
+            department=department,
+            days=days,
+            reason="no_pricing_products",
+        )
         return {}
 
     cutoff = datetime.now(UTC) - timedelta(days=days)
@@ -1039,23 +1052,42 @@ async def get_sales_map(
                     BlingOrder.item_codigo != "",
                     BlingOrder.data >= cutoff,
                     BlingOrder.situacao.notin_(excluded_situations),
+                    BlingOrder.devolvido.isnot(True),
                 )
             )
         )
     ).all()
 
-    sales_by_pid: dict[str, int] = {str(pp.id): 0 for pp in pricing_rows}
+    sales_by_key: dict[str, int] = {}
     for codigo, qty in rows:
         key = (codigo or "").strip().lower()
         if not key:
             continue
-        pids = sku_to_pids.get(key)
-        if not pids:
+        sales_by_key[key] = sales_by_key.get(key, 0) + int(qty or 0)
+
+    matches = match_pricing_to_product_keys(pricing_rows, sales_by_key.keys())
+
+    out: dict[str, int] = {}
+    matched_pids = 0
+    for pp in pricing_rows:
+        keys = matches.get(pp.id)
+        if not keys:
+            out[str(pp.id)] = 0
             continue
-        amount = int(qty or 0)
-        for pid in pids:
-            sales_by_pid[str(pid)] += amount
-    return sales_by_pid
+        out[str(pp.id)] = sum(sales_by_key.get(k, 0) for k in keys)
+        matched_pids += 1
+
+    logger.info(
+        "pricing.sales_map",
+        user_id=str(user.id),
+        department=department,
+        days=days,
+        pricing_products=len(pricing_rows),
+        order_rows=len(rows),
+        sales_keys=len(sales_by_key),
+        matched_pricing_products=matched_pids,
+    )
+    return out
 
 
 # =============================================================================
