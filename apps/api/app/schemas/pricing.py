@@ -10,7 +10,10 @@ class PricingAccountBase(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     platform: str
     listing_type: str | None = None
-    department: str = "celular"
+    # Inputs may set the root either via `segment_id` (preferred) or via the
+    # legacy `department` slug; outputs always include both for UI compat.
+    segment_id: UUID | None = None
+    department: str | None = None
     kit_number: int = Field(default=1, ge=1, le=5)
     commission: Decimal | None = None
     margin1: Decimal | None = None
@@ -44,6 +47,7 @@ class PricingAccountPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     platform: str | None = None
     listing_type: str | None = None
+    segment_id: UUID | None = None
     department: str | None = None
     kit_number: int | None = Field(default=None, ge=1, le=5)
     commission: Decimal | None = None
@@ -85,8 +89,11 @@ class PricingAccountOut(PricingAccountBase):
 class PricingProductBase(BaseModel):
     sku: str = Field(min_length=1, max_length=2048)
     name: str = Field(min_length=1, max_length=512)
-    department: str = "celular"
-    product_type: int = 2
+    # Either `segment_id` (preferred, must be a leaf) or the legacy
+    # (`department` + `product_type`) pair. Router resolves to segment_id.
+    segment_id: UUID | None = None
+    department: str | None = None
+    product_type: int | None = None
     bling_cost_price: Decimal | None = None
     cost_kit1: Decimal = Decimal("0")
     cost_kit2: Decimal | None = None
@@ -107,6 +114,7 @@ class PricingProductCreate(PricingProductBase):
 class PricingProductPatch(BaseModel):
     sku: str | None = Field(default=None, min_length=1, max_length=2048)
     name: str | None = Field(default=None, min_length=1, max_length=512)
+    segment_id: UUID | None = None
     department: str | None = None
     product_type: int | None = None
     bling_cost_price: Decimal | None = None
@@ -136,8 +144,9 @@ class PricingProductImportItem(BaseModel):
     """Lenient row used by /products/import — empty SKUs are skipped, not rejected."""
     sku: str = ""
     name: str = ""
-    department: str = "celular"
-    product_type: int = 2
+    segment_id: UUID | None = None
+    department: str | None = None
+    product_type: int | None = None
     bling_cost_price: Decimal | None = None
     cost_kit1: Decimal = Decimal("0")
     cost_kit2: Decimal | None = None

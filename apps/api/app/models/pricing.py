@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
-from app.models.enums import CellStatus, Department, PricingPlatform
+from app.models.enums import CellStatus, PricingPlatform
 
 
 def _enum(py_enum, name: str):
@@ -46,11 +46,10 @@ class PricingAccount(Base, TimestampMixin):
         _enum(PricingPlatform, "pricing_platform"), nullable=False
     )
     listing_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    department: Mapped[Department] = mapped_column(
-        _enum(Department, "department"),
+    segment_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="RESTRICT"),
         nullable=False,
-        default=Department.CELULAR,
-        server_default=text("'celular'"),
     )
     kit_number: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
@@ -105,14 +104,10 @@ class PricingProduct(Base, TimestampMixin):
     )
     sku: Mapped[str] = mapped_column(String(2048), nullable=False)
     name: Mapped[str] = mapped_column(String(512), nullable=False)
-    department: Mapped[Department] = mapped_column(
-        _enum(Department, "department"),
+    segment_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="RESTRICT"),
         nullable=False,
-        default=Department.CELULAR,
-        server_default=text("'celular'"),
-    )
-    product_type: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=2, server_default=text("2")
     )
     bling_cost_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     cost_kit1: Mapped[Decimal] = mapped_column(

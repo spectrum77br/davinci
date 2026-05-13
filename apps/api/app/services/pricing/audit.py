@@ -11,7 +11,7 @@ celular base-SKU matching logic:
     Given a product SKU and indexes built from the pricing list, returns the
     PricingProduct that covers it (or None).
 
-Matching rules (per `pricing_product.department`):
+Matching rules (per `pricing_product` root segment slug):
   - `celular`: each comma piece is treated as a *base* — products whose
     SKU equals the base or starts with `base + '.'` are matched.
     Example: pricing piece `dg078` matches products `dg078`, `dg078.pi`,
@@ -37,14 +37,38 @@ from app.models import (
     PricingProduct,
     Product,
     ProductLink,
+    Segment,
 )
 
 logger = structlog.get_logger()
 
 
-def _dept_value(pp: PricingProduct) -> str:
-    d = pp.department
-    return d.value if hasattr(d, "value") else str(d)
+async def _load_segment_roots(session: AsyncSession) -> dict[UUID, str]:
+    """Returns {segment_id: root_slug} for every segment in the taxonomy.
+
+    Built fresh per call rather than cached across requests — the taxonomy
+    table is tiny and rarely changes. Callers that need it more than once
+    per request should pass the result around.
+    """
+    rows = (await session.execute(select(Segment))).scalars().all()
+    by_id = {s.id: s for s in rows}
+    out: dict[UUID, str] = {}
+    for s in rows:
+        cur = s
+        seen: set[UUID] = set()
+        while cur.parent_id and cur.id not in seen:
+            seen.add(cur.id)
+            parent = by_id.get(cur.parent_id)
+            if parent is None:
+                break
+            cur = parent
+        out[s.id] = cur.slug
+    return out
+
+
+def _dept_value(pp: PricingProduct, segment_roots: dict[UUID, str]) -> str:
+    """Returns the root segment slug for a pricing_product."""
+    return segment_roots.get(pp.segment_id, "")
 
 
 def _q2(v: Decimal | None) -> Decimal | None:
@@ -61,10 +85,12 @@ def _q2(v: Decimal | None) -> Decimal | None:
 def match_pricing_to_product_keys(
     pricing_rows: Iterable[PricingProduct],
     product_keys: Iterable[str],
+    segment_roots: dict[UUID, str],
 ) -> dict[UUID, set[str]]:
     """Returns {pricing_product_id: {matched product sku keys (lowercased)}}.
 
-    See module docstring for the per-department matching rules.
+    `segment_roots` is a `{segment_id: root_slug}` map (e.g. from
+    `_load_segment_roots`) used to dispatch the per-root SKU rule.
     """
     keys = {k.strip().lower() for k in product_keys if k}
     by_base: dict[str, set[str]] = {}
@@ -77,7 +103,7 @@ def match_pricing_to_product_keys(
 
     out: dict[UUID, set[str]] = {}
     for pp in pricing_rows:
-        dept = _dept_value(pp)
+        dept = _dept_value(pp, segment_roots)
         matched: set[str] = set()
         for piece in (pp.sku or "").split(","):
             key = piece.strip().lower()
@@ -96,15 +122,16 @@ def match_pricing_to_product_keys(
 
 def build_product_lookup(
     pricing_rows: Iterable[PricingProduct],
+    segment_roots: dict[UUID, str],
 ) -> tuple[dict[str, PricingProduct], dict[str, PricingProduct]]:
     """Returns (exact_map, celular_base_map) used by
-    `find_pricing_for_product_sku`. Exact map is filled for every department;
+    `find_pricing_for_product_sku`. Exact map is filled for every root;
     base map only for celular pieces.
     """
     exact_map: dict[str, PricingProduct] = {}
     base_map: dict[str, PricingProduct] = {}
     for pp in pricing_rows:
-        dept = _dept_value(pp)
+        dept = _dept_value(pp, segment_roots)
         for piece in (pp.sku or "").split(","):
             key = piece.strip().lower()
             if not key:
@@ -168,7 +195,8 @@ async def scan_missing_skus(
         )
     ).scalars().all()
 
-    exact_map, base_map = build_product_lookup(pricing_rows)
+    segment_roots = await _load_segment_roots(session)
+    exact_map, base_map = build_product_lookup(pricing_rows, segment_roots)
 
     link_rows = (
         await session.execute(
@@ -271,4 +299,5 @@ __all__ = [
     "match_pricing_to_product_keys",
     "build_product_lookup",
     "find_pricing_for_product_sku",
+    "_load_segment_roots",
 ]

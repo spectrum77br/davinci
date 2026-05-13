@@ -15,6 +15,7 @@ from app.models import (
     IntegrationPlatform,
     Product,
     ProductLink,
+    Segment,
     User,
 )
 from app.schemas.products import (
@@ -23,6 +24,7 @@ from app.schemas.products import (
     BlingPreviewItem,
     BlingPreviewOut,
     BulkDeleteIn,
+    BulkSegmentAssignIn,
     CsvImportSummary,
     ProductCreate,
     ProductLinkOut,
@@ -31,12 +33,12 @@ from app.schemas.products import (
     ProductPatch,
 )
 from app.security.cipher import decrypt_json
-from app.services.relink_hook import trigger_user_relink
 from app.services.marketplaces.bling import (
     BLING_PRODUCTS_PAGE_SIZE,
     BlingClient,
     parse_bling_product,
 )
+from app.services.relink_hook import trigger_user_relink
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api", tags=["products"])
@@ -48,9 +50,48 @@ def _to_link_out(link: ProductLink) -> ProductLinkOut:
     return ProductLinkOut.model_validate(link)
 
 
-def _to_product_out(p: Product, links: list[ProductLink]) -> ProductOut:
+async def _segment_lookup(
+    session: AsyncSession, segment_ids: list[UUID]
+) -> dict[UUID, tuple[str, str]]:
+    """Returns {segment_id: (name, path)} for the given ids. Path joins
+    ancestors as "Root / Child / Leaf" using cached segment rows."""
+    if not segment_ids:
+        return {}
+    ids = list({sid for sid in segment_ids if sid is not None})
+    if not ids:
+        return {}
+    # Load all segments — table is small (taxonomy) so a full read is fine and
+    # avoids recursive CTEs when assembling paths.
+    rows = (await session.execute(select(Segment))).scalars().all()
+    by_id = {s.id: s for s in rows}
+    out: dict[UUID, tuple[str, str]] = {}
+    for sid in ids:
+        s = by_id.get(sid)
+        if s is None:
+            continue
+        chain: list[str] = []
+        cur: Segment | None = s
+        seen: set[UUID] = set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            chain.append(cur.name)
+            cur = by_id.get(cur.parent_id) if cur.parent_id else None
+        chain.reverse()
+        out[sid] = (s.name, " / ".join(chain))
+    return out
+
+
+def _to_product_out(
+    p: Product,
+    links: list[ProductLink],
+    segments: dict[UUID, tuple[str, str]] | None = None,
+) -> ProductOut:
     out = ProductOut.model_validate(p)
     out.links = [_to_link_out(link) for link in links]
+    if segments and p.segment_id and p.segment_id in segments:
+        name, path = segments[p.segment_id]
+        out.segment_name = name
+        out.segment_path = path
     return out
 
 
@@ -129,7 +170,8 @@ async def list_products(
     for link in links:
         by_pid.setdefault(link.product_id, []).append(link)
 
-    items = [_to_product_out(p, by_pid.get(p.id, [])) for p in rows]
+    seg_map = await _segment_lookup(session, [p.segment_id for p in rows if p.segment_id])
+    items = [_to_product_out(p, by_pid.get(p.id, []), seg_map) for p in rows]
     return ProductPage(items=items, total=total, page=page, page_size=page_size)
 
 
@@ -149,7 +191,8 @@ async def get_product(
     links = (
         await session.execute(select(ProductLink).where(ProductLink.product_id == p.id))
     ).scalars().all()
-    return _to_product_out(p, list(links))
+    seg_map = await _segment_lookup(session, [p.segment_id]) if p.segment_id else {}
+    return _to_product_out(p, list(links), seg_map)
 
 
 @router.post("/products", response_model=ProductOut, status_code=status.HTTP_201_CREATED)
@@ -202,6 +245,12 @@ async def patch_product(
     if p is None:
         raise HTTPException(404, detail={"code": "product_not_found"})
     data = body.model_dump(exclude_unset=True)
+    if "segment_id" in data and data["segment_id"] is not None:
+        seg = (
+            await session.execute(select(Segment).where(Segment.id == data["segment_id"]))
+        ).scalar_one_or_none()
+        if seg is None:
+            raise HTTPException(400, detail={"code": "segment_not_found"})
     sku_changed = "sku" in data and data["sku"] != p.sku
     for k, v in data.items():
         setattr(p, k, v)
@@ -212,7 +261,8 @@ async def patch_product(
     links = (
         await session.execute(select(ProductLink).where(ProductLink.product_id == p.id))
     ).scalars().all()
-    return _to_product_out(p, list(links))
+    seg_map = await _segment_lookup(session, [p.segment_id]) if p.segment_id else {}
+    return _to_product_out(p, list(links), seg_map)
 
 
 @router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -243,6 +293,29 @@ async def bulk_delete_products(
     )
     await session.commit()
     return {"deleted": res.rowcount or 0}
+
+
+@router.post("/products/bulk-segment")
+async def bulk_assign_segment(
+    body: BulkSegmentAssignIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+) -> dict:
+    if body.segment_id is not None:
+        seg = (
+            await session.execute(select(Segment).where(Segment.id == body.segment_id))
+        ).scalar_one_or_none()
+        if seg is None:
+            raise HTTPException(400, detail={"code": "segment_not_found"})
+    from sqlalchemy import update
+
+    res = await session.execute(
+        update(Product)
+        .where(and_(Product.id.in_(body.product_ids), user_scope(Product, user)))
+        .values(segment_id=body.segment_id)
+    )
+    await session.commit()
+    return {"updated": res.rowcount or 0}
 
 
 # --------------------------------------------------------------- product_links

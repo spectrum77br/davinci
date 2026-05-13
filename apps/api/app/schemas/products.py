@@ -38,6 +38,9 @@ class ProductOut(BaseModel):
     sku: str
     name: str
     category: str | None = None
+    segment_id: UUID | None = None
+    segment_name: str | None = None
+    segment_path: str | None = None
     cost_price: Decimal | None = None
     bling_cost_price: Decimal | None = None
     price: Decimal | None = None
@@ -88,6 +91,7 @@ class ProductCreate(BaseModel):
 class ProductPatch(BaseModel):
     name: str | None = None
     category: str | None = None
+    segment_id: UUID | None = None
     cost_price: Decimal | None = None
     price: Decimal | None = None
     stock: int | None = None
@@ -100,6 +104,11 @@ class ProductPatch(BaseModel):
 
 class BulkDeleteIn(BaseModel):
     ids: list[UUID] = Field(min_length=1)
+
+
+class BulkSegmentAssignIn(BaseModel):
+    product_ids: list[UUID] = Field(min_length=1)
+    segment_id: UUID | None = None
 
 
 # ---------- Bling import ----------

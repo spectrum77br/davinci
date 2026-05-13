@@ -39,6 +39,7 @@ from app.models.pricing import (
     StoreInfo,
 )
 from app.models.product import BackgroundJob, Product, ProductLink
+from app.models.segment import Segment
 from app.models.sync_log import SyncLog
 from app.models.user import User
 from app.models.user_settings import UserSettings
@@ -84,6 +85,7 @@ __all__ = [
     "PricingPushIdempotency",
     "Product",
     "ProductLink",
+    "Segment",
     "Store",
     "StoreInfo",
     "StoreStatus",

@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
   Package, Megaphone, DollarSign, Truck, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell,
-  Store, ChevronLeft, ChevronRight,
+  Store, Tags, ChevronLeft, ChevronRight,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -61,6 +61,7 @@ const sections: Section[] = [
       { to: '/companies', label: 'Empresas', icon: Building2, resource: 'empresa' },
       { to: '/cadastros', label: 'Cadastros', icon: ContactRound, resource: 'cadastro' },
       { to: '/store-info', label: 'Lojas (info)', icon: Store, resource: 'lojas_info' },
+      { to: '/admin/segments', label: 'Segmentos', icon: Tags, resource: 'segmentos' },
     ],
   },
   {

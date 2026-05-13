@@ -24,7 +24,6 @@ from app.models import (
     BackgroundJobType,
     BlingOrder,
     CellStatus,
-    Department,
     Integration,
     IntegrationPlatform,
     Listing,
@@ -33,6 +32,7 @@ from app.models import (
     PricingPlatform,
     PricingProduct,
     Product,
+    Segment,
     StoreInfo,
     User,
 )
@@ -79,15 +79,6 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
 
 
-def _coerce_department(v: str | None) -> Department | None:
-    if v is None:
-        return None
-    try:
-        return Department(v)
-    except ValueError as e:
-        raise HTTPException(400, detail={"code": "invalid_department"}) from e
-
-
 def _coerce_platform(v: str | None) -> PricingPlatform | None:
     if v is None:
         return None
@@ -106,9 +97,87 @@ def _coerce_cell_status(v: str | None) -> CellStatus | None:
         raise HTTPException(400, detail={"code": "invalid_cell_status"}) from e
 
 
-def _account_out(row: PricingAccount) -> PricingAccountOut:
+async def _resolve_root_segment_id(
+    session: AsyncSession, dept_slug: str | None
+) -> UUID | None:
+    """Returns the root segment id whose slug matches the given department
+    string. Returns None if the slug doesn't resolve to a root segment."""
+    if not dept_slug:
+        return None
+    res = await session.execute(
+        select(Segment.id).where(
+            and_(Segment.parent_id.is_(None), Segment.slug == dept_slug)
+        )
+    )
+    return res.scalar_one_or_none()
+
+
+async def _resolve_leaf_segment_id(
+    session: AsyncSession,
+    dept_slug: str | None,
+    product_type: int | None,
+) -> UUID | None:
+    """Returns the leaf segment id for (root slug, column-index 1..5)."""
+    if not dept_slug or product_type is None:
+        return None
+    sort_order = max(0, min(4, int(product_type) - 1))
+    root_subq = select(Segment.id).where(
+        and_(Segment.parent_id.is_(None), Segment.slug == dept_slug)
+    )
+    res = await session.execute(
+        select(Segment.id).where(
+            and_(
+                Segment.sort_order == sort_order,
+                Segment.parent_id.in_(root_subq),
+            )
+        )
+    )
+    return res.scalar_one_or_none()
+
+
+async def _segment_index(
+    session: AsyncSession,
+) -> tuple[dict[UUID, str], dict[UUID, tuple[str, int]], dict[str, UUID]]:
+    """Returns three indexes used to compose pricing schema outputs and
+    translate department-slug filter queries:
+
+      * `roots_by_id`     {segment_id: root_slug}      — for accounts
+      * `leaves_by_id`    {segment_id: (root_slug, product_type 1..5)} — products
+      * `root_id_by_slug` {slug: root_segment_id}      — for filter queries
+    """
+    rows = (await session.execute(select(Segment))).scalars().all()
+    by_id = {s.id: s for s in rows}
+    roots_by_id: dict[UUID, str] = {}
+    leaves_by_id: dict[UUID, tuple[str, int]] = {}
+    root_id_by_slug: dict[str, UUID] = {}
+    for s in rows:
+        if s.parent_id is None:
+            roots_by_id[s.id] = s.slug
+            root_id_by_slug[s.slug] = s.id
+    for s in rows:
+        if s.parent_id is not None:
+            parent = by_id.get(s.parent_id)
+            if parent and parent.parent_id is None:
+                leaves_by_id[s.id] = (parent.slug, int(s.sort_order) + 1)
+    return roots_by_id, leaves_by_id, root_id_by_slug
+
+
+def _account_out(
+    row: PricingAccount, roots_by_id: dict[UUID, str]
+) -> PricingAccountOut:
     out = PricingAccountOut.model_validate(row)
     out.has_password = bool(row.password_enc)
+    out.department = roots_by_id.get(row.segment_id)
+    return out
+
+
+def _product_out(
+    row: PricingProduct, leaves_by_id: dict[UUID, tuple[str, int]]
+) -> PricingProductOut:
+    out = PricingProductOut.model_validate(row)
+    pair = leaves_by_id.get(row.segment_id)
+    if pair:
+        out.department, out.product_type = pair
     return out
 
 
@@ -125,14 +194,18 @@ async def list_accounts(
     department: str | None = Query(None),
     platform: str | None = Query(None),
 ) -> list[PricingAccountOut]:
+    roots_by_id, _, root_id_by_slug = await _segment_index(session)
     stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
     if department:
-        stmt = stmt.where(PricingAccount.department == _coerce_department(department))
+        rid = root_id_by_slug.get(department)
+        if rid is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+        stmt = stmt.where(PricingAccount.segment_id == rid)
     if platform:
         stmt = stmt.where(PricingAccount.platform == _coerce_platform(platform))
     stmt = stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
     rows = (await session.execute(stmt)).scalars().all()
-    return [_account_out(r) for r in rows]
+    return [_account_out(r, roots_by_id) for r in rows]
 
 
 @router.post(
@@ -147,16 +220,23 @@ async def create_account(
         User, Depends(require_permission("tabela_precos_contas", "edit"))
     ],
 ) -> PricingAccountOut:
-    data = body.model_dump(exclude={"password"})
+    data = body.model_dump(exclude={"password", "department"})
     data["platform"] = _coerce_platform(body.platform)
-    data["department"] = _coerce_department(body.department) or Department.CELULAR
+    # Resolve segment_id: prefer explicit, fall back to department slug, then
+    # default to root "celular" for backward compatibility.
+    if data.get("segment_id") is None:
+        sid = await _resolve_root_segment_id(session, body.department or "celular")
+        if sid is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+        data["segment_id"] = sid
     row = PricingAccount(user_id=user.id, **data)
     if body.password:
         row.password_enc = encrypt(body.password)
     session.add(row)
     await session.commit()
     await session.refresh(row)
-    return _account_out(row)
+    roots_by_id, _, _ = await _segment_index(session)
+    return _account_out(row, roots_by_id)
 
 
 @router.patch("/accounts/{account_id}", response_model=PricingAccountOut)
@@ -187,13 +267,20 @@ async def patch_account(
         row.password_enc = encrypt(pwd) if pwd else None
     if "platform" in data and data["platform"] is not None:
         data["platform"] = _coerce_platform(data["platform"])
-    if "department" in data and data["department"] is not None:
-        data["department"] = _coerce_department(data["department"])
+    # Translate legacy department-string into segment_id; explicit segment_id
+    # wins if both are present.
+    dept_str = data.pop("department", None)
+    if "segment_id" not in data and dept_str:
+        sid = await _resolve_root_segment_id(session, dept_str)
+        if sid is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+        data["segment_id"] = sid
     for k, v in data.items():
         setattr(row, k, v)
     await session.commit()
     await session.refresh(row)
-    return _account_out(row)
+    roots_by_id, _, _ = await _segment_index(session)
+    return _account_out(row, roots_by_id)
 
 
 @router.delete(
@@ -234,16 +321,21 @@ async def list_products(
     in_catalog: bool | None = Query(None),
     is_active: bool | None = Query(None),
 ) -> list[PricingProductOut]:
+    _, leaves_by_id, root_id_by_slug = await _segment_index(session)
     stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
     if department:
-        stmt = stmt.where(PricingProduct.department == _coerce_department(department))
+        rid = root_id_by_slug.get(department)
+        if rid is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+        leaf_ids = [lid for lid, (rs, _pt) in leaves_by_id.items() if rs == department]
+        stmt = stmt.where(PricingProduct.segment_id.in_(leaf_ids))
     if in_catalog is not None:
         stmt = stmt.where(PricingProduct.in_catalog == in_catalog)
     if is_active is not None:
         stmt = stmt.where(PricingProduct.is_active == is_active)
     stmt = stmt.order_by(PricingProduct.sku)
     rows = (await session.execute(stmt)).scalars().all()
-    return [PricingProductOut.model_validate(r) for r in rows]
+    return [_product_out(r, leaves_by_id) for r in rows]
 
 
 @router.post(
@@ -258,8 +350,14 @@ async def create_product(
         User, Depends(require_permission("tabela_precos_produtos", "edit"))
     ],
 ) -> PricingProductOut:
-    data = body.model_dump()
-    data["department"] = _coerce_department(body.department) or Department.CELULAR
+    data = body.model_dump(exclude={"department", "product_type"})
+    if data.get("segment_id") is None:
+        sid = await _resolve_leaf_segment_id(
+            session, body.department or "celular", body.product_type or 2
+        )
+        if sid is None:
+            raise HTTPException(400, detail={"code": "invalid_segment"})
+        data["segment_id"] = sid
     row = PricingProduct(user_id=user.id, **data)
     session.add(row)
     try:
@@ -270,7 +368,8 @@ async def create_product(
             raise HTTPException(409, detail={"code": "sku_exists"}) from e
         raise
     await session.refresh(row)
-    return PricingProductOut.model_validate(row)
+    _, leaves_by_id, _ = await _segment_index(session)
+    return _product_out(row, leaves_by_id)
 
 
 @router.patch("/products/{product_id}", response_model=PricingProductOut)
@@ -296,8 +395,20 @@ async def patch_product(
         raise HTTPException(404, detail={"code": "product_not_found"})
 
     data = body.model_dump(exclude_unset=True)
-    if "department" in data and data["department"] is not None:
-        data["department"] = _coerce_department(data["department"])
+    # Translate (department + product_type) → segment_id when the caller used
+    # the legacy fields. Explicit segment_id wins if both are present.
+    dept_str = data.pop("department", None)
+    pt_val = data.pop("product_type", None)
+    if "segment_id" not in data and (dept_str or pt_val is not None):
+        # Need current values for whichever field was left out.
+        _, leaves_by_id, _ = await _segment_index(session)
+        cur = leaves_by_id.get(row.segment_id, ("celular", 2))
+        sid = await _resolve_leaf_segment_id(
+            session, dept_str or cur[0], pt_val if pt_val is not None else cur[1]
+        )
+        if sid is None:
+            raise HTTPException(400, detail={"code": "invalid_segment"})
+        data["segment_id"] = sid
     for k, v in data.items():
         setattr(row, k, v)
     try:
@@ -308,7 +419,8 @@ async def patch_product(
             raise HTTPException(409, detail={"code": "sku_exists"}) from e
         raise
     await session.refresh(row)
-    return PricingProductOut.model_validate(row)
+    _, leaves_by_id, _ = await _segment_index(session)
+    return _product_out(row, leaves_by_id)
 
 
 @router.delete(
@@ -361,7 +473,8 @@ async def toggle_catalog(
     row.in_catalog = not row.in_catalog
     await session.commit()
     await session.refresh(row)
-    return PricingProductOut.model_validate(row)
+    _, leaves_by_id, _ = await _segment_index(session)
+    return _product_out(row, leaves_by_id)
 
 
 @router.post("/products/import", response_model=PricingProductImportResult)
@@ -389,8 +502,17 @@ async def import_products(
         if not item.sku:
             skipped += 1
             continue
-        data = item.model_dump()
-        data["department"] = _coerce_department(item.department) or Department.CELULAR
+        data = item.model_dump(exclude={"department", "product_type"})
+        if data.get("segment_id") is None:
+            sid = await _resolve_leaf_segment_id(
+                session,
+                item.department or "celular",
+                item.product_type if item.product_type is not None else 2,
+            )
+            if sid is None:
+                skipped += 1
+                continue
+            data["segment_id"] = sid
         row = by_sku.get(item.sku)
         if row is None:
             session.add(PricingProduct(user_id=user.id, **data))
@@ -418,10 +540,13 @@ async def list_overrides(
 ) -> list[PricingOverrideOut]:
     stmt = select(PricingOverride).where(user_scope(PricingOverride, user))
     if department:
-        dept = _coerce_department(department)
+        _, leaves_by_id, root_id_by_slug = await _segment_index(session)
+        if root_id_by_slug.get(department) is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+        leaf_ids = [lid for lid, (rs, _pt) in leaves_by_id.items() if rs == department]
         stmt = stmt.join(
             PricingProduct, PricingProduct.id == PricingOverride.pricing_product_id
-        ).where(PricingProduct.department == dept)
+        ).where(PricingProduct.segment_id.in_(leaf_ids))
     rows = (await session.execute(stmt)).scalars().all()
     return [PricingOverrideOut.model_validate(r) for r in rows]
 
@@ -634,13 +759,16 @@ async def get_grid(
     ],
     department: str | None = Query(None),
 ) -> PricingGridOut:
-    dept = _coerce_department(department)
-
+    _, leaves_by_id, root_id_by_slug = await _segment_index(session)
     accounts_stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
     products_stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
-    if dept is not None:
-        accounts_stmt = accounts_stmt.where(PricingAccount.department == dept)
-        products_stmt = products_stmt.where(PricingProduct.department == dept)
+    if department:
+        rid = root_id_by_slug.get(department)
+        if rid is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+        leaf_ids = [lid for lid, (rs, _pt) in leaves_by_id.items() if rs == department]
+        accounts_stmt = accounts_stmt.where(PricingAccount.segment_id == rid)
+        products_stmt = products_stmt.where(PricingProduct.segment_id.in_(leaf_ids))
     accounts = (
         await session.execute(
             accounts_stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
@@ -673,9 +801,10 @@ async def get_grid(
                 )
             )
 
+    roots_by_id, _, _ = await _segment_index(session)
     return PricingGridOut(
-        accounts=[_account_out(a) for a in accounts],
-        products=[PricingProductOut.model_validate(p) for p in products],
+        accounts=[_account_out(a, roots_by_id) for a in accounts],
+        products=[_product_out(p, leaves_by_id) for p in products],
         cells=cells,
     )
 
@@ -747,6 +876,8 @@ async def push_catalog_prices(
     if not body.items:
         return PricingPushOut(results=[])
 
+    catalog_roots_by_id, _, _ = await _segment_index(session)
+
     # Validate every item belongs to a catalog account + product first.
     prod_ids = {it.pricing_product_id for it in body.items}
     acc_ids = {it.pricing_account_id for it in body.items}
@@ -812,7 +943,8 @@ async def push_catalog_prices(
                 )
             )
             continue
-        dept_val = acc.department.value if hasattr(acc.department, "value") else acc.department
+        # Roots map loaded once at top of function (see _segment_index call).
+        dept_val = catalog_roots_by_id.get(acc.segment_id, "")
         if dept_val != "catalogo":
             results.append(
                 PricingPushItemOut(
@@ -967,10 +1099,13 @@ async def get_stock_map(
          use an exact case-insensitive lookup.
       4. SUM contributions across pieces. Missing pieces contribute 0.
     """
-    dept = _coerce_department(department)
+    _, leaves_by_id, root_id_by_slug = await _segment_index(session)
     stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
-    if dept is not None:
-        stmt = stmt.where(PricingProduct.department == dept)
+    if department:
+        if root_id_by_slug.get(department) is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+        leaf_ids = [lid for lid, (rs, _pt) in leaves_by_id.items() if rs == department]
+        stmt = stmt.where(PricingProduct.segment_id.in_(leaf_ids))
     pricing_rows = (await session.execute(stmt)).scalars().all()
     if not pricing_rows:
         logger.info(
@@ -1007,11 +1142,15 @@ async def get_stock_map(
         if cur is None or (len(skl), skl) < (len(cur[0]), cur[0]):
             variant_pick[base] = (skl, st)
 
+    from app.services.pricing.audit import _dept_value, _load_segment_roots
+
+    segment_roots = await _load_segment_roots(session)
+
     out: dict[str, int] = {}
     matched_pids = 0
     matched_pieces_total = 0
     for pp in pricing_rows:
-        dept_v = pp.department.value if hasattr(pp.department, "value") else pp.department
+        dept_v = _dept_value(pp, segment_roots)
         total = 0
         any_match = False
         for piece in (pp.sku or "").split(","):
@@ -1065,11 +1204,13 @@ async def get_sales_map(
     """
     from datetime import UTC, datetime, timedelta
 
-    dept = _coerce_department(department)
-
+    _, leaves_by_id, root_id_by_slug = await _segment_index(session)
     pp_stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
-    if dept is not None:
-        pp_stmt = pp_stmt.where(PricingProduct.department == dept)
+    if department:
+        if root_id_by_slug.get(department) is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+        leaf_ids = [lid for lid, (rs, _pt) in leaves_by_id.items() if rs == department]
+        pp_stmt = pp_stmt.where(PricingProduct.segment_id.in_(leaf_ids))
     pricing_rows = (await session.execute(pp_stmt)).scalars().all()
     if not pricing_rows:
         logger.info(
@@ -1104,7 +1245,12 @@ async def get_sales_map(
             continue
         sales_by_key[key] = sales_by_key.get(key, 0) + int(qty or 0)
 
-    matches = match_pricing_to_product_keys(pricing_rows, sales_by_key.keys())
+    from app.services.pricing.audit import _load_segment_roots
+
+    segment_roots = await _load_segment_roots(session)
+    matches = match_pricing_to_product_keys(
+        pricing_rows, sales_by_key.keys(), segment_roots
+    )
 
     out: dict[str, int] = {}
     matched_pids = 0
@@ -1359,8 +1505,8 @@ async def set_account_department(
         User, Depends(require_permission("tabela_precos_contas", "edit"))
     ],
 ) -> PricingAccountOut:
-    dept = _coerce_department(body.department)
-    if dept is None:
+    sid = await _resolve_root_segment_id(session, body.department)
+    if sid is None:
         raise HTTPException(400, detail={"code": "invalid_department"})
     row = (
         await session.execute(
@@ -1374,10 +1520,11 @@ async def set_account_department(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "account_not_found"})
-    row.department = dept
+    row.segment_id = sid
     await session.commit()
     await session.refresh(row)
-    return _account_out(row)
+    roots_by_id, _, _ = await _segment_index(session)
+    return _account_out(row, roots_by_id)
 
 
 # =============================================================================
@@ -1525,9 +1672,9 @@ async def set_store_info_department(
     ],
 ) -> PricingAccountOut:
     """Bind a department to a store_info — auto-creates the matching
-    `pricing_accounts` row if absent (one per (store_info, department))."""
-    dept = _coerce_department(body.department)
-    if dept is None:
+    `pricing_accounts` row if absent (one per (store_info, root_segment))."""
+    sid = await _resolve_root_segment_id(session, body.department)
+    if sid is None:
         raise HTTPException(400, detail={"code": "invalid_department"})
 
     info = (
@@ -1554,26 +1701,28 @@ async def set_store_info_department(
                 and_(
                     user_scope(PricingAccount, user),
                     PricingAccount.store_info_id == store_info_id,
-                    PricingAccount.department == dept,
+                    PricingAccount.segment_id == sid,
                 )
             )
         )
     ).scalar_one_or_none()
+    roots_by_id, _, _ = await _segment_index(session)
     if existing is not None:
-        return _account_out(existing)
+        return _account_out(existing, roots_by_id)
 
-    name = info.account_name or f"{info.platform} — {dept.value}"
+    dept_slug = roots_by_id.get(sid, body.department)
+    name = info.account_name or f"{info.platform} — {dept_slug}"
     row = PricingAccount(
         user_id=user.id,
         name=name,
         platform=platform,
-        department=dept,
+        segment_id=sid,
         store_info_id=store_info_id,
     )
     session.add(row)
     await session.commit()
     await session.refresh(row)
-    return _account_out(row)
+    return _account_out(row, roots_by_id)
 
 
 @router.delete("/store-info/{store_info_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -48,6 +48,11 @@ class Product(Base, TimestampMixin):
     sku: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     cost_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     bling_cost_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)

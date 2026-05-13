@@ -22,6 +22,7 @@ from app.routers import metrics as metrics_router
 from app.routers import oauth as oauth_router
 from app.routers import pricing as pricing_router
 from app.routers import products as products_router
+from app.routers import segments as segments_router
 from app.routers import settings as settings_router
 from app.routers import stores as stores_router
 from app.routers import sync as sync_router
@@ -65,6 +66,7 @@ _OPENAPI_TAGS = [
     {"name": "alerts", "description": "User alerts feed."},
     {"name": "listings", "description": "Cached marketplace listings."},
     {"name": "pricing", "description": "Catálogo, regras, push de preços, auditorias."},
+    {"name": "segments", "description": "Taxonomia hierárquica (Celular/Mala/..., subtipos)."},
     {"name": "audit", "description": "Audit by spreadsheet — runs, items, fixes."},
     {"name": "discrepancies", "description": "Cross-platform stock divergences."},
     {"name": "dashboard", "description": "Onboarding + KPIs do dashboard."},
@@ -118,6 +120,7 @@ app.include_router(settings_router.router)
 app.include_router(alerts_router.router)
 app.include_router(listings_router.router)
 app.include_router(pricing_router.router)
+app.include_router(segments_router.router)
 app.include_router(audit_router.router)
 app.include_router(discrepancies_router.router)
 app.include_router(dashboard_router.router)

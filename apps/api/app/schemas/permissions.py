@@ -20,6 +20,7 @@ Resource = Literal[
     "empresa",
     "cadastro",
     "lojas_info",
+    "segmentos",
     "usuarios",
     "permissoes",
     "configuracoes",

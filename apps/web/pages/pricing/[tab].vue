@@ -3,7 +3,7 @@ import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
   Star, Send, Ban, Check, Link2, Copy,
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
-  ChevronDown, Download, Undo2, Redo2, Search,
+  ChevronDown, Download, Undo2, Redo2, Search, Tags,
 } from 'lucide-vue-next'
 
 definePageMeta({
@@ -38,20 +38,72 @@ const canDeleteContas = useCan('tabela_precos_contas', 'delete')
 const canEditProdutos = useCan('tabela_precos_produtos', 'edit')
 const canDeleteProdutos = useCan('tabela_precos_produtos', 'delete')
 
-const DEPARTMENTS = [
+// Departments + their subtypes are loaded from /api/segments at boot.
+// Icon mapping is by slug — unknown slugs fall back to a generic Tags icon.
+type DeptKey = string
+
+const DEPT_ICONS: Record<string, any> = {
+  celular: Smartphone,
+  mala: Briefcase,
+  eletro: Zap,
+  catalogo: BarChart3,
+}
+
+const DEPARTMENTS_FALLBACK = [
   { value: 'celular', label: 'Celular', icon: Smartphone },
   { value: 'mala', label: 'Mala', icon: Briefcase },
   { value: 'eletro', label: 'Eletro', icon: Zap },
   { value: 'catalogo', label: 'Catálogo ML', icon: BarChart3 },
-] as const
+]
 
-type DeptKey = typeof DEPARTMENTS[number]['value']
+const DEPARTMENTS = ref<{ value: string; label: string; icon: any }[]>([...DEPARTMENTS_FALLBACK])
 
-const TYPE_HEADERS: Record<DeptKey, string[]> = {
-  celular: ['Acessórios', 'Reg.Diversos', 'Reg.Uranyx', 'Robusto', 'Apple'],
-  catalogo: ['Acessórios', 'Reg.Diversos', 'Reg.Uranyx', 'Robusto', 'Apple'],
-  eletro: ['Acessórios', 'Reg.Diversos', 'Reg.Uranyx', 'Robusto', 'Apple'],
-  mala: ['8"/Acess.', '12"', '18"/20"', '24"+', 'Queima'],
+const TYPE_HEADERS_FALLBACK: Record<string, string[]> = {
+  celular: ['Acessórios', 'Diversos', 'Regular', 'Robusto', 'Apple'],
+  catalogo: ['Acessórios', 'Diversos', 'Regular', 'Robusto', 'Apple'],
+  eletro: ['1', '2', '3', '4', '5'],
+  mala: ['Acessórios', '12"', '18" e 20"', '24" acima', 'Queima de estoque'],
+}
+
+const TYPE_HEADERS = ref<Record<string, string[]>>({ ...TYPE_HEADERS_FALLBACK })
+
+type SegmentRow = {
+  id: string
+  parent_id: string | null
+  name: string
+  slug: string
+  sort_order: number
+  active: boolean
+}
+
+async function loadSegments() {
+  try {
+    const rows = await api<SegmentRow[]>('/api/segments')
+    const roots = rows
+      .filter((r) => r.parent_id === null && r.active)
+      .sort((a, b) => a.sort_order - b.sort_order)
+    if (roots.length === 0) return
+
+    DEPARTMENTS.value = roots.map((r) => ({
+      value: r.slug,
+      label: r.name,
+      icon: DEPT_ICONS[r.slug] ?? Tags,
+    }))
+
+    const next: Record<string, string[]> = {}
+    for (const root of roots) {
+      const children = rows
+        .filter((r) => r.parent_id === root.id && r.active)
+        .sort((a, b) => a.sort_order - b.sort_order)
+        .map((r) => r.name)
+      next[root.slug] = children.length
+        ? children
+        : (TYPE_HEADERS_FALLBACK[root.slug] ?? [])
+    }
+    TYPE_HEADERS.value = next
+  } catch {
+    /* keep fallback */
+  }
 }
 
 const PLATFORMS = [
@@ -1401,7 +1453,8 @@ function fmtBRL(v: string | number | null) {
 }
 
 function tabelaName(p: PricingProduct): string {
-  const list = TYPE_HEADERS[(p.department as DeptKey)] ?? TYPE_HEADERS.celular
+  const headers = TYPE_HEADERS.value
+  const list = headers[(p.department as DeptKey)] ?? headers.celular
   const t = Math.max(1, Math.min(5, p.product_type || 1))
   return list[t - 1] ?? '—'
 }
@@ -1420,6 +1473,7 @@ function tabelaBadgeClass(p: PricingProduct): string {
 
 // =========================================================== boot
 
+await loadSegments()
 await loadAccounts()
 await loadProducts()
 await loadIntegrations()
@@ -1538,7 +1592,7 @@ watch(department, async () => {
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Kit</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Comissão</th>
               <th
-                v-for="(label, i) in TYPE_HEADERS[department]"
+                v-for="(label, i) in TYPE_HEADERS[department] ?? []"
                 :key="i"
                 colSpan="2"
                 class="text-center px-1 py-2 font-medium border-b border-border"
@@ -1997,7 +2051,15 @@ watch(department, async () => {
                 <input v-model="newProd.cost_kit4" type="number" step="0.01" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
               <td class="border border-border px-1 py-1">
-                <input v-model.number="newProd.product_type" type="number" min="1" max="5" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-center" />
+                <select v-model.number="newProd.product_type" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-center">
+                  <option
+                    v-for="(label, i) in (TYPE_HEADERS[department] ?? [])"
+                    :key="i"
+                    :value="i + 1"
+                  >
+                    {{ label }}
+                  </option>
+                </select>
               </td>
               <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center">
@@ -2113,13 +2175,21 @@ watch(department, async () => {
                 :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'product_type'), 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'product_type') }"
                 @click="!isEditing(p.id, 'product_type') && startEditProduct(p, 'product_type')"
               >
-                <input
+                <select
                   v-if="isEditing(p.id, 'product_type')"
                   :ref="setEditInputRef"
-                  v-model="editValue" type="number" min="1" max="5"
-                  class="w-full text-xs bg-transparent outline-none text-center"
-                  @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
-                />
+                  v-model="editValue"
+                  class="w-full text-xs bg-background outline-none text-center"
+                  @blur="commitEditProduct" @change="commitEditProduct" @keydown.escape.prevent="cancelEdit"
+                >
+                  <option
+                    v-for="(label, i) in (TYPE_HEADERS[p.department as DeptKey] ?? [])"
+                    :key="i"
+                    :value="String(i + 1)"
+                  >
+                    {{ label }}
+                  </option>
+                </select>
                 <span v-else class="inline-block px-2 py-0.5 rounded text-[10px] font-medium" :class="tabelaBadgeClass(p)">
                   {{ tabelaName(p) }}
                 </span>

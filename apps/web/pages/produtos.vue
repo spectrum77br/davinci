@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onUnmounted } from 'vue'
-import { Plus, Trash2, Download, RefreshCw, ChevronDown, ChevronRight, X, Loader2, Zap, Upload, Search } from 'lucide-vue-next'
+import { Plus, Trash2, Download, RefreshCw, ChevronDown, ChevronRight, X, Loader2, Zap, Upload, Search, Tags } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'produtos', action: 'view' } })
 
@@ -35,6 +35,9 @@ type Product = {
   sku: string
   name: string
   category: string | null
+  segment_id: string | null
+  segment_name: string | null
+  segment_path: string | null
   cost_price: string | null
   bling_cost_price: string | null
   price: string | null
@@ -50,6 +53,15 @@ type Product = {
   created_at: string
   updated_at: string
   links: ProductLink[]
+}
+
+type Segment = {
+  id: string
+  parent_id: string | null
+  name: string
+  slug: string
+  sort_order: number
+  active: boolean
 }
 
 type ProductPage = { items: Product[]; total: number; page: number; page_size: number }
@@ -84,11 +96,13 @@ const canDelete = useCan('produtos', 'delete')
 
 const integrations = ref<Integration[]>([])
 const items = ref<Product[]>([])
+const segments = ref<Segment[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = 50
 const search = ref('')
 const filtroIntegration = ref<string>('')
+const filtroSegment = ref<string>('')
 const stockFilter = ref<'' | 'low' | 'ok' | 'zero'>('')
 const expanded = ref<Set<string>>(new Set())
 const selected = ref<Set<string>>(new Set())
@@ -148,7 +162,7 @@ async function refreshAll() {
   loading.value = true
   error.value = null
   try {
-    const [pg, integ, settings] = await Promise.all([
+    const [pg, integ, settings, segs] = await Promise.all([
       api<ProductPage>(`/api/products?page=${page.value}&page_size=${pageSize}` +
         (search.value ? `&search=${encodeURIComponent(search.value)}` : '') +
         (filtroIntegration.value ? `&integration_id=${filtroIntegration.value}` : '') +
@@ -157,11 +171,13 @@ async function refreshAll() {
         // 'ok' is handled client-side (filteredItems) to avoid backend changes
       api<Integration[]>('/api/integrations'),
       api<UserSettings>('/api/settings'),
+      api<Segment[]>('/api/segments').catch(() => [] as Segment[]),
     ])
     items.value = pg.items
     total.value = pg.total
     integrations.value = integ
     autoSyncEnabled.value = settings.daily_sync_enabled
+    segments.value = segs
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -229,11 +245,144 @@ function manualLink(_p: Product, col: MarketCol) {
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
 const filteredItems = computed(() => {
+  let list = items.value
   if (stockFilter.value === 'ok') {
-    return items.value.filter((p) => p.stock > 0 && p.stock >= p.min_stock)
+    list = list.filter((p) => p.stock > 0 && p.stock >= p.min_stock)
   }
-  return items.value
+  if (filtroSegment.value === '__none__') {
+    list = list.filter((p) => !p.segment_id)
+  } else if (filtroSegment.value) {
+    const want = filtroSegment.value
+    const segIds = new Set<string>([want])
+    // include all descendants — taxonomy may have subtypes
+    let frontier = new Set<string>([want])
+    while (frontier.size) {
+      const next = new Set<string>()
+      for (const s of segments.value) {
+        if (s.parent_id && frontier.has(s.parent_id) && !segIds.has(s.id)) {
+          segIds.add(s.id)
+          next.add(s.id)
+        }
+      }
+      frontier = next
+    }
+    list = list.filter((p) => p.segment_id && segIds.has(p.segment_id))
+  }
+  return list
 })
+
+const segmentsById = computed(() => Object.fromEntries(segments.value.map((s) => [s.id, s])))
+
+// Set of segment ids that are parents (have at least one active child).
+// Used to enforce "leaf-only" selection in the product picker.
+const parentIds = computed(() => {
+  const out = new Set<string>()
+  for (const s of segments.value) {
+    if (s.parent_id && s.active) out.add(s.parent_id)
+  }
+  return out
+})
+
+// Flattened segments with "Root / Child" labels, sorted by path — for dropdowns.
+// Only LEAF segments (no active children) are returned, since a product must
+// be classified to a subtype, not just a root.
+const segmentOptions = computed(() => {
+  const byId = segmentsById.value
+  const isParent = parentIds.value
+  const out: { id: string; label: string; depth: number }[] = []
+  function pathOf(s: Segment): string {
+    const chain: string[] = []
+    let cur: Segment | undefined = s
+    const seen = new Set<string>()
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id)
+      chain.push(cur.name)
+      cur = cur.parent_id ? byId[cur.parent_id] : undefined
+    }
+    return chain.reverse().join(' / ')
+  }
+  function depthOf(s: Segment): number {
+    let d = 0
+    let cur: Segment | undefined = s
+    const seen = new Set<string>()
+    while (cur?.parent_id && !seen.has(cur.id)) {
+      seen.add(cur.id)
+      d++
+      cur = byId[cur.parent_id]
+    }
+    return d
+  }
+  for (const s of segments.value) {
+    if (!s.active) continue
+    if (isParent.has(s.id)) continue  // skip roots / non-leaf nodes
+    out.push({ id: s.id, label: pathOf(s), depth: depthOf(s) })
+  }
+  out.sort((a, b) => a.label.localeCompare(b.label))
+  return out
+})
+
+// Filter dropdown includes both roots and leaves (so user can filter by
+// "Celular" and see all subtypes, or by a specific leaf).
+const segmentFilterOptions = computed(() => {
+  const byId = segmentsById.value
+  function pathOf(s: Segment): string {
+    const chain: string[] = []
+    let cur: Segment | undefined = s
+    const seen = new Set<string>()
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id)
+      chain.push(cur.name)
+      cur = cur.parent_id ? byId[cur.parent_id] : undefined
+    }
+    return chain.reverse().join(' / ')
+  }
+  return segments.value
+    .filter((s) => s.active)
+    .map((s) => ({ id: s.id, label: pathOf(s) }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+})
+
+const segPickerProductId = ref<string | null>(null)
+function openSegPicker(p: Product) {
+  segPickerProductId.value = segPickerProductId.value === p.id ? null : p.id
+}
+function closeSegPicker() {
+  segPickerProductId.value = null
+}
+
+async function setProductSegment(p: Product, segmentId: string | null) {
+  try {
+    const updated = await api<Product>(`/api/products/${p.id}`, {
+      method: 'PATCH',
+      body: { segment_id: segmentId },
+    })
+    Object.assign(p, updated)
+    closeSegPicker()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
+
+const showBulkSegment = ref(false)
+const bulkSegmentId = ref<string>('')
+async function runBulkSegment() {
+  if (selected.value.size === 0) return
+  try {
+    await api('/api/products/bulk-segment', {
+      method: 'POST',
+      body: {
+        product_ids: [...selected.value],
+        segment_id: bulkSegmentId.value || null,
+      },
+    })
+    showBulkSegment.value = false
+    bulkSegmentId.value = ''
+    selected.value = new Set()
+    await refreshAll()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
 
 function toggleExpand(id: string) {
   if (expanded.value.has(id)) expanded.value.delete(id)
@@ -639,9 +788,17 @@ onUnmounted(() => {
         <option value="">Todas as contas</option>
         <option v-for="i in integrations" :key="i.id" :value="i.id">[{{ i.platform }}] {{ i.name }}</option>
       </select>
+      <select v-model="filtroSegment" class="h-9 w-[200px] rounded-md border bg-background px-2 text-sm">
+        <option value="">Todos segmentos</option>
+        <option value="__none__">— sem segmento</option>
+        <option v-for="s in segmentFilterOptions" :key="s.id" :value="s.id">{{ s.label }}</option>
+      </select>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ filteredItems.length }} de {{ total }} produtos · pág {{ page }}/{{ totalPages }}
       </span>
+      <Button v-if="canEdit && selected.size > 0" size="sm" variant="outline" @click="showBulkSegment = true">
+        <Tags class="size-4 mr-1.5" /> segmento ({{ selected.size }})
+      </Button>
       <Button v-if="canDelete && selected.size > 0" size="sm" variant="destructive" @click="bulkDelete">
         <Trash2 class="size-4 mr-1.5" /> excluir {{ selected.size }}
       </Button>
@@ -655,6 +812,7 @@ onUnmounted(() => {
             <th class="w-8"></th>
             <th>SKU</th>
             <th>Produto</th>
+            <th>Segmento</th>
             <th class="text-center">Bling</th>
             <th class="text-center">Shopee</th>
             <th class="text-center">Amazon</th>
@@ -678,6 +836,50 @@ onUnmounted(() => {
               </td>
               <td class="font-mono text-xs">{{ p.sku }}</td>
               <td class="font-medium">{{ p.name }}</td>
+              <td class="text-xs relative">
+                <button
+                  v-if="canEdit"
+                  class="text-left hover:underline"
+                  :class="p.segment_id ? 'text-foreground' : 'text-muted-foreground italic'"
+                  :title="p.segment_path || 'Clique para definir segmento'"
+                  @click="openSegPicker(p)"
+                >
+                  <span v-if="p.segment_path">{{ p.segment_path }}</span>
+                  <span v-else>+ segmento</span>
+                </button>
+                <span v-else :class="p.segment_id ? '' : 'text-muted-foreground'">
+                  {{ p.segment_path || '—' }}
+                </span>
+                <div
+                  v-if="segPickerProductId === p.id"
+                  class="absolute left-0 top-full mt-1 z-30 w-72 rounded-md border bg-background shadow-lg p-2 text-left"
+                  @click.stop
+                >
+                  <div class="space-y-1 max-h-72 overflow-y-auto">
+                    <button
+                      class="w-full text-left text-xs px-2 py-1 rounded hover:bg-muted text-muted-foreground italic"
+                      @click="setProductSegment(p, null)"
+                    >
+                      — limpar segmento —
+                    </button>
+                    <button
+                      v-for="opt in segmentOptions"
+                      :key="opt.id"
+                      class="w-full text-left text-xs px-2 py-1 rounded hover:bg-muted"
+                      :class="opt.id === p.segment_id ? 'bg-emerald-50 dark:bg-emerald-900/30 font-semibold' : ''"
+                      @click="setProductSegment(p, opt.id)"
+                    >
+                      {{ opt.label }}
+                    </button>
+                    <p v-if="segmentOptions.length === 0" class="text-xs text-muted-foreground italic px-2 py-1">
+                      Nenhum segmento. Cadastre em Admin → Segmentos.
+                    </p>
+                  </div>
+                  <div class="flex justify-end pt-1 border-t mt-1">
+                    <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="closeSegPicker">fechar</Button>
+                  </div>
+                </div>
+              </td>
               <td class="text-center tabular-nums font-semibold">
                 <span :class="p.stock === 0 ? 'text-red-600' : p.stock < p.min_stock ? 'text-amber-600' : ''">
                   {{ p.stock }}
@@ -787,7 +989,7 @@ onUnmounted(() => {
               </td>
             </tr>
             <tr v-if="expanded.has(p.id)" class="bg-muted/30">
-              <td colspan="12" class="p-3">
+              <td colspan="13" class="p-3">
                 <div v-if="p.links.length === 0" class="text-xs text-muted-foreground">
                   Sem links. Rode o auto-link para vincular este SKU aos canais.
                 </div>
@@ -831,7 +1033,7 @@ onUnmounted(() => {
             </tr>
           </template>
           <tr v-if="items.length === 0">
-            <td colspan="12" class="py-8 text-center text-sm text-muted-foreground">
+            <td colspan="13" class="py-8 text-center text-sm text-muted-foreground">
               Nenhum produto. Use "importar Bling" para começar.
             </td>
           </tr>
@@ -1236,6 +1438,35 @@ onUnmounted(() => {
             <Button :disabled="!csvFile || csvImporting" @click="submitCsvImport">
               <Loader2 v-if="csvImporting" class="size-4 mr-1 animate-spin" />
               Importar
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bulk segment assign modal -->
+    <div v-if="showBulkSegment" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showBulkSegment = false">
+      <div class="bg-background rounded-lg shadow-lg w-[min(520px,95vw)]">
+        <div class="flex items-center justify-between border-b p-3">
+          <h3 class="font-semibold flex items-center gap-2">
+            <Tags class="size-5 text-emerald-600" />
+            Atribuir segmento ({{ selected.size }} produto(s))
+          </h3>
+          <button @click="showBulkSegment = false"><X class="size-4" /></button>
+        </div>
+        <div class="p-4 space-y-3">
+          <label class="text-sm font-medium">Segmento</label>
+          <select v-model="bulkSegmentId" class="w-full h-9 rounded-md border bg-background px-2 text-sm">
+            <option value="">— remover segmento —</option>
+            <option v-for="s in segmentOptions" :key="s.id" :value="s.id">{{ s.label }}</option>
+          </select>
+          <p v-if="segmentOptions.length === 0" class="text-xs text-muted-foreground italic">
+            Nenhum segmento cadastrado. Vá em Admin → Segmentos.
+          </p>
+          <div class="flex gap-2 justify-end pt-2">
+            <Button variant="outline" @click="showBulkSegment = false">Cancelar</Button>
+            <Button @click="runBulkSegment">
+              Aplicar
             </Button>
           </div>
         </div>
