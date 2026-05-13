@@ -26,6 +26,7 @@ from app.models import (
     BackgroundJobType,
     LinkSyncStatus,
     Product,
+    ProductLink,
     SyncLog,
     User,
 )
@@ -35,6 +36,7 @@ from app.schemas.sync import (
     SyncLogOut,
     SyncLogPage,
     SyncLogStats,
+    SyncProductBody,
 )
 from app.services.advisory_lock import try_user_sync_lock
 from app.services.sync_orchestrator import SyncOrchestrator
@@ -142,6 +144,7 @@ async def sync_product(
     product_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+    body: SyncProductBody | None = None,
 ) -> JobOut:
     product = (
         await session.execute(
@@ -153,11 +156,34 @@ async def sync_product(
     if product is None:
         raise HTTPException(404, detail={"code": "product_not_found"})
 
+    only_link_ids: list[UUID] | None = None
+    requested_integration_ids = body.integration_ids if body else None
+    if requested_integration_ids:
+        link_rows = (
+            await session.execute(
+                select(ProductLink.id).where(
+                    and_(
+                        ProductLink.product_id == product.id,
+                        ProductLink.integration_id.in_(requested_integration_ids),
+                    )
+                )
+            )
+        ).scalars().all()
+        only_link_ids = list(link_rows)
+        if not only_link_ids:
+            raise HTTPException(
+                400,
+                detail={"code": "no_links_for_integrations"},
+            )
+
     job = BackgroundJob(
         type=BackgroundJobType.SYNC_PRODUCT,
         status=BackgroundJobStatus.PENDING,
         created_by=user.id,
-        payload={"product_id": str(product_id)},
+        payload={
+            "product_id": str(product_id),
+            "integration_ids": [str(i) for i in (requested_integration_ids or [])],
+        },
     )
     session.add(job)
     await session.flush()
@@ -169,7 +195,7 @@ async def sync_product(
                 detail={"code": "sync_already_running"},
             )
         orch = SyncOrchestrator(session, user_id=user.id, job=job)
-        await orch.run([product])
+        await orch.run([product], only_link_ids=only_link_ids)
 
     await session.refresh(job)
     return JobOut.model_validate(job, from_attributes=True)

@@ -8,6 +8,10 @@ class SyncProductIn(BaseModel):
     product_id: UUID
 
 
+class SyncProductBody(BaseModel):
+    integration_ids: list[UUID] | None = None
+
+
 class SyncAllIn(BaseModel):
     integration_ids: list[UUID] | None = None
     product_ids: list[UUID] | None = None

@@ -104,6 +104,10 @@ const showRefreshStock = ref(false)
 const selectedAutoLinkIds = ref<Set<string>>(new Set())
 const selectedSyncAllIds = ref<Set<string>>(new Set())
 
+// Per-product sync popover
+const syncPopoverProductId = ref<string | null>(null)
+const syncPopoverSelectedIds = ref<Set<string>>(new Set())
+
 // Feature 1: CSV import
 const showImportCsv = ref(false)
 const csvFile = ref<File | null>(null)
@@ -344,11 +348,16 @@ async function submitNewProduct() {
 
 const syncingProduct = ref<Set<string>>(new Set())
 
-async function syncProduct(id: string) {
+async function syncProduct(id: string, integrationIds?: string[]) {
   syncingProduct.value.add(id)
   syncingProduct.value = new Set(syncingProduct.value)
   try {
-    await api(`/api/sync/product/${id}`, { method: 'POST' })
+    await api(`/api/sync/product/${id}`, {
+      method: 'POST',
+      body: integrationIds && integrationIds.length > 0
+        ? { integration_ids: integrationIds }
+        : {},
+    })
     await refreshAll()
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -356,6 +365,37 @@ async function syncProduct(id: string) {
     syncingProduct.value.delete(id)
     syncingProduct.value = new Set(syncingProduct.value)
   }
+}
+
+function openSyncPopover(p: Product) {
+  // Pre-selecionar todas as integrações que têm link com este produto.
+  syncPopoverSelectedIds.value = new Set(
+    p.links.map((l) => l.integration_id).filter(Boolean) as string[],
+  )
+  syncPopoverProductId.value = p.id
+}
+
+function closeSyncPopover() {
+  syncPopoverProductId.value = null
+  syncPopoverSelectedIds.value = new Set()
+}
+
+function toggleSyncPopoverIntegration(id: string) {
+  if (syncPopoverSelectedIds.value.has(id)) syncPopoverSelectedIds.value.delete(id)
+  else syncPopoverSelectedIds.value.add(id)
+  syncPopoverSelectedIds.value = new Set(syncPopoverSelectedIds.value)
+}
+
+async function runSyncFromPopover(productId: string) {
+  if (syncPopoverSelectedIds.value.size === 0) return
+  const ids = Array.from(syncPopoverSelectedIds.value)
+  closeSyncPopover()
+  await syncProduct(productId, ids)
+}
+
+function linkedIntegrationsFor(p: Product): Integration[] {
+  const linkedIds = new Set(p.links.map((l) => l.integration_id))
+  return marketplaceIntegrations.value.filter((i) => linkedIds.has(i.id))
 }
 
 function openSyncAllDialog() {
@@ -674,7 +714,7 @@ onUnmounted(() => {
                 </span>
               </td>
               <td class="text-right">
-                <div class="flex items-center justify-end gap-1">
+                <div class="flex items-center justify-end gap-1 relative">
                   <Button
                     v-if="canEdit"
                     size="icon"
@@ -682,7 +722,7 @@ onUnmounted(() => {
                     class="text-cyan-600 hover:text-cyan-700 hover:bg-cyan-50"
                     :disabled="syncingProduct.has(p.id)"
                     :title="syncingProduct.has(p.id) ? 'sincronizando…' : 'Sincronizar este SKU'"
-                    @click="syncProduct(p.id)"
+                    @click="syncPopoverProductId === p.id ? closeSyncPopover() : openSyncPopover(p)"
                   >
                     <RefreshCw class="size-4" :class="syncingProduct.has(p.id) ? 'animate-spin' : ''" />
                   </Button>
@@ -696,6 +736,53 @@ onUnmounted(() => {
                   >
                     <Trash2 class="size-4" />
                   </Button>
+
+                  <!-- Per-product sync popover -->
+                  <div
+                    v-if="syncPopoverProductId === p.id"
+                    class="absolute right-0 top-full mt-1 z-30 w-72 rounded-md border bg-background shadow-lg p-3 text-left"
+                    @click.stop
+                  >
+                    <div class="space-y-3">
+                      <div>
+                        <p class="text-sm font-semibold">Sincronizar: {{ p.sku }}</p>
+                        <p class="text-xs text-muted-foreground">Selecione as contas para sincronizar</p>
+                      </div>
+                      <div class="space-y-1 max-h-48 overflow-y-auto">
+                        <p v-if="linkedIntegrationsFor(p).length === 0" class="text-xs text-muted-foreground italic py-2">
+                          Sem links neste produto. Use "Vincular Automático".
+                        </p>
+                        <label
+                          v-for="integ in linkedIntegrationsFor(p)"
+                          :key="integ.id"
+                          class="flex items-center gap-2 text-sm cursor-pointer hover:bg-muted/50 rounded px-1 py-0.5"
+                        >
+                          <input
+                            type="checkbox"
+                            :checked="syncPopoverSelectedIds.has(integ.id)"
+                            @change="toggleSyncPopoverIntegration(integ.id)"
+                          />
+                          <span :class="platformBadgeClass(integ.platform)">{{ integ.platform }}</span>
+                          <span class="truncate">{{ integ.name }}</span>
+                        </label>
+                      </div>
+                      <div class="flex items-center justify-between gap-2 pt-1 border-t">
+                        <span class="text-xs text-muted-foreground">{{ syncPopoverSelectedIds.size }} selecionada(s)</span>
+                        <div class="flex gap-1">
+                          <Button size="sm" variant="ghost" @click="closeSyncPopover">Cancelar</Button>
+                          <Button
+                            size="sm"
+                            :disabled="syncPopoverSelectedIds.size === 0 || syncingProduct.has(p.id)"
+                            @click="runSyncFromPopover(p.id)"
+                          >
+                            <Loader2 v-if="syncingProduct.has(p.id)" class="size-3.5 mr-1 animate-spin" />
+                            <RefreshCw v-else class="size-3.5 mr-1" />
+                            Sincronizar
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </td>
             </tr>
