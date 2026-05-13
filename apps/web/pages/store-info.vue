@@ -32,12 +32,11 @@ type StoreInfo = {
   updated_at: string
 }
 
-// Tipo column shows only operational departments — catálogo is a separate
-// flag, not a "type", so it's filtered out of the badges.
 const DEPT_BADGE: Record<string, { label: string; cls: string }> = {
-  celular: { label: 'Cel',    cls: 'bg-blue-500/15 text-blue-400 border-blue-500/40' },
-  mala:    { label: 'Mala',   cls: 'bg-amber-500/15 text-amber-400 border-amber-500/40' },
-  eletro:  { label: 'Eletro', cls: 'bg-purple-500/15 text-purple-400 border-purple-500/40' },
+  celular:  { label: 'Cel',      cls: 'bg-blue-500/15 text-blue-400 border-blue-500/40' },
+  mala:     { label: 'Mala',     cls: 'bg-amber-500/15 text-amber-400 border-amber-500/40' },
+  eletro:   { label: 'Eletro',   cls: 'bg-purple-500/15 text-purple-400 border-purple-500/40' },
+  catalogo: { label: 'Catálogo', cls: 'bg-muted text-muted-foreground border-border' },
 }
 
 type IntegrationRef = {
@@ -341,9 +340,10 @@ async function remove(row: StoreInfo) {
 // =========================================================== bind dept
 
 const TIPO_OPTIONS = [
-  { slug: 'celular', label: 'Celular' },
-  { slug: 'mala',    label: 'Mala' },
-  { slug: 'eletro',  label: 'Eletro' },
+  { slug: 'celular',  label: 'Celular' },
+  { slug: 'mala',     label: 'Mala' },
+  { slug: 'eletro',   label: 'Eletro' },
+  { slug: 'catalogo', label: 'Catálogo' },
 ] as const
 
 const tipoPopoverFor = ref<string | null>(null)
@@ -557,7 +557,7 @@ async function copyText(text: string) {
                 </span>
                 <span
                   v-if="integrationFor(row)"
-                  class="shrink-0 inline-flex items-center gap-0.5 px-1 py-0.5 rounded bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-[10px] max-w-[100px]"
+                  class="shrink-0 inline-flex items-center gap-0.5 px-1 py-0.5 rounded border bg-muted text-muted-foreground text-[10px] max-w-[100px]"
                   :title="`integração: ${integrationFor(row)!.name}`"
                 >
                   <Link2 class="h-2.5 w-2.5 shrink-0" />
@@ -571,17 +571,6 @@ async function copyText(text: string) {
                 >
                   <Unlink class="h-3 w-3" />
                 </button>
-                <select
-                  v-else-if="canEdit && availableIntegrationsFor(row).length"
-                  class="opacity-0 group-hover:opacity-100 transition-opacity border rounded text-[10px] bg-background px-0.5 py-0 h-5 max-w-[80px] shrink-0"
-                  @change="(e: any) => { attachIntegration(row, e.target.value); e.target.value = '' }"
-                  @click.stop
-                >
-                  <option value="">+ vincular…</option>
-                  <option v-for="i in availableIntegrationsFor(row)" :key="i.id" :value="i.id">
-                    {{ i.name }}
-                  </option>
-                </select>
               </div>
             </td>
             <!-- text fields -->
