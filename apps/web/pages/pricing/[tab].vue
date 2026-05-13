@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
-  Star, Send, Lock, Ban, Check, Link2, Copy,
+  Star, Send, Ban, Check, Link2, Copy,
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
   ChevronDown, Download, Undo2, Redo2, Search,
 } from 'lucide-vue-next'
@@ -712,22 +712,24 @@ function cellOf(prodId: string, accId: string): GridCell | undefined {
 }
 
 function cellLabel(c: GridCell | undefined): string {
-  if (!c) return '—'
+  // Default for empty/uncomputable cells is "NA" (matches SSH).
+  if (!c) return 'NA'
   if (c.cell_status === 'NA') return 'NA'
   if (c.cell_status === 'SV') return 'SV'
   if (c.source === 'disabled') return '∅'
-  if (c.price == null) return '—'
+  if (c.price == null) return 'NA'
   return Number(c.price).toFixed(0)
 }
 
 function cellTone(c: GridCell | undefined): string {
-  if (!c) return ''
+  // Default empty/missing cell → gray "NA" look.
+  if (!c) return 'bg-gray-100 text-gray-500 font-semibold'
   if (c.cell_status === 'NA') return 'bg-gray-200 text-gray-500 font-semibold'
-  if (c.cell_status === 'SV') return 'bg-amber-100 text-amber-700 font-semibold'
+  if (c.cell_status === 'SV') return 'bg-emerald-100 text-emerald-700 font-semibold'
   if (c.source === 'disabled') return 'bg-muted/50 text-muted-foreground'
   if (c.source === 'locked') return 'bg-amber-50 text-amber-900 dark:bg-amber-900/20 dark:text-amber-100'
   if (c.source === 'override') return 'bg-blue-50 text-blue-900 dark:bg-blue-900/20 dark:text-blue-100'
-  if (c.source === 'missing_inputs') return 'bg-red-50 text-red-900 dark:bg-red-900/20 dark:text-red-100'
+  if (c.source === 'missing_inputs') return 'bg-gray-100 text-gray-500 font-semibold'
   if (c.price != null) {
     const prod = grid.value?.products.find(p => p.id === c.pricing_product_id)
     const acc = grid.value?.accounts.find(a => a.id === c.pricing_account_id)
