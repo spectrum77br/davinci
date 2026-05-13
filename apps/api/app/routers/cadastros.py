@@ -83,6 +83,36 @@ async def cadastros_grid(
     return CadastroGridOut(marketplaces=list(MARKETPLACES), rows=rows)
 
 
+@router.get("/available", response_model=list[CadastroOut])
+async def list_available_cadastros(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("cadastro", "view"))],
+    tipo: str,
+    marketplace: str,
+) -> list[CadastroOut]:
+    """Cadastros (fone/email/...) of `tipo` that aren't already linked to any
+    Store on `marketplace`. Drives the dropdowns in the Empresas "Nova conta"
+    modal — keeps the user from picking a code that's already claimed.
+    """
+    cad_tipo = _to_tipo(tipo)
+    busy = (
+        select(CadastroStore.cadastro_id)
+        .join(Store, Store.id == CadastroStore.store_id)
+        .where(Store.marketplace == marketplace)
+    )
+    stmt = (
+        select(Cadastro)
+        .where(
+            Cadastro.tipo == cad_tipo,
+            Cadastro.status == CadastroStatus.ACTIVE,
+            Cadastro.id.notin_(busy),
+        )
+        .order_by(Cadastro.codigo)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [CadastroOut.model_validate(c) for c in rows]
+
+
 @router.get("", response_model=list[CadastroOut])
 async def list_cadastros(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -181,6 +211,41 @@ async def delete_cadastro(
     await session.delete(c)
     await session.commit()
     return None
+
+
+@router.post("/{cadastro_id}/stores", status_code=status.HTTP_204_NO_CONTENT)
+async def add_cadastro_store_link(
+    cadastro_id: UUID,
+    body: CadastroStoreLink,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("cadastro", "edit"))],
+) -> None:
+    """Adds a single (cadastro, store) link without clobbering existing ones —
+    used by the Empresas "Nova conta" flow to mark fone/email codes as
+    in-use the moment a new Store is created."""
+    cad = (
+        await session.execute(select(Cadastro).where(Cadastro.id == cadastro_id))
+    ).scalar_one_or_none()
+    if cad is None:
+        raise HTTPException(404, detail={"code": "cadastro_not_found"})
+    s = (await session.execute(select(Store).where(Store.id == body.store_id))).scalar_one_or_none()
+    if s is None:
+        raise HTTPException(404, detail={"code": "store_not_found"})
+    existing = (
+        await session.execute(
+            select(CadastroStore).where(
+                CadastroStore.cadastro_id == cadastro_id,
+                CadastroStore.store_id == body.store_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        session.add(CadastroStore(
+            cadastro_id=cadastro_id, store_id=body.store_id, alias=body.alias,
+        ))
+    else:
+        existing.alias = body.alias
+    await session.commit()
 
 
 @router.put("/{cadastro_id}/stores", response_model=CadastroDetailOut)

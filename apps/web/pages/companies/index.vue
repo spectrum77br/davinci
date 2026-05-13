@@ -260,18 +260,40 @@ async function commitEditObs(row: GridRow) {
 }
 
 // ---------- new account modal (Store + store_info) ----------
+type CadastroLite = { id: string; codigo: string; label: string | null }
+
 const newAccountFor = ref<{ company: CompanyOut; mk: Marketplace } | null>(null)
-const newAccountForm = reactive({ phone: '', email: '', server: '' })
+const newAccountForm = reactive({ phoneId: '', emailId: '', server: '' })
+const availablePhones = ref<CadastroLite[]>([])
+const availableEmails = ref<CadastroLite[]>([])
 const newAccountSaving = ref(false)
 const newAccountErr = ref<string | null>(null)
+const newAccountResult = ref<string | null>(null)
 
-function openNewAccount(row: GridRow, mk: Marketplace) {
+async function loadAvailableCadastros(mk: Marketplace) {
+  try {
+    const [phones, emails] = await Promise.all([
+      api<CadastroLite[]>(`/api/cadastros/available?tipo=fone&marketplace=${mk}`),
+      api<CadastroLite[]>(`/api/cadastros/available?tipo=email&marketplace=${mk}`),
+    ])
+    availablePhones.value = phones
+    availableEmails.value = emails
+  } catch (e: any) {
+    newAccountErr.value = e?.data?.detail?.code || e?.message || 'erro ao carregar cadastros'
+    availablePhones.value = []
+    availableEmails.value = []
+  }
+}
+
+async function openNewAccount(row: GridRow, mk: Marketplace) {
   if (!canEdit.value) return
   newAccountFor.value = { company: row.company, mk }
-  newAccountForm.phone = ''
-  newAccountForm.email = ''
+  newAccountForm.phoneId = ''
+  newAccountForm.emailId = ''
   newAccountForm.server = ''
   newAccountErr.value = null
+  newAccountResult.value = null
+  await loadAvailableCadastros(mk)
 }
 
 function closeNewAccount() {
@@ -282,10 +304,10 @@ function closeNewAccount() {
 async function submitNewAccount() {
   if (!newAccountFor.value) return
   const { company, mk } = newAccountFor.value
-  const phone = newAccountForm.phone.trim()
-  const email = newAccountForm.email.trim()
+  const phoneCad = availablePhones.value.find((c) => c.id === newAccountForm.phoneId)
+  const emailCad = availableEmails.value.find((c) => c.id === newAccountForm.emailId)
   const server = newAccountForm.server.trim()
-  if (!phone || !email || !server) {
+  if (!phoneCad || !emailCad || !server) {
     newAccountErr.value = 'Fone, e-mail e servidor são obrigatórios.'
     return
   }
@@ -293,30 +315,48 @@ async function submitNewAccount() {
   newAccountErr.value = null
   try {
     // 1. Create the Store cell (gated by enabled_marketplaces server-side).
-    await api('/api/stores', {
+    const store = await api<{ id: string }>('/api/stores', {
       method: 'POST',
       body: { company_id: company.id, marketplace: mk, status: 'active' },
     })
+
     // 2. Mirror to store_info so the data shows up on the Lojas page.
-    //    Failure here is non-fatal — the Store still exists; user can fill
-    //    the fields manually later.
     try {
       await api('/api/pricing/store-info', {
         method: 'POST',
         body: {
           platform: mk,
           account_name: company.apelido,
-          phone,
-          email,
+          phone: phoneCad.codigo,
+          email: emailCad.codigo,
           server,
         },
       })
     } catch (e: any) {
-      // Surface as a warning but don't roll back.
       error.value = `Loja criada, mas store_info falhou: ${e?.data?.detail?.code || e?.message || 'erro'}`
     }
+
+    // 3. Link the chosen fone/email Cadastros to the new Store so they show
+    //    up as "in use" on this marketplace and disappear from future
+    //    dropdowns. Each is non-fatal — if the link fails the loja still
+    //    exists and the operator can wire it up manually in /cadastros.
+    for (const cad of [phoneCad, emailCad]) {
+      try {
+        await api(`/api/cadastros/${cad.id}/stores`, {
+          method: 'POST',
+          body: { store_id: store.id, alias: company.apelido },
+        })
+      } catch (e: any) {
+        error.value = `Loja criada, mas link Cadastros falhou para ${cad.codigo}: ${e?.data?.detail?.code || e?.message || 'erro'}`
+      }
+    }
+
+    newAccountResult.value =
+      `Conta criada: ${company.apelido} · ${MARKETPLACE_SHORT[mk]} — ` +
+      `Fone ${phoneCad.codigo} · Email ${emailCad.codigo} · Servidor ${server}`
     await refresh()
-    closeNewAccount()
+    // Keep modal open briefly so user sees the result toast, then close.
+    setTimeout(() => closeNewAccount(), 1500)
   } catch (e: any) {
     newAccountErr.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -515,25 +555,53 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         <div class="space-y-3">
           <div>
             <Label>Fone <span class="text-red-500">*</span></Label>
-            <Input v-model="newAccountForm.phone" :disabled="newAccountSaving" placeholder="11999999999" />
+            <select
+              v-model="newAccountForm.phoneId"
+              :disabled="newAccountSaving"
+              class="w-full border rounded px-2 py-1 bg-background text-sm"
+            >
+              <option value="">— selecione um fone disponível —</option>
+              <option v-for="c in availablePhones" :key="c.id" :value="c.id">
+                {{ c.codigo }}{{ c.label ? ` · ${c.label}` : '' }}
+              </option>
+            </select>
+            <p v-if="!availablePhones.length" class="text-xs text-amber-600 mt-1">
+              Sem fones disponíveis para esta plataforma. Cadastre um em /cadastros.
+            </p>
           </div>
           <div>
             <Label>E-mail <span class="text-red-500">*</span></Label>
-            <Input v-model="newAccountForm.email" :disabled="newAccountSaving" placeholder="conta@dominio" />
+            <select
+              v-model="newAccountForm.emailId"
+              :disabled="newAccountSaving"
+              class="w-full border rounded px-2 py-1 bg-background text-sm"
+            >
+              <option value="">— selecione um e-mail disponível —</option>
+              <option v-for="c in availableEmails" :key="c.id" :value="c.id">
+                {{ c.codigo }}{{ c.label ? ` · ${c.label}` : '' }}
+              </option>
+            </select>
+            <p v-if="!availableEmails.length" class="text-xs text-amber-600 mt-1">
+              Sem e-mails disponíveis para esta plataforma. Cadastre um em /cadastros.
+            </p>
           </div>
           <div>
             <Label>Servidor <span class="text-red-500">*</span></Label>
             <Input v-model="newAccountForm.server" :disabled="newAccountSaving" placeholder="ex: 76" />
           </div>
           <p class="text-xs text-muted-foreground">
-            Cria a loja e o registro correspondente em Lojas (info) — você pode editar os outros campos depois.
+            Apenas códigos sem vínculo nesta plataforma aparecem nos selects. Ao criar, o fone e o e-mail
+            ficam marcados como "em uso" na tabela Cadastros.
           </p>
         </div>
         <div v-if="newAccountErr" class="text-sm text-red-500">erro: {{ newAccountErr }}</div>
+        <div v-if="newAccountResult" class="text-sm rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 px-3 py-2">
+          ✓ {{ newAccountResult }}
+        </div>
         <div class="flex justify-end gap-2">
           <Button variant="ghost" :disabled="newAccountSaving" @click="closeNewAccount">cancelar</Button>
           <Button
-            :disabled="newAccountSaving || !newAccountForm.phone.trim() || !newAccountForm.email.trim() || !newAccountForm.server.trim()"
+            :disabled="newAccountSaving || !newAccountForm.phoneId || !newAccountForm.emailId || !newAccountForm.server.trim()"
             @click="submitNewAccount"
           >
             {{ newAccountSaving ? 'criando…' : 'Criar conta' }}
