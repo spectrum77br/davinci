@@ -3,7 +3,7 @@ import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, External
 
 definePageMeta({
   middleware: ['permission'],
-  permission: { resource: 'tabela_precos', action: 'view' },
+  permission: { resource: 'lojas_info', action: 'view' },
 })
 
 type StoreInfo = {

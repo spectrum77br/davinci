@@ -8,15 +8,16 @@ Resource = Literal[
     "tabela_precos",
     "tabela_precos_contas",
     "tabela_precos_produtos",
-    "auditoria",
+    "margem",
     "conciliacao_frete",
-    "sincronizacoes",
     "devolucoes",
     "reembolso",
-    "margem",
+    "sincronizacoes",
     "empresa",
     "cadastro",
+    "lojas_info",
     "permissoes",
+    "configuracoes",
 ]
 RESOURCES: tuple[str, ...] = get_args(Resource)
 

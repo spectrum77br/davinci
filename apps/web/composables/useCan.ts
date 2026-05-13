@@ -13,7 +13,9 @@ export type Resource =
   | 'margem'
   | 'empresa'
   | 'cadastro'
+  | 'lojas_info'
   | 'permissoes'
+  | 'configuracoes'
 
 export type Action = 'view' | 'edit' | 'delete'
 
@@ -44,11 +46,11 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     label: 'Cadastros',
-    resources: ['empresa', 'cadastro'],
+    resources: ['empresa', 'cadastro', 'lojas_info'],
   },
   {
     label: 'Admin',
-    resources: ['permissoes'],
+    resources: ['permissoes', 'configuracoes'],
   },
 ]
 
@@ -69,7 +71,9 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   sincronizacoes: 'Sincronizações',
   empresa: 'Empresa',
   cadastro: 'Cadastro',
+  lojas_info: 'Lojas (info)',
   permissoes: 'Permissões',
+  configuracoes: 'Configurações',
 }
 
 export function useCan(resource: Resource, action: Action) {

@@ -60,7 +60,7 @@ const sections: Section[] = [
     items: [
       { to: '/companies', label: 'Empresas', icon: Building2, resource: 'empresa' },
       { to: '/cadastros', label: 'Cadastros', icon: ContactRound, resource: 'cadastro' },
-      { to: '/store-info', label: 'Lojas (info)', icon: Store, resource: 'tabela_precos' },
+      { to: '/store-info', label: 'Lojas (info)', icon: Store, resource: 'lojas_info' },
     ],
   },
   {
@@ -68,7 +68,7 @@ const sections: Section[] = [
     items: [
       { to: '/users', label: 'Usuários', icon: Users, adminOnly: true },
       { to: '/permissoes', label: 'Permissões', icon: ShieldCheck, adminOnly: true },
-      { to: '/configuracoes', label: 'Configurações', icon: Settings },
+      { to: '/configuracoes', label: 'Configurações', icon: Settings, resource: 'configuracoes' },
     ],
   },
 ]
