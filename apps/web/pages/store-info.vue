@@ -338,8 +338,51 @@ async function remove(row: StoreInfo) {
   }
 }
 
-// Tipo cell is read-only — derived from `pricing_accounts` matched by
-// (platform, account_name). Editing happens via Tabela de Preços > Contas.
+// =========================================================== bind dept
+
+const TIPO_OPTIONS = [
+  { slug: 'celular', label: 'Celular' },
+  { slug: 'mala',    label: 'Mala' },
+  { slug: 'eletro',  label: 'Eletro' },
+] as const
+
+const tipoPopoverFor = ref<string | null>(null)
+const tipoBusy = ref<Set<string>>(new Set())
+
+function openTipoPopover(rowId: string) {
+  if (!canEdit.value) return
+  tipoPopoverFor.value = rowId === tipoPopoverFor.value ? null : rowId
+}
+
+// Close the Tipo popover on any click outside the popover/cell.
+const onDocClick = () => { tipoPopoverFor.value = null }
+onMounted(() => document.addEventListener('click', onDocClick))
+onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
+
+async function toggleDepartment(row: StoreInfo, slug: string, checked: boolean) {
+  const key = `${row.id}:${slug}`
+  if (tipoBusy.value.has(key)) return
+  tipoBusy.value.add(key)
+  try {
+    if (checked) {
+      await api(`/api/pricing/store-info/${row.id}/department`, {
+        method: 'POST',
+        body: { department: slug },
+      })
+    } else {
+      await api(
+        `/api/pricing/store-info/${row.id}/department/${encodeURIComponent(slug)}`,
+        { method: 'DELETE' },
+      )
+    }
+    flash(row.id, 'department')
+    await load()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    tipoBusy.value.delete(key)
+  }
+}
 
 // =========================================================== password reveal
 
@@ -666,11 +709,17 @@ async function copyText(text: string) {
                 {{ row.observation || '—' }}
               </span>
             </td>
-            <!-- Tipo (read-only badges from linked pricing_accounts; catálogo excluded) -->
-            <td class="border border-border px-1 py-1 text-center">
+            <!-- Tipo (badges from linked pricing_accounts; catálogo excluded;
+                 click to open the bind/unbind popover) -->
+            <td
+              class="border border-border px-1 py-1 text-center relative"
+              :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': tipoPopoverFor === row.id }"
+              :title="canEdit ? 'Vincular departamentos' : ''"
+              @click.stop="openTipoPopover(row.id)"
+            >
               <div
                 v-if="row.departments.some((d) => DEPT_BADGE[d])"
-                class="flex flex-wrap gap-0.5 justify-center"
+                class="flex flex-wrap gap-0.5 justify-center cursor-pointer"
               >
                 <span
                   v-for="d in row.departments.filter((x) => DEPT_BADGE[x])"
@@ -680,6 +729,33 @@ async function copyText(text: string) {
                 >
                   {{ DEPT_BADGE[d].label }}
                 </span>
+              </div>
+              <span v-else class="text-muted-foreground cursor-pointer text-xs">—</span>
+              <!-- popover -->
+              <div
+                v-if="tipoPopoverFor === row.id"
+                class="absolute z-20 mt-1 left-1/2 -translate-x-1/2 w-36 rounded-md border bg-popover p-2 shadow-lg text-left"
+                @click.stop
+              >
+                <label
+                  v-for="opt in TIPO_OPTIONS"
+                  :key="opt.slug"
+                  class="flex items-center gap-2 py-1 cursor-pointer text-xs hover:bg-accent/50 px-1 rounded"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="row.departments.includes(opt.slug)"
+                    :disabled="tipoBusy.has(`${row.id}:${opt.slug}`)"
+                    @change="(e) => toggleDepartment(row, opt.slug, (e.target as HTMLInputElement).checked)"
+                  />
+                  <span>{{ opt.label }}</span>
+                </label>
+                <button
+                  class="mt-1 w-full text-center text-[10px] text-muted-foreground hover:text-foreground py-0.5"
+                  @click="tipoPopoverFor = null"
+                >
+                  fechar
+                </button>
               </div>
             </td>
             <!-- Tab. Preço -->
