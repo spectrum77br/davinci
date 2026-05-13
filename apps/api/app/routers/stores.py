@@ -3,13 +3,13 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import and_, delete as sa_delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Company, Integration, Marketplace, Store, StoreStatus, User
+from app.models import Company, Integration, Marketplace, Store, StoreInfo, StoreStatus, User
 from app.schemas.companies import StoreCreate, StoreOut, StorePatch
 
 logger = structlog.get_logger()
@@ -143,9 +143,29 @@ async def delete_store(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("empresa", "delete"))],
 ) -> None:
+    """Removes the Store + every shadow record tied to it.
+
+    - `cadastros_stores` rows are dropped automatically by the FK cascade.
+    - `store_info` is loosely coupled (matched by `(platform, account_name)`,
+      not an FK) so we delete by hand: every store_info row whose platform
+      matches the Store's marketplace and whose `account_name` (lowered)
+      equals the company's apelido (lowered) is removed.
+    """
     s = (await session.execute(select(Store).where(Store.id == store_id))).scalar_one_or_none()
     if s is None:
         raise HTTPException(404, detail={"code": "store_not_found"})
+    company = (
+        await session.execute(select(Company).where(Company.id == s.company_id))
+    ).scalar_one_or_none()
+    if company is not None and company.apelido:
+        await session.execute(
+            sa_delete(StoreInfo).where(
+                and_(
+                    StoreInfo.platform == s.marketplace.value,
+                    func.lower(StoreInfo.account_name) == company.apelido.strip().lower(),
+                )
+            )
+        )
     await session.delete(s)
     await session.commit()
     return None

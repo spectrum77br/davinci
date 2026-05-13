@@ -43,6 +43,9 @@ type StoreInfoLite = {
   account_name: string | null
   cpf_name: string | null
   platform: string
+  phone: string | null
+  email: string | null
+  server: string | null
 }
 
 const { api } = useApi()
@@ -371,6 +374,40 @@ async function createStoreCell(companyId: string, mk: Marketplace) {
   openNewAccount(row, mk)
 }
 
+// ---------- store cell popover (Ver detalhes / Remover conta) ----------
+const cellPopoverFor = ref<string | null>(null) // `${companyId}:${mk}`
+function openCellPopover(companyId: string, mk: Marketplace) {
+  if (!canEdit.value) return
+  const key = `${companyId}:${mk}`
+  cellPopoverFor.value = cellPopoverFor.value === key ? null : key
+}
+function closeCellPopover() { cellPopoverFor.value = null }
+
+const onDocClickCell = () => { cellPopoverFor.value = null }
+onMounted(() => document.addEventListener('click', onDocClickCell))
+onBeforeUnmount(() => document.removeEventListener('click', onDocClickCell))
+
+function storeInfoFor(row: GridRow, mk: Marketplace): StoreInfoLite | undefined {
+  const apelido = (row.company.apelido || '').trim().toLowerCase()
+  return storeInfos.value.find(
+    (s) => s.platform === mk && (s.account_name || '').trim().toLowerCase() === apelido,
+  )
+}
+
+async function removeStoreCell(row: GridRow, mk: Marketplace) {
+  const cell = row.stores[mk]
+  if (!cell) return
+  const apelido = row.company.apelido
+  if (!confirm(`Remover conta de ${apelido} no ${MARKETPLACE_SHORT[mk]}? Vai apagar Loja, dados em store_info e vínculos em Cadastros.`)) return
+  try {
+    await api(`/api/stores/${cell.id}`, { method: 'DELETE' })
+    closeCellPopover()
+    await refresh()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro ao remover'
+  }
+}
+
 async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
   if (!canEdit.value) return
   const enabled = new Set(row.company.enabled_marketplaces || [])
@@ -477,11 +514,40 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 {{ respByApelido.get(row.company.apelido.trim().toLowerCase())?.cpf || '—' }}
               </span>
             </td>
-            <td v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
+            <td v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center relative">
               <template v-if="row.stores[mk]">
-                <span :class="STORE_STATUS_CLASSES[row.stores[mk]!.status]">
+                <button
+                  v-if="canEdit"
+                  :class="[STORE_STATUS_CLASSES[row.stores[mk]!.status], 'cursor-pointer hover:bg-accent/40 px-1.5 rounded']"
+                  :title="`${MARKETPLACE_SHORT[mk]} — clique para opções`"
+                  @click.stop="openCellPopover(row.company.id, mk)"
+                >{{ STORE_STATUS_LABELS[row.stores[mk]!.status] }}</button>
+                <span v-else :class="STORE_STATUS_CLASSES[row.stores[mk]!.status]">
                   {{ STORE_STATUS_LABELS[row.stores[mk]!.status] }}
                 </span>
+                <div
+                  v-if="cellPopoverFor === `${row.company.id}:${mk}`"
+                  class="absolute z-30 mt-1 left-1/2 -translate-x-1/2 w-56 rounded-md border bg-popover p-2 shadow-lg text-left text-xs"
+                  @click.stop
+                >
+                  <div class="px-1 pb-2 border-b border-border space-y-0.5">
+                    <div class="font-semibold uppercase text-[10px] text-muted-foreground">
+                      {{ row.company.apelido }} · {{ MARKETPLACE_SHORT[mk] }}
+                    </div>
+                    <template v-if="storeInfoFor(row, mk)">
+                      <div><span class="text-muted-foreground">Fone:</span> {{ storeInfoFor(row, mk)!.phone || '—' }}</div>
+                      <div><span class="text-muted-foreground">Email:</span> {{ storeInfoFor(row, mk)!.email || '—' }}</div>
+                      <div><span class="text-muted-foreground">Servidor:</span> {{ storeInfoFor(row, mk)!.server || '—' }}</div>
+                    </template>
+                    <div v-else class="text-muted-foreground">Sem store_info vinculada.</div>
+                  </div>
+                  <button
+                    class="w-full text-left mt-1 px-2 py-1 rounded hover:bg-destructive/10 text-destructive"
+                    @click="removeStoreCell(row, mk)"
+                  >
+                    Remover conta
+                  </button>
+                </div>
               </template>
               <template v-else-if="!(row.company.enabled_marketplaces || []).includes(mk)">
                 <button
