@@ -1557,28 +1557,28 @@ async def list_store_info(
             .order_by(StoreInfo.sort_order, StoreInfo.platform)
         )
     ).scalars().all()
-    # Bulk-fetch the department set per store_info via pricing_accounts. After
-    # the segments refactor `department` lives only as a virtual field, so we
-    # resolve each account's `segment_id` to its root slug through the segment
-    # index (one extra query, no N+1).
+    # Match badges by `account_name` (case-insensitive), mirroring SSH:
+    # `pricing_accounts.store_info_id` is empty in prod (the FK column was
+    # never populated), so a JOIN on it returns nothing and every store would
+    # show "✕ Não". Use the textual name as the link instead.
     roots_by_id, _, _ = await _segment_index(session)
     acc_rows = (
         await session.execute(
-            select(PricingAccount.store_info_id, PricingAccount.segment_id).where(
-                and_(
-                    user_scope(PricingAccount, user),
-                    PricingAccount.store_info_id.is_not(None),
-                )
+            select(PricingAccount.name, PricingAccount.segment_id).where(
+                user_scope(PricingAccount, user)
             )
         )
     ).all()
-    by_store: dict[UUID, set[str]] = {}
-    for sid, seg_id in acc_rows:
+    depts_by_name: dict[str, set[str]] = {}
+    for acct_name, seg_id in acc_rows:
+        key = (acct_name or "").strip().lower()
+        if not key:
+            continue
         slug = roots_by_id.get(seg_id)
         if slug:
-            by_store.setdefault(sid, set()).add(slug)
+            depts_by_name.setdefault(key, set()).add(slug)
     return [
-        _store_info_out(r, list(by_store.get(r.id, set())))
+        _store_info_out(r, list(depts_by_name.get((r.account_name or "").strip().lower(), set())))
         for r in rows
     ]
 
