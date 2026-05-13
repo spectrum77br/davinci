@@ -37,11 +37,13 @@ type StoreInfo = {
   updated_at: string
 }
 
+// Tipo badges all share the neutral palette — colors per dept were too noisy.
+const DEPT_BADGE_CLS = 'bg-muted text-muted-foreground border-border'
 const DEPT_BADGE: Record<string, { label: string; cls: string }> = {
-  celular:  { label: 'Cel',      cls: 'bg-blue-500/15 text-blue-400 border-blue-500/40' },
-  mala:     { label: 'Mala',     cls: 'bg-amber-500/15 text-amber-400 border-amber-500/40' },
-  eletro:   { label: 'Eletro',   cls: 'bg-purple-500/15 text-purple-400 border-purple-500/40' },
-  catalogo: { label: 'Catálogo', cls: 'bg-muted text-muted-foreground border-border' },
+  celular:  { label: 'Cel',      cls: DEPT_BADGE_CLS },
+  mala:     { label: 'Mala',     cls: DEPT_BADGE_CLS },
+  eletro:   { label: 'Eletro',   cls: DEPT_BADGE_CLS },
+  catalogo: { label: 'Catálogo', cls: DEPT_BADGE_CLS },
 }
 
 type IntegrationRef = {
