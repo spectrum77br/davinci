@@ -157,9 +157,7 @@ async function unlinkIntegration(row: StoreInfo) {
 }
 
 const sorted = computed(() => {
-  let list = [...items.value].sort(
-    (a, b) => a.sort_order - b.sort_order || a.platform.localeCompare(b.platform),
-  )
+  let list = [...items.value]
   if (filterPlatform.value !== 'all') {
     const want = normPlatform(filterPlatform.value)
     list = list.filter((s) => normPlatform(s.platform) === want)
@@ -176,6 +174,29 @@ const sorted = computed(() => {
     )
   }
   return list
+})
+
+// Grouped by platform (alphabetical platform order, alphabetical account_name
+// within each group). Mirrors the SSH "Lojas" view with platform headers.
+const groups = computed(() => {
+  const map = new Map<string, StoreInfo[]>()
+  for (const r of sorted.value) {
+    const key = normPlatform(r.platform)
+    if (!map.has(key)) map.set(key, [])
+    map.get(key)!.push(r)
+  }
+  for (const arr of map.values()) {
+    arr.sort((a, b) =>
+      (a.account_name || '').localeCompare(b.account_name || '', 'pt-BR', { sensitivity: 'base' })
+    )
+  }
+  return Array.from(map.keys())
+    .sort()
+    .map((platform) => ({
+      platform,
+      count: map.get(platform)!.length,
+      rows: map.get(platform)!,
+    }))
 })
 
 // =========================================================== inline edit
@@ -393,34 +414,30 @@ async function copyText(text: string) {
           <tr>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Plataforma</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Conta</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[110px]">Tipo</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Tab. Preço</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Integração</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[100px]">Segmento</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Frete</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Servidor</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">CNPJ</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">E-mail</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Telefone</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Fone</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Senha</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">Link</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">End. Envio</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">End. Devolução</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">Observação</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border w-32">Vincular dept</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Ord</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border w-32">End. Envio</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border w-32">End. Dev.</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[160px]">Obs</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[110px]">Tipo</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Tab. Preço</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Integração</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colSpan="20" class="text-center py-6 text-muted-foreground">
+            <td colSpan="16" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!sorted.length && !showAdd">
-            <td colSpan="20" class="text-center py-8 text-muted-foreground">Nenhuma loja cadastrada.</td>
+            <td colSpan="16" class="text-center py-8 text-muted-foreground">Nenhuma loja cadastrada.</td>
           </tr>
 
           <!-- add row -->
@@ -440,7 +457,7 @@ async function copyText(text: string) {
                 @keydown.escape="showAdd = false"
               />
             </td>
-            <td v-for="i in 15" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
+            <td v-for="i in 13" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
             <td class="border border-border px-1 py-1 text-center">
               <div class="flex gap-0.5 justify-center">
                 <button class="p-1 text-emerald-600 hover:bg-emerald-50 rounded" :disabled="adding" @click="submitNew">
@@ -454,8 +471,17 @@ async function copyText(text: string) {
             </td>
           </tr>
 
-          <!-- data rows -->
-          <tr v-for="row in sorted" :key="row.id" class="hover:bg-accent/30">
+          <!-- platform groups: header + rows -->
+          <template v-for="group in groups" :key="group.platform">
+            <tr class="bg-muted/60">
+              <td colSpan="16" class="px-3 py-2 text-xs font-bold uppercase tracking-wide text-foreground/80 border-b border-border">
+                {{ group.platform }}
+                <span class="font-normal text-muted-foreground normal-case">
+                  {{ group.count }} conta{{ group.count > 1 ? 's' : '' }}
+                </span>
+              </td>
+            </tr>
+          <tr v-for="row in group.rows" :key="row.id" class="hover:bg-accent/30">
             <!-- platform -->
             <td
               class="border border-border px-2 py-1.5 text-xs cursor-pointer"
@@ -529,45 +555,10 @@ async function copyText(text: string) {
                 </select>
               </div>
             </td>
-            <!-- Tipo (department badges from linked pricing_accounts) -->
-            <td class="border border-border px-1 py-1 text-center">
-              <div v-if="row.departments && row.departments.length" class="flex flex-wrap gap-0.5 justify-center">
-                <span
-                  v-for="d in row.departments"
-                  :key="d"
-                  class="px-1.5 py-0.5 rounded border text-[10px] font-semibold"
-                  :class="(DEPT_BADGE[d]?.cls) || 'bg-muted text-muted-foreground border-muted'"
-                >
-                  {{ DEPT_BADGE[d]?.label || d }}
-                </span>
-              </div>
-            </td>
-            <!-- Tab. Preço -->
-            <td class="border border-border px-1 py-1 text-center">
-              <span
-                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold"
-                :class="row.has_pricing
-                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
-                  : 'bg-muted text-muted-foreground border-border'"
-              >
-                {{ row.has_pricing ? 'sim' : '—' }}
-              </span>
-            </td>
-            <!-- Integração -->
-            <td class="border border-border px-1 py-1 text-center">
-              <span
-                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold"
-                :class="row.has_integration
-                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
-                  : 'bg-muted text-muted-foreground border-border'"
-              >
-                {{ row.has_integration ? 'sim' : '—' }}
-              </span>
-            </td>
             <!-- text fields -->
             <template
               v-for="f in [
-                'segment', 'freight', 'cpf_name', 'server', 'cnpj', 'email', 'phone',
+                'freight', 'cpf_name', 'server', 'cnpj', 'email', 'phone',
               ]"
               :key="f"
             >
@@ -627,43 +618,14 @@ async function copyText(text: string) {
                 </button>
               </div>
             </td>
-            <!-- link -->
+            <!-- shipping_address (compact: truncate + tooltip) -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
-              :class="{
-                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'link'),
-                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'link'),
-              }"
-              @click="!isEditing(row.id, 'link') && startEdit(row, 'link')"
-            >
-              <input
-                v-if="isEditing(row.id, 'link')"
-                :ref="setEditInputRef"
-                v-model="editValue" type="text"
-                class="w-full text-xs bg-transparent outline-none"
-                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
-              />
-              <div v-else class="flex items-center gap-1">
-                <span :class="{ 'text-muted-foreground': !row.link, 'text-blue-600 dark:text-blue-400 truncate flex-1': !!row.link }">
-                  {{ row.link || '—' }}
-                </span>
-                <a
-                  v-if="row.link"
-                  :href="row.link.startsWith('http') ? row.link : `https://${row.link}`"
-                  target="_blank" rel="noopener" class="shrink-0"
-                  @click.stop
-                >
-                  <ExternalLink class="h-3 w-3 text-muted-foreground" />
-                </a>
-              </div>
-            </td>
-            <!-- shipping_address -->
-            <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer max-w-[140px]"
               :class="{
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'shipping_address'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'shipping_address'),
               }"
+              :title="row.shipping_address || ''"
               @click="!isEditing(row.id, 'shipping_address') && startEdit(row, 'shipping_address')"
             >
               <input
@@ -673,17 +635,18 @@ async function copyText(text: string) {
                 class="w-full text-xs bg-transparent outline-none"
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               />
-              <span v-else :class="{ 'text-muted-foreground': !row.shipping_address }">
+              <span v-else class="block truncate" :class="{ 'text-muted-foreground': !row.shipping_address }">
                 {{ row.shipping_address || '—' }}
               </span>
             </td>
-            <!-- return_address -->
+            <!-- return_address (compact: truncate + tooltip) -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer max-w-[140px]"
               :class="{
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'return_address'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'return_address'),
               }"
+              :title="row.return_address || ''"
               @click="!isEditing(row.id, 'return_address') && startEdit(row, 'return_address')"
             >
               <input
@@ -693,7 +656,7 @@ async function copyText(text: string) {
                 class="w-full text-xs bg-transparent outline-none"
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               />
-              <span v-else :class="{ 'text-muted-foreground': !row.return_address }">
+              <span v-else class="block truncate" :class="{ 'text-muted-foreground': !row.return_address }">
                 {{ row.return_address || '—' }}
               </span>
             </td>
@@ -717,32 +680,40 @@ async function copyText(text: string) {
                 {{ row.observation || '—' }}
               </span>
             </td>
-            <!-- bind dept -->
+            <!-- Tipo (department badges from linked pricing_accounts) -->
             <td class="border border-border px-1 py-1 text-center">
-              <select
-                v-if="canEdit"
-                class="border rounded px-1 py-0.5 text-xs bg-background"
-                @change="(e) => setDepartment(row, e)"
-              >
-                <option value="">+ dept…</option>
-                <option v-for="d in DEPARTMENTS" :key="d.value" :value="d.value">{{ d.label }}</option>
-              </select>
-              <Check v-if="isFlashed(row.id, 'department')" class="inline h-3 w-3 text-emerald-600 ml-1" />
+              <div v-if="row.departments && row.departments.length" class="flex flex-wrap gap-0.5 justify-center">
+                <span
+                  v-for="d in row.departments"
+                  :key="d"
+                  class="px-1.5 py-0.5 rounded border text-[10px] font-semibold"
+                  :class="(DEPT_BADGE[d]?.cls) || 'bg-muted text-muted-foreground border-muted'"
+                >
+                  {{ DEPT_BADGE[d]?.label || d }}
+                </span>
+              </div>
             </td>
-            <!-- sort_order -->
-            <td
-              class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
-              :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'sort_order') }"
-              @click="!isEditing(row.id, 'sort_order') && startEdit(row, 'sort_order')"
-            >
-              <input
-                v-if="isEditing(row.id, 'sort_order')"
-                :ref="setEditInputRef"
-                v-model="editValue" type="number"
-                class="w-full text-xs bg-transparent outline-none text-center"
-                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
-              />
-              <span v-else>{{ row.sort_order }}</span>
+            <!-- Tab. Preço -->
+            <td class="border border-border px-1 py-1 text-center">
+              <span
+                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold"
+                :class="row.has_pricing
+                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+                  : 'bg-red-500/15 text-red-400 border-red-500/40'"
+              >
+                {{ row.has_pricing ? 'Sim' : '✕ Não' }}
+              </span>
+            </td>
+            <!-- Integração -->
+            <td class="border border-border px-1 py-1 text-center">
+              <span
+                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold"
+                :class="row.has_integration
+                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+                  : 'bg-red-500/15 text-red-400 border-red-500/40'"
+              >
+                {{ row.has_integration ? 'Sim' : '✕ Não' }}
+              </span>
             </td>
             <!-- delete -->
             <td class="border border-border px-1 py-1 text-center">
@@ -756,6 +727,7 @@ async function copyText(text: string) {
               </button>
             </td>
           </tr>
+          </template>
         </tbody>
       </table>
     </div>
