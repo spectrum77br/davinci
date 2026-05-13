@@ -258,7 +258,15 @@ class PricingPushReportIn(BaseModel):
 
 class SkuAuditRow(BaseModel):
     sku: str
-    listing_count: int
+    title: str | None = None
+    stock: int | None = None
+    accounts: list[str] = []
+    account_count: int = 0
+    issues: list[str] = []
+    bling_cost: str | None = None
+    pricing_cost: str | None = None
+    # Legacy/back-compat fields (kept so older callers don't break).
+    listing_count: int = 0
     platforms: list[str] = []
     integration_ids: list[str] = []
     sample_titles: list[str] = []

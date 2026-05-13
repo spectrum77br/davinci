@@ -259,6 +259,68 @@ const productsLoading = ref(false)
 const productsErr = ref<string | null>(null)
 const searchProdutos = ref('')
 
+// ----- Pendências (sku-audit) for the Produtos tab -----
+type AuditPendingRow = {
+  sku: string
+  title: string | null
+  stock: number | null
+  accounts: string[]
+  account_count: number
+  issues: string[]
+  bling_cost: string | null
+  pricing_cost: string | null
+  dismissed: boolean
+}
+
+const auditRows = ref<AuditPendingRow[]>([])
+const auditLoading = ref(false)
+const auditError = ref<string | null>(null)
+const auditShowDismissed = ref(false)
+const auditHidden = ref(false)
+
+async function loadAudit() {
+  auditLoading.value = true
+  auditError.value = null
+  try {
+    const includeDismissed = '?include_dismissed=true'
+    auditRows.value = await api<AuditPendingRow[]>(`/api/pricing/sku-audit${includeDismissed}`)
+  } catch (e: any) {
+    auditError.value = e?.data?.detail?.code || 'audit_failed'
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+const auditPending = computed(() => auditRows.value.filter((r) => !r.dismissed))
+const auditDismissed = computed(() => auditRows.value.filter((r) => r.dismissed))
+
+function issueBadgeClass(issue: string): string {
+  const base = 'inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold'
+  if (issue === 'Sem anúncio') return `${base} bg-red-100 text-red-700`
+  if (issue === 'Custo divergente') return `${base} bg-orange-100 text-orange-700`
+  return `${base} bg-amber-100 text-amber-700`
+}
+
+async function dismissAuditSku(sku: string) {
+  try {
+    await api(`/api/pricing/sku-audit/${encodeURIComponent(sku)}/dismiss`, { method: 'POST' })
+    const row = auditRows.value.find((r) => r.sku === sku)
+    if (row) row.dismissed = true
+  } catch (e: any) {
+    auditError.value = e?.data?.detail?.code || 'dismiss_failed'
+  }
+}
+
+async function undismissAuditSku(sku: string) {
+  try {
+    await api(`/api/pricing/sku-audit/${encodeURIComponent(sku)}/undismiss`, { method: 'POST' })
+    const row = auditRows.value.find((r) => r.sku === sku)
+    if (row) row.dismissed = false
+  } catch (e: any) {
+    auditError.value = e?.data?.detail?.code || 'undismiss_failed'
+  }
+}
+
 async function loadProducts() {
   productsLoading.value = true
   productsErr.value = null
@@ -699,6 +761,33 @@ async function loadGrid() {
   } finally {
     gridLoading.value = false
   }
+  // Stock + sales maps load in the background; failures don't break the grid.
+  loadStockMap()
+  loadSalesMaps()
+}
+
+// Maps: pricing_product_id -> integer (stock or units sold)
+const stockMap = ref<Record<string, number>>({})
+const salesMap7d = ref<Record<string, number>>({})
+const salesMap30d = ref<Record<string, number>>({})
+
+async function loadStockMap() {
+  try {
+    const qs = department.value ? `?department=${department.value}` : ''
+    stockMap.value = await api<Record<string, number>>(`/api/pricing/stock-map${qs}`)
+  } catch {
+    stockMap.value = {}
+  }
+}
+
+async function loadSalesMaps() {
+  const dep = department.value
+  const [m7, m30] = await Promise.all([
+    api<Record<string, number>>(`/api/pricing/sales-map?days=7${dep ? `&department=${dep}` : ''}`).catch(() => ({})),
+    api<Record<string, number>>(`/api/pricing/sales-map?days=30${dep ? `&department=${dep}` : ''}`).catch(() => ({})),
+  ])
+  salesMap7d.value = m7
+  salesMap30d.value = m30
 }
 
 const cellMap = computed(() => {
@@ -1107,14 +1196,16 @@ function handleExportExcel() {
   if (!grid.value) return
   const accs = grid.value.accounts
   const prods = filteredGridProducts.value
-  const headers = ['SKU', 'Produto', 'Bling', department.value === 'celular' ? 'Kit1' : 'Custo']
+  const headers = ['SKU', 'Produto', 'Bling', '7d', '30d', department.value === 'celular' ? 'Kit1' : 'Custo']
   if (department.value === 'celular') headers.push('Kit2', 'Kit3', 'Kit4')
   for (const acc of accs) headers.push(acc.name)
   const rows = prods.map(p => {
     const row: string[] = [
       p.sku,
       p.name,
-      String(Number(p.bling_cost_price || 0).toFixed(0)),
+      String(stockMap.value[p.id] ?? 0),
+      String(salesMap7d.value[p.id] ?? 0),
+      String(salesMap30d.value[p.id] ?? 0),
       String(Number(p.cost_kit1 || 0).toFixed(0)),
     ]
     if (department.value === 'celular') {
@@ -1334,6 +1425,7 @@ watch(
   tab,
   async (t) => {
     if (t === 'tabela') await loadGrid()
+    if (t === 'produtos') loadAudit()
   },
   { immediate: true },
 )
@@ -1698,6 +1790,102 @@ watch(department, async () => {
 
     <!-- ============================================ PRODUTOS -->
     <section v-else-if="tab === 'produtos'" class="space-y-3">
+      <!-- Pendências box (Custo divergente / Sem anúncio / Fora da tabela) -->
+      <div
+        v-if="!auditHidden && (auditPending.length > 0 || auditDismissed.length > 0 || auditLoading)"
+        class="rounded border border-amber-300 bg-amber-50 p-3"
+      >
+        <div class="flex items-center justify-between">
+          <div class="text-sm font-semibold text-amber-800 flex items-center gap-2">
+            <AlertCircle class="h-4 w-4" />
+            <span v-if="auditLoading">Verificando pendências…</span>
+            <span v-else>
+              {{ auditPending.length }} produto(s) do Bling com pendências
+              <span v-if="auditDismissed.length" class="font-normal text-amber-700">({{ auditDismissed.length }} dispensado(s))</span>
+            </span>
+          </div>
+          <div class="flex gap-2">
+            <button class="btn btn-sm" :disabled="auditLoading" @click="loadAudit">
+              <RefreshCw class="h-3.5 w-3.5 mr-1" :class="{ 'animate-spin': auditLoading }" /> Atualizar
+            </button>
+            <button class="btn btn-sm" @click="auditHidden = true">Ocultar</button>
+          </div>
+        </div>
+
+        <div v-if="auditError" class="mt-2 text-xs text-red-700">{{ auditError }}</div>
+
+        <div v-if="auditPending.length" class="mt-3 overflow-auto rounded border border-amber-200 bg-background max-h-[420px]">
+          <table class="w-full text-xs">
+            <thead class="bg-amber-100/60 sticky top-0">
+              <tr class="text-left">
+                <th class="px-2 py-1.5 font-semibold">SKU</th>
+                <th class="px-2 py-1.5 font-semibold">Produto</th>
+                <th class="px-2 py-1.5 font-semibold text-right w-20">Estoque</th>
+                <th class="px-2 py-1.5 font-semibold w-44">Contas</th>
+                <th class="px-2 py-1.5 font-semibold">Pendências</th>
+                <th class="px-2 py-1.5 font-semibold w-24"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in auditPending" :key="row.sku" class="border-t border-amber-100 align-top">
+                <td class="px-2 py-1.5 font-mono">{{ row.sku }}</td>
+                <td class="px-2 py-1.5">{{ row.title || '—' }}</td>
+                <td class="px-2 py-1.5 text-right tabular-nums">{{ row.stock ?? 0 }}</td>
+                <td class="px-2 py-1.5">
+                  <span v-if="row.account_count === 0" class="text-red-600 font-medium">Nenhuma</span>
+                  <span v-else>
+                    {{ row.account_count }} ({{ row.accounts.slice(0, 3).join(', ') }}{{ row.accounts.length > 3 ? ', ...' : '' }})
+                  </span>
+                </td>
+                <td class="px-2 py-1.5">
+                  <div class="flex flex-col gap-1">
+                    <div class="flex flex-wrap gap-1">
+                      <span v-for="iss in row.issues" :key="iss" :class="issueBadgeClass(iss)">{{ iss }}</span>
+                    </div>
+                    <div v-if="row.issues.includes('Custo divergente')" class="text-[10px] text-orange-700">
+                      Bling: R$ {{ row.bling_cost ?? '—' }} · Tabela: R$ {{ row.pricing_cost ?? '—' }}
+                    </div>
+                  </div>
+                </td>
+                <td class="px-2 py-1.5 text-right">
+                  <button class="btn btn-xs" @click="dismissAuditSku(row.sku)">Dispensar</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-if="auditDismissed.length" class="mt-3">
+          <button class="text-xs text-amber-800 underline" @click="auditShowDismissed = !auditShowDismissed">
+            {{ auditShowDismissed ? 'Ocultar' : 'Dispensados' }} ({{ auditDismissed.length }})
+          </button>
+          <div v-if="auditShowDismissed" class="mt-2 overflow-auto rounded border border-amber-200 bg-background max-h-[280px]">
+            <table class="w-full text-xs">
+              <thead class="bg-amber-100/40 sticky top-0">
+                <tr class="text-left">
+                  <th class="px-2 py-1.5 font-semibold">SKU</th>
+                  <th class="px-2 py-1.5 font-semibold">Produto</th>
+                  <th class="px-2 py-1.5 font-semibold">Pendências</th>
+                  <th class="px-2 py-1.5 font-semibold w-24"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in auditDismissed" :key="row.sku" class="border-t border-amber-100">
+                  <td class="px-2 py-1.5 font-mono">{{ row.sku }}</td>
+                  <td class="px-2 py-1.5">{{ row.title || '—' }}</td>
+                  <td class="px-2 py-1.5">
+                    <span v-for="iss in row.issues" :key="iss" :class="issueBadgeClass(iss)" class="mr-1">{{ iss }}</span>
+                  </td>
+                  <td class="px-2 py-1.5 text-right">
+                    <button class="btn btn-xs" @click="undismissAuditSku(row.sku)">Restaurar</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <div class="flex items-center justify-between">
         <div>
           <h3 class="text-base font-semibold">
@@ -2102,7 +2290,7 @@ watch(department, async () => {
             <tr>
               <th
                 class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30"
-                :colspan="department === 'celular' ? 6 : 3"
+                :colspan="department === 'celular' ? 8 : 5"
               />
               <th
                 v-for="group in accountGroups"
@@ -2118,7 +2306,7 @@ watch(department, async () => {
             <tr>
               <th
                 class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30 align-bottom"
-                :colspan="department === 'celular' ? 6 : 3"
+                :colspan="department === 'celular' ? 8 : 5"
               >
                 Produto
               </th>
@@ -2160,14 +2348,16 @@ watch(department, async () => {
             <tr>
               <th class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30 min-w-[200px]">Produto</th>
               <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-green-700 font-bold z-30 min-w-[56px]" :style="{ left: '200px' }">bling</th>
+              <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 min-w-[56px]" :style="{ left: '256px' }">7d</th>
+              <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 min-w-[56px]" :style="{ left: '312px' }">30d</th>
               <template v-if="department === 'celular'">
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '256px' }">kit 1</th>
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '312px' }">kit 2</th>
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '368px' }">kit 3</th>
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '424px' }">kit 4</th>
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">kit 1</th>
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '424px' }">kit 2</th>
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '480px' }">kit 3</th>
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '536px' }">kit 4</th>
               </template>
               <template v-else>
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '256px' }">custo</th>
+                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">custo</th>
               </template>
               <th
                 v-for="acc in grid?.accounts ?? []"
@@ -2212,30 +2402,47 @@ watch(department, async () => {
                   </div>
                 </div>
               </td>
-              <!-- Sticky cost: bling -->
+              <!-- Sticky: Bling stock (was cost; now stock from products table) -->
               <td
-                class="sticky bg-green-50 text-green-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]"
+                class="sticky bg-green-50 px-1 py-1 text-center text-xs font-bold z-10 min-w-[56px]"
+                :class="(stockMap[prod.id] ?? 0) === 0 ? 'text-red-600' : 'text-green-700'"
                 :style="{ left: '200px' }"
               >
-                {{ prod.bling_cost_price != null ? Number(prod.bling_cost_price).toFixed(0) : '—' }}
+                {{ stockMap[prod.id] ?? 0 }}
               </td>
-              <!-- Sticky cost: kits or custo -->
+              <!-- Sticky: 7d sales -->
+              <td
+                class="sticky bg-blue-50 px-1 py-1 text-center text-xs font-bold z-10 min-w-[56px]"
+                :class="(salesMap7d[prod.id] ?? 0) === 0 ? 'text-muted-foreground/60' : 'text-blue-700'"
+                :style="{ left: '256px' }"
+              >
+                {{ (salesMap7d[prod.id] ?? 0) === 0 ? '—' : salesMap7d[prod.id] }}
+              </td>
+              <!-- Sticky: 30d sales -->
+              <td
+                class="sticky bg-blue-50 px-1 py-1 text-center text-xs font-bold z-10 min-w-[56px]"
+                :class="(salesMap30d[prod.id] ?? 0) === 0 ? 'text-muted-foreground/60' : 'text-blue-700'"
+                :style="{ left: '312px' }"
+              >
+                {{ (salesMap30d[prod.id] ?? 0) === 0 ? '—' : salesMap30d[prod.id] }}
+              </td>
+              <!-- Sticky cost: kits or custo (positions shifted by +112px) -->
               <template v-if="department === 'celular'">
-                <td class="sticky bg-background text-blue-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '256px' }">
+                <td class="sticky bg-background text-blue-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '368px' }">
                   {{ Number(prod.cost_kit1 || 0).toFixed(0) }}
                 </td>
-                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '312px' }">
+                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '424px' }">
                   {{ prod.cost_kit2 != null ? Number(prod.cost_kit2).toFixed(0) : '—' }}
                 </td>
-                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '368px' }">
+                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '480px' }">
                   {{ prod.cost_kit3 != null ? Number(prod.cost_kit3).toFixed(0) : '—' }}
                 </td>
-                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '424px' }">
+                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '536px' }">
                   {{ prod.cost_kit4 != null ? Number(prod.cost_kit4).toFixed(0) : '—' }}
                 </td>
               </template>
               <template v-else>
-                <td class="sticky bg-background text-blue-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '256px' }">
+                <td class="sticky bg-background text-blue-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '368px' }">
                   {{ Number(prod.cost_kit1 || 0).toFixed(0) }}
                 </td>
               </template>

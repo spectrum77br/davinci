@@ -22,6 +22,7 @@ from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobType,
+    BlingOrder,
     CellStatus,
     Department,
     Integration,
@@ -31,6 +32,7 @@ from app.models import (
     PricingOverride,
     PricingPlatform,
     PricingProduct,
+    Product,
     StoreInfo,
     User,
 )
@@ -936,6 +938,124 @@ async def send_push_report(
             400,
             detail={"code": "telegram_not_configured", "reason": str(e)},
         ) from e
+
+
+# =============================================================================
+# Stock + sales maps (used by the grid Bling/7d/30d columns)
+# =============================================================================
+
+
+def _expand_pricing_skus(
+    pricing_products: list[PricingProduct],
+) -> dict[str, list[UUID]]:
+    """Map each individual SKU piece to the pricing_product_id(s) that include it.
+
+    pricing_products.sku may be comma-separated (e.g. "a001,a002,a003"). We
+    split, strip and lowercase to build a lookup.
+    """
+    by_sku: dict[str, list[UUID]] = {}
+    for pp in pricing_products:
+        for piece in (pp.sku or "").split(","):
+            key = piece.strip().lower()
+            if not key:
+                continue
+            by_sku.setdefault(key, []).append(pp.id)
+    return by_sku
+
+
+@router.get("/stock-map")
+async def get_stock_map(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
+    department: Annotated[str | None, Query()] = None,
+) -> dict[str, int]:
+    """Returns {pricing_product_id: total_stock} summing products.stock for
+    every SKU piece referenced by the pricing_product."""
+    dept = _coerce_department(department)
+    stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
+    if dept is not None:
+        stmt = stmt.where(PricingProduct.department == dept)
+    pricing_rows = (await session.execute(stmt)).scalars().all()
+    if not pricing_rows:
+        return {}
+
+    sku_to_pids = _expand_pricing_skus(list(pricing_rows))
+    if not sku_to_pids:
+        return {}
+
+    # Pull product stock for every distinct sku piece (case-insensitive).
+    product_rows = (
+        await session.execute(
+            select(Product.sku, Product.stock).where(user_scope(Product, user))
+        )
+    ).all()
+
+    stock_by_pid: dict[str, int] = {str(pp.id): 0 for pp in pricing_rows}
+    for sku, stock in product_rows:
+        if not sku:
+            continue
+        key = sku.strip().lower()
+        pids = sku_to_pids.get(key)
+        if not pids:
+            continue
+        for pid in pids:
+            stock_by_pid[str(pid)] += int(stock or 0)
+    return stock_by_pid
+
+
+@router.get("/sales-map")
+async def get_sales_map(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
+    department: Annotated[str | None, Query()] = None,
+    days: Annotated[int, Query(ge=1, le=365)] = 7,
+) -> dict[str, int]:
+    """Returns {pricing_product_id: units_sold_in_last_N_days} from bling_orders.
+
+    bling_orders is single-tenant so no user_scope is applied. Cancelled and
+    returned orders are excluded.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    dept = _coerce_department(department)
+
+    pp_stmt = select(PricingProduct).where(user_scope(PricingProduct, _u))
+    if dept is not None:
+        pp_stmt = pp_stmt.where(PricingProduct.department == dept)
+    pricing_rows = (await session.execute(pp_stmt)).scalars().all()
+    if not pricing_rows:
+        return {}
+    sku_to_pids = _expand_pricing_skus(list(pricing_rows))
+    if not sku_to_pids:
+        return {}
+
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    excluded_situations = ("Cancelado", "Devolvido")
+    rows = (
+        await session.execute(
+            select(BlingOrder.item_codigo, BlingOrder.item_quantidade).where(
+                and_(
+                    BlingOrder.item_codigo.isnot(None),
+                    BlingOrder.item_codigo != "",
+                    BlingOrder.data >= cutoff,
+                    BlingOrder.situacao.notin_(excluded_situations),
+                )
+            )
+        )
+    ).all()
+
+    sales_by_pid: dict[str, int] = {str(pp.id): 0 for pp in pricing_rows}
+    for codigo, qty in rows:
+        key = (codigo or "").strip().lower()
+        if not key:
+            continue
+        pids = sku_to_pids.get(key)
+        if not pids:
+            continue
+        amount = int(qty or 0)
+        for pid in pids:
+            sales_by_pid[str(pid)] += amount
+    return sales_by_pid
 
 
 # =============================================================================
