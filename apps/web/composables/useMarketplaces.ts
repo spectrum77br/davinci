@@ -19,8 +19,8 @@ export const MARKETPLACE_LABELS: Record<Marketplace, string> = {
 }
 
 export const MARKETPLACE_SHORT: Record<Marketplace, string> = {
-  ml: 'ML', shopee: 'Shopee', amazon: 'AMZ', aliexpress: 'Ali',
-  temu: 'Temu', tiktok: 'TT', shein: 'Shein', magalu: 'Magalu', site: 'Site',
+  ml: 'ML', shopee: 'Shopee', amazon: 'Amazon', aliexpress: 'Aliexpress',
+  temu: 'Temu', tiktok: 'Tik tok', shein: 'Shein', magalu: 'Magalu', site: 'Site',
 }
 
 export type StoreStatus =
