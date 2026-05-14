@@ -45,6 +45,7 @@ from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.tiktok import TikTokClient
 from app.services.marketplaces.temu import TemuClient
 from app.services.pricing.calc import CalcOutcome, calculate
+from app.services.pricing.sku_match import build_prefix_index, resolve_product_ids
 
 if TYPE_CHECKING:
     from app.models import User
@@ -167,28 +168,22 @@ async def _resolve_product_links(
 ) -> list[ProductLink]:
     """Find all product_links for the (integration, pricing_product) pair.
 
-    SSH semantics: pricing_product.sku is a comma-joined list of variant SKUs
-    (e.g. "x043,x044,x045,x046"). Each variant maps to a row in
-    `davinci.products`, and each `products` row can have multiple
-    `product_links` rows (one per integration). We return every link for
-    every variant SKU on the target integration so the caller can push the
-    price to all variations of the listing.
+    SSH stores pricing_product.sku as a comma-joined list of *base* codes
+    ("t031,t032"). DaVinci's products table carries Bling-decorated SKUs
+    ("t031.sa", "t031.sa+a001.sa"). The prefix index lets a base code
+    reach every variant that shares it.
     """
     if not pricing_product_sku:
         return []
-    sku_pieces = [s.strip() for s in pricing_product_sku.split(",") if s.strip()]
-    if not sku_pieces:
-        return []
-    product_ids = (
+    rows = (
         await session.execute(
-            select(Product.id).where(
-                and_(
-                    Product.user_id == user_id,
-                    Product.sku.in_(sku_pieces),
-                )
+            select(Product.id, Product.sku).where(
+                Product.user_id == user_id,
             )
         )
-    ).scalars().all()
+    ).all()
+    prefix_index = build_prefix_index((pid, sku) for pid, sku in rows)
+    product_ids = resolve_product_ids(pricing_product_sku, prefix_index)
     if not product_ids:
         return []
     return list(

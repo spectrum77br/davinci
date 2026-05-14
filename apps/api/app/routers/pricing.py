@@ -786,40 +786,25 @@ async def get_grid(
     ).scalars().all()
     by_pair = {(o.pricing_product_id, o.pricing_account_id): o for o in overrides}
 
-    # SSH-style NA/SV computation. For each cell we need to know whether the
-    # account has a connected integration *and* whether at least one variant
-    # SKU of the pricing_product has a product_link on that integration. Done
-    # in one pass instead of N queries.
-    all_skus: set[str] = set()
-    for prod in products:
-        for piece in (prod.sku or "").split(","):
-            piece = piece.strip()
-            if piece:
-                all_skus.add(piece)
-    sku_to_product_ids: dict[str, list[UUID]] = {}
-    if all_skus:
-        rows = (
-            await session.execute(
-                select(Product.id, Product.sku).where(
-                    and_(
-                        user_scope(Product, user),
-                        Product.sku.in_(list(all_skus)),
-                    )
-                )
-            )
-        ).all()
-        for pid, sku in rows:
-            sku_to_product_ids.setdefault(sku, []).append(pid)
+    # SSH-style NA/SV computation. SSH pricing_product.sku is a comma-joined
+    # list of *base* codes ("t031,t032"); davinci.products.sku is Bling's
+    # decorated SKU ("t031.sa", "t031.sa+a001.sa"). Walk the prefix index
+    # from sku_match so a base code reaches every variant that shares it.
+    from app.services.pricing.sku_match import (
+        build_prefix_index,
+        resolve_product_ids,
+    )
 
-    # pricing_product.id → list of davinci.products.id (one per variant SKU
-    # that resolved)
+    rows = (
+        await session.execute(
+            select(Product.id, Product.sku).where(user_scope(Product, user))
+        )
+    ).all()
+    prefix_index = build_prefix_index((pid, sku) for pid, sku in rows)
+
     pp_to_product_ids: dict[UUID, list[UUID]] = {}
     for prod in products:
-        ids: list[UUID] = []
-        for piece in (prod.sku or "").split(","):
-            piece = piece.strip()
-            if piece and piece in sku_to_product_ids:
-                ids.extend(sku_to_product_ids[piece])
+        ids = resolve_product_ids(prod.sku, prefix_index)
         if ids:
             pp_to_product_ids[prod.id] = ids
 
