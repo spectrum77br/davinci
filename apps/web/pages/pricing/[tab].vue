@@ -646,11 +646,11 @@ async function commitEditProduct() {
     if (gp) Object.assign(gp, updated)
     flash(id, field)
     if (field.startsWith('cost_kit')) {
-      // Recompute prices in-memory so the tabela view repaints without a
-      // round trip. Cells with override / explicit status are left alone.
-      // No tab guard — when the grid isn't loaded recomputeCellsForProduct
-      // is a no-op and there's nothing to repaint.
+      // In-memory recompute first for instant repaint; then loadGrid so the
+      // backend formula (with stored overrides, product_type, etc) is the
+      // source of truth. Falls back gracefully if grid isn't loaded.
       recomputeCellsForProduct(id)
+      if (grid.value) await loadGrid()
     }
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'save_failed'
