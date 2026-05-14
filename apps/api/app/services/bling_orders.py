@@ -135,6 +135,20 @@ def _row_from_item(
     if not isinstance(produto, dict):
         produto = {}
 
+    # Marketplace fees live under `taxas` (valorBase / custoFrete / taxaComissao),
+    # not at the top level. Bling populates these AFTER the marketplace settles,
+    # so they may be NULL on the first webhook and arrive on a later
+    # `pedido.alteracao.situacao` event. Fallback to `originaldata.taxas` (raw
+    # marketplace payload preserved by Bling) if the normalized field is empty.
+    taxas = raw_order.get("taxas") if isinstance(raw_order.get("taxas"), dict) else {}
+    orig_taxas = (
+        (raw_order.get("originaldata") or {}).get("taxas")
+        if isinstance(raw_order.get("originaldata"), dict)
+        else {}
+    )
+    if not isinstance(orig_taxas, dict):
+        orig_taxas = {}
+
     return {
         "bling_id": _int(raw_order.get("id")),
         "numero": str(raw_order["numero"]) if raw_order.get("numero") is not None else None,
@@ -154,9 +168,18 @@ def _row_from_item(
         "loja": str(loja.get("id")) if loja.get("id") is not None else None,
         "store_id": store_id,
         "itens": raw_order.get("itens"),
-        "valorbase": _num(raw_order.get("valorBase") or raw_order.get("valorbase")),
-        "custofrete": _num(raw_order.get("transporte", {}).get("frete") if isinstance(raw_order.get("transporte"), dict) else None),
-        "taxacomissao": _num(raw_order.get("taxas", {}).get("taxaComissao") if isinstance(raw_order.get("taxas"), dict) else None),
+        "valorbase": _num(
+            taxas.get("valorBase") if taxas.get("valorBase") is not None
+            else orig_taxas.get("valorBase")
+        ),
+        "custofrete": _num(
+            taxas.get("custoFrete") if taxas.get("custoFrete") is not None
+            else orig_taxas.get("custoFrete")
+        ),
+        "taxacomissao": _num(
+            taxas.get("taxaComissao") if taxas.get("taxaComissao") is not None
+            else orig_taxas.get("taxaComissao")
+        ),
         "item_id": _int(item.get("id")),
         "item_index": item_index,
         "itemvalor": _num(item.get("valor")),
@@ -170,6 +193,27 @@ def _row_from_item(
         "categoria_id": _int(categoria.get("id")),
         "categoria_nome": categoria.get("descricao") or categoria.get("nome"),
     }
+
+
+def _situacao_id(raw_order: dict[str, Any]) -> str | None:
+    s = raw_order.get("situacao")
+    if isinstance(s, dict):
+        sid = s.get("id")
+        return str(sid) if sid is not None else None
+    return str(s) if s is not None else None
+
+
+async def _cost_price_by_sku(
+    session: AsyncSession, skus: set[str]
+) -> dict[str, float]:
+    if not skus:
+        return {}
+    rows = (
+        await session.execute(
+            select(Product.sku, Product.cost_price).where(Product.sku.in_(skus))
+        )
+    ).all()
+    return {sku: float(cost) for sku, cost in rows if cost is not None}
 
 
 async def upsert_order(
@@ -189,6 +233,21 @@ async def upsert_order(
     if not isinstance(itens, list):
         itens = []
 
+    # Situacao 6 = "Em andamento" — snapshot unit cost from products.cost_price.
+    cost_by_sku: dict[str, float] = {}
+    if _situacao_id(raw_order) == "6" and itens:
+        skus: set[str] = set()
+        for it in itens:
+            if not isinstance(it, dict):
+                continue
+            raw_sku = it.get("codigo") or (it.get("produto") or {}).get("codigo")
+            if raw_sku is None:
+                continue
+            s = str(raw_sku).strip()
+            if s:
+                skus.add(s)
+        cost_by_sku = await _cost_price_by_sku(session, skus)
+
     await session.execute(
         delete(BlingOrder).where(BlingOrder.bling_id == bling_id)
     )
@@ -203,6 +262,9 @@ async def upsert_order(
         if not isinstance(item, dict):
             continue
         row = _row_from_item(raw_order, item, item_index=idx, store_id=store_id)
+        sku = (row.get("item_codigo") or "").strip() if row.get("item_codigo") else None
+        if sku and sku in cost_by_sku:
+            row["preco_custo"] = cost_by_sku[sku]
         session.add(BlingOrder(**row))
     return len(itens)
 
