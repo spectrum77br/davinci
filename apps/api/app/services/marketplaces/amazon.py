@@ -270,6 +270,53 @@ class AmazonClient:
 
         return _classify_price_response(r, sku, price)
 
+    async def get_listing_price(self, link: "ProductLink") -> float | None:
+        """Read the current price from /listings/2021-08-01/items/{seller}/{sku}.
+        Amazon stores it under attributes.purchasable_offer[0].our_price[0]
+        .schedule[0].value_with_tax — the same path update_price writes to."""
+        sku = (link.external_sku or link.external_id or "").strip()
+        if not sku or not self.seller_id or not self.marketplace_id:
+            return None
+        try:
+            r = await self._request(
+                "GET",
+                f"/listings/2021-08-01/items/{self.seller_id}/{sku}",
+                params={
+                    "marketplaceIds": self.marketplace_id,
+                    "includedData": "offers,attributes",
+                },
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if r.status_code != 200:
+            return None
+        body = r.json() or {}
+        # Try offers[] first — that's the live offer view; fall back to the
+        # attributes patch shape we wrote.
+        offers = body.get("offers") or body.get("payload", {}).get("offers") or []
+        for offer in offers:
+            price = offer.get("price") or {}
+            amount = price.get("amount") if isinstance(price, dict) else None
+            if amount is not None:
+                try:
+                    return float(amount)
+                except (TypeError, ValueError):
+                    return None
+        attrs = body.get("attributes") or {}
+        po = attrs.get("purchasable_offer") or []
+        for entry in po:
+            our_price = entry.get("our_price") or []
+            for op in our_price:
+                schedules = op.get("schedule") or []
+                for s in schedules:
+                    val = s.get("value_with_tax")
+                    if val is not None:
+                        try:
+                            return float(val)
+                        except (TypeError, ValueError):
+                            return None
+        return None
+
 
 # ---------------------------------------------------------------- helpers
 

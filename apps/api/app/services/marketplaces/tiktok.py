@@ -548,6 +548,46 @@ class TikTokClient:
         )
         return True
 
+    async def get_listing_price(self, link) -> float | None:
+        """Read the current price from GET /product/202309/products/{id}.
+        Each SKU under skus[] has its own price object; we look up the one
+        matching link.variation_id, or fall back to the first one when the
+        listing has no variations stored on the link."""
+        path = f"/product/202309/products/{link.external_id}"
+        try:
+            resp = await self._get(path)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(resp, dict) or resp.get("code") != 0:
+            return None
+        data = resp.get("data") or {}
+        skus = data.get("skus") or []
+        if not skus:
+            return None
+        target = (link.variation_id or "").strip()
+        chosen = None
+        if target:
+            for sku in skus:
+                if str(sku.get("id") or "") == target:
+                    chosen = sku
+                    break
+        chosen = chosen or skus[0]
+        price = chosen.get("price") or {}
+        # TikTok responds with amount as a string in cents OR in reais
+        # depending on version — try both.
+        amount = price.get("sale_price") or price.get("tax_exclusive_price") or price.get("amount")
+        if amount is None:
+            return None
+        try:
+            v = float(amount)
+        except (TypeError, ValueError):
+            return None
+        # Heuristic: if the value is "large and integer-shaped" assume cents.
+        # Real prices in BRL are typically < 100000.
+        if v > 100000 and v == int(v):
+            return v / 100.0
+        return v
+
     async def activate_product(self, product_id: str) -> bool:
         """Activate a deactivated product.
 

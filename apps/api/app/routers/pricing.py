@@ -1372,7 +1372,7 @@ async def get_actual_prices(
         # Only platforms with get_listing_price implemented carry real data;
         # the rest silently leave the cell at null.
         platform_value = integ.platform.value if hasattr(integ.platform, "value") else integ.platform
-        if platform_value not in ("ml", "shopee"):
+        if platform_value not in ("ml", "shopee", "amazon", "tiktok"):
             continue
 
         # Apply the same SSH match push uses, with the real platform so the
