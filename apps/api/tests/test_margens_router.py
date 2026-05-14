@@ -139,3 +139,33 @@ async def test_patch_margem_skips_bling_when_order_is_already_target_situacao(
     assert order.status == "Aprovado"
     assert order.aprovado_por == user.id
     assert order.verificado is True
+
+
+async def test_patch_margem_local_only_marks_order_verified_without_changing_situacao(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+    monkeypatch,
+):
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    margem, order = await _create_margem_with_order(db, situacao="12")
+
+    async def fail_if_called(session):
+        raise AssertionError("Bling client should not be needed")
+
+    monkeypatch.setattr(margens_router, "_global_bling_client", fail_if_called)
+
+    response = await client.patch(
+        f"/api/margens/{margem.id}",
+        json={"status": "Aprovado", "local_only": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "Aprovado"
+    await db.refresh(order)
+    assert order.status == "Aprovado"
+    assert order.aprovado_por == user.id
+    assert order.situacao == "12"
+    assert order.verificado is True

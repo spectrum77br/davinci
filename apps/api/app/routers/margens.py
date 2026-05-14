@@ -56,12 +56,19 @@ async def patch_margens(
         raise HTTPException(404, detail={"code": "margem_not_found"})
 
     data = body.model_dump(exclude_unset=True)
+    local_only = bool(data.pop("local_only", False))
     new_status = data.get("status")
     if "status" in data and new_status is not None and new_status not in ALLOWED_STATUS:
         raise HTTPException(400, detail={"code": "invalid_status"})
 
     if new_status in ("Aprovado", "Reprovado"):
-        await _apply_bling_decision(session, user.id, row, new_status)
+        await _apply_bling_decision(
+            session,
+            user.id,
+            row,
+            new_status,
+            update_bling=not local_only,
+        )
 
     for k, v in data.items():
         setattr(row, k, v)
@@ -81,6 +88,8 @@ async def _apply_bling_decision(
     actor_id: UUID,
     margem: Margens,
     new_status: str,
+    *,
+    update_bling: bool = True,
 ) -> None:
     pedido_bling = margem.pedido_bling
     if pedido_bling is None:
@@ -91,7 +100,7 @@ async def _apply_bling_decision(
         raise HTTPException(404, detail={"code": "bling_order_not_found"})
 
     situacao_id = SITUACAO_APROVADO if new_status == "Aprovado" else SITUACAO_REPROVADO
-    if str(order.situacao or "") != str(situacao_id):
+    if update_bling and str(order.situacao or "") != str(situacao_id):
         client = await _global_bling_client(session)
         if client is None:
             raise HTTPException(400, detail={"code": "bling_integration_missing"})
@@ -129,9 +138,9 @@ async def _apply_bling_decision(
         .where(BlingOrder.bling_id == order.bling_id)
         .values(
             aprovado_por=actor_id,
-            situacao=str(situacao_id),
             status=new_status,
             verificado=True,
+            **({"situacao": str(situacao_id)} if update_bling else {}),
         )
     )
 

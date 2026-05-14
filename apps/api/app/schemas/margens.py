@@ -40,3 +40,4 @@ class MargensOut(BaseModel):
 class MargensPatch(BaseModel):
     status: MargensStatus | None = None
     observacao: str | None = None
+    local_only: bool = False

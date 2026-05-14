@@ -48,6 +48,15 @@ function apiError(e: any) {
   return detail || e?.message || 'erro'
 }
 
+function apiErrorCode(e: any) {
+  const detail = e?.data?.detail
+  return detail && typeof detail === 'object' ? detail.code : null
+}
+
+function isBlingPatchError(e: any) {
+  return ['bling_patch_failed', 'bling_integration_missing'].includes(apiErrorCode(e))
+}
+
 async function load() {
   loading.value = true
   error.value = null
@@ -113,8 +122,27 @@ async function setStatus(row: Margem, value: MargensStatus) {
     })
     Object.assign(row, updated)
   } catch (e: any) {
+    if (isBlingPatchError(e)) {
+      const ok = window.confirm(
+        `O pedido nao foi alterado no Bling.\n\nDeseja continuar e marcar como ${value} apenas no DaVinci?`,
+      )
+      if (ok) {
+        try {
+          const updated = await api<Margem>(`/api/margens/${row.id}`, {
+            method: 'PATCH',
+            body: { status: value, local_only: true },
+          })
+          Object.assign(row, updated)
+          error.value = null
+          return
+        } catch (fallbackError: any) {
+          error.value = apiError(fallbackError)
+        }
+      }
+    } else {
+      error.value = apiError(e)
+    }
     row.status = prev
-    error.value = apiError(e)
   }
 }
 
