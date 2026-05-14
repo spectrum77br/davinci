@@ -42,13 +42,19 @@ const error = ref<string | null>(null)
 const search = ref('')
 const filterStatus = ref<'all' | MargensStatus>('Pendente')
 
+function apiError(e: any) {
+  const detail = e?.data?.detail
+  if (detail && typeof detail === 'object') return detail.message || detail.code || e?.message || 'erro'
+  return detail || e?.message || 'erro'
+}
+
 async function load() {
   loading.value = true
   error.value = null
   try {
     items.value = await api<Margem[]>('/api/margens')
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = apiError(e)
   } finally {
     loading.value = false
   }
@@ -108,7 +114,7 @@ async function setStatus(row: Margem, value: MargensStatus) {
     Object.assign(row, updated)
   } catch (e: any) {
     row.status = prev
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = apiError(e)
   }
 }
 
@@ -139,7 +145,7 @@ async function saveObs(row: Margem) {
     })
     Object.assign(row, updated)
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = apiError(e)
   } finally {
     cancelEditObs()
   }

@@ -13,9 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import BlingOrder, Margens, User
+from app.models import BlingOrder, Integration, IntegrationPlatform, Margens, User
 from app.schemas.margens import ALLOWED_STATUS, MargensOut, MargensPatch
-from app.services.bling_orders import _bling_client_for_user
+from app.security.cipher import decrypt_json
+from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/margens", tags=["margens"])
@@ -60,7 +61,7 @@ async def patch_margens(
         raise HTTPException(400, detail={"code": "invalid_status"})
 
     if new_status in ("Aprovado", "Reprovado"):
-        await _apply_bling_decision(session, user.id, row.pedido_bling, new_status)
+        await _apply_bling_decision(session, user.id, row, new_status)
 
     for k, v in data.items():
         setattr(row, k, v)
@@ -77,49 +78,109 @@ async def patch_margens(
 
 async def _apply_bling_decision(
     session: AsyncSession,
-    user_id: UUID,
-    pedido_bling: int | None,
+    actor_id: UUID,
+    margem: Margens,
     new_status: str,
 ) -> None:
+    pedido_bling = margem.pedido_bling
     if pedido_bling is None:
         raise HTTPException(400, detail={"code": "pedido_bling_missing"})
 
-    bling_id = (
-        await session.execute(
-            select(BlingOrder.bling_id)
-            .where(BlingOrder.numero == str(pedido_bling))
-            .where(BlingOrder.bling_id.is_not(None))
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if bling_id is None:
+    order = await _find_bling_order_for_margem(session, margem)
+    if order is None or order.bling_id is None:
         raise HTTPException(404, detail={"code": "bling_order_not_found"})
 
-    client = await _bling_client_for_user(session, user_id)
-    if client is None:
-        raise HTTPException(400, detail={"code": "bling_integration_missing"})
-
     situacao_id = SITUACAO_APROVADO if new_status == "Aprovado" else SITUACAO_REPROVADO
-    try:
-        await client.update_order_situacao(int(bling_id), situacao_id)
-    except httpx.HTTPStatusError as e:
-        code = e.response.status_code if e.response is not None else 0
-        body = e.response.text[:300] if e.response is not None else ""
-        logger.warning(
-            "bling_situacao_patch_failed",
-            bling_id=bling_id,
+    if str(order.situacao or "") != str(situacao_id):
+        client = await _global_bling_client(session)
+        if client is None:
+            raise HTTPException(400, detail={"code": "bling_integration_missing"})
+
+        try:
+            await client.update_order_situacao(int(order.bling_id), situacao_id)
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code if e.response is not None else 0
+            body = e.response.text[:500] if e.response is not None else ""
+            message = _bling_error_message(e.response) if e.response is not None else None
+            logger.warning(
+                "bling_situacao_patch_failed",
+                bling_id=order.bling_id,
+                situacao_id=situacao_id,
+                http=code,
+                body=body,
+            )
+            raise HTTPException(
+                502,
+                detail={
+                    "code": "bling_patch_failed",
+                    "http": code,
+                    "message": message or "Falha ao atualizar situacao no Bling",
+                },
+            ) from e
+    else:
+        logger.info(
+            "bling_situacao_already_target",
+            bling_id=order.bling_id,
             situacao_id=situacao_id,
-            http=code,
-            body=body,
         )
-        raise HTTPException(
-            502,
-            detail={"code": "bling_patch_failed", "http": code},
-        ) from e
 
     await session.execute(
         update(BlingOrder)
-        .where(BlingOrder.numero == str(pedido_bling))
-        .where(BlingOrder.verificado.is_not(True))
-        .values(verificado=True)
+        .where(BlingOrder.bling_id == order.bling_id)
+        .values(
+            aprovado_por=actor_id,
+            situacao=str(situacao_id),
+            status=new_status,
+            verificado=True,
+        )
     )
+
+
+async def _find_bling_order_for_margem(
+    session: AsyncSession,
+    margem: Margens,
+) -> BlingOrder | None:
+    stmt = (
+        select(BlingOrder)
+        .where(BlingOrder.numero == str(margem.pedido_bling))
+        .where(BlingOrder.bling_id.is_not(None))
+    )
+    if margem.sku:
+        stmt = stmt.where(BlingOrder.item_codigo == margem.sku)
+    return (
+        await session.execute(stmt.order_by(BlingOrder.item_index.asc()).limit(1))
+    ).scalar_one_or_none()
+
+
+async def _global_bling_client(session: AsyncSession) -> BlingClient | None:
+    integ = (
+        await session.execute(
+            select(Integration)
+            .where(Integration.platform == IntegrationPlatform.BLING)
+            .where(Integration.status == "active")
+            .where(Integration.store_id.is_(None))
+            .order_by(Integration.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if integ is None:
+        return None
+    return BlingClient(decrypt_json(integ.credentials), integration_id=integ.id)
+
+
+def _bling_error_message(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:300] or None
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        fields = error.get("fields")
+        if isinstance(fields, list) and fields:
+            first = fields[0]
+            if isinstance(first, dict) and first.get("msg"):
+                return str(first["msg"])
+        for key in ("description", "message"):
+            if error.get(key):
+                return str(error[key])
+    return None

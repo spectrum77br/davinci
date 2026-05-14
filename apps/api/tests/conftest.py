@@ -149,6 +149,7 @@ _CLEANUP_TABLES = (
     "cadastros",
     "product_links",
     "products",
+    "margens",
     "bling_orders",
     "background_jobs",
     "integrations",
@@ -161,7 +162,7 @@ _CLEANUP_TABLES = (
 
 async def _wipe(db: AsyncSession) -> None:
     for tbl in _CLEANUP_TABLES:
-        await db.execute(text(f"DELETE FROM {tbl}"))
+        await db.execute(text(f"DELETE FROM {tbl}"))  # noqa: S608
     await db.commit()
 
 
