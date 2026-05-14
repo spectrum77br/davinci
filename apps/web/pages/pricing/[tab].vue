@@ -881,6 +881,34 @@ function cellLabel(c: GridCell | undefined): string {
   return Number(c.price).toFixed(0)
 }
 
+// SSH: "Ao editar, TODOS os preços da linha recalculam automaticamente no
+// frontend (pois dependem do custo)". While the user is mid-edit on a
+// cost_kit cell, every non-override cell in that product's row paints with
+// the formula evaluated against the typed value.
+function liveCellLabel(prod: any, acc: Account): string {
+  const c = cellOf(prod.id, acc.id)
+  // Explicit user states + override (price fixed) always win.
+  if (c) {
+    if (c.cell_status === 'NA') return 'NA'
+    if (c.cell_status === 'SV') return 'SV'
+    if (c.source === 'disabled') return '∅'
+    if (c.source === 'override') return c.price != null ? Number(c.price).toFixed(0) : '—'
+  }
+  if (
+    editing.value
+    && editing.value.id === prod.id
+    && editing.value.field.startsWith('cost_kit')
+  ) {
+    const typed = Number(editValue.value)
+    if (Number.isFinite(typed)) {
+      const fakeProd = { ...prod, [editing.value.field]: typed }
+      const p = computePrice(acc, fakeProd as any)
+      if (p != null) return String(Math.round(p))
+    }
+  }
+  return cellLabel(c)
+}
+
 function cellTone(c: GridCell | undefined): string {
   if (!c) return 'text-muted-foreground'
   if (c.cell_status === 'NA') return 'bg-gray-200 text-gray-500 font-semibold'
@@ -2656,7 +2684,7 @@ watch(department, async () => {
                 <template v-else>
                   <div class="flex flex-col gap-0.5">
                     <div class="flex items-center justify-between gap-1">
-                      <span>{{ cellLabel(cellOf(prod.id, acc.id)) }}</span>
+                      <span>{{ liveCellLabel(prod, acc) }}</span>
                       <div class="flex items-center gap-0.5 opacity-60 hover:opacity-100">
                         <button v-if="cellOf(prod.id, acc.id)" class="p-0.5 hover:bg-muted rounded" title="Editar override" @click.stop="startCellEdit(cellOf(prod.id, acc.id)!)">
                           <Save class="h-3 w-3" />
