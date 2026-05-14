@@ -1627,19 +1627,19 @@ async def list_store_info(
         )
         splat = (r.platform or "").strip().lower()
         depts: set[str] = set()
-        exact_hit = False
         if sname:
             for pname, pplat, pdept in accs_normalized:
                 if pplat != splat_alias or not pname:
                     continue
-                if pname == sname:
-                    depts.add(pdept)
-                    exact_hit = True
-                elif pname.startswith(sname + " "):
+                # SSH semantics: exact OR prefix `<sname> ` both count for
+                # has_pricing. So "barbosa" matches "barbosa classico" /
+                # "barbosa premium" — even when no exact "barbosa" pricing
+                # account exists for that platform.
+                if pname == sname or pname.startswith(sname + " "):
                     depts.add(pdept)
         has_integ = bool(sname and (sname, splat) in integ_keys)
         out_list.append(
-            _store_info_out(r, list(depts), has_pricing=exact_hit, has_integration=has_integ)
+            _store_info_out(r, list(depts), has_pricing=bool(depts), has_integration=has_integ)
         )
     return out_list
 
