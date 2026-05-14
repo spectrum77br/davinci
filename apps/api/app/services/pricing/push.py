@@ -31,6 +31,8 @@ from app.models import (
     PricingOverride,
     PricingProduct,
     PricingPushIdempotency,
+    Product,
+    ProductLink,
     Segment,
 )
 from app.deps.auth import user_scope
@@ -156,28 +158,52 @@ async def _resolve_product_type(
     return int(leaf.sort_order or 0) + 1
 
 
-async def _resolve_listing(
+async def _resolve_product_links(
     session: AsyncSession,
     *,
+    user_id: UUID,
     integration_id: UUID,
-    product_sku: str,
-) -> Listing | None:
-    """Find the ML listing for `(integration, sku)`. Phase 9b uses simple
-    `(integration_id, sku)` match; richer routing (catalog id, variation)
-    arrives in 9c with the catalog endpoint.
+    pricing_product_sku: str,
+) -> list[ProductLink]:
+    """Find all product_links for the (integration, pricing_product) pair.
+
+    SSH semantics: pricing_product.sku is a comma-joined list of variant SKUs
+    (e.g. "x043,x044,x045,x046"). Each variant maps to a row in
+    `davinci.products`, and each `products` row can have multiple
+    `product_links` rows (one per integration). We return every link for
+    every variant SKU on the target integration so the caller can push the
+    price to all variations of the listing.
     """
-    if not product_sku:
-        return None
-    return (
+    if not pricing_product_sku:
+        return []
+    sku_pieces = [s.strip() for s in pricing_product_sku.split(",") if s.strip()]
+    if not sku_pieces:
+        return []
+    product_ids = (
         await session.execute(
-            select(Listing).where(
+            select(Product.id).where(
                 and_(
-                    Listing.integration_id == integration_id,
-                    Listing.sku == product_sku,
+                    Product.user_id == user_id,
+                    Product.sku.in_(sku_pieces),
                 )
-            ).limit(1)
+            )
         )
-    ).scalar_one_or_none()
+    ).scalars().all()
+    if not product_ids:
+        return []
+    return list(
+        (
+            await session.execute(
+                select(ProductLink).where(
+                    and_(
+                        ProductLink.user_id == user_id,
+                        ProductLink.integration_id == integration_id,
+                        ProductLink.product_id.in_(product_ids),
+                    )
+                )
+            )
+        ).scalars().all()
+    )
 
 
 async def push_one(
@@ -308,14 +334,17 @@ async def push_one(
             price=outcome.price,
         )
 
-    listing = await _resolve_listing(
-        session, integration_id=integration.id, product_sku=product.sku
+    links = await _resolve_product_links(
+        session,
+        user_id=user.id,
+        integration_id=integration.id,
+        pricing_product_sku=product.sku,
     )
-    if listing is None:
+    if not links:
         return PushOutcome(
             ok=False,
             code="listing_not_found",
-            detail=f"no listing for sku={product.sku} on integration={integration.id}",
+            detail=f"no product_links for sku={product.sku} on integration={integration.id}",
             price=outcome.price,
         )
 
@@ -332,21 +361,65 @@ async def push_one(
         integration.platform, creds, on_token_refresh=_persist_refresh
     )
 
-    # Dispatch update_price to the appropriate client
-    result: SyncResult = await _dispatch_price_update(
-        client, integration.platform, listing, float(outcome.price)
-    )
-    ok = result.status == SyncStatus.OK
-    code = "ok" if ok else (result.error_code or result.status.value)
+    # Push to every variation/link. Aggregate the outcome: ok if all ok,
+    # partial if some ok some not, fail if none ok. Item/variation id of
+    # the response is the first successful (or first attempted) link.
+    per_link: list[dict] = []
+    ok_count = 0
+    fail_count = 0
+    first_item: str | None = None
+    first_variation: str | None = None
+    last_error_code: str | None = None
+    last_error_detail: str | None = None
+    for link in links:
+        if first_item is None:
+            first_item = link.external_id
+            first_variation = link.variation_id
+        result = await _dispatch_price_update_link(
+            client, integration.platform, link, float(outcome.price)
+        )
+        per_link.append(
+            {
+                "external_id": link.external_id,
+                "variation_id": link.variation_id,
+                "status": result.status.value,
+                "error_code": result.error_code,
+            }
+        )
+        if result.status == SyncStatus.OK:
+            ok_count += 1
+            if first_item != link.external_id:
+                # If a later link succeeded but earlier failed, surface a
+                # working item_id back to the UI.
+                first_item = link.external_id
+                first_variation = link.variation_id
+        else:
+            fail_count += 1
+            last_error_code = result.error_code or result.status.value
+            last_error_detail = result.error_detail
+
+    if ok_count == len(links):
+        agg_ok = True
+        agg_code = "ok"
+        agg_detail = None
+    elif ok_count > 0:
+        agg_ok = True
+        agg_code = "partial"
+        agg_detail = f"{ok_count}/{len(links)} variations ok; last error: {last_error_code}"
+    else:
+        agg_ok = False
+        agg_code = last_error_code or "push_failed"
+        agg_detail = last_error_detail
+
     response = PushOutcome(
-        ok=ok,
-        code=code,
-        detail=result.error_detail,
+        ok=agg_ok,
+        code=agg_code,
+        detail=agg_detail,
         price=outcome.price,
-        item_id=listing.external_id,
-        variation_id=None,
+        item_id=first_item,
+        variation_id=first_variation,
         cached=False,
-        payload={"calc": outcome.inputs or {}, "push_result": result.payload},
+        payload={"calc": outcome.inputs or {}, "links": per_link},
     )
 
     if idempotency_key:
@@ -360,49 +433,41 @@ async def push_one(
     return response
 
 
-async def _dispatch_price_update(
+async def _dispatch_price_update_link(
     client,
     platform: IntegrationPlatform,
-    listing: "Listing",
+    link: "ProductLink",
     price: float,
 ) -> SyncResult:
-    """Route price update to the correct client method based on platform.
-
-    Each marketplace has a slightly different update_price signature:
-    - ML: update_price(item_id, price, variation_id=...)
-    - Shopee: update_price(item_id, price, variation_id=...)
-    - Amazon: update_price(sku, price, currency=...)
-    - TikTok: update_price_with_activation(product_id, sku_ids, price)
-    - Temu: update_price(product_sku_id, price, currency=...)
-    """
+    """Route price update to the correct client method based on platform,
+    using ProductLink as the source of (external_id, variation_id, sku)."""
     try:
         if platform == IntegrationPlatform.ML:
             return await client.update_price(
-                item_id=listing.external_id,
+                item_id=link.external_id,
                 price=price,
+                variation_id=link.variation_id,
             )
         elif platform == IntegrationPlatform.SHOPEE:
             return await client.update_price(
-                item_id=listing.external_id,
+                item_id=link.external_id,
                 price=price,
-                variation_id=listing.sku,  # model_id stored in sku or raw_data
+                variation_id=link.variation_id,
             )
         elif platform == IntegrationPlatform.AMAZON:
-            sku = listing.sku or listing.external_id
+            sku = link.external_sku or link.external_id
             return await client.update_price(sku=sku, price=price)
         elif platform == IntegrationPlatform.TIKTOK:
-            # TikTok needs product_id and sku_id
-            # external_id = product_id, sku from raw_data or listing.sku
-            sku_id = listing.sku or ""
+            sku_id = link.variation_id or ""
             try:
                 await client.update_price_with_activation(
-                    product_id=listing.external_id,
+                    product_id=link.external_id,
                     sku_ids=sku_id,
                     price=price,
                 )
                 return SyncResult(
                     status=SyncStatus.OK,
-                    payload={"product_id": listing.external_id, "sku_id": sku_id, "price": price},
+                    payload={"product_id": link.external_id, "sku_id": sku_id, "price": price},
                 )
             except RuntimeError as e:
                 return SyncResult(
@@ -411,7 +476,7 @@ async def _dispatch_price_update(
                     error_detail=str(e)[:500],
                 )
         elif platform == IntegrationPlatform.TEMU:
-            product_sku_id = listing.external_id
+            product_sku_id = link.variation_id or link.external_id
             try:
                 await client.update_price(
                     product_sku_id=product_sku_id,

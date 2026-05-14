@@ -646,7 +646,9 @@ async function commitEditProduct() {
     if (gp) Object.assign(gp, updated)
     flash(id, field)
     if (field.startsWith('cost_kit') && tab.value === 'tabela') {
-      await loadGrid()
+      // Recompute prices in-memory so the tabela view repaints without a
+      // round trip. Cells with override / explicit status are left alone.
+      recomputeCellsForProduct(id)
     }
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'save_failed'
@@ -1168,6 +1170,41 @@ function getMarginShipping(acc: Account, productType: number): { margin: number;
   const shipping = Number((acc as any)[`shipping${t}`] || 0)
   if (!margin && !shipping) return null
   return { margin, shipping }
+}
+
+// Mirrors backend calc.py: (cost * (1 + margin) + shipping) / (1 - commission)
+// Returns null if any required input is missing (margin/commission/cost).
+function computePrice(acc: Account, prod: PricingProduct): number | null {
+  const cost = getKitCost(prod, acc.kit_number)
+  if (!cost) return null
+  const ms = getMarginShipping(acc, (prod as any).product_type ?? 2)
+  if (!ms) return null
+  const commission = Number(acc.commission || 0)
+  const denom = 1 - commission
+  if (denom <= 0) return null
+  const price = (cost * (1 + ms.margin) + ms.shipping) / denom
+  return Math.round(price * 100) / 100
+}
+
+// Re-compute every non-override cell for `prodId` against the current
+// account roster. Skips cells with `cell_status` in {'manual','locked','NA','SV','disabled'}
+// so user-fixed values stay put. Used after inline kit edits to reflect the
+// new cost without a full grid reload.
+function recomputeCellsForProduct(prodId: string) {
+  if (!grid.value) return
+  const prod = grid.value.products.find((x) => x.id === prodId)
+  if (!prod) return
+  for (const acc of grid.value.accounts) {
+    const c = cellOf(prodId, acc.id)
+    if (!c) continue
+    if (c.has_override) continue
+    if (c.cell_status === 'manual' || c.cell_status === 'locked'
+        || c.cell_status === 'NA' || c.cell_status === 'SV'
+        || c.source === 'disabled') continue
+    const newPrice = computePrice(acc, prod)
+    c.price = newPrice == null ? null : (newPrice.toFixed(2) as any)
+    c.source = newPrice == null ? 'missing_inputs' : 'computed'
+  }
 }
 
 const negativeMarginCount = computed(() => {

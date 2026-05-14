@@ -32,6 +32,7 @@ from app.models import (
     PricingPlatform,
     PricingProduct,
     Product,
+    ProductLink,
     Segment,
     StoreInfo,
     User,
@@ -785,6 +786,70 @@ async def get_grid(
     ).scalars().all()
     by_pair = {(o.pricing_product_id, o.pricing_account_id): o for o in overrides}
 
+    # SSH-style NA/SV computation. For each cell we need to know whether the
+    # account has a connected integration *and* whether at least one variant
+    # SKU of the pricing_product has a product_link on that integration. Done
+    # in one pass instead of N queries.
+    all_skus: set[str] = set()
+    for prod in products:
+        for piece in (prod.sku or "").split(","):
+            piece = piece.strip()
+            if piece:
+                all_skus.add(piece)
+    sku_to_product_ids: dict[str, list[UUID]] = {}
+    if all_skus:
+        rows = (
+            await session.execute(
+                select(Product.id, Product.sku).where(
+                    and_(
+                        user_scope(Product, user),
+                        Product.sku.in_(list(all_skus)),
+                    )
+                )
+            )
+        ).all()
+        for pid, sku in rows:
+            sku_to_product_ids.setdefault(sku, []).append(pid)
+
+    # pricing_product.id → list of davinci.products.id (one per variant SKU
+    # that resolved)
+    pp_to_product_ids: dict[UUID, list[UUID]] = {}
+    for prod in products:
+        ids: list[UUID] = []
+        for piece in (prod.sku or "").split(","):
+            piece = piece.strip()
+            if piece and piece in sku_to_product_ids:
+                ids.extend(sku_to_product_ids[piece])
+        if ids:
+            pp_to_product_ids[prod.id] = ids
+
+    # Look up product_links for all (integration, product) combinations needed.
+    integ_ids = {a.integration_id for a in accounts if a.integration_id}
+    all_product_ids = {pid for ids in pp_to_product_ids.values() for pid in ids}
+    linked_pairs: set[tuple[UUID, UUID]] = set()
+    if integ_ids and all_product_ids:
+        rows = (
+            await session.execute(
+                select(ProductLink.integration_id, ProductLink.product_id).where(
+                    and_(
+                        user_scope(ProductLink, user),
+                        ProductLink.integration_id.in_(list(integ_ids)),
+                        ProductLink.product_id.in_(list(all_product_ids)),
+                    )
+                )
+            )
+        ).all()
+        for iid, pid in rows:
+            linked_pairs.add((iid, pid))
+
+    def _has_link(acc: PricingAccount, pp_id: UUID) -> bool:
+        if acc.integration_id is None:
+            return False
+        for pid in pp_to_product_ids.get(pp_id, ()):
+            if (acc.integration_id, pid) in linked_pairs:
+                return True
+        return False
+
     cells: list[PricingGridCell] = []
     for prod in products:
         pair = leaves_by_id.get(prod.segment_id)
@@ -792,13 +857,30 @@ async def get_grid(
         for acc in accounts:
             ovr = by_pair.get((prod.id, acc.id))
             outcome = calculate(acc, prod, ovr, prod_type)
+            # Determine the effective cell_status. User-explicit states win
+            # (manual/locked/disabled); otherwise auto/NA/SV is derived from
+            # account+link state — same logic the SSH UI applies.
+            if ovr is not None and ovr.cell_status.value in (
+                "manual",
+                "locked",
+                "disabled",
+                "NA",
+                "SV",
+            ):
+                effective = ovr.cell_status.value
+            elif acc.integration_id is None:
+                effective = "SV"
+            elif not _has_link(acc, prod.id):
+                effective = "NA"
+            else:
+                effective = "auto"
             cells.append(
                 PricingGridCell(
                     pricing_account_id=acc.id,
                     pricing_product_id=prod.id,
                     price=outcome.price,
                     source=outcome.source,
-                    cell_status=(ovr.cell_status.value if ovr else "auto"),
+                    cell_status=effective,
                     has_override=ovr is not None,
                 )
             )
