@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, reactive } from 'vue'
-import { Plus, RefreshCw, X } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, ExternalLink } from 'lucide-vue-next'
 import {
   MARKETPLACES,
   MARKETPLACE_SHORT,
@@ -226,6 +226,50 @@ async function commitEditResp(apelido: string) {
   } finally {
     respSaving.value = false
     cancelEditResp()
+  }
+}
+
+// ---------- generic inline edit for company text fields ----------
+type EditableField = 'razao_social' | 'apelido' | 'uf' | 'cnpj' | 'inscricao_estadual' | 'site_url'
+
+const editingCell = ref<{ id: string; field: EditableField } | null>(null)
+const editCellValue = ref('')
+const editCellSaving = ref(false)
+
+function startEditCell(row: GridRow, field: EditableField) {
+  if (!canEdit.value) return
+  editingCell.value = { id: row.company.id, field }
+  editCellValue.value = (row.company[field] || '') as string
+}
+function cancelEditCell() {
+  editingCell.value = null
+  editCellValue.value = ''
+}
+function isEditingCell(row: GridRow, field: EditableField) {
+  return editingCell.value?.id === row.company.id && editingCell.value?.field === field
+}
+async function commitEditCell(row: GridRow, field: EditableField) {
+  if (!isEditingCell(row, field)) return
+  const next = editCellValue.value.trim()
+  const prev = (row.company[field] || '') as string
+  if (next === prev.trim()) return cancelEditCell()
+  // razao_social and apelido are non-null on the server; refuse to blank them.
+  if ((field === 'razao_social' || field === 'apelido') && !next) {
+    error.value = `${field === 'razao_social' ? 'Razão social' : 'Apelido'} não pode ficar vazio.`
+    return cancelEditCell()
+  }
+  editCellSaving.value = true
+  try {
+    const updated = await api<CompanyOut>(`/api/companies/${row.company.id}`, {
+      method: 'PATCH',
+      body: { [field]: next || null },
+    })
+    row.company[field] = updated[field] as any
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    editCellSaving.value = false
+    cancelEditCell()
   }
 }
 
@@ -473,15 +517,111 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         </thead>
         <tbody>
           <tr v-for="row in filteredRows" :key="row.company.id" class="border-t hover:bg-muted/20">
-            <td class="px-3 py-2 sticky left-0 bg-background">
-              <NuxtLink :to="`/companies/${row.company.id}`" class="hover:underline font-medium">
-                {{ row.company.razao_social }}
-              </NuxtLink>
+            <td
+              class="px-3 py-2 sticky left-0 bg-background"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'razao_social') }"
+              @click="canEdit && !isEditingCell(row, 'razao_social') && startEditCell(row, 'razao_social')"
+            >
+              <input
+                v-if="isEditingCell(row, 'razao_social')"
+                v-model="editCellValue"
+                type="text"
+                class="w-full text-sm bg-transparent outline-none border-b border-blue-500 font-medium"
+                :disabled="editCellSaving"
+                autofocus
+                @blur="commitEditCell(row, 'razao_social')"
+                @keydown.enter.prevent="commitEditCell(row, 'razao_social')"
+                @keydown.escape.prevent="cancelEditCell"
+              />
+              <div v-else class="flex items-center gap-1 group">
+                <span class="font-medium flex-1 truncate" :title="row.company.razao_social">
+                  {{ row.company.razao_social }}
+                </span>
+                <NuxtLink
+                  :to="`/companies/${row.company.id}`"
+                  class="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 hover:bg-muted rounded"
+                  title="Abrir empresa"
+                  @click.stop
+                >
+                  <ExternalLink class="size-3 text-muted-foreground" />
+                </NuxtLink>
+              </div>
             </td>
-            <td class="px-3 py-2">{{ row.company.uf || '—' }}</td>
-            <td class="px-3 py-2 font-mono text-xs">{{ row.company.cnpj || '—' }}</td>
-            <td class="px-3 py-2">{{ row.company.inscricao_estadual || '—' }}</td>
-            <td class="px-3 py-2">{{ row.company.apelido }}</td>
+            <td
+              class="px-3 py-2"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'uf') }"
+              @click="canEdit && !isEditingCell(row, 'uf') && startEditCell(row, 'uf')"
+            >
+              <input
+                v-if="isEditingCell(row, 'uf')"
+                v-model="editCellValue"
+                type="text"
+                maxlength="2"
+                class="w-12 text-sm bg-transparent outline-none border-b border-blue-500 uppercase"
+                :disabled="editCellSaving"
+                autofocus
+                @blur="commitEditCell(row, 'uf')"
+                @keydown.enter.prevent="commitEditCell(row, 'uf')"
+                @keydown.escape.prevent="cancelEditCell"
+              />
+              <span v-else :class="{ 'text-muted-foreground': !row.company.uf }">{{ row.company.uf || '—' }}</span>
+            </td>
+            <td
+              class="px-3 py-2 font-mono text-xs"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'cnpj') }"
+              @click="canEdit && !isEditingCell(row, 'cnpj') && startEditCell(row, 'cnpj')"
+            >
+              <input
+                v-if="isEditingCell(row, 'cnpj')"
+                v-model="editCellValue"
+                type="text"
+                class="w-full text-xs font-mono bg-transparent outline-none border-b border-blue-500"
+                :disabled="editCellSaving"
+                autofocus
+                @blur="commitEditCell(row, 'cnpj')"
+                @keydown.enter.prevent="commitEditCell(row, 'cnpj')"
+                @keydown.escape.prevent="cancelEditCell"
+              />
+              <span v-else :class="{ 'text-muted-foreground': !row.company.cnpj }">{{ row.company.cnpj || '—' }}</span>
+            </td>
+            <td
+              class="px-3 py-2"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'inscricao_estadual') }"
+              @click="canEdit && !isEditingCell(row, 'inscricao_estadual') && startEditCell(row, 'inscricao_estadual')"
+            >
+              <input
+                v-if="isEditingCell(row, 'inscricao_estadual')"
+                v-model="editCellValue"
+                type="text"
+                class="w-full text-sm bg-transparent outline-none border-b border-blue-500"
+                :disabled="editCellSaving"
+                autofocus
+                @blur="commitEditCell(row, 'inscricao_estadual')"
+                @keydown.enter.prevent="commitEditCell(row, 'inscricao_estadual')"
+                @keydown.escape.prevent="cancelEditCell"
+              />
+              <span v-else :class="{ 'text-muted-foreground': !row.company.inscricao_estadual }">
+                {{ row.company.inscricao_estadual || '—' }}
+              </span>
+            </td>
+            <td
+              class="px-3 py-2"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'apelido') }"
+              @click="canEdit && !isEditingCell(row, 'apelido') && startEditCell(row, 'apelido')"
+            >
+              <input
+                v-if="isEditingCell(row, 'apelido')"
+                v-model="editCellValue"
+                type="text"
+                class="w-full text-sm bg-transparent outline-none border-b border-blue-500"
+                :disabled="editCellSaving"
+                autofocus
+                @blur="commitEditCell(row, 'apelido')"
+                @keydown.enter.prevent="commitEditCell(row, 'apelido')"
+                @keydown.escape.prevent="cancelEditCell"
+              />
+              <span v-else>{{ row.company.apelido }}</span>
+            </td>
             <td
               class="px-3 py-2 text-xs max-w-40"
               :class="{
@@ -565,11 +705,38 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 @click="createStoreCell(row.company.id, mk)"
               >+</button>
             </td>
-            <td class="px-3 py-2 truncate max-w-32">
-              <a v-if="row.company.site_url" :href="row.company.site_url" target="_blank" class="hover:underline text-xs">
-                {{ row.company.site_url }}
-              </a>
-              <span v-else class="text-muted-foreground">—</span>
+            <td
+              class="px-3 py-2 max-w-32"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'site_url') }"
+              :title="row.company.site_url || ''"
+              @click="canEdit && !isEditingCell(row, 'site_url') && startEditCell(row, 'site_url')"
+            >
+              <input
+                v-if="isEditingCell(row, 'site_url')"
+                v-model="editCellValue"
+                type="text"
+                class="w-full text-xs bg-transparent outline-none border-b border-blue-500"
+                :disabled="editCellSaving"
+                autofocus
+                @blur="commitEditCell(row, 'site_url')"
+                @keydown.enter.prevent="commitEditCell(row, 'site_url')"
+                @keydown.escape.prevent="cancelEditCell"
+              />
+              <div v-else class="flex items-center gap-1 group">
+                <span :class="{ 'text-muted-foreground': !row.company.site_url }" class="flex-1 truncate text-xs">
+                  {{ row.company.site_url || '—' }}
+                </span>
+                <a
+                  v-if="row.company.site_url"
+                  :href="row.company.site_url"
+                  target="_blank"
+                  class="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 hover:bg-muted rounded"
+                  title="Abrir site"
+                  @click.stop
+                >
+                  <ExternalLink class="size-3 text-muted-foreground" />
+                </a>
+              </div>
             </td>
             <td
               class="px-3 py-2 text-xs max-w-48"
