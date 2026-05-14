@@ -95,17 +95,32 @@ def _base_sku(sku: str) -> str:
     return sku.split(".", 1)[0]
 
 
-def _matches_celular(product_sku: str, pp_variants: set[str]) -> bool:
+def _matches_celular(
+    product_sku: str, pp_variants: set[str], pp_base: set[str]
+) -> bool:
+    # Spec: celular only considers kit listings (SKU contains "+"). Take the
+    # main SKU (before "+"), then its base (before "."). Match that base
+    # against the *base* set of pricing_product variants — SSH keeps the
+    # base set as a separate index because pricing_product.sku can carry
+    # variant suffixes too ("a19.pi,a20.pi" → base {"a19","a20"}).
     if "+" not in product_sku:
         return False
-    return _base_sku(_main_sku(product_sku)) in pp_variants
+    return _base_sku(_main_sku(product_sku)) in pp_base
 
 
-def _matches_mala(product_sku: str, pp_variants: set[str]) -> bool:
+def _matches_mala(
+    product_sku: str, pp_variants: set[str], pp_base: set[str]
+) -> bool:
+    # Mala: each size is its own listing. Compare the main SKU (before "+")
+    # against the full pricing_product variants — pp.sku already carries
+    # the full Bling SKU.
     return _main_sku(product_sku) in pp_variants
 
 
-def _matches_catalogo(product_sku: str, pp_variants: set[str]) -> bool:
+def _matches_catalogo(
+    product_sku: str, pp_variants: set[str], pp_base: set[str]
+) -> bool:
+    # Catalogo: only single-product listings (no "+"). Exact full-SKU match.
     if "+" in product_sku:
         return False
     return product_sku in pp_variants
@@ -129,10 +144,11 @@ def filter_products_by_department(
     pp_variants = set(variants_of(pricing_product_sku))
     if not pp_variants:
         return []
+    pp_base = {_base_sku(v) for v in pp_variants}
     matcher = _DEPT_MATCHERS.get(department, _matches_celular)
     out: list[UUID] = []
     for pid, sku in candidate_products:
-        if sku and matcher(sku, pp_variants):
+        if sku and matcher(sku, pp_variants, pp_base):
             out.append(pid)
     return out
 
