@@ -157,6 +157,11 @@ class CellStatus(StrEnum):
     DISABLED = "disabled"
     NA = "NA"
     SV = "SV"
+    # Transient states written by push: error after API failure, no_link
+    # when the resolver found 0 product_links. UI exposes a "NA"/"SV"
+    # button when the cell is in one of these states.
+    ERROR = "error"
+    NO_LINK = "no_link"
 
 
 class AuditRunStatus(StrEnum):

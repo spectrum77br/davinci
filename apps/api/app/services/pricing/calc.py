@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 
 _TWO = Decimal("0.01")
+_ONE = Decimal("1")
 
 
 @dataclass(slots=True)
@@ -157,10 +158,12 @@ def calculate(
             inputs=inputs,
         )
 
-    # SSH formula: (cost * (1 + margin) + shipping) / (1 - commission)
-    price = (cost * (Decimal("1") + margin) + shipping) / denom
+    # SSH formula: Math.round((cost * (1+margin) + shipping) / (1-commission))
+    # SSH rounds to integer reais — the computed price is *always* a whole
+    # number; only manual overrides may carry cents.
+    price = (cost * (_ONE + margin) + shipping) / denom
     return CalcOutcome(
-        price=price.quantize(_TWO, ROUND_HALF_UP),
+        price=price.quantize(_ONE, ROUND_HALF_UP),
         source="computed",
         inputs=inputs,
     )

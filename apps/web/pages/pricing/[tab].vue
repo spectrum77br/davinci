@@ -762,7 +762,7 @@ type GridCell = {
   pricing_product_id: string
   price: string | number | null
   source: string
-  cell_status: 'auto' | 'manual' | 'locked' | 'disabled' | 'NA' | 'SV'
+  cell_status: 'auto' | 'manual' | 'locked' | 'disabled' | 'NA' | 'SV' | 'error' | 'no_link'
   has_override: boolean
 }
 type GridResponse = {
@@ -884,7 +884,11 @@ function cellLabel(c: GridCell | undefined): string {
 function cellTone(c: GridCell | undefined): string {
   if (!c) return 'text-muted-foreground'
   if (c.cell_status === 'NA') return 'bg-gray-200 text-gray-500 font-semibold'
-  if (c.cell_status === 'SV') return 'bg-emerald-100 text-emerald-700 font-semibold'
+  if (c.cell_status === 'SV') return 'bg-amber-100 text-amber-700 font-semibold'
+  // Transient post-push states. SSH paints these so the user can decide whether
+  // to mark NA/SV permanently or fix the underlying issue and retry.
+  if (c.cell_status === 'error') return 'bg-red-50 text-red-700'
+  if (c.cell_status === 'no_link') return 'bg-amber-50 text-amber-700'
   if (c.source === 'disabled') return 'bg-muted/50 text-muted-foreground'
   if (c.source === 'locked') return 'bg-amber-50 text-amber-900 dark:bg-amber-900/20 dark:text-amber-100'
   if (c.source === 'override') return 'bg-blue-50 text-blue-900 dark:bg-blue-900/20 dark:text-blue-100'
@@ -1184,8 +1188,10 @@ function computePrice(acc: Account, prod: PricingProduct): number | null {
   const commission = Number(acc.commission || 0)
   const denom = 1 - commission
   if (denom <= 0) return null
+  // SSH rounds the computed price to integer reais (Math.round). Cents
+  // only show up on manual overrides.
   const price = (cost * (1 + ms.margin) + ms.shipping) / denom
-  return Math.round(price * 100) / 100
+  return Math.round(price)
 }
 
 // Re-compute every non-overridden cell for `prodId` against the current
@@ -2664,17 +2670,17 @@ watch(department, async () => {
                           <Ban class="h-3 w-3" />
                         </button>
                         <button
-                          v-if="cellOf(prod.id, acc.id)"
+                          v-if="cellOf(prod.id, acc.id)?.cell_status === 'NA' || cellOf(prod.id, acc.id)?.cell_status === 'error'"
                           class="px-1 py-0.5 hover:bg-muted rounded text-[9px] font-bold"
                           :class="cellOf(prod.id, acc.id)?.cell_status === 'NA' ? 'text-gray-700 bg-gray-200' : 'text-gray-500'"
-                          title="Marcar NA"
+                          :title="cellOf(prod.id, acc.id)?.cell_status === 'NA' ? 'Limpar NA' : 'Marcar como NA (não anunciar)'"
                           @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'NA' ? 'auto' : 'NA')"
                         >NA</button>
                         <button
-                          v-if="cellOf(prod.id, acc.id)"
+                          v-if="cellOf(prod.id, acc.id)?.cell_status === 'SV' || cellOf(prod.id, acc.id)?.cell_status === 'no_link'"
                           class="px-1 py-0.5 hover:bg-muted rounded text-[9px] font-bold"
                           :class="cellOf(prod.id, acc.id)?.cell_status === 'SV' ? 'text-amber-700 bg-amber-100' : 'text-amber-600'"
-                          title="Marcar SV"
+                          :title="cellOf(prod.id, acc.id)?.cell_status === 'SV' ? 'Limpar SV' : 'Marcar como SV (sem vínculo)'"
                           @click.stop="setCellStatus(cellOf(prod.id, acc.id)!, cellOf(prod.id, acc.id)?.cell_status === 'SV' ? 'auto' : 'SV')"
                         >SV</button>
                         <button

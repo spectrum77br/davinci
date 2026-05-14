@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
+    PricingAccount,
+    Segment,
     User,
     UserSettings,
 )
@@ -32,6 +34,40 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+_DEPT_LABEL = {
+    "celular": "Celular",
+    "mala": "Mala",
+    "eletro": "Eletro",
+    "catalogo": "Catálogo ML",
+}
+
+
+async def _infer_batch_department(
+    session: AsyncSession, items: list[dict]
+) -> str | None:
+    """Pick the department slug of the first item's pricing_account. The
+    bulk-push UI is per-department so this is normally unambiguous; mixed
+    batches just get the first one's label."""
+    if not items:
+        return None
+    try:
+        acc_id = UUID(items[0]["pricing_account_id"])
+    except (KeyError, ValueError):
+        return None
+    acc = await session.get(PricingAccount, acc_id)
+    if acc is None or acc.segment_id is None:
+        return None
+    seg = await session.get(Segment, acc.segment_id)
+    if seg is None:
+        return None
+    if seg.parent_id is None:
+        return _DEPT_LABEL.get(seg.slug, seg.slug)
+    parent = await session.get(Segment, seg.parent_id)
+    if parent is None:
+        return None
+    return _DEPT_LABEL.get(parent.slug, parent.slug)
+
+
 async def _resolve_chat_id(session: AsyncSession, user_id: UUID) -> str | None:
     settings = (
         await session.execute(
@@ -41,20 +77,51 @@ async def _resolve_chat_id(session: AsyncSession, user_id: UUID) -> str | None:
     return settings.telegram_chat_id if settings else None
 
 
-def _format_report(summary: dict, samples: list[dict]) -> str:
+def _format_report(summary: dict, samples: list[dict], department: str | None = None) -> str:
+    """SSH-style Telegram report. Categorizes failures into
+    "Pulados (encerrados)", "Sem vínculo", and "Erros" so the user can
+    triage at a glance and see which SKUs need attention."""
+    closed_codes = {"ml_listing_closed", "ml_listing_paused", "ml_listing_under_review"}
+    no_link_codes = {"no_link", "listing_not_found"}
+
+    skipped = []
+    no_link = []
+    errors = []
+    for s in samples:
+        code = s.get("code") or ""
+        if code in closed_codes:
+            skipped.append(s)
+        elif code in no_link_codes:
+            no_link.append(s)
+        elif code not in ("ok", "partial"):
+            errors.append(s)
+
+    header_dept = f" — {department}" if department else ""
     lines = [
-        "<b>Push de preços — relatório</b>",
-        f"Total: {summary['total']}",
-        f"OK: {summary['ok']}  ·  Falhas: {summary['failed']}  ·  Cached: {summary['cached']}",
+        f"🔔 <b>Relatório de Envio de Preços{header_dept}</b>",
+        f"✅ Enviados: {summary['ok']}",
+        f"⏭️ Pulados (encerrados): {len(skipped)}",
+        f"❌ Erros: {len(errors)}",
+        f"🔗 Sem vínculo: {len(no_link)}",
     ]
-    if samples:
+
+    def _fmt(s: dict) -> str:
+        price = f" R$ {s['price']}" if s.get("price") else ""
+        detail = s.get("detail") or ""
+        if len(detail) > 80:
+            detail = detail[:77] + "…"
+        return f"• <code>{s.get('code','')}</code>{price} {detail}".rstrip()
+
+    if errors:
         lines.append("")
-        lines.append("<b>Falhas (até 10):</b>")
-        for s in samples[:10]:
-            price = f" R$ {s['price']}" if s.get("price") else ""
-            lines.append(
-                f"• <code>{s['code']}</code>{price} — {s.get('detail') or ''}"
-            )
+        lines.append(f"<b>Erros (até 10 de {len(errors)}):</b>")
+        for s in errors[:10]:
+            lines.append(_fmt(s))
+    if no_link:
+        lines.append("")
+        lines.append(f"<b>Sem vínculo (até 10 de {len(no_link)}):</b>")
+        for s in no_link[:10]:
+            lines.append(_fmt(s))
     return "\n".join(lines)
 
 
@@ -136,8 +203,9 @@ async def run_push_prices_batch(
         chat_id = await _resolve_chat_id(session, user_id)
         if chat_id:
             try:
+                department_label = await _infer_batch_department(session, items)
                 await TelegramClient(default_chat_id=chat_id).safe_send(
-                    _format_report(summary, failures)
+                    _format_report(summary, failures, department_label)
                 )
             except TelegramConfigError:
                 logger.warning("batch_push_telegram_skipped", reason="no_token")

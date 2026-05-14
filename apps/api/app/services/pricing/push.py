@@ -24,6 +24,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    CellStatus,
     Integration,
     IntegrationPlatform,
     Listing,
@@ -222,6 +223,51 @@ async def _resolve_product_links_for_push(
     return dedup_links_for_push(platform_str, links)
 
 
+async def _persist_cell_status(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    account_id: UUID,
+    product_id: UUID,
+    new_status: CellStatus,
+    existing_override: PricingOverride | None,
+) -> None:
+    """Write the post-push cell_status to pricing_overrides.
+
+    Skip writes when the cell carries a user-explicit state (manual / locked /
+    NA / SV / disabled) — those win over auto/error/no_link from a push.
+    Persist on top of the auto/error/no_link triad otherwise.
+    """
+    USER_EXPLICIT = {
+        CellStatus.MANUAL,
+        CellStatus.LOCKED,
+        CellStatus.DISABLED,
+        CellStatus.NA,
+        CellStatus.SV,
+    }
+    if existing_override is not None and existing_override.cell_status in USER_EXPLICIT:
+        return
+    if existing_override is None:
+        # Only create a row when there's a non-auto state to persist; a fresh
+        # cell with status='auto' doesn't need an override entry.
+        if new_status == CellStatus.AUTO:
+            return
+        session.add(
+            PricingOverride(
+                user_id=user_id,
+                pricing_product_id=product_id,
+                pricing_account_id=account_id,
+                price_override=None,
+                cell_status=new_status,
+            )
+        )
+    else:
+        if existing_override.cell_status == new_status:
+            return
+        existing_override.cell_status = new_status
+    await session.flush()
+
+
 async def _account_department(
     session: AsyncSession, account: PricingAccount
 ) -> str | None:
@@ -385,9 +431,17 @@ async def push_one(
         platform_str=integration.platform.value,
     )
     if not links:
+        await _persist_cell_status(
+            session,
+            user_id=user.id,
+            account_id=account_id,
+            product_id=product_id,
+            new_status=CellStatus.NO_LINK,
+            existing_override=override,
+        )
         return PushOutcome(
             ok=False,
-            code="listing_not_found",
+            code="no_link",
             detail=(
                 f"no product_links for sku={product.sku} on integration="
                 f"{integration.id} (dept={department!r}, listing_type="
@@ -450,14 +504,29 @@ async def push_one(
         agg_ok = True
         agg_code = "ok"
         agg_detail = None
+        post_status = CellStatus.AUTO
     elif ok_count > 0:
         agg_ok = True
         agg_code = "partial"
         agg_detail = f"{ok_count}/{len(links)} variations ok; last error: {last_error_code}"
+        # Partial: at least one variation got the new price. Treat the cell
+        # as good ("auto"); the per-link payload still carries the failures
+        # for the UI to surface.
+        post_status = CellStatus.AUTO
     else:
         agg_ok = False
         agg_code = last_error_code or "push_failed"
         agg_detail = last_error_detail
+        post_status = CellStatus.ERROR
+
+    await _persist_cell_status(
+        session,
+        user_id=user.id,
+        account_id=account_id,
+        product_id=product_id,
+        new_status=post_status,
+        existing_override=override,
+    )
 
     response = PushOutcome(
         ok=agg_ok,
