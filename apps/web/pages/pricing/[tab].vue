@@ -867,18 +867,18 @@ function cellOf(prodId: string, accId: string): GridCell | undefined {
 }
 
 function cellLabel(c: GridCell | undefined): string {
-  // Default for empty/uncomputable cells is "NA" (matches SSH).
-  if (!c) return 'NA'
+  // SSH semantics: NA/SV are explicit user flags. Missing/uncomputable cells
+  // show "—" so the user can tell apart "sem anúncio" from "sem preço".
+  if (!c) return '—'
   if (c.cell_status === 'NA') return 'NA'
   if (c.cell_status === 'SV') return 'SV'
   if (c.source === 'disabled') return '∅'
-  if (c.price == null) return 'NA'
+  if (c.price == null) return '—'
   return Number(c.price).toFixed(0)
 }
 
 function cellTone(c: GridCell | undefined): string {
-  // Default empty/missing cell → gray "NA" look.
-  if (!c) return 'bg-gray-100 text-gray-500 font-semibold'
+  if (!c) return 'text-muted-foreground'
   if (c.cell_status === 'NA') return 'bg-gray-200 text-gray-500 font-semibold'
   if (c.cell_status === 'SV') return 'bg-emerald-100 text-emerald-700 font-semibold'
   if (c.source === 'disabled') return 'bg-muted/50 text-muted-foreground'
