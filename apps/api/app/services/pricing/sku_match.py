@@ -95,16 +95,21 @@ def _base_sku(sku: str) -> str:
     return sku.split(".", 1)[0]
 
 
-def _matches_celular(
+def _matches_celular_ml(
     product_sku: str, pp_variants: set[str], pp_base: set[str]
 ) -> bool:
-    # Spec: celular only considers kit listings (SKU contains "+"). Take the
-    # main SKU (before "+"), then its base (before "."). Match that base
-    # against the *base* set of pricing_product variants — SSH keeps the
-    # base set as a separate index because pricing_product.sku can carry
-    # variant suffixes too ("a19.pi,a20.pi" → base {"a19","a20"}).
+    # Celular on ML: kit-only listings (must contain "+"). Non-kit ML SKUs
+    # belong to the Catálogo department, not celular.
     if "+" not in product_sku:
         return False
+    return _base_sku(_main_sku(product_sku)) in pp_base
+
+
+def _matches_celular_other(
+    product_sku: str, pp_variants: set[str], pp_base: set[str]
+) -> bool:
+    # Shopee / Amazon / TikTok celular: any SKU is fair game — those
+    # marketplaces don't have a separate "catalogo" stream.
     return _base_sku(_main_sku(product_sku)) in pp_base
 
 
@@ -126,26 +131,33 @@ def _matches_catalogo(
     return product_sku in pp_variants
 
 
-_DEPT_MATCHERS = {
-    "celular": _matches_celular,
-    "eletro": _matches_celular,
-    "mala": _matches_mala,
-    "catalogo": _matches_catalogo,
-}
-
-
 def filter_products_by_department(
     department: str,
     pricing_product_sku: str | None,
     candidate_products: Iterable[tuple[UUID, str]],
+    *,
+    platform: str = "ml",
 ) -> list[UUID]:
     """Apply the SSH department-specific rule, returning every davinci.product.id
-    whose SKU is eligible to receive the pricing_product's price."""
+    whose SKU is eligible to receive the pricing_product's price.
+
+    The celular/eletro rules differ between ML (kit-only) and the other
+    platforms (any SKU) — see SSH spec §5. Pass the integration platform
+    so we route to the correct matcher.
+    """
     pp_variants = set(variants_of(pricing_product_sku))
     if not pp_variants:
         return []
     pp_base = {_base_sku(v) for v in pp_variants}
-    matcher = _DEPT_MATCHERS.get(department, _matches_celular)
+
+    if department == "mala":
+        matcher = _matches_mala
+    elif department == "catalogo":
+        matcher = _matches_catalogo
+    else:
+        # celular + eletro
+        matcher = _matches_celular_ml if platform == "ml" else _matches_celular_other
+
     out: list[UUID] = []
     for pid, sku in candidate_products:
         if sku and matcher(sku, pp_variants, pp_base):

@@ -203,6 +203,7 @@ async def _resolve_product_links_for_push(
         department or "celular",
         pricing_product.sku,
         candidate_products,
+        platform=platform_str,
     )
     if not target_ids:
         return []
@@ -338,6 +339,16 @@ async def push_one(
             )
         )
     ).scalar_one_or_none()
+
+    # SSH spec §11.7: NA/SV BLOCK push. The user marked the cell as "Não
+    # Anunciar" or "Sem Vínculo" — refuse before we even resolve the price.
+    if override is not None and override.cell_status in (CellStatus.NA, CellStatus.SV):
+        return PushOutcome(
+            ok=False,
+            code=f"cell_{override.cell_status.value.lower()}",
+            detail=f"cell_status={override.cell_status.value} blocks push",
+            price=None,
+        )
 
     product_type = await _resolve_product_type(session, product)
     outcome: CalcOutcome = calculate(account, product, override, product_type)

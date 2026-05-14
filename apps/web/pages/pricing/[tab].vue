@@ -919,7 +919,8 @@ function cellTone(c: GridCell | undefined): string {
   if (c.cell_status === 'no_link') return 'bg-amber-50 text-amber-700'
   if (c.source === 'disabled') return 'bg-muted/50 text-muted-foreground'
   if (c.source === 'locked') return 'bg-amber-50 text-amber-900 dark:bg-amber-900/20 dark:text-amber-100'
-  if (c.source === 'override') return 'bg-blue-50 text-blue-900 dark:bg-blue-900/20 dark:text-blue-100'
+  // SSH: override (preço fixo manual) → fundo laranja.
+  if (c.source === 'override') return 'bg-orange-100 text-orange-900 dark:bg-orange-900/30 dark:text-orange-100'
   if (c.source === 'missing_inputs') return 'bg-gray-100 text-gray-500 font-semibold'
   if (c.price != null) {
     const prod = grid.value?.products.find(p => p.id === c.pricing_product_id)
