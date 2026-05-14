@@ -32,7 +32,6 @@ from app.models import (
     PricingPlatform,
     PricingProduct,
     Product,
-    ProductLink,
     Segment,
     StoreInfo,
     User,
@@ -786,55 +785,10 @@ async def get_grid(
     ).scalars().all()
     by_pair = {(o.pricing_product_id, o.pricing_account_id): o for o in overrides}
 
-    # SSH-style NA/SV computation. SSH pricing_product.sku is a comma-joined
-    # list of *base* codes ("t031,t032"); davinci.products.sku is Bling's
-    # decorated SKU ("t031.sa", "t031.sa+a001.sa"). Walk the prefix index
-    # from sku_match so a base code reaches every variant that shares it.
-    from app.services.pricing.sku_match import (
-        build_prefix_index,
-        resolve_product_ids,
-    )
-
-    rows = (
-        await session.execute(
-            select(Product.id, Product.sku).where(user_scope(Product, user))
-        )
-    ).all()
-    prefix_index = build_prefix_index((pid, sku) for pid, sku in rows)
-
-    pp_to_product_ids: dict[UUID, list[UUID]] = {}
-    for prod in products:
-        ids = resolve_product_ids(prod.sku, prefix_index)
-        if ids:
-            pp_to_product_ids[prod.id] = ids
-
-    # Look up product_links for all (integration, product) combinations needed.
-    integ_ids = {a.integration_id for a in accounts if a.integration_id}
-    all_product_ids = {pid for ids in pp_to_product_ids.values() for pid in ids}
-    linked_pairs: set[tuple[UUID, UUID]] = set()
-    if integ_ids and all_product_ids:
-        rows = (
-            await session.execute(
-                select(ProductLink.integration_id, ProductLink.product_id).where(
-                    and_(
-                        user_scope(ProductLink, user),
-                        ProductLink.integration_id.in_(list(integ_ids)),
-                        ProductLink.product_id.in_(list(all_product_ids)),
-                    )
-                )
-            )
-        ).all()
-        for iid, pid in rows:
-            linked_pairs.add((iid, pid))
-
-    def _has_link(acc: PricingAccount, pp_id: UUID) -> bool:
-        if acc.integration_id is None:
-            return False
-        for pid in pp_to_product_ids.get(pp_id, ()):
-            if (acc.integration_id, pid) in linked_pairs:
-                return True
-        return False
-
+    # cell_status reflects only what's stored in pricing_overrides. NA/SV are
+    # user-set flags persisted after a failed push (SSH semantics); the grid
+    # never infers them. Cells without a calculable price render as "—" in
+    # the UI via the cellLabel fallback, not as NA.
     cells: list[PricingGridCell] = []
     for prod in products:
         pair = leaves_by_id.get(prod.segment_id)
@@ -842,30 +796,13 @@ async def get_grid(
         for acc in accounts:
             ovr = by_pair.get((prod.id, acc.id))
             outcome = calculate(acc, prod, ovr, prod_type)
-            # Determine the effective cell_status. User-explicit states win
-            # (manual/locked/disabled); otherwise auto/NA/SV is derived from
-            # account+link state — same logic the SSH UI applies.
-            if ovr is not None and ovr.cell_status.value in (
-                "manual",
-                "locked",
-                "disabled",
-                "NA",
-                "SV",
-            ):
-                effective = ovr.cell_status.value
-            elif acc.integration_id is None:
-                effective = "SV"
-            elif not _has_link(acc, prod.id):
-                effective = "NA"
-            else:
-                effective = "auto"
             cells.append(
                 PricingGridCell(
                     pricing_account_id=acc.id,
                     pricing_product_id=prod.id,
                     price=outcome.price,
                     source=outcome.source,
-                    cell_status=effective,
+                    cell_status=(ovr.cell_status.value if ovr else "auto"),
                     has_override=ovr is not None,
                 )
             )
