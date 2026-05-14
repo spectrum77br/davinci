@@ -242,7 +242,9 @@ const storesByCompanyMk = computed(() => {
 })
 
 function cellLabel(cell: Cell): string {
-  return cell.alias || cell.company_apelido
+  // Sempre o nome da conta (account_name) — alias da integração não entra
+  // aqui; mantém uma linha por loja por marketplace.
+  return cell.company_apelido || cell.alias || ''
 }
 
 function cap(s: string | null | undefined): string {
@@ -466,16 +468,6 @@ async function submitResolve() {
                   </button>
                 </div>
               </div>
-              <button
-                v-else-if="row.cadastro.raw_links?.[mk]"
-                type="button"
-                class="text-amber-400/80 italic underline-offset-2 hover:underline disabled:no-underline disabled:cursor-default"
-                :disabled="!canEdit"
-                :title="canEdit ? 'clique para vincular a uma loja' : 'sem permissão para vincular'"
-                @click="canEdit && openResolve(row.cadastro.id, mk, row.cadastro.raw_links[mk])"
-              >
-                {{ row.cadastro.raw_links[mk] }}
-              </button>
             </td>
             <td v-if="canEdit" class="px-2 py-2 text-right whitespace-nowrap">
               <button

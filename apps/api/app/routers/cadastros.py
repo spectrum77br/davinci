@@ -101,16 +101,21 @@ async def cadastros_grid(
             if not s:
                 continue
             company = companies.get(s.company_id)
-            apelido = s.apelido_override or (company.apelido if company else "")
+            # Dedup key uses company.apelido (canonical) so an FK cell with
+            # apelido_override "Shopee Poofy" + store_info entry "poofy" are
+            # recognized as the same loja and don't render twice.
+            canonical = (company.apelido if company else "").strip().lower()
+            display = (company.apelido if company else "") or s.apelido_override or ""
             cells[s.marketplace.value].append(
                 CadastroGridStoreCell(
                     store_id=s.id,
                     alias=link.alias,
-                    company_apelido=apelido,
+                    company_apelido=display,
                     store_status=s.status.value,
                 )
             )
-            covered[s.marketplace.value].add(apelido.strip().lower())
+            if canonical:
+                covered[s.marketplace.value].add(canonical)
         # Fold in store_info-only matches for this cadastro's tipo.
         idx = si_index.get(cad.tipo, {})
         if idx:

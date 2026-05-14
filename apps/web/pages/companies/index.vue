@@ -512,7 +512,6 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
               {{ MARKETPLACE_SHORT[mk] }}
             </th>
-            <th class="px-3 py-2">site</th>
             <th class="px-3 py-2">obs</th>
           </tr>
         </thead>
@@ -711,39 +710,6 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
               >+</button>
             </td>
             <td
-              class="px-3 py-2 max-w-32"
-              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'site_url') }"
-              :title="row.company.site_url || ''"
-              @click="canEdit && !isEditingCell(row, 'site_url') && startEditCell(row, 'site_url')"
-            >
-              <input
-                v-if="isEditingCell(row, 'site_url')"
-                v-model="editCellValue"
-                type="text"
-                class="w-full text-xs bg-transparent outline-none border-b border-blue-500"
-                :disabled="editCellSaving"
-                autofocus
-                @blur="commitEditCell(row, 'site_url')"
-                @keydown.enter.prevent="commitEditCell(row, 'site_url')"
-                @keydown.escape.prevent="cancelEditCell"
-              />
-              <div v-else class="flex items-center gap-1 group">
-                <span :class="{ 'text-muted-foreground': !row.company.site_url }" class="flex-1 truncate text-xs">
-                  {{ row.company.site_url || '—' }}
-                </span>
-                <a
-                  v-if="row.company.site_url"
-                  :href="row.company.site_url"
-                  target="_blank"
-                  class="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 hover:bg-muted rounded"
-                  title="Abrir site"
-                  @click.stop
-                >
-                  <ExternalLink class="size-3 text-muted-foreground" />
-                </a>
-              </div>
-            </td>
-            <td
               class="px-3 py-2 text-xs max-w-48"
               :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && editingObs !== row.company.id }"
               :title="row.company.obs || ''"
@@ -766,7 +732,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
-            <td :colspan="17" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
+            <td :colspan="16" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
           </tr>
         </tbody>
       </table>
