@@ -1087,10 +1087,31 @@ async function sendManualReport() {
 
 // =========================================================== grid extras (features)
 
-// Feature 1: account groups by platform + kit
-const accountGroups = computed<{ label: string; platform: string; accounts: Account[] }[]>(() => {
+// Feature 1: account groups by platform + kit (SSH order)
+// Platform order chosen to match the SSH UI:
+//   amazon → magalu → mercadolivre → shopee → temu → aliexpress → tiktok
+const PLATFORM_ORDER: Record<string, number> = {
+  amazon: 0, magalu: 1, mercadolivre: 2, shopee: 3,
+  temu: 4, aliexpress: 5, tiktok: 6,
+}
+
+// Same SSH order is reused by the body iteration so each data column lines
+// up with its grouped header — see `gridAccounts` below.
+const gridAccounts = computed<Account[]>(() => {
+  return (grid.value?.accounts ?? []).slice().sort((a, b) => {
+    const pa = PLATFORM_ORDER[a.platform] ?? 99
+    const pb = PLATFORM_ORDER[b.platform] ?? 99
+    if (pa !== pb) return pa - pb
+    if (a.kit_number !== b.kit_number) return (a.kit_number || 0) - (b.kit_number || 0)
+    return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' })
+  })
+})
+
+const accountGroups = computed<
+  { label: string; platform: string; accounts: Account[] }[]
+>(() => {
+  const accs = gridAccounts.value
   const groups: { label: string; platform: string; accounts: Account[] }[] = []
-  const accs = grid.value?.accounts ?? []
   let currentKey = ''
   for (const acc of accs) {
     const key = `${acc.platform}-kit${acc.kit_number}`
@@ -1172,13 +1193,14 @@ function platformBg(platform: string): string {
 }
 function platformHeaderBg(platform: string): string {
   switch (platform) {
-    case 'shopee': return 'bg-orange-50'
-    case 'amazon': return 'bg-yellow-50'
-    case 'temu': return 'bg-purple-50'
-    case 'aliexpress': return 'bg-red-50'
-    case 'tiktok': return 'bg-pink-50'
-    case 'mercadolivre': return 'bg-blue-50'
-    default: return 'bg-muted/50'
+    case 'amazon':       return 'bg-yellow-50 dark:bg-yellow-900/30'
+    case 'magalu':       return 'bg-blue-50 dark:bg-blue-900/30'
+    case 'mercadolivre': return 'bg-muted'
+    case 'shopee':       return 'bg-orange-50 dark:bg-orange-900/30'
+    case 'temu':         return 'bg-purple-50 dark:bg-purple-900/30'
+    case 'aliexpress':   return 'bg-red-50 dark:bg-red-900/30'
+    case 'tiktok':       return 'bg-pink-50 dark:bg-pink-900/30'
+    default:             return 'bg-muted/50'
   }
 }
 
@@ -2387,7 +2409,7 @@ watch(department, async () => {
                 Produto
               </th>
               <th
-                v-for="acc in grid?.accounts ?? []"
+                v-for="acc in gridAccounts"
                 :key="`n-${acc.id}`"
                 class="px-1 py-1 text-left min-w-[110px] align-top"
                 :class="[platformHeaderBg(acc.platform), firstAccountIdInGroup.has(acc.id) ? 'border-l-[3px] border-gray-500' : 'border-l']"
@@ -2436,7 +2458,7 @@ watch(department, async () => {
                 <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">custo</th>
               </template>
               <th
-                v-for="acc in grid?.accounts ?? []"
+                v-for="acc in gridAccounts"
                 :key="`lt-${acc.id}`"
                 class="px-1 py-1 text-center text-[10px] text-muted-foreground"
                 :class="[platformHeaderBg(acc.platform), firstAccountIdInGroup.has(acc.id) ? 'border-l-[3px] border-gray-500' : 'border-l']"
@@ -2524,7 +2546,7 @@ watch(department, async () => {
               </template>
               <!-- Account cells -->
               <td
-                v-for="(acc, accIdx) in grid?.accounts ?? []"
+                v-for="(acc, accIdx) in gridAccounts"
                 :key="acc.id"
                 class="px-1 py-1"
                 :class="[
