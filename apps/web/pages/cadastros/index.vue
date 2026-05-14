@@ -374,18 +374,18 @@ async function submitResolve() {
 
     <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
 
-    <div class="border rounded-md overflow-x-auto">
+    <div class="border rounded-md overflow-auto max-h-[calc(100vh-220px)]">
       <table class="w-full text-sm">
-        <thead class="bg-muted/40 text-left">
+        <thead class="bg-muted text-left sticky top-0 z-10 shadow-[inset_0_-1px_0_var(--border)]">
           <tr>
-            <th class="px-3 py-2">Tipo</th>
-            <th class="px-3 py-2">Provedor</th>
-            <th class="px-3 py-2">Código</th>
-            <th class="px-3 py-2">Label</th>
-            <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
+            <th class="px-3 py-2 w-20">Tipo</th>
+            <th class="px-3 py-2 w-20">Provedor</th>
+            <th class="px-3 py-2 w-32">Código</th>
+            <th class="px-3 py-2 w-24">Label</th>
+            <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center min-w-[110px]">
               {{ MARKETPLACE_SHORT[mk] }}
             </th>
-            <th v-if="canEdit" class="px-2 py-2 text-right">Ações</th>
+            <th v-if="canEdit" class="px-2 py-2 text-right w-20">Ações</th>
           </tr>
         </thead>
         <tbody>
@@ -439,12 +439,12 @@ async function submitResolve() {
                 @dblclick="startCellEdit(row.cadastro, 'label')"
               >{{ row.cadastro.label || '—' }}</span>
             </td>
-            <td v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-xs">
+            <td v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-xs text-center">
               <div v-if="row.cells[mk]?.length" class="space-y-0.5">
                 <div
-                  v-for="cell in row.cells[mk]"
-                  :key="cell.store_id"
-                  class="flex items-center gap-1 group/cell"
+                  v-for="(cell, idx) in row.cells[mk]"
+                  :key="cell.store_id || `${mk}-si-${idx}`"
+                  class="inline-flex items-center gap-1 group/cell"
                   :class="cellClass(cell)"
                 >
                   <span
