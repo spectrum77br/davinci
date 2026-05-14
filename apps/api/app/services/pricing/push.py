@@ -45,7 +45,13 @@ from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.tiktok import TikTokClient
 from app.services.marketplaces.temu import TemuClient
 from app.services.pricing.calc import CalcOutcome, calculate
-from app.services.pricing.sku_match import build_prefix_index, resolve_product_ids
+from app.services.pricing.sku_match import (
+    build_prefix_index,
+    dedup_links_for_push,
+    filter_products_by_department,
+    ml_listing_type_for_account,
+    resolve_product_ids,
+)
 
 if TYPE_CHECKING:
     from app.models import User
@@ -159,46 +165,86 @@ async def _resolve_product_type(
     return int(leaf.sort_order or 0) + 1
 
 
-async def _resolve_product_links(
+async def _resolve_product_links_for_push(
     session: AsyncSession,
     *,
     user_id: UUID,
-    integration_id: UUID,
-    pricing_product_sku: str,
+    account: PricingAccount,
+    pricing_product: PricingProduct,
+    department: str | None,
+    platform_str: str,
 ) -> list[ProductLink]:
-    """Find all product_links for the (integration, pricing_product) pair.
+    """SSH-style link resolution for a push target.
 
-    SSH stores pricing_product.sku as a comma-joined list of *base* codes
-    ("t031,t032"). DaVinci's products table carries Bling-decorated SKUs
-    ("t031.sa", "t031.sa+a001.sa"). The prefix index lets a base code
-    reach every variant that shares it.
+    Walks the prefix index to get every davinci.products row that *could*
+    map to the pricing_product, then narrows with the department-specific
+    rule (celular = kit-only by base, mala = exact main SKU, catalogo =
+    exact non-kit), filters by ML listing_type when the account is
+    classico/premium, and dedups per platform semantics.
     """
-    if not pricing_product_sku:
+    if not pricing_product.sku:
         return []
     rows = (
         await session.execute(
-            select(Product.id, Product.sku).where(
-                Product.user_id == user_id,
-            )
+            select(Product.id, Product.sku).where(Product.user_id == user_id)
         )
     ).all()
+    # Stage 1: prefix index narrows the candidate set so we don't carry
+    # every product through the department filter.
     prefix_index = build_prefix_index((pid, sku) for pid, sku in rows)
-    product_ids = resolve_product_ids(pricing_product_sku, prefix_index)
-    if not product_ids:
+    candidate_ids = set(resolve_product_ids(pricing_product.sku, prefix_index))
+    if not candidate_ids:
         return []
-    return list(
-        (
-            await session.execute(
-                select(ProductLink).where(
-                    and_(
-                        ProductLink.user_id == user_id,
-                        ProductLink.integration_id == integration_id,
-                        ProductLink.product_id.in_(product_ids),
-                    )
-                )
-            )
-        ).scalars().all()
+    candidate_products = [(pid, sku) for pid, sku in rows if pid in candidate_ids]
+    # Stage 2: SSH department rule. For celular, kit-only by base SKU; for
+    # mala, exact main SKU; for catalogo, exact non-kit SKU.
+    target_ids = filter_products_by_department(
+        department or "celular",
+        pricing_product.sku,
+        candidate_products,
     )
+    if not target_ids:
+        return []
+    # Stage 3: load product_links scoped to (integration, target products),
+    # then apply ML listing_type filter and platform-specific dedup.
+    links_q = select(ProductLink).where(
+        and_(
+            ProductLink.user_id == user_id,
+            ProductLink.integration_id == account.integration_id,
+            ProductLink.product_id.in_(target_ids),
+        )
+    )
+    links = list((await session.execute(links_q)).scalars().all())
+    if platform_str == "ml":
+        wanted_listing_type = ml_listing_type_for_account(account.listing_type)
+        if wanted_listing_type:
+            links = [lk for lk in links if (lk.listing_type or "") == wanted_listing_type]
+    return dedup_links_for_push(platform_str, links)
+
+
+async def _account_department(
+    session: AsyncSession, account: PricingAccount
+) -> str | None:
+    """Return the root segment slug for an account ("celular"/"mala"/...).
+    pricing_accounts.segment_id is pinned to the root segment by the
+    importer, so a single fetch is enough."""
+    if account.segment_id is None:
+        return None
+    seg = (
+        await session.execute(
+            select(Segment).where(Segment.id == account.segment_id)
+        )
+    ).scalar_one_or_none()
+    if seg is None:
+        return None
+    if seg.parent_id is None:
+        return seg.slug
+    parent = (
+        await session.execute(
+            select(Segment).where(Segment.id == seg.parent_id)
+        )
+    ).scalar_one_or_none()
+    return parent.slug if parent and parent.parent_id is None else None
 
 
 async def push_one(
@@ -329,17 +375,24 @@ async def push_one(
             price=outcome.price,
         )
 
-    links = await _resolve_product_links(
+    department = await _account_department(session, account)
+    links = await _resolve_product_links_for_push(
         session,
         user_id=user.id,
-        integration_id=integration.id,
-        pricing_product_sku=product.sku,
+        account=account,
+        pricing_product=product,
+        department=department,
+        platform_str=integration.platform.value,
     )
     if not links:
         return PushOutcome(
             ok=False,
             code="listing_not_found",
-            detail=f"no product_links for sku={product.sku} on integration={integration.id}",
+            detail=(
+                f"no product_links for sku={product.sku} on integration="
+                f"{integration.id} (dept={department!r}, listing_type="
+                f"{account.listing_type!r})"
+            ),
             price=outcome.price,
         )
 
