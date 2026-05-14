@@ -311,25 +311,29 @@ async function commitEditObs(row: GridRow) {
 type CadastroLite = { id: string; codigo: string; label: string | null }
 
 const newAccountFor = ref<{ company: CompanyOut; mk: Marketplace } | null>(null)
-const newAccountForm = reactive({ phoneId: '', emailId: '', server: '' })
+const newAccountForm = reactive({ phoneId: '', emailId: '', serverId: '' })
 const availablePhones = ref<CadastroLite[]>([])
 const availableEmails = ref<CadastroLite[]>([])
+const availableServers = ref<CadastroLite[]>([])
 const newAccountSaving = ref(false)
 const newAccountErr = ref<string | null>(null)
 const newAccountResult = ref<string | null>(null)
 
 async function loadAvailableCadastros(mk: Marketplace) {
   try {
-    const [phones, emails] = await Promise.all([
+    const [phones, emails, servers] = await Promise.all([
       api<CadastroLite[]>(`/api/cadastros/available?tipo=fone&marketplace=${mk}`),
       api<CadastroLite[]>(`/api/cadastros/available?tipo=email&marketplace=${mk}`),
+      api<CadastroLite[]>(`/api/cadastros/available?tipo=servidor&marketplace=${mk}`),
     ])
     availablePhones.value = phones
     availableEmails.value = emails
+    availableServers.value = servers
   } catch (e: any) {
     newAccountErr.value = e?.data?.detail?.code || e?.message || 'erro ao carregar cadastros'
     availablePhones.value = []
     availableEmails.value = []
+    availableServers.value = []
   }
 }
 
@@ -338,7 +342,7 @@ async function openNewAccount(row: GridRow, mk: Marketplace) {
   newAccountFor.value = { company: row.company, mk }
   newAccountForm.phoneId = ''
   newAccountForm.emailId = ''
-  newAccountForm.server = ''
+  newAccountForm.serverId = ''
   newAccountErr.value = null
   newAccountResult.value = null
   await loadAvailableCadastros(mk)
@@ -354,8 +358,8 @@ async function submitNewAccount() {
   const { company, mk } = newAccountFor.value
   const phoneCad = availablePhones.value.find((c) => c.id === newAccountForm.phoneId)
   const emailCad = availableEmails.value.find((c) => c.id === newAccountForm.emailId)
-  const server = newAccountForm.server.trim()
-  if (!phoneCad || !emailCad || !server) {
+  const serverCad = availableServers.value.find((c) => c.id === newAccountForm.serverId)
+  if (!phoneCad || !emailCad || !serverCad) {
     newAccountErr.value = 'Fone, e-mail e servidor são obrigatórios.'
     return
   }
@@ -377,18 +381,18 @@ async function submitNewAccount() {
           account_name: company.apelido,
           phone: phoneCad.codigo,
           email: emailCad.codigo,
-          server,
+          server: serverCad.codigo,
         },
       })
     } catch (e: any) {
       error.value = `Loja criada, mas store_info falhou: ${e?.data?.detail?.code || e?.message || 'erro'}`
     }
 
-    // 3. Link the chosen fone/email Cadastros to the new Store so they show
-    //    up as "in use" on this marketplace and disappear from future
-    //    dropdowns. Each is non-fatal — if the link fails the loja still
-    //    exists and the operator can wire it up manually in /cadastros.
-    for (const cad of [phoneCad, emailCad]) {
+    // 3. Link the chosen fone/email/servidor Cadastros to the new Store so
+    //    they show up as "in use" on this marketplace and disappear from
+    //    future dropdowns. Each is non-fatal — if the link fails the loja
+    //    still exists and the operator can wire it up manually in /cadastros.
+    for (const cad of [phoneCad, emailCad, serverCad]) {
       try {
         await api(`/api/cadastros/${cad.id}/stores`, {
           method: 'POST',
@@ -401,7 +405,7 @@ async function submitNewAccount() {
 
     newAccountResult.value =
       `Conta criada: ${company.apelido} · ${MARKETPLACE_SHORT[mk]} — ` +
-      `Fone ${phoneCad.codigo} · Email ${emailCad.codigo} · Servidor ${server}`
+      `Fone ${phoneCad.codigo} · Email ${emailCad.codigo} · Servidor ${serverCad.codigo}`
     await refresh()
     // Keep modal open briefly so user sees the result toast, then close.
     setTimeout(() => closeNewAccount(), 1500)
@@ -791,11 +795,23 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
           </div>
           <div>
             <Label>Servidor <span class="text-red-500">*</span></Label>
-            <Input v-model="newAccountForm.server" :disabled="newAccountSaving" placeholder="ex: 76" />
+            <select
+              v-model="newAccountForm.serverId"
+              :disabled="newAccountSaving"
+              class="w-full border rounded px-2 py-1 bg-background text-sm"
+            >
+              <option value="">— selecione um servidor disponível —</option>
+              <option v-for="c in availableServers" :key="c.id" :value="c.id">
+                {{ c.codigo }}{{ c.label ? ` · ${c.label}` : '' }}
+              </option>
+            </select>
+            <p v-if="!availableServers.length" class="text-xs text-amber-600 mt-1">
+              Sem servidores disponíveis para esta plataforma. Cadastre um em /cadastros.
+            </p>
           </div>
           <p class="text-xs text-muted-foreground">
-            Apenas códigos sem vínculo nesta plataforma aparecem nos selects. Ao criar, o fone e o e-mail
-            ficam marcados como "em uso" na tabela Cadastros.
+            Apenas códigos sem vínculo nesta plataforma aparecem nos selects. Ao criar, fone, e-mail
+            e servidor ficam marcados como "em uso" na tabela Cadastros.
           </p>
         </div>
         <div v-if="newAccountErr" class="text-sm text-red-500">erro: {{ newAccountErr }}</div>
@@ -805,7 +821,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         <div class="flex justify-end gap-2">
           <Button variant="ghost" :disabled="newAccountSaving" @click="closeNewAccount">cancelar</Button>
           <Button
-            :disabled="newAccountSaving || !newAccountForm.phoneId || !newAccountForm.emailId || !newAccountForm.server.trim()"
+            :disabled="newAccountSaving || !newAccountForm.phoneId || !newAccountForm.emailId || !newAccountForm.serverId"
             @click="submitNewAccount"
           >
             {{ newAccountSaving ? 'criando…' : 'Criar conta' }}
