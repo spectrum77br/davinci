@@ -14,7 +14,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -216,26 +216,85 @@ async def _cost_price_by_sku(
     return {sku: float(cost) for sku, cost in rows if cost is not None}
 
 
+def _normalize_new_itens(itens: list[Any]) -> list[tuple[str, int, float]]:
+    out: list[tuple[str, int, float]] = []
+    for it in itens:
+        if not isinstance(it, dict):
+            continue
+        produto = it.get("produto") if isinstance(it.get("produto"), dict) else {}
+        codigo = it.get("codigo") or produto.get("codigo") or ""
+        qty = _int(it.get("quantidade")) or 0
+        valor = _num(it.get("valor")) or 0.0
+        out.append((str(codigo).strip(), qty, float(valor)))
+    return sorted(out)
+
+
+async def _existing_itens_signature(
+    session: AsyncSession, bling_id: int
+) -> list[tuple[str, int, float]]:
+    rows = (
+        await session.execute(
+            select(
+                BlingOrder.item_codigo,
+                BlingOrder.item_quantidade,
+                BlingOrder.itemvalor,
+            ).where(BlingOrder.bling_id == bling_id)
+        )
+    ).all()
+    return sorted(
+        (
+            ((codigo or "").strip(), int(qty or 0), float(valor or 0))
+            for codigo, qty, valor in rows
+        )
+    )
+
+
 async def upsert_order(
     session: AsyncSession,
     raw_order: dict[str, Any],
 ) -> int:
-    """Replace all rows for an order with one row per item. Returns row count."""
+    """Persist a Bling order. Strategy:
+    - situacao=6 ("Em andamento"): full replace + snapshot `preco_custo` from
+      `products.cost_price`.
+    - other situations: if itens unchanged vs. DB, only UPDATE `situacao`
+      (preserves preco_custo, taxas_checked_at, etc. populated by the daily
+      sync); if itens differ or no row exists yet, full replace.
+    """
     bling_id = _int(raw_order.get("id"))
     if bling_id is None:
         return 0
 
-    loja = raw_order.get("loja") or {}
-    bling_loja_id = _int(loja.get("id")) if isinstance(loja, dict) else None
-    store_id = await _resolve_store_id(session, bling_loja_id)
+    situacao = _situacao_id(raw_order)
 
     itens = raw_order.get("itens") or []
     if not isinstance(itens, list):
         itens = []
 
-    # Situacao 6 = "Em andamento" — snapshot unit cost from products.cost_price.
+    existing_count = (
+        await session.execute(
+            select(func.count(BlingOrder.id)).where(BlingOrder.bling_id == bling_id)
+        )
+    ).scalar() or 0
+
+    # Non-6 + existing rows + itens unchanged → narrow UPDATE only.
+    if situacao != "6" and existing_count > 0:
+        new_sig = _normalize_new_itens(itens)
+        old_sig = await _existing_itens_signature(session, bling_id)
+        if new_sig == old_sig:
+            await session.execute(
+                update(BlingOrder)
+                .where(BlingOrder.bling_id == bling_id)
+                .values(situacao=situacao)
+            )
+            return existing_count
+
+    loja = raw_order.get("loja") or {}
+    bling_loja_id = _int(loja.get("id")) if isinstance(loja, dict) else None
+    store_id = await _resolve_store_id(session, bling_loja_id)
+
+    # situacao=6 → snapshot unit cost from products.cost_price.
     cost_by_sku: dict[str, float] = {}
-    if _situacao_id(raw_order) == "6" and itens:
+    if situacao == "6" and itens:
         skus: set[str] = set()
         for it in itens:
             if not isinstance(it, dict):
