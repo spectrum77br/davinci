@@ -645,9 +645,11 @@ async function commitEditProduct() {
     const gp = grid.value?.products.find((x) => x.id === id)
     if (gp) Object.assign(gp, updated)
     flash(id, field)
-    if (field.startsWith('cost_kit') && tab.value === 'tabela') {
+    if (field.startsWith('cost_kit')) {
       // Recompute prices in-memory so the tabela view repaints without a
       // round trip. Cells with override / explicit status are left alone.
+      // No tab guard — when the grid isn't loaded recomputeCellsForProduct
+      // is a no-op and there's nothing to repaint.
       recomputeCellsForProduct(id)
     }
   } catch (e: any) {
@@ -1186,10 +1188,13 @@ function computePrice(acc: Account, prod: PricingProduct): number | null {
   return Math.round(price * 100) / 100
 }
 
-// Re-compute every non-override cell for `prodId` against the current
-// account roster. Skips cells with `cell_status` in {'manual','locked','NA','SV','disabled'}
-// so user-fixed values stay put. Used after inline kit edits to reflect the
-// new cost without a full grid reload.
+// Re-compute every non-overridden cell for `prodId` against the current
+// account roster. Skips cells the user explicitly set (manual/locked/NA/SV/
+// disabled status, or a real price_override producing source='override').
+// Used after inline kit edits to reflect the new cost without a full grid
+// reload. has_override alone is NOT a skip signal — overrides with
+// cell_status='auto' and no price_override are just leftover rows from the
+// SSH import and should still recompute.
 function recomputeCellsForProduct(prodId: string) {
   if (!grid.value) return
   const prod = grid.value.products.find((x) => x.id === prodId)
@@ -1197,10 +1202,9 @@ function recomputeCellsForProduct(prodId: string) {
   for (const acc of grid.value.accounts) {
     const c = cellOf(prodId, acc.id)
     if (!c) continue
-    if (c.has_override) continue
     if (c.cell_status === 'manual' || c.cell_status === 'locked'
         || c.cell_status === 'NA' || c.cell_status === 'SV'
-        || c.source === 'disabled') continue
+        || c.source === 'disabled' || c.source === 'override') continue
     const newPrice = computePrice(acc, prod)
     c.price = newPrice == null ? null : (newPrice.toFixed(2) as any)
     c.source = newPrice == null ? 'missing_inputs' : 'computed'
