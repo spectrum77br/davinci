@@ -257,7 +257,7 @@ const accountsGrouped = computed<{ platform: string; label: string; rows: Accoun
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key)!.push(a)
   }
-  const order = ['aliexpress', 'amazon', 'mercadolivre', 'shopee', 'tiktok', 'temu', 'magalu']
+  const order = ['amazon', 'magalu', 'mercadolivre', 'shopee', 'temu', 'aliexpress', 'tiktok']
   return Array.from(groups.entries())
     .sort(([a], [b]) => {
       const ia = order.indexOf(a)
@@ -602,7 +602,9 @@ function startEditProduct(p: PricingProduct, field: string) {
 async function commitEditProduct() {
   if (!editing.value) return
   const { id, field } = editing.value
-  const p = products.value.find((x) => x.id === id)
+  const p =
+    products.value.find((x) => x.id === id) ??
+    grid.value?.products.find((x) => x.id === id)
   if (!p) return cancelEdit()
 
   const raw = editValue.value.trim()
@@ -638,7 +640,14 @@ async function commitEditProduct() {
       body: payload,
     })
     Object.assign(p, updated)
+    // Mirror cost edits to the grid copy so the tabela view repaints without
+    // a full reload. Recompute affected cells.
+    const gp = grid.value?.products.find((x) => x.id === id)
+    if (gp) Object.assign(gp, updated)
     flash(id, field)
+    if (field.startsWith('cost_kit') && tab.value === 'tabela') {
+      await loadGrid()
+    }
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'save_failed'
   } finally {
@@ -2526,22 +2535,45 @@ watch(department, async () => {
               </td>
               <!-- Sticky cost: kits or custo (positions shifted by +112px) -->
               <template v-if="department === 'celular'">
-                <td class="sticky bg-background text-blue-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '368px' }">
-                  {{ Number(prod.cost_kit1 || 0).toFixed(0) }}
-                </td>
-                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '424px' }">
-                  {{ prod.cost_kit2 != null ? Number(prod.cost_kit2).toFixed(0) : '—' }}
-                </td>
-                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '480px' }">
-                  {{ prod.cost_kit3 != null ? Number(prod.cost_kit3).toFixed(0) : '—' }}
-                </td>
-                <td class="sticky bg-background text-muted-foreground px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '536px' }">
-                  {{ prod.cost_kit4 != null ? Number(prod.cost_kit4).toFixed(0) : '—' }}
+                <td
+                  v-for="k in 4" :key="`gridkit-${k}`"
+                  class="sticky bg-background px-1 py-1 text-center text-xs z-10 min-w-[56px] cursor-pointer"
+                  :class="[
+                    k === 1 ? 'text-blue-700 font-bold' : 'text-muted-foreground',
+                    isEditing(prod.id, `cost_kit${k}`) ? 'ring-2 ring-blue-500 ring-inset' : '',
+                    isFlashed(prod.id, `cost_kit${k}`) ? 'bg-emerald-50 dark:bg-emerald-900/20' : '',
+                  ]"
+                  :style="{ left: `${368 + (k - 1) * 56}px` }"
+                  @click="canEditProdutos && !isEditing(prod.id, `cost_kit${k}`) && startEditProduct(prod as any, `cost_kit${k}`)"
+                >
+                  <input
+                    v-if="isEditing(prod.id, `cost_kit${k}`)"
+                    :ref="setEditInputRef"
+                    v-model="editValue" type="number" step="0.01"
+                    class="w-full text-xs bg-transparent outline-none text-center"
+                    @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
+                  />
+                  <span v-else>{{ (prod as any)[`cost_kit${k}`] != null ? Number((prod as any)[`cost_kit${k}`]).toFixed(0) : '—' }}</span>
                 </td>
               </template>
               <template v-else>
-                <td class="sticky bg-background text-blue-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px]" :style="{ left: '368px' }">
-                  {{ Number(prod.cost_kit1 || 0).toFixed(0) }}
+                <td
+                  class="sticky bg-background text-blue-700 font-bold px-1 py-1 text-center text-xs z-10 min-w-[56px] cursor-pointer"
+                  :class="[
+                    isEditing(prod.id, 'cost_kit1') ? 'ring-2 ring-blue-500 ring-inset' : '',
+                    isFlashed(prod.id, 'cost_kit1') ? 'bg-emerald-50 dark:bg-emerald-900/20' : '',
+                  ]"
+                  :style="{ left: '368px' }"
+                  @click="canEditProdutos && !isEditing(prod.id, 'cost_kit1') && startEditProduct(prod as any, 'cost_kit1')"
+                >
+                  <input
+                    v-if="isEditing(prod.id, 'cost_kit1')"
+                    :ref="setEditInputRef"
+                    v-model="editValue" type="number" step="0.01"
+                    class="w-full text-xs bg-transparent outline-none text-center"
+                    @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
+                  />
+                  <span v-else>{{ Number(prod.cost_kit1 || 0).toFixed(0) }}</span>
                 </td>
               </template>
               <!-- Account cells -->

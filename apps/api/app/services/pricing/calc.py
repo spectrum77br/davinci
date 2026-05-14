@@ -3,8 +3,8 @@
 Formula
 -------
 Given:
-- account: pricing_account (commission, margin_K, shipping_K, kit_number)
-- product: pricing_product (cost_kit_K, bling_cost_price)
+- account: pricing_account (commission, margin_T, shipping_T, kit_number)
+- product: pricing_product (cost_kit_K, product_type T)
 - override: optional pricing_override
 
 Resolution order (highest precedence first):
@@ -18,11 +18,15 @@ Compute formula (alinhada ao SSH):
 Equivalent to the SSH wording:
     price = (Custo × Margem + Frete + Custo) / (1 - Comissão)
 
-`cost` resolves to `product.cost_kit_{kit_number}` with fallback to
-`cost_kit1` when the kit-N cost is NULL or 0 (defaults aprovados).
-`commission` and `margin/shipping` of the matching kit slot must be set —
-when missing, calc returns `None` and the caller treats the cell as
-"not configured" (UI shows `—`, push refuses).
+Slot mapping (SSH semantics):
+  * `cost` = `product.cost_kit_{account.kit_number}`, fallback `cost_kit1`.
+  * `margin/shipping` = `account.margin_{product.product_type}` /
+    `account.shipping_{product.product_type}`. The product type (1..5)
+    is the leaf-segment column under the root department.
+
+`commission` and the matching margin slot must both be set — when missing,
+calc returns `None` and the caller treats the cell as "not configured"
+(UI shows `—`/NA, push refuses).
 
 The result is a `Decimal` quantized to 2 decimals (cents-precision in BRL),
 ROUND_HALF_UP — closer to seller intuition than banker's rounding.
@@ -63,7 +67,7 @@ def _kit_value(product: PricingProduct, kit: int) -> Decimal | None:
 
 
 def _account_pair(
-    account: PricingAccount, kit: int
+    account: PricingAccount, slot: int
 ) -> tuple[Decimal | None, Decimal | None]:
     margins = {
         1: account.margin1,
@@ -79,8 +83,8 @@ def _account_pair(
         4: account.shipping4,
         5: account.shipping5,
     }
-    m = margins.get(kit)
-    s = shippings.get(kit)
+    m = margins.get(slot)
+    s = shippings.get(slot)
     return (
         Decimal(m) if m is not None else None,
         Decimal(s) if s is not None else None,
@@ -91,6 +95,7 @@ def calculate(
     account: PricingAccount,
     product: PricingProduct,
     override: PricingOverride | None = None,
+    product_type: int | None = None,
 ) -> CalcOutcome:
     if override is not None:
         raw = override.cell_status
@@ -111,14 +116,22 @@ def calculate(
             )
 
     kit = int(account.kit_number or 1)
+    # Margin/shipping slot is the product type (Acessórios/Diversos/Regular/
+    # Robusto/Apple). When the caller didn't resolve it, fall back to a
+    # transient attr the API sets after the segment lookup; ultimate fallback
+    # is the account's kit_number (legacy behavior).
+    if product_type is None:
+        product_type = getattr(product, "_product_type", None) or kit
+    slot = max(1, min(5, int(product_type)))
     cost = _kit_value(product, kit) or _kit_value(product, 1)
-    margin, shipping = _account_pair(account, kit)
+    margin, shipping = _account_pair(account, slot)
     commission = (
         Decimal(account.commission) if account.commission is not None else None
     )
 
     inputs = {
         "kit": kit,
+        "product_type": slot,
         "cost": str(cost) if cost is not None else None,
         "commission": str(commission) if commission is not None else None,
         "margin": str(margin) if margin is not None else None,

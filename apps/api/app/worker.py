@@ -105,9 +105,15 @@ async def sync_all_run(
     job_id: str,
     user_id: str,
     product_ids: list[str] | None,
+    include_all_stock: bool = False,
 ) -> None:
     """Fase 4a: full sync run. Acquires per-user advisory lock; if busy, marks
-    job as `failed` with `error='sync_already_running'`."""
+    job as `failed` with `error='sync_already_running'`.
+
+    `include_all_stock=True` bypasses the cron-driven low-stock filter — used
+    when the UI explicitly clicks "sync all" and the user expects every
+    product to be pushed to its marketplaces.
+    """
     uid = UUID(user_id)
     jid = UUID(job_id)
 
@@ -134,12 +140,12 @@ async def sync_all_run(
                 where.append(Product.user_id == uid)
             if product_ids:
                 where.append(Product.id.in_([UUID(p) for p in product_ids]))
-            else:
-                # Low-stock-only mode: full sync_all sweeps only items at
-                # risk of stockout. Hi-stock items rarely diverge between
+            elif not include_all_stock:
+                # Low-stock-only mode: cron-driven sync_all sweeps only items
+                # at risk of stockout. Hi-stock items rarely diverge between
                 # Bling and marketplaces; skipping them keeps the per-day
-                # call volume well under Bling's CF rate gate. Manual
-                # single-product sync (product_ids set) bypasses the filter.
+                # call volume well under Bling's CF rate gate. Manual full
+                # sync (UI button) sets include_all_stock=True to bypass.
                 where.append(Product.stock < SYNC_ALL_LOW_STOCK_THRESHOLD)
             stmt = select(Product)
             if where:

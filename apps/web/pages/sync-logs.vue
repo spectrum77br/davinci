@@ -112,7 +112,7 @@ async function startSyncAll() {
   activeJob.value = null
   const r = await api<{ job_id: string }>('/api/jobs/sync-all', {
     method: 'POST',
-    body: { integration_ids: null, product_ids: null },
+    body: { integration_ids: null, product_ids: null, include_all_stock: true },
   })
   startPolling(r.job_id)
 }

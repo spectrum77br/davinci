@@ -31,7 +31,9 @@ from app.models import (
     PricingOverride,
     PricingProduct,
     PricingPushIdempotency,
+    Segment,
 )
+from app.deps.auth import user_scope
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.base import SyncResult, SyncStatus
 from app.services.marketplaces.factory import client_for
@@ -137,6 +139,23 @@ async def _store_idempotent(
     await session.flush()
 
 
+async def _resolve_product_type(
+    session: AsyncSession, product: PricingProduct
+) -> int | None:
+    """Returns the product_type (1..5) for a pricing_product by looking up
+    the leaf segment's sort_order under its root department. None if the
+    segment chain doesn't resolve.
+    """
+    leaf = (
+        await session.execute(
+            select(Segment).where(Segment.id == product.segment_id)
+        )
+    ).scalar_one_or_none()
+    if leaf is None or leaf.parent_id is None:
+        return None
+    return int(leaf.sort_order or 0) + 1
+
+
 async def _resolve_listing(
     session: AsyncSession,
     *,
@@ -174,7 +193,7 @@ async def push_one(
             select(PricingAccount).where(
                 and_(
                     PricingAccount.id == account_id,
-                    PricingAccount.user_id == user.id,
+                    user_scope(PricingAccount, user),
                 )
             )
         )
@@ -187,7 +206,7 @@ async def push_one(
             select(PricingProduct).where(
                 and_(
                     PricingProduct.id == product_id,
-                    PricingProduct.user_id == user.id,
+                    user_scope(PricingProduct, user),
                 )
             )
         )
@@ -201,13 +220,14 @@ async def push_one(
                 and_(
                     PricingOverride.pricing_account_id == account_id,
                     PricingOverride.pricing_product_id == product_id,
-                    PricingOverride.user_id == user.id,
+                    user_scope(PricingOverride, user),
                 )
             )
         )
     ).scalar_one_or_none()
 
-    outcome: CalcOutcome = calculate(account, product, override)
+    product_type = await _resolve_product_type(session, product)
+    outcome: CalcOutcome = calculate(account, product, override, product_type)
     if outcome.source in {"disabled", "locked"} and (
         outcome.source == "disabled" or outcome.price is None
     ):
@@ -261,7 +281,7 @@ async def push_one(
             select(Integration).where(
                 and_(
                     Integration.id == account.integration_id,
-                    Integration.user_id == user.id,
+                    user_scope(Integration, user),
                 )
             )
         )

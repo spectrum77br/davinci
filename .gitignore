@@ -38,3 +38,6 @@ data/
 test-results/
 playwright-report/
 playwright/.cache/
+
+# SSH MySQL dumps (contain production credentials — never commit)
+ssh_dados_completos/

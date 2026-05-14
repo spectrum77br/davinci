@@ -15,6 +15,10 @@ class SyncProductBody(BaseModel):
 class SyncAllIn(BaseModel):
     integration_ids: list[UUID] | None = None
     product_ids: list[UUID] | None = None
+    # Bypasses the low-stock-only filter used by the cron-driven daily sync.
+    # When the UI explicitly clicks "sync all", users expect every product to
+    # push to marketplaces — not just the ones near stockout.
+    include_all_stock: bool = False
 
 
 class SyncLogOut(BaseModel):

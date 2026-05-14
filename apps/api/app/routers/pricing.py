@@ -787,9 +787,11 @@ async def get_grid(
 
     cells: list[PricingGridCell] = []
     for prod in products:
+        pair = leaves_by_id.get(prod.segment_id)
+        prod_type = pair[1] if pair else None
         for acc in accounts:
             ovr = by_pair.get((prod.id, acc.id))
-            outcome = calculate(acc, prod, ovr)
+            outcome = calculate(acc, prod, ovr, prod_type)
             cells.append(
                 PricingGridCell(
                     pricing_account_id=acc.id,

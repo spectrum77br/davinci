@@ -569,6 +569,7 @@ async function runSyncAll() {
       body: {
         integration_ids: Array.from(selectedSyncAllIds.value),
         product_ids: null,
+        include_all_stock: true,
       },
     })
     startPolling(r.job_id)
