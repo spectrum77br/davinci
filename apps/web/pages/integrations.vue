@@ -93,14 +93,37 @@ const filtered = computed(() => {
   })
 })
 
+// Display order for the platform headers — alphabetical by long name with
+// the most-used marketplaces first; everything else falls through alphabetically.
+const PLATFORM_ORDER: string[] = [
+  'ml', 'shopee', 'amazon', 'tiktok', 'temu', 'aliexpress', 'shein', 'magalu', 'site', 'bling',
+]
+
 const grouped = computed(() => {
   const map: Record<string, Integration[]> = {}
   for (const i of filtered.value) {
-    const key = i.company_id || 'sem-empresa'
+    const key = i.platform || 'outras'
     map[key] ??= []
     map[key].push(i)
   }
-  return map
+  // Sort each group by integration name (alpha, pt-BR, case-insensitive).
+  for (const arr of Object.values(map)) {
+    arr.sort((a, b) =>
+      (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' })
+    )
+  }
+  // Return as ordered array of {platform, items} so the template can render
+  // headers in PLATFORM_ORDER instead of the JS object key order.
+  const keys = Object.keys(map)
+  keys.sort((a, b) => {
+    const ai = PLATFORM_ORDER.indexOf(a)
+    const bi = PLATFORM_ORDER.indexOf(b)
+    if (ai === -1 && bi === -1) return a.localeCompare(b)
+    if (ai === -1) return 1
+    if (bi === -1) return -1
+    return ai - bi
+  })
+  return keys.map(k => ({ platform: k, items: map[k] }))
 })
 
 async function testIntegration(i: Integration) {
@@ -195,12 +218,15 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
     </div>
     <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
 
-    <div v-for="(group, cid) in grouped" :key="cid" class="space-y-2">
-      <h2 class="font-semibold text-sm text-muted-foreground">
-        {{ companyById[cid]?.apelido || (cid === 'sem-empresa' ? 'sem empresa' : cid) }}
+    <div v-for="group in grouped" :key="group.platform" class="space-y-2">
+      <h2 class="font-bold text-xs uppercase tracking-wide text-foreground/80 border-b border-border pb-1">
+        {{ (PLATFORM_LABELS[group.platform] || group.platform).toUpperCase() }}
+        <span class="font-normal text-muted-foreground normal-case">
+          {{ group.items.length }} conta{{ group.items.length > 1 ? 's' : '' }}
+        </span>
       </h2>
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        <div v-for="i in group" :key="i.id" class="border rounded-md p-3 space-y-2">
+        <div v-for="i in group.items" :key="i.id" class="border rounded-md p-3 space-y-2">
           <div class="flex items-center gap-2">
             <span class="text-xs uppercase font-mono">{{ PLATFORM_LABELS[i.platform] }}</span>
             <span class="text-xs px-2 py-0.5 rounded border ml-auto" :class="statusClass(i)">

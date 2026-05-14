@@ -562,18 +562,10 @@ async function copyText(text: string) {
                 >
                   {{ row.account_name || '—' }}
                 </span>
-                <span
-                  v-if="integrationFor(row)"
-                  class="shrink-0 inline-flex items-center gap-0.5 px-1 py-0.5 rounded border bg-muted text-muted-foreground text-[10px] max-w-[100px]"
-                  :title="`integração: ${integrationFor(row)!.name}`"
-                >
-                  <Link2 class="h-2.5 w-2.5 shrink-0" />
-                  <span class="truncate">{{ integrationFor(row)!.name }}</span>
-                </span>
                 <button
                   v-if="row.integration_id && canEdit"
                   class="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-muted rounded shrink-0"
-                  title="Desvincular integração"
+                  :title="integrationFor(row) ? `Desvincular ${integrationFor(row)!.name}` : 'Desvincular integração'"
                   @click.stop="unlinkIntegration(row)"
                 >
                   <Unlink class="h-3 w-3" />

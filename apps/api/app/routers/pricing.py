@@ -1549,6 +1549,7 @@ def _store_info_out(
     row: StoreInfo,
     departments: list[str] | None = None,
     has_pricing: bool | None = None,
+    has_integration: bool | None = None,
 ) -> StoreInfoOut:
     out = StoreInfoOut.model_validate(row)
     out.has_password = bool(row.password_enc)
@@ -1557,7 +1558,12 @@ def _store_info_out(
     # in pricing_accounts). Falls back to "any department was matched" so
     # callers that don't compute the strict variant still get a sensible value.
     out.has_pricing = bool(has_pricing) if has_pricing is not None else bool(out.departments)
-    out.has_integration = row.integration_id is not None
+    # `has_integration` is the strict (lower(name), platform) match against the
+    # `integrations` table. Falls back to the legacy FK if the caller didn't
+    # compute the strict variant.
+    out.has_integration = (
+        bool(has_integration) if has_integration is not None else (row.integration_id is not None)
+    )
     return out
 
 
@@ -1601,12 +1607,25 @@ async def list_store_info(
         plat_val = plat.value if hasattr(plat, "value") else str(plat)
         accs_normalized.append(((name or "").strip().lower(), plat_val.lower(), slug))
 
+    # has_integration: strict (lower(name), platform) match against integrations.
+    # Both store_info.platform and integrations.platform use short codes (ml,
+    # shopee, …) so no alias translation is needed here.
+    integ_rows = (
+        await session.execute(select(Integration.name, Integration.platform))
+    ).all()
+    integ_keys: set[tuple[str, str]] = set()
+    for iname, iplat in integ_rows:
+        iplat_val = iplat.value if hasattr(iplat, "value") else str(iplat)
+        if iname:
+            integ_keys.add((iname.strip().lower(), iplat_val.lower()))
+
     out_list: list[StoreInfoOut] = []
     for r in rows:
         sname = (r.account_name or "").strip().lower()
         splat_alias = _STORE_TO_PRICING_PLATFORM.get(
             (r.platform or "").strip().lower(), (r.platform or "").strip().lower()
         )
+        splat = (r.platform or "").strip().lower()
         depts: set[str] = set()
         exact_hit = False
         if sname:
@@ -1618,7 +1637,10 @@ async def list_store_info(
                     exact_hit = True
                 elif pname.startswith(sname + " "):
                     depts.add(pdept)
-        out_list.append(_store_info_out(r, list(depts), has_pricing=exact_hit))
+        has_integ = bool(sname and (sname, splat) in integ_keys)
+        out_list.append(
+            _store_info_out(r, list(depts), has_pricing=exact_hit, has_integration=has_integ)
+        )
     return out_list
 
 
