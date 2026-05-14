@@ -40,7 +40,7 @@ const items = ref<Margem[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const search = ref('')
-const filterStatus = ref<'all' | MargensStatus>('all')
+const filterStatus = ref<'all' | MargensStatus>('Pendente')
 
 async function load() {
   loading.value = true
