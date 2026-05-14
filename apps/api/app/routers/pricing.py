@@ -32,6 +32,7 @@ from app.models import (
     PricingPlatform,
     PricingProduct,
     Product,
+    ProductLink,
     Segment,
     StoreInfo,
     User,
@@ -1278,6 +1279,162 @@ async def get_sales_map(
         matched_pricing_products=matched_pids,
     )
     return out
+
+
+# =============================================================================
+# Actual marketplace prices — per-account current price for a pricing_product
+# =============================================================================
+
+@router.get("/actual-prices/{pricing_product_id}")
+async def get_actual_prices(
+    pricing_product_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "view"))
+    ],
+    department: Annotated[str | None, Query()] = None,
+) -> dict[str, float | None]:
+    """Fetch the *current* listing price from each connected marketplace for
+    every pricing_account that could carry this product. Frontend uses the
+    response to show "real: R$ XXX" alongside the computed price so the
+    seller can spot drift between the table and what's live.
+
+    Phase 1: ML only. Other platforms return null until their `get_price`
+    helper lands.
+    """
+    from app.services.marketplaces.factory import client_for
+    from app.services.pricing.sku_match import (
+        build_prefix_index,
+        dedup_links_for_push,
+        filter_products_by_department,
+        ml_listing_type_for_account,
+        resolve_product_ids,
+    )
+
+    product = (
+        await session.execute(
+            select(PricingProduct).where(
+                and_(
+                    PricingProduct.id == pricing_product_id,
+                    user_scope(PricingProduct, user),
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if product is None:
+        raise HTTPException(404, detail={"code": "product_not_found"})
+
+    accounts_stmt = select(PricingAccount).where(user_scope(PricingAccount, user))
+    if department:
+        _, _, root_id_by_slug = await _segment_index(session)
+        rid = root_id_by_slug.get(department)
+        if rid is None:
+            raise HTTPException(400, detail={"code": "invalid_department"})
+        accounts_stmt = accounts_stmt.where(PricingAccount.segment_id == rid)
+    accounts = (await session.execute(accounts_stmt)).scalars().all()
+
+    # Resolve the same davinci.products that push would target so the price
+    # we read corresponds to the listing push would write.
+    products_rows = (
+        await session.execute(
+            select(Product.id, Product.sku).where(user_scope(Product, user))
+        )
+    ).all()
+    prefix_index = build_prefix_index((pid, sku) for pid, sku in products_rows)
+    candidate_ids = set(resolve_product_ids(product.sku, prefix_index))
+    candidate_products = [
+        (pid, sku) for pid, sku in products_rows if pid in candidate_ids
+    ]
+
+    integration_cache: dict[UUID, Integration | None] = {}
+    client_cache: dict[UUID, object] = {}
+    result: dict[str, float | None] = {}
+
+    for acc in accounts:
+        result[str(acc.id)] = None
+        if acc.integration_id is None:
+            continue
+
+        # Apply the same SSH match the push uses so we read the listing the
+        # user would actually update.
+        target_ids = filter_products_by_department(
+            await _account_department_root(session, acc) or "celular",
+            product.sku,
+            candidate_products,
+            platform="ml",  # the dept rule only differs on celular ML
+        )
+        if not target_ids:
+            continue
+
+        if acc.integration_id not in integration_cache:
+            integration_cache[acc.integration_id] = (
+                await session.execute(
+                    select(Integration).where(
+                        and_(
+                            Integration.id == acc.integration_id,
+                            user_scope(Integration, user),
+                        )
+                    )
+                )
+            ).scalar_one_or_none()
+        integ = integration_cache[acc.integration_id]
+        if integ is None or integ.platform != IntegrationPlatform.ML:
+            # Non-ML platforms: skip in this phase.
+            continue
+
+        links_q = select(ProductLink).where(
+            and_(
+                ProductLink.user_id == user.id,
+                ProductLink.integration_id == acc.integration_id,
+                ProductLink.product_id.in_(list(target_ids)),
+            )
+        )
+        links = list((await session.execute(links_q)).scalars().all())
+        wanted = ml_listing_type_for_account(acc.listing_type)
+        if wanted:
+            links = [lk for lk in links if (lk.listing_type or "") == wanted]
+        links = dedup_links_for_push("ml", links)
+        if not links:
+            continue
+
+        if acc.integration_id not in client_cache:
+            from app.security.cipher import decrypt_json
+            creds = decrypt_json(integ.credentials)
+            client_cache[acc.integration_id] = client_for(
+                integ.platform, creds
+            )
+        client = client_cache[acc.integration_id]
+
+        # ML: one price per listing — grab the first link's item and read
+        # its price field.
+        link = links[0]
+        try:
+            item = await client.get_item(link.external_id)  # type: ignore[attr-defined]
+            price = item.get("price")
+            if price is not None:
+                result[str(acc.id)] = float(price)
+        except Exception:  # noqa: BLE001
+            # Quiet — a single listing fetch failing shouldn't blank out the
+            # whole compare-mode column. The cell just stays "no real price".
+            continue
+
+    return result
+
+
+async def _account_department_root(
+    session: AsyncSession, acc: PricingAccount
+) -> str | None:
+    """Same as push._account_department but inlined here to avoid the
+    cross-module dep."""
+    if acc.segment_id is None:
+        return None
+    seg = await session.get(Segment, acc.segment_id)
+    if seg is None:
+        return None
+    if seg.parent_id is None:
+        return seg.slug
+    parent = await session.get(Segment, seg.parent_id)
+    return parent.slug if parent and parent.parent_id is None else None
 
 
 # =============================================================================
