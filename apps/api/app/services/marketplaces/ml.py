@@ -190,6 +190,20 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_listing_price(self, link: "ProductLink") -> float | None:
+        """Read the current price from /items/{id}. ML quotes the item-level
+        price even for multi-variation listings, so variation_id is ignored
+        here — matches how update_price works."""
+        try:
+            item = await self.get_item(link.external_id)
+        except Exception:  # noqa: BLE001
+            return None
+        price = item.get("price")
+        try:
+            return float(price) if price is not None else None
+        except (TypeError, ValueError):
+            return None
+
     async def update_stock(
         self,
         link: ProductLink,

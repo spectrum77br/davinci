@@ -1355,17 +1355,6 @@ async def get_actual_prices(
         if acc.integration_id is None:
             continue
 
-        # Apply the same SSH match the push uses so we read the listing the
-        # user would actually update.
-        target_ids = filter_products_by_department(
-            await _account_department_root(session, acc) or "celular",
-            product.sku,
-            candidate_products,
-            platform="ml",  # the dept rule only differs on celular ML
-        )
-        if not target_ids:
-            continue
-
         if acc.integration_id not in integration_cache:
             integration_cache[acc.integration_id] = (
                 await session.execute(
@@ -1378,8 +1367,23 @@ async def get_actual_prices(
                 )
             ).scalar_one_or_none()
         integ = integration_cache[acc.integration_id]
-        if integ is None or integ.platform != IntegrationPlatform.ML:
-            # Non-ML platforms: skip in this phase.
+        if integ is None:
+            continue
+        # Only platforms with get_listing_price implemented carry real data;
+        # the rest silently leave the cell at null.
+        platform_value = integ.platform.value if hasattr(integ.platform, "value") else integ.platform
+        if platform_value not in ("ml", "shopee"):
+            continue
+
+        # Apply the same SSH match push uses, with the real platform so the
+        # celular ML kit-only filter only fires for ML.
+        target_ids = filter_products_by_department(
+            await _account_department_root(session, acc) or "celular",
+            product.sku,
+            candidate_products,
+            platform=platform_value,
+        )
+        if not target_ids:
             continue
 
         links_q = select(ProductLink).where(
@@ -1390,10 +1394,11 @@ async def get_actual_prices(
             )
         )
         links = list((await session.execute(links_q)).scalars().all())
-        wanted = ml_listing_type_for_account(acc.listing_type)
-        if wanted:
-            links = [lk for lk in links if (lk.listing_type or "") == wanted]
-        links = dedup_links_for_push("ml", links)
+        if platform_value == "ml":
+            wanted = ml_listing_type_for_account(acc.listing_type)
+            if wanted:
+                links = [lk for lk in links if (lk.listing_type or "") == wanted]
+        links = dedup_links_for_push(platform_value, links)
         if not links:
             continue
 
@@ -1405,18 +1410,17 @@ async def get_actual_prices(
             )
         client = client_cache[acc.integration_id]
 
-        # ML: one price per listing — grab the first link's item and read
-        # its price field.
-        link = links[0]
-        try:
-            item = await client.get_item(link.external_id)  # type: ignore[attr-defined]
-            price = item.get("price")
+        # Try each candidate link until one returns a price — protects
+        # against single-listing failures (closed/under_review) blanking
+        # the whole cell.
+        for link in links:
+            try:
+                price = await client.get_listing_price(link)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                price = None
             if price is not None:
                 result[str(acc.id)] = float(price)
-        except Exception:  # noqa: BLE001
-            # Quiet — a single listing fetch failing shouldn't blank out the
-            # whole compare-mode column. The cell just stays "no real price".
-            continue
+                break
 
     return result
 

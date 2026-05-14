@@ -470,6 +470,59 @@ class ShopeeClient:
                 offset = int(resp.get("next_offset") or (offset + len(items)))
                 page_idx += 1
 
+    async def get_listing_price(self, link: "ProductLink") -> float | None:
+        """Read the current price from /api/v2/product/get_item_base_info.
+
+        Shopee quotes one current_price entry per model under price_info.
+        For an item without variations (model_id=0) the first entry is what
+        we want. For a specific model_id, walk price_info looking for it.
+        Returns the price in reais (Shopee stores it as int "cents").
+        """
+        try:
+            item_id = int(link.external_id)
+        except (TypeError, ValueError):
+            return None
+        try:
+            r = await self._request(
+                "GET",
+                "/api/v2/product/get_item_base_info",
+                params={"item_id_list": str(item_id)},
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if r.status_code != 200:
+            return None
+        body = r.json() or {}
+        if body.get("error"):
+            return None
+        items = (body.get("response") or {}).get("item_list") or []
+        if not items:
+            return None
+        price_info = items[0].get("price_info") or []
+
+        target_model: int | None = None
+        if link.variation_id:
+            try:
+                target_model = int(link.variation_id)
+            except (TypeError, ValueError):
+                target_model = None
+
+        for pi in price_info:
+            if target_model is not None:
+                if int(pi.get("model_id") or 0) != target_model:
+                    continue
+            raw = pi.get("current_price") or pi.get("original_price")
+            if raw is None:
+                continue
+            try:
+                # Shopee quotes the price as a float in reais (e.g. 129.90).
+                # _normalize_shopee_item multiplies by 100 elsewhere to store
+                # as integer cents; we want the raw display value here.
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+        return None
+
     async def _fetch_base_info(
         self, item_ids: list[int], status_filter: str
     ) -> AsyncIterator[dict]:
