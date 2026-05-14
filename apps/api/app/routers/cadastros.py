@@ -64,22 +64,72 @@ async def cadastros_grid(
     for link in links:
         by_cad.setdefault(link.cadastro_id, []).append(link)
 
+    # Index store_info by tipo so we can also mark a cadastro as "in use" when
+    # its codigo appears in `store_info.phone`/`email`/`server` of any loja —
+    # even when no explicit cadastros_stores link exists. Keys are
+    # (platform_lower, codigo_lower); values are the account_name to show.
+    si_rows = (
+        await session.execute(
+            select(StoreInfo.platform, StoreInfo.account_name, StoreInfo.phone, StoreInfo.email, StoreInfo.server)
+        )
+    ).all()
+    si_index: dict[CadastroTipo, dict[tuple[str, str], str]] = {
+        CadastroTipo.FONE: {},
+        CadastroTipo.EMAIL: {},
+        CadastroTipo.SERVIDOR: {},
+    }
+    for plat, name, phone, email, server in si_rows:
+        plat_l = (plat or "").strip().lower()
+        nm = (name or "").strip()
+        for tipo, val in (
+            (CadastroTipo.FONE, phone),
+            (CadastroTipo.EMAIL, email),
+            (CadastroTipo.SERVIDOR, server),
+        ):
+            if val and plat_l:
+                si_index[tipo].setdefault((plat_l, val.strip().lower()), nm or "")
+
     rows: list[CadastroGridRow] = []
     for cad in cadastros:
         cells: dict[str, list[CadastroGridStoreCell]] = {mk: [] for mk in MARKETPLACES}
+        # Marks marketplaces already accounted for by FK link, keyed by alias
+        # (lower) so we can avoid duplicating a row from store_info when the
+        # same name was already linked through cadastros_stores.
+        covered: dict[str, set[str]] = {mk: set() for mk in MARKETPLACES}
         for link in by_cad.get(cad.id, []):
             s = stores.get(link.store_id)
             if not s:
                 continue
             company = companies.get(s.company_id)
+            apelido = s.apelido_override or (company.apelido if company else "")
             cells[s.marketplace.value].append(
                 CadastroGridStoreCell(
                     store_id=s.id,
                     alias=link.alias,
-                    company_apelido=(s.apelido_override or (company.apelido if company else "")),
+                    company_apelido=apelido,
                     store_status=s.status.value,
                 )
             )
+            covered[s.marketplace.value].add(apelido.strip().lower())
+        # Fold in store_info-only matches for this cadastro's tipo.
+        idx = si_index.get(cad.tipo, {})
+        if idx:
+            cod = (cad.codigo or "").strip().lower()
+            for mk in MARKETPLACES:
+                apelido = idx.get((mk, cod))
+                if apelido is None:
+                    continue
+                if apelido.strip().lower() in covered[mk]:
+                    continue  # already represented by an FK link
+                cells[mk].append(
+                    CadastroGridStoreCell(
+                        store_id=None,
+                        alias=None,
+                        company_apelido=apelido,
+                        store_status="active",
+                        from_store_info=True,
+                    )
+                )
         rows.append(CadastroGridRow(cadastro=CadastroOut.model_validate(cad), cells=cells))
     return CadastroGridOut(marketplaces=list(MARKETPLACES), rows=rows)
 

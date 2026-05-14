@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import MARKETPLACES, Company, Store, User
+from app.models import MARKETPLACES, Company, Store, StoreInfo, User
 from app.schemas.companies import (
     CompanyCreate,
     CompanyDetailOut,
@@ -40,15 +40,34 @@ async def companies_grid(
     for s in stores_rows:
         by_company.setdefault(s.company_id, {})[s.marketplace.value] = s
 
+    # store_info acts as a fallback presence signal: if a row exists with
+    # platform=mk and account_name matching company.apelido, mark the cell
+    # green even when no Store row was ever created. Lets operators see
+    # accounts that exist on the Lojas page but were never wired through
+    # /companies grid before.
+    si_rows = (
+        await session.execute(
+            select(StoreInfo.platform, StoreInfo.account_name).where(
+                StoreInfo.account_name.isnot(None)
+            )
+        )
+    ).all()
+    si_by_platform: dict[str, set[str]] = {}
+    for plat, name in si_rows:
+        if not name:
+            continue
+        si_by_platform.setdefault((plat or "").strip().lower(), set()).add(
+            name.strip().lower()
+        )
+
     rows: list[CompanyGridRow] = []
     for c in companies:
         cells: dict[str, GridStoreCell | None] = {}
         company_stores = by_company.get(c.id, {})
+        apelido_lower = (c.apelido or "").strip().lower()
         for mk in MARKETPLACES:
             s = company_stores.get(mk)
-            if s is None:
-                cells[mk] = None
-            else:
+            if s is not None:
                 cells[mk] = GridStoreCell(
                     id=s.id,
                     status=s.status.value,
@@ -56,6 +75,17 @@ async def companies_grid(
                     integration_id=s.integration_id,
                     bling_store_id=s.bling_store_id,
                 )
+            elif apelido_lower and apelido_lower in si_by_platform.get(mk, set()):
+                # Synthetic cell — no Store row to act on; UI hides destructive
+                # actions because `id` is None.
+                cells[mk] = GridStoreCell(
+                    id=None,
+                    status="active",
+                    label=c.apelido,
+                    from_store_info=True,
+                )
+            else:
+                cells[mk] = None
         rows.append(CompanyGridRow(company=CompanyOut.model_validate(c), stores=cells))
     return CompanyGridOut(marketplaces=list(MARKETPLACES), rows=rows)
 

@@ -118,11 +118,15 @@ class StorePatch(BaseModel):
 
 
 class GridStoreCell(BaseModel):
-    id: UUID
+    # `id` is None when the cell came from store_info alone (no Store row in
+    # `stores` for that company+marketplace) — the green check still shows up
+    # but per-cell actions like "Remover" are disabled on the frontend.
+    id: UUID | None = None
     status: str
     label: str
     integration_id: UUID | None = None
     bling_store_id: int | None = None
+    from_store_info: bool = False
 
 
 class CompanyGridRow(BaseModel):
@@ -197,10 +201,14 @@ class CadastroDetailOut(CadastroOut):
 
 
 class CadastroGridStoreCell(BaseModel):
-    store_id: UUID
+    # `store_id` is None when the cell came from store_info alone (the code
+    # is in `store_info.phone`/`email` for that platform but no Store row
+    # was linked via `cadastros_stores`).
+    store_id: UUID | None = None
     alias: str | None = None
     company_apelido: str
     store_status: str
+    from_store_info: bool = False
 
 
 class CadastroGridRow(BaseModel):

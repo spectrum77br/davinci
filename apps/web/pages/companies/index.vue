@@ -13,11 +13,12 @@ import {
 definePageMeta({ middleware: ['permission'], permission: { resource: 'empresa', action: 'view' } })
 
 type GridStoreCell = {
-  id: string
+  id: string | null
   status: StoreStatus
   label: string
   integration_id: string | null
   bling_store_id: number | null
+  from_store_info?: boolean
 }
 
 type CompanyOut = {
@@ -440,7 +441,7 @@ function storeInfoFor(row: GridRow, mk: Marketplace): StoreInfoLite | undefined 
 
 async function removeStoreCell(row: GridRow, mk: Marketplace) {
   const cell = row.stores[mk]
-  if (!cell) return
+  if (!cell || !cell.id) return
   const apelido = row.company.apelido
   if (!confirm(`Remover conta de ${apelido} no ${MARKETPLACE_SHORT[mk]}? Vai apagar Loja, dados em store_info e vínculos em Cadastros.`)) return
   try {
@@ -682,11 +683,15 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                     <div v-else class="text-muted-foreground">Sem store_info vinculada.</div>
                   </div>
                   <button
+                    v-if="row.stores[mk]?.id"
                     class="w-full text-left mt-1 px-2 py-1 rounded hover:bg-destructive/10 text-destructive"
                     @click="removeStoreCell(row, mk)"
                   >
                     Remover conta
                   </button>
+                  <p v-else class="mt-1 text-[10px] text-muted-foreground italic">
+                    Detectado via store_info — sem registro em stores. Remova pela aba Lojas.
+                  </p>
                 </div>
               </template>
               <template v-else-if="!(row.company.enabled_marketplaces || []).includes(mk)">
