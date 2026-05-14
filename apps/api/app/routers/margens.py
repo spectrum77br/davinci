@@ -22,7 +22,10 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/margens", tags=["margens"])
 
 SITUACAO_APROVADO = 6
+SITUACAO_ATENDIDO = 9
 SITUACAO_REPROVADO = 83955
+SITUACAO_VERIFICAR_MARGEM = 84680
+SITUACAO_VERIFICAR_MARGEM_NOME = "Verificar Margem"
 
 
 @router.get("", response_model=list[MargensOut])
@@ -100,32 +103,57 @@ async def _apply_bling_decision(
         raise HTTPException(404, detail={"code": "bling_order_not_found"})
 
     situacao_id = SITUACAO_APROVADO if new_status == "Aprovado" else SITUACAO_REPROVADO
-    if update_bling and str(order.situacao or "") != str(situacao_id):
+    current_situacao_id = order.situacao
+    client: BlingClient | None = None
+    if update_bling and (
+        new_status == "Reprovado" or str(current_situacao_id or "") != str(situacao_id)
+    ):
         client = await _global_bling_client(session)
         if client is None:
             raise HTTPException(400, detail={"code": "bling_integration_missing"})
 
-        try:
-            await client.update_order_situacao(int(order.bling_id), situacao_id)
-        except httpx.HTTPStatusError as e:
-            code = e.response.status_code if e.response is not None else 0
-            body = e.response.text[:500] if e.response is not None else ""
-            message = _bling_error_message(e.response) if e.response is not None else None
-            logger.warning(
-                "bling_situacao_patch_failed",
-                bling_id=order.bling_id,
-                situacao_id=situacao_id,
-                http=code,
-                body=body,
+        if new_status == "Reprovado":
+            current_situacao_id, _current_situacao_nome = await _require_verificar_margem(
+                client,
+                int(order.bling_id),
             )
-            raise HTTPException(
-                502,
-                detail={
-                    "code": "bling_patch_failed",
-                    "http": code,
-                    "message": message or "Falha ao atualizar situacao no Bling",
-                },
-            ) from e
+
+    if update_bling and str(current_situacao_id or "") != str(situacao_id):
+        if client is None:
+            client = await _global_bling_client(session)
+            if client is None:
+                raise HTTPException(400, detail={"code": "bling_integration_missing"})
+
+        if new_status == "Aprovado":
+            steps: list[int] = []
+            if str(current_situacao_id or "") != str(SITUACAO_ATENDIDO):
+                steps.append(SITUACAO_ATENDIDO)
+            steps.append(SITUACAO_APROVADO)
+        else:
+            steps = [SITUACAO_REPROVADO]
+
+        for step_id in steps:
+            try:
+                await client.update_order_situacao(int(order.bling_id), step_id)
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code if e.response is not None else 0
+                body = e.response.text[:500] if e.response is not None else ""
+                message = _bling_error_message(e.response) if e.response is not None else None
+                logger.warning(
+                    "bling_situacao_patch_failed",
+                    bling_id=order.bling_id,
+                    situacao_id=step_id,
+                    http=code,
+                    body=body,
+                )
+                raise HTTPException(
+                    502,
+                    detail={
+                        "code": "bling_patch_failed",
+                        "http": code,
+                        "message": message or "Falha ao atualizar situacao no Bling",
+                    },
+                ) from e
     else:
         logger.info(
             "bling_situacao_already_target",
@@ -159,6 +187,101 @@ async def _find_bling_order_for_margem(
     return (
         await session.execute(stmt.order_by(BlingOrder.item_index.asc()).limit(1))
     ).scalar_one_or_none()
+
+
+async def _require_verificar_margem(
+    client: BlingClient,
+    bling_order_id: int,
+) -> tuple[str, str | None]:
+    try:
+        raw_order = await client.get_order(bling_order_id)
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code if e.response is not None else 0
+        body = e.response.text[:500] if e.response is not None else ""
+        message = _bling_error_message(e.response) if e.response is not None else None
+        logger.warning(
+            "bling_situacao_check_failed",
+            bling_id=bling_order_id,
+            http=code,
+            body=body,
+        )
+        raise HTTPException(
+            502,
+            detail={
+                "code": "bling_situacao_check_failed",
+                "http": code,
+                "message": message or "Nao foi possivel verificar a situacao atual no Bling.",
+            },
+        ) from e
+    except httpx.HTTPError as e:
+        logger.warning(
+            "bling_situacao_check_failed",
+            bling_id=bling_order_id,
+            error=str(e),
+        )
+        raise HTTPException(
+            502,
+            detail={
+                "code": "bling_situacao_check_failed",
+                "message": "Nao foi possivel verificar a situacao atual no Bling.",
+            },
+        ) from e
+
+    current_situacao_id, current_situacao_nome = _bling_order_situacao(raw_order)
+    if current_situacao_id != str(SITUACAO_VERIFICAR_MARGEM):
+        current_label = _format_situacao_label(current_situacao_id, current_situacao_nome)
+        logger.info(
+            "bling_reprovacao_blocked_by_situacao",
+            bling_id=bling_order_id,
+            current_situacao_id=current_situacao_id,
+            current_situacao_nome=current_situacao_nome,
+            required_situacao_id=SITUACAO_VERIFICAR_MARGEM,
+        )
+        raise HTTPException(
+            409,
+            detail={
+                "code": "bling_situacao_not_verificar_margem",
+                "current_situacao": current_situacao_id,
+                "current_situacao_nome": current_situacao_nome,
+                "required_situacao": str(SITUACAO_VERIFICAR_MARGEM),
+                "message": (
+                    f"O pedido esta em {current_label} no Bling. "
+                    "Para reprovar, ele precisa estar em Verificar Margem. "
+                    "Nenhuma alteracao foi enviada ao Bling."
+                ),
+            },
+        )
+
+    return current_situacao_id, current_situacao_nome
+
+
+def _bling_order_situacao(raw_order: dict) -> tuple[str | None, str | None]:
+    situacao = raw_order.get("situacao") if isinstance(raw_order, dict) else None
+    if isinstance(situacao, dict):
+        situacao_id = situacao.get("id")
+        situacao_nome = (
+            situacao.get("nome")
+            or situacao.get("descricao")
+            or situacao.get("valor")
+            or situacao.get("name")
+        )
+        return (
+            str(situacao_id) if situacao_id is not None else None,
+            str(situacao_nome) if situacao_nome else None,
+        )
+    if situacao is not None:
+        return str(situacao), None
+    return None, None
+
+
+def _format_situacao_label(situacao_id: str | None, situacao_nome: str | None) -> str:
+    if situacao_nome and situacao_id:
+        return f"{situacao_nome} ({situacao_id})"
+    if situacao_nome:
+        return situacao_nome
+    if situacao_id:
+        return f"situacao {situacao_id}"
+    return "uma situacao desconhecida"
 
 
 async def _global_bling_client(session: AsyncSession) -> BlingClient | None:
