@@ -57,7 +57,6 @@ def _now() -> datetime:
 async def _classify_listing_status(
     session: AsyncSession,
     *,
-    user_id: UUID,
     integration_id: UUID | None,
     sku: str,
 ) -> tuple[bool, str | None]:
@@ -70,7 +69,6 @@ async def _classify_listing_status(
         await session.execute(
             select(Listing.status).where(
                 and_(
-                    Listing.user_id == user_id,
                     Listing.integration_id == integration_id,
                     Listing.sku == sku,
                 )
@@ -111,25 +109,19 @@ async def run_audit(
         await _fail(session, run=run, job=job, error="upload_missing")
         return
 
-    # Pre-load owned products + accounts + overrides into in-memory dicts.
+    # Pre-load all products + accounts + overrides into in-memory dicts.
     products = (
-        await session.execute(
-            select(PricingProduct).where(PricingProduct.user_id == user_id)
-        )
+        await session.execute(select(PricingProduct))
     ).scalars().all()
     by_sku = {p.sku: p for p in products}
 
     accounts = (
-        await session.execute(
-            select(PricingAccount).where(PricingAccount.user_id == user_id)
-        )
+        await session.execute(select(PricingAccount))
     ).scalars().all()
     accounts_by_id = {a.id: a for a in accounts}
 
     overrides = (
-        await session.execute(
-            select(PricingOverride).where(PricingOverride.user_id == user_id)
-        )
+        await session.execute(select(PricingOverride))
     ).scalars().all()
     by_pair: dict[tuple[UUID, UUID], PricingOverride] = {
         (o.pricing_product_id, o.pricing_account_id): o for o in overrides
@@ -226,7 +218,6 @@ async def run_audit(
 
                 paused, paused_detail = await _classify_listing_status(
                     session,
-                    user_id=user_id,
                     integration_id=account.integration_id,
                     sku=sku,
                 )

@@ -25,14 +25,11 @@ from app.services.marketplaces.bling import BlingClient, parse_bling_product
 logger = structlog.get_logger()
 
 
-async def _bling_client_for_user(
-    session: AsyncSession, user_id: UUID
-) -> BlingClient | None:
+async def _bling_client_for_user(session: AsyncSession) -> BlingClient | None:
     integ = (
         await session.execute(
             select(Integration).where(
-                Integration.user_id == user_id,
-                Integration.platform == IntegrationPlatform.BLING,
+                Integration.platform == IntegrationPlatform.BLING
             ).limit(1)
         )
     ).scalar_one_or_none()
@@ -59,15 +56,14 @@ async def run_auto_create_product_from_bling(
     existing = (
         await session.execute(
             select(Product).where(
-                Product.user_id == user_id,
-                Product.bling_product_id == bling_product_id,
+                Product.bling_product_id == bling_product_id
             ).limit(1)
         )
     ).scalar_one_or_none()
     if existing is not None:
         return {"ok": True, "created": False, "product_id": str(existing.id)}
 
-    client = await _bling_client_for_user(session, user_id)
+    client = await _bling_client_for_user(session)
     if client is None:
         logger.warning(
             "auto_create_product_no_bling_integration",
@@ -100,9 +96,7 @@ async def run_auto_create_product_from_bling(
 
     by_sku = (
         await session.execute(
-            select(Product).where(
-                Product.user_id == user_id, Product.sku == sku
-            ).limit(1)
+            select(Product).where(Product.sku == sku).limit(1)
         )
     ).scalar_one_or_none()
     if by_sku is not None:

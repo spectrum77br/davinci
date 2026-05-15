@@ -53,18 +53,12 @@ async def _append_detail(session: AsyncSession, job: BackgroundJob, entry: dict[
 async def _link_bling_integration(
     session: AsyncSession,
     job: BackgroundJob,
-    user_id: UUID,
     integ: Integration,
 ) -> tuple[int, int]:
     """Returns (created, already_present)."""
     products = (
         await session.execute(
-            select(Product).where(
-                and_(
-                    Product.user_id == user_id,
-                    Product.bling_product_id.is_not(None),
-                )
-            )
+            select(Product).where(Product.bling_product_id.is_not(None))
         )
     ).scalars().all()
 
@@ -72,7 +66,6 @@ async def _link_bling_integration(
         await session.execute(
             select(ProductLink).where(
                 and_(
-                    ProductLink.user_id == user_id,
                     ProductLink.integration_id == integ.id,
                     ProductLink.platform == IntegrationPlatform.BLING,
                 )
@@ -91,7 +84,7 @@ async def _link_bling_integration(
             already += 1
             continue
         link = ProductLink(
-            user_id=user_id,
+            user_id=integ.user_id,
             product_id=p.id,
             integration_id=integ.id,
             store_id=integ.store_id,
@@ -115,7 +108,6 @@ async def _link_bling_integration(
 async def _link_tiktok_integration(
     session: AsyncSession,
     job: BackgroundJob,
-    user_id: UUID,
     integ: Integration,
 ) -> tuple[int, int, int]:
     """Returns (created, already_present, not_found).
@@ -127,11 +119,7 @@ async def _link_tiktok_integration(
     `external_id` / `variation_id`.
     """
     # Build case-insensitive sku → product index for fast match.
-    products = (
-        await session.execute(
-            select(Product).where(Product.user_id == user_id)
-        )
-    ).scalars().all()
+    products = (await session.execute(select(Product))).scalars().all()
     by_sku: dict[str, Product] = {}
     for p in products:
         sk = (p.sku or "").strip().lower()
@@ -143,7 +131,6 @@ async def _link_tiktok_integration(
         await session.execute(
             select(ProductLink).where(
                 and_(
-                    ProductLink.user_id == user_id,
                     ProductLink.integration_id == integ.id,
                     ProductLink.platform == IntegrationPlatform.TIKTOK,
                 )
@@ -201,7 +188,7 @@ async def _link_tiktok_integration(
                     continue
                 session.add(
                     ProductLink(
-                        user_id=user_id,
+                        user_id=integ.user_id,
                         product_id=local.id,
                         integration_id=integ.id,
                         store_id=integ.store_id,
@@ -231,7 +218,6 @@ async def run_auto_link(
     session: AsyncSession,
     *,
     job_id: UUID,
-    user_id: UUID,
     integration_ids: list[UUID] | None,
 ) -> None:
     job = (
@@ -245,7 +231,7 @@ async def run_auto_link(
     job.started_at = _now()
     job.last_heartbeat_at = _now()
 
-    stmt = select(Integration).where(Integration.user_id == user_id)
+    stmt = select(Integration)
     if integration_ids:
         stmt = stmt.where(Integration.id.in_(integration_ids))
     integrations = (await session.execute(stmt)).scalars().all()
@@ -259,7 +245,7 @@ async def run_auto_link(
         for integ in integrations:
             await _heartbeat(session, job)
             if integ.platform == IntegrationPlatform.BLING:
-                created, already = await _link_bling_integration(session, job, user_id, integ)
+                created, already = await _link_bling_integration(session, job, integ)
                 summary["created"] += created
                 summary["already_present"] += already
                 await _append_detail(
@@ -275,7 +261,7 @@ async def run_auto_link(
                 )
             elif integ.platform == IntegrationPlatform.TIKTOK:
                 created, already, not_found = await _link_tiktok_integration(
-                    session, job, user_id, integ
+                    session, job, integ
                 )
                 summary["created"] += created
                 summary["already_present"] += already

@@ -21,8 +21,6 @@ from app.models import (
     Integration,
     IntegrationPlatform,
     Product,
-    User,
-    UserRole,
     UserSettings,
 )
 from app.security.cipher import decrypt_json, encrypt_json
@@ -88,14 +86,12 @@ async def auth_codes_cleanup(ctx: dict) -> None:
 async def auto_link_run(
     ctx: dict,
     job_id: str,
-    user_id: str,
     integration_ids: list[str] | None,
 ) -> None:
     async with session_scope() as s:
         await run_auto_link(
             s,
             job_id=UUID(job_id),
-            user_id=UUID(user_id),
             integration_ids=[UUID(i) for i in (integration_ids or [])] or None,
         )
 
@@ -133,11 +129,7 @@ async def sync_all_run(
                 logger.warning("sync_all_run_job_missing", job_id=job_id)
                 return
 
-            user = await s.get(User, uid)
-            is_admin = user is not None and user.role == UserRole.ADMIN
             where: list = []
-            if not is_admin:
-                where.append(Product.user_id == uid)
             if product_ids:
                 where.append(Product.id.in_([UUID(p) for p in product_ids]))
             elif not include_all_stock:

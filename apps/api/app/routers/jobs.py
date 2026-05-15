@@ -144,7 +144,6 @@ async def enqueue_auto_link(
     arq = await pool.enqueue_job(
         "auto_link_run",
         str(job.id),
-        str(user.id),
         body.integration_ids and [str(i) for i in body.integration_ids],
     )
     if arq is not None:

@@ -169,7 +169,6 @@ async def _resolve_product_type(
 async def _resolve_product_links_for_push(
     session: AsyncSession,
     *,
-    user_id: UUID,
     account: PricingAccount,
     pricing_product: PricingProduct,
     department: str | None,
@@ -186,9 +185,7 @@ async def _resolve_product_links_for_push(
     if not pricing_product.sku:
         return []
     rows = (
-        await session.execute(
-            select(Product.id, Product.sku).where(Product.user_id == user_id)
-        )
+        await session.execute(select(Product.id, Product.sku))
     ).all()
     # Stage 1: prefix index narrows the candidate set so we don't carry
     # every product through the department filter.
@@ -211,7 +208,6 @@ async def _resolve_product_links_for_push(
     # then apply ML listing_type filter and platform-specific dedup.
     links_q = select(ProductLink).where(
         and_(
-            ProductLink.user_id == user_id,
             ProductLink.integration_id == account.integration_id,
             ProductLink.product_id.in_(target_ids),
         )
@@ -435,7 +431,6 @@ async def push_one(
     department = await _account_department(session, account)
     links = await _resolve_product_links_for_push(
         session,
-        user_id=user.id,
         account=account,
         pricing_product=product,
         department=department,

@@ -15,7 +15,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -64,10 +64,7 @@ async def run_sync_bling_costs(
     integ = (
         await session.execute(
             select(Integration).where(
-                and_(
-                    Integration.user_id == user_id,
-                    Integration.platform == IntegrationPlatform.BLING,
-                )
+                Integration.platform == IntegrationPlatform.BLING
             ).limit(1)
         )
     ).scalar_one_or_none()
@@ -92,20 +89,13 @@ async def run_sync_bling_costs(
     # Index: product.sku → product.bling_product_id (only those linked).
     products = (
         await session.execute(
-            select(Product).where(
-                and_(
-                    Product.user_id == user_id,
-                    Product.bling_product_id.isnot(None),
-                )
-            )
+            select(Product).where(Product.bling_product_id.isnot(None))
         )
     ).scalars().all()
     by_sku = {p.sku: p for p in products}
 
     pricing_rows = (
-        await session.execute(
-            select(PricingProduct).where(PricingProduct.user_id == user_id)
-        )
+        await session.execute(select(PricingProduct))
     ).scalars().all()
 
     candidates = [

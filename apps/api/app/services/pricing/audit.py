@@ -28,7 +28,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -183,16 +183,12 @@ async def scan_missing_skus(
     """
     products = (
         await session.execute(
-            select(Product).where(
-                and_(Product.user_id == user_id, Product.stock > 0)
-            )
+            select(Product).where(Product.stock > 0)
         )
     ).scalars().all()
 
     pricing_rows = (
-        await session.execute(
-            select(PricingProduct).where(PricingProduct.user_id == user_id)
-        )
+        await session.execute(select(PricingProduct))
     ).scalars().all()
 
     segment_roots = await _load_segment_roots(session)
@@ -202,7 +198,6 @@ async def scan_missing_skus(
         await session.execute(
             select(ProductLink, Integration.name)
             .outerjoin(Integration, Integration.id == ProductLink.integration_id)
-            .where(ProductLink.user_id == user_id)
         )
     ).all()
     links_by_pid: dict[UUID, list[str]] = {}

@@ -142,25 +142,17 @@ async def _upsert_listing(
     return "updated"
 
 
-async def _create_product_links_for_matched(
-    session: AsyncSession, *, user_id: UUID | None = None
-) -> int:
+async def _create_product_links_for_matched(session: AsyncSession) -> int:
     """Promote matched `listings` into `product_links` rows.
 
     A listing carries the (product, integration, external_id, sku, title,
     stock) tuple. The orchestrator only pushes stock per `product_link`, so
     a listing matched via `_link_by_sku` is invisible to sync_all until a
     corresponding row exists in `product_links`. Skip rows that already
-    exist for (user_id, integration_id, platform, external_id).
+    exist for (integration_id, platform, external_id).
     """
-    params: dict = {}
-    user_filter = ""
-    if user_id is not None:
-        user_filter = "AND l.user_id = :uid"
-        params["uid"] = str(user_id)
-
     sql = sa_text(
-        f"""
+        """
         INSERT INTO davinci.product_links (
             id, user_id, product_id, integration_id, store_id, platform,
             external_id, external_sku, listing_title, listing_type, stock, price,
@@ -173,42 +165,34 @@ async def _create_product_links_for_matched(
         FROM davinci.listings l
         JOIN davinci.integrations i ON i.id = l.integration_id
         WHERE l.product_id IS NOT NULL
-          {user_filter}
           AND NOT EXISTS (
               SELECT 1 FROM davinci.product_links pl
-              WHERE pl.user_id = l.user_id
-                AND pl.integration_id = l.integration_id
+              WHERE pl.integration_id = l.integration_id
                 AND pl.platform = l.platform
                 AND pl.external_id = l.external_id
           )
         """
     )
-    r = await session.execute(sql, params)
+    r = await session.execute(sql)
     return r.rowcount or 0
 
 
-async def _link_by_sku(session: AsyncSession, *, user_id: UUID) -> int:
+async def _link_by_sku(session: AsyncSession) -> int:
     """Single-pass auto-link: set listings.product_id where sku matches.
 
-    Limits the work to the current user; uses a single UPDATE gated by an
-    EXISTS so the rowcount only counts listings that actually got linked
-    (otherwise listings with no matching product would be counted as updated
-    too, even though `product_id` ends up unchanged)."""
+    Uses a single UPDATE gated by an EXISTS so the rowcount only counts
+    listings that actually got linked (otherwise listings with no matching
+    product would be counted as updated too, even though `product_id` ends
+    up unchanged)."""
     matching_product_subq = (
         select(Product.id)
-        .where(
-            and_(
-                Product.user_id == user_id,
-                Product.sku == Listing.sku,
-            )
-        )
+        .where(Product.sku == Listing.sku)
         .correlate(Listing)
     )
     res = await session.execute(
         update(Listing)
         .where(
             and_(
-                Listing.user_id == user_id,
                 Listing.product_id.is_(None),
                 Listing.sku.is_not(None),
                 func.length(func.trim(Listing.sku)) > 0,
@@ -239,7 +223,7 @@ async def run_import_listings(
     await session.commit()
 
     integ = await session.get(Integration, integration_id)
-    if integ is None or integ.user_id != user_id:
+    if integ is None:
         job.status = BackgroundJobStatus.FAILED
         job.error = "integration_not_found"
         job.finished_at = _now()
@@ -269,10 +253,8 @@ async def run_import_listings(
                 await _heartbeat(session, job)
 
         # Auto-link in the same job so the user sees linked counts up-front.
-        summary["linked"] = await _link_by_sku(session, user_id=user_id)
-        summary["product_links"] = await _create_product_links_for_matched(
-            session, user_id=user_id
-        )
+        summary["linked"] = await _link_by_sku(session)
+        summary["product_links"] = await _create_product_links_for_matched(session)
 
         job.total = (
             summary["created"] + summary["updated"] + summary["skipped"]
@@ -289,31 +271,12 @@ async def run_import_listings(
 
 
 async def run_auto_import_link(session: AsyncSession) -> dict[str, int]:
-    """Cron entrypoint: walks every user with at least one unlinked listing
-    and runs `_link_by_sku` for that user. Returns aggregate counts."""
-    rows = (
-        await session.execute(
-            select(Listing.user_id)
-            .where(
-                and_(
-                    Listing.product_id.is_(None),
-                    Listing.sku.is_not(None),
-                    func.length(func.trim(Listing.sku)) > 0,
-                )
-            )
-            .group_by(Listing.user_id)
-        )
-    ).all()
-    total_linked = 0
-    for (uid,) in rows:
-        total_linked += await _link_by_sku(session, user_id=uid)
-    # Promote every newly-matched (and any historical orphan) listing into a
-    # product_link row. Single global pass — the helper's NOT EXISTS guard
-    # makes it idempotent across users.
+    """Cron entrypoint: single-tenant CRM — one global pass over all
+    unlinked listings."""
+    total_linked = await _link_by_sku(session)
     total_product_links = await _create_product_links_for_matched(session)
     await session.commit()
     return {
-        "users_scanned": len(rows),
         "linked": total_linked,
         "product_links": total_product_links,
     }

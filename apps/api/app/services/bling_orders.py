@@ -14,7 +14,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, delete, func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -93,10 +93,7 @@ async def _bling_client_for_user(
     integ = (
         await session.execute(
             select(Integration).where(
-                and_(
-                    Integration.user_id == user_id,
-                    Integration.platform == IntegrationPlatform.BLING,
-                )
+                Integration.platform == IntegrationPlatform.BLING
             ).limit(1)
         )
     ).scalar_one_or_none()
@@ -346,16 +343,13 @@ async def mark_order_excluido(
 async def _resolve_local_product(
     session: AsyncSession,
     *,
-    user_id: UUID,
     sku: str | None,
     bling_product_id: int | None,
 ) -> Product | None:
     if sku:
         p = (
             await session.execute(
-                select(Product).where(
-                    Product.user_id == user_id, Product.sku == sku
-                ).limit(1)
+                select(Product).where(Product.sku == sku).limit(1)
             )
         ).scalar_one_or_none()
         if p is not None:
@@ -364,8 +358,7 @@ async def _resolve_local_product(
         p = (
             await session.execute(
                 select(Product).where(
-                    Product.user_id == user_id,
-                    Product.bling_product_id == bling_product_id,
+                    Product.bling_product_id == bling_product_id
                 ).limit(1)
             )
         ).scalar_one_or_none()
@@ -374,7 +367,6 @@ async def _resolve_local_product(
         link = (
             await session.execute(
                 select(ProductLink).where(
-                    ProductLink.user_id == user_id,
                     ProductLink.platform == IntegrationPlatform.BLING,
                     ProductLink.external_id == str(bling_product_id),
                 ).limit(1)
@@ -412,7 +404,7 @@ async def _enqueue_stock_refresh_for_order(
         qty = _int(item.get("quantidade"))
         desc = item.get("descricao") or produto.get("nome")
         product = await _resolve_local_product(
-            session, user_id=user_id, sku=sku, bling_product_id=bling_pid
+            session, sku=sku, bling_product_id=bling_pid
         )
         notif.append(
             {

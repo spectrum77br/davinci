@@ -117,7 +117,6 @@ async def test_auto_link_attaches_listing_by_sku(db: AsyncSession, user: User):
     await db.commit()
 
     report = await run_auto_import_link(db)
-    assert report["users_scanned"] == 1
     assert report["linked"] == 1
 
     rows = (await db.execute(select(Listing).order_by(Listing.external_id))).scalars().all()
@@ -129,7 +128,10 @@ async def test_auto_link_attaches_listing_by_sku(db: AsyncSession, user: User):
 
 
 @pytest.mark.asyncio
-async def test_auto_link_scoped_to_user(db: AsyncSession, user: User):
+async def test_auto_link_links_across_users_in_crm_mode(db: AsyncSession, user: User):
+    """CRM mode: integrations/products/listings are shared. Auto-link matches
+    on SKU globally — a listing owned by user A links to a product owned by
+    user B if the SKU matches."""
     integ = await _make_integration(db, user)
     other = User(
         open_id=f"email:o2-{uuid.uuid4().hex[:6]}@davinci-test.com",
@@ -146,16 +148,17 @@ async def test_auto_link_scoped_to_user(db: AsyncSession, user: User):
     db.add(other_product)
     await db.flush()
 
-    listing_for_user = Listing(
-        user_id=user.id,
-        integration_id=integ.id,
-        platform=IntegrationPlatform.SHOPEE,
-        external_id="ext-1",
-        sku="SHARED",
-        title="t",
-        status=ListingStatus.ACTIVE,
+    db.add(
+        Listing(
+            user_id=user.id,
+            integration_id=integ.id,
+            platform=IntegrationPlatform.SHOPEE,
+            external_id="ext-1",
+            sku="SHARED",
+            title="t",
+            status=ListingStatus.ACTIVE,
+        )
     )
-    db.add(listing_for_user)
     db.add(
         Listing(
             user_id=other.id,
@@ -172,12 +175,10 @@ async def test_auto_link_scoped_to_user(db: AsyncSession, user: User):
     await run_auto_import_link(db)
 
     rows = (await db.execute(select(Listing).order_by(Listing.external_id))).scalars().all()
-    user_row = next(r for r in rows if r.user_id == user.id)
-    other_row = next(r for r in rows if r.user_id == other.id)
-    # User has no product matching SKU "SHARED" — should remain unlinked.
-    assert user_row.product_id is None
-    # Other user does → linked.
-    assert other_row.product_id == other_product.id
+    by_ext = {r.external_id: r for r in rows}
+    # Both listings link to the shared product regardless of owner.
+    assert by_ext["ext-1"].product_id == other_product.id
+    assert by_ext["ext-2"].product_id == other_product.id
 
 
 # -------------------------------------------------------------- import job

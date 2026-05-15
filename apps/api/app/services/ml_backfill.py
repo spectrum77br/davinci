@@ -52,7 +52,6 @@ async def run_backfill_ml_stock(
         await session.execute(
             select(ProductLink).where(
                 and_(
-                    ProductLink.user_id == user_id,
                     ProductLink.platform == IntegrationPlatform.ML,
                     or_(
                         ProductLink.last_sync_at.is_(None),
