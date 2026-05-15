@@ -24,7 +24,7 @@ from app.models import (
 )
 from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services.advisory_lock import try_user_sync_lock
+from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
 from app.services.alerts import emit_alert
 from app.services.audit.runner import run_audit
 from app.services.auto_link import run_auto_link
@@ -540,6 +540,24 @@ async def alerts_cleanup(ctx: dict) -> None:
         logger.info("alerts_cleanup_done", deleted=result.rowcount or 0)
 
 
+async def sync_lock_safety_release(ctx: dict) -> None:
+    """SSH-parity: terminate backends idle >30min holding our SYNC_NAMESPACE
+    advisory lock. Counterpart to SSH's in-memory 30-min safety timeout.
+
+    Scenario this protects against: a sync_all/auto_link script is killed
+    mid-flight (SIGKILL, OOM, a stopped TaskStop) — the asyncpg connection
+    returns to the pool 'idle' but session-level advisory locks survive,
+    blocking every future sync_all with sync_already_running until the
+    connection is finally recycled (can be hours).
+    """
+    async with session_scope() as s:
+        killed = await release_stale_sync_locks(s, idle_minutes=30)
+        if killed:
+            logger.warning("sync_lock_safety_release", killed=killed)
+        else:
+            logger.debug("sync_lock_safety_release_noop")
+
+
 async def failed_jobs_alert_scan(ctx: dict) -> None:
     """Emit `sync_failure` alert per BackgroundJob that finished failed in
     the last 10 minutes. Dedupe key per job id keeps it idempotent across
@@ -893,6 +911,9 @@ class WorkerSettings:
         cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),
         cron(webhook_signature_alert_scan, minute={5, 35}, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),
+        # SSH parity: 30-min safety timeout for stuck sync advisory locks.
+        # Runs every 5 minutes so the worst-case stuck duration is 35min.
+        cron(sync_lock_safety_release, minute=_FIVE_MIN, run_at_startup=False),
         # Safety-net only — hooks via app.services.relink_hook handle the
         # day-to-day work. Runs at 02:00 and 14:00 UTC.
         cron(auto_import_link, hour={2, 14}, minute=0, run_at_startup=False),
