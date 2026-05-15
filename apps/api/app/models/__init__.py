@@ -34,6 +34,7 @@ from app.models.margens import Margens
 from app.models.marketplace_financial import (
     MarketplaceFinancialEvent,
     MarketplaceOrderFinancial,
+    MarketplaceOrderFreightReconciliation,
 )
 from app.models.pricing import (
     AuditDismissedSku,
@@ -84,6 +85,7 @@ __all__ = [
     "Marketplace",
     "MarketplaceFinancialEvent",
     "MarketplaceOrderFinancial",
+    "MarketplaceOrderFreightReconciliation",
     "OAuthState",
     "PLATFORMS",
     "PricingAccount",

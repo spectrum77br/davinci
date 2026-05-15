@@ -17,6 +17,7 @@ from app.models import (
     IntegrationPlatform,
     MarketplaceFinancialEvent,
     MarketplaceOrderFinancial,
+    MarketplaceOrderFreightReconciliation,
     Store,
 )
 from app.security.cipher import decrypt_json, encrypt_json
@@ -49,6 +50,36 @@ class FinancialEventDraft:
 
 
 @dataclass
+class FreightReconciliationDraft:
+    item_index: int
+    status: str
+    currency: str = "BRL"
+    seller_id: str | None = None
+    shipping_id: str | None = None
+    pack_id: str | None = None
+    shipping_status: str | None = None
+    marketplace_item_id: str | None = None
+    marketplace_variation_id: str | None = None
+    sku: str | None = None
+    title: str | None = None
+    quantity: Decimal | None = None
+    freight_actual_amount: Decimal | None = None
+    freight_promised_amount: Decimal | None = None
+    freight_list_cost_amount: Decimal | None = None
+    freight_discount_rate: Decimal | None = None
+    freight_diff_amount: Decimal | None = None
+    freight_diff_pct: Decimal | None = None
+    dimension_width: Decimal | None = None
+    dimension_length: Decimal | None = None
+    dimension_height: Decimal | None = None
+    dimension_weight: Decimal | None = None
+    dimensions_text: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+    fetched_at: datetime | None = None
+    error: str | None = None
+
+
+@dataclass
 class FinancialSnapshot:
     status: str
     currency: str = "BRL"
@@ -63,6 +94,8 @@ class FinancialSnapshot:
     net_amount: Decimal | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     events: list[FinancialEventDraft] = field(default_factory=list)
+    freights: list[FreightReconciliationDraft] = field(default_factory=list)
+    freight_reconciliation_checked: bool = False
     error: str | None = None
 
 
@@ -124,6 +157,7 @@ async def run_sync_marketplace_financials_for_bling_order(
         "status": snapshot.status,
         "financial_id": str(financial.id),
         "events": len(snapshot.events),
+        "freights": len(snapshot.freights),
     }
 
 
@@ -338,6 +372,49 @@ async def _persist_snapshot(
                 raw=event.raw or {},
             )
         )
+    if snapshot.freight_reconciliation_checked:
+        await session.execute(
+            delete(MarketplaceOrderFreightReconciliation).where(
+                MarketplaceOrderFreightReconciliation.order_financial_id == financial.id
+            )
+        )
+        for freight in snapshot.freights:
+            session.add(
+                MarketplaceOrderFreightReconciliation(
+                    order_financial_id=financial.id,
+                    platform=platform,
+                    integration_id=integration.id,
+                    store_id=store.id if store else None,
+                    bling_id=bling_id,
+                    external_order_id=external_order_id,
+                    item_index=freight.item_index,
+                    status=freight.status,
+                    currency=freight.currency or snapshot.currency or "BRL",
+                    seller_id=freight.seller_id,
+                    shipping_id=freight.shipping_id,
+                    pack_id=freight.pack_id,
+                    shipping_status=freight.shipping_status,
+                    marketplace_item_id=freight.marketplace_item_id,
+                    marketplace_variation_id=freight.marketplace_variation_id,
+                    sku=freight.sku,
+                    title=freight.title,
+                    quantity=freight.quantity,
+                    freight_actual_amount=freight.freight_actual_amount,
+                    freight_promised_amount=freight.freight_promised_amount,
+                    freight_list_cost_amount=freight.freight_list_cost_amount,
+                    freight_discount_rate=freight.freight_discount_rate,
+                    freight_diff_amount=freight.freight_diff_amount,
+                    freight_diff_pct=freight.freight_diff_pct,
+                    dimension_width=freight.dimension_width,
+                    dimension_length=freight.dimension_length,
+                    dimension_height=freight.dimension_height,
+                    dimension_weight=freight.dimension_weight,
+                    dimensions_text=freight.dimensions_text,
+                    raw=freight.raw or {},
+                    fetched_at=freight.fetched_at or now,
+                    last_error=freight.error,
+                )
+            )
     await session.flush()
     return financial
 
@@ -452,7 +529,12 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
     gross = _money(order.get("total_amount")) if isinstance(order, dict) else None
     payments = order.get("payments") if isinstance(order, dict) else []
     payment = payments[0] if isinstance(payments, list) and payments else {}
-    freight = _money(payment.get("shipping_cost")) if isinstance(payment, dict) else None
+    payment_shipping_cost = (
+        _money(payment.get("shipping_cost")) if isinstance(payment, dict) else None
+    )
+    freights = await _fetch_ml_freight_reconciliations(client, order, order_id, currency)
+    freight_actual_total = _ml_actual_freight_total(freights)
+    freight = freight_actual_total or payment_shipping_cost
     net = None
     if gross is not None:
         net = gross - commission - (freight or Decimal("0"))
@@ -467,7 +549,19 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
         [
             _event("sale", gross, currency=currency),
             _event("commission_fee", commission, negative=True, currency=currency),
-            _event("freight", freight, negative=True, currency=currency),
+            _event(
+                "freight",
+                freight,
+                negative=True,
+                currency=currency,
+                raw={
+                    "source": (
+                        "shipments_costs"
+                        if freight_actual_total is not None
+                        else "payment_shipping_cost"
+                    )
+                },
+            ),
             _event("net_estimated", net, currency=currency, status=status),
         ]
     )
@@ -478,10 +572,333 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
         fee_amount=abs(commission),
         freight_amount=abs(freight) if freight is not None else None,
         net_amount=net,
-        raw={"order": order, "billing": billing, "billing_error": billing_error},
+        raw={
+            "order": order,
+            "billing": billing,
+            "billing_error": billing_error,
+            "payment_shipping_cost": str(payment_shipping_cost)
+            if payment_shipping_cost is not None
+            else None,
+        },
         events=events,
+        freights=freights,
+        freight_reconciliation_checked=True,
         error=None if has_billing else billing_error or "ML billing detail not posted yet",
     )
+
+
+async def _fetch_ml_freight_reconciliations(
+    client: MercadoLivreClient,
+    order: dict[str, Any],
+    order_id: str,
+    currency: str,
+) -> list[FreightReconciliationDraft]:
+    if not isinstance(order, dict):
+        return [
+            FreightReconciliationDraft(
+                item_index=0,
+                status="error",
+                currency=currency,
+                raw={"order_id": order_id},
+                error="ML order payload is not a dict",
+            )
+        ]
+
+    shipping = order.get("shipping") if isinstance(order.get("shipping"), dict) else {}
+    seller = order.get("seller") if isinstance(order.get("seller"), dict) else {}
+    shipping_id = _text_value(shipping.get("id"))
+    seller_id = _text_value(
+        client.creds.get("user_id") or seller.get("id") or order.get("seller_id")
+    )
+    pack_id = _text_value(order.get("pack_id"))
+    shipping_status = _text_value(shipping.get("status"))
+
+    order_items = order.get("order_items")
+    items = order_items if isinstance(order_items, list) and order_items else [{}]
+
+    costs_payload: dict[str, Any] | None = None
+    costs_error: str | None = None
+    freight_actual = None
+    shipment_items_payload: dict[str, Any] | list[Any] | None = None
+    shipment_items_error: str | None = None
+    dimensions_by_item: dict[str, dict[str, Decimal | str | None]] = {}
+
+    if shipping_id:
+        try:
+            costs_payload = await client.get_shipment_costs(shipping_id)
+            freight_actual = _ml_sender_cost(costs_payload)
+        except Exception as e:  # noqa: BLE001
+            costs_error = f"shipment_costs: {str(e)[:300]}"
+        try:
+            shipment_items_payload = await client.get_shipment_items(shipping_id)
+            dimensions_by_item = _ml_dimensions_by_item(shipment_items_payload)
+        except Exception as e:  # noqa: BLE001
+            shipment_items_error = f"shipment_items: {str(e)[:300]}"
+    else:
+        costs_error = "missing_shipping_id"
+
+    rows: list[FreightReconciliationDraft] = []
+    for item_index, item in enumerate(items):
+        item_payload = item if isinstance(item, dict) else {}
+        marketplace_item = (
+            item_payload.get("item") if isinstance(item_payload.get("item"), dict) else {}
+        )
+        item_id = _text_value(
+            marketplace_item.get("id")
+            or item_payload.get("item_id")
+            or item_payload.get("item")
+        )
+        variation_id = _text_value(
+            marketplace_item.get("variation_id") or item_payload.get("variation_id")
+        )
+        sku = _text_value(
+            marketplace_item.get("seller_sku")
+            or marketplace_item.get("seller_custom_field")
+            or item_payload.get("seller_sku")
+            or item_payload.get("seller_custom_field")
+        )
+        title = _text_value(marketplace_item.get("title") or item_payload.get("title"))
+        quantity = _quantize_decimal(_decimal_value(item_payload.get("quantity")), "0.0001")
+
+        quote_payload: dict[str, Any] | None = None
+        quote_error: str | None = None
+        list_cost = rate = promised = None
+        if seller_id and item_id:
+            try:
+                quote_payload = await client.get_free_shipping_options(seller_id, item_id)
+                list_cost, rate, promised = _ml_free_shipping_quote(quote_payload)
+            except Exception as e:  # noqa: BLE001
+                quote_error = f"shipping_options_free: {str(e)[:300]}"
+        elif not seller_id:
+            quote_error = "missing_seller_id"
+        else:
+            quote_error = "missing_marketplace_item_id"
+
+        dimensions = _ml_dimensions_for_item(dimensions_by_item, item_id, item_index)
+        diff = _money_from_decimal(freight_actual - promised) if (
+            freight_actual is not None and promised is not None
+        ) else None
+        diff_pct = (
+            _quantize_decimal((diff / promised) * Decimal("100"), "0.0001")
+            if diff is not None and promised not in (None, Decimal("0"))
+            else None
+        )
+        status_errors = [error for error in (costs_error, quote_error) if error]
+        all_errors = [
+            error
+            for error in (costs_error, shipment_items_error, quote_error)
+            if error
+        ]
+        rows.append(
+            FreightReconciliationDraft(
+                item_index=item_index,
+                status=_ml_freight_status(status_errors, freight_actual, promised),
+                currency=currency,
+                seller_id=seller_id,
+                shipping_id=shipping_id,
+                pack_id=pack_id,
+                shipping_status=shipping_status,
+                marketplace_item_id=item_id,
+                marketplace_variation_id=variation_id,
+                sku=sku,
+                title=title,
+                quantity=quantity,
+                freight_actual_amount=freight_actual,
+                freight_promised_amount=promised,
+                freight_list_cost_amount=list_cost,
+                freight_discount_rate=rate,
+                freight_diff_amount=diff,
+                freight_diff_pct=diff_pct,
+                dimension_width=dimensions.get("width"),
+                dimension_length=dimensions.get("length"),
+                dimension_height=dimensions.get("height"),
+                dimension_weight=dimensions.get("weight"),
+                dimensions_text=_text_value(dimensions.get("text")),
+                raw={
+                    "order_id": order_id,
+                    "shipment_costs": costs_payload if item_index == 0 else None,
+                    "shipment_items": shipment_items_payload if item_index == 0 else None,
+                    "shipping_options_free": quote_payload,
+                    "errors": all_errors,
+                },
+                error="; ".join(all_errors) if all_errors else None,
+            )
+        )
+    return rows
+
+
+def _ml_sender_cost(payload: dict[str, Any] | None) -> Decimal | None:
+    senders = payload.get("senders") if isinstance(payload, dict) else None
+    if not isinstance(senders, list) or not senders:
+        return None
+    sender = senders[0]
+    if not isinstance(sender, dict):
+        return None
+    return _money(sender.get("cost"))
+
+
+def _ml_free_shipping_quote(
+    payload: dict[str, Any] | None,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    coverage = payload.get("coverage") if isinstance(payload, dict) else None
+    all_country = coverage.get("all_country") if isinstance(coverage, dict) else None
+    if not isinstance(all_country, dict):
+        return None, None, None
+
+    list_cost = _money(all_country.get("list_cost") or all_country.get("cost"))
+    discount = all_country.get("discount")
+    if isinstance(discount, dict):
+        rate = _rate_value(discount.get("rate") or discount.get("value"))
+    else:
+        rate = _rate_value(
+            all_country.get("discount_rate")
+            or all_country.get("discountRate")
+            or discount
+        )
+    if list_cost is None:
+        return None, rate, None
+    effective_rate = rate if rate is not None else Decimal("0")
+    promised = _money_from_decimal(list_cost * (Decimal("1") - effective_rate))
+    return list_cost, rate, promised
+
+
+def _ml_actual_freight_total(freights: list[FreightReconciliationDraft]) -> Decimal | None:
+    total = Decimal("0")
+    seen = False
+    seen_shipments: set[str] = set()
+    for freight in freights:
+        if freight.freight_actual_amount is None:
+            continue
+        key = freight.shipping_id or f"item:{freight.item_index}"
+        if key in seen_shipments:
+            continue
+        seen_shipments.add(key)
+        total += freight.freight_actual_amount
+        seen = True
+    return total if seen else None
+
+
+def _ml_freight_status(
+    errors: list[str],
+    actual: Decimal | None,
+    promised: Decimal | None,
+) -> str:
+    if any(error == "missing_shipping_id" for error in errors):
+        return "missing_shipping"
+    if any(error in {"missing_seller_id", "missing_marketplace_item_id"} for error in errors):
+        return "estimated" if actual is not None else "pending"
+    if errors:
+        return "error"
+    if actual is not None and promised is not None:
+        return "posted"
+    if actual is not None or promised is not None:
+        return "estimated"
+    return "pending"
+
+
+def _ml_dimensions_by_item(
+    payload: dict[str, Any] | list[Any] | None,
+) -> dict[str, dict[str, Decimal | str | None]]:
+    entries = payload if isinstance(payload, list) else _list_from(payload, "items")
+    if not entries and isinstance(payload, dict):
+        entries = [payload]
+    dimensions_by_item: dict[str, dict[str, Decimal | str | None]] = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        dimensions = _ml_dimensions_from(entry)
+        if not dimensions:
+            continue
+        dimensions_by_item[f"index:{index}"] = dimensions
+        entry_item = entry.get("item") if isinstance(entry.get("item"), dict) else {}
+        item_id = _text_value(entry.get("item_id") or entry.get("id") or entry_item.get("id"))
+        if item_id:
+            dimensions_by_item[item_id] = dimensions
+    return dimensions_by_item
+
+
+def _ml_dimensions_for_item(
+    dimensions_by_item: dict[str, dict[str, Decimal | str | None]],
+    item_id: str | None,
+    item_index: int,
+) -> dict[str, Decimal | str | None]:
+    if item_id and item_id in dimensions_by_item:
+        return dimensions_by_item[item_id]
+    return dimensions_by_item.get(f"index:{item_index}", {})
+
+
+def _ml_dimensions_from(raw: Any) -> dict[str, Decimal | str | None]:
+    dimensions = _find_dimensions_dict(raw)
+    if not dimensions:
+        return {}
+
+    width = _quantize_decimal(
+        _decimal_value(dimensions.get("width") or dimensions.get("width_cm")),
+        "0.0001",
+    )
+    length = _quantize_decimal(
+        _decimal_value(
+            dimensions.get("length")
+            or dimensions.get("depth")
+            or dimensions.get("length_cm")
+        ),
+        "0.0001",
+    )
+    height = _quantize_decimal(
+        _decimal_value(dimensions.get("height") or dimensions.get("height_cm")),
+        "0.0001",
+    )
+    weight = _quantize_decimal(
+        _decimal_value(
+            dimensions.get("weight")
+            or dimensions.get("gross_weight")
+            or dimensions.get("weight_g")
+        ),
+        "0.0001",
+    )
+    text = _text_value(
+        dimensions.get("dimensions")
+        or dimensions.get("dimensions_text")
+        or dimensions.get("size")
+    )
+    if not text and width is not None and length is not None and height is not None:
+        text = f"{width} x {length} x {height}"
+    return {
+        "width": width,
+        "length": length,
+        "height": height,
+        "weight": weight,
+        "text": text,
+    }
+
+
+def _find_dimensions_dict(raw: Any) -> dict[str, Any] | None:
+    if isinstance(raw, dict):
+        if any(key in raw for key in ("width", "length", "height")):
+            return raw
+        if isinstance(raw.get("dimensions"), str):
+            return raw
+        for key in (
+            "dimensions",
+            "dimension",
+            "dimensions_source",
+            "measured",
+            "package",
+            "shipping",
+        ):
+            found = _find_dimensions_dict(raw.get(key))
+            if found:
+                return found
+        for value in raw.values():
+            found = _find_dimensions_dict(value)
+            if found:
+                return found
+    if isinstance(raw, list):
+        for value in raw:
+            found = _find_dimensions_dict(value)
+            if found:
+                return found
+    return None
 
 
 async def _fetch_amazon(client: AmazonClient, order_id: str) -> FinancialSnapshot:
@@ -588,6 +1005,50 @@ def _money(raw: Any) -> Decimal | None:
         return Decimal(str(raw)).quantize(Decimal("0.01"))
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _money_from_decimal(value: Decimal | None) -> Decimal | None:
+    return _quantize_decimal(value, "0.01")
+
+
+def _quantize_decimal(value: Decimal | None, quantum: str) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return value.quantize(Decimal(quantum))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _decimal_value(raw: Any) -> Decimal | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, dict):
+        for key in ("rate", "value", "amount", "currencyAmount"):
+            found = _decimal_value(raw.get(key))
+            if found is not None:
+                return found
+        return None
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _rate_value(raw: Any) -> Decimal | None:
+    value = _decimal_value(raw)
+    if value is None:
+        return None
+    if abs(value) > 1:
+        value = value / Decimal("100")
+    return _quantize_decimal(value, "0.000001")
+
+
+def _text_value(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    return value or None
 
 
 def _sum_money(values: Any) -> Decimal | None:

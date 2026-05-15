@@ -130,3 +130,73 @@ class MarketplaceFinancialEvent(Base, TimestampMixin):
     raw: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
     )
+
+
+class MarketplaceOrderFreightReconciliation(Base, TimestampMixin):
+    __tablename__ = "marketplace_order_freight_reconciliations"
+    __table_args__ = (
+        UniqueConstraint(
+            "order_financial_id",
+            "item_index",
+            name="uq_marketplace_order_freight_reconciliations_financial_item",
+        ),
+        Index("ix_marketplace_order_freight_reconciliations_order", "order_financial_id"),
+        Index("ix_marketplace_order_freight_reconciliations_shipping", "shipping_id"),
+        Index(
+            "ix_marketplace_order_freight_reconciliations_bling",
+            "bling_id",
+            "external_order_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    order_financial_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketplace_order_financials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    platform: Mapped[IntegrationPlatform] = mapped_column(
+        _enum(IntegrationPlatform, "integration_platform"), nullable=False
+    )
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    store_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("stores.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    bling_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    external_order_id: Mapped[str] = mapped_column(Text, nullable=False)
+    item_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'pending'")
+    )
+    currency: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'BRL'"))
+    seller_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shipping_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pack_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shipping_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    marketplace_item_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    marketplace_variation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sku: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    freight_actual_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    freight_promised_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    freight_list_cost_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    freight_discount_rate: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+    freight_diff_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    freight_diff_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    dimension_width: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    dimension_length: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    dimension_height: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    dimension_weight: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    dimensions_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -204,6 +204,48 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_shipment_costs(self, shipping_id: str) -> dict:
+        r = await self._request("GET", f"/shipments/{shipping_id}/costs")
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def get_shipment_items(self, shipping_id: str) -> dict | list:
+        r = await self._request("GET", f"/shipments/{shipping_id}/items")
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def get_free_shipping_options(self, seller_id: str | int, item_id: str) -> dict:
+        r = await self._request(
+            "GET",
+            f"/users/{seller_id}/shipping_options/free",
+            params={"item_id": item_id, "verbose": "true"},
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def search_orders(
+        self,
+        *,
+        seller_id: str | int,
+        date_from: str,
+        date_to: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        r = await self._request(
+            "GET",
+            "/orders/search",
+            params={
+                "seller": seller_id,
+                "order.date_created.from": date_from,
+                "order.date_created.to": date_to,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
     async def get_listing_price(self, link: "ProductLink") -> float | None:
         """Read the current price from /items/{id}. ML quotes the item-level
         price even for multi-variation listings, so variation_id is ignored
