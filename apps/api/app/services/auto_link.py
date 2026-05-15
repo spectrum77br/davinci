@@ -19,6 +19,7 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import and_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -243,6 +244,47 @@ async def _link_tiktok_integration(
     return created, already, not_found
 
 
+async def _safe_flush_batch(
+    session: AsyncSession,
+    pending: list[ProductLink],
+) -> tuple[int, int]:
+    """Flush `pending` rows inside a savepoint. On IntegrityError (FK race
+    with a concurrent product delete, or a UniqueViolation we missed in our
+    in-memory dedup), fall back to per-row savepoints so good rows still
+    land. Returns (committed, skipped).
+    """
+    if not pending:
+        return 0, 0
+    sp = await session.begin_nested()
+    try:
+        session.add_all(pending)
+        await session.flush()
+        await sp.commit()
+        return len(pending), 0
+    except IntegrityError:
+        await sp.rollback()
+    committed = 0
+    skipped = 0
+    for link in pending:
+        sp2 = await session.begin_nested()
+        try:
+            session.add(link)
+            await session.flush()
+            await sp2.commit()
+            committed += 1
+        except IntegrityError as e:
+            await sp2.rollback()
+            skipped += 1
+            logger.warning(
+                "auto_link_row_skipped",
+                err=str(e)[:200],
+                product_id=str(link.product_id),
+                external_id=link.external_id,
+                variation_id=link.variation_id,
+            )
+    return committed, skipped
+
+
 async def _link_via_listings(
     session: AsyncSession,
     job: BackgroundJob,
@@ -283,9 +325,22 @@ async def _link_via_listings(
             (link.external_id or "", link.variation_id or "")
         )
 
+    pending: list[ProductLink] = []
     created = 0
+    skipped = 0
     already = 0
     not_found = 0
+
+    async def _flush() -> None:
+        nonlocal pending, created, skipped
+        if not pending:
+            return
+        c, s = await _safe_flush_batch(session, pending)
+        created += c
+        skipped += s
+        pending = []
+        await _heartbeat(session, job)
+
     try:
         async for listing in client.list_listings():
             sku = (listing.get("sku") or "").strip()
@@ -304,7 +359,7 @@ async def _link_via_listings(
             if key in existing_keys:
                 already += 1
                 continue
-            session.add(
+            pending.append(
                 ProductLink(
                     user_id=integ.user_id,
                     product_id=local.id,
@@ -322,10 +377,10 @@ async def _link_via_listings(
                 )
             )
             existing_keys.add(key)
-            created += 1
             job.processed = (job.processed or 0) + 1
-            if created % 25 == 0:
-                await _heartbeat(session, job)
+            if len(pending) >= 100:
+                await _flush()
+        await _flush()
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "auto_link_listings_failed",
@@ -335,6 +390,13 @@ async def _link_via_listings(
         )
 
     await session.commit()
+    if skipped:
+        logger.info(
+            "auto_link_skipped_rows",
+            integration_id=str(integ.id),
+            platform=platform.value,
+            skipped=skipped,
+        )
     return created, already, not_found
 
 
@@ -411,16 +473,17 @@ async def _link_amazon_integration(
 
     pending: list[ProductLink] = []
     created = 0
+    skipped = 0
     already = 0
     not_found = 0
 
     async def _flush() -> None:
-        nonlocal pending, created
+        nonlocal pending, created, skipped
         if not pending:
             return
-        session.add_all(pending)
-        await session.flush()
-        created += len(pending)
+        c, s = await _safe_flush_batch(session, pending)
+        created += c
+        skipped += s
         pending = []
         await _heartbeat(session, job)
 
@@ -469,6 +532,13 @@ async def _link_amazon_integration(
         )
 
     await session.commit()
+    if skipped:
+        logger.info(
+            "auto_link_skipped_rows",
+            integration_id=str(integ.id),
+            platform="amazon",
+            skipped=skipped,
+        )
     return created, already, not_found
 
 
