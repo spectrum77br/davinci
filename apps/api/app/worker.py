@@ -164,7 +164,11 @@ async def sync_all_run(
             await s.commit()
 
             orch = SyncOrchestrator(s, user_id=uid, job=job)
-            report = await orch.run_parallel(pids)
+            # SSH delta #1 — run_with_retry wraps run_parallel with up to
+            # MAX_RESYNC_ROUNDS-1 retry passes for products whose links
+            # came back RETRYABLE. The verify-before-send shortcut (delta
+            # #2) and skipped_verified accounting are inside _process_link.
+            report = await orch.run_with_retry(pids)
 
             if (job.payload or {}).get("trigger") == "daily_sync":
                 await _notify_daily_sync_completed(s, uid, job, report)

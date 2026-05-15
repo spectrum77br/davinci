@@ -28,7 +28,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import select, text, update
+from sqlalchemy import and_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
@@ -65,6 +65,14 @@ SYNC_ALL_CONCURRENCY = 8
 # doesn't pay that cost — single-product manual syncs still bypass via the
 # `force_bling_refresh=True` flag.
 BLING_REFRESH_TTL_SECONDS = 86_400
+# SSH delta #1: after the initial pass, re-sync products whose links came back
+# RETRYABLE so transient marketplace blips (timeouts, 5xx) get a second chance
+# without waiting for the next daily run. 30s pause before the first retry, 15s
+# before each subsequent one — gives token refreshers and rate limits time to
+# settle without dragging sync_all out.
+MAX_RESYNC_ROUNDS = 3
+RESYNC_WAIT_FIRST_SECONDS = 30
+RESYNC_WAIT_SUBSEQUENT_SECONDS = 15
 
 
 @dataclass(slots=True)
@@ -104,6 +112,9 @@ class SyncOrchestrator:
         self._client_cache: dict[UUID, object] = {}
         self._integration_cache: dict[UUID, Integration] = {}
         self._store_cache: dict[UUID, Store] = {}
+        # SSH delta #1 — populated by run_parallel after each pass so
+        # run_with_retry knows which products to re-sync.
+        self._last_round_retryable_ids: list[UUID] = []
 
     async def _get_integration(self, integration_id: UUID) -> Integration:
         if integration_id in self._integration_cache:
@@ -246,9 +257,29 @@ class SyncOrchestrator:
                     integration = await self._get_integration(link.integration_id)
                     client = await self._client(integration)
                     qty = product.stock
-                    result = await client.update_stock(  # type: ignore[union-attr]
-                        link, qty, bling_store_id=bling_store_id
-                    )
+                    # SSH delta #2 — verify-before-send. If the link's last
+                    # successful push already wrote `qty`, skip the
+                    # marketplace round-trip entirely. We trust link.stock
+                    # because it's the value our last push acknowledged;
+                    # external changes get caught by the discrepancy
+                    # checks (ml_discrepancy_check / shopee_discrepancy_check)
+                    # rather than every sync_all pass.
+                    if (
+                        link.stock is not None
+                        and link.stock == qty
+                        and link.last_sync_status == LinkSyncStatus.OK
+                    ):
+                        result = SyncResult(
+                            status=SyncStatus.SKIPPED,
+                            qty_before=qty,
+                            qty_after=qty,
+                            error_code="verified_skip",
+                            error_detail="link.stock already matches",
+                        )
+                    else:
+                        result = await client.update_stock(  # type: ignore[union-attr]
+                            link, qty, bling_store_id=bling_store_id
+                        )
                 except HTTPException as e:
                     code = "platform_not_implemented" if e.status_code == 501 else "http_error"
                     result = SyncResult(
@@ -563,6 +594,7 @@ class SyncOrchestrator:
                     return None
 
         tasks = [process_one(pid) for pid in product_ids]
+        round_start = datetime.now(UTC)
         results = await asyncio.gather(*tasks, return_exceptions=False)
 
         for r in results:
@@ -574,6 +606,24 @@ class SyncOrchestrator:
             self.report.retryable += r.retryable
             self.report.fatal += r.fatal
             self.report.requires_review += r.requires_review
+
+        # SSH delta #1 — collect products whose links came back RETRYABLE in
+        # this pass so run_with_retry can re-sync just those. Filter by
+        # round_start so a prior round's noise doesn't carry over.
+        retryable_rows = (
+            await self.session.execute(
+                select(ProductLink.product_id)
+                .where(
+                    and_(
+                        ProductLink.product_id.in_([pid for pid in product_ids]),
+                        ProductLink.last_sync_status == LinkSyncStatus.RETRYABLE,
+                        ProductLink.last_sync_at >= round_start,
+                    )
+                )
+                .distinct()
+            )
+        ).all()
+        self._last_round_retryable_ids = [row[0] for row in retryable_rows]
 
         if self.job is not None:
             self.job.status = BackgroundJobStatus.SUCCEEDED
@@ -587,8 +637,58 @@ class SyncOrchestrator:
                 "requires_review": self.report.requires_review,
             }
             await self.session.commit()
+
+        return self.report
+
+    async def run_with_retry(
+        self,
+        product_ids: list[UUID],
+        *,
+        only_link_ids: list[UUID] | None = None,
+        concurrency: int = SYNC_ALL_CONCURRENCY,
+        max_rounds: int = MAX_RESYNC_ROUNDS,
+    ) -> OrchestratorReport:
+        """SSH delta #1 — run the initial sync_parallel pass, then re-sync
+        products whose links came back RETRYABLE up to `max_rounds` times
+        with progressive waits (30s for the first retry, 15s after that).
+
+        Each round inherits the parent SyncOrchestrator's report and job
+        state; the underlying `run_parallel` updates job.status/finished_at
+        on every call so the final state reflects the last round.
+        """
+        await self.run_parallel(
+            product_ids,
+            only_link_ids=only_link_ids,
+            concurrency=concurrency,
+        )
+        rounds_run = 0
+        for round_idx in range(1, max_rounds):
+            retry_ids = list(self._last_round_retryable_ids)
+            if not retry_ids:
+                break
+            wait_s = (
+                RESYNC_WAIT_FIRST_SECONDS
+                if round_idx == 1
+                else RESYNC_WAIT_SUBSEQUENT_SECONDS
+            )
+            logger.info(
+                "sync_retry_round_waiting",
+                round=round_idx,
+                wait_seconds=wait_s,
+                product_count=len(retry_ids),
+            )
+            await asyncio.sleep(wait_s)
+            # run_parallel will reset _last_round_retryable_ids based on the
+            # outcome of this round's products.
+            await self.run_parallel(
+                retry_ids,
+                only_link_ids=only_link_ids,
+                concurrency=concurrency,
+            )
+            rounds_run = round_idx
         logger.info(
-            "sync_orchestrator_parallel_done",
+            "sync_orchestrator_with_retry_done",
+            retry_rounds=rounds_run,
             **(self.job.result if self.job else asdict(self.report)),
         )
         return self.report
