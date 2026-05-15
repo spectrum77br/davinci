@@ -1712,6 +1712,56 @@ async def set_account_department(
 # Store info (9d) — CRUD com password cifrado
 # =============================================================================
 
+async def _compute_store_info_badges(
+    session: AsyncSession, user: User, row: StoreInfo
+) -> tuple[list[str], bool, bool]:
+    """Recompute the (departments, has_pricing, has_integration) triple for a
+    single StoreInfo row. Mirrors the loop list_store_info runs, factored out
+    so PATCH/POST responses don't return stale "Tab.Preço = Não" / "Integração
+    = Não" badges when the user edits an unrelated field."""
+    roots_by_id, _, _ = await _segment_index(session)
+    acc_rows = (
+        await session.execute(
+            select(
+                PricingAccount.name,
+                PricingAccount.platform,
+                PricingAccount.segment_id,
+            ).where(user_scope(PricingAccount, user))
+        )
+    ).all()
+    sname = (row.account_name or "").strip().lower()
+    splat_alias = _STORE_TO_PRICING_PLATFORM.get(
+        (row.platform or "").strip().lower(),
+        (row.platform or "").strip().lower(),
+    )
+    splat = (row.platform or "").strip().lower()
+    depts: set[str] = set()
+    if sname:
+        for name, plat, seg_id in acc_rows:
+            slug = roots_by_id.get(seg_id)
+            if not slug:
+                continue
+            plat_val = plat.value if hasattr(plat, "value") else str(plat)
+            pname = (name or "").strip().lower()
+            if not pname or plat_val.lower() != splat_alias:
+                continue
+            if pname == sname or pname.startswith(sname + " "):
+                depts.add(slug)
+
+    integ_rows = (
+        await session.execute(select(Integration.name, Integration.platform))
+    ).all()
+    has_integ = False
+    if sname:
+        for iname, iplat in integ_rows:
+            iplat_val = iplat.value if hasattr(iplat, "value") else str(iplat)
+            if (iname or "").strip().lower() == sname and iplat_val.lower() == splat:
+                has_integ = True
+                break
+
+    return sorted(depts), bool(depts), has_integ
+
+
 def _store_info_out(
     row: StoreInfo,
     departments: list[str] | None = None,
@@ -1862,7 +1912,18 @@ async def patch_store_info(
         setattr(row, k, v)
     await session.commit()
     await session.refresh(row)
-    return _store_info_out(row)
+    # Recompute the Tab.Preço / Integração badges so the response doesn't
+    # regress to "Não" after editing an unrelated field (UpseSeller, Duoker,
+    # bling_store_id, etc).
+    depts, has_pricing, has_integ = await _compute_store_info_badges(
+        session, user, row
+    )
+    return _store_info_out(
+        row,
+        departments=depts,
+        has_pricing=has_pricing,
+        has_integration=has_integ,
+    )
 
 
 @router.get("/store-info/{store_info_id}/password")

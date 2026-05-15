@@ -841,17 +841,28 @@ async function copyText(text: string) {
                 {{ row.has_integration ? 'Sim' : '✕ Não' }}
               </span>
             </td>
-            <!-- Bling ID -->
-            <td class="border border-border px-2 py-1 text-xs">
+            <!-- Bling ID — click-to-edit matching the rest of the editable
+                 cells (CNPJ, e-mail, fone, etc.). -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'bling_store_id'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'bling_store_id'),
+              }"
+            >
               <input
-                v-if="canEdit"
-                :value="row.bling_store_id || ''"
-                type="text"
-                placeholder="—"
-                class="w-full bg-transparent outline-none focus:bg-background focus:ring-1 focus:ring-blue-500 rounded px-1 py-0.5"
-                @change="updateField(row, 'bling_store_id', ($event.target as HTMLInputElement).value || null)"
+                v-if="isEditing(row.id, 'bling_store_id')"
+                :ref="setEditInputRef"
+                v-model="editValue" type="text"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               />
-              <span v-else>{{ row.bling_store_id || '—' }}</span>
+              <span
+                v-else
+                class="cursor-pointer"
+                :class="{ 'text-muted-foreground': !row.bling_store_id }"
+                @click="canEdit && startEdit(row, 'bling_store_id')"
+              >{{ row.bling_store_id || '—' }}</span>
             </td>
             <!-- UpseSeller — matches Tab.Preço/Integração badge style. Click cycles
                  null → Sim → Não → null. -->
