@@ -60,7 +60,7 @@ const sections: Section[] = [
     items: [
       { to: '/companies', label: 'Empresas', icon: Building2, resource: 'empresa' },
       { to: '/cadastros', label: 'Cadastros', icon: ContactRound, resource: 'cadastro' },
-      { to: '/store-info', label: 'Lojas (info)', icon: Store, resource: 'lojas_info' },
+      { to: '/store-info', label: 'Lojas', icon: Store, resource: 'lojas_info' },
       { to: '/admin/segments', label: 'Segmentos', icon: Tags, resource: 'segmentos' },
     ],
   },

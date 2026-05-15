@@ -33,9 +33,18 @@ type StoreInfo = {
   departments: string[]
   has_pricing: boolean
   has_integration: boolean
+  bling_store_id: string | null
+  upseseller: boolean | null
+  duoker: boolean | null
+  uf_restrictions: string[] | null
   created_at: string
   updated_at: string
 }
+
+const UF_OPTIONS = [
+  'AC','AL','AM','AP','BA','CE','DF','ES','GO','MA','MG','MS','MT',
+  'PA','PB','PE','PI','PR','RJ','RN','RO','RR','RS','SC','SE','SP','TO',
+]
 
 // Tipo badges all share the neutral palette — colors per dept were too noisy.
 const DEPT_BADGE_CLS = 'bg-muted text-muted-foreground border-border'
@@ -161,6 +170,41 @@ async function unlinkIntegration(row: StoreInfo) {
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   }
+}
+
+// Generic single-field PATCH used by the new Bling ID / UpseSeller / Duoker
+// / UF cells.
+async function updateField(row: StoreInfo, field: keyof StoreInfo, value: unknown) {
+  try {
+    const body: Record<string, unknown> = { [field]: value }
+    const updated = await api<StoreInfo>(`/api/pricing/store-info/${row.id}`, {
+      method: 'PATCH',
+      body,
+    })
+    Object.assign(row, updated)
+    flash(row.id, String(field))
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
+
+function boolFromSelect(v: string): boolean | null {
+  if (v === 'sim') return true
+  if (v === 'nao') return false
+  return null
+}
+
+// UF multi-select popover state: tracks which row's popover is open.
+const openUfRowId = ref<string | null>(null)
+function toggleUfPopover(id: string) {
+  openUfRowId.value = openUfRowId.value === id ? null : id
+}
+async function toggleUf(row: StoreInfo, uf: string, checked: boolean) {
+  const current = new Set(row.uf_restrictions || [])
+  if (checked) current.add(uf)
+  else current.delete(uf)
+  const next = Array.from(current).sort()
+  await updateField(row, 'uf_restrictions', next.length ? next : null)
 }
 
 const sorted = computed(() => {
@@ -463,6 +507,10 @@ async function copyText(text: string) {
             <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[110px]">Tipo</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Tab. Preço</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Integração</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Bling ID</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">UpseSeller</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Duoker</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">UF</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
           </tr>
         </thead>
@@ -767,6 +815,80 @@ async function copyText(text: string) {
               >
                 {{ row.has_integration ? 'Sim' : '✕ Não' }}
               </span>
+            </td>
+            <!-- Bling ID -->
+            <td class="border border-border px-2 py-1 text-xs">
+              <input
+                v-if="canEdit"
+                :value="row.bling_store_id || ''"
+                type="text"
+                placeholder="—"
+                class="w-full bg-transparent outline-none focus:bg-background focus:ring-1 focus:ring-blue-500 rounded px-1 py-0.5"
+                @change="updateField(row, 'bling_store_id', ($event.target as HTMLInputElement).value || null)"
+              />
+              <span v-else>{{ row.bling_store_id || '—' }}</span>
+            </td>
+            <!-- UpseSeller -->
+            <td class="border border-border px-1 py-1 text-center">
+              <select
+                v-if="canEdit"
+                :value="row.upseseller === null ? '' : (row.upseseller ? 'sim' : 'nao')"
+                class="text-xs bg-transparent border rounded px-1 py-0.5"
+                @change="updateField(row, 'upseseller', boolFromSelect(($event.target as HTMLSelectElement).value))"
+              >
+                <option value="">—</option>
+                <option value="sim">Sim</option>
+                <option value="nao">Não</option>
+              </select>
+              <span v-else>{{ row.upseseller === null ? '—' : (row.upseseller ? 'Sim' : 'Não') }}</span>
+            </td>
+            <!-- Duoker -->
+            <td class="border border-border px-1 py-1 text-center">
+              <select
+                v-if="canEdit"
+                :value="row.duoker === null ? '' : (row.duoker ? 'sim' : 'nao')"
+                class="text-xs bg-transparent border rounded px-1 py-0.5"
+                @change="updateField(row, 'duoker', boolFromSelect(($event.target as HTMLSelectElement).value))"
+              >
+                <option value="">—</option>
+                <option value="sim">Sim</option>
+                <option value="nao">Não</option>
+              </select>
+              <span v-else>{{ row.duoker === null ? '—' : (row.duoker ? 'Sim' : 'Não') }}</span>
+            </td>
+            <!-- UF -->
+            <td class="border border-border px-2 py-1 text-xs">
+              <div v-if="canEdit" class="relative">
+                <button
+                  type="button"
+                  class="w-full text-left bg-transparent border rounded px-1.5 py-0.5 hover:bg-muted text-xs"
+                  @click="toggleUfPopover(row.id)"
+                >
+                  {{ (row.uf_restrictions && row.uf_restrictions.length) ? row.uf_restrictions.join(', ') : '—' }}
+                </button>
+                <div
+                  v-if="openUfRowId === row.id"
+                  class="absolute z-50 mt-1 bg-background border rounded shadow-lg p-2 grid grid-cols-4 gap-1 w-64"
+                >
+                  <label
+                    v-for="uf in UF_OPTIONS"
+                    :key="uf"
+                    class="flex items-center gap-1 text-[11px] cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="(row.uf_restrictions || []).includes(uf)"
+                      @change="toggleUf(row, uf, ($event.target as HTMLInputElement).checked)"
+                    />
+                    {{ uf }}
+                  </label>
+                  <button
+                    class="col-span-4 mt-1 text-xs text-blue-600 hover:underline"
+                    @click="openUfRowId = null"
+                  >fechar</button>
+                </div>
+              </div>
+              <span v-else>{{ (row.uf_restrictions && row.uf_restrictions.length) ? row.uf_restrictions.join(', ') : '—' }}</span>
             </td>
             <!-- delete -->
             <td class="border border-border px-1 py-1 text-center">

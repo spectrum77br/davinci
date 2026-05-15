@@ -315,6 +315,11 @@ class StoreInfoBase(BaseModel):
     link: str | None = None
     integration_id: UUID | None = None
     sort_order: int = 0
+    # Lojas screen extras (migration 0043).
+    bling_store_id: str | None = None
+    upseseller: bool | None = None
+    duoker: bool | None = None
+    uf_restrictions: list[str] | None = None
 
 
 class StoreInfoCreate(StoreInfoBase):
@@ -338,6 +343,10 @@ class StoreInfoPatch(BaseModel):
     link: str | None = None
     integration_id: UUID | None = None
     sort_order: int | None = None
+    bling_store_id: str | None = None
+    upseseller: bool | None = None
+    duoker: bool | None = None
+    uf_restrictions: list[str] | None = None
 
 
 class StoreInfoOut(StoreInfoBase):
