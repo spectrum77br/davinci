@@ -157,34 +157,16 @@ async def main() -> None:
 
     ssh_prod_sku = {p["id"]: p["sku"] for p in ssh_prods}
 
-    # --- DELETE existing pricing data for spectrum77 ---
-    async with eng.begin() as c:
-        # Preserve bling product_links (used by stock sync to Bling)
-        r = await c.execute(
-            text(
-                "DELETE FROM davinci.product_links "
-                "WHERE user_id = :u AND platform::text != 'bling'"
-            ),
-            {"u": str(DV_USER_ID)},
+    # Refuse to wipe the DB if the dump is suspiciously small — early sanity
+    # check so a partial-copy dump can never trigger a destructive DELETE.
+    if len(pls) < 1000 or len(pas) < 50 or len(pps) < 50:
+        raise SystemExit(
+            f"[abort] dump looks incomplete: pa={len(pas)} pp={len(pps)} pl={len(pls)}"
         )
-        print(f"[delete] product_links non-bling: {r.rowcount}")
-        r = await c.execute(
-            text("DELETE FROM davinci.pricing_overrides WHERE user_id = :u"),
-            {"u": str(DV_USER_ID)},
-        )
-        print(f"[delete] pricing_overrides: {r.rowcount}")
-        # accounts have FK to overrides, but overrides already gone; pricing_products
-        # also FK from overrides
-        r = await c.execute(
-            text("DELETE FROM davinci.pricing_accounts WHERE user_id = :u"),
-            {"u": str(DV_USER_ID)},
-        )
-        print(f"[delete] pricing_accounts: {r.rowcount}")
-        r = await c.execute(
-            text("DELETE FROM davinci.pricing_products WHERE user_id = :u"),
-            {"u": str(DV_USER_ID)},
-        )
-        print(f"[delete] pricing_products: {r.rowcount}")
+
+    # Phase 1: build every row list in memory BEFORE touching the DB. Phase 2
+    # is a single atomic transaction (DELETE + all INSERTs) so an interrupted
+    # run can never leave the table in a wiped state.
 
     # --- INSERT pricing_accounts ---
     pa_id_map: dict[int, UUID] = {}
@@ -347,7 +329,6 @@ async def main() -> None:
                    :bling_cost_price, :cost_kit1, :cost_kit2, :cost_kit3, :cost_kit4,
                    :description, :model, :ean, :is_active, false,
                    :created_at, :updated_at)
-                ON CONFLICT (user_id, sku) DO NOTHING
                 """
                 ),
                 chunk,

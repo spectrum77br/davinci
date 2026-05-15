@@ -469,6 +469,21 @@ async def push_one(
         integration.platform, creds, on_token_refresh=_persist_refresh
     )
 
+    # Pre-load the davinci.products.sku for every link so Amazon (which
+    # addresses listings by seller SKU, not external_id) can use the real
+    # value. SSH-imported links carry external_sku=NULL, hence the lookup.
+    product_ids_in_links = list({lk.product_id for lk in links})
+    sku_by_product: dict[UUID, str] = {}
+    if product_ids_in_links:
+        sku_rows = (
+            await session.execute(
+                select(Product.id, Product.sku).where(
+                    Product.id.in_(product_ids_in_links)
+                )
+            )
+        ).all()
+        sku_by_product = {pid: sku for pid, sku in sku_rows if sku}
+
     # Push to every variation/link. Aggregate the outcome: ok if all ok,
     # partial if some ok some not, fail if none ok. Item/variation id of
     # the response is the first successful (or first attempted) link.
@@ -484,7 +499,11 @@ async def push_one(
             first_item = link.external_id
             first_variation = link.variation_id
         result = await _dispatch_price_update_link(
-            client, integration.platform, link, float(outcome.price)
+            client,
+            integration.platform,
+            link,
+            float(outcome.price),
+            product_sku=sku_by_product.get(link.product_id),
         )
         per_link.append(
             {
@@ -561,9 +580,13 @@ async def _dispatch_price_update_link(
     platform: IntegrationPlatform,
     link: "ProductLink",
     price: float,
+    *,
+    product_sku: str | None = None,
 ) -> SyncResult:
     """Route price update to the correct client method based on platform,
-    using ProductLink as the source of (external_id, variation_id, sku)."""
+    using ProductLink as the source of (external_id, variation_id) and
+    `product_sku` (the linked davinci.products.sku) for Amazon — which
+    addresses listings by seller SKU, NOT external_id."""
     try:
         if platform == IntegrationPlatform.ML:
             return await client.update_price(
@@ -578,7 +601,10 @@ async def _dispatch_price_update_link(
                 variation_id=link.variation_id,
             )
         elif platform == IntegrationPlatform.AMAZON:
-            sku = link.external_sku or link.external_id
+            # SSH spec: Amazon addresses listings by seller SKU. Prefer the
+            # actual product SKU; fall back to external_sku then external_id
+            # only when the join didn't resolve.
+            sku = product_sku or link.external_sku or link.external_id
             return await client.update_price(sku=sku, price=price)
         elif platform == IntegrationPlatform.TIKTOK:
             sku_id = link.variation_id or ""

@@ -226,10 +226,15 @@ class ShopeeClient:
         *,
         variation_id: str | None = None,
     ) -> SyncResult:
-        """Push price to a single Shopee listing.
+        """Push price to a single Shopee listing via the SHOP DISCOUNT.
 
-        If item has an active promotion, updates the promotion price instead.
-        Falls back to regular price update via /api/v2/product/update_price.
+        SSH spec: Shopee never updates base price — the displayed price comes
+        from an active "Discount Promotions" (Desconto de Loja). We try
+        update_discount_item first (item already attached to the discount),
+        then fall back to add_discount_item (activate the item in that
+        discount). If no active shop discount exists, push errors out so the
+        user knows to create one. Items in Flash Sale are also surfaced as a
+        distinct error code.
         """
         if price <= 0:
             return SyncResult(
@@ -253,42 +258,112 @@ class ShopeeClient:
             except (TypeError, ValueError):
                 model_id = 0
 
-        # Try promotion price first
-        try:
-            promo = await self.get_item_promotion(iid)
-            if promo:
-                promo_id = promo.get("promotion_id")
-                if promo_id:
-                    ok = await self.update_promotion_price(
-                        promo_id, iid, model_id, price
-                    )
-                    if ok:
-                        return SyncResult(
-                            status=SyncStatus.OK,
-                            payload={
-                                "item_id": item_id,
-                                "model_id": model_id,
-                                "price": price,
-                                "via": "promotion",
-                            },
-                        )
-        except Exception as e:  # noqa: BLE001
-            logger.debug(
-                "shopee_promo_price_fallback",
-                item_id=item_id,
-                error=str(e)[:200],
+        promo = await self.get_item_promotion(iid)
+        if promo is None:
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="shopee_no_active_discount",
+                error_detail=(
+                    f"Item {iid} sem 'Desconto de Loja' ativo. Crie um Desconto "
+                    "no painel da Shopee antes de tentar empurrar preço."
+                ),
+            )
+        ptype = (promo.get("discount_info") or {}).get("promotion_type") or ""
+        if "flash" in ptype.lower():
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                error_code="shopee_flash_sale_active",
+                error_detail=(
+                    f"Item {iid} está em Promoção Relâmpago; preço só pode "
+                    "ser alterado após o fim da flash sale."
+                ),
+            )
+        promo_id = promo.get("promotion_id")
+        if not promo_id:
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="shopee_no_promo_id",
+                error_detail=f"item={iid} promotion present but missing promotion_id",
             )
 
-        # Regular price update
-        body: dict[str, Any] = {
-            "item_id": iid,
-            "price_list": [{"model_id": model_id, "original_price": price}],
-        }
+        # 1) Try update first — item already in the discount.
+        ok_update = False
         try:
-            r = await self._request("POST", "/api/v2/product/update_price", json=body)
-        except httpx.HTTPError as e:
-            return _http_error_to_result(e, None)
-        return _classify_price_response(r, item_id, model_id, price)
+            ok_update = await self.update_promotion_price(
+                promo_id, iid, model_id, price
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("shopee_update_discount_item_failed", err=str(e)[:200])
+        if ok_update:
+            return SyncResult(
+                status=SyncStatus.OK,
+                payload={
+                    "item_id": item_id,
+                    "model_id": model_id,
+                    "price": price,
+                    "via": "update_discount_item",
+                    "promotion_id": promo_id,
+                },
+            )
+
+        # 2) Fall back to add — activate the item in this discount.
+        try:
+            ok_add = await self.add_discount_item(promo_id, iid, model_id, price)
+        except Exception as e:  # noqa: BLE001
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="shopee_add_discount_item_failed",
+                error_detail=str(e)[:500],
+            )
+        if ok_add:
+            return SyncResult(
+                status=SyncStatus.OK,
+                payload={
+                    "item_id": item_id,
+                    "model_id": model_id,
+                    "price": price,
+                    "via": "add_discount_item",
+                    "promotion_id": promo_id,
+                },
+            )
+        return SyncResult(
+            status=SyncStatus.FATAL,
+            error_code="shopee_discount_push_failed",
+            error_detail=f"update+add both failed for item={iid}",
+        )
+
+    async def add_discount_item(
+        self,
+        discount_id: int,
+        item_id: int,
+        model_id: int,
+        price: float,
+    ) -> bool:
+        """Attach item to the discount (activates the toggle and sets price).
+
+        Uses /api/v2/discount/add_discount_item — the SSH spec's "add"
+        path that fires when update fails because the item wasn't yet in
+        the discount.
+        """
+        rounded = round(float(price))
+        item_entry: dict[str, Any] = {"item_id": item_id, "purchase_limit": 0}
+        if model_id > 0:
+            item_entry["model_list"] = [
+                {"model_id": model_id, "model_promotion_price": rounded}
+            ]
+        else:
+            item_entry["item_promotion_price"] = rounded
+        body = {"discount_id": discount_id, "item_list": [item_entry]}
+        try:
+            r = await self._request(
+                "POST", "/api/v2/discount/add_discount_item", json=body
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        if r.status_code != 200:
+            return False
+        resp = r.json() or {}
+        return not resp.get("error")
 
     async def get_model_stock(
         self, item_id: int, model_id: int = 0
