@@ -841,27 +841,29 @@ async function copyText(text: string) {
                 {{ row.has_integration ? 'Sim' : '✕ Não' }}
               </span>
             </td>
-            <!-- Bling ID — click-to-edit matching the rest of the editable
-                 cells (CNPJ, e-mail, fone, etc.). -->
+            <!-- Bling ID — click anywhere in the cell to edit (matches the
+                 platform cell pattern). Empty cells get a "—" placeholder
+                 but the whole <td> is the click target so a row with no
+                 value is still trivially editable. -->
             <td
-              class="border border-border px-2 py-1.5 text-xs"
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
               :class="{
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'bling_store_id'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'bling_store_id'),
               }"
+              @click="!isEditing(row.id, 'bling_store_id') && canEdit && startEdit(row, 'bling_store_id')"
             >
               <input
                 v-if="isEditing(row.id, 'bling_store_id')"
                 :ref="setEditInputRef"
                 v-model="editValue" type="text"
                 class="w-full text-xs bg-transparent outline-none"
+                @click.stop
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               />
               <span
                 v-else
-                class="cursor-pointer"
                 :class="{ 'text-muted-foreground': !row.bling_store_id }"
-                @click="canEdit && startEdit(row, 'bling_store_id')"
               >{{ row.bling_store_id || '—' }}</span>
             </td>
             <!-- UpseSeller — matches Tab.Preço/Integração badge style. Click cycles
