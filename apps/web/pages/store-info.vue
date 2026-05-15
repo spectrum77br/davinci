@@ -207,6 +207,31 @@ async function toggleUf(row: StoreInfo, uf: string, checked: boolean) {
   await updateField(row, 'uf_restrictions', next.length ? next : null)
 }
 
+// Tri-state boolean badge helpers (UpseSeller / Duoker). Mirrors the
+// "Sim / ✕ Não / —" visual that Tab.Preço and Integração use, plus an
+// extra null state so the field stays "unset" until the user picks one.
+function labelTriBool(v: boolean | null): string {
+  if (v === true) return 'Sim'
+  if (v === false) return '✕ Não'
+  return '—'
+}
+function badgeClassTriBool(v: boolean | null): string {
+  if (v === true) return 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+  if (v === false) return 'bg-red-500/15 text-red-400 border-red-500/40'
+  return 'bg-muted/40 text-muted-foreground border-border'
+}
+async function cycleTriBool(row: StoreInfo, field: 'upseseller' | 'duoker') {
+  const cur = row[field]
+  const next: boolean | null = cur === null ? true : cur === true ? false : null
+  await updateField(row, field, next)
+}
+
+// Computed for the UF popover overlay so the template can read the
+// currently-open row reactively.
+const openUfRow = computed(() =>
+  openUfRowId.value ? items.value.find((r) => r.id === openUfRowId.value) || null : null
+)
+
 const sorted = computed(() => {
   let list = [...items.value]
   if (filterPlatform.value !== 'all') {
@@ -828,67 +853,47 @@ async function copyText(text: string) {
               />
               <span v-else>{{ row.bling_store_id || '—' }}</span>
             </td>
-            <!-- UpseSeller -->
+            <!-- UpseSeller — matches Tab.Preço/Integração badge style. Click cycles
+                 null → Sim → Não → null. -->
             <td class="border border-border px-1 py-1 text-center">
-              <select
-                v-if="canEdit"
-                :value="row.upseseller === null ? '' : (row.upseseller ? 'sim' : 'nao')"
-                class="text-xs bg-transparent border rounded px-1 py-0.5"
-                @change="updateField(row, 'upseseller', boolFromSelect(($event.target as HTMLSelectElement).value))"
+              <button
+                type="button"
+                :disabled="!canEdit"
+                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
+                :class="badgeClassTriBool(row.upseseller)"
+                @click="canEdit && cycleTriBool(row, 'upseseller')"
               >
-                <option value="">—</option>
-                <option value="sim">Sim</option>
-                <option value="nao">Não</option>
-              </select>
-              <span v-else>{{ row.upseseller === null ? '—' : (row.upseseller ? 'Sim' : 'Não') }}</span>
+                {{ labelTriBool(row.upseseller) }}
+              </button>
             </td>
             <!-- Duoker -->
             <td class="border border-border px-1 py-1 text-center">
-              <select
-                v-if="canEdit"
-                :value="row.duoker === null ? '' : (row.duoker ? 'sim' : 'nao')"
-                class="text-xs bg-transparent border rounded px-1 py-0.5"
-                @change="updateField(row, 'duoker', boolFromSelect(($event.target as HTMLSelectElement).value))"
+              <button
+                type="button"
+                :disabled="!canEdit"
+                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
+                :class="badgeClassTriBool(row.duoker)"
+                @click="canEdit && cycleTriBool(row, 'duoker')"
               >
-                <option value="">—</option>
-                <option value="sim">Sim</option>
-                <option value="nao">Não</option>
-              </select>
-              <span v-else>{{ row.duoker === null ? '—' : (row.duoker ? 'Sim' : 'Não') }}</span>
+                {{ labelTriBool(row.duoker) }}
+              </button>
             </td>
-            <!-- UF -->
-            <td class="border border-border px-2 py-1 text-xs">
-              <div v-if="canEdit" class="relative">
-                <button
-                  type="button"
-                  class="w-full text-left bg-transparent border rounded px-1.5 py-0.5 hover:bg-muted text-xs"
-                  @click="toggleUfPopover(row.id)"
-                >
-                  {{ (row.uf_restrictions && row.uf_restrictions.length) ? row.uf_restrictions.join(', ') : '—' }}
-                </button>
-                <div
-                  v-if="openUfRowId === row.id"
-                  class="absolute z-50 mt-1 bg-background border rounded shadow-lg p-2 grid grid-cols-4 gap-1 w-64"
-                >
-                  <label
-                    v-for="uf in UF_OPTIONS"
-                    :key="uf"
-                    class="flex items-center gap-1 text-[11px] cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      :checked="(row.uf_restrictions || []).includes(uf)"
-                      @change="toggleUf(row, uf, ($event.target as HTMLInputElement).checked)"
-                    />
-                    {{ uf }}
-                  </label>
-                  <button
-                    class="col-span-4 mt-1 text-xs text-blue-600 hover:underline"
-                    @click="openUfRowId = null"
-                  >fechar</button>
-                </div>
-              </div>
-              <span v-else>{{ (row.uf_restrictions && row.uf_restrictions.length) ? row.uf_restrictions.join(', ') : '—' }}</span>
+            <!-- UF — compact badge showing count; click opens popover anchored
+                 to the badge (not inside the cell to avoid clipping). -->
+            <td class="border border-border px-1 py-1 text-center">
+              <button
+                type="button"
+                :disabled="!canEdit"
+                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
+                :class="(row.uf_restrictions && row.uf_restrictions.length)
+                  ? 'bg-blue-500/15 text-blue-400 border-blue-500/40'
+                  : 'bg-muted/40 text-muted-foreground border-border'"
+                @click="canEdit && toggleUfPopover(row.id)"
+              >
+                {{ (row.uf_restrictions && row.uf_restrictions.length)
+                  ? `${row.uf_restrictions.length} UF`
+                  : '—' }}
+              </button>
             </td>
             <!-- delete -->
             <td class="border border-border px-1 py-1 text-center">
@@ -905,6 +910,57 @@ async function copyText(text: string) {
           </template>
         </tbody>
       </table>
+    </div>
+
+    <!-- UF multi-select popover — rendered outside the table to escape its
+         overflow-clipping. Centered overlay; click outside or "fechar" to
+         close. -->
+    <div
+      v-if="openUfRow"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      @click.self="openUfRowId = null"
+    >
+      <div class="bg-background border rounded-lg shadow-xl p-4 w-80">
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-sm font-semibold">
+            UF — {{ openUfRow.platform }} / {{ openUfRow.account_name || '—' }}
+          </div>
+          <button
+            class="text-muted-foreground hover:text-foreground"
+            @click="openUfRowId = null"
+          >
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+        <div class="grid grid-cols-5 gap-1 text-xs">
+          <label
+            v-for="uf in UF_OPTIONS"
+            :key="uf"
+            class="flex items-center gap-1 cursor-pointer px-1 py-0.5 rounded hover:bg-muted"
+          >
+            <input
+              type="checkbox"
+              :checked="(openUfRow.uf_restrictions || []).includes(uf)"
+              @change="toggleUf(openUfRow, uf, ($event.target as HTMLInputElement).checked)"
+            />
+            <span>{{ uf }}</span>
+          </label>
+        </div>
+        <div class="mt-3 flex justify-end gap-2 text-xs">
+          <button
+            class="px-2 py-1 rounded border hover:bg-muted"
+            @click="updateField(openUfRow, 'uf_restrictions', null); openUfRowId = null"
+          >
+            limpar tudo
+          </button>
+          <button
+            class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
+            @click="openUfRowId = null"
+          >
+            fechar
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
