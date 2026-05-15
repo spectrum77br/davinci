@@ -215,7 +215,10 @@ function linkCol(l: ProductLink): MarketCol | null {
   if (l.platform === 'tiktok') return 'tiktok'
   if (l.platform === 'ml') {
     const t = (l.listing_type || '').toLowerCase()
-    if (t === 'ml premium') return 'ml_premium'
+    // ML API values (preserved at ingestion):
+    //   gold_pro / gold_premium      → Premium
+    //   gold_special / free / (none) → Clássico
+    if (t === 'gold_pro' || t === 'gold_premium' || t === 'ml premium') return 'ml_premium'
     return 'ml_classico'
   }
   return null
