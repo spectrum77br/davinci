@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onUnmounted } from 'vue'
-import { Plus, Trash2, Download, RefreshCw, ChevronDown, ChevronRight, X, Loader2, Zap, Upload, Search, Tags } from 'lucide-vue-next'
+import { Plus, Trash2, Download, RefreshCw, ChevronDown, ChevronRight, X, Loader2, Zap, Upload, Search, Tags, Link2 } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'produtos', action: 'view' } })
 
@@ -696,6 +696,18 @@ async function runAutoLink() {
   }
 }
 
+async function runAutoImportLink() {
+  activeJob.value = null
+  try {
+    const r = await api<{ job_id: string }>('/api/jobs/auto-import-link', {
+      method: 'POST',
+    })
+    startPolling(r.job_id)
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
+
 function startPolling(jobId: string) {
   if (pollHandle) clearInterval(pollHandle)
   const tick = async () => {
@@ -748,6 +760,16 @@ onUnmounted(() => {
           @click="openAutoLinkDialog"
         >
           <Zap class="size-4 mr-1.5" /> Vincular Automático
+        </Button>
+        <Button
+          v-if="canEdit"
+          size="sm"
+          variant="outline"
+          class="border-sky-300 text-sky-700 hover:bg-sky-50"
+          title="Anexa anúncios já importados ao SKU do produto local (sem chamar marketplace)"
+          @click="runAutoImportLink"
+        >
+          <Link2 class="size-4 mr-1.5" /> Vincular Anúncios
         </Button>
         <Button v-if="canEdit" size="sm" variant="outline" @click="openSyncAllDialog">
           <RefreshCw class="size-4 mr-1.5" /> Sincronizar Todos

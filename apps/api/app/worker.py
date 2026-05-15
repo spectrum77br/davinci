@@ -686,24 +686,47 @@ async def low_stock_polling(ctx: dict) -> None:
 
 async def auto_import_link(ctx: dict) -> None:
     """Fase 8: scan listings whose product_id is null and a non-blank SKU
-    matches a product the user owns; attach product_id.
+    matches a product; attach product_id and promote into product_links.
 
-    Kept as a safety-net cron in case a hook enqueue is dropped (Redis
-    outage, etc). Hooks via `app.services.relink_hook.trigger_user_relink`
-    do the day-to-day work."""
+    Cron tick (untracked) + hook safety-net. Manual UI trigger uses the
+    `auto_import_link_run` variant below, which writes a BackgroundJob row
+    so the operator can see progress in /sincronizacoes."""
     async with session_scope() as s:
         report = await run_auto_import_link(s)
         logger.info("auto_import_link_done", **report)
 
 
-async def user_relink_run(ctx: dict, user_id: str) -> None:
-    """Per-user relink + product_link promotion. Enqueued by
-    `trigger_user_relink` from write paths (product create/patch/import,
-    listing patch). Idempotent — re-running is a no-op."""
-    uid = UUID(user_id)
+async def auto_import_link_run(ctx: dict, job_id: str) -> None:
+    """Job-tracked variant of `auto_import_link` for the UI trigger."""
     async with session_scope() as s:
-        linked = await _link_by_sku(s, user_id=uid)
-        promoted = await _create_product_links_for_matched(s, user_id=uid)
+        job = await s.get(BackgroundJob, UUID(job_id))
+        if job is None:
+            logger.error("auto_import_link_run_job_missing", job_id=job_id)
+            return
+        job.status = BackgroundJobStatus.RUNNING
+        job.started_at = datetime.now(UTC)
+        job.last_heartbeat_at = job.started_at
+        await s.commit()
+        try:
+            report = await run_auto_import_link(s)
+            job.status = BackgroundJobStatus.SUCCEEDED
+            job.result = report
+        except Exception as e:  # noqa: BLE001
+            logger.exception("auto_import_link_run_failed", job_id=job_id)
+            job.status = BackgroundJobStatus.FAILED
+            job.error = f"{type(e).__name__}: {e}"[:1000]
+        finally:
+            job.finished_at = datetime.now(UTC)
+            await s.commit()
+
+
+async def user_relink_run(ctx: dict, user_id: str) -> None:
+    """Global relink + product_link promotion. Single-tenant CRM —
+    user_id is kept for compatibility but the pass is global.
+    Idempotent — re-running is a no-op."""
+    async with session_scope() as s:
+        linked = await _link_by_sku(s)
+        promoted = await _create_product_links_for_matched(s)
         await s.commit()
         logger.info(
             "user_relink_done",
@@ -812,6 +835,7 @@ class WorkerSettings:
         low_stock_polling,
         import_listings_run,
         auto_import_link,
+        auto_import_link_run,
         push_prices_batch_run,
         sync_bling_costs_run,
         audit_run,

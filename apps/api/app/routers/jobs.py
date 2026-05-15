@@ -150,3 +150,31 @@ async def enqueue_auto_link(
         job.arq_job_id = arq.job_id
     await session.commit()
     return JobCreatedOut(job_id=job.id)
+
+
+@router.post(
+    "/jobs/auto-import-link",
+    response_model=JobCreatedOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def enqueue_auto_import_link(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+) -> JobCreatedOut:
+    """Scan unlinked listings → attach product_id by SKU and materialize
+    `product_links`. Global CRM-mode pass. Mirrors the 02h/14h cron tick."""
+    job = BackgroundJob(
+        type=BackgroundJobType.AUTO_IMPORT_LINK,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={},
+    )
+    session.add(job)
+    await session.flush()
+
+    pool = await get_arq_pool()
+    arq = await pool.enqueue_job("auto_import_link_run", str(job.id))
+    if arq is not None:
+        job.arq_job_id = arq.job_id
+    await session.commit()
+    return JobCreatedOut(job_id=job.id)

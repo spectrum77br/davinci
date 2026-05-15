@@ -91,6 +91,7 @@ class BackgroundJobType(StrEnum):
     PUSH_PRICES_BATCH = "push_prices_batch"
     BACKFILL_ML_STOCK = "backfill_ml_stock"
     REFRESH_BLING_STOCK = "refresh_bling_stock"
+    AUTO_IMPORT_LINK = "auto_import_link"
 
 
 class BackgroundJobStatus(StrEnum):
