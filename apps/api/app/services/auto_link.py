@@ -30,6 +30,8 @@ from app.models import (
     ProductLink,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.marketplaces.ml import MercadoLivreClient
+from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
@@ -214,6 +216,117 @@ async def _link_tiktok_integration(
     return created, already, not_found
 
 
+async def _link_via_listings(
+    session: AsyncSession,
+    job: BackgroundJob,
+    integ: Integration,
+    client,
+    platform: IntegrationPlatform,
+) -> tuple[int, int, int]:
+    """Generic adapter: walk `client.list_listings()` (which already yields
+    normalized {external_id, sku, title, listing_type, …} dicts for ML and
+    Shopee) and create `product_links` for every listing whose SKU matches
+    a row in `products`. Returns (created, already_present, not_found).
+    """
+    products = (await session.execute(select(Product))).scalars().all()
+    by_sku: dict[str, Product] = {}
+    for p in products:
+        sk = (p.sku or "").strip().lower()
+        if sk:
+            by_sku[sk] = p
+
+    existing_keys: set[tuple[UUID, str, str]] = set()
+    for link in (
+        await session.execute(
+            select(ProductLink).where(
+                and_(
+                    ProductLink.integration_id == integ.id,
+                    ProductLink.platform == platform,
+                )
+            )
+        )
+    ).scalars().all():
+        existing_keys.add(
+            (link.product_id, link.external_id or "", link.variation_id or "")
+        )
+
+    created = 0
+    already = 0
+    not_found = 0
+    try:
+        async for listing in client.list_listings():
+            sku = (listing.get("sku") or "").strip()
+            external_id = (listing.get("external_id") or "").strip()
+            if not external_id:
+                continue
+            if not sku:
+                not_found += 1
+                continue
+            local = by_sku.get(sku.lower())
+            if local is None:
+                not_found += 1
+                continue
+            # ML/Shopee both expose variation in raw.variations[*].id or raw
+            # model_list. For now use the top-level listing as one link; the
+            # listings_import path keeps richer per-variation handling for
+            # downstream stock sync.
+            key = (local.id, external_id, "")
+            if key in existing_keys:
+                already += 1
+                continue
+            session.add(
+                ProductLink(
+                    user_id=integ.user_id,
+                    product_id=local.id,
+                    integration_id=integ.id,
+                    store_id=integ.store_id,
+                    platform=platform,
+                    external_id=external_id,
+                    external_sku=sku,
+                    listing_title=listing.get("title"),
+                    listing_type=listing.get("listing_type"),
+                    stock=listing.get("stock"),
+                    last_sync_status=LinkSyncStatus.OK,
+                    last_sync_at=_now(),
+                )
+            )
+            existing_keys.add(key)
+            created += 1
+            job.processed = (job.processed or 0) + 1
+            if created % 25 == 0:
+                await _heartbeat(session, job)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "auto_link_listings_failed",
+            integration_id=str(integ.id),
+            platform=platform.value,
+            err=str(e)[:200],
+        )
+
+    await session.commit()
+    return created, already, not_found
+
+
+def _ml_client_for(integ: Integration, session: AsyncSession) -> MercadoLivreClient:
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+
+    async def _persist_refresh(new_creds: dict) -> None:
+        integ.credentials = encrypt_json(new_creds)
+        await session.commit()
+
+    return MercadoLivreClient(creds, on_token_refresh=_persist_refresh)
+
+
+def _shopee_client_for(integ: Integration, session: AsyncSession) -> ShopeeClient:
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+
+    async def _persist_refresh(new_creds: dict) -> None:
+        integ.credentials = encrypt_json(new_creds)
+        await session.commit()
+
+    return ShopeeClient(creds, on_token_refresh=_persist_refresh)
+
+
 async def run_auto_link(
     session: AsyncSession,
     *,
@@ -279,7 +392,53 @@ async def run_auto_link(
                         "not_found": not_found,
                     },
                 )
+            elif integ.platform == IntegrationPlatform.ML:
+                client = _ml_client_for(integ, session)
+                created, already, not_found = await _link_via_listings(
+                    session, job, integ, client, IntegrationPlatform.ML
+                )
+                summary["created"] += created
+                summary["already_present"] += already
+                summary.setdefault("not_found", 0)
+                summary["not_found"] += not_found
+                await _append_detail(
+                    session,
+                    job,
+                    {
+                        "integration_id": str(integ.id),
+                        "platform": integ.platform.value,
+                        "result": "ok",
+                        "created": created,
+                        "already_present": already,
+                        "not_found": not_found,
+                    },
+                )
+            elif integ.platform == IntegrationPlatform.SHOPEE:
+                client = _shopee_client_for(integ, session)
+                created, already, not_found = await _link_via_listings(
+                    session, job, integ, client, IntegrationPlatform.SHOPEE
+                )
+                summary["created"] += created
+                summary["already_present"] += already
+                summary.setdefault("not_found", 0)
+                summary["not_found"] += not_found
+                await _append_detail(
+                    session,
+                    job,
+                    {
+                        "integration_id": str(integ.id),
+                        "platform": integ.platform.value,
+                        "result": "ok",
+                        "created": created,
+                        "already_present": already,
+                        "not_found": not_found,
+                    },
+                )
             else:
+                # AMAZON / TEMU still go through the listings-table path
+                # (run_auto_import_link cron at 02:00 / 14:00). Adding a
+                # direct adapter requires the SP-API Reports flow which is
+                # async (request → poll → download CSV).
                 summary["skipped"] += 1
                 await _append_detail(
                     session,
@@ -287,8 +446,11 @@ async def run_auto_link(
                     {
                         "integration_id": str(integ.id),
                         "platform": integ.platform.value,
-                        "result": "no_adapter_yet",
-                        "note": "marketplace adapter implemented in Phase 4",
+                        "result": "deferred_to_listings_cron",
+                        "note": (
+                            "Amazon/Temu auto-link runs via "
+                            "auto_import_link cron (uses listings table)"
+                        ),
                     },
                 )
         job.status = BackgroundJobStatus.SUCCEEDED
