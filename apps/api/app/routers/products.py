@@ -3,7 +3,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -265,33 +265,98 @@ async def patch_product(
     return _to_product_out(p, list(links), seg_map)
 
 
+def _audit_request_ctx(request: Request) -> dict:
+    return {
+        "client_ip": (request.client.host if request.client else None),
+        "user_agent": request.headers.get("user-agent", "")[:200],
+        "referer": request.headers.get("referer", "")[:200],
+    }
+
+
 @router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_product(
     product_id: UUID,
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "delete"))],
 ) -> None:
+    # Capture cascade impact before the DELETE so the audit log records
+    # how many product_links / listings get pulled down with the product.
+    cascade = (
+        await session.execute(
+            select(
+                func.count(ProductLink.id).label("links"),
+            ).where(ProductLink.product_id == product_id)
+        )
+    ).one()
+    target = (
+        await session.execute(
+            select(Product.sku, Product.name, Product.bling_product_id).where(
+                and_(Product.id == product_id, user_scope(Product, user))
+            )
+        )
+    ).one_or_none()
+
     res = await session.execute(
         delete(Product).where(and_(Product.id == product_id, user_scope(Product, user)))
     )
     if res.rowcount == 0:
         raise HTTPException(404, detail={"code": "product_not_found"})
     await session.commit()
+    logger.info(
+        "product_deleted",
+        actor_user_id=str(user.id),
+        actor_email=user.email,
+        product_id=str(product_id),
+        sku=target.sku if target else None,
+        name=target.name if target else None,
+        bling_product_id=target.bling_product_id if target else None,
+        cascade_product_links=cascade.links or 0,
+        **_audit_request_ctx(request),
+    )
     return None
 
 
 @router.post("/products/bulk-delete")
 async def bulk_delete_products(
     body: BulkDeleteIn,
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "delete"))],
 ) -> dict:
+    # Snapshot the would-be-deleted set for the audit trail.
+    snapshot = (
+        await session.execute(
+            select(Product.id, Product.sku, Product.bling_product_id).where(
+                and_(Product.id.in_(body.ids), user_scope(Product, user))
+            )
+        )
+    ).all()
+    cascade = (
+        await session.execute(
+            select(func.count(ProductLink.id)).where(
+                ProductLink.product_id.in_(body.ids)
+            )
+        )
+    ).scalar() or 0
+
     res = await session.execute(
         delete(Product).where(
             and_(Product.id.in_(body.ids), user_scope(Product, user))
         )
     )
     await session.commit()
+    logger.info(
+        "products_bulk_deleted",
+        actor_user_id=str(user.id),
+        actor_email=user.email,
+        requested=len(body.ids),
+        deleted=res.rowcount or 0,
+        cascade_product_links=cascade,
+        sample_skus=[r.sku for r in snapshot[:20]],
+        sample_bling_ids=[r.bling_product_id for r in snapshot[:20] if r.bling_product_id],
+        **_audit_request_ctx(request),
+    )
     return {"deleted": res.rowcount or 0}
 
 
@@ -341,9 +406,19 @@ async def list_product_links(
 @router.delete("/product-links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_product_link(
     link_id: UUID,
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "delete"))],
 ) -> None:
+    target = (
+        await session.execute(
+            select(
+                ProductLink.product_id, ProductLink.platform,
+                ProductLink.external_id, ProductLink.variation_id,
+                ProductLink.integration_id, ProductLink.external_sku,
+            ).where(and_(ProductLink.id == link_id, user_scope(ProductLink, user)))
+        )
+    ).one_or_none()
     res = await session.execute(
         delete(ProductLink).where(
             and_(ProductLink.id == link_id, user_scope(ProductLink, user))
@@ -352,6 +427,19 @@ async def delete_product_link(
     if res.rowcount == 0:
         raise HTTPException(404, detail={"code": "product_link_not_found"})
     await session.commit()
+    logger.info(
+        "product_link_deleted",
+        actor_user_id=str(user.id),
+        actor_email=user.email,
+        link_id=str(link_id),
+        product_id=str(target.product_id) if target else None,
+        platform=target.platform.value if target else None,
+        external_id=target.external_id if target else None,
+        variation_id=target.variation_id if target else None,
+        integration_id=str(target.integration_id) if target else None,
+        external_sku=target.external_sku if target else None,
+        **_audit_request_ctx(request),
+    )
     return None
 
 
