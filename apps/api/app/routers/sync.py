@@ -15,7 +15,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -38,7 +38,7 @@ from app.schemas.sync import (
     SyncLogStats,
     SyncProductBody,
 )
-from app.services.advisory_lock import try_user_sync_lock
+from app.services.advisory_lock import SYNC_NAMESPACE, _user_lock_key, try_user_sync_lock
 from app.services.sync_orchestrator import SyncOrchestrator
 from app.worker_pool import get_arq_pool
 
@@ -81,6 +81,51 @@ async def enqueue_sync_all(
         job.arq_job_id = arq.job_id
     await session.commit()
     return JobCreatedOut(job_id=job.id)
+
+
+@router.post("/sync/reset-lock")
+async def reset_sync_lock(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+    force: bool = Query(False, description="If true, pg_terminate_backend on holders"),
+) -> dict:
+    """Inspect (and optionally clear) the per-user sync advisory lock.
+
+    Mirrors SSH's `POST /api/sync/reset-lock`: in DaVinci the lock is a
+    Postgres advisory lock keyed on `(SYNC_NAMESPACE, hash(user_id))`. It
+    auto-releases when the holding session is checked back into the pool,
+    so a stuck lock usually means a wedged worker connection. With
+    `force=true`, we `pg_terminate_backend` the holders — last resort.
+    """
+    key = _user_lock_key(user.id)
+    row = await session.execute(
+        text(
+            "SELECT pid, granted, mode FROM pg_locks "
+            "WHERE locktype = 'advisory' "
+            "AND classid = :ns AND objid = ((:k)::bigint & 4294967295)::int"
+        ),
+        {"ns": SYNC_NAMESPACE, "k": key},
+    )
+    holders = [{"pid": r.pid, "granted": r.granted, "mode": r.mode} for r in row.all()]
+
+    terminated: list[int] = []
+    if force and holders:
+        for h in holders:
+            try:
+                await session.execute(
+                    text("SELECT pg_terminate_backend(:pid)"), {"pid": h["pid"]}
+                )
+                terminated.append(h["pid"])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("reset_sync_lock_term_failed", pid=h["pid"], err=str(e))
+
+    return {
+        "user_id": str(user.id),
+        "key": key,
+        "holders": holders,
+        "forced": force,
+        "terminated": terminated,
+    }
 
 
 @router.post(

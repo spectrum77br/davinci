@@ -26,6 +26,7 @@ For listings without variations, `model_id=0` writes to the master.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import time
@@ -521,12 +522,16 @@ class ShopeeClient:
         page_size: int = 50,
         max_pages: int | None = None,
     ) -> AsyncIterator[dict]:
-        """Yields one normalized listing dict per Shopee item.
+        """Yields one normalized listing dict per Shopee model (or per item
+        when has_model=False, with variation_id="0").
 
-        Uses /api/v2/product/get_item_list to enumerate item ids per status,
-        then /api/v2/product/get_item_base_info in batches of 50 (Shopee cap)
-        to fetch title/sku/price/stock/image. Each yielded dict matches the
-        shape consumed by the listings import service.
+        Three-step flow mirroring SSH:
+          1. GET /api/v2/product/get_item_list   → item_ids
+          2. GET /api/v2/product/get_item_base_info  → has_model / item_sku / stock
+          3. for each has_model=True item: GET /api/v2/product/get_model_list → models
+
+        Rate-limit: 500ms after each get_model_list, 1000ms between pages
+        (matches SSH's getProductsWithVariations).
         """
         for status_filter in item_status:
             offset = 0
@@ -562,6 +567,7 @@ class ShopeeClient:
                     break
                 offset = int(resp.get("next_offset") or (offset + len(items)))
                 page_idx += 1
+                await asyncio.sleep(1.0)
 
     async def get_listing_price(self, link: "ProductLink") -> float | None:
         """Read the current price from /api/v2/product/get_item_base_info.
@@ -643,7 +649,35 @@ class ShopeeClient:
                 continue
             resp = body.get("response") or {}
             for it in resp.get("item_list") or []:
-                yield _normalize_shopee_item(it, status_filter)
+                if it.get("has_model"):
+                    try:
+                        models = await self._get_model_list(int(it["item_id"]))
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "shopee_get_model_list_failed",
+                            item_id=it.get("item_id"),
+                            err=str(e)[:200],
+                        )
+                        models = []
+                    for model in models:
+                        yield _normalize_shopee_model(it, model, status_filter)
+                    await asyncio.sleep(0.5)
+                else:
+                    yield _normalize_shopee_item(it, status_filter)
+
+    async def _get_model_list(self, item_id: int) -> list[dict]:
+        r = await self._request(
+            "GET",
+            "/api/v2/product/get_model_list",
+            params={"item_id": item_id},
+        )
+        if r.status_code != 200:
+            return []
+        body = r.json() or {}
+        if body.get("error"):
+            return []
+        resp = body.get("response") or {}
+        return resp.get("model") or []
 
 
 def _shopee_status_to_listing(item_status: str | None) -> str:
@@ -660,6 +694,8 @@ def _shopee_status_to_listing(item_status: str | None) -> str:
 
 
 def _normalize_shopee_item(it: dict, fallback_status: str) -> dict:
+    """Normalize a Shopee item WITHOUT models. variation_id is "0" (string)
+    so the stock/price update API can target model_id=0."""
     price_info = (it.get("price_info") or [{}])[0] if it.get("price_info") else {}
     stock_info = (it.get("stock_info_v2") or {}).get("summary_info") or {}
     raw_price = price_info.get("current_price") or price_info.get("original_price")
@@ -673,6 +709,7 @@ def _normalize_shopee_item(it: dict, fallback_status: str) -> dict:
     img_list = images.get("image_url_list") or []
     return {
         "external_id": str(it.get("item_id") or ""),
+        "variation_id": "0",
         "sku": (it.get("item_sku") or "").strip() or None,
         "title": it.get("item_name") or "",
         "description": it.get("description"),
@@ -682,6 +719,43 @@ def _normalize_shopee_item(it: dict, fallback_status: str) -> dict:
         "category": str(it.get("category_id")) if it.get("category_id") else None,
         "thumbnail_url": img_list[0] if img_list else None,
         "raw": it,
+    }
+
+
+def _normalize_shopee_model(it: dict, model: dict, fallback_status: str) -> dict:
+    """Normalize a Shopee model (variation). One product_link per model.
+    Stock comes from the model's stock_info_v2 (falls back to stock_info)."""
+    price_info_list = model.get("price_info") or [{}]
+    price_info = price_info_list[0] if price_info_list else {}
+    raw_price = price_info.get("current_price") or price_info.get("original_price")
+    price_cents: int | None = None
+    if raw_price is not None:
+        try:
+            price_cents = int(round(float(raw_price) * 100))
+        except (TypeError, ValueError):
+            price_cents = None
+    stock_v2 = (model.get("stock_info_v2") or {}).get("summary_info") or {}
+    stock_v1 = model.get("stock_info") or {}
+    stock = stock_v2.get("total_available_stock")
+    if stock is None:
+        stock = stock_v1.get("total_available_stock") or 0
+    images = it.get("image") or {}
+    img_list = images.get("image_url_list") or []
+    base_title = it.get("item_name") or ""
+    model_name = (model.get("model_name") or "").strip()
+    title = f"{base_title} - {model_name}" if model_name else base_title
+    return {
+        "external_id": str(it.get("item_id") or ""),
+        "variation_id": str(model.get("model_id") or "") or "0",
+        "sku": (model.get("model_sku") or "").strip() or None,
+        "title": title,
+        "description": it.get("description"),
+        "price": price_cents,
+        "stock": stock,
+        "status": _shopee_status_to_listing(it.get("item_status") or fallback_status),
+        "category": str(it.get("category_id")) if it.get("category_id") else None,
+        "thumbnail_url": img_list[0] if img_list else None,
+        "raw": {"item": it, "model": model},
     }
 
 

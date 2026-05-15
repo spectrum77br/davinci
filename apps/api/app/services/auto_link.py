@@ -12,6 +12,7 @@ job log is honest about what was skipped. Fase 4 fills those adapters.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -30,6 +31,7 @@ from app.models import (
     ProductLink,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
@@ -39,6 +41,10 @@ logger = structlog.get_logger()
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _loop_now() -> float:
+    return time.monotonic()
 
 
 async def _heartbeat(session: AsyncSession, job: BackgroundJob) -> None:
@@ -151,12 +157,33 @@ async def _link_tiktok_integration(
 
     client = TikTokClient(creds, on_token_refresh=_persist_refresh)
 
+    # SSH parity: MAX_PAGES=20 (caps at 2000 products) and a 2-minute wall
+    # timeout per account so a slow/wedged search can't block the auto-link
+    # job indefinitely.
+    MAX_PAGES = 20
+    TIMEOUT_SECONDS = 120.0
+    started_at = _loop_now()
+
     created = 0
     already = 0
     not_found = 0
     page_token: str | None = None
     page_idx = 0
     while True:
+        if page_idx >= MAX_PAGES:
+            logger.warning(
+                "auto_link_tiktok_max_pages",
+                integration_id=str(integ.id),
+                pages=page_idx,
+            )
+            break
+        if _loop_now() - started_at > TIMEOUT_SECONDS:
+            logger.warning(
+                "auto_link_tiktok_timeout",
+                integration_id=str(integ.id),
+                elapsed=_loop_now() - started_at,
+            )
+            break
         page_idx += 1
         try:
             tk_products, page_token = await client.search_products(
@@ -257,6 +284,7 @@ async def _link_via_listings(
         async for listing in client.list_listings():
             sku = (listing.get("sku") or "").strip()
             external_id = (listing.get("external_id") or "").strip()
+            variation_id = (listing.get("variation_id") or "").strip() or None
             if not external_id:
                 continue
             if not sku:
@@ -266,11 +294,7 @@ async def _link_via_listings(
             if local is None:
                 not_found += 1
                 continue
-            # ML/Shopee both expose variation in raw.variations[*].id or raw
-            # model_list. For now use the top-level listing as one link; the
-            # listings_import path keeps richer per-variation handling for
-            # downstream stock sync.
-            key = (local.id, external_id, "")
+            key = (local.id, external_id, variation_id or "")
             if key in existing_keys:
                 already += 1
                 continue
@@ -282,6 +306,7 @@ async def _link_via_listings(
                     store_id=integ.store_id,
                     platform=platform,
                     external_id=external_id,
+                    variation_id=variation_id,
                     external_sku=sku,
                     listing_title=listing.get("title"),
                     listing_type=listing.get("listing_type"),
@@ -325,6 +350,122 @@ def _shopee_client_for(integ: Integration, session: AsyncSession) -> ShopeeClien
         await session.commit()
 
     return ShopeeClient(creds, on_token_refresh=_persist_refresh)
+
+
+def _amazon_client_for(integ: Integration, session: AsyncSession) -> AmazonClient:
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+
+    async def _persist_refresh(new_creds: dict) -> None:
+        integ.credentials = encrypt_json(new_creds)
+        await session.commit()
+
+    return AmazonClient(creds, on_token_refresh=_persist_refresh)
+
+
+async def _link_amazon_integration(
+    session: AsyncSession,
+    job: BackgroundJob,
+    integ: Integration,
+) -> tuple[int, int, int]:
+    """Amazon-specific adapter: pulls the GET_MERCHANT_LISTINGS_ALL_DATA
+    report (TSV via Reports API), matches by seller-SKU, and bulk-inserts
+    product_links in chunks of 100 (mirroring SSH's createProductLinksBulk).
+
+    Dedup key INCLUDES `integration_id` because the same SKU can exist in
+    multiple Amazon seller accounts (e.g., MFN + FBA, or two regions).
+
+    Returns (created, already_present, not_found).
+    """
+    client = _amazon_client_for(integ, session)
+
+    products = (await session.execute(select(Product))).scalars().all()
+    by_sku: dict[str, Product] = {}
+    for p in products:
+        sk = (p.sku or "").strip().lower()
+        if sk:
+            by_sku[sk] = p
+
+    existing_keys: set[tuple[UUID, UUID, str, str]] = set()
+    for link in (
+        await session.execute(
+            select(ProductLink).where(
+                and_(
+                    ProductLink.integration_id == integ.id,
+                    ProductLink.platform == IntegrationPlatform.AMAZON,
+                )
+            )
+        )
+    ).scalars().all():
+        existing_keys.add(
+            (
+                link.product_id,
+                link.integration_id,
+                link.external_id or "",
+                link.variation_id or "",
+            )
+        )
+
+    pending: list[ProductLink] = []
+    created = 0
+    already = 0
+    not_found = 0
+
+    async def _flush() -> None:
+        nonlocal pending, created
+        if not pending:
+            return
+        session.add_all(pending)
+        await session.flush()
+        created += len(pending)
+        pending = []
+        await _heartbeat(session, job)
+
+    try:
+        async for listing in client.list_listings():
+            sku = (listing.get("sku") or "").strip()
+            external_id = (listing.get("external_id") or "").strip()
+            variation_id = (listing.get("variation_id") or "").strip() or None
+            if not external_id or not sku:
+                not_found += 1
+                continue
+            local = by_sku.get(sku.lower())
+            if local is None:
+                not_found += 1
+                continue
+            key = (local.id, integ.id, external_id, variation_id or "")
+            if key in existing_keys:
+                already += 1
+                continue
+            pending.append(
+                ProductLink(
+                    user_id=integ.user_id,
+                    product_id=local.id,
+                    integration_id=integ.id,
+                    store_id=integ.store_id,
+                    platform=IntegrationPlatform.AMAZON,
+                    external_id=external_id,
+                    variation_id=variation_id,
+                    external_sku=listing.get("external_sku") or sku,
+                    listing_title=listing.get("title"),
+                    listing_type=listing.get("listing_type"),
+                    stock=listing.get("stock"),
+                    last_sync_status=LinkSyncStatus.OK,
+                    last_sync_at=_now(),
+                )
+            )
+            existing_keys.add(key)
+            if len(pending) >= 100:
+                await _flush()
+        await _flush()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "auto_link_amazon_failed",
+            integration_id=str(integ.id),
+            err=str(e)[:300],
+        )
+
+    await session.commit()
+    return created, already, not_found
 
 
 async def run_auto_link(
@@ -434,11 +575,29 @@ async def run_auto_link(
                         "not_found": not_found,
                     },
                 )
+            elif integ.platform == IntegrationPlatform.AMAZON:
+                created, already, not_found = await _link_amazon_integration(
+                    session, job, integ
+                )
+                summary["created"] += created
+                summary["already_present"] += already
+                summary.setdefault("not_found", 0)
+                summary["not_found"] += not_found
+                await _append_detail(
+                    session,
+                    job,
+                    {
+                        "integration_id": str(integ.id),
+                        "platform": integ.platform.value,
+                        "result": "ok",
+                        "created": created,
+                        "already_present": already,
+                        "not_found": not_found,
+                    },
+                )
             else:
-                # AMAZON / TEMU still go through the listings-table path
-                # (run_auto_import_link cron at 02:00 / 14:00). Adding a
-                # direct adapter requires the SP-API Reports flow which is
-                # async (request → poll → download CSV).
+                # TEMU still goes through the listings-table path (no
+                # direct API adapter implemented yet).
                 summary["skipped"] += 1
                 await _append_detail(
                     session,
@@ -447,10 +606,7 @@ async def run_auto_link(
                         "integration_id": str(integ.id),
                         "platform": integ.platform.value,
                         "result": "deferred_to_listings_cron",
-                        "note": (
-                            "Amazon/Temu auto-link runs via "
-                            "auto_import_link cron (uses listings table)"
-                        ),
+                        "note": "Temu auto-link uses listings_import cron",
                     },
                 )
         job.status = BackgroundJobStatus.SUCCEEDED

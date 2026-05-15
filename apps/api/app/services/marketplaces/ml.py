@@ -494,12 +494,13 @@ class MercadoLivreClient:
             ids = data.get("results") or []
             if not ids:
                 break
-            for chunk_start in range(0, len(ids), 20):
+            n_chunks = (len(ids) + 19) // 20
+            for chunk_idx, chunk_start in enumerate(range(0, len(ids), 20)):
                 chunk = ids[chunk_start : chunk_start + 20]
                 rr = await self._request(
                     "GET",
                     "/items",
-                    params={"ids": ",".join(chunk)},
+                    params={"ids": ",".join(chunk), "include_attributes": "all"},
                 )
                 if rr.status_code != 200:
                     logger.warning(
@@ -510,13 +511,17 @@ class MercadoLivreClient:
                     if entry.get("code") != 200:
                         continue
                     body = entry.get("body") or {}
-                    yield _normalize_ml_item(body)
+                    for normalized in _iter_ml_variants(body):
+                        yield normalized
+                if chunk_idx < n_chunks - 1:
+                    await asyncio.sleep(1.0)
             paging = data.get("paging") or {}
             total = int(paging.get("total") or 0)
             offset += page_size
             page_idx += 1
             if offset >= total:
                 break
+            await asyncio.sleep(0.3)
 
 
 # ---------------------------------------------------------------- helpers
@@ -541,12 +546,13 @@ def _map_ml_listing_type(listing_type_id: str | None) -> str | None:
 
 
 def _normalize_ml_item(body: dict) -> dict:
-    sku = (body.get("seller_custom_field") or "").strip()
+    sku = None
+    for attr in body.get("attributes") or []:
+        if (attr.get("id") or "").upper() == "SELLER_SKU":
+            sku = (attr.get("value_name") or attr.get("value") or "").strip() or None
+            break
     if not sku:
-        for attr in body.get("attributes") or []:
-            if (attr.get("id") or "").upper() == "SELLER_SKU":
-                sku = (attr.get("value_name") or "").strip()
-                break
+        sku = (body.get("seller_custom_field") or "").strip() or None
     raw_price = body.get("price")
     price_cents: int | None = None
     if raw_price is not None:
@@ -557,7 +563,8 @@ def _normalize_ml_item(body: dict) -> dict:
     status = (body.get("status") or "").lower() or "active"
     return {
         "external_id": str(body.get("id") or ""),
-        "sku": sku or None,
+        "variation_id": None,
+        "sku": sku,
         "title": body.get("title") or "",
         "description": None,
         "price": price_cents,
@@ -570,6 +577,72 @@ def _normalize_ml_item(body: dict) -> dict:
         "listing_type": _map_ml_listing_type(body.get("listing_type_id")),
         "raw": body,
     }
+
+
+def _iter_ml_variants(body: dict):
+    """Yield one normalized listing dict per ML variation, or one for the item
+    if it has no variations. Mirrors SSH's getProducts fan-out logic — same
+    SKU resolution priority (SELLER_SKU attr value_name → value →
+    seller_custom_field → sku field) and one product_link per variation_id.
+    """
+    variations = body.get("variations") or []
+    if not variations:
+        yield _normalize_ml_item(body)
+        return
+
+    base_title = body.get("title") or ""
+    status = (body.get("status") or "").lower() or "active"
+    norm_status = status if status in {
+        "active", "paused", "closed", "under_review", "inactive"
+    } else "inactive"
+    listing_type = _map_ml_listing_type(body.get("listing_type_id"))
+    body_price = body.get("price")
+
+    for variation in variations:
+        sku = None
+        for attr in variation.get("attributes") or []:
+            if (attr.get("id") or "").upper() == "SELLER_SKU":
+                sku = (attr.get("value_name") or attr.get("value") or "").strip() or None
+                break
+        if not sku:
+            sku = (variation.get("seller_custom_field") or "").strip() or None
+        if not sku:
+            sku = (variation.get("sku") or "").strip() or None
+        if not sku:
+            continue
+
+        raw_price = variation.get("price")
+        if raw_price is None:
+            raw_price = body_price
+        price_cents: int | None = None
+        if raw_price is not None:
+            try:
+                price_cents = int(round(float(raw_price) * 100))
+            except (TypeError, ValueError):
+                price_cents = None
+
+        combos = variation.get("attribute_combinations") or []
+        combo_label = " / ".join(
+            (a.get("value_name") or "").strip()
+            for a in combos
+            if (a.get("value_name") or "").strip()
+        )
+        title = f"{base_title} - {combo_label}" if combo_label else base_title
+
+        yield {
+            "external_id": str(body.get("id") or ""),
+            "variation_id": str(variation.get("id") or "") or None,
+            "sku": sku,
+            "title": title,
+            "description": None,
+            "price": price_cents,
+            "stock": variation.get("available_quantity") or 0,
+            "status": norm_status,
+            "category": body.get("category_id"),
+            "thumbnail_url": body.get("thumbnail") or body.get("secure_thumbnail"),
+            "listing_type": listing_type,
+            "raw": body,
+        }
 
 
 def _resolve_variation(

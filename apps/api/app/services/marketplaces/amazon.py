@@ -22,7 +22,10 @@ Credentials shape stored in `integrations.credentials`:
 
 from __future__ import annotations
 
+import asyncio
+import gzip
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -154,6 +157,95 @@ class AmazonClient:
             return TestResult(ok=False, detail=f"http_error: {e}")
         except Exception as e:  # noqa: BLE001
             return TestResult(ok=False, detail=f"error: {e}")
+
+    async def list_listings(
+        self,
+        *,
+        max_poll_attempts: int = 30,
+        poll_interval: float = 5.0,
+    ) -> AsyncIterator[dict]:
+        """Yields one normalized listing dict per row of the
+        GET_MERCHANT_LISTINGS_ALL_DATA report. Mirrors SSH's getInventory:
+
+          1. POST /reports/2021-06-30/reports         → reportId
+          2. Poll /reports/2021-06-30/reports/{id}    → reportDocumentId
+          3. GET  /reports/2021-06-30/documents/{id}  → url + compressionAlgorithm
+          4. Download (possibly GZIP) and decode (UTF-8/UTF-16/Latin1)
+          5. Parse TSV (columns: seller-sku, item-name, asin1, quantity,
+             status, price)
+        """
+        if not self.marketplace_id or not self.seller_id:
+            raise RuntimeError("amazon_missing_creds: seller_id or marketplace_id")
+
+        create_r = await self._request(
+            "POST",
+            "/reports/2021-06-30/reports",
+            json={
+                "reportType": "GET_MERCHANT_LISTINGS_ALL_DATA",
+                "marketplaceIds": [self.marketplace_id],
+            },
+        )
+        if create_r.status_code not in (200, 202):
+            raise RuntimeError(
+                f"amazon_create_report_failed status={create_r.status_code} body={create_r.text[:300]}"
+            )
+        report_id = (create_r.json() or {}).get("reportId")
+        if not report_id:
+            raise RuntimeError("amazon_create_report_no_id")
+        logger.info("amazon_report_created", report_id=report_id)
+
+        report_document_id: str | None = None
+        last_status = "IN_QUEUE"
+        for attempt in range(max_poll_attempts):
+            await asyncio.sleep(poll_interval)
+            status_r = await self._request(
+                "GET", f"/reports/2021-06-30/reports/{report_id}"
+            )
+            if status_r.status_code != 200:
+                continue
+            data = status_r.json() or {}
+            last_status = data.get("processingStatus") or "UNKNOWN"
+            if last_status == "DONE":
+                report_document_id = data.get("reportDocumentId")
+                break
+            if last_status in ("CANCELLED", "FATAL"):
+                raise RuntimeError(f"amazon_report_failed status={last_status}")
+        if last_status != "DONE" or not report_document_id:
+            raise RuntimeError(
+                f"amazon_report_timeout last_status={last_status} attempts={max_poll_attempts}"
+            )
+        logger.info(
+            "amazon_report_done", report_id=report_id, document_id=report_document_id
+        )
+
+        doc_r = await self._request(
+            "GET", f"/reports/2021-06-30/documents/{report_document_id}"
+        )
+        if doc_r.status_code != 200:
+            raise RuntimeError(
+                f"amazon_get_document_failed status={doc_r.status_code} body={doc_r.text[:300]}"
+            )
+        doc = doc_r.json() or {}
+        url = doc.get("url")
+        compression = doc.get("compressionAlgorithm")
+        if not url:
+            raise RuntimeError("amazon_document_no_url")
+
+        async with httpx.AsyncClient(timeout=60.0) as c:
+            dl = await c.get(url)
+        if dl.status_code != 200:
+            raise RuntimeError(
+                f"amazon_download_failed status={dl.status_code}"
+            )
+        raw = dl.content
+        if compression == "GZIP":
+            raw = gzip.decompress(raw)
+
+        text = _decode_amazon_report(raw)
+        logger.info("amazon_report_downloaded", bytes=len(raw), chars=len(text))
+
+        for row in _parse_amazon_listings_tsv(text):
+            yield row
 
     async def get_finance_transactions_for_order(self, order_id: str) -> dict:
         r = await self._request(
@@ -473,3 +565,87 @@ def _classify_price_response(
         status=SyncStatus.OK,
         payload={"sku": sku, "price": price, "submission_id": payload.get("submissionId")},
     )
+
+
+def _decode_amazon_report(raw: bytes) -> str:
+    """Decode an Amazon report buffer with BOM-aware encoding detection.
+    Matches SSH's encoding heuristic (UTF-16 LE/BE → UTF-8 BOM → UTF-8 →
+    Latin1 fallback for Cp1252 reports)."""
+    if len(raw) >= 2 and raw[0] == 0xFF and raw[1] == 0xFE:
+        return raw.decode("utf-16-le", errors="replace").lstrip("﻿")
+    if len(raw) >= 2 and raw[0] == 0xFE and raw[1] == 0xFF:
+        return raw.decode("utf-16-be", errors="replace").lstrip("﻿")
+    if len(raw) >= 3 and raw[0] == 0xEF and raw[1] == 0xBB and raw[2] == 0xBF:
+        return raw[3:].decode("utf-8", errors="replace")
+    try:
+        text = raw.decode("utf-8")
+        if "�" not in text:
+            return text
+    except UnicodeDecodeError:
+        pass
+    return raw.decode("latin-1", errors="replace")
+
+
+def _parse_amazon_listings_tsv(tsv: str) -> list[dict]:
+    """Parse GET_MERCHANT_LISTINGS_ALL_DATA TSV. Returns one normalized dict
+    per row (yields a list, kept small enough to fit in memory — Amazon
+    reports are bounded by listing count per account).
+
+    Output shape matches the contract consumed by `auto_link._link_amazon`:
+        external_id  = seller-sku
+        variation_id = asin1 (or None)
+        external_sku = seller-sku
+        sku          = seller-sku (also used for matching)
+        title        = item-name
+        stock        = quantity
+        listing_type = None
+    """
+    lines = [ln for ln in tsv.split("\n") if ln.strip()]
+    if len(lines) < 2:
+        return []
+    headers = [h.strip().lower() for h in lines[0].split("\t")]
+    def _idx(*names: str) -> int:
+        for n in names:
+            if n in headers:
+                return headers.index(n)
+        return -1
+    sku_i = _idx("seller-sku")
+    title_i = _idx("item-name")
+    asin_i = _idx("asin1", "asin")
+    qty_i = _idx("quantity")
+    status_i = _idx("status")
+    price_i = _idx("price")
+
+    out: list[dict] = []
+    for ln in lines[1:]:
+        cols = ln.split("\t")
+        sku = cols[sku_i].strip() if 0 <= sku_i < len(cols) else ""
+        if not sku:
+            continue
+        asin = cols[asin_i].strip() if 0 <= asin_i < len(cols) else ""
+        qty_raw = cols[qty_i] if 0 <= qty_i < len(cols) else "0"
+        try:
+            qty = int(qty_raw or "0")
+        except ValueError:
+            qty = 0
+        price_raw = cols[price_i] if 0 <= price_i < len(cols) else ""
+        price_cents: int | None = None
+        if price_raw:
+            try:
+                price_cents = int(round(float(price_raw) * 100))
+            except ValueError:
+                price_cents = None
+        amz_status = (cols[status_i].strip() if 0 <= status_i < len(cols) else "Active") or "Active"
+        out.append({
+            "external_id": sku,
+            "variation_id": asin or None,
+            "external_sku": sku,
+            "sku": sku,
+            "title": cols[title_i].strip() if 0 <= title_i < len(cols) else "",
+            "asin": asin or None,
+            "stock": qty,
+            "price": price_cents,
+            "status": "active" if amz_status.lower() == "active" else "inactive",
+            "listing_type": None,
+        })
+    return out
