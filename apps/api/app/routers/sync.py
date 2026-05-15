@@ -132,9 +132,7 @@ async def enqueue_refresh_bling_stock(
     await session.flush()
 
     pool = await get_arq_pool()
-    arq = await pool.enqueue_job(
-        "refresh_bling_stock_run", str(job.id), str(user.id)
-    )
+    arq = await pool.enqueue_job("refresh_bling_stock_run", str(job.id))
     if arq is not None:
         job.arq_job_id = arq.job_id
     await session.commit()

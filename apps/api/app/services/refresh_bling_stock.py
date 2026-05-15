@@ -16,7 +16,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -27,8 +27,6 @@ from app.models import (
     LinkSyncStatus,
     Product,
     ProductLink,
-    User,
-    UserRole,
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import (
@@ -74,7 +72,6 @@ async def run_refresh_bling_stock(
     session: AsyncSession,
     *,
     job_id: UUID,
-    user_id: UUID,
 ) -> None:
     job = await session.get(BackgroundJob, job_id)
     if job is None:
@@ -86,14 +83,10 @@ async def run_refresh_bling_stock(
     job.last_heartbeat_at = _now()
     await session.commit()
 
-    user = await session.get(User, user_id)
-    is_admin = user is not None and user.role == UserRole.ADMIN
-
-    integ_where = [Integration.platform == IntegrationPlatform.BLING]
-    if not is_admin:
-        integ_where.append(Integration.user_id == user_id)
     integrations = (
-        await session.execute(select(Integration).where(and_(*integ_where)))
+        await session.execute(
+            select(Integration).where(Integration.platform == IntegrationPlatform.BLING)
+        )
     ).scalars().all()
 
     if not integrations:
@@ -113,11 +106,10 @@ async def run_refresh_bling_stock(
     # Match Bling products to local products by Product.bling_product_id
     # (canonical), not by ProductLink — many tenants don't maintain a Bling
     # self-link and rely on the column instead.
-    prod_where = [Product.bling_product_id.is_not(None)]
-    if not is_admin:
-        prod_where.append(Product.user_id == user_id)
     products = (
-        await session.execute(select(Product).where(and_(*prod_where)))
+        await session.execute(
+            select(Product).where(Product.bling_product_id.is_not(None))
+        )
     ).scalars().all()
     product_by_bpid = {int(p.bling_product_id): p for p in products if p.bling_product_id is not None}
 
@@ -134,14 +126,13 @@ async def run_refresh_bling_stock(
             )
             client = await _build_client(session, integ)
 
-            bling_link_where = [
-                ProductLink.integration_id == integ.id,
-                ProductLink.platform == IntegrationPlatform.BLING,
-            ]
-            if not is_admin:
-                bling_link_where.append(ProductLink.user_id == user_id)
             bling_links = (
-                await session.execute(select(ProductLink).where(and_(*bling_link_where)))
+                await session.execute(
+                    select(ProductLink).where(
+                        ProductLink.integration_id == integ.id,
+                        ProductLink.platform == IntegrationPlatform.BLING,
+                    )
+                )
             ).scalars().all()
             bling_link_by_external = {str(l.external_id): l for l in bling_links}
 

@@ -266,16 +266,11 @@ async def ml_backfill_run(
 async def refresh_bling_stock_run(
     ctx: dict,
     job_id: str,
-    user_id: str,
 ) -> None:
     """Manual stock-only refresh: paginates Bling /produtos and writes stock
     to local product_links + products. No marketplace push."""
     async with session_scope() as s:
-        await run_refresh_bling_stock(
-            s,
-            job_id=UUID(job_id),
-            user_id=UUID(user_id),
-        )
+        await run_refresh_bling_stock(s, job_id=UUID(job_id))
 
 
 async def auto_create_product_from_bling_run(
