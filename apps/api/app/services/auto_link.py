@@ -63,8 +63,8 @@ async def _link_bling_integration(
     session: AsyncSession,
     job: BackgroundJob,
     integ: Integration,
-) -> tuple[int, int]:
-    """Returns (created, already_present)."""
+) -> tuple[int, int, str | None]:
+    """Returns (created, already_present, error)."""
     products = (
         await session.execute(
             select(Product).where(Product.bling_product_id.is_not(None))
@@ -111,15 +111,15 @@ async def _link_bling_integration(
         job.processed = (job.processed or 0) + 1
         if created % 25 == 0:
             await _heartbeat(session, job)
-    return created, already
+    return created, already, None
 
 
 async def _link_tiktok_integration(
     session: AsyncSession,
     job: BackgroundJob,
     integ: Integration,
-) -> tuple[int, int, int]:
-    """Returns (created, already_present, not_found).
+) -> tuple[int, int, int, str | None]:
+    """Returns (created, already_present, not_found, error).
 
     Iterates `client.search_products` in pages of 100, matching each TikTok
     SKU's `seller_sku` against the user's `products.sku` (case-insensitive).
@@ -168,6 +168,7 @@ async def _link_tiktok_integration(
     created = 0
     already = 0
     not_found = 0
+    error: str | None = None
     page_token: str | None = None
     page_idx = 0
     while True:
@@ -184,6 +185,7 @@ async def _link_tiktok_integration(
                 integration_id=str(integ.id),
                 elapsed=_loop_now() - started_at,
             )
+            error = error or "timeout"
             break
         page_idx += 1
         try:
@@ -197,6 +199,7 @@ async def _link_tiktok_integration(
                 page=page_idx,
                 err=str(e)[:200],
             )
+            error = f"search_failed: {str(e)[:200]}"
             break
         if not tk_products:
             break
@@ -241,7 +244,7 @@ async def _link_tiktok_integration(
             break
 
     await session.commit()
-    return created, already, not_found
+    return created, already, not_found, error
 
 
 async def _safe_flush_batch(
@@ -291,11 +294,11 @@ async def _link_via_listings(
     integ: Integration,
     client,
     platform: IntegrationPlatform,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, str | None]:
     """Generic adapter: walk `client.list_listings()` (which already yields
     normalized {external_id, sku, title, listing_type, …} dicts for ML and
     Shopee) and create `product_links` for every listing whose SKU matches
-    a row in `products`. Returns (created, already_present, not_found).
+    a row in `products`. Returns (created, already_present, not_found, error).
     """
     products = (await session.execute(select(Product))).scalars().all()
     by_sku: dict[str, Product] = {}
@@ -330,6 +333,7 @@ async def _link_via_listings(
     skipped = 0
     already = 0
     not_found = 0
+    error: str | None = None
 
     async def _flush() -> None:
         nonlocal pending, created, skipped
@@ -388,6 +392,7 @@ async def _link_via_listings(
             platform=platform.value,
             err=str(e)[:200],
         )
+        error = f"listings_failed: {str(e)[:200]}"
 
     await session.commit()
     if skipped:
@@ -397,7 +402,7 @@ async def _link_via_listings(
             platform=platform.value,
             skipped=skipped,
         )
-    return created, already, not_found
+    return created, already, not_found, error
 
 
 def _ml_client_for(integ: Integration, session: AsyncSession) -> MercadoLivreClient:
@@ -434,7 +439,7 @@ async def _link_amazon_integration(
     session: AsyncSession,
     job: BackgroundJob,
     integ: Integration,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, str | None]:
     """Amazon-specific adapter: pulls the GET_MERCHANT_LISTINGS_ALL_DATA
     report (TSV via Reports API), matches by seller-SKU, and bulk-inserts
     product_links in chunks of 100 (mirroring SSH's createProductLinksBulk).
@@ -442,7 +447,7 @@ async def _link_amazon_integration(
     Dedup key INCLUDES `integration_id` because the same SKU can exist in
     multiple Amazon seller accounts (e.g., MFN + FBA, or two regions).
 
-    Returns (created, already_present, not_found).
+    Returns (created, already_present, not_found, error).
     """
     client = _amazon_client_for(integ, session)
 
@@ -476,6 +481,7 @@ async def _link_amazon_integration(
     skipped = 0
     already = 0
     not_found = 0
+    error: str | None = None
 
     async def _flush() -> None:
         nonlocal pending, created, skipped
@@ -530,6 +536,7 @@ async def _link_amazon_integration(
             integration_id=str(integ.id),
             err=str(e)[:300],
         )
+        error = f"amazon_failed: {str(e)[:300]}"
 
     await session.commit()
     if skipped:
@@ -539,7 +546,7 @@ async def _link_amazon_integration(
             platform="amazon",
             skipped=skipped,
         )
-    return created, already, not_found
+    return created, already, not_found, error
 
 
 async def run_auto_link(
@@ -567,107 +574,82 @@ async def run_auto_link(
     job.total = sum(1 for _ in integrations) or 1
     await session.commit()
 
-    summary = {"created": 0, "already_present": 0, "skipped": 0}
+    summary = {
+        "created": 0,
+        "already_present": 0,
+        "skipped": 0,
+        "not_found": 0,
+        "failed_integrations": 0,
+        "ok_integrations": 0,
+    }
+
+    async def _record(integ: Integration, *, created: int, already: int,
+                      not_found: int, error: str | None) -> None:
+        summary["created"] += created
+        summary["already_present"] += already
+        summary["not_found"] += not_found
+        if error:
+            summary["failed_integrations"] += 1
+        else:
+            summary["ok_integrations"] += 1
+        await _append_detail(
+            session,
+            job,
+            {
+                "integration_id": str(integ.id),
+                "integration_name": integ.name,
+                "platform": integ.platform.value,
+                "result": "failed" if error else "ok",
+                "created": created,
+                "already_present": already,
+                "not_found": not_found,
+                "error": error,
+            },
+        )
 
     try:
         for integ in integrations:
             await _heartbeat(session, job)
             if integ.platform == IntegrationPlatform.BLING:
-                created, already = await _link_bling_integration(session, job, integ)
-                summary["created"] += created
-                summary["already_present"] += already
-                await _append_detail(
-                    session,
-                    job,
-                    {
-                        "integration_id": str(integ.id),
-                        "platform": integ.platform.value,
-                        "result": "ok",
-                        "created": created,
-                        "already_present": already,
-                    },
-                )
-            elif integ.platform == IntegrationPlatform.TIKTOK:
-                created, already, not_found = await _link_tiktok_integration(
+                created, already, error = await _link_bling_integration(
                     session, job, integ
                 )
-                summary["created"] += created
-                summary["already_present"] += already
-                summary.setdefault("not_found", 0)
-                summary["not_found"] += not_found
-                await _append_detail(
-                    session,
-                    job,
-                    {
-                        "integration_id": str(integ.id),
-                        "platform": integ.platform.value,
-                        "result": "ok",
-                        "created": created,
-                        "already_present": already,
-                        "not_found": not_found,
-                    },
+                await _record(
+                    integ, created=created, already=already, not_found=0, error=error
+                )
+            elif integ.platform == IntegrationPlatform.TIKTOK:
+                created, already, not_found, error = await _link_tiktok_integration(
+                    session, job, integ
+                )
+                await _record(
+                    integ, created=created, already=already,
+                    not_found=not_found, error=error,
                 )
             elif integ.platform == IntegrationPlatform.ML:
                 client = _ml_client_for(integ, session)
-                created, already, not_found = await _link_via_listings(
+                created, already, not_found, error = await _link_via_listings(
                     session, job, integ, client, IntegrationPlatform.ML
                 )
-                summary["created"] += created
-                summary["already_present"] += already
-                summary.setdefault("not_found", 0)
-                summary["not_found"] += not_found
-                await _append_detail(
-                    session,
-                    job,
-                    {
-                        "integration_id": str(integ.id),
-                        "platform": integ.platform.value,
-                        "result": "ok",
-                        "created": created,
-                        "already_present": already,
-                        "not_found": not_found,
-                    },
+                await _record(
+                    integ, created=created, already=already,
+                    not_found=not_found, error=error,
                 )
             elif integ.platform == IntegrationPlatform.SHOPEE:
                 client = _shopee_client_for(integ, session)
-                created, already, not_found = await _link_via_listings(
+                created, already, not_found, error = await _link_via_listings(
                     session, job, integ, client, IntegrationPlatform.SHOPEE
                 )
-                summary["created"] += created
-                summary["already_present"] += already
-                summary.setdefault("not_found", 0)
-                summary["not_found"] += not_found
-                await _append_detail(
-                    session,
-                    job,
-                    {
-                        "integration_id": str(integ.id),
-                        "platform": integ.platform.value,
-                        "result": "ok",
-                        "created": created,
-                        "already_present": already,
-                        "not_found": not_found,
-                    },
+                await _record(
+                    integ, created=created, already=already,
+                    not_found=not_found, error=error,
                 )
             elif integ.platform == IntegrationPlatform.AMAZON:
-                created, already, not_found = await _link_amazon_integration(
+                created, already, not_found, error = await _link_amazon_integration(
                     session, job, integ
                 )
-                summary["created"] += created
-                summary["already_present"] += already
-                summary.setdefault("not_found", 0)
-                summary["not_found"] += not_found
-                await _append_detail(
-                    session,
-                    job,
-                    {
-                        "integration_id": str(integ.id),
-                        "platform": integ.platform.value,
-                        "result": "ok",
-                        "created": created,
-                        "already_present": already,
-                        "not_found": not_found,
-                    },
+                await _record(
+                    integ, created=created, already=already,
+                    not_found=not_found, error=error,
                 )
             else:
                 # TEMU still goes through the listings-table path (no
@@ -678,13 +660,33 @@ async def run_auto_link(
                     job,
                     {
                         "integration_id": str(integ.id),
+                        "integration_name": integ.name,
                         "platform": integ.platform.value,
                         "result": "deferred_to_listings_cron",
                         "note": "Temu auto-link uses listings_import cron",
                     },
                 )
-        job.status = BackgroundJobStatus.SUCCEEDED
         job.result = summary
+        # Job is FAILED only when *every* integration failed (no successes).
+        # Otherwise SUCCEEDED — the UI can flag partial failures via
+        # `result.failed_integrations` and the per-integration details.
+        if (
+            summary["failed_integrations"] > 0
+            and summary["ok_integrations"] == 0
+            and summary["skipped"] == 0
+        ):
+            job.status = BackgroundJobStatus.FAILED
+            job.error = (
+                f"all {summary['failed_integrations']} integration(s) failed"
+            )
+        else:
+            job.status = BackgroundJobStatus.SUCCEEDED
+            if summary["failed_integrations"] > 0:
+                job.error = (
+                    f"{summary['failed_integrations']}/"
+                    f"{summary['failed_integrations'] + summary['ok_integrations']}"
+                    " integration(s) failed"
+                )
     except Exception as e:  # noqa: BLE001
         logger.exception("auto_link_failed", job_id=str(job_id))
         job.status = BackgroundJobStatus.FAILED

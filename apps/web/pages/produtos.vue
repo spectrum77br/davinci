@@ -74,6 +74,7 @@ type BlingPreviewItem = {
   price: string | null
   stock: number | null
   image_url: string | null
+  already_imported?: boolean
 }
 
 type Job = {
@@ -563,6 +564,11 @@ function toggleSelectedSyncAll(id: string) {
   selectedSyncAllIds.value = new Set(selectedSyncAllIds.value)
 }
 
+// When the floating multi-select bar fires "Sincronizar Selecionados", this
+// holds the product UUIDs for the next sync_all call so we don't conflate
+// global sync with selection-scoped sync.
+const syncAllProductIds = ref<string[] | null>(null)
+
 async function runSyncAll() {
   if (selectedSyncAllIds.value.size === 0) return
   activeJob.value = null
@@ -571,14 +577,23 @@ async function runSyncAll() {
       method: 'POST',
       body: {
         integration_ids: Array.from(selectedSyncAllIds.value),
-        product_ids: null,
+        product_ids: syncAllProductIds.value,
         include_all_stock: true,
       },
     })
     startPolling(r.job_id)
+    syncAllProductIds.value = null
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   }
+}
+
+function openSyncSelected() {
+  if (selected.value.size === 0) return
+  syncAllProductIds.value = [...selected.value]
+  selectedSyncAllIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
+  activeJob.value = null
+  showSyncAll.value = true
 }
 
 async function startRefreshBlingStock() {
@@ -611,6 +626,122 @@ function formatDetail(d: Record<string, any>): string {
     return `${at} [${d.platform || 'bling'}] iniciando integração ${d.integration_id?.slice(0, 8) || ''}…`
   }
   return `${at} ${JSON.stringify(d)}`
+}
+
+// Per-line color/icon for sync log entries. Mirrors SSH's traffic-light
+// scheme (green ok / amber skipped or retryable / red fatal/review).
+function detailIcon(d: Record<string, any>): string {
+  const s = d.status
+  if (s === 'ok') return '✓'
+  if (s === 'skipped') return '⊘'
+  if (s === 'retryable') return '↻'
+  if (s === 'fatal' || s === 'requires_review') return '✗'
+  if (d.error_code) return '✗'
+  return '·'
+}
+function detailColorClass(d: Record<string, any>): string {
+  const s = d.status
+  if (s === 'ok') return 'text-emerald-600'
+  if (s === 'skipped') return 'text-amber-600'
+  if (s === 'retryable') return 'text-amber-600'
+  if (s === 'fatal' || s === 'requires_review') return 'text-red-600'
+  if (d.error_code) return 'text-red-600'
+  return 'text-muted-foreground'
+}
+// Latest SKU we observed sliding through the orchestrator log — for the
+// "Sincronizando: X" line. Iterates from the tail because details is
+// append-only and the most recent product is always last.
+function lastProcessedSku(details: Array<Record<string, any>> | undefined): string {
+  if (!details?.length) return ''
+  for (let i = details.length - 1; i >= 0; i--) {
+    const d = details[i]
+    if (d?.sku) return d.sku
+  }
+  return ''
+}
+// Pull job.result counters with safe defaults so the badges always render.
+function syncCounters(job: any): {
+  ok: number
+  skipped: number
+  retryable: number
+  fatal: number
+  requires_review: number
+  total_links: number
+} {
+  const r = (job?.result || {}) as Record<string, any>
+  return {
+    ok: r.ok ?? r.synced ?? 0,
+    skipped: r.skipped ?? r.skippedVerified ?? 0,
+    retryable: r.retryable ?? 0,
+    fatal: r.fatal ?? r.errors ?? r.failed ?? 0,
+    requires_review: r.requires_review ?? 0,
+    total_links: r.total_links ?? job?.total ?? 0,
+  }
+}
+// Final summary box color. Green if no failures, amber if any
+// retryable/skipped without fatal, red if any fatal/review.
+function syncSummaryClass(job: any): string {
+  if (job?.status === 'failed') return 'border-red-300 bg-red-50 text-red-800'
+  const c = syncCounters(job)
+  if (c.fatal > 0 || c.requires_review > 0)
+    return 'border-red-300 bg-red-50 text-red-800'
+  if (c.skipped > 0 || c.retryable > 0)
+    return 'border-amber-300 bg-amber-50 text-amber-800'
+  return 'border-emerald-300 bg-emerald-50 text-emerald-800'
+}
+// Tail slice — render the last N entries to keep DOM small even on long runs.
+function tailDetails(details: Array<Record<string, any>> | undefined, n: number) {
+  if (!details?.length) return []
+  return details.slice(Math.max(0, details.length - n))
+}
+
+// Auto-link helpers: surface the marketplace currently being scanned and a
+// running tally aggregated per platform from the per-integration entries.
+function autoLinkCurrent(job: any): string {
+  const last = (job?.details || []).at?.(-1)
+  if (!last) return ''
+  const plat = last.platform ? String(last.platform).toUpperCase() : ''
+  const name = last.integration_name || ''
+  return name ? `${plat}: ${name}` : plat
+}
+function autoLinkTotals(job: any): {
+  created: number
+  already: number
+  not_found: number
+  failed: number
+} {
+  const r = (job?.result || {}) as Record<string, any>
+  return {
+    created: r.created ?? 0,
+    already: r.already_present ?? 0,
+    not_found: r.not_found ?? 0,
+    failed: r.failed_integrations ?? 0,
+  }
+}
+function autoLinkBreakdown(job: any): Array<{
+  integration: string
+  platform: string
+  created: number
+  already: number
+  not_found: number
+  result: string
+  error: string | null
+}> {
+  return (job?.details || []).map((d: any) => ({
+    integration: d.integration_name || (d.integration_id || '').slice(0, 8),
+    platform: d.platform || '',
+    created: d.created ?? 0,
+    already: d.already_present ?? 0,
+    not_found: d.not_found ?? 0,
+    result: d.result || 'ok',
+    error: d.error || null,
+  }))
+}
+function autoLinkSummaryClass(job: any): string {
+  if (job?.status === 'failed') return 'border-red-300 bg-red-50 text-red-800'
+  const t = autoLinkTotals(job)
+  if (t.failed > 0) return 'border-amber-300 bg-amber-50 text-amber-800'
+  return 'border-emerald-300 bg-emerald-50 text-emerald-800'
 }
 
 // ---------------------------- Bling import ----------------------------------
@@ -665,6 +796,47 @@ async function runImport() {
     importLoading.value = false
   }
 }
+
+const importSearch = ref('')
+const filteredPreview = computed(() => {
+  const q = importSearch.value.trim().toLowerCase()
+  if (!q) return importPreview.value
+  return importPreview.value.filter(
+    (r) =>
+      (r.sku || '').toLowerCase().includes(q) ||
+      (r.name || '').toLowerCase().includes(q),
+  )
+})
+// Selectable = has SKU AND not yet imported. Already-imported rows render
+// disabled in the UI, so they cannot be added to the selection.
+const selectablePreview = computed(() =>
+  filteredPreview.value.filter((r) => !!r.sku && !r.already_imported),
+)
+const allPageSelected = computed(
+  () =>
+    selectablePreview.value.length > 0 &&
+    selectablePreview.value.every((r) => importSelected.value.has(r.bling_product_id)),
+)
+const somePageSelected = computed(
+  () =>
+    selectablePreview.value.some((r) => importSelected.value.has(r.bling_product_id)) &&
+    !allPageSelected.value,
+)
+function toggleAllOnPage() {
+  const next = new Set(importSelected.value)
+  if (allPageSelected.value) {
+    for (const r of selectablePreview.value) next.delete(r.bling_product_id)
+  } else {
+    for (const r of selectablePreview.value) next.add(r.bling_product_id)
+  }
+  importSelected.value = next
+}
+const importStats = computed(() => {
+  const total = importPreview.value.length
+  const imported = importPreview.value.filter((r) => r.already_imported).length
+  const novos = importPreview.value.filter((r) => !r.already_imported && !!r.sku).length
+  return { total, imported, novos, selecionados: importSelected.value.size }
+})
 
 // ---------------------------- Auto-link ------------------------------------
 
@@ -922,7 +1094,11 @@ onUnmounted(() => {
                   <span v-else class="text-xs text-muted-foreground">—</span>
                 </template>
                 <div v-else class="flex flex-col gap-1 items-center">
-                  <div v-for="l in linksFor(p, col)" :key="l.id" class="leading-tight">
+                  <div
+                    v-for="l in linksFor(p, col)"
+                    :key="l.id"
+                    class="leading-tight group relative px-2"
+                  >
                     <div
                       class="font-semibold tabular-nums"
                       :class="l.last_sync_status === 'fatal' ? 'text-red-600' : ''"
@@ -930,6 +1106,12 @@ onUnmounted(() => {
                     <div class="text-[10px] text-muted-foreground">
                       {{ integrationById[l.integration_id]?.name || l.platform }}
                     </div>
+                    <button
+                      v-if="canDelete"
+                      class="hidden group-hover:flex absolute -top-1 -right-1 size-4 items-center justify-center rounded-full bg-red-500 text-white text-[9px] hover:bg-red-600"
+                      :title="`Remover vínculo: ${integrationById[l.integration_id]?.name || l.platform}`"
+                      @click="deleteLink(l.id)"
+                    >×</button>
                   </div>
                 </div>
               </td>
@@ -1080,6 +1262,53 @@ onUnmounted(() => {
       </span>
     </div>
 
+    <!-- Floating multi-select action bar (visible whenever there's at least
+         one selected product). Sits above the modals via z-40 so the modals
+         (z-50) still render on top. -->
+    <Transition
+      enter-active-class="transition duration-150 ease-out"
+      enter-from-class="opacity-0 translate-y-4"
+      enter-to-class="opacity-100 translate-y-0"
+      leave-active-class="transition duration-100 ease-in"
+      leave-from-class="opacity-100 translate-y-0"
+      leave-to-class="opacity-0 translate-y-4"
+    >
+      <div
+        v-if="selected.size > 0"
+        class="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 rounded-lg border bg-background shadow-xl px-4 py-3 flex items-center gap-3"
+      >
+        <span class="text-sm font-medium">
+          ☑ {{ selected.size }} produto(s) selecionado(s)
+        </span>
+        <div class="h-5 w-px bg-border" />
+        <Button
+          v-if="canEdit"
+          size="sm"
+          variant="outline"
+          class="border-cyan-300 text-cyan-700 hover:bg-cyan-50"
+          @click="openSyncSelected"
+        >
+          <RefreshCw class="size-4 mr-1.5" /> Sincronizar Selecionados
+        </Button>
+        <Button
+          v-if="canDelete"
+          size="sm"
+          variant="outline"
+          class="border-red-300 text-red-700 hover:bg-red-50"
+          @click="bulkDelete"
+        >
+          <Trash2 class="size-4 mr-1.5" /> Excluir {{ selected.size }}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          @click="selected = new Set()"
+        >
+          Limpar
+        </Button>
+      </div>
+    </Transition>
+
     <!-- Import modal -->
     <div v-if="showImport" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showImport = false">
       <div class="bg-background rounded-lg shadow-lg w-[min(900px,95vw)] max-h-[90vh] flex flex-col">
@@ -1096,7 +1325,44 @@ onUnmounted(() => {
             <Button size="sm" :disabled="importPage <= 1 || importLoading" @click="importPage--; loadPreview()">←</Button>
             <span class="text-xs">página {{ importPage }}</span>
             <Button size="sm" :disabled="importLoading" @click="importPage++; loadPreview()">→</Button>
-            <span class="ml-auto text-xs text-muted-foreground">{{ importSelected.size }} selecionados</span>
+          </div>
+
+          <!-- Counters -->
+          <div class="grid grid-cols-4 gap-2 text-center text-xs">
+            <div class="rounded-md border bg-muted/30 px-2 py-1.5">
+              <div class="text-base font-semibold tabular-nums">{{ importStats.total }}</div>
+              <div class="text-muted-foreground">no Bling</div>
+            </div>
+            <div class="rounded-md border bg-emerald-50 px-2 py-1.5">
+              <div class="text-base font-semibold tabular-nums text-emerald-700">{{ importStats.imported }}</div>
+              <div class="text-emerald-700">importados</div>
+            </div>
+            <div class="rounded-md border bg-amber-50 px-2 py-1.5">
+              <div class="text-base font-semibold tabular-nums text-amber-700">{{ importStats.novos }}</div>
+              <div class="text-amber-700">novos</div>
+            </div>
+            <div class="rounded-md border bg-blue-50 px-2 py-1.5">
+              <div class="text-base font-semibold tabular-nums text-blue-700">{{ importStats.selecionados }}</div>
+              <div class="text-blue-700">selecionados</div>
+            </div>
+          </div>
+
+          <!-- Search + Selecionar Novos -->
+          <div class="flex gap-2 items-center">
+            <input
+              v-model="importSearch"
+              placeholder="🔍 Buscar por nome ou SKU..."
+              class="h-9 flex-1 rounded-md border bg-background px-3 text-sm"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              :disabled="selectablePreview.length === 0 || importLoading"
+              class="whitespace-nowrap"
+              @click="toggleAllOnPage"
+            >
+              {{ allPageSelected ? '☐ Desmarcar' : '☑ Selecionar Novos' }}
+            </Button>
           </div>
 
           <div v-if="importResult" class="rounded-md border bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
@@ -1107,20 +1373,34 @@ onUnmounted(() => {
           <table class="w-full text-sm">
             <thead>
               <tr>
-                <th class="w-8"></th>
+                <th class="w-8">
+                  <input
+                    type="checkbox"
+                    :disabled="selectablePreview.length === 0 || importLoading"
+                    :checked="allPageSelected"
+                    :indeterminate.prop="somePageSelected"
+                    title="Selecionar todos os novos visíveis"
+                    @change="toggleAllOnPage"
+                  />
+                </th>
                 <th>Bling ID</th>
                 <th>SKU</th>
                 <th>Nome</th>
                 <th class="text-right">Preço</th>
                 <th class="text-right">Estoque</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in importPreview" :key="row.bling_product_id">
+              <tr
+                v-for="row in filteredPreview"
+                :key="row.bling_product_id"
+                :class="row.already_imported ? 'opacity-60' : ''"
+              >
                 <td>
                   <input
                     type="checkbox"
-                    :disabled="!row.sku"
+                    :disabled="!row.sku || row.already_imported"
                     :checked="importSelected.has(row.bling_product_id)"
                     @change="
                       importSelected.has(row.bling_product_id)
@@ -1137,10 +1417,24 @@ onUnmounted(() => {
                 <td>{{ row.name }}</td>
                 <td class="text-right tabular-nums">{{ brl(row.price) }}</td>
                 <td class="text-right tabular-nums">{{ row.stock ?? '—' }}</td>
+                <td>
+                  <span
+                    v-if="row.already_imported"
+                    class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-700"
+                  >Importado</span>
+                  <span
+                    v-else-if="!row.sku"
+                    class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-700"
+                  >sem SKU</span>
+                  <span
+                    v-else
+                    class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-700"
+                  >Novo</span>
+                </td>
               </tr>
-              <tr v-if="importPreview.length === 0">
-                <td colspan="6" class="py-4 text-center text-muted-foreground">
-                  {{ importLoading ? 'carregando…' : 'nenhum produto nesta página' }}
+              <tr v-if="filteredPreview.length === 0">
+                <td colspan="7" class="py-4 text-center text-muted-foreground">
+                  {{ importLoading ? 'carregando…' : importSearch ? 'nenhum resultado para a busca' : 'nenhum produto nesta página' }}
                 </td>
               </tr>
             </tbody>
@@ -1215,29 +1509,84 @@ onUnmounted(() => {
 
         <!-- Progress phase -->
         <div v-else class="p-4 space-y-3 flex-1 overflow-y-auto">
-          <div class="flex justify-between text-sm">
-            <span class="flex items-center gap-2">
-              <Loader2 v-if="activeJob.status === 'running' || activeJob.status === 'pending'" class="size-4 animate-spin text-emerald-600" />
-              <span>Status: <strong>{{ activeJob.status }}</strong></span>
+          <!-- Current marketplace -->
+          <div v-if="activeJob.status === 'running' || activeJob.status === 'pending'" class="text-sm flex items-center gap-2">
+            <Loader2 class="size-4 animate-spin text-emerald-600" />
+            <span class="text-muted-foreground">Processando:</span>
+            <span class="font-medium">{{ autoLinkCurrent(activeJob) || '…' }}</span>
+          </div>
+
+          <!-- Progress bar (integrations done / total) -->
+          <div>
+            <div class="flex justify-between text-xs mb-1">
+              <span class="text-muted-foreground tabular-nums">
+                {{ activeJob.details?.length ?? 0 }} / {{ activeJob.total }} integraçõe(s)
+              </span>
+              <span class="tabular-nums font-semibold text-emerald-600">
+                {{ activeJob.total > 0 ? Math.round(((activeJob.details?.length ?? 0) / activeJob.total) * 100) : 0 }}%
+              </span>
+            </div>
+            <div class="h-2 bg-muted rounded overflow-hidden">
+              <div
+                class="h-full bg-emerald-500 transition-all"
+                :style="`width: ${activeJob.total > 0 ? ((activeJob.details?.length ?? 0) / activeJob.total) * 100 : 0}%`"
+              />
+            </div>
+          </div>
+
+          <!-- Running counter -->
+          <div class="text-sm">
+            <span class="font-semibold tabular-nums text-emerald-700">{{ autoLinkTotals(activeJob).created }}</span>
+            <span class="text-muted-foreground"> vinculados até agora</span>
+            <span v-if="autoLinkTotals(activeJob).failed > 0" class="ml-2 text-amber-700">
+              · {{ autoLinkTotals(activeJob).failed }} integração(ões) com erro
             </span>
-            <span class="tabular-nums">{{ activeJob.processed }} / {{ activeJob.total }}</span>
           </div>
-          <div class="h-2 bg-muted rounded overflow-hidden">
-            <div
-              class="h-full bg-emerald-500 transition-all"
-              :style="`width: ${activeJob.total > 0 ? (activeJob.processed / activeJob.total) * 100 : 0}%`"
-            />
+
+          <!-- Final summary box -->
+          <div
+            v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed' || activeJob.status === 'cancelled'"
+            class="rounded-md border-2 px-3 py-2 text-sm"
+            :class="autoLinkSummaryClass(activeJob)"
+          >
+            <div class="text-center">
+              <div class="text-lg font-bold tabular-nums">
+                {{ autoLinkTotals(activeJob).created }} produto(s) vinculados
+              </div>
+              <div class="text-xs mt-0.5 opacity-90">
+                {{ autoLinkTotals(activeJob).already }} já existentes ·
+                {{ autoLinkTotals(activeJob).not_found }} não encontrados
+              </div>
+              <div v-if="activeJob.error" class="text-xs mt-1 font-mono opacity-90">{{ activeJob.error }}</div>
+            </div>
+            <!-- Per-integration breakdown -->
+            <ul class="mt-2 space-y-0.5 text-xs">
+              <li v-for="(b, idx) in autoLinkBreakdown(activeJob)" :key="idx" class="flex items-center gap-1">
+                <span class="font-bold">{{ b.result === 'failed' ? '✗' : '✓' }}</span>
+                <span class="uppercase font-semibold">{{ b.platform }}</span>
+                <span>({{ b.integration }}):</span>
+                <template v-if="b.result === 'failed'">
+                  <span class="text-red-700 font-mono text-[11px]">{{ b.error }}</span>
+                </template>
+                <template v-else>
+                  <span>{{ b.created }} vinculados, {{ b.already }} já existentes, {{ b.not_found }} não encontrados</span>
+                </template>
+              </li>
+            </ul>
           </div>
-          <div v-if="activeJob.result && Object.keys(activeJob.result).length" class="text-xs text-muted-foreground">
-            vinculados: {{ (activeJob.result as any).linked ?? (activeJob.result as any).synced ?? 0 }}
-            <span v-if="(activeJob.result as any).errors !== undefined"> · erros: {{ (activeJob.result as any).errors }}</span>
-          </div>
-          <div v-if="activeJob.error" class="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-700">
-            {{ activeJob.error }}
-          </div>
+
+          <!-- Live log -->
           <ul class="max-h-48 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
-            <li v-for="(d, idx) in activeJob.details" :key="idx" class="text-muted-foreground whitespace-pre-wrap">
-              {{ formatDetail(d) }}
+            <li
+              v-for="(d, idx) in tailDetails(activeJob.details, 100)"
+              :key="idx"
+              class="whitespace-pre-wrap"
+              :class="d.result === 'failed' ? 'text-red-600' : 'text-emerald-600'"
+            >
+              <span class="font-bold">{{ d.result === 'failed' ? '✗' : '✓' }}</span>
+              [{{ (d.platform || '').toUpperCase() }}] {{ d.integration_name || (d.integration_id || '').slice(0, 8) }}:
+              <template v-if="d.result === 'failed'">{{ d.error }}</template>
+              <template v-else>{{ d.created ?? 0 }} vinculados · {{ d.already_present ?? 0 }} já existentes · {{ d.not_found ?? 0 }} não encontrados</template>
             </li>
             <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
               processando…
@@ -1336,34 +1685,78 @@ onUnmounted(() => {
 
         <!-- Progress phase -->
         <div v-else class="p-4 space-y-3 flex-1 overflow-y-auto">
-          <div class="flex justify-between text-sm">
-            <span class="flex items-center gap-2">
-              <Loader2 v-if="activeJob.status === 'running' || activeJob.status === 'pending'" class="size-4 animate-spin text-cyan-600" />
-              <span>Status: <strong>{{ activeJob.status }}</strong></span>
+          <!-- Current SKU -->
+          <div v-if="activeJob.status === 'running' || activeJob.status === 'pending'" class="text-sm">
+            <span class="text-muted-foreground">Sincronizando:</span>
+            <span class="ml-1 font-mono font-medium">{{ lastProcessedSku(activeJob.details) || '…' }}</span>
+          </div>
+
+          <!-- Progress bar + % -->
+          <div>
+            <div class="flex justify-between text-xs mb-1">
+              <span class="text-muted-foreground tabular-nums">{{ activeJob.processed }} / {{ activeJob.total }} links</span>
+              <span class="tabular-nums font-semibold text-cyan-600">
+                {{ activeJob.total > 0 ? Math.round((activeJob.processed / activeJob.total) * 100) : 0 }}%
+              </span>
+            </div>
+            <div class="h-2 bg-muted rounded overflow-hidden">
+              <div
+                class="h-full bg-cyan-500 transition-all"
+                :style="`width: ${activeJob.total > 0 ? (activeJob.processed / activeJob.total) * 100 : 0}%`"
+              />
+            </div>
+          </div>
+
+          <!-- Colored counters -->
+          <div class="flex flex-wrap gap-2 text-xs">
+            <span class="inline-flex items-center gap-1 rounded px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <span class="font-semibold">✓ {{ syncCounters(activeJob).ok }}</span>
+              <span class="text-emerald-600">sincronizados</span>
             </span>
-            <span class="tabular-nums font-semibold text-cyan-600">
-              {{ activeJob.total > 0 ? Math.round((activeJob.processed / activeJob.total) * 100) : 0 }}%
+            <span v-if="syncCounters(activeJob).skipped > 0" class="inline-flex items-center gap-1 rounded px-2 py-1 bg-amber-50 text-amber-700 border border-amber-200">
+              <span class="font-semibold">⊘ {{ syncCounters(activeJob).skipped }}</span>
+              <span class="text-amber-600">pulados</span>
+            </span>
+            <span v-if="syncCounters(activeJob).retryable > 0" class="inline-flex items-center gap-1 rounded px-2 py-1 bg-amber-50 text-amber-700 border border-amber-200">
+              <span class="font-semibold">↻ {{ syncCounters(activeJob).retryable }}</span>
+              <span class="text-amber-600">retry</span>
+            </span>
+            <span v-if="syncCounters(activeJob).fatal > 0" class="inline-flex items-center gap-1 rounded px-2 py-1 bg-red-50 text-red-700 border border-red-200">
+              <span class="font-semibold">✗ {{ syncCounters(activeJob).fatal }}</span>
+              <span class="text-red-600">erros</span>
+            </span>
+            <span v-if="syncCounters(activeJob).requires_review > 0" class="inline-flex items-center gap-1 rounded px-2 py-1 bg-red-50 text-red-700 border border-red-200">
+              <span class="font-semibold">⚠ {{ syncCounters(activeJob).requires_review }}</span>
+              <span class="text-red-600">revisar</span>
             </span>
           </div>
-          <div class="h-2 bg-muted rounded overflow-hidden">
-            <div
-              class="h-full bg-cyan-500 transition-all"
-              :style="`width: ${activeJob.total > 0 ? (activeJob.processed / activeJob.total) * 100 : 0}%`"
-            />
+
+          <!-- Final summary (only when done) -->
+          <div
+            v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed' || activeJob.status === 'cancelled'"
+            class="rounded-md border-2 px-3 py-2 text-sm text-center"
+            :class="syncSummaryClass(activeJob)"
+          >
+            <div class="text-lg font-bold tabular-nums">
+              {{ syncCounters(activeJob).ok }} sincronizado(s)
+            </div>
+            <div class="text-xs mt-0.5 opacity-90">
+              {{ activeJob.processed }} processado(s) ·
+              {{ syncCounters(activeJob).skipped }} pulado(s) ·
+              {{ syncCounters(activeJob).fatal + syncCounters(activeJob).requires_review }} erro(s)
+            </div>
+            <div v-if="activeJob.error" class="text-xs mt-1 font-mono opacity-90">{{ activeJob.error }}</div>
           </div>
-          <div class="flex justify-between text-xs text-muted-foreground">
-            <span>{{ activeJob.processed }} / {{ activeJob.total }} links</span>
-            <span v-if="activeJob.result && Object.keys(activeJob.result).length" class="flex gap-3">
-              <span class="text-emerald-600">✓ {{ (activeJob.result as any).ok ?? (activeJob.result as any).synced ?? 0 }}</span>
-              <span v-if="(activeJob.result as any).failed" class="text-red-600">✗ {{ (activeJob.result as any).failed }}</span>
-            </span>
-          </div>
-          <div v-if="activeJob.error" class="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-700">
-            {{ activeJob.error }}
-          </div>
+
+          <!-- Log: last 100 entries with colored status -->
           <ul class="max-h-60 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
-            <li v-for="(d, idx) in activeJob.details" :key="idx" class="text-muted-foreground whitespace-pre-wrap">
-              {{ formatDetail(d) }}
+            <li
+              v-for="(d, idx) in tailDetails(activeJob.details, 100)"
+              :key="idx"
+              class="whitespace-pre-wrap"
+              :class="detailColorClass(d)"
+            >
+              <span class="font-bold">{{ detailIcon(d) }}</span> {{ formatDetail(d) }}
             </li>
             <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
               processando…

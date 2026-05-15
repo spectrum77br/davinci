@@ -125,6 +125,7 @@ class BlingPreviewItem(BaseModel):
     image_url: str | None = None
     category: str | None = None
     observation: str | None = None
+    already_imported: bool = False
 
 
 class BlingPreviewOut(BaseModel):

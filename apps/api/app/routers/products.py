@@ -448,7 +448,7 @@ async def delete_product_link(
 @router.get("/products/preview/bling", response_model=BlingPreviewOut)
 async def bling_preview(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("produtos", "edit"))],
+    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
     integration_id: UUID = Query(...),
     page: int = Query(1, ge=1),
 ) -> BlingPreviewOut:
@@ -459,7 +459,30 @@ async def bling_preview(
         raise HTTPException(404, detail={"code": "integration_not_found"})
     client = await _bling_client_for(session, integ)
     raw = await client.list_products_page(pagina=page, limite=BLING_PRODUCTS_PAGE_SIZE)
-    items = [BlingPreviewItem(**parse_bling_product(r)) for r in raw]
+    parsed = [parse_bling_product(r) for r in raw]
+    bling_ids = [p["bling_product_id"] for p in parsed if p.get("bling_product_id")]
+    already: set[int] = set()
+    if bling_ids:
+        already_rows = (
+            await session.execute(
+                select(Product.bling_product_id).where(
+                    and_(
+                        user_scope(Product, user),
+                        Product.bling_product_id.in_(bling_ids),
+                    )
+                )
+            )
+        ).scalars().all()
+        already = {int(b) for b in already_rows if b is not None}
+    items = [
+        BlingPreviewItem(
+            **p,
+            already_imported=int(p["bling_product_id"]) in already
+            if p.get("bling_product_id")
+            else False,
+        )
+        for p in parsed
+    ]
     return BlingPreviewOut(integration_id=integ.id, page=page, items=items)
 
 
