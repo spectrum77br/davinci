@@ -262,7 +262,13 @@ async def _link_via_listings(
         if sk:
             by_sku[sk] = p
 
-    existing_keys: set[tuple[UUID, str, str]] = set()
+    # Dedup key matches the DB unique constraint (uq_product_links_identity):
+    # (user_id, platform, integration_id, external_id, COALESCE(variation_id, '')).
+    # We already filter existing_keys by integration_id below, so we just key
+    # the in-memory set on (external_id, variation_id). Including product_id
+    # would allow two DaVinci products that share a SKU to both queue a link
+    # for the same marketplace listing — and the DB then 23505s out.
+    existing_keys: set[tuple[str, str]] = set()
     for link in (
         await session.execute(
             select(ProductLink).where(
@@ -274,7 +280,7 @@ async def _link_via_listings(
         )
     ).scalars().all():
         existing_keys.add(
-            (link.product_id, link.external_id or "", link.variation_id or "")
+            (link.external_id or "", link.variation_id or "")
         )
 
     created = 0
@@ -294,7 +300,7 @@ async def _link_via_listings(
             if local is None:
                 not_found += 1
                 continue
-            key = (local.id, external_id, variation_id or "")
+            key = (external_id, variation_id or "")
             if key in existing_keys:
                 already += 1
                 continue
@@ -385,7 +391,10 @@ async def _link_amazon_integration(
         if sk:
             by_sku[sk] = p
 
-    existing_keys: set[tuple[UUID, UUID, str, str]] = set()
+    # Same rule as _link_via_listings: dedup on (external_id, variation_id)
+    # since the DB unique constraint excludes product_id. existing_keys is
+    # already scoped to this integration via the WHERE clause below.
+    existing_keys: set[tuple[str, str]] = set()
     for link in (
         await session.execute(
             select(ProductLink).where(
@@ -397,12 +406,7 @@ async def _link_amazon_integration(
         )
     ).scalars().all():
         existing_keys.add(
-            (
-                link.product_id,
-                link.integration_id,
-                link.external_id or "",
-                link.variation_id or "",
-            )
+            (link.external_id or "", link.variation_id or "")
         )
 
     pending: list[ProductLink] = []
@@ -432,7 +436,7 @@ async def _link_amazon_integration(
             if local is None:
                 not_found += 1
                 continue
-            key = (local.id, integ.id, external_id, variation_id or "")
+            key = (external_id, variation_id or "")
             if key in existing_keys:
                 already += 1
                 continue
