@@ -183,6 +183,24 @@ class ShopeeClient:
         except Exception as e:  # noqa: BLE001
             return TestResult(ok=False, detail=f"error: {e}")
 
+    async def get_escrow_detail(self, order_sn: str) -> dict:
+        """Fetch Shopee accounting details for one order."""
+        path = "/api/v2/payment/get_escrow_detail"
+        r = await self._request("GET", path, params={"order_sn": order_sn})
+        r.raise_for_status()
+        body = r.json() or {}
+        if body.get("error") in _AUTH_CODES:
+            await self.refresh()
+            r = await self._request("GET", path, params={"order_sn": order_sn})
+            r.raise_for_status()
+            body = r.json() or {}
+        if body.get("error"):
+            raise RuntimeError(
+                f"shopee_escrow_error {body.get('error')}: {body.get('message')}"
+            )
+        response = body.get("response")
+        return response if isinstance(response, dict) else {}
+
     async def update_stock(
         self,
         link: "ProductLink",

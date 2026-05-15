@@ -190,6 +190,20 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_order(self, order_id: str) -> dict:
+        r = await self._request("GET", f"/orders/{order_id}")
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def get_billing_order_details(self, order_id: str) -> dict:
+        r = await self._request(
+            "GET",
+            "/billing/integration/group/ML/order/details",
+            params={"order_ids": order_id},
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
     async def get_listing_price(self, link: "ProductLink") -> float | None:
         """Read the current price from /items/{id}. ML quotes the item-level
         price even for multi-variation listings, so variation_id is ignored

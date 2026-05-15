@@ -28,8 +28,8 @@ import hashlib
 import hmac
 import json
 import time
-from typing import TYPE_CHECKING, Any
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -386,6 +386,12 @@ class TikTokClient:
             return TestResult(ok=False, detail=f"http_error: {e}")
         except Exception as e:  # noqa: BLE001
             return TestResult(ok=False, detail=f"error: {e}")
+
+    async def get_order_settlements(self, order_id: str) -> dict:
+        return await self._get(
+            "/api/finance/order/settlements",
+            {"order_id": order_id},
+        )
 
     async def update_stock(
         self,

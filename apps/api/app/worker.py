@@ -9,7 +9,6 @@ from sqlalchemy import and_, delete, or_, select, text, update
 
 from app.config import get_settings
 from app.db import session_scope
-from app.redis_client import redis
 from app.models import (
     Alert,
     AlertSeverity,
@@ -23,6 +22,7 @@ from app.models import (
     Product,
     UserSettings,
 )
+from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.advisory_lock import try_user_sync_lock
 from app.services.alerts import emit_alert
@@ -37,13 +37,17 @@ from app.services.listings_import import (
     run_auto_import_link,
     run_import_listings,
 )
+from app.services.marketplace_financials import (
+    run_due_marketplace_financial_retries,
+    run_sync_marketplace_financials_for_bling_order,
+)
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.ml_backfill import run_backfill_ml_stock
-from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
+from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.sync_orchestrator import SyncOrchestrator
 from app.worker_pool import get_arq_pool
 
@@ -310,6 +314,24 @@ async def ingest_bling_order_run(
         )
 
 
+async def sync_marketplace_financials_for_order_run(
+    ctx: dict,
+    bling_order_id: int,
+    trigger: str = "manual",
+) -> None:
+    """Fetch marketplace financials for one Bling order after ingestion."""
+    lock_key = f"marketplace_financials:{bling_order_id}"
+    async with session_scope() as s:
+        await s.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key}
+        )
+        await run_sync_marketplace_financials_for_bling_order(
+            s,
+            bling_order_id=int(bling_order_id),
+            trigger=trigger,
+        )
+
+
 # ---------------------------------------------------------------- cron jobs
 
 
@@ -432,6 +454,13 @@ async def ml_token_refresh(ctx: dict) -> None:
 async def tiktok_token_refresh(ctx: dict) -> None:
     """Refresh TikTok tokens expiring within 12h (TikTok AT lasts ~24h)."""
     await _refresh_tokens_for(IntegrationPlatform.TIKTOK, expiring_within_s=12 * 3600)
+
+
+async def marketplace_financials_retry(ctx: dict) -> None:
+    """Retry marketplace financial lookups that were not available on webhook."""
+    async with session_scope() as s:
+        result = await run_due_marketplace_financial_retries(s, limit=100)
+    logger.info("marketplace_financials_retry_done", **result)
 
 
 async def shopee_discrepancy_check(ctx: dict) -> None:
@@ -844,6 +873,7 @@ class WorkerSettings:
         sync_bling_costs_run,
         audit_run,
         user_relink_run,
+        sync_marketplace_financials_for_order_run,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -853,6 +883,7 @@ class WorkerSettings:
         cron(shopee_token_refresh, hour={0, 4, 8, 12, 16, 20}, minute=0, run_at_startup=False),
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(tiktok_token_refresh, hour={0, 6, 12, 18}, minute=45, run_at_startup=False),
+        cron(marketplace_financials_retry, minute={10, 40}, run_at_startup=False),
         cron(shopee_discrepancy_check, hour={1, 5, 9, 13, 17, 21}, minute=0, run_at_startup=False),
         cron(ml_discrepancy_check, hour={2, 6, 10, 14, 18, 22}, minute=30, run_at_startup=False),
         cron(background_jobs_gc, hour=6, minute=30, run_at_startup=False),  # 03:30 BRT
@@ -892,6 +923,7 @@ __all__ = [
     "low_stock_polling",
     "ml_backfill_run",
     "ml_token_refresh",
+    "marketplace_financials_retry",
     "refresh_bling_stock_run",
     "push_prices_batch_run",
     "sync_bling_costs_run",
@@ -899,6 +931,7 @@ __all__ = [
     "shopee_token_refresh",
     "send_otp_email",
     "sync_all_run",
+    "sync_marketplace_financials_for_order_run",
     "webhook_signature_alert_scan",
     "sync_logs_partition_gc",
     "sync_product_run",

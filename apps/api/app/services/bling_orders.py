@@ -539,8 +539,29 @@ async def run_ingest_bling_order(
     )
     await session.commit()
 
-    if jobs:
+    pool = None
+    try:
         pool = await get_arq_pool()
+        arq = await pool.enqueue_job(
+            "sync_marketplace_financials_for_order_run",
+            int(bling_order_id),
+            "webhook",
+        )
+        logger.info(
+            "bling_order_financial_sync_enqueued",
+            bling_order_id=bling_order_id,
+            arq_job_id=arq.job_id if arq is not None else None,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "bling_order_financial_sync_enqueue_failed",
+            bling_order_id=bling_order_id,
+            err=str(e)[:500],
+        )
+
+    if jobs:
+        if pool is None:
+            pool = await get_arq_pool()
         for job_id, product_id, link_ids in jobs:
             arq = await pool.enqueue_job(
                 "sync_product_run",

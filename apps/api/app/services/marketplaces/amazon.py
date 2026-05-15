@@ -155,6 +155,19 @@ class AmazonClient:
         except Exception as e:  # noqa: BLE001
             return TestResult(ok=False, detail=f"error: {e}")
 
+    async def get_finance_transactions_for_order(self, order_id: str) -> dict:
+        r = await self._request(
+            "GET",
+            "/finances/2024-06-19/transactions",
+            params={
+                "marketplaceId": self.marketplace_id,
+                "relatedIdentifierName": "ORDER_ID",
+                "relatedIdentifier": order_id,
+            },
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
     async def update_stock(
         self,
         link: "ProductLink",
