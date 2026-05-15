@@ -520,18 +520,24 @@ class MercadoLivreClient:
 
 
 # ---------------------------------------------------------------- helpers
-
-_ML_LISTING_TYPE_MAP = {
-    "gold_pro": "ml premium",
-    "gold_premium": "ml premium",
-    "gold_special": "ml classico",
-}
+#
+# Keep ML's raw listing_type_id ("gold_special" / "gold_pro") in product_links
+# and listings so the push resolver (sku_match.ml_listing_type_for_account)
+# can filter against the SAME value the API returns. The translation to the
+# user-facing "ml classico" / "ml premium" lives in the pricing UI / sku_match
+# layer — *not* at the ingestion edge. Earlier the mapping happened here, so
+# the auto-link path wrote display strings into product_links.listing_type
+# and push filtered by API values → 0 matches.
 
 
 def _map_ml_listing_type(listing_type_id: str | None) -> str | None:
     if not listing_type_id:
         return None
-    return _ML_LISTING_TYPE_MAP.get(listing_type_id.lower())
+    val = listing_type_id.strip().lower()
+    # gold_premium is the legacy alias for gold_pro — collapse it.
+    if val == "gold_premium":
+        return "gold_pro"
+    return val
 
 
 def _normalize_ml_item(body: dict) -> dict:
