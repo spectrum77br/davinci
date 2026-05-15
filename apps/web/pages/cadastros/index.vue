@@ -360,7 +360,7 @@ async function submitResolve() {
         <RefreshCw class="size-4 mr-1" /> recarregar
       </Button>
       <div class="ml-auto flex gap-2 flex-wrap">
-        <Input v-model="search" placeholder="código / label" class="w-56" />
+        <Input v-model="search" placeholder="código / ID" class="w-56" />
         <Input v-model="filterProvedor" placeholder="provedor" class="w-32" />
         <select v-model="filterTipo" class="border rounded px-2 text-sm bg-background">
           <option value="">todos tipos</option>
@@ -381,7 +381,7 @@ async function submitResolve() {
             <th class="px-3 py-2 w-20">Tipo</th>
             <th class="px-3 py-2 w-20">Provedor</th>
             <th class="px-3 py-2 w-32">Código</th>
-            <th class="px-3 py-2 w-24">Label</th>
+            <th class="px-3 py-2 w-24">ID</th>
             <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center min-w-[110px]">
               {{ MARKETPLACE_SHORT[mk] }}
             </th>
