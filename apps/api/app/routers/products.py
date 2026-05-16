@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
@@ -13,6 +14,7 @@ from app.deps.auth import require_permission, user_scope
 from app.models import (
     Integration,
     IntegrationPlatform,
+    LinkSyncStatus,
     Product,
     ProductLink,
     Segment,
@@ -458,35 +460,129 @@ async def delete_product_link(
 
 # ----------------------------------------------------------- Bling preview/import
 
+async def _ensure_bling_link(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    integration_id: UUID,
+    product: Product,
+    bling_product_id: int,
+) -> None:
+    """Make sure every product imported from Bling carries a `bling` platform
+    link pointing at its bling produto.id — otherwise the SyncOrchestrator's
+    `_refresh_bling` never runs for that product and the stock stays stale.
+    No-op when the link already exists."""
+    existing = (
+        await session.execute(
+            select(ProductLink.id).where(
+                and_(
+                    ProductLink.product_id == product.id,
+                    ProductLink.platform == IntegrationPlatform.BLING,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return
+    session.add(
+        ProductLink(
+            user_id=user_id,
+            product_id=product.id,
+            integration_id=integration_id,
+            platform=IntegrationPlatform.BLING,
+            external_id=str(bling_product_id),
+            external_sku=product.sku,
+            listing_title=product.name,
+            stock=product.stock,
+            last_sync_status=LinkSyncStatus.PENDING,
+        )
+    )
+
+
+# Bling listing rate-limit guard: CF gates the API at ~3 req/s. 1.5s between
+# pages stays comfortably under that and matches SSH's getAllProducts cadence.
+_BLING_PREVIEW_PAGE_DELAY_SEC = 1.5
+# Hard cap on pages to prevent runaway loops if the API stops returning empty.
+_BLING_PREVIEW_MAX_PAGES = 200
+# Stop after this many back-to-back page errors so a transient outage doesn't
+# leave the request hanging forever — partial results still flow to the UI.
+_BLING_PREVIEW_MAX_CONSECUTIVE_ERRORS = 3
+
+
 @router.get("/products/preview/bling", response_model=BlingPreviewOut)
 async def bling_preview(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "edit"))],
     integration_id: UUID = Query(...),
-    page: int = Query(1, ge=1),
 ) -> BlingPreviewOut:
+    """Fetch ALL Bling products (paginating internally) so the UI can show
+    a single scrollable list with accurate total/imported/new counters.
+    SSH parity: replaces the old page-by-page preview that forced the
+    operator to click ← → to discover the rest of the catalog."""
     integ = (
         await session.execute(select(Integration).where(Integration.id == integration_id))
     ).scalar_one_or_none()
     if integ is None:
         raise HTTPException(404, detail={"code": "integration_not_found"})
     client = await _bling_client_for(session, integ)
-    raw = await client.list_products_page(pagina=page, limite=BLING_PRODUCTS_PAGE_SIZE)
-    parsed = [parse_bling_product(r) for r in raw]
-    bling_ids = [p["bling_product_id"] for p in parsed if p.get("bling_product_id")]
+
+    all_raw: list[dict] = []
+    page = 1
+    consecutive_errors = 0
+    while page <= _BLING_PREVIEW_MAX_PAGES:
+        try:
+            items_page = await client.list_products_page(
+                pagina=page, limite=BLING_PRODUCTS_PAGE_SIZE
+            )
+            consecutive_errors = 0
+        except Exception as e:  # noqa: BLE001
+            consecutive_errors += 1
+            logger.warning(
+                "bling_preview_page_error",
+                page=page,
+                err=str(e)[:200],
+                consecutive=consecutive_errors,
+                total_so_far=len(all_raw),
+            )
+            if consecutive_errors >= _BLING_PREVIEW_MAX_CONSECUTIVE_ERRORS:
+                logger.error(
+                    "bling_preview_stopping",
+                    page=page,
+                    total_so_far=len(all_raw),
+                )
+                break
+            await asyncio.sleep(10)  # cool off before retry
+            continue
+        if not items_page:
+            break
+        all_raw.extend(items_page)
+        if len(items_page) < BLING_PRODUCTS_PAGE_SIZE:
+            break
+        page += 1
+        await asyncio.sleep(_BLING_PREVIEW_PAGE_DELAY_SEC)
+
+    parsed = [parse_bling_product(r) for r in all_raw]
+
+    # Batch the already_imported lookup so the IN clause stays manageable
+    # even with a 5k+ product catalog (Postgres caps params at ~32k but the
+    # planner balks long before that on a single OR'd list).
+    all_bling_ids = [p["bling_product_id"] for p in parsed if p.get("bling_product_id")]
     already: set[int] = set()
-    if bling_ids:
-        already_rows = (
+    BATCH = 500
+    for i in range(0, len(all_bling_ids), BATCH):
+        chunk = all_bling_ids[i : i + BATCH]
+        rows = (
             await session.execute(
                 select(Product.bling_product_id).where(
                     and_(
                         user_scope(Product, user),
-                        Product.bling_product_id.in_(bling_ids),
+                        Product.bling_product_id.in_(chunk),
                     )
                 )
             )
         ).scalars().all()
-        already = {int(b) for b in already_rows if b is not None}
+        already.update(int(b) for b in rows if b is not None)
+
     items = [
         BlingPreviewItem(
             **p,
@@ -496,7 +592,13 @@ async def bling_preview(
         )
         for p in parsed
     ]
-    return BlingPreviewOut(integration_id=integ.id, page=page, items=items)
+    logger.info(
+        "bling_preview_done",
+        pages_fetched=page,
+        total_items=len(items),
+        already_imported=len(already),
+    )
+    return BlingPreviewOut(integration_id=integ.id, page=1, items=items)
 
 
 @router.post("/products/import/bling", response_model=BlingImportSummary)
@@ -592,9 +694,23 @@ async def bling_import(
                         existing.image_url = norm["image_url"] or existing.image_url
                         existing.integration_id = integ.id
                         existing.last_imported_at = datetime.now(UTC)
+                        await _ensure_bling_link(
+                            session,
+                            user_id=user.id,
+                            integration_id=integ.id,
+                            product=existing,
+                            bling_product_id=int(bid),
+                        )
                         updated += 1
                         continue
                 raise
+            await _ensure_bling_link(
+                session,
+                user_id=user.id,
+                integration_id=integ.id,
+                product=p,
+                bling_product_id=int(bid),
+            )
             imported += 1
         else:
             p.name = norm["name"] or p.name
@@ -611,6 +727,13 @@ async def bling_import(
             p.image_url = norm["image_url"] or p.image_url
             p.integration_id = integ.id
             p.last_imported_at = datetime.now(UTC)
+            await _ensure_bling_link(
+                session,
+                user_id=user.id,
+                integration_id=integ.id,
+                product=p,
+                bling_product_id=int(bid),
+            )
             updated += 1
 
     await session.commit()

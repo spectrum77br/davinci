@@ -836,7 +836,6 @@ function autoLinkSummaryClass(job: any): string {
 // ---------------------------- Bling import ----------------------------------
 
 const importIntegration = ref<string>('')
-const importPage = ref(1)
 const importPreview = ref<BlingPreviewItem[]>([])
 const importSelected = ref<Set<number>>(new Set())
 const importLoading = ref(false)
@@ -844,7 +843,6 @@ const importResult = ref<{ imported: number; updated: number; skipped_no_sku: nu
 
 async function openImport() {
   importIntegration.value = blingIntegrations.value[0]?.id || ''
-  importPage.value = 1
   importPreview.value = []
   importSelected.value = new Set()
   importResult.value = null
@@ -855,9 +853,11 @@ async function openImport() {
 async function loadPreview() {
   if (!importIntegration.value) return
   importLoading.value = true
+  // Backend now paginates internally and returns the full catalog in one
+  // call (SSH parity) — UI no longer drives page-by-page navigation.
   try {
     const r = await api<{ items: BlingPreviewItem[] }>(
-      `/api/products/preview/bling?integration_id=${importIntegration.value}&page=${importPage.value}`,
+      `/api/products/preview/bling?integration_id=${importIntegration.value}`,
     )
     importPreview.value = r.items
   } catch (e: any) {
@@ -1465,13 +1465,20 @@ onUnmounted(() => {
         </div>
         <div class="p-3 space-y-3 overflow-auto">
           <div class="flex gap-2 items-center">
-            <select v-model="importIntegration" class="h-9 rounded-md border bg-background px-2 text-sm" @change="importPage = 1; loadPreview()">
+            <select v-model="importIntegration" class="h-9 rounded-md border bg-background px-2 text-sm" @change="loadPreview()">
               <option v-for="i in blingIntegrations" :key="i.id" :value="i.id">{{ i.name }}</option>
               <option v-if="blingIntegrations.length === 0" disabled value="">sem integração Bling</option>
             </select>
-            <Button size="sm" :disabled="importPage <= 1 || importLoading" @click="importPage--; loadPreview()">←</Button>
-            <span class="text-xs">página {{ importPage }}</span>
-            <Button size="sm" :disabled="importLoading" @click="importPage++; loadPreview()">→</Button>
+            <Button size="sm" variant="outline" :disabled="importLoading || !importIntegration" @click="loadPreview()">
+              <RefreshCw class="size-3.5" :class="importLoading ? 'animate-spin' : ''" />
+              <span class="ml-1.5">{{ importLoading ? 'buscando…' : 'recarregar' }}</span>
+            </Button>
+          </div>
+          <div
+            v-if="importLoading"
+            class="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700"
+          >
+            Buscando todos os produtos do Bling… isso pode levar alguns segundos para catálogos grandes (2k+ SKUs).
           </div>
 
           <!-- Counters -->
