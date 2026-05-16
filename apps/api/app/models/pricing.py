@@ -80,6 +80,40 @@ class PricingAccount(Base, TimestampMixin):
         nullable=True,
         index=True,
     )
+    # Slot-to-segment binding (one FK per shipping{N}/margin{N} pair). Lets
+    # analysts JOIN slot{N}_segment_id → segments to see which subtype each
+    # slot represents on a given account. Calc code keeps reading
+    # shipping1..5 / margin1..5 directly; these columns are pure metadata.
+    slot1_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slot2_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slot3_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slot4_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    slot5_segment_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("segments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     integration_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("integrations.id", ondelete="SET NULL"),
