@@ -175,7 +175,44 @@ async def patch_marketplace_observacao(
         pedido_bling=pedido_bling,
         rows=result.rowcount,
     )
+    await _refresh_mv_silent(session)
     return {"pedido_bling": pedido_bling, "observacao": next_value, "rows": result.rowcount}
+
+
+async def _refresh_mv_silent(session: AsyncSession) -> None:
+    """Best-effort refresh of mv_conciliacao_margens_marketplace.
+
+    Called as a side-effect of PATCHes (status/observacao) so the user
+    sees their change reflected on next page load without waiting for
+    a cron. Swallows errors — refresh failure should never block the
+    underlying mutation.
+    """
+    try:
+        await session.execute(
+            text(
+                "REFRESH MATERIALIZED VIEW CONCURRENTLY "
+                "davinci.mv_conciliacao_margens_marketplace"
+            )
+        )
+        await session.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("mv_conciliacao_margens_marketplace_refresh_failed", error=str(e)[:200])
+
+
+@router.post("/marketplace/refresh")
+async def refresh_marketplace_mv(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("margem", "view"))],
+) -> dict:
+    """Trigger MV refresh on-demand (UI 'atualizar' button)."""
+    await session.execute(
+        text(
+            "REFRESH MATERIALIZED VIEW CONCURRENTLY "
+            "davinci.mv_conciliacao_margens_marketplace"
+        )
+    )
+    await session.commit()
+    return {"refreshed": True}
 
 
 class MarketplaceStatusPatch(BaseModel):
@@ -217,6 +254,7 @@ async def patch_marketplace_status(
         )
 
     await session.commit()
+    await _refresh_mv_silent(session)
     logger.info(
         "marketplace_status_patched",
         pedido_bling=pedido_bling,

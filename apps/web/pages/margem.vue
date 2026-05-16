@@ -112,6 +112,19 @@ async function load() {
 }
 await load()
 
+async function refreshAndLoad() {
+  loading.value = true
+  error.value = null
+  try {
+    await api('/api/margens/marketplace/refresh', { method: 'POST' })
+  } catch (e: any) {
+    error.value = apiError(e)
+    loading.value = false
+    return
+  }
+  await load()
+}
+
 // reload on filter change (debounced search)
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 watch(search, () => {
@@ -248,7 +261,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
   <div class="space-y-5">
     <PageHeader title="Margem" description="Margem por pedido — conciliação marketplace (últimos 30 dias).">
       <template #actions>
-        <Button size="sm" variant="outline" :disabled="loading" @click="load">
+        <Button size="sm" variant="outline" :disabled="loading" @click="refreshAndLoad">
           <RefreshCw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
           atualizar
         </Button>

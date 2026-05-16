@@ -945,7 +945,11 @@ class WorkerSettings:
         # SSH parity: 30-min safety timeout for stuck sync advisory locks.
         # Runs every 5 minutes so the worst-case stuck duration is 35min.
         cron(sync_lock_safety_release, minute=_FIVE_MIN, run_at_startup=False),
-        cron(refresh_margens_marketplace_mv, minute=_FIVE_MIN, run_at_startup=True),
+        # mv_conciliacao_margens_marketplace refresh is on-demand
+        # (POST /api/margens/marketplace/refresh from the UI's "atualizar"
+        # button, and as a side effect of PATCH status/observacao). The
+        # worker still runs it at startup so a fresh deploy has data.
+        cron(refresh_margens_marketplace_mv, hour={6}, minute={0}, run_at_startup=True),
         # Safety-net only — hooks via app.services.relink_hook handle the
         # day-to-day work. Runs at 02:00 and 14:00 UTC.
         cron(auto_import_link, hour={2, 14}, minute=0, run_at_startup=False),
