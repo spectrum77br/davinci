@@ -556,7 +556,30 @@ async function syncProduct(id: string, integrationIds?: string[]) {
             `${plat} ${acc}: ${d.qty_before ?? '—'} → ${d.qty_after ?? '—'} ✓`,
           )
         } else if (d.status === 'skipped') {
-          okLines.push(`${plat} ${acc}: pulado (estoque igual)`)
+          // Skip can mean many things — translate the backend error_code so
+          // operators understand which guard fired instead of seeing a
+          // misleading "estoque igual" for every skip.
+          const code = String(d.error_code || '')
+          let msg: string
+          if (code === 'b1_guard_zero_block') {
+            msg = 'bloqueado (proteção anti-zerar)'
+          } else if (code.startsWith('ml_listing_')) {
+            msg = `pulado (${code.replace('ml_listing_', '')})`
+          } else if (code === 'bling_refresh_failed_no_push') {
+            msg = 'pulado (Bling falhou)'
+          } else if (code === 'platform_not_implemented') {
+            msg = 'pulado (não implementado)'
+          } else if (code === 'verified_skip') {
+            // legacy code from the (now-removed) verify-before-send shortcut
+            msg = 'pulado (estoque igual)'
+          } else if (d.error_detail) {
+            msg = `pulado (${String(d.error_detail).slice(0, 60)})`
+          } else if (code) {
+            msg = `pulado (${code})`
+          } else {
+            msg = 'pulado'
+          }
+          okLines.push(`${plat} ${acc}: ${msg}`)
         } else {
           const err = d.error_code
             ? `${d.error_code}${d.error_detail ? ': ' + d.error_detail : ''}`

@@ -266,18 +266,21 @@ class MercadoLivreClient:
         qty: int,
         *,
         bling_store_id: int | None = None,  # ignored on ML side
+        force: bool = False,
     ) -> SyncResult:
         """ABC entrypoint. Resolves variation, applies B1 guard, dispatches to
         the correct ML endpoint, and classifies the outcome.
 
-        B1: never write `available_quantity=0` when caller has positive stock.
+        B1: never write `available_quantity=0` when caller has positive stock —
+        unless `force=True` (manual/individual sync where the user explicitly
+        wants the marketplace to reflect a Bling zero).
         B3: re-resolve variation_id by `seller_sku` when the stored id is gone.
         """
         del bling_store_id  # not used; signature kept for ABC parity
         qty_before = link.stock
 
         # B1 guard ------------------------------------------------------------
-        if qty == 0 and (qty_before or 0) > 0:
+        if not force and qty == 0 and (qty_before or 0) > 0:
             return SyncResult(
                 status=SyncStatus.SKIPPED,
                 qty_before=qty_before,

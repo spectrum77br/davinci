@@ -239,7 +239,10 @@ async def sync_product(
     # products without seeing `sync_already_running`. The orchestrator's
     # per-link writes are still safe under concurrent runs — the worst case
     # is two pushes of the same value to the same marketplace.
-    orch = SyncOrchestrator(session, user_id=user.id, job=job)
+    # `force=True` also bypasses ML's B1 zero-guard: the operator clicked
+    # sync expecting the marketplace to mirror whatever Bling reports, even
+    # when that means dropping from positive stock to zero.
+    orch = SyncOrchestrator(session, user_id=user.id, job=job, force=True)
     await orch.run([product], only_link_ids=only_link_ids)
 
     await session.refresh(job)

@@ -103,11 +103,17 @@ class SyncOrchestrator:
         user_id: UUID,
         job: BackgroundJob | None = None,
         force_bling_refresh: bool = False,
+        force: bool = False,
     ):
         self.session = session
         self.user_id = user_id
         self.job = job
         self.force_bling_refresh = force_bling_refresh
+        # `force=True` bypasses marketplace-side safety guards (notably ML's
+        # B1 zero-block). Used by the manual sync endpoint where the user
+        # explicitly wants the marketplace to mirror Bling, even when that
+        # means writing 0 on a link that previously had positive stock.
+        self.force = force
         self.report = OrchestratorReport()
         self._client_cache: dict[UUID, object] = {}
         self._integration_cache: dict[UUID, Integration] = {}
@@ -264,7 +270,7 @@ class SyncOrchestrator:
                     # without us noticing, and operators expect "sincronizar"
                     # to actually call the API every time.
                     result = await client.update_stock(  # type: ignore[union-attr]
-                        link, qty, bling_store_id=bling_store_id
+                        link, qty, bling_store_id=bling_store_id, force=self.force
                     )
                 except HTTPException as e:
                     code = "platform_not_implemented" if e.status_code == 501 else "http_error"
@@ -558,6 +564,7 @@ class SyncOrchestrator:
                             user_id=user_id,
                             job=sub_job,
                             force_bling_refresh=self.force_bling_refresh,
+                            force=self.force,
                         )
 
                         bling_links = [

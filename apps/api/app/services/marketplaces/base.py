@@ -50,4 +50,5 @@ class MarketplaceClient(Protocol):
         qty: int,
         *,
         bling_store_id: int | None = None,
+        force: bool = False,
     ) -> SyncResult: ...
