@@ -55,7 +55,9 @@ function statusCls(s: string | null | undefined): string {
   return STATUS_CLS[s ?? ''] ?? 'bg-muted text-muted-foreground border-border'
 }
 
-const PAGE_SIZE = 50
+const PAGE_SIZE = 100
+type StatusFilter = 'Pendente' | 'Aprovado' | 'Reprovado' | 'all'
+const STATUS_FILTER_OPTIONS: StatusFilter[] = ['Pendente', 'Aprovado', 'Reprovado', 'all']
 
 const { api } = useApi()
 const canEdit = useCan('margem', 'edit')
@@ -68,6 +70,7 @@ const error = ref<string | null>(null)
 
 const search = ref('')
 const platform = ref<'all' | string>('all')
+const statusFilter = ref<StatusFilter>('Pendente')
 const page = ref(1)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
@@ -99,6 +102,7 @@ async function load() {
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', String((page.value - 1) * PAGE_SIZE))
     if (platform.value !== 'all') params.set('platform', platform.value)
+    if (statusFilter.value !== 'all') params.set('status', statusFilter.value)
     if (search.value.trim()) params.set('search', search.value.trim())
     const res = await api<PageResponse>(`/api/margens/marketplace?${params.toString()}`)
     items.value = res.items
@@ -112,19 +116,6 @@ async function load() {
 }
 await load()
 
-async function refreshAndLoad() {
-  loading.value = true
-  error.value = null
-  try {
-    await api('/api/margens/marketplace/refresh', { method: 'POST' })
-  } catch (e: any) {
-    error.value = apiError(e)
-    loading.value = false
-    return
-  }
-  await load()
-}
-
 // reload on filter change (debounced search)
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 watch(search, () => {
@@ -135,6 +126,10 @@ watch(search, () => {
   }, 350)
 })
 watch(platform, () => {
+  page.value = 1
+  load()
+})
+watch(statusFilter, () => {
   page.value = 1
   load()
 })
@@ -261,7 +256,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
   <div class="space-y-5">
     <PageHeader title="Margem" description="Margem por pedido — conciliação marketplace (últimos 30 dias).">
       <template #actions>
-        <Button size="sm" variant="outline" :disabled="loading" @click="refreshAndLoad">
+        <Button size="sm" variant="outline" :disabled="loading" @click="load">
           <RefreshCw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
           atualizar
         </Button>
@@ -288,6 +283,14 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       >
         <option value="all">todas plataformas</option>
         <option v-for="p in platforms" :key="p" :value="p">{{ p }}</option>
+      </select>
+      <select
+        v-model="statusFilter"
+        class="text-sm rounded-md border bg-background px-2 py-1.5"
+      >
+        <option v-for="s in STATUS_FILTER_OPTIONS" :key="s" :value="s">
+          {{ s === 'all' ? 'todos status' : s }}
+        </option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ rangeStart }}–{{ rangeEnd }} de {{ total }}

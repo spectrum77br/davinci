@@ -56,14 +56,16 @@ async def list_margens(
 async def list_margens_marketplace(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("margem", "view"))],
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     search: str | None = Query(None),
     platform: str | None = Query(None),
+    status: str | None = Query(None),
 ) -> MargensMarketplacePage:
-    """Per-item marketplace conciliation rows (paginated, 30d window).
+    """Per-item marketplace conciliation rows (paginated, 20d window).
 
-    Filters apply server-side over the full view; pagination is offset/limit.
+    Queries the live view (not the MV) so each page request returns
+    fresh data. Filters apply server-side; pagination is offset/limit.
     `platforms` is the distinct list available — used by the UI dropdown.
     """
     where = ["TRUE"]
@@ -71,6 +73,14 @@ async def list_margens_marketplace(
     if platform:
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
         params["platform"] = platform
+    if status:
+        if status == "Pendente":
+            # Treat NULL as Pendente — that's what the UI dropdown defaults to
+            # for an order that was never approved/rejected.
+            where.append("(v.bling_status_margem IS NULL OR v.bling_status_margem = 'Pendente')")
+        elif status in ("Aprovado", "Reprovado"):
+            where.append("v.bling_status_margem = :status")
+            params["status"] = status
     if search:
         where.append(
             "(v.pedido_bling ILIKE :q OR v.pedido_marketplace ILIKE :q "
@@ -81,11 +91,11 @@ async def list_margens_marketplace(
     where_sql = " AND ".join(where)
 
     count_sql = text(
-        f"SELECT count(*) FROM davinci.mv_conciliacao_margens_marketplace v WHERE {where_sql}"  # noqa: S608
+        f"SELECT count(*) FROM davinci.vw_conciliacao_margens_marketplace v WHERE {where_sql}"  # noqa: S608
     )
     platforms_sql = text(
         "SELECT DISTINCT COALESCE(plataforma_bling, plataforma_financeiro) AS p "
-        "FROM davinci.mv_conciliacao_margens_marketplace "
+        "FROM davinci.vw_conciliacao_margens_marketplace "
         "WHERE COALESCE(plataforma_bling, plataforma_financeiro) IS NOT NULL "
         "ORDER BY 1"
     )
@@ -122,7 +132,7 @@ async def list_margens_marketplace(
             v.pricing_leaf_segment_name,
             v.bling_listing_type,
             bo.observacao
-        FROM davinci.mv_conciliacao_margens_marketplace v
+        FROM davinci.vw_conciliacao_margens_marketplace v
         LEFT JOIN LATERAL (
             SELECT bo.observacao
             FROM davinci.bling_orders bo
@@ -175,44 +185,7 @@ async def patch_marketplace_observacao(
         pedido_bling=pedido_bling,
         rows=result.rowcount,
     )
-    await _refresh_mv_silent(session)
     return {"pedido_bling": pedido_bling, "observacao": next_value, "rows": result.rowcount}
-
-
-async def _refresh_mv_silent(session: AsyncSession) -> None:
-    """Best-effort refresh of mv_conciliacao_margens_marketplace.
-
-    Called as a side-effect of PATCHes (status/observacao) so the user
-    sees their change reflected on next page load without waiting for
-    a cron. Swallows errors — refresh failure should never block the
-    underlying mutation.
-    """
-    try:
-        await session.execute(
-            text(
-                "REFRESH MATERIALIZED VIEW CONCURRENTLY "
-                "davinci.mv_conciliacao_margens_marketplace"
-            )
-        )
-        await session.commit()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("mv_conciliacao_margens_marketplace_refresh_failed", error=str(e)[:200])
-
-
-@router.post("/marketplace/refresh")
-async def refresh_marketplace_mv(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("margem", "view"))],
-) -> dict:
-    """Trigger MV refresh on-demand (UI 'atualizar' button)."""
-    await session.execute(
-        text(
-            "REFRESH MATERIALIZED VIEW CONCURRENTLY "
-            "davinci.mv_conciliacao_margens_marketplace"
-        )
-    )
-    await session.commit()
-    return {"refreshed": True}
 
 
 class MarketplaceStatusPatch(BaseModel):
@@ -254,7 +227,6 @@ async def patch_marketplace_status(
         )
 
     await session.commit()
-    await _refresh_mv_silent(session)
     logger.info(
         "marketplace_status_patched",
         pedido_bling=pedido_bling,
