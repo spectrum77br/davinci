@@ -37,6 +37,15 @@ class PricingAccountBase(BaseModel):
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int = 0
+    # Slot ↔ segment binding. Each slot{N}_segment_id pins the segment that
+    # margin{N}/shipping{N} apply to (e.g. slot1=Acessórios, slot2=Diversos).
+    # NULL means "not assigned"; UI falls back to TYPE_HEADERS ordering when
+    # rendering. Mirrors the columns added by migration 0048.
+    slot1_segment_id: UUID | None = None
+    slot2_segment_id: UUID | None = None
+    slot3_segment_id: UUID | None = None
+    slot4_segment_id: UUID | None = None
+    slot5_segment_id: UUID | None = None
 
 
 class PricingAccountCreate(PricingAccountBase):
@@ -73,6 +82,11 @@ class PricingAccountPatch(BaseModel):
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int | None = None
+    slot1_segment_id: UUID | None = None
+    slot2_segment_id: UUID | None = None
+    slot3_segment_id: UUID | None = None
+    slot4_segment_id: UUID | None = None
+    slot5_segment_id: UUID | None = None
 
 
 class PricingAccountOut(PricingAccountBase):
@@ -82,6 +96,12 @@ class PricingAccountOut(PricingAccountBase):
     has_password: bool = False
     created_at: datetime
     updated_at: datetime
+    # Resolved segment names for each slot (read-only; router fills these).
+    slot1_segment_name: str | None = None
+    slot2_segment_name: str | None = None
+    slot3_segment_name: str | None = None
+    slot4_segment_name: str | None = None
+    slot5_segment_name: str | None = None
 
 
 # --------------------------------------------------------------- pricing products

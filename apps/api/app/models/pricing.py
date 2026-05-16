@@ -127,7 +127,12 @@ class PricingAccount(Base, TimestampMixin):
 class PricingProduct(Base, TimestampMixin):
     __tablename__ = "pricing_products"
     __table_args__ = (
-        UniqueConstraint("user_id", "sku", name="uq_pricing_products_user_sku"),
+        # Same SKU can repeat across departments (mala vs celular vs catalogo).
+        # The original UQ was (user_id, sku); migration 0049 widened it to
+        # include `department` so segments can fork pricing for the same code.
+        UniqueConstraint(
+            "user_id", "sku", "department", name="uq_pricing_products_user_sku_dept"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)

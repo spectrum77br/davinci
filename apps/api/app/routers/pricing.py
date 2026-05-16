@@ -163,12 +163,27 @@ async def _segment_index(
     return roots_by_id, leaves_by_id, root_id_by_slug
 
 
+async def _segment_names_by_id(session: AsyncSession) -> dict[UUID, str]:
+    """All segment ids → name, used to resolve slot{N}_segment_id labels for
+    PricingAccountOut. Cached per-request by the caller (we expect this to
+    be called once per request alongside `_segment_index`)."""
+    rows = (await session.execute(select(Segment.id, Segment.name))).all()
+    return {sid: name for sid, name in rows}
+
+
 def _account_out(
-    row: PricingAccount, roots_by_id: dict[UUID, str]
+    row: PricingAccount,
+    roots_by_id: dict[UUID, str],
+    names_by_id: dict[UUID, str] | None = None,
 ) -> PricingAccountOut:
     out = PricingAccountOut.model_validate(row)
     out.has_password = bool(row.password_enc)
     out.department = roots_by_id.get(row.segment_id)
+    if names_by_id is not None:
+        for n in (1, 2, 3, 4, 5):
+            sid = getattr(row, f"slot{n}_segment_id", None)
+            if sid is not None:
+                setattr(out, f"slot{n}_segment_name", names_by_id.get(sid))
     return out
 
 
@@ -206,7 +221,8 @@ async def list_accounts(
         stmt = stmt.where(PricingAccount.platform == _coerce_platform(platform))
     stmt = stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
     rows = (await session.execute(stmt)).scalars().all()
-    return [_account_out(r, roots_by_id) for r in rows]
+    names_by_id = await _segment_names_by_id(session)
+    return [_account_out(r, roots_by_id, names_by_id) for r in rows]
 
 
 @router.post(
@@ -237,7 +253,8 @@ async def create_account(
     await session.commit()
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
-    return _account_out(row, roots_by_id)
+    names_by_id = await _segment_names_by_id(session)
+    return _account_out(row, roots_by_id, names_by_id)
 
 
 @router.patch("/accounts/{account_id}", response_model=PricingAccountOut)
@@ -281,7 +298,8 @@ async def patch_account(
     await session.commit()
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
-    return _account_out(row, roots_by_id)
+    names_by_id = await _segment_names_by_id(session)
+    return _account_out(row, roots_by_id, names_by_id)
 
 
 @router.delete(
@@ -809,8 +827,9 @@ async def get_grid(
             )
 
     roots_by_id, _, _ = await _segment_index(session)
+    names_by_id = await _segment_names_by_id(session)
     return PricingGridOut(
-        accounts=[_account_out(a, roots_by_id) for a in accounts],
+        accounts=[_account_out(a, roots_by_id, names_by_id) for a in accounts],
         products=[_product_out(p, leaves_by_id) for p in products],
         cells=cells,
     )
@@ -1705,7 +1724,8 @@ async def set_account_department(
     await session.commit()
     await session.refresh(row)
     roots_by_id, _, _ = await _segment_index(session)
-    return _account_out(row, roots_by_id)
+    names_by_id = await _segment_names_by_id(session)
+    return _account_out(row, roots_by_id, names_by_id)
 
 
 # =============================================================================
@@ -2001,8 +2021,9 @@ async def set_store_info_department(
         )
     ).scalar_one_or_none()
     roots_by_id, _, _ = await _segment_index(session)
+    names_by_id = await _segment_names_by_id(session)
     if existing is not None:
-        return _account_out(existing, roots_by_id)
+        return _account_out(existing, roots_by_id, names_by_id)
 
     dept_slug = roots_by_id.get(sid, body.department)
     name = info.account_name or f"{info.platform} — {dept_slug}"
@@ -2016,7 +2037,7 @@ async def set_store_info_department(
     session.add(row)
     await session.commit()
     await session.refresh(row)
-    return _account_out(row, roots_by_id)
+    return _account_out(row, roots_by_id, names_by_id)
 
 
 @router.delete(

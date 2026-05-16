@@ -76,9 +76,15 @@ type SegmentRow = {
   active: boolean
 }
 
+// Raw segments list — kept alongside TYPE_HEADERS because the slot editor
+// popover needs to resolve `account.segment_id` (department root) to its
+// ordered children for the per-slot dropdowns.
+const allSegments = ref<SegmentRow[]>([])
+
 async function loadSegments() {
   try {
     const rows = await api<SegmentRow[]>('/api/segments')
+    allSegments.value = rows
     const roots = rows
       .filter((r) => r.parent_id === null && r.active)
       .sort((a, b) => a.sort_order - b.sort_order)
@@ -103,6 +109,57 @@ async function loadSegments() {
     TYPE_HEADERS.value = next
   } catch {
     /* keep fallback */
+  }
+}
+
+// ============================================================ slot editor
+// Compact per-account popover that lets the user pick which segment
+// slot{1..5}_segment_id points to. Default mapping mirrors the department
+// children's sort_order; this popover only matters when the user wants to
+// remap (e.g. swap Acessórios/Diversos for one specific account).
+const slotPopoverAccountId = ref<string | null>(null)
+const slotPopoverValues = ref<Array<string | null>>([null, null, null, null, null])
+const slotPopoverSaving = ref(false)
+const slotPopoverError = ref<string | null>(null)
+
+function openSlotPopover(acc: Account) {
+  slotPopoverAccountId.value = acc.id
+  slotPopoverValues.value = [
+    acc.slot1_segment_id,
+    acc.slot2_segment_id,
+    acc.slot3_segment_id,
+    acc.slot4_segment_id,
+    acc.slot5_segment_id,
+  ]
+  slotPopoverError.value = null
+}
+function closeSlotPopover() {
+  slotPopoverAccountId.value = null
+  slotPopoverError.value = null
+}
+function segmentChildrenFor(acc: Account): SegmentRow[] {
+  if (!acc.segment_id) return []
+  return allSegments.value
+    .filter((s) => s.parent_id === acc.segment_id && s.active)
+    .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))
+}
+async function saveSlotPopover(accId: string) {
+  slotPopoverSaving.value = true
+  slotPopoverError.value = null
+  try {
+    const body: Record<string, string | null> = {}
+    for (let i = 0; i < 5; i++) body[`slot${i + 1}_segment_id`] = slotPopoverValues.value[i]
+    const updated = await api<Account>(`/api/pricing/accounts/${accId}`, {
+      method: 'PATCH',
+      body,
+    })
+    const idx = accounts.value.findIndex((a) => a.id === accId)
+    if (idx >= 0) accounts.value[idx] = updated
+    closeSlotPopover()
+  } catch (e: any) {
+    slotPopoverError.value = e?.data?.detail?.code ?? 'save_failed'
+  } finally {
+    slotPopoverSaving.value = false
   }
 }
 
@@ -150,9 +207,23 @@ type Account = {
   observation3: string | null
   has_password: boolean
   integration_id: string | null
+  segment_id: string | null
   sort_order: number
   created_at: string
   updated_at: string
+  // Slot ↔ segment binding. Each slot{N}_segment_id pins which segment the
+  // margin{N}/shipping{N} pair applies to. The router resolves and returns
+  // the segment name alongside for read-only display.
+  slot1_segment_id: string | null
+  slot2_segment_id: string | null
+  slot3_segment_id: string | null
+  slot4_segment_id: string | null
+  slot5_segment_id: string | null
+  slot1_segment_name: string | null
+  slot2_segment_name: string | null
+  slot3_segment_name: string | null
+  slot4_segment_name: string | null
+  slot5_segment_name: string | null
 }
 
 const accounts = ref<Account[]>([])
@@ -1786,12 +1857,11 @@ watch(department, async () => {
               <tr v-for="acc in group.rows" :key="acc.id" class="hover:bg-accent/30">
                 <!-- name -->
               <td
-                class="border border-border px-2 py-1.5 text-xs cursor-pointer text-left"
+                class="border border-border px-2 py-1.5 text-xs text-left relative"
                 :class="{
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'name'),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'name'),
                 }"
-                @click="!isEditing(acc.id, 'name') && startEditAccount(acc, 'name')"
               >
                 <input
                   v-if="isEditing(acc.id, 'name')"
@@ -1803,7 +1873,60 @@ watch(department, async () => {
                   @keydown.enter.prevent="commitEditAccount"
                   @keydown.escape.prevent="cancelEdit"
                 />
-                <span v-else class="font-medium">{{ acc.name }}<Check v-if="isFlashed(acc.id, 'name')" class="inline h-3 w-3 ml-1 text-emerald-600" /></span>
+                <div v-else class="flex items-center gap-1 group/acc">
+                  <span
+                    class="font-medium cursor-pointer flex-1 truncate"
+                    @click="startEditAccount(acc, 'name')"
+                  >{{ acc.name }}<Check v-if="isFlashed(acc.id, 'name')" class="inline h-3 w-3 ml-1 text-emerald-600" /></span>
+                  <button
+                    v-if="canEditContas"
+                    class="opacity-0 group-hover/acc:opacity-100 text-muted-foreground hover:text-foreground p-0.5 rounded"
+                    title="Vincular segmento aos slots de margem/frete"
+                    @click.stop="openSlotPopover(acc)"
+                  >
+                    <Tags class="h-3 w-3" />
+                  </button>
+                </div>
+                <!-- slot↔segment editor popover (per-account) -->
+                <div
+                  v-if="slotPopoverAccountId === acc.id"
+                  class="absolute left-0 top-full mt-1 z-30 w-72 rounded-md border bg-background shadow-lg p-3 text-left"
+                  @click.stop
+                >
+                  <div class="text-xs font-semibold mb-2">
+                    Slots desta conta · {{ DEPARTMENTS.find(d => d.value === acc.department)?.label }}
+                  </div>
+                  <div class="space-y-1.5">
+                    <div v-for="i in 5" :key="i" class="flex items-center gap-2">
+                      <span class="text-[10px] text-muted-foreground w-12 shrink-0">
+                        slot{{ i }}<br/>
+                        <span class="opacity-70">m{{ i }}/f{{ i }}</span>
+                      </span>
+                      <select
+                        v-model="slotPopoverValues[i - 1]"
+                        class="flex-1 text-xs border rounded px-1.5 py-1 bg-background"
+                      >
+                        <option :value="null">— sem vínculo —</option>
+                        <option
+                          v-for="seg in segmentChildrenFor(acc)"
+                          :key="seg.id"
+                          :value="seg.id"
+                        >{{ seg.name }}</option>
+                      </select>
+                    </div>
+                  </div>
+                  <p v-if="slotPopoverError" class="text-[10px] text-red-600 mt-1.5">{{ slotPopoverError }}</p>
+                  <div class="flex justify-end gap-1 pt-2 mt-2 border-t">
+                    <button class="text-xs px-2 py-1 rounded hover:bg-muted" @click="closeSlotPopover">Cancelar</button>
+                    <button
+                      class="text-xs px-2 py-1 rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                      :disabled="slotPopoverSaving"
+                      @click="saveSlotPopover(acc.id)"
+                    >
+                      {{ slotPopoverSaving ? 'salvando…' : 'salvar' }}
+                    </button>
+                  </div>
+                </div>
               </td>
               <!-- platform -->
               <td
