@@ -12,8 +12,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision: str = "0047_vw_conciliacao_margens_frete_projetado"
-down_revision: str | None = "0046_marketplace_freight_reconciliation"
+revision: str = "0050_vw_conciliacao_margens_frete_projetado"
+down_revision: str | None = "0049_pricing_products_uq_user_sku_dept"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -23,8 +23,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision: str = "0049_vw_conciliacao_margens_fuzzy_sku"
-down_revision: str | None = "0048_bling_orders_observacao"
+revision: str = "0052_vw_conciliacao_margens_fuzzy_sku"
+down_revision: str | None = "0051_bling_orders_observacao"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -44,8 +44,8 @@ def _load_module(filename: str, modname: str):
 
 def _previous_view_sql() -> str:
     return str(_load_module(
-        "0047_vw_conciliacao_margens_frete_projetado.py",
-        "_davinci_0047_view",
+        "0050_vw_conciliacao_margens_frete_projetado.py",
+        "_davinci_0050_view",
     )._view_sql())
 
 
