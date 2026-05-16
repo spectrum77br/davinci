@@ -257,29 +257,15 @@ class SyncOrchestrator:
                     integration = await self._get_integration(link.integration_id)
                     client = await self._client(integration)
                     qty = product.stock
-                    # SSH delta #2 — verify-before-send. If the link's last
-                    # successful push already wrote `qty`, skip the
-                    # marketplace round-trip entirely. We trust link.stock
-                    # because it's the value our last push acknowledged;
-                    # external changes get caught by the discrepancy
-                    # checks (ml_discrepancy_check / shopee_discrepancy_check)
-                    # rather than every sync_all pass.
-                    if (
-                        link.stock is not None
-                        and link.stock == qty
-                        and link.last_sync_status == LinkSyncStatus.OK
-                    ):
-                        result = SyncResult(
-                            status=SyncStatus.SKIPPED,
-                            qty_before=qty,
-                            qty_after=qty,
-                            error_code="verified_skip",
-                            error_detail="link.stock already matches",
-                        )
-                    else:
-                        result = await client.update_stock(  # type: ignore[union-attr]
-                            link, qty, bling_store_id=bling_store_id
-                        )
+                    # Always push to the marketplace — SSH parity. The earlier
+                    # "verify-before-send" optimization (skip when link.stock
+                    # equals qty + last_sync_status=OK) was removed because
+                    # external edits to the marketplace can drift link.stock
+                    # without us noticing, and operators expect "sincronizar"
+                    # to actually call the API every time.
+                    result = await client.update_stock(  # type: ignore[union-attr]
+                        link, qty, bling_store_id=bling_store_id
+                    )
                 except HTTPException as e:
                     code = "platform_not_implemented" if e.status_code == 501 else "http_error"
                     result = SyncResult(
