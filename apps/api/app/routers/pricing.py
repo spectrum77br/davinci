@@ -493,49 +493,98 @@ async def toggle_catalog(
     row.in_catalog = not row.in_catalog
     await session.flush()
 
-    # SSH parity: clicking the star also mirrors the row into the "catalogo"
-    # department so it shows up on the Catálogo ML tab. Toggling it off
-    # removes the mirror. The mirror itself carries `in_catalog=False` to
-    # avoid recursion if someone toggles the catalog copy.
-    catalog_copy = (
+    # SSH parity: clicking the star mirrors the row into the "catalogo"
+    # department so it surfaces on the Catálogo ML tab. The mirror's
+    # `segment_id` is mapped from the source segment by sort_order — the
+    # catalogo subtree has the same five slots (Acessórios/Diversos/…) in
+    # the same positions, so Robusto→Robusto, Apple→Apple, etc.
+    catalogo_root_id = (
         await session.execute(
-            select(PricingProduct).where(
-                and_(
-                    user_scope(PricingProduct, user),
-                    PricingProduct.department == Department.CATALOGO,
-                    PricingProduct.sku == row.sku,
-                )
+            select(Segment.id).where(
+                and_(Segment.parent_id.is_(None), Segment.slug == "catalogo")
             )
         )
     ).scalar_one_or_none()
 
-    if row.in_catalog:
-        if catalog_copy is None and row.department != Department.CATALOGO:
-            session.add(
-                PricingProduct(
-                    user_id=row.user_id,
-                    product_id=row.product_id,
-                    sku=row.sku,
-                    name=row.name,
-                    bling_cost_price=row.bling_cost_price,
-                    cost_kit1=row.cost_kit1,
-                    cost_kit2=row.cost_kit2,
-                    cost_kit3=row.cost_kit3,
-                    cost_kit4=row.cost_kit4,
-                    description=row.description,
-                    model=row.model,
-                    ean=row.ean,
-                    is_active=row.is_active,
-                    in_catalog=False,
-                    department=Department.CATALOGO,
-                    segment_id=row.segment_id,
+    if catalogo_root_id is not None:
+        catalog_children_subq = select(Segment.id).where(
+            Segment.parent_id == catalogo_root_id
+        )
+        catalog_copy = (
+            await session.execute(
+                select(PricingProduct).where(
+                    and_(
+                        user_scope(PricingProduct, user),
+                        PricingProduct.segment_id.in_(catalog_children_subq),
+                        PricingProduct.sku == row.sku,
+                    )
                 )
             )
-    else:
-        # Skip the delete if the row being toggled IS the catalog mirror —
-        # otherwise we'd delete the user-facing row.
-        if catalog_copy is not None and catalog_copy.id != row.id:
-            await session.delete(catalog_copy)
+        ).scalar_one_or_none()
+
+        if row.in_catalog:
+            # Skip the mirror when the row being toggled IS the catalog
+            # copy — `existing` would return the same row and we'd add a
+            # duplicate (UQ would error anyway).
+            row_is_in_catalog = row.segment_id in {
+                sid for sid in (
+                    await session.execute(catalog_children_subq)
+                ).scalars().all()
+            }
+            if catalog_copy is None and not row_is_in_catalog:
+                # Resolve target catalogo segment by matching sort_order.
+                source_segment = await session.get(Segment, row.segment_id)
+                catalog_segment_id: UUID | None = None
+                if source_segment is not None:
+                    catalog_segment_id = (
+                        await session.execute(
+                            select(Segment.id).where(
+                                and_(
+                                    Segment.parent_id == catalogo_root_id,
+                                    Segment.sort_order
+                                    == source_segment.sort_order,
+                                )
+                            )
+                        )
+                    ).scalar_one_or_none()
+                # Fallback: Diversos (sort_order=1) if no equivalent slot.
+                if catalog_segment_id is None:
+                    catalog_segment_id = (
+                        await session.execute(
+                            select(Segment.id).where(
+                                and_(
+                                    Segment.parent_id == catalogo_root_id,
+                                    Segment.sort_order == 1,
+                                )
+                            )
+                        )
+                    ).scalar_one_or_none()
+                if catalog_segment_id is not None:
+                    session.add(
+                        PricingProduct(
+                            user_id=row.user_id,
+                            product_id=row.product_id,
+                            sku=row.sku,
+                            name=row.name,
+                            bling_cost_price=row.bling_cost_price,
+                            cost_kit1=row.cost_kit1,
+                            cost_kit2=row.cost_kit2,
+                            cost_kit3=row.cost_kit3,
+                            cost_kit4=row.cost_kit4,
+                            description=row.description,
+                            model=row.model,
+                            ean=row.ean,
+                            is_active=row.is_active,
+                            in_catalog=False,
+                            department=Department.CATALOGO,
+                            segment_id=catalog_segment_id,
+                        )
+                    )
+        else:
+            # Toggle off: drop the mirror, but never self-delete if the
+            # row being toggled IS the catalog mirror itself.
+            if catalog_copy is not None and catalog_copy.id != row.id:
+                await session.delete(catalog_copy)
 
     await session.commit()
     await session.refresh(row)
