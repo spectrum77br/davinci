@@ -314,6 +314,7 @@ class SyncOrchestrator:
                 "product_id": str(product.id),
                 "sku": product.sku,
                 "platform": link.platform.value,
+                "integration_id": str(link.integration_id),
                 "external_id": link.external_id,
                 "action": action.value,
                 "status": result.status.value,

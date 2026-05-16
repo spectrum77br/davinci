@@ -110,6 +110,25 @@ const selected = ref<Set<string>>(new Set())
 const loading = ref(false)
 const error = ref<string | null>(null)
 
+type Toast = {
+  id: number
+  kind: 'success' | 'error' | 'warning'
+  title: string
+  lines: string[]
+}
+const toasts = ref<Toast[]>([])
+let _toastId = 0
+function pushToast(t: Omit<Toast, 'id'>, ttl = 5000) {
+  const id = ++_toastId
+  toasts.value = [...toasts.value, { id, ...t }]
+  window.setTimeout(() => {
+    toasts.value = toasts.value.filter((x) => x.id !== id)
+  }, ttl)
+}
+function dismissToast(id: number) {
+  toasts.value = toasts.value.filter((x) => x.id !== id)
+}
+
 const showImport = ref(false)
 const showAutoLink = ref(false)
 const showSyncAll = ref(false)
@@ -505,15 +524,62 @@ async function syncProduct(id: string, integrationIds?: string[]) {
   syncingProduct.value.add(id)
   syncingProduct.value = new Set(syncingProduct.value)
   try {
-    await api(`/api/sync/product/${id}`, {
+    const job = await api<Job>(`/api/sync/product/${id}`, {
       method: 'POST',
       body: integrationIds && integrationIds.length > 0
         ? { integration_ids: integrationIds }
         : {},
     })
+    // Re-fetch products so the table reflects new marketplace stock + last_sync_at.
     await refreshAll()
+    // Emit toasts: one per link (sku · platform · account · qty_before -> qty_after).
+    // We resolve integration name via the local map populated by loadIntegrations().
+    const product = items.value.find((p) => p.id === id)
+    const sku = product?.sku || id.slice(0, 8)
+    const details = (job?.details || []) as Array<Record<string, any>>
+    if (details.length === 0) {
+      pushToast({
+        kind: 'warning',
+        title: `⚠ ${sku}`,
+        lines: ['nenhum link sincronizado'],
+      })
+    } else {
+      const okLines: string[] = []
+      const errLines: string[] = []
+      for (const d of details) {
+        const acc = d.integration_id
+          ? integrationById.value[d.integration_id]?.name || d.platform
+          : d.platform
+        const plat = String(d.platform || '').toUpperCase()
+        if (d.status === 'ok') {
+          okLines.push(
+            `${plat} ${acc}: ${d.qty_before ?? '—'} → ${d.qty_after ?? '—'} ✓`,
+          )
+        } else if (d.status === 'skipped') {
+          okLines.push(`${plat} ${acc}: pulado (estoque igual)`)
+        } else {
+          const err = d.error_code
+            ? `${d.error_code}${d.error_detail ? ': ' + d.error_detail : ''}`
+            : 'erro'
+          errLines.push(`${plat} ${acc}: ${err}`)
+        }
+      }
+      if (errLines.length === 0) {
+        pushToast({ kind: 'success', title: `✓ ${sku} sincronizado`, lines: okLines })
+      } else if (okLines.length === 0) {
+        pushToast({ kind: 'error', title: `✗ ${sku}`, lines: errLines })
+      } else {
+        pushToast({
+          kind: 'warning',
+          title: `${sku} sincronizado parcialmente`,
+          lines: [...okLines, ...errLines],
+        })
+      }
+    }
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    const msg = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = msg
+    pushToast({ kind: 'error', title: '✗ Erro ao sincronizar', lines: [msg] })
   } finally {
     syncingProduct.value.delete(id)
     syncingProduct.value = new Set(syncingProduct.value)
@@ -1260,6 +1326,63 @@ onUnmounted(() => {
       <span class="text-xs text-muted-foreground">
         mostrando {{ total === 0 ? 0 : (page - 1) * pageSize + 1 }}-{{ Math.min(page * pageSize, total) }} de {{ total }} produtos
       </span>
+    </div>
+
+    <!-- Toast stack — top-right, auto-dismisses after 5s. Sits above modals
+         (z-[60]) so per-link sync results stay visible even mid-dialog. -->
+    <div class="fixed top-4 right-4 z-[60] flex flex-col gap-2 w-[min(420px,calc(100vw-2rem))]">
+      <TransitionGroup
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0 translate-x-4"
+        enter-to-class="opacity-100 translate-x-0"
+        leave-active-class="transition duration-100 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-for="t in toasts"
+          :key="t.id"
+          class="rounded-lg border-2 shadow-lg px-3 py-2 text-sm bg-background"
+          :class="
+            t.kind === 'success'
+              ? 'border-emerald-400 bg-emerald-50'
+              : t.kind === 'error'
+              ? 'border-red-400 bg-red-50'
+              : 'border-amber-400 bg-amber-50'
+          "
+        >
+          <div class="flex items-start justify-between gap-2">
+            <div class="flex-1 min-w-0">
+              <div
+                class="font-semibold"
+                :class="
+                  t.kind === 'success'
+                    ? 'text-emerald-800'
+                    : t.kind === 'error'
+                    ? 'text-red-800'
+                    : 'text-amber-800'
+                "
+              >{{ t.title }}</div>
+              <ul class="mt-0.5 space-y-0.5 font-mono text-xs">
+                <li
+                  v-for="(ln, i) in t.lines"
+                  :key="i"
+                  :class="
+                    t.kind === 'success'
+                      ? 'text-emerald-700'
+                      : t.kind === 'error'
+                      ? 'text-red-700'
+                      : 'text-amber-700'
+                  "
+                >{{ ln }}</li>
+              </ul>
+            </div>
+            <button class="text-muted-foreground hover:text-foreground" @click="dismissToast(t.id)">
+              <X class="size-3.5" />
+            </button>
+          </div>
+        </div>
+      </TransitionGroup>
     </div>
 
     <!-- Floating multi-select action bar (visible whenever there's at least
