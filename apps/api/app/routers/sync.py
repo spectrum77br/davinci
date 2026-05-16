@@ -233,14 +233,14 @@ async def sync_product(
     session.add(job)
     await session.flush()
 
-    async with try_user_sync_lock(session, user.id) as acquired:
-        if not acquired:
-            raise HTTPException(
-                409,
-                detail={"code": "sync_already_running"},
-            )
-        orch = SyncOrchestrator(session, user_id=user.id, job=job)
-        await orch.run([product], only_link_ids=only_link_ids)
+    # Individual sync intentionally bypasses the per-user advisory lock that
+    # `sync_all` uses: this endpoint runs synchronously, is scoped to one
+    # product, and the user expects to be able to click sync on several
+    # products without seeing `sync_already_running`. The orchestrator's
+    # per-link writes are still safe under concurrent runs — the worst case
+    # is two pushes of the same value to the same marketplace.
+    orch = SyncOrchestrator(session, user_id=user.id, job=job)
+    await orch.run([product], only_link_ids=only_link_ids)
 
     await session.refresh(job)
     return JobOut.model_validate(job, from_attributes=True)

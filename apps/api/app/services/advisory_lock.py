@@ -40,25 +40,27 @@ def _user_lock_key(user_id: UUID) -> int:
 
 @asynccontextmanager
 async def try_user_sync_lock(session: AsyncSession, user_id: UUID):
-    """Try to acquire a non-blocking advisory lock for `user_id`'s sync run.
+    """Try to acquire a non-blocking *transactional* advisory lock for the
+    user's sync run.
 
-    Yields True if acquired (caller proceeds and releases on exit), False if
-    another process already holds it (caller should 409).
+    Yields True if acquired (caller proceeds), False if another process
+    holds it (caller should 409).
+
+    Uses `pg_try_advisory_xact_lock` rather than the session-level variant
+    so the lock is released automatically when the surrounding transaction
+    commits OR rolls back. The session-level lock has a subtle leak: if the
+    transaction aborts before `pg_advisory_unlock` runs, the unlock call
+    itself fails (`current transaction is aborted`) and the lock stays
+    pinned to the pooled connection — every subsequent sync sees
+    `sync_already_running` until the connection is recycled.
     """
     key = _user_lock_key(user_id)
     row = await session.execute(
-        text("SELECT pg_try_advisory_lock(:ns, :k)"),
+        text("SELECT pg_try_advisory_xact_lock(:ns, :k)"),
         {"ns": SYNC_NAMESPACE, "k": key},
     )
     acquired: bool = bool(row.scalar())
-    try:
-        yield acquired
-    finally:
-        if acquired:
-            await session.execute(
-                text("SELECT pg_advisory_unlock(:ns, :k)"),
-                {"ns": SYNC_NAMESPACE, "k": key},
-            )
+    yield acquired
 
 
 async def release_stale_sync_locks(
