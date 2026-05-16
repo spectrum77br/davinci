@@ -232,15 +232,17 @@ async def _persist_cell_status(
     """Write the post-push cell_status to pricing_overrides.
 
     Skip writes when the cell carries a user-explicit state (manual / locked /
-    NA / SV / disabled) — those win over auto/error/no_link from a push.
-    Persist on top of the auto/error/no_link triad otherwise.
+    NA / disabled) — those win over auto/error/no_link from a push.
+
+    SV and NO_LINK are *transient* "no product_link found" markers — push
+    success clears them automatically so a cell that recovered a link
+    (e.g. after auto-link) stops showing SV without manual intervention.
     """
     USER_EXPLICIT = {
         CellStatus.MANUAL,
         CellStatus.LOCKED,
         CellStatus.DISABLED,
         CellStatus.NA,
-        CellStatus.SV,
     }
     if existing_override is not None and existing_override.cell_status in USER_EXPLICIT:
         return
@@ -336,13 +338,15 @@ async def push_one(
         )
     ).scalar_one_or_none()
 
-    # SSH spec §11.7: NA/SV BLOCK push. The user marked the cell as "Não
-    # Anunciar" or "Sem Vínculo" — refuse before we even resolve the price.
-    if override is not None and override.cell_status in (CellStatus.NA, CellStatus.SV):
+    # NA still BLOCKS push (user said "não anunciar"). SV is now transient —
+    # we still let the push proceed; if no link exists the resolver below
+    # will return no_link and the override updates accordingly. If a link
+    # exists (auto-link recreated it), push succeeds and clears SV.
+    if override is not None and override.cell_status == CellStatus.NA:
         return PushOutcome(
             ok=False,
-            code=f"cell_{override.cell_status.value.lower()}",
-            detail=f"cell_status={override.cell_status.value} blocks push",
+            code="cell_na",
+            detail="cell_status=NA blocks push",
             price=None,
         )
 
