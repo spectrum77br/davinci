@@ -2468,11 +2468,11 @@ watch(department, async () => {
         @keydown="handleGridKeyDown"
       >
         <table class="text-xs border-collapse">
-          <thead class="bg-muted/50 sticky top-0 z-20">
+          <thead class="bg-background sticky top-0 z-20">
             <!-- Row 1: Platform groups -->
             <tr>
               <th
-                class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30"
+                class="sticky left-0 bg-background px-2 py-1 text-left z-30"
                 :colspan="department === 'celular' ? 8 : 5"
               />
               <th
@@ -2485,14 +2485,14 @@ watch(department, async () => {
                 {{ group.label }}
               </th>
             </tr>
-            <!-- Row 2: Account names + obs -->
+            <!-- Row 2: Account names + obs (left spacer is intentionally
+                 empty — "Produto" lives in the row 3 column header to avoid
+                 the duplicate label readers were seeing) -->
             <tr>
               <th
-                class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30 align-bottom"
+                class="sticky left-0 bg-background px-2 py-1 text-left z-30 align-bottom"
                 :colspan="department === 'celular' ? 8 : 5"
-              >
-                Produto
-              </th>
+              />
               <th
                 v-for="acc in gridAccounts"
                 :key="`n-${acc.id}`"
@@ -2529,18 +2529,18 @@ watch(department, async () => {
             </tr>
             <!-- Row 3: Listing type + cost column headers -->
             <tr>
-              <th class="sticky left-0 bg-muted/50 px-2 py-1 text-left z-30 min-w-[200px]">Produto</th>
-              <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-green-700 font-bold z-30 min-w-[56px]" :style="{ left: '200px' }">bling</th>
+              <th class="sticky left-0 bg-background px-2 py-1 text-left z-30 min-w-[200px]">Produto</th>
+              <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-green-700 font-bold z-30 min-w-[56px]" :style="{ left: '200px' }">bling</th>
               <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 min-w-[56px]" :style="{ left: '256px' }">7d</th>
               <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 min-w-[56px]" :style="{ left: '312px' }">30d</th>
               <template v-if="department === 'celular'">
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">kit 1</th>
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '424px' }">kit 2</th>
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '480px' }">kit 3</th>
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '536px' }">kit 4</th>
+                <th class="sticky bg-background px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">kit 1</th>
+                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '424px' }">kit 2</th>
+                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '480px' }">kit 3</th>
+                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '536px' }">kit 4</th>
               </template>
               <template v-else>
-                <th class="sticky bg-muted/50 px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">custo</th>
+                <th class="sticky bg-background px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">custo</th>
               </template>
               <th
                 v-for="acc in gridAccounts"
