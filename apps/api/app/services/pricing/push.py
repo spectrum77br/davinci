@@ -489,6 +489,7 @@ async def push_one(
     # the response is the first successful (or first attempted) link.
     per_link: list[dict] = []
     ok_count = 0
+    skipped_count = 0
     fail_count = 0
     first_item: str | None = None
     first_variation: str | None = None
@@ -505,8 +506,27 @@ async def push_one(
             float(outcome.price),
             product_sku=sku_by_product.get(link.product_id),
         )
+        result = _reclassify_skipped(result)
+        # SSH-style per-link entry (externalId/success/skipped/message) plus
+        # the original status/error_code fields kept for back-compat. UI
+        # surfaces `message` directly and uses `skipped` to bucket
+        # "encerrado/moderação"-like outcomes as warnings, not errors.
+        if result.status == SyncStatus.OK:
+            link_message = f"R${int(outcome.price)}"
+        elif result.error_detail:
+            link_message = result.error_detail[:300]
+        elif result.error_code:
+            link_message = result.error_code
+        else:
+            link_message = result.status.value
         per_link.append(
             {
+                "externalId": link.external_id,
+                "variationId": link.variation_id,
+                "success": result.status == SyncStatus.OK,
+                "skipped": result.status == SyncStatus.SKIPPED,
+                "message": link_message,
+                # back-compat
                 "external_id": link.external_id,
                 "variation_id": link.variation_id,
                 "status": result.status.value,
@@ -520,6 +540,8 @@ async def push_one(
                 # working item_id back to the UI.
                 first_item = link.external_id
                 first_variation = link.variation_id
+        elif result.status == SyncStatus.SKIPPED:
+            skipped_count += 1
         else:
             fail_count += 1
             last_error_code = result.error_code or result.status.value
@@ -533,10 +555,22 @@ async def push_one(
     elif ok_count > 0:
         agg_ok = True
         agg_code = "partial"
-        agg_detail = f"{ok_count}/{len(links)} variations ok; last error: {last_error_code}"
+        agg_detail = (
+            f"{ok_count}/{len(links)} variations ok"
+            + (f"; {skipped_count} pulado(s)" if skipped_count else "")
+            + (f"; last error: {last_error_code}" if last_error_code else "")
+        )
         # Partial: at least one variation got the new price. Treat the cell
         # as good ("auto"); the per-link payload still carries the failures
         # for the UI to surface.
+        post_status = CellStatus.AUTO
+    elif fail_count == 0 and skipped_count > 0:
+        # All links were "encerrado/moderação" — not a hard failure. Keep
+        # the cell as-is (no state change) and surface a warning code so
+        # the UI can show it differently from an error.
+        agg_ok = False
+        agg_code = "all_skipped"
+        agg_detail = f"{skipped_count} anúncio(s) pulado(s) (encerrado/moderação)"
         post_status = CellStatus.AUTO
     else:
         agg_ok = False
@@ -573,6 +607,45 @@ async def push_one(
             response.to_dict(),
         )
     return response
+
+
+# SSH parity: marketplaces sometimes reject price changes because the listing
+# is closed/under moderation/ended. SSH classifies those outcomes as "pulado"
+# (skipped) rather than hard errors so the UI summary doesn't paint the whole
+# push red over inactive listings. We match the same Portuguese substrings the
+# SSH router uses, plus the canonical ML error codes.
+_SKIPPED_HINTS = (
+    "encerrado",
+    "encerrada",
+    "moderação",
+    "moderacao",
+    "under_review",
+    "listing_closed",
+    "item.status.closed",
+    "item_closed",
+)
+
+
+def _reclassify_skipped(result: SyncResult) -> SyncResult:
+    if result.status != SyncStatus.FATAL:
+        return result
+    haystack = " ".join(
+        str(part).lower()
+        for part in (result.error_code, result.error_detail)
+        if part
+    )
+    if not haystack:
+        return result
+    if any(h in haystack for h in _SKIPPED_HINTS):
+        return SyncResult(
+            status=SyncStatus.SKIPPED,
+            error_code=result.error_code or "listing_closed_or_moderation",
+            error_detail=result.error_detail,
+            qty_before=result.qty_before,
+            qty_after=result.qty_after,
+            payload=result.payload,
+        )
+    return result
 
 
 async def _dispatch_price_update_link(
@@ -651,7 +724,8 @@ async def _dispatch_price_update_link(
         logger.error(
             "pricing_push_dispatch_error",
             platform=platform.value,
-            listing_id=str(listing.id),
+            link_id=str(link.id),
+            external_id=link.external_id,
             error=str(e)[:500],
         )
         return SyncResult(
