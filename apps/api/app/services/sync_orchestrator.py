@@ -292,6 +292,16 @@ class SyncOrchestrator:
             if result.error_code or result.error_detail
             else None
         )
+        # Mirror the marketplace-side value into our cached `link.stock` so
+        # subsequent UI reads (which page through /api/products) reflect the
+        # just-pushed quantity instead of the stale pre-sync value. For
+        # bling refresh this is already set inside `_refresh_bling`.
+        if (
+            result.status == SyncStatus.OK
+            and result.qty_after is not None
+            and link.platform != IntegrationPlatform.BLING
+        ):
+            link.stock = int(result.qty_after)
 
         await self._emit_link_alerts(product, link, result)
 
