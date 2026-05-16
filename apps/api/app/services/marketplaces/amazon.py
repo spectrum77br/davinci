@@ -266,8 +266,10 @@ class AmazonClient:
         qty: int,
         *,
         bling_store_id: int | None = None,  # ignored for Amazon
+        force: bool = False,
     ) -> SyncResult:
-        del bling_store_id
+        # `force` accepted for ABC parity; Amazon has no zero-stock guard.
+        del bling_store_id, force
         qty_before = link.stock
 
         # Amazon Listings Items uses the seller's own SKU, not an Amazon ASIN.

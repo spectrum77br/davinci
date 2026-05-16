@@ -306,7 +306,10 @@ class MercadoLivreClient:
             return _map_http_error(e, qty_before, "ml_get_item_failed")
 
         listing_status = (item.get("status") or "").lower()
-        if listing_status in {"closed", "paused"}:
+        # Manual sync (force=True) overrides the closed/paused short-circuit:
+        # the user explicitly asked to push, so let ML reject if it must,
+        # but don't preemptively skip on this side.
+        if not force and listing_status in {"closed", "paused"}:
             return SyncResult(
                 status=SyncStatus.SKIPPED,
                 qty_before=qty_before,

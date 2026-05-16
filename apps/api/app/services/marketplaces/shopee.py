@@ -208,8 +208,11 @@ class ShopeeClient:
         qty: int,
         *,
         bling_store_id: int | None = None,  # ignored for Shopee
+        force: bool = False,
     ) -> SyncResult:
-        del bling_store_id
+        # `force` is accepted for ABC parity (manual sync bypass). Shopee has
+        # no zero-stock guard of its own, so the flag is a no-op here.
+        del bling_store_id, force
         qty_before = link.stock
         try:
             item_id = int(link.external_id)

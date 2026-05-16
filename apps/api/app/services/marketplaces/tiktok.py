@@ -399,8 +399,12 @@ class TikTokClient:
         qty: int,
         *,
         bling_store_id: int | None = None,
+        force: bool = False,
     ) -> SyncResult:
         """Push stock to a TikTok product SKU.
+
+        `force` accepted for ABC parity (manual sync bypass). TikTok has no
+        zero-stock guard, so the flag is a no-op here.
 
         link.external_id = TikTok product_id
         link.variation_id = TikTok sku_id
@@ -409,7 +413,7 @@ class TikTokClient:
         TikTok side), the product is reactivated and the stock push retried
         once after a 2-second delay.
         """
-        del bling_store_id
+        del bling_store_id, force
         qty_before = link.stock
         product_id = (link.external_id or "").strip()
         sku_id = (link.variation_id or "").strip()

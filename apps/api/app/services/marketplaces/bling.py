@@ -333,10 +333,14 @@ class BlingClient:
         qty: int,
         *,
         bling_store_id: int | None = None,
+        force: bool = False,
     ) -> SyncResult:
         """ABC-conformant wrapper. `link` is a `ProductLink` whose `external_id`
         carries the Bling produto.id. See `services.marketplaces.base.MarketplaceClient`.
+
+        `force` accepted for ABC parity; Bling has no zero-stock guard.
         """
+        del force
         try:
             bling_product_id = int(link.external_id)
         except (TypeError, ValueError):

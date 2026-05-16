@@ -152,13 +152,16 @@ class TemuClient:
         qty: int,
         *,
         bling_store_id: int | None = None,
+        force: bool = False,
     ) -> SyncResult:
         """Push stock to a Temu product SKU.
 
         link.external_id = Temu product_sku_id
         link.variation_id = warehouse_id (optional)
+
+        `force` accepted for ABC parity; Temu has no zero-stock guard.
         """
-        del bling_store_id
+        del bling_store_id, force
         qty_before = link.stock
         product_sku_id = (link.external_id or "").strip()
 
