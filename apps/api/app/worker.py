@@ -167,7 +167,14 @@ async def sync_all_run(
             job.payload = {**(job.payload or {}), "total_products": len(products)}
             await s.commit()
 
-            orch = SyncOrchestrator(s, user_id=uid, job=job)
+            # `force_bling_refresh=True`: daily sync_all also bypasses the
+            # cached-refresh shortcut so every product gets fresh Bling stock
+            # before pushing to marketplaces. (TTL is now 0 anyway, but the
+            # flag stays explicit so the intent is clear if the constant
+            # changes later.)
+            orch = SyncOrchestrator(
+                s, user_id=uid, job=job, force_bling_refresh=True
+            )
             # SSH delta #1 — run_with_retry wraps run_parallel with up to
             # MAX_RESYNC_ROUNDS-1 retry passes for products whose links
             # came back RETRYABLE. The verify-before-send shortcut (delta

@@ -59,12 +59,11 @@ logger = structlog.get_logger()
 HEARTBEAT_EVERY = 25
 DETAILS_MAX = 500
 SYNC_ALL_CONCURRENCY = 8
-# Webhook keeps local Bling stock fresh. Bulk re-fetch through /produtos/{id}
-# bursts Cloudflare's 3 req/s gate and triggers 429s across every Bling call
-# (including /oauth/token). Cache the per-link refresh so daily sync_all
-# doesn't pay that cost — single-product manual syncs still bypass via the
-# `force_bling_refresh=True` flag.
-BLING_REFRESH_TTL_SECONDS = 86_400
+# Bling is the source of truth — always fetch fresh stock before pushing to
+# marketplaces, regardless of how recently we synced. The previous 24h cache
+# kept sync_all cheap but caused stale stock on the table; the cron now pays
+# the Bling rate-limit cost (handled by Bling client retry/backoff).
+BLING_REFRESH_TTL_SECONDS = 0
 # SSH delta #1: after the initial pass, re-sync products whose links came back
 # RETRYABLE so transient marketplace blips (timeouts, 5xx) get a second chance
 # without waiting for the next daily run. 30s pause before the first retry, 15s
