@@ -24,6 +24,7 @@ from app.models import (
     BackgroundJobType,
     BlingOrder,
     CellStatus,
+    Department,
     Integration,
     IntegrationPlatform,
     Listing,
@@ -490,6 +491,52 @@ async def toggle_catalog(
     if row is None:
         raise HTTPException(404, detail={"code": "product_not_found"})
     row.in_catalog = not row.in_catalog
+    await session.flush()
+
+    # SSH parity: clicking the star also mirrors the row into the "catalogo"
+    # department so it shows up on the Catálogo ML tab. Toggling it off
+    # removes the mirror. The mirror itself carries `in_catalog=False` to
+    # avoid recursion if someone toggles the catalog copy.
+    catalog_copy = (
+        await session.execute(
+            select(PricingProduct).where(
+                and_(
+                    user_scope(PricingProduct, user),
+                    PricingProduct.department == Department.CATALOGO,
+                    PricingProduct.sku == row.sku,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+
+    if row.in_catalog:
+        if catalog_copy is None and row.department != Department.CATALOGO:
+            session.add(
+                PricingProduct(
+                    user_id=row.user_id,
+                    product_id=row.product_id,
+                    sku=row.sku,
+                    name=row.name,
+                    bling_cost_price=row.bling_cost_price,
+                    cost_kit1=row.cost_kit1,
+                    cost_kit2=row.cost_kit2,
+                    cost_kit3=row.cost_kit3,
+                    cost_kit4=row.cost_kit4,
+                    description=row.description,
+                    model=row.model,
+                    ean=row.ean,
+                    is_active=row.is_active,
+                    in_catalog=False,
+                    department=Department.CATALOGO,
+                    segment_id=row.segment_id,
+                )
+            )
+    else:
+        # Skip the delete if the row being toggled IS the catalog mirror —
+        # otherwise we'd delete the user-facing row.
+        if catalog_copy is not None and catalog_copy.id != row.id:
+            await session.delete(catalog_copy)
+
     await session.commit()
     await session.refresh(row)
     _, leaves_by_id, _ = await _segment_index(session)
