@@ -226,6 +226,10 @@ type Account = {
   slot5_segment_name: string | null
 }
 
+// Global toast feedback for push / auto-match outcomes. Rendered by
+// <AppToastStack /> in app.vue, so we just call success/error/warning here.
+const toast = useToasts()
+
 const accounts = ref<Account[]>([])
 const accountsLoading = ref(false)
 const accountsErr = ref<string | null>(null)
@@ -614,10 +618,25 @@ async function deleteAccount(a: Account) {
 
 async function autoMatchAccounts() {
   try {
-    await api('/api/pricing/accounts/auto-match', { method: 'POST' })
+    const r = await api<{ matched?: number; skipped?: number; updated?: number }>(
+      '/api/pricing/accounts/auto-match',
+      { method: 'POST' },
+    )
     await loadAccounts()
+    // Backend may report either `matched` (new field) or `updated` (legacy).
+    const matched = r.matched ?? r.updated ?? 0
+    const skipped = r.skipped ?? 0
+    if (matched > 0) {
+      toast.success(
+        `${matched} conta(s) vinculada(s) com sucesso!`,
+        skipped > 0 ? `${skipped} sem match` : undefined,
+      )
+    } else {
+      toast.info('Todas as contas já estão vinculadas.', skipped > 0 ? `${skipped} sem match` : undefined)
+    }
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'auto_match_failed'
+    toast.error('Erro ao vincular integrações', accountsErr.value || undefined)
   }
 }
 
@@ -1081,8 +1100,25 @@ async function pushCell(c: GridCell) {
       },
     })
     lastPushResults.value = r.results
+    const okItems = r.results.filter((x) => x.ok)
+    const failItems = r.results.filter((x) => !x.ok)
+    if (failItems.length === 0) {
+      const priceTxt = okItems[0]?.price ? ` — R$ ${Number(okItems[0].price).toFixed(0)}` : ''
+      toast.success(`Preço enviado${priceTxt}`, `${okItems.length} variação(ões) ok`)
+    } else if (okItems.length === 0) {
+      toast.error(
+        'Erro no push',
+        failItems.map((f) => f.detail || f.code).slice(0, 5),
+      )
+    } else {
+      toast.warning(
+        `Push parcial: ${okItems.length} ok, ${failItems.length} erro(s)`,
+        failItems.map((f) => f.detail || f.code).slice(0, 5),
+      )
+    }
   } catch (e: any) {
     gridErr.value = e?.data?.detail?.code ?? 'push_failed'
+    toast.error('Erro no push', gridErr.value || undefined)
   } finally {
     pushing.value = false
   }
@@ -1118,8 +1154,30 @@ async function pushItemsBatch(
         body: { items },
       })
       lastPushResults.value = r.results
+      const ok = r.results.filter((x) => x.ok).length
+      const fail = r.results.filter((x) => !x.ok).length
+      if (fail === 0) {
+        toast.success('Push concluído!', `${ok} preço(s) enviado(s) com sucesso`)
+      } else if (ok === 0) {
+        toast.error(
+          `Push falhou: ${fail} erro(s)`,
+          r.results
+            .filter((x) => !x.ok)
+            .map((f) => f.detail || f.code)
+            .slice(0, 5),
+        )
+      } else {
+        toast.warning(
+          `Envio: ${ok} ok, ${fail} erro(s)`,
+          r.results
+            .filter((x) => !x.ok)
+            .map((f) => f.detail || f.code)
+            .slice(0, 5),
+        )
+      }
     } catch (e: any) {
       gridErr.value = e?.data?.detail?.code ?? 'push_failed'
+      toast.error('Erro no push', gridErr.value || undefined)
     } finally {
       pushing.value = false
     }
@@ -1133,9 +1191,11 @@ async function pushItemsBatch(
       headers: { 'Idempotency-Key': `${keyHint}:${Date.now()}` },
       body: { items },
     })
+    toast.info(`Push em background iniciado`, `${items.length} item(ns) na fila`)
     await pollJob(created.job_id)
   } catch (e: any) {
     gridErr.value = e?.data?.detail?.code ?? 'push_failed'
+    toast.error('Erro ao iniciar push em batch', gridErr.value || undefined)
   } finally {
     pushing.value = false
   }
@@ -1147,11 +1207,33 @@ async function pollJob(jobId: string, attempts = 0): Promise<void> {
     activeJob.value = job
     if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
       await loadGrid()
+      // Surface the terminal outcome via toast so the user doesn't have to
+      // scroll back to the (also-rendered) result box.
+      if (job.status === 'succeeded') {
+        const s = job.result?.summary
+        if (s) {
+          if (s.failed === 0) {
+            toast.success('Push concluído!', `${s.ok} preço(s) enviado(s)`)
+          } else {
+            toast.error(
+              `Envio: ${s.ok} ok, ${s.failed} falha(s)`,
+              s.cached ? `${s.cached} cached` : undefined,
+            )
+          }
+        } else {
+          toast.success('Push concluído!')
+        }
+      } else if (job.status === 'failed') {
+        toast.error('Push falhou', job.error || 'Erro desconhecido')
+      } else {
+        toast.warning('Push cancelado')
+      }
       return
     }
   } catch (e: any) {
     if (attempts > 60) {
       gridErr.value = 'job_poll_timeout'
+      toast.error('Timeout aguardando o job', 'Recarregue a página pra ver o status')
       return
     }
   }
