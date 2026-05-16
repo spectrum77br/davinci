@@ -1159,24 +1159,25 @@ onUnmounted(() => {
                   >+ vincular</button>
                   <span v-else class="text-xs text-muted-foreground">—</span>
                 </template>
-                <div v-else class="flex flex-col gap-1 items-center">
+                <div v-else class="flex flex-col items-center gap-0.5">
                   <div
-                    v-for="l in linksFor(p, col)"
+                    v-for="(l, idx) in linksFor(p, col)"
                     :key="l.id"
-                    class="leading-tight group relative px-2"
+                    class="group/link relative flex flex-col items-center leading-tight px-3"
+                    :class="idx > 0 ? 'border-t border-border/30 pt-0.5 mt-0.5' : ''"
                   >
-                    <div
-                      class="font-semibold tabular-nums"
+                    <span
+                      class="text-xs font-bold tabular-nums"
                       :class="l.last_sync_status === 'fatal' ? 'text-red-600' : ''"
-                    >{{ l.stock ?? 0 }}</div>
-                    <div class="text-[10px] text-muted-foreground">
-                      {{ integrationById[l.integration_id]?.name || l.platform }}
-                    </div>
+                    >{{ l.stock ?? 0 }}</span>
+                    <span class="text-[9px] text-muted-foreground leading-none">
+                      {{ integrationById[l.integration_id]?.name?.trim() || l.platform }}
+                    </span>
                     <button
                       v-if="canDelete"
-                      class="hidden group-hover:flex absolute -top-1 -right-1 size-4 items-center justify-center rounded-full bg-red-500 text-white text-[9px] hover:bg-red-600"
+                      class="absolute -right-2 -top-0.5 hidden group-hover/link:flex items-center justify-center size-3.5 rounded-full bg-red-500 hover:bg-red-600 text-white text-[9px]"
                       :title="`Remover vínculo: ${integrationById[l.integration_id]?.name || l.platform}`"
-                      @click="deleteLink(l.id)"
+                      @click.stop="deleteLink(l.id)"
                     >×</button>
                   </div>
                 </div>

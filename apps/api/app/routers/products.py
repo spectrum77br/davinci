@@ -138,8 +138,21 @@ async def list_products(
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)
     if integration_id:
-        stmt = stmt.where(Product.integration_id == integration_id)
-        count_stmt = count_stmt.where(Product.integration_id == integration_id)
+        # Filter products that have at least one ProductLink to this
+        # integration. Previously this matched `Product.integration_id` —
+        # but that column only stores the *source* (Bling) integration, so
+        # selecting a marketplace account in the filter dropdown returned
+        # an empty list. Subquery via EXISTS keeps the statement composable
+        # with the other filters and avoids row duplication a JOIN would
+        # introduce when a product has multiple links to the same account.
+        link_match = select(ProductLink.id).where(
+            and_(
+                ProductLink.product_id == Product.id,
+                ProductLink.integration_id == integration_id,
+            )
+        ).exists()
+        stmt = stmt.where(link_match)
+        count_stmt = count_stmt.where(link_match)
     if low_stock:
         cond = Product.stock < Product.min_stock
         stmt = stmt.where(cond)
