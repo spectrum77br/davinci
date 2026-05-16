@@ -79,3 +79,4 @@ class BlingOrder(Base, TimestampMixin):
     amazon_lookup_applied_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    observacao: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -488,6 +488,7 @@ async def _fetch_shopee(client: ShopeeClient, order_sn: str) -> FinancialSnapsho
         ]
     )
     status = "posted" if net is not None else "pending"
+    freights = _shopee_freight_drafts(income, currency)
     return FinancialSnapshot(
         status=status,
         currency=currency,
@@ -502,8 +503,59 @@ async def _fetch_shopee(client: ShopeeClient, order_sn: str) -> FinancialSnapsho
         net_amount=net,
         raw={"escrow": escrow},
         events=events,
+        freights=freights,
+        freight_reconciliation_checked=True,
         error=None if status == "posted" else "Shopee net payout not available yet",
     )
+
+
+def _shopee_freight_drafts(
+    income: dict[str, Any],
+    currency: str,
+) -> list[FreightReconciliationDraft]:
+    """Build one freight reconciliation row per Shopee order.
+
+    Shopee returns shipping data per order (not per shipment) inside
+    `order_income`. We map:
+      - freight_actual_amount  = actual_shipping_fee (gross cost Shopee charged the seller)
+      - freight_promised_amount = buyer_paid_shipping_fee (what buyer paid; may be null)
+      - freight_list_cost_amount = forced_shipping_fee (Shopee's "official" cost)
+      - freight_diff_amount = actual − buyer_paid (positive = seller out of pocket)
+    """
+    actual = _money(income.get("actual_shipping_fee"))
+    if actual is None:
+        return []
+    buyer_paid = (
+        _money(income.get("buyer_paid_shipping_fee"))
+        or _money(income.get("final_shipping_fee"))
+    )
+    forced = _money(income.get("forced_shipping_fee"))
+    rebate = _money(income.get("shopee_shipping_rebate"))
+    diff: Decimal | None = None
+    diff_pct: Decimal | None = None
+    if buyer_paid is not None:
+        diff = actual - buyer_paid
+        if buyer_paid != 0:
+            diff_pct = (diff / buyer_paid) * Decimal(100)
+    return [
+        FreightReconciliationDraft(
+            item_index=0,
+            status="posted",
+            currency=currency,
+            freight_actual_amount=actual,
+            freight_promised_amount=buyer_paid,
+            freight_list_cost_amount=forced,
+            freight_diff_amount=diff,
+            freight_diff_pct=diff_pct,
+            raw={
+                "source": "shopee_escrow_detail",
+                "actual_shipping_fee": str(actual),
+                "buyer_paid_shipping_fee": str(buyer_paid) if buyer_paid is not None else None,
+                "forced_shipping_fee": str(forced) if forced is not None else None,
+                "shopee_shipping_rebate": str(rebate) if rebate is not None else None,
+            },
+        )
+    ]
 
 
 async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnapshot:

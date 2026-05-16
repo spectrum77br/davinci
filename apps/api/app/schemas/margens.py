@@ -41,3 +41,52 @@ class MargensPatch(BaseModel):
     status: MargensStatus | None = None
     observacao: str | None = None
     local_only: bool = False
+
+
+class MargensMarketplacePage(BaseModel):
+    items: list["MargensMarketplaceOut"]
+    total: int
+    limit: int
+    offset: int
+    platforms: list[str]
+
+
+class MargensMarketplaceOut(BaseModel):
+    """Per-item row from vw_conciliacao_margens_marketplace (last 30 days)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    bling_order_item_id: UUID
+    bling_id: int | None = None
+    data: datetime | None = None
+    pedido_bling: str | None = None
+    pedido_marketplace: str | None = None
+    plataforma: str | None = None
+    conta: str | None = None
+    sku: str | None = None
+    produto: str | None = None
+    quantidade: int | None = None
+
+    custo_produto: float | None = None
+    frete_plataforma: float | None = None
+    frete_anuncio: float | None = None
+    frete_projetado: float | None = None
+    reembolso: float | None = None
+    resultado_frete: float | None = None
+    saldo_plataforma: float | None = None
+    saldo_bling: float | None = None
+    saldo_efetivo: float | None = None
+
+    margem: float | None = None
+    margem_minima: float | None = None
+    status: str | None = None
+
+    pricing_account_id: UUID | None = None
+    pricing_account_name: str | None = None
+    pricing_account_listing_type: str | None = None
+    pricing_leaf_segment_name: str | None = None
+    bling_listing_type: str | None = None
+    observacao: str | None = None
+
+
+MargensMarketplacePage.model_rebuild()
