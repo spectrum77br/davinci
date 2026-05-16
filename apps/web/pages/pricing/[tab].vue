@@ -2496,8 +2496,8 @@ watch(department, async () => {
               <th
                 v-for="acc in gridAccounts"
                 :key="`n-${acc.id}`"
-                class="px-1 py-1 text-left min-w-[110px] align-top"
-                :class="[platformHeaderBg(acc.platform), firstAccountIdInGroup.has(acc.id) ? 'border-l-[3px] border-gray-500' : 'border-l']"
+                class="px-1 py-1 text-left min-w-[110px] align-top border-l"
+                :class="platformHeaderBg(acc.platform)"
               >
                 <div class="flex items-center gap-1">
                   <span class="text-xs font-semibold truncate" :title="acc.name">{{ acc.name }}</span>
@@ -2545,8 +2545,8 @@ watch(department, async () => {
               <th
                 v-for="acc in gridAccounts"
                 :key="`lt-${acc.id}`"
-                class="px-1 py-1 text-center text-[10px] text-muted-foreground"
-                :class="[platformHeaderBg(acc.platform), firstAccountIdInGroup.has(acc.id) ? 'border-l-[3px] border-gray-500' : 'border-l']"
+                class="px-1 py-1 text-center text-[10px] text-muted-foreground border-l"
+                :class="platformHeaderBg(acc.platform)"
               >
                 {{ acc.listing_type || platformLabel(acc.platform) }}
               </th>
@@ -2660,7 +2660,7 @@ watch(department, async () => {
                 :class="[
                   cellTone(cellOf(prod.id, acc.id)),
                   platformBg(acc.platform),
-                  firstAccountIdInGroup.has(acc.id) ? 'border-l-[3px] border-gray-500' : 'border-l',
+                  'border-l',
                   selectedCell?.row === rowIdx && selectedCell?.col === accIdx ? 'ring-2 ring-blue-500 ring-inset' : '',
                 ]"
                 @click="selectedCell = { row: rowIdx, col: accIdx }"
