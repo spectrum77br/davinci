@@ -212,8 +212,13 @@ class SyncOrchestrator:
                 qty_before=qty_before,
                 error_code="bling_stock_missing",
             )
-        link.stock = int(new_stock)
-        product.stock = int(new_stock)
+        # SSH parity: clamp Bling stock to >= 0. Bling occasionally reports
+        # negative balances (oversells, manual adjustments) but marketplaces
+        # reject negative quantities, so a negative bling stock counts as 0
+        # for both the local cache and the outbound push.
+        clamped = max(0, int(new_stock))
+        link.stock = clamped
+        product.stock = clamped
         if parsed.get("min_stock") is not None:
             product.min_stock = int(parsed["min_stock"])
         if parsed.get("category"):
@@ -261,7 +266,11 @@ class SyncOrchestrator:
                 try:
                     integration = await self._get_integration(link.integration_id)
                     client = await self._client(integration)
-                    qty = product.stock
+                    # Negative product.stock can leak in from direct DB writes
+                    # or older imports — guard at the push site too so the
+                    # clamp is enforced even if `_refresh_bling` didn't run
+                    # this pass (e.g. webhook-fed stock).
+                    qty = max(0, product.stock)
                     # Always push to the marketplace — SSH parity. The earlier
                     # "verify-before-send" optimization (skip when link.stock
                     # equals qty + last_sync_status=OK) was removed because
