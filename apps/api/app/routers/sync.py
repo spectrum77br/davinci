@@ -242,7 +242,15 @@ async def sync_product(
     # `force=True` also bypasses ML's B1 zero-guard: the operator clicked
     # sync expecting the marketplace to mirror whatever Bling reports, even
     # when that means dropping from positive stock to zero.
-    orch = SyncOrchestrator(session, user_id=user.id, job=job, force=True)
+    # `force_bling_refresh=True` bypasses the 24h Bling stock cache so the
+    # operator sees the up-to-date stock pushed, not whatever Redis had.
+    orch = SyncOrchestrator(
+        session,
+        user_id=user.id,
+        job=job,
+        force=True,
+        force_bling_refresh=True,
+    )
     await orch.run([product], only_link_ids=only_link_ids)
 
     await session.refresh(job)

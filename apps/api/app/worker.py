@@ -248,8 +248,11 @@ async def sync_product_run(
         link_uuids = [UUID(i) for i in (link_ids or [])] or None
         # Webhook-triggered single-product sync: the payload carries the
         # current Bling stock (often 0 on sellout), so we trust it and
-        # bypass the ML B1 zero-guard like the manual sync endpoint does.
-        orch = SyncOrchestrator(s, user_id=uid, job=job, force=True)
+        # bypass both the ML B1 zero-guard and the 24h Bling refresh cache
+        # — the webhook itself is the "fresh stock" signal.
+        orch = SyncOrchestrator(
+            s, user_id=uid, job=job, force=True, force_bling_refresh=True
+        )
         await orch.run([product], only_link_ids=link_uuids)
 
 
