@@ -553,6 +553,24 @@ async def alerts_cleanup(ctx: dict) -> None:
         logger.info("alerts_cleanup_done", deleted=result.rowcount or 0)
 
 
+async def refresh_margens_marketplace_mv(ctx: dict) -> None:
+    """Refresh mv_conciliacao_margens_marketplace (every 5 min).
+
+    The underlying view is too expensive to query live (~20s for a
+    full sweep). The MV gives sub-second reads; CONCURRENTLY keeps
+    the page available during refresh.
+    """
+    async with session_scope() as s:
+        await s.execute(
+            text(
+                "REFRESH MATERIALIZED VIEW CONCURRENTLY "
+                "davinci.mv_conciliacao_margens_marketplace"
+            )
+        )
+        await s.commit()
+    logger.info("mv_conciliacao_margens_marketplace_refreshed")
+
+
 async def sync_lock_safety_release(ctx: dict) -> None:
     """SSH-parity: terminate backends idle >30min holding our SYNC_NAMESPACE
     advisory lock. Counterpart to SSH's in-memory 30-min safety timeout.
@@ -927,6 +945,7 @@ class WorkerSettings:
         # SSH parity: 30-min safety timeout for stuck sync advisory locks.
         # Runs every 5 minutes so the worst-case stuck duration is 35min.
         cron(sync_lock_safety_release, minute=_FIVE_MIN, run_at_startup=False),
+        cron(refresh_margens_marketplace_mv, minute=_FIVE_MIN, run_at_startup=True),
         # Safety-net only — hooks via app.services.relink_hook handle the
         # day-to-day work. Runs at 02:00 and 14:00 UTC.
         cron(auto_import_link, hour={2, 14}, minute=0, run_at_startup=False),

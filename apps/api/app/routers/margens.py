@@ -81,11 +81,11 @@ async def list_margens_marketplace(
     where_sql = " AND ".join(where)
 
     count_sql = text(
-        f"SELECT count(*) FROM davinci.vw_conciliacao_margens_marketplace v WHERE {where_sql}"  # noqa: S608
+        f"SELECT count(*) FROM davinci.mv_conciliacao_margens_marketplace v WHERE {where_sql}"  # noqa: S608
     )
     platforms_sql = text(
         "SELECT DISTINCT COALESCE(plataforma_bling, plataforma_financeiro) AS p "
-        "FROM davinci.vw_conciliacao_margens_marketplace "
+        "FROM davinci.mv_conciliacao_margens_marketplace "
         "WHERE COALESCE(plataforma_bling, plataforma_financeiro) IS NOT NULL "
         "ORDER BY 1"
     )
@@ -122,7 +122,7 @@ async def list_margens_marketplace(
             v.pricing_leaf_segment_name,
             v.bling_listing_type,
             bo.observacao
-        FROM davinci.vw_conciliacao_margens_marketplace v
+        FROM davinci.mv_conciliacao_margens_marketplace v
         LEFT JOIN LATERAL (
             SELECT bo.observacao
             FROM davinci.bling_orders bo
