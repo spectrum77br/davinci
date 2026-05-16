@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
-from app.models.enums import CellStatus, PricingPlatform
+from app.models.enums import CellStatus, Department, PricingPlatform
 
 
 def _enum(py_enum, name: str):
@@ -152,6 +152,11 @@ class PricingProduct(Base, TimestampMixin):
         PG_UUID(as_uuid=True),
         ForeignKey("segments.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    # Legacy enum column kept in sync with segment_id's root; the unique
+    # constraint includes it so the same SKU can fork pricing per department.
+    department: Mapped[Department | None] = mapped_column(
+        _enum(Department, "department"), nullable=True
     )
     bling_cost_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     cost_kit1: Mapped[Decimal] = mapped_column(
