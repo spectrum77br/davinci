@@ -249,7 +249,7 @@ async def scan_missing_skus(
 
         bling_cost = _q2(p.bling_cost_price)
         pricing_cost: Decimal | None = None
-        divergent_dept: str | None = None
+        divergent_depts: list[str] = []
 
         if not pp_list:
             issues.append("Fora da tabela de preços")
@@ -259,29 +259,25 @@ async def scan_missing_skus(
             # pricing table, so comparing them is meaningless.
             #
             # When the same SKU appears in multiple departments (celular +
-            # catalogo is the common case), each row has its own cost_kit1.
-            # The user typically updates only the department they're
-            # working in, so we treat the divergence as resolved when ANY
-            # row's cost_kit1 matches the Bling cost (rounded to integer
-            # to ignore intentional centavo differences like 41.00 vs 41.20).
+            # catalogo etc.), each row has its own cost_kit1. EVERY row
+            # must match the Bling cost (rounded to integer to ignore
+            # intentional centavo differences like 41.00 vs 41.20). Any
+            # department that doesn't match is reported so the user knows
+            # exactly which row to fix.
             is_kit = (p.formato or '').upper() == 'E'
             if not is_kit and bling_cost is not None:
                 bling_int = int(round(bling_cost))
-                matched_any = False
-                divergent_pp: PricingProduct | None = None
                 for pp in pp_list:
                     kit1 = _q2(pp.cost_kit1) if pp.cost_kit1 else None
                     if kit1 is None:
                         continue
                     if int(round(kit1)) == bling_int:
-                        matched_any = True
-                        break
-                    if divergent_pp is None:
-                        divergent_pp = pp
+                        continue
+                    divergent_depts.append(_dept_value(pp, segment_roots))
+                    if pricing_cost is None:
                         pricing_cost = kit1
-                if not matched_any and divergent_pp is not None:
+                if divergent_depts:
                     issues.append("Custo divergente")
-                    divergent_dept = _dept_value(divergent_pp, segment_roots)
 
         if not accounts:
             issues.append("Sem anúncio")
@@ -300,7 +296,7 @@ async def scan_missing_skus(
                 "dismissed": is_dismissed,
                 "bling_cost": str(bling_cost) if bling_cost is not None else None,
                 "pricing_cost": str(pricing_cost) if pricing_cost is not None else None,
-                "department": divergent_dept,
+                "divergent_departments": divergent_depts or None,
                 "listing_count": len(accounts),
                 "sample_titles": [p.name] if p.name else [],
                 "platforms": [],
