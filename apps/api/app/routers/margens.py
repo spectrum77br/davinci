@@ -61,6 +61,7 @@ async def list_margens_marketplace(
     search: str | None = Query(None),
     platform: str | None = Query(None),
     status: str | None = Query(None),
+    attention_only: bool = Query(True),
 ) -> MargensMarketplacePage:
     """Per-item marketplace conciliation rows (paginated, 20d window).
 
@@ -81,6 +82,14 @@ async def list_margens_marketplace(
         elif status in ("Aprovado", "Reprovado"):
             where.append("v.bling_status_margem = :status")
             params["status"] = status
+    if attention_only:
+        # First-pass triage view: only rows where the margin is below the
+        # configured minimum OR the seller paid more shipping than projected.
+        where.append(
+            "((v.marketplace_margem IS NOT NULL AND v.margem_minima IS NOT NULL "
+            "  AND v.marketplace_margem < v.margem_minima) "
+            " OR (v.frete_resultado_item IS NOT NULL AND v.frete_resultado_item < 0))"
+        )
     if search:
         where.append(
             "(v.pedido_bling ILIKE :q OR v.pedido_marketplace ILIKE :q "

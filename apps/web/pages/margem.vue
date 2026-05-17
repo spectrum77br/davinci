@@ -71,6 +71,7 @@ const error = ref<string | null>(null)
 const search = ref('')
 const platform = ref<'all' | string>('all')
 const statusFilter = ref<StatusFilter>('Pendente')
+const attentionOnly = ref(true)
 const page = ref(1)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
@@ -103,6 +104,7 @@ async function load() {
     params.set('offset', String((page.value - 1) * PAGE_SIZE))
     if (platform.value !== 'all') params.set('platform', platform.value)
     if (statusFilter.value !== 'all') params.set('status', statusFilter.value)
+    params.set('attention_only', attentionOnly.value ? 'true' : 'false')
     if (search.value.trim()) params.set('search', search.value.trim())
     const res = await api<PageResponse>(`/api/margens/marketplace?${params.toString()}`)
     items.value = res.items
@@ -143,6 +145,10 @@ watch(platform, () => {
   load()
 })
 watch(statusFilter, () => {
+  page.value = 1
+  load()
+})
+watch(attentionOnly, () => {
   page.value = 1
   load()
 })
@@ -305,6 +311,13 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
           {{ s === 'all' ? 'todos status' : s }}
         </option>
       </select>
+      <Button
+        size="sm"
+        :variant="attentionOnly ? 'default' : 'outline'"
+        @click="attentionOnly = !attentionOnly"
+      >
+        {{ attentionOnly ? 'só atenção' : 'todos pedidos' }}
+      </Button>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ rangeStart }}–{{ rangeEnd }} de {{ total }}
       </span>
