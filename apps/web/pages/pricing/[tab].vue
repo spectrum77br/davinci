@@ -2072,7 +2072,7 @@ watch(department, async () => {
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'platform'),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'platform'),
                 }"
-                @mousedown.prevent="!isEditing(acc.id, 'platform') && startEditAccount(acc, 'platform')"
+                @click="!isEditing(acc.id, 'platform') && startEditAccount(acc, 'platform')"
               >
                 <select
                   v-if="isEditing(acc.id, 'platform')"
@@ -2091,7 +2091,7 @@ watch(department, async () => {
               <td
                 class="border border-border px-2 py-1.5 text-xs cursor-pointer text-center"
                 :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'kit_number') }"
-                @mousedown.prevent="!isEditing(acc.id, 'kit_number') && startEditAccount(acc, 'kit_number')"
+                @click="!isEditing(acc.id, 'kit_number') && startEditAccount(acc, 'kit_number')"
               >
                 <input
                   v-if="isEditing(acc.id, 'kit_number')"
@@ -2112,7 +2112,7 @@ watch(department, async () => {
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, 'commission'),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, 'commission'),
                 }"
-                @mousedown.prevent="!isEditing(acc.id, 'commission') && startEditAccount(acc, 'commission')"
+                @click="!isEditing(acc.id, 'commission') && startEditAccount(acc, 'commission')"
               >
                 <input
                   v-if="isEditing(acc.id, 'commission')"
@@ -2134,7 +2134,7 @@ watch(department, async () => {
                     'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, `margin${t}`),
                     'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, `margin${t}`),
                   }"
-                  @mousedown.prevent="!isEditing(acc.id, `margin${t}`) && startEditAccount(acc, `margin${t}`)"
+                  @click="!isEditing(acc.id, `margin${t}`) && startEditAccount(acc, `margin${t}`)"
                 >
                   <input
                     v-if="isEditing(acc.id, `margin${t}`)"
@@ -2154,7 +2154,7 @@ watch(department, async () => {
                     'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, `shipping${t}`),
                     'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, `shipping${t}`),
                   }"
-                  @mousedown.prevent="!isEditing(acc.id, `shipping${t}`) && startEditAccount(acc, `shipping${t}`)"
+                  @click="!isEditing(acc.id, `shipping${t}`) && startEditAccount(acc, `shipping${t}`)"
                 >
                   <input
                     v-if="isEditing(acc.id, `shipping${t}`)"
@@ -2177,7 +2177,7 @@ watch(department, async () => {
                     'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, i === 1 ? 'observation' : `observation${i}`),
                     'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, i === 1 ? 'observation' : `observation${i}`),
                   }"
-                  @mousedown.prevent="!isEditing(acc.id, i === 1 ? 'observation' : `observation${i}`) && startEditAccount(acc, i === 1 ? 'observation' : `observation${i}`)"
+                  @click="!isEditing(acc.id, i === 1 ? 'observation' : `observation${i}`) && startEditAccount(acc, i === 1 ? 'observation' : `observation${i}`)"
                 >
                   <input
                     v-if="isEditing(acc.id, i === 1 ? 'observation' : `observation${i}`)"
@@ -2450,7 +2450,7 @@ watch(department, async () => {
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'sku'),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'sku'),
                 }"
-                @mousedown.prevent="!isEditing(p.id, 'sku') && startEditProduct(p, 'sku')"
+                @click="!isEditing(p.id, 'sku') && startEditProduct(p, 'sku')"
               >
                 <input
                   v-if="isEditing(p.id, 'sku')"
@@ -2464,7 +2464,7 @@ watch(department, async () => {
               <td
                 class="border border-border px-2 py-1.5 text-xs cursor-pointer"
                 :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'name'), 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'name') }"
-                @mousedown.prevent="!isEditing(p.id, 'name') && startEditProduct(p, 'name')"
+                @click="!isEditing(p.id, 'name') && startEditProduct(p, 'name')"
               >
                 <input
                   v-if="isEditing(p.id, 'name')"
@@ -2478,7 +2478,7 @@ watch(department, async () => {
               <td
                 class="border border-border px-2 py-1.5 text-xs font-mono cursor-pointer"
                 :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'ean'), 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'ean') }"
-                @mousedown.prevent="!isEditing(p.id, 'ean') && startEditProduct(p, 'ean')"
+                @click="!isEditing(p.id, 'ean') && startEditProduct(p, 'ean')"
               >
                 <input
                   v-if="isEditing(p.id, 'ean')"
@@ -2493,7 +2493,7 @@ watch(department, async () => {
                 <td
                   class="border border-border px-2 py-1.5 text-xs cursor-pointer"
                   :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'description'), 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'description') }"
-                  @mousedown.prevent="!isEditing(p.id, 'description') && startEditProduct(p, 'description')"
+                  @click="!isEditing(p.id, 'description') && startEditProduct(p, 'description')"
                 >
                   <input
                     v-if="isEditing(p.id, 'description')"
@@ -2507,7 +2507,7 @@ watch(department, async () => {
                 <td
                   class="border border-border px-2 py-1.5 text-xs cursor-pointer"
                   :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'model'), 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'model') }"
-                  @mousedown.prevent="!isEditing(p.id, 'model') && startEditProduct(p, 'model')"
+                  @click="!isEditing(p.id, 'model') && startEditProduct(p, 'model')"
                 >
                   <input
                     v-if="isEditing(p.id, 'model')"
@@ -2526,7 +2526,7 @@ watch(department, async () => {
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, `cost_kit${k}`),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, `cost_kit${k}`),
                 }"
-                @mousedown.prevent="!isEditing(p.id, `cost_kit${k}`) && startEditProduct(p, `cost_kit${k}`)"
+                @click="!isEditing(p.id, `cost_kit${k}`) && startEditProduct(p, `cost_kit${k}`)"
               >
                 <input
                   v-if="isEditing(p.id, `cost_kit${k}`)"
@@ -2540,7 +2540,7 @@ watch(department, async () => {
               <td
                 class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
                 :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'product_type'), 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'product_type') }"
-                @mousedown.prevent="!isEditing(p.id, 'product_type') && startEditProduct(p, 'product_type')"
+                @click="!isEditing(p.id, 'product_type') && startEditProduct(p, 'product_type')"
               >
                 <select
                   v-if="isEditing(p.id, 'product_type')"
@@ -2880,7 +2880,7 @@ watch(department, async () => {
                     isFlashed(prod.id, `cost_kit${k}`) ? 'bg-emerald-50 dark:bg-emerald-900/20' : '',
                   ]"
                   :style="{ left: `${368 + (k - 1) * 56}px` }"
-                  @mousedown.prevent="canEditProdutos && !isEditing(prod.id, `cost_kit${k}`) && startEditProduct(prod as any, `cost_kit${k}`)"
+                  @click="canEditProdutos && !isEditing(prod.id, `cost_kit${k}`) && startEditProduct(prod as any, `cost_kit${k}`)"
                 >
                   <input
                     v-if="isEditing(prod.id, `cost_kit${k}`)"
@@ -2900,7 +2900,7 @@ watch(department, async () => {
                     isFlashed(prod.id, 'cost_kit1') ? 'bg-emerald-50 dark:bg-emerald-900/20' : '',
                   ]"
                   :style="{ left: '368px' }"
-                  @mousedown.prevent="canEditProdutos && !isEditing(prod.id, 'cost_kit1') && startEditProduct(prod as any, 'cost_kit1')"
+                  @click="canEditProdutos && !isEditing(prod.id, 'cost_kit1') && startEditProduct(prod as any, 'cost_kit1')"
                 >
                   <input
                     v-if="isEditing(prod.id, 'cost_kit1')"
