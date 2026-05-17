@@ -396,6 +396,7 @@ type AuditPendingRow = {
   issues: string[]
   bling_cost: string | null
   pricing_cost: string | null
+  department: string | null
   dismissed: boolean
 }
 
@@ -2284,6 +2285,7 @@ watch(department, async () => {
                     </div>
                     <div v-if="row.issues.includes('Custo divergente')" class="text-[10px] text-orange-700">
                       Bling: R$ {{ row.bling_cost ?? '—' }} · Tabela: R$ {{ row.pricing_cost ?? '—' }}
+                      <span v-if="row.department" class="text-orange-500">({{ row.department }})</span>
                     </div>
                   </div>
                 </td>

@@ -123,13 +123,15 @@ def match_pricing_to_product_keys(
 def build_product_lookup(
     pricing_rows: Iterable[PricingProduct],
     segment_roots: dict[UUID, str],
-) -> tuple[dict[str, PricingProduct], dict[str, PricingProduct]]:
+) -> tuple[dict[str, list[PricingProduct]], dict[str, list[PricingProduct]]]:
     """Returns (exact_map, celular_base_map) used by
-    `find_pricing_for_product_sku`. Exact map is filled for every root;
-    base map only for celular pieces.
+    `find_pricing_for_product_sku`. Each key maps to a LIST of
+    PricingProducts — the same SKU often appears in multiple departments
+    (e.g. celular + catalogo), and the audit needs to check ALL of them
+    before deciding whether a divergence exists.
     """
-    exact_map: dict[str, PricingProduct] = {}
-    base_map: dict[str, PricingProduct] = {}
+    exact_map: dict[str, list[PricingProduct]] = {}
+    base_map: dict[str, list[PricingProduct]] = {}
     for pp in pricing_rows:
         dept = _dept_value(pp, segment_roots)
         for piece in (pp.sku or "").split(","):
@@ -138,30 +140,32 @@ def build_product_lookup(
                 continue
             if dept == "catalogo" and "+" in key:
                 continue
-            exact_map.setdefault(key, pp)
+            exact_map.setdefault(key, []).append(pp)
             if dept == "celular":
-                base_map.setdefault(key, pp)
+                base_map.setdefault(key, []).append(pp)
     return exact_map, base_map
 
 
 def find_pricing_for_product_sku(
     sku: str,
-    exact_map: dict[str, PricingProduct],
-    base_map: dict[str, PricingProduct],
-) -> PricingProduct | None:
-    """Resolves a products.sku to its covering PricingProduct (or None).
+    exact_map: dict[str, list[PricingProduct]],
+    base_map: dict[str, list[PricingProduct]],
+) -> list[PricingProduct]:
+    """Resolves a products.sku to EVERY matching PricingProduct.
 
-    Order: exact → celular base. Caller must have built the maps via
+    Order: exact match wins (returns all departments that exact-match);
+    otherwise falls back to celular's base-sku index. Returns [] when
+    nothing matches. Caller must have built the maps via
     `build_product_lookup`.
     """
     skl = sku.strip().lower()
     if not skl:
-        return None
+        return []
     exact = exact_map.get(skl)
-    if exact is not None:
+    if exact:
         return exact
     base = skl.split(".")[0]
-    return base_map.get(base)
+    return base_map.get(base, [])
 
 
 # ---------------------------------------------------------------------------
@@ -237,32 +241,47 @@ async def scan_missing_skus(
         if not include_dismissed and is_dismissed:
             continue
 
-        pp = find_pricing_for_product_sku(sku, exact_map, base_map)
-        if pp is not None:
+        pp_list = find_pricing_for_product_sku(sku, exact_map, base_map)
+        if pp_list:
             matched_count += 1
         accounts = sorted(set(links_by_pid.get(p.id, [])))
         issues: list[str] = []
 
         bling_cost = _q2(p.bling_cost_price)
         pricing_cost: Decimal | None = None
+        divergent_dept: str | None = None
 
-        if pp is None:
+        if not pp_list:
             issues.append("Fora da tabela de preços")
         else:
-            # Business rule: "Custo divergente" only applies to simple
-            # products (formato='S' or NULL). Kits (formato='E') are
-            # skipped — see prior commit for the why.
+            # "Custo divergente" only for simple products (formato != 'E')
+            # — kits store the total cost in Bling but unit costs in the
+            # pricing table, so comparing them is meaningless.
             #
-            # Compare Bling's cost against pp.cost_kit1 (the field users
-            # actually edit in the Tabela de Preços UI) — NOT against
-            # pp.bling_cost_price, which is a legacy/import field that
-            # doesn't track user edits, so it would keep firing false
-            # "Custo divergente" alerts after a corrected price.
+            # When the same SKU appears in multiple departments (celular +
+            # catalogo is the common case), each row has its own cost_kit1.
+            # The user typically updates only the department they're
+            # working in, so we treat the divergence as resolved when ANY
+            # row's cost_kit1 matches the Bling cost (rounded to integer
+            # to ignore intentional centavo differences like 41.00 vs 41.20).
             is_kit = (p.formato or '').upper() == 'E'
-            if not is_kit:
-                pricing_cost = _q2(pp.cost_kit1) if pp.cost_kit1 else None
-                if bling_cost is not None and pricing_cost is not None and bling_cost != pricing_cost:
+            if not is_kit and bling_cost is not None:
+                bling_int = int(round(bling_cost))
+                matched_any = False
+                divergent_pp: PricingProduct | None = None
+                for pp in pp_list:
+                    kit1 = _q2(pp.cost_kit1) if pp.cost_kit1 else None
+                    if kit1 is None:
+                        continue
+                    if int(round(kit1)) == bling_int:
+                        matched_any = True
+                        break
+                    if divergent_pp is None:
+                        divergent_pp = pp
+                        pricing_cost = kit1
+                if not matched_any and divergent_pp is not None:
                     issues.append("Custo divergente")
+                    divergent_dept = _dept_value(divergent_pp, segment_roots)
 
         if not accounts:
             issues.append("Sem anúncio")
@@ -281,6 +300,7 @@ async def scan_missing_skus(
                 "dismissed": is_dismissed,
                 "bling_cost": str(bling_cost) if bling_cost is not None else None,
                 "pricing_cost": str(pricing_cost) if pricing_cost is not None else None,
+                "department": divergent_dept,
                 "listing_count": len(accounts),
                 "sample_titles": [p.name] if p.name else [],
                 "platforms": [],
