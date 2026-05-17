@@ -520,9 +520,20 @@ function cancelEdit() {
 async function focusEditInput() {
   await nextTick()
   const el = editInputRef.value
-  if (!el) return
-  el.focus()
-  if ('select' in el) (el as HTMLInputElement).select?.()
+  if (el) {
+    el.focus()
+    if ('select' in el) (el as HTMLInputElement).select?.()
+    return
+  }
+  // Fallback: setEditInputRef sometimes hasn't been called yet on the
+  // first tick when the v-if just remounted the input — retry once on
+  // the next macrotask before giving up.
+  setTimeout(() => {
+    const el2 = editInputRef.value
+    if (!el2) return
+    el2.focus()
+    if ('select' in el2) (el2 as HTMLInputElement).select?.()
+  }, 0)
 }
 
 // =========================================================== account inline edit
@@ -1958,14 +1969,14 @@ watch(department, async () => {
               <td class="border border-border px-1 py-1">
                 <input
                   v-model.number="newAcc.kit_number"
-                  type="number" min="1" max="5"
+                  type="text" inputmode="numeric"
                   class="w-full text-xs border rounded px-1 py-1 bg-background text-center"
                 />
               </td>
               <td class="border border-border px-1 py-1">
                 <input
                   v-model="newAcc.commission"
-                  type="number" step="0.1"
+                  type="text" inputmode="decimal"
                   placeholder="11"
                   class="w-full text-xs border rounded px-1 py-1 bg-background text-center"
                   @keydown.enter="submitNewAcc"
@@ -2099,7 +2110,7 @@ watch(department, async () => {
                   v-if="isEditing(acc.id, 'kit_number')"
                   :ref="setEditInputRef"
                   v-model="editValue"
-                  type="number" min="1" max="5"
+                  type="text" inputmode="numeric"
                   class="w-full text-xs bg-transparent outline-none text-center"
                   @blur="commitEditAccount"
                   @keydown.enter.prevent="commitEditAccount"
@@ -2120,7 +2131,7 @@ watch(department, async () => {
                   v-if="isEditing(acc.id, 'commission')"
                   :ref="setEditInputRef"
                   v-model="editValue"
-                  type="number" step="0.1"
+                  type="text" inputmode="decimal"
                   class="w-full text-xs bg-transparent outline-none text-center"
                   @blur="commitEditAccount"
                   @keydown.enter.prevent="commitEditAccount"
@@ -2142,7 +2153,7 @@ watch(department, async () => {
                     v-if="isEditing(acc.id, `margin${t}`)"
                     :ref="setEditInputRef"
                     v-model="editValue"
-                    type="number" step="0.1"
+                    type="text" inputmode="decimal"
                     class="w-full text-xs bg-transparent outline-none text-center"
                     @blur="commitEditAccount"
                     @keydown.enter.prevent="commitEditAccount"
@@ -2162,7 +2173,7 @@ watch(department, async () => {
                     v-if="isEditing(acc.id, `shipping${t}`)"
                     :ref="setEditInputRef"
                     v-model="editValue"
-                    type="number" step="1"
+                    type="text" inputmode="numeric"
                     class="w-full text-xs bg-transparent outline-none text-center"
                     @blur="commitEditAccount"
                     @keydown.enter.prevent="commitEditAccount"
@@ -2408,16 +2419,16 @@ watch(department, async () => {
                 </td>
               </template>
               <td class="border border-border px-1 py-1">
-                <input v-model="newProd.cost_kit1" type="number" step="0.01" placeholder="0.00" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
+                <input v-model="newProd.cost_kit1" type="text" inputmode="decimal" placeholder="0.00" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
               <td class="border border-border px-1 py-1">
-                <input v-model="newProd.cost_kit2" type="number" step="0.01" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
+                <input v-model="newProd.cost_kit2" type="text" inputmode="decimal" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
               <td class="border border-border px-1 py-1">
-                <input v-model="newProd.cost_kit3" type="number" step="0.01" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
+                <input v-model="newProd.cost_kit3" type="text" inputmode="decimal" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
               <td class="border border-border px-1 py-1">
-                <input v-model="newProd.cost_kit4" type="number" step="0.01" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
+                <input v-model="newProd.cost_kit4" type="text" inputmode="decimal" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
               <td class="border border-border px-1 py-1">
                 <select v-model.number="newProd.product_type" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-center">
@@ -2533,7 +2544,7 @@ watch(department, async () => {
                 <input
                   v-if="isEditing(p.id, `cost_kit${k}`)"
                   :ref="setEditInputRef"
-                  v-model="editValue" type="number" step="0.01"
+                  v-model="editValue" type="text" inputmode="decimal"
                   class="w-full text-xs bg-transparent outline-none text-right"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
@@ -2887,7 +2898,7 @@ watch(department, async () => {
                   <input
                     v-if="isEditing(prod.id, `cost_kit${k}`)"
                     :ref="setEditInputRef"
-                    v-model="editValue" type="number" step="0.01"
+                    v-model="editValue" type="text" inputmode="decimal"
                     class="w-full text-xs bg-transparent outline-none text-center"
                     @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                   />
@@ -2907,7 +2918,7 @@ watch(department, async () => {
                   <input
                     v-if="isEditing(prod.id, 'cost_kit1')"
                     :ref="setEditInputRef"
-                    v-model="editValue" type="number" step="0.01"
+                    v-model="editValue" type="text" inputmode="decimal"
                     class="w-full text-xs bg-transparent outline-none text-center"
                     @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                   />
@@ -2931,7 +2942,7 @@ watch(department, async () => {
                   <div class="flex items-center gap-1">
                     <input
                       v-model="cellEditValue"
-                      type="number" step="0.01"
+                      type="text" inputmode="decimal"
                       class="border rounded px-1 py-0.5 w-20 text-xs bg-background"
                       @keydown.enter="saveOverride"
                       @keydown.escape="cancelCellEdit"
