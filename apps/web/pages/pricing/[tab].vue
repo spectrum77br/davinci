@@ -529,15 +529,15 @@ async function focusEditInput() {
 
 function startEditAccount(acc: Account, field: string) {
   if (!canEditContas.value) return
-  // Commit any pending edit BEFORE we overwrite editing.value. Fire-and-forget
-  // the async PATCH — the synchronous snapshot inside commitEditAccount
-  // captures the old field/value, so it's safe to start the new edit
-  // immediately. Skip the commit when re-focusing the same cell.
+  // Flush any pending edit BEFORE overwriting editing.value. commitEditAccount
+  // is now synchronous — it captures + clears in the same tick and dispatches
+  // the PATCH fire-and-forget — so calling it here cannot race with the new
+  // edit we're about to start.
   if (
     editing.value &&
     (editing.value.id !== acc.id || editing.value.field !== field)
   ) {
-    void commitEditAccount()
+    commitEditAccount()
   }
   editing.value = { id: acc.id, field }
   const raw = (acc as any)[field]
@@ -554,20 +554,23 @@ function startEditAccount(acc: Account, field: string) {
   focusEditInput()
 }
 
-async function commitEditAccount() {
-  // ── Snapshot editing state synchronously BEFORE any async work ──────
-  // @blur fires immediately when the user moves focus; the next cell's
-  // @click then runs startEditAccount and reassigns editing.value /
-  // editValue.value while this function is still pending. Capturing into
-  // locals + clearing the refs now means the PATCH that follows always
-  // targets the row the user just edited, not the one they clicked next.
-  const snapshot = editing.value
-  if (!snapshot) return
-  const { id, field } = snapshot
+// SSH parity: commit is SYNCHRONOUS. Reads editing.value + editValue.value
+// the moment blur/enter fires, clears them immediately, then dispatches
+// the PATCH fire-and-forget. Keeping this sync (not async) guarantees the
+// snapshot can't be reassigned by another scheduled microtask between
+// capture and clear — we're already running synchronously inside the
+// blur callback.
+function commitEditAccount(): void {
+  const snap = editing.value
+  if (!snap) return
+  const { id, field } = snap
   const raw = editValue.value.trim()
   editing.value = null
   editValue.value = ''
+  void _patchAccount(id, field, raw)
+}
 
+async function _patchAccount(id: string, field: string, raw: string) {
   const acc = accounts.value.find((x) => x.id === id)
   if (!acc) return
 
@@ -612,6 +615,9 @@ async function commitEditAccount() {
     return
   }
 
+  // Optimistic update: paint the new value before the round-trip.
+  Object.assign(acc, payload)
+
   try {
     const updated = await api<Account>(`/api/pricing/accounts/${id}`, {
       method: 'PATCH',
@@ -621,6 +627,8 @@ async function commitEditAccount() {
     flash(id, field)
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'save_failed'
+    // Reload to revert the optimistic update on failure.
+    await loadAccounts()
   }
 }
 
@@ -701,14 +709,14 @@ async function submitNewAcc() {
 
 function startEditProduct(p: PricingProduct, field: string) {
   if (!canEditProdutos.value) return
-  // Commit any pending edit BEFORE we overwrite editing.value. Same race
-  // fix as startEditAccount — fire-and-forget keeps the previous cell's
-  // PATCH alive while we transition to the new cell.
+  // Flush any pending edit BEFORE overwriting editing.value. commitEditProduct
+  // is now synchronous (PATCH dispatched fire-and-forget inside) so this
+  // call cannot race with the new edit we're about to start below.
   if (
     editing.value &&
     (editing.value.id !== p.id || editing.value.field !== field)
   ) {
-    void commitEditProduct()
+    commitEditProduct()
   }
   editing.value = { id: p.id, field }
   const raw = (p as any)[field]
@@ -716,19 +724,21 @@ function startEditProduct(p: PricingProduct, field: string) {
   focusEditInput()
 }
 
-async function commitEditProduct() {
-  // ── Snapshot editing state synchronously BEFORE any async work ──────
-  // Same race fix as commitEditAccount: blur on cell A → click on cell B
-  // rewrites editing.value before the PATCH for A actually fires. Capture
-  // {id, field, raw} now and clear the refs so startEditProduct(B) doesn't
-  // bleed cell B's empty value into the cell A request.
-  const snapshot = editing.value
-  if (!snapshot) return
-  const { id, field } = snapshot
+// SSH parity: commit is SYNCHRONOUS. Captures editing.value + editValue.value
+// the moment blur/enter fires and dispatches the PATCH fire-and-forget. See
+// `commitEditAccount` for the rationale (no async = no window for other
+// microtasks to rewrite the refs between read and clear).
+function commitEditProduct(): void {
+  const snap = editing.value
+  if (!snap) return
+  const { id, field } = snap
   const raw = editValue.value.trim()
   editing.value = null
   editValue.value = ''
+  void _patchProduct(id, field, raw)
+}
 
+async function _patchProduct(id: string, field: string, raw: string) {
   const p =
     products.value.find((x) => x.id === id) ??
     grid.value?.products.find((x) => x.id === id)
@@ -760,26 +770,33 @@ async function commitEditProduct() {
     return
   }
 
+  // Optimistic update: paint the new value immediately, both on the
+  // products list and the grid mirror, so the user sees the change without
+  // waiting on the network. Failures revert via loadGrid below.
+  Object.assign(p, payload)
+  const gp0 = grid.value?.products.find((x) => x.id === id)
+  if (gp0 && gp0 !== p) Object.assign(gp0, payload)
+  if (field.startsWith('cost_kit')) recomputeCellsForProduct(id)
+
   try {
     const updated = await api<PricingProduct>(`/api/pricing/products/${id}`, {
       method: 'PATCH',
       body: payload,
     })
     Object.assign(p, updated)
-    // Mirror cost edits to the grid copy so the tabela view repaints without
-    // a full reload. Recompute affected cells.
     const gp = grid.value?.products.find((x) => x.id === id)
-    if (gp) Object.assign(gp, updated)
+    if (gp && gp !== p) Object.assign(gp, updated)
     flash(id, field)
-    if (field.startsWith('cost_kit')) {
-      // In-memory recompute first for instant repaint; then loadGrid so the
-      // backend formula (with stored overrides, product_type, etc) is the
-      // source of truth. Falls back gracefully if grid isn't loaded.
-      recomputeCellsForProduct(id)
-      if (grid.value) await loadGrid()
+    if (field.startsWith('cost_kit') && grid.value) {
+      // Backend reload so price formula (overrides + product_type) is the
+      // source of truth after the cost edit.
+      await loadGrid()
     }
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'save_failed'
+    // Revert the optimistic update on failure by re-fetching.
+    if (grid.value) await loadGrid()
+    else await loadProducts()
   }
 }
 
