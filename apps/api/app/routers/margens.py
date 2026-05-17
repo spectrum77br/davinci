@@ -91,11 +91,11 @@ async def list_margens_marketplace(
     where_sql = " AND ".join(where)
 
     count_sql = text(
-        f"SELECT count(*) FROM davinci.vw_conciliacao_margens_marketplace v WHERE {where_sql}"  # noqa: S608
+        f"SELECT count(*) FROM davinci.mv_conciliacao_margens_marketplace v WHERE {where_sql}"  # noqa: S608
     )
     platforms_sql = text(
         "SELECT DISTINCT COALESCE(plataforma_bling, plataforma_financeiro) AS p "
-        "FROM davinci.vw_conciliacao_margens_marketplace "
+        "FROM davinci.mv_conciliacao_margens_marketplace "
         "WHERE COALESCE(plataforma_bling, plataforma_financeiro) IS NOT NULL "
         "ORDER BY 1"
     )
@@ -132,7 +132,7 @@ async def list_margens_marketplace(
             v.pricing_leaf_segment_name,
             v.bling_listing_type,
             bo.observacao
-        FROM davinci.vw_conciliacao_margens_marketplace v
+        FROM davinci.mv_conciliacao_margens_marketplace v
         LEFT JOIN LATERAL (
             SELECT bo.observacao
             FROM davinci.bling_orders bo
@@ -185,7 +185,46 @@ async def patch_marketplace_observacao(
         pedido_bling=pedido_bling,
         rows=result.rowcount,
     )
+    await _refresh_mv_silent(session)
     return {"pedido_bling": pedido_bling, "observacao": next_value, "rows": result.rowcount}
+
+
+async def _refresh_mv_silent(session: AsyncSession) -> None:
+    """Best-effort refresh of mv_conciliacao_margens_marketplace.
+
+    Fires after PATCHes (status/observacao) so the user sees their
+    change immediately on next page load. Swallows errors — refresh
+    failure must never block the underlying mutation.
+    """
+    try:
+        await session.execute(
+            text(
+                "REFRESH MATERIALIZED VIEW CONCURRENTLY "
+                "davinci.mv_conciliacao_margens_marketplace"
+            )
+        )
+        await session.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "mv_conciliacao_margens_marketplace_refresh_failed",
+            error=str(e)[:200],
+        )
+
+
+@router.post("/marketplace/refresh")
+async def refresh_marketplace_mv(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("margem", "view"))],
+) -> dict:
+    """Trigger MV refresh on-demand (UI 'atualizar' button)."""
+    await session.execute(
+        text(
+            "REFRESH MATERIALIZED VIEW CONCURRENTLY "
+            "davinci.mv_conciliacao_margens_marketplace"
+        )
+    )
+    await session.commit()
+    return {"refreshed": True}
 
 
 class MarketplaceStatusPatch(BaseModel):
@@ -227,6 +266,7 @@ async def patch_marketplace_status(
         )
 
     await session.commit()
+    await _refresh_mv_silent(session)
     logger.info(
         "marketplace_status_patched",
         pedido_bling=pedido_bling,
