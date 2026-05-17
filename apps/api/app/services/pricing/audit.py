@@ -249,17 +249,16 @@ async def scan_missing_skus(
         if pp is None:
             issues.append("Fora da tabela de preços")
         else:
-            # Kits in Bling (formato='E') store the *total* kit cost in
-            # bling_cost_price (e.g. R$441.90 for 6 units), while the
-            # PricingProduct row stores the unit cost in bling_cost_price
-            # and the kit total in cost_kit1. Compare like-for-like.
+            # Business rule: "Custo divergente" only applies to simple
+            # products (formato='S' or NULL). Kit/composite products
+            # (formato='E') store the total kit cost in Bling but the
+            # pricing table tracks individual unit costs, so a comparison
+            # is meaningless — skip the check entirely for kits.
             is_kit = (p.formato or '').upper() == 'E'
-            if is_kit:
-                pricing_cost = _q2(pp.cost_kit1) if pp.cost_kit1 else None
-            else:
+            if not is_kit:
                 pricing_cost = _q2(pp.bling_cost_price)
-            if bling_cost is not None and pricing_cost is not None and bling_cost != pricing_cost:
-                issues.append("Custo divergente")
+                if bling_cost is not None and pricing_cost is not None and bling_cost != pricing_cost:
+                    issues.append("Custo divergente")
 
         if not accounts:
             issues.append("Sem anúncio")
