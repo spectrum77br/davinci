@@ -250,13 +250,17 @@ async def scan_missing_skus(
             issues.append("Fora da tabela de preços")
         else:
             # Business rule: "Custo divergente" only applies to simple
-            # products (formato='S' or NULL). Kit/composite products
-            # (formato='E') store the total kit cost in Bling but the
-            # pricing table tracks individual unit costs, so a comparison
-            # is meaningless — skip the check entirely for kits.
+            # products (formato='S' or NULL). Kits (formato='E') are
+            # skipped — see prior commit for the why.
+            #
+            # Compare Bling's cost against pp.cost_kit1 (the field users
+            # actually edit in the Tabela de Preços UI) — NOT against
+            # pp.bling_cost_price, which is a legacy/import field that
+            # doesn't track user edits, so it would keep firing false
+            # "Custo divergente" alerts after a corrected price.
             is_kit = (p.formato or '').upper() == 'E'
             if not is_kit:
-                pricing_cost = _q2(pp.bling_cost_price)
+                pricing_cost = _q2(pp.cost_kit1) if pp.cost_kit1 else None
                 if bling_cost is not None and pricing_cost is not None and bling_cost != pricing_cost:
                     issues.append("Custo divergente")
 
