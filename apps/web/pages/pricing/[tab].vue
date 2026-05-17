@@ -2880,7 +2880,7 @@ watch(department, async () => {
                     isFlashed(prod.id, `cost_kit${k}`) ? 'bg-emerald-50 dark:bg-emerald-900/20' : '',
                   ]"
                   :style="{ left: `${368 + (k - 1) * 56}px` }"
-                  @click="canEditProdutos && !isEditing(prod.id, `cost_kit${k}`) && startEditProduct(prod as any, `cost_kit${k}`)"
+                  @mousedown.prevent="canEditProdutos && !isEditing(prod.id, `cost_kit${k}`) && startEditProduct(prod as any, `cost_kit${k}`)"
                 >
                   <input
                     v-if="isEditing(prod.id, `cost_kit${k}`)"
@@ -2900,7 +2900,7 @@ watch(department, async () => {
                     isFlashed(prod.id, 'cost_kit1') ? 'bg-emerald-50 dark:bg-emerald-900/20' : '',
                   ]"
                   :style="{ left: '368px' }"
-                  @click="canEditProdutos && !isEditing(prod.id, 'cost_kit1') && startEditProduct(prod as any, 'cost_kit1')"
+                  @mousedown.prevent="canEditProdutos && !isEditing(prod.id, 'cost_kit1') && startEditProduct(prod as any, 'cost_kit1')"
                 >
                   <input
                     v-if="isEditing(prod.id, 'cost_kit1')"
