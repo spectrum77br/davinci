@@ -28,7 +28,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -181,9 +181,21 @@ async def scan_missing_skus(
          integration_ids}
     sorted by issue priority (sem anúncio first, then divergente, then fora).
     """
+    # Only audit products that are active in Bling: situacao='A' (Ativo) or
+    # NULL (legacy rows without the flag). Excluded ('E') and inactive ('I')
+    # products may still carry residual stock locally but they're no longer
+    # sellable, so flagging them as "Fora da tabela" would be noise.
     products = (
         await session.execute(
-            select(Product).where(Product.stock > 0)
+            select(Product).where(
+                and_(
+                    Product.stock > 0,
+                    or_(
+                        Product.situacao == 'A',
+                        Product.situacao.is_(None),
+                    ),
+                )
+            )
         )
     ).scalars().all()
 
@@ -237,7 +249,15 @@ async def scan_missing_skus(
         if pp is None:
             issues.append("Fora da tabela de preços")
         else:
-            pricing_cost = _q2(pp.bling_cost_price)
+            # Kits in Bling (formato='E') store the *total* kit cost in
+            # bling_cost_price (e.g. R$441.90 for 6 units), while the
+            # PricingProduct row stores the unit cost in bling_cost_price
+            # and the kit total in cost_kit1. Compare like-for-like.
+            is_kit = (p.formato or '').upper() == 'E'
+            if is_kit:
+                pricing_cost = _q2(pp.cost_kit1) if pp.cost_kit1 else None
+            else:
+                pricing_cost = _q2(pp.bling_cost_price)
             if bling_cost is not None and pricing_cost is not None and bling_cost != pricing_cost:
                 issues.append("Custo divergente")
 

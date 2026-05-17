@@ -59,6 +59,13 @@ class Product(Base, TimestampMixin):
     stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     min_stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     bling_product_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Bling product flags (char(1) in DB, populated by the importer):
+    #   situacao: A=Ativo, E=Excluído, I=Inativo, NULL=desconhecido
+    #   formato:  S=Simples, E=Composto/kit
+    # Used by the audit to skip deleted products and to switch the cost
+    # comparison to cost_kit1 when the source is a kit.
+    situacao: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    formato: Mapped[str | None] = mapped_column(String(1), nullable=True)
     integration_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("integrations.id", ondelete="SET NULL"),
