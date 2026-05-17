@@ -545,29 +545,39 @@ function startEditAccount(acc: Account, field: string) {
 }
 
 async function commitEditAccount() {
-  if (!editing.value) return
-  const { id, field } = editing.value
-  const acc = accounts.value.find((x) => x.id === id)
-  if (!acc) return cancelEdit()
-
+  // ── Snapshot editing state synchronously BEFORE any async work ──────
+  // @blur fires immediately when the user moves focus; the next cell's
+  // @click then runs startEditAccount and reassigns editing.value /
+  // editValue.value while this function is still pending. Capturing into
+  // locals + clearing the refs now means the PATCH that follows always
+  // targets the row the user just edited, not the one they clicked next.
+  const snapshot = editing.value
+  if (!snapshot) return
+  const { id, field } = snapshot
   const raw = editValue.value.trim()
+  editing.value = null
+  editValue.value = ''
+
+  const acc = accounts.value.find((x) => x.id === id)
+  if (!acc) return
+
   const payload: Record<string, unknown> = {}
 
   if (field === 'name') {
-    if (!raw) return cancelEdit()
+    if (!raw) return
     payload.name = raw
   } else if (field === 'platform') {
     payload.platform = raw
   } else if (field === 'kit_number') {
     const n = parseInt(raw)
-    if (!Number.isFinite(n) || n < 1 || n > 5) return cancelEdit()
+    if (!Number.isFinite(n) || n < 1 || n > 5) return
     payload.kit_number = n
   } else if (field === 'commission') {
     if (!raw) {
       payload.commission = null
     } else {
       const pct = Number(raw)
-      if (Number.isNaN(pct)) return cancelEdit()
+      if (Number.isNaN(pct)) return
       payload.commission = (pct / 100).toFixed(4)
     }
   } else if (field.startsWith('margin')) {
@@ -575,7 +585,7 @@ async function commitEditAccount() {
       payload[field] = null
     } else {
       const pct = Number(raw)
-      if (Number.isNaN(pct)) return cancelEdit()
+      if (Number.isNaN(pct)) return
       payload[field] = (pct / 100).toFixed(4)
     }
   } else if (field.startsWith('shipping')) {
@@ -583,13 +593,13 @@ async function commitEditAccount() {
       payload[field] = null
     } else {
       const n = Number(raw)
-      if (Number.isNaN(n)) return cancelEdit()
+      if (Number.isNaN(n)) return
       payload[field] = n
     }
   } else if (field.startsWith('observation') || field === 'email' || field === 'phone' || field === 'listing_type') {
     payload[field] = raw || null
   } else {
-    return cancelEdit()
+    return
   }
 
   try {
@@ -601,8 +611,6 @@ async function commitEditAccount() {
     flash(id, field)
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'save_failed'
-  } finally {
-    cancelEdit()
   }
 }
 
@@ -690,24 +698,33 @@ function startEditProduct(p: PricingProduct, field: string) {
 }
 
 async function commitEditProduct() {
-  if (!editing.value) return
-  const { id, field } = editing.value
+  // ── Snapshot editing state synchronously BEFORE any async work ──────
+  // Same race fix as commitEditAccount: blur on cell A → click on cell B
+  // rewrites editing.value before the PATCH for A actually fires. Capture
+  // {id, field, raw} now and clear the refs so startEditProduct(B) doesn't
+  // bleed cell B's empty value into the cell A request.
+  const snapshot = editing.value
+  if (!snapshot) return
+  const { id, field } = snapshot
+  const raw = editValue.value.trim()
+  editing.value = null
+  editValue.value = ''
+
   const p =
     products.value.find((x) => x.id === id) ??
     grid.value?.products.find((x) => x.id === id)
-  if (!p) return cancelEdit()
+  if (!p) return
 
-  const raw = editValue.value.trim()
   const payload: Record<string, unknown> = {}
 
   if (field === 'sku' || field === 'name') {
-    if (!raw) return cancelEdit()
+    if (!raw) return
     payload[field] = raw
   } else if (field === 'department') {
     payload.department = raw
   } else if (field === 'product_type') {
     const n = parseInt(raw)
-    if (!Number.isFinite(n)) return cancelEdit()
+    if (!Number.isFinite(n)) return
     payload.product_type = n
   } else if (field.startsWith('cost_kit')) {
     if (!raw || raw === '-' || raw === '—') {
@@ -715,13 +732,13 @@ async function commitEditProduct() {
       else payload[field] = null
     } else {
       const n = Number(raw)
-      if (Number.isNaN(n)) return cancelEdit()
+      if (Number.isNaN(n)) return
       payload[field] = n.toFixed(2)
     }
   } else if (field === 'description' || field === 'model' || field === 'ean') {
     payload[field] = raw || null
   } else {
-    return cancelEdit()
+    return
   }
 
   try {
@@ -744,8 +761,6 @@ async function commitEditProduct() {
     }
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'save_failed'
-  } finally {
-    cancelEdit()
   }
 }
 
@@ -1449,13 +1464,17 @@ function startEditObs(accId: string, field: string, currentVal: string | null) {
 }
 
 async function commitObs(accId: string, field: string) {
+  // Snapshot obsValue synchronously: blur on obs1 → click on obs2 would
+  // reassign obsValue before the PATCH fires (same race as commitEditProduct).
+  const raw = obsValue.value.trim()
   editingObsId.value = null
+  obsValue.value = ''
   const acc = (grid.value?.accounts ?? []).find(a => a.id === accId)
   if (!acc) return
   try {
     const updated = await api<Account>(`/api/pricing/accounts/${accId}`, {
       method: 'PATCH',
-      body: { [field]: obsValue.value.trim() || null },
+      body: { [field]: raw || null },
     })
     Object.assign(acc, updated)
     const local = accounts.value.find(a => a.id === accId)
