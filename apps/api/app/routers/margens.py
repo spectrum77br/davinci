@@ -34,6 +34,26 @@ SITUACAO_REPROVADO = 83955
 SITUACAO_VERIFICAR_MARGEM = 84680
 SITUACAO_VERIFICAR_MARGEM_NOME = "Verificar Margem"
 
+# "Needs attention" flag — rows the user must triage. Three independent triggers:
+#   1) margin below the configured minimum
+#   2) seller paid more shipping than projected (negative frete result)
+#   3) Bling-computed net diverges from marketplace net by more than 1%
+# Rows that don't trigger any of these are treated as auto-approved in the UI
+# (status filter "Pendente" hides them; "Aprovado" includes them).
+NEEDS_ATTENTION_SQL = """(
+    (v.marketplace_margem IS NOT NULL AND v.margem_minima IS NOT NULL
+     AND v.marketplace_margem < v.margem_minima)
+ OR (v.frete_resultado_item IS NOT NULL AND v.frete_resultado_item < 0)
+ OR (v.marketplace_liquido_base_margem_item IS NOT NULL
+     AND v.bling_valorbase_item IS NOT NULL
+     AND ABS(
+            (v.bling_valorbase_item
+             - COALESCE(v.bling_custofrete_item, 0)
+             - COALESCE(v.bling_taxacomissao_item, 0))
+            - v.marketplace_liquido_base_margem_item
+         ) > 0.01 * ABS(v.marketplace_liquido_base_margem_item))
+)"""
+
 
 @router.get("", response_model=list[MargensOut])
 async def list_margens(
@@ -61,7 +81,6 @@ async def list_margens_marketplace(
     search: str | None = Query(None),
     platform: str | None = Query(None),
     status: str | None = Query(None),
-    attention_only: bool = Query(True),
 ) -> MargensMarketplacePage:
     """Per-item marketplace conciliation rows (paginated, 20d window).
 
@@ -75,21 +94,23 @@ async def list_margens_marketplace(
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
         params["platform"] = platform
     if status:
+        # Effective status:
+        #   Aprovado/Reprovado in DB → respected as-is
+        #   NULL/Pendente in DB     → derived from NEEDS_ATTENTION_SQL
+        #                               (true → Pendente, false → Aprovado)
         if status == "Pendente":
-            # Treat NULL as Pendente — that's what the UI dropdown defaults to
-            # for an order that was never approved/rejected.
-            where.append("(v.bling_status_margem IS NULL OR v.bling_status_margem = 'Pendente')")
-        elif status in ("Aprovado", "Reprovado"):
-            where.append("v.bling_status_margem = :status")
-            params["status"] = status
-    if attention_only:
-        # First-pass triage view: only rows where the margin is below the
-        # configured minimum OR the seller paid more shipping than projected.
-        where.append(
-            "((v.marketplace_margem IS NOT NULL AND v.margem_minima IS NOT NULL "
-            "  AND v.marketplace_margem < v.margem_minima) "
-            " OR (v.frete_resultado_item IS NOT NULL AND v.frete_resultado_item < 0))"
-        )
+            where.append(
+                f"(v.bling_status_margem IS NULL OR v.bling_status_margem = 'Pendente') "
+                f"AND {NEEDS_ATTENTION_SQL}"
+            )
+        elif status == "Aprovado":
+            where.append(
+                f"(v.bling_status_margem = 'Aprovado' "
+                f" OR ((v.bling_status_margem IS NULL OR v.bling_status_margem = 'Pendente') "
+                f"     AND NOT {NEEDS_ATTENTION_SQL}))"
+            )
+        elif status == "Reprovado":
+            where.append("v.bling_status_margem = 'Reprovado'")
     if search:
         where.append(
             "(v.pedido_bling ILIKE :q OR v.pedido_marketplace ILIKE :q "
@@ -134,7 +155,12 @@ async def list_margens_marketplace(
             v.marketplace_liquido_base_margem_item               AS saldo_efetivo,
             v.marketplace_margem                                 AS margem,
             v.margem_minima,
-            v.bling_status_margem                                AS status,
+            CASE
+                WHEN v.bling_status_margem IN ('Aprovado', 'Reprovado')
+                    THEN v.bling_status_margem
+                WHEN {NEEDS_ATTENTION_SQL} THEN 'Pendente'
+                ELSE 'Aprovado'
+            END                                                  AS status,
             v.pricing_account_id,
             v.pricing_account_name,
             v.pricing_account_listing_type,
