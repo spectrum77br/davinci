@@ -787,11 +787,13 @@ async function _patchProduct(id: string, field: string, raw: string) {
     const gp = grid.value?.products.find((x) => x.id === id)
     if (gp && gp !== p) Object.assign(gp, updated)
     flash(id, field)
-    if (field.startsWith('cost_kit') && grid.value) {
-      // Backend reload so price formula (overrides + product_type) is the
-      // source of truth after the cost edit.
-      await loadGrid()
-    }
+    // SSH parity: do NOT reload the whole grid after a cost edit. The
+    // server response already carries the canonical row, and recomputing
+    // cells in-memory from the new cost is enough to repaint dependent
+    // prices. A full loadGrid() here used to occasionally overwrite the
+    // freshly-saved value with stale data, producing the "I typed 20 and
+    // it snapped back to 4000" bug.
+    if (field.startsWith('cost_kit')) recomputeCellsForProduct(id)
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'save_failed'
     // Revert the optimistic update on failure by re-fetching.
