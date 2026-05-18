@@ -40,12 +40,25 @@ SITUACAO_VERIFICAR_MARGEM_NOME = "Verificar Margem"
 #   3) Bling-computed net diverges from marketplace net by more than 1%
 # Rows that don't trigger any of these are treated as auto-approved in the UI
 # (status filter "Pendente" hides them; "Aprovado" includes them).
+# Frete Plataforma (per-item) — mirrors what the UI displays in that column.
+# Used both in the SELECT (as `frete_plataforma`) and in the Frete Resultado
+# computation, so the filter and the displayed values stay in sync.
+_FRETE_PLATAFORMA_SQL = (
+    "CASE "
+    "WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee' "
+    "THEN (v.evento_freight * v.item_proportion) "
+    "ELSE v.marketplace_frete_real_cobrado_item "
+    "END"
+)
+# Frete Resultado (per-item) = Frete Projetado − Frete Plataforma
+_FRETE_RESULTADO_SQL = f"(v.frete_projetado_item - ({_FRETE_PLATAFORMA_SQL}))"
+
 _ATTENTION_MARGEM_SQL = (
     "(v.marketplace_margem IS NOT NULL AND v.margem_minima IS NOT NULL "
     " AND v.marketplace_margem < v.margem_minima)"
 )
 _ATTENTION_FRETE_SQL = (
-    "(v.frete_resultado_item IS NOT NULL AND v.frete_resultado_item < 0)"
+    f"(v.frete_projetado_item IS NOT NULL AND {_FRETE_RESULTADO_SQL} < 0)"
 )
 _ATTENTION_SALDO_SQL = (
     "(v.marketplace_liquido_base_margem_item IS NOT NULL "
@@ -115,9 +128,14 @@ async def list_margens_marketplace(
     if platform:
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
         params["platform"] = platform
-    # attention_type narrows which "needs attention" trigger qualifies a
-    # Pendente row. Defaults to all triggers ORd together.
+    # attention_type narrows which "needs attention" trigger qualifies a row.
+    # When the user picks a specific trigger (frete/margem/saldo), only rows
+    # that hit that trigger are returned — regardless of the chosen status.
+    # When attention_type='all' (default), status alone drives the filter.
     attention_sql = _ATTENTION_TYPE_MAP.get(attention_type or "all", NEEDS_ATTENTION_SQL)
+    attention_active = attention_type and attention_type != "all"
+    if attention_active:
+        where.append(attention_sql)
     if status:
         # Effective status:
         #   Aprovado/Reprovado in DB → respected as-is
@@ -126,7 +144,7 @@ async def list_margens_marketplace(
         if status == "Pendente":
             where.append(
                 f"(v.bling_status_margem IS NULL OR v.bling_status_margem = 'Pendente') "
-                f"AND {attention_sql}"
+                f"AND {NEEDS_ATTENTION_SQL}"
             )
         elif status == "Aprovado":
             where.append(
@@ -168,11 +186,7 @@ async def list_margens_marketplace(
             v.produto,
             v.quantidade,
             v.bling_custo_produtos                               AS custo_produto,
-            CASE
-                WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
-                THEN (v.evento_freight * v.item_proportion)
-                ELSE v.marketplace_frete_real_cobrado_item
-            END                                                  AS frete_plataforma,
+            {_FRETE_PLATAFORMA_SQL}                              AS frete_plataforma,
             (v.evento_frete_anuncio * v.item_proportion)         AS frete_anuncio,
             v.frete_projetado_item                               AS frete_projetado,
             CASE
@@ -180,7 +194,7 @@ async def list_margens_marketplace(
                 THEN 0::numeric
                 ELSE (v.marketplace_frete_item - v.marketplace_frete_real_cobrado_item)
             END                                                  AS reembolso,
-            (v.frete_projetado_item - (v.evento_frete_anuncio * v.item_proportion)) AS resultado_frete,
+            {_FRETE_RESULTADO_SQL}                               AS resultado_frete,
             v.marketplace_liquido_base_margem_item               AS saldo_plataforma,
             (v.bling_valorbase_item
                 - COALESCE(v.bling_custofrete_item, 0)

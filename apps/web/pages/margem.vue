@@ -113,7 +113,7 @@ async function load() {
     params.set('offset', String((page.value - 1) * PAGE_SIZE))
     if (platform.value !== 'all') params.set('platform', platform.value)
     if (statusFilter.value !== 'all') params.set('status', statusFilter.value)
-    if (statusFilter.value === 'Pendente' && attentionType.value !== 'all') {
+    if (attentionType.value !== 'all') {
       params.set('attention_type', attentionType.value)
     }
     if (search.value.trim()) params.set('search', search.value.trim())
@@ -160,7 +160,6 @@ watch(statusFilter, () => {
   load()
 })
 watch(attentionType, () => {
-  if (statusFilter.value !== 'Pendente') return
   page.value = 1
   load()
 })
@@ -342,7 +341,6 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
         </option>
       </select>
       <select
-        v-if="statusFilter === 'Pendente'"
         v-model="attentionType"
         class="text-sm rounded-md border bg-background px-2 py-1.5"
       >
