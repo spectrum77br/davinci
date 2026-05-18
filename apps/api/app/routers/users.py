@@ -6,6 +6,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.db import get_session
 from app.deps.auth import require_active_user, require_admin
@@ -219,6 +220,9 @@ async def patch_permissions(
         raise HTTPException(403, detail={"code": "cannot_edit_admin_permissions"})
 
     u.permissions = body.permissions.to_jsonb()
+    # JSONB columns can fail to mark dirty when the new dict compares equal
+    # by identity to the previous value — force SQLAlchemy to emit the UPDATE.
+    flag_modified(u, "permissions")
     await session.commit()
     await session.refresh(u)
     return _to_out(u)
