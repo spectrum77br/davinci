@@ -160,7 +160,12 @@ function pct(v: number | null | undefined) {
 
 function fmtDate(v: string | null) {
   if (!v) return '—'
-  return new Date(v).toLocaleDateString('pt-BR')
+  // Bling envia 'data' como YYYY-MM-DDT00:00:00Z — usar a parte YYYY-MM-DD
+  // direto evita o off-by-one por causa do fuso BRT (UTC-3).
+  const ymd = v.slice(0, 10)
+  const [y, m, d] = ymd.split('-')
+  if (!y || !m || !d) return v
+  return `${d}/${m}/${y}`
 }
 
 function freteProjMissingReason(r: MarketplaceRow): string | null {
