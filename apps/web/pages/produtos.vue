@@ -428,19 +428,30 @@ function brl(v: string | number | null | undefined) {
 
 async function bulkDelete() {
   if (selected.value.size === 0) return
-  if (!confirm(`Excluir ${selected.value.size} produto(s)?`)) return
-  await api('/api/products/bulk-delete', {
-    method: 'POST',
-    body: { ids: [...selected.value] },
-  })
-  selected.value = new Set()
-  await refreshAll()
+  const count = selected.value.size
+  if (!confirm(`Excluir ${count} produto(s)?`)) return
+  try {
+    await api('/api/products/bulk-delete', {
+      method: 'POST',
+      body: { ids: [...selected.value] },
+    })
+    selected.value = new Set()
+    await refreshAll()
+  } catch (e: any) {
+    const msg = e?.data?.detail?.code || e?.message || 'erro desconhecido'
+    pushToast({ kind: 'error', title: `Falha ao excluir ${count} produto(s)`, lines: [msg] }, 15000)
+  }
 }
 
 async function deleteOne(id: string) {
   if (!confirm('Excluir produto?')) return
-  await api(`/api/products/${id}`, { method: 'DELETE' })
-  await refreshAll()
+  try {
+    await api(`/api/products/${id}`, { method: 'DELETE' })
+    await refreshAll()
+  } catch (e: any) {
+    const msg = e?.data?.detail?.code || e?.message || 'erro desconhecido'
+    pushToast({ kind: 'error', title: 'Falha ao excluir produto', lines: [msg] }, 15000)
+  }
 }
 
 async function deleteLink(id: string) {
