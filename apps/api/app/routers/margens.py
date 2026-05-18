@@ -43,10 +43,15 @@ SITUACAO_VERIFICAR_MARGEM_NOME = "Verificar Margem"
 # Frete Plataforma (per-item) — mirrors what the UI displays in that column.
 # Used both in the SELECT (as `frete_plataforma`) and in the Frete Resultado
 # computation, so the filter and the displayed values stay in sync.
+# For Shopee, evento_freight can be negative (final_shipping_fee < 0 when the
+# buyer pays for shipping — Shopee credits the seller). We floor at 0 because
+# a credit is not a "frete plataforma" cost. NULL is preserved (= no financial
+# synced yet), so the cell stays blank instead of showing 0.
 _FRETE_PLATAFORMA_SQL = (
     "CASE "
     "WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee' "
-    "THEN (v.evento_freight * v.item_proportion) "
+    "THEN CASE WHEN v.evento_freight IS NULL THEN NULL "
+    "          ELSE GREATEST(v.evento_freight * v.item_proportion, 0::numeric) END "
     "ELSE v.marketplace_frete_real_cobrado_item "
     "END"
 )
