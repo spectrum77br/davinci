@@ -643,6 +643,10 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
         and billing["results"]
     )
     status = "posted" if has_billing else "estimated"
+    # `frete_anuncio` for ML = sum of `freight_promised_amount` across items
+    # (= list_cost * (1 - discount.rate) from /shipping_options/free, per item).
+    # Same event name as Shopee so the view exposes both uniformly.
+    frete_anuncio_total = _ml_frete_anuncio_total(freights)
     events = _compact_events(
         [
             _event("sale", gross, currency=currency),
@@ -660,6 +664,7 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
                     )
                 },
             ),
+            _event("frete_anuncio", frete_anuncio_total, currency=currency),
             _event("net_estimated", net, currency=currency, status=status),
         ]
     )
@@ -858,6 +863,25 @@ def _ml_free_shipping_quote(
     effective_rate = rate if rate is not None else Decimal("0")
     promised = _money_from_decimal(list_cost * (Decimal("1") - effective_rate))
     return list_cost, rate, promised
+
+
+def _ml_frete_anuncio_total(
+    freights: list[FreightReconciliationDraft],
+) -> Decimal | None:
+    """Sum `freight_promised_amount` across ML freight rows.
+
+    `freight_promised_amount` per item = list_cost * (1 - discount.rate)
+    from /shipping_options/free — the freight the seller "would pay"
+    according to the listing's quote. Returns None if no item has a quote.
+    """
+    total = Decimal("0")
+    seen = False
+    for freight in freights:
+        if freight.freight_promised_amount is None:
+            continue
+        total += freight.freight_promised_amount
+        seen = True
+    return total if seen else None
 
 
 def _ml_actual_freight_total(freights: list[FreightReconciliationDraft]) -> Decimal | None:
