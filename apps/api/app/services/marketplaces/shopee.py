@@ -444,15 +444,19 @@ class ShopeeClient:
     async def get_item_promotion(
         self, item_id: int
     ) -> dict | None:
-        """Check if item has an active discount promotion.
+        """Returns the active promotion (discount or flash sale) for an item,
+        or None if none. Prefers shop-discount over flash-sale so the caller
+        can update the discount price; falls back to flash-sale so the caller
+        still surfaces the "flash sale active" SKIPPED status correctly.
 
-        Returns promotion info dict or None if no active promotion.
+        Uses /api/v2/product/get_item_promotion (matches SSH): one call, keyed
+        by item_id_list, no paging through every shop discount.
         """
         try:
             r = await self._request(
                 "GET",
-                "/api/v2/discount/get_discount_list",
-                params={"discount_status": "ongoing", "page_no": 1, "page_size": 50},
+                "/api/v2/product/get_item_promotion",
+                params={"item_id_list": str(item_id)},
             )
             if r.status_code != 200:
                 return None
@@ -461,27 +465,28 @@ class ShopeeClient:
             if body.get("error"):
                 return None
 
-            discounts = (body.get("response") or {}).get("discount_list") or []
-            for discount in discounts:
-                discount_id = discount.get("discount_id")
-                if not discount_id:
+            success_list = (body.get("response") or {}).get("success_item_list") or []
+            for item in success_list:
+                if int(item.get("item_id") or 0) != item_id:
                     continue
-                # Check if this discount contains our item
-                r2 = await self._request(
-                    "GET",
-                    "/api/v2/discount/get_discount",
-                    params={"discount_id": discount_id},
-                )
-                if r2.status_code != 200:
-                    continue
-                body2 = r2.json() or {}
-                items = (body2.get("response") or {}).get("items") or []
-                for it in items:
-                    if int(it.get("item_id") or 0) == item_id:
+                promos = item.get("promotion") or []
+                # 1) shop discount wins — that's what update_promotion_price patches
+                for p in promos:
+                    ptype = (p.get("promotion_type") or "").lower()
+                    if ptype in ("discount promotions", "discount", "shop_discount"):
                         return {
-                            "promotion_id": discount_id,
+                            "promotion_id": p.get("promotion_id"),
                             "item_id": item_id,
-                            "discount_info": discount,
+                            "discount_info": {"promotion_type": p.get("promotion_type")},
+                        }
+                # 2) flash sale fallback — caller will SKIP it
+                for p in promos:
+                    ptype = (p.get("promotion_type") or "").lower()
+                    if "flash" in ptype:
+                        return {
+                            "promotion_id": p.get("promotion_id"),
+                            "item_id": item_id,
+                            "discount_info": {"promotion_type": p.get("promotion_type")},
                         }
             return None
         except Exception:  # noqa: BLE001
