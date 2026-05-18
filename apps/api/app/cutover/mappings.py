@@ -18,7 +18,7 @@ LEGACY_TO_NEW_PLATFORM = {
     "amazon": IntegrationPlatform.AMAZON.value,
 }
 
-DROPPED_PLATFORMS = {"tiktok", "temu", "aliexpress", "shein", "magalu", "site"}
+DROPPED_PLATFORMS = {"tiktok", "temu", "aliexpress", "magalu", "site"}
 
 LEGACY_ALERT_TYPE = {
     "sync_error": AlertType.SYNC_FAILURE.value,
@@ -59,6 +59,7 @@ LEGACY_PRICING_PLATFORM = {
     "tiktok": PricingPlatform.TIKTOK.value,
     "aliexpress": PricingPlatform.ALIEXPRESS.value,
     "magalu": PricingPlatform.MAGALU.value,
+    "shein": PricingPlatform.SHEIN.value,
 }
 
 LINK_SYNC_DEFAULT = LinkSyncStatus.PENDING.value

@@ -53,6 +53,7 @@ const DEPT_BADGE: Record<string, { label: string; cls: string }> = {
   mala:     { label: 'Mala',     cls: DEPT_BADGE_CLS },
   eletro:   { label: 'Eletro',   cls: DEPT_BADGE_CLS },
   catalogo: { label: 'Catálogo', cls: DEPT_BADGE_CLS },
+  shein:    { label: 'Shein',    cls: DEPT_BADGE_CLS },
 }
 
 type IntegrationRef = {
@@ -69,6 +70,7 @@ const STORE_INFO_TO_INTEGRATION_PLATFORM: Record<string, string> = {
   amazon: 'amazon',
   tiktok: 'tiktok',
   temu: 'temu',
+  shein: 'shein',
 }
 
 const PLATFORM_ALIASES: Record<string, string> = {
@@ -102,6 +104,7 @@ const DEPARTMENTS = [
   { value: 'mala', label: 'Mala' },
   { value: 'eletro', label: 'Eletro' },
   { value: 'catalogo', label: 'Catálogo' },
+  { value: 'shein', label: 'Shein' },
 ]
 
 const { api } = useApi()

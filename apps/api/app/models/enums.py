@@ -56,6 +56,7 @@ class IntegrationPlatform(StrEnum):
     AMAZON = "amazon"
     TIKTOK = "tiktok"
     TEMU = "temu"
+    SHEIN = "shein"
 
 
 PLATFORMS: tuple[str, ...] = tuple(p.value for p in IntegrationPlatform)
@@ -139,6 +140,7 @@ class Department(StrEnum):
     MALA = "mala"
     ELETRO = "eletro"
     CATALOGO = "catalogo"
+    SHEIN = "shein"
 
 
 class PricingPlatform(StrEnum):
@@ -149,6 +151,7 @@ class PricingPlatform(StrEnum):
     ALIEXPRESS = "aliexpress"
     TIKTOK = "tiktok"
     MAGALU = "magalu"
+    SHEIN = "shein"
 
 
 class CellStatus(StrEnum):
