@@ -168,13 +168,21 @@ async def list_margens_marketplace(
             v.produto,
             v.quantidade,
             v.bling_custo_produtos                               AS custo_produto,
-            (v.evento_freight * v.item_proportion)               AS frete_plataforma,
-            (v.evento_frete_anuncio * v.item_proportion)         AS frete_anuncio,
+            CASE
+                WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
+                THEN (v.evento_freight * v.item_proportion)
+                ELSE v.marketplace_frete_real_cobrado_item
+            END                                                  AS frete_plataforma,
+            CASE
+                WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
+                THEN (v.evento_frete_anuncio * v.item_proportion)
+                ELSE v.marketplace_frete_item
+            END                                                  AS frete_anuncio,
             v.frete_projetado_item                               AS frete_projetado,
             CASE
                 WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
                 THEN 0::numeric
-                ELSE (v.evento_shipping_rebate * v.item_proportion)
+                ELSE (v.marketplace_frete_item - v.marketplace_frete_real_cobrado_item)
             END                                                  AS reembolso,
             CASE
                 WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
