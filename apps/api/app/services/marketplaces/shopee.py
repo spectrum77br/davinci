@@ -465,7 +465,9 @@ class ShopeeClient:
             if body.get("error"):
                 return None
 
-            success_list = (body.get("response") or {}).get("success_item_list") or []
+            # Endpoint returns `success_list` here (not `success_item_list` —
+            # that key belongs to discount/add_discount_item).
+            success_list = (body.get("response") or {}).get("success_list") or []
             for item in success_list:
                 if int(item.get("item_id") or 0) != item_id:
                     continue
