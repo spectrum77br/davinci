@@ -288,13 +288,29 @@ async def sync_bling_from_marketplace(
     nenhuma escolha — o próprio UPDATE é a ação. O `custofrete` usa o
     mesmo CASE da coluna Frete Plataforma (com GREATEST(.,0) para Shopee).
     """
+    # Shopee: o escrow_amount ja embute commission rebates, vouchers, cashback
+    # etc — entao gravamos o liquido direto em valor_base e zeramos
+    # taxacomissao/custofrete pra que (valor_base − taxa − frete) = liquido.
+    # Outras plataformas seguem o split por componentes (bruto / taxas / frete).
     row = (await session.execute(
         text(
             f"""
             SELECT
-              v.marketplace_valor_bruto_item AS valorbase,
-              v.marketplace_taxas_item        AS taxacomissao,
-              {_FRETE_PLATAFORMA_SQL}         AS custofrete,
+              CASE
+                WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
+                THEN v.marketplace_liquido_base_margem_item
+                ELSE v.marketplace_valor_bruto_item
+              END AS valorbase,
+              CASE
+                WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
+                THEN 0::numeric
+                ELSE v.marketplace_taxas_item
+              END AS taxacomissao,
+              CASE
+                WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
+                THEN 0::numeric
+                ELSE {_FRETE_PLATAFORMA_SQL}
+              END AS custofrete,
               v.pedido_bling
             FROM davinci.vw_conciliacao_margens_marketplace v
             WHERE v.bling_order_item_id = :id
