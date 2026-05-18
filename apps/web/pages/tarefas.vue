@@ -31,6 +31,12 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 
 const users = ref<UserOption[]>([])
+const filterResponsavel = ref<string>('all')
+
+const filteredRows = computed(() => {
+  if (!isAdmin.value || filterResponsavel.value === 'all') return rows.value
+  return rows.value.filter((t) => t.responsavel_id === filterResponsavel.value)
+})
 
 async function refresh() {
   loading.value = true
@@ -195,7 +201,15 @@ function userLabel(u: UserOption) {
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">
         <RefreshCw class="size-4 mr-1" /> recarregar
       </Button>
-      <Button v-if="isAdmin" class="ml-auto" size="sm" @click="openNew">
+      <select
+        v-if="isAdmin"
+        v-model="filterResponsavel"
+        class="ml-auto border rounded-md px-2 py-1 text-sm bg-background"
+      >
+        <option value="all">Todos responsáveis</option>
+        <option v-for="u in users" :key="u.id" :value="u.id">{{ u.name || u.email }}</option>
+      </select>
+      <Button v-if="isAdmin" size="sm" @click="openNew">
         <Plus class="size-4 mr-1" /> Nova tarefa
       </Button>
     </div>
@@ -216,7 +230,7 @@ function userLabel(u: UserOption) {
         </thead>
         <tbody>
           <tr
-            v-for="t in rows"
+            v-for="t in filteredRows"
             :key="t.id"
             class="border-t hover:bg-muted/20 cursor-pointer"
             :class="{ 'opacity-60': t.data_conclusao }"
@@ -231,7 +245,7 @@ function userLabel(u: UserOption) {
             <td class="px-3 py-2">{{ t.tarefa }}</td>
             <td class="px-3 py-2 text-muted-foreground">{{ t.observacao || '—' }}</td>
           </tr>
-          <tr v-if="!loading && rows.length === 0">
+          <tr v-if="!loading && filteredRows.length === 0">
             <td colspan="5" class="px-3 py-6 text-center text-muted-foreground">nenhuma tarefa</td>
           </tr>
         </tbody>
@@ -241,7 +255,7 @@ function userLabel(u: UserOption) {
     <!-- Mobile cards -->
     <div class="md:hidden space-y-2">
       <div
-        v-for="t in rows"
+        v-for="t in filteredRows"
         :key="t.id"
         class="border rounded-md p-3 space-y-2 hover:bg-muted/20 cursor-pointer"
         :class="{ 'opacity-60': t.data_conclusao }"
@@ -265,7 +279,7 @@ function userLabel(u: UserOption) {
           <span class="text-muted-foreground">Obs.:</span> {{ t.observacao }}
         </div>
       </div>
-      <div v-if="!loading && rows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
+      <div v-if="!loading && filteredRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
         nenhuma tarefa
       </div>
     </div>
