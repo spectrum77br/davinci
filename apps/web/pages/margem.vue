@@ -59,6 +59,15 @@ const PAGE_SIZE = 100
 type StatusFilter = 'Pendente' | 'Aprovado' | 'Reprovado' | 'all'
 const STATUS_FILTER_OPTIONS: StatusFilter[] = ['Pendente', 'Aprovado', 'Reprovado', 'all']
 
+type AttentionType = 'all' | 'margem' | 'frete' | 'saldo'
+const ATTENTION_LABEL: Record<AttentionType, string> = {
+  all:    'todos motivos',
+  margem: 'margem baixa',
+  frete:  'frete negativo',
+  saldo:  'saldo divergente',
+}
+const ATTENTION_OPTIONS: AttentionType[] = ['all', 'margem', 'frete', 'saldo']
+
 const { api } = useApi()
 const canEdit = useCan('margem', 'edit')
 
@@ -71,6 +80,7 @@ const error = ref<string | null>(null)
 const search = ref('')
 const platform = ref<'all' | string>('all')
 const statusFilter = ref<StatusFilter>('Pendente')
+const attentionType = ref<AttentionType>('all')
 const page = ref(1)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
@@ -103,6 +113,9 @@ async function load() {
     params.set('offset', String((page.value - 1) * PAGE_SIZE))
     if (platform.value !== 'all') params.set('platform', platform.value)
     if (statusFilter.value !== 'all') params.set('status', statusFilter.value)
+    if (statusFilter.value === 'Pendente' && attentionType.value !== 'all') {
+      params.set('attention_type', attentionType.value)
+    }
     if (search.value.trim()) params.set('search', search.value.trim())
     const res = await api<PageResponse>(`/api/margens/marketplace?${params.toString()}`)
     items.value = res.items
@@ -143,6 +156,11 @@ watch(platform, () => {
   load()
 })
 watch(statusFilter, () => {
+  page.value = 1
+  load()
+})
+watch(attentionType, () => {
+  if (statusFilter.value !== 'Pendente') return
   page.value = 1
   load()
 })
@@ -308,6 +326,15 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       >
         <option v-for="s in STATUS_FILTER_OPTIONS" :key="s" :value="s">
           {{ s === 'all' ? 'todos status' : s }}
+        </option>
+      </select>
+      <select
+        v-if="statusFilter === 'Pendente'"
+        v-model="attentionType"
+        class="text-sm rounded-md border bg-background px-2 py-1.5"
+      >
+        <option v-for="a in ATTENTION_OPTIONS" :key="a" :value="a">
+          {{ ATTENTION_LABEL[a] }}
         </option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">
