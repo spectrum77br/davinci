@@ -186,6 +186,19 @@ function fmtDate(v: string | null) {
   return `${d}/${m}/${y}`
 }
 
+function platformRowBg(platform: string | null): string {
+  switch ((platform || '').toLowerCase()) {
+    case 'shopee':       return 'bg-orange-50/50 dark:bg-orange-900/10'
+    case 'mercadolivre':
+    case 'mercado livre':
+    case 'meli':         return 'bg-blue-50/50 dark:bg-blue-900/10'
+    case 'amazon':       return 'bg-yellow-50/50 dark:bg-yellow-900/10'
+    case 'magalu':       return 'bg-blue-50/30 dark:bg-blue-900/10'
+    case 'tiktok':       return 'bg-pink-50/50 dark:bg-pink-900/10'
+    default:             return ''
+  }
+}
+
 function freteProjMissingReason(r: MarketplaceRow): string | null {
   if (r.frete_projetado != null) return null
   if (!r.pricing_leaf_segment_name) {
@@ -342,88 +355,109 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       </span>
     </div>
 
-    <div class="table-card overflow-x-auto">
-      <table class="w-full text-xs min-w-[1800px]">
-        <thead>
+    <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
+      <table class="text-xs border-collapse">
+        <thead class="bg-background sticky top-0 z-20">
           <tr>
-            <th>Data</th>
-            <th>Pedido</th>
-            <th>Plataforma</th>
-            <th>Conta</th>
-            <th>SKU</th>
-            <th>Produto</th>
-            <th class="text-right">Custo</th>
-            <th class="text-right bg-amber-500/10">Frete plat.</th>
-            <th class="text-right bg-amber-500/10">Frete anún.</th>
-            <th class="text-right bg-amber-500/10">Frete proj.</th>
-            <th class="text-right bg-amber-500/10">Reembolso</th>
-            <th class="text-right bg-amber-500/10">Result. frete</th>
-            <th class="text-right bg-amber-500/10">Saldo plat.</th>
-            <th class="text-right">Saldo Bling</th>
-            <th class="text-right bg-amber-500/10">Saldo efetivo</th>
-            <th class="text-right">Margem</th>
-            <th class="text-right">Marg. mín.</th>
-            <th>Status</th>
-            <th>Pricing acc.</th>
-            <th>Obs</th>
+            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="3">Identificação</th>
+            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="5">Anúncio</th>
+            <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Item</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="5">Frete</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="3">Saldo</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-blue-50 dark:bg-blue-900/20" colspan="2">Margem</th>
+            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Aprovação</th>
+          </tr>
+          <tr class="border-b">
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]">Data</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Pedido Bling</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px]">Pedido Marketplace</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] border-l-[3px] border-gray-400 dark:border-gray-600">Plataforma</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]">Conta</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px]">Segmento</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">SKU</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground min-w-[240px]">Produto</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] border-l-[3px] border-gray-400 dark:border-gray-600">Quantidade</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">Custo</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Frete Plataforma</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Frete Anúncio</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Frete Projetado</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Frete Resultado</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Saldo Plataforma</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-emerald-50 dark:bg-emerald-900/20">Saldo Bling</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-emerald-50 dark:bg-emerald-900/20">Saldo Efetivo</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Margem</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-blue-50 dark:bg-blue-900/20">Margem Mínima</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] border-l-[3px] border-gray-400 dark:border-gray-600">Status</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px]">Observação</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="20" class="text-center py-8 text-muted-foreground">
+            <td colspan="22" class="text-center py-8 text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td colspan="20" class="text-center py-8 text-muted-foreground">
+            <td colspan="22" class="text-center py-8 text-muted-foreground">
               sem registros
             </td>
           </tr>
-          <tr v-for="r in items" :key="r.bling_order_item_id">
-            <td class="whitespace-nowrap text-muted-foreground">{{ fmtDate(r.data) }}</td>
-            <td class="tabular-nums">
-              <div class="font-medium">{{ r.pedido_bling ?? '—' }}</div>
-              <div v-if="r.pedido_marketplace" class="text-[10px] text-muted-foreground">{{ r.pedido_marketplace }}</div>
-            </td>
-            <td class="uppercase text-muted-foreground">
-              {{ r.plataforma || '—' }}
-              <div v-if="r.bling_listing_type" class="text-[10px] normal-case">{{ r.bling_listing_type }}</div>
-            </td>
-            <td>{{ r.conta || '—' }}</td>
-            <td class="font-mono">{{ r.sku || '—' }}</td>
-            <td class="max-w-[260px] truncate" :title="r.produto || ''">{{ r.produto || '—' }}</td>
-            <td class="text-right tabular-nums text-muted-foreground">{{ brl(r.custo_produto) }}</td>
-            <td class="text-right tabular-nums bg-amber-500/5">{{ brl(r.frete_plataforma) }}</td>
-            <td class="text-right tabular-nums bg-amber-500/5">{{ brl(r.frete_anuncio) }}</td>
+          <tr
+            v-for="r in items"
+            :key="r.bling_order_item_id"
+            class="border-t hover:brightness-95 dark:hover:brightness-110"
+            :class="platformRowBg(r.plataforma)"
+          >
+            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDate(r.data) }}</td>
+            <td class="px-2 py-1 tabular-nums font-medium whitespace-nowrap">{{ r.pedido_bling ?? '—' }}</td>
+            <td class="px-2 py-1 tabular-nums text-muted-foreground whitespace-nowrap">{{ r.pedido_marketplace ?? '—' }}</td>
+            <td class="px-2 py-1 uppercase whitespace-nowrap border-l-[3px] border-gray-400 dark:border-gray-600">{{ r.plataforma || '—' }}</td>
             <td
-              class="text-right tabular-nums bg-amber-500/5 cursor-help"
+              class="px-2 py-1 whitespace-nowrap cursor-help"
+              :class="!r.pricing_account_name && !r.pricing_leaf_segment_name ? 'text-red-400' : ''"
+              :title="freteProjMissingReason(r) || ''"
+            >
+              <template v-if="r.pricing_account_name">{{ r.pricing_account_name }}</template>
+              <template v-else-if="!r.pricing_leaf_segment_name">⚠️ sem cadastro</template>
+              <template v-else><span class="text-amber-500">sem account</span></template>
+            </td>
+            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ r.pricing_leaf_segment_name || '—' }}</td>
+            <td class="px-2 py-1 font-mono whitespace-nowrap">{{ r.sku || '—' }}</td>
+            <td class="px-2 py-1 max-w-[260px] truncate" :title="r.produto || ''">{{ r.produto || '—' }}</td>
+            <td class="px-2 py-1 text-right tabular-nums border-l-[3px] border-gray-400 dark:border-gray-600">{{ r.quantidade ?? '—' }}</td>
+            <td class="px-2 py-1 text-right tabular-nums text-muted-foreground whitespace-nowrap">{{ brl(r.custo_produto) }}</td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">{{ brl(r.frete_plataforma) }}</td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">{{ brl(r.frete_anuncio) }}</td>
+            <td
+              class="px-2 py-1 text-right tabular-nums bg-amber-50/40 dark:bg-amber-900/10 cursor-help whitespace-nowrap"
               :class="r.frete_projetado == null
-                ? (!r.pricing_leaf_segment_name ? 'text-red-400' : 'text-amber-400')
+                ? (!r.pricing_leaf_segment_name ? 'text-red-500' : 'text-amber-500')
                 : ''"
               :title="freteProjMissingReason(r) || ''"
             >
               {{ r.frete_projetado != null ? brl(r.frete_projetado) : (!r.pricing_leaf_segment_name ? '⚠️' : '—') }}
             </td>
-            <td class="text-right tabular-nums bg-amber-500/5">{{ brl(r.reembolso) }}</td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">{{ brl(r.reembolso) }}</td>
             <td
-              class="text-right tabular-nums bg-amber-500/5 font-medium"
-              :class="r.resultado_frete != null ? (r.resultado_frete >= 0 ? 'text-emerald-500' : 'text-red-500') : ''"
+              class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10 font-medium"
+              :class="r.resultado_frete != null ? (r.resultado_frete >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400') : ''"
             >
               {{ brl(r.resultado_frete) }}
             </td>
-            <td class="text-right tabular-nums bg-amber-500/5">{{ brl(r.saldo_plataforma) }}</td>
-            <td class="text-right tabular-nums text-muted-foreground">{{ brl(r.saldo_bling) }}</td>
-            <td class="text-right tabular-nums bg-amber-500/5 font-medium">{{ brl(r.saldo_efetivo) }}</td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">{{ brl(r.saldo_plataforma) }}</td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 text-muted-foreground">{{ brl(r.saldo_bling) }}</td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 font-medium">{{ brl(r.saldo_efetivo) }}</td>
             <td
-              class="text-right tabular-nums font-medium"
+              class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 font-medium border-l-[3px] border-gray-400 dark:border-gray-600"
               :class="r.margem != null && r.margem_minima != null
-                ? (r.margem >= r.margem_minima ? 'text-emerald-500' : 'text-red-500')
-                : (r.margem != null && r.margem >= 0 ? 'text-emerald-500' : 'text-red-500')"
+                ? (r.margem >= r.margem_minima ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')
+                : (r.margem != null && r.margem >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')"
             >
               {{ pct(r.margem) }}
             </td>
-            <td class="text-right tabular-nums text-muted-foreground">{{ pct(r.margem_minima) }}</td>
-            <td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 text-muted-foreground">{{ pct(r.margem_minima) }}</td>
+            <td class="px-2 py-1 border-l-[3px] border-gray-400 dark:border-gray-600">
               <select
                 :value="r.status ?? 'Pendente'"
                 :disabled="!canEdit || !r.pedido_bling"
@@ -434,24 +468,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                 <option v-for="s in STATUS_OPTIONS" :key="s" :value="s">{{ s }}</option>
               </select>
             </td>
-            <td
-              class="text-[10px] cursor-help"
-              :class="!r.pricing_account_name && !r.pricing_leaf_segment_name ? 'text-red-400' : ''"
-              :title="freteProjMissingReason(r) || ''"
-            >
-              <template v-if="r.pricing_account_name">
-                <div>{{ r.pricing_account_name }}</div>
-                <div v-if="r.pricing_leaf_segment_name" class="text-muted-foreground">{{ r.pricing_leaf_segment_name }}</div>
-              </template>
-              <template v-else-if="!r.pricing_leaf_segment_name">
-                <div>⚠️ sem pricing_products</div>
-                <div class="text-muted-foreground">cadastrar SKU</div>
-              </template>
-              <template v-else>
-                <div class="text-amber-400">sem account p/ {{ r.pricing_leaf_segment_name }}</div>
-              </template>
-            </td>
-            <td class="max-w-[200px]">
+            <td class="px-2 py-1 max-w-[200px]">
               <div v-if="editingObs === r.bling_order_item_id" class="flex items-center gap-1">
                 <input
                   v-model="obsDraft"
