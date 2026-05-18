@@ -501,19 +501,29 @@ class ShopeeClient:
         model_id: int,
         price: float,
     ) -> bool:
-        """Update the promotion/discount price for a specific item/model.
+        """Updates a single item/variation's discount price.
 
-        Uses /api/v2/discount/update_discount_item.
+        Three things had to be right for Shopee to accept the call (matches SSH):
+          1. Top-level key is `item_list`, not `items`.
+          2. Price is rounded to int — Shopee rejects decimals on this endpoint.
+          3. For variations (model_id > 0) send ONLY `model_list`; for the
+             master listing send ONLY `item_promotion_price`. Sending both at
+             once returns 200 with `error == ""` but silently drops the update.
         """
-        model_list = [{"model_id": model_id, "model_promotion_price": price}]
-        body = {
-            "discount_id": discount_id,
-            "items": [{
-                "item_id": item_id,
-                "item_promotion_price": price,
-                "model_list": model_list if model_id else [],
-            }],
+        rounded = round(float(price))
+
+        item_entry: dict[str, Any] = {
+            "item_id": item_id,
+            "purchase_limit": 0,
         }
+        if model_id > 0:
+            item_entry["model_list"] = [
+                {"model_id": model_id, "model_promotion_price": rounded}
+            ]
+        else:
+            item_entry["item_promotion_price"] = rounded
+
+        body = {"discount_id": discount_id, "item_list": [item_entry]}
         try:
             r = await self._request(
                 "POST", "/api/v2/discount/update_discount_item", json=body
@@ -521,7 +531,11 @@ class ShopeeClient:
             if r.status_code != 200:
                 return False
             resp = r.json() or {}
-            return not resp.get("error")
+            # Shopee returns error="" on success; treat truthy non-empty as fail.
+            err = resp.get("error")
+            if err and err != "":
+                return False
+            return True
         except Exception:  # noqa: BLE001
             return False
 
