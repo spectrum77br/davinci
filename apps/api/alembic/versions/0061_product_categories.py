@@ -38,59 +38,68 @@ CATEGORIES: tuple[tuple[int, str, int | None], ...] = (
 def upgrade() -> None:
     op.execute(f'SET search_path TO "{SCHEMA}"')
 
-    op.create_table(
-        "product_categories",
-        sa.Column(
-            "id",
-            postgresql.UUID(as_uuid=True),
-            primary_key=True,
-            server_default=sa.text("gen_random_uuid()"),
-        ),
-        sa.Column("bling_category_id", sa.BigInteger(), nullable=False),
-        sa.Column("name", sa.Text(), nullable=False),
-        sa.Column("parent_bling_category_id", sa.BigInteger(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["parent_bling_category_id"],
-            [f"{SCHEMA}.product_categories.bling_category_id"],
-            ondelete="SET NULL",
-            name="fk_product_categories_parent_bling_cat_id",
-        ),
-        sa.UniqueConstraint(
-            "bling_category_id",
-            name="uq_product_categories_bling_category_id",
-        ),
-        sa.CheckConstraint(
-            "length(trim(name)) > 0",
-            name="ck_product_categories_name_not_blank",
-        ),
-        schema=SCHEMA,
-    )
-    op.create_index(
-        "ix_product_categories_parent_bling_category_id",
-        "product_categories",
-        ["parent_bling_category_id"],
-        schema=SCHEMA,
+    bind = op.get_bind()
+    table_exists = bind.execute(
+        sa.text("SELECT to_regclass(:table_name)"),
+        {"table_name": "davinci.product_categories"},
+    ).scalar_one()
+    if table_exists is None:
+        op.create_table(
+            "product_categories",
+            sa.Column(
+                "id",
+                postgresql.UUID(as_uuid=True),
+                primary_key=True,
+                server_default=sa.text("gen_random_uuid()"),
+            ),
+            sa.Column("bling_category_id", sa.BigInteger(), nullable=False),
+            sa.Column("name", sa.Text(), nullable=False),
+            sa.Column("parent_bling_category_id", sa.BigInteger(), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+            sa.ForeignKeyConstraint(
+                ["parent_bling_category_id"],
+                [f"{SCHEMA}.product_categories.bling_category_id"],
+                ondelete="SET NULL",
+                name="fk_product_categories_parent_bling_cat_id",
+            ),
+            sa.UniqueConstraint(
+                "bling_category_id",
+                name="uq_product_categories_bling_category_id",
+            ),
+            sa.CheckConstraint(
+                "length(trim(name)) > 0",
+                name="ck_product_categories_name_not_blank",
+            ),
+            schema=SCHEMA,
+        )
+    op.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_product_categories_parent_bling_category_id
+        ON davinci.product_categories (parent_bling_category_id)
+        """
     )
 
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_product_categories_updated_at "
+        "ON davinci.product_categories"
+    )
     op.execute(
         f'CREATE TRIGGER trg_product_categories_updated_at '
         f'BEFORE UPDATE ON "{SCHEMA}".product_categories '
         f'FOR EACH ROW EXECUTE FUNCTION "{SCHEMA}".set_updated_at()'
     )
 
-    bind = op.get_bind()
     for bling_category_id, name, parent_bling_category_id in CATEGORIES:
         bind.execute(
             sa.text(
