@@ -1,7 +1,7 @@
 """add 'shein' to pricing_platform, department, and integration_platform enums
 
-Revision ID: 0058_add_shein_enums
-Revises: 0057_recreate_mv_conciliacao_margens
+Revision ID: 0064_add_shein_enums
+Revises: 0063_merge_tarefas_product_categories
 Create Date: 2026-05-18
 """
 
@@ -9,8 +9,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0058_add_shein_enums"
-down_revision: str | None = "0057_recreate_mv_conciliacao_margens"
+revision: str = "0064_add_shein_enums"
+down_revision: str | None = "0063_merge_tarefas_product_categories"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
