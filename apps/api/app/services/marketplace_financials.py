@@ -466,6 +466,7 @@ async def _fetch_shopee(client: ShopeeClient, order_sn: str) -> FinancialSnapsho
     )
     net = _money(income.get("escrow_amount"))
 
+    frete_anuncio = _shopee_frete_anuncio(income)
     events = _compact_events(
         [
             _event(
@@ -484,6 +485,11 @@ async def _fetch_shopee(client: ShopeeClient, order_sn: str) -> FinancialSnapsho
             _event("refund", refund, negative=True, currency=currency),
             _event("tax", tax, negative=True, currency=currency),
             _event("adjustment", adjustment, negative=True, currency=currency),
+            # `frete_anuncio` is the per-unit fixed component of the Shopee BR
+            # commission table — already embedded inside `service_fee`. Emitted as
+            # an info-only event so it appears in event_totals / the view without
+            # being summed into net_payout (which already accounts for service_fee).
+            _event("frete_anuncio", frete_anuncio, currency=currency),
             _event("net_payout", net, currency=currency),
         ]
     )
@@ -507,6 +513,46 @@ async def _fetch_shopee(client: ShopeeClient, order_sn: str) -> FinancialSnapsho
         freight_reconciliation_checked=True,
         error=None if status == "posted" else "Shopee net payout not available yet",
     )
+
+
+# Shopee BR commission-table fixed component ("taxa fixa do anúncio"), indexed by
+# per-unit "valor do item". Already embedded in `service_fee` — exposed as a
+# separate event for visibility/auditing only. Cumulative thresholds; first match wins.
+_SHOPEE_FRETE_ANUNCIO_BUCKETS: tuple[tuple[Decimal, Decimal], ...] = (
+    (Decimal("79.99"), Decimal("4")),
+    (Decimal("99.99"), Decimal("16")),
+    (Decimal("199.99"), Decimal("20")),
+)
+_SHOPEE_FRETE_ANUNCIO_DEFAULT = Decimal("26")  # R$200 ou mais
+
+
+def _shopee_frete_anuncio(income: dict[str, Any]) -> Decimal | None:
+    """Compute the 'frete anúncio' (taxa fixa do anúncio) per Shopee BR table.
+
+    The fee is charged per unit sold: bucket by `selling_price / quantity_purchased`
+    and multiply by `quantity_purchased`. Sum across items.
+    """
+    items = income.get("items") if isinstance(income, dict) else None
+    if not isinstance(items, list) or not items:
+        return None
+    total = Decimal("0")
+    found_any = False
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        qty = _money(it.get("quantity_purchased"))
+        line_price = _money(it.get("selling_price")) or _money(it.get("discounted_price"))
+        if qty is None or qty <= 0 or line_price is None or line_price <= 0:
+            continue
+        unit_price = line_price / qty
+        fixed = _SHOPEE_FRETE_ANUNCIO_DEFAULT
+        for threshold, value in _SHOPEE_FRETE_ANUNCIO_BUCKETS:
+            if unit_price <= threshold:
+                fixed = value
+                break
+        total += fixed * qty
+        found_any = True
+    return total if found_any else None
 
 
 def _shopee_freight_drafts(
