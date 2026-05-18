@@ -44,7 +44,7 @@ from app.models.pricing import (
     PricingPushIdempotency,
     StoreInfo,
 )
-from app.models.product import BackgroundJob, Product, ProductLink
+from app.models.product import BackgroundJob, Product, ProductCategory, ProductLink
 from app.models.segment import Segment
 from app.models.sync_log import SyncLog
 from app.models.tarefa import Tarefa
@@ -95,6 +95,7 @@ __all__ = [
     "PricingProduct",
     "PricingPushIdempotency",
     "Product",
+    "ProductCategory",
     "ProductLink",
     "Segment",
     "Store",

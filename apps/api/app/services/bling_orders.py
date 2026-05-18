@@ -14,7 +14,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -26,6 +26,7 @@ from app.models import (
     IntegrationPlatform,
     LinkSyncStatus,
     Product,
+    ProductCategory,
     ProductLink,
     Store,
     UserSettings,
@@ -117,6 +118,9 @@ def _row_from_item(
     *,
     item_index: int,
     store_id: UUID | None,
+    category_names_by_id: dict[int, str] | None = None,
+    product_categories_by_id: dict[int, tuple[int | None, str]] | None = None,
+    product_categories_by_sku: dict[str, tuple[int | None, str]] | None = None,
 ) -> dict[str, Any]:
     """Flatten one (order, item) pair into a `bling_orders` row dict."""
     loja = raw_order.get("loja") or {}
@@ -131,6 +135,22 @@ def _row_from_item(
     produto = item.get("produto") or {}
     if not isinstance(produto, dict):
         produto = {}
+    item_codigo = item.get("codigo") or produto.get("codigo")
+    item_produto_id = _int(produto.get("id"))
+    categoria_id = _int(categoria.get("id"))
+    categoria_nome = categoria.get("descricao") or categoria.get("nome")
+    if not categoria_nome and categoria_id is not None and category_names_by_id:
+        categoria_nome = category_names_by_id.get(categoria_id)
+    if not categoria_nome:
+        product_category = None
+        if item_produto_id is not None and product_categories_by_id:
+            product_category = product_categories_by_id.get(item_produto_id)
+        if product_category is None and item_codigo and product_categories_by_sku:
+            product_category = product_categories_by_sku.get(str(item_codigo).strip().lower())
+        if product_category is not None:
+            fallback_category_id, categoria_nome = product_category
+            if categoria_id is None:
+                categoria_id = fallback_category_id
 
     # Marketplace fees live under `taxas` (valorBase / custoFrete / taxaComissao),
     # not at the top level. Bling populates these AFTER the marketplace settles,
@@ -180,15 +200,15 @@ def _row_from_item(
         "item_id": _int(item.get("id")),
         "item_index": item_index,
         "itemvalor": _num(item.get("valor")),
-        "item_codigo": item.get("codigo") or produto.get("codigo"),
-        "item_produto_id": _int(produto.get("id")),
+        "item_codigo": item_codigo,
+        "item_produto_id": item_produto_id,
         "item_descricao": item.get("descricao") or produto.get("nome"),
         "item_quantidade": _int(item.get("quantidade")),
         "item_desconto": _num(item.get("desconto")),
         "item_comissao_base": _num(comissao.get("base")),
         "item_comissao_valor": _num(comissao.get("valor")),
-        "categoria_id": _int(categoria.get("id")),
-        "categoria_nome": categoria.get("descricao") or categoria.get("nome"),
+        "categoria_id": categoria_id,
+        "categoria_nome": categoria_nome,
     }
 
 
@@ -211,6 +231,96 @@ async def _cost_price_by_sku(
         )
     ).all()
     return {sku: float(cost) for sku, cost in rows if cost is not None}
+
+
+async def _category_names_by_bling_id(
+    session: AsyncSession, category_ids: set[int]
+) -> dict[int, str]:
+    if not category_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                ProductCategory.bling_category_id,
+                ProductCategory.name,
+            ).where(ProductCategory.bling_category_id.in_(category_ids))
+        )
+    ).all()
+    return {int(category_id): name for category_id, name in rows}
+
+
+async def _product_categories_by_item(
+    session: AsyncSession, itens: list[Any]
+) -> tuple[dict[int, tuple[int | None, str]], dict[str, tuple[int | None, str]]]:
+    product_ids: set[int] = set()
+    sku_keys: set[str] = set()
+    for item in itens:
+        if not isinstance(item, dict):
+            continue
+        produto = item.get("produto") or {}
+        if not isinstance(produto, dict):
+            produto = {}
+        product_id = _int(produto.get("id"))
+        if product_id is not None:
+            product_ids.add(product_id)
+        sku = item.get("codigo") or produto.get("codigo")
+        if sku is not None:
+            sku_key = str(sku).strip().lower()
+            if sku_key:
+                sku_keys.add(sku_key)
+
+    if not product_ids and not sku_keys:
+        return {}, {}
+
+    category_rows = (
+        await session.execute(
+            select(ProductCategory.bling_category_id, ProductCategory.name)
+        )
+    ).all()
+    category_by_id = {
+        str(category_id): (int(category_id), name)
+        for category_id, name in category_rows
+    }
+    category_by_name = {
+        name.strip().lower(): (int(category_id), name)
+        for category_id, name in category_rows
+    }
+
+    filters = []
+    if product_ids:
+        filters.append(Product.bling_product_id.in_(product_ids))
+    if sku_keys:
+        filters.append(func.lower(func.btrim(Product.sku)).in_(sku_keys))
+
+    product_rows = (
+        await session.execute(
+            select(
+                Product.bling_product_id,
+                Product.sku,
+                Product.category,
+            ).where(or_(*filters))
+        )
+    ).all()
+    by_product_id: dict[int, tuple[int | None, str]] = {}
+    by_sku: dict[str, tuple[int | None, str]] = {}
+    for product_id, sku, raw_category in product_rows:
+        if raw_category is None:
+            continue
+        category = str(raw_category).strip()
+        if not category:
+            continue
+        resolved = category_by_id.get(category) or category_by_name.get(category.lower())
+        if resolved is None and not category.isdigit():
+            resolved = (None, category)
+        if resolved is None:
+            continue
+        if product_id is not None:
+            by_product_id[int(product_id)] = resolved
+        if sku is not None:
+            sku_key = str(sku).strip().lower()
+            if sku_key:
+                by_sku[sku_key] = resolved
+    return by_product_id, by_sku
 
 
 def _normalize_new_itens(itens: list[Any]) -> list[tuple[str, int, float]]:
@@ -291,6 +401,7 @@ async def upsert_order(
 
     # situacao=6 → snapshot unit cost from products.cost_price.
     cost_by_sku: dict[str, float] = {}
+    category_ids: set[int] = set()
     if situacao == "6" and itens:
         skus: set[str] = set()
         for it in itens:
@@ -303,6 +414,23 @@ async def upsert_order(
             if s:
                 skus.add(s)
         cost_by_sku = await _cost_price_by_sku(session, skus)
+    for it in itens:
+        if not isinstance(it, dict):
+            continue
+        produto = it.get("produto") or {}
+        if not isinstance(produto, dict):
+            continue
+        categoria = produto.get("categoria") or {}
+        if not isinstance(categoria, dict):
+            continue
+        categoria_id = _int(categoria.get("id"))
+        if categoria_id is not None:
+            category_ids.add(categoria_id)
+    category_names_by_id = await _category_names_by_bling_id(session, category_ids)
+    (
+        product_categories_by_id,
+        product_categories_by_sku,
+    ) = await _product_categories_by_item(session, itens)
 
     await session.execute(
         delete(BlingOrder).where(BlingOrder.bling_id == bling_id)
@@ -310,14 +438,30 @@ async def upsert_order(
 
     if not itens:
         # Order with no items — keep one summary row at item_index=0.
-        row = _row_from_item(raw_order, {}, item_index=0, store_id=store_id)
+        row = _row_from_item(
+            raw_order,
+            {},
+            item_index=0,
+            store_id=store_id,
+            category_names_by_id=category_names_by_id,
+            product_categories_by_id=product_categories_by_id,
+            product_categories_by_sku=product_categories_by_sku,
+        )
         session.add(BlingOrder(**row))
         return 1
 
     for idx, item in enumerate(itens):
         if not isinstance(item, dict):
             continue
-        row = _row_from_item(raw_order, item, item_index=idx, store_id=store_id)
+        row = _row_from_item(
+            raw_order,
+            item,
+            item_index=idx,
+            store_id=store_id,
+            category_names_by_id=category_names_by_id,
+            product_categories_by_id=product_categories_by_id,
+            product_categories_by_sku=product_categories_by_sku,
+        )
         sku = (row.get("item_codigo") or "").strip() if row.get("item_codigo") else None
         if sku and sku in cost_by_sku:
             row["preco_custo"] = cost_by_sku[sku]
@@ -431,7 +575,7 @@ async def _enqueue_stock_refresh_for_order(
                 )
             )
         ).scalars().all()
-        link_ids = [str(l.id) for l in links]
+        link_ids = [str(link.id) for link in links]
         job = BackgroundJob(
             type=BackgroundJobType.SYNC_PRODUCT,
             status=BackgroundJobStatus.PENDING,

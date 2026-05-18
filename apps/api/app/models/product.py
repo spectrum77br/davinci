@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -80,6 +81,24 @@ class Product(Base, TimestampMixin):
     )
 
 
+class ProductCategory(Base, TimestampMixin):
+    __tablename__ = "product_categories"
+    __table_args__ = (CheckConstraint("length(trim(name)) > 0", name="name_not_blank"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    bling_category_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_bling_category_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "product_categories.bling_category_id",
+            ondelete="SET NULL",
+            name="fk_product_categories_parent_bling_cat_id",
+        ),
+        nullable=True,
+    )
+
+
 class ProductLink(Base, TimestampMixin):
     __tablename__ = "product_links"
 
@@ -153,4 +172,6 @@ class BackgroundJob(Base, TimestampMixin):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
