@@ -276,6 +276,68 @@ async def patch_marketplace_observacao(
     return {"pedido_bling": pedido_bling, "observacao": next_value, "rows": result.rowcount}
 
 
+@router.post("/marketplace/{bling_order_item_id}/sync-from-marketplace")
+async def sync_bling_from_marketplace(
+    bling_order_item_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("margem", "edit"))],
+) -> dict:
+    """One-shot apply: copia bruto/taxas/frete do marketplace para bling_orders.
+
+    Faz o Saldo Bling do item ficar igual ao Saldo Plataforma sem persistir
+    nenhuma escolha — o próprio UPDATE é a ação. O `custofrete` usa o
+    mesmo CASE da coluna Frete Plataforma (com GREATEST(.,0) para Shopee).
+    """
+    row = (await session.execute(
+        text(
+            f"""
+            SELECT
+              v.marketplace_valor_bruto_item AS valorbase,
+              v.marketplace_taxas_item        AS taxacomissao,
+              {_FRETE_PLATAFORMA_SQL}         AS custofrete,
+              v.pedido_bling
+            FROM davinci.vw_conciliacao_margens_marketplace v
+            WHERE v.bling_order_item_id = :id
+            LIMIT 1
+            """  # noqa: S608
+        ),
+        {"id": str(bling_order_item_id)},
+    )).first()
+    if row is None:
+        raise HTTPException(404, detail={"code": "row_not_found"})
+    if row.valorbase is None and row.taxacomissao is None and row.custofrete is None:
+        raise HTTPException(400, detail={"code": "no_marketplace_data"})
+
+    result = await session.execute(
+        update(BlingOrder)
+        .where(BlingOrder.id == bling_order_item_id)
+        .values(
+            valorbase=row.valorbase,
+            taxacomissao=row.taxacomissao,
+            custofrete=row.custofrete,
+        )
+    )
+    await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(404, detail={"code": "bling_order_not_found"})
+
+    logger.info(
+        "marketplace_synced_to_bling",
+        bling_order_item_id=str(bling_order_item_id),
+        pedido_bling=row.pedido_bling,
+        valorbase=str(row.valorbase),
+        taxacomissao=str(row.taxacomissao),
+        custofrete=str(row.custofrete),
+    )
+    await _refresh_mv_silent(session)
+    return {
+        "ok": True,
+        "valorbase": float(row.valorbase) if row.valorbase is not None else None,
+        "taxacomissao": float(row.taxacomissao) if row.taxacomissao is not None else None,
+        "custofrete": float(row.custofrete) if row.custofrete is not None else None,
+    }
+
+
 async def _refresh_mv_silent(session: AsyncSession) -> None:
     """Best-effort refresh of mv_conciliacao_margens_marketplace.
 

@@ -255,6 +255,31 @@ async function setStatus(row: MarketplaceRow, value: MargensStatus) {
   }
 }
 
+// ---------- Sync Bling ← Marketplace (one-shot) ----------
+
+const syncing = ref<Set<string>>(new Set())
+function isSyncing(id: string): boolean { return syncing.value.has(id) }
+
+async function syncFromMarketplace(row: MarketplaceRow) {
+  if (!canEdit.value) return
+  const id = row.bling_order_item_id
+  if (syncing.value.has(id)) return
+  syncing.value.add(id)
+  try {
+    await api(`/api/margens/marketplace/${encodeURIComponent(id)}/sync-from-marketplace`, {
+      method: 'POST',
+    })
+    error.value = null
+    await load()
+  } catch (e: any) {
+    error.value = apiError(e)
+  } finally {
+    const next = new Set(syncing.value)
+    next.delete(id)
+    syncing.value = next
+  }
+}
+
 // ---------- Edição inline de observação ----------
 
 const editingObs = ref<string | null>(null)
@@ -445,7 +470,22 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             </td>
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">{{ brl(r.saldo_plataforma) }}</td>
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 text-muted-foreground">{{ brl(r.saldo_bling) }}</td>
-            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 font-medium">{{ brl(r.saldo_efetivo) }}</td>
+            <td class="px-2 py-1 whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 font-medium">
+              <div class="flex items-center justify-end gap-2">
+                <button
+                  v-if="canEdit && r.saldo_plataforma != null && r.saldo_bling != null && Math.abs(r.saldo_plataforma - r.saldo_bling) > 0.01"
+                  type="button"
+                  :disabled="isSyncing(r.bling_order_item_id)"
+                  class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-default"
+                  :title="`Copia bruto/taxa/frete do Marketplace para Bling neste item`"
+                  @click="syncFromMarketplace(r)"
+                >
+                  <Loader2 v-if="isSyncing(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
+                  <span v-else>Mkt →</span>
+                </button>
+                <span class="text-right tabular-nums">{{ brl(r.saldo_efetivo) }}</span>
+              </div>
+            </td>
             <td
               class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 font-medium border-l-[3px] border-gray-400 dark:border-gray-600"
               :class="r.margem != null && r.margem_minima != null
