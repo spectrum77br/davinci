@@ -172,7 +172,11 @@ async def list_margens_marketplace(
             (v.evento_frete_anuncio * v.item_proportion)         AS frete_anuncio,
             v.frete_projetado_item                               AS frete_projetado,
             (v.evento_shipping_rebate * v.item_proportion)       AS reembolso,
-            v.frete_resultado_item                               AS resultado_frete,
+            CASE
+                WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
+                THEN v.frete_projetado_item - (v.evento_frete_anuncio * v.item_proportion)
+                ELSE v.frete_resultado_item
+            END                                                  AS resultado_frete,
             v.marketplace_liquido_base_margem_item               AS saldo_plataforma,
             (v.bling_valorbase_item
                 - COALESCE(v.bling_custofrete_item, 0)
