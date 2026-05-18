@@ -295,15 +295,6 @@ async def delete_product(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "delete"))],
 ) -> None:
-    # Capture cascade impact before the DELETE so the audit log records
-    # how many product_links / listings get pulled down with the product.
-    cascade = (
-        await session.execute(
-            select(
-                func.count(ProductLink.id).label("links"),
-            ).where(ProductLink.product_id == product_id)
-        )
-    ).one()
     target = (
         await session.execute(
             select(Product.sku, Product.name, Product.bling_product_id).where(
@@ -311,22 +302,57 @@ async def delete_product(
             )
         )
     ).one_or_none()
-
-    res = await session.execute(
-        delete(Product).where(and_(Product.id == product_id, user_scope(Product, user)))
-    )
-    if res.rowcount == 0:
+    if target is None:
         raise HTTPException(404, detail={"code": "product_not_found"})
-    await session.commit()
+
+    cascade_links = (
+        await session.execute(
+            select(func.count(ProductLink.id)).where(ProductLink.product_id == product_id)
+        )
+    ).scalar() or 0
+
+    # Belt and suspenders: the FK on product_links is ON DELETE CASCADE, but
+    # we delete explicitly first so an IntegrityError surfacing below is
+    # unambiguously some OTHER table holding a reference (not product_links).
+    await session.execute(
+        delete(ProductLink).where(ProductLink.product_id == product_id)
+    )
+
+    try:
+        res = await session.execute(
+            delete(Product).where(and_(Product.id == product_id, user_scope(Product, user)))
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, detail={"code": "product_not_found"})
+        await session.commit()
+    except IntegrityError as e:
+        await session.rollback()
+        logger.error(
+            "product_delete_integrity_error",
+            product_id=str(product_id),
+            sku=target.sku,
+            error=str(e.orig),
+        )
+        raise HTTPException(
+            409,
+            detail={
+                "code": "product_has_dependencies",
+                "message": (
+                    f"Produto '{target.sku}' possui dependências que impedem exclusão. "
+                    f"Erro: {str(e.orig)[:200]}"
+                ),
+            },
+        )
+
     logger.info(
         "product_deleted",
         actor_user_id=str(user.id),
         actor_email=user.email,
         product_id=str(product_id),
-        sku=target.sku if target else None,
-        name=target.name if target else None,
-        bling_product_id=target.bling_product_id if target else None,
-        cascade_product_links=cascade.links or 0,
+        sku=target.sku,
+        name=target.name,
+        bling_product_id=target.bling_product_id,
+        cascade_product_links=cascade_links,
         **_audit_request_ctx(request),
     )
     return None
@@ -355,12 +381,37 @@ async def bulk_delete_products(
         )
     ).scalar() or 0
 
-    res = await session.execute(
-        delete(Product).where(
-            and_(Product.id.in_(body.ids), user_scope(Product, user))
-        )
+    # Same belt-and-suspenders as delete_product: drop the CASCADE-eligible
+    # children explicitly so an IntegrityError below points at something else.
+    await session.execute(
+        delete(ProductLink).where(ProductLink.product_id.in_(body.ids))
     )
-    await session.commit()
+
+    try:
+        res = await session.execute(
+            delete(Product).where(
+                and_(Product.id.in_(body.ids), user_scope(Product, user))
+            )
+        )
+        await session.commit()
+    except IntegrityError as e:
+        await session.rollback()
+        logger.error(
+            "products_bulk_delete_integrity_error",
+            requested=len(body.ids),
+            error=str(e.orig),
+        )
+        raise HTTPException(
+            409,
+            detail={
+                "code": "products_have_dependencies",
+                "message": (
+                    "Alguns produtos possuem dependências que impedem exclusão. "
+                    f"Erro: {str(e.orig)[:200]}"
+                ),
+            },
+        )
+
     logger.info(
         "products_bulk_deleted",
         actor_user_id=str(user.id),
