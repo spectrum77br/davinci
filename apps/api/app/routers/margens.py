@@ -168,10 +168,10 @@ async def list_margens_marketplace(
             v.produto,
             v.quantidade,
             v.bling_custo_produtos                               AS custo_produto,
-            v.marketplace_frete_real_cobrado_item                AS frete_plataforma,
-            v.marketplace_frete_item                             AS frete_anuncio,
+            (v.evento_freight * v.item_proportion)               AS frete_plataforma,
+            (v.evento_frete_anuncio * v.item_proportion)         AS frete_anuncio,
             v.frete_projetado_item                               AS frete_projetado,
-            (v.marketplace_frete_item - v.marketplace_frete_real_cobrado_item) AS reembolso,
+            (v.evento_shipping_rebate * v.item_proportion)       AS reembolso,
             v.frete_resultado_item                               AS resultado_frete,
             v.marketplace_liquido_base_margem_item               AS saldo_plataforma,
             (v.bling_valorbase_item
