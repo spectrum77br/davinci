@@ -13,8 +13,8 @@ every (pricing_product, pricing_account) pair is evaluated together per
 listing, preferring (1) tuples where a slot actually covers the leaf,
 (2) exact SKU match, (3) accounts with listing_type set, (4) recency.
 
-Revision ID: 0054_vw_conciliacao_margens_fix_segment_priority
-Revises: 0053_vw_conciliacao_margens_slot_match
+Revision ID: 0058_vw_conciliacao_margens_fix_segment_priority
+Revises: 0057_recreate_mv_conciliacao_margens
 Create Date: 2026-05-18
 """
 
@@ -24,8 +24,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision: str = "0054_vw_conciliacao_margens_fix_segment_priority"
-down_revision: str | None = "0053_vw_conciliacao_margens_slot_match"
+revision: str = "0058_vw_conciliacao_margens_fix_segment_priority"
+down_revision: str | None = "0057_recreate_mv_conciliacao_margens"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -43,11 +43,22 @@ def _load_module(filename: str, modname: str):
     return module
 
 
+# 0056/0057 only touch the materialized view; 0055 is the last migration
+# that defines the regular view's SQL. It doesn't expose a `_view_sql()` helper
+# (the 30d→20d swap is inlined in its `upgrade`), so we replicate the same
+# substitution here off 0053's view.
+MV_NAME = "mv_conciliacao_margens_marketplace"
+
+
 def _previous_view_sql() -> str:
-    return str(_load_module(
+    sql = str(_load_module(
         "0053_vw_conciliacao_margens_slot_match.py",
         "_davinci_0053_view",
     )._view_sql())
+    sql = sql.replace("interval '30 days'", "interval '20 days'")
+    if "interval '30 days'" in sql:
+        raise RuntimeError("not all 30-day filters were replaced")
+    return sql
 
 
 def _replace_once(sql: str, old: str, new: str) -> str:
@@ -243,15 +254,47 @@ def _view_sql() -> str:
     return sql
 
 
+def _recreate_mv() -> None:
+    # Same MV shape as 0057. Recreated so the materialized data reflects
+    # the corrected pricing_match logic on next read (no manual refresh).
+    op.execute(f'DROP MATERIALIZED VIEW IF EXISTS "{SCHEMA}"."{MV_NAME}"')
+    op.execute(
+        f'CREATE MATERIALIZED VIEW "{SCHEMA}"."{MV_NAME}" AS '
+        f'SELECT * FROM "{SCHEMA}"."{VIEW_NAME}"'
+    )
+    op.execute(
+        f'CREATE UNIQUE INDEX "uq_{MV_NAME}_bling_order_item_id" '
+        f'ON "{SCHEMA}"."{MV_NAME}" (bling_order_item_id)'
+    )
+    op.execute(
+        f'CREATE INDEX "ix_{MV_NAME}_data_desc" '
+        f'ON "{SCHEMA}"."{MV_NAME}" (data DESC NULLS LAST)'
+    )
+    op.execute(
+        f'CREATE INDEX "ix_{MV_NAME}_plataforma" '
+        f'ON "{SCHEMA}"."{MV_NAME}" (plataforma_bling)'
+    )
+    op.execute(
+        f'CREATE INDEX "ix_{MV_NAME}_pedido_bling" '
+        f'ON "{SCHEMA}"."{MV_NAME}" (pedido_bling)'
+    )
+    op.execute(
+        f'CREATE INDEX "ix_{MV_NAME}_status" '
+        f'ON "{SCHEMA}"."{MV_NAME}" (bling_status_margem)'
+    )
+
+
 def upgrade() -> None:
     op.execute(f'SET search_path TO "{SCHEMA}"')
     op.execute(_view_sql())
     op.execute(
         f"COMMENT ON VIEW {SCHEMA}.{VIEW_NAME} IS "
-        "'Compara margem Bling x financeiro marketplace (30d). Resolve pricing_product + pricing_account em conjunto por listing, priorizando slot coberto -> SKU exato -> listing_type -> recencia (corrige SKU multi-departamento).'"
+        "'Compara margem Bling x financeiro marketplace (20d). Resolve pricing_product + pricing_account em conjunto por listing, priorizando slot coberto -> SKU exato -> listing_type -> recencia (corrige SKU multi-departamento).'"
     )
+    _recreate_mv()
 
 
 def downgrade() -> None:
     op.execute(f'SET search_path TO "{SCHEMA}"')
     op.execute(_previous_view_sql())
+    _recreate_mv()
