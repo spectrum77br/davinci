@@ -47,6 +47,7 @@ from app.models.pricing import (
 from app.models.product import BackgroundJob, Product, ProductLink
 from app.models.segment import Segment
 from app.models.sync_log import SyncLog
+from app.models.tarefa import Tarefa
 from app.models.user import User
 from app.models.user_settings import UserSettings
 
@@ -101,6 +102,7 @@ __all__ = [
     "StoreStatus",
     "SyncLog",
     "SyncLogAction",
+    "Tarefa",
     "User",
     "UserRole",
     "UserSettings",

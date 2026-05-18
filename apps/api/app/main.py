@@ -27,6 +27,7 @@ from app.routers import segments as segments_router
 from app.routers import settings as settings_router
 from app.routers import stores as stores_router
 from app.routers import sync as sync_router
+from app.routers import tarefas as tarefas_router
 from app.routers import users as users_router
 from app.routers import webhooks as webhooks_router
 from app.services.bootstrap import promote_owner_if_needed
@@ -73,6 +74,7 @@ _OPENAPI_TAGS = [
     {"name": "dashboard", "description": "Onboarding + KPIs do dashboard."},
     {"name": "settings", "description": "User preferences (Telegram, daily sync, etc)."},
     {"name": "metrics", "description": "Observability — counts, latency, error codes."},
+    {"name": "tarefas", "description": "Tarefas atribuídas a usuários (admin gerencia, usuário vê as suas)."},
 ]
 
 app = FastAPI(
@@ -127,6 +129,7 @@ app.include_router(discrepancies_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(metrics_router.router)
 app.include_router(margens_router.router)
+app.include_router(tarefas_router.router)
 
 
 @app.get("/api/health")

@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
   Package, Megaphone, DollarSign, Truck, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell,
-  Store, Tags, ChevronLeft, ChevronRight,
+  Store, Tags, ClipboardList, ChevronLeft, ChevronRight,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -70,6 +70,9 @@ const sections: Section[] = [
       { to: '/users', label: 'Usuários', icon: Users, adminOnly: true },
       { to: '/permissoes', label: 'Permissões', icon: ShieldCheck, adminOnly: true },
       { to: '/configuracoes', label: 'Configurações', icon: Settings, resource: 'configuracoes' },
+      // Regular users see their own tarefas (router-level filter), so this
+      // is NOT marked adminOnly — the page itself hides admin-only controls.
+      { to: '/tarefas', label: 'Tarefas', icon: ClipboardList },
     ],
   },
 ]
