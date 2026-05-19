@@ -1356,7 +1356,7 @@ async function pushAccountColumn(accId: string) {
 async function pushAllVisible() {
   if (!grid.value) return
   const items: { pricing_account_id: string; pricing_product_id: string }[] = []
-  for (const p of grid.value.products) {
+  for (const p of filteredGridProducts.value) {
     for (const a of grid.value.accounts) {
       const c = cellOf(p.id, a.id)
       if (c && c.price != null && c.source !== 'locked' && c.source !== 'disabled') {
