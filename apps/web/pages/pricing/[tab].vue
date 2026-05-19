@@ -1199,8 +1199,12 @@ type BatchJob = {
   error?: string | null
 }
 const activeJob = ref<BatchJob | null>(null)
-const BATCH_THRESHOLD = 5
 
+// SSH-style push: drop the background-job path and walk the items sequentially
+// from the browser, one POST /api/pricing/push per item. Each call returns in
+// ~1–2s so the banner advances visibly (previously the job committed every 10
+// items, which made the UI look frozen at e.g. 130/173). loadGrid runs once at
+// the end so the grid mirrors the new link.stock state.
 async function pushItemsBatch(
   items: { pricing_account_id: string; pricing_product_id: string }[],
   keyHint: string,
@@ -1209,58 +1213,89 @@ async function pushItemsBatch(
     gridErr.value = 'no_eligible_cells'
     return
   }
-  if (items.length <= BATCH_THRESHOLD) {
-    pushing.value = true
-    lastPushResults.value = []
-    try {
-      const r = await api<{ results: PushResult[] }>('/api/pricing/push', {
-        method: 'POST',
-        headers: { 'Idempotency-Key': `${keyHint}:${Date.now()}` },
-        body: { items },
-      })
-      lastPushResults.value = r.results
-      const ok = r.results.filter((x) => x.ok).length
-      const fail = r.results.filter((x) => !x.ok).length
-      if (fail === 0) {
-        toast.success('Push concluído!', `${ok} preço(s) enviado(s) com sucesso`)
-      } else if (ok === 0) {
-        toast.error(
-          `Push falhou: ${fail} erro(s)`,
-          r.results
-            .filter((x) => !x.ok)
-            .map((f) => f.detail || f.code)
-            .slice(0, 5),
-        )
-      } else {
-        toast.warning(
-          `Envio: ${ok} ok, ${fail} erro(s)`,
-          r.results
-            .filter((x) => !x.ok)
-            .map((f) => f.detail || f.code)
-            .slice(0, 5),
-        )
-      }
-    } catch (e: any) {
-      gridErr.value = e?.data?.detail?.code ?? 'push_failed'
-      toast.error('Erro no push', gridErr.value || undefined)
-    } finally {
-      pushing.value = false
-    }
-    return
-  }
   pushing.value = true
-  activeJob.value = null
+  lastPushResults.value = []
+  const baseKey = `${keyHint}:${Date.now()}`
+  const total = items.length
+  activeJob.value = {
+    id: `local:${Date.now()}`,
+    type: 'pricing_push',
+    status: 'running',
+    total,
+    processed: 0,
+    result: { summary: { total, ok: 0, failed: 0, cached: 0 } },
+    error: null,
+  }
+  const results: PushResult[] = []
+  let ok = 0
+  let fail = 0
+  let cached = 0
   try {
-    const created = await api<{ job_id: string }>('/api/pricing/push-batch', {
-      method: 'POST',
-      headers: { 'Idempotency-Key': `${keyHint}:${Date.now()}` },
-      body: { items },
-    })
-    toast.info(`Push em background iniciado`, `${items.length} item(ns) na fila`)
-    await pollJob(created.job_id)
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      try {
+        const r = await api<{ results: PushResult[] }>('/api/pricing/push', {
+          method: 'POST',
+          headers: { 'Idempotency-Key': `${baseKey}:${i}` },
+          body: { items: [item] },
+        })
+        const res = r.results[0]
+        if (res) {
+          results.push(res)
+          if (res.ok) ok++
+          else fail++
+          if (res.cached) cached++
+        }
+      } catch (e: any) {
+        results.push({
+          pricing_account_id: item.pricing_account_id,
+          pricing_product_id: item.pricing_product_id,
+          ok: false,
+          code: e?.data?.detail?.code ?? 'request_failed',
+          detail: e?.message ?? null,
+          price: null,
+          item_id: null,
+          variation_id: null,
+          cached: false,
+        })
+        fail++
+      }
+      activeJob.value = {
+        ...activeJob.value!,
+        processed: i + 1,
+        result: { summary: { total, ok, failed: fail, cached } },
+      }
+      // Surface partial results so the user sees per-cell outcomes as they land.
+      lastPushResults.value = results.slice()
+    }
+    activeJob.value = {
+      ...activeJob.value!,
+      status: fail > 0 && ok === 0 ? 'failed' : 'succeeded',
+    }
+    if (fail === 0) {
+      toast.success('Push concluído!', `${ok} preço(s) enviado(s) com sucesso`)
+    } else if (ok === 0) {
+      toast.error(
+        `Push falhou: ${fail} erro(s)`,
+        results
+          .filter((x) => !x.ok)
+          .map((f) => f.detail || f.code)
+          .slice(0, 5),
+      )
+    } else {
+      toast.warning(
+        `Envio: ${ok} ok, ${fail} erro(s)`,
+        results
+          .filter((x) => !x.ok)
+          .map((f) => f.detail || f.code)
+          .slice(0, 5),
+      )
+    }
+    await loadGrid()
   } catch (e: any) {
     gridErr.value = e?.data?.detail?.code ?? 'push_failed'
-    toast.error('Erro ao iniciar push em batch', gridErr.value || undefined)
+    toast.error('Erro no push', gridErr.value || undefined)
+    if (activeJob.value) activeJob.value = { ...activeJob.value, status: 'failed' }
   } finally {
     pushing.value = false
   }
