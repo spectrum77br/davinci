@@ -28,6 +28,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -348,7 +349,11 @@ class AmazonClient:
                 error_detail=f"price={price}",
             )
 
-        path = f"/listings/2021-08-01/items/{self.seller_id}/{sku}"
+        # Amazon BR rejects decimal prices (InvalidInput); round to whole
+        # reais. URL-encode the SKU so '/', '+', '#', etc. don't blow up
+        # the path.
+        price = float(round(price))
+        path = f"/listings/2021-08-01/items/{self.seller_id}/{quote(sku, safe='')}"
         body = {
             "productType": "PRODUCT",
             "patches": [
@@ -428,6 +433,20 @@ class AmazonClient:
 # ---------------------------------------------------------------- helpers
 
 
+def _safe_text(resp: Any, max_len: int = 500) -> str:
+    """Read .text off something that's *probably* an httpx.Response but
+    might be a mock, a wrapped error, or `None` after an unexpected
+    interceptor. Falls back to str() so we never propagate AttributeError
+    out of the error-classification layer."""
+    try:
+        body = getattr(resp, "text", None)
+        if isinstance(body, str):
+            return body[:max_len]
+    except Exception:  # noqa: BLE001
+        pass
+    return str(resp)[:max_len]
+
+
 def _classify_response(
     r: httpx.Response, qty_before: int | None, *, qty_after: int, sku: str
 ) -> SyncResult:
@@ -438,14 +457,14 @@ def _classify_response(
             status=SyncStatus.RETRYABLE,
             qty_before=qty_before,
             error_code=f"http_{r.status_code}",
-            error_detail=r.text[:500],
+            error_detail=_safe_text(r),
         )
     if r.status_code in {401, 403}:
         return SyncResult(
             status=SyncStatus.FATAL,
             qty_before=qty_before,
             error_code=f"amazon_auth_{r.status_code}",
-            error_detail=r.text[:500],
+            error_detail=_safe_text(r),
         )
     if r.status_code == 404:
         return SyncResult(
@@ -462,7 +481,7 @@ def _classify_response(
 
     if r.status_code >= 400:
         errors = payload.get("errors") or []
-        detail = "; ".join(_describe_error(e) for e in errors) or r.text[:500]
+        detail = "; ".join(_describe_error(e) for e in errors) or _safe_text(r)
         return SyncResult(
             status=SyncStatus.FATAL,
             qty_before=qty_before,
@@ -528,13 +547,13 @@ def _classify_price_response(
         return SyncResult(
             status=SyncStatus.RETRYABLE,
             error_code=f"http_{r.status_code}",
-            error_detail=r.text[:500],
+            error_detail=_safe_text(r),
         )
     if r.status_code in {401, 403}:
         return SyncResult(
             status=SyncStatus.FATAL,
             error_code=f"amazon_auth_{r.status_code}",
-            error_detail=r.text[:500],
+            error_detail=_safe_text(r),
         )
     if r.status_code == 404:
         return SyncResult(
@@ -548,7 +567,7 @@ def _classify_price_response(
         payload = {}
     if r.status_code >= 400:
         errors = payload.get("errors") or []
-        detail = "; ".join(_describe_error(e) for e in errors) or r.text[:500]
+        detail = "; ".join(_describe_error(e) for e in errors) or _safe_text(r)
         return SyncResult(
             status=SyncStatus.FATAL,
             error_code=f"amazon_http_{r.status_code}",

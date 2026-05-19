@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
-  Star, Send, Ban, Check, Link2, Copy,
+  Star, Send, Ban, Check, Link2, Copy, Minus,
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
   ChevronDown, Download, Undo2, Redo2, Search, Tags,
 } from 'lucide-vue-next'
@@ -956,6 +956,18 @@ const editingCell = ref<{ accId: string; prodId: string } | null>(null)
 const cellEditValue = ref<string>('')
 const pushing = ref(false)
 const lastPushResults = ref<PushResult[]>([])
+// SSH-style per-cell feedback while pushItemsBatch walks the queue.
+// `pushStates` is keyed by `${productId}:${accountId}` and ticks through
+// pushing → success/error/no_link. `bulkPushProgress` shows "3/173" while
+// the loop runs. Success states fade out 5s after the run finishes; errors
+// and no_link stick around so the user can review them.
+type PushCellState = 'pushing' | 'success' | 'error' | 'no_link'
+const pushStates = ref<Map<string, PushCellState>>(new Map())
+const bulkPushProgress = ref<string>('')
+
+function pushCellKey(productId: string, accountId: string): string {
+  return `${productId}:${accountId}`
+}
 
 // ---------- Feature 3: obs editing in header
 const editingObsId = ref<string | null>(null)
@@ -1212,11 +1224,12 @@ type BatchJob = {
 }
 const activeJob = ref<BatchJob | null>(null)
 
-// SSH-style push: drop the background-job path and walk the items sequentially
-// from the browser, one POST /api/pricing/push per item. Each call returns in
-// ~1–2s so the banner advances visibly (previously the job committed every 10
-// items, which made the UI look frozen at e.g. 130/173). loadGrid runs once at
-// the end so the grid mirrors the new link.stock state.
+// SSH-style cell-by-cell push: walk the items sequentially from the browser,
+// one POST /api/pricing/push per cell, and update per-cell visual state in
+// `pushStates` so the user sees each spinner → ✓/✗ as it happens. Callers
+// must build `items` in the visual order they want (e.g. produto×conta in
+// gridAccounts order) — pushItemsBatch groups by product only to compute
+// the "N/total" label.
 async function pushItemsBatch(
   items: { pricing_account_id: string; pricing_product_id: string }[],
   keyHint: string,
@@ -1227,89 +1240,97 @@ async function pushItemsBatch(
   }
   pushing.value = true
   lastPushResults.value = []
+  pushStates.value = new Map()
+  bulkPushProgress.value = ''
   const baseKey = `${keyHint}:${Date.now()}`
-  const total = items.length
-  activeJob.value = {
-    id: `local:${Date.now()}`,
-    type: 'pricing_push',
-    status: 'running',
-    total,
-    processed: 0,
-    result: { summary: { total, ok: 0, failed: 0, cached: 0 } },
-    error: null,
-  }
+
+  const productIds = [...new Set(items.map((it) => it.pricing_product_id))]
   const results: PushResult[] = []
-  let ok = 0
-  let fail = 0
-  let cached = 0
+  let sent = 0
+  let errors = 0
+  let noLinks = 0
+  let skipped = 0
+  const errorDetails: string[] = []
+
+  function setCell(ck: string, st: PushCellState) {
+    pushStates.value = new Map(pushStates.value).set(ck, st)
+  }
+
   try {
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i]
-      try {
-        const r = await api<{ results: PushResult[] }>('/api/pricing/push', {
-          method: 'POST',
-          headers: { 'Idempotency-Key': `${baseKey}:${i}` },
-          body: { items: [item] },
-        })
-        const res = r.results[0]
-        if (res) {
-          results.push(res)
-          if (res.ok) ok++
-          else fail++
-          if (res.cached) cached++
+    for (let pIdx = 0; pIdx < productIds.length; pIdx++) {
+      const prodId = productIds[pIdx]
+      bulkPushProgress.value = `${pIdx + 1}/${productIds.length}`
+      const prodItems = items.filter((it) => it.pricing_product_id === prodId)
+
+      for (const item of prodItems) {
+        const ck = pushCellKey(item.pricing_product_id, item.pricing_account_id)
+        setCell(ck, 'pushing')
+
+        try {
+          const r = await api<{ results: PushResult[] }>('/api/pricing/push', {
+            method: 'POST',
+            headers: { 'Idempotency-Key': `${baseKey}:${ck}` },
+            body: { items: [item] },
+          })
+          const result = r.results[0]
+          if (!result) {
+            setCell(ck, 'error')
+            errors++
+            continue
+          }
+          results.push(result)
+          lastPushResults.value = results.slice()
+
+          if (result.ok) {
+            setCell(ck, 'success')
+            sent++
+          } else if (result.code === 'no_link' || result.code === 'account_not_linked') {
+            setCell(ck, 'no_link')
+            noLinks++
+          } else if (result.code === 'all_skipped') {
+            setCell(ck, 'success')
+            skipped++
+          } else {
+            setCell(ck, 'error')
+            errors++
+            errorDetails.push(`${result.code}: ${result.detail || ''}`)
+          }
+        } catch (e: any) {
+          setCell(ck, 'error')
+          errors++
+          errorDetails.push(e?.message || 'request_failed')
         }
-      } catch (e: any) {
-        results.push({
-          pricing_account_id: item.pricing_account_id,
-          pricing_product_id: item.pricing_product_id,
-          ok: false,
-          code: e?.data?.detail?.code ?? 'request_failed',
-          detail: e?.message ?? null,
-          price: null,
-          item_id: null,
-          variation_id: null,
-          cached: false,
-        })
-        fail++
       }
-      activeJob.value = {
-        ...activeJob.value!,
-        processed: i + 1,
-        result: { summary: { total, ok, failed: fail, cached } },
-      }
-      // Surface partial results so the user sees per-cell outcomes as they land.
-      lastPushResults.value = results.slice()
     }
-    activeJob.value = {
-      ...activeJob.value!,
-      status: fail > 0 && ok === 0 ? 'failed' : 'succeeded',
-    }
-    if (fail === 0) {
-      toast.success('Push concluído!', `${ok} preço(s) enviado(s) com sucesso`)
-    } else if (ok === 0) {
+
+    if (errors > 0) {
       toast.error(
-        `Push falhou: ${fail} erro(s)`,
-        results
-          .filter((x) => !x.ok)
-          .map((f) => f.detail || f.code)
-          .slice(0, 5),
+        `Envio: ${sent} ok, ${errors} erro(s)${noLinks > 0 ? `, ${noLinks} sem vínculo` : ''}`,
+        errorDetails.slice(0, 5),
       )
+    } else if (sent === 0 && noLinks > 0) {
+      toast.warning(`Nenhum preço enviado. ${noLinks} célula(s) sem vínculo.`)
     } else {
-      toast.warning(
-        `Envio: ${ok} ok, ${fail} erro(s)`,
-        results
-          .filter((x) => !x.ok)
-          .map((f) => f.detail || f.code)
-          .slice(0, 5),
+      toast.success(
+        'Push concluído!',
+        `${sent} preço(s) enviado(s) com sucesso${skipped > 0 ? ` (${skipped} pulado(s))` : ''}`,
       )
     }
+
     await loadGrid()
   } catch (e: any) {
     gridErr.value = e?.data?.detail?.code ?? 'push_failed'
     toast.error('Erro no push', gridErr.value || undefined)
-    if (activeJob.value) activeJob.value = { ...activeJob.value, status: 'failed' }
   } finally {
     pushing.value = false
+    bulkPushProgress.value = ''
+    // Let success indicators fade after 5s; keep error/no_link so the user
+    // can scan the grid for cells that still need attention.
+    setTimeout(() => {
+      pushStates.value = new Map(
+        [...pushStates.value.entries()].filter(([, v]) => v !== 'success'),
+      )
+    }, 5000)
   }
 }
 
@@ -1368,8 +1389,11 @@ async function pushAccountColumn(accId: string) {
 async function pushAllVisible() {
   if (!grid.value) return
   const items: { pricing_account_id: string; pricing_product_id: string }[] = []
+  // gridAccounts.value carries the visual left-to-right order; iterating
+  // products × gridAccounts means the queue walks the table the same way
+  // the user reads it, so the per-cell spinners march in a predictable path.
   for (const p of filteredGridProducts.value) {
-    for (const a of grid.value.accounts) {
+    for (const a of gridAccounts.value) {
       const c = cellOf(p.id, a.id)
       if (c && c.price != null && c.source !== 'locked' && c.source !== 'disabled') {
         items.push({ pricing_account_id: a.id, pricing_product_id: p.id })
@@ -2725,7 +2749,8 @@ watch(department, async () => {
           Recarregar
         </button>
         <span v-if="pushing" class="text-sm text-muted-foreground flex items-center gap-1">
-          <Loader2 class="h-3 w-3 animate-spin" /> enviando…
+          <Loader2 class="h-3 w-3 animate-spin" />
+          {{ bulkPushProgress ? `enviando ${bulkPushProgress}…` : 'enviando…' }}
         </span>
       </div>
 
@@ -2981,7 +3006,7 @@ watch(department, async () => {
               <td
                 v-for="(acc, accIdx) in gridAccounts"
                 :key="acc.id"
-                class="px-1 py-1"
+                class="px-1 py-1 relative"
                 :class="[
                   cellTone(cellOf(prod.id, acc.id)),
                   platformBg(acc.platform),
@@ -2990,6 +3015,22 @@ watch(department, async () => {
                 ]"
                 @click="selectedCell = { row: rowIdx, col: accIdx }"
               >
+                <!-- Per-cell push status (SSH-style overlay) -->
+                <div
+                  v-if="pushStates.get(pushCellKey(prod.id, acc.id))"
+                  class="absolute inset-0 flex items-center justify-center z-10 pointer-events-none"
+                  :class="{
+                    'bg-blue-100/80': pushStates.get(pushCellKey(prod.id, acc.id)) === 'pushing',
+                    'bg-emerald-100/80': pushStates.get(pushCellKey(prod.id, acc.id)) === 'success',
+                    'bg-red-100/80': pushStates.get(pushCellKey(prod.id, acc.id)) === 'error',
+                    'bg-gray-200/80': pushStates.get(pushCellKey(prod.id, acc.id)) === 'no_link',
+                  }"
+                >
+                  <Loader2 v-if="pushStates.get(pushCellKey(prod.id, acc.id)) === 'pushing'" class="h-3 w-3 animate-spin text-blue-600" />
+                  <Check v-else-if="pushStates.get(pushCellKey(prod.id, acc.id)) === 'success'" class="h-3 w-3 text-emerald-600" />
+                  <X v-else-if="pushStates.get(pushCellKey(prod.id, acc.id)) === 'error'" class="h-3 w-3 text-red-600" />
+                  <Minus v-else class="h-3 w-3 text-gray-500" />
+                </div>
                 <template v-if="editingCell && editingCell.accId === acc.id && editingCell.prodId === prod.id">
                   <div class="flex items-center gap-1">
                     <input
