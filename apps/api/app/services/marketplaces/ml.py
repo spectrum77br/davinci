@@ -389,24 +389,77 @@ class MercadoLivreClient:
         *,
         variation_id: str | None = None,
     ) -> SyncResult:
-        """Push price to a single ML listing (or one of its variations).
+        """Push price to a single ML listing — SSH semantics.
 
-        SSH semantics: ML refuses price changes on paused listings with
-        `item.price.not_modifiable`. When that happens we activate the
-        listing, wait ~2s for ML to settle, retry the price update, then
-        re-pause to leave the state intact.
+        SSH rules we mirror here:
+          1. Round to integer reais (ML rejects decimals on most categories).
+          2. GET /items/{id} first so we know if the listing has variations
+             AND the current item.status (skip cleanly for closed/forbidden).
+          3. For items WITH variations: PUT the same price on EVERY variation
+             in one request. ML's docs are explicit: "you should make a PUT
+             sending the same price in all the IDs for the variations".
+             Sending only one variation is silently ignored or rejected.
+          4. For items WITHOUT variations: PUT `{price: N}` directly.
+          5. If ML returns `item.price.not_modifiable` (paused listing):
+             activate → wait 2s → retry → re-pause regardless of retry result.
         """
-        if price <= 0:
+        rounded_price = int(round(price))
+        if rounded_price <= 0:
             return SyncResult(
                 status=SyncStatus.SKIPPED,
                 error_code="invalid_price",
                 error_detail=f"price={price}",
             )
-        body: dict[str, Any]
-        if variation_id:
-            body = {"variations": [{"id": int(variation_id), "price": price}]}
+
+        # 1. Fetch item info so we have variations + status.
+        try:
+            item_r = await self._request("GET", f"/items/{item_id}")
+        except httpx.HTTPError as e:
+            return SyncResult(
+                status=SyncStatus.RETRYABLE,
+                error_code="ml_get_item_failed",
+                error_detail=str(e)[:500],
+            )
+        if item_r.status_code != 200:
+            return SyncResult(
+                status=SyncStatus.RETRYABLE,
+                error_code=f"ml_get_item_{item_r.status_code}",
+                error_detail=(item_r.text or "")[:500],
+            )
+        try:
+            item_info = item_r.json() or {}
+        except Exception:  # noqa: BLE001
+            item_info = {}
+
+        item_status = (item_info.get("status") or "").lower()
+        sub_status = item_info.get("sub_status") or []
+        variations = item_info.get("variations") or []
+
+        # 2. Bail cleanly on terminal states — don't fight ML's moderation/closure.
+        if item_status == "closed":
+            detail = ",".join(sub_status) if sub_status else "closed"
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                error_code="ml_item_closed",
+                error_detail=f"Anúncio {item_id} encerrado ({detail})",
+            )
+        if item_status == "under_review" and "forbidden" in sub_status:
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                error_code="ml_item_forbidden",
+                error_detail=f"Anúncio {item_id} removido por moderação",
+            )
+
+        # 3. Build the PUT body. SSH parity: when variations exist, send ALL.
+        if variations:
+            body: dict[str, Any] = {
+                "variations": [
+                    {"id": v["id"], "price": rounded_price}
+                    for v in variations
+                ]
+            }
         else:
-            body = {"price": price}
+            body = {"price": rounded_price}
 
         async def _put_price() -> tuple[int, dict]:
             try:
@@ -419,69 +472,69 @@ class MercadoLivreClient:
                 payload = {}
             return r.status_code, payload
 
-        status, payload = await _put_price()
-        if status == -1:
-            return _map_http_error(
-                httpx.HTTPError(payload.get("_http_error", "unknown")),
-                None,
-                "ml_put_price_failed",
+        status_code, payload = await _put_price()
+
+        if status_code == -1:
+            return SyncResult(
+                status=SyncStatus.RETRYABLE,
+                error_code="ml_put_price_failed",
+                error_detail=str(payload.get("_http_error", "unknown"))[:500],
             )
-        if status < 400:
+        if status_code < 400:
             return SyncResult(
                 status=SyncStatus.OK,
-                qty_after=None,
                 payload={
                     "item_id": item_id,
                     "variation_id": variation_id,
-                    "price": price,
+                    "price": rounded_price,
+                    "variations_count": len(variations),
                 },
             )
 
-        # SSH retry path: detect not_modifiable + pause → activate → wait → push
-        # → repause.
+        # 4. not_modifiable → activate → wait → push → re-pause.
         message = (payload.get("message") or "").lower() if isinstance(payload, dict) else ""
         cause_list = payload.get("cause") or [] if isinstance(payload, dict) else []
         cause_codes = " ".join(str(c.get("code", "")) for c in cause_list).lower()
+
         if "not_modifiable" in message or "not_modifiable" in cause_codes:
             try:
-                # 1. activate (status="active")
                 ar = await self._request(
                     "PUT", f"/items/{item_id}", json={"status": "active"}
                 )
                 if ar.status_code >= 400:
-                    return _map_status_error(
-                        ar, None, "ml_unpause_for_price_failed"
+                    return SyncResult(
+                        status=SyncStatus.FATAL,
+                        error_code="ml_unpause_failed",
+                        error_detail=(ar.text or "")[:500],
                     )
                 await asyncio.sleep(2)
-                # 2. retry price push
-                status2, payload2 = await _put_price()
-                # 3. re-pause regardless of step 2 outcome
+                status_code2, payload2 = await _put_price()
+                # Re-pause regardless of retry outcome.
                 try:
                     await self._request(
                         "PUT", f"/items/{item_id}", json={"status": "paused"}
                     )
                 except Exception:  # noqa: BLE001
                     pass
-                if status2 == -1:
-                    return _map_http_error(
-                        httpx.HTTPError(payload2.get("_http_error", "unknown")),
-                        None,
-                        "ml_put_price_failed_after_unpause",
+                if status_code2 == -1:
+                    return SyncResult(
+                        status=SyncStatus.RETRYABLE,
+                        error_code="ml_put_price_failed_after_unpause",
+                        error_detail=str(payload2.get("_http_error", "unknown"))[:500],
                     )
-                if status2 < 400:
+                if status_code2 < 400:
                     return SyncResult(
                         status=SyncStatus.OK,
-                        qty_after=None,
                         payload={
                             "item_id": item_id,
                             "variation_id": variation_id,
-                            "price": price,
+                            "price": rounded_price,
                             "via": "unpause_repause",
                         },
                     )
-                # Reconstruct an httpx.Response-ish object via mapping helpers
-                # is awkward — fall through to the generic path below.
-                status = status2
+                # Fall through to the generic error mapping below using the
+                # second-attempt status/payload.
+                status_code = status_code2
                 payload = payload2
             except Exception as e:  # noqa: BLE001
                 return SyncResult(
@@ -490,15 +543,29 @@ class MercadoLivreClient:
                     error_detail=str(e)[:500],
                 )
 
-        # Generic error mapping for the non-retryable path.
-        class _R:
-            status_code = status
-            content = json.dumps(payload).encode() if payload else b""
+        # 5. Generic error mapping — inline, no _R shim (the previous version
+        # built a fake response object that failed at `r.text` later on).
+        if status_code in {429, 502, 503, 504}:
+            sync_status = SyncStatus.RETRYABLE
+        else:
+            sync_status = SyncStatus.FATAL
 
-            def json(self):
-                return payload
+        if isinstance(payload, dict):
+            cause = payload.get("cause") or []
+            if cause:
+                error_detail = "; ".join(
+                    f"{c.get('code', '?')}: {c.get('message', '')}" for c in cause
+                )[:500]
+            else:
+                error_detail = (payload.get("message") or json.dumps(payload))[:500]
+        else:
+            error_detail = str(payload)[:500]
 
-        return _map_status_error(_R(), None, "ml_put_price_status")
+        return SyncResult(
+            status=sync_status,
+            error_code=f"ml_put_price_status_{status_code}",
+            error_detail=error_detail,
+        )
 
     async def list_listings(
         self,
@@ -744,11 +811,21 @@ def _map_status_error(r: httpx.Response, qty_before: int | None, code: str) -> S
         status = SyncStatus.FATAL
     else:
         status = SyncStatus.RETRYABLE
+    # Some callers pass non-httpx objects (mocks, wrapped errors). Read `.text`
+    # defensively so a misshaped response can never raise AttributeError out
+    # of the error-classification layer itself.
+    try:
+        body = getattr(r, "text", None)
+        if not isinstance(body, str):
+            content = getattr(r, "content", None)
+            body = content.decode("utf-8", "replace") if isinstance(content, bytes) else str(r)
+    except Exception:  # noqa: BLE001
+        body = str(r)
     return SyncResult(
         status=status,
         qty_before=qty_before,
         error_code=f"{code}_{r.status_code}",
-        error_detail=r.text[:500],
+        error_detail=body[:500],
     )
 
 

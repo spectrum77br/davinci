@@ -520,19 +520,36 @@ class TikTokClient:
         sku_ids: str | list[str],
         price: float,
     ) -> bool:
-        """Update price for one or more SKUs within a product.
+        """Update price for one or more SKUs within a product — SSH parity.
 
-        Uses PATCH /product/202309/products/{product_id} with skus[].price.
-        TikTok expects price in cents (amount as string of integer cents).
+        Uses POST /product/202309/products/{product_id}/prices/update — the
+        dedicated price endpoint. TikTok expects:
+          - amount and sale_price as strings with 2 decimal places ("299.00"),
+            not integer cents,
+          - currency "BRL",
+          - both amount AND sale_price must be present.
+
+        Empty / falsy sku_ids are dropped before the call; if nothing remains
+        we surface that loudly so the caller can mark the link as needing
+        attention instead of pushing into nowhere.
         """
-        path = f"/product/202309/products/{product_id}"
-        ids = [sku_ids] if isinstance(sku_ids, str) else sku_ids
-
+        ids_in: list[str] = [sku_ids] if isinstance(sku_ids, str) else list(sku_ids)
+        ids = [sid for sid in ids_in if sid]
+        if not ids:
+            raise RuntimeError(
+                f"SKU ID não encontrado no vínculo para produto {product_id}"
+            )
+        path = f"/product/202309/products/{product_id}/prices/update"
+        price_str = f"{price:.2f}"
         body = {
             "skus": [
                 {
                     "id": sid,
-                    "price": {"amount": str(int(round(price * 100))), "currency": "BRL"},
+                    "price": {
+                        "amount": price_str,
+                        "currency": "BRL",
+                        "sale_price": price_str,
+                    },
                 }
                 for sid in ids
             ]
