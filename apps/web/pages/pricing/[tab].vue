@@ -1344,7 +1344,7 @@ async function pollJob(jobId: string, attempts = 0): Promise<void> {
 async function pushAccountColumn(accId: string) {
   if (!grid.value) return
   if (!confirm('Disparar push para todos os produtos desta conta?')) return
-  const items = grid.value.products
+  const items = filteredGridProducts.value
     .map((p) => ({ pricing_account_id: accId, pricing_product_id: p.id }))
     .filter((it) => {
       const c = cellOf(it.pricing_product_id, it.pricing_account_id)
