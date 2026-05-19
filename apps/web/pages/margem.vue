@@ -100,10 +100,6 @@ function isBlingPatchError(e: any) {
   return ['bling_patch_failed', 'bling_integration_missing'].includes(apiErrorCode(e))
 }
 
-function isBlingSituationGuardError(e: any) {
-  return ['bling_situacao_not_verificar_margem', 'bling_situacao_check_failed'].includes(apiErrorCode(e))
-}
-
 async function load() {
   loading.value = true
   error.value = null
@@ -229,12 +225,6 @@ async function setStatus(row: MarketplaceRow, value: MargensStatus) {
     await call(false)
     error.value = null
   } catch (e: any) {
-    if (isBlingSituationGuardError(e)) {
-      window.alert(apiError(e))
-      for (const r of items.value) if (r.pedido_bling === pedido) r.status = prev
-      error.value = null
-      return
-    }
     if (isBlingPatchError(e)) {
       const ok = window.confirm(
         `O pedido nao foi alterado no Bling.\n\nDeseja continuar e marcar como ${value} apenas no DaVinci?`,

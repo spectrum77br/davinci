@@ -10,28 +10,8 @@ pytestmark = pytest.mark.asyncio
 
 
 class FakeBlingClient:
-    def __init__(
-        self,
-        *,
-        order_situacao: int | str | None = margens_router.SITUACAO_VERIFICAR_MARGEM,
-        order_situacao_nome: str | None = margens_router.SITUACAO_VERIFICAR_MARGEM_NOME,
-    ) -> None:
+    def __init__(self) -> None:
         self.calls: list[tuple[int, int]] = []
-        self.get_order_calls: list[int] = []
-        self.order_situacao = order_situacao
-        self.order_situacao_nome = order_situacao_nome
-
-    async def get_order(self, bling_order_id: int) -> dict:
-        self.get_order_calls.append(bling_order_id)
-        if self.order_situacao is None:
-            return {"id": bling_order_id, "situacao": None}
-        return {
-            "id": bling_order_id,
-            "situacao": {
-                "id": self.order_situacao,
-                "nome": self.order_situacao_nome,
-            },
-        }
 
     async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
         self.calls.append((bling_order_id, situacao_id))
@@ -168,7 +148,7 @@ async def test_patch_margem_aprovado_from_atendido_skips_atendido_step(
     assert order.situacao == str(margens_router.SITUACAO_APROVADO)
 
 
-async def test_patch_margem_reprovado_requires_current_bling_verificar_margem(
+async def test_patch_margem_reprovado_when_situacao_not_em_aberto_skips_bling(
     client,
     db: AsyncSession,
     make_user,
@@ -177,41 +157,29 @@ async def test_patch_margem_reprovado_requires_current_bling_verificar_margem(
 ):
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
-    margem, order = await _create_margem_with_order(db)
-    fake_client = FakeBlingClient(
-        order_situacao=margens_router.SITUACAO_APROVADO,
-        order_situacao_nome="Em aberto",
-    )
+    margem, order = await _create_margem_with_order(db, situacao="15")
 
-    async def fake_global_bling_client(session):
-        return fake_client
+    async def fail_if_called(session):
+        raise AssertionError("Bling client should not be needed")
 
-    monkeypatch.setattr(
-        margens_router,
-        "_global_bling_client",
-        fake_global_bling_client,
-    )
+    monkeypatch.setattr(margens_router, "_global_bling_client", fail_if_called)
 
     response = await client.patch(
         f"/api/margens/{margem.id}",
         json={"status": "Reprovado"},
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "bling_situacao_not_verificar_margem"
-    assert fake_client.get_order_calls == [987654]
-    assert fake_client.calls == []
+    assert response.status_code == 200
+    assert response.json()["status"] == "Reprovado"
 
-    await db.refresh(margem)
     await db.refresh(order)
-    assert margem.status == "Pendente"
-    assert order.status is None
-    assert order.aprovado_por is None
+    assert order.status == "Reprovado"
+    assert order.aprovado_por == user.id
     assert order.situacao == "15"
-    assert order.verificado is False
+    assert order.verificado is True
 
 
-async def test_patch_margem_reprovado_from_verificar_margem_updates_bling(
+async def test_patch_margem_reprovado_from_em_aberto_patches_bling(
     client,
     db: AsyncSession,
     make_user,
@@ -220,7 +188,10 @@ async def test_patch_margem_reprovado_from_verificar_margem_updates_bling(
 ):
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
-    margem, order = await _create_margem_with_order(db)
+    margem, order = await _create_margem_with_order(
+        db,
+        situacao=str(margens_router.SITUACAO_APROVADO),
+    )
     fake_client = FakeBlingClient()
 
     async def fake_global_bling_client(session):
@@ -239,7 +210,6 @@ async def test_patch_margem_reprovado_from_verificar_margem_updates_bling(
 
     assert response.status_code == 200
     assert response.json()["status"] == "Reprovado"
-    assert fake_client.get_order_calls == [987654]
     assert fake_client.calls == [(987654, margens_router.SITUACAO_REPROVADO)]
 
     await db.refresh(order)
