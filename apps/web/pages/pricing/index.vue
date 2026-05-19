@@ -4,7 +4,7 @@ definePageMeta({
   permission: { resource: 'tabela_precos', action: 'view' },
 })
 
-await navigateTo('/pricing/contas', { redirectCode: 302 })
+await navigateTo('/pricing/tabela', { redirectCode: 302 })
 </script>
 
 <template><div /></template>

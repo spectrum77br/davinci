@@ -26,11 +26,12 @@ const { api } = useApi()
 
 const tab = computed<Tab>(() => {
   const t = route.params.tab as string
-  return (TABS.find((x) => x.key === t)?.key ?? 'contas') as Tab
+  return (TABS.find((x) => x.key === t)?.key ?? 'tabela') as Tab
 })
 
 function setTab(t: Tab) {
-  router.push(`/pricing/${t}`)
+  // Preserve the active department (?dept=) when switching sub-tabs.
+  router.push({ path: `/pricing/${t}`, query: { ...route.query } })
 }
 
 const canEditContas = useCan('tabela_precos_contas', 'edit')
@@ -177,7 +178,18 @@ function platformLabel(p: string) {
   return PLATFORMS.find((x) => x.value === p)?.label ?? p
 }
 
-const department = ref<DeptKey>('celular')
+// Department lives in the URL (?dept=mala) so it survives the [tab].vue
+// re-mount that happens when the user clicks a different sub-tab. Default
+// is 'celular' when the query is absent.
+const department = computed<DeptKey>({
+  get() {
+    const q = route.query.dept
+    return typeof q === 'string' && q ? q : 'celular'
+  },
+  set(v) {
+    router.replace({ path: route.path, query: { ...route.query, dept: v } })
+  },
+})
 
 // =========================================================== accounts state
 
@@ -2497,11 +2509,12 @@ watch(department, async () => {
             <!-- data rows -->
             <tr v-for="p in productsCurrent" :key="p.id" class="hover:bg-accent/30" :class="{ 'opacity-50': !p.is_active }">
               <td
-                class="border border-border px-2 py-1.5 text-xs font-mono cursor-pointer"
+                class="border border-border px-2 py-1.5 text-xs font-mono cursor-pointer max-w-[220px]"
                 :class="{
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'sku'),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'sku'),
                 }"
+                :title="p.sku"
                 @click="!isEditing(p.id, 'sku') && startEditProduct(p, 'sku')"
               >
                 <input
@@ -2511,7 +2524,7 @@ watch(department, async () => {
                   class="w-full text-xs bg-transparent outline-none font-mono"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
-                <span v-else>{{ p.sku }}</span>
+                <span v-else class="block truncate">{{ p.sku.length > 20 ? p.sku.slice(0, 20) + '…' : p.sku }}</span>
               </td>
               <td
                 class="border border-border px-2 py-1.5 text-xs cursor-pointer"
