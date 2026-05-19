@@ -47,11 +47,9 @@ from app.services.marketplaces.tiktok import TikTokClient
 from app.services.marketplaces.temu import TemuClient
 from app.services.pricing.calc import CalcOutcome, calculate
 from app.services.pricing.sku_match import (
-    build_prefix_index,
     dedup_links_for_push,
-    filter_products_by_department,
     ml_listing_type_for_account,
-    resolve_product_ids,
+    variants_of,
 )
 
 if TYPE_CHECKING:
@@ -174,50 +172,94 @@ async def _resolve_product_links_for_push(
     department: str | None,
     platform_str: str,
 ) -> list[ProductLink]:
-    """SSH-style link resolution for a push target.
+    """Resolução SSH-style: busca TODOS os product_links da integração
+    primeiro e só depois filtra pelos SKUs do pricing_product.
 
-    Walks the prefix index to get every davinci.products row that *could*
-    map to the pricing_product, then narrows with the department-specific
-    rule (celular = kit-only by base, mala = exact main SKU, catalogo =
-    exact non-kit), filters by ML listing_type when the account is
-    classico/premium, and dedups per platform semantics.
+    Espelha findProductLinksForPricingPush (SSH server/db.ts ~708-850). A
+    abordagem antiga (prefix_index -> filtro por departamento -> IN
+    product_ids) sumia silenciosamente quando o prefix_index não pegava
+    SKUs longos de mala (ex. "b005.12.18"); essa versão garante que
+    nenhum link válido é descartado antes do filtro de SKU.
     """
     if not pricing_product.sku:
         return []
-    rows = (
-        await session.execute(select(Product.id, Product.sku))
-    ).all()
-    # Stage 1: prefix index narrows the candidate set so we don't carry
-    # every product through the department filter.
-    prefix_index = build_prefix_index((pid, sku) for pid, sku in rows)
-    candidate_ids = set(resolve_product_ids(pricing_product.sku, prefix_index))
-    if not candidate_ids:
+
+    sku_list = variants_of(pricing_product.sku)
+    if not sku_list:
         return []
-    candidate_products = [(pid, sku) for pid, sku in rows if pid in candidate_ids]
-    # Stage 2: SSH department rule. For celular, kit-only by base SKU; for
-    # mala, exact main SKU; for catalogo, exact non-kit SKU.
-    target_ids = filter_products_by_department(
-        department or "celular",
-        pricing_product.sku,
-        candidate_products,
-        platform=platform_str,
-    )
-    if not target_ids:
-        return []
-    # Stage 3: load product_links scoped to (integration, target products),
-    # then apply ML listing_type filter and platform-specific dedup.
+    sku_full_set = {s.lower() for s in sku_list}
+    sku_base_set = {s.split(".", 1)[0].lower() for s in sku_list}
+
+    dept = (department or "celular").lower()
+    is_mala = dept == "mala"
+    is_catalogo = dept == "catalogo"
+
+    # 1. todos os links da integração — sem filtrar por produto ainda
     links_q = select(ProductLink).where(
-        and_(
-            ProductLink.integration_id == account.integration_id,
-            ProductLink.product_id.in_(target_ids),
-        )
+        ProductLink.integration_id == account.integration_id
     )
-    links = list((await session.execute(links_q)).scalars().all())
+    all_links = list((await session.execute(links_q)).scalars().all())
+    if not all_links:
+        return []
+
+    # 2. filtro de listing_type do ML (premium/classico) na frente
     if platform_str == "ml":
         wanted_listing_type = ml_listing_type_for_account(account.listing_type)
         if wanted_listing_type:
-            links = [lk for lk in links if (lk.listing_type or "") == wanted_listing_type]
-    return dedup_links_for_push(platform_str, links)
+            all_links = [
+                lk for lk in all_links if (lk.listing_type or "") == wanted_listing_type
+            ]
+        if not all_links:
+            return []
+
+    # 3. mapa product_id -> SKU para tomar decisão de departamento
+    product_ids_in_links = list({lk.product_id for lk in all_links})
+    sku_rows = (
+        await session.execute(
+            select(Product.id, Product.sku).where(Product.id.in_(product_ids_in_links))
+        )
+    ).all()
+    product_map: dict[UUID, str] = {pid: sku for pid, sku in sku_rows if sku}
+
+    # 4. aplica a regra de SKU do departamento direto no SKU do produto
+    matched_links: list[ProductLink] = []
+    for link in all_links:
+        sku = product_map.get(link.product_id)
+        if not sku:
+            continue
+        sku_lc = sku.lower()
+
+        if is_catalogo:
+            # catálogo: só SKUs simples (sem "+") e match exato
+            if "+" in sku_lc:
+                continue
+            if sku_lc not in sku_full_set:
+                continue
+        else:
+            # mainSku = parte antes do "+" (descarta o lado direito de kits)
+            main_sku = sku_lc.split("+", 1)[0]
+            if is_mala:
+                # mala: match exato do mainSku contra o conjunto completo
+                if main_sku not in sku_full_set:
+                    continue
+            else:
+                # celular/eletro: match por SKU base (parte antes do ".")
+                if main_sku.split(".", 1)[0] not in sku_base_set:
+                    continue
+
+        matched_links.append(link)
+
+    # 5. ML celular: se houver kits, priorize só os kits (paridade SSH)
+    if not is_mala and not is_catalogo and platform_str == "ml":
+        has_kit = any("+" in (product_map.get(lk.product_id) or "") for lk in matched_links)
+        if has_kit:
+            matched_links = [
+                lk
+                for lk in matched_links
+                if "+" in (product_map.get(lk.product_id) or "")
+            ]
+
+    return dedup_links_for_push(platform_str, matched_links)
 
 
 async def _persist_cell_status(
