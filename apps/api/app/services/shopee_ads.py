@@ -28,10 +28,23 @@ from app.services.marketplaces.shopee import ShopeeClient
 
 logger = structlog.get_logger()
 
-# Soft rate limit Shopee suggests for Ads endpoints. Sleep after every call
-# so a chain of sync requests (balance → daily → hourly → campaigns) doesn't
-# trip 429s. 1.0s is conservative; can be tuned later via env.
-_RATE_LIMIT_SECONDS = 1.0
+# Soft rate limit Shopee enforces for Ads endpoints. 1.0s was too aggressive
+# in prod — `get_total_balance` specifically returns `ads_rate_limit_total_api`
+# on every call when fired in a tight loop across 13 shops, even with the
+# 1s breather. Bumping to 3s spreads the burst enough that 13 sequential
+# syncs (about 40s of total sleep) stay under Shopee's "balance" sub-quota.
+_RATE_LIMIT_SECONDS = 3.0
+
+# When a rate-limit error specifically targets the balance endpoint, retry
+# with exponential backoff. Per-error code so we don't muddle generic 5xx
+# failures with this very chatty Shopee-side throttle.
+_RATE_LIMIT_RETRY_CODES = frozenset({
+    "ads_rate_limit_total_api",
+    "ads.rate_limit.exceed_api",
+    "error_rate_limit_total_api",
+})
+_RATE_LIMIT_MAX_RETRIES = 3
+_RATE_LIMIT_BACKOFF_BASE = 5.0  # seconds: 5, 10, 20
 
 
 class ShopeeAdsError(RuntimeError):
@@ -124,20 +137,41 @@ class ShopeeAdsClient(ShopeeClient):
     async def _ads_post(self, path: str, body: dict) -> dict:
         """POST helper that raises ShopeeAdsError on any body.error and
         otherwise returns the `response` payload (Shopee Ads wraps results
-        in `{error, message, response}`)."""
-        r = await self._request("POST", path, json=body)
-        # 5xx / network → httpx exception propagates upward. 200 may still
-        # carry an `error`.
-        if r.status_code >= 400:
-            raise ShopeeAdsError(
-                "http_error", f"status={r.status_code} body={r.text[:200]}", path
-            )
-        body_json = r.json() or {}
-        err = body_json.get("error")
-        if err:
-            raise ShopeeAdsError(str(err), str(body_json.get("message") or ""), path)
-        await asyncio.sleep(_RATE_LIMIT_SECONDS)
-        return body_json.get("response") or body_json
+        in `{error, message, response}`).
+
+        Auto-retries `ads_rate_limit_total_api` (the per-endpoint throttle
+        Shopee Ads enforces on `get_total_balance` and friends) with
+        exponential backoff. Without this, the very first run across 13
+        shops fails 100% because the throttle kicks in before the loop
+        finishes."""
+        attempt = 0
+        last_err: ShopeeAdsError | None = None
+        while attempt <= _RATE_LIMIT_MAX_RETRIES:
+            r = await self._request("POST", path, json=body)
+            if r.status_code >= 400:
+                raise ShopeeAdsError(
+                    "http_error", f"status={r.status_code} body={r.text[:200]}", path
+                )
+            body_json = r.json() or {}
+            err = body_json.get("error")
+            if err:
+                code = str(err)
+                msg = str(body_json.get("message") or "")
+                if code in _RATE_LIMIT_RETRY_CODES and attempt < _RATE_LIMIT_MAX_RETRIES:
+                    delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
+                    logger.warning(
+                        "shopee_ads_rate_limited",
+                        path=path, code=code, attempt=attempt + 1, sleep=delay,
+                    )
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    last_err = ShopeeAdsError(code, msg, path)
+                    continue
+                raise ShopeeAdsError(code, msg, path)
+            await asyncio.sleep(_RATE_LIMIT_SECONDS)
+            return body_json.get("response") or body_json
+        # All retries exhausted — surface the last error
+        raise last_err if last_err else ShopeeAdsError("rate_limit_exhausted", "", path)
 
     # ─── 1. credit balance ───────────────────────────────────────────────
 

@@ -214,12 +214,16 @@ class MLAdsClient(MercadoLivreClient):
         )
         out: list[MLCampaign] = []
         offset = 0
+        # ML Product Ads expects `metrics=<comma list>` (`metrics=true` is
+        # rejected with "Metrics true is not valid"). Request the four
+        # account-level metrics we surface in the dashboard.
+        metrics_csv = "impressions,clicks,cost,acos"
         while True:
             data = await self._ads_request(
                 "GET",
                 path,
                 params={
-                    "metrics": "true",
+                    "metrics": metrics_csv,
                     "date_from": date_from.isoformat(),
                     "date_to": date_to.isoformat(),
                     "limit": limit,
