@@ -117,6 +117,7 @@ async def list_margens_marketplace(
     offset: int = Query(0, ge=0),
     search: str | None = Query(None),
     platform: str | None = Query(None),
+    conta: str | None = Query(None),
     status: str | None = Query(None),
     attention_type: str | None = Query(None),
 ) -> MargensMarketplacePage:
@@ -131,6 +132,9 @@ async def list_margens_marketplace(
     if platform:
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
         params["platform"] = platform
+    if conta:
+        where.append("v.loja_nome = :conta")
+        params["conta"] = conta
     # attention_type narrows which "needs attention" trigger qualifies a row.
     # When the user picks a specific trigger (frete/margem/saldo), only rows
     # that hit that trigger are returned — regardless of the chosen status.
@@ -175,6 +179,12 @@ async def list_margens_marketplace(
         "WHERE COALESCE(plataforma_bling, plataforma_financeiro) IS NOT NULL "
         "ORDER BY 1"
     )
+    contas_sql = text(
+        "SELECT DISTINCT loja_nome "
+        "FROM davinci.mv_conciliacao_margens_marketplace "
+        "WHERE loja_nome IS NOT NULL "
+        "ORDER BY 1"
+    )
     items_sql = text(
         f"""
         SELECT
@@ -216,7 +226,10 @@ async def list_margens_marketplace(
             v.pricing_account_listing_type,
             v.pricing_leaf_segment_name,
             v.bling_listing_type,
-            bo.observacao
+            bo.observacao,
+            {_ATTENTION_MARGEM_SQL}                              AS attention_margem,
+            {_ATTENTION_FRETE_SQL}                               AS attention_frete,
+            {_ATTENTION_SALDO_SQL}                               AS attention_saldo
         FROM davinci.mv_conciliacao_margens_marketplace v
         LEFT JOIN LATERAL (
             SELECT bo.observacao
@@ -234,6 +247,7 @@ async def list_margens_marketplace(
     total = (await session.execute(count_sql, params)).scalar_one()
     rows = (await session.execute(items_sql, params)).mappings().all()
     platforms = [r[0] for r in (await session.execute(platforms_sql)).all()]
+    contas = [r[0] for r in (await session.execute(contas_sql)).all()]
 
     return MargensMarketplacePage(
         items=[MargensMarketplaceOut.model_validate(dict(r)) for r in rows],
@@ -241,6 +255,7 @@ async def list_margens_marketplace(
         limit=limit,
         offset=offset,
         platforms=platforms,
+        contas=contas,
     )
 
 

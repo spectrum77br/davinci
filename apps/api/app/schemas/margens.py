@@ -49,6 +49,7 @@ class MargensMarketplacePage(BaseModel):
     limit: int
     offset: int
     platforms: list[str]
+    contas: list[str]
 
 
 class MargensMarketplaceOut(BaseModel):
@@ -87,6 +88,10 @@ class MargensMarketplaceOut(BaseModel):
     pricing_leaf_segment_name: str | None = None
     bling_listing_type: str | None = None
     observacao: str | None = None
+
+    attention_margem: bool = False
+    attention_frete: bool = False
+    attention_saldo: bool = False
 
 
 MargensMarketplacePage.model_rebuild()

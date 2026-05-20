@@ -34,6 +34,9 @@ type MarketplaceRow = {
   pricing_leaf_segment_name: string | null
   bling_listing_type: string | null
   observacao: string | null
+  attention_margem: boolean
+  attention_frete: boolean
+  attention_saldo: boolean
 }
 
 type PageResponse = {
@@ -42,6 +45,7 @@ type PageResponse = {
   limit: number
   offset: number
   platforms: string[]
+  contas: string[]
 }
 
 type MargensStatus = 'Pendente' | 'Reprovado' | 'Aprovado'
@@ -74,11 +78,13 @@ const canEdit = useCan('margem', 'edit')
 const items = ref<MarketplaceRow[]>([])
 const total = ref(0)
 const platforms = ref<string[]>([])
+const contas = ref<string[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 
 const search = ref('')
 const platform = ref<'all' | string>('all')
+const conta = ref<'all' | string>('all')
 const statusFilter = ref<StatusFilter>('Pendente')
 const attentionType = ref<AttentionType>('all')
 const page = ref(1)
@@ -108,6 +114,7 @@ async function load() {
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', String((page.value - 1) * PAGE_SIZE))
     if (platform.value !== 'all') params.set('platform', platform.value)
+    if (conta.value !== 'all') params.set('conta', conta.value)
     if (statusFilter.value !== 'all') params.set('status', statusFilter.value)
     if (attentionType.value !== 'all') {
       params.set('attention_type', attentionType.value)
@@ -117,6 +124,7 @@ async function load() {
     items.value = res.items
     total.value = res.total
     platforms.value = res.platforms
+    contas.value = res.contas
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -148,6 +156,10 @@ watch(search, () => {
   }, 350)
 })
 watch(platform, () => {
+  page.value = 1
+  load()
+})
+watch(conta, () => {
   page.value = 1
   load()
 })
@@ -211,6 +223,9 @@ async function setStatus(row: MarketplaceRow, value: MargensStatus) {
   if (!canEdit.value || value === row.status || !row.pedido_bling) return
   const prev = row.status
   const pedido = row.pedido_bling
+  // Push to Bling apenas quando o problema é de margem. Frete/saldo divergente
+  // só altera status local — sem situacao no Bling, sem dialog de fallback.
+  const pushBling = row.attention_margem
   // optimistic update — propagar pra todas as linhas do mesmo pedido
   for (const r of items.value) if (r.pedido_bling === pedido) r.status = value
 
@@ -222,10 +237,10 @@ async function setStatus(row: MarketplaceRow, value: MargensStatus) {
   }
 
   try {
-    await call(false)
+    await call(!pushBling)
     error.value = null
   } catch (e: any) {
-    if (isBlingPatchError(e)) {
+    if (pushBling && isBlingPatchError(e)) {
       const ok = window.confirm(
         `O pedido nao foi alterado no Bling.\n\nDeseja continuar e marcar como ${value} apenas no DaVinci?`,
       )
@@ -346,6 +361,13 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       >
         <option value="all">todas plataformas</option>
         <option v-for="p in platforms" :key="p" :value="p">{{ p }}</option>
+      </select>
+      <select
+        v-model="conta"
+        class="text-sm rounded-md border bg-background px-2 py-1.5"
+      >
+        <option value="all">todas contas</option>
+        <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
       </select>
       <select
         v-model="statusFilter"
