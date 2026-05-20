@@ -1,8 +1,13 @@
 """marketing module: accounts + schedules + metrics + decisions + patterns
 
 Revision ID: 0065_marketing_module
-Revises: 0064_add_shein_enums
+Revises: 0065_refunds
 Create Date: 2026-05-20
+
+Chains after 0065_refunds (a recovery stub for an orphan prod stamp).
+Numbering is preserved (both at 0065_*) because the revision_id is what
+alembic uses, not the filename — but the file is loaded after refunds
+to keep the natural reading order.
 """
 
 from collections.abc import Sequence
@@ -12,7 +17,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0065_marketing_module"
-down_revision: str | None = "0064_add_shein_enums"
+down_revision: str | None = "0065_refunds"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
