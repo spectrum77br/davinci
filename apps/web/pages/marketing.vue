@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Activity, AlertCircle, BarChart3, Bell, Bot, Clock, Cpu, LayoutGrid,
-  RefreshCw, Sparkles, Sprout, TrendingUp, TrendingDown,
+  RefreshCw, Sparkles, TrendingUp, TrendingDown,
 } from 'lucide-vue-next'
 
 const { api } = useApi()
@@ -140,7 +140,6 @@ const campaignAccountId = ref<string>('all')
 
 const loading = ref(false)
 const errorText = ref<string | null>(null)
-const seeding = ref(false)
 const triggering = ref(false)
 
 const period1Days = ref(7)
@@ -326,18 +325,6 @@ async function refresh() {
   }
 }
 
-async function seed() {
-  seeding.value = true
-  try {
-    await api('/api/marketing/seed', { method: 'POST' })
-    await refresh()
-  } catch (e: any) {
-    errorText.value = e?.data?.detail?.code ?? 'seed_failed'
-  } finally {
-    seeding.value = false
-  }
-}
-
 async function triggerAll() {
   triggering.value = true
   try {
@@ -398,17 +385,12 @@ definePageMeta({ middleware: [] })
       <div class="flex items-center gap-2">
         <BarChart3 class="h-6 w-6 text-primary" />
         <h1 class="text-2xl font-semibold">Marketing</h1>
-        <span class="text-xs uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/10 text-amber-700 border border-amber-500/30">mock</span>
       </div>
       <button class="rounded-md border px-2 py-1 text-sm hover:bg-muted disabled:opacity-50 inline-flex items-center gap-1"
         :disabled="loading" @click="refresh">
         <RefreshCw class="size-4" :class="{ 'animate-spin': loading }" /> recarregar
       </button>
       <div class="ml-auto flex items-center gap-2">
-        <button class="rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50 inline-flex items-center gap-1"
-          :disabled="seeding" @click="seed">
-          <Sprout class="size-4" /> {{ seeding ? 'criando…' : 'seed mock' }}
-        </button>
         <button v-if="(summary?.accounts.length ?? 0) > 0"
           class="rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm inline-flex items-center gap-1 disabled:opacity-50"
           :disabled="triggering" @click="triggerAll">
@@ -423,7 +405,7 @@ definePageMeta({ middleware: [] })
 
     <div v-if="(summary?.accounts.length ?? 0) === 0 && !loading"
       class="rounded-md border bg-muted/30 px-6 py-10 text-center text-sm text-muted-foreground">
-      Nenhuma conta cadastrada. Clique <strong>"seed mock"</strong> acima para popular 10 contas + 20 campanhas com 30 dias de métricas.
+      Nenhuma conta sincronizada ainda. As integrações Shopee/ML/Amazon com <code>ads_enabled</code> são populadas automaticamente pelo cron.
     </div>
 
     <!-- Tabs + department -->
@@ -569,7 +551,7 @@ definePageMeta({ middleware: [] })
           <span class="text-xs text-muted-foreground">Telegram dispara quando ≤2 dias</span>
         </div>
         <div v-if="creditAlerts.length === 0" class="text-sm text-muted-foreground py-2">
-          Nenhuma conta Shopee com saldo + gasto registrado. Rode "seed mock" se ainda não fez.
+          Nenhuma conta Shopee com saldo + gasto registrado ainda. O cron de Shopee roda a cada 5min em round-robin.
         </div>
         <div v-else class="space-y-1.5">
           <div v-for="a in creditAlerts" :key="a.account_id"

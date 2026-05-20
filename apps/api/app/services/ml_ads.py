@@ -236,8 +236,20 @@ class MLAdsClient(MercadoLivreClient):
     async def fetch_campaign_metrics(
         self, *, date_from: date, date_to: date
     ) -> dict[str, dict]:
-        """Pull per-campaign metrics for the window via the alternate
-        endpoint `/advertising/advertisers/{adv}/product_ads/campaigns`.
+        """Pull per-campaign metrics from `/advertising/advertisers/{adv}
+        /product_ads/campaigns`. The key was passing `metrics=...` with
+        ML's exact vocabulary:
+
+          prints          → impressions
+          clicks          → clicks
+          cost            → spend (R$)
+          direct_amount   → directly-attributed sales
+          indirect_amount → indirectly-attributed sales
+          total_amount    → direct + indirect (the headline "revenue" ML uses)
+          acos            → ML's own ACOS calc
+
+        Without the `metrics=` query the endpoint returns config-only
+        (acos_target, roas_target, budget) without performance numbers.
         Returns a dict keyed by campaign_id with spend/impressions/clicks/
         attributed_revenue. Falls back to {} on any error so the caller
         can still persist campaigns with zero metrics."""
@@ -248,6 +260,7 @@ class MLAdsClient(MercadoLivreClient):
             data = await self._ads_request(
                 "GET", path,
                 params={
+                    "metrics": "prints,clicks,cost,direct_amount,indirect_amount,total_amount,acos",
                     "date_from": date_from.isoformat(),
                     "date_to": date_to.isoformat(),
                 },
@@ -258,19 +271,23 @@ class MLAdsClient(MercadoLivreClient):
                 path=path, code=e.code, status=e.status,
             )
             return out
-        rows = data.get("campaigns") or data.get("results") or []
+        rows = data.get("results") or data.get("campaigns") or []
         for c in rows:
             cid = str(c.get("id") or c.get("campaign_id") or "")
             if not cid:
                 continue
-            m = c.get("metrics") or c
+            m = c.get("metrics") or {}
             out[cid] = {
-                "spend": _safe_float(m.get("cost") or m.get("spend")),
-                "impressions": _safe_int(m.get("impressions") or m.get("prints")),
+                "spend": _safe_float(m.get("cost")),
+                "impressions": _safe_int(m.get("prints")),
                 "clicks": _safe_int(m.get("clicks")),
-                "attributed_revenue": _safe_float(
-                    m.get("attributed_sales") or m.get("revenue") or m.get("acos_revenue") or 0
-                ),
+                # "total_amount" = direct + indirect attributed sales,
+                # which is the closest analogue to "campaign revenue"
+                # that ML reports. We persist this in MarketingCampaign.revenue
+                # for the per-campaign view; account-level still uses Bling.
+                "attributed_revenue": _safe_float(m.get("total_amount")),
+                "direct_revenue": _safe_float(m.get("direct_amount")),
+                "ml_acos": (float(m["acos"]) if m.get("acos") is not None else None),
             }
         return out
 
