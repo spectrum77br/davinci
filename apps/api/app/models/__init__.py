@@ -31,6 +31,13 @@ from app.models.enums import (
 from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
 from app.models.margens import Margens
+from app.models.marketing import (
+    MarketingAccount,
+    MarketingDecision,
+    MarketingMetric,
+    MarketingPattern,
+    MarketingSchedule,
+)
 from app.models.marketplace_financial import (
     MarketplaceFinancialEvent,
     MarketplaceOrderFinancial,
@@ -83,6 +90,11 @@ __all__ = [
     "ListingStatus",
     "MARKETPLACES",
     "Margens",
+    "MarketingAccount",
+    "MarketingDecision",
+    "MarketingMetric",
+    "MarketingPattern",
+    "MarketingSchedule",
     "Marketplace",
     "MarketplaceFinancialEvent",
     "MarketplaceOrderFinancial",

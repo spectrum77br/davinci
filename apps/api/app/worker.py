@@ -25,6 +25,7 @@ from app.models import (
 from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
+from app.services.marketing.agent import agent_decision_cycle as _marketing_agent_cycle
 from app.services.alerts import emit_alert
 from app.services.audit.runner import run_audit
 from app.services.auto_link import run_auto_link
@@ -346,6 +347,24 @@ async def sync_marketplace_financials_for_order_run(
 
 
 # ---------------------------------------------------------------- cron jobs
+
+
+async def marketing_agent_cycle(ctx: dict) -> None:
+    """Every 15 min: run one decision cycle per enabled MarketingAccount."""
+    from app.models.marketing import MarketingAccount
+
+    async with session_scope() as s:
+        rows = (
+            await s.execute(
+                select(MarketingAccount).where(MarketingAccount.agent_enabled.is_(True))
+            )
+        ).scalars().all()
+        ids = [a.id for a in rows]
+    for aid in ids:
+        try:
+            await _marketing_agent_cycle(aid)
+        except Exception as e:  # noqa: BLE001
+            logger.error("marketing_agent_cycle_error", account_id=str(aid), err=str(e)[:200])
 
 
 async def daily_sync_scheduler(ctx: dict) -> None:
@@ -926,10 +945,14 @@ class WorkerSettings:
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),
         # SSH parity: 30-min safety timeout for stuck sync advisory locks.
         # Runs every 5 minutes so the worst-case stuck duration is 35min.
+
         cron(sync_lock_safety_release, minute=_FIVE_MIN, run_at_startup=False),
         # Safety-net only — hooks via app.services.relink_hook handle the
         # day-to-day work. Runs at 02:00 and 14:00 UTC.
         cron(auto_import_link, hour={2, 14}, minute=0, run_at_startup=False),
+        # Marketing module (per-platform/department) — every quarter-hour
+        # per enabled MarketingAccount.
+        cron(marketing_agent_cycle, minute={0, 15, 30, 45}, run_at_startup=False),
     ]
     max_jobs = 10
     job_timeout = 1800

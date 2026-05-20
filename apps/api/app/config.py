@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Dev: enables /api/dev/mock-login (gated by ENV=development too).
+    dev_mock_login: bool = False
+
     @property
     def is_prod(self) -> bool:
         return self.env == "production"

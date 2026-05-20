@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
   Package, Megaphone, DollarSign, Truck, RefreshCw, Undo2,
-  Receipt, TrendingUp, ShieldCheck, Settings, Bell,
+  Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
   Store, Tags, ClipboardList, ChevronLeft, ChevronRight,
 } from 'lucide-vue-next'
 
@@ -35,6 +35,7 @@ const sections: Section[] = [
     items: [
       { to: '/produtos', label: 'Produtos', icon: Package, resource: 'produtos' },
       { to: '/anuncios', label: 'Anúncios', icon: Megaphone, resource: 'anuncios' },
+      { to: '/marketing', label: 'Marketing', icon: BarChart3 },
       { to: '/pricing/tabela', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
       { to: '/margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
     ],

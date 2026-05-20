@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.db import engine
 from app.redis_client import redis
 from app.routers import alerts as alerts_router
+from app.routers import dev as dev_router
 from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import cadastros as cadastros_router
@@ -19,6 +20,7 @@ from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
 from app.routers import margens as margens_router
+from app.routers import marketing as marketing_router
 from app.routers import metrics as metrics_router
 from app.routers import oauth as oauth_router
 from app.routers import pricing as pricing_router
@@ -130,6 +132,8 @@ app.include_router(dashboard_router.router)
 app.include_router(metrics_router.router)
 app.include_router(margens_router.router)
 app.include_router(tarefas_router.router)
+app.include_router(marketing_router.router)
+app.include_router(dev_router.router)
 
 
 @app.get("/api/health")
