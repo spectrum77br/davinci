@@ -39,10 +39,19 @@ from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
 
-# Bling situação id for "Atendido" (NF emitida). The Marketing module's
-# definition of "faturamento" is exactly this status — partial or
-# cancelled orders are excluded so ACOS isn't inflated by churn.
-BLING_SITUACAO_FATURADO = 9
+# Optional Bling situação filter. The default-9 ("Atendido / NF emitida")
+# turned out to be wrong for prod's Bling — that account uses custom
+# situação IDs (15, 83953-83965) and never set anything to 9 in 30 days.
+# Leaving this None means: don't filter server-side; the client-side
+# `_EXCLUDED_SITUACOES` set drops cancelled + draft pedidos. Set to a
+# specific int (e.g. 9 or 15) here to re-enable strict filtering once
+# the per-shop "faturado" id is known.
+BLING_SITUACAO_FATURADO: int | None = None
+
+# Situações we always exclude even when no positive filter is set:
+#   12 = Cancelado (refund/cancel, no revenue)
+#    6 = Em digitação (draft, not confirmed yet)
+_EXCLUDED_SITUACOES: frozenset[int] = frozenset({12, 6})
 
 
 @dataclass(slots=True)
@@ -156,9 +165,18 @@ async def get_bling_revenue(
         async for pedido in client.iter_pedidos_vendas(
             data_inicial=start.isoformat(),
             data_final=end.isoformat(),
-            id_situacao=BLING_SITUACAO_FATURADO,
+            id_situacao=BLING_SITUACAO_FATURADO,  # None → no server-side filter
             id_loja=loja_id,
         ):
+            # Exclude cancelled / draft pedidos client-side so revenue
+            # doesn't get inflated by orders that never shipped.
+            sit_id = (pedido.get("situacao") or {}).get("id")
+            try:
+                sit_int = int(sit_id) if sit_id is not None else None
+            except (TypeError, ValueError):
+                sit_int = None
+            if sit_int in _EXCLUDED_SITUACOES:
+                continue
             d = _parse_bling_date(pedido.get("dataEmissao") or pedido.get("data"))
             v = _pedido_total(pedido)
             if d is not None:
