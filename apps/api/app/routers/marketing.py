@@ -17,6 +17,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+import sqlalchemy as sa
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +26,7 @@ from app.deps.auth import require_active_user
 from app.models import User
 from app.models.marketing import (
     MarketingAccount,
+    MarketingCampaign,
     MarketingDecision,
     MarketingMetric,
     MarketingPattern,
@@ -337,6 +339,56 @@ async def replace_schedules(
     ]
 
 
+@router.get("/schedules/{account_id}/heatmap")
+async def schedule_heatmap(
+    account_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+    days: int = Query(30, ge=1, le=180),
+) -> dict:
+    """7×24 ACOS heatmap. Aggregates the last N days of MarketingMetric by
+    (weekday, hour). Returns {acos_target, cells: {"<dow>-<hour>": {...}}}
+    so the schedule UI can colour each cell by ACOS without re-aggregating
+    on the client. Cells with no metrics in the window are simply absent."""
+    acc = await session.get(MarketingAccount, account_id)
+    if acc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "account_not_found"})
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = (
+        await session.execute(
+            select(
+                func.extract("dow", MarketingMetric.timestamp).label("pg_dow"),
+                func.extract("hour", MarketingMetric.timestamp).label("hour"),
+                func.coalesce(func.sum(MarketingMetric.spend), 0.0).label("spend"),
+                func.coalesce(func.sum(MarketingMetric.revenue), 0.0).label("revenue"),
+                func.coalesce(func.sum(MarketingMetric.impressions), 0).label("impressions"),
+            )
+            .where(
+                and_(
+                    MarketingMetric.account_id == account_id,
+                    MarketingMetric.timestamp >= since,
+                )
+            )
+            .group_by("pg_dow", "hour")
+        )
+    ).all()
+    # Postgres EXTRACT(dow): 0=Sun..6=Sat. Convert to py weekday (0=Mon..6=Sun)
+    # so it matches the UI's days = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'].
+    cells: dict[str, dict] = {}
+    for r in rows:
+        py_dow = (int(r.pg_dow) - 1) % 7
+        spend = float(r.spend or 0)
+        revenue = float(r.revenue or 0)
+        acos = round(spend / revenue * 100, 1) if revenue > 0 else None
+        cells[f"{py_dow}-{int(r.hour)}"] = {
+            "spend": round(spend, 2),
+            "revenue": round(revenue, 2),
+            "impressions": int(r.impressions or 0),
+            "acos": acos,
+        }
+    return {"acos_target": acc.acos_target, "cells": cells}
+
+
 @router.post("/schedules/{account_id}/copy")
 async def copy_schedules(
     account_id: UUID,
@@ -562,79 +614,177 @@ async def list_credit_alerts(
     return out
 
 
-@router.get("/chart-data")
-async def chart_data(
+# Explicit platform ordering for the spreadsheet header — Amazon → ML →
+# Shopee. Mirrors how the pricing grid groups columns. Anything outside the
+# trio falls back to 9 so it lands last.
+_PLATFORM_ORDER = sa.case(
+    (MarketingAccount.platform == "amazon", 0),
+    (MarketingAccount.platform == "ml", 1),
+    (MarketingAccount.platform == "shopee", 2),
+    else_=9,
+)
+
+
+@router.get("/campaigns")
+async def list_campaigns(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_active_user)],
     department: str | None = Query(None),
-    accounts: str = Query(""),
-    metrics: str = Query("spend,revenue,acos"),
-    period1: int = Query(7, ge=1, le=365),
-    period2: int = Query(30, ge=1, le=365),
-) -> dict:
-    """Returns grouped bar data: { accounts: [...], metric_keys: [...],
-    period_1: {metric: [v per account]}, period_2: ... }
-    """
-    requested_ids: list[UUID] = []
-    if accounts:
-        for raw in accounts.split(","):
-            try:
-                requested_ids.append(UUID(raw.strip()))
-            except ValueError:
-                continue
-    stmt = select(MarketingAccount)
-    if requested_ids:
-        stmt = stmt.where(MarketingAccount.id.in_(requested_ids))
-    elif department:
+    platform: str | None = Query(None),
+    account_id: UUID | None = Query(None),
+) -> list[dict]:
+    """List campaigns joined to their account so the grid can build per-column
+    headers (Name / Platform / Account / DEPARTMENT). Filter by any of the
+    selectors the UI exposes. Columns are ordered Amazon → ML → Shopee,
+    then by account name, then department, then campaign name."""
+    stmt = select(MarketingCampaign, MarketingAccount).join(
+        MarketingAccount, MarketingAccount.id == MarketingCampaign.account_id
+    )
+    if account_id is not None:
+        stmt = stmt.where(MarketingCampaign.account_id == account_id)
+    if department:
         stmt = stmt.where(MarketingAccount.department == department)
-    accs = (
-        await session.execute(stmt.order_by(MarketingAccount.platform, MarketingAccount.name))
-    ).scalars().all()
+    if platform:
+        stmt = stmt.where(MarketingAccount.platform == platform)
+    stmt = stmt.order_by(
+        _PLATFORM_ORDER,
+        MarketingAccount.name,
+        MarketingAccount.department,
+        MarketingCampaign.name,
+    )
+    rows = (await session.execute(stmt)).all()
+    return [_campaign_out(c, a) for c, a in rows]
 
-    metric_keys = [m.strip() for m in metrics.split(",") if m.strip()]
-    now = datetime.now(UTC)
 
-    async def period_data(days: int) -> dict[str, list[float]]:
-        since = now - timedelta(days=days)
-        result: dict[str, list[float]] = {k: [] for k in metric_keys}
-        for acc in accs:
-            row = (
-                await session.execute(
-                    select(
-                        func.coalesce(func.sum(MarketingMetric.spend), 0.0),
-                        func.coalesce(func.sum(MarketingMetric.revenue), 0.0),
-                        func.coalesce(func.sum(MarketingMetric.impressions), 0),
-                        func.coalesce(func.sum(MarketingMetric.clicks), 0),
-                        func.coalesce(func.sum(MarketingMetric.orders), 0),
-                        func.avg(MarketingMetric.acos),
-                    ).where(
-                        and_(
-                            MarketingMetric.account_id == acc.id,
-                            MarketingMetric.timestamp >= since,
-                        )
-                    )
-                )
-            ).first()
-            buckets = {
-                "spend": float(row[0] or 0),
-                "revenue": float(row[1] or 0),
-                "impressions": float(row[2] or 0),
-                "clicks": float(row[3] or 0),
-                "orders": float(row[4] or 0),
-                "acos": float(row[5]) if row[5] is not None else 0.0,
-            }
-            for k in metric_keys:
-                result[k].append(round(buckets.get(k, 0), 2))
-        return result
+@router.get("/campaigns/{campaign_id}")
+async def get_campaign(
+    campaign_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    row = (
+        await session.execute(
+            select(MarketingCampaign, MarketingAccount)
+            .join(MarketingAccount, MarketingAccount.id == MarketingCampaign.account_id)
+            .where(MarketingCampaign.id == campaign_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "campaign_not_found"})
+    camp, acc = row
+    return _campaign_out(camp, acc)
 
+
+def _campaign_out(camp: MarketingCampaign, acc: MarketingAccount) -> dict:
     return {
-        "accounts": [
-            {"id": str(a.id), "name": a.name, "platform": a.platform, "department": a.department}
-            for a in accs
-        ],
-        "metric_keys": metric_keys,
-        "period_1": {"days": period1, "data": await period_data(period1)},
-        "period_2": {"days": period2, "data": await period_data(period2)},
+        "id": str(camp.id),
+        "account_id": str(camp.account_id),
+        "account_name": acc.name,
+        "platform": acc.platform,
+        "department": acc.department,
+        "name": camp.name,
+        "external_id": camp.external_id,
+        "status": camp.status,
+        "credit": float(camp.credit) if camp.credit is not None else None,
+        "spend": round(float(camp.spend), 2),
+        "revenue": round(float(camp.revenue), 2),
+        "impressions": camp.impressions,
+        "acos": round(float(camp.acos), 1) if camp.acos is not None else None,
+        "acos_target": acc.acos_target,
+    }
+
+
+@router.post("/sync-shopee/{integration_id}")
+async def sync_shopee(
+    integration_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    """Manually pull live Shopee Ads data for one integration. Persists to
+    MarketingAccount + MarketingMetric + MarketingCampaign so the dashboard
+    reads from DB right after the call returns."""
+    from app.services.marketing.shopee_sync import sync_shopee_integration
+
+    return await sync_shopee_integration(session, integration_id)
+
+
+@router.post("/sync-shopee-all")
+async def sync_shopee_all(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> list[dict]:
+    """Loop over every active Shopee integration and sync each one. Each
+    failure is recorded inline so a single bad shop doesn't abort the run."""
+    from app.services.marketing.shopee_sync import sync_all_shopee_integrations
+
+    return await sync_all_shopee_integrations(session)
+
+
+@router.post("/sync-ml/{integration_id}")
+async def sync_ml(
+    integration_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    """Manually pull live ML Product Ads data for one integration."""
+    from app.services.marketing.ml_sync import sync_ml_integration
+
+    return await sync_ml_integration(session, integration_id)
+
+
+@router.post("/sync-ml-all")
+async def sync_ml_all(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> list[dict]:
+    """Loop over every ads-enabled ML integration."""
+    from app.services.marketing.ml_sync import sync_all_ml_integrations
+
+    return await sync_all_ml_integrations(session)
+
+
+@router.post("/sync-amazon/{integration_id}")
+async def sync_amazon(
+    integration_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    """Manually pull live Amazon Sponsored Products data for one integration."""
+    from app.services.marketing.amazon_sync import sync_amazon_integration
+
+    return await sync_amazon_integration(session, integration_id)
+
+
+@router.post("/sync-amazon-all")
+async def sync_amazon_all(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> list[dict]:
+    """Loop over every ads-enabled Amazon integration."""
+    from app.services.marketing.amazon_sync import sync_all_amazon_integrations
+
+    return await sync_all_amazon_integrations(session)
+
+
+@router.post("/sync-all")
+async def sync_all_platforms(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    """Sync every ads-enabled integration across Shopee + ML + Amazon. Each
+    platform runs sequentially so a slow Amazon report doesn't block Shopee;
+    each platform's failure is contained in its own block of the response."""
+    from app.services.marketing.amazon_sync import sync_all_amazon_integrations
+    from app.services.marketing.ml_sync import sync_all_ml_integrations
+    from app.services.marketing.shopee_sync import sync_all_shopee_integrations
+
+    shopee_results = await sync_all_shopee_integrations(session)
+    ml_results = await sync_all_ml_integrations(session)
+    amazon_results = await sync_all_amazon_integrations(session)
+    return {
+        "shopee": shopee_results,
+        "mercadolivre": ml_results,
+        "amazon": amazon_results,
     }
 
 
@@ -687,6 +837,68 @@ _MOCK_PATTERNS = [
     ("peak_day", "Sábado: melhor dia da semana para Shopee", 0.82, {"dow": 5}),
     ("correlation", "Quando Shopee aquece, ML aquece 2h depois", 0.68, {}),
 ]
+
+# (account_name, platform, department, campaign_name, status)
+_MOCK_CAMPAIGNS = [
+    # Kfa — Amazon — celular
+    ("Kfa", "amazon", "celular", "SP - iPhone 15 Case", "active"),
+    ("Kfa", "amazon", "celular", "SP - Screen Protector", "active"),
+    ("Kfa", "amazon", "celular", "SP - Fast Charger", "paused"),
+    # Kfa — Amazon — mala
+    ("Kfa", "amazon", "mala", "SP - Mala Viagem G", "active"),
+    ("Kfa", "amazon", "mala", "SP - Mochila Executiva", "active"),
+    # Inova — ML — celular
+    ("Inova", "ml", "celular", "Product Ads - Celulares", "active"),
+    ("Inova", "ml", "celular", "Product Ads - Acessórios", "active"),
+    # Inova — ML — eletro
+    ("Inova", "ml", "eletro", "Product Ads - Eletrônicos", "active"),
+    ("Inova", "ml", "eletro", "Product Ads - Informática", "reduced"),
+    # Nexus — ML — mala
+    ("Nexus", "ml", "mala", "Product Ads - Malas", "active"),
+    ("Nexus", "ml", "mala", "Product Ads - Mochilas", "active"),
+    # Minas — Shopee — celular
+    ("Minas", "shopee", "celular", "Fone Bluetooth TWS", "active"),
+    ("Minas", "shopee", "celular", "Smartwatch Fitness", "active"),
+    # Poofy — Shopee — celular
+    ("Poofy", "shopee", "celular", "Capinha Silicone Premium", "active"),
+    ("Poofy", "shopee", "celular", "Película Vidro 3D", "active"),
+    ("Poofy", "shopee", "celular", "Carregador Turbo 65W", "reduced"),
+    # Poofy — Shopee — mala
+    ("Poofy", "shopee", "mala", "Mala Bordo Rígida", "active"),
+    ("Poofy", "shopee", "mala", "Mochila Notebook 15pol", "active"),
+    # Minas — Shopee — mala
+    ("Minas", "shopee", "mala", "Necessaire Viagem", "active"),
+]
+
+
+def _mock_campaign_metrics(platform: str, status: str) -> dict:
+    """Mock 7d metrics matching the spec ranges:
+      - active: spend R$100–600, revenue 10–20x spend (ACOS 5–10%),
+        impressions 3k–15k.
+      - reduced: same model but at ~55% scale.
+      - paused/off: all zero.
+      - credit only on Shopee (R$100–400); null otherwise."""
+    if status in ("paused", "off"):
+        return {
+            "spend": 0.0, "revenue": 0.0, "impressions": 0, "acos": None,
+            "credit": round(random.uniform(100, 400), 2) if platform == "shopee" else None,
+        }
+    spend = round(random.uniform(100, 600), 2)
+    if status == "reduced":
+        spend = round(spend * 0.55, 2)
+    rev_multiplier = random.uniform(10, 20)
+    revenue = round(spend * rev_multiplier, 2)
+    acos = round(spend / revenue * 100, 1) if revenue > 0 else None
+    impressions = random.randint(3000, 15000)
+    if status == "reduced":
+        impressions = int(impressions * 0.6)
+    return {
+        "spend": spend,
+        "revenue": revenue,
+        "impressions": impressions,
+        "acos": acos,
+        "credit": round(random.uniform(100, 400), 2) if platform == "shopee" else None,
+    }
 
 
 @router.post("/seed")
@@ -826,10 +1038,47 @@ async def seed(
                 decisions_created += 1
     await session.commit()
 
+    # Campaigns + their 7d roll-up metrics. Skip accounts that already have a
+    # campaign with the same name so re-running seed doesn't duplicate them.
+    by_key: dict[tuple[str, str, str], MarketingAccount] = {
+        (a.name, a.platform, a.department): a for a in accounts
+    }
+    campaigns_created = 0
+    for name, platform, dept, camp_name, status_ in _MOCK_CAMPAIGNS:
+        acc = by_key.get((name, platform, dept))
+        if acc is None:
+            continue
+        already = (
+            await session.execute(
+                select(func.count())
+                .select_from(MarketingCampaign)
+                .where(
+                    and_(
+                        MarketingCampaign.account_id == acc.id,
+                        MarketingCampaign.name == camp_name,
+                    )
+                )
+            )
+        ).scalar_one()
+        if already:
+            continue
+        metrics_blob = _mock_campaign_metrics(platform, status_)
+        session.add(
+            MarketingCampaign(
+                account_id=acc.id,
+                name=camp_name,
+                status=status_,
+                **metrics_blob,
+            )
+        )
+        campaigns_created += 1
+    await session.commit()
+
     return {
         "status": "ok",
         "accounts": len(accounts),
         "metrics_created": metrics_created,
         "patterns_created": patterns_created,
         "decisions_created": decisions_created,
+        "campaigns_created": campaigns_created,
     }

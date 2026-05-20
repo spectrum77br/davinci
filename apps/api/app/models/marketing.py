@@ -120,6 +120,37 @@ class MarketingDecision(Base, TimestampMixin):
     acos_at_time: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class MarketingCampaign(Base, TimestampMixin):
+    """One ad campaign inside a MarketingAccount. Holds the same six rolled-up
+    metrics that the dashboard's period tables show (Crédito, Gasto,
+    Faturamento, Impressões, ACOS, Status) so the spreadsheet grid can render
+    directly off this row without re-aggregating per cell. `credit` is only
+    meaningful for Shopee (`credit_balance` on the parent account is the
+    shop-level pot; this column lets a future real-API hook keep a per-
+    campaign credit too — null for ML/Amazon)."""
+
+    __tablename__ = "marketing_campaigns"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketing_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # "active" | "reduced" | "paused" | "off"
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="active", server_default=text("'active'")
+    )
+
+    credit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spend: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0"))
+    revenue: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0"))
+    impressions: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    acos: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 class MarketingPattern(Base, TimestampMixin):
     __tablename__ = "marketing_patterns"
 

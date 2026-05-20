@@ -287,6 +287,65 @@ class BlingClient:
         r.raise_for_status()
         return r.json().get("data") or {}
 
+    async def list_pedidos_vendas(
+        self,
+        *,
+        data_inicial: str | None = None,
+        data_final: str | None = None,
+        id_situacao: int | None = None,
+        id_loja: int | None = None,
+        pagina: int = 1,
+        limite: int = 100,
+    ) -> list[dict]:
+        """Single page of `/pedidos/vendas` with the marketing module's
+        filter set. Bling v3 expects YYYY-MM-DD for dates and integer ids
+        for situação/loja.
+
+        situação 9 = "Atendido" (NF emitida) — the canonical "faturado"
+        signal the aggregator uses as authoritative revenue. Other useful
+        situações: 5 (em andamento), 6 (em digitação), 12 (cancelado).
+        Pagination via `pagina` + `limite`; caller iterates pages."""
+        params: dict[str, Any] = {"pagina": pagina, "limite": limite}
+        if data_inicial:
+            params["dataInicial"] = data_inicial
+        if data_final:
+            params["dataFinal"] = data_final
+        if id_situacao is not None:
+            params["idSituacao"] = id_situacao
+        if id_loja is not None:
+            params["idLoja"] = id_loja
+        r = await self._request("GET", "/pedidos/vendas", params=params)
+        r.raise_for_status()
+        return r.json().get("data") or []
+
+    async def iter_pedidos_vendas(
+        self,
+        *,
+        data_inicial: str | None = None,
+        data_final: str | None = None,
+        id_situacao: int | None = None,
+        id_loja: int | None = None,
+        page_size: int = 100,
+    ) -> AsyncIterator[dict]:
+        """Iterate every pedido matching the filters, pulling pages until
+        Bling returns a partial page (signal of end-of-list). Hard cap at
+        50 pages to bound runaway loops; the marketing window is at most
+        30 days so 50×100=5000 pedidos is generous."""
+        page = 1
+        while page <= 50:
+            items = await self.list_pedidos_vendas(
+                data_inicial=data_inicial, data_final=data_final,
+                id_situacao=id_situacao, id_loja=id_loja,
+                pagina=page, limite=page_size,
+            )
+            if not items:
+                return
+            for it in items:
+                yield it
+            if len(items) < page_size:
+                return
+            page += 1
+
     async def update_order_situacao(
         self, bling_order_id: int, situacao_id: int
     ) -> None:

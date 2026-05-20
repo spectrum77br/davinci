@@ -67,6 +67,17 @@ class Settings(BaseSettings):
     amazon_refresh_token: str = ""
     amazon_marketplace_id: str = ""
 
+    # Amazon Advertising API — separate OAuth app from SP-API. Leave blank
+    # to disable; sync orchestrator returns {status: skipped, reason:
+    # missing_amazon_ads_credentials} so the rest of the marketing pull
+    # keeps working. `amazon_ads_profile_id` is per-region (one per
+    # marketplace); look it up once via GET /v2/profiles.
+    amazon_ads_client_id: str = ""
+    amazon_ads_client_secret: str = ""
+    amazon_ads_refresh_token: str = ""
+    amazon_ads_profile_id: str = ""
+    amazon_ads_region: str = "na"  # na | eu | fe — SA shares the NA cluster
+
     tiktok_app_key: str = ""
     tiktok_app_secret: str = ""
     tiktok_shop_cipher: str = ""

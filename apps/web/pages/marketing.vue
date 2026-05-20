@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  Activity, AlertCircle, BarChart3, Bell, Bot, Clock, Cpu,
+  Activity, AlertCircle, BarChart3, Bell, Bot, Clock, Cpu, LayoutGrid,
   RefreshCw, Sparkles, Sprout, TrendingUp, TrendingDown,
 } from 'lucide-vue-next'
 
@@ -76,6 +76,16 @@ type Schedule = {
   start_hour: number
   end_hour: number
 }
+type HeatmapCell = {
+  spend: number
+  revenue: number
+  impressions: number
+  acos: number | null
+}
+type Heatmap = {
+  acos_target: number
+  cells: Record<string, HeatmapCell>
+}
 type AgentStatus = {
   platform: string
   running: boolean
@@ -92,17 +102,27 @@ type CreditAlert = {
   days_remaining: number
   severity: 'ok' | 'warning' | 'critical'
 }
-type ChartPayload = {
-  accounts: { id: string; name: string; platform: string; department: string }[]
-  metric_keys: string[]
-  period_1: { days: number; data: Record<string, number[]> }
-  period_2: { days: number; data: Record<string, number[]> }
+type Campaign = {
+  id: string
+  account_id: string
+  account_name: string
+  platform: string
+  department: string
+  name: string
+  status: 'active' | 'reduced' | 'paused' | 'off' | string
+  credit: number | null
+  spend: number
+  revenue: number
+  impressions: number
+  acos: number | null
+  acos_target: number
 }
 
 // ── State ────────────────────────────────────────────────────────────
-type Tab = 'metricas' | 'horarios' | 'agentes'
+type Tab = 'metricas' | 'campanhas' | 'agentes'
+type Dept = 'celular' | 'mala' | 'eletro'
 const tab = ref<Tab>('metricas')
-const department = ref<'celular' | 'mala' | 'eletro' | 'all'>('all')
+const department = ref<Dept>('celular')
 
 const summary = ref<Summary | null>(null)
 const intensity = ref<Intensity[]>([])
@@ -110,23 +130,22 @@ const decisions = ref<Decision[]>([])
 const patterns = ref<Pattern[]>([])
 const agentStatus = ref<AgentStatus[]>([])
 const creditAlerts = ref<CreditAlert[]>([])
-const chartData = ref<ChartPayload | null>(null)
+const campaigns = ref<Campaign[]>([])
 
 const schedAccountId = ref<string | null>(null)
 const schedules = ref<Schedule[]>([])
+const heatmap = ref<Heatmap | null>(null)
+
+const campaignAccountId = ref<string>('all')
 
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 const seeding = ref(false)
 const triggering = ref(false)
 
-// Chart vars
-const chartMetrics = ref<Set<string>>(new Set(['spend', 'revenue', 'acos']))
-const chartAccountIds = ref<Set<string>>(new Set())
 const period1Days = ref(7)
 const period2Days = ref(30)
 
-// Decision filter
 const decFilterPlatform = ref<string>('all')
 
 const days = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
@@ -148,21 +167,60 @@ const statusDot: Record<string, string> = {
   active: 'bg-emerald-500', reduced: 'bg-amber-500',
   paused: 'bg-red-500', off: 'bg-zinc-400',
 }
+const statusLabel: Record<string, string> = {
+  active: 'Ativo', reduced: 'Reduzido', paused: 'Pausado', off: 'Desligado',
+}
 const actionLabel: Record<string, string> = {
   no_action: 'Sem ação', enable_all: 'LIGAR ADS', disable_all: 'DESLIGAR ADS',
   increase_budget: 'AUMENTAR BUDGET', decrease_budget: 'REDUZIR BUDGET',
   pause_worst: 'PAUSAR PIORES',
 }
 
+// ── Computeds ────────────────────────────────────────────────────────
 const filteredAccounts = computed(() => {
   if (!summary.value) return []
-  if (department.value === 'all') return summary.value.accounts
   return summary.value.accounts.filter((a) => a.department === department.value)
 })
 
 const filteredDecisions = computed(() => {
   if (decFilterPlatform.value === 'all') return decisions.value
   return decisions.value.filter((d) => d.platform === decFilterPlatform.value)
+})
+
+const selectedSchedAccount = computed(
+  () => summary.value?.accounts.find((a) => a.id === schedAccountId.value) ?? null,
+)
+function scheduleCells(): Set<string> {
+  if (!schedAccountId.value) return new Set()
+  const s = new Set<string>()
+  for (const sch of schedules.value) {
+    if (sch.end_hour <= sch.start_hour) {
+      for (let h = sch.start_hour; h < 24; h++) s.add(`${sch.day_of_week}-${h}`)
+      for (let h = 0; h < sch.end_hour; h++) s.add(`${sch.day_of_week}-${h}`)
+    } else {
+      for (let h = sch.start_hour; h < sch.end_hour; h++) s.add(`${sch.day_of_week}-${h}`)
+    }
+  }
+  return s
+}
+const scheduleSet = computed(() => scheduleCells())
+
+const filteredCampaigns = computed(() => {
+  let out = campaigns.value.filter((c) => c.department === department.value)
+  if (campaignAccountId.value !== 'all') {
+    out = out.filter((c) => c.account_id === campaignAccountId.value)
+  }
+  return out
+})
+
+const campaignAccountOptions = computed(() => {
+  const accs = filteredAccounts.value
+  const byId = new Set(
+    campaigns.value
+      .filter((c) => c.department === department.value)
+      .map((c) => c.account_id),
+  )
+  return accs.filter((a) => byId.has(a.id))
 })
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -185,60 +243,47 @@ function acosClass(acos: number | null | undefined, target: number): string {
   return 'text-red-600 font-medium'
 }
 
-const selectedSchedAccount = computed(
-  () => summary.value?.accounts.find((a) => a.id === schedAccountId.value) ?? null,
-)
-function scheduleCells(): Set<string> {
-  if (!schedAccountId.value) return new Set()
-  const s = new Set<string>()
-  for (const sch of schedules.value) {
-    if (sch.end_hour <= sch.start_hour) {
-      for (let h = sch.start_hour; h < 24; h++) s.add(`${sch.day_of_week}-${h}`)
-      for (let h = 0; h < sch.end_hour; h++) s.add(`${sch.day_of_week}-${h}`)
-    } else {
-      for (let h = sch.start_hour; h < sch.end_hour; h++) s.add(`${sch.day_of_week}-${h}`)
-    }
-  }
-  return s
+function heatmapCellClass(dow: number, hour: number): string {
+  const on = scheduleSet.value.has(`${dow}-${hour}`)
+  const cell = heatmap.value?.cells[`${dow}-${hour}`]
+  const target = heatmap.value?.acos_target ?? 7
+  if (!on) return 'bg-muted hover:bg-muted-foreground/30'
+  if (!cell || cell.acos == null) return 'bg-sky-400/60 hover:bg-sky-500/80'
+  if (cell.acos < target) return 'bg-emerald-500/80 hover:bg-emerald-500'
+  if (cell.acos < target * 1.5) return 'bg-amber-400/80 hover:bg-amber-500'
+  return 'bg-red-500/80 hover:bg-red-600'
 }
-const scheduleSet = computed(() => scheduleCells())
 
-// Chart math: max value per metric (so different metric scales render visibly)
-const chartScales = computed(() => {
-  const scales: Record<string, number> = {}
-  if (!chartData.value) return scales
-  for (const m of chartData.value.metric_keys) {
-    const all = [
-      ...(chartData.value.period_1.data[m] ?? []),
-      ...(chartData.value.period_2.data[m] ?? []),
-    ]
-    scales[m] = Math.max(1, ...all)
+function heatmapTooltip(dow: number, hour: number): string {
+  const dayName = days[dow]
+  const cell = heatmap.value?.cells[`${dow}-${hour}`]
+  const on = scheduleSet.value.has(`${dow}-${hour}`)
+  const lines = [`${dayName} ${hour}:00${on ? ' — ligado' : ' — desligado'}`]
+  if (cell) {
+    lines.push(`ACOS: ${cell.acos != null ? cell.acos.toFixed(1) + '%' : '—'}`)
+    lines.push(`Gasto: ${fmtMoney(cell.spend)}`)
+    lines.push(`Faturamento: ${fmtMoney(cell.revenue)}`)
+    lines.push(`Impressões: ${cell.impressions.toLocaleString('pt-BR')}`)
+  } else {
+    lines.push('Sem dados nesse horário')
   }
-  return scales
-})
+  return lines.join('\n')
+}
 
 // ── Fetchers ─────────────────────────────────────────────────────────
-function deptQuery(): string {
-  return department.value === 'all' ? '' : `&department=${department.value}`
-}
-
 async function loadSummary() {
-  const qs = `?period1_days=${period1Days.value}&period2_days=${period2Days.value}${deptQuery()}`
+  const qs = `?period1_days=${period1Days.value}&period2_days=${period2Days.value}&department=${department.value}`
   summary.value = await api<Summary>(`/api/marketing/metrics/summary${qs}`)
-  if (!schedAccountId.value && summary.value.accounts.length > 0) {
-    schedAccountId.value = summary.value.accounts[0].id
-  }
-  // Default chart account selection: pick first 4 visible.
-  if (chartAccountIds.value.size === 0) {
-    chartAccountIds.value = new Set(filteredAccounts.value.slice(0, 4).map((a) => a.id))
+  const accs = summary.value.accounts
+  if (accs.length > 0 && (!schedAccountId.value || !accs.find((a) => a.id === schedAccountId.value))) {
+    schedAccountId.value = accs[0].id
   }
 }
 async function loadIntensity() {
-  intensity.value = await api<Intensity[]>(`/api/marketing/intensity${department.value !== 'all' ? `?department=${department.value}` : ''}`)
+  intensity.value = await api<Intensity[]>(`/api/marketing/intensity?department=${department.value}`)
 }
 async function loadDecisions() {
-  const qs = `?limit=20${department.value !== 'all' ? `&department=${department.value}` : ''}`
-  decisions.value = await api<Decision[]>(`/api/marketing/decisions${qs}`)
+  decisions.value = await api<Decision[]>(`/api/marketing/decisions?limit=20&department=${department.value}`)
 }
 async function loadPatterns() {
   patterns.value = await api<Pattern[]>('/api/marketing/patterns?active=true')
@@ -253,16 +298,15 @@ async function loadSchedules() {
   if (!schedAccountId.value) return
   schedules.value = await api<Schedule[]>(`/api/marketing/schedules/${schedAccountId.value}`)
 }
-async function loadChart() {
-  const ids = [...chartAccountIds.value].join(',')
-  const metrics = [...chartMetrics.value].join(',')
-  if (!ids || !metrics) {
-    chartData.value = null
+async function loadHeatmap() {
+  if (!schedAccountId.value) {
+    heatmap.value = null
     return
   }
-  chartData.value = await api<ChartPayload>(
-    `/api/marketing/chart-data?accounts=${ids}&metrics=${metrics}&period1=${period1Days.value}&period2=${period2Days.value}`,
-  )
+  heatmap.value = await api<Heatmap>(`/api/marketing/schedules/${schedAccountId.value}/heatmap`)
+}
+async function loadCampaigns() {
+  campaigns.value = await api<Campaign[]>(`/api/marketing/campaigns?department=${department.value}`)
 }
 
 async function refresh() {
@@ -273,8 +317,8 @@ async function refresh() {
     await Promise.all([
       loadIntensity(), loadDecisions(), loadPatterns(),
       loadAgentStatus(), loadCreditAlerts(), loadSchedules(),
+      loadHeatmap(), loadCampaigns(),
     ])
-    await loadChart()
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code ?? e?.message ?? 'load_failed'
   } finally {
@@ -335,29 +379,14 @@ onBeforeUnmount(() => {
 })
 
 watch(department, async () => {
-  await loadSummary()
-  chartAccountIds.value = new Set(filteredAccounts.value.slice(0, 4).map((a) => a.id))
-  await Promise.all([loadIntensity(), loadDecisions(), loadChart()])
+  campaignAccountId.value = 'all'
+  await Promise.all([loadSummary(), loadIntensity(), loadDecisions(), loadCampaigns()])
 })
-
-watch([chartAccountIds, chartMetrics, period1Days, period2Days], () => {
-  loadChart().catch(() => {})
-}, { deep: true })
 
 watch(schedAccountId, () => {
   loadSchedules().catch(() => {})
+  loadHeatmap().catch(() => {})
 })
-
-function toggleChartAccount(id: string) {
-  const s = new Set(chartAccountIds.value)
-  if (s.has(id)) s.delete(id); else s.add(id)
-  chartAccountIds.value = s
-}
-function toggleChartMetric(m: string) {
-  const s = new Set(chartMetrics.value)
-  if (s.has(m)) s.delete(m); else s.add(m)
-  chartMetrics.value = s
-}
 
 definePageMeta({ middleware: [] })
 </script>
@@ -394,41 +423,39 @@ definePageMeta({ middleware: [] })
 
     <div v-if="(summary?.accounts.length ?? 0) === 0 && !loading"
       class="rounded-md border bg-muted/30 px-6 py-10 text-center text-sm text-muted-foreground">
-      Nenhuma conta cadastrada. Clique <strong>"seed mock"</strong> acima para popular 10 contas (Poofy/Minas/Inova/Nexus/Kfa × celular/mala/eletro) com 30 dias de métricas.
+      Nenhuma conta cadastrada. Clique <strong>"seed mock"</strong> acima para popular 10 contas + 20 campanhas com 30 dias de métricas.
     </div>
 
-    <!-- Tabs -->
+    <!-- Tabs + department -->
     <div v-if="(summary?.accounts.length ?? 0) > 0" class="flex flex-wrap items-center gap-3">
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
-        <button v-for="t in (['metricas', 'horarios', 'agentes'] as const)" :key="t"
+        <button v-for="t in (['metricas', 'campanhas', 'agentes'] as const)" :key="t"
           class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
           :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
           @click="tab = t">
           <BarChart3 v-if="t === 'metricas'" class="size-4" />
-          <Clock v-else-if="t === 'horarios'" class="size-4" />
+          <LayoutGrid v-else-if="t === 'campanhas'" class="size-4" />
           <Cpu v-else class="size-4" />
-          {{ t === 'metricas' ? 'Métricas' : t === 'horarios' ? 'Horários' : 'Agentes' }}
+          {{ t === 'metricas' ? 'Métricas' : t === 'campanhas' ? 'Campanhas' : 'Agentes' }}
         </button>
       </div>
-      <!-- Department selector (shared) -->
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
-        <button v-for="d in (['all', 'celular', 'mala', 'eletro'] as const)" :key="d"
+        <button v-for="d in (['celular', 'mala', 'eletro'] as const)" :key="d"
           class="px-3 py-1 rounded text-sm transition-colors"
           :class="department === d ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
           @click="department = d">
-          {{ d === 'all' ? 'Todos' : d === 'celular' ? 'Celular' : d === 'mala' ? 'Mala' : 'Eletro' }}
+          {{ d === 'celular' ? 'Celular' : d === 'mala' ? 'Mala' : 'Eletro' }}
         </button>
       </div>
     </div>
 
     <!-- ═══════════════════════════════ MÉTRICAS ═══════════════════════ -->
     <template v-if="tab === 'metricas' && summary">
-      <!-- Tabela período 1 -->
       <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <template v-for="(period, idx) in [{ key: 'period_1', label: `Últimos ${period1Days} dias`, days: period1Days, ref: 'period1Days' as const }, { key: 'period_2', label: `Últimos ${period2Days} dias`, days: period2Days, ref: 'period2Days' as const }] as const" :key="period.key">
+        <template v-for="(period, idx) in [{ key: 'period_1', days: period1Days }, { key: 'period_2', days: period2Days }] as const" :key="period.key">
           <div class="rounded-md border overflow-hidden">
             <div class="bg-muted/40 px-3 py-2 text-sm font-medium border-b flex items-center justify-between">
-              <span>{{ period.label }}</span>
+              <span>Últimos {{ idx === 0 ? period1Days : period2Days }} dias</span>
               <label class="text-xs font-normal text-muted-foreground inline-flex items-center gap-1">
                 Dias:
                 <input
@@ -444,12 +471,10 @@ definePageMeta({ middleware: [] })
                 <thead class="bg-muted/20 text-left">
                   <tr>
                     <th class="px-2 py-2"></th>
-                    <th v-for="a in filteredAccounts" :key="a.id" class="px-2 py-2 whitespace-nowrap min-w-[110px]">
-                      <div class="font-medium">{{ a.name }}</div>
-                      <div class="text-[10px]" :style="{ color: platformColor[a.platform] }">
-                        {{ platformLabel[a.platform] ?? a.platform }}
-                      </div>
-                      <div class="text-[9px] text-muted-foreground uppercase">{{ a.department }}</div>
+                    <th v-for="a in filteredAccounts" :key="a.id" class="px-2 py-2 whitespace-nowrap min-w-[110px] align-top">
+                      <div class="text-[11px] font-semibold" :style="{ color: platformColor[a.platform] }">{{ platformLabel[a.platform] ?? a.platform }}</div>
+                      <div class="text-[11px] text-muted-foreground">{{ a.name }}</div>
+                      <div class="text-[9px] uppercase tracking-wide text-muted-foreground">{{ a.department }}</div>
                     </th>
                   </tr>
                 </thead>
@@ -484,7 +509,7 @@ definePageMeta({ middleware: [] })
                     <td v-for="a in filteredAccounts" :key="a.id" class="px-2 py-1 whitespace-nowrap">
                       <span class="inline-flex items-center gap-1">
                         <span class="size-2 rounded-full" :class="statusDot[a.status] ?? 'bg-zinc-400'" />
-                        <span class="text-xs">{{ a.status }}</span>
+                        <span class="text-xs">{{ statusLabel[a.status] ?? a.status }}</span>
                       </span>
                     </td>
                   </tr>
@@ -495,88 +520,19 @@ definePageMeta({ middleware: [] })
         </template>
       </div>
 
-      <!-- Comparative chart -->
-      <div v-if="chartData" class="rounded-md border p-4 space-y-3">
-        <div class="flex items-center gap-2 flex-wrap">
-          <BarChart3 class="size-4 text-primary" />
-          <h2 class="text-lg font-semibold">Gráfico comparativo</h2>
-          <span class="text-xs text-muted-foreground">{{ period1Days }}d (sólido) vs {{ period2Days }}d (hachurado)</span>
-        </div>
-        <!-- Metric checkboxes -->
-        <div class="flex gap-2 flex-wrap text-xs">
-          <label v-for="m in ['spend', 'revenue', 'acos', 'impressions', 'clicks', 'orders']" :key="m"
-            class="inline-flex items-center gap-1 px-2 py-1 border rounded cursor-pointer hover:bg-muted">
-            <input type="checkbox" :checked="chartMetrics.has(m)" @change="toggleChartMetric(m)" />
-            {{ m }}
-          </label>
-        </div>
-        <!-- Account checkboxes -->
-        <div class="flex gap-2 flex-wrap text-xs">
-          <label v-for="a in filteredAccounts" :key="a.id"
-            class="inline-flex items-center gap-1 px-2 py-1 border rounded cursor-pointer hover:bg-muted">
-            <input type="checkbox" :checked="chartAccountIds.has(a.id)" @change="toggleChartAccount(a.id)" />
-            <span class="size-2 rounded-full" :style="{ backgroundColor: platformColor[a.platform] }" />
-            {{ a.name }} <span class="text-muted-foreground">{{ a.department }}</span>
-          </label>
-        </div>
-        <!-- Grouped bars: one row per metric, columns = accounts, bars = period1/period2 -->
-        <div class="space-y-3">
-          <div v-for="m in chartData.metric_keys" :key="m">
-            <div class="text-xs font-medium text-muted-foreground mb-1 uppercase">{{ m }}</div>
-            <div class="flex items-end gap-2 h-32 border-b border-muted">
-              <div v-for="(acc, i) in chartData.accounts" :key="acc.id" class="flex-1 flex flex-col items-center gap-1 min-w-0">
-                <div class="flex items-end gap-0.5 w-full h-full justify-center">
-                  <div class="flex-1 flex flex-col items-center justify-end">
-                    <div class="text-[8px] text-muted-foreground">{{ chartData.period_1.data[m]?.[i]?.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) ?? '' }}</div>
-                    <div class="w-full rounded-t"
-                      :style="{
-                        height: `${(chartData.period_1.data[m]?.[i] ?? 0) / chartScales[m] * 100}%`,
-                        backgroundColor: platformColor[acc.platform],
-                      }"
-                      :title="`${acc.name} — período 1: ${chartData.period_1.data[m]?.[i]}`"
-                    />
-                  </div>
-                  <div class="flex-1 flex flex-col items-center justify-end">
-                    <div class="text-[8px] text-muted-foreground">{{ chartData.period_2.data[m]?.[i]?.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) ?? '' }}</div>
-                    <div class="w-full rounded-t opacity-50"
-                      :style="{
-                        height: `${(chartData.period_2.data[m]?.[i] ?? 0) / chartScales[m] * 100}%`,
-                        backgroundColor: platformColor[acc.platform],
-                        backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(255,255,255,.3) 3px, rgba(255,255,255,.3) 6px)',
-                      }"
-                      :title="`${acc.name} — período 2: ${chartData.period_2.data[m]?.[i]}`"
-                    />
-                  </div>
-                </div>
-                <div class="text-[10px] text-center truncate w-full">{{ acc.name }}<br><span class="text-muted-foreground">{{ acc.department }}</span></div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </template>
-
-    <!-- ═══════════════════════════════ HORÁRIOS ═══════════════════════ -->
-    <template v-if="tab === 'horarios' && summary">
-      <!-- Account selector -->
-      <div class="flex items-center gap-2 flex-wrap">
-        <span class="text-sm text-muted-foreground">Conta:</span>
-        <select v-model="schedAccountId" class="border rounded-md px-2 py-1 text-sm bg-background">
-          <option v-for="a in filteredAccounts" :key="a.id" :value="a.id">
-            {{ a.name }} ({{ platformLabel[a.platform] }} — {{ a.department }})
-          </option>
-        </select>
-        <button v-if="selectedSchedAccount" class="text-xs px-2 py-1 border rounded hover:bg-muted"
-          @click="schedules = []">Reset</button>
-      </div>
-
-      <div v-if="selectedSchedAccount" class="rounded-md border p-4">
-        <div class="flex items-center gap-2 mb-3">
+      <!-- Schedule heatmap (ACOS por hora × dia) -->
+      <div class="rounded-md border p-4">
+        <div class="flex items-center gap-2 mb-3 flex-wrap">
           <Clock class="size-4 text-primary" />
-          <h2 class="text-lg font-semibold">Grid de horários — {{ selectedSchedAccount.name }} ({{ selectedSchedAccount.department }})</h2>
-          <span class="text-xs text-muted-foreground">— clique para alternar</span>
+          <h2 class="text-lg font-semibold">Heatmap ACOS — Horários</h2>
+          <span class="text-xs text-muted-foreground">— clique para ligar/desligar</span>
+          <select v-if="filteredAccounts.length > 0" v-model="schedAccountId" class="ml-auto border rounded-md px-2 py-1 text-sm bg-background">
+            <option v-for="a in filteredAccounts" :key="a.id" :value="a.id">
+              {{ a.name }} ({{ platformLabel[a.platform] }} — {{ a.department }})
+            </option>
+          </select>
         </div>
-        <div class="overflow-x-auto">
+        <div v-if="selectedSchedAccount" class="overflow-x-auto">
           <table class="text-[10px] border-separate border-spacing-0.5">
             <thead>
               <tr>
@@ -589,16 +545,19 @@ definePageMeta({ middleware: [] })
                 <td class="text-right pr-2 text-muted-foreground font-medium">{{ d }}</td>
                 <td v-for="h in 24" :key="h"
                   class="w-6 h-6 rounded cursor-pointer transition-colors"
-                  :class="scheduleSet.has(`${dIdx}-${h - 1}`) ? 'bg-sky-500/80 hover:bg-sky-500' : 'bg-muted hover:bg-muted-foreground/30'"
-                  :title="`${d} ${h - 1}:00`"
+                  :class="heatmapCellClass(dIdx, h - 1)"
+                  :title="heatmapTooltip(dIdx, h - 1)"
                   @click="toggleScheduleCell(dIdx, h - 1)" />
               </tr>
             </tbody>
           </table>
         </div>
-        <div class="mt-3 text-xs text-muted-foreground flex gap-3 items-center">
-          <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 rounded bg-sky-500/80" /> base (ligado)</span>
-          <span class="inline-flex items-center gap-1"><span class="inline-block w-3 h-3 rounded bg-muted" /> desligado</span>
+        <div v-if="selectedSchedAccount" class="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+          <span class="inline-flex items-center gap-1"><span class="size-3 rounded bg-emerald-500/80" /> ACOS &lt; {{ (heatmap?.acos_target ?? selectedSchedAccount.acos_target).toFixed(1) }}%</span>
+          <span class="inline-flex items-center gap-1"><span class="size-3 rounded bg-amber-400/80" /> ACOS médio (até {{ ((heatmap?.acos_target ?? selectedSchedAccount.acos_target) * 1.5).toFixed(1) }}%)</span>
+          <span class="inline-flex items-center gap-1"><span class="size-3 rounded bg-red-500/80" /> ACOS ruim</span>
+          <span class="inline-flex items-center gap-1"><span class="size-3 rounded bg-sky-400/60" /> Ligado, sem dados</span>
+          <span class="inline-flex items-center gap-1"><span class="size-3 rounded bg-muted border" /> Desligado</span>
         </div>
       </div>
 
@@ -633,9 +592,96 @@ definePageMeta({ middleware: [] })
       </div>
     </template>
 
+    <!-- ═══════════════════════════════ CAMPANHAS ══════════════════════ -->
+    <template v-if="tab === 'campanhas' && summary">
+      <div class="flex flex-wrap items-center gap-3">
+        <span class="text-sm text-muted-foreground">Conta:</span>
+        <select v-model="campaignAccountId" class="border rounded-md px-2 py-1 text-sm bg-background">
+          <option value="all">Todas</option>
+          <option v-for="a in campaignAccountOptions" :key="a.id" :value="a.id">
+            {{ a.name }} ({{ platformLabel[a.platform] }} — {{ a.department }})
+          </option>
+        </select>
+        <span class="text-xs text-muted-foreground">
+          {{ filteredCampaigns.length }} campanha{{ filteredCampaigns.length === 1 ? '' : 's' }}
+        </span>
+      </div>
+
+      <div v-if="filteredCampaigns.length === 0" class="rounded-md border bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+        Nenhuma campanha pra esse filtro.
+      </div>
+      <div v-else class="rounded-md border overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="text-sm border-collapse min-w-full">
+            <thead>
+              <tr class="bg-muted/40">
+                <th class="sticky left-0 z-10 bg-muted/40 px-3 py-2 text-left text-xs uppercase tracking-wide text-muted-foreground border-r min-w-[140px] align-bottom">Métrica</th>
+                <th v-for="c in filteredCampaigns" :key="c.id"
+                  class="px-3 py-2 text-left whitespace-nowrap border-r last:border-r-0 min-w-[180px] align-top">
+                  <div class="text-[11px] font-semibold" :style="{ color: platformColor[c.platform] }">
+                    {{ platformLabel[c.platform] ?? c.platform }}
+                  </div>
+                  <div class="text-[11px] text-muted-foreground">{{ c.account_name }}</div>
+                  <div class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ c.department }}</div>
+                  <div class="font-semibold mt-1">{{ c.name }}</div>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Crédito (Shopee only; ML/Amazon = "—") -->
+              <tr class="border-t hover:bg-muted/10">
+                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Crédito</td>
+                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0">
+                  {{ c.platform === 'shopee' ? fmtMoney(c.credit) : '—' }}
+                </td>
+              </tr>
+              <!-- Gasto -->
+              <tr class="border-t hover:bg-muted/10">
+                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Gasto</td>
+                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0">
+                  {{ fmtMoney(c.spend) }}
+                </td>
+              </tr>
+              <!-- Faturamento -->
+              <tr class="border-t hover:bg-muted/10">
+                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Faturamento</td>
+                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0">
+                  {{ fmtMoney(c.revenue) }}
+                </td>
+              </tr>
+              <!-- Impressões -->
+              <tr class="border-t hover:bg-muted/10">
+                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Impressões</td>
+                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap text-muted-foreground border-r last:border-r-0">
+                  {{ c.impressions.toLocaleString('pt-BR') }}
+                </td>
+              </tr>
+              <!-- ACOS -->
+              <tr class="border-t hover:bg-muted/10">
+                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">ACOS</td>
+                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0"
+                  :class="acosClass(c.acos, c.acos_target)">
+                  {{ fmtPct(c.acos) }}
+                </td>
+              </tr>
+              <!-- Status -->
+              <tr class="border-t hover:bg-muted/10">
+                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Status</td>
+                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0">
+                  <span class="inline-flex items-center gap-1.5">
+                    <span class="size-2 rounded-full" :class="statusDot[c.status] ?? 'bg-zinc-400'" />
+                    <span class="text-xs">{{ statusLabel[c.status] ?? c.status }}</span>
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </template>
+
     <!-- ═══════════════════════════════ AGENTES ════════════════════════ -->
     <template v-if="tab === 'agentes'">
-      <!-- Agent status cards -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         <div v-for="ag in agentStatus" :key="ag.platform"
           class="rounded-md border p-3 flex items-center gap-3">
@@ -659,7 +705,6 @@ definePageMeta({ middleware: [] })
         </div>
       </div>
 
-      <!-- Intensity bars -->
       <div v-if="intensity.length > 0" class="rounded-md border p-4">
         <div class="flex items-center gap-2 mb-3">
           <Activity class="size-4 text-primary" />
@@ -682,7 +727,6 @@ definePageMeta({ middleware: [] })
         </div>
       </div>
 
-      <!-- Recent decisions -->
       <div class="rounded-md border p-4">
         <div class="flex items-center gap-2 mb-3 flex-wrap">
           <Cpu class="size-4 text-primary" />
@@ -719,7 +763,6 @@ definePageMeta({ middleware: [] })
         </div>
       </div>
 
-      <!-- Patterns -->
       <div class="rounded-md border p-4">
         <div class="flex items-center gap-2 mb-3">
           <Sparkles class="size-4 text-primary" />

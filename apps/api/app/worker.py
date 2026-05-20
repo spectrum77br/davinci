@@ -377,6 +377,43 @@ async def marketing_agent_cycle(ctx: dict) -> None:
             logger.error("marketing_agent_cycle_error", account_id=str(aid), err=str(e)[:200])
 
 
+async def marketing_full_sync(ctx: dict) -> None:
+    """Every 30 min: pull live ad-platform numbers (Shopee + ML + Amazon)
+    for every `ads_enabled` integration and persist them into the
+    marketing_* tables.
+
+    Each platform runs in its own try/except so a slow Amazon report or a
+    Shopee outage doesn't abort the other two. Per-integration errors
+    are contained one layer deeper inside each `sync_all_*` helper.
+    Feature flag (`enable_marketing`) keeps prod inert when off.
+    """
+    if not _settings.enable_marketing:
+        return
+    from app.services.marketing.amazon_sync import sync_all_amazon_integrations
+    from app.services.marketing.ml_sync import sync_all_ml_integrations
+    from app.services.marketing.shopee_sync import sync_all_shopee_integrations
+
+    async with session_scope() as s:
+        results: dict[str, list[dict] | str] = {}
+        for name, runner in (
+            ("shopee", sync_all_shopee_integrations),
+            ("mercadolivre", sync_all_ml_integrations),
+            ("amazon", sync_all_amazon_integrations),
+        ):
+            try:
+                results[name] = await runner(s)
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "marketing_full_sync_platform_failed",
+                    platform=name, err=str(e)[:300],
+                )
+                results[name] = f"error: {str(e)[:200]}"
+    summary = {
+        k: (len(v) if isinstance(v, list) else 0) for k, v in results.items()
+    }
+    logger.info("marketing_full_sync", **summary)
+
+
 async def daily_sync_scheduler(ctx: dict) -> None:
     """Every 5min: enqueue sync_all for users whose `daily_sync_time` falls
     inside the current 5-minute window in America/Sao_Paulo, only if no
@@ -963,6 +1000,10 @@ class WorkerSettings:
         # Marketing module (per-platform/department) — every quarter-hour
         # per enabled MarketingAccount.
         cron(marketing_agent_cycle, minute={0, 15, 30, 45}, run_at_startup=False),
+        # Marketing: pull live ad data (Shopee + ML + Amazon) every
+        # half-hour. Runs at :05 and :35 so it lands BEFORE the agent
+        # cycle reads metrics.
+        cron(marketing_full_sync, minute={5, 35}, run_at_startup=False),
     ]
     max_jobs = 10
     job_timeout = 1800

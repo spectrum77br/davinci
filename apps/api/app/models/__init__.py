@@ -33,6 +33,7 @@ from app.models.listing import Listing, ListingRequest
 from app.models.margens import Margens
 from app.models.marketing import (
     MarketingAccount,
+    MarketingCampaign,
     MarketingDecision,
     MarketingMetric,
     MarketingPattern,
@@ -91,6 +92,7 @@ __all__ = [
     "MARKETPLACES",
     "Margens",
     "MarketingAccount",
+    "MarketingCampaign",
     "MarketingDecision",
     "MarketingMetric",
     "MarketingPattern",

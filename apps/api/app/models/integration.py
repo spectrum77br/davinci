@@ -1,7 +1,8 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, LargeBinary, String, Text, text
+import sqlalchemy as sa
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, LargeBinary, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -44,6 +45,22 @@ class Integration(Base, TimestampMixin):
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Marketing module: per-integration department, optional Bling loja
+    # override, and ads-enabled opt-in. The cron only pulls from
+    # `ads_enabled=True` rows so unrelated Bling/Shopee integrations don't
+    # eat API quota.
+    department: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bling_loja_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ads_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Counter incremented on each marketing-sync failure, reset on
+    # success. Used by alerts.notify_consecutive_failures to fire
+    # Telegram on exactly the 3rd consecutive miss so flaky APIs don't
+    # spam the operator.
+    consecutive_errors: Mapped[int] = mapped_column(
+        sa.Integer, nullable=False, default=0, server_default=text("0")
+    )
 
 
 class OAuthState(Base):
