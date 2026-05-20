@@ -116,9 +116,6 @@ class MLAdsClient(MercadoLivreClient):
         # headers per-call. ML accepts both — `api_version=2` as a query
         # param has the same effect on Ads endpoints.
         merged_params = dict(params or {})
-        # Inject api-version. Most Ads endpoints honour both header and
-        # query but the query form survives our parent's request signature.
-        merged_params.setdefault("api_version", "2")
 
         # ML's parent _request retries 429/502/503/504 once; we wrap the
         # final response only.
@@ -130,10 +127,15 @@ class MLAdsClient(MercadoLivreClient):
         from app.services.marketplaces.ml import ML_API_BASE  # avoid cycle
 
         url = f"{ML_API_BASE}{path}"
+        # Api-Version: 1 is the version /marketplace/advertising/* and the
+        # newer /advertising/advertisers/{id}/product_ads/campaigns endpoints
+        # accept. v2 returned 400 ("Metrics X is not valid") on the
+        # campaigns/search path — ML rejected the request entirely with
+        # that header, regardless of the params we sent.
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Accept": "application/json",
-            "Api-Version": "2",
+            "Api-Version": "1",
         }
         delay = 1.0
         last_resp: httpx.Response | None = None
@@ -200,75 +202,111 @@ class MLAdsClient(MercadoLivreClient):
 
     # ─── campaigns + metrics ──────────────────────────────────────────────
 
-    async def list_campaigns_with_metrics(
-        self, *, date_from: date, date_to: date, limit: int = 50
-    ) -> list[MLCampaign]:
-        """One call returns campaigns + their metrics for the window. ML
-        paginates with offset/limit — we loop until the page is partial.
-        The /marketplace/advertising path is the public one; the
-        non-marketplace path may require a different scope."""
+    async def list_campaigns_metadata(
+        self, *, limit: int = 50
+    ) -> list[dict]:
+        """List campaign metadata (id/name/status/budget) — NO metrics.
+        Empirically this is the only thing `/marketplace/advertising/.../
+        product_ads/campaigns/search` accepts; any `metrics=` param trips
+        a 400. Metrics get pulled from a separate endpoint by
+        `fetch_campaign_metrics`."""
         advertiser_id = await self.get_advertiser_id()
         path = (
             f"/marketplace/advertising/{ML_SITE_ID_BR}/advertisers/"
             f"{advertiser_id}/product_ads/campaigns/search"
         )
-        out: list[MLCampaign] = []
+        out: list[dict] = []
         offset = 0
-        # ML Product Ads expects `metrics=<comma list>` (`metrics=true` is
-        # rejected with "Metrics true is not valid"). Request the four
-        # account-level metrics we surface in the dashboard.
-        metrics_csv = "impressions,clicks,cost,acos"
         while True:
             data = await self._ads_request(
-                "GET",
-                path,
-                params={
-                    "metrics": metrics_csv,
-                    "date_from": date_from.isoformat(),
-                    "date_to": date_to.isoformat(),
-                    "limit": limit,
-                    "offset": offset,
-                },
+                "GET", path, params={"limit": limit, "offset": offset},
             )
             results = data.get("results") or data.get("campaigns") or []
             if not results:
                 break
-            for c in results:
-                metrics = c.get("metrics") or {}
-                spend = _safe_float(metrics.get("spend") or metrics.get("cost"))
-                ml_attributed_revenue = _safe_float(
-                    metrics.get("revenue") or metrics.get("attributed_sales") or 0
-                )
-                acos = (
-                    round(spend / ml_attributed_revenue * 100, 2)
-                    if ml_attributed_revenue > 0
-                    else None
-                )
-                out.append(
-                    MLCampaign(
-                        campaign_id=str(c.get("id") or c.get("campaign_id") or ""),
-                        name=str(c.get("name") or ""),
-                        status=str(c.get("status") or "unknown").lower(),
-                        daily_budget=(
-                            _safe_float(c.get("daily_budget"))
-                            if c.get("daily_budget") is not None
-                            else None
-                        ),
-                        spend=spend,
-                        impressions=_safe_int(metrics.get("impressions")),
-                        clicks=_safe_int(metrics.get("clicks")),
-                        acos=acos,
-                    )
-                )
+            out.extend(results)
             if len(results) < limit:
                 break
             offset += limit
             if offset > 1000:
-                # Defensive — Product Ads accounts typically have <100
-                # campaigns. If we ever hit 1000 something is paginating
-                # wrong and we should stop instead of looping forever.
                 logger.warning("ml_ads_pagination_cap", path=path, offset=offset)
                 break
+        return out
+
+    async def fetch_campaign_metrics(
+        self, *, date_from: date, date_to: date
+    ) -> dict[str, dict]:
+        """Pull per-campaign metrics for the window via the alternate
+        endpoint `/advertising/advertisers/{adv}/product_ads/campaigns`.
+        Returns a dict keyed by campaign_id with spend/impressions/clicks/
+        attributed_revenue. Falls back to {} on any error so the caller
+        can still persist campaigns with zero metrics."""
+        advertiser_id = await self.get_advertiser_id()
+        path = f"/advertising/advertisers/{advertiser_id}/product_ads/campaigns"
+        out: dict[str, dict] = {}
+        try:
+            data = await self._ads_request(
+                "GET", path,
+                params={
+                    "date_from": date_from.isoformat(),
+                    "date_to": date_to.isoformat(),
+                },
+            )
+        except MLAdsError as e:
+            logger.warning(
+                "ml_ads_campaign_metrics_endpoint_failed",
+                path=path, code=e.code, status=e.status,
+            )
+            return out
+        rows = data.get("campaigns") or data.get("results") or []
+        for c in rows:
+            cid = str(c.get("id") or c.get("campaign_id") or "")
+            if not cid:
+                continue
+            m = c.get("metrics") or c
+            out[cid] = {
+                "spend": _safe_float(m.get("cost") or m.get("spend")),
+                "impressions": _safe_int(m.get("impressions") or m.get("prints")),
+                "clicks": _safe_int(m.get("clicks")),
+                "attributed_revenue": _safe_float(
+                    m.get("attributed_sales") or m.get("revenue") or m.get("acos_revenue") or 0
+                ),
+            }
+        return out
+
+    async def list_campaigns_with_metrics(
+        self, *, date_from: date, date_to: date, limit: int = 50
+    ) -> list[MLCampaign]:
+        """Returns campaigns enriched with metrics. Two-step pull because
+        the campaigns/search endpoint refuses to embed metrics on
+        Api-Version 1 — see `list_campaigns_metadata` + `fetch_campaign_metrics`."""
+        meta = await self.list_campaigns_metadata(limit=limit)
+        metrics_by_id = await self.fetch_campaign_metrics(
+            date_from=date_from, date_to=date_to
+        )
+        out: list[MLCampaign] = []
+        for c in meta:
+            cid = str(c.get("id") or c.get("campaign_id") or "")
+            m = metrics_by_id.get(cid, {})
+            spend = float(m.get("spend") or 0)
+            revenue = float(m.get("attributed_revenue") or 0)
+            acos = round(spend / revenue * 100, 2) if revenue > 0 else None
+            out.append(
+                MLCampaign(
+                    campaign_id=cid,
+                    name=str(c.get("name") or ""),
+                    status=str(c.get("status") or "unknown").lower(),
+                    daily_budget=(
+                        _safe_float(c.get("daily_budget"))
+                        if c.get("daily_budget") is not None
+                        else None
+                    ),
+                    spend=spend,
+                    impressions=int(m.get("impressions") or 0),
+                    clicks=int(m.get("clicks") or 0),
+                    acos=acos,
+                )
+            )
         return out
 
     # ─── daily aggregates (no native endpoint; derive from campaigns) ─────

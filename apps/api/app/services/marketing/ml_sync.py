@@ -74,8 +74,9 @@ async def sync_ml_integration(
         campaigns, daily = await client.get_daily_performance(start_day, today)
         remaining_budget = await client.get_remaining_daily_budget(campaigns=campaigns)
     except MLAdsScopeError as e:
+        # Scope not granted = operator action needed = NOT a flapping bug.
+        # Don't increment consecutive_errors (would spam Telegram every cron).
         integration.last_error = f"ml_scope_missing: {e.message}"[:500]
-        await record_sync_failure(session, integration, code="scope_missing", message=e.message)
         await session.commit()
         logger.warning(
             "ml_ads_scope_missing",
@@ -85,6 +86,15 @@ async def sync_ml_integration(
         return {"status": "skipped", "code": "scope_missing", "message": e.message}
     except MLAdsError as e:
         integration.last_error = f"{e.code}: {e.message}"[:500]
+        # "no_advertiser" / 404 not_found = account literally doesn't
+        # have Product Ads — same treatment as scope_missing.
+        if e.code in {"no_advertiser", "not_found"} or e.status == 404:
+            await session.commit()
+            logger.info(
+                "ml_ads_no_advertiser",
+                integration_id=str(integration_id), code=e.code,
+            )
+            return {"status": "skipped", "code": e.code, "message": e.message}
         await record_sync_failure(session, integration, code=e.code, message=e.message)
         await session.commit()
         raise

@@ -59,6 +59,13 @@ class MarketingAccount(Base, TimestampMixin):
         Integer, nullable=False, default=50, server_default=text("50")
     )
     credit_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Timestamp of the last successful Shopee `get_total_balance` call.
+    # The orchestrator uses this to decide whether to call the API again
+    # (TTL 6h) or reuse the cached `credit_balance`. Shopee's per-endpoint
+    # throttle makes naive every-tick polling impossible across 13 shops.
+    credit_balance_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     spend_today: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0"))
     revenue_today: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0"))

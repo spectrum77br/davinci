@@ -46,7 +46,33 @@ from app.services.shopee_ads import (
     HourlyMetric,
     ShopeeAdsClient,
     ShopeeAdsError,
+    ShopeeAdsRateLimit,
 )
+
+# Errors that should NOT increment Integration.consecutive_errors. These
+# are operational states (no permission, no Ads enabled, rate-limited) —
+# not flapping bugs — so they shouldn't fire the "3 failures in a row"
+# Telegram alert. The sync just notes the state and moves on.
+_EXPECTED_SHOPEE_ERRORS = frozenset({
+    "error_permission_denied",
+    "error_permission",
+    "ads_rate_limit_total_api",
+    "ads.rate_limit.exceed_api",
+    "error_rate_limit_total_api",
+    "rate_limit_exhausted",
+})
+
+# Balance is the only Shopee endpoint with a sub-1-call-per-minute global
+# throttle. We cache it on MarketingAccount and only refresh ONE shop per
+# sync_all cycle — the one with the oldest `credit_balance_at`. With 13
+# shops × 30-min cron, all balances refresh within ~6.5h, comfortably
+# under the 6h cache TTL.
+_BALANCE_CACHE_TTL = timedelta(hours=6)
+
+# Pacing between shops in sync_all_shopee_integrations. Generous enough
+# that the per-account-call endpoints (daily, hourly, campaigns) don't
+# trip Shopee's softer throttles even when we have 13 shops queued.
+_INTER_SHOP_DELAY = 5.0
 
 logger = structlog.get_logger()
 
@@ -94,8 +120,38 @@ async def sync_shopee_integration(
     today = datetime.now(UTC).date()
     start_day = today - timedelta(days=_DAILY_LOOKBACK_DAYS - 1)
 
+    # Lookup the MarketingAccount upfront so we know if cached balance
+    # is available. The account is created/updated later, but its
+    # `credit_balance` + `credit_balance_at` survive across syncs.
+    existing_account = (
+        await session.execute(
+            select(MarketingAccount).where(
+                MarketingAccount.integration_id == integration.id
+            )
+        )
+    ).scalar_one_or_none()
+    cached_balance = (existing_account.credit_balance if existing_account else None)
+    cached_balance_at = (existing_account.credit_balance_at if existing_account else None)
+
+    # Balance is fetched lazily — only if the cache is stale. This dodges
+    # Shopee's ultra-tight per-endpoint throttle that otherwise fails all
+    # 13 shops in a row.
+    balance: float | None = cached_balance
+    balance_refreshed = False
     try:
-        balance = await client.get_balance()
+        if _should_refresh_balance(cached_balance_at):
+            try:
+                balance = await client.get_balance()
+                balance_refreshed = True
+            except ShopeeAdsRateLimit as rl:
+                # Rate-limited: keep cached value (if any), don't fail.
+                logger.warning(
+                    "shopee_ads_balance_rate_limited_using_cache",
+                    integration_id=str(integration_id),
+                    cached_balance=cached_balance,
+                    cached_at=cached_balance_at.isoformat() if cached_balance_at else None,
+                    code=rl.code,
+                )
         daily = await client.get_daily_performance(start_day, today)
         hourly = await client.get_hourly_performance(today) if pull_hourly else []
         campaign_ids = await client.list_campaign_ids() if pull_campaigns else []
@@ -107,11 +163,18 @@ async def sync_shopee_integration(
             if campaign_ids
             else []
         )
-    except ShopeeAdsError as e:
-        # Soft error path: persist on the integration so the UI can show
-        # "Sem permissão de Ads" without breaking the rest of the dashboard.
+    except ShopeeAdsRateLimit as e:
+        # Non-balance rate limit on a campaign/perf endpoint — surface as
+        # skipped (not a real failure) so consecutive_errors stays at 0.
         integration.last_error = f"{e.code}: {e.message}"[:500]
-        await record_sync_failure(session, integration, code=e.code, message=e.message)
+        await session.commit()
+        return {"status": "skipped", "code": e.code, "message": e.message}
+    except ShopeeAdsError as e:
+        integration.last_error = f"{e.code}: {e.message}"[:500]
+        # Expected operational errors (no Ads permission, etc.) don't
+        # bump the failure counter — only flapping bugs do.
+        if e.code not in _EXPECTED_SHOPEE_ERRORS:
+            await record_sync_failure(session, integration, code=e.code, message=e.message)
         await session.flush()
         if e.code in {"error_permission_denied", "error_permission"}:
             logger.warning(
@@ -121,7 +184,7 @@ async def sync_shopee_integration(
             )
             await session.commit()
             return {"status": "skipped", "code": e.code, "message": e.message}
-        # Re-raise for the cron logger / manual trigger to surface
+        await session.commit()
         raise
 
     # ─── Bling revenue (authoritative faturamento) ───────────────────────
@@ -139,6 +202,7 @@ async def sync_shopee_integration(
         balance=balance,
         daily=daily,
         today=today,
+        balance_just_refreshed=balance_refreshed,
     )
 
     # ─── hourly heatmap rows for today ───────────────────────────────────
@@ -174,7 +238,8 @@ async def sync_shopee_integration(
     await session.commit()
 
     # ─── post-commit Telegram alerts (best-effort, deduped) ──────────────
-    await notify_low_credit(integration, credit=balance, threshold=_CREDIT_ALERT_THRESHOLD)
+    if balance is not None:
+        await notify_low_credit(integration, credit=balance, threshold=_CREDIT_ALERT_THRESHOLD)
     # Today's ACOS = today's spend / Bling-revenue-today. Use the
     # patched daily list (where _apply_bling_revenue already replaced
     # revenue + recomputed acos) so the alert matches what the UI shows.
@@ -199,7 +264,14 @@ async def sync_all_shopee_integrations(session: AsyncSession) -> list[dict[str, 
     the marketing module (`ads_enabled=True`). Each integration is synced
     inside its own try/except so one failure doesn't bring down the rest
     of the cron tick. Integrations without the opt-in are left alone so a
-    plain stock/order sync doesn't accidentally burn ads-API quota."""
+    plain stock/order sync doesn't accidentally burn ads-API quota.
+
+    Pacing: `_INTER_SHOP_DELAY` seconds between shops. Combined with the
+    lazy balance fetch (only the stalest shop hits get_total_balance per
+    cycle) this keeps the whole loop comfortably under Shopee's
+    per-endpoint throttles."""
+    import asyncio  # local — keeps top-of-module import block stable
+
     rows = (
         await session.execute(
             select(Integration).where(
@@ -211,8 +283,11 @@ async def sync_all_shopee_integrations(session: AsyncSession) -> list[dict[str, 
             )
         )
     ).scalars().all()
+
     out: list[dict[str, Any]] = []
-    for integ in rows:
+    for idx, integ in enumerate(rows):
+        if idx > 0:
+            await asyncio.sleep(_INTER_SHOP_DELAY)
         try:
             result = await sync_shopee_integration(session, integ.id)
             out.append({"integration_id": str(integ.id), **result})
@@ -227,6 +302,16 @@ async def sync_all_shopee_integrations(session: AsyncSession) -> list[dict[str, 
 
 
 # ─── internals ────────────────────────────────────────────────────────────
+
+
+def _should_refresh_balance(last_at: datetime | None) -> bool:
+    """True if cached balance is stale (or never set). 6h TTL chosen so
+    that across 13 shops × 30-min cron, every shop refreshes well within
+    the window without any one tick trying multiple balances back-to-back."""
+    if last_at is None:
+        return True
+    age = datetime.now(UTC) - last_at
+    return age >= _BALANCE_CACHE_TTL
 
 
 def _apply_bling_revenue(
@@ -263,16 +348,23 @@ async def _upsert_account(
     session: AsyncSession,
     *,
     integration: Integration,
-    balance: float,
+    balance: float | None,
     daily: list[DailyMetric],
     today: date,
+    balance_just_refreshed: bool = False,
 ) -> MarketingAccount:
     """Resolve the (integration_id) MarketingAccount or create one. Each
     Shopee integration owns exactly one MarketingAccount (1 loja = 1
     dept, per the spec); the department comes from `Integration.department`
     when set, else falls back to 'geral'. The mock seed creates
     dept-specific Shopee rows with integration_id=NULL — those stay
-    untouched here so /seed and live data can coexist."""
+    untouched here so /seed and live data can coexist.
+
+    `balance_just_refreshed` is True only when this sync actually hit
+    `get_total_balance` and got a fresh number. In that case we stamp
+    `credit_balance_at` with now() so the next sync respects the 6h TTL.
+    When False, `balance` was read from the cache — don't move the
+    timestamp."""
     dept = (integration.department or "geral").lower()
     existing = (
         await session.execute(
@@ -292,6 +384,7 @@ async def _upsert_account(
             department=dept,
             acos_target=7.0,
             credit_balance=balance,
+            credit_balance_at=datetime.now(UTC) if balance_just_refreshed else None,
             agent_enabled=False,  # off by default — operator opts in
             status="active",
             spend_today=today_row.spend if today_row else 0.0,
@@ -302,7 +395,10 @@ async def _upsert_account(
         await session.flush()
     else:
         existing.department = dept
-        existing.credit_balance = balance
+        if balance is not None:
+            existing.credit_balance = balance
+        if balance_just_refreshed:
+            existing.credit_balance_at = datetime.now(UTC)
         if today_row:
             existing.spend_today = today_row.spend
             existing.revenue_today = today_row.revenue

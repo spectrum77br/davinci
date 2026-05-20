@@ -59,6 +59,13 @@ class ShopeeAdsError(RuntimeError):
         self.path = path
 
 
+class ShopeeAdsRateLimit(ShopeeAdsError):
+    """Subclass for the per-endpoint Ads throttle (`ads_rate_limit_total_api`
+    and friends). Orchestrators catch this specifically to fall back to
+    cached balance instead of incrementing consecutive_errors — the
+    request will simply be retried next cron tick."""
+
+
 @dataclass(slots=True)
 class DailyMetric:
     day: date
@@ -145,7 +152,6 @@ class ShopeeAdsClient(ShopeeClient):
         shops fails 100% because the throttle kicks in before the loop
         finishes."""
         attempt = 0
-        last_err: ShopeeAdsError | None = None
         while attempt <= _RATE_LIMIT_MAX_RETRIES:
             r = await self._request("POST", path, json=body)
             if r.status_code >= 400:
@@ -157,21 +163,24 @@ class ShopeeAdsClient(ShopeeClient):
             if err:
                 code = str(err)
                 msg = str(body_json.get("message") or "")
-                if code in _RATE_LIMIT_RETRY_CODES and attempt < _RATE_LIMIT_MAX_RETRIES:
-                    delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
-                    logger.warning(
-                        "shopee_ads_rate_limited",
-                        path=path, code=code, attempt=attempt + 1, sleep=delay,
-                    )
-                    await asyncio.sleep(delay)
-                    attempt += 1
-                    last_err = ShopeeAdsError(code, msg, path)
-                    continue
+                if code in _RATE_LIMIT_RETRY_CODES:
+                    if attempt < _RATE_LIMIT_MAX_RETRIES:
+                        delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
+                        logger.warning(
+                            "shopee_ads_rate_limited",
+                            path=path, code=code, attempt=attempt + 1, sleep=delay,
+                        )
+                        await asyncio.sleep(delay)
+                        attempt += 1
+                        continue
+                    # Retries exhausted: raise the specific subclass so the
+                    # orchestrator can fall back to cache instead of marking
+                    # the integration as failed.
+                    raise ShopeeAdsRateLimit(code, msg, path)
                 raise ShopeeAdsError(code, msg, path)
             await asyncio.sleep(_RATE_LIMIT_SECONDS)
             return body_json.get("response") or body_json
-        # All retries exhausted — surface the last error
-        raise last_err if last_err else ShopeeAdsError("rate_limit_exhausted", "", path)
+        raise ShopeeAdsRateLimit("rate_limit_exhausted", "", path)
 
     # ─── 1. credit balance ───────────────────────────────────────────────
 
