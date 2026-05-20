@@ -41,6 +41,7 @@ from app.services.marketplace_financials import (
     run_due_marketplace_financial_retries,
     run_sync_marketplace_financials_for_bling_order,
 )
+from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
@@ -561,6 +562,18 @@ async def tiktok_token_refresh(ctx: dict) -> None:
     await _refresh_tokens_for(IntegrationPlatform.TIKTOK, expiring_within_s=12 * 3600)
 
 
+async def refunds_freight_backfill(ctx: dict) -> None:
+    """Sweep the full margens view and upsert Frete refunds.
+
+    Catches reconciliations that close days after the order (ML freight
+    diffs in particular). Per-order hook in marketplace_financials covers
+    the realtime case; this is the safety net.
+    """
+    async with session_scope() as s:
+        result = await backfill_freight_refunds(s)
+    logger.info("refunds_freight_backfill_cron_done", **result)
+
+
 async def marketplace_financials_retry(ctx: dict) -> None:
     """Retry marketplace financial lookups that were not available on webhook."""
     async with session_scope() as s:
@@ -1007,6 +1020,11 @@ class WorkerSettings:
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(tiktok_token_refresh, hour={0, 6, 12, 18}, minute=45, run_at_startup=False),
         cron(marketplace_financials_retry, minute={10, 40}, run_at_startup=False),
+        # Daily Frete refund sweep — 06:20 UTC = 03:20 BRT, in the quiet
+        # window after the daily sync scheduler. Per-order hook in
+        # marketplace_financials handles the realtime case; this cron
+        # picks up ML freight diffs that settle days later.
+        cron(refunds_freight_backfill, hour=6, minute=20, run_at_startup=False),
         cron(shopee_discrepancy_check, hour={1, 5, 9, 13, 17, 21}, minute=0, run_at_startup=False),
         cron(ml_discrepancy_check, hour={2, 6, 10, 14, 18, 22}, minute=30, run_at_startup=False),
         cron(background_jobs_gc, hour=6, minute=30, run_at_startup=False),  # 03:30 BRT
@@ -1066,6 +1084,7 @@ __all__ = [
     "ml_backfill_run",
     "ml_token_refresh",
     "marketplace_financials_retry",
+    "refunds_freight_backfill",
     "refresh_bling_stock_run",
     "push_prices_batch_run",
     "sync_bling_costs_run",

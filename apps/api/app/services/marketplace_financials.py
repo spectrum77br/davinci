@@ -26,6 +26,7 @@ from app.services.marketplaces.factory import client_for
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
+from app.services.refunds_freight_sync import upsert_freight_refund_for_bling_order
 
 logger = structlog.get_logger()
 
@@ -152,6 +153,21 @@ async def run_sync_marketplace_financials_for_bling_order(
         status=snapshot.status,
         financial_id=str(financial.id),
     )
+
+    # Refund auto-row: now that financial events are persisted, the view
+    # has fresh data — upsert any Frete refund triggered by this pedido.
+    # Best-effort: a failure here must not break the financial sync.
+    if snapshot.status not in {"error", "unsupported"} and order.numero:
+        try:
+            await upsert_freight_refund_for_bling_order(session, pedido_bling=order.numero)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "refunds_freight_upsert_failed",
+                bling_order_id=bling_order_id,
+                pedido_bling=order.numero,
+                error=str(e)[:500],
+            )
+
     return {
         "ok": snapshot.status not in {"error", "unsupported"},
         "status": snapshot.status,
