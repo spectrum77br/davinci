@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     # Dev: enables /api/dev/mock-login (gated by ENV=development too).
     dev_mock_login: bool = False
 
+    # Marketing module is in active development; off in prod until the
+    # tables (`alembic upgrade head` after 0065_marketing_module) are
+    # explicitly applied. Locally we enable it via ENABLE_MARKETING=true.
+    enable_marketing: bool = False
+
     @property
     def is_prod(self) -> bool:
         return self.env == "production"

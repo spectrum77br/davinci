@@ -12,6 +12,8 @@ const emit = defineEmits<{ (e: 'toggle'): void }>()
 
 const auth = useAuthStore()
 const route = useRoute()
+const runtimeConfig = useRuntimeConfig()
+const enableMarketing = computed(() => Boolean(runtimeConfig.public.enableMarketing))
 
 type Item = {
   to: string
@@ -19,6 +21,7 @@ type Item = {
   icon: any
   resource?: string
   adminOnly?: boolean
+  featureFlag?: 'marketing'
 }
 
 type Section = { label?: string; items: Item[] }
@@ -35,7 +38,7 @@ const sections: Section[] = [
     items: [
       { to: '/produtos', label: 'Produtos', icon: Package, resource: 'produtos' },
       { to: '/anuncios', label: 'Anúncios', icon: Megaphone, resource: 'anuncios' },
-      { to: '/marketing', label: 'Marketing', icon: BarChart3 },
+      { to: '/marketing', label: 'Marketing', icon: BarChart3, featureFlag: 'marketing' },
       { to: '/pricing/tabela', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
       { to: '/margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
     ],
@@ -84,6 +87,7 @@ const visibleSections = computed(() =>
       ...s,
       items: s.items.filter((it) => {
         if (it.adminOnly && !auth.isAdmin) return false
+        if (it.featureFlag === 'marketing' && !enableMarketing.value) return false
         return true
       }),
     }))

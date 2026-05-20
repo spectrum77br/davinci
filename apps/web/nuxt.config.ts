@@ -28,6 +28,10 @@ export default defineNuxtConfig({
       // In dev leave empty so $fetch hits same-origin and the routeRules proxy
       // forwards /api/** to the FastAPI backend (no CORS, no PNA).
       apiUrl: process.env.API_URL_PUBLIC ?? '',
+      // Marketing module gate. Set NUXT_PUBLIC_ENABLE_MARKETING=true to show
+      // the sidebar link. Default off so prod ignores it until the backend
+      // (alembic + ENABLE_MARKETING) is also turned on.
+      enableMarketing: process.env.NUXT_PUBLIC_ENABLE_MARKETING === 'true',
       turnstile: {
         siteKey: process.env.TURNSTILE_SITE_KEY || '',
       },

@@ -25,7 +25,6 @@ from app.models import (
 from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
-from app.services.marketing.agent import agent_decision_cycle as _marketing_agent_cycle
 from app.services.alerts import emit_alert
 from app.services.audit.runner import run_audit
 from app.services.auto_link import run_auto_link
@@ -350,8 +349,19 @@ async def sync_marketplace_financials_for_order_run(
 
 
 async def marketing_agent_cycle(ctx: dict) -> None:
-    """Every 15 min: run one decision cycle per enabled MarketingAccount."""
+    """Every 15 min: run one decision cycle per enabled MarketingAccount.
+
+    Gated by `settings.enable_marketing`. When the flag is off the cron is
+    a no-op so prod (where the tables don't exist yet) doesn't churn errors
+    every quarter-hour. Imports are local so the worker boots cleanly even
+    if marketing models change shape.
+    """
+    if not _settings.enable_marketing:
+        return
     from app.models.marketing import MarketingAccount
+    from app.services.marketing.agent import (
+        agent_decision_cycle as _marketing_run_cycle,
+    )
 
     async with session_scope() as s:
         rows = (
@@ -362,7 +372,7 @@ async def marketing_agent_cycle(ctx: dict) -> None:
         ids = [a.id for a in rows]
     for aid in ids:
         try:
-            await _marketing_agent_cycle(aid)
+            await _marketing_run_cycle(aid)
         except Exception as e:  # noqa: BLE001
             logger.error("marketing_agent_cycle_error", account_id=str(aid), err=str(e)[:200])
 
