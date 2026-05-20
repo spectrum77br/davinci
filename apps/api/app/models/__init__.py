@@ -53,6 +53,7 @@ from app.models.pricing import (
     StoreInfo,
 )
 from app.models.product import BackgroundJob, Product, ProductCategory, ProductLink
+from app.models.refund import Refund
 from app.models.segment import Segment
 from app.models.sync_log import SyncLog
 from app.models.tarefa import Tarefa
@@ -111,6 +112,7 @@ __all__ = [
     "Product",
     "ProductCategory",
     "ProductLink",
+    "Refund",
     "Segment",
     "Store",
     "StoreInfo",

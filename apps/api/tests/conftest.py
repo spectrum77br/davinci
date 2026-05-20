@@ -150,6 +150,7 @@ _CLEANUP_TABLES = (
     "product_links",
     "products",
     "margens",
+    "refunds",
     "bling_orders",
     "background_jobs",
     "integrations",

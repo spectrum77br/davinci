@@ -9,12 +9,12 @@ from app.config import get_settings
 from app.db import engine
 from app.redis_client import redis
 from app.routers import alerts as alerts_router
-from app.routers import dev as dev_router
 from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import cadastros as cadastros_router
 from app.routers import companies as companies_router
 from app.routers import dashboard as dashboard_router
+from app.routers import dev as dev_router
 from app.routers import discrepancies as discrepancies_router
 from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
@@ -24,6 +24,7 @@ from app.routers import metrics as metrics_router
 from app.routers import oauth as oauth_router
 from app.routers import pricing as pricing_router
 from app.routers import products as products_router
+from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
 from app.routers import settings as settings_router
 from app.routers import stores as stores_router
@@ -75,7 +76,11 @@ _OPENAPI_TAGS = [
     {"name": "dashboard", "description": "Onboarding + KPIs do dashboard."},
     {"name": "settings", "description": "User preferences (Telegram, daily sync, etc)."},
     {"name": "metrics", "description": "Observability — counts, latency, error codes."},
-    {"name": "tarefas", "description": "Tarefas atribuídas a usuários (admin gerencia, usuário vê as suas)."},
+    {
+        "name": "tarefas",
+        "description": "Tarefas atribuídas a usuários (admin gerencia, usuário vê as suas).",
+    },
+    {"name": "refunds", "description": "Reembolsos vinculados aos pedidos da conciliação."},
 ]
 
 app = FastAPI(
@@ -131,6 +136,7 @@ app.include_router(dashboard_router.router)
 app.include_router(metrics_router.router)
 app.include_router(margens_router.router)
 app.include_router(tarefas_router.router)
+app.include_router(refunds_router.router)
 app.include_router(dev_router.router)
 
 if settings.enable_marketing:
@@ -156,4 +162,8 @@ async def health() -> dict:
     except Exception as e:
         logger.warning("redis_health_failed", err=str(e))
     status = "ok" if pg_ok and redis_ok else "degraded"
-    return {"status": status, "postgres": "ok" if pg_ok else "fail", "redis": "ok" if redis_ok else "fail"}
+    return {
+        "status": status,
+        "postgres": "ok" if pg_ok else "fail",
+        "redis": "ok" if redis_ok else "fail",
+    }

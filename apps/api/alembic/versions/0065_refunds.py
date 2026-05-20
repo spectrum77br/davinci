@@ -24,9 +24,7 @@ would have done).
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
 
 revision: str = "0065_refunds"
 down_revision: str | None = "0064_add_shein_enums"
