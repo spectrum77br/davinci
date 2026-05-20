@@ -1722,7 +1722,10 @@ _STORE_TO_PRICING_PLATFORM = {
     "temu": "temu",
     "aliexpress": "aliexpress",
     "magalu": "magalu",
-    "shein": "shein",
+    # SSH parity: Shein is operationally a Shopee-platform pricing surface,
+    # not its own pricing platform. Mapping it to "shopee" lets badge wiring
+    # and account creation reuse the existing PricingPlatform.SHOPEE row.
+    "shein": "shopee",
 }
 
 
@@ -2081,8 +2084,17 @@ async def set_store_info_department(
         User, Depends(require_permission("tabela_precos", "edit"))
     ],
 ) -> PricingAccountOut:
-    """Bind a department to a store_info — auto-creates the matching
-    `pricing_accounts` row if absent (one per (store_info, root_segment))."""
+    """Bind a department to a store_info. SSH parity:
+      1. Map StoreInfo.platform (short code "ml", "shein", …) into a
+         PricingPlatform value via `_STORE_TO_PRICING_PLATFORM`. Direct
+         `PricingPlatform(info.platform)` would crash on "ml"/"shein" because
+         the enum values are "mercadolivre"/"shopee".
+      2. If an account is already linked for (store_info, root_segment), reuse it.
+      3. Otherwise try to LINK an existing-but-unlinked account by name
+         match (exact or name-prefix), instead of always creating a duplicate.
+      4. Only as a last resort, create a fresh account with sort_order placed
+         AFTER existing accounts for the same (platform, segment).
+    """
     sid = await _resolve_root_segment_id(session, body.department)
     if sid is None:
         raise HTTPException(400, detail={"code": "invalid_department"})
@@ -2100,10 +2112,19 @@ async def set_store_info_department(
     if info is None:
         raise HTTPException(404, detail={"code": "store_info_not_found"})
 
+    raw_platform = (info.platform or "").strip().lower()
+    pricing_value = _STORE_TO_PRICING_PLATFORM.get(raw_platform)
+    if not pricing_value:
+        raise HTTPException(400, detail={"code": "store_info_platform_unsupported"})
     try:
-        platform = PricingPlatform(info.platform)
+        platform = PricingPlatform(pricing_value)
     except ValueError as e:
-        raise HTTPException(400, detail={"code": "store_info_platform_unsupported"}) from e
+        raise HTTPException(
+            400, detail={"code": "store_info_platform_unsupported"},
+        ) from e
+
+    roots_by_id, _, _ = await _segment_index(session)
+    names_by_id = await _segment_names_by_id(session)
 
     existing = (
         await session.execute(
@@ -2116,19 +2137,61 @@ async def set_store_info_department(
             )
         )
     ).scalar_one_or_none()
-    roots_by_id, _, _ = await _segment_index(session)
-    names_by_id = await _segment_names_by_id(session)
     if existing is not None:
         return _account_out(existing, roots_by_id, names_by_id)
 
+    # SSH setDepartment: try to LINK an existing unlinked account whose name
+    # matches the store_info account_name (exact or "<name> <suffix>" form),
+    # instead of creating a duplicate.
+    account_name = (info.account_name or "").strip()
+    if account_name:
+        name_lower = account_name.lower()
+        unlinked = (
+            await session.execute(
+                select(PricingAccount).where(
+                    and_(
+                        user_scope(PricingAccount, user),
+                        PricingAccount.platform == platform,
+                        PricingAccount.segment_id == sid,
+                        PricingAccount.store_info_id.is_(None),
+                    )
+                )
+            )
+        ).scalars().all()
+        matches = [
+            a for a in unlinked
+            if (a.name or "").strip().lower() == name_lower
+            or (a.name or "").strip().lower().startswith(name_lower + " ")
+        ]
+        if matches:
+            for m in matches:
+                m.store_info_id = store_info_id
+            await session.commit()
+            await session.refresh(matches[0])
+            return _account_out(matches[0], roots_by_id, names_by_id)
+
     dept_slug = roots_by_id.get(sid, body.department)
-    name = info.account_name or f"{info.platform} — {dept_slug}"
+    name = account_name or f"{raw_platform} — {dept_slug}"
+
+    max_sort = (
+        await session.execute(
+            select(func.coalesce(func.max(PricingAccount.sort_order), 0)).where(
+                and_(
+                    user_scope(PricingAccount, user),
+                    PricingAccount.platform == platform,
+                    PricingAccount.segment_id == sid,
+                )
+            )
+        )
+    ).scalar() or 0
+
     row = PricingAccount(
         user_id=user.id,
         name=name,
         platform=platform,
         segment_id=sid,
         store_info_id=store_info_id,
+        sort_order=int(max_sort) + 1,
     )
     session.add(row)
     await session.commit()
