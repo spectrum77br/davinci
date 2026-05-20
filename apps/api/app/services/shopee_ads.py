@@ -35,13 +35,16 @@ logger = structlog.get_logger()
 # syncs (about 40s of total sleep) stay under Shopee's "balance" sub-quota.
 _RATE_LIMIT_SECONDS = 3.0
 
-# When a rate-limit error specifically targets the balance endpoint, retry
-# with exponential backoff. Per-error code so we don't muddle generic 5xx
-# failures with this very chatty Shopee-side throttle.
+# When a rate-limit error fires, retry with exponential backoff. Per-error
+# code so we don't muddle generic 5xx failures with this very chatty
+# Shopee-side throttle. `error_rate_limit` is the global Ads throttle
+# (HTTP 429); `ads_rate_limit_total_api` is the per-endpoint sub-quota
+# on get_total_balance and friends.
 _RATE_LIMIT_RETRY_CODES = frozenset({
     "ads_rate_limit_total_api",
     "ads.rate_limit.exceed_api",
     "error_rate_limit_total_api",
+    "error_rate_limit",
 })
 _RATE_LIMIT_MAX_RETRIES = 3
 _RATE_LIMIT_BACKOFF_BASE = 5.0  # seconds: 5, 10, 20
@@ -154,6 +157,26 @@ class ShopeeAdsClient(ShopeeClient):
         attempt = 0
         while attempt <= _RATE_LIMIT_MAX_RETRIES:
             r = await self._request("POST", path, json=body)
+            # HTTP 429 carries the rate-limit signal in the body too.
+            # Parse it so we can branch on rate-limit-specific codes
+            # instead of raising a generic http_error.
+            if r.status_code == 429:
+                try:
+                    body_json = r.json() or {}
+                    err_code = str(body_json.get("error") or "error_rate_limit")
+                    err_msg = str(body_json.get("message") or r.text[:200])
+                except Exception:  # noqa: BLE001
+                    err_code, err_msg = "error_rate_limit", r.text[:200]
+                if attempt < _RATE_LIMIT_MAX_RETRIES:
+                    delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
+                    logger.warning(
+                        "shopee_ads_rate_limited",
+                        path=path, code=err_code, attempt=attempt + 1, sleep=delay,
+                    )
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                raise ShopeeAdsRateLimit(err_code, err_msg, path)
             if r.status_code >= 400:
                 raise ShopeeAdsError(
                     "http_error", f"status={r.status_code} body={r.text[:200]}", path
