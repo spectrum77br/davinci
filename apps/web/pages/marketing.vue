@@ -86,6 +86,19 @@ type Heatmap = {
   acos_target: number
   cells: Record<string, HeatmapCell>
 }
+type TimeseriesPoint = {
+  day: string
+  spend: number
+  revenue: number
+  impressions: number
+  clicks: number
+  acos: number | null
+}
+type Timeseries = {
+  days: number
+  accounts: Account[]
+  series: Record<string, TimeseriesPoint[]>
+}
 type AgentStatus = {
   platform: string
   running: boolean
@@ -175,10 +188,24 @@ const actionLabel: Record<string, string> = {
   pause_worst: 'PAUSAR PIORES',
 }
 
+// Marketplace filter for the 7d/30d period tables. 'all' = no filter.
+const tablePlatform = ref<'all' | 'shopee' | 'ml' | 'amazon'>('all')
+
+// Chart state
+type ChartMetric = 'spend' | 'revenue' | 'impressions' | 'clicks' | 'acos'
+const chartMetric = ref<ChartMetric>('spend')
+const chartDays = ref<7 | 30>(7)
+const timeseries = ref<Timeseries | null>(null)
+const chartHidden = ref<Set<string>>(new Set())  // account_ids hidden
+const chartHover = ref<{ x: number; y: number; day: string; rows: { id: string; name: string; color: string; val: number | null }[] } | null>(null)
+
 // ── Computeds ────────────────────────────────────────────────────────
 const filteredAccounts = computed(() => {
   if (!summary.value) return []
-  return summary.value.accounts.filter((a) => a.department === department.value)
+  return summary.value.accounts.filter((a) =>
+    a.department === department.value
+    && (tablePlatform.value === 'all' || a.platform === tablePlatform.value),
+  )
 })
 
 const filteredDecisions = computed(() => {
@@ -240,6 +267,134 @@ function acosClass(acos: number | null | undefined, target: number): string {
   if (acos < target) return 'text-emerald-600 font-medium'
   if (acos < target * 1.5) return 'text-amber-600 font-medium'
   return 'text-red-600 font-medium'
+}
+
+// Deterministic per-account chart color. Groups by platform so the eye
+// can read "this batch of bluish lines = ML"; within a platform each
+// account picks its own hue via a stable hash.
+const _PLATFORM_HUE_BASE: Record<string, number> = {
+  amazon: 28,    // oranges
+  ml: 50,        // yellows
+  shopee: 8,     // reds
+}
+function accountColor(account: Account): string {
+  const base = _PLATFORM_HUE_BASE[account.platform] ?? 200
+  // Stable per-name hue offset within ±40°.
+  let h = 0
+  for (let i = 0; i < account.name.length; i++) h = (h * 31 + account.name.charCodeAt(i)) & 0xffff
+  const hue = (base + (h % 80) - 40 + 360) % 360
+  return `hsl(${hue} 65% 48%)`
+}
+
+// Chart geometry — derived from chartDays + timeseries data + chartMetric.
+// Returns null when no series; the template hides the chart in that case.
+type ChartPoint = { x: number; y: number; v: number; day: string }
+type ChartLine = { id: string; name: string; platform: string; color: string; pts: ChartPoint[] }
+
+function _metricValue(p: TimeseriesPoint, m: ChartMetric): number | null {
+  if (m === 'acos') return p.acos
+  return p[m] as number
+}
+
+const chartLines = computed<ChartLine[]>(() => {
+  if (!timeseries.value) return []
+  // Filter accounts the user can see (department + marketplace filter
+  // mirror the period table) and excludes chips the user toggled off.
+  const accs = (timeseries.value.accounts || []).filter(
+    (a) => !chartHidden.value.has(a.id)
+        && a.department === department.value
+        && (tablePlatform.value === 'all' || a.platform === tablePlatform.value),
+  )
+  // x/y are placeholders here — chartGeom resolves them once it knows
+  // the union-of-days and yMax. We drop null/NaN values per day so
+  // lines just connect across gaps instead of dipping to zero.
+  return accs.map((a) => {
+    const raw = timeseries.value!.series[a.id] || []
+    const pts: ChartPoint[] = raw
+      .map((p) => ({ day: p.day, v: _metricValue(p, chartMetric.value) }))
+      .filter((p): p is { day: string; v: number } => p.v !== null && !Number.isNaN(p.v))
+      .map((p) => ({ x: 0, y: 0, v: p.v, day: p.day }))
+    return {
+      id: a.id, name: a.name, platform: a.platform,
+      color: accountColor(a), pts,
+    }
+  }).filter((l) => l.pts.length > 0)
+})
+
+// Resolved chart geometry: viewBox 1000×320, padding 40 left / 10 right
+// / 10 top / 30 bottom. Pre-computes x/y for each point off the maxes
+// across all visible lines so axes are stable as user toggles chips.
+const chartGeom = computed(() => {
+  const W = 1000, H = 320
+  const PAD = { t: 10, r: 10, b: 30, l: 56 }
+  const lines = chartLines.value
+  if (!lines.length) return { W, H, PAD, lines: [] as ChartLine[], days: [] as string[], yMax: 0 }
+  // Union of days across all lines (sorted ASC).
+  const dayset = new Set<string>()
+  for (const l of lines) for (const p of l.pts) dayset.add(p.day)
+  const days = Array.from(dayset).sort()
+  const innerW = W - PAD.l - PAD.r
+  const innerH = H - PAD.t - PAD.b
+  const dx = days.length > 1 ? innerW / (days.length - 1) : 0
+  // Max value across all lines for the current metric.
+  let yMax = 0
+  for (const l of lines) for (const p of l.pts) if (p.v > yMax) yMax = p.v
+  if (yMax === 0) yMax = 1
+  const sized: ChartLine[] = lines.map((l) => ({
+    ...l,
+    pts: l.pts.map((p) => {
+      const i = days.indexOf(p.day)
+      const x = PAD.l + (i >= 0 ? i * dx : 0)
+      const y = PAD.t + innerH - (p.v / yMax) * innerH
+      return { ...p, x, y }
+    }),
+  }))
+  return { W, H, PAD, lines: sized, days, yMax }
+})
+
+function chartPath(line: ChartLine): string {
+  if (!line.pts.length) return ''
+  return line.pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+}
+
+function chartFmt(v: number | null): string {
+  if (v == null) return '—'
+  if (chartMetric.value === 'spend' || chartMetric.value === 'revenue') return fmtMoney(v)
+  if (chartMetric.value === 'acos') return fmtPct(v)
+  return v.toLocaleString('pt-BR')
+}
+
+// Hover: figure out which X column the mouse is over, build the stack
+// of (account, value) at that day. SVG client coords → viewBox conversion.
+function onChartHover(ev: MouseEvent) {
+  const g = chartGeom.value
+  if (!g.days.length || !g.lines.length) { chartHover.value = null; return }
+  const svg = ev.currentTarget as SVGSVGElement
+  const rect = svg.getBoundingClientRect()
+  const xRel = ((ev.clientX - rect.left) / rect.width) * g.W
+  const innerW = g.W - g.PAD.l - g.PAD.r
+  const dx = g.days.length > 1 ? innerW / (g.days.length - 1) : 0
+  let idx = Math.round((xRel - g.PAD.l) / Math.max(dx, 1))
+  if (idx < 0) idx = 0
+  if (idx >= g.days.length) idx = g.days.length - 1
+  const day = g.days[idx]
+  const rows = g.lines.map((l) => {
+    const p = l.pts.find((pp) => pp.day === day)
+    return { id: l.id, name: l.name, color: l.color, val: p ? p.v : null }
+  })
+  chartHover.value = {
+    x: g.PAD.l + idx * dx,
+    y: 0,
+    day,
+    rows,
+  }
+}
+function onChartLeave() { chartHover.value = null }
+
+function toggleChartLine(id: string) {
+  const s = new Set(chartHidden.value)
+  if (s.has(id)) s.delete(id); else s.add(id)
+  chartHidden.value = s
 }
 
 function heatmapCellClass(dow: number, hour: number): string {
@@ -307,6 +462,14 @@ async function loadHeatmap() {
 async function loadCampaigns() {
   campaigns.value = await api<Campaign[]>(`/api/marketing/campaigns?department=${department.value}`)
 }
+async function loadTimeseries() {
+  const params = new URLSearchParams({
+    days: String(chartDays.value),
+    department: department.value,
+  })
+  if (tablePlatform.value !== 'all') params.set('platform', tablePlatform.value)
+  timeseries.value = await api<Timeseries>(`/api/marketing/timeseries?${params}`)
+}
 
 async function refresh() {
   loading.value = true
@@ -316,7 +479,7 @@ async function refresh() {
     await Promise.all([
       loadIntensity(), loadDecisions(), loadPatterns(),
       loadAgentStatus(), loadCreditAlerts(), loadSchedules(),
-      loadHeatmap(), loadCampaigns(),
+      loadHeatmap(), loadCampaigns(), loadTimeseries(),
     ])
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code ?? e?.message ?? 'load_failed'
@@ -367,7 +530,13 @@ onBeforeUnmount(() => {
 
 watch(department, async () => {
   campaignAccountId.value = 'all'
-  await Promise.all([loadSummary(), loadIntensity(), loadDecisions(), loadCampaigns()])
+  await Promise.all([
+    loadSummary(), loadIntensity(), loadDecisions(),
+    loadCampaigns(), loadTimeseries(),
+  ])
+})
+watch([chartDays, tablePlatform], () => {
+  loadTimeseries().catch(() => {})
 })
 
 watch(schedAccountId, () => {
@@ -436,17 +605,28 @@ definePageMeta({ middleware: [] })
       <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <template v-for="(period, idx) in [{ key: 'period_1', days: period1Days }, { key: 'period_2', days: period2Days }] as const" :key="period.key">
           <div class="rounded-md border overflow-hidden">
-            <div class="bg-muted/40 px-3 py-2 text-sm font-medium border-b flex items-center justify-between">
+            <div class="bg-muted/40 px-3 py-2 text-sm font-medium border-b flex items-center justify-between gap-2 flex-wrap">
               <span>Últimos {{ idx === 0 ? period1Days : period2Days }} dias</span>
-              <label class="text-xs font-normal text-muted-foreground inline-flex items-center gap-1">
-                Dias:
-                <input
-                  type="number" min="1" max="365"
-                  :value="idx === 0 ? period1Days : period2Days"
-                  class="w-16 border rounded px-2 py-0.5 bg-background text-foreground"
-                  @change="(e: any) => { const v = parseInt(e.target.value || '7', 10); if (idx === 0) period1Days = v; else period2Days = v; loadSummary(); }"
-                />
-              </label>
+              <div class="flex items-center gap-3">
+                <label v-if="idx === 0" class="text-xs font-normal text-muted-foreground inline-flex items-center gap-1">
+                  Plataforma:
+                  <select v-model="tablePlatform" class="border rounded-md px-2 py-0.5 text-xs bg-background text-foreground">
+                    <option value="all">Todas</option>
+                    <option value="amazon">Amazon</option>
+                    <option value="ml">Mercado Livre</option>
+                    <option value="shopee">Shopee</option>
+                  </select>
+                </label>
+                <label class="text-xs font-normal text-muted-foreground inline-flex items-center gap-1">
+                  Dias:
+                  <input
+                    type="number" min="1" max="365"
+                    :value="idx === 0 ? period1Days : period2Days"
+                    class="w-16 border rounded px-2 py-0.5 bg-background text-foreground"
+                    @change="(e: any) => { const v = parseInt(e.target.value || '7', 10); if (idx === 0) period1Days = v; else period2Days = v; loadSummary(); }"
+                  />
+                </label>
+              </div>
             </div>
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
@@ -500,6 +680,101 @@ definePageMeta({ middleware: [] })
             </div>
           </div>
         </template>
+      </div>
+
+      <!-- Interactive chart -->
+      <div class="rounded-md border p-4">
+        <div class="flex items-center gap-3 mb-3 flex-wrap">
+          <BarChart3 class="size-4 text-primary" />
+          <h2 class="text-lg font-semibold">Evolução</h2>
+          <label class="text-xs text-muted-foreground inline-flex items-center gap-1">
+            Métrica:
+            <select v-model="chartMetric" class="border rounded-md px-2 py-0.5 text-xs bg-background text-foreground">
+              <option value="spend">Gasto</option>
+              <option value="revenue">Faturamento</option>
+              <option value="impressions">Impressões</option>
+              <option value="clicks">Cliques</option>
+              <option value="acos">ACOS</option>
+            </select>
+          </label>
+          <label class="text-xs text-muted-foreground inline-flex items-center gap-1">
+            Janela:
+            <select v-model.number="chartDays" class="border rounded-md px-2 py-0.5 text-xs bg-background text-foreground">
+              <option :value="7">7 dias</option>
+              <option :value="30">30 dias</option>
+            </select>
+          </label>
+          <span class="text-xs text-muted-foreground ml-auto">Clique nos chips abaixo pra mostrar/esconder lojas no gráfico.</span>
+        </div>
+
+        <div v-if="!timeseries || chartGeom.lines.length === 0"
+             class="text-sm text-muted-foreground py-8 text-center">
+          Sem dados pra essa combinação de departamento × plataforma × janela.
+        </div>
+        <div v-else class="relative">
+          <svg :viewBox="`0 0 ${chartGeom.W} ${chartGeom.H}`" class="w-full h-[320px]"
+               @mousemove="onChartHover" @mouseleave="onChartLeave">
+            <!-- Y axis baseline + max -->
+            <line :x1="chartGeom.PAD.l" :x2="chartGeom.W - chartGeom.PAD.r"
+                  :y1="chartGeom.H - chartGeom.PAD.b" :y2="chartGeom.H - chartGeom.PAD.b"
+                  stroke="currentColor" stroke-opacity="0.2" />
+            <line :x1="chartGeom.PAD.l" :x2="chartGeom.W - chartGeom.PAD.r"
+                  :y1="chartGeom.PAD.t" :y2="chartGeom.PAD.t"
+                  stroke="currentColor" stroke-opacity="0.08" />
+            <!-- Y labels -->
+            <text :x="chartGeom.PAD.l - 6" :y="chartGeom.PAD.t + 4"
+                  text-anchor="end" font-size="11" fill="currentColor" fill-opacity="0.5">
+              {{ chartFmt(chartGeom.yMax) }}
+            </text>
+            <text :x="chartGeom.PAD.l - 6" :y="chartGeom.H - chartGeom.PAD.b + 4"
+                  text-anchor="end" font-size="11" fill="currentColor" fill-opacity="0.5">
+              {{ chartFmt(0) }}
+            </text>
+            <!-- X labels (first, mid, last day) -->
+            <template v-for="(d, i) in chartGeom.days" :key="d">
+              <text v-if="i === 0 || i === chartGeom.days.length - 1 || i === Math.floor((chartGeom.days.length - 1) / 2)"
+                    :x="chartGeom.PAD.l + (chartGeom.days.length > 1 ? i * ((chartGeom.W - chartGeom.PAD.l - chartGeom.PAD.r) / (chartGeom.days.length - 1)) : 0)"
+                    :y="chartGeom.H - chartGeom.PAD.b + 14"
+                    text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.5">
+                {{ d.slice(5) }}
+              </text>
+            </template>
+            <!-- Lines -->
+            <g v-for="line in chartGeom.lines" :key="line.id">
+              <path :d="chartPath(line)" :stroke="line.color" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" />
+              <circle v-for="(p, i) in line.pts" :key="i" :cx="p.x" :cy="p.y" r="2" :fill="line.color" />
+            </g>
+            <!-- Hover vertical line + tooltip anchor -->
+            <line v-if="chartHover"
+                  :x1="chartHover.x" :x2="chartHover.x"
+                  :y1="chartGeom.PAD.t" :y2="chartGeom.H - chartGeom.PAD.b"
+                  stroke="currentColor" stroke-opacity="0.3" stroke-dasharray="3 3" />
+          </svg>
+          <!-- HTML tooltip overlay (easier formatting than SVG text) -->
+          <div v-if="chartHover" class="absolute top-0 pointer-events-none bg-popover border rounded-md shadow-md px-3 py-2 text-xs"
+               :style="{ left: `${(chartHover.x / chartGeom.W) * 100}%`, transform: 'translateX(-100%)', marginLeft: '-8px', maxWidth: '260px' }">
+            <div class="font-semibold mb-1">{{ chartHover.day }}</div>
+            <div v-for="r in chartHover.rows" :key="r.id" class="flex items-center gap-1.5">
+              <span class="size-2 rounded-full" :style="{ backgroundColor: r.color }" />
+              <span class="truncate">{{ r.name }}</span>
+              <span class="ml-auto font-medium">{{ chartFmt(r.val) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chips: one per account, click to toggle. -->
+        <div v-if="(timeseries?.accounts.length ?? 0) > 0" class="mt-3 flex flex-wrap gap-1.5">
+          <button v-for="a in timeseries?.accounts.filter((a) => a.department === department && (tablePlatform === 'all' || a.platform === tablePlatform)) || []"
+                  :key="a.id"
+                  class="text-[11px] inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border transition-opacity"
+                  :class="chartHidden.has(a.id) ? 'opacity-40' : ''"
+                  :style="{ borderColor: accountColor(a), color: accountColor(a) }"
+                  @click="toggleChartLine(a.id)">
+            <span class="size-2 rounded-full" :style="{ backgroundColor: accountColor(a) }" />
+            {{ a.name }}
+            <span class="text-[9px] uppercase opacity-60">{{ a.platform }}</span>
+          </button>
+        </div>
       </div>
 
       <!-- Schedule heatmap (ACOS por hora × dia) -->

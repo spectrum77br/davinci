@@ -281,6 +281,70 @@ async def metrics_by_account(
     ]
 
 
+@router.get("/timeseries")
+async def metrics_timeseries(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+    days: int = Query(7, ge=1, le=90),
+    department: str | None = Query(None),
+    platform: str | None = Query(None),
+) -> dict:
+    """Per-account daily time series for the chart on the Métricas tab.
+    Returns one row per (account, day) pre-aggregated so the frontend can
+    plot N accounts × M days without further client-side groupBy."""
+    stmt = select(MarketingAccount)
+    if department:
+        stmt = stmt.where(MarketingAccount.department == department)
+    if platform:
+        stmt = stmt.where(MarketingAccount.platform == platform)
+    accounts = (
+        await session.execute(stmt.order_by(MarketingAccount.platform, MarketingAccount.name))
+    ).scalars().all()
+
+    now = datetime.now(UTC)
+    since = now - timedelta(days=days)
+
+    series: dict[str, list[dict]] = {}
+    if accounts:
+        ids = [a.id for a in accounts]
+        # One query: group by account + day. Postgres date_trunc gives a
+        # midnight-UTC timestamp; we cast to ISO date string client-side.
+        agg = (
+            await session.execute(
+                select(
+                    MarketingMetric.account_id,
+                    func.date_trunc("day", MarketingMetric.timestamp).label("day"),
+                    func.coalesce(func.sum(MarketingMetric.spend), 0.0).label("spend"),
+                    func.coalesce(func.sum(MarketingMetric.revenue), 0.0).label("revenue"),
+                    func.coalesce(func.sum(MarketingMetric.impressions), 0).label("impressions"),
+                    func.coalesce(func.sum(MarketingMetric.clicks), 0).label("clicks"),
+                    func.avg(MarketingMetric.acos).label("acos"),
+                ).where(
+                    and_(
+                        MarketingMetric.account_id.in_(ids),
+                        MarketingMetric.timestamp >= since,
+                    )
+                ).group_by(MarketingMetric.account_id, "day").order_by("day")
+            )
+        ).all()
+        for row in agg:
+            aid = str(row.account_id)
+            series.setdefault(aid, []).append({
+                "day": row.day.date().isoformat(),
+                "spend": round(float(row.spend or 0), 2),
+                "revenue": round(float(row.revenue or 0), 2),
+                "impressions": int(row.impressions or 0),
+                "clicks": int(row.clicks or 0),
+                "acos": round(float(row.acos), 2) if row.acos is not None else None,
+            })
+
+    return {
+        "days": days,
+        "accounts": [_account_out(a) for a in accounts],
+        "series": series,
+    }
+
+
 # ─── SCHEDULES ────────────────────────────────────────────────────────
 
 
