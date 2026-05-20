@@ -21,6 +21,7 @@ them and the operator can investigate.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from uuid import UUID
@@ -73,6 +74,17 @@ _BALANCE_CACHE_TTL = timedelta(hours=6)
 # that the per-account-call endpoints (daily, hourly, campaigns) don't
 # trip Shopee's softer throttles even when we have 13 shops queued.
 _INTER_SHOP_DELAY = 5.0
+
+# Round-robin: minimum time between syncs of the SAME shop. With cron
+# every 5min × 13 shops, each shop refreshes ~once per 65min — well
+# above this floor.
+_MIN_SHOP_REFRESH = timedelta(hours=2)
+
+# Pacing between API calls WITHIN a single shop sync. Shopee's
+# per-partner Ads throttle is global so even successive endpoints
+# (daily → hourly → campaigns) on the same shop benefit from breathing
+# room between calls.
+_INTER_CALL_DELAY = 10.0
 
 logger = structlog.get_logger()
 
@@ -152,12 +164,22 @@ async def sync_shopee_integration(
                     cached_at=cached_balance_at.isoformat() if cached_balance_at else None,
                     code=rl.code,
                 )
+            # Pace before the next call regardless of outcome — Shopee's
+            # throttle counts attempted calls too.
+            await asyncio.sleep(_INTER_CALL_DELAY)
         daily = await client.get_daily_performance(start_day, today)
+        await asyncio.sleep(_INTER_CALL_DELAY)
         hourly = await client.get_hourly_performance(today) if pull_hourly else []
+        if pull_hourly:
+            await asyncio.sleep(_INTER_CALL_DELAY)
         campaign_ids = await client.list_campaign_ids() if pull_campaigns else []
+        if pull_campaigns and campaign_ids:
+            await asyncio.sleep(_INTER_CALL_DELAY)
         campaign_info = (
             await client.get_campaign_settings(campaign_ids) if campaign_ids else []
         )
+        if campaign_info:
+            await asyncio.sleep(_INTER_CALL_DELAY)
         campaign_perf = (
             await client.get_campaign_performance(campaign_ids, start_day, today)
             if campaign_ids
@@ -234,6 +256,7 @@ async def sync_shopee_integration(
     integration.last_error = None
     integration.last_test_ok = True
     integration.last_test_at = datetime.now(UTC)
+    integration.last_ads_sync_at = datetime.now(UTC)
     await record_sync_success(session, integration)
     await session.commit()
 
@@ -269,9 +292,8 @@ async def sync_all_shopee_integrations(session: AsyncSession) -> list[dict[str, 
     Pacing: `_INTER_SHOP_DELAY` seconds between shops. Combined with the
     lazy balance fetch (only the stalest shop hits get_total_balance per
     cycle) this keeps the whole loop comfortably under Shopee's
-    per-endpoint throttles."""
-    import asyncio  # local — keeps top-of-module import block stable
-
+    per-endpoint throttles. Still slower than the cron-tick budget on
+    13 shops though — for the steady-state, prefer `sync_shopee_single_next`."""
     rows = (
         await session.execute(
             select(Integration).where(
@@ -299,6 +321,74 @@ async def sync_all_shopee_integrations(session: AsyncSession) -> list[dict[str, 
             )
             out.append({"integration_id": str(integ.id), "status": "error", "error": str(e)[:200]})
     return out
+
+
+async def sync_shopee_single_next(session: AsyncSession) -> dict[str, Any]:
+    """Round-robin: pick the one Shopee integration whose
+    `last_ads_sync_at` is oldest (NULL → never synced → first in line)
+    and sync only that shop. Designed for a 5-minute cron — across 13
+    shops, each refreshes ~once an hour, comfortably under Shopee's
+    per-partner Ads throttle even when individual calls retry.
+
+    Even if the shop sync fails (rate-limited, permission denied, etc.)
+    we stamp `last_ads_sync_at` so the next tick rotates to a different
+    shop instead of getting stuck on the same one.
+
+    Skips shops whose `last_ads_sync_at` is within `_MIN_SHOP_REFRESH`
+    (2h) — returns `{status: 'all_fresh'}` when every eligible shop is
+    already recent."""
+    integ = (
+        await session.execute(
+            select(Integration)
+            .where(
+                and_(
+                    Integration.status == "active",
+                    Integration.platform == "shopee",
+                    Integration.ads_enabled.is_(True),
+                )
+            )
+            # NULLs FIRST so never-synced shops are processed before
+            # already-synced ones. Then oldest first.
+            .order_by(Integration.last_ads_sync_at.asc().nulls_first())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if integ is None:
+        return {"status": "no_shopee_integrations"}
+
+    # Honour the cooldown so we don't repeatedly hammer the same shop
+    # if it's the only ads_enabled one or the others are mid-flight.
+    if integ.last_ads_sync_at is not None:
+        age = datetime.now(UTC) - integ.last_ads_sync_at
+        if age < _MIN_SHOP_REFRESH:
+            return {
+                "status": "all_fresh",
+                "integration_id": str(integ.id),
+                "age_minutes": int(age.total_seconds() / 60),
+            }
+
+    integration_id = integ.id
+    name = integ.name
+    try:
+        result = await sync_shopee_integration(session, integration_id)
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "shopee_ads_single_sync_failed",
+            integration_id=str(integration_id), err=str(e)[:300],
+        )
+        result = {"status": "error", "error": str(e)[:200]}
+
+    # Always advance the cursor — even on failure — so the next tick
+    # picks a DIFFERENT shop instead of getting stuck on this one.
+    # sync_shopee_integration already stamps last_ads_sync_at on success;
+    # on failure we stamp here to release the round-robin.
+    integ_refreshed = await session.get(Integration, integration_id)
+    if integ_refreshed and integ_refreshed.last_ads_sync_at is None:
+        integ_refreshed.last_ads_sync_at = datetime.now(UTC)
+        await session.commit()
+
+    return {"integration_id": str(integration_id), "name": name, **result}
 
 
 # ─── internals ────────────────────────────────────────────────────────────

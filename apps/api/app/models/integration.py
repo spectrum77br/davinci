@@ -61,6 +61,13 @@ class Integration(Base, TimestampMixin):
     consecutive_errors: Mapped[int] = mapped_column(
         sa.Integer, nullable=False, default=0, server_default=text("0")
     )
+    # Stamp of the last completed marketing Ads sync for this integration.
+    # Used by `sync_shopee_single_next` as a round-robin cursor so the
+    # 5-min cron picks the staleest shop each tick — necessary because
+    # Shopee's per-partner Ads throttle can't sustain a batch over 13 shops.
+    last_ads_sync_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class OAuthState(Base):

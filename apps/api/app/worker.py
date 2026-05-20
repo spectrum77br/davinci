@@ -378,25 +378,26 @@ async def marketing_agent_cycle(ctx: dict) -> None:
 
 
 async def marketing_full_sync(ctx: dict) -> None:
-    """Every 30 min: pull live ad-platform numbers (Shopee + ML + Amazon)
-    for every `ads_enabled` integration and persist them into the
-    marketing_* tables.
+    """Every 30 min: pull live ML + Amazon Ads numbers and persist them
+    into the marketing_* tables.
 
-    Each platform runs in its own try/except so a slow Amazon report or a
-    Shopee outage doesn't abort the other two. Per-integration errors
-    are contained one layer deeper inside each `sync_all_*` helper.
-    Feature flag (`enable_marketing`) keeps prod inert when off.
+    Shopee is intentionally NOT included here — its per-partner Ads
+    throttle is so tight that batching 13 shops never succeeds. Shopee
+    runs on its own 5-min round-robin cron (`marketing_shopee_tick`)
+    that processes one shop per tick.
+
+    Each platform runs in its own try/except so a slow Amazon report
+    doesn't abort ML. Feature flag (`enable_marketing`) keeps prod
+    inert when off.
     """
     if not _settings.enable_marketing:
         return
     from app.services.marketing.amazon_sync import sync_all_amazon_integrations
     from app.services.marketing.ml_sync import sync_all_ml_integrations
-    from app.services.marketing.shopee_sync import sync_all_shopee_integrations
 
     async with session_scope() as s:
         results: dict[str, list[dict] | str] = {}
         for name, runner in (
-            ("shopee", sync_all_shopee_integrations),
             ("mercadolivre", sync_all_ml_integrations),
             ("amazon", sync_all_amazon_integrations),
         ):
@@ -412,6 +413,31 @@ async def marketing_full_sync(ctx: dict) -> None:
         k: (len(v) if isinstance(v, list) else 0) for k, v in results.items()
     }
     logger.info("marketing_full_sync", **summary)
+
+
+async def marketing_shopee_tick(ctx: dict) -> None:
+    """Every 5 min: sync ONE Shopee shop (the one with the oldest
+    `last_ads_sync_at`). Designed around Shopee's per-partner Ads
+    throttle which fails any batch over a few calls. With 13 shops × 5min
+    cron, each shop refreshes ~once per 65 minutes — well under the
+    throttle ceiling.
+    """
+    if not _settings.enable_marketing:
+        return
+    from app.services.marketing.shopee_sync import sync_shopee_single_next
+
+    async with session_scope() as s:
+        try:
+            r = await sync_shopee_single_next(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("marketing_shopee_tick_failed", err=str(e)[:300])
+            return
+    logger.info(
+        "marketing_shopee_tick",
+        status=r.get("status"),
+        integration_id=r.get("integration_id"),
+        name=r.get("name"),
+    )
 
 
 async def daily_sync_scheduler(ctx: dict) -> None:
@@ -1000,10 +1026,18 @@ class WorkerSettings:
         # Marketing module (per-platform/department) — every quarter-hour
         # per enabled MarketingAccount.
         cron(marketing_agent_cycle, minute={0, 15, 30, 45}, run_at_startup=False),
-        # Marketing: pull live ad data (Shopee + ML + Amazon) every
-        # half-hour. Runs at :05 and :35 so it lands BEFORE the agent
-        # cycle reads metrics.
+        # Marketing: pull live ML + Amazon ad data every half-hour at :05
+        # and :35 (Shopee is NOT included — see marketing_shopee_tick).
         cron(marketing_full_sync, minute={5, 35}, run_at_startup=False),
+        # Marketing: Shopee round-robin. One shop per tick, every 5 min.
+        # 13 shops × 5min = each refreshes ~once per 65 minutes. The
+        # per-partner Ads throttle can't sustain a full-batch sync; this
+        # spreads the load thin enough to stay under it.
+        cron(
+            marketing_shopee_tick,
+            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+            run_at_startup=False,
+        ),
     ]
     max_jobs = 10
     job_timeout = 1800
