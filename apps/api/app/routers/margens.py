@@ -123,9 +123,10 @@ async def list_margens_marketplace(
 ) -> MargensMarketplacePage:
     """Per-item marketplace conciliation rows (paginated, 20d window).
 
-    Queries the live view (not the MV) so each page request returns
-    fresh data. Filters apply server-side; pagination is offset/limit.
-    `platforms` is the distinct list available — used by the UI dropdown.
+    Reads from davinci.verificar_margem (snapshot of the view).
+    The snapshot is repopulated every 30min by the worker cron, fully
+    rebuilt by the 'atualizar' UI button, and targeted-refreshed after
+    PATCHes so the user always sees their own edits immediately.
     """
     where = ["TRUE"]
     params: dict = {"limit": limit, "offset": offset}
@@ -171,17 +172,17 @@ async def list_margens_marketplace(
     where_sql = " AND ".join(where)
 
     count_sql = text(
-        f"SELECT count(*) FROM davinci.mv_conciliacao_margens_marketplace v WHERE {where_sql}"  # noqa: S608
+        f"SELECT count(*) FROM davinci.verificar_margem v WHERE {where_sql}"  # noqa: S608
     )
     platforms_sql = text(
         "SELECT DISTINCT COALESCE(plataforma_bling, plataforma_financeiro) AS p "
-        "FROM davinci.mv_conciliacao_margens_marketplace "
+        "FROM davinci.verificar_margem "
         "WHERE COALESCE(plataforma_bling, plataforma_financeiro) IS NOT NULL "
         "ORDER BY 1"
     )
     contas_sql = text(
         "SELECT DISTINCT loja_nome "
-        "FROM davinci.mv_conciliacao_margens_marketplace "
+        "FROM davinci.verificar_margem "
         "WHERE loja_nome IS NOT NULL "
         "ORDER BY 1"
     )
@@ -230,7 +231,7 @@ async def list_margens_marketplace(
             {_ATTENTION_MARGEM_SQL}                              AS attention_margem,
             {_ATTENTION_FRETE_SQL}                               AS attention_frete,
             {_ATTENTION_SALDO_SQL}                               AS attention_saldo
-        FROM davinci.mv_conciliacao_margens_marketplace v
+        FROM davinci.verificar_margem v
         LEFT JOIN LATERAL (
             SELECT bo.observacao
             FROM davinci.bling_orders bo
@@ -285,7 +286,7 @@ async def patch_marketplace_observacao(
         pedido_bling=pedido_bling,
         rows=result.rowcount,
     )
-    await _refresh_mv_silent(session)
+    await _refresh_verificar_margem_silent(session, pedido_bling=pedido_bling)
     return {"pedido_bling": pedido_bling, "observacao": next_value, "rows": result.rowcount}
 
 
@@ -325,7 +326,7 @@ async def sync_bling_from_marketplace(
                 ELSE {_FRETE_PLATAFORMA_SQL}
               END AS custofrete,
               v.pedido_bling
-            FROM davinci.vw_conciliacao_margens_marketplace v
+            FROM davinci.verificar_margem v
             WHERE v.bling_order_item_id = :id
             LIMIT 1
             """  # noqa: S608
@@ -358,7 +359,7 @@ async def sync_bling_from_marketplace(
         taxacomissao=str(row.taxacomissao),
         custofrete=str(row.custofrete),
     )
-    await _refresh_mv_silent(session)
+    await _refresh_verificar_margem_silent(session, pedido_bling=str(row.pedido_bling))
     return {
         "ok": True,
         "valorbase": float(row.valorbase) if row.valorbase is not None else None,
@@ -367,24 +368,68 @@ async def sync_bling_from_marketplace(
     }
 
 
-async def _refresh_mv_silent(session: AsyncSession) -> None:
-    """Best-effort refresh of mv_conciliacao_margens_marketplace.
+async def _rebuild_verificar_margem(session: AsyncSession) -> int:
+    """Rebuild davinci.verificar_margem from the live view.
+
+    DELETE + INSERT inside a transaction — under MVCC concurrent SELECT
+    readers keep seeing the pre-commit snapshot, no ACCESS EXCLUSIVE
+    lock (unlike TRUNCATE). Returns the inserted row count.
+    """
+    await session.execute(text("DELETE FROM davinci.verificar_margem"))
+    result = await session.execute(
+        text(
+            "INSERT INTO davinci.verificar_margem "
+            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace"
+        )
+    )
+    await session.commit()
+    return result.rowcount or 0
+
+
+async def _refresh_verificar_margem_for_pedido(
+    session: AsyncSession, pedido_bling: str
+) -> int:
+    """Targeted refresh: re-snapshot only rows of one pedido_bling.
+
+    Used by post-mutation hooks so the user's edit (status/observacao)
+    is reflected immediately without rebuilding the whole table.
+    """
+    await session.execute(
+        text("DELETE FROM davinci.verificar_margem WHERE pedido_bling = :p"),
+        {"p": pedido_bling},
+    )
+    result = await session.execute(
+        text(
+            "INSERT INTO davinci.verificar_margem "
+            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace "
+            "WHERE pedido_bling = :p"
+        ),
+        {"p": pedido_bling},
+    )
+    await session.commit()
+    return result.rowcount or 0
+
+
+async def _refresh_verificar_margem_silent(
+    session: AsyncSession, pedido_bling: str | None = None
+) -> None:
+    """Best-effort refresh of davinci.verificar_margem.
 
     Fires after PATCHes (status/observacao) so the user sees their
     change immediately on next page load. Swallows errors — refresh
-    failure must never block the underlying mutation.
+    failure must never block the underlying mutation. When pedido_bling
+    is provided, refreshes only that order's rows (fast); otherwise
+    rebuilds the whole table.
     """
     try:
-        await session.execute(
-            text(
-                "REFRESH MATERIALIZED VIEW CONCURRENTLY "
-                "davinci.mv_conciliacao_margens_marketplace"
-            )
-        )
-        await session.commit()
+        if pedido_bling:
+            await _refresh_verificar_margem_for_pedido(session, pedido_bling)
+        else:
+            await _rebuild_verificar_margem(session)
     except Exception as e:  # noqa: BLE001
         logger.warning(
-            "mv_conciliacao_margens_marketplace_refresh_failed",
+            "verificar_margem_refresh_failed",
+            pedido_bling=pedido_bling,
             error=str(e)[:200],
         )
 
@@ -394,15 +439,9 @@ async def refresh_marketplace_mv(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("margem", "view"))],
 ) -> dict:
-    """Trigger MV refresh on-demand (UI 'atualizar' button)."""
-    await session.execute(
-        text(
-            "REFRESH MATERIALIZED VIEW CONCURRENTLY "
-            "davinci.mv_conciliacao_margens_marketplace"
-        )
-    )
-    await session.commit()
-    return {"refreshed": True}
+    """Rebuild davinci.verificar_margem on-demand (UI 'atualizar' button)."""
+    inserted = await _rebuild_verificar_margem(session)
+    return {"refreshed": True, "rows": inserted}
 
 
 class MarketplaceStatusPatch(BaseModel):
@@ -444,7 +483,7 @@ async def patch_marketplace_status(
         )
 
     await session.commit()
-    await _refresh_mv_silent(session)
+    await _refresh_verificar_margem_silent(session, pedido_bling=pedido_bling)
     logger.info(
         "marketplace_status_patched",
         pedido_bling=pedido_bling,
