@@ -11,7 +11,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import case, desc, select
+from sqlalchemy import case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -44,6 +44,29 @@ def _to_out(t: Tarefa, responsavel: User | None) -> TarefaOut:
         created_at=t.created_at,
         updated_at=t.updated_at,
     )
+
+
+@router.get("/meu-pendente-count")
+async def meu_pendente_count(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_active_user)],
+) -> dict[str, int]:
+    """Counts the active tarefas assigned to the current user — "pending"
+    is encoded as `data_conclusao IS NULL` (the existing list endpoint
+    already orders by this same predicate). Drives the pulsing red dot
+    on the Tarefas item in the sidebar. Returns `{"count": N}` for an
+    obvious JSON shape on the front-end."""
+    n = (
+        await session.execute(
+            select(func.count())
+            .select_from(Tarefa)
+            .where(
+                Tarefa.responsavel_id == user.id,
+                Tarefa.data_conclusao.is_(None),
+            )
+        )
+    ).scalar_one()
+    return {"count": int(n or 0)}
 
 
 @router.get("", response_model=list[TarefaOut])

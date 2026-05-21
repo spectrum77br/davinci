@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onScopeDispose, ref, watch } from 'vue'
 import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
   Package, Megaphone, DollarSign, Truck, RefreshCw, Undo2,
@@ -14,6 +14,48 @@ const auth = useAuthStore()
 const route = useRoute()
 const runtimeConfig = useRuntimeConfig()
 const enableMarketing = computed(() => Boolean(runtimeConfig.public.enableMarketing))
+
+// Pulsing red dot on the "Tarefas" row when the current user has open
+// tarefas (data_conclusao IS NULL). Polls /api/tarefas/meu-pendente-count
+// every 15s + on auth-state change. Independent from the modal so the
+// dot stays even after the modal is dismissed.
+const { api } = useApi()
+const pendingTarefasCount = ref(0)
+
+async function fetchPendingTarefas() {
+  if (!auth.user) return
+  try {
+    const r = await api<{ count: number }>('/api/tarefas/meu-pendente-count')
+    pendingTarefasCount.value = r.count ?? 0
+  } catch {
+    // Silent — the modal's polling will surface real outages.
+  }
+}
+
+let pendingPoll: ReturnType<typeof setInterval> | null = null
+watch(
+  () => auth.user?.id ?? null,
+  (uid) => {
+    if (pendingPoll) {
+      clearInterval(pendingPoll)
+      pendingPoll = null
+    }
+    pendingTarefasCount.value = 0
+    if (uid && import.meta.client) {
+      void fetchPendingTarefas()
+      pendingPoll = setInterval(() => {
+        void fetchPendingTarefas()
+      }, 15_000)
+    }
+  },
+  { immediate: true },
+)
+onScopeDispose(() => {
+  if (pendingPoll) {
+    clearInterval(pendingPoll)
+    pendingPoll = null
+  }
+})
 
 type Item = {
   to: string
@@ -132,13 +174,26 @@ function isActive(to: string) {
             <NuxtLink
               :to="it.to"
               :title="props.collapsed ? it.label : undefined"
-              class="group flex items-center gap-3 rounded-lg px-2.5 h-9 text-sm font-medium transition-colors"
+              class="group relative flex items-center gap-3 rounded-lg px-2.5 h-9 text-sm font-medium transition-colors"
               :class="isActive(it.to)
                 ? 'bg-[hsl(var(--sidebar-active-bg))] text-[hsl(var(--sidebar-active-fg))]'
                 : 'text-[hsl(var(--sidebar-foreground))] hover:bg-muted'"
             >
               <component :is="it.icon" class="size-[18px] shrink-0" />
               <span v-if="!props.collapsed" class="truncate">{{ it.label }}</span>
+              <!-- Pulsing red dot when this user has pending tarefas.
+                   Expanded layout: right-aligned next to the label.
+                   Collapsed layout: small dot in the icon's top-right corner. -->
+              <span
+                v-if="it.to === '/tarefas' && pendingTarefasCount > 0"
+                :class="props.collapsed
+                  ? 'absolute top-1 right-1 inline-flex size-2.5'
+                  : 'ml-auto inline-flex size-2.5'"
+                :title="`${pendingTarefasCount} tarefa${pendingTarefasCount === 1 ? '' : 's'} pendente${pendingTarefasCount === 1 ? '' : 's'}`"
+              >
+                <span class="absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75 animate-ping" />
+                <span class="relative inline-flex size-2.5 rounded-full bg-red-500" />
+              </span>
             </NuxtLink>
           </li>
         </ul>
