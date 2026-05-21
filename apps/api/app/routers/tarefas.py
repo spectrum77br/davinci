@@ -18,7 +18,9 @@ from sqlalchemy.orm import aliased
 from app.db import get_session
 from app.deps.auth import require_active_user, require_admin
 from app.models import Tarefa, User, UserRole
+from app.models.enums import AlertSeverity, AlertType
 from app.schemas.tarefas import TarefaCreate, TarefaOut, TarefaPatch
+from app.services.alerts import emit_alert
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/tarefas", tags=["tarefas"])
@@ -89,6 +91,28 @@ async def create_tarefa(
     await session.commit()
     await session.refresh(t)
     logger.info("tarefa_created", id=str(t.id), responsavel_id=str(t.responsavel_id))
+
+    # Drop the modal-style notification on the responsável's screen via
+    # the alerts pipeline. emit_alert writes an Alert row + (optionally)
+    # pings Telegram; the TarefaNotification.vue component polls
+    # /api/alerts and pops the dialog. Admin self-assigning their own
+    # tarefa skips the notification (avoid surprising the creator).
+    if t.responsavel_id != admin.id:
+        await emit_alert(
+            session,
+            user_id=t.responsavel_id,
+            type=AlertType.TAREFA_ATRIBUIDA,
+            title="📋 Nova tarefa atribuída a você",
+            severity=AlertSeverity.INFO,
+            message=t.tarefa,
+            payload={
+                "tarefa_id": str(t.id),
+                "atribuida_por": admin.name or admin.email,
+                "data_inicio": t.data_inicio.isoformat() if t.data_inicio else None,
+            },
+            notify_telegram=True,
+        )
+        await session.commit()
     return _to_out(t, resp)
 
 
@@ -112,6 +136,9 @@ async def patch_tarefa(
 
     data = body.model_dump(exclude_unset=True)
 
+    # Track reassignment so we can notify AFTER the commit.
+    reassigned_to: UUID | None = None
+
     if is_admin:
         if "responsavel_id" in data and data["responsavel_id"] is not None:
             new_resp = (
@@ -119,7 +146,12 @@ async def patch_tarefa(
             ).scalar_one_or_none()
             if new_resp is None:
                 raise HTTPException(404, detail={"code": "responsavel_not_found"})
+            old_resp = t.responsavel_id
             t.responsavel_id = data["responsavel_id"]
+            # Notify only if the responsável actually changed and the
+            # admin isn't reassigning to themselves.
+            if t.responsavel_id != old_resp and t.responsavel_id != user.id:
+                reassigned_to = t.responsavel_id
         if "data_inicio" in data and data["data_inicio"] is not None:
             t.data_inicio = data["data_inicio"]
         if "data_conclusao" in data:
@@ -144,6 +176,24 @@ async def patch_tarefa(
 
     await session.commit()
     await session.refresh(t)
+
+    if reassigned_to is not None:
+        await emit_alert(
+            session,
+            user_id=reassigned_to,
+            type=AlertType.TAREFA_ATRIBUIDA,
+            title="📋 Tarefa reatribuída a você",
+            severity=AlertSeverity.INFO,
+            message=t.tarefa,
+            payload={
+                "tarefa_id": str(t.id),
+                "atribuida_por": user.name or user.email,
+                "data_inicio": t.data_inicio.isoformat() if t.data_inicio else None,
+            },
+            notify_telegram=True,
+        )
+        await session.commit()
+
     resp = (
         await session.execute(select(User).where(User.id == t.responsavel_id))
     ).scalar_one_or_none()

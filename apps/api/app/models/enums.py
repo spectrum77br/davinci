@@ -133,6 +133,7 @@ class AlertType(StrEnum):
     DAILY_SYNC_COMPLETED = "daily_sync_completed"
     TOKEN_EXPIRING = "token_expiring"
     GENERIC = "generic"
+    TAREFA_ATRIBUIDA = "tarefa_atribuida"
 
 
 class Department(StrEnum):

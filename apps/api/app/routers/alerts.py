@@ -11,7 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_active_user, user_scope
+from app.deps.auth import require_active_user
 from app.models import (
     Alert,
     BackgroundJob,
@@ -28,6 +28,14 @@ from app.schemas.alerts import (
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 
+# Alerts intentionally bypass the CRM-mode `user_scope(Alert, user) → true()`
+# because they're inherently per-user notifications (low-stock for MY
+# integrations, tarefa atribuída to ME, etc.). Letting every user see
+# every other user's alerts would be a real privacy leak — and the new
+# tarefa-atribuída flow makes that visible (Carlos would see Maria's
+# "tarefa atribuída a você" pop up on his screen). We scope by
+# `Alert.user_id == user.id` directly in this router only.
+
 
 @router.get("", response_model=AlertListOut)
 async def list_alerts(
@@ -37,7 +45,7 @@ async def list_alerts(
     offset: int = Query(0, ge=0),
     unread_only: bool = Query(False),
 ) -> AlertListOut:
-    base = select(Alert).where(user_scope(Alert, user))
+    base = select(Alert).where(Alert.user_id == user.id)
     if unread_only:
         base = base.where(Alert.read_at.is_(None))
     stmt = base.order_by(Alert.created_at.desc()).limit(limit).offset(offset)
@@ -45,14 +53,14 @@ async def list_alerts(
 
     total = (
         await session.execute(
-            select(func.count()).select_from(Alert).where(user_scope(Alert, user))
+            select(func.count()).select_from(Alert).where(Alert.user_id == user.id)
         )
     ).scalar_one()
     unread = (
         await session.execute(
             select(func.count())
             .select_from(Alert)
-            .where(user_scope(Alert, user), Alert.read_at.is_(None))
+            .where(Alert.user_id == user.id, Alert.read_at.is_(None))
         )
     ).scalar_one()
     return AlertListOut(
@@ -71,7 +79,7 @@ async def unread_count(
         await session.execute(
             select(func.count())
             .select_from(Alert)
-            .where(user_scope(Alert, user), Alert.read_at.is_(None))
+            .where(Alert.user_id == user.id, Alert.read_at.is_(None))
         )
     ).scalar_one()
     return UnreadCountOut(unread=n)
@@ -114,7 +122,7 @@ async def mark_read(
 ) -> AlertOut:
     a = (
         await session.execute(
-            select(Alert).where(Alert.id == alert_id, user_scope(Alert, user))
+            select(Alert).where(Alert.id == alert_id, Alert.user_id == user.id)
         )
     ).scalar_one_or_none()
     if a is None:
@@ -133,7 +141,7 @@ async def mark_all_read(
 ) -> MarkReadOut:
     result = await session.execute(
         update(Alert)
-        .where(user_scope(Alert, user), Alert.read_at.is_(None))
+        .where(Alert.user_id == user.id, Alert.read_at.is_(None))
         .values(read_at=datetime.now(UTC))
     )
     await session.commit()
