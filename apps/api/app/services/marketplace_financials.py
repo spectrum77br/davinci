@@ -27,6 +27,7 @@ from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
 from app.services.refunds_freight_sync import upsert_freight_refund_for_bling_order
+from app.services.verificar_margem import refresh_silent as _verificar_margem_refresh_silent
 
 logger = structlog.get_logger()
 
@@ -167,6 +168,8 @@ async def run_sync_marketplace_financials_for_bling_order(
                 pedido_bling=order.numero,
                 error=str(e)[:500],
             )
+
+    await _verificar_margem_refresh_silent(session, bling_id=bling_order_id)
 
     return {
         "ok": snapshot.status not in {"error", "unsupported"},

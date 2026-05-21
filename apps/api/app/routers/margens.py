@@ -24,6 +24,10 @@ from app.schemas.margens import (
 )
 from app.security.cipher import decrypt_json
 from app.services.marketplaces.bling import BlingClient
+from app.services.verificar_margem import (
+    rebuild_all as _rebuild_verificar_margem,
+    refresh_silent as _refresh_verificar_margem_silent,
+)
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/margens", tags=["margens"])
@@ -366,72 +370,6 @@ async def sync_bling_from_marketplace(
         "taxacomissao": float(row.taxacomissao) if row.taxacomissao is not None else None,
         "custofrete": float(row.custofrete) if row.custofrete is not None else None,
     }
-
-
-async def _rebuild_verificar_margem(session: AsyncSession) -> int:
-    """Rebuild davinci.verificar_margem from the live view.
-
-    DELETE + INSERT inside a transaction — under MVCC concurrent SELECT
-    readers keep seeing the pre-commit snapshot, no ACCESS EXCLUSIVE
-    lock (unlike TRUNCATE). Returns the inserted row count.
-    """
-    await session.execute(text("DELETE FROM davinci.verificar_margem"))
-    result = await session.execute(
-        text(
-            "INSERT INTO davinci.verificar_margem "
-            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace"
-        )
-    )
-    await session.commit()
-    return result.rowcount or 0
-
-
-async def _refresh_verificar_margem_for_pedido(
-    session: AsyncSession, pedido_bling: str
-) -> int:
-    """Targeted refresh: re-snapshot only rows of one pedido_bling.
-
-    Used by post-mutation hooks so the user's edit (status/observacao)
-    is reflected immediately without rebuilding the whole table.
-    """
-    await session.execute(
-        text("DELETE FROM davinci.verificar_margem WHERE pedido_bling = :p"),
-        {"p": pedido_bling},
-    )
-    result = await session.execute(
-        text(
-            "INSERT INTO davinci.verificar_margem "
-            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace "
-            "WHERE pedido_bling = :p"
-        ),
-        {"p": pedido_bling},
-    )
-    await session.commit()
-    return result.rowcount or 0
-
-
-async def _refresh_verificar_margem_silent(
-    session: AsyncSession, pedido_bling: str | None = None
-) -> None:
-    """Best-effort refresh of davinci.verificar_margem.
-
-    Fires after PATCHes (status/observacao) so the user sees their
-    change immediately on next page load. Swallows errors — refresh
-    failure must never block the underlying mutation. When pedido_bling
-    is provided, refreshes only that order's rows (fast); otherwise
-    rebuilds the whole table.
-    """
-    try:
-        if pedido_bling:
-            await _refresh_verificar_margem_for_pedido(session, pedido_bling)
-        else:
-            await _rebuild_verificar_margem(session)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "verificar_margem_refresh_failed",
-            pedido_bling=pedido_bling,
-            error=str(e)[:200],
-        )
 
 
 @router.post("/marketplace/refresh")

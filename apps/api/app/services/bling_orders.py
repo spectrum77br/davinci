@@ -33,6 +33,7 @@ from app.models import (
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import BlingClient
+from app.services.verificar_margem import refresh_silent as _verificar_margem_refresh_silent
 from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
@@ -656,6 +657,7 @@ async def run_ingest_bling_order(
     if event in ("pedido.exclusao", "order.deleted"):
         n = await mark_order_excluido(session, bling_order_id)
         await session.commit()
+        await _verificar_margem_refresh_silent(session, bling_id=bling_order_id)
         logger.info(
             "bling_order_excluido", bling_order_id=bling_order_id, rows=n
         )
@@ -682,6 +684,7 @@ async def run_ingest_bling_order(
         session, raw_order=raw, user_id=user_id
     )
     await session.commit()
+    await _verificar_margem_refresh_silent(session, bling_id=bling_order_id)
 
     pool = None
     try:
