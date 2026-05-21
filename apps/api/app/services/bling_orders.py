@@ -29,7 +29,6 @@ from app.models import (
     ProductCategory,
     ProductLink,
     Store,
-    UserSettings,
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import BlingClient
@@ -527,16 +526,14 @@ async def _enqueue_stock_refresh_for_order(
     *,
     raw_order: dict[str, Any],
     user_id: UUID,
-) -> tuple[list[tuple[UUID, UUID, list[str]]], list[dict[str, Any]]]:
+) -> list[tuple[UUID, UUID, list[str]]]:
     """For each item in the order, resolve local Product and create a
-    SYNC_PRODUCT BackgroundJob so the stock refresh shows up in the jobs UI.
-    Returns (jobs_to_enqueue, notif_items)."""
+    SYNC_PRODUCT BackgroundJob so the stock refresh shows up in the jobs UI."""
     itens = raw_order.get("itens") or []
     if not isinstance(itens, list):
-        return [], []
+        return []
     seen_products: set[UUID] = set()
     jobs: list[tuple[UUID, UUID, list[str]]] = []
-    notif: list[dict[str, Any]] = []
     for item in itens:
         if not isinstance(item, dict):
             continue
@@ -546,18 +543,8 @@ async def _enqueue_stock_refresh_for_order(
         sku_raw = item.get("codigo") or produto.get("codigo")
         sku = (str(sku_raw).strip() or None) if sku_raw is not None else None
         bling_pid = _int(produto.get("id"))
-        qty = _int(item.get("quantidade"))
-        desc = item.get("descricao") or produto.get("nome")
         product = await _resolve_local_product(
             session, sku=sku, bling_product_id=bling_pid
-        )
-        notif.append(
-            {
-                "sku": sku,
-                "desc": desc,
-                "qty": qty,
-                "matched": product is not None,
-            }
         )
         if product is None or product.id in seen_products:
             continue
@@ -593,54 +580,7 @@ async def _enqueue_stock_refresh_for_order(
         session.add(job)
         await session.flush()
         jobs.append((job.id, product.id, link_ids))
-    return jobs, notif
-
-
-async def _store_label(session: AsyncSession, bling_loja_id: int | None) -> str | None:
-    if bling_loja_id is None:
-        return None
-    row = (
-        await session.execute(
-            select(Store).where(Store.bling_store_id == bling_loja_id).limit(1)
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        return f"loja {bling_loja_id}"
-    return row.apelido_override or row.marketplace.value
-
-
-async def _notify_sale_telegram(
-    session: AsyncSession,
-    *,
-    user_id: UUID,
-    raw_order: dict[str, Any],
-    notif_items: list[dict[str, Any]],
-) -> None:
-    us = await session.get(UserSettings, user_id)
-    if us is None or not us.notify_telegram:
-        return
-    loja = raw_order.get("loja") or {}
-    bling_loja_id = _int(loja.get("id")) if isinstance(loja, dict) else None
-    store_label = await _store_label(session, bling_loja_id)
-    numero = raw_order.get("numero")
-    total = _num(raw_order.get("total"))
-    lines = [f"<b>Venda Bling</b> — pedido <code>{numero}</code>"]
-    if store_label:
-        lines.append(f"Loja: {store_label}")
-    if total is not None:
-        lines.append(f"Total: R$ {total:.2f}")
-    for it in notif_items:
-        mark = "" if it["matched"] else " ⚠ não importado"
-        desc = (it.get("desc") or "")[:60]
-        sku = it.get("sku") or "—"
-        qty = it.get("qty")
-        qty_s = f"×{qty}" if qty is not None else ""
-        lines.append(f"• {sku} {qty_s} — {desc}{mark}")
-    from app.services.telegram import TelegramClient
-
-    await TelegramClient().safe_send(
-        "\n".join(lines), chat_id=us.telegram_chat_id
-    )
+    return jobs
 
 
 async def run_ingest_bling_order(
@@ -652,8 +592,7 @@ async def run_ingest_bling_order(
 ) -> dict[str, Any]:
     """Worker entrypoint. Fetches order from Bling and upserts (or marks excluded).
     For non-exclusion events, also enqueues a SYNC_PRODUCT job per matched SKU
-    so the sale-driven stock refresh is visible in the jobs UI, and optionally
-    sends a Telegram notification."""
+    so the sale-driven stock refresh is visible in the jobs UI."""
     if event in ("pedido.exclusao", "order.deleted"):
         n = await mark_order_excluido(session, bling_order_id)
         await session.commit()
@@ -680,7 +619,7 @@ async def run_ingest_bling_order(
         return {"ok": False, "error": "empty_order"}
 
     n = await upsert_order(session, raw)
-    jobs, notif_items = await _enqueue_stock_refresh_for_order(
+    jobs = await _enqueue_stock_refresh_for_order(
         session, raw_order=raw, user_id=user_id
     )
     await session.commit()
@@ -722,13 +661,6 @@ async def run_ingest_bling_order(
                 if job is not None:
                     job.arq_job_id = arq.job_id
         await session.commit()
-
-    try:
-        await _notify_sale_telegram(
-            session, user_id=user_id, raw_order=raw, notif_items=notif_items
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("bling_order_telegram_failed", err=str(e))
 
     logger.info(
         "bling_order_ingested",
