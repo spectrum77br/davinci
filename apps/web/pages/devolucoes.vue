@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  ExternalLink,
   Loader2,
   Package,
   Plus,
@@ -115,6 +116,14 @@ function apiError(e: any) {
 function brl(v: number | null | undefined) {
   if (v == null) return '—'
   return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+}
+
+function normalizeUrl(v: string | null | undefined) {
+  if (!v) return ''
+  const trimmed = v.trim()
+  if (!trimmed) return ''
+  if (/^https?:\/\//i.test(trimmed)) return trimmed
+  return `https://${trimmed}`
 }
 
 function fmtDateTime(v: string | null) {
@@ -587,12 +596,24 @@ async function deleteRow(row: DevolutionRow) {
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <input
-                :value="row.link_abertura || ''"
-                :disabled="!canEdit"
-                :class="sheetInputClass"
-                @input="(e) => setRowText(row, 'link_abertura', (e.target as HTMLInputElement).value)"
-              />
+              <div class="flex items-center gap-1">
+                <input
+                  :value="row.link_abertura || ''"
+                  :disabled="!canEdit"
+                  :class="sheetInputClass"
+                  @input="(e) => setRowText(row, 'link_abertura', (e.target as HTMLInputElement).value)"
+                />
+                <a
+                  v-if="row.link_abertura"
+                  :href="normalizeUrl(row.link_abertura)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Abrir em nova guia"
+                  class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                >
+                  <ExternalLink class="size-3.5" />
+                </a>
+              </div>
             </td>
             <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
               <input
