@@ -49,6 +49,7 @@ type LookupRow = {
   pedido_marketplace: string | null
   plataforma: string | null
   conta: string
+  custo_produto: number | null
 }
 
 type RefundDraft = LookupRow & {
@@ -206,13 +207,10 @@ async function setRowTipo(row: RefundRow, value: string) {
   }
 }
 
-async function onDraftTipoChange() {
+function onDraftTipoChange() {
   if (!draft.value) return
-  if (draft.value.tipo === 'Extraviado') {
-    const cost = await fetchOrderCost(draft.value.pedido_bling, draft.value.conta)
-    if (cost != null && draft.value?.tipo === 'Extraviado') {
-      draft.value.prejuizo = cost
-    }
+  if (draft.value.tipo === 'Extraviado' && draft.value.custo_produto != null) {
+    draft.value.prejuizo = draft.value.custo_produto
   }
 }
 

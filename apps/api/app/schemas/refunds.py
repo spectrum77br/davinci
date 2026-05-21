@@ -114,6 +114,7 @@ class RefundLookupOut(BaseModel):
     pedido_marketplace: str | None = None
     plataforma: str | None = None
     conta: str
+    custo_produto: float | None = None
 
 
 class RefundOrderCostOut(BaseModel):

@@ -107,26 +107,22 @@ async def lookup_refund_order(
         await session.execute(
             text(
                 f"""
-                SELECT DISTINCT ON (pedido_bling, pedido_marketplace, plataforma, conta)
-                    data,
-                    pedido_bling,
-                    pedido_marketplace,
-                    plataforma,
-                    conta
-                FROM (
-                    SELECT
-                        v.data,
-                        v.pedido_bling::text AS pedido_bling,
-                        v.pedido_marketplace::text AS pedido_marketplace,
-                        COALESCE(v.plataforma_bling, v.plataforma_financeiro)::text AS plataforma,
-                        v.loja_nome::text AS conta
-                    FROM "{SCHEMA}".vw_conciliacao_margens_marketplace v
-                    WHERE v.pedido_bling::text = :pedido
-                       OR v.pedido_marketplace::text = :pedido
-                ) s
-                WHERE conta IS NOT NULL
-                  AND btrim(conta) <> ''
-                ORDER BY pedido_bling, pedido_marketplace, plataforma, conta, data DESC NULLS LAST
+                SELECT
+                    MAX(v.data) AS data,
+                    v.pedido_bling::text AS pedido_bling,
+                    MAX(v.pedido_marketplace)::text AS pedido_marketplace,
+                    COALESCE(v.plataforma_bling, v.plataforma_financeiro)::text AS plataforma,
+                    btrim(v.loja_nome) AS conta,
+                    SUM(v.bling_custo_produtos)::double precision AS custo_produto
+                FROM "{SCHEMA}".vw_conciliacao_margens_marketplace v
+                WHERE (v.pedido_bling::text = :pedido OR v.pedido_marketplace::text = :pedido)
+                  AND v.loja_nome IS NOT NULL
+                  AND btrim(v.loja_nome) <> ''
+                GROUP BY
+                    v.pedido_bling,
+                    COALESCE(v.plataforma_bling, v.plataforma_financeiro),
+                    btrim(v.loja_nome)
+                ORDER BY MAX(v.data) DESC NULLS LAST
                 LIMIT 20
                 """  # noqa: S608
             ),

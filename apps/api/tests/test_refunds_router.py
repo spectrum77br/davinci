@@ -72,13 +72,13 @@ async def test_lookup_refund_order_reads_conciliation_view(
         text(
             f"""
             CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace AS
-            SELECT
-                '2026-05-20T12:00:00+00:00'::timestamptz AS data,
-                '123456'::text AS pedido_bling,
-                'MLB999'::text AS pedido_marketplace,
-                'ml'::text AS plataforma_bling,
-                NULL::text AS plataforma_financeiro,
-                'Conta View'::text AS loja_nome
+            SELECT * FROM (VALUES
+                ('2026-05-20T12:00:00+00:00'::timestamptz, '123456'::text, 'MLB999'::text,
+                 'ml'::text, NULL::text, 'Conta View'::text, 12.50::numeric),
+                ('2026-05-20T12:00:00+00:00'::timestamptz, '123456'::text, 'MLB999'::text,
+                 'ml'::text, NULL::text, 'Conta View'::text, 7.25::numeric)
+            ) AS t(data, pedido_bling, pedido_marketplace, plataforma_bling,
+                   plataforma_financeiro, loja_nome, bling_custo_produtos)
             """  # noqa: S608
         )
     )
@@ -94,6 +94,7 @@ async def test_lookup_refund_order_reads_conciliation_view(
             "pedido_marketplace": "MLB999",
             "plataforma": "ml",
             "conta": "Conta View",
+            "custo_produto": 19.75,
         }
     ]
 
