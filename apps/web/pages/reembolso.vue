@@ -6,9 +6,7 @@ import {
   Loader2,
   Plus,
   RotateCcw,
-  Save,
   Search,
-  Trash2,
   X,
 } from 'lucide-vue-next'
 
@@ -67,7 +65,6 @@ const PAGE_SIZE = 100
 
 const { api } = useApi()
 const canEdit = useCan('reembolso', 'edit')
-const canDelete = useCan('reembolso', 'delete')
 
 const items = ref<RefundRow[]>([])
 const total = ref(0)
@@ -89,9 +86,7 @@ const lookupError = ref<string | null>(null)
 const creating = ref(false)
 const draft = ref<RefundDraft | null>(null)
 
-const dirtyRows = ref<Set<string>>(new Set())
-const savingRows = ref<Set<string>>(new Set())
-const deletingRows = ref<Set<string>>(new Set())
+const rowSaveQueue = new Map<string, Promise<void>>()
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 const rangeStart = computed(() => total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1)
@@ -102,7 +97,7 @@ const totalAConferir = computed(() => items.value.filter((row) => !row.conferido
 
 const sheetInputClass = 'h-7 w-full rounded-none border-0 bg-transparent px-1 text-xs focus:bg-background focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-70'
 const sheetSelectClass = `${sheetInputClass} cursor-pointer`
-const sheetMoneyInputClass = `${sheetInputClass} text-right tabular-nums`
+const sheetMoneyInputClass = `${sheetInputClass} text-right tabular-nums [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:m-0 [&::-webkit-inner-spin-button]:appearance-none`
 
 function apiError(e: any) {
   const detail = e?.data?.detail
@@ -128,58 +123,29 @@ function fmtDateTime(v: string | null) {
   })
 }
 
-function markDirty(id: string) {
-  const next = new Set(dirtyRows.value)
-  next.add(id)
-  dirtyRows.value = next
-}
-
-function clearDirty(id: string) {
-  const next = new Set(dirtyRows.value)
-  next.delete(id)
-  dirtyRows.value = next
-}
-
-function hasDirty(id: string) {
-  return dirtyRows.value.has(id)
-}
-
-function setSaving(id: string, saving: boolean) {
-  const next = new Set(savingRows.value)
-  if (saving) next.add(id)
-  else next.delete(id)
-  savingRows.value = next
-}
-
-function isSaving(id: string) {
-  return savingRows.value.has(id)
-}
-
-function setDeleting(id: string, deleting: boolean) {
-  const next = new Set(deletingRows.value)
-  if (deleting) next.add(id)
-  else next.delete(id)
-  deletingRows.value = next
-}
-
-function isDeleting(id: string) {
-  return deletingRows.value.has(id)
-}
-
 function numberOrNull(value: string) {
   if (value === '') return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
 }
 
-function setRowNumber(row: RefundRow, field: 'prejuizo' | 'reembolso', value: string) {
-  row[field] = numberOrNull(value)
-  markDirty(row.id)
+function clampReembolsoForCliente(row: RefundRow) {
+  if (row.tipo === 'Cliente' && row.reembolso != null && row.reembolso > 0) {
+    row.reembolso = -row.reembolso
+  }
+}
+
+function setRowReembolso(row: RefundRow, value: string) {
+  const parsed = numberOrNull(value)
+  if (parsed != null && row.tipo === 'Cliente' && parsed > 0) {
+    row.reembolso = -parsed
+  } else {
+    row.reembolso = parsed
+  }
 }
 
 function setRowText(row: RefundRow, field: 'chamado' | 'operacao' | 'observacao', value: string) {
   row[field] = value || null
-  markDirty(row.id)
 }
 
 async function fetchOrderCost(pedido_bling: string | null, conta: string | null): Promise<number | null> {
@@ -197,14 +163,14 @@ async function fetchOrderCost(pedido_bling: string | null, conta: string | null)
 async function setRowTipo(row: RefundRow, value: string) {
   const next = (value || null) as RefundTipo | null
   row.tipo = next
-  markDirty(row.id)
+  if (next === 'Cliente') clampReembolsoForCliente(row)
   if (next === 'Extraviado') {
     const cost = await fetchOrderCost(row.pedido_bling, row.conta)
     if (cost != null && row.tipo === 'Extraviado') {
       row.prejuizo = cost
-      markDirty(row.id)
     }
   }
+  await saveRow(row)
 }
 
 function onDraftTipoChange() {
@@ -214,9 +180,9 @@ function onDraftTipoChange() {
   }
 }
 
-function setRowConferido(row: RefundRow, value: boolean) {
+async function setRowConferido(row: RefundRow, value: boolean) {
   row.conferido = value
-  markDirty(row.id)
+  await saveRow(row)
 }
 
 async function load() {
@@ -234,7 +200,6 @@ async function load() {
     items.value = res.items
     total.value = res.total
     platforms.value = res.platforms
-    dirtyRows.value = new Set()
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -351,40 +316,28 @@ function rowPatchPayload(row: RefundRow) {
   }
 }
 
-async function saveRow(row: RefundRow) {
-  if (!canEdit.value || !hasDirty(row.id) || isSaving(row.id)) return
-  setSaving(row.id, true)
-  error.value = null
-  try {
-    const updated = await api<RefundRow>(`/api/refunds/${encodeURIComponent(row.id)}`, {
-      method: 'PATCH',
-      body: rowPatchPayload(row),
+async function saveRow(row: RefundRow): Promise<void> {
+  if (!canEdit.value) return
+  const id = row.id
+  const prev = rowSaveQueue.get(id) ?? Promise.resolve()
+  const next = prev
+    .catch(() => undefined)
+    .then(async () => {
+      try {
+        await api(`/api/refunds/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          body: rowPatchPayload(row),
+        })
+        error.value = null
+      } catch (e: any) {
+        error.value = apiError(e)
+      }
     })
-    const idx = items.value.findIndex((item) => item.id === row.id)
-    if (idx >= 0) items.value[idx] = updated
-    clearDirty(row.id)
-  } catch (e: any) {
-    error.value = apiError(e)
-  } finally {
-    setSaving(row.id, false)
-  }
-}
-
-async function deleteRow(row: RefundRow) {
-  if (!canDelete.value || isDeleting(row.id)) return
-  const ok = window.confirm(`Excluir reembolso do pedido ${row.pedido_bling || row.pedido_marketplace || row.id}?`)
-  if (!ok) return
-  setDeleting(row.id, true)
-  error.value = null
-  try {
-    await api(`/api/refunds/${encodeURIComponent(row.id)}`, { method: 'DELETE' })
-    items.value = items.value.filter((item) => item.id !== row.id)
-    total.value = Math.max(0, total.value - 1)
-  } catch (e: any) {
-    error.value = apiError(e)
-  } finally {
-    setDeleting(row.id, false)
-  }
+    .finally(() => {
+      if (rowSaveQueue.get(id) === next) rowSaveQueue.delete(id)
+    })
+  rowSaveQueue.set(id, next)
+  await next
 }
 </script>
 
@@ -558,13 +511,12 @@ async function deleteRow(row: RefundRow) {
     </div>
 
     <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
-      <table class="min-w-[1540px] text-xs border-collapse">
+      <table class="min-w-[1440px] text-xs border-collapse">
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="5">Identificação</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="5">Reembolso</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Conferência</th>
-            <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Ações</th>
           </tr>
           <tr class="border-b">
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data</th>
@@ -579,18 +531,17 @@ async function deleteRow(row: RefundRow) {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px] bg-amber-50 dark:bg-amber-900/20">Operação</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Conferido</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[260px] bg-emerald-50 dark:bg-emerald-900/20">Observação</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] border-l-[3px] border-gray-400 dark:border-gray-600"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="13" class="py-8 text-center text-muted-foreground">
+            <td colspan="12" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td colspan="13" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td colspan="12" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -609,15 +560,8 @@ async function deleteRow(row: RefundRow) {
                 <option v-for="tipo in TIPO_OPTIONS" :key="tipo" :value="tipo">{{ tipo }}</option>
               </select>
             </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <input
-                :value="row.prejuizo ?? ''"
-                :disabled="!canEdit"
-                type="number"
-                step="0.01"
-                :class="sheetMoneyInputClass"
-                @input="(e) => setRowNumber(row, 'prejuizo', (e.target as HTMLInputElement).value)"
-              />
+            <td class="px-2 py-1 text-right tabular-nums bg-amber-50/40 dark:bg-amber-900/10 text-muted-foreground">
+              {{ row.prejuizo ?? '—' }}
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input
@@ -625,8 +569,10 @@ async function deleteRow(row: RefundRow) {
                 :disabled="!canEdit"
                 type="number"
                 step="0.01"
+                :max="row.tipo === 'Cliente' ? 0 : undefined"
                 :class="sheetMoneyInputClass"
-                @input="(e) => setRowNumber(row, 'reembolso', (e.target as HTMLInputElement).value)"
+                @input="(e) => setRowReembolso(row, (e.target as HTMLInputElement).value)"
+                @change="saveRow(row)"
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -635,6 +581,7 @@ async function deleteRow(row: RefundRow) {
                 :disabled="!canEdit"
                 :class="sheetInputClass"
                 @input="(e) => setRowText(row, 'chamado', (e.target as HTMLInputElement).value)"
+                @change="saveRow(row)"
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -643,6 +590,7 @@ async function deleteRow(row: RefundRow) {
                 :disabled="!canEdit"
                 :class="sheetInputClass"
                 @input="(e) => setRowText(row, 'operacao', (e.target as HTMLInputElement).value)"
+                @change="saveRow(row)"
               />
             </td>
             <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
@@ -660,32 +608,8 @@ async function deleteRow(row: RefundRow) {
                 :disabled="!canEdit"
                 :class="sheetInputClass"
                 @input="(e) => setRowText(row, 'observacao', (e.target as HTMLInputElement).value)"
+                @change="saveRow(row)"
               />
-            </td>
-            <td class="px-2 py-1 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <div class="flex items-center justify-end gap-1">
-                <button
-                  type="button"
-                  class="inline-flex h-7 w-7 items-center justify-center rounded border text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-default disabled:opacity-40"
-                  :disabled="!canEdit || !hasDirty(row.id) || isSaving(row.id)"
-                  title="Salvar"
-                  @click="saveRow(row)"
-                >
-                  <Loader2 v-if="isSaving(row.id)" class="size-4 animate-spin" />
-                  <Save v-else class="size-4" />
-                </button>
-                <button
-                  v-if="canDelete"
-                  type="button"
-                  class="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-red-500/10 hover:text-red-500 disabled:cursor-default disabled:opacity-40"
-                  :disabled="isDeleting(row.id)"
-                  title="Excluir"
-                  @click="deleteRow(row)"
-                >
-                  <Loader2 v-if="isDeleting(row.id)" class="size-4 animate-spin" />
-                  <Trash2 v-else class="size-4" />
-                </button>
-              </div>
             </td>
           </tr>
         </tbody>
