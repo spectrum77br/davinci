@@ -24,13 +24,26 @@ logger = structlog.get_logger()
 
 
 async def rebuild_all(session: AsyncSession) -> int:
-    """Full rebuild: DELETE + INSERT in a single transaction.
+    """Full rebuild dentro da janela de 20d (escopo da view base).
+
+    Apaga somente as linhas cujo bling_order_item_id aparece na view base
+    (janela de 20d) e re-insere a partir dela. Linhas de pedidos antigos
+    inseridos por outros caminhos — tipicamente refunds manuais — ficam
+    preservadas para que o usuario consiga aprovar o saldo final na
+    pagina de margens mesmo apos um rebuild manual.
 
     MVCC keeps concurrent SELECT readers on the pre-commit snapshot,
-    so the ~17s rebuild does not block the margens page (unlike
-    TRUNCATE, which takes ACCESS EXCLUSIVE).
+    so the ~17s rebuild does not block the margens page.
     """
-    await session.execute(text("DELETE FROM davinci.verificar_margem"))
+    await session.execute(
+        text(
+            "DELETE FROM davinci.verificar_margem v "
+            "WHERE v.bling_order_item_id IN ("
+            "  SELECT bling_order_item_id "
+            "  FROM davinci.vw_conciliacao_margens_marketplace"
+            ")"
+        )
+    )
     result = await session.execute(
         text(
             "INSERT INTO davinci.verificar_margem "
@@ -42,7 +55,12 @@ async def rebuild_all(session: AsyncSession) -> int:
 
 
 async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
-    """Targeted refresh of one order by its Bling `numero`."""
+    """Targeted refresh of one order by its Bling `numero`.
+
+    Le da view "_all" (sem janela de 20d) para que pedidos antigos
+    referenciados manualmente em refunds tambem apareçam em
+    verificar_margem e fiquem disponiveis na pagina de margens.
+    """
     await session.execute(
         text("DELETE FROM davinci.verificar_margem WHERE pedido_bling = :p"),
         {"p": pedido_bling},
@@ -50,7 +68,7 @@ async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
     result = await session.execute(
         text(
             "INSERT INTO davinci.verificar_margem "
-            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace "
+            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace_all "
             "WHERE pedido_bling = :p"
         ),
         {"p": pedido_bling},
@@ -60,7 +78,10 @@ async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
 
 
 async def refresh_for_bling_id(session: AsyncSession, bling_id: int) -> int:
-    """Targeted refresh of one order by its internal Bling id."""
+    """Targeted refresh of one order by its internal Bling id.
+
+    Le da view "_all" (sem janela de 20d), mesmo motivo de refresh_for_pedido.
+    """
     await session.execute(
         text("DELETE FROM davinci.verificar_margem WHERE bling_id = :b"),
         {"b": bling_id},
@@ -68,7 +89,7 @@ async def refresh_for_bling_id(session: AsyncSession, bling_id: int) -> int:
     result = await session.execute(
         text(
             "INSERT INTO davinci.verificar_margem "
-            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace "
+            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace_all "
             "WHERE bling_id = :b"
         ),
         {"b": bling_id},
