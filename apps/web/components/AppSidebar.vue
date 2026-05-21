@@ -2,7 +2,7 @@
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
-  Package, Megaphone, DollarSign, Truck, RefreshCw, Undo2,
+  Package, Megaphone, DollarSign, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
   Store, Tags, ClipboardList, ChevronLeft, ChevronRight,
 } from 'lucide-vue-next'
@@ -88,7 +88,6 @@ const sections: Section[] = [
   {
     label: 'Pós-venda',
     items: [
-      { to: '/conciliacao-frete', label: 'Conciliação frete', icon: Truck, resource: 'conciliacao_frete' },
       { to: '/devolucoes', label: 'Devoluções', icon: Undo2, resource: 'devolucoes' },
       { to: '/reembolso', label: 'Reembolso', icon: Receipt, resource: 'reembolso' },
     ],

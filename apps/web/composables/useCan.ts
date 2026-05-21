@@ -8,7 +8,6 @@ export type Resource =
   | 'tabela_precos_produtos'
   | 'tabela_precos_concorrencia'
   | 'margem'
-  | 'conciliacao_frete'
   | 'devolucoes'
   | 'reembolso'
   | 'sincronizacoes'
@@ -45,7 +44,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     label: 'Pós-venda',
-    resources: ['conciliacao_frete', 'devolucoes', 'reembolso'],
+    resources: ['devolucoes', 'reembolso'],
   },
   {
     label: 'Sistema',
@@ -73,7 +72,6 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   tabela_precos_produtos: 'Tabela Preços — Produtos',
   tabela_precos_concorrencia: 'Tabela Preços — Concorrência',
   margem: 'Margem',
-  conciliacao_frete: 'Conciliação Frete',
   devolucoes: 'Devoluções',
   reembolso: 'Reembolso',
   sincronizacoes: 'Sincronizações',
