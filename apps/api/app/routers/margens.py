@@ -376,6 +376,63 @@ async def sync_bling_from_marketplace(
     }
 
 
+@router.post("/marketplace/{bling_order_item_id}/sync-saldo-final")
+async def sync_bling_from_saldo_final(
+    bling_order_item_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("margem", "edit"))],
+) -> dict:
+    """One-shot apply: grava o Saldo Final como `valor_base` no Bling.
+
+    Mesmo padrao do sync-from-marketplace, mas usando `saldo_final` (saldo
+    efetivo do marketplace ajustado por prejuizo/reembolso da tabela
+    refunds) como valor liquido. Zera custofrete e taxacomissao para que
+    (valor_base − taxa − frete) = saldo_final.
+    """
+    row = (await session.execute(
+        text(
+            """
+            SELECT v.saldo_final, v.pedido_bling
+            FROM davinci.verificar_margem v
+            WHERE v.bling_order_item_id = :id
+            LIMIT 1
+            """
+        ),
+        {"id": str(bling_order_item_id)},
+    )).first()
+    if row is None:
+        raise HTTPException(404, detail={"code": "row_not_found"})
+    if row.saldo_final is None:
+        raise HTTPException(400, detail={"code": "no_saldo_final"})
+
+    result = await session.execute(
+        update(BlingOrder)
+        .where(BlingOrder.id == bling_order_item_id)
+        .values(
+            valorbase=row.saldo_final,
+            taxacomissao=0,
+            custofrete=0,
+        )
+    )
+    await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(404, detail={"code": "bling_order_not_found"})
+
+    logger.info(
+        "saldo_final_synced_to_bling",
+        bling_order_item_id=str(bling_order_item_id),
+        pedido_bling=row.pedido_bling,
+        valorbase=str(row.saldo_final),
+    )
+    await _refresh_verificar_margem_silent(session, pedido_bling=str(row.pedido_bling))
+    return {
+        "ok": True,
+        "valorbase": float(row.saldo_final),
+        "taxacomissao": 0.0,
+        "custofrete": 0.0,
+    }
+
+
 @router.post("/marketplace/refresh")
 async def refresh_marketplace_mv(
     session: Annotated[AsyncSession, Depends(get_session)],
