@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission, user_scope
+from app.deps.auth import require_admin, require_permission, user_scope
 from app.models import (
     AuditDismissedSku,
     BackgroundJob,
@@ -2049,9 +2049,7 @@ async def patch_store_info(
 async def reveal_store_info_password(
     store_info_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("tabela_precos", "edit"))
-    ],
+    user: Annotated[User, Depends(require_admin)],
 ) -> dict[str, str]:
     row = (
         await session.execute(

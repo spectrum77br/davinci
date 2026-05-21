@@ -110,6 +110,8 @@ const DEPARTMENTS = [
 const { api } = useApi()
 const canEdit = useCan('tabela_precos', 'edit')
 const canDelete = useCan('tabela_precos', 'delete')
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.isAdmin)
 
 const items = ref<StoreInfo[]>([])
 const integrations = ref<IntegrationRef[]>([])
@@ -528,7 +530,7 @@ async function copyText(text: string) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">CNPJ</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">E-mail</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Fone</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Senha</th>
+            <th v-if="isAdmin" class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Senha</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border w-32">End. Envio</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border w-32">End. Dev.</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[160px]">Obs</th>
@@ -569,7 +571,7 @@ async function copyText(text: string) {
                 @keydown.escape="showAdd = false"
               />
             </td>
-            <td v-for="i in 13" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
+            <td v-for="i in (isAdmin ? 13 : 12)" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
             <td class="border border-border px-1 py-1 text-center">
               <div class="flex gap-0.5 justify-center">
                 <button class="p-1 text-emerald-600 hover:bg-emerald-50 rounded" :disabled="adding" @click="submitNew">
@@ -677,8 +679,8 @@ async function copyText(text: string) {
                 </span>
               </td>
             </template>
-            <!-- password -->
-            <td class="border border-border px-2 py-1.5 text-xs">
+            <!-- password (admins only) -->
+            <td v-if="isAdmin" class="border border-border px-2 py-1.5 text-xs">
               <div class="flex items-center gap-1 group">
                 <span
                   class="cursor-pointer truncate flex-1 font-mono"
