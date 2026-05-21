@@ -96,3 +96,48 @@ async def test_lookup_refund_order_reads_conciliation_view(
             "conta": "Conta View",
         }
     ]
+
+
+async def test_order_cost_sums_bling_custo_produtos(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    user = await make_user(permissions=_refund_permissions(edit=False, delete=False))
+    auth_as(user)
+    schema = get_settings().database_schema
+    await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_conciliacao_margens_marketplace'))
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace AS
+            SELECT * FROM (VALUES
+                ('123456'::text, 'Conta View'::text, 12.50::numeric),
+                ('123456'::text, 'Conta View'::text, 7.25::numeric),
+                ('123456'::text, 'Outra Conta'::text, 99.00::numeric),
+                ('999999'::text, 'Conta View'::text, 50.00::numeric)
+            ) AS t(pedido_bling, loja_nome, bling_custo_produtos)
+            """  # noqa: S608
+        )
+    )
+    await db.commit()
+
+    response = await client.get(
+        "/api/refunds/order-cost",
+        params={"pedido_bling": "123456", "conta": "Conta View"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "pedido_bling": "123456",
+        "conta": "Conta View",
+        "custo_produto": 19.75,
+    }
+
+    empty = await client.get(
+        "/api/refunds/order-cost",
+        params={"pedido_bling": "no-match", "conta": "Conta View"},
+    )
+    assert empty.status_code == 200
+    assert empty.json()["custo_produto"] is None

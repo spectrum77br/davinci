@@ -181,9 +181,39 @@ function setRowText(row: RefundRow, field: 'chamado' | 'operacao' | 'observacao'
   markDirty(row.id)
 }
 
-function setRowTipo(row: RefundRow, value: string) {
-  row.tipo = (value || null) as RefundTipo | null
+async function fetchOrderCost(pedido_bling: string | null, conta: string | null): Promise<number | null> {
+  if (!pedido_bling || !conta) return null
+  try {
+    const params = new URLSearchParams({ pedido_bling, conta })
+    const res = await api<{ custo_produto: number | null }>(`/api/refunds/order-cost?${params.toString()}`)
+    return res.custo_produto ?? null
+  } catch (e: any) {
+    error.value = apiError(e)
+    return null
+  }
+}
+
+async function setRowTipo(row: RefundRow, value: string) {
+  const next = (value || null) as RefundTipo | null
+  row.tipo = next
   markDirty(row.id)
+  if (next === 'Extraviado') {
+    const cost = await fetchOrderCost(row.pedido_bling, row.conta)
+    if (cost != null && row.tipo === 'Extraviado') {
+      row.prejuizo = cost
+      markDirty(row.id)
+    }
+  }
+}
+
+async function onDraftTipoChange() {
+  if (!draft.value) return
+  if (draft.value.tipo === 'Extraviado') {
+    const cost = await fetchOrderCost(draft.value.pedido_bling, draft.value.conta)
+    if (cost != null && draft.value?.tipo === 'Extraviado') {
+      draft.value.prejuizo = cost
+    }
+  }
 }
 
 function setRowConferido(row: RefundRow, value: boolean) {
@@ -469,7 +499,7 @@ async function deleteRow(row: RefundRow) {
               <td class="px-2 py-1 uppercase">{{ draft.plataforma || '—' }}</td>
               <td class="px-2 py-1">{{ draft.conta }}</td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-                <select v-model="draft.tipo" :class="sheetSelectClass">
+                <select v-model="draft.tipo" :class="sheetSelectClass" @change="onDraftTipoChange">
                   <option value="">—</option>
                   <option v-for="tipo in TIPO_OPTIONS" :key="tipo" :value="tipo">{{ tipo }}</option>
                 </select>

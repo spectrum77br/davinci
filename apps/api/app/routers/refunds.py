@@ -10,7 +10,14 @@ from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import Refund, User
-from app.schemas.refunds import RefundCreate, RefundLookupOut, RefundOut, RefundPage, RefundPatch
+from app.schemas.refunds import (
+    RefundCreate,
+    RefundLookupOut,
+    RefundOrderCostOut,
+    RefundOut,
+    RefundPage,
+    RefundPatch,
+)
 from app.services.verificar_margem import refresh_silent as _verificar_margem_refresh_silent
 
 logger = structlog.get_logger()
@@ -128,6 +135,39 @@ async def lookup_refund_order(
     ).mappings().all()
 
     return [RefundLookupOut.model_validate(dict(row)) for row in rows]
+
+
+@router.get("/order-cost", response_model=RefundOrderCostOut)
+async def get_order_cost(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("reembolso", "view"))],
+    pedido_bling: str = Query(..., min_length=1),
+    conta: str = Query(..., min_length=1),
+) -> RefundOrderCostOut:
+    pedido_bling = pedido_bling.strip()
+    conta = conta.strip()
+    if not pedido_bling or not conta:
+        raise HTTPException(422, detail={"code": "pedido_and_conta_required"})
+
+    row = (
+        await session.execute(
+            text(
+                f"""
+                SELECT SUM(v.bling_custo_produtos)::double precision AS custo_produto
+                FROM "{SCHEMA}".vw_conciliacao_margens_marketplace v
+                WHERE v.pedido_bling::text = :pedido_bling
+                  AND btrim(v.loja_nome) = :conta
+                """  # noqa: S608
+            ),
+            {"pedido_bling": pedido_bling, "conta": conta},
+        )
+    ).mappings().first()
+
+    return RefundOrderCostOut(
+        pedido_bling=pedido_bling,
+        conta=conta,
+        custo_produto=row["custo_produto"] if row else None,
+    )
 
 
 @router.post("", response_model=RefundOut, status_code=status.HTTP_201_CREATED)
