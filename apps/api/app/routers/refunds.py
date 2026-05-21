@@ -17,6 +17,7 @@ from app.schemas.refunds import (
     RefundOut,
     RefundPage,
     RefundPatch,
+    _clamp_cliente_reembolso,
 )
 
 logger = structlog.get_logger()
@@ -209,6 +210,10 @@ async def patch_refund(
 
     for key, value in data.items():
         setattr(row, key, value)
+
+    # Enforce Cliente -> reembolso <= 0 against the merged state (tipo or
+    # reembolso may have come from either the patch or the existing row).
+    row.reembolso = _clamp_cliente_reembolso(row.tipo, row.reembolso)
 
     await session.commit()
     await session.refresh(row)

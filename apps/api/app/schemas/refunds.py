@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 RefundTipo = Literal["Logistica", "Cliente", "Manutenção", "Extraviado"]
 
@@ -12,6 +12,14 @@ def _clean_optional_text(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _clamp_cliente_reembolso(tipo: str | None, reembolso: float | None) -> float | None:
+    """Mirror frontend behavior: when tipo='Cliente', reembolso must be <= 0.
+    Positive values are auto-negated. Negative/null/zero pass through."""
+    if tipo == "Cliente" and reembolso is not None and reembolso > 0:
+        return -reembolso
+    return reembolso
 
 
 class RefundOut(BaseModel):
@@ -68,6 +76,11 @@ class RefundCreate(BaseModel):
         if not value:
             raise ValueError("conta cannot be blank")
         return value
+
+    @model_validator(mode="after")
+    def _enforce_cliente_reembolso(self) -> "RefundCreate":
+        self.reembolso = _clamp_cliente_reembolso(self.tipo, self.reembolso)
+        return self
 
 
 class RefundPatch(BaseModel):

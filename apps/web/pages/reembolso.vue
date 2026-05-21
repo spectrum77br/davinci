@@ -178,6 +178,19 @@ function onDraftTipoChange() {
   if (draft.value.tipo === 'Extraviado' && draft.value.custo_produto != null) {
     draft.value.prejuizo = draft.value.custo_produto
   }
+  if (draft.value.tipo === 'Cliente' && draft.value.reembolso != null && draft.value.reembolso > 0) {
+    draft.value.reembolso = -draft.value.reembolso
+  }
+}
+
+function setDraftReembolso(value: string) {
+  if (!draft.value) return
+  const parsed = numberOrNull(value)
+  if (parsed != null && draft.value.tipo === 'Cliente' && parsed > 0) {
+    draft.value.reembolso = -parsed
+  } else {
+    draft.value.reembolso = parsed
+  }
 }
 
 async function setRowConferido(row: RefundRow, value: boolean) {
@@ -459,7 +472,14 @@ async function saveRow(row: RefundRow): Promise<void> {
                 <input v-model.number="draft.prejuizo" type="number" step="0.01" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model.number="draft.reembolso" type="number" step="0.01" :class="sheetMoneyInputClass" />
+                <input
+                  :value="draft.reembolso ?? ''"
+                  type="number"
+                  step="0.01"
+                  :max="draft.tipo === 'Cliente' ? 0 : undefined"
+                  :class="sheetMoneyInputClass"
+                  @input="(e) => setDraftReembolso((e.target as HTMLInputElement).value)"
+                />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input v-model="draft.chamado" :class="sheetInputClass" />

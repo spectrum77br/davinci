@@ -58,6 +58,69 @@ async def test_create_refund_starts_unchecked_and_can_be_patched(client, make_us
     assert updated["chamado"] == "CH-1"
 
 
+async def test_cliente_reembolso_is_clamped_to_non_positive(client, make_user, auth_as):
+    user = await make_user(permissions=_refund_permissions())
+    auth_as(user)
+
+    # Create with Cliente + positive reembolso → auto-negated.
+    response = await client.post(
+        "/api/refunds",
+        json={
+            "pedido_bling": "C-1",
+            "conta": "Loja X",
+            "tipo": "Cliente",
+            "reembolso": 12.5,
+        },
+    )
+    assert response.status_code == 201
+    created = response.json()
+    assert created["tipo"] == "Cliente"
+    assert created["reembolso"] == -12.5
+
+    # Patch a Logistica row to tipo=Cliente without resending reembolso →
+    # existing positive reembolso must still get clamped.
+    logistica = await client.post(
+        "/api/refunds",
+        json={
+            "pedido_bling": "C-2",
+            "conta": "Loja X",
+            "tipo": "Logistica",
+            "reembolso": 8.0,
+        },
+    )
+    assert logistica.status_code == 201
+    assert logistica.json()["reembolso"] == 8.0  # not Cliente → untouched
+
+    flip = await client.patch(
+        f"/api/refunds/{logistica.json()['id']}",
+        json={"tipo": "Cliente"},
+    )
+    assert flip.status_code == 200
+    assert flip.json()["reembolso"] == -8.0
+
+    # Patch only reembolso on an already-Cliente row with a positive value →
+    # also clamped.
+    bump = await client.patch(
+        f"/api/refunds/{created['id']}",
+        json={"reembolso": 30.0},
+    )
+    assert bump.status_code == 200
+    assert bump.json()["reembolso"] == -30.0
+
+    # Other tipos accept positive reembolso unchanged.
+    other = await client.post(
+        "/api/refunds",
+        json={
+            "pedido_bling": "C-3",
+            "conta": "Loja X",
+            "tipo": "Extraviado",
+            "reembolso": 5.0,
+        },
+    )
+    assert other.status_code == 201
+    assert other.json()["reembolso"] == 5.0
+
+
 async def test_lookup_refund_order_reads_conciliation_view(
     client,
     db: AsyncSession,
