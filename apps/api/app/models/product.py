@@ -58,6 +58,11 @@ class Product(Base, TimestampMixin):
     bling_cost_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # Units held by ongoing sales — `saldoFisicoTotal - saldoVirtualTotal`
+    # from the Bling estoque webhook. Updated by the webhook handler
+    # whenever a payload carries both totals. Default 0 until the first
+    # estoque event arrives.
+    reserved_stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     min_stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     bling_product_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Bling product flags (char(1) in DB, populated by the importer):

@@ -5,6 +5,9 @@ from pydantic import BaseModel, EmailStr, Field
 from app.schemas.permissions import Permissions
 
 
+_STOCK_TAG_PATTERN = "^(ci|pi|ra|sa|sp)$"
+
+
 class UserOut(BaseModel):
     id: str
     open_id: str
@@ -17,6 +20,7 @@ class UserOut(BaseModel):
     bling_login: str | None = None
     adspower: str | None = None
     duoke: str | None = None
+    stock_tag: str | None = None
     permissions: dict
     last_login_at: datetime | None = None
     disabled_at: datetime | None = None
@@ -39,6 +43,7 @@ class UserCreate(BaseModel):
     bling_login: str | None = None
     adspower: str | None = None
     duoke: str | None = None
+    stock_tag: str | None = Field(default=None, pattern=_STOCK_TAG_PATTERN)
     permissions: Permissions | None = None
 
 
@@ -50,6 +55,9 @@ class UserPatch(BaseModel):
     bling_login: str | None = None
     adspower: str | None = None
     duoke: str | None = None
+    # `Field(default=None, pattern=...)` rejects garbage but allows None
+    # — the UI sends "" or null to clear the tag, both treated as null.
+    stock_tag: str | None = Field(default=None)
     status: str | None = Field(default=None, pattern="^(pending|active|suspended)$")
 
 

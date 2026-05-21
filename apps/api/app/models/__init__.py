@@ -56,6 +56,8 @@ from app.models.pricing import (
 from app.models.product import BackgroundJob, Product, ProductCategory, ProductLink
 from app.models.refund import Refund
 from app.models.segment import Segment
+from app.models.stock_check import StockCheck
+from app.models.stock_movement import StockMovement
 from app.models.sync_log import SyncLog
 from app.models.tarefa import Tarefa
 from app.models.user import User
@@ -116,6 +118,8 @@ __all__ = [
     "ProductLink",
     "Refund",
     "Segment",
+    "StockCheck",
+    "StockMovement",
     "Store",
     "StoreInfo",
     "StoreStatus",

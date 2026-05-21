@@ -10,6 +10,7 @@ Resource = Literal[
     "tabela_precos_produtos",
     "tabela_precos_concorrencia",
     "margem",
+    "controle_estoque",
     "devolucoes",
     "reembolso",
     "sincronizacoes",

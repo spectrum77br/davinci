@@ -8,6 +8,9 @@ export type AuthUser = {
   role: 'admin' | 'user'
   status: 'pending' | 'active' | 'suspended'
   permissions: Record<string, { view?: boolean; edit?: boolean; delete?: boolean }>
+  // Operator-of-stock tag (ci|pi|ra|sa|sp). When non-null and role !== 'admin',
+  // the user is locked to /controle-estoque by auth.global middleware.
+  stock_tag?: string | null
 }
 
 export const useAuthStore = defineStore('auth', {

@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
   Package, Megaphone, DollarSign, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
-  Store, Tags, ClipboardList, ChevronLeft, ChevronRight,
+  Store, Tags, ClipboardList, ChevronLeft, ChevronRight, Warehouse,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -83,6 +83,7 @@ const sections: Section[] = [
       { to: '/marketing', label: 'Marketing', icon: BarChart3, featureFlag: 'marketing' },
       { to: '/pricing/tabela', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
       { to: '/margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
+      { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse, resource: 'controle_estoque' },
     ],
   },
   {
@@ -122,8 +123,24 @@ const sections: Section[] = [
   },
 ]
 
-const visibleSections = computed(() =>
-  sections
+// "Operador de estoque" = role !== 'admin' AND stock_tag set. These
+// users only ever see /controle-estoque; the sidebar collapses to that
+// single item even though the route guard already locks them there.
+const isOperator = computed(
+  () => !auth.isAdmin && !!(auth.user?.stock_tag || '').trim(),
+)
+
+const visibleSections = computed(() => {
+  if (isOperator.value) {
+    return [
+      {
+        items: [
+          { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse },
+        ],
+      },
+    ]
+  }
+  return sections
     .map((s) => ({
       ...s,
       items: s.items.filter((it) => {
@@ -132,8 +149,8 @@ const visibleSections = computed(() =>
         return true
       }),
     }))
-    .filter((s) => s.items.length > 0),
-)
+    .filter((s) => s.items.length > 0)
+})
 
 function isActive(to: string) {
   if (to === '/') return route.path === '/'

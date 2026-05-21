@@ -17,6 +17,7 @@ from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
 from app.routers import devolutions as devolutions_router
 from app.routers import discrepancies as discrepancies_router
+from app.routers import estoque as estoque_router
 from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
@@ -140,6 +141,7 @@ app.include_router(margens_router.router)
 app.include_router(tarefas_router.router)
 app.include_router(refunds_router.router)
 app.include_router(devolutions_router.router)
+app.include_router(estoque_router.router)
 app.include_router(dev_router.router)
 
 if settings.enable_marketing:

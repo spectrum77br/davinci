@@ -17,6 +17,7 @@ type UserDetail = {
   bling_login: string | null
   adspower: string | null
   duoke: string | null
+  stock_tag: string | null
   permissions: Partial<Record<Resource, Partial<ResourcePerm>>>
   disabled_at: string | null
 }
@@ -47,6 +48,7 @@ const form = reactive({
   bling_login: '',
   adspower: '',
   duoke: '',
+  stock_tag: '',
   status: 'pending' as 'pending' | 'active' | 'suspended',
 })
 
@@ -59,6 +61,7 @@ function resetForm() {
   form.bling_login = user.value.bling_login || ''
   form.adspower = user.value.adspower || ''
   form.duoke = user.value.duoke || ''
+  form.stock_tag = user.value.stock_tag || ''
   form.status = user.value.status
 }
 
@@ -122,6 +125,9 @@ async function saveCadastral() {
     }
     body.email = form.email
     body.status = form.status
+    // Operator-of-stock tag — empty string clears it. Backend treats
+    // "" / null identically (no tag).
+    body.stock_tag = form.stock_tag || null
     user.value = await api<UserDetail>(`/api/users/${userId}`, { method: 'PATCH', body })
     resetPerms()
   } catch (e: any) {
@@ -218,6 +224,21 @@ async function removeUser() {
           <div>
             <Label>Duoke</Label>
             <Input v-model="form.duoke" />
+          </div>
+          <div>
+            <Label>Tag Estoque</Label>
+            <select v-model="form.stock_tag" class="w-full h-9 rounded-md border bg-background px-3 text-sm">
+              <option value="">(nenhuma)</option>
+              <option value="ci">ci</option>
+              <option value="pi">pi</option>
+              <option value="ra">ra</option>
+              <option value="sa">sa</option>
+              <option value="sp">sp</option>
+            </select>
+            <p class="text-[11px] text-muted-foreground mt-1">
+              Quando preenchida e o usuário não é admin, o sistema bloqueia em /controle-estoque
+              e filtra produtos por SKU terminando em <code>.{{ form.stock_tag || 'tag' }}</code>.
+            </p>
           </div>
           <div>
             <Label>Status</Label>

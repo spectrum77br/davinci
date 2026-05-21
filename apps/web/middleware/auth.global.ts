@@ -23,6 +23,22 @@ export default defineNuxtRouteMiddleware(async (to) => {
     return navigateTo('/')
   }
 
+  // Operador de estoque: role != admin AND stock_tag set → locked to
+  // /controle-estoque. Any other route bounces back. The sidebar also
+  // hides every other item for these users, but the guard is the
+  // authoritative line — a typed URL or stale bookmark still gets
+  // caught here.
+  if (
+    auth.isAuthenticated
+    && auth.user?.status === 'active'
+    && auth.user.role !== 'admin'
+    && (auth.user.stock_tag || '').trim()
+    && to.path !== '/controle-estoque'
+    && !to.path.startsWith('/login')
+  ) {
+    return navigateTo('/controle-estoque')
+  }
+
   // Redirect to onboarding if no integrations yet. Only on the root page —
   // we don't trap users inside other pages they navigated to deliberately.
   if (

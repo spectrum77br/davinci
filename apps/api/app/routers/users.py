@@ -38,6 +38,7 @@ def _to_out(u: User) -> UserOut:
         bling_login=u.bling_login,
         adspower=u.adspower,
         duoke=u.duoke,
+        stock_tag=u.stock_tag,
         permissions=u.permissions or {},
         last_login_at=u.last_login_at,
         disabled_at=u.disabled_at,
@@ -153,6 +154,7 @@ async def create_user(
         bling_login=body.bling_login,
         adspower=body.adspower,
         duoke=body.duoke,
+        stock_tag=body.stock_tag,
         role=UserRole.USER,
         status=UserStatus.PENDING,
         permissions=perms,
@@ -198,6 +200,15 @@ async def patch_user(
     for field in ("name", "tuta", "upseller", "bling_login", "adspower", "duoke"):
         if field in data:
             setattr(u, field, data[field])
+
+    # stock_tag accepts ci/pi/ra/sa/sp or empty/null to clear. Validates
+    # against the small enum here (not in Pydantic) so the admin can
+    # explicitly clear with "" without tripping the pattern.
+    if "stock_tag" in data:
+        raw = (data["stock_tag"] or "").strip().lower() or None
+        if raw is not None and raw not in {"ci", "pi", "ra", "sa", "sp"}:
+            raise HTTPException(400, detail={"code": "invalid_stock_tag"})
+        u.stock_tag = raw
 
     await session.commit()
     await session.refresh(u)

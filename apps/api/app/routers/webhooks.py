@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -33,6 +34,7 @@ from app.models import (
     LinkSyncStatus,
     Product,
     ProductLink,
+    StockMovement,
     SyncLog,
     SyncLogAction,
 )
@@ -113,7 +115,18 @@ async def _verify_bling_signature(
 
 
 def _extract_payload(parsed: dict[str, Any]) -> tuple[str | None, int | None, int | None, int | None]:
-    """Return (sku, bling_product_id, stock, bling_store_id) — best effort."""
+    """Return (sku, bling_product_id, stock, bling_store_id) — best effort.
+
+    Bling sends two webhook shapes that BOTH end up here:
+      * "produto.*" — stock lives at `dados.estoque.saldoVirtualTotal`.
+      * "estoque.*" — stock lives at `dados.saldoVirtualTotal` (root).
+    We try the nested path first (older / product-level events) and then
+    fall through to the root form. `_extract_stock_event` parses the
+    movement-specific fields (operacao, quantidade, saldoFisicoTotal)
+    that only appear on the estoque shape — kept separate so callers
+    that only care about the new stock value can keep their tuple
+    unpacking unchanged.
+    """
     dados = parsed.get("dados") or parsed.get("data") or {}
     if not isinstance(dados, dict):
         dados = {}
@@ -141,6 +154,14 @@ def _extract_payload(parsed: dict[str, Any]) -> tuple[str | None, int | None, in
                 stock = int(v)
             except (TypeError, ValueError):
                 stock = None
+    # Fall through to root for the estoque.* webhook shape.
+    if stock is None:
+        v = dados.get("saldoVirtualTotal")
+        if v is not None:
+            try:
+                stock = int(v)
+            except (TypeError, ValueError):
+                stock = None
 
     bling_store_id: int | None = None
     loja = dados.get("loja") or {}
@@ -151,6 +172,49 @@ def _extract_payload(parsed: dict[str, Any]) -> tuple[str | None, int | None, in
             bling_store_id = None
 
     return sku, bling_product_id, stock, bling_store_id
+
+
+def _extract_stock_event(
+    parsed: dict[str, Any],
+) -> tuple[str | None, int | None, float | None, str | None]:
+    """Pull the movement-specific fields out of the estoque webhook payload.
+
+    Returns `(operacao, quantidade, saldo_fisico_total, observacao)`.
+    All four are None on payloads that don't carry the estoque shape
+    (e.g. produto.alteracao) — the caller treats that as "no movement
+    to record". `operacao` is "E" (entrada) or "S" (saida); anything
+    else is normalised to None so the StockMovement insert never gets
+    a garbage `tipo`.
+    """
+    dados = parsed.get("dados") or parsed.get("data") or {}
+    if not isinstance(dados, dict):
+        return None, None, None, None
+
+    op_raw = dados.get("operacao")
+    operacao: str | None = None
+    if isinstance(op_raw, str) and op_raw.strip().upper() in ("E", "S"):
+        operacao = op_raw.strip().upper()
+
+    quantidade: int | None = None
+    raw_qtd = dados.get("quantidade")
+    if raw_qtd is not None:
+        try:
+            quantidade = int(float(raw_qtd))
+        except (TypeError, ValueError):
+            quantidade = None
+
+    saldo_fisico: float | None = None
+    raw_fisico = dados.get("saldoFisicoTotal")
+    if raw_fisico is not None:
+        try:
+            saldo_fisico = float(raw_fisico)
+        except (TypeError, ValueError):
+            saldo_fisico = None
+
+    obs_raw = dados.get("observacao") or dados.get("observacoes")
+    observacao: str | None = (obs_raw or "").strip() or None if isinstance(obs_raw, str) else None
+
+    return operacao, quantidade, saldo_fisico, observacao
 
 
 async def _claim_delivery(delivery_key: str) -> bool:
@@ -322,6 +386,30 @@ async def receive_bling_webhook(
 
         # Always update local DB with latest stock from Bling
         product.stock = stock
+
+        # Record the stock event for the operador-facing /controle-estoque
+        # journal AND update the cached `reserved_stock` (physical minus
+        # virtual). Only the estoque.* webhook carries `operacao` +
+        # `quantidade` — produto.* payloads make these None, so the
+        # StockMovement insert is skipped on those.
+        operacao_e, qtd_e, saldo_fisico_e, obs_e = _extract_stock_event(parsed)
+        if operacao_e and qtd_e is not None and qtd_e > 0:
+            session.add(
+                StockMovement(
+                    bling_product_id=int(product.bling_product_id or 0),
+                    sku=product.sku,
+                    product_name=product.name,
+                    date=datetime.now(UTC),
+                    tipo=operacao_e,
+                    quantidade=qtd_e,
+                    observacao=obs_e,
+                    origem=None,  # filled lazily on first /api/estoque/produtos read
+                    saldo_fisico=saldo_fisico_e,
+                    saldo_virtual=float(stock),
+                )
+            )
+        if saldo_fisico_e is not None:
+            product.reserved_stock = max(0, int(saldo_fisico_e - stock))
 
         if is_sale and stock > WEBHOOK_LOW_STOCK_LIMIT:
             # Sale but stock still high — defer to daily sync
