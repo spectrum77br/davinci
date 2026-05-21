@@ -78,6 +78,22 @@ class Settings(BaseSettings):
     amazon_ads_profile_id: str = ""
     amazon_ads_region: str = "na"  # na | eu | fe — SA shares the NA cluster
 
+    # Shopee Ads — separate feature flag from `enable_marketing` so the
+    # operator can pause JUST Shopee (e.g. while a quota issue with
+    # Shopee Open Platform is open) without affecting ML/Amazon sync.
+    # Default off — flip to true via prod .env once the partner_id
+    # rate-limit is confirmed cleared.
+    enable_shopee_ads: bool = False
+    # Pause between successive Ads API calls within a single shop sync.
+    # 30s is conservative — Shopee's per-partner Ads throttle is
+    # empirically <1 call/min, so spacing balance/daily/campaign calls
+    # 30s apart keeps a single-shop sync under the ceiling.
+    shopee_ads_delay_between_calls_s: int = 30
+    # Global cooldown after the first `ads_rate_limit_total_api` hit.
+    # During cooldown, the round-robin cron skips Shopee entirely.
+    # Default 3600 (1h) — operator can shorten via env.
+    shopee_ads_cooldown_on_rate_limit_s: int = 3600
+
     tiktok_app_key: str = ""
     tiktok_app_secret: str = ""
     tiktok_shop_cipher: str = ""

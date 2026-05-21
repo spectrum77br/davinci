@@ -30,8 +30,10 @@ import structlog
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models.integration import Integration
 from app.models.marketing import MarketingAccount, MarketingCampaign, MarketingMetric
+from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketing.alerts import (
     notify_high_acos,
@@ -40,6 +42,7 @@ from app.services.marketing.alerts import (
     record_sync_success,
 )
 from app.services.marketing.bling_revenue import BlingRevenue, get_bling_revenue
+from app.services.marketplaces.shopee import ShopeeClient
 from app.services.shopee_ads import (
     CampaignInfo,
     CampaignPerformance,
@@ -49,6 +52,15 @@ from app.services.shopee_ads import (
     ShopeeAdsError,
     ShopeeAdsRateLimit,
 )
+from app.services.telegram import TelegramClient
+
+logger = structlog.get_logger()
+
+# Redis key for the global Shopee Ads cooldown. Set after the first
+# `ads_rate_limit_total_api` hit so the next cron tick skips Shopee
+# entirely instead of hammering the throttle until the partner gets
+# suspended. Cleared automatically by Redis TTL expiry.
+_COOLDOWN_KEY = "shopee_ads:global_cooldown"
 
 # Errors that should NOT increment Integration.consecutive_errors. These
 # are operational states (no permission, no Ads enabled, rate-limited) —
@@ -80,13 +92,40 @@ _INTER_SHOP_DELAY = 5.0
 # above this floor.
 _MIN_SHOP_REFRESH = timedelta(hours=2)
 
-# Pacing between API calls WITHIN a single shop sync. Shopee's
-# per-partner Ads throttle is global so even successive endpoints
-# (daily → hourly → campaigns) on the same shop benefit from breathing
-# room between calls.
-_INTER_CALL_DELAY = 10.0
+# Pacing between API calls WITHIN a single shop sync. Now read from
+# `settings.shopee_ads_delay_between_calls_s` so the operator can tune
+# without redeploying. Default 30s — Shopee's per-partner Ads throttle
+# is so tight that 10s wasn't enough.
+def _inter_call_delay() -> float:
+    return float(get_settings().shopee_ads_delay_between_calls_s)
 
-logger = structlog.get_logger()
+
+async def _is_on_cooldown() -> bool:
+    """True if a previous tick set the global Shopee Ads cooldown."""
+    try:
+        return bool(await redis.exists(_COOLDOWN_KEY))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _set_cooldown(reason: str) -> None:
+    """Lock Shopee out for `settings.shopee_ads_cooldown_on_rate_limit_s`
+    seconds (default 3600 = 1h). Best-effort Telegram alert so the
+    operator knows the lockout fired."""
+    ttl = int(get_settings().shopee_ads_cooldown_on_rate_limit_s)
+    try:
+        await redis.set(_COOLDOWN_KEY, reason, ex=ttl)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("shopee_ads_cooldown_set_failed", err=str(e)[:200])
+        return
+    logger.warning("shopee_ads_cooldown_activated", reason=reason, ttl_seconds=ttl)
+    try:
+        await TelegramClient().safe_send(
+            f"⚠️ Shopee Ads RATE LIMITED — cooldown global ativo por {ttl // 60} min.\n"
+            f"Motivo: <code>{reason}</code>"
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 # Shopee credit balance below which we Telegram the operator. R$50 picked
 # from the spec; the real "low" threshold varies per shop's daily burn, so
@@ -127,7 +166,11 @@ async def sync_shopee_integration(
             integration.token_expires_at = datetime.fromtimestamp(int(expires_at), tz=UTC)
         await session.flush()
 
-    client = ShopeeAdsClient(creds, on_token_refresh=_persist_refreshed_creds)
+    # Composition: build a ShopeeClient (handles HMAC + token refresh)
+    # and wrap it in ShopeeAdsClient. Keeps Ads surface fully isolated
+    # from any future change to ShopeeClient.
+    shopee = ShopeeClient(creds, on_token_refresh=_persist_refreshed_creds)
+    client = ShopeeAdsClient(shopee)
 
     today = datetime.now(UTC).date()
     start_day = today - timedelta(days=_DAILY_LOOKBACK_DAYS - 1)
@@ -157,6 +200,8 @@ async def sync_shopee_integration(
                 balance_refreshed = True
             except ShopeeAdsRateLimit as rl:
                 # Rate-limited: keep cached value (if any), don't fail.
+                # ALSO arm the global cooldown so we don't hammer the
+                # partner-wide throttle through other shops this cycle.
                 logger.warning(
                     "shopee_ads_balance_rate_limited_using_cache",
                     integration_id=str(integration_id),
@@ -164,31 +209,38 @@ async def sync_shopee_integration(
                     cached_at=cached_balance_at.isoformat() if cached_balance_at else None,
                     code=rl.code,
                 )
+                await _set_cooldown(f"balance:{rl.code}")
+                # Bail out — the rest of the shop's endpoints would just
+                # add more 429s to the partner's counter.
+                await session.commit()
+                return {"status": "skipped", "code": rl.code, "message": "rate_limited_cooldown_set"}
             # Pace before the next call regardless of outcome — Shopee's
             # throttle counts attempted calls too.
-            await asyncio.sleep(_INTER_CALL_DELAY)
+            await asyncio.sleep(_inter_call_delay())
         daily = await client.get_daily_performance(start_day, today)
-        await asyncio.sleep(_INTER_CALL_DELAY)
+        await asyncio.sleep(_inter_call_delay())
         hourly = await client.get_hourly_performance(today) if pull_hourly else []
         if pull_hourly:
-            await asyncio.sleep(_INTER_CALL_DELAY)
+            await asyncio.sleep(_inter_call_delay())
         campaign_ids = await client.list_campaign_ids() if pull_campaigns else []
         if pull_campaigns and campaign_ids:
-            await asyncio.sleep(_INTER_CALL_DELAY)
+            await asyncio.sleep(_inter_call_delay())
         campaign_info = (
             await client.get_campaign_settings(campaign_ids) if campaign_ids else []
         )
         if campaign_info:
-            await asyncio.sleep(_INTER_CALL_DELAY)
+            await asyncio.sleep(_inter_call_delay())
         campaign_perf = (
             await client.get_campaign_performance(campaign_ids, start_day, today)
             if campaign_ids
             else []
         )
     except ShopeeAdsRateLimit as e:
-        # Non-balance rate limit on a campaign/perf endpoint — surface as
-        # skipped (not a real failure) so consecutive_errors stays at 0.
+        # Non-balance rate limit on a campaign/perf endpoint — arm the
+        # global cooldown and bail. consecutive_errors stays at 0 since
+        # this is operational, not a flapping bug.
         integration.last_error = f"{e.code}: {e.message}"[:500]
+        await _set_cooldown(f"perf:{e.code}")
         await session.commit()
         return {"status": "skipped", "code": e.code, "message": e.message}
     except ShopeeAdsError as e:
@@ -336,7 +388,20 @@ async def sync_shopee_single_next(session: AsyncSession) -> dict[str, Any]:
 
     Skips shops whose `last_ads_sync_at` is within `_MIN_SHOP_REFRESH`
     (2h) — returns `{status: 'all_fresh'}` when every eligible shop is
-    already recent."""
+    already recent.
+
+    Honours the global Shopee Ads cooldown (Redis-backed) — if a
+    previous tick got rate-limited, returns `{status: 'on_cooldown'}`
+    without making any API calls."""
+    if await _is_on_cooldown():
+        try:
+            ttl = await redis.ttl(_COOLDOWN_KEY)
+        except Exception:  # noqa: BLE001
+            ttl = -1
+        return {
+            "status": "on_cooldown",
+            "cooldown_remaining_seconds": max(ttl, 0),
+        }
     integ = (
         await session.execute(
             select(Integration)

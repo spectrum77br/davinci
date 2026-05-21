@@ -422,8 +422,12 @@ async def marketing_shopee_tick(ctx: dict) -> None:
     throttle which fails any batch over a few calls. With 13 shops × 5min
     cron, each shop refreshes ~once per 65 minutes — well under the
     throttle ceiling.
+
+    Double-gated by `enable_marketing` (turns off the whole module) and
+    `enable_shopee_ads` (turns off ONLY Shopee while keeping ML/Amazon
+    running — useful while a Shopee Open Platform quota ticket is open).
     """
-    if not _settings.enable_marketing:
+    if not _settings.enable_marketing or not _settings.enable_shopee_ads:
         return
     from app.services.marketing.shopee_sync import sync_shopee_single_next
 

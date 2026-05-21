@@ -1,24 +1,24 @@
 """Shopee Ads API client — Marketing module's data source for live Shopee data.
 
-Reuses `ShopeeClient`'s HMAC signing + token refresh (subclassing it gets us
-`_request`, `refresh`, the encrypted-creds shape, and the Redis-locked
-token rotation for free). All the methods here just wrap the
-`/api/v2/ads/*` endpoints with typed return values and apply the rate
-limit Shopee enforces (1 req/s, soft).
+**Composition over inheritance**: this wraps an existing `ShopeeClient`
+instance instead of subclassing it. The parent class is responsible for
+stock/price/order syncs that production depends on; we don't want any
+risk of an Ads-only change leaking back into those flows. The wrapper
+uses `ShopeeClient._request` (already-handled HMAC + token refresh +
+the Redis lock that prevents concurrent token rotation) without touching
+its public surface.
 
-Date format: Shopee Ads uses DD-MM-YYYY (NOT ISO). The helpers `_fmt_date`
-and `_parse_date` convert at the boundary so the rest of the app keeps
-dealing with `datetime.date`.
+Date format: Shopee Ads uses DD-MM-YYYY (NOT ISO). `_fmt_date` converts.
 
-Errors: every Shopee response carries `error` + `message`. We surface those
-as `ShopeeAdsError` so the orchestrator can decide between (a) silent fallback
-to last-saved DB row, (b) logging the issue + Telegram alert, or (c) hard
-failing for the operator. `error_permission_denied` is the most common one
-for accounts that haven't enabled Ads — we treat it as a soft error.
+Rate limit policy: **fail fast**. The earlier version retried 3× with
+backoff, which only deepened the partner-wide throttle ban. Now any
+rate-limit response raises `ShopeeAdsRateLimit` immediately so the
+orchestrator can set a global Redis cooldown and skip Shopee entirely
+for an hour. This is the only thing that keeps the partner-id from
+getting suspended.
 """
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from datetime import date
 
@@ -28,26 +28,15 @@ from app.services.marketplaces.shopee import ShopeeClient
 
 logger = structlog.get_logger()
 
-# Soft rate limit Shopee enforces for Ads endpoints. 1.0s was too aggressive
-# in prod — `get_total_balance` specifically returns `ads_rate_limit_total_api`
-# on every call when fired in a tight loop across 13 shops, even with the
-# 1s breather. Bumping to 3s spreads the burst enough that 13 sequential
-# syncs (about 40s of total sleep) stay under Shopee's "balance" sub-quota.
-_RATE_LIMIT_SECONDS = 3.0
-
-# When a rate-limit error fires, retry with exponential backoff. Per-error
-# code so we don't muddle generic 5xx failures with this very chatty
-# Shopee-side throttle. `error_rate_limit` is the global Ads throttle
-# (HTTP 429); `ads_rate_limit_total_api` is the per-endpoint sub-quota
-# on get_total_balance and friends.
-_RATE_LIMIT_RETRY_CODES = frozenset({
+# Error codes that mean Shopee is throttling us — caller MUST treat as
+# fatal-for-this-cycle and not retry. The global cooldown is set by
+# the orchestrator (services/marketing/shopee_sync.py) on the first hit.
+_RATE_LIMIT_CODES = frozenset({
     "ads_rate_limit_total_api",
     "ads.rate_limit.exceed_api",
     "error_rate_limit_total_api",
     "error_rate_limit",
 })
-_RATE_LIMIT_MAX_RETRIES = 3
-_RATE_LIMIT_BACKOFF_BASE = 5.0  # seconds: 5, 10, 20
 
 
 class ShopeeAdsError(RuntimeError):
@@ -139,71 +128,55 @@ def _acos(spend: float, revenue: float) -> float | None:
     return round(spend / revenue * 100, 2)
 
 
-class ShopeeAdsClient(ShopeeClient):
-    """Thin Ads layer on top of ShopeeClient. Each method makes ONE Ads call
-    + sleeps `_RATE_LIMIT_SECONDS` after it. The parent class handles HMAC
-    signing, token refresh, base URL, and shop_id query injection."""
+class ShopeeAdsClient:
+    """Ads layer wrapping an existing `ShopeeClient` via composition.
+
+    Construct with `ShopeeAdsClient(shopee_client)` — the wrapped client
+    is responsible for HMAC signing + token refresh. We don't subclass
+    so stock/price flows that share the same ShopeeClient instance can't
+    be affected by anything done here.
+
+    Fail-fast: any rate-limit response raises `ShopeeAdsRateLimit`
+    immediately. Retry is the orchestrator's call, and the current
+    strategy is to NOT retry — set a 1h Redis cooldown and try again
+    next cron tick (5 min later, after cooldown).
+    """
+
+    def __init__(self, client: ShopeeClient):
+        self._client = client
+
+    @property
+    def shop_id(self) -> int:
+        return self._client.shop_id
 
     async def _ads_post(self, path: str, body: dict) -> dict:
-        """POST helper that raises ShopeeAdsError on any body.error and
-        otherwise returns the `response` payload (Shopee Ads wraps results
-        in `{error, message, response}`).
-
-        Auto-retries `ads_rate_limit_total_api` (the per-endpoint throttle
-        Shopee Ads enforces on `get_total_balance` and friends) with
-        exponential backoff. Without this, the very first run across 13
-        shops fails 100% because the throttle kicks in before the loop
-        finishes."""
-        attempt = 0
-        while attempt <= _RATE_LIMIT_MAX_RETRIES:
-            r = await self._request("POST", path, json=body)
-            # HTTP 429 carries the rate-limit signal in the body too.
-            # Parse it so we can branch on rate-limit-specific codes
-            # instead of raising a generic http_error.
-            if r.status_code == 429:
-                try:
-                    body_json = r.json() or {}
-                    err_code = str(body_json.get("error") or "error_rate_limit")
-                    err_msg = str(body_json.get("message") or r.text[:200])
-                except Exception:  # noqa: BLE001
-                    err_code, err_msg = "error_rate_limit", r.text[:200]
-                if attempt < _RATE_LIMIT_MAX_RETRIES:
-                    delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
-                    logger.warning(
-                        "shopee_ads_rate_limited",
-                        path=path, code=err_code, attempt=attempt + 1, sleep=delay,
-                    )
-                    await asyncio.sleep(delay)
-                    attempt += 1
-                    continue
-                raise ShopeeAdsRateLimit(err_code, err_msg, path)
-            if r.status_code >= 400:
-                raise ShopeeAdsError(
-                    "http_error", f"status={r.status_code} body={r.text[:200]}", path
-                )
-            body_json = r.json() or {}
-            err = body_json.get("error")
-            if err:
-                code = str(err)
-                msg = str(body_json.get("message") or "")
-                if code in _RATE_LIMIT_RETRY_CODES:
-                    if attempt < _RATE_LIMIT_MAX_RETRIES:
-                        delay = _RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
-                        logger.warning(
-                            "shopee_ads_rate_limited",
-                            path=path, code=code, attempt=attempt + 1, sleep=delay,
-                        )
-                        await asyncio.sleep(delay)
-                        attempt += 1
-                        continue
-                    # Retries exhausted: raise the specific subclass so the
-                    # orchestrator can fall back to cache instead of marking
-                    # the integration as failed.
-                    raise ShopeeAdsRateLimit(code, msg, path)
-                raise ShopeeAdsError(code, msg, path)
-            await asyncio.sleep(_RATE_LIMIT_SECONDS)
-            return body_json.get("response") or body_json
-        raise ShopeeAdsRateLimit("rate_limit_exhausted", "", path)
+        """POST helper. Parses body errors and raises:
+          - `ShopeeAdsRateLimit` when the response carries a known
+            rate-limit code (in body.error OR HTTP 429),
+          - `ShopeeAdsError` for any other Shopee-side failure.
+        Returns the `response` payload on success."""
+        r = await self._client._request("POST", path, json=body)
+        if r.status_code == 429:
+            try:
+                body_json = r.json() or {}
+                err_code = str(body_json.get("error") or "error_rate_limit")
+                err_msg = str(body_json.get("message") or r.text[:200])
+            except Exception:  # noqa: BLE001
+                err_code, err_msg = "error_rate_limit", r.text[:200]
+            raise ShopeeAdsRateLimit(err_code, err_msg, path)
+        if r.status_code >= 400:
+            raise ShopeeAdsError(
+                "http_error", f"status={r.status_code} body={r.text[:200]}", path
+            )
+        body_json = r.json() or {}
+        err = body_json.get("error")
+        if err:
+            code = str(err)
+            msg = str(body_json.get("message") or "")
+            if code in _RATE_LIMIT_CODES:
+                raise ShopeeAdsRateLimit(code, msg, path)
+            raise ShopeeAdsError(code, msg, path)
+        return body_json.get("response") or body_json
 
     # ─── 1. credit balance ───────────────────────────────────────────────
 
