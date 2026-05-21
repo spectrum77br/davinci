@@ -983,6 +983,9 @@ const syncingBlingCosts = ref(false)
 
 // ---------- Feature 7: grid search
 const gridSearch = ref('')
+// Video filter: only ML carries video info; for non-ML grids the
+// dropdown is shown but every row maps to false (no Listing match).
+const videoFilter = ref<'all' | 'with_video' | 'without_video'>('all')
 
 // ---------- Feature 8: push dropdown
 const showPushMenu = ref(false)
@@ -1008,15 +1011,19 @@ async function loadGrid() {
   } finally {
     gridLoading.value = false
   }
-  // Stock + sales maps load in the background; failures don't break the grid.
+  // Stock + sales + video maps load in the background; failures don't break the grid.
   loadStockMap()
   loadSalesMaps()
+  loadVideoMap()
 }
 
 // Maps: pricing_product_id -> integer (stock or units sold)
 const stockMap = ref<Record<string, number>>({})
 const salesMap7d = ref<Record<string, number>>({})
 const salesMap30d = ref<Record<string, number>>({})
+// pricing_product_id -> has any ML listing with a video_id attached.
+// Drives the "Sem vídeo" / "Com vídeo" filter dropdown.
+const videoMap = ref<Record<string, boolean>>({})
 
 async function loadStockMap() {
   try {
@@ -1024,6 +1031,15 @@ async function loadStockMap() {
     stockMap.value = await api<Record<string, number>>(`/api/pricing/stock-map${qs}`)
   } catch {
     stockMap.value = {}
+  }
+}
+
+async function loadVideoMap() {
+  try {
+    const qs = department.value ? `?department=${department.value}` : ''
+    videoMap.value = await api<Record<string, boolean>>(`/api/pricing/video-map${qs}`)
+  } catch {
+    videoMap.value = {}
   }
 }
 
@@ -1469,16 +1485,34 @@ const firstAccountIdInGroup = computed<Set<string>>(() => {
   return s
 })
 
-// Feature 7: grid search
+// Feature 7: grid search + video filter
 const filteredGridProducts = computed(() => {
   const prods = grid.value?.products ?? []
   const q = gridSearch.value.trim().toLowerCase()
-  const filtered = q
+  let filtered = q
     ? prods.filter((p) => p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
     : prods.slice()
+  if (videoFilter.value === 'with_video') {
+    filtered = filtered.filter((p) => videoMap.value[p.id] === true)
+  } else if (videoFilter.value === 'without_video') {
+    // Default `false` covers both explicitly-false rows AND products that
+    // have no ML listing at all (`videoMap` missing the key entirely).
+    filtered = filtered.filter((p) => videoMap.value[p.id] !== true)
+  }
   return filtered.sort((a, b) =>
     (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }),
   )
+})
+
+// Counts surfaced next to the filter dropdown so operators see how many
+// products still need a video at a glance.
+const countWithVideo = computed(() => {
+  const prods = grid.value?.products ?? []
+  return prods.filter((p) => videoMap.value[p.id] === true).length
+})
+const countWithoutVideo = computed(() => {
+  const prods = grid.value?.products ?? []
+  return prods.filter((p) => videoMap.value[p.id] !== true).length
 })
 
 // Feature 9: negative margin helpers + counter
@@ -2689,6 +2723,15 @@ watch(department, async () => {
             class="border rounded pl-7 pr-2 py-1 text-sm bg-background w-full"
           />
         </div>
+        <select
+          v-model="videoFilter"
+          class="border rounded px-2 py-1 text-sm bg-background"
+          title="Filtrar produtos por presença de vídeo no anúncio do Mercado Livre"
+        >
+          <option value="all">Vídeo: todos</option>
+          <option value="with_video">Com vídeo ▶ ({{ countWithVideo }})</option>
+          <option value="without_video">Sem vídeo ○ ({{ countWithoutVideo }})</option>
+        </select>
         <button class="btn btn-sm" :disabled="!undoStack.length" title="Desfazer (Ctrl+Z)" @click="handleUndo">
           <Undo2 class="h-4 w-4" />
         </button>
@@ -2931,7 +2974,19 @@ watch(department, async () => {
                     <Eye v-else class="h-3 w-3" />
                   </button>
                   <div class="min-w-0">
-                    <div class="text-xs truncate max-w-[180px]" :title="`${prod.sku} — ${prod.name}`">{{ prod.name }}</div>
+                    <div class="text-xs truncate max-w-[180px] flex items-center gap-1" :title="`${prod.sku} — ${prod.name}`">
+                      <span>{{ prod.name }}</span>
+                      <span
+                        v-if="videoMap[prod.id] === true"
+                        class="text-green-600 text-[10px] shrink-0"
+                        title="Tem vídeo no anúncio do ML"
+                      >▶</span>
+                      <span
+                        v-else-if="prod.id in videoMap"
+                        class="text-red-400 text-[10px] shrink-0"
+                        title="Sem vídeo no anúncio do ML"
+                      >○</span>
+                    </div>
                   </div>
                 </div>
               </td>
