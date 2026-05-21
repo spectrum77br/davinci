@@ -662,6 +662,21 @@ async def alerts_cleanup(ctx: dict) -> None:
         logger.info("alerts_cleanup_done", deleted=result.rowcount or 0)
 
 
+async def verificar_margem_snapshot(ctx: dict) -> None:
+    """Snapshot novos itens de vw_conciliacao_margens_marketplace em
+    davinci.verificar_margem. Skip rows already inserted via PK conflict on
+    bling_order_item_id."""
+    async with session_scope() as s:
+        result = await s.execute(
+            text(
+                "INSERT INTO davinci.verificar_margem "
+                "SELECT * FROM davinci.vw_conciliacao_margens_marketplace "
+                "ON CONFLICT (bling_order_item_id) DO NOTHING"
+            )
+        )
+        logger.info("verificar_margem_snapshot_done", inserted=result.rowcount or 0)
+
+
 async def sync_lock_safety_release(ctx: dict) -> None:
     """SSH-parity: terminate backends idle >30min holding our SYNC_NAMESPACE
     advisory lock. Counterpart to SSH's in-memory 30-min safety timeout.
@@ -1014,6 +1029,7 @@ class WorkerSettings:
         audit_run,
         user_relink_run,
         sync_marketplace_financials_for_order_run,
+        verificar_margem_snapshot,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -1060,6 +1076,7 @@ class WorkerSettings:
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
             run_at_startup=False,
         ),
+        cron(verificar_margem_snapshot, minute={0, 30}, run_at_startup=False),
     ]
     max_jobs = 10
     job_timeout = 1800
@@ -1101,5 +1118,6 @@ __all__ = [
     "sync_logs_partition_gc",
     "sync_product_run",
     "user_relink_run",
+    "verificar_margem_snapshot",
     "_next_month_partition_bounds",
 ]
