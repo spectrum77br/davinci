@@ -5,8 +5,8 @@ Espelha a estrutura de refunds mas com campos especificos de devolucao
 abertura, flag devolver estoque). O reembolso aqui e boolean (refunds
 usa double precision pra valor de reembolso).
 
-Revision ID: 0077_devolutions
-Revises: 0076_vw_conciliacao_margens_saldo_final_reembolso
+Revision ID: 0078_devolutions
+Revises: 0077_alert_type_tarefa_atribuida
 Create Date: 2026-05-21
 """
 
@@ -14,8 +14,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0077_devolutions"
-down_revision: str | None = "0076_vw_conciliacao_margens_saldo_final_reembolso"
+revision: str = "0078_devolutions"
+down_revision: str | None = "0077_alert_type_tarefa_atribuida"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
