@@ -219,6 +219,7 @@ async def list_margens_marketplace(
                 - COALESCE(v.bling_taxacomissao_item, 0))        AS saldo_bling,
             v.marketplace_liquido_base_margem_item               AS saldo_efetivo,
             v.marketplace_margem                                 AS margem,
+            v.bling_margem_calculado                             AS margem_bling,
             v.margem_minima,
             CASE
                 WHEN v.bling_status_margem IN ('Aprovado', 'Reprovado')
