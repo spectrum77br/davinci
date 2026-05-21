@@ -221,6 +221,9 @@ async def list_margens_marketplace(
             v.marketplace_margem                                 AS margem,
             v.bling_margem_calculado                             AS margem_bling,
             v.margem_minima,
+            v.situacao_nome                                      AS situacao,
+            v.ajustes,
+            v.saldo_final,
             CASE
                 WHEN v.bling_status_margem IN ('Aprovado', 'Reprovado')
                     THEN v.bling_status_margem

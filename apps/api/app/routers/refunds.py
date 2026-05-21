@@ -11,6 +11,7 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import Refund, User
 from app.schemas.refunds import RefundCreate, RefundLookupOut, RefundOut, RefundPage, RefundPatch
+from app.services.verificar_margem import refresh_silent as _verificar_margem_refresh_silent
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/refunds", tags=["refunds"])
@@ -153,6 +154,8 @@ async def create_refund(
     await session.commit()
     await session.refresh(row)
     logger.info("refund_created", id=str(row.id), pedido_bling=row.pedido_bling)
+    if row.pedido_bling:
+        await _verificar_margem_refresh_silent(session, pedido_bling=row.pedido_bling)
     return RefundOut.model_validate(row)
 
 
@@ -171,11 +174,17 @@ async def patch_refund(
     if data.get("conta") is None and "conta" in data:
         raise HTTPException(422, detail={"code": "conta_required"})
 
+    old_pedido_bling = row.pedido_bling
     for key, value in data.items():
         setattr(row, key, value)
 
     await session.commit()
     await session.refresh(row)
+    # Refresh the snapshot for both the previous and the (possibly new) pedido.
+    if old_pedido_bling:
+        await _verificar_margem_refresh_silent(session, pedido_bling=old_pedido_bling)
+    if row.pedido_bling and row.pedido_bling != old_pedido_bling:
+        await _verificar_margem_refresh_silent(session, pedido_bling=row.pedido_bling)
     return RefundOut.model_validate(row)
 
 
@@ -188,7 +197,10 @@ async def delete_refund(
     row = (await session.execute(select(Refund).where(Refund.id == refund_id))).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "refund_not_found"})
+    pedido_bling = row.pedido_bling
     await session.delete(row)
     await session.commit()
     logger.info("refund_deleted", id=str(refund_id))
+    if pedido_bling:
+        await _verificar_margem_refresh_silent(session, pedido_bling=pedido_bling)
     return None
