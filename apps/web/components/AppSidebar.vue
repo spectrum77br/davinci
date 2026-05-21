@@ -181,19 +181,17 @@ function isActive(to: string) {
             >
               <component :is="it.icon" class="size-[18px] shrink-0" />
               <span v-if="!props.collapsed" class="truncate">{{ it.label }}</span>
-              <!-- Pulsing red dot when this user has pending tarefas.
-                   Expanded layout: right-aligned next to the label.
-                   Collapsed layout: small dot in the icon's top-right corner. -->
+              <!-- Solid red dot when this user has pending tarefas.
+                   Static (no animation) — the pulsing version was too
+                   visually noisy. Expanded layout: right-aligned next
+                   to the label. Collapsed: top-right of the icon. -->
               <span
                 v-if="it.to === '/tarefas' && pendingTarefasCount > 0"
                 :class="props.collapsed
-                  ? 'absolute top-1 right-1 inline-flex size-2.5'
-                  : 'ml-auto inline-flex size-2.5'"
+                  ? 'absolute top-1 right-1 inline-block size-2.5 rounded-full bg-red-500'
+                  : 'ml-auto inline-block size-2.5 rounded-full bg-red-500'"
                 :title="`${pendingTarefasCount} tarefa${pendingTarefasCount === 1 ? '' : 's'} pendente${pendingTarefasCount === 1 ? '' : 's'}`"
-              >
-                <span class="absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75 animate-ping" />
-                <span class="relative inline-flex size-2.5 rounded-full bg-red-500" />
-              </span>
+              />
             </NuxtLink>
           </li>
         </ul>
