@@ -15,6 +15,7 @@ from app.routers import cadastros as cadastros_router
 from app.routers import companies as companies_router
 from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
+from app.routers import devolutions as devolutions_router
 from app.routers import discrepancies as discrepancies_router
 from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
@@ -81,6 +82,7 @@ _OPENAPI_TAGS = [
         "description": "Tarefas atribuídas a usuários (admin gerencia, usuário vê as suas).",
     },
     {"name": "refunds", "description": "Reembolsos vinculados aos pedidos da conciliação."},
+    {"name": "devolutions", "description": "Devoluções por pedido — controle manual de retorno de produto."},
 ]
 
 app = FastAPI(
@@ -137,6 +139,7 @@ app.include_router(metrics_router.router)
 app.include_router(margens_router.router)
 app.include_router(tarefas_router.router)
 app.include_router(refunds_router.router)
+app.include_router(devolutions_router.router)
 app.include_router(dev_router.router)
 
 if settings.enable_marketing:
