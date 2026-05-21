@@ -645,16 +645,31 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
         commission += sale_fee * qty
     gross = _money(order.get("total_amount")) if isinstance(order, dict) else None
     payments = order.get("payments") if isinstance(order, dict) else []
-    payment = payments[0] if isinstance(payments, list) and payments else {}
+    if not isinstance(payments, list):
+        payments = []
+    payment = payments[0] if payments else {}
     payment_shipping_cost = (
         _money(payment.get("shipping_cost")) if isinstance(payment, dict) else None
+    )
+    # ML's `payment.coupon_amount` is a seller-financed discount applied at
+    # checkout (most commonly the R$2 catalog/promo contribution). The order
+    # payload has no field separating seller-paid from MP-paid coupons, so we
+    # always deduct it from net here; once the billing detail posts ML reflects
+    # the actual deduction and any mismatch gets reconciled then.
+    discount = _sum_money(
+        p.get("coupon_amount") for p in payments if isinstance(p, dict)
     )
     freights = await _fetch_ml_freight_reconciliations(client, order, order_id, currency)
     freight_actual_total = _ml_actual_freight_total(freights)
     freight = freight_actual_total or payment_shipping_cost
     net = None
     if gross is not None:
-        net = gross - commission - (freight or Decimal("0"))
+        net = (
+            gross
+            - commission
+            - (freight or Decimal("0"))
+            - (discount or Decimal("0"))
+        )
 
     has_billing = bool(
         isinstance(billing, dict)
@@ -684,6 +699,13 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
                 },
             ),
             _event("frete_anuncio", frete_anuncio_total, currency=currency),
+            _event(
+                "discount",
+                discount,
+                negative=True,
+                currency=currency,
+                raw={"source": "payments[].coupon_amount"},
+            ),
             _event("net_estimated", net, currency=currency, status=status),
         ]
     )
@@ -693,6 +715,7 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
         gross_amount=gross,
         fee_amount=abs(commission),
         freight_amount=abs(freight) if freight is not None else None,
+        discount_amount=discount,
         net_amount=net,
         raw={
             "order": order,
