@@ -196,7 +196,9 @@ type ChartMetric = 'spend' | 'revenue' | 'impressions' | 'clicks' | 'acos'
 const chartMetric = ref<ChartMetric>('spend')
 const chartDays = ref<7 | 30>(7)
 const timeseries = ref<Timeseries | null>(null)
-const chartHidden = ref<Set<string>>(new Set())  // account_ids hidden
+// account_ids selected (=lines visible). Default empty → chart shows
+// "select accounts" prompt until the user picks at least one.
+const chartSelected = ref<Set<string>>(new Set())
 const chartHover = ref<{ x: number; y: number; day: string; rows: { id: string; name: string; color: string; val: number | null }[] } | null>(null)
 
 // ── Computeds ────────────────────────────────────────────────────────
@@ -269,21 +271,22 @@ function acosClass(acos: number | null | undefined, target: number): string {
   return 'text-red-600 font-medium'
 }
 
-// Deterministic per-account chart color. Groups by platform so the eye
-// can read "this batch of bluish lines = ML"; within a platform each
-// account picks its own hue via a stable hash.
+// Deterministic per-account chart color. Hue base per platform keeps
+// the eye reading "blues = ML, oranges = Amazon, reds = Shopee" without
+// a separate legend; the per-name hash gives each account inside a
+// platform a slightly different shade so they don't all look the same.
+// Spread is kept tight (±25°) so platforms stay visually distinct.
 const _PLATFORM_HUE_BASE: Record<string, number> = {
-  amazon: 28,    // oranges
-  ml: 50,        // yellows
-  shopee: 8,     // reds
+  amazon: 35,    // orange ↔ yellow
+  ml: 200,       // cyan ↔ blue ↔ green-blue
+  shopee: 350,   // red ↔ pink
 }
 function accountColor(account: Account): string {
   const base = _PLATFORM_HUE_BASE[account.platform] ?? 200
-  // Stable per-name hue offset within ±40°.
   let h = 0
   for (let i = 0; i < account.name.length; i++) h = (h * 31 + account.name.charCodeAt(i)) & 0xffff
-  const hue = (base + (h % 80) - 40 + 360) % 360
-  return `hsl(${hue} 65% 48%)`
+  const hue = (base + (h % 50) - 25 + 360) % 360
+  return `hsl(${hue} 70% 48%)`
 }
 
 // Chart geometry — derived from chartDays + timeseries data + chartMetric.
@@ -298,10 +301,11 @@ function _metricValue(p: TimeseriesPoint, m: ChartMetric): number | null {
 
 const chartLines = computed<ChartLine[]>(() => {
   if (!timeseries.value) return []
-  // Filter accounts the user can see (department + marketplace filter
-  // mirror the period table) and excludes chips the user toggled off.
+  // Lines are the accounts the user explicitly checked. Department +
+  // marketplace filter still apply so the chart respects the page's
+  // current view scope.
   const accs = (timeseries.value.accounts || []).filter(
-    (a) => !chartHidden.value.has(a.id)
+    (a) => chartSelected.value.has(a.id)
         && a.department === department.value
         && (tablePlatform.value === 'all' || a.platform === tablePlatform.value),
   )
@@ -392,9 +396,56 @@ function onChartHover(ev: MouseEvent) {
 function onChartLeave() { chartHover.value = null }
 
 function toggleChartLine(id: string) {
-  const s = new Set(chartHidden.value)
+  const s = new Set(chartSelected.value)
   if (s.has(id)) s.delete(id); else s.add(id)
-  chartHidden.value = s
+  chartSelected.value = s
+}
+
+// Grouped account list for the sidebar — same scope filters as the
+// chart itself, then bucketed by platform with a stable display order.
+const chartSidebarGroups = computed(() => {
+  const out: { platform: string; label: string; accounts: Account[] }[] = []
+  const accs = (timeseries.value?.accounts || []).filter(
+    (a) => a.department === department.value
+        && (tablePlatform.value === 'all' || a.platform === tablePlatform.value),
+  )
+  const groups: Record<string, Account[]> = { amazon: [], ml: [], shopee: [] }
+  for (const a of accs) {
+    if (!(a.platform in groups)) groups[a.platform] = []
+    groups[a.platform].push(a)
+  }
+  for (const p of ['amazon', 'ml', 'shopee']) {
+    if (groups[p]?.length) {
+      out.push({
+        platform: p,
+        label: platformLabel[p] ?? p,
+        accounts: groups[p].sort((x, y) => x.name.localeCompare(y.name)),
+      })
+    }
+  }
+  return out
+})
+
+const chartAllVisible = computed(() =>
+  chartSidebarGroups.value.flatMap((g) => g.accounts.map((a) => a.id)),
+)
+const chartAllSelected = computed(() =>
+  chartAllVisible.value.length > 0
+    && chartAllVisible.value.every((id) => chartSelected.value.has(id)),
+)
+
+function toggleChartAll() {
+  if (chartAllSelected.value) {
+    // Deselect all currently-visible accounts (keep selections from
+    // other depts/platforms intact so switching scope doesn't wipe them).
+    const next = new Set(chartSelected.value)
+    for (const id of chartAllVisible.value) next.delete(id)
+    chartSelected.value = next
+  } else {
+    const next = new Set(chartSelected.value)
+    for (const id of chartAllVisible.value) next.add(id)
+    chartSelected.value = next
+  }
 }
 
 function heatmapCellClass(dow: number, hour: number): string {
@@ -704,76 +755,94 @@ definePageMeta({ middleware: [] })
               <option :value="30">30 dias</option>
             </select>
           </label>
-          <span class="text-xs text-muted-foreground ml-auto">Clique nos chips abaixo pra mostrar/esconder lojas no gráfico.</span>
         </div>
 
-        <div v-if="!timeseries || chartGeom.lines.length === 0"
-             class="text-sm text-muted-foreground py-8 text-center">
-          Sem dados pra essa combinação de departamento × plataforma × janela.
-        </div>
-        <div v-else class="relative">
-          <svg :viewBox="`0 0 ${chartGeom.W} ${chartGeom.H}`" class="w-full h-[320px]"
-               @mousemove="onChartHover" @mouseleave="onChartLeave">
-            <!-- Y axis baseline + max -->
-            <line :x1="chartGeom.PAD.l" :x2="chartGeom.W - chartGeom.PAD.r"
-                  :y1="chartGeom.H - chartGeom.PAD.b" :y2="chartGeom.H - chartGeom.PAD.b"
-                  stroke="currentColor" stroke-opacity="0.2" />
-            <line :x1="chartGeom.PAD.l" :x2="chartGeom.W - chartGeom.PAD.r"
-                  :y1="chartGeom.PAD.t" :y2="chartGeom.PAD.t"
-                  stroke="currentColor" stroke-opacity="0.08" />
-            <!-- Y labels -->
-            <text :x="chartGeom.PAD.l - 6" :y="chartGeom.PAD.t + 4"
-                  text-anchor="end" font-size="11" fill="currentColor" fill-opacity="0.5">
-              {{ chartFmt(chartGeom.yMax) }}
-            </text>
-            <text :x="chartGeom.PAD.l - 6" :y="chartGeom.H - chartGeom.PAD.b + 4"
-                  text-anchor="end" font-size="11" fill="currentColor" fill-opacity="0.5">
-              {{ chartFmt(0) }}
-            </text>
-            <!-- X labels (first, mid, last day) -->
-            <template v-for="(d, i) in chartGeom.days" :key="d">
-              <text v-if="i === 0 || i === chartGeom.days.length - 1 || i === Math.floor((chartGeom.days.length - 1) / 2)"
-                    :x="chartGeom.PAD.l + (chartGeom.days.length > 1 ? i * ((chartGeom.W - chartGeom.PAD.l - chartGeom.PAD.r) / (chartGeom.days.length - 1)) : 0)"
-                    :y="chartGeom.H - chartGeom.PAD.b + 14"
-                    text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.5">
-                {{ d.slice(5) }}
-              </text>
-            </template>
-            <!-- Lines -->
-            <g v-for="line in chartGeom.lines" :key="line.id">
-              <path :d="chartPath(line)" :stroke="line.color" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" />
-              <circle v-for="(p, i) in line.pts" :key="i" :cx="p.x" :cy="p.y" r="2" :fill="line.color" />
-            </g>
-            <!-- Hover vertical line + tooltip anchor -->
-            <line v-if="chartHover"
-                  :x1="chartHover.x" :x2="chartHover.x"
-                  :y1="chartGeom.PAD.t" :y2="chartGeom.H - chartGeom.PAD.b"
-                  stroke="currentColor" stroke-opacity="0.3" stroke-dasharray="3 3" />
-          </svg>
-          <!-- HTML tooltip overlay (easier formatting than SVG text) -->
-          <div v-if="chartHover" class="absolute top-0 pointer-events-none bg-popover border rounded-md shadow-md px-3 py-2 text-xs"
-               :style="{ left: `${(chartHover.x / chartGeom.W) * 100}%`, transform: 'translateX(-100%)', marginLeft: '-8px', maxWidth: '260px' }">
-            <div class="font-semibold mb-1">{{ chartHover.day }}</div>
-            <div v-for="r in chartHover.rows" :key="r.id" class="flex items-center gap-1.5">
-              <span class="size-2 rounded-full" :style="{ backgroundColor: r.color }" />
-              <span class="truncate">{{ r.name }}</span>
-              <span class="ml-auto font-medium">{{ chartFmt(r.val) }}</span>
+        <!-- Chart + side panel of checkboxes. Stack vertically on small
+             screens so mobile readers don't have to scroll horizontally. -->
+        <div class="flex flex-col lg:flex-row gap-4">
+          <!-- Chart -->
+          <div class="flex-1 min-w-0">
+            <div v-if="chartSelected.size === 0"
+                 class="text-sm text-muted-foreground py-12 text-center border border-dashed rounded-md">
+              Selecione uma ou mais contas na lista ao lado para ver a evolução.
+            </div>
+            <div v-else-if="!timeseries || chartGeom.lines.length === 0"
+                 class="text-sm text-muted-foreground py-12 text-center">
+              Sem dados pra essa combinação de departamento × plataforma × janela.
+            </div>
+            <div v-else class="relative">
+              <svg :viewBox="`0 0 ${chartGeom.W} ${chartGeom.H}`" class="w-full h-[320px]"
+                   @mousemove="onChartHover" @mouseleave="onChartLeave">
+                <line :x1="chartGeom.PAD.l" :x2="chartGeom.W - chartGeom.PAD.r"
+                      :y1="chartGeom.H - chartGeom.PAD.b" :y2="chartGeom.H - chartGeom.PAD.b"
+                      stroke="currentColor" stroke-opacity="0.2" />
+                <line :x1="chartGeom.PAD.l" :x2="chartGeom.W - chartGeom.PAD.r"
+                      :y1="chartGeom.PAD.t" :y2="chartGeom.PAD.t"
+                      stroke="currentColor" stroke-opacity="0.08" />
+                <text :x="chartGeom.PAD.l - 6" :y="chartGeom.PAD.t + 4"
+                      text-anchor="end" font-size="11" fill="currentColor" fill-opacity="0.5">
+                  {{ chartFmt(chartGeom.yMax) }}
+                </text>
+                <text :x="chartGeom.PAD.l - 6" :y="chartGeom.H - chartGeom.PAD.b + 4"
+                      text-anchor="end" font-size="11" fill="currentColor" fill-opacity="0.5">
+                  {{ chartFmt(0) }}
+                </text>
+                <template v-for="(d, i) in chartGeom.days" :key="d">
+                  <text v-if="i === 0 || i === chartGeom.days.length - 1 || i === Math.floor((chartGeom.days.length - 1) / 2)"
+                        :x="chartGeom.PAD.l + (chartGeom.days.length > 1 ? i * ((chartGeom.W - chartGeom.PAD.l - chartGeom.PAD.r) / (chartGeom.days.length - 1)) : 0)"
+                        :y="chartGeom.H - chartGeom.PAD.b + 14"
+                        text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.5">
+                    {{ d.slice(5) }}
+                  </text>
+                </template>
+                <g v-for="line in chartGeom.lines" :key="line.id">
+                  <path :d="chartPath(line)" :stroke="line.color" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round" />
+                  <circle v-for="(p, i) in line.pts" :key="i" :cx="p.x" :cy="p.y" r="2" :fill="line.color" />
+                </g>
+                <line v-if="chartHover"
+                      :x1="chartHover.x" :x2="chartHover.x"
+                      :y1="chartGeom.PAD.t" :y2="chartGeom.H - chartGeom.PAD.b"
+                      stroke="currentColor" stroke-opacity="0.3" stroke-dasharray="3 3" />
+              </svg>
+              <div v-if="chartHover" class="absolute top-0 pointer-events-none bg-popover border rounded-md shadow-md px-3 py-2 text-xs"
+                   :style="{ left: `${(chartHover.x / chartGeom.W) * 100}%`, transform: 'translateX(-100%)', marginLeft: '-8px', maxWidth: '260px' }">
+                <div class="font-semibold mb-1">{{ chartHover.day }}</div>
+                <div v-for="r in chartHover.rows" :key="r.id" class="flex items-center gap-1.5">
+                  <span class="size-2 rounded-full" :style="{ backgroundColor: r.color }" />
+                  <span class="truncate">{{ r.name }}</span>
+                  <span class="ml-auto font-medium">{{ chartFmt(r.val) }}</span>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
 
-        <!-- Chips: one per account, click to toggle. -->
-        <div v-if="(timeseries?.accounts.length ?? 0) > 0" class="mt-3 flex flex-wrap gap-1.5">
-          <button v-for="a in timeseries?.accounts.filter((a) => a.department === department && (tablePlatform === 'all' || a.platform === tablePlatform)) || []"
-                  :key="a.id"
-                  class="text-[11px] inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border transition-opacity"
-                  :class="chartHidden.has(a.id) ? 'opacity-40' : ''"
-                  :style="{ borderColor: accountColor(a), color: accountColor(a) }"
-                  @click="toggleChartLine(a.id)">
-            <span class="size-2 rounded-full" :style="{ backgroundColor: accountColor(a) }" />
-            {{ a.name }}
-            <span class="text-[9px] uppercase opacity-60">{{ a.platform }}</span>
-          </button>
+          <!-- Sidebar: account picker, grouped by platform. Scrolls if
+               the account list is taller than the chart on desktop. -->
+          <aside class="w-full lg:w-64 lg:max-h-[340px] lg:overflow-y-auto border rounded-md p-2 text-sm shrink-0">
+            <label v-if="chartSidebarGroups.length > 0"
+                   class="flex items-center gap-2 px-2 py-1 cursor-pointer hover:bg-muted/40 rounded">
+              <input type="checkbox" :checked="chartAllSelected" @change="toggleChartAll" />
+              <span class="font-medium">{{ chartAllSelected ? 'Desmarcar todas' : 'Selecionar todas' }}</span>
+            </label>
+            <div v-if="chartSidebarGroups.length === 0" class="text-xs text-muted-foreground py-4 text-center">
+              Sem contas pra esse filtro.
+            </div>
+            <template v-for="g in chartSidebarGroups" :key="g.platform">
+              <div class="border-t my-1" />
+              <div class="px-2 py-1 text-[10px] uppercase tracking-wide font-semibold"
+                   :style="{ color: platformColor[g.platform] }">
+                {{ g.label }}
+              </div>
+              <label v-for="a in g.accounts" :key="a.id"
+                     class="flex items-center gap-2 px-2 py-1 cursor-pointer hover:bg-muted/40 rounded">
+                <input type="checkbox"
+                       :checked="chartSelected.has(a.id)"
+                       @change="toggleChartLine(a.id)" />
+                <span class="size-2.5 rounded-full shrink-0" :style="{ backgroundColor: accountColor(a) }" />
+                <span class="truncate">{{ a.name }}</span>
+              </label>
+            </template>
+          </aside>
         </div>
       </div>
 
