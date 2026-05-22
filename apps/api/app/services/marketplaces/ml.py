@@ -195,6 +195,15 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_shipment(self, shipment_id: str) -> dict:
+        """Fetch shipment details. Used by the shipment-check sweep to read
+        `substatus=dropped_off`, which fires when the seller hands the
+        package to the agency — the order itself still reports
+        `status=paid` at that point but the ML UI already shows "A caminho"."""
+        r = await self._request("GET", f"/shipments/{shipment_id}")
+        r.raise_for_status()
+        return r.json() or {}
+
     async def get_billing_order_details(self, order_id: str) -> dict:
         r = await self._request(
             "GET",

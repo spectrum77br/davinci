@@ -321,12 +321,39 @@ async def _check_marketplace_shipped(
                     numeroloja=o.numeroloja, err=str(e)[:200],
                 )
                 continue
+
+            # Pass 1 — order/shipping level says shipped/delivered outright.
             ship_status = ((data.get("shipping") or {}) or {}).get("status")
             top_status = data.get("status")
             if (ship_status and str(ship_status).lower() in _ML_SHIPPED) or (
                 top_status and str(top_status).lower() in _ML_SHIPPED
             ):
                 shipped.add(int(o.bling_id))
+                continue
+
+            # Pass 2 — order.status still "paid" but the shipment was
+            # dropped off. ML's order endpoint lags behind the shipment
+            # state: when the seller hands the package to the agency and
+            # it's scanned, `/shipments/{id}` reports
+            # status=ready_to_ship, substatus=dropped_off, while the
+            # order resource still shows status=paid. The seller's job
+            # is done at dropped_off — treat as shipped. Only fetch the
+            # shipment when pass 1 missed, to avoid the extra round-trip.
+            shipment_id = (data.get("shipping") or {}).get("id")
+            if shipment_id:
+                try:
+                    ship_data = await client.get_shipment(str(shipment_id))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "shipment_check_ml_shipment_failed",
+                        numeroloja=o.numeroloja, shipment_id=shipment_id,
+                        err=str(e)[:200],
+                    )
+                    continue
+                substatus = str(ship_data.get("substatus") or "").lower()
+                ship_status2 = str(ship_data.get("status") or "").lower()
+                if substatus == "dropped_off" or ship_status2 in _ML_SHIPPED:
+                    shipped.add(int(o.bling_id))
         logger.info("shipment_check_ml", orders=len(orders), shipped=len(shipped))
 
     elif platform == IntegrationPlatform.AMAZON:
