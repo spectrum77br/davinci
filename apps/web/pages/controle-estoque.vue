@@ -421,19 +421,20 @@ const pedidosFiltered = computed(() => {
     <div v-if="tab === 'estoque'" class="border rounded-md overflow-x-auto">
       <table class="grid-table w-full text-xs border-collapse">
         <colgroup>
-          <col style="width: 110px" />
-          <col style="width: 220px" />
-          <col style="width: 240px" />
-          <col style="width: 60px" />
-          <col style="width: 160px" />
-          <col style="width: 70px" />
-          <col style="width: 70px" />
-          <col style="width: 40px" />
+          <col style="width: 80px" />   <!-- SKU -->
+          <col style="width: 160px" />  <!-- Produto -->
+          <col style="width: 50px" />   <!-- Entrada Qtd -->
+          <col style="width: 110px" />  <!-- Entrada Obs -->
+          <col style="width: 50px" />   <!-- Saída Qtd -->
+          <col style="width: 100px" />  <!-- Saída Nº Pedidos -->
+          <col style="width: 60px" />   <!-- Saldo Atual -->
+          <col style="width: 55px" />   <!-- Saldo Reserva -->
+          <col style="width: 40px" />   <!-- Conf -->
         </colgroup>
         <thead>
           <tr class="bg-muted/50">
             <th class="text-left text-[11px] font-semibold" colspan="2">Identificação</th>
-            <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20">Entrada</th>
+            <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20" colspan="2">Entrada</th>
             <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20" colspan="2">Saída</th>
             <th class="text-center text-[11px] font-semibold bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Saldo</th>
             <th class="text-center text-[11px] font-semibold bg-gray-100 dark:bg-gray-800/40">Conf.</th>
@@ -441,7 +442,8 @@ const pedidosFiltered = computed(() => {
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
             <th class="text-left">SKU</th>
             <th class="text-left">Produto</th>
-            <th class="text-left bg-amber-50/60 dark:bg-amber-900/10">Qtd - Obs</th>
+            <th class="text-right bg-amber-50/60 dark:bg-amber-900/10">Qtd</th>
+            <th class="text-left bg-amber-50/60 dark:bg-amber-900/10">Obs</th>
             <th class="text-right bg-amber-50/60 dark:bg-amber-900/10">Qtd</th>
             <th class="text-left bg-amber-50/60 dark:bg-amber-900/10">Nº Pedidos</th>
             <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10">Atual</th>
@@ -451,7 +453,7 @@ const pedidosFiltered = computed(() => {
         </thead>
         <tbody>
           <tr v-if="produtosFiltered.length === 0">
-            <td colspan="8" class="py-6 text-center text-muted-foreground">
+            <td colspan="9" class="py-6 text-center text-muted-foreground">
               Nenhum produto para esse filtro.
             </td>
           </tr>
@@ -460,26 +462,31 @@ const pedidosFiltered = computed(() => {
             class="hover:bg-muted/20"
             :class="row.conferido ? 'bg-emerald-50/40 dark:bg-emerald-900/10' : ''"
           >
-            <td class="font-mono text-[11px]">{{ row.sku }}</td>
+            <td class="font-mono text-[11px] truncate" :title="row.sku">{{ row.sku }}</td>
             <td class="truncate" :title="row.nome">{{ row.nome }}</td>
-            <td class="bg-amber-50/40 dark:bg-amber-900/5 align-top">
+            <!-- Entrada Qtd + Obs are split into 2 cells but visually
+                 aligned: same vertical stack of N entradas in each. -->
+            <td class="bg-amber-50/40 dark:bg-amber-900/5 align-top text-right">
               <div v-if="row.entradas.length === 0" class="text-muted-foreground/60">—</div>
               <div v-else class="space-y-0.5">
                 <div
-                  v-for="(e, idx) in row.entradas" :key="e.movement_id"
-                  class="flex items-center gap-1.5"
+                  v-for="e in row.entradas" :key="e.movement_id"
+                  class="font-semibold text-amber-700 dark:text-amber-300 leading-5 h-5"
                 >
-                  <span class="font-semibold text-amber-700 dark:text-amber-300 shrink-0">
-                    {{ e.qty }}
-                  </span>
-                  <span class="text-muted-foreground shrink-0">-</span>
-                  <input
-                    :value="e.obs"
-                    placeholder="obs"
-                    class="flex-1 h-5 border rounded px-1 bg-background text-[11px] min-w-0"
-                    @blur="(ev) => patchMovementObs(e.movement_id, (ev.target as HTMLInputElement).value, row, idx)"
-                  />
+                  {{ e.qty }}
                 </div>
+              </div>
+            </td>
+            <td class="bg-amber-50/40 dark:bg-amber-900/5 align-top">
+              <div v-if="row.entradas.length === 0" class="text-muted-foreground/60">—</div>
+              <div v-else class="space-y-0.5">
+                <input
+                  v-for="(e, idx) in row.entradas" :key="e.movement_id"
+                  :value="e.obs"
+                  placeholder="—"
+                  class="block w-full h-5 border rounded px-1 bg-background text-[11px] leading-5 placeholder:text-muted-foreground/60"
+                  @blur="(ev) => patchMovementObs(e.movement_id, (ev.target as HTMLInputElement).value, row, idx)"
+                />
               </div>
             </td>
             <td

@@ -59,6 +59,19 @@ _VALID_TAGS = frozenset({
 _SUFFIX_TAGS = ("ci", "pi", "ra", "sa", "sp", "us", "cd")
 _PREFIX_TAGS = ("fake",)
 
+# Extra ILIKE exclusions for the `mala` tag. Real mala SKUs follow
+# `<letter><digits>.<digits>` (b005.20, a001.5, …); everything else in
+# the catalog that survives the suffix/prefix exclusion is noise:
+# caixas/embalagens, S001…S015 services, sucatas, kits/personalizados,
+# x-prefixed SKUs (sorveteiras, etc), ha (sorveteiras), i1 internals,
+# bp mochilas, teste/SISTEMA placeholders. Case-insensitive — `s0%`
+# matches both `s0…` and `S0…`. Subset patterns (e.g. `x09%`) collapse
+# into their supersets (`x0%`).
+_MALA_EXCLUDE_PATTERNS = (
+    "caixa%", "s0%", "%sucata%", "%personalizado%", "kit%",
+    "x0%", "ha%", "i1%", "bp%", "teste%", "sistema%",
+)
+
 # Bling situação ID for "enviado etiqueta" — confirmed against prod
 # distinct values: id=15 has 735/928 rows with em_andamento_data set,
 # the highest correspondence rate of any situação. id=12 is cancelado;
@@ -88,6 +101,10 @@ def _sql_clause_for_tag(column, tag: str):
         clauses = [column.notilike("%+%")]
         clauses += [column.notilike(f"%.{s}") for s in _SUFFIX_TAGS]
         clauses += [column.notilike(f"{p}.%") for p in _PREFIX_TAGS]
+        clauses += [column.notilike(p) for p in _MALA_EXCLUDE_PATTERNS]
+        # n9 placeholder + numeric-only SKUs (1,2,…30) — never malas.
+        clauses.append(func.lower(column) != "n9")
+        clauses.append(column.op("!~")("^[0-9]+$"))
         return and_(*clauses)
     # eletro / insumos — no pattern available yet.
     return literal(False)
