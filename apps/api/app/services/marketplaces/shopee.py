@@ -202,6 +202,57 @@ class ShopeeClient:
         response = body.get("response")
         return response if isinstance(response, dict) else {}
 
+    async def get_order_status_map(self, order_sns: list[str]) -> dict[str, str]:
+        """Batch-fetch order_status for up to 50 order_sns at a time.
+
+        Endpoint: GET /api/v2/order/get_order_detail with `order_sn_list`
+        (comma-separated). Returns `{order_sn: status_upper}` for every
+        order Shopee returned; orders Shopee didn't return are simply
+        absent from the map (caller decides how to handle that).
+
+        Used by the shipped-orders sweep to decide when to bump the
+        local em_andamento_data + Bling situacao=15. We only need
+        order_status, so we ask Shopee for exactly that one field.
+        """
+        if not order_sns:
+            return {}
+        out: dict[str, str] = {}
+        chunk_size = 50  # Shopee max per call.
+        path = "/api/v2/order/get_order_detail"
+        for i in range(0, len(order_sns), chunk_size):
+            chunk = order_sns[i : i + chunk_size]
+            params = {
+                "order_sn_list": ",".join(chunk),
+                "response_optional_fields": "order_status",
+            }
+            try:
+                r = await self._request("GET", path, params=params)
+            except httpx.HTTPError as e:
+                logger.warning("shopee_get_order_status_http_error", err=str(e)[:200])
+                continue
+            body = r.json() or {}
+            if body.get("error") in _AUTH_CODES:
+                await self.refresh()
+                try:
+                    r = await self._request("GET", path, params=params)
+                except httpx.HTTPError as e:
+                    logger.warning("shopee_get_order_status_retry_failed", err=str(e)[:200])
+                    continue
+                body = r.json() or {}
+            if body.get("error"):
+                logger.warning(
+                    "shopee_get_order_status_api_error",
+                    err=body.get("error"), msg=body.get("message"),
+                )
+                continue
+            order_list = ((body.get("response") or {}).get("order_list") or [])
+            for o in order_list:
+                sn = o.get("order_sn")
+                status = o.get("order_status")
+                if sn and status:
+                    out[str(sn)] = str(status).upper()
+        return out
+
     async def update_stock(
         self,
         link: "ProductLink",

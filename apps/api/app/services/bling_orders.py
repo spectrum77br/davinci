@@ -166,6 +166,20 @@ def _row_from_item(
     if not isinstance(orig_taxas, dict):
         orig_taxas = {}
 
+    situacao_id = (
+        str(((raw_order.get("situacao") or {}) or {}).get("id"))
+        if isinstance(raw_order.get("situacao"), dict)
+        else (str(raw_order.get("situacao")) if raw_order.get("situacao") is not None else None)
+    )
+    # situacao=15 ("Em andamento") = order shipped. Stamp em_andamento_data
+    # the moment we see it, regardless of which path delivered the event
+    # (Bling webhook OR the marketplace_shipment_check sweep bumping
+    # Bling first then re-fetching the order). Date-only so it survives
+    # the day-window queries in /api/estoque/pedidos and /api/estoque/envios.
+    em_andamento_data = (
+        datetime.now(UTC).date() if situacao_id == "15" else None
+    )
+
     return {
         "bling_id": _int(raw_order.get("id")),
         "numero": str(raw_order["numero"]) if raw_order.get("numero") is not None else None,
@@ -177,11 +191,8 @@ def _row_from_item(
         "data": _to_dt(raw_order.get("data")),
         "totalprodutos": _num(raw_order.get("totalProdutos") or raw_order.get("totalprodutos")),
         "total": _num(raw_order.get("total")),
-        "situacao": (
-            str(((raw_order.get("situacao") or {}) or {}).get("id"))
-            if isinstance(raw_order.get("situacao"), dict)
-            else (str(raw_order.get("situacao")) if raw_order.get("situacao") is not None else None)
-        ),
+        "situacao": situacao_id,
+        "em_andamento_data": em_andamento_data,
         "loja": str(loja.get("id")) if loja.get("id") is not None else None,
         "store_id": store_id,
         "itens": raw_order.get("itens"),
@@ -388,10 +399,16 @@ async def upsert_order(
         new_sig = _normalize_new_itens(itens)
         old_sig = await _existing_itens_signature(session, bling_id)
         if new_sig == old_sig:
+            values: dict[str, Any] = {"situacao": situacao}
+            # situacao=15 ("Em andamento") = shipped — stamp em_andamento_data
+            # on this narrow path too. Otherwise webhooks that don't change
+            # the item set would leave the field NULL forever.
+            if situacao == "15":
+                values["em_andamento_data"] = datetime.now(UTC).date()
             await session.execute(
                 update(BlingOrder)
                 .where(BlingOrder.bling_id == bling_id)
-                .values(situacao=situacao)
+                .values(**values)
             )
             return existing_count
 

@@ -42,6 +42,7 @@ from app.services.marketplace_financials import (
     run_sync_marketplace_financials_for_bling_order,
 )
 from app.services.refunds_freight_sync import backfill_freight_refunds
+from app.services.marketplace_shipment_check import run_check_marketplace_shipped_orders
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
@@ -695,6 +696,27 @@ async def sync_lock_safety_release(ctx: dict) -> None:
             logger.debug("sync_lock_safety_release_noop")
 
 
+async def check_marketplace_shipped_orders(ctx: dict) -> None:
+    """Sweeps bling_orders rows stuck in custom 'Em aberto' (situacao=83965)
+    against Shopee/ML/Amazon shipment status. When a marketplace reports
+    SHIPPED/shipped/Shipped, we bump Bling to situacao=15 ('Em andamento')
+    via PATCH, then stamp em_andamento_data locally so the order surfaces
+    in /controle-estoque's Pedidos and Envios tabs.
+
+    Bling itself never auto-promotes 83965 → 15; carrier scans only update
+    state on the marketplace side. This cron closes that gap every 5 min.
+    See app.services.marketplace_shipment_check for the full strategy.
+    """
+    try:
+        summary = await run_check_marketplace_shipped_orders()
+        if summary.get("shipped_found") or summary.get("errors"):
+            logger.info("shipment_check_cron_done", **summary)
+        else:
+            logger.debug("shipment_check_cron_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("shipment_check_cron_unhandled")
+
+
 async def failed_jobs_alert_scan(ctx: dict) -> None:
     """Emit `sync_failure` alert per BackgroundJob that finished failed in
     the last 10 minutes. Dedupe key per job id keeps it idempotent across
@@ -1030,6 +1052,7 @@ class WorkerSettings:
         user_relink_run,
         sync_marketplace_financials_for_order_run,
         verificar_margem_snapshot,
+        check_marketplace_shipped_orders,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -1077,6 +1100,10 @@ class WorkerSettings:
             run_at_startup=False,
         ),
         cron(verificar_margem_snapshot, minute={0, 30}, run_at_startup=False),
+        # Sweeps bling_orders stuck in 'Em aberto' (83965) against the
+        # marketplace's shipment state. Marketplace SHIPPED → Bling 15
+        # + stamp em_andamento_data so the order shows on /controle-estoque.
+        cron(check_marketplace_shipped_orders, minute=_FIVE_MIN, run_at_startup=False),
     ]
     max_jobs = 10
     job_timeout = 1800

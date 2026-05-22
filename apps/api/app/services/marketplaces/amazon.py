@@ -159,6 +159,28 @@ class AmazonClient:
         except Exception as e:  # noqa: BLE001
             return TestResult(ok=False, detail=f"error: {e}")
 
+    async def get_order_status(self, order_id: str) -> str | None:
+        """Returns the SP-API OrderStatus string for one order ("Pending",
+        "Unshipped", "Shipped", "Canceled", ...), or None if Amazon
+        didn't return a payload. The shipped-orders sweep treats
+        `Shipped` as the trigger for bumping Bling situacao=15.
+        """
+        try:
+            r = await self._request("GET", f"/orders/v0/orders/{order_id}")
+        except httpx.HTTPError as e:
+            logger.warning("amazon_get_order_status_http_error", order_id=order_id, err=str(e)[:200])
+            return None
+        if r.status_code != 200:
+            logger.warning(
+                "amazon_get_order_status_non_200",
+                order_id=order_id, status=r.status_code, body=r.text[:200],
+            )
+            return None
+        body = r.json() or {}
+        payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
+        status = (payload or {}).get("OrderStatus")
+        return str(status) if status else None
+
     async def list_listings(
         self,
         *,
