@@ -37,6 +37,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import BlingOrder, Product, User, UserRole
+from app.models.company import Store
+from app.models.integration import Integration
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
 
@@ -89,7 +91,15 @@ async def list_estoque_produtos(
     window_start = datetime.combine(data_inicio, time.min, tzinfo=UTC)
     window_end = datetime.combine(data_fim, time.max, tzinfo=UTC)
 
-    where: list = [Product.situacao == "A", Product.formato == "S"]
+    # `formato='S'` should already exclude kits, but prod data has some
+    # compound SKUs ("x009.ci+a001.ci") sneaking through with the
+    # simples flag set incorrectly. Belt-and-suspenders: drop anything
+    # whose SKU contains a '+' character regardless of `formato`.
+    where: list = [
+        Product.situacao == "A",
+        Product.formato == "S",
+        Product.sku.notlike("%+%"),
+    ]
     if tag_filter is not None:
         where.append(Product.sku.ilike(f"%.{tag_filter}"))
 
@@ -119,6 +129,7 @@ async def list_estoque_produtos(
                 StockMovement.quantidade,
                 StockMovement.observacao,
                 StockMovement.origem,
+                StockMovement.date,
             )
             .where(
                 and_(
@@ -131,27 +142,33 @@ async def list_estoque_produtos(
         )
     ).all()
 
-    # Aggregate per-(SKU, tipo). Also collect the most-recent movement_id
-    # per group so the inline-obs PATCH can target it.
+    # Per-SKU buckets of individual entradas and saídas. We expose the
+    # full lists so the front-end can render one "{qty} - {obs}" row per
+    # entrada (matches what the operator sees in the Bling planilha).
+    # `saida_qty_total` is a convenience sum — operators still want the
+    # day's total for the saída column. `saida_origens` is the
+    # comma-list of pedido numbers.
     by_sku: dict[str, dict[str, Any]] = {}
     for m in movements:
         slot = by_sku.setdefault(
             m.sku,
-            {
-                "entrada_qty": 0, "entrada_obs": [], "entrada_movement_id": None,
-                "saida_qty": 0, "saida_origens": [], "saida_movement_id": None,
-            },
+            {"entradas": [], "saidas": [], "saida_qty_total": 0, "saida_origens": []},
         )
         if m.tipo == "E":
-            slot["entrada_qty"] += int(m.quantidade or 0)
-            if m.observacao:
-                slot["entrada_obs"].append(m.observacao)
-            slot["entrada_movement_id"] = str(m.id)  # last one wins
+            slot["entradas"].append({
+                "movement_id": str(m.id),
+                "qty": int(m.quantidade or 0),
+                "obs": m.observacao or "",
+            })
         elif m.tipo == "S":
-            slot["saida_qty"] += int(m.quantidade or 0)
+            slot["saidas"].append({
+                "movement_id": str(m.id),
+                "qty": int(m.quantidade or 0),
+                "origem": m.origem or "",
+            })
+            slot["saida_qty_total"] += int(m.quantidade or 0)
             if m.origem:
                 slot["saida_origens"].append(m.origem)
-            slot["saida_movement_id"] = str(m.id)
 
     checks_rows = (
         await session.execute(
@@ -169,17 +186,22 @@ async def list_estoque_produtos(
     result: list[dict[str, Any]] = []
     for p in products:
         slot = by_sku.get(p.sku, {})
+        virtual = int(p.stock or 0)
+        reserved = int(p.reserved_stock or 0)
+        # `Product.stock` is the VIRTUAL balance (Bling saldoVirtualTotal).
+        # The operator's "saldo atual" column wants the FÍSICO total —
+        # virtual + reserved reconstructs that. No new column needed.
+        saldo_fisico = virtual + reserved
         result.append({
             "sku": p.sku,
             "nome": p.name,
-            "entrada_qty": int(slot.get("entrada_qty", 0)),
-            "entrada_obs": "; ".join(slot.get("entrada_obs") or []),
-            "entrada_movement_id": slot.get("entrada_movement_id"),
-            "saida_qty": int(slot.get("saida_qty", 0)),
+            "entradas": slot.get("entradas") or [],
+            "saidas": slot.get("saidas") or [],
+            "saida_qty_total": int(slot.get("saida_qty_total", 0)),
             "saida_origens": ", ".join(slot.get("saida_origens") or []),
-            "saida_movement_id": slot.get("saida_movement_id"),
-            "saldo": int(p.stock or 0),
-            "reserva": int(p.reserved_stock or 0),
+            "saldo_fisico": saldo_fisico,
+            "saldo_virtual": virtual,
+            "reserva": reserved,
             "conferido": checks.get(p.sku, False),
         })
 
@@ -201,26 +223,65 @@ async def list_estoque_pedidos(
     status_filter: str | None = Query(None, alias="status"),  # enviado | nao_enviado
     tag: str | None = Query(None),
 ) -> dict[str, Any]:
+    """Lista pedidos enviado-etiqueta. Filtra por `em_andamento_data`
+    (data efetiva do envio) — pedidos que ainda não foram bipados
+    aparecem apenas quando `status_filter='nao_enviado'` é pedido
+    explicitamente; nesse modo cai pra `BlingOrder.data` como filtro
+    (sem em_andamento_data nada por que filtrar)."""
     tag_filter = _resolve_tag(user, tag)
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
-    where: list = [
-        BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA,
-        cast(BlingOrder.data, Date) >= data_inicio,
-        cast(BlingOrder.data, Date) <= data_fim,
-    ]
+    where: list = [BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA]
     if tag_filter is not None:
         where.append(BlingOrder.item_codigo.ilike(f"%.{tag_filter}"))
-    if status_filter == "enviado":
-        where.append(BlingOrder.em_andamento_data.isnot(None))
-    elif status_filter == "nao_enviado":
+
+    if status_filter == "nao_enviado":
         where.append(BlingOrder.em_andamento_data.is_(None))
+        where.append(cast(BlingOrder.data, Date) >= data_inicio)
+        where.append(cast(BlingOrder.data, Date) <= data_fim)
+        order_by = BlingOrder.data.desc()
+    else:
+        # Default + "enviado" filter: scope by the SHIP date.
+        where.append(BlingOrder.em_andamento_data.isnot(None))
+        where.append(BlingOrder.em_andamento_data >= data_inicio)
+        where.append(BlingOrder.em_andamento_data <= data_fim)
+        order_by = BlingOrder.em_andamento_data.desc()
 
     orders = (
         await session.execute(
-            select(BlingOrder).where(and_(*where)).order_by(BlingOrder.data.desc())
+            select(BlingOrder).where(and_(*where)).order_by(order_by)
         )
     ).scalars().all()
+
+    # Build a bling_store_id → "Plataforma loja" map for every store
+    # referenced by the result set. One query, no N+1. Falls back to the
+    # raw ID string when the lookup misses (rare — manual data, etc).
+    store_ids: set[int] = set()
+    for o in orders:
+        try:
+            store_ids.add(int(o.loja))
+        except (TypeError, ValueError):
+            continue
+    store_name_by_id: dict[int, str] = {}
+    if store_ids:
+        rows = (
+            await session.execute(
+                select(Store.bling_store_id, Integration.name, Integration.platform)
+                .join(Integration, Integration.id == Store.integration_id, isouter=True)
+                .where(Store.bling_store_id.in_(store_ids))
+            )
+        ).all()
+        for r in rows:
+            try:
+                bsid = int(r.bling_store_id)
+            except (TypeError, ValueError):
+                continue
+            plat = (r.platform.value if hasattr(r.platform, "value") else str(r.platform or "")).strip()
+            label = (r.name or "").strip()
+            if plat and label:
+                store_name_by_id[bsid] = f"{plat.upper()} {label}"
+            elif label:
+                store_name_by_id[bsid] = label
 
     order_ids = [str(o.id) for o in orders]
     checks_map: dict[str, dict[str, Any]] = {}
@@ -244,12 +305,26 @@ async def list_estoque_pedidos(
     result: list[dict[str, Any]] = []
     for o in orders:
         check = checks_map.get(str(o.id), {"conferido": False, "observacao": None})
+        bling_store_id: int | None = None
+        try:
+            bling_store_id = int(o.loja) if o.loja else None
+        except (TypeError, ValueError):
+            bling_store_id = None
+        loja_name = (
+            store_name_by_id.get(bling_store_id) if bling_store_id is not None else None
+        ) or (o.loja or "")
+        # "data" on the front-end shows the SHIP date; fall back to the
+        # order create date if em_andamento_data isn't set (only happens
+        # for the nao_enviado filter).
+        ship_or_create = o.em_andamento_data or (o.data.date() if o.data else None)
         result.append({
             "id": str(o.id),
-            "data": o.data.isoformat() if o.data else None,
+            "data": ship_or_create.isoformat() if ship_or_create else None,
+            "data_pedido": o.data.isoformat() if o.data else None,
+            "data_envio": o.em_andamento_data.isoformat() if o.em_andamento_data else None,
             "pedido_bling": o.numero,
             "pedido_marketplace": o.numeroloja,
-            "loja": o.loja,
+            "loja": loja_name,
             "sku": o.item_codigo,
             "produto": o.item_descricao,
             "quantidade": o.item_quantidade or 1,
@@ -275,6 +350,11 @@ async def list_estoque_envios(
     data_inicio: date | None = Query(None),
     data_fim: date | None = Query(None),
     tag: str | None = Query(None),
+    conferido_filter: str | None = Query(
+        None,
+        alias="conferido",
+        pattern="^(all|conferidos|nao_conferidos)$",
+    ),
 ) -> dict[str, Any]:
     tag_filter = _resolve_tag(user, tag)
     # Envios tab defaults to last 7 days when no window is set, matching
@@ -326,6 +406,13 @@ async def list_estoque_envios(
         dia_str = r.dia.isoformat() if r.dia else ""
         envios_n = int(r.envios or 0)
         conf = checks.get(dia_str, False)
+        # `conferido_filter` is applied client-of-the-loop so totals
+        # reflect the visible set only. `all` (or None) shows everything;
+        # the other two narrow to one bucket.
+        if conferido_filter == "conferidos" and not conf:
+            continue
+        if conferido_filter == "nao_conferidos" and conf:
+            continue
         items.append({"data": dia_str, "envios": envios_n, "conferido": conf})
         total_envios += envios_n
         if conf:
@@ -333,6 +420,9 @@ async def list_estoque_envios(
 
     return {
         "data": items,
+        # Spec: rodapé "Total" conta SÓ os conferidos. `total_envios`
+        # mantido pra "Total geral" se a UI quiser exibir.
+        "total": total_conferido,
         "total_envios": total_envios,
         "total_conferido": total_conferido,
         "periodo": {"inicio": str(data_inicio), "fim": str(data_fim)},
@@ -352,6 +442,10 @@ async def toggle_estoque_check(
     conferido: bool = Query(...),
     observacao: str | None = Query(None),
 ) -> dict[str, Any]:
+    # Envios tab is an admin-only triage view — operators see read-only
+    # ✓/✗ but can't toggle. The other two sections are operator-editable.
+    if section == "envio" and user.role != UserRole.ADMIN:
+        raise HTTPException(403, detail={"code": "admin_only"})
     existing = (
         await session.execute(
             select(StockCheck).where(

@@ -1,14 +1,17 @@
 <script setup lang="ts">
 // Controle de Estoque — operator-facing planilha.
 //
-// 3 tabs, each backed by a single GET on the backend. The default date
-// window opens to "today" everywhere; the Envios tab opens to last 7
-// days because per-day rollups need a wider window to be useful.
+// Filter model: SINGLE-DAY everywhere. The backend still accepts a
+// date range (data_inicio / data_fim) so admin tooling can probe wider
+// windows; the UI sends `data` for both to keep the contract one knob.
+// Default = today.
 //
-// Permission guard: definePageMeta middleware redirects users without
-// controle_estoque.view to /403. The auth.global guard also bounces
-// operadores (role != admin + stock_tag set) here whenever they try to
-// navigate elsewhere, so this page is effectively their home screen.
+// Tabs are isolated GETs:
+//   * Estoque  → entradas + saídas + saldos for the chosen day.
+//   * Pedidos  → "enviado etiqueta" orders shipped on the chosen day.
+//   * Envios   → per-day shipment counts (the only tab that benefits
+//                from a wider window, so it auto-widens to last 7 days
+//                on first activation if the user hasn't picked a date).
 import { computed, onMounted, ref, watch } from 'vue'
 import { Boxes, Truck, ClipboardList, Loader2 } from 'lucide-vue-next'
 
@@ -21,25 +24,28 @@ const { api } = useApi()
 const auth = useAuthStore()
 
 // ── Types ─────────────────────────────────────────────────────────────
+type EntradaMov = { movement_id: string; qty: number; obs: string }
+type SaidaMov = { movement_id: string; qty: number; origem: string }
 type ProdutoRow = {
   sku: string
   nome: string
-  entrada_qty: number
-  entrada_obs: string
-  entrada_movement_id: string | null
-  saida_qty: number
+  entradas: EntradaMov[]
+  saidas: SaidaMov[]
+  saida_qty_total: number
   saida_origens: string
-  saida_movement_id: string | null
-  saldo: number
+  saldo_fisico: number
+  saldo_virtual: number
   reserva: number
   conferido: boolean
 }
 type PedidoRow = {
   id: string
-  data: string | null
+  data: string | null         // ship date (em_andamento_data) — shown in column
+  data_pedido: string | null
+  data_envio: string | null
   pedido_bling: string | null
   pedido_marketplace: string | null
-  loja: string | null
+  loja: string | null         // already pretty-formatted by backend
   sku: string | null
   produto: string | null
   quantidade: number
@@ -63,33 +69,46 @@ function isoDaysAgo(days: number): string {
   return d.toISOString().slice(0, 10)
 }
 
-const dataInicio = ref(isoToday())
-const dataFim = ref(isoToday())
-// Envios tab uses a wider default window. Switching to that tab the
-// first time auto-bumps the date inputs so the operator sees ~a week.
-const enviosInitialized = ref(false)
+// Single-day filter for Estoque + Pedidos. Envios uses a 7-day window
+// that auto-resets on first activation (see watch below) — operators
+// still want per-day counts but with enough rows on screen to compare.
+const dia = ref(isoToday())
+const enviosInicio = ref(isoDaysAgo(6))
+const enviosFim = ref(isoToday())
 
-// Admin override: pick a specific tag to view. Operadores ignore this
-// (the backend uses their stock_tag).
+// Admin-only tag override.
 const isAdmin = computed(() => auth.user?.role === 'admin')
 const tagOverride = ref<string>('')
 
 const statusFilter = ref<'all' | 'enviado' | 'nao_enviado'>('all')
+const conferidoFilter = ref<'all' | 'conferidos' | 'nao_conferidos'>('all')
 const search = ref('')
 
 // Data
 const produtos = ref<ProdutoRow[]>([])
 const pedidos = ref<PedidoRow[]>([])
-const envios = ref<{ items: EnvioRow[]; total: number; total_conferido: number }>({
-  items: [], total: 0, total_conferido: 0,
-})
+const envios = ref<{
+  items: EnvioRow[]
+  total: number          // sum of conferido envios (footer "Total")
+  total_envios: number   // sum across the window (footer "Total geral")
+}>({ items: [], total: 0, total_envios: 0 })
 
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 
 // ── Fetchers ──────────────────────────────────────────────────────────
-function dateParams(): string {
-  const parts = [`data_inicio=${dataInicio.value}`, `data_fim=${dataFim.value}`]
+function singleDayDates(): string {
+  // Estoque + Pedidos send the same value for both endpoints — backend
+  // tolerates either treating the window as a single point or a range.
+  const parts = [`data_inicio=${dia.value}`, `data_fim=${dia.value}`]
+  if (isAdmin.value && tagOverride.value) parts.push(`tag=${tagOverride.value}`)
+  return parts.join('&')
+}
+function rangeDates(): string {
+  const parts = [
+    `data_inicio=${enviosInicio.value}`,
+    `data_fim=${enviosFim.value}`,
+  ]
   if (isAdmin.value && tagOverride.value) parts.push(`tag=${tagOverride.value}`)
   return parts.join('&')
 }
@@ -98,7 +117,7 @@ async function loadEstoque() {
   loading.value = true
   errorText.value = null
   try {
-    const r = await api<{ data: ProdutoRow[] }>(`/api/estoque/produtos?${dateParams()}`)
+    const r = await api<{ data: ProdutoRow[] }>(`/api/estoque/produtos?${singleDayDates()}`)
     produtos.value = r.data || []
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'load_failed'
@@ -112,7 +131,7 @@ async function loadPedidos() {
   loading.value = true
   errorText.value = null
   try {
-    const qs = [dateParams()]
+    const qs = [singleDayDates()]
     if (statusFilter.value !== 'all') qs.push(`status=${statusFilter.value}`)
     const r = await api<{ data: PedidoRow[] }>(`/api/estoque/pedidos?${qs.join('&')}`)
     pedidos.value = r.data || []
@@ -128,17 +147,22 @@ async function loadEnvios() {
   loading.value = true
   errorText.value = null
   try {
-    const r = await api<{ data: EnvioRow[]; total_envios: number; total_conferido: number }>(
-      `/api/estoque/envios?${dateParams()}`,
-    )
+    const qs = [rangeDates()]
+    if (conferidoFilter.value !== 'all') qs.push(`conferido=${conferidoFilter.value}`)
+    const r = await api<{
+      data: EnvioRow[]
+      total: number
+      total_envios: number
+      total_conferido: number
+    }>(`/api/estoque/envios?${qs.join('&')}`)
     envios.value = {
       items: r.data || [],
-      total: r.total_envios || 0,
-      total_conferido: r.total_conferido || 0,
+      total: r.total ?? 0,
+      total_envios: r.total_envios ?? 0,
     }
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'load_failed'
-    envios.value = { items: [], total: 0, total_conferido: 0 }
+    envios.value = { items: [], total: 0, total_envios: 0 }
   } finally {
     loading.value = false
   }
@@ -150,16 +174,17 @@ function loadCurrentTab() {
   return loadEnvios()
 }
 
-watch(tab, (newTab) => {
-  if (newTab === 'envios' && !enviosInitialized.value) {
-    dataInicio.value = isoDaysAgo(6)
-    dataFim.value = isoToday()
-    enviosInitialized.value = true
-  }
+watch(tab, () => {
   void loadCurrentTab()
 })
-watch([dataInicio, dataFim, tagOverride, statusFilter], () => {
-  void loadCurrentTab()
+watch([dia, tagOverride, statusFilter], () => {
+  if (tab.value !== 'envios') void loadCurrentTab()
+})
+watch([enviosInicio, enviosFim, conferidoFilter], () => {
+  if (tab.value === 'envios') void loadCurrentTab()
+})
+watch(tagOverride, () => {
+  if (tab.value === 'envios') void loadCurrentTab()
 })
 onMounted(() => {
   void loadCurrentTab()
@@ -187,49 +212,48 @@ async function toggleProduto(row: ProdutoRow) {
   const next = !row.conferido
   row.conferido = next
   try {
-    await toggleCheck('estoque', row.sku, dataInicio.value, next)
+    await toggleCheck('estoque', row.sku, dia.value, next)
   } catch {
-    row.conferido = !next  // revert on error
+    row.conferido = !next
   }
 }
 async function togglePedido(row: PedidoRow) {
   const next = !row.conferido
   row.conferido = next
+  const refDate = (row.data || dia.value).slice(0, 10)
   try {
-    await toggleCheck('pedido', row.id, (row.data || '').slice(0, 10), next, row.observacao)
+    await toggleCheck('pedido', row.id, refDate, next, row.observacao)
   } catch {
     row.conferido = !next
   }
 }
 async function patchPedidoObs(row: PedidoRow, newObs: string) {
   row.observacao = newObs
+  const refDate = (row.data || dia.value).slice(0, 10)
   try {
-    await toggleCheck('pedido', row.id, (row.data || '').slice(0, 10), row.conferido, newObs)
-  } catch {
-    // Silent — next reload will surface the truth.
-  }
+    await toggleCheck('pedido', row.id, refDate, row.conferido, newObs)
+  } catch { /* next reload reverts */ }
 }
 async function toggleEnvio(row: EnvioRow) {
+  if (!isAdmin.value) return
   const next = !row.conferido
   row.conferido = next
   try {
     await toggleCheck('envio', row.data, row.data, next)
-    // Recompute summary footer locally.
-    if (next) envios.value.total_conferido += row.envios
-    else envios.value.total_conferido = Math.max(0, envios.value.total_conferido - row.envios)
+    if (next) envios.value.total += row.envios
+    else envios.value.total = Math.max(0, envios.value.total - row.envios)
   } catch {
     row.conferido = !next
   }
 }
 
-async function patchMovementObs(movementId: string, newObs: string, row: ProdutoRow) {
-  row.entrada_obs = newObs
+async function patchMovementObs(movementId: string, newObs: string, row: ProdutoRow, idx: number) {
+  row.entradas[idx].obs = newObs
   try {
     const params = new URLSearchParams()
     if (newObs) params.set('observacao', newObs)
     await api(`/api/estoque/movement/${movementId}/obs?${params.toString()}`, { method: 'PATCH' })
   } catch {
-    // Reload to revert
     void loadEstoque()
   }
 }
@@ -258,7 +282,7 @@ const pedidosFiltered = computed(() => {
 </script>
 
 <template>
-  <div class="space-y-3 p-4">
+  <div class="controle-estoque space-y-3 p-4">
     <!-- Header + tabs -->
     <div class="flex flex-wrap items-center gap-3">
       <div class="flex items-center gap-2">
@@ -289,14 +313,30 @@ const pedidosFiltered = computed(() => {
         placeholder="Buscar SKU, nome, pedido…"
         class="h-7 border rounded px-2 bg-background min-w-[200px]"
       />
-      <label class="inline-flex items-center gap-1">
-        De:
-        <input v-model="dataInicio" type="date" class="h-7 border rounded px-2 bg-background" />
-      </label>
-      <label class="inline-flex items-center gap-1">
-        Até:
-        <input v-model="dataFim" type="date" class="h-7 border rounded px-2 bg-background" />
-      </label>
+      <template v-if="tab !== 'envios'">
+        <label class="inline-flex items-center gap-1">
+          Dia:
+          <input v-model="dia" type="date" class="h-7 border rounded px-2 bg-background" />
+        </label>
+      </template>
+      <template v-else>
+        <label class="inline-flex items-center gap-1">
+          De:
+          <input v-model="enviosInicio" type="date" class="h-7 border rounded px-2 bg-background" />
+        </label>
+        <label class="inline-flex items-center gap-1">
+          Até:
+          <input v-model="enviosFim" type="date" class="h-7 border rounded px-2 bg-background" />
+        </label>
+        <label class="inline-flex items-center gap-1">
+          Conferência:
+          <select v-model="conferidoFilter" class="h-7 border rounded px-2 bg-background">
+            <option value="all">todos</option>
+            <option value="conferidos">conferidos</option>
+            <option value="nao_conferidos">não conferidos</option>
+          </select>
+        </label>
+      </template>
       <label v-if="isAdmin" class="inline-flex items-center gap-1">
         Tag:
         <select v-model="tagOverride" class="h-7 border rounded px-2 bg-background">
@@ -324,75 +364,88 @@ const pedidosFiltered = computed(() => {
 
     <!-- TAB: ESTOQUE ────────────────────────────────────────────────── -->
     <div v-if="tab === 'estoque'" class="border rounded-md overflow-x-auto">
-      <table class="w-full text-xs border-collapse">
+      <table class="grid-table w-full text-xs border-collapse">
+        <colgroup>
+          <col style="width: 110px" />
+          <col style="width: 220px" />
+          <col style="width: 240px" />
+          <col style="width: 60px" />
+          <col style="width: 160px" />
+          <col style="width: 70px" />
+          <col style="width: 70px" />
+          <col style="width: 40px" />
+        </colgroup>
         <thead>
           <tr class="bg-muted/50">
-            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="2">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="2">Entrada</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="2">Saída</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Saldo</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-gray-100 dark:bg-gray-800/40" colspan="1">Conf.</th>
+            <th class="text-left text-[11px] font-semibold" colspan="2">Identificação</th>
+            <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20">Entrada</th>
+            <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20" colspan="2">Saída</th>
+            <th class="text-center text-[11px] font-semibold bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Saldo</th>
+            <th class="text-center text-[11px] font-semibold bg-gray-100 dark:bg-gray-800/40">Conf.</th>
           </tr>
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
-            <th class="px-2 py-1 text-left border-b">SKU</th>
-            <th class="px-2 py-1 text-left border-b">Produto</th>
-            <th class="px-2 py-1 text-right border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50/60 dark:bg-amber-900/10">Qtd</th>
-            <th class="px-2 py-1 text-left border-b bg-amber-50/60 dark:bg-amber-900/10">Resp./Obs</th>
-            <th class="px-2 py-1 text-right border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50/60 dark:bg-amber-900/10">Qtd</th>
-            <th class="px-2 py-1 text-left border-b bg-amber-50/60 dark:bg-amber-900/10">Nº Pedidos</th>
-            <th class="px-2 py-1 text-right border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50/60 dark:bg-emerald-900/10">Atual</th>
-            <th class="px-2 py-1 text-right border-b bg-emerald-50/60 dark:bg-emerald-900/10">Reserva</th>
-            <th class="px-2 py-1 text-center border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-gray-100/60 dark:bg-gray-800/30">✓</th>
+            <th class="text-left">SKU</th>
+            <th class="text-left">Produto</th>
+            <th class="text-left bg-amber-50/60 dark:bg-amber-900/10">Qtd - Obs</th>
+            <th class="text-right bg-amber-50/60 dark:bg-amber-900/10">Qtd</th>
+            <th class="text-left bg-amber-50/60 dark:bg-amber-900/10">Nº Pedidos</th>
+            <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10">Atual</th>
+            <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10">Reserva</th>
+            <th class="text-center bg-gray-100/60 dark:bg-gray-800/30">✓</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="produtosFiltered.length === 0">
-            <td colspan="9" class="py-6 text-center text-muted-foreground">
+            <td colspan="8" class="py-6 text-center text-muted-foreground">
               Nenhum produto para esse filtro.
             </td>
           </tr>
           <tr
             v-for="row in produtosFiltered" :key="row.sku"
-            class="border-t hover:bg-muted/20"
+            class="hover:bg-muted/20"
             :class="row.conferido ? 'bg-emerald-50/40 dark:bg-emerald-900/10' : ''"
           >
-            <td class="px-2 py-1 font-mono text-[11px]">{{ row.sku }}</td>
-            <td class="px-2 py-1 truncate max-w-[280px]" :title="row.nome">{{ row.nome }}</td>
+            <td class="font-mono text-[11px]">{{ row.sku }}</td>
+            <td class="truncate" :title="row.nome">{{ row.nome }}</td>
+            <td class="bg-amber-50/40 dark:bg-amber-900/5 align-top">
+              <div v-if="row.entradas.length === 0" class="text-muted-foreground/60">—</div>
+              <div v-else class="space-y-0.5">
+                <div
+                  v-for="(e, idx) in row.entradas" :key="e.movement_id"
+                  class="flex items-center gap-1.5"
+                >
+                  <span class="font-semibold text-amber-700 dark:text-amber-300 shrink-0">
+                    {{ e.qty }}
+                  </span>
+                  <span class="text-muted-foreground shrink-0">-</span>
+                  <input
+                    :value="e.obs"
+                    placeholder="obs"
+                    class="flex-1 h-5 border rounded px-1 bg-background text-[11px] min-w-0"
+                    @blur="(ev) => patchMovementObs(e.movement_id, (ev.target as HTMLInputElement).value, row, idx)"
+                  />
+                </div>
+              </div>
+            </td>
             <td
-              class="px-2 py-1 text-right border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50/40 dark:bg-amber-900/5"
-              :class="row.entrada_qty > 0 ? 'font-semibold text-amber-700 dark:text-amber-300' : 'text-muted-foreground/60'"
+              class="text-right bg-amber-50/40 dark:bg-amber-900/5"
+              :class="row.saida_qty_total > 0 ? 'font-semibold text-amber-700 dark:text-amber-300' : 'text-muted-foreground/60'"
             >
-              {{ row.entrada_qty || '—' }}
+              {{ row.saida_qty_total || '—' }}
             </td>
-            <td class="px-2 py-1 bg-amber-50/40 dark:bg-amber-900/5">
-              <input
-                v-if="row.entrada_movement_id"
-                :value="row.entrada_obs"
-                placeholder="responsável / obs"
-                class="w-full h-6 border rounded px-1 bg-background text-[11px]"
-                @blur="(e) => patchMovementObs(row.entrada_movement_id!, (e.target as HTMLInputElement).value, row)"
-              />
-              <span v-else class="text-muted-foreground/60">—</span>
-            </td>
-            <td
-              class="px-2 py-1 text-right border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50/40 dark:bg-amber-900/5"
-              :class="row.saida_qty > 0 ? 'font-semibold text-amber-700 dark:text-amber-300' : 'text-muted-foreground/60'"
-            >
-              {{ row.saida_qty || '—' }}
-            </td>
-            <td class="px-2 py-1 truncate max-w-[200px] bg-amber-50/40 dark:bg-amber-900/5" :title="row.saida_origens">
+            <td class="truncate bg-amber-50/40 dark:bg-amber-900/5" :title="row.saida_origens">
               {{ row.saida_origens || '—' }}
             </td>
             <td
-              class="px-2 py-1 text-right border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50/40 dark:bg-emerald-900/5 font-semibold"
-              :class="row.saldo === 0 ? 'text-red-600' : 'text-emerald-700'"
+              class="text-right bg-emerald-50/40 dark:bg-emerald-900/5 font-semibold"
+              :class="row.saldo_fisico === 0 ? 'text-red-600' : 'text-emerald-700'"
             >
-              {{ row.saldo }}
+              {{ row.saldo_fisico }}
             </td>
-            <td class="px-2 py-1 text-right bg-emerald-50/40 dark:bg-emerald-900/5 text-muted-foreground">
+            <td class="text-right bg-emerald-50/40 dark:bg-emerald-900/5 text-muted-foreground">
               {{ row.reserva || '—' }}
             </td>
-            <td class="px-2 py-1 text-center border-l-[3px] border-gray-400 dark:border-gray-600 bg-gray-100/40 dark:bg-gray-800/20">
+            <td class="text-center bg-gray-100/40 dark:bg-gray-800/20">
               <input
                 type="checkbox"
                 :checked="row.conferido"
@@ -407,40 +460,40 @@ const pedidosFiltered = computed(() => {
 
     <!-- TAB: PEDIDOS ────────────────────────────────────────────────── -->
     <div v-if="tab === 'pedidos'" class="border rounded-md overflow-x-auto">
-      <table class="w-full text-xs border-collapse">
+      <table class="grid-table w-full text-xs border-collapse">
         <thead>
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
-            <th class="px-2 py-1 text-left border-b">Data</th>
-            <th class="px-2 py-1 text-left border-b">Pedido Bling</th>
-            <th class="px-2 py-1 text-left border-b">Marketplace</th>
-            <th class="px-2 py-1 text-left border-b">Loja</th>
-            <th class="px-2 py-1 text-left border-b">SKU</th>
-            <th class="px-2 py-1 text-left border-b">Produto</th>
-            <th class="px-2 py-1 text-right border-b">Qtd</th>
-            <th class="px-2 py-1 text-center border-b">Status</th>
-            <th class="px-2 py-1 text-center border-b bg-gray-100/40">Conf.</th>
-            <th class="px-2 py-1 text-left border-b bg-emerald-50/40">Obs</th>
+            <th class="text-left">Data Envio</th>
+            <th class="text-left">Pedido Bling</th>
+            <th class="text-left">Marketplace</th>
+            <th class="text-left">Loja</th>
+            <th class="text-left">SKU</th>
+            <th class="text-left">Produto</th>
+            <th class="text-right">Qtd</th>
+            <th class="text-center">Status</th>
+            <th class="text-center bg-gray-100/40">Conf.</th>
+            <th class="text-left bg-emerald-50/40">Obs</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="pedidosFiltered.length === 0">
             <td colspan="10" class="py-6 text-center text-muted-foreground">
-              Nenhum pedido para esse filtro.
+              Nenhum pedido para esse dia.
             </td>
           </tr>
           <tr
             v-for="row in pedidosFiltered" :key="row.id"
-            class="border-t hover:bg-muted/20"
+            class="hover:bg-muted/20"
             :class="row.conferido ? 'bg-emerald-50/40 dark:bg-emerald-900/10' : ''"
           >
-            <td class="px-2 py-1 whitespace-nowrap">{{ row.data ? row.data.slice(0, 10) : '—' }}</td>
-            <td class="px-2 py-1 font-mono text-[11px]">{{ row.pedido_bling || '—' }}</td>
-            <td class="px-2 py-1 font-mono text-[11px]">{{ row.pedido_marketplace || '—' }}</td>
-            <td class="px-2 py-1">{{ row.loja || '—' }}</td>
-            <td class="px-2 py-1 font-mono text-[11px]">{{ row.sku || '—' }}</td>
-            <td class="px-2 py-1 truncate max-w-[280px]" :title="row.produto || ''">{{ row.produto || '—' }}</td>
-            <td class="px-2 py-1 text-right">{{ row.quantidade }}</td>
-            <td class="px-2 py-1 text-center">
+            <td class="whitespace-nowrap">{{ row.data ? row.data.slice(0, 10) : '—' }}</td>
+            <td class="font-mono text-[11px]">{{ row.pedido_bling || '—' }}</td>
+            <td class="font-mono text-[11px]">{{ row.pedido_marketplace || '—' }}</td>
+            <td>{{ row.loja || '—' }}</td>
+            <td class="font-mono text-[11px]">{{ row.sku || '—' }}</td>
+            <td class="truncate max-w-[280px]" :title="row.produto || ''">{{ row.produto || '—' }}</td>
+            <td class="text-right">{{ row.quantidade }}</td>
+            <td class="text-center">
               <span
                 class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium"
                 :class="row.status === 'enviado'
@@ -450,10 +503,10 @@ const pedidosFiltered = computed(() => {
                 {{ row.status === 'enviado' ? 'Enviado' : 'Não enviado' }}
               </span>
             </td>
-            <td class="px-2 py-1 text-center bg-gray-100/30">
+            <td class="text-center bg-gray-100/30">
               <input type="checkbox" :checked="row.conferido" class="cursor-pointer" @change="togglePedido(row)" />
             </td>
-            <td class="px-2 py-1 bg-emerald-50/30">
+            <td class="bg-emerald-50/30">
               <input
                 :value="row.observacao || ''"
                 placeholder="observação"
@@ -468,12 +521,12 @@ const pedidosFiltered = computed(() => {
 
     <!-- TAB: ENVIOS ─────────────────────────────────────────────────── -->
     <div v-if="tab === 'envios'" class="border rounded-md overflow-x-auto">
-      <table class="w-full text-xs border-collapse">
+      <table class="grid-table w-full text-xs border-collapse">
         <thead>
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
-            <th class="px-2 py-1 text-left border-b">Data</th>
-            <th class="px-2 py-1 text-right border-b">Envios</th>
-            <th class="px-2 py-1 text-center border-b bg-gray-100/40">Conferido</th>
+            <th class="text-left">Data</th>
+            <th class="text-right">Envios</th>
+            <th class="text-center bg-gray-100/40">Conferido</th>
           </tr>
         </thead>
         <tbody>
@@ -484,22 +537,34 @@ const pedidosFiltered = computed(() => {
           </tr>
           <tr
             v-for="row in envios.items" :key="row.data"
-            class="border-t hover:bg-muted/20"
+            class="hover:bg-muted/20"
             :class="row.conferido ? 'bg-emerald-50/40 dark:bg-emerald-900/10' : ''"
           >
-            <td class="px-2 py-1">{{ row.data }}</td>
-            <td class="px-2 py-1 text-right font-semibold">{{ row.envios }}</td>
-            <td class="px-2 py-1 text-center bg-gray-100/30">
-              <input type="checkbox" :checked="row.conferido" class="cursor-pointer" @change="toggleEnvio(row)" />
+            <td>{{ row.data }}</td>
+            <td class="text-right font-semibold">{{ row.envios }}</td>
+            <td class="text-center bg-gray-100/30">
+              <input
+                v-if="isAdmin"
+                type="checkbox"
+                :checked="row.conferido"
+                class="cursor-pointer"
+                @change="toggleEnvio(row)"
+              />
+              <span
+                v-else
+                class="inline-block text-base"
+                :class="row.conferido ? 'text-emerald-600' : 'text-muted-foreground/40'"
+                :title="row.conferido ? 'Conferido' : 'Não conferido'"
+              >{{ row.conferido ? '✓' : '✗' }}</span>
             </td>
           </tr>
         </tbody>
         <tfoot v-if="envios.items.length > 0" class="bg-muted/30 font-semibold">
           <tr>
-            <td class="px-2 py-1 text-right">Total</td>
-            <td class="px-2 py-1 text-right">{{ envios.total }}</td>
-            <td class="px-2 py-1 text-center">
-              {{ envios.total_conferido }} conferidos
+            <td class="text-right">Total (conferidos)</td>
+            <td class="text-right">{{ envios.total }}</td>
+            <td class="text-center text-muted-foreground text-[10px]">
+              geral: {{ envios.total_envios }}
             </td>
           </tr>
         </tfoot>
@@ -507,3 +572,16 @@ const pedidosFiltered = computed(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* Full-grid borders on every cell — spreadsheet look. Padding kept tight
+   so the row count visible on screen stays high. */
+.grid-table th,
+.grid-table td {
+  border: 1px solid hsl(var(--border));
+  padding: 4px 6px;
+}
+.grid-table thead th {
+  background-clip: padding-box;
+}
+</style>
