@@ -123,11 +123,12 @@ const sections: Section[] = [
   },
 ]
 
-// "Operador de estoque" = role !== 'admin' AND stock_tag set. These
-// users only ever see /controle-estoque; the sidebar collapses to that
-// single item even though the route guard already locks them there.
+// "Operador de estoque" = role !== 'admin' AND has at least one
+// stock tag. These users only ever see /controle-estoque; the sidebar
+// collapses to that single item even though the route guard already
+// locks them there.
 const isOperator = computed(
-  () => !auth.isAdmin && !!(auth.user?.stock_tag || '').trim(),
+  () => !auth.isAdmin && (auth.user?.stock_tags?.length ?? 0) > 0,
 )
 
 const visibleSections = computed(() => {

@@ -58,7 +58,7 @@ class UserOut(BaseModel):
     permissions: dict
     # Operator-of-stock tag — front-end uses this in auth.global to
     # detect "operador" users and lock them to /controle-estoque.
-    stock_tag: str | None = None
+    stock_tags: list[str] | None = None
 
 
 class VerifyOtpResp(BaseModel):
@@ -257,7 +257,7 @@ async def verify_otp(
             role=user.role.value,
             status=user.status.value,
             permissions=user.permissions,
-            stock_tag=user.stock_tag,
+            stock_tags=user.stock_tags or None,
         ),
         requires_approval=user.status == UserStatus.PENDING,
     )
@@ -293,5 +293,5 @@ async def me(user: Annotated[User | None, Depends(get_current_user)]) -> UserOut
         role=user.role.value,
         status=user.status.value,
         permissions=user.permissions,
-        stock_tag=user.stock_tag,
+        stock_tags=user.stock_tags or None,
     )

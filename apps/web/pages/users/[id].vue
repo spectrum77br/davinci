@@ -17,10 +17,26 @@ type UserDetail = {
   bling_login: string | null
   adspower: string | null
   duoke: string | null
-  stock_tag: string | null
+  stock_tags: string[] | null
   permissions: Partial<Record<Resource, Partial<ResourcePerm>>>
   disabled_at: string | null
 }
+
+// Single source of truth for the operator-of-stock tag whitelist. Keep
+// in sync with backend STOCK_TAGS (apps/api/app/schemas/users.py).
+const STOCK_TAG_OPTIONS: { slug: string; label: string }[] = [
+  { slug: 'ci', label: 'CI' },
+  { slug: 'pi', label: 'PI' },
+  { slug: 'ra', label: 'RA' },
+  { slug: 'sa', label: 'SA' },
+  { slug: 'sp', label: 'SP' },
+  { slug: 'us', label: 'Usados' },
+  { slug: 'cd', label: 'Centro de Distribuição' },
+  { slug: 'fake', label: 'Fake' },
+  { slug: 'mala', label: 'Mala' },
+  { slug: 'eletro', label: 'Eletro' },
+  { slug: 'insumos', label: 'Insumos' },
+]
 
 const route = useRoute()
 const router = useRouter()
@@ -48,7 +64,7 @@ const form = reactive({
   bling_login: '',
   adspower: '',
   duoke: '',
-  stock_tag: '',
+  stock_tags: [] as string[],
   status: 'pending' as 'pending' | 'active' | 'suspended',
 })
 
@@ -61,8 +77,14 @@ function resetForm() {
   form.bling_login = user.value.bling_login || ''
   form.adspower = user.value.adspower || ''
   form.duoke = user.value.duoke || ''
-  form.stock_tag = user.value.stock_tag || ''
+  form.stock_tags = [...(user.value.stock_tags || [])]
   form.status = user.value.status
+}
+
+function toggleStockTag(slug: string) {
+  const i = form.stock_tags.indexOf(slug)
+  if (i >= 0) form.stock_tags.splice(i, 1)
+  else form.stock_tags.push(slug)
 }
 
 const perms = reactive<Record<Resource, ResourcePerm>>(
@@ -125,9 +147,9 @@ async function saveCadastral() {
     }
     body.email = form.email
     body.status = form.status
-    // Operator-of-stock tag — empty string clears it. Backend treats
-    // "" / null identically (no tag).
-    body.stock_tag = form.stock_tag || null
+    // Operator-of-stock tags — empty array clears (backend treats []
+    // and null identically).
+    body.stock_tags = [...form.stock_tags]
     user.value = await api<UserDetail>(`/api/users/${userId}`, { method: 'PATCH', body })
     resetPerms()
   } catch (e: any) {
@@ -225,19 +247,28 @@ async function removeUser() {
             <Label>Duoke</Label>
             <Input v-model="form.duoke" />
           </div>
-          <div>
-            <Label>Tag Estoque</Label>
-            <select v-model="form.stock_tag" class="w-full h-9 rounded-md border bg-background px-3 text-sm">
-              <option value="">(nenhuma)</option>
-              <option value="ci">ci</option>
-              <option value="pi">pi</option>
-              <option value="ra">ra</option>
-              <option value="sa">sa</option>
-              <option value="sp">sp</option>
-            </select>
+          <div class="md:col-span-2">
+            <Label>Tags de Estoque</Label>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-1.5 mt-1 border rounded-md p-2 bg-background">
+              <label
+                v-for="opt in STOCK_TAG_OPTIONS"
+                :key="opt.slug"
+                class="inline-flex items-center gap-1.5 text-sm cursor-pointer hover:bg-muted/50 rounded px-1.5 py-0.5"
+              >
+                <input
+                  type="checkbox"
+                  :checked="form.stock_tags.includes(opt.slug)"
+                  @change="toggleStockTag(opt.slug)"
+                />
+                <span>{{ opt.label }}</span>
+              </label>
+            </div>
             <p class="text-[11px] text-muted-foreground mt-1">
-              Quando preenchida e o usuário não é admin, o sistema bloqueia em /controle-estoque
-              e filtra produtos por SKU terminando em <code>.{{ form.stock_tag || 'tag' }}</code>.
+              Multi-select. Quando ≥1 marcada e o usuário não é admin, o sistema bloqueia em
+              /controle-estoque e mostra a união de produtos das tags selecionadas.
+              <span v-if="form.stock_tags.length">
+                Selecionadas: <code>{{ form.stock_tags.join(', ') }}</code>
+              </span>
             </p>
           </div>
           <div>

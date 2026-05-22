@@ -5,7 +5,29 @@ from pydantic import BaseModel, EmailStr, Field
 from app.schemas.permissions import Permissions
 
 
-_STOCK_TAG_PATTERN = "^(ci|pi|ra|sa|sp)$"
+# Single source of truth for the valid operator-of-stock tags. The UI
+# shows labels in PT-BR (CI, PI, RA, SA, SP, Usados, Centro de
+# Distribuição, Fake, Mala, Eletro, Insumos) — the stored values are
+# always the short slug below.
+STOCK_TAGS = ("ci", "pi", "ra", "sa", "sp", "us", "cd", "fake", "mala", "eletro", "insumos")
+_STOCK_TAG_SET = frozenset(STOCK_TAGS)
+
+
+def _normalize_stock_tags(raw: list | None) -> list[str] | None:
+    """Trim/lowercase + dedupe + drop unknowns. Empty list becomes
+    None so the DB column stays null when the admin clears all tags."""
+    if raw is None:
+        return None
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in raw:
+        if not isinstance(v, str):
+            continue
+        t = v.strip().lower()
+        if t and t in _STOCK_TAG_SET and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out or None
 
 
 class UserOut(BaseModel):
@@ -20,7 +42,7 @@ class UserOut(BaseModel):
     bling_login: str | None = None
     adspower: str | None = None
     duoke: str | None = None
-    stock_tag: str | None = None
+    stock_tags: list[str] | None = None
     permissions: dict
     last_login_at: datetime | None = None
     disabled_at: datetime | None = None
@@ -43,7 +65,7 @@ class UserCreate(BaseModel):
     bling_login: str | None = None
     adspower: str | None = None
     duoke: str | None = None
-    stock_tag: str | None = Field(default=None, pattern=_STOCK_TAG_PATTERN)
+    stock_tags: list[str] | None = None
     permissions: Permissions | None = None
 
 
@@ -55,9 +77,9 @@ class UserPatch(BaseModel):
     bling_login: str | None = None
     adspower: str | None = None
     duoke: str | None = None
-    # `Field(default=None, pattern=...)` rejects garbage but allows None
-    # — the UI sends "" or null to clear the tag, both treated as null.
-    stock_tag: str | None = Field(default=None)
+    # Pass a list of slugs (any subset of STOCK_TAGS) or [] / null to
+    # clear. Backend dedupes / lowercases / drops unknowns.
+    stock_tags: list[str] | None = None
     status: str | None = Field(default=None, pattern="^(pending|active|suspended)$")
 
 

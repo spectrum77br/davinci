@@ -56,7 +56,10 @@ class User(Base, TimestampMixin):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Operator-of-stock tag. When non-null AND role != admin, this user
-    # is locked to /controle-estoque (sees only products whose SKU ends
-    # with `.{stock_tag}`). Valid values: ci / pi / ra / sa / sp.
-    stock_tag: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Operator-of-stock tags (multi). When non-empty AND role != admin,
+    # this user is locked to /controle-estoque and sees the union of
+    # products matching ANY tag in the list. Stored as JSONB array of
+    # short strings. Valid values: ci/pi/ra/sa/sp/us/cd/fake/mala/
+    # eletro/insumos. Tag-to-SKU mapping lives in services/marketing
+    # ... actually in routers/estoque.py (TAG_PATTERNS).
+    stock_tags: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)

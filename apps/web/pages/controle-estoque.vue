@@ -13,7 +13,7 @@
 //                from a wider window, so it auto-widens to last 7 days
 //                on first activation if the user hasn't picked a date).
 import { computed, onMounted, ref, watch } from 'vue'
-import { Boxes, Truck, ClipboardList, Loader2 } from 'lucide-vue-next'
+import { Boxes, Truck, ClipboardList, Loader2, RefreshCw } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -79,6 +79,50 @@ const enviosFim = ref(isoToday())
 // Admin-only tag override.
 const isAdmin = computed(() => auth.user?.role === 'admin')
 const tagOverride = ref<string>('')
+
+// Single source of truth for tag labels — keep in sync with backend
+// STOCK_TAGS list. The admin dropdown uses these; operadores never
+// see this UI (they have a fixed set from user.stock_tags).
+const TAG_OPTIONS: { slug: string; label: string }[] = [
+  { slug: 'ci', label: 'CI' },
+  { slug: 'pi', label: 'PI' },
+  { slug: 'ra', label: 'RA' },
+  { slug: 'sa', label: 'SA' },
+  { slug: 'sp', label: 'SP' },
+  { slug: 'us', label: 'Usados' },
+  { slug: 'cd', label: 'Centro de Distribuição' },
+  { slug: 'fake', label: 'Fake' },
+  { slug: 'mala', label: 'Mala' },
+  { slug: 'eletro', label: 'Eletro' },
+  { slug: 'insumos', label: 'Insumos' },
+]
+
+// Manual reload — calls POST /api/estoque/sync-stocks which fans out
+// GET /estoques/saldos on Bling for the visible product set. Used when
+// the webhook missed a virtual-balance update (rare but happens for
+// reservation-driven changes).
+const syncing = ref(false)
+const syncToast = ref<string | null>(null)
+async function syncFromBling() {
+  if (syncing.value) return
+  syncing.value = true
+  syncToast.value = null
+  try {
+    const params = new URLSearchParams()
+    if (isAdmin.value && tagOverride.value) params.set('tag', tagOverride.value)
+    const r = await api<{ updated: number; total_products: number; missing_bling_data: number }>(
+      `/api/estoque/sync-stocks${params.toString() ? `?${params.toString()}` : ''}`,
+      { method: 'POST' },
+    )
+    syncToast.value = `Sincronizado: ${r.updated}/${r.total_products} produtos`
+    void loadCurrentTab()
+  } catch (e: any) {
+    syncToast.value = `Falha: ${e?.data?.detail?.code || e?.message || 'erro'}`
+  } finally {
+    syncing.value = false
+    setTimeout(() => { syncToast.value = null }, 4000)
+  }
+}
 
 const statusFilter = ref<'all' | 'enviado' | 'nao_enviado'>('all')
 const conferidoFilter = ref<'all' | 'conferidos' | 'nao_conferidos'>('all')
@@ -289,7 +333,20 @@ const pedidosFiltered = computed(() => {
         <Boxes class="h-5 w-5 text-primary" />
         <h1 class="text-xl font-semibold">Controle de Estoque</h1>
       </div>
-      <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit ml-auto">
+      <button
+        class="ml-auto inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        :disabled="syncing"
+        :title="'Busca saldos atualizados direto do Bling para os produtos visíveis'"
+        @click="syncFromBling"
+      >
+        <RefreshCw class="size-3.5" :class="{ 'animate-spin': syncing }" />
+        {{ syncing ? 'Sincronizando…' : 'Recarregar' }}
+      </button>
+      <span
+        v-if="syncToast"
+        class="text-xs text-muted-foreground bg-muted/40 border rounded px-2 py-1"
+      >{{ syncToast }}</span>
+      <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
         <button
           v-for="t in (['estoque', 'pedidos', 'envios'] as const)"
           :key="t"
@@ -341,11 +398,9 @@ const pedidosFiltered = computed(() => {
         Tag:
         <select v-model="tagOverride" class="h-7 border rounded px-2 bg-background">
           <option value="">todas</option>
-          <option value="ci">ci</option>
-          <option value="pi">pi</option>
-          <option value="ra">ra</option>
-          <option value="sa">sa</option>
-          <option value="sp">sp</option>
+          <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">
+            {{ opt.label }}
+          </option>
         </select>
       </label>
       <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">

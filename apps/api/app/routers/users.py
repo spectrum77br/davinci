@@ -19,6 +19,7 @@ from app.schemas.users import (
     UserListOut,
     UserOut,
     UserPatch,
+    _normalize_stock_tags,
 )
 
 logger = structlog.get_logger()
@@ -38,7 +39,7 @@ def _to_out(u: User) -> UserOut:
         bling_login=u.bling_login,
         adspower=u.adspower,
         duoke=u.duoke,
-        stock_tag=u.stock_tag,
+        stock_tags=u.stock_tags or None,
         permissions=u.permissions or {},
         last_login_at=u.last_login_at,
         disabled_at=u.disabled_at,
@@ -154,7 +155,7 @@ async def create_user(
         bling_login=body.bling_login,
         adspower=body.adspower,
         duoke=body.duoke,
-        stock_tag=body.stock_tag,
+        stock_tags=_normalize_stock_tags(body.stock_tags),
         role=UserRole.USER,
         status=UserStatus.PENDING,
         permissions=perms,
@@ -201,14 +202,11 @@ async def patch_user(
         if field in data:
             setattr(u, field, data[field])
 
-    # stock_tag accepts ci/pi/ra/sa/sp or empty/null to clear. Validates
-    # against the small enum here (not in Pydantic) so the admin can
-    # explicitly clear with "" without tripping the pattern.
-    if "stock_tag" in data:
-        raw = (data["stock_tag"] or "").strip().lower() or None
-        if raw is not None and raw not in {"ci", "pi", "ra", "sa", "sp"}:
-            raise HTTPException(400, detail={"code": "invalid_stock_tag"})
-        u.stock_tag = raw
+    # stock_tags: list of slugs from the whitelist. Normalisation
+    # dedupes, lowercases, drops unknowns; empty list → null. Done in
+    # the schema helper so create + patch share the rule.
+    if "stock_tags" in data:
+        u.stock_tags = _normalize_stock_tags(data["stock_tags"])
 
     await session.commit()
     await session.refresh(u)

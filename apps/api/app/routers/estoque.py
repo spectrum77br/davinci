@@ -45,7 +45,14 @@ from app.models.stock_movement import StockMovement
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/estoque", tags=["estoque"])
 
-_VALID_TAGS = frozenset({"ci", "pi", "ra", "sa", "sp"})
+_VALID_TAGS = frozenset({
+    "ci", "pi", "ra", "sa", "sp",  # GERAL <UF> (suffix-mapped)
+    "us",                            # USADOS (suffix .us)
+    "cd",                            # CENTRO DE DISTRIBUIÇÃO (suffix .cd in prod)
+    "fake",                          # FAKE (prefix fake.)
+    "mala", "eletro", "insumos",     # Bling tag-only — no SKU pattern in prod
+})
+
 # Bling situação ID for "enviado etiqueta" — confirmed against prod
 # distinct values: id=15 has 735/928 rows with em_andamento_data set,
 # the highest correspondence rate of any situação. id=12 is cancelado;
@@ -53,18 +60,43 @@ _VALID_TAGS = frozenset({"ci", "pi", "ra", "sa", "sp"})
 _SITUACAO_ENVIADO_ETIQUETA = "15"
 
 
-def _resolve_tag(user: User, override: str | None) -> str | None:
-    """Returns the tag to filter by — None means "no filter" (admin viewing all)."""
+def _sql_clause_for_tag(tag: str):
+    """Returns an SQLAlchemy boolean expression matching products that
+    belong to the given operator tag.
+
+    Suffix tags (ci/pi/ra/sa/sp/us/cd) match `sku ILIKE '%.{tag}'`.
+    `fake` matches `sku ILIKE 'fake.%'`. The remaining tags (mala,
+    eletro, insumos) don't have a SKU pattern in prod — we'd need to
+    pull them off a Bling product-tags column that doesn't exist yet,
+    so for now they match nothing. Returning `false` keeps the OR
+    correct without exploding the query.
+    """
+    from sqlalchemy import literal
+
+    suffix_tags = {"ci", "pi", "ra", "sa", "sp", "us", "cd"}
+    if tag in suffix_tags:
+        return Product.sku.ilike(f"%.{tag}")
+    if tag == "fake":
+        return Product.sku.ilike("fake.%")
+    # mala / eletro / insumos — no pattern available yet.
+    return literal(False)
+
+
+def _resolve_tags(user: User, override: str | None) -> list[str] | None:
+    """Returns the list of tags to OR-filter products by. `None` means
+    "no tag filter" (admin viewing all). Empty list also collapses to
+    None — UI sends "" for "todas" on the admin dropdown."""
     if user.role == UserRole.ADMIN:
         if override:
             ov = override.strip().lower()
             if ov not in _VALID_TAGS:
                 raise HTTPException(400, detail={"code": "invalid_tag"})
-            return ov
-        return None  # admin sees everything
-    if not user.stock_tag:
+            return [ov]
+        return None
+    tags = [t for t in (user.stock_tags or []) if isinstance(t, str) and t.lower() in _VALID_TAGS]
+    if not tags:
         raise HTTPException(403, detail={"code": "no_stock_tag"})
-    return user.stock_tag.lower()
+    return [t.lower() for t in tags]
 
 
 def _resolve_dates(
@@ -86,7 +118,7 @@ async def list_estoque_produtos(
     data_fim: date | None = Query(None),
     tag: str | None = Query(None),  # admin-only override
 ) -> dict[str, Any]:
-    tag_filter = _resolve_tag(user, tag)
+    tags = _resolve_tags(user, tag)
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
     window_start = datetime.combine(data_inicio, time.min, tzinfo=UTC)
     window_end = datetime.combine(data_fim, time.max, tzinfo=UTC)
@@ -100,8 +132,10 @@ async def list_estoque_produtos(
         Product.formato == "S",
         Product.sku.notlike("%+%"),
     ]
-    if tag_filter is not None:
-        where.append(Product.sku.ilike(f"%.{tag_filter}"))
+    if tags is not None:
+        # OR across each tag's pattern — operator with [ci, ra] sees
+        # products ending in .ci OR .ra.
+        where.append(or_(*[_sql_clause_for_tag(t) for t in tags]))
 
     products = (
         await session.execute(
@@ -228,12 +262,26 @@ async def list_estoque_pedidos(
     aparecem apenas quando `status_filter='nao_enviado'` é pedido
     explicitamente; nesse modo cai pra `BlingOrder.data` como filtro
     (sem em_andamento_data nada por que filtrar)."""
-    tag_filter = _resolve_tag(user, tag)
+    tags = _resolve_tags(user, tag)
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
     where: list = [BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA]
-    if tag_filter is not None:
-        where.append(BlingOrder.item_codigo.ilike(f"%.{tag_filter}"))
+    if tags is not None:
+        # Same OR-pattern as the produtos endpoint, but applied to
+        # BlingOrder.item_codigo since pedidos are filtered by the
+        # ordered item's SKU.
+        clauses = []
+        for t in tags:
+            if t in {"ci", "pi", "ra", "sa", "sp", "us", "cd"}:
+                clauses.append(BlingOrder.item_codigo.ilike(f"%.{t}"))
+            elif t == "fake":
+                clauses.append(BlingOrder.item_codigo.ilike("fake.%"))
+            # mala / eletro / insumos: no pattern → contribute nothing
+        if clauses:
+            where.append(or_(*clauses))
+        else:
+            # Operator has only Bling-tag-only tags → no matches today.
+            where.append(BlingOrder.id == None)  # noqa: E711 — force empty
 
     if status_filter == "nao_enviado":
         where.append(BlingOrder.em_andamento_data.is_(None))
@@ -356,7 +404,7 @@ async def list_estoque_envios(
         pattern="^(all|conferidos|nao_conferidos)$",
     ),
 ) -> dict[str, Any]:
-    tag_filter = _resolve_tag(user, tag)
+    tags = _resolve_tags(user, tag)
     # Envios tab defaults to last 7 days when no window is set, matching
     # the page's date-picker default.
     today = datetime.now(UTC).date()
@@ -371,8 +419,17 @@ async def list_estoque_envios(
         BlingOrder.em_andamento_data >= data_inicio,
         BlingOrder.em_andamento_data <= data_fim,
     ]
-    if tag_filter is not None:
-        where.append(BlingOrder.item_codigo.ilike(f"%.{tag_filter}"))
+    if tags is not None:
+        clauses = []
+        for t in tags:
+            if t in {"ci", "pi", "ra", "sa", "sp", "us", "cd"}:
+                clauses.append(BlingOrder.item_codigo.ilike(f"%.{t}"))
+            elif t == "fake":
+                clauses.append(BlingOrder.item_codigo.ilike("fake.%"))
+        if clauses:
+            where.append(or_(*clauses))
+        else:
+            where.append(BlingOrder.id == None)  # noqa: E711
 
     rows = (
         await session.execute(
@@ -475,6 +532,116 @@ async def toggle_estoque_check(
 
     await session.commit()
     return {"ok": True}
+
+
+# ─── SYNC STOCKS (manual reload from Bling) ──────────────────────────────
+
+
+@router.post("/sync-stocks")
+async def sync_stocks(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
+    tag: str | None = Query(None),
+) -> dict[str, Any]:
+    """Forces a fresh GET /estoques/saldos call on Bling for every
+    product matching the current user/tag filter, then updates
+    `Product.stock` + `Product.reserved_stock` in-place.
+
+    Bling's webhook is reliable for most stock changes, but virtual
+    balance updates triggered by reservas occasionally don't fire — the
+    operator's "Reload" button calls this endpoint so they can force a
+    fresh read after spotting a discrepancy.
+
+    Batched in 50-id chunks (Bling allows up to 100 per call; 50 is
+    a comfortable rate-limit safety margin). Soft-fails per chunk;
+    returns the count of products it managed to refresh."""
+    import asyncio
+
+    from app.services.marketing.bling_revenue import _resolve_bling_client
+
+    tags = _resolve_tags(user, tag)
+
+    where: list = [
+        Product.situacao == "A",
+        Product.formato == "S",
+        Product.sku.notlike("%+%"),
+        Product.bling_product_id.isnot(None),
+    ]
+    if tags is not None:
+        where.append(or_(*[_sql_clause_for_tag(t) for t in tags]))
+
+    products = (
+        await session.execute(
+            select(Product).where(and_(*where))
+        )
+    ).scalars().all()
+    if not products:
+        return {"updated": 0, "missing_bling_data": 0, "total_products": 0}
+
+    client = await _resolve_bling_client(session)
+    if client is None:
+        raise HTTPException(503, detail={"code": "bling_not_connected"})
+
+    by_bling_id: dict[int, Product] = {
+        int(p.bling_product_id): p for p in products if p.bling_product_id
+    }
+    bling_ids = list(by_bling_id.keys())
+
+    updated = 0
+    missing = 0
+    chunk_size = 50
+    for i in range(0, len(bling_ids), chunk_size):
+        chunk = bling_ids[i : i + chunk_size]
+        params: list[tuple[str, str]] = [("idsProdutos[]", str(bid)) for bid in chunk]
+        try:
+            r = await client._request("GET", "/estoques/saldos", params=params)
+            r.raise_for_status()
+            data = (r.json() or {}).get("data") or []
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "estoque_sync_bling_chunk_failed",
+                err=str(e)[:200], chunk_start=i, chunk_len=len(chunk),
+            )
+            continue
+        for row in data:
+            prod_obj = (row.get("produto") or {})
+            try:
+                bid = int(prod_obj.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            p = by_bling_id.get(bid)
+            if p is None:
+                continue
+            fisico = row.get("saldoFisicoTotal")
+            virtual = row.get("saldoVirtualTotal")
+            if virtual is None and fisico is None:
+                missing += 1
+                continue
+            try:
+                v = int(float(virtual)) if virtual is not None else int(p.stock or 0)
+                f = int(float(fisico)) if fisico is not None else v
+            except (TypeError, ValueError):
+                missing += 1
+                continue
+            p.stock = v
+            p.reserved_stock = max(0, f - v)
+            updated += 1
+        # Polite pacing between chunks — Bling's documented ceiling is
+        # 3 req/s but bursts close to that have tripped us before.
+        if i + chunk_size < len(bling_ids):
+            await asyncio.sleep(0.4)
+
+    await session.commit()
+    logger.info(
+        "estoque_sync_stocks", user_id=str(user.id), tags=tags,
+        total_products=len(products), updated=updated, missing=missing,
+    )
+    return {
+        "updated": updated,
+        "missing_bling_data": missing,
+        "total_products": len(products),
+        "synced_at": datetime.now(UTC).isoformat(),
+    }
 
 
 # ─── MOVEMENT OBS PATCH (operator inline-edit) ───────────────────────────
