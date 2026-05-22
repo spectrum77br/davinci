@@ -1,10 +1,19 @@
 # DaVinci prod reverse proxy.
-# Single domain, path-based routing.
-#   /api/*  -> api:8000
-#   /*      -> web:3000  (Nuxt SSR)
+# Path-based routing on two hostnames:
+#   {$DOMAIN_APP}             — full app (admin + operator)
+#   gestaoestoque.com         — operator-only portal: locked to
+#                               /controle-estoque by a Nuxt middleware,
+#                               root redirected here by Caddy. Same
+#                               backend containers.
 #
 # Caddy handles TLS automatically via Let's Encrypt HTTP-01.
 # Email used for ACME registration is set via {$ACME_EMAIL} env var.
+#
+# Cloudflare proxy compatibility: HTTP-01 traverses Cloudflare's proxy
+# transparently. If cert issuance fails, ensure Cloudflare's "Always
+# Use HTTPS" is OFF until the first cert is issued (it would 302 the
+# ACME challenge to HTTPS), or temporarily flip the DNS record to
+# DNS-only ("gray cloud") for the initial issuance.
 
 {
 	email {$ACME_EMAIL}
@@ -13,6 +22,29 @@
 
 {$DOMAIN_APP} {
 	encode zstd gzip
+
+	@api path /api /api/*
+	handle @api {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+gestaoestoque.com, www.gestaoestoque.com {
+	encode zstd gzip
+
+	# Root → operator's only page. Saves a round-trip vs letting the
+	# Nuxt middleware redirect on the client.
+	@root path /
+	redir @root /controle-estoque
 
 	@api path /api /api/*
 	handle @api {
