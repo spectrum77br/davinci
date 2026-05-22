@@ -72,11 +72,30 @@ _MALA_EXCLUDE_PATTERNS = (
     "x0%", "ha%", "i1%", "bp%", "teste%", "sistema%",
 )
 
+# Universal junk-SKU exclusions — applied to every produtos/sync-stocks
+# view regardless of tag. These SKUs (numeric labels 1-30, `n9`
+# placeholder) are caixa/embalagem identifiers, never real products the
+# operator needs to track. They were leaking into the admin "todas"
+# view because the mala-specific filter only runs when tag=mala.
+_BASELINE_NUMERIC_SKUS = tuple(str(n) for n in range(1, 31))
+
 # Bling situação ID for "enviado etiqueta" — confirmed against prod
 # distinct values: id=15 has 735/928 rows with em_andamento_data set,
 # the highest correspondence rate of any situação. id=12 is cancelado;
 # 83953/83957 are custom statuses for this shop.
 _SITUACAO_ENVIADO_ETIQUETA = "15"
+
+
+def _baseline_sku_exclusions(column):
+    """Universal exclusions applied to every produtos/sync-stocks view.
+    Returns a list of clauses to extend the WHERE with. Keep narrow —
+    only patterns that are NEVER tracked products under ANY tag belong
+    here (numeric labels, `n9`)."""
+    return [
+        column.op("!~")("^[0-9]+$"),
+        column.notin_(_BASELINE_NUMERIC_SKUS),
+        func.lower(column) != "n9",
+    ]
 
 
 def _sql_clause_for_tag(column, tag: str):
@@ -163,6 +182,7 @@ async def list_estoque_produtos(
         Product.situacao == "A",
         Product.formato == "S",
         Product.sku.notlike("%+%"),
+        *_baseline_sku_exclusions(Product.sku),
     ]
     if tags is not None:
         # OR across each tag's pattern — operator with [ci, ra] sees
@@ -578,6 +598,7 @@ async def sync_stocks(
         Product.formato == "S",
         Product.sku.notlike("%+%"),
         Product.bling_product_id.isnot(None),
+        *_baseline_sku_exclusions(Product.sku),
     ]
     if tags is not None:
         where.append(or_(*[_sql_clause_for_tag(Product.sku, t) for t in tags]))
@@ -653,6 +674,86 @@ async def sync_stocks(
         "missing_bling_data": missing,
         "total_products": len(products),
         "synced_at": datetime.now(UTC).isoformat(),
+    }
+
+
+# ─── SKU NOTE UPSERT (operator obs on no-movement day) ───────────────────
+
+
+@router.post("/sku-obs")
+async def upsert_sku_obs(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
+    sku: str = Query(...),
+    reference_date: date = Query(...),
+    observacao: str | None = Query(None),
+) -> dict[str, Any]:
+    """Writes an obs against a SKU on `reference_date` even when no
+    Bling-emitted entrada movement exists for that day. Used by the
+    Estoque tab so the operator can leave a note ("Reposição prevista
+    quarta", "Aguardando fornecedor") on any SKU regardless of the
+    day's actual movements.
+
+    Behavior:
+      * If an entrada movement (`tipo='E'`) exists for the SKU within
+        the day's UTC window, updates its observacao.
+      * Otherwise inserts a placeholder movement (`tipo='E'`,
+        `quantidade=0`, `origem='manual-note'`) carrying the obs. The
+        next produtos GET surfaces it as a regular entrada with qty=0.
+
+    Returns the resolved movement_id so the FE can reuse the
+    movement-level PATCH endpoint on subsequent edits."""
+    obs = (observacao or "").strip() or None
+    window_start = datetime.combine(reference_date, time.min, tzinfo=UTC)
+    window_end = datetime.combine(reference_date, time.max, tzinfo=UTC)
+
+    existing = (
+        await session.execute(
+            select(StockMovement).where(
+                StockMovement.sku == sku,
+                StockMovement.tipo == "E",
+                StockMovement.date >= window_start,
+                StockMovement.date <= window_end,
+            ).order_by(StockMovement.date.desc())
+        )
+    ).scalars().first()
+
+    if existing is not None:
+        existing.observacao = obs
+        await session.commit()
+        return {
+            "ok": True,
+            "movement_id": str(existing.id),
+            "observacao": existing.observacao,
+            "created": False,
+        }
+
+    # Need bling_product_id (NOT NULL on the movement) — look up via SKU.
+    bling_product_id = (
+        await session.execute(
+            select(Product.bling_product_id).where(Product.sku == sku)
+        )
+    ).scalar_one_or_none()
+    if bling_product_id is None:
+        raise HTTPException(404, detail={"code": "sku_not_found"})
+
+    m = StockMovement(
+        bling_product_id=int(bling_product_id),
+        sku=sku,
+        tipo="E",
+        quantidade=0,
+        observacao=obs,
+        origem="manual-note",
+        date=datetime.now(UTC),
+    )
+    session.add(m)
+    await session.commit()
+    await session.refresh(m)
+    return {
+        "ok": True,
+        "movement_id": str(m.id),
+        "observacao": m.observacao,
+        "created": True,
     }
 
 

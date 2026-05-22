@@ -37,6 +37,12 @@ type ProdutoRow = {
   saldo_virtual: number
   reserva: number
   conferido: boolean
+  // Client-side state for the "no-entrada" obs row — survives until the
+  // user types something, at which point saveSkuObs() upserts a real
+  // placeholder movement and we cache the resulting id so blur/Enter
+  // edits route back through patchMovementObs.
+  _skuObsValue?: string
+  _skuObsMovementId?: string
 }
 type PedidoRow = {
   id: string
@@ -302,6 +308,30 @@ async function patchMovementObs(movementId: string, newObs: string, row: Produto
   }
 }
 
+// Obs input on a SKU with NO entrada today — upserts a placeholder
+// `manual-note` movement via the dedicated endpoint. Once created, the
+// next loadEstoque() surfaces it as a regular entrada (with qty=0) and
+// subsequent edits go through patchMovementObs.
+async function saveSkuObs(row: ProdutoRow, newObs: string) {
+  // No-op on empty → don't create an empty placeholder movement.
+  if (!newObs.trim() && (!row._skuObsMovementId)) return
+  try {
+    const params = new URLSearchParams({
+      sku: row.sku,
+      reference_date: dia.value,
+    })
+    if (newObs) params.set('observacao', newObs)
+    const r = await api<{ movement_id: string }>(
+      `/api/estoque/sku-obs?${params.toString()}`,
+      { method: 'POST' },
+    )
+    row._skuObsMovementId = r.movement_id
+    row._skuObsValue = newObs
+  } catch {
+    void loadEstoque()
+  }
+}
+
 // ── Search filter (client-side) ───────────────────────────────────────
 const produtosFiltered = computed(() => {
   const q = search.value.trim().toLowerCase()
@@ -478,7 +508,15 @@ const pedidosFiltered = computed(() => {
               </div>
             </td>
             <td class="bg-amber-50/40 dark:bg-amber-900/5 align-top p-0">
-              <div v-if="row.entradas.length === 0" class="text-muted-foreground/60 text-center py-1">—</div>
+              <div v-if="row.entradas.length === 0" class="p-0.5">
+                <input
+                  :value="row._skuObsValue ?? ''"
+                  placeholder="—"
+                  class="obs-input"
+                  @blur="(ev) => saveSkuObs(row, (ev.target as HTMLInputElement).value)"
+                  @keyup.enter="($event.target as HTMLInputElement).blur()"
+                />
+              </div>
               <div v-else class="space-y-0.5 p-0.5">
                 <input
                   v-for="(e, idx) in row.entradas" :key="e.movement_id"
