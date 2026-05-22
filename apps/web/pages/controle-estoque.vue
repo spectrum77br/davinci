@@ -477,15 +477,16 @@ const pedidosFiltered = computed(() => {
                 </div>
               </div>
             </td>
-            <td class="bg-amber-50/40 dark:bg-amber-900/5 align-top">
-              <div v-if="row.entradas.length === 0" class="text-muted-foreground/60">—</div>
-              <div v-else class="space-y-0.5">
+            <td class="bg-amber-50/40 dark:bg-amber-900/5 align-top p-0">
+              <div v-if="row.entradas.length === 0" class="text-muted-foreground/60 text-center py-1">—</div>
+              <div v-else class="space-y-0.5 p-0.5">
                 <input
                   v-for="(e, idx) in row.entradas" :key="e.movement_id"
                   :value="e.obs"
                   placeholder="—"
-                  class="block w-full h-5 border rounded px-1 bg-background text-[11px] leading-5 placeholder:text-muted-foreground/60"
+                  class="obs-input"
                   @blur="(ev) => patchMovementObs(e.movement_id, (ev.target as HTMLInputElement).value, row, idx)"
+                  @keyup.enter="($event.target as HTMLInputElement).blur()"
                 />
               </div>
             </td>
@@ -645,5 +646,36 @@ const pedidosFiltered = computed(() => {
 }
 .grid-table thead th {
   background-clip: padding-box;
+}
+
+/* Inline-editable obs field on Entrada column. Sits flush in the cell
+   with a dashed underline so operators can see it's editable without
+   a heavy border that competes with the spreadsheet grid. Focused
+   state turns into a clear bordered input on the muted background. */
+.obs-input {
+  display: block;
+  width: 100%;
+  height: 20px;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 20px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px dashed hsl(var(--border));
+  border-radius: 2px;
+  color: inherit;
+  cursor: text;
+}
+.obs-input::placeholder {
+  color: hsl(var(--muted-foreground) / 0.55);
+}
+.obs-input:hover {
+  background: hsl(var(--background) / 0.6);
+  border-bottom-style: solid;
+}
+.obs-input:focus {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--primary));
+  outline: none;
 }
 </style>

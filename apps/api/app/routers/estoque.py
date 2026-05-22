@@ -102,9 +102,13 @@ def _sql_clause_for_tag(column, tag: str):
         clauses += [column.notilike(f"%.{s}") for s in _SUFFIX_TAGS]
         clauses += [column.notilike(f"{p}.%") for p in _PREFIX_TAGS]
         clauses += [column.notilike(p) for p in _MALA_EXCLUDE_PATTERNS]
-        # n9 placeholder + numeric-only SKUs (1,2,…30) — never malas.
         clauses.append(func.lower(column) != "n9")
+        # Numeric-only SKUs (1-30 in prod) are caixa labels, never malas.
+        # Belt-and-suspenders: PostgreSQL regex + an explicit NOT IN
+        # against the known 1-30 range so the rule holds even if the
+        # collation or DB engine ever surprises us.
         clauses.append(column.op("!~")("^[0-9]+$"))
+        clauses.append(column.notin_([str(n) for n in range(1, 31)]))
         return and_(*clauses)
     # eletro / insumos — no pattern available yet.
     return literal(False)
