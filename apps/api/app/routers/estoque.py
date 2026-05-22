@@ -50,8 +50,14 @@ _VALID_TAGS = frozenset({
     "us",                            # USADOS (suffix .us)
     "cd",                            # CENTRO DE DISTRIBUIÇÃO (suffix .cd in prod)
     "fake",                          # FAKE (prefix fake.)
-    "mala", "eletro", "insumos",     # Bling tag-only — no SKU pattern in prod
+    "mala",                          # MALA (defined by exclusion — see helper)
+    "eletro", "insumos",             # Bling tag-only — no SKU pattern in prod
 })
+
+# Suffixes (".ci", ".pi", …) that belong to OTHER tags. Used both for
+# direct matching and — inverted — as the "mala" exclusion rule.
+_SUFFIX_TAGS = ("ci", "pi", "ra", "sa", "sp", "us", "cd")
+_PREFIX_TAGS = ("fake",)
 
 # Bling situação ID for "enviado etiqueta" — confirmed against prod
 # distinct values: id=15 has 735/928 rows with em_andamento_data set,
@@ -60,25 +66,30 @@ _VALID_TAGS = frozenset({
 _SITUACAO_ENVIADO_ETIQUETA = "15"
 
 
-def _sql_clause_for_tag(tag: str):
-    """Returns an SQLAlchemy boolean expression matching products that
-    belong to the given operator tag.
+def _sql_clause_for_tag(column, tag: str):
+    """Returns an SQLAlchemy boolean expression matching items whose SKU
+    column belongs to the given operator tag.
 
-    Suffix tags (ci/pi/ra/sa/sp/us/cd) match `sku ILIKE '%.{tag}'`.
-    `fake` matches `sku ILIKE 'fake.%'`. The remaining tags (mala,
-    eletro, insumos) don't have a SKU pattern in prod — we'd need to
-    pull them off a Bling product-tags column that doesn't exist yet,
-    so for now they match nothing. Returning `false` keeps the OR
-    correct without exploding the query.
+    Suffix tags (ci/pi/ra/sa/sp/us/cd) match `column ILIKE '%.{tag}'`.
+    `fake` matches `column ILIKE 'fake.%'`. `mala` is defined by
+    EXCLUSION — every simples SKU (no `+`) that doesn't end in a known
+    suffix or start with a known prefix. `eletro`/`insumos` still have
+    no SKU pattern in prod (would require a Bling product-tags column),
+    so they match nothing; the operator gets an empty result until that
+    data source is wired up.
     """
-    from sqlalchemy import literal
+    from sqlalchemy import and_, literal
 
-    suffix_tags = {"ci", "pi", "ra", "sa", "sp", "us", "cd"}
-    if tag in suffix_tags:
-        return Product.sku.ilike(f"%.{tag}")
-    if tag == "fake":
-        return Product.sku.ilike("fake.%")
-    # mala / eletro / insumos — no pattern available yet.
+    if tag in _SUFFIX_TAGS:
+        return column.ilike(f"%.{tag}")
+    if tag in _PREFIX_TAGS:
+        return column.ilike(f"{tag}.%")
+    if tag == "mala":
+        clauses = [column.notilike("%+%")]
+        clauses += [column.notilike(f"%.{s}") for s in _SUFFIX_TAGS]
+        clauses += [column.notilike(f"{p}.%") for p in _PREFIX_TAGS]
+        return and_(*clauses)
+    # eletro / insumos — no pattern available yet.
     return literal(False)
 
 
@@ -135,7 +146,7 @@ async def list_estoque_produtos(
     if tags is not None:
         # OR across each tag's pattern — operator with [ci, ra] sees
         # products ending in .ci OR .ra.
-        where.append(or_(*[_sql_clause_for_tag(t) for t in tags]))
+        where.append(or_(*[_sql_clause_for_tag(Product.sku, t) for t in tags]))
 
     products = (
         await session.execute(
@@ -270,18 +281,7 @@ async def list_estoque_pedidos(
         # Same OR-pattern as the produtos endpoint, but applied to
         # BlingOrder.item_codigo since pedidos are filtered by the
         # ordered item's SKU.
-        clauses = []
-        for t in tags:
-            if t in {"ci", "pi", "ra", "sa", "sp", "us", "cd"}:
-                clauses.append(BlingOrder.item_codigo.ilike(f"%.{t}"))
-            elif t == "fake":
-                clauses.append(BlingOrder.item_codigo.ilike("fake.%"))
-            # mala / eletro / insumos: no pattern → contribute nothing
-        if clauses:
-            where.append(or_(*clauses))
-        else:
-            # Operator has only Bling-tag-only tags → no matches today.
-            where.append(BlingOrder.id == None)  # noqa: E711 — force empty
+        where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
 
     if status_filter == "nao_enviado":
         where.append(BlingOrder.em_andamento_data.is_(None))
@@ -420,16 +420,7 @@ async def list_estoque_envios(
         BlingOrder.em_andamento_data <= data_fim,
     ]
     if tags is not None:
-        clauses = []
-        for t in tags:
-            if t in {"ci", "pi", "ra", "sa", "sp", "us", "cd"}:
-                clauses.append(BlingOrder.item_codigo.ilike(f"%.{t}"))
-            elif t == "fake":
-                clauses.append(BlingOrder.item_codigo.ilike("fake.%"))
-        if clauses:
-            where.append(or_(*clauses))
-        else:
-            where.append(BlingOrder.id == None)  # noqa: E711
+        where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
 
     rows = (
         await session.execute(
@@ -568,7 +559,7 @@ async def sync_stocks(
         Product.bling_product_id.isnot(None),
     ]
     if tags is not None:
-        where.append(or_(*[_sql_clause_for_tag(t) for t in tags]))
+        where.append(or_(*[_sql_clause_for_tag(Product.sku, t) for t in tags]))
 
     products = (
         await session.execute(
