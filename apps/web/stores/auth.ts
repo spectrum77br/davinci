@@ -30,10 +30,11 @@ export const useAuthStore = defineStore('auth', {
   actions: {
     async fetchMe() {
       const config = useRuntimeConfig()
-      // SSR: hit internal docker DNS (no Traefik hop). Client: hit same-origin.
+      // SSR: hit internal docker DNS (no proxy hop). Client: relative
+      // URL — same-origin via Caddy on whichever host served the page.
       const base = (import.meta.server
         ? (config as any).apiUrlInternal
-        : config.public.apiUrl) as string
+        : '') as string
       try {
         const r = await $fetch<AuthUser | null>(`${base}/api/auth/me`, {
           credentials: 'include',
@@ -48,9 +49,8 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async requestOtp(email: string, turnstileToken?: string) {
-      const config = useRuntimeConfig()
       return $fetch<{ prefix: string; expires_at: string }>(
-        `${config.public.apiUrl}/api/auth/request`,
+        `/api/auth/request`,
         {
           method: 'POST',
           credentials: 'include',
@@ -60,11 +60,10 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async verifyOtp(email: string, code: string) {
-      const config = useRuntimeConfig()
       const r = await $fetch<{
         user: AuthUser
         requires_approval: boolean
-      }>(`${config.public.apiUrl}/api/auth/verify`, {
+      }>(`/api/auth/verify`, {
         method: 'POST',
         credentials: 'include',
         body: { email, code },
@@ -74,9 +73,8 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async resendOtp(email: string) {
-      const config = useRuntimeConfig()
       return $fetch<{ prefix: string; expires_at: string }>(
-        `${config.public.apiUrl}/api/auth/resend`,
+        `/api/auth/resend`,
         {
           method: 'POST',
           credentials: 'include',
@@ -86,8 +84,7 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async logout() {
-      const config = useRuntimeConfig()
-      await $fetch(`${config.public.apiUrl}/api/auth/logout`, {
+      await $fetch(`/api/auth/logout`, {
         method: 'POST',
         credentials: 'include',
       })

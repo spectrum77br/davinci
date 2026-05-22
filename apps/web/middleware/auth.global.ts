@@ -49,7 +49,7 @@ export default defineNuxtRouteMiddleware(async (to) => {
     const config = useRuntimeConfig()
     const base = (import.meta.server
       ? (config as any).apiUrlInternal
-      : config.public.apiUrl) as string
+      : '') as string
     try {
       const r = await $fetch<{ needs_onboarding: boolean }>(`${base}/api/dashboard`, {
         credentials: 'include',

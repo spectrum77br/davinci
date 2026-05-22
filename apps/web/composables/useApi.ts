@@ -1,8 +1,14 @@
 export function useApi() {
   const config = useRuntimeConfig()
+  // Client uses relative URLs — Caddy path-routes `/api/*` to the api
+  // container on whichever host the page was served from (app.hadken.com
+  // OR gestaoestoque.com), so requests are always same-origin and no
+  // CORS preflight is involved. SSR still needs an absolute URL because
+  // node fetch has no document.location; `apiUrlInternal` points at
+  // `http://api:8000` over the Docker network.
   const base = (import.meta.server
     ? (config as any).apiUrlInternal
-    : config.public.apiUrl) as string
+    : '') as string
 
   function url(path: string) {
     return `${base}${path.startsWith('/') ? path : `/${path}`}`

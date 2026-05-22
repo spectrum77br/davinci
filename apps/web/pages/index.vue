@@ -41,11 +41,10 @@ type AlertOut = {
 }
 type AlertList = { items: AlertOut[]; total: number; unread: number }
 
-const config = useRuntimeConfig()
 const { api } = useApi()
 
 const { data: health } = await useFetch<{ status: string; postgres: string; redis: string }>(
-  `${config.public.apiUrl}/api/health`,
+  `/api/health`,
   { server: false, default: () => ({ status: 'unknown', postgres: '?', redis: '?' }) },
 )
 

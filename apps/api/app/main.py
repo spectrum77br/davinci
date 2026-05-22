@@ -102,16 +102,23 @@ app = FastAPI(
     contact={"name": "DaVinci", "url": "https://app.hadken.com"},
 )
 
-# In prod, web and api share the same origin (path-routing on app.hadken.com),
-# so CORS is largely a no-op. Still set allow_origins explicitly for any
-# cross-origin SSR fetches and to satisfy strict browsers.
+# In prod, web and api share the same origin (Caddy path-routes /api/*
+# to api:8000 on every host the page is served from), so CORS is largely
+# a no-op. Allowlist is kept explicit anyway as defense-in-depth: SSR
+# can occasionally emit a cross-origin fetch, and the operator portal
+# at gestaoestoque.com is a second valid front-end host.
 _DEV_ORIGINS = [
     "http://localhost:3000", "http://127.0.0.1:3000",
     "http://localhost:3001", "http://127.0.0.1:3001",
 ]
+_PROD_ORIGINS = [
+    settings.app_url,
+    "https://gestaoestoque.com",
+    "https://www.gestaoestoque.com",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.app_url] if settings.is_prod else _DEV_ORIGINS,
+    allow_origins=_PROD_ORIGINS if settings.is_prod else _DEV_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
