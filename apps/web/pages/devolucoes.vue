@@ -84,6 +84,14 @@ const MOTIVOS_DEVOLUCAO = [
   'Embalagem Externa Danificada',
 ] as const
 
+const CONDICOES_PRODUTO = [
+  'Novo',
+  'Usado',
+  'Manutenção',
+  'Extraviado',
+  'Trocado',
+] as const
+
 const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
 const canDelete = useCan('devolucoes', 'delete')
@@ -493,7 +501,10 @@ async function deleteRow(row: DevolutionRow) {
                 <input v-model.number="draft.custo_produto" type="number" step="0.01" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model="draft.condicao_produto" :class="sheetInputClass" />
+                <select v-model="draft.condicao_produto" :class="sheetSelectClass">
+                  <option value="">—</option>
+                  <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
+                </select>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input v-model="draft.link_abertura" :class="sheetInputClass" />
@@ -604,12 +615,19 @@ async function deleteRow(row: DevolutionRow) {
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <input
+              <select
                 :value="row.condicao_produto || ''"
                 :disabled="!canEdit"
-                :class="sheetInputClass"
-                @input="(e) => setRowText(row, 'condicao_produto', (e.target as HTMLInputElement).value)"
-              />
+                :class="sheetSelectClass"
+                @change="(e) => setRowText(row, 'condicao_produto', (e.target as HTMLSelectElement).value)"
+              >
+                <option value="">—</option>
+                <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
+                <option
+                  v-if="row.condicao_produto && !(CONDICOES_PRODUTO as readonly string[]).includes(row.condicao_produto)"
+                  :value="row.condicao_produto"
+                >{{ row.condicao_produto }}</option>
+              </select>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <div class="flex items-center gap-1">
