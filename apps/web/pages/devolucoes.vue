@@ -71,6 +71,19 @@ type ReembolsoFilter = 'all' | 'true' | 'false'
 
 const PAGE_SIZE = 100
 
+const MOTIVOS_DEVOLUCAO = [
+  'Mudou de ideia',
+  'Golpe',
+  'Tamanho',
+  'Item faltando',
+  'Dano funcional / Não funciona',
+  'Item Incorreto',
+  'Não recebido',
+  'Danificado (Outros)',
+  'Pacote Suspeito',
+  'Embalagem Externa Danificada',
+] as const
+
 const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
 const canDelete = useCan('devolucoes', 'delete')
@@ -489,7 +502,10 @@ async function deleteRow(row: DevolutionRow) {
                 <input v-model="draft.reembolso" type="checkbox" class="size-4 rounded border accent-primary" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model="draft.motivo_devolucao" :class="sheetInputClass" />
+                <select v-model="draft.motivo_devolucao" :class="sheetSelectClass">
+                  <option value="">—</option>
+                  <option v-for="m in MOTIVOS_DEVOLUCAO" :key="m" :value="m">{{ m }}</option>
+                </select>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input v-model.number="draft.custo_manutencao" type="number" step="0.01" :class="sheetMoneyInputClass" />
@@ -625,12 +641,19 @@ async function deleteRow(row: DevolutionRow) {
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <input
+              <select
                 :value="row.motivo_devolucao || ''"
                 :disabled="!canEdit"
-                :class="sheetInputClass"
-                @input="(e) => setRowText(row, 'motivo_devolucao', (e.target as HTMLInputElement).value)"
-              />
+                :class="sheetSelectClass"
+                @change="(e) => setRowText(row, 'motivo_devolucao', (e.target as HTMLSelectElement).value)"
+              >
+                <option value="">—</option>
+                <option v-for="m in MOTIVOS_DEVOLUCAO" :key="m" :value="m">{{ m }}</option>
+                <option
+                  v-if="row.motivo_devolucao && !(MOTIVOS_DEVOLUCAO as readonly string[]).includes(row.motivo_devolucao)"
+                  :value="row.motivo_devolucao"
+                >{{ row.motivo_devolucao }}</option>
+              </select>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input
