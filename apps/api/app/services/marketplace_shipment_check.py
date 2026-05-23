@@ -64,6 +64,13 @@ _SHOPEE_SHIPPED = {"SHIPPED", "TO_RETURN", "COMPLETED"}
 _ML_SHIPPED = {"shipped", "delivered"}
 _AMAZON_SHIPPED = {"Shipped"}
 
+# ML shipment substatuses where the seller has NOT yet handed the package.
+# Any OTHER substatus under status=ready_to_ship means the package already
+# left the seller's hands (dropped_off, in_packing_list, in_hub, first_mile,
+# …). On the ML seller UI those all show up as "A caminho", so we treat
+# them as shipped on our side too.
+_ML_NOT_YET_SHIPPED_SUBSTATUS = {"pending", "printed", "ready_to_print"}
+
 
 async def run_check_marketplace_shipped_orders() -> dict[str, int]:
     """One sweep. Returns counters for logging/observability."""
@@ -331,14 +338,19 @@ async def _check_marketplace_shipped(
                 shipped.add(int(o.bling_id))
                 continue
 
-            # Pass 2 — order.status still "paid" but the shipment was
-            # dropped off. ML's order endpoint lags behind the shipment
-            # state: when the seller hands the package to the agency and
-            # it's scanned, `/shipments/{id}` reports
-            # status=ready_to_ship, substatus=dropped_off, while the
-            # order resource still shows status=paid. The seller's job
-            # is done at dropped_off — treat as shipped. Only fetch the
-            # shipment when pass 1 missed, to avoid the extra round-trip.
+            # Pass 2 — order.status still "paid" but the shipment may
+            # already be moving. ML's order endpoint lags the shipment
+            # state: once the seller hands the package off and it gets
+            # scanned anywhere downstream (agency drop-off, hub, packing
+            # list, first mile), `/shipments/{id}` flips to
+            # status=ready_to_ship with a substatus that means "no longer
+            # with the seller", while the order resource still says
+            # status=paid. The seller's job ends the moment the package
+            # leaves their hands, so we whitelist by EXCLUSION: any
+            # ready_to_ship substatus that isn't one of the three pre-
+            # handoff states counts as shipped. (Previous version only
+            # caught dropped_off and missed in_hub / in_packing_list /
+            # first_mile.) Only fetch the shipment when pass 1 missed.
             shipment_id = (data.get("shipping") or {}).get("id")
             if shipment_id:
                 try:
@@ -352,7 +364,14 @@ async def _check_marketplace_shipped(
                     continue
                 substatus = str(ship_data.get("substatus") or "").lower()
                 ship_status2 = str(ship_data.get("status") or "").lower()
-                if substatus == "dropped_off" or ship_status2 in _ML_SHIPPED:
+                if ship_status2 in _ML_SHIPPED:
+                    # shipment-level shipped/delivered → done.
+                    shipped.add(int(o.bling_id))
+                elif (
+                    ship_status2 == "ready_to_ship"
+                    and substatus not in _ML_NOT_YET_SHIPPED_SUBSTATUS
+                ):
+                    # ready_to_ship + any "post-handoff" substatus → done.
                     shipped.add(int(o.bling_id))
         logger.info("shipment_check_ml", orders=len(orders), shipped=len(shipped))
 
