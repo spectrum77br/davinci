@@ -488,6 +488,15 @@ async def list_estoque_envios(
     ).all()
     checks = {r.reference_id: bool(r.conferido) for r in checks_rows}
 
+    # Per-day stock conferência aggregate. Total de produtos é fixo
+    # (não varia por dia); conferidos vem por reference_date a partir
+    # da seção 'estoque'. O front exibe Total/Parcial/Não conferido
+    # numa coluna nova ao lado de "Envios".
+    total_produtos = await _count_active_products(session, tags)
+    estoque_checks_by_day = await _count_estoque_checks_by_day(
+        session, user_id=user.id, data_inicio=data_inicio, data_fim=data_fim,
+    )
+
     items: list[dict[str, Any]] = []
     total_envios = 0
     total_conferido = 0
@@ -502,7 +511,21 @@ async def list_estoque_envios(
             continue
         if conferido_filter == "nao_conferidos" and conf:
             continue
-        items.append({"data": dia_str, "envios": envios_n, "conferido": conf})
+        estoque_conferidos = estoque_checks_by_day.get(dia_str, 0)
+        if total_produtos == 0:
+            conferencia_estoque = "nenhuma"
+        elif estoque_conferidos >= total_produtos:
+            conferencia_estoque = "total"
+        elif estoque_conferidos > 0:
+            conferencia_estoque = "parcial"
+        else:
+            conferencia_estoque = "nenhuma"
+        items.append({
+            "data": dia_str,
+            "envios": envios_n,
+            "conferido": conf,
+            "conferencia_estoque": conferencia_estoque,
+        })
         total_envios += envios_n
         if conf:
             total_conferido += envios_n
@@ -515,6 +538,85 @@ async def list_estoque_envios(
         "total_envios": total_envios,
         "total_conferido": total_conferido,
         "periodo": {"inicio": str(data_inicio), "fim": str(data_fim)},
+    }
+
+
+async def _count_active_products(
+    session: AsyncSession, tags: list[str] | None,
+) -> int:
+    """Total de produtos visíveis na aba Estoque pro usuário (mesmo
+    filtro de situacao/formato/SKU+/baseline da list_estoque_produtos).
+    Usado pra calcular % de conferência por dia."""
+    where: list = [
+        Product.situacao == "A",
+        Product.formato == "S",
+        Product.sku.notlike("%+%"),
+        *_baseline_sku_exclusions(Product.sku),
+    ]
+    if tags is not None:
+        where.append(or_(*[_sql_clause_for_tag(Product.sku, t) for t in tags]))
+    n = (
+        await session.execute(
+            select(func.count()).select_from(Product).where(and_(*where))
+        )
+    ).scalar_one()
+    return int(n or 0)
+
+
+async def _count_estoque_checks_by_day(
+    session: AsyncSession,
+    *,
+    user_id,
+    data_inicio: date,
+    data_fim: date,
+) -> dict[str, int]:
+    """{reference_date_iso: count_conferido_true} pra section='estoque'
+    do usuário, no período. Cada SKU é uma reference_id distinta, então
+    o COUNT é por (reference_date) — não DISTINCT."""
+    rows = (
+        await session.execute(
+            select(
+                StockCheck.reference_date,
+                func.count().label("n"),
+            )
+            .where(
+                StockCheck.user_id == user_id,
+                StockCheck.section == "estoque",
+                StockCheck.conferido.is_(True),
+                StockCheck.reference_date >= data_inicio.isoformat(),
+                StockCheck.reference_date <= data_fim.isoformat(),
+            )
+            .group_by(StockCheck.reference_date)
+        )
+    ).all()
+    return {str(r.reference_date): int(r.n or 0) for r in rows}
+
+
+@router.get("/conferencia-hoje")
+async def conferencia_estoque_hoje(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    tag: str | None = Query(None),
+) -> dict[str, Any]:
+    """Foto da conferência da aba Estoque para HOJE — independente do
+    dia que o operador está visualizando. Usado pelo bloqueio da aba
+    Envios (só libera quando o dia atual está 100%)."""
+    tags = _resolve_tags(user, tag)
+    today = datetime.now(UTC).date()
+    total = await _count_active_products(session, tags)
+    by_day = await _count_estoque_checks_by_day(
+        session, user_id=user.id, data_inicio=today, data_fim=today,
+    )
+    conferido = by_day.get(today.isoformat(), 0)
+    if total == 0:
+        percent = 0
+    else:
+        percent = min(100, int(round(100 * conferido / total)))
+    return {
+        "data": today.isoformat(),
+        "total": total,
+        "conferido": conferido,
+        "percent": percent,
     }
 
 

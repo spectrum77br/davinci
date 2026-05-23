@@ -60,7 +60,14 @@ type PedidoRow = {
   observacao: string | null
   bling_id: number | null
 }
-type EnvioRow = { data: string; envios: number; conferido: boolean }
+type EnvioRow = {
+  data: string
+  envios: number
+  conferido: boolean
+  // Status da conferência da aba Estoque para aquele dia. Vem do
+  // backend — comparação count(StockCheck conferido) vs count(produtos).
+  conferencia_estoque: 'total' | 'parcial' | 'nenhuma'
+}
 
 // ── State ─────────────────────────────────────────────────────────────
 type Tab = 'estoque' | 'pedidos' | 'envios'
@@ -142,6 +149,27 @@ const envios = ref<{
   total: number          // sum of conferido envios (footer "Total")
   total_envios: number   // sum across the window (footer "Total geral")
 }>({ items: [], total: 0, total_envios: 0 })
+
+// Foto da conferência do estoque HOJE — independente do filtro de dia.
+// Alimenta o bloqueio da aba Envios pro operador (admin nunca bloqueia).
+// Recarregado em onMounted, ao trocar a tab e após conferirTodos/toggleProduto
+// quando o operador está vendo o dia de hoje.
+const conferenciaHoje = ref<{ total: number; conferido: number; percent: number }>({
+  total: 0, conferido: 0, percent: 0,
+})
+async function refreshConferenciaHoje() {
+  try {
+    const params = new URLSearchParams()
+    if (isAdmin.value && tagOverride.value) params.set('tag', tagOverride.value)
+    const r = await api<{ total: number; conferido: number; percent: number }>(
+      `/api/estoque/conferencia-hoje${params.toString() ? `?${params.toString()}` : ''}`,
+    )
+    conferenciaHoje.value = { total: r.total, conferido: r.conferido, percent: r.percent }
+  } catch {
+    // não-fatal: mantém o valor anterior; o bloqueio cai pro lado seguro
+    // (operador não acessa Envios sem conferência confirmada).
+  }
+}
 
 const loading = ref(false)
 const errorText = ref<string | null>(null)
@@ -226,6 +254,9 @@ function loadCurrentTab() {
 
 watch(tab, () => {
   void loadCurrentTab()
+  // O bloqueio da aba Envios depende da conferência de hoje — refetch
+  // sempre que a tab muda pra refletir alterações feitas em outra aba.
+  void refreshConferenciaHoje()
 })
 watch([dia, tagOverride, statusFilter], () => {
   if (tab.value !== 'envios') void loadCurrentTab()
@@ -238,6 +269,7 @@ watch(tagOverride, () => {
 })
 onMounted(() => {
   void loadCurrentTab()
+  void refreshConferenciaHoje()
 })
 
 // ── Conferido toggle (per section) ────────────────────────────────────
@@ -263,6 +295,9 @@ async function toggleProduto(row: ProdutoRow) {
   row.conferido = next
   try {
     await toggleCheck('estoque', row.sku, dia.value, next)
+    // Só conta pra liberar a aba Envios se o operador está marcando
+    // o dia de hoje. Marcar dias passados não destrava nada.
+    if (dia.value === isoToday()) void refreshConferenciaHoje()
   } catch {
     row.conferido = !next
   }
@@ -353,6 +388,42 @@ const pedidosFiltered = computed(() => {
       || (p.pedido_marketplace || '').toLowerCase().includes(q),
   )
 })
+
+// Percentual conferido na aba Estoque DO DIA VISÍVEL — usado pelo
+// header de progresso e pelo botão "Conferir todos". Difere de
+// `conferenciaHoje` que é sempre HOJE (fonte da verdade pro bloqueio).
+const conferidoPercent = computed(() => {
+  const total = produtos.value.length
+  if (total === 0) return 0
+  const checked = produtos.value.filter((p) => p.conferido).length
+  return Math.round((checked / total) * 100)
+})
+
+// Bloqueio da aba Envios: admin entra sempre; operador só com 100%
+// da aba Estoque conferido HOJE (não do dia que ele estiver visualizando).
+const canAccessEnvios = computed(() => {
+  if (isAdmin.value) return true
+  return conferenciaHoje.value.percent >= 100
+})
+
+async function conferirTodos() {
+  const unchecked = produtos.value.filter((p) => !p.conferido)
+  if (unchecked.length === 0) return
+  if (!window.confirm(`Confirmar que você conferiu os ${unchecked.length} itens restantes?`)) return
+  // Optimistic UI: marca local imediatamente; em caso de falha
+  // individual reverte só aquele item (loadEstoque pegaria o resto).
+  await Promise.all(
+    unchecked.map(async (row) => {
+      row.conferido = true
+      try {
+        await toggleCheck('estoque', row.sku, dia.value, true)
+      } catch {
+        row.conferido = false
+      }
+    }),
+  )
+  if (dia.value === isoToday()) void refreshConferenciaHoje()
+}
 </script>
 
 <template>
@@ -448,6 +519,24 @@ const pedidosFiltered = computed(() => {
     </div>
 
     <!-- TAB: ESTOQUE ────────────────────────────────────────────────── -->
+    <!-- Barra de progresso + "Conferir todos". Botão sempre visível
+         (sem mínimo de %); ao 100% troca pro badge verde. -->
+    <div v-if="tab === 'estoque' && produtos.length > 0" class="flex items-center gap-3 text-xs">
+      <template v-if="conferidoPercent < 100">
+        <button
+          class="px-3 py-1.5 bg-emerald-600 text-white text-[11px] font-medium rounded hover:bg-emerald-700"
+          @click="conferirTodos"
+        >
+          ✓ Conferir todos
+        </button>
+        <span class="text-muted-foreground">
+          {{ conferidoPercent }}% conferido ({{ produtos.filter((p) => p.conferido).length }}/{{ produtos.length }})
+        </span>
+      </template>
+      <span v-else class="text-emerald-600 font-medium">
+        ✓ Estoque 100% conferido
+      </span>
+    </div>
     <div v-if="tab === 'estoque'" class="border rounded-md overflow-x-auto">
       <table class="grid-table w-full text-xs border-collapse">
         <colgroup>
@@ -572,20 +661,18 @@ const pedidosFiltered = computed(() => {
             <th class="text-left">Produto</th>
             <th class="text-right">Qtd</th>
             <th class="text-center">Status</th>
-            <th class="text-center bg-gray-100/40">Conf.</th>
             <th class="text-left bg-emerald-50/40">Obs</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="pedidosFiltered.length === 0">
-            <td colspan="10" class="py-6 text-center text-muted-foreground">
+            <td colspan="9" class="py-6 text-center text-muted-foreground">
               Nenhum pedido para esse dia.
             </td>
           </tr>
           <tr
             v-for="row in pedidosFiltered" :key="row.id"
             class="hover:bg-muted/20"
-            :class="row.conferido ? 'bg-emerald-50/40 dark:bg-emerald-900/10' : ''"
           >
             <td class="whitespace-nowrap">{{ row.data ? row.data.slice(0, 10) : '—' }}</td>
             <td class="font-mono text-[11px]">{{ row.pedido_bling || '—' }}</td>
@@ -604,9 +691,6 @@ const pedidosFiltered = computed(() => {
                 {{ row.status === 'enviado' ? 'Enviado' : 'Não enviado' }}
               </span>
             </td>
-            <td class="text-center bg-gray-100/30">
-              <input type="checkbox" :checked="row.conferido" class="cursor-pointer" @change="togglePedido(row)" />
-            </td>
             <td class="bg-emerald-50/30">
               <input
                 :value="row.observacao || ''"
@@ -621,18 +705,35 @@ const pedidosFiltered = computed(() => {
     </div>
 
     <!-- TAB: ENVIOS ─────────────────────────────────────────────────── -->
-    <div v-if="tab === 'envios'" class="border rounded-md overflow-x-auto">
+    <!-- Bloqueio pro operador: precisa estar 100% conferido HOJE.
+         Admin nunca cai aqui (canAccessEnvios returns true). -->
+    <div v-if="tab === 'envios' && !canAccessEnvios" class="border rounded-md py-10 px-4 text-center space-y-3">
+      <p class="text-sm text-muted-foreground">
+        ⚠️ Confira o estoque do dia antes de acessar os envios.
+      </p>
+      <p class="text-[11px] text-muted-foreground">
+        Hoje: {{ conferenciaHoje.conferido }}/{{ conferenciaHoje.total }} ({{ conferenciaHoje.percent }}%)
+      </p>
+      <button
+        class="px-3 py-1.5 bg-primary text-primary-foreground text-xs rounded"
+        @click="tab = 'estoque'"
+      >
+        Ir para Estoque
+      </button>
+    </div>
+    <div v-else-if="tab === 'envios'" class="border rounded-md overflow-x-auto">
       <table class="grid-table w-full text-xs border-collapse">
         <thead>
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
             <th class="text-left">Data</th>
             <th class="text-right">Envios</th>
+            <th class="text-center">Conf. Estoque</th>
             <th class="text-center bg-gray-100/40">Conferido</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="envios.items.length === 0">
-            <td colspan="3" class="py-6 text-center text-muted-foreground">
+            <td colspan="4" class="py-6 text-center text-muted-foreground">
               Nenhum envio no período.
             </td>
           </tr>
@@ -643,6 +744,24 @@ const pedidosFiltered = computed(() => {
           >
             <td>{{ row.data }}</td>
             <td class="text-right font-semibold">{{ row.envios }}</td>
+            <td class="text-center">
+              <span
+                class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium"
+                :class="{
+                  'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300': row.conferencia_estoque === 'total',
+                  'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300': row.conferencia_estoque === 'parcial',
+                  'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300': row.conferencia_estoque === 'nenhuma',
+                }"
+              >
+                {{
+                  row.conferencia_estoque === 'total'
+                    ? 'Total'
+                    : row.conferencia_estoque === 'parcial'
+                      ? 'Parcial'
+                      : 'Não conferido'
+                }}
+              </span>
+            </td>
             <td class="text-center bg-gray-100/30">
               <input
                 v-if="isAdmin"
@@ -664,6 +783,7 @@ const pedidosFiltered = computed(() => {
           <tr>
             <td class="text-right">Total (conferidos)</td>
             <td class="text-right">{{ envios.total }}</td>
+            <td></td>
             <td class="text-center text-muted-foreground text-[10px]">
               geral: {{ envios.total_envios }}
             </td>
