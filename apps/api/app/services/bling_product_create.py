@@ -105,6 +105,9 @@ async def run_auto_create_product_from_bling(
             await session.commit()
         return {"ok": True, "created": False, "product_id": str(by_sku.id)}
 
+    # situacao/formato vêm do parse; default A/S quando o Bling omite
+    # — produtos novos nascem ativos e simples, e o filtro do /controle-
+    # estoque ficaria invisível com NULL nesses campos.
     product = Product(
         user_id=user_id,
         sku=sku,
@@ -117,6 +120,8 @@ async def run_auto_create_product_from_bling(
         image_url=parsed.get("image_url"),
         category=parsed.get("category"),
         observation=parsed.get("observation"),
+        situacao=parsed.get("situacao") or "A",
+        formato=parsed.get("formato") or "S",
     )
     session.add(product)
     await session.commit()

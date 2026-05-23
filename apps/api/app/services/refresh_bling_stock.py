@@ -159,6 +159,14 @@ async def run_refresh_bling_stock(
                     product.stock = int(new_stock)
                     if parsed.get("min_stock") is not None:
                         product.min_stock = int(parsed["min_stock"])
+                    # Backfill situacao/formato em produtos pré-existentes
+                    # que ainda têm NULL (criados antes do fix do parse).
+                    # Não sobrescrevemos valor já populado pra preservar
+                    # qualquer correção manual feita no DB.
+                    if product.situacao is None and parsed.get("situacao"):
+                        product.situacao = parsed["situacao"]
+                    if product.formato is None and parsed.get("formato"):
+                        product.formato = parsed["formato"]
                     bling_link = bling_link_by_external.get(str(bpid))
                     if bling_link is not None:
                         bling_link.stock = int(new_stock)

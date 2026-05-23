@@ -586,6 +586,15 @@ def parse_bling_product(raw: dict) -> dict:
     observation = raw.get("observacoes")
     if observation is not None:
         observation = str(observation).strip() or None
+    # situacao: A=Ativo, I=Inativo, E=Excluído (char(1) no DB).
+    # formato:  S=Simples, E=Composto/kit.
+    # Bling v3 GET /produtos/{id} já retorna esses dois campos com a letra
+    # certa; o [:1] é só um cinto-e-suspensórios caso uma rota antiga (ou
+    # uma resposta de erro fora do padrão) devolva "Ativo"/"Simples" por
+    # extenso. Ambos viram None se a chave estiver ausente — quem cria/
+    # atualiza decide qual fallback aplicar (a importação default é "A"/"S").
+    situacao = (raw.get("situacao") or "").strip().upper()[:1] or None
+    formato = (raw.get("formato") or "").strip().upper()[:1] or None
     return {
         "bling_product_id": int(raw["id"]),
         "sku": sku,
@@ -598,6 +607,8 @@ def parse_bling_product(raw: dict) -> dict:
         "image_url": image,
         "category": category,
         "observation": observation,
+        "situacao": situacao,
+        "formato": formato,
     }
 
 
