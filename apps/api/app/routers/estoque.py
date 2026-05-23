@@ -583,8 +583,10 @@ async def _count_estoque_checks_by_day(
                 StockCheck.user_id == user_id,
                 StockCheck.section == "estoque",
                 StockCheck.conferido.is_(True),
-                StockCheck.reference_date >= data_inicio.isoformat(),
-                StockCheck.reference_date <= data_fim.isoformat(),
+                # reference_date é DATE no banco; passar date diretamente
+                # — .isoformat() vira VARCHAR e o PG recusa a comparação.
+                StockCheck.reference_date >= data_inicio,
+                StockCheck.reference_date <= data_fim,
             )
             .group_by(StockCheck.reference_date)
         )
