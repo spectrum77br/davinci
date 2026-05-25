@@ -495,6 +495,7 @@ async def list_estoque_envios(
     total_produtos = await _count_active_products(session, tags)
     estoque_checks_by_day = await _count_estoque_checks_by_day(
         session, user_id=user.id, data_inicio=data_inicio, data_fim=data_fim,
+        tags=tags,
     )
 
     items: list[dict[str, Any]] = []
@@ -569,25 +570,36 @@ async def _count_estoque_checks_by_day(
     user_id,
     data_inicio: date,
     data_fim: date,
+    tags: list[str] | None,
 ) -> dict[str, int]:
     """{reference_date_iso: count_conferido_true} pra section='estoque'
-    do usuário, no período. Cada SKU é uma reference_id distinta, então
-    o COUNT é por (reference_date) — não DISTINCT."""
+    do usuário, no período. `tags` mirrors _count_active_products —
+    sem isso, contar todos os checks do usuário cruzava tags (operador
+    confere malas, troca pra SP e o dia aparecia 'Total' porque o
+    numerador era o count global e o denominador era só SP).
+
+    Filtro: StockCheck.reference_id é o SKU; aplicamos as mesmas
+    regras de SKU usadas pelo tag-resolver + baseline exclusions pra
+    ficar 1:1 com o COUNT de produtos ativos."""
+    where: list = [
+        StockCheck.user_id == user_id,
+        StockCheck.section == "estoque",
+        StockCheck.conferido.is_(True),
+        StockCheck.reference_date >= data_inicio,
+        StockCheck.reference_date <= data_fim,
+        *_baseline_sku_exclusions(StockCheck.reference_id),
+    ]
+    if tags is not None:
+        where.append(
+            or_(*[_sql_clause_for_tag(StockCheck.reference_id, t) for t in tags])
+        )
     rows = (
         await session.execute(
             select(
                 StockCheck.reference_date,
                 func.count().label("n"),
             )
-            .where(
-                StockCheck.user_id == user_id,
-                StockCheck.section == "estoque",
-                StockCheck.conferido.is_(True),
-                # reference_date é DATE no banco; passar date diretamente
-                # — .isoformat() vira VARCHAR e o PG recusa a comparação.
-                StockCheck.reference_date >= data_inicio,
-                StockCheck.reference_date <= data_fim,
-            )
+            .where(and_(*where))
             .group_by(StockCheck.reference_date)
         )
     ).all()
@@ -608,6 +620,7 @@ async def conferencia_estoque_hoje(
     total = await _count_active_products(session, tags)
     by_day = await _count_estoque_checks_by_day(
         session, user_id=user.id, data_inicio=today, data_fim=today,
+        tags=tags,
     )
     conferido = by_day.get(today.isoformat(), 0)
     if total == 0:
