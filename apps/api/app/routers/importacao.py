@@ -414,7 +414,11 @@ async def list_resumo(
 ) -> ImportResumoList:
     rows = (
         await session.execute(
-            select(ImportResumo).order_by(ImportResumo.data, ImportResumo.created_at)
+            # ImportResumo is append-only and has no created_at — sort
+            # by (data, id) so rows with the same data stay in insert
+            # order (UUID v4 isn't time-ordered but the secondary sort
+            # at least makes the response stable across calls).
+            select(ImportResumo).order_by(ImportResumo.data, ImportResumo.id)
         )
     ).scalars().all()
     total = sum((Decimal(r.saldo) for r in rows), _ZERO)
