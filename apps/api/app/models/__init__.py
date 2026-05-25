@@ -5,6 +5,12 @@ from app.models.base import Base
 from app.models.bling_order import BlingOrder
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.devolution import Devolution
+from app.models.financeiro import (
+    FinanceiroConsorcio,
+    FinanceiroSimulacao,
+    FinanceiroSuprimentos,
+    NCMCache,
+)
 from app.models.enums import (
     MARKETPLACES,
     PLATFORMS,
@@ -87,6 +93,9 @@ __all__ = [
     "Company",
     "Department",
     "Devolution",
+    "FinanceiroConsorcio",
+    "FinanceiroSimulacao",
+    "FinanceiroSuprimentos",
     "Integration",
     "IntegrationPlatform",
     "LinkSyncStatus",
@@ -106,6 +115,7 @@ __all__ = [
     "MarketplaceFinancialEvent",
     "MarketplaceOrderFinancial",
     "MarketplaceOrderFreightReconciliation",
+    "NCMCache",
     "OAuthState",
     "PLATFORMS",
     "PricingAccount",

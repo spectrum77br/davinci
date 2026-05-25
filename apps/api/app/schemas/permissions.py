@@ -13,6 +13,7 @@ Resource = Literal[
     "controle_estoque",
     "devolucoes",
     "reembolso",
+    "financeiro",
     "sincronizacoes",
     "sync_logs",
     "integracoes",
