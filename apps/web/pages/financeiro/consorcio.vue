@@ -51,7 +51,14 @@ async function load() {
   loading.value = true
   errorText.value = null
   try {
-    rows.value = await api<Row[]>('/api/financeiro/consorcio')
+    const r = await api<Row[]>('/api/financeiro/consorcio')
+    // Coerce alienacao null → '' so the <select v-model> matches the
+    // empty-string option ("—") explicitly. Without this, the select
+    // would render the first option visually but row.alienacao would
+    // stay null — and the SSR-rendered HTML for `<select :value=>` had
+    // no way to encode the selected option, so on F5 the dropdown
+    // appeared empty until the user re-clicked it.
+    rows.value = r.map((row) => ({ ...row, alienacao: row.alienacao ?? '' }))
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'erro'
     rows.value = []
@@ -221,8 +228,13 @@ const totalRows = computed(() => rows.value.length)
                 @input="(e) => scheduleSave(row, 'cota', Number((e.target as HTMLInputElement).value) || null)" />
             </td>
             <td>
-              <select class="cell-input" :value="row.alienacao ?? ''" :disabled="!canEdit"
-                @change="(e) => scheduleSave(row, 'alienacao', (e.target as HTMLSelectElement).value)">
+              <!-- v-model (instead of :value+@change) so SSR renders
+                   <option selected> correctly. The previous :value
+                   binding only set the DOM property after hydration,
+                   making the dropdown appear empty until the user
+                   interacted with it. -->
+              <select class="cell-input" v-model="row.alienacao" :disabled="!canEdit"
+                @change="() => persist(row, 'alienacao')">
                 <option v-for="o in ALIENACAO_OPTIONS" :key="o" :value="o">{{ o || '—' }}</option>
               </select>
             </td>

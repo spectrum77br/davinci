@@ -280,6 +280,18 @@ function margemClass(v: number | null): string {
   return 'text-red-600 dark:text-red-400 font-semibold'
 }
 
+// Coluna valor_usd (Numeric(14,4)) e fator (Numeric(8,4)) chegam do
+// backend com 4 casas (ex: "78.0000" / "2.0000"). Formatar pro display
+// do input com 2 casas — o snap on blur já garante a persistência com
+// 2 casas, mas isso cobre a primeira render antes de qualquer edição.
+// As fórmulas (certificado/compra/margem) continuam usando o Number()
+// completo, então 78.0000 e 78.00 produzem o mesmo cálculo.
+function fmtInput2(v: number | string | null | undefined): string {
+  if (v == null || v === '') return ''
+  const n = Number(v)
+  return Number.isFinite(n) ? n.toFixed(2) : ''
+}
+
 // Formata um <input type="number" step="0.01"> pra sempre mostrar
 // 2 casas decimais no blur. Mantém type=number durante a edição (setas
 // + validação nativas) — só reformata o valor depois que o operador
@@ -476,7 +488,7 @@ const totalRows = computed(() => rows.value.length)
             </td>
 
             <td><input type="number" step="0.01" class="cell-input text-right"
-              :value="row.valor_usd ?? ''" :disabled="!canEdit"
+              :value="fmtInput2(row.valor_usd)" :disabled="!canEdit"
               @input="(e) => scheduleSave(row, 'valor_usd', Number((e.target as HTMLInputElement).value) || null)"
               @blur="(e) => snapTwoDecimals(row, 'valor_usd', e)" /></td>
             <td><input type="number" class="cell-input text-right"
@@ -484,7 +496,7 @@ const totalRows = computed(() => rows.value.length)
               @input="(e) => scheduleSave(row, 'projecao_compra', Number((e.target as HTMLInputElement).value) || null)" /></td>
             <td class="calc text-right">{{ fmt2(calcCertificado(row)) }}</td>
             <td><input type="number" step="0.01" class="cell-input text-right"
-              :value="row.fator ?? ''" :disabled="!canEdit"
+              :value="fmtInput2(row.fator)" :disabled="!canEdit"
               @input="(e) => scheduleSave(row, 'fator', Number((e.target as HTMLInputElement).value) || null)"
               @blur="(e) => snapTwoDecimals(row, 'fator', e)" /></td>
             <td class="calc text-right">{{ fmtMoney(calcMoqTotal(row)) }}</td>

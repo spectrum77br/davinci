@@ -38,6 +38,8 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   {
     label: 'Operação',
     resources: [
+      'margem',
+      'controle_estoque',
       'produtos',
       'anuncios',
       'tabela_precos',
@@ -47,15 +49,11 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     ],
   },
   {
-    // Margem and Controle de Estoque live under Financeiro on the
-    // permissions matrix (they were under "Operação" before — moved
-    // to match how operators talk about them). The four financeiro_*
-    // slugs are the per-planilha grants for Consórcio, Suprimentos,
-    // Simulação and DNP.
+    // Financeiro = the four import-business planilhas. Margem and
+    // Controle de Estoque belong in Operação because they're day-to-day
+    // operator tools, not accounting/procurement planilhas.
     label: 'Financeiro',
     resources: [
-      'margem',
-      'controle_estoque',
       'financeiro_consorcio',
       'financeiro_suprimentos',
       'financeiro_simulacao',
