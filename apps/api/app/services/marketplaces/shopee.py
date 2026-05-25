@@ -202,28 +202,29 @@ class ShopeeClient:
         response = body.get("response")
         return response if isinstance(response, dict) else {}
 
-    async def get_order_status_map(self, order_sns: list[str]) -> dict[str, str]:
-        """Batch-fetch order_status for up to 50 order_sns at a time.
+    async def get_order_status_map(self, order_sns: list[str]) -> dict[str, dict]:
+        """Batch-fetch order_status + update_time for up to 50 order_sns at a time.
 
         Endpoint: GET /api/v2/order/get_order_detail with `order_sn_list`
-        (comma-separated). Returns `{order_sn: status_upper}` for every
-        order Shopee returned; orders Shopee didn't return are simply
-        absent from the map (caller decides how to handle that).
+        (comma-separated). Returns `{order_sn: {"status": str_upper,
+        "update_time": int | None}}` for every order Shopee returned;
+        orders Shopee didn't return are simply absent from the map.
 
-        Used by the shipped-orders sweep to decide when to bump the
-        local em_andamento_data + Bling situacao=15. We only need
-        order_status, so we ask Shopee for exactly that one field.
+        `update_time` is the unix-epoch (UTC) at which the order last
+        changed state on Shopee's side — used by the shipment sweep to
+        stamp em_andamento_data with the actual ship date instead of
+        "today" (matters when the sweep runs days late after a weekend).
         """
         if not order_sns:
             return {}
-        out: dict[str, str] = {}
+        out: dict[str, dict] = {}
         chunk_size = 50  # Shopee max per call.
         path = "/api/v2/order/get_order_detail"
         for i in range(0, len(order_sns), chunk_size):
             chunk = order_sns[i : i + chunk_size]
             params = {
                 "order_sn_list": ",".join(chunk),
-                "response_optional_fields": "order_status",
+                "response_optional_fields": "order_status,update_time",
             }
             try:
                 r = await self._request("GET", path, params=params)
@@ -250,7 +251,10 @@ class ShopeeClient:
                 sn = o.get("order_sn")
                 status = o.get("order_status")
                 if sn and status:
-                    out[str(sn)] = str(status).upper()
+                    out[str(sn)] = {
+                        "status": str(status).upper(),
+                        "update_time": o.get("update_time"),
+                    }
         return out
 
     async def update_stock(

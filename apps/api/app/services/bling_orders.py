@@ -12,6 +12,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
+
+# em_andamento_data is the operator-facing ship-date column on the
+# planilha. Stamp it in Brasília-local date — without this conversion,
+# orders shipped late evening BRT would land on the next calendar day.
+_BRT = ZoneInfo("America/Sao_Paulo")
 
 import structlog
 from sqlalchemy import delete, func, or_, select, update
@@ -177,7 +183,7 @@ def _row_from_item(
     # Bling first then re-fetching the order). Date-only so it survives
     # the day-window queries in /api/estoque/pedidos and /api/estoque/envios.
     em_andamento_data = (
-        datetime.now(UTC).date() if situacao_id == "15" else None
+        datetime.now(UTC).astimezone(_BRT).date() if situacao_id == "15" else None
     )
 
     return {
@@ -404,7 +410,7 @@ async def upsert_order(
             # on this narrow path too. Otherwise webhooks that don't change
             # the item set would leave the field NULL forever.
             if situacao == "15":
-                values["em_andamento_data"] = datetime.now(UTC).date()
+                values["em_andamento_data"] = datetime.now(UTC).astimezone(_BRT).date()
             await session.execute(
                 update(BlingOrder)
                 .where(BlingOrder.bling_id == bling_id)

@@ -31,8 +31,9 @@ ends up correct.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
@@ -70,6 +71,43 @@ _AMAZON_SHIPPED = {"Shipped"}
 # …). On the ML seller UI those all show up as "A caminho", so we treat
 # them as shipped on our side too.
 _ML_NOT_YET_SHIPPED_SUBSTATUS = {"pending", "printed", "ready_to_print"}
+
+# Brasília is UTC-3 (no DST since 2019). em_andamento_data is the
+# operator-facing ship-date column on the planilha; storing it in BRT
+# avoids the "23h BRT order shows up as next day" off-by-one and lets
+# late-detected orders (sweep skipped a weekend) carry the real ship
+# date instead of the day the sweep finally noticed.
+_BRT = ZoneInfo("America/Sao_Paulo")
+
+
+def _shopee_ship_date(update_time: Any) -> date | None:
+    """Convert a Shopee update_time (unix-epoch seconds, UTC) to BRT date."""
+    if not update_time:
+        return None
+    try:
+        return datetime.fromtimestamp(int(update_time), tz=UTC).astimezone(_BRT).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _ml_ship_date(iso_str: Any) -> date | None:
+    """Convert an ML timestamp ("2026-05-23T14:30:00.000-03:00" or similar)
+    to a BRT-localised date. ML occasionally emits Z-suffixed UTC strings;
+    fromisoformat handles both since Python 3.11."""
+    if not iso_str:
+        return None
+    try:
+        s = str(iso_str)
+        # Python's fromisoformat accepts "Z" since 3.11 but normalising
+        # to "+00:00" keeps us defensive against older runtimes.
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(_BRT).date()
+    except (TypeError, ValueError):
+        return None
 
 
 async def run_check_marketplace_shipped_orders() -> dict[str, int]:
@@ -135,7 +173,7 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                 continue
 
             bling_client = await _build_bling_client(session, bling_integration)
-            for bling_id in shipped_bling_ids:
+            for bling_id, real_ship_date in shipped_bling_ids.items():
                 try:
                     await bling_client.update_order_situacao(
                         int(bling_id), _SHIPPED_SITUACAO,
@@ -167,11 +205,16 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                     continue
 
                 # Local stamp — covers every row of this order (multi-item).
-                today = datetime.now(UTC).date()
+                # Use the marketplace's reported ship-date when present;
+                # fall back to today-in-BRT only when the marketplace
+                # didn't surface a timestamp. The fallback is "best-
+                # available" — without a real date, we'd rather record
+                # the sweep day than leave the field NULL forever.
+                ship_date = real_ship_date or datetime.now(UTC).astimezone(_BRT).date()
                 result = await session.execute(
                     update(BlingOrder)
                     .where(BlingOrder.bling_id == int(bling_id))
-                    .values(em_andamento_data=today, situacao=str(_SHIPPED_SITUACAO))
+                    .values(em_andamento_data=ship_date, situacao=str(_SHIPPED_SITUACAO))
                 )
                 summary["local_updated"] += result.rowcount or 0
 
@@ -284,9 +327,12 @@ async def _check_marketplace_shipped(
     session: AsyncSession,
     integration: Integration,
     orders: list[BlingOrder],
-) -> set[int]:
-    """Returns the set of bling_ids that the marketplace reports as
-    shipped. Soft-fails per order — one bad fetch doesn't drop the rest."""
+) -> dict[int, date | None]:
+    """Returns `{bling_id: real_ship_date_BRT}` for orders the marketplace
+    reports as shipped. Value is None when the marketplace surfaced the
+    shipped state without a usable timestamp — callers fall back to
+    today-in-BRT in that case. Soft-fails per order — one bad fetch
+    doesn't drop the rest."""
     creds = decrypt_json(integration.credentials)
 
     async def _persist(new_creds: dict) -> None:
@@ -297,7 +343,7 @@ async def _check_marketplace_shipped(
         await session.flush()
 
     platform = integration.platform
-    shipped: set[int] = set()
+    shipped: dict[int, date | None] = {}
 
     if platform == IntegrationPlatform.SHOPEE:
         client = ShopeeClient(creds, on_token_refresh=_persist)
@@ -306,9 +352,9 @@ async def _check_marketplace_shipped(
         for o in orders:
             if not o.numeroloja or not o.bling_id:
                 continue
-            status = status_map.get(str(o.numeroloja))
-            if status and status in _SHOPEE_SHIPPED:
-                shipped.add(int(o.bling_id))
+            info = status_map.get(str(o.numeroloja))
+            if info and info.get("status") in _SHOPEE_SHIPPED:
+                shipped[int(o.bling_id)] = _shopee_ship_date(info.get("update_time"))
         logger.info(
             "shipment_check_shopee",
             orders=len(orders), found_in_response=len(status_map),
@@ -335,7 +381,9 @@ async def _check_marketplace_shipped(
             if (ship_status and str(ship_status).lower() in _ML_SHIPPED) or (
                 top_status and str(top_status).lower() in _ML_SHIPPED
             ):
-                shipped.add(int(o.bling_id))
+                shipped[int(o.bling_id)] = _ml_ship_date(
+                    data.get("last_updated") or data.get("date_closed")
+                )
                 continue
 
             # Pass 2 — order.status still "paid" but the shipment may
@@ -364,15 +412,18 @@ async def _check_marketplace_shipped(
                     continue
                 substatus = str(ship_data.get("substatus") or "").lower()
                 ship_status2 = str(ship_data.get("status") or "").lower()
-                if ship_status2 in _ML_SHIPPED:
-                    # shipment-level shipped/delivered → done.
-                    shipped.add(int(o.bling_id))
-                elif (
+                # Whitelist by exclusion: shipped/delivered outright, OR
+                # ready_to_ship with any substatus that isn't one of the
+                # three pre-handoff states. Real ship date from
+                # last_updated (the moment ML flipped substatus) or
+                # date_created on the shipment.
+                if ship_status2 in _ML_SHIPPED or (
                     ship_status2 == "ready_to_ship"
                     and substatus not in _ML_NOT_YET_SHIPPED_SUBSTATUS
                 ):
-                    # ready_to_ship + any "post-handoff" substatus → done.
-                    shipped.add(int(o.bling_id))
+                    shipped[int(o.bling_id)] = _ml_ship_date(
+                        ship_data.get("last_updated") or ship_data.get("date_created")
+                    )
         logger.info("shipment_check_ml", orders=len(orders), shipped=len(shipped))
 
     elif platform == IntegrationPlatform.AMAZON:
@@ -382,7 +433,10 @@ async def _check_marketplace_shipped(
                 continue
             status = await client.get_order_status(str(o.numeroloja))
             if status and status in _AMAZON_SHIPPED:
-                shipped.add(int(o.bling_id))
+                # Amazon get_order_status returns only the OrderStatus
+                # string today. Real LastUpdateDate would require a
+                # client change — fall back to today-in-BRT for now.
+                shipped[int(o.bling_id)] = None
         logger.info("shipment_check_amazon", orders=len(orders), shipped=len(shipped))
 
     else:
