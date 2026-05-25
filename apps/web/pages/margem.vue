@@ -240,9 +240,18 @@ async function setStatus(row: MarketplaceRow, value: MargensStatus) {
     })
   }
 
+  function removeFromView() {
+    if (statusFilter.value !== 'all' && value !== statusFilter.value) {
+      const removed = items.value.filter(r => r.pedido_bling === pedido).length
+      items.value = items.value.filter(r => r.pedido_bling !== pedido)
+      total.value = Math.max(0, total.value - removed)
+    }
+  }
+
   try {
     await call(!pushBling)
     error.value = null
+    removeFromView()
   } catch (e: any) {
     if (pushBling && isBlingPatchError(e)) {
       const ok = window.confirm(
@@ -252,6 +261,7 @@ async function setStatus(row: MarketplaceRow, value: MargensStatus) {
         try {
           await call(true)
           error.value = null
+          removeFromView()
           return
         } catch (fallback: any) {
           error.value = apiError(fallback)
