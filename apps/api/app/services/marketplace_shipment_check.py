@@ -55,7 +55,16 @@ logger = structlog.get_logger()
 # custom "Em aberto" — that's where orders sit between Bling import
 # and marketplace shipment. Other 8xxx custom statuses exist but
 # don't represent a still-shippable state for this account.
-_OPEN_SITUACAO = "83965"
+# Pre-shipment states the sweep should consider. The shop's custom
+# "Em aberto" was 83965 — but orders imported directly from Bling
+# arrive in the system at situacao=6 (Bling's stock "Em aberto"),
+# never touch 83965, and were silently skipped before this list
+# expanded. Both states mean "not yet flagged shipped"; the
+# marketplace verification logic downstream is what actually decides
+# to bump to 15 (Em andamento), so adding 6 only widens the candidate
+# pool — it never marks an order shipped without the marketplace
+# confirming.
+_OPEN_SITUACOES: tuple[str, ...] = ("83965", "6")
 _SHIPPED_SITUACAO = 15  # Bling system situacao "Em andamento".
 _CANDIDATE_WINDOW = timedelta(days=7)
 
@@ -236,7 +245,7 @@ async def _load_candidates(session: AsyncSession) -> list[BlingOrder]:
             select(BlingOrder)
             .where(
                 and_(
-                    BlingOrder.situacao == _OPEN_SITUACAO,
+                    BlingOrder.situacao.in_(_OPEN_SITUACOES),
                     BlingOrder.em_andamento_data.is_(None),
                     BlingOrder.created_at >= cutoff,
                     BlingOrder.item_index == 0,  # one row per order
