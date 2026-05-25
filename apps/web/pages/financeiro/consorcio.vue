@@ -162,6 +162,17 @@ const totalRows = computed(() => rows.value.length)
 
     <div class="border overflow-x-auto">
       <table class="grid-table w-full text-xs border-collapse">
+        <colgroup>
+          <!-- Larguras explícitas: EMP/Grupo/Cota são identificadores
+               curtos (até 4 chars) então recebem o mínimo confortável;
+               Alienação cabe textos como "ag. Repasse" e "a contemplar"
+               sem quebrar linha. As demais colunas seguem auto-fit. -->
+          <col />              <!-- Crédito -->
+          <col style="width: 48px" />  <!-- EMP -->
+          <col style="width: 60px" />  <!-- Grupo -->
+          <col style="width: 60px" />  <!-- Cota -->
+          <col style="width: 140px" /> <!-- Alienação -->
+        </colgroup>
         <thead>
           <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
             <th class="text-right">Crédito</th>

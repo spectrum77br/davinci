@@ -198,11 +198,8 @@ class DNPProdutoOut(BaseModel):
     fabrica: str | None = None
     modelo: str | None = None
     moq: int | None = None
-    voltagem: str | None = None
-    cor: str | None = None
-    material: str | None = None
-    tamanho: str | None = None
-    potencia: str | None = None
+    descricao: str | None = None
+    foto_url: str | None = None
     valor_usd: Decimal | None = None
     projecao_compra: int | None = None
     fator: Decimal | None = None
@@ -221,11 +218,9 @@ class DNPProdutoPatch(BaseModel):
     fabrica: str | None = None
     modelo: str | None = None
     moq: int | None = None
-    voltagem: str | None = None
-    cor: str | None = None
-    material: str | None = None
-    tamanho: str | None = None
-    potencia: str | None = None
+    descricao: str | None = None
+    # foto_url is set via the dedicated photo-upload endpoint, not by
+    # the cell-by-cell PATCH used for the rest of the row.
     valor_usd: Decimal | None = None
     projecao_compra: int | None = None
     fator: Decimal | None = None

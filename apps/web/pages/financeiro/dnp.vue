@@ -7,8 +7,13 @@
 // Dólar do dia: bate na awesomeapi do lado do cliente ao carregar a
 // página. Operador pode sobrescrever; o valor persistido em
 // davinci.dnp_config é o que vale pra próxima carga.
+//
+// Layout: descricao livre substitui as 5 colunas antigas
+// (voltagem/cor/material/tamanho/potencia). Foto opcional por linha
+// com lightbox no click. Compra/Venda em destaque dourado por serem
+// os campos-chave da decisão de compra.
 import { computed, reactive, ref } from 'vue'
-import { Plus, RefreshCw, Trash2, ExternalLink } from 'lucide-vue-next'
+import { Plus, RefreshCw, Trash2, ExternalLink, Camera, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -34,11 +39,8 @@ type Produto = {
   fabrica: string | null
   modelo: string | null
   moq: number | null
-  voltagem: string | null
-  cor: string | null
-  material: string | null
-  tamanho: string | null
-  potencia: string | null
+  descricao: string | null
+  foto_url: string | null
   valor_usd: number | null
   projecao_compra: number | null
   fator: number | null
@@ -63,6 +65,13 @@ const configSaveTimer = ref<ReturnType<typeof setTimeout> | null>(null)
 // Seleção pra exclusão em batch
 const selected = ref<Set<string>>(new Set())
 
+// Cache-busting token for the foto endpoint — gets bumped on upload so
+// the thumbnail refreshes without a full reload.
+const fotoBust = reactive<Record<string, number>>({})
+
+// Lightbox state
+const lightboxRow = ref<Produto | null>(null)
+
 async function loadConfig() {
   try {
     const c = await api<{ dolar_dia: number | null; certificado: number | null }>('/api/financeiro/dnp/config')
@@ -86,8 +95,6 @@ async function loadProdutos() {
   }
 }
 
-// Dólar automático — bate em awesomeapi do CLIENT (a API tem CORS aberto).
-// Se falhar (rede / rate-limit), mantém o valor que veio do banco.
 async function refreshDolar() {
   dolarApiStatus.value = 'Buscando…'
   try {
@@ -109,7 +116,6 @@ async function refreshDolar() {
 
 await loadConfig()
 await loadProdutos()
-// Não awaita — operador já vê a tabela enquanto o dólar carrega.
 void refreshDolar()
 
 function scheduleConfigSave() {
@@ -180,6 +186,46 @@ async function excluirSelecionados() {
   await loadProdutos()
 }
 
+// ── Foto upload ────────────────────────────────────────────────────
+function fotoSrc(row: Produto): string | null {
+  if (!row.foto_url) return null
+  const bust = fotoBust[row.id] ?? 0
+  return `/api/financeiro/dnp/produtos/${row.id}/foto${bust ? `?v=${bust}` : ''}`
+}
+
+async function uploadFoto(row: Produto, ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  const fd = new FormData()
+  fd.append('file', file)
+  try {
+    const updated = await api<Produto>(
+      `/api/financeiro/dnp/produtos/${row.id}/foto`,
+      { method: 'POST', body: fd },
+    )
+    row.foto_url = updated.foto_url
+    fotoBust[row.id] = Date.now()
+  } catch (e: any) {
+    errorText.value = `Falha ao subir foto: ${e?.data?.detail?.code || 'erro'}`
+  } finally {
+    // Reset input so the same file can be picked again later.
+    input.value = ''
+  }
+}
+
+async function removerFoto(row: Produto) {
+  if (!row.foto_url) return
+  if (!confirm('Remover foto deste produto?')) return
+  try {
+    await api(`/api/financeiro/dnp/produtos/${row.id}/foto`, { method: 'DELETE' })
+    row.foto_url = null
+    fotoBust[row.id] = Date.now()
+  } catch (e: any) {
+    errorText.value = `Falha ao remover foto: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
+
 // ── Cálculos ──────────────────────────────────────────────────────────
 function num(v: number | null | undefined): number {
   return v == null || isNaN(Number(v)) ? 0 : Number(v)
@@ -198,7 +244,14 @@ function calcCompra(r: Produto): number | null {
   if (N == null || !L || !O) return null
   return (L * O) * dolar.value + N
 }
-// T (%) = ((((Q * (1-S)) - R) / P) - 1)
+// MOQ Total = Compra × MOQ
+function calcMoqTotal(r: Produto): number | null {
+  const P = calcCompra(r)
+  const M = num(r.moq)
+  if (P == null || !M) return null
+  return P * M
+}
+// Margem = (((Q*(1-S)) - R) / P) - 1
 function calcMargem(r: Produto): number | null {
   const Q = num(r.venda_estimada), S = num(r.comissao), R = num(r.frete)
   const P = calcCompra(r)
@@ -210,14 +263,51 @@ function fmt2(v: number | null): string {
   if (v == null) return '—'
   return v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
-function fmtPct(v: number | null): string {
+function fmtMoney(v: number | null): string {
   if (v == null) return '—'
-  return `${(v * 100).toFixed(2)}%`
+  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+}
+// Comissão + Margem viram percentual inteiro arredondado pra exibição
+// (Comissão é input — armazenamos 0.14, mostramos 14%; Margem é
+// computada, mostramos como porcentagem inteira).
+function fmtPctInt(v: number | null): string {
+  if (v == null) return '—'
+  return `${Math.round(v * 100)}%`
 }
 function margemClass(v: number | null): string {
   if (v == null) return ''
   if (v > 0) return 'text-emerald-700 dark:text-emerald-400 font-semibold'
   return 'text-red-600 dark:text-red-400 font-semibold'
+}
+
+// Formata um <input type="number" step="0.01"> pra sempre mostrar
+// 2 casas decimais no blur. Mantém type=number durante a edição (setas
+// + validação nativas) — só reformata o valor depois que o operador
+// sai do campo.
+function snapTwoDecimals(row: Produto, field: keyof Produto, ev: Event) {
+  const el = ev.target as HTMLInputElement
+  const v = Number(el.value)
+  if (!Number.isFinite(v)) return
+  const fixed = Math.round(v * 100) / 100
+  if ((row as any)[field] !== fixed) {
+    scheduleSave(row, field, fixed)
+  }
+}
+
+// Comissão: input mostra "14" (percentual inteiro), armazenamos 0.14.
+function comissaoDisplay(v: number | null): number | null {
+  if (v == null) return null
+  return Math.round(v * 100)
+}
+function onComissaoInput(row: Produto, value: string) {
+  const pct = Number(value)
+  if (!Number.isFinite(pct)) {
+    scheduleSave(row, 'comissao', null)
+    return
+  }
+  // Round to 4 decimals to dodge floating-point noise (14/100 = 0.14
+  // exactly, but 35/100 produces 0.35000000000000003 on some JS engines).
+  scheduleSave(row, 'comissao', Math.round(pct) / 100)
 }
 
 const totalRows = computed(() => rows.value.length)
@@ -294,31 +384,29 @@ const totalRows = computed(() => rows.value.length)
                 }" />
             </th>
             <th class="text-left">Produto</th>
+            <th class="text-center">Foto</th>
             <th class="text-left">Link</th>
             <th class="text-left">Fábrica</th>
             <th class="text-left">Modelo</th>
             <th class="text-right">MOQ</th>
-            <th class="text-left">Volt.</th>
-            <th class="text-left">Cor</th>
-            <th class="text-left">Material</th>
-            <th class="text-left">Tam.</th>
-            <th class="text-left">Pot.</th>
+            <th class="text-left">Descrição</th>
             <th class="text-right">Valor USD</th>
-            <th class="text-right">Proj. compra</th>
+            <th class="text-right whitespace-normal">Projeção de Compra</th>
             <th class="text-right">Certificado</th>
             <th class="text-right">Fator</th>
-            <th class="text-right">Compra</th>
-            <th class="text-right">Venda est.</th>
+            <th class="text-right">MOQ Total</th>
+            <th class="text-right hl-cell">Compra</th>
+            <th class="text-right hl-cell">Venda</th>
             <th class="text-right">Frete</th>
             <th class="text-right">Comissão</th>
-            <th class="text-right">%</th>
+            <th class="text-right">Margem</th>
             <th class="text-left">Inmetro</th>
             <th class="text-left">Obs</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!loading && rows.length === 0">
-            <td :colspan="canDelete ? 22 : 21" class="py-6 text-center text-muted-foreground">
+            <td :colspan="canDelete ? 20 : 19" class="py-6 text-center text-muted-foreground">
               Nenhum produto. Clique em "Adicionar produto" para começar.
             </td>
           </tr>
@@ -335,6 +423,34 @@ const totalRows = computed(() => rows.value.length)
             </td>
             <td><input class="cell-input" :value="row.produto ?? ''" :disabled="!canEdit"
               @input="(e) => scheduleSave(row, 'produto', (e.target as HTMLInputElement).value)" /></td>
+
+            <!-- Foto: thumbnail clicável (abre lightbox) + upload + remover -->
+            <td class="text-center foto-cell">
+              <div v-if="row.foto_url" class="relative inline-block">
+                <img
+                  :src="fotoSrc(row) || ''"
+                  alt="foto"
+                  class="foto-thumb cursor-pointer"
+                  @click="lightboxRow = row"
+                />
+                <button
+                  v-if="canEdit"
+                  class="absolute -top-1 -right-1 bg-white/95 dark:bg-black/80 border border-border rounded-full p-0.5 text-muted-foreground hover:text-destructive shadow-sm"
+                  :title="'Remover foto'"
+                  @click="removerFoto(row)"
+                >
+                  <X class="size-2.5" />
+                </button>
+              </div>
+              <label v-else-if="canEdit"
+                class="inline-flex items-center gap-1 cursor-pointer text-muted-foreground hover:text-foreground text-[10px]">
+                <Camera class="size-3" />
+                <input type="file" accept="image/*" class="hidden"
+                  @change="(e) => uploadFoto(row, e)" />
+              </label>
+              <span v-else class="text-muted-foreground">—</span>
+            </td>
+
             <td class="link-cell">
               <a v-if="row.link" :href="row.link" target="_blank" rel="noopener noreferrer"
                 class="inline-flex items-center gap-1 text-blue-600 hover:underline" :title="row.link">
@@ -351,37 +467,45 @@ const totalRows = computed(() => rows.value.length)
             <td><input type="number" class="cell-input text-right"
               :value="row.moq ?? ''" :disabled="!canEdit"
               @input="(e) => scheduleSave(row, 'moq', Number((e.target as HTMLInputElement).value) || null)" /></td>
-            <td><input class="cell-input" :value="row.voltagem ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'voltagem', (e.target as HTMLInputElement).value)" /></td>
-            <td><input class="cell-input" :value="row.cor ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'cor', (e.target as HTMLInputElement).value)" /></td>
-            <td><input class="cell-input" :value="row.material ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'material', (e.target as HTMLInputElement).value)" /></td>
-            <td><input class="cell-input" :value="row.tamanho ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'tamanho', (e.target as HTMLInputElement).value)" /></td>
-            <td><input class="cell-input" :value="row.potencia ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'potencia', (e.target as HTMLInputElement).value)" /></td>
+
+            <!-- Descrição: substituiu voltagem|cor|material|tamanho|potencia. -->
+            <td>
+              <input class="cell-input" :value="row.descricao ?? ''" :disabled="!canEdit"
+                placeholder="110/220 | preto | 5L | …"
+                @input="(e) => scheduleSave(row, 'descricao', (e.target as HTMLInputElement).value)" />
+            </td>
+
             <td><input type="number" step="0.01" class="cell-input text-right"
               :value="row.valor_usd ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'valor_usd', Number((e.target as HTMLInputElement).value) || null)" /></td>
+              @input="(e) => scheduleSave(row, 'valor_usd', Number((e.target as HTMLInputElement).value) || null)"
+              @blur="(e) => snapTwoDecimals(row, 'valor_usd', e)" /></td>
             <td><input type="number" class="cell-input text-right"
               :value="row.projecao_compra ?? ''" :disabled="!canEdit"
               @input="(e) => scheduleSave(row, 'projecao_compra', Number((e.target as HTMLInputElement).value) || null)" /></td>
             <td class="calc text-right">{{ fmt2(calcCertificado(row)) }}</td>
             <td><input type="number" step="0.01" class="cell-input text-right"
               :value="row.fator ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'fator', Number((e.target as HTMLInputElement).value) || null)" /></td>
-            <td class="calc text-right">{{ fmt2(calcCompra(row)) }}</td>
-            <td><input type="number" step="0.01" class="cell-input text-right"
+              @input="(e) => scheduleSave(row, 'fator', Number((e.target as HTMLInputElement).value) || null)"
+              @blur="(e) => snapTwoDecimals(row, 'fator', e)" /></td>
+            <td class="calc text-right">{{ fmtMoney(calcMoqTotal(row)) }}</td>
+            <td class="calc text-right hl-cell">{{ fmt2(calcCompra(row)) }}</td>
+            <td class="hl-cell"><input type="number" step="0.01" class="cell-input text-right"
               :value="row.venda_estimada ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'venda_estimada', Number((e.target as HTMLInputElement).value) || null)" /></td>
+              @input="(e) => scheduleSave(row, 'venda_estimada', Number((e.target as HTMLInputElement).value) || null)"
+              @blur="(e) => snapTwoDecimals(row, 'venda_estimada', e)" /></td>
             <td><input type="number" step="0.01" class="cell-input text-right"
               :value="row.frete ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'frete', Number((e.target as HTMLInputElement).value) || null)" /></td>
-            <td><input type="number" step="0.0001" class="cell-input text-right"
-              :value="row.comissao ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave(row, 'comissao', Number((e.target as HTMLInputElement).value) || null)" /></td>
-            <td class="calc text-right" :class="margemClass(calcMargem(row))">{{ fmtPct(calcMargem(row)) }}</td>
+              @input="(e) => scheduleSave(row, 'frete', Number((e.target as HTMLInputElement).value) || null)"
+              @blur="(e) => snapTwoDecimals(row, 'frete', e)" /></td>
+            <td>
+              <div class="flex items-center justify-end">
+                <input type="number" step="1" class="cell-input text-right"
+                  :value="comissaoDisplay(row.comissao) ?? ''" :disabled="!canEdit"
+                  @input="(e) => onComissaoInput(row, (e.target as HTMLInputElement).value)" />
+                <span class="ml-0.5 text-muted-foreground">%</span>
+              </div>
+            </td>
+            <td class="calc text-right" :class="margemClass(calcMargem(row))">{{ fmtPctInt(calcMargem(row)) }}</td>
             <td><input class="cell-input" :value="row.inmetro ?? ''" :disabled="!canEdit"
               @input="(e) => scheduleSave(row, 'inmetro', (e.target as HTMLInputElement).value)" /></td>
             <td><input class="cell-input" :value="row.obs ?? ''" :disabled="!canEdit"
@@ -389,6 +513,26 @@ const totalRows = computed(() => rows.value.length)
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- Lightbox modal — overlay com clique-fora pra fechar. -->
+    <div
+      v-if="lightboxRow"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+      @click="lightboxRow = null"
+    >
+      <button
+        class="absolute top-4 right-4 text-white/80 hover:text-white"
+        @click.stop="lightboxRow = null"
+      >
+        <X class="size-6" />
+      </button>
+      <img
+        :src="fotoSrc(lightboxRow) || ''"
+        :alt="lightboxRow.produto || 'foto'"
+        class="max-h-[90vh] max-w-[90vw] object-contain shadow-2xl"
+        @click.stop
+      />
     </div>
   </div>
 </template>
@@ -432,7 +576,7 @@ const totalRows = computed(() => rows.value.length)
 }
 /* Dólar = destaque laranja; Certificado = amarelo. */
 .dolar-input {
-  background: rgb(254 215 170 / 0.7); /* orange-200 */
+  background: rgb(254 215 170 / 0.7);
 }
 :global(.dark) .dolar-input {
   background: rgb(154 52 18 / 0.25);
@@ -445,5 +589,36 @@ const totalRows = computed(() => rows.value.length)
 }
 .link-cell {
   min-width: 110px;
+}
+/* Compra + Venda — destaque dourado, foco visual do operador.
+   Aplicado no header E nas células de dados. */
+.hl-cell,
+.grid-table thead th.hl-cell {
+  background: rgb(255 192 0 / 0.85) !important;
+  color: #1a1a1a;
+  font-weight: 700;
+}
+.hl-cell .cell-input {
+  background: rgb(255 235 180 / 0.95);
+  font-weight: 600;
+  color: #1a1a1a;
+}
+:global(.dark) .hl-cell {
+  background: rgb(180 130 0 / 0.7) !important;
+  color: #ffffff;
+}
+:global(.dark) .hl-cell .cell-input {
+  background: rgb(180 130 0 / 0.4);
+  color: #ffffff;
+}
+.foto-cell {
+  width: 56px;
+}
+.foto-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border: 1px solid hsl(var(--border));
+  border-radius: 3px;
 }
 </style>

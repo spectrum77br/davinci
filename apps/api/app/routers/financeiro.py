@@ -7,16 +7,21 @@ preenche manualmente na primeira consulta de cada NCM e o valor fica
 cacheado pras próximas. Isso evita inventar números.
 """
 
+import asyncio
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import aiofiles
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
@@ -480,6 +485,115 @@ async def delete_dnp(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "dnp_produto_not_found"})
+    # Best-effort cleanup of the photo on disk. If the file is already
+    # gone the delete still succeeds — orphan photos are tolerable, an
+    # orphan DB row referencing a missing file is the worse failure
+    # mode and the GET endpoint already 404s on FileNotFoundError.
+    if row.foto_url:
+        await asyncio.to_thread(_unlink_photo, row.foto_url)
     await session.delete(row)
     await session.commit()
+    return None
+
+
+# ── DNP — Photo upload + serve ─────────────────────────────────────────
+
+# Photos land under ${UPLOADS_DIR}/dnp/{row_id}.{ext}. One image per row
+# (replacing on re-upload). We store the relative file path in
+# `foto_url` — not a URL — so the GET endpoint is the only consumer and
+# the field can't accidentally leak a filesystem path to the client. The
+# operator hits /api/financeiro/dnp/produtos/{id}/foto to render the
+# thumbnail and the lightbox both.
+_PHOTO_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB — generous for product shots
+_PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def _unlink_photo(rel_path: str) -> None:
+    p = Path(get_settings().uploads_dir) / rel_path
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        pass
+
+
+@router.post(
+    "/dnp/produtos/{row_id}/foto",
+    response_model=DNPProdutoOut,
+    status_code=status.HTTP_200_OK,
+)
+async def upload_dnp_foto(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    file: Annotated[UploadFile, File(...)],
+) -> DNPProdutoOut:
+    row = (
+        await session.execute(select(DNPProduto).where(DNPProduto.id == row_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "dnp_produto_not_found"})
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in _PHOTO_SUFFIXES:
+        raise HTTPException(400, detail={
+            "code": "unsupported_image_type",
+            "allowed": sorted(_PHOTO_SUFFIXES),
+        })
+
+    content = await file.read()
+    if len(content) > _PHOTO_MAX_BYTES:
+        raise HTTPException(413, detail={"code": "file_too_large"})
+
+    base = Path(get_settings().uploads_dir) / "dnp"
+    await asyncio.to_thread(base.mkdir, parents=True, exist_ok=True)
+    rel = f"dnp/{row.id}{suffix}"
+    abs_path = Path(get_settings().uploads_dir) / rel
+
+    # Drop the previous photo (different extension if the user re-uploads
+    # a different format) so we don't accumulate orphans on disk.
+    if row.foto_url and row.foto_url != rel:
+        await asyncio.to_thread(_unlink_photo, row.foto_url)
+
+    async with aiofiles.open(abs_path, "wb") as f:
+        await f.write(content)
+
+    row.foto_url = rel
+    await session.commit()
+    await session.refresh(row)
+    logger.info("dnp_foto_uploaded", row_id=str(row.id), size=len(content), suffix=suffix)
+    return DNPProdutoOut.model_validate(row, from_attributes=True)
+
+
+@router.get("/dnp/produtos/{row_id}/foto")
+async def get_dnp_foto(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+) -> FileResponse:
+    row = (
+        await session.execute(select(DNPProduto).where(DNPProduto.id == row_id))
+    ).scalar_one_or_none()
+    if row is None or not row.foto_url:
+        raise HTTPException(404, detail={"code": "no_photo"})
+    abs_path = Path(get_settings().uploads_dir) / row.foto_url
+    if not abs_path.exists():
+        raise HTTPException(404, detail={"code": "photo_missing_on_disk"})
+    return FileResponse(abs_path)
+
+
+@router.delete("/dnp/produtos/{row_id}/foto", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_dnp_foto(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+) -> None:
+    row = (
+        await session.execute(select(DNPProduto).where(DNPProduto.id == row_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "dnp_produto_not_found"})
+    if row.foto_url:
+        await asyncio.to_thread(_unlink_photo, row.foto_url)
+        row.foto_url = None
+        await session.commit()
     return None
