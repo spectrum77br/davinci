@@ -102,10 +102,12 @@ def _compute_product_fields(
 ) -> tuple[Decimal | None, int | None, int | None]:
     """Returns (memoria_consumo, reposicao_estoque, saldo_reposicao).
 
-    Mirrors the spec:
-      * memoria_consumo = max(consumo_diario, maior_media_30d) — but
-        if estoque=0, pin to maior_media_30d so we don't divide by zero
-        consumption.
+    Per operator spec — memoria is NOT a MAX, it's a gate on estoque:
+      * estoque > 0  → memoria = consumo_diario (current rate is reliable)
+      * estoque ≤ 0  → memoria = maior_media_30d (current rate is
+                       distorted by stock-out; use the historical peak)
+
+    Then:
       * reposicao_estoque = (dias_necessarios − duração_estoque) * consumo_diario
       * saldo_reposicao = reposicao_estoque − pedidos_em_aberto
     """
@@ -113,15 +115,13 @@ def _compute_product_fields(
     media = Decimal(p.maior_media_30d) if p.maior_media_30d is not None else None
     estoque = p.estoque_bling
 
-    # memoria_consumo
-    if estoque == 0:
+    # Gate on estoque, not MAX. When stock ran out the current 30-day
+    # window includes the out-of-stock days, dragging consumo to ~0;
+    # using maior_media_30d instead reflects real demand.
+    if estoque is None or estoque <= 0:
         memoria = media
-    elif consumo is not None and media is not None:
-        memoria = max(consumo, media)
-    elif consumo is not None:
-        memoria = consumo
     else:
-        memoria = media
+        memoria = consumo
 
     if memoria is None or memoria <= 0 or estoque is None or consumo is None:
         return memoria, None, None
