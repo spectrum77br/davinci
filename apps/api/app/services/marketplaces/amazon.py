@@ -159,11 +159,27 @@ class AmazonClient:
         except Exception as e:  # noqa: BLE001
             return TestResult(ok=False, detail=f"error: {e}")
 
-    async def get_order_status(self, order_id: str) -> str | None:
-        """Returns the SP-API OrderStatus string for one order ("Pending",
-        "Unshipped", "Shipped", "Canceled", ...), or None if Amazon
-        didn't return a payload. The shipped-orders sweep treats
-        `Shipped` as the trigger for bumping Bling situacao=15.
+    async def get_order_status(self, order_id: str) -> dict | None:
+        """Returns SP-API order-status fields needed by the shipment sweep:
+
+          * `order_status`    — OrderStatus ("Pending", "Unshipped",
+                                "Shipped", "Canceled", ...).
+          * `easyship_status` — EasyShipShipmentStatus when present
+                                ("PendingPickUp", "PickedUp", "Delivered",
+                                ...) — for EasyShip orders Amazon flips
+                                OrderStatus to "Shipped" the moment the
+                                NF is emitted, BEFORE the carrier picks
+                                up. Without this field the sweep would
+                                bump Bling to "Em andamento" while the
+                                package is still sitting on the seller's
+                                shelf.
+          * `last_update_date`— LastUpdateDate (ISO). When the sweep marks
+                                an order shipped, this is the moment the
+                                state actually changed — used as
+                                em_andamento_data so a late-detection
+                                sweep doesn't backdate everything to today.
+
+        Returns None when Amazon didn't return a payload at all.
         """
         try:
             r = await self._request("GET", f"/orders/v0/orders/{order_id}")
@@ -178,8 +194,15 @@ class AmazonClient:
             return None
         body = r.json() or {}
         payload = body.get("payload") if isinstance(body.get("payload"), dict) else body
-        status = (payload or {}).get("OrderStatus")
-        return str(status) if status else None
+        payload = payload or {}
+        status = payload.get("OrderStatus")
+        if not status:
+            return None
+        return {
+            "order_status": str(status),
+            "easyship_status": payload.get("EasyShipShipmentStatus"),
+            "last_update_date": payload.get("LastUpdateDate"),
+        }
 
     async def list_listings(
         self,

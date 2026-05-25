@@ -90,9 +90,10 @@ def _shopee_ship_date(update_time: Any) -> date | None:
         return None
 
 
-def _ml_ship_date(iso_str: Any) -> date | None:
-    """Convert an ML timestamp ("2026-05-23T14:30:00.000-03:00" or similar)
-    to a BRT-localised date. ML occasionally emits Z-suffixed UTC strings;
+def _iso_to_brt_date(iso_str: Any) -> date | None:
+    """Convert an ISO-8601 timestamp (ML last_updated, Amazon
+    LastUpdateDate, …) to a BRT-localised date. Marketplaces emit
+    "2026-05-23T14:30:00.000-03:00" or Z-suffixed UTC strings;
     fromisoformat handles both since Python 3.11."""
     if not iso_str:
         return None
@@ -381,7 +382,7 @@ async def _check_marketplace_shipped(
             if (ship_status and str(ship_status).lower() in _ML_SHIPPED) or (
                 top_status and str(top_status).lower() in _ML_SHIPPED
             ):
-                shipped[int(o.bling_id)] = _ml_ship_date(
+                shipped[int(o.bling_id)] = _iso_to_brt_date(
                     data.get("last_updated") or data.get("date_closed")
                 )
                 continue
@@ -421,7 +422,7 @@ async def _check_marketplace_shipped(
                     ship_status2 == "ready_to_ship"
                     and substatus not in _ML_NOT_YET_SHIPPED_SUBSTATUS
                 ):
-                    shipped[int(o.bling_id)] = _ml_ship_date(
+                    shipped[int(o.bling_id)] = _iso_to_brt_date(
                         ship_data.get("last_updated") or ship_data.get("date_created")
                     )
         logger.info("shipment_check_ml", orders=len(orders), shipped=len(shipped))
@@ -431,12 +432,24 @@ async def _check_marketplace_shipped(
         for o in orders:
             if not o.numeroloja or not o.bling_id:
                 continue
-            status = await client.get_order_status(str(o.numeroloja))
-            if status and status in _AMAZON_SHIPPED:
-                # Amazon get_order_status returns only the OrderStatus
-                # string today. Real LastUpdateDate would require a
-                # client change — fall back to today-in-BRT for now.
-                shipped[int(o.bling_id)] = None
+            result = await client.get_order_status(str(o.numeroloja))
+            if not result:
+                continue
+            order_status = result.get("order_status")
+            easyship_status = result.get("easyship_status")
+            # Amazon flips OrderStatus to "Shipped" the moment the NF is
+            # emitted, BEFORE the carrier picks the package up. EasyShip
+            # orders also carry EasyShipShipmentStatus, which stays at
+            # "PendingPickUp" until the carrier scans the package. Treat
+            # "PendingPickUp" as NOT shipped; any other EasyShip state
+            # (PickedUp, Delivered, OutForDelivery, …) or no EasyShip
+            # status at all (non-EasyShip orders) means it really left
+            # the seller's hands.
+            if order_status not in _AMAZON_SHIPPED:
+                continue
+            if easyship_status == "PendingPickUp":
+                continue
+            shipped[int(o.bling_id)] = _iso_to_brt_date(result.get("last_update_date"))
         logger.info("shipment_check_amazon", orders=len(orders), shipped=len(shipped))
 
     else:
