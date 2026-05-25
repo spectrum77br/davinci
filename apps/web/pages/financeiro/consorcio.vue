@@ -160,10 +160,10 @@ const totalRows = computed(() => rows.value.length)
 
     <div v-if="errorText" class="text-sm text-destructive">erro: {{ errorText }}</div>
 
-    <div class="border rounded-md overflow-x-auto">
+    <div class="border overflow-x-auto">
       <table class="grid-table w-full text-xs border-collapse">
         <thead>
-          <tr class="bg-muted/40 text-[10px] uppercase tracking-wide">
+          <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
             <th class="text-right">Crédito</th>
             <th class="text-left">EMP</th>
             <th class="text-right">Grupo</th>
@@ -172,12 +172,12 @@ const totalRows = computed(() => rows.value.length)
             <th class="text-left">NF</th>
             <th class="text-right">Parc a pagar</th>
             <th class="text-right">Lance</th>
-            <th class="text-right calc">Imposto 7%</th>
+            <th class="text-right">Imposto 7%</th>
             <th class="text-right">Valor parc.</th>
-            <th class="text-right calc">Devedor</th>
+            <th class="text-right">Devedor</th>
             <th class="text-left">Atualizado</th>
-            <th class="text-left calc">Finalizado</th>
-            <th class="text-right calc">Crédito líq.</th>
+            <th class="text-left">Finalizado</th>
+            <th class="text-right">Crédito líq.</th>
             <th class="text-left">Fundo reserva</th>
             <th class="text-left">Obs</th>
             <th v-if="canDelete" class="w-8"></th>
@@ -189,7 +189,7 @@ const totalRows = computed(() => rows.value.length)
               Nenhuma linha. Clique em "Nova linha" para começar.
             </td>
           </tr>
-          <tr v-for="row in rows" :key="row.id" class="hover:bg-muted/20">
+          <tr v-for="row in rows" :key="row.id" class="even:bg-muted/10 hover:bg-amber-50/40 dark:hover:bg-amber-900/10">
             <td>
               <input type="number" step="0.01" class="cell-input text-right"
                 :value="row.credito ?? ''" :disabled="!canEdit"
@@ -264,24 +264,34 @@ const totalRows = computed(() => rows.value.length)
 </template>
 
 <style scoped>
+/* Visual de planilha — header verde escuro, zebra leve, células
+   compactas. As "calc" são as 4 colunas amarela-cinza que o usuário
+   não pode editar (Imposto 7%, Devedor, Finalizado, Crédito líq.). */
 .grid-table th,
 .grid-table td {
   border: 1px solid hsl(var(--border));
-  padding: 2px 4px;
+  padding: 2px 5px;
+  white-space: nowrap;
 }
-.grid-table th.calc,
+.grid-table thead th {
+  border-color: rgba(255, 255, 255, 0.15);
+  font-weight: 600;
+}
 .grid-table td.calc {
-  background-color: hsl(var(--muted) / 0.4);
+  background-color: hsl(var(--muted) / 0.5);
   color: hsl(var(--muted-foreground));
-  font-style: italic;
 }
+/* Inputs editáveis em fundo amarelo claro (estilo Excel). */
 .cell-input {
   width: 100%;
   border: 0;
-  background: transparent;
+  background: rgb(254 252 232 / 0.6); /* yellow-50/60 */
   padding: 2px 4px;
   font-size: 11px;
   color: inherit;
+}
+:global(.dark) .cell-input {
+  background: rgb(120 53 15 / 0.15); /* amber-900 leve */
 }
 .cell-input:focus {
   outline: 1px solid hsl(var(--primary));
@@ -290,5 +300,6 @@ const totalRows = computed(() => rows.value.length)
 .cell-input:disabled {
   cursor: not-allowed;
   opacity: 0.7;
+  background: transparent;
 }
 </style>

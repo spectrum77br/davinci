@@ -361,164 +361,238 @@ const custoRows = computed(() => {
 
     <div v-if="errorText" class="text-sm text-destructive">erro: {{ errorText }}</div>
 
-    <div v-if="!current" class="border rounded-md p-10 text-center text-muted-foreground text-sm">
+    <div v-if="!current" class="border p-10 text-center text-muted-foreground text-sm">
       Selecione uma cotação ou crie uma nova.
     </div>
 
     <div v-else class="grid gap-4 lg:grid-cols-2">
-      <!-- CABEÇALHO -->
-      <section class="border rounded-md">
-        <header class="bg-muted/60 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide">Cabeçalho</header>
-        <div class="grid grid-cols-2 gap-px bg-border">
-          <label class="field"><span>Nº Cotação</span><input :value="current.numero_cotacao ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('numero_cotacao', (e.target as HTMLInputElement).value)" /></label>
-          <label class="field"><span>Cliente</span><input :value="current.cliente ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('cliente', (e.target as HTMLInputElement).value)" /></label>
-          <label class="field"><span>Data</span><input type="date" :value="current.data ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('data', (e.target as HTMLInputElement).value || null)" /></label>
-          <label class="field"><span>Processo</span><input :value="current.processo ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('processo', (e.target as HTMLInputElement).value)" /></label>
-          <label class="field"><span>Exportador</span><input :value="current.exportador ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('exportador', (e.target as HTMLInputElement).value)" /></label>
-          <label class="field"><span>País origem</span><input :value="current.pais_origem ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('pais_origem', (e.target as HTMLInputElement).value)" /></label>
-        </div>
-      </section>
+      <!-- QUOTATION IMPORT (cabeçalho) — tabela 2 colunas estilo planilha -->
+      <table class="grid-table border-collapse text-xs">
+        <thead>
+          <tr class="bg-black text-white"><th colspan="2" class="text-left tracking-wider">QUOTATION IMPORT</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="label">Nº Cotação</td>
+            <td><input class="cell-input" :value="current.numero_cotacao ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('numero_cotacao', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+          <tr>
+            <td class="label">Cliente</td>
+            <td><input class="cell-input" :value="current.cliente ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('cliente', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+          <tr>
+            <td class="label">Data</td>
+            <td><input type="date" class="cell-input" :value="current.data ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('data', (e.target as HTMLInputElement).value || null)" /></td>
+          </tr>
+          <tr>
+            <td class="label">Processo</td>
+            <td><input class="cell-input" :value="current.processo ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('processo', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+          <tr>
+            <td class="label">Exportador</td>
+            <td><input class="cell-input" :value="current.exportador ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('exportador', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+          <tr>
+            <td class="label">País Origem</td>
+            <td><input class="cell-input" :value="current.pais_origem ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('pais_origem', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+        </tbody>
+      </table>
 
-      <!-- MERCADORIA -->
-      <section class="border rounded-md">
-        <header class="bg-muted/60 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide">Mercadoria</header>
-        <div class="grid grid-cols-2 gap-px bg-border">
-          <label class="field"><span>Descrição</span><input :value="current.descricao ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('descricao', (e.target as HTMLInputElement).value)" /></label>
-          <label class="field"><span>Fornecedor</span><input :value="current.fornecedor ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('fornecedor', (e.target as HTMLInputElement).value)" /></label>
-          <label class="field"><span>Quantidade</span><input type="number" :value="current.quantidade ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('quantidade', Number((e.target as HTMLInputElement).value) || null)" /></label>
-          <label class="field"><span>NCM</span>
-            <div class="flex gap-1">
-              <input :value="current.ncm ?? ''" :disabled="!canEdit" class="flex-1"
+      <!-- MERCADORIA — campos editáveis (amarelo) + NCM/Qtd em laranja -->
+      <table class="grid-table border-collapse text-xs">
+        <thead>
+          <tr class="bg-black text-white"><th colspan="2" class="text-left tracking-wider">MERCADORIA</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="label">Descrição</td>
+            <td><input class="cell-input" :value="current.descricao ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('descricao', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+          <tr>
+            <td class="label">Fornecedor</td>
+            <td><input class="cell-input" :value="current.fornecedor ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('fornecedor', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+          <tr>
+            <td class="label">Quantidade</td>
+            <td><input type="number" class="cell-input cell-orange text-right" :value="current.quantidade ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('quantidade', Number((e.target as HTMLInputElement).value) || null)" /></td>
+          </tr>
+          <tr>
+            <td class="label">NCM</td>
+            <td class="flex items-stretch gap-1 p-0">
+              <input class="cell-input cell-orange flex-1" :value="current.ncm ?? ''" :disabled="!canEdit"
                 placeholder="ex: 85094010"
                 @input="(e) => scheduleSave('ncm', (e.target as HTMLInputElement).value)"
                 @blur="lookupNCM" />
-              <button v-if="canEdit" class="text-[10px] px-1.5 border rounded hover:bg-muted" :disabled="!current.ncm"
-                :title="'Salvar as 4 alíquotas atuais no cache do NCM'" @click="salvarAliquotasNoCache">
-                <Save class="size-3.5 inline" />
+              <button v-if="canEdit" class="px-1.5 border-l text-[10px] hover:bg-muted whitespace-nowrap"
+                :disabled="!current.ncm" :title="'Salvar as 4 alíquotas atuais no cache do NCM'"
+                @click="salvarAliquotasNoCache">
+                <Save class="size-3 inline" />
               </button>
-            </div>
-          </label>
-          <label class="field col-span-2"><span>Descrição NCM</span><input :value="current.descricao_ncm ?? ''" disabled
-            class="calc" /></label>
-          <label class="field"><span>Invoice nº</span><input :value="current.invoice_numero ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('invoice_numero', (e.target as HTMLInputElement).value)" /></label>
-          <div class="field"><span></span>
-            <span v-if="ncmStatus" class="text-[10px] text-muted-foreground">{{ ncmStatus }}</span>
-          </div>
-        </div>
-      </section>
+            </td>
+          </tr>
+          <tr>
+            <td class="label">Descrição NCM</td>
+            <td class="calc">{{ current.descricao_ncm || '—' }}</td>
+          </tr>
+          <tr>
+            <td class="label">Invoice nº</td>
+            <td><input class="cell-input" :value="current.invoice_numero ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('invoice_numero', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+          <tr v-if="ncmStatus">
+            <td colspan="2" class="text-[10px] text-muted-foreground px-2 py-1">{{ ncmStatus }}</td>
+          </tr>
+        </tbody>
+      </table>
 
-      <!-- LOGÍSTICA -->
-      <section class="border rounded-md lg:col-span-2">
-        <header class="bg-muted/60 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide">Logística</header>
-        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-px bg-border">
-          <label class="field"><span>Porto origem</span><input :value="current.porto_origem ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('porto_origem', (e.target as HTMLInputElement).value)" /></label>
-          <label class="field"><span>Porto destino</span><input :value="current.porto_destino ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('porto_destino', (e.target as HTMLInputElement).value)" /></label>
-          <label class="field"><span>ETD (Saída)</span><input type="date" :value="current.etd ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('etd', (e.target as HTMLInputElement).value || null)" /></label>
-          <label class="field"><span>ETA (Chegada)</span><input type="date" :value="current.eta ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('eta', (e.target as HTMLInputElement).value || null)" /></label>
-          <label class="field"><span>Taxa Câmbio USD→BRL</span><input type="number" step="0.0001"
-            :value="current.taxa_cambio ?? ''" :disabled="!canEdit"
-            @input="(e) => scheduleSave('taxa_cambio', Number((e.target as HTMLInputElement).value) || null)" /></label>
-        </div>
-      </section>
+      <!-- LOGÍSTICA — span 2 columns -->
+      <table class="grid-table border-collapse text-xs lg:col-span-2">
+        <thead>
+          <tr class="bg-black text-white"><th colspan="2" class="text-left tracking-wider">LOGÍSTICA</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="label">Porto Origem</td>
+            <td><input class="cell-input" :value="current.porto_origem ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('porto_origem', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+          <tr>
+            <td class="label">Porto Destino</td>
+            <td><input class="cell-input" :value="current.porto_destino ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('porto_destino', (e.target as HTMLInputElement).value)" /></td>
+          </tr>
+          <tr>
+            <td class="label">ETD (Saída)</td>
+            <td><input type="date" class="cell-input" :value="current.etd ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('etd', (e.target as HTMLInputElement).value || null)" /></td>
+          </tr>
+          <tr>
+            <td class="label">ETA (Chegada)</td>
+            <td><input type="date" class="cell-input" :value="current.eta ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('eta', (e.target as HTMLInputElement).value || null)" /></td>
+          </tr>
+          <tr>
+            <td class="label">Taxa Câmbio (USD/BRL)</td>
+            <td><input type="number" step="0.0001" class="cell-input cell-orange text-right"
+              :value="current.taxa_cambio ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('taxa_cambio', Number((e.target as HTMLInputElement).value) || null)" /></td>
+          </tr>
+        </tbody>
+      </table>
 
-      <!-- CUSTOS -->
-      <section class="border rounded-md lg:col-span-2">
-        <header class="bg-muted/60 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide">Custos</header>
+      <!-- CUSTOS — 4 colunas estilo planilha completa -->
+      <div class="lg:col-span-2 overflow-x-auto">
         <table class="grid-table w-full text-xs border-collapse">
           <thead>
-            <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
-              <th class="text-left">Componente</th>
+            <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
+              <th class="text-left">Descrição</th>
               <th class="text-right">USD</th>
               <th class="text-right">BRL</th>
-              <th class="text-right w-[120px]">Alíquota</th>
+              <th class="text-right w-[110px]">Alíquota</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(r, i) in custoRows" :key="i" :class="{ 'font-semibold bg-muted/30': r.bold }">
-              <td>{{ r.label }}</td>
-              <td class="text-right">
+            <tr v-for="(r, i) in custoRows" :key="i"
+              class="even:bg-muted/10"
+              :class="{ 'font-semibold bg-emerald-100/60 dark:bg-emerald-900/30': r.bold }">
+              <td class="label">{{ r.label }}</td>
+              <td class="text-right" :class="r.kind === 'calc' ? 'calc' : ''">
                 <input v-if="r.kind === 'input' && canEdit" type="number" :step="r.step || '0.01'" class="cell-input text-right"
                   :value="r.usd || ''"
                   @input="(e) => scheduleSave(r.field!, Number((e.target as HTMLInputElement).value) || null)" />
                 <span v-else>{{ r.raw ? r.usd.toFixed(4) : fmtUSD(r.usd) }}</span>
               </td>
-              <td class="text-right">{{ r.raw ? '—' : fmtBRL(brl(r.usd)) }}</td>
+              <td class="text-right calc">{{ r.raw ? '—' : fmtBRL(brl(r.usd)) }}</td>
               <td class="text-right">
-                <input v-if="r.kind === 'aliquota' && canEdit" type="number" step="0.0001" class="cell-input text-right"
+                <input v-if="r.kind === 'aliquota' && canEdit" type="number" step="0.0001"
+                  class="cell-input cell-orange text-right"
                   :value="(current as any)[r.aliq] ?? ''"
                   @input="(e) => scheduleSave(r.aliq as keyof Cotacao, Number((e.target as HTMLInputElement).value) || null)" />
-                <span v-else-if="typeof r.aliq === 'number'">{{ fmtPct(r.aliq) }}</span>
-                <span v-else-if="r.aliq">{{ fmtPct((current as any)[r.aliq]) }}</span>
+                <span v-else-if="typeof r.aliq === 'number'" class="calc-inline">{{ fmtPct(r.aliq) }}</span>
+                <span v-else-if="r.aliq" class="calc-inline">{{ fmtPct((current as any)[r.aliq]) }}</span>
                 <span v-else>—</span>
               </td>
             </tr>
           </tbody>
         </table>
-      </section>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.field {
-  display: flex;
-  flex-direction: column;
-  padding: 4px 8px;
-  background: hsl(var(--background));
-}
-.field > span:first-child {
-  font-size: 10px;
-  color: hsl(var(--muted-foreground));
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 2px;
-}
-.field input {
-  border: 0;
-  background: transparent;
-  padding: 2px 0;
-  font-size: 12px;
-  color: inherit;
-}
-.field input:focus {
-  outline: 1px solid hsl(var(--primary));
-  background: hsl(var(--background));
-}
-.field input:disabled,
-.field input.calc {
-  cursor: not-allowed;
-  color: hsl(var(--muted-foreground));
-  font-style: italic;
+/* Visual de planilha — 3 minitabelas 2-col (Cabeçalho/Mercadoria/
+   Logística) e a tabela grande de Custos. Header preto nas seções,
+   verde escuro no thead da tabela de Custos. */
+.grid-table {
+  width: 100%;
 }
 .grid-table th,
 .grid-table td {
   border: 1px solid hsl(var(--border));
-  padding: 3px 6px;
+  padding: 2px 5px;
+  white-space: nowrap;
+  vertical-align: middle;
 }
+.grid-table thead th {
+  font-weight: 600;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+.grid-table td.label {
+  background: hsl(var(--muted) / 0.6);
+  font-weight: 500;
+  width: 180px;
+}
+/* Calc cells: cinza claro, itálico, não-editável */
+.grid-table td.calc {
+  background: hsl(var(--muted) / 0.4);
+  color: hsl(var(--muted-foreground));
+  font-style: italic;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.calc-inline {
+  color: hsl(var(--muted-foreground));
+  font-style: italic;
+}
+/* Inputs editáveis em fundo amarelo (estilo Excel) */
 .cell-input {
   width: 100%;
   border: 0;
-  background: transparent;
+  background: rgb(254 252 232 / 0.6); /* yellow-50 */
   padding: 2px 4px;
   font-size: 11px;
   color: inherit;
 }
+:global(.dark) .cell-input {
+  background: rgb(120 53 15 / 0.15);
+}
 .cell-input:focus {
   outline: 1px solid hsl(var(--primary));
   background: hsl(var(--background));
+}
+.cell-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+  background: transparent;
+}
+/* Inputs "automáticos / impactam cálculo" em laranja (NCM, Quantidade,
+   Câmbio, Alíquotas NCM) */
+.cell-orange {
+  background: rgb(254 215 170 / 0.7) !important; /* orange-200 */
+}
+:global(.dark) .cell-orange {
+  background: rgb(154 52 18 / 0.25) !important; /* orange-800 */
 }
 </style>
