@@ -30,7 +30,7 @@ class ImportProductBase(BaseModel):
     modelo_china: str | None = None
     cor_china: str | None = None
     fechamento: str | None = None
-    tsa: bool = False
+    tsa: int | None = None
     modelo_bling: str | None = None
     sku: str
     cor: str | None = None
@@ -50,7 +50,7 @@ class ImportProductPatch(BaseModel):
     modelo_china: str | None = None
     cor_china: str | None = None
     fechamento: str | None = None
-    tsa: bool | None = None
+    tsa: int | None = None
     modelo_bling: str | None = None
     sku: str | None = None
     cor: str | None = None

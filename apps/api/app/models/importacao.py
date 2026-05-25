@@ -12,7 +12,6 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
-    Boolean,
     Date,
     ForeignKey,
     Integer,
@@ -48,7 +47,10 @@ class ImportProduct(Base, TimestampMixin):
     modelo_china: Mapped[str | None] = mapped_column(String(100), nullable=True)
     cor_china: Mapped[str | None] = mapped_column(String(50), nullable=True)
     fechamento: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    tsa: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # TSA = count of TSA locks on the suitcase (1, 2, 3) or NULL for none.
+    # v1 stored this as a boolean — migration 0090 widened to integer
+    # because the operator distinguishes between "no TSA" and "1 cadeado".
+    tsa: Mapped[int | None] = mapped_column(Integer, nullable=True)
     modelo_bling: Mapped[str | None] = mapped_column(String(100), nullable=True)
     sku: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     cor: Mapped[str | None] = mapped_column(String(50), nullable=True)

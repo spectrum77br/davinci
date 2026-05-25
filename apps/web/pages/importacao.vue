@@ -46,7 +46,7 @@ type Product = {
   modelo_china: string | null
   cor_china: string | null
   fechamento: string | null
-  tsa: boolean
+  tsa: number | null
   modelo_bling: string | null
   sku: string
   cor: string | null
@@ -399,6 +399,42 @@ function loteTotal(prod: Product, loteId: string): number {
 
     <!-- ─── TAB MALA ─────────────────────────────────────────────── -->
     <div v-if="tab === 'mala'" class="space-y-2">
+      <!-- Replenishment parameters — same fields as the Reposição tab,
+           surfaced here so the operator can tweak them while reading
+           the table. Both inputs PATCH the same singleton config row
+           used by the backend's _compute_product_fields() — every
+           reposição/saldo cell recalculates on the next loadProductsOnly
+           triggered by saveConfig(). -->
+      <div class="flex flex-wrap items-center gap-3 bg-amber-50 dark:bg-amber-900/20 border rounded-md px-3 py-2 text-xs">
+        <label class="inline-flex items-center gap-2">
+          <span class="font-semibold uppercase tracking-wide text-[10px]">tempo de reposição</span>
+          <input
+            type="number"
+            min="0"
+            class="h-7 w-20 border rounded px-2 text-right text-sm bg-background"
+            v-model.number="config.tempo_reposicao"
+            :disabled="!canEdit"
+            @change="saveConfig"
+          />
+          <span class="text-[10px] text-muted-foreground">dias</span>
+        </label>
+        <label class="inline-flex items-center gap-2">
+          <span class="font-semibold uppercase tracking-wide text-[10px]">tempo de estoque</span>
+          <input
+            type="number"
+            min="0"
+            class="h-7 w-20 border rounded px-2 text-right text-sm bg-background"
+            v-model.number="config.tempo_estoque"
+            :disabled="!canEdit"
+            @change="saveConfig"
+          />
+          <span class="text-[10px] text-muted-foreground">dias</span>
+        </label>
+        <span class="ml-auto text-[10px] text-muted-foreground">
+          Recalcula reposição/saldo em tempo real
+        </span>
+      </div>
+
       <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
         <div class="relative flex-1 min-w-[200px] max-w-sm">
           <Search class="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-muted-foreground" />
@@ -545,8 +581,20 @@ function loteTotal(prod: Product, loteId: string): number {
               <td><input class="cell-input" :value="row.fechamento ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'fechamento', (e.target as HTMLInputElement).value)" /></td>
               <td class="text-center">
-                <input type="checkbox" :checked="row.tsa" :disabled="!canEdit"
-                  @change="(e) => scheduleSave(row, 'tsa', (e.target as HTMLInputElement).checked)" />
+                <!-- TSA = count of locks. Blank = no TSA, 1/2/3 = number of cadeados. -->
+                <input
+                  type="number"
+                  min="1"
+                  max="3"
+                  step="1"
+                  class="cell-input text-center"
+                  :value="row.tsa ?? ''"
+                  :disabled="!canEdit"
+                  @input="(e) => {
+                    const v = (e.target as HTMLInputElement).value;
+                    scheduleSave(row, 'tsa', v === '' ? null : Math.max(1, Math.min(3, Number(v))));
+                  }"
+                />
               </td>
               <td><input class="cell-input" :value="row.modelo_bling ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'modelo_bling', (e.target as HTMLInputElement).value)" /></td>
