@@ -61,7 +61,7 @@ _BRASILAPI_NCM = "https://brasilapi.com.br/api/ncm/v1/{codigo}"
 @router.get("/consorcio", response_model=list[ConsorcioOut])
 async def list_consorcio(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_consorcio", "view"))],
 ) -> list[ConsorcioOut]:
     rows = (
         await session.execute(
@@ -80,7 +80,7 @@ async def list_consorcio(
 async def create_consorcio(
     body: ConsorcioPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_consorcio", "edit"))],
 ) -> ConsorcioOut:
     row = FinanceiroConsorcio(**body.model_dump(exclude_unset=True))
     session.add(row)
@@ -94,7 +94,7 @@ async def patch_consorcio(
     row_id: UUID,
     body: ConsorcioPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_consorcio", "edit"))],
 ) -> ConsorcioOut:
     row = (
         await session.execute(
@@ -114,7 +114,7 @@ async def patch_consorcio(
 async def delete_consorcio(
     row_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "delete"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_consorcio", "delete"))],
 ) -> None:
     row = (
         await session.execute(
@@ -134,7 +134,7 @@ async def delete_consorcio(
 @router.get("/suprimentos", response_model=list[SuprimentosOut])
 async def list_suprimentos(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "view"))],
 ) -> list[SuprimentosOut]:
     rows = (
         await session.execute(
@@ -152,7 +152,7 @@ async def list_suprimentos(
 async def create_suprimentos(
     body: SuprimentosPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
 ) -> SuprimentosOut:
     row = FinanceiroSuprimentos(**body.model_dump(exclude_unset=True))
     session.add(row)
@@ -166,7 +166,7 @@ async def patch_suprimentos(
     row_id: UUID,
     body: SuprimentosPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
 ) -> SuprimentosOut:
     row = (
         await session.execute(
@@ -186,7 +186,7 @@ async def patch_suprimentos(
 async def delete_suprimentos(
     row_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "delete"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "delete"))],
 ) -> None:
     row = (
         await session.execute(
@@ -206,7 +206,7 @@ async def delete_suprimentos(
 @router.get("/simulacao", response_model=list[SimulacaoOut])
 async def list_simulacao(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_simulacao", "view"))],
 ) -> list[SimulacaoOut]:
     rows = (
         await session.execute(
@@ -222,7 +222,7 @@ async def list_simulacao(
 async def get_simulacao(
     row_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_simulacao", "view"))],
 ) -> SimulacaoOut:
     row = (
         await session.execute(
@@ -238,7 +238,7 @@ async def get_simulacao(
 async def create_simulacao(
     body: SimulacaoPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_simulacao", "edit"))],
 ) -> SimulacaoOut:
     # Defaults da planilha-mãe (constantes da empresa) só aplicam se o
     # cliente não mandou nada — uma vez criado, o operador edita à mão.
@@ -259,7 +259,7 @@ async def patch_simulacao(
     row_id: UUID,
     body: SimulacaoPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_simulacao", "edit"))],
 ) -> SimulacaoOut:
     row = (
         await session.execute(
@@ -279,7 +279,7 @@ async def patch_simulacao(
 async def delete_simulacao(
     row_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "delete"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_simulacao", "delete"))],
 ) -> None:
     row = (
         await session.execute(
@@ -328,7 +328,7 @@ async def _fetch_brasilapi_descricao(codigo: str) -> str | None:
 async def lookup_ncm(
     codigo: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_simulacao", "view"))],
 ) -> NCMOut:
     """Lookup de NCM. Fluxo:
       1. Procura no cache (davinci.ncm_cache).
@@ -364,7 +364,7 @@ async def patch_ncm(
     codigo: str,
     body: NCMPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_simulacao", "edit"))],
 ) -> NCMOut:
     """Operador edita as alíquotas do NCM cacheado. Persiste pra que a
     próxima cotação com o mesmo NCM já venha preenchida."""
@@ -390,7 +390,7 @@ async def patch_ncm(
 @router.get("/dnp/config", response_model=DNPConfigOut)
 async def get_dnp_config(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_dnp", "view"))],
 ) -> DNPConfigOut:
     """Singleton (id=1) com dolar_dia + certificado. A página atualiza
     o dolar via awesomeapi do lado do cliente; o backend só persiste
@@ -410,7 +410,7 @@ async def get_dnp_config(
 async def patch_dnp_config(
     body: DNPConfigPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_dnp", "edit"))],
 ) -> DNPConfigOut:
     row = await session.get(DNPConfig, 1)
     if row is None:
@@ -426,7 +426,7 @@ async def patch_dnp_config(
 @router.get("/dnp/produtos", response_model=list[DNPProdutoOut])
 async def list_dnp(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_dnp", "view"))],
 ) -> list[DNPProdutoOut]:
     rows = (
         await session.execute(
@@ -440,7 +440,7 @@ async def list_dnp(
 async def create_dnp(
     body: DNPProdutoPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_dnp", "edit"))],
 ) -> DNPProdutoOut:
     # Defaults da planilha-mãe pra novo produto.
     data = body.model_dump(exclude_unset=True)
@@ -460,7 +460,7 @@ async def patch_dnp(
     row_id: UUID,
     body: DNPProdutoPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_dnp", "edit"))],
 ) -> DNPProdutoOut:
     row = (
         await session.execute(select(DNPProduto).where(DNPProduto.id == row_id))
@@ -478,7 +478,7 @@ async def patch_dnp(
 async def delete_dnp(
     row_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "delete"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_dnp", "delete"))],
 ) -> None:
     row = (
         await session.execute(select(DNPProduto).where(DNPProduto.id == row_id))
@@ -524,7 +524,7 @@ def _unlink_photo(rel_path: str) -> None:
 async def upload_dnp_foto(
     row_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_dnp", "edit"))],
     file: Annotated[UploadFile, File(...)],
 ) -> DNPProdutoOut:
     row = (
@@ -568,7 +568,7 @@ async def upload_dnp_foto(
 async def get_dnp_foto(
     row_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_dnp", "view"))],
 ) -> FileResponse:
     row = (
         await session.execute(select(DNPProduto).where(DNPProduto.id == row_id))
@@ -585,7 +585,7 @@ async def get_dnp_foto(
 async def delete_dnp_foto(
     row_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+    _u: Annotated[User, Depends(require_permission("financeiro_dnp", "edit"))],
 ) -> None:
     row = (
         await session.execute(select(DNPProduto).where(DNPProduto.id == row_id))

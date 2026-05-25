@@ -9,6 +9,10 @@ export type Resource =
   | 'tabela_precos_concorrencia'
   | 'margem'
   | 'controle_estoque'
+  | 'financeiro_consorcio'
+  | 'financeiro_suprimentos'
+  | 'financeiro_simulacao'
+  | 'financeiro_dnp'
   | 'devolucoes'
   | 'reembolso'
   | 'sincronizacoes'
@@ -40,8 +44,22 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
       'tabela_precos_contas',
       'tabela_precos_produtos',
       'tabela_precos_concorrencia',
+    ],
+  },
+  {
+    // Margem and Controle de Estoque live under Financeiro on the
+    // permissions matrix (they were under "Operação" before — moved
+    // to match how operators talk about them). The four financeiro_*
+    // slugs are the per-planilha grants for Consórcio, Suprimentos,
+    // Simulação and DNP.
+    label: 'Financeiro',
+    resources: [
       'margem',
       'controle_estoque',
+      'financeiro_consorcio',
+      'financeiro_suprimentos',
+      'financeiro_simulacao',
+      'financeiro_dnp',
     ],
   },
   {
@@ -75,6 +93,10 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   tabela_precos_concorrencia: 'Tabela Preços — Concorrência',
   margem: 'Margem',
   controle_estoque: 'Controle de Estoque',
+  financeiro_consorcio: 'Consórcio',
+  financeiro_suprimentos: 'Suprimentos',
+  financeiro_simulacao: 'Simulação',
+  financeiro_dnp: 'DNP',
   devolucoes: 'Devoluções',
   reembolso: 'Reembolso',
   sincronizacoes: 'Sincronizações',

@@ -13,7 +13,16 @@ Resource = Literal[
     "controle_estoque",
     "devolucoes",
     "reembolso",
+    # Legacy single-bucket — no longer used by any route after the
+    # financeiro_* split below, but kept in the literal so stored
+    # permissions JSON containing the old key still validates.
     "financeiro",
+    # Per-planilha financeiro grants. Each backs a sidebar entry and
+    # a path-prefix in apps/api/app/routers/financeiro.py.
+    "financeiro_consorcio",
+    "financeiro_suprimentos",
+    "financeiro_simulacao",
+    "financeiro_dnp",
     "sincronizacoes",
     "sync_logs",
     "integracoes",

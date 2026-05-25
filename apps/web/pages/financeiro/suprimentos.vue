@@ -7,19 +7,19 @@ import { Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
-  permission: { resource: 'financeiro', action: 'view' },
+  permission: { resource: 'financeiro_suprimentos', action: 'view' },
 })
 
 const { api } = useApi()
 const auth = useAuthStore()
 const canEdit = computed(() => {
   if (auth.isAdmin) return true
-  const p = auth.user?.permissions?.financeiro
+  const p = auth.user?.permissions?.financeiro_suprimentos
   return Boolean(p?.edit || p?.delete)
 })
 const canDelete = computed(() => {
   if (auth.isAdmin) return true
-  return Boolean(auth.user?.permissions?.financeiro?.delete)
+  return Boolean(auth.user?.permissions?.financeiro_suprimentos?.delete)
 })
 
 type Row = {

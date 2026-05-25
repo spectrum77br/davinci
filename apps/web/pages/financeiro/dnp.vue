@@ -17,19 +17,19 @@ import { Plus, RefreshCw, Trash2, ExternalLink, Camera, X } from 'lucide-vue-nex
 
 definePageMeta({
   middleware: ['permission'],
-  permission: { resource: 'financeiro', action: 'view' },
+  permission: { resource: 'financeiro_dnp', action: 'view' },
 })
 
 const { api } = useApi()
 const auth = useAuthStore()
 const canEdit = computed(() => {
   if (auth.isAdmin) return true
-  const p = auth.user?.permissions?.financeiro
+  const p = auth.user?.permissions?.financeiro_dnp
   return Boolean(p?.edit || p?.delete)
 })
 const canDelete = computed(() => {
   if (auth.isAdmin) return true
-  return Boolean(auth.user?.permissions?.financeiro?.delete)
+  return Boolean(auth.user?.permissions?.financeiro_dnp?.delete)
 })
 
 type Produto = {
