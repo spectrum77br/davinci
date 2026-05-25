@@ -434,64 +434,104 @@ function loteTotal(prod: Product, loteId: string): number {
       <div class="border rounded-md overflow-x-auto">
         <table class="grid-table w-full text-xs border-collapse">
           <thead>
-            <!-- Lote metadata row (sits above qty/total headers) -->
-            <tr class="bg-amber-50 dark:bg-amber-900/20 text-[10px]">
-              <th :colspan="15" class="text-left px-2">— dados do SKU + cálculos —</th>
-              <th
-                v-for="lote in visibleLotes"
-                :key="`meta-${lote.id}`"
-                :colspan="2"
-                class="text-center border-l"
-              >
-                <div class="font-semibold uppercase tracking-wide">{{ lote.nome }}</div>
-                <div class="flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 text-[9px] font-normal text-muted-foreground">
-                  <span>ab: <input type="date" :value="lote.abertura" :disabled="!canEdit"
-                    class="bg-transparent border-b border-dashed border-muted-foreground/40 w-24"
-                    @input="(e) => schedulePatchLote(lote, 'abertura', (e.target as HTMLInputElement).value)" /></span>
-                  <span>fech: <input type="date" :value="lote.fechamento ?? ''" :disabled="!canEdit"
-                    class="bg-transparent border-b border-dashed border-muted-foreground/40 w-24"
-                    @input="(e) => schedulePatchLote(lote, 'fechamento', (e.target as HTMLInputElement).value || null)" /></span>
-                  <span>prev: <strong class="text-foreground">{{ fmtMoney(lote.previsto) }}</strong></span>
-                  <span>real: <input type="number" step="0.01" :value="lote.realizado" :disabled="!canEdit"
-                    class="bg-transparent border-b border-dashed border-muted-foreground/40 w-20 text-right"
-                    @input="(e) => schedulePatchLote(lote, 'realizado', Number((e.target as HTMLInputElement).value) || 0)" /></span>
-                  <span>saldo: <strong :class="Number(lote.saldo) > 0 ? 'text-red-700' : 'text-emerald-700'">{{ fmtMoney(lote.saldo) }}</strong></span>
-                  <span v-if="lote.prazo != null">prazo: <strong class="text-foreground">{{ lote.prazo }}d</strong></span>
-                  <button v-if="canEdit && lote.is_aberto" class="underline hover:text-primary" @click="fecharLote(lote)">fechar</button>
-                  <button v-if="canDelete" class="text-destructive hover:text-destructive-foreground" @click="removeLote(lote)" title="Excluir lote">
+            <!-- 8-row header. Fixed left columns use rowspan=8 so their
+                 label sits centered across the full header height.
+                 Each lote occupies 2 cols (label + value) and fills
+                 rows 1-7 with metadata (lote/abertura/fechamento/
+                 previsto/realizado/saldo/prazo) then row 8 with the
+                 actual sub-headers (quant | total) that align with
+                 the per-cell inputs in tbody. Mirrors the operator's
+                 Excel layout 1:1. -->
+            <tr>
+              <th rowspan="8" class="col-head text-left">fornecedor</th>
+              <th rowspan="8" class="col-head text-left">modelo china</th>
+              <th rowspan="8" class="col-head text-left">cor china</th>
+              <th rowspan="8" class="col-head text-left">fechamento</th>
+              <th rowspan="8" class="col-head text-center">TSA</th>
+              <th rowspan="8" class="col-head text-left">modelo bling</th>
+              <th rowspan="8" class="col-head text-left">sku</th>
+              <th rowspan="8" class="col-head text-left">cor</th>
+              <th rowspan="8" class="col-head text-right">custo bling</th>
+              <th rowspan="8" class="col-head text-right">estoque bling</th>
+              <th rowspan="8" class="col-head text-right">consumo diário</th>
+              <th rowspan="8" class="col-head text-right">memória consumo</th>
+              <th rowspan="8" class="col-head text-right">reposição estoque</th>
+              <th rowspan="8" class="col-head text-right">saldo reposição</th>
+              <th rowspan="8" class="col-head text-left">obs</th>
+              <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
+                <td class="lote-label border-l">lote</td>
+                <td class="lote-value">
+                  <span class="font-semibold uppercase">{{ lote.nome }}</span>
+                  <button v-if="canEdit && lote.is_aberto" class="ml-2 text-[10px] underline hover:text-primary" @click="fecharLote(lote)">fechar</button>
+                  <button v-if="canDelete" class="ml-1 text-destructive" @click="removeLote(lote)" :title="`Excluir ${lote.nome}`">
                     <Trash2 class="size-3 inline" />
                   </button>
-                </div>
-              </th>
-              <th v-if="canDelete" class="w-8"></th>
-            </tr>
-            <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
-              <th class="text-left">Fornecedor</th>
-              <th class="text-left">Modelo (CN)</th>
-              <th class="text-left">Cor (CN)</th>
-              <th class="text-left">Fech.</th>
-              <th class="text-center">TSA</th>
-              <th class="text-left">Modelo Bling</th>
-              <th class="text-left">SKU</th>
-              <th class="text-left">Cor</th>
-              <th class="text-right">Custo Bling</th>
-              <th class="text-right">Estoque</th>
-              <th class="text-right">Cons/dia</th>
-              <th class="text-right">Média 30d</th>
-              <th class="text-right">Memória</th>
-              <th class="text-right">Reposição</th>
-              <th class="text-right">Saldo Rep.</th>
-              <th class="text-left">Obs</th>
-              <template v-for="lote in visibleLotes" :key="`hdr-${lote.id}`">
-                <th class="text-right border-l">Qtd</th>
-                <th class="text-right">Total</th>
+                </td>
               </template>
-              <th v-if="canDelete" class="w-8"></th>
+              <th rowspan="8" v-if="canDelete" class="col-head w-8"></th>
+            </tr>
+            <tr>
+              <template v-for="lote in visibleLotes" :key="`lote-r2-${lote.id}`">
+                <td class="lote-label border-l">abertura</td>
+                <td class="lote-value editable">
+                  <input type="date" :value="lote.abertura" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px]"
+                    @input="(e) => schedulePatchLote(lote, 'abertura', (e.target as HTMLInputElement).value)" />
+                </td>
+              </template>
+            </tr>
+            <tr>
+              <template v-for="lote in visibleLotes" :key="`lote-r3-${lote.id}`">
+                <td class="lote-label border-l">fechamento</td>
+                <td class="lote-value editable">
+                  <input type="date" :value="lote.fechamento ?? ''" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px]"
+                    @input="(e) => schedulePatchLote(lote, 'fechamento', (e.target as HTMLInputElement).value || null)" />
+                </td>
+              </template>
+            </tr>
+            <tr>
+              <template v-for="lote in visibleLotes" :key="`lote-r4-${lote.id}`">
+                <td class="lote-label border-l">previsto</td>
+                <td class="lote-value calculated">{{ fmtMoney(lote.previsto) }}</td>
+              </template>
+            </tr>
+            <tr>
+              <template v-for="lote in visibleLotes" :key="`lote-r5-${lote.id}`">
+                <td class="lote-label border-l">realizado</td>
+                <td class="lote-value editable">
+                  <input type="number" step="0.01" :value="lote.realizado" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right"
+                    @input="(e) => schedulePatchLote(lote, 'realizado', Number((e.target as HTMLInputElement).value) || 0)" />
+                </td>
+              </template>
+            </tr>
+            <tr>
+              <template v-for="lote in visibleLotes" :key="`lote-r6-${lote.id}`">
+                <td class="lote-label border-l">saldo</td>
+                <td class="lote-value calculated" :class="Number(lote.saldo) > 0 ? 'text-red-700' : 'text-emerald-700'">
+                  {{ fmtMoney(lote.saldo) }}
+                </td>
+              </template>
+            </tr>
+            <tr>
+              <template v-for="lote in visibleLotes" :key="`lote-r7-${lote.id}`">
+                <td class="lote-label border-l">prazo</td>
+                <td class="lote-value calculated">{{ lote.prazo != null ? lote.prazo + 'd' : '—' }}</td>
+              </template>
+            </tr>
+            <tr>
+              <!-- Row 8 = the actual sub-headers for the body data cells.
+                   These align directly above the quant/total cells in tbody. -->
+              <template v-for="lote in visibleLotes" :key="`lote-r8-${lote.id}`">
+                <th class="col-quant border-l">quant</th>
+                <th class="col-total">total</th>
+              </template>
             </tr>
           </thead>
           <tbody>
             <tr v-if="!loading && filteredProducts.length === 0">
-              <td :colspan="16 + visibleLotes.length * 2 + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
+              <td :colspan="15 + visibleLotes.length * 2 + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
                 Nenhum produto. Clique em "Adicionar produto" para começar.
               </td>
             </tr>
@@ -516,14 +556,10 @@ function loteTotal(prod: Product, loteId: string): number {
                 @input="(e) => scheduleSave(row, 'cor', (e.target as HTMLInputElement).value)" /></td>
               <td><input type="number" step="0.01" class="cell-input text-right" :value="row.custo_bling" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'custo_bling', Number((e.target as HTMLInputElement).value) || 0)" /></td>
-              <!-- Manual fields -->
               <td><input type="number" class="cell-input text-right" :value="row.estoque_bling ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'estoque_bling', (e.target as HTMLInputElement).value === '' ? null : Number((e.target as HTMLInputElement).value))" /></td>
               <td><input type="number" step="0.01" class="cell-input text-right" :value="row.consumo_diario ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'consumo_diario', (e.target as HTMLInputElement).value === '' ? null : Number((e.target as HTMLInputElement).value))" /></td>
-              <td><input type="number" step="0.01" class="cell-input text-right" :value="row.maior_media_30d ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'maior_media_30d', (e.target as HTMLInputElement).value === '' ? null : Number((e.target as HTMLInputElement).value))" /></td>
-              <!-- Computed -->
               <td class="calc text-right">{{ fmtNum2(row.memoria_consumo) }}</td>
               <td class="calc text-right" :class="reposicaoClass(row.reposicao_estoque)">
                 {{ row.reposicao_estoque ?? '—' }}
@@ -533,8 +569,7 @@ function loteTotal(prod: Product, loteId: string): number {
               </td>
               <td><input class="cell-input" :value="row.obs ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'obs', (e.target as HTMLInputElement).value)" /></td>
-
-              <!-- Per-lote cells (qty + total) -->
+              <!-- Per-lote cells align directly under the row-8 quant/total sub-headers. -->
               <template v-for="lote in visibleLotes" :key="`cell-${row.id}-${lote.id}`">
                 <td class="border-l">
                   <input
@@ -669,11 +704,6 @@ function loteTotal(prod: Product, loteId: string): number {
   padding: 2px 4px;
   vertical-align: middle;
 }
-.grid-table thead th {
-  border-color: rgba(255, 255, 255, 0.15);
-  font-weight: 600;
-  white-space: nowrap;
-}
 .grid-table td.calc {
   background: hsl(var(--muted) / 0.5);
   color: hsl(var(--muted-foreground));
@@ -698,5 +728,57 @@ function loteTotal(prod: Product, loteId: string): number {
   cursor: not-allowed;
   opacity: 0.7;
   background: transparent;
+}
+
+/* ── 8-row Excel-style header ──────────────────────────────────────
+ * Fixed left columns: one <th rowspan=8>, centered both axes.
+ * Per-lote metadata: label/value pairs that stack down the same
+ * 8 thead rows. Row 8 holds the actual data sub-headers
+ * (quant | total) so they line up with the body inputs.
+ */
+.col-head {
+  vertical-align: middle;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  background: hsl(var(--muted) / 0.7);
+  padding: 4px;
+  white-space: nowrap;
+}
+.lote-label {
+  background: hsl(var(--muted) / 0.5);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: right;
+  padding: 2px 6px;
+  white-space: nowrap;
+  width: 80px;
+  color: hsl(var(--muted-foreground));
+}
+.lote-value {
+  font-size: 11px;
+  text-align: left;
+  padding: 2px 6px;
+  min-width: 110px;
+  background: hsl(var(--background));
+}
+.lote-value.calculated {
+  font-weight: 600;
+}
+.lote-value.editable {
+  background: rgb(255 253 230 / 0.7);
+}
+:global(.dark) .lote-value.editable {
+  background: rgb(120 53 15 / 0.15);
+}
+.col-quant,
+.col-total {
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  background: hsl(var(--muted));
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px;
 }
 </style>
