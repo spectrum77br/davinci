@@ -17,6 +17,7 @@ from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
 from app.routers import devolutions as devolutions_router
 from app.routers import financeiro as financeiro_router
+from app.routers import importacao as importacao_router
 from app.routers import discrepancies as discrepancies_router
 from app.routers import estoque as estoque_router
 from app.routers import integrations as integrations_router
@@ -86,6 +87,7 @@ _OPENAPI_TAGS = [
     {"name": "refunds", "description": "Reembolsos vinculados aos pedidos da conciliação."},
     {"name": "devolutions", "description": "Devoluções por pedido — controle manual de retorno de produto."},
     {"name": "financeiro", "description": "Consórcio, suprimentos (certificações) e simulação de cotações de importação."},
+    {"name": "importacao", "description": "Controle de pedidos de importação de malas — SKUs, lotes, resumo financeiro."},
 ]
 
 app = FastAPI(
@@ -152,6 +154,7 @@ app.include_router(refunds_router.router)
 app.include_router(devolutions_router.router)
 app.include_router(estoque_router.router)
 app.include_router(financeiro_router.router)
+app.include_router(importacao_router.router)
 app.include_router(dev_router.router)
 
 if settings.enable_marketing:

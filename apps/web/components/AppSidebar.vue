@@ -5,7 +5,7 @@ import {
   Package, Megaphone, DollarSign, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
   Store, Tags, ClipboardList, ChevronLeft, ChevronRight, Warehouse,
-  Coins, FileText, Calculator, FlaskConical,
+  Coins, FileText, Calculator, FlaskConical, Ship,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -101,6 +101,12 @@ const sections: Section[] = [
       { to: '/financeiro/suprimentos', label: 'Suprimentos', icon: FileText, resource: 'financeiro_suprimentos' },
       { to: '/financeiro/simulacao', label: 'Simulação', icon: Calculator, resource: 'financeiro_simulacao' },
       { to: '/financeiro/dnp', label: 'DNP', icon: FlaskConical, resource: 'financeiro_dnp' },
+    ],
+  },
+  {
+    label: 'Importação',
+    items: [
+      { to: '/importacao', label: 'Importação', icon: Ship, resource: 'importacao' },
     ],
   },
   {

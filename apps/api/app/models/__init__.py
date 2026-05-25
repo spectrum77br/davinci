@@ -37,6 +37,13 @@ from app.models.enums import (
     UserRole,
     UserStatus,
 )
+from app.models.importacao import (
+    ImportConfig,
+    ImportLote,
+    ImportLoteItem,
+    ImportProduct,
+    ImportResumo,
+)
 from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
 from app.models.margens import Margens

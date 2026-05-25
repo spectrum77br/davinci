@@ -13,6 +13,7 @@ export type Resource =
   | 'financeiro_suprimentos'
   | 'financeiro_simulacao'
   | 'financeiro_dnp'
+  | 'importacao'
   | 'devolucoes'
   | 'reembolso'
   | 'sincronizacoes'
@@ -61,6 +62,13 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     ],
   },
   {
+    // Importação = controle de pedidos de importação (módulo separado
+    // de Financeiro porque é o ciclo de compra/lote, não os planilhas
+    // financeiras propriamente ditas).
+    label: 'Importação',
+    resources: ['importacao'],
+  },
+  {
     label: 'Pós-venda',
     resources: ['devolucoes', 'reembolso'],
   },
@@ -95,6 +103,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   financeiro_suprimentos: 'Suprimentos',
   financeiro_simulacao: 'Simulação',
   financeiro_dnp: 'DNP',
+  importacao: 'Importação',
   devolucoes: 'Devoluções',
   reembolso: 'Reembolso',
   sincronizacoes: 'Sincronizações',

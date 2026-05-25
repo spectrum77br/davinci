@@ -23,6 +23,8 @@ Resource = Literal[
     "financeiro_suprimentos",
     "financeiro_simulacao",
     "financeiro_dnp",
+    # Importação module — controle de pedidos de importação (malas/China)
+    "importacao",
     "sincronizacoes",
     "sync_logs",
     "integracoes",
