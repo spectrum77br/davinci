@@ -20,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
+    DNPConfig,
+    DNPProduto,
     FinanceiroConsorcio,
     FinanceiroSimulacao,
     FinanceiroSuprimentos,
@@ -29,6 +31,10 @@ from app.models import (
 from app.schemas.financeiro import (
     ConsorcioOut,
     ConsorcioPatch,
+    DNPConfigOut,
+    DNPConfigPatch,
+    DNPProdutoOut,
+    DNPProdutoPatch,
     NCMOut,
     NCMPatch,
     SimulacaoOut,
@@ -371,3 +377,109 @@ async def patch_ncm(
     out = NCMOut.model_validate(row, from_attributes=True)
     out.cached = True
     return out
+
+
+# ── DNP — Desenvolvimento de Produtos ──────────────────────────────────
+
+
+@router.get("/dnp/config", response_model=DNPConfigOut)
+async def get_dnp_config(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+) -> DNPConfigOut:
+    """Singleton (id=1) com dolar_dia + certificado. A página atualiza
+    o dolar via awesomeapi do lado do cliente; o backend só persiste
+    o último valor confirmado pelo operador."""
+    row = await session.get(DNPConfig, 1)
+    if row is None:
+        # Defensa: a migration insere a linha, mas se alguém deletou
+        # o registro recria com defaults.
+        row = DNPConfig(id=1, dolar_dia=None, certificado=10000)
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+    return DNPConfigOut.model_validate(row, from_attributes=True)
+
+
+@router.patch("/dnp/config", response_model=DNPConfigOut)
+async def patch_dnp_config(
+    body: DNPConfigPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+) -> DNPConfigOut:
+    row = await session.get(DNPConfig, 1)
+    if row is None:
+        row = DNPConfig(id=1)
+        session.add(row)
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(row, k, v)
+    await session.commit()
+    await session.refresh(row)
+    return DNPConfigOut.model_validate(row, from_attributes=True)
+
+
+@router.get("/dnp/produtos", response_model=list[DNPProdutoOut])
+async def list_dnp(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro", "view"))],
+) -> list[DNPProdutoOut]:
+    rows = (
+        await session.execute(
+            select(DNPProduto).order_by(DNPProduto.created_at.asc())
+        )
+    ).scalars().all()
+    return [DNPProdutoOut.model_validate(r, from_attributes=True) for r in rows]
+
+
+@router.post("/dnp/produtos", response_model=DNPProdutoOut, status_code=status.HTTP_201_CREATED)
+async def create_dnp(
+    body: DNPProdutoPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+) -> DNPProdutoOut:
+    # Defaults da planilha-mãe pra novo produto.
+    data = body.model_dump(exclude_unset=True)
+    data.setdefault("projecao_compra", 500)
+    data.setdefault("fator", 2)
+    data.setdefault("frete", 30)
+    data.setdefault("comissao", 0.14)
+    row = DNPProduto(**data)
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return DNPProdutoOut.model_validate(row, from_attributes=True)
+
+
+@router.patch("/dnp/produtos/{row_id}", response_model=DNPProdutoOut)
+async def patch_dnp(
+    row_id: UUID,
+    body: DNPProdutoPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro", "edit"))],
+) -> DNPProdutoOut:
+    row = (
+        await session.execute(select(DNPProduto).where(DNPProduto.id == row_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "dnp_produto_not_found"})
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(row, k, v)
+    await session.commit()
+    await session.refresh(row)
+    return DNPProdutoOut.model_validate(row, from_attributes=True)
+
+
+@router.delete("/dnp/produtos/{row_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_dnp(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro", "delete"))],
+) -> None:
+    row = (
+        await session.execute(select(DNPProduto).where(DNPProduto.id == row_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "dnp_produto_not_found"})
+    await session.delete(row)
+    await session.commit()
+    return None

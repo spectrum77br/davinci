@@ -89,6 +89,44 @@ class FinanceiroSimulacao(Base, TimestampMixin):
     aliquota_intermediacao: Mapped[Decimal | None] = mapped_column(Numeric(7, 4), nullable=True)
 
 
+class DNPConfig(Base):
+    __tablename__ = "dnp_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    dolar_dia: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    certificado: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class DNPProduto(Base, TimestampMixin):
+    __tablename__ = "dnp_produtos"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    produto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fabrica: Mapped[str | None] = mapped_column(Text, nullable=True)
+    modelo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    moq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    voltagem: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    material: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tamanho: Mapped[str | None] = mapped_column(Text, nullable=True)
+    potencia: Mapped[str | None] = mapped_column(Text, nullable=True)
+    valor_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    projecao_compra: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fator: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    venda_estimada: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    frete: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    comissao: Mapped[Decimal | None] = mapped_column(Numeric(7, 4), nullable=True)
+    inmetro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class NCMCache(Base):
     __tablename__ = "ncm_cache"
 

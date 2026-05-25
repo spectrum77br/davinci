@@ -175,3 +175,62 @@ class NCMPatch(BaseModel):
     aliquota_ipi: Decimal | None = None
     aliquota_pis: Decimal | None = None
     aliquota_cofins: Decimal | None = None
+
+
+# ── DNP ────────────────────────────────────────────────────────────────
+
+
+class DNPConfigOut(BaseModel):
+    dolar_dia: Decimal | None = None
+    certificado: Decimal | None = None
+    updated_at: datetime
+
+
+class DNPConfigPatch(BaseModel):
+    dolar_dia: Decimal | None = None
+    certificado: Decimal | None = None
+
+
+class DNPProdutoOut(BaseModel):
+    id: UUID
+    produto: str | None = None
+    link: str | None = None
+    fabrica: str | None = None
+    modelo: str | None = None
+    moq: int | None = None
+    voltagem: str | None = None
+    cor: str | None = None
+    material: str | None = None
+    tamanho: str | None = None
+    potencia: str | None = None
+    valor_usd: Decimal | None = None
+    projecao_compra: int | None = None
+    fator: Decimal | None = None
+    venda_estimada: Decimal | None = None
+    frete: Decimal | None = None
+    comissao: Decimal | None = None
+    inmetro: str | None = None
+    obs: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DNPProdutoPatch(BaseModel):
+    produto: str | None = None
+    link: str | None = None
+    fabrica: str | None = None
+    modelo: str | None = None
+    moq: int | None = None
+    voltagem: str | None = None
+    cor: str | None = None
+    material: str | None = None
+    tamanho: str | None = None
+    potencia: str | None = None
+    valor_usd: Decimal | None = None
+    projecao_compra: int | None = None
+    fator: Decimal | None = None
+    venda_estimada: Decimal | None = None
+    frete: Decimal | None = None
+    comissao: Decimal | None = None
+    inmetro: str | None = None
+    obs: str | None = None

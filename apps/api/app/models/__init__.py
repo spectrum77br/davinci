@@ -6,6 +6,8 @@ from app.models.bling_order import BlingOrder
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.devolution import Devolution
 from app.models.financeiro import (
+    DNPConfig,
+    DNPProduto,
     FinanceiroConsorcio,
     FinanceiroSimulacao,
     FinanceiroSuprimentos,
@@ -92,6 +94,8 @@ __all__ = [
     "CellStatus",
     "Company",
     "Department",
+    "DNPConfig",
+    "DNPProduto",
     "Devolution",
     "FinanceiroConsorcio",
     "FinanceiroSimulacao",
