@@ -986,6 +986,12 @@ const syncingBlingCosts = ref(false)
 // ---------- Feature 7: grid search
 const gridSearch = ref('')
 
+// ---------- Feature 7b: grid platform filter
+// Empty string = show all marketplaces. Selecting one hides the other
+// platforms' columns (and their grouped headers). Reset to '' whenever
+// the user switches department — see the watch(department) below.
+const gridPlatformFilter = ref<string>('')
+
 // ---------- Feature 8: push dropdown
 const showPushMenu = ref(false)
 const pushLabel = ref('')
@@ -1517,14 +1523,36 @@ const PLATFORM_ORDER: Record<string, number> = {
 
 // Same SSH order is reused by the body iteration so each data column lines
 // up with its grouped header — see `gridAccounts` below.
+//
+// Platform filter: when gridPlatformFilter is set, drop accounts whose
+// platform doesn't match. The downstream consumers (accountGroups,
+// pushItemsBatch's "send all visible" iteration, the cellOf lookups
+// in keyboard nav) all read from this computed so they inherit the
+// filter automatically.
 const gridAccounts = computed<Account[]>(() => {
-  return (grid.value?.accounts ?? []).slice().sort((a, b) => {
+  let accs = (grid.value?.accounts ?? []).slice()
+  if (gridPlatformFilter.value) {
+    accs = accs.filter((a) => a.platform === gridPlatformFilter.value)
+  }
+  return accs.sort((a, b) => {
     const pa = PLATFORM_ORDER[a.platform] ?? 99
     const pb = PLATFORM_ORDER[b.platform] ?? 99
     if (pa !== pb) return pa - pb
     if (a.kit_number !== b.kit_number) return (a.kit_number || 0) - (b.kit_number || 0)
     return (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' })
   })
+})
+
+// Dropdown options derived from the unfiltered grid response — only
+// platforms actually present in the current department show up so the
+// operator doesn't see dead-end options like "TikTok" when there are
+// zero TikTok accounts in the loaded department.
+const gridPlatformOptions = computed<string[]>(() => {
+  const set = new Set<string>()
+  for (const a of (grid.value?.accounts ?? [])) set.add(a.platform)
+  return Array.from(set).sort(
+    (a, b) => (PLATFORM_ORDER[a] ?? 99) - (PLATFORM_ORDER[b] ?? 99),
+  )
 })
 
 const accountGroups = computed<
@@ -1973,6 +2001,10 @@ watch(
 )
 
 watch(department, async () => {
+  // Switching department invalidates the platform filter — the new
+  // dept may not have the same platforms, and stale filters silently
+  // hide all columns until the operator notices.
+  gridPlatformFilter.value = ''
   if (tab.value === 'tabela') await loadGrid()
 })
 </script>
@@ -2774,6 +2806,19 @@ watch(department, async () => {
             class="border rounded pl-7 pr-2 py-1 text-sm bg-background w-full"
           />
         </div>
+        <!-- Marketplace filter: hides every column except the selected
+             platform's. Empty string = todos. Options list reflects
+             only platforms actually present in the loaded department. -->
+        <select
+          v-model="gridPlatformFilter"
+          class="border rounded px-2 py-1 text-sm bg-background min-w-[140px]"
+          title="Filtrar colunas por marketplace"
+        >
+          <option value="">Todos marketplaces</option>
+          <option v-for="p in gridPlatformOptions" :key="p" :value="p">
+            {{ platformLabel(p) }}
+          </option>
+        </select>
         <button class="btn btn-sm" :disabled="!undoStack.length" title="Desfazer (Ctrl+Z)" @click="handleUndo">
           <Undo2 class="h-4 w-4" />
         </button>
