@@ -139,13 +139,19 @@ const sections: Section[] = [
   },
 ]
 
-// "Operador de estoque" = role !== 'admin' AND has at least one
-// stock tag. These users only ever see /controle-estoque; the sidebar
-// collapses to that single item even though the route guard already
-// locks them there.
-const isOperator = computed(
-  () => !auth.isAdmin && (auth.user?.stock_tags?.length ?? 0) > 0,
-)
+// "Operador de estoque" = role !== 'admin' AND has at least one stock tag
+// AND has no view permission on any resource other than controle_estoque.
+// Users who also hold other permissions (margem, devolucoes, etc.) see the
+// full sidebar even if they happen to have stock tags assigned.
+const isOperator = computed(() => {
+  if (auth.isAdmin) return false
+  if (!(auth.user?.stock_tags?.length ?? 0)) return false
+  const perms = auth.user?.permissions ?? {}
+  const hasOtherAccess = Object.entries(perms).some(
+    ([key, val]) => key !== 'controle_estoque' && (val as any)?.view === true,
+  )
+  return !hasOtherAccess
+})
 
 const visibleSections = computed(() => {
   if (isOperator.value) {
