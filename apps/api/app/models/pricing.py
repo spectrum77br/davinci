@@ -209,6 +209,10 @@ class PricingOverride(Base, TimestampMixin):
         default=CellStatus.AUTO,
         server_default=text("'auto'"),
     )
+    # Operator-picked highlight color (Excel-style). NULL = no highlight.
+    # Allowed values are whitelisted at the API; column itself is free-form
+    # short string so we can add palette entries without a migration.
+    cell_color: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 
 class AuditDismissedSku(Base):

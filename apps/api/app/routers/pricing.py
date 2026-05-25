@@ -48,6 +48,7 @@ from app.schemas.pricing import (
     PricingCatalogListingItem,
     PricingGridCell,
     PricingGridOut,
+    PricingOverrideCellColor,
     PricingOverrideCellStatus,
     PricingOverrideOut,
     PricingOverrideUpsert,
@@ -721,11 +722,17 @@ async def upsert_override(
             pricing_account_id=body.pricing_account_id,
             price_override=body.price_override,
             cell_status=cell_status,
+            cell_color=body.cell_color,
         )
         session.add(row)
     else:
         row.price_override = body.price_override
         row.cell_status = cell_status
+        # Only overwrite cell_color when the caller explicitly sent one;
+        # the dedicated cell-color endpoint is how it's normally set, so
+        # the price-edit path must not silently clear an existing highlight.
+        if body.cell_color is not None:
+            row.cell_color = body.cell_color
 
     await session.commit()
     await session.refresh(row)
@@ -787,6 +794,85 @@ async def set_cell_status(
         session.add(row)
     else:
         row.cell_status = cell_status
+
+    await session.commit()
+    await session.refresh(row)
+    return PricingOverrideOut.model_validate(row)
+
+
+# Allowed swatch values — match the frontend palette. NULL clears the
+# highlight. Adding/renaming is a 1-file change (here + the FE
+# CELL_COLORS array) with no migration.
+_ALLOWED_CELL_COLORS: frozenset[str] = frozenset({
+    "red", "orange", "yellow", "green", "blue", "purple", "pink", "gray",
+})
+
+
+@router.put("/overrides/cell-color", response_model=PricingOverrideOut)
+async def set_cell_color(
+    body: PricingOverrideCellColor,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> PricingOverrideOut:
+    """Set or clear the Excel-style highlight color on one pricing cell.
+
+    Auto-creates the override row with sentinel values (no price, status
+    AUTO) when the cell didn't have an override yet — picking a color on
+    a never-touched cell shouldn't drag any other state with it.
+    """
+    if body.cell_color is not None and body.cell_color not in _ALLOWED_CELL_COLORS:
+        raise HTTPException(400, detail={
+            "code": "invalid_color",
+            "allowed": sorted(_ALLOWED_CELL_COLORS),
+        })
+
+    row = (
+        await session.execute(
+            select(PricingOverride).where(
+                and_(
+                    PricingOverride.pricing_product_id == body.pricing_product_id,
+                    PricingOverride.pricing_account_id == body.pricing_account_id,
+                    user_scope(PricingOverride, user),
+                )
+            )
+        )
+    ).scalar_one_or_none()
+
+    if row is None:
+        prod_owned = (
+            await session.execute(
+                select(PricingProduct.id).where(
+                    and_(
+                        PricingProduct.id == body.pricing_product_id,
+                        user_scope(PricingProduct, user),
+                    )
+                )
+            )
+        ).scalar_one_or_none()
+        acc_owned = (
+            await session.execute(
+                select(PricingAccount.id).where(
+                    and_(
+                        PricingAccount.id == body.pricing_account_id,
+                        user_scope(PricingAccount, user),
+                    )
+                )
+            )
+        ).scalar_one_or_none()
+        if prod_owned is None or acc_owned is None:
+            raise HTTPException(404, detail={"code": "override_target_not_found"})
+        row = PricingOverride(
+            user_id=user.id,
+            pricing_product_id=body.pricing_product_id,
+            pricing_account_id=body.pricing_account_id,
+            cell_status=CellStatus.AUTO,
+            cell_color=body.cell_color,
+        )
+        session.add(row)
+    else:
+        row.cell_color = body.cell_color
 
     await session.commit()
     await session.refresh(row)
@@ -919,6 +1005,7 @@ async def get_grid(
                     source=outcome.source,
                     cell_status=(ovr.cell_status.value if ovr else "auto"),
                     has_override=ovr is not None,
+                    cell_color=(ovr.cell_color if ovr else None),
                 )
             )
 

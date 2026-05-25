@@ -924,6 +924,7 @@ async function submitNewProd() {
 
 // =========================================================== overrides / grid
 
+type CellColor = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink' | 'gray'
 type GridCell = {
   pricing_account_id: string
   pricing_product_id: string
@@ -931,6 +932,7 @@ type GridCell = {
   source: string
   cell_status: 'auto' | 'manual' | 'locked' | 'disabled' | 'NA' | 'SV' | 'error' | 'no_link'
   has_override: boolean
+  cell_color: CellColor | null
 }
 type GridResponse = {
   accounts: Account[]
@@ -990,6 +992,72 @@ const pushLabel = ref('')
 
 // ---------- Feature 11: keyboard nav
 const selectedCell = ref<{ row: number; col: number } | null>(null)
+
+// ---------- Excel-style per-cell highlight color
+// 8 swatches + a clear button. Backend whitelist mirrors this in
+// app/routers/pricing.py:_ALLOWED_CELL_COLORS — keep in sync. Tailwind
+// classes hardcoded so the JIT compiler picks them up; can't be built
+// dynamically from the color value.
+const CELL_COLORS: ReadonlyArray<{ value: CellColor; label: string; swatch: string; ring: string }> = [
+  { value: 'red',    label: 'Vermelho', swatch: 'bg-red-200',    ring: 'ring-red-500' },
+  { value: 'orange', label: 'Laranja',  swatch: 'bg-orange-200', ring: 'ring-orange-500' },
+  { value: 'yellow', label: 'Amarelo',  swatch: 'bg-yellow-200', ring: 'ring-yellow-500' },
+  { value: 'green',  label: 'Verde',    swatch: 'bg-green-200',  ring: 'ring-green-500' },
+  { value: 'blue',   label: 'Azul',     swatch: 'bg-blue-200',   ring: 'ring-blue-500' },
+  { value: 'purple', label: 'Roxo',     swatch: 'bg-purple-200', ring: 'ring-purple-500' },
+  { value: 'pink',   label: 'Rosa',     swatch: 'bg-pink-200',   ring: 'ring-pink-500' },
+  { value: 'gray',   label: 'Cinza',    swatch: 'bg-gray-300',   ring: 'ring-gray-500' },
+] as const
+
+const selectedCellColor = computed<CellColor | null>(() => {
+  if (!selectedCell.value) return null
+  const { row, col } = selectedCell.value
+  const prod = filteredGridProducts.value[row]
+  const acc = gridAccounts.value[col]
+  if (!prod || !acc) return null
+  return cellOf(prod.id, acc.id)?.cell_color ?? null
+})
+
+async function setCellColor(color: CellColor | null) {
+  if (!selectedCell.value) return
+  const { row, col } = selectedCell.value
+  const prod = filteredGridProducts.value[row]
+  const acc = gridAccounts.value[col]
+  if (!prod || !acc || !grid.value) return
+
+  // Optimistic local update — find or insert the cell row, then PUT.
+  let cell = cellOf(prod.id, acc.id)
+  const prevColor = cell?.cell_color ?? null
+  if (cell) {
+    cell.cell_color = color
+  } else {
+    cell = {
+      pricing_account_id: acc.id,
+      pricing_product_id: prod.id,
+      price: null,
+      source: 'computed',
+      cell_status: 'auto',
+      has_override: false,
+      cell_color: color,
+    }
+    grid.value.cells.push(cell)
+  }
+
+  try {
+    await api('/api/pricing/overrides/cell-color', {
+      method: 'PUT',
+      body: {
+        pricing_product_id: prod.id,
+        pricing_account_id: acc.id,
+        cell_color: color,
+      },
+    })
+  } catch (e) {
+    // Revert on failure.
+    cell.cell_color = prevColor
+    console.error('cell_color save failed', e)
+  }
+}
 
 // ---------- Feature 12: compare mode
 const compareProductIds = ref<Set<string>>(new Set())
@@ -1090,12 +1158,29 @@ function liveCellLabel(prod: any, acc: Account): string {
 
 function cellTone(c: GridCell | undefined): string {
   if (!c) return 'text-muted-foreground'
+  // Critical states keep priority over any manual highlight — NA/SV/error
+  // /no_link are signals the operator actually needs to see, not paint over.
   if (c.cell_status === 'NA') return 'bg-gray-200 text-gray-500 font-semibold'
   if (c.cell_status === 'SV') return 'bg-amber-100 text-amber-700 font-semibold'
   // Transient post-push states. SSH paints these so the user can decide whether
   // to mark NA/SV permanently or fix the underlying issue and retry.
   if (c.cell_status === 'error') return 'bg-red-50 text-red-700'
   if (c.cell_status === 'no_link') return 'bg-amber-50 text-amber-700'
+  // Operator-picked highlight beats the automatic palette. Hardcoded
+  // Tailwind class names so the JIT bundles them; keep in sync with
+  // CELL_COLORS above.
+  if (c.cell_color) {
+    switch (c.cell_color) {
+      case 'red':    return 'bg-red-200 text-red-900'
+      case 'orange': return 'bg-orange-200 text-orange-900'
+      case 'yellow': return 'bg-yellow-200 text-yellow-900'
+      case 'green':  return 'bg-green-200 text-green-900'
+      case 'blue':   return 'bg-blue-200 text-blue-900'
+      case 'purple': return 'bg-purple-200 text-purple-900'
+      case 'pink':   return 'bg-pink-200 text-pink-900'
+      case 'gray':   return 'bg-gray-300 text-gray-800'
+    }
+  }
   if (c.source === 'disabled') return 'bg-muted/50 text-muted-foreground'
   if (c.source === 'locked') return 'bg-amber-50 text-amber-900 dark:bg-amber-900/20 dark:text-amber-100'
   // SSH: override (preço fixo manual) → fundo laranja.
@@ -2752,6 +2837,32 @@ watch(department, async () => {
           <Loader2 class="h-3 w-3 animate-spin" />
           {{ bulkPushProgress ? `enviando ${bulkPushProgress}…` : 'enviando…' }}
         </span>
+        <!-- Excel-style cell color picker — only shows once a cell is selected.
+             Selected swatch gets a ring matching its color. Trailing X clears. -->
+        <div v-if="selectedCell" class="flex items-center gap-1 border-l pl-2 ml-1">
+          <span class="text-xs text-muted-foreground mr-1">Cor:</span>
+          <button
+            v-for="color in CELL_COLORS"
+            :key="color.value"
+            type="button"
+            class="w-5 h-5 rounded-sm border border-gray-300 transition-transform hover:scale-110"
+            :class="[
+              color.swatch,
+              selectedCellColor === color.value ? `ring-2 ${color.ring} scale-110` : '',
+            ]"
+            :title="color.label"
+            @click="setCellColor(color.value)"
+          />
+          <button
+            type="button"
+            class="w-5 h-5 rounded-sm border border-gray-300 flex items-center justify-center hover:bg-muted transition-colors"
+            :class="selectedCellColor === null ? 'ring-2 ring-gray-400' : ''"
+            title="Remover cor"
+            @click="setCellColor(null)"
+          >
+            <X class="h-3 w-3 text-muted-foreground" />
+          </button>
+        </div>
       </div>
 
       <div

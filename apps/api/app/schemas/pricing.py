@@ -198,6 +198,10 @@ class PricingOverrideBase(BaseModel):
     pricing_account_id: UUID
     price_override: Decimal | None = None
     cell_status: str = "auto"
+    # Optional on the upsert path: if absent we preserve whatever's
+    # already stored. The dedicated /overrides/cell-color endpoint is
+    # the canonical way to set it.
+    cell_color: str | None = None
 
 
 class PricingOverrideUpsert(PricingOverrideBase):
@@ -208,6 +212,12 @@ class PricingOverrideCellStatus(BaseModel):
     pricing_product_id: UUID
     pricing_account_id: UUID
     cell_status: str
+
+
+class PricingOverrideCellColor(BaseModel):
+    pricing_product_id: UUID
+    pricing_account_id: UUID
+    cell_color: str | None = None  # None = clear the highlight
 
 
 class PricingOverrideOut(PricingOverrideBase):
@@ -252,6 +262,7 @@ class PricingGridCell(BaseModel):
     source: str  # computed | override | locked | disabled | missing_inputs
     cell_status: str = "auto"
     has_override: bool = False
+    cell_color: str | None = None
 
 
 class PricingGridOut(BaseModel):
