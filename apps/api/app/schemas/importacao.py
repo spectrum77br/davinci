@@ -132,7 +132,9 @@ class ImportResumoOut(BaseModel):
     lote_nome: str | None = None
     saldo: Decimal
     obs: str | None = None
-    created_at: datetime
+    # ImportResumo is intentionally append-only (no TimestampMixin)
+    # so the model doesn't expose created_at — keep the schema in sync
+    # or the GET endpoint 500s on Pydantic validation.
 
 
 class ImportResumoList(BaseModel):

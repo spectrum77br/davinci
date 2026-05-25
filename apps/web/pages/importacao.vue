@@ -474,7 +474,7 @@ function loteTotal(prod: Product, loteId: string): number {
               <th class="text-left">Modelo Bling</th>
               <th class="text-left">SKU</th>
               <th class="text-left">Cor</th>
-              <th class="text-right">Custo USD</th>
+              <th class="text-right">Custo Bling</th>
               <th class="text-right">Estoque</th>
               <th class="text-right">Cons/dia</th>
               <th class="text-right">Média 30d</th>
