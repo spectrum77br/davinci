@@ -22,7 +22,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import and_, desc, func, select
+from sqlalchemy import and_, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -33,6 +33,7 @@ from app.models import (
     ImportLoteItem,
     ImportProduct,
     ImportResumo,
+    Product,
     User,
 )
 from app.schemas.importacao import (
@@ -134,6 +135,17 @@ def _compute_product_fields(
     return memoria, reposicao, saldo
 
 
+class _Effective:
+    """Lightweight stand-in for _compute_product_fields when we want to
+    feed it auto-pulled values without mutating the ORM row."""
+    __slots__ = ("estoque_bling", "consumo_diario", "maior_media_30d")
+
+    def __init__(self, estoque, consumo, media):
+        self.estoque_bling = estoque
+        self.consumo_diario = consumo
+        self.maior_media_30d = media
+
+
 @router.get("/products", response_model=list[ImportProductOut])
 async def list_products(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -149,8 +161,7 @@ async def list_products(
     if cfg is None:
         cfg = ImportConfig(id=1, tempo_reposicao=150, tempo_estoque=60)
 
-    # Load all OPEN-lote items, group by product_id for pedidos_em_aberto
-    # AND keep a per-(lote,product) map for the dict the FE renders.
+    # Open-lote items: aggregate for pedidos_em_aberto + per-(lote,product) map.
     open_items = (
         await session.execute(
             select(ImportLoteItem, ImportLote)
@@ -166,17 +177,89 @@ async def list_products(
                 qty_by_product_open.get(item.product_id, 0) + (item.quantidade or 0)
             )
 
+    # ── Auto-pull: estoque_bling from products.stock by SKU ───────────
+    skus_lower = [(p.sku or "").lower() for p in products if p.sku]
+    stock_by_sku: dict[str, int | None] = {}
+    if skus_lower:
+        stock_rows = (await session.execute(
+            select(func.lower(Product.sku).label("sku"), Product.stock)
+            .where(func.lower(Product.sku).in_(skus_lower))
+        )).all()
+        stock_by_sku = {r.sku: r.stock for r in stock_rows if r.sku}
+
+    # ── Auto-pull: 6 monthly sales buckets (30, 60, 90, 120, 150, 180d)
+    # from bling_orders by item_codigo. consumo_diario = bucket30 / 30;
+    # maior_media_30d = MAX(buckets) / 30. Excluded situacoes match the
+    # pricing/sales-map endpoint so the two pages agree on what counts.
+    sales_by_sku: dict[str, dict[str, int]] = {}
+    if skus_lower:
+        sales_rows = (await session.execute(text("""
+            SELECT
+                LOWER(item_codigo) AS sku,
+                SUM(CASE WHEN data >= now() - interval '30 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b30,
+                SUM(CASE WHEN data >= now() - interval '60 days'  AND data < now() - interval '30 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b60,
+                SUM(CASE WHEN data >= now() - interval '90 days'  AND data < now() - interval '60 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b90,
+                SUM(CASE WHEN data >= now() - interval '120 days' AND data < now() - interval '90 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b120,
+                SUM(CASE WHEN data >= now() - interval '150 days' AND data < now() - interval '120 days' THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b150,
+                SUM(CASE WHEN data >= now() - interval '180 days' AND data < now() - interval '150 days' THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b180
+            FROM davinci.bling_orders
+            WHERE item_codigo IS NOT NULL AND item_codigo <> ''
+              AND data >= now() - interval '180 days'
+              AND COALESCE(situacao, '') NOT IN ('Cancelado', 'Devolvido', '12')
+              AND LOWER(item_codigo) = ANY(:skus)
+            GROUP BY LOWER(item_codigo)
+        """), {"skus": skus_lower})).all()
+        sales_by_sku = {
+            r.sku: {
+                "b30": int(r.b30 or 0), "b60": int(r.b60 or 0),
+                "b90": int(r.b90 or 0), "b120": int(r.b120 or 0),
+                "b150": int(r.b150 or 0), "b180": int(r.b180 or 0),
+            }
+            for r in sales_rows
+        }
+
     out: list[ImportProductOut] = []
     for p in products:
+        sku_lc = (p.sku or "").lower()
+
+        # Effective stock: auto-pulled wins; fall back to stored manual value.
+        auto_stock = stock_by_sku.get(sku_lc)
+        eff_estoque: int | None
+        if auto_stock is not None:
+            eff_estoque = int(auto_stock)
+        else:
+            eff_estoque = p.estoque_bling
+
+        # Effective consumo + maior_media from sales buckets when present.
+        auto_sales = sales_by_sku.get(sku_lc)
+        if auto_sales:
+            eff_consumo = Decimal(auto_sales["b30"]) / Decimal(30)
+            biggest = max(
+                auto_sales["b30"], auto_sales["b60"], auto_sales["b90"],
+                auto_sales["b120"], auto_sales["b150"], auto_sales["b180"],
+            )
+            eff_media = Decimal(biggest) / Decimal(30)
+        else:
+            eff_consumo = (
+                Decimal(p.consumo_diario) if p.consumo_diario is not None else None
+            )
+            eff_media = (
+                Decimal(p.maior_media_30d) if p.maior_media_30d is not None else None
+            )
+
         pedidos = qty_by_product_open.get(p.id, 0)
-        memoria, reposicao, saldo = _compute_product_fields(p, cfg, pedidos)
+        memoria, reposicao, saldo = _compute_product_fields(
+            _Effective(eff_estoque, eff_consumo, eff_media), cfg, pedidos,
+        )
         out.append(ImportProductOut(
             id=p.id,
             fornecedor=p.fornecedor, modelo_china=p.modelo_china, cor_china=p.cor_china,
             fechamento=p.fechamento, tsa=p.tsa, modelo_bling=p.modelo_bling,
             sku=p.sku, cor=p.cor, custo_bling=p.custo_bling,
-            estoque_bling=p.estoque_bling, consumo_diario=p.consumo_diario,
-            maior_media_30d=p.maior_media_30d, obs=p.obs,
+            estoque_bling=eff_estoque,
+            consumo_diario=eff_consumo,
+            maior_media_30d=eff_media,
+            obs=p.obs,
             memoria_consumo=memoria,
             reposicao_estoque=reposicao,
             saldo_reposicao=saldo,

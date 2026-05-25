@@ -604,10 +604,15 @@ function loteTotal(prod: Product, loteId: string): number {
                 @input="(e) => scheduleSave(row, 'cor', (e.target as HTMLInputElement).value)" /></td>
               <td><input type="number" step="0.01" class="cell-input text-right" :value="row.custo_bling" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'custo_bling', Number((e.target as HTMLInputElement).value) || 0)" /></td>
-              <td><input type="number" class="cell-input text-right" :value="row.estoque_bling ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'estoque_bling', (e.target as HTMLInputElement).value === '' ? null : Number((e.target as HTMLInputElement).value))" /></td>
-              <td><input type="number" step="0.01" class="cell-input text-right" :value="row.consumo_diario ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'consumo_diario', (e.target as HTMLInputElement).value === '' ? null : Number((e.target as HTMLInputElement).value))" /></td>
+              <!-- estoque_bling auto-pulled from products.stock by SKU in
+                   the router; consumo_diario = bling_orders last 30d / 30.
+                   Both read-only — the operator can't override the source. -->
+              <td class="calc text-right" :title="'Auto: products.stock por SKU'">
+                {{ row.estoque_bling ?? '—' }}
+              </td>
+              <td class="calc text-right" :title="'Auto: bling_orders 30d ÷ 30'">
+                {{ fmtNum2(row.consumo_diario) }}
+              </td>
               <td class="calc text-right">{{ fmtNum2(row.memoria_consumo) }}</td>
               <td class="calc text-right" :class="reposicaoClass(row.reposicao_estoque)">
                 {{ row.reposicao_estoque ?? '—' }}
