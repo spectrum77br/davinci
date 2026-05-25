@@ -84,10 +84,20 @@ async def lookup_devolution_order(
     if not pedido:
         raise HTTPException(422, detail={"code": "pedido_required"})
 
+    q_like = f"%{pedido}%"
     rows = (
         await session.execute(
             text(
                 f"""
+                WITH transporte AS (
+                    SELECT DISTINCT ON (numero)
+                        numero,
+                        nome_destinatario,
+                        cep_destino
+                    FROM "{SCHEMA}".bling_orders
+                    WHERE item_index = 0
+                    ORDER BY numero
+                )
                 SELECT
                     MAX(v.data) AS data,
                     v.pedido_bling::text AS pedido_bling,
@@ -95,9 +105,17 @@ async def lookup_devolution_order(
                     btrim(v.loja_nome) AS conta,
                     string_agg(DISTINCT v.sku, ', ' ORDER BY v.sku) AS sku,
                     string_agg(DISTINCT v.produto, ' | ' ORDER BY v.produto) AS produtos,
-                    SUM(v.bling_custo_produtos)::double precision AS custo_produto
+                    SUM(v.bling_custo_produtos)::double precision AS custo_produto,
+                    MAX(t.nome_destinatario) AS nome_destinatario,
+                    MAX(t.cep_destino) AS cep_destino
                 FROM "{SCHEMA}".vw_conciliacao_margens_marketplace v
-                WHERE (v.pedido_bling::text = :pedido OR v.pedido_marketplace::text = :pedido)
+                LEFT JOIN transporte t ON t.numero = v.pedido_bling
+                WHERE (
+                    v.pedido_bling::text = :pedido
+                    OR v.pedido_marketplace::text = :pedido
+                    OR t.nome_destinatario ILIKE :q_like
+                    OR t.cep_destino ILIKE :q_like
+                )
                   AND v.loja_nome IS NOT NULL
                   AND btrim(v.loja_nome) <> ''
                 GROUP BY v.pedido_bling, btrim(v.loja_nome)
@@ -105,7 +123,7 @@ async def lookup_devolution_order(
                 LIMIT 20
                 """  # noqa: S608
             ),
-            {"pedido": pedido},
+            {"pedido": pedido, "q_like": q_like},
         )
     ).mappings().all()
 

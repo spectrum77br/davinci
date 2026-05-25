@@ -186,6 +186,16 @@ def _row_from_item(
         datetime.now(UTC).astimezone(_BRT).date() if situacao_id == "15" else None
     )
 
+    transporte = raw_order.get("transporte") or {}
+    if not isinstance(transporte, dict):
+        transporte = {}
+    _contato = transporte.get("contato") or {}
+    if not isinstance(_contato, dict):
+        _contato = {}
+    _endereco = transporte.get("enderecoEntrega") or {}
+    if not isinstance(_endereco, dict):
+        _endereco = {}
+
     return {
         "bling_id": _int(raw_order.get("id")),
         "numero": str(raw_order["numero"]) if raw_order.get("numero") is not None else None,
@@ -226,6 +236,8 @@ def _row_from_item(
         "item_comissao_valor": _num(comissao.get("valor")),
         "categoria_id": categoria_id,
         "categoria_nome": categoria_nome,
+        "nome_destinatario": _contato.get("nome") or None,
+        "cep_destino": _endereco.get("cep") or None,
     }
 
 
@@ -411,6 +423,15 @@ async def upsert_order(
             # the item set would leave the field NULL forever.
             if situacao == "15":
                 values["em_andamento_data"] = datetime.now(UTC).astimezone(_BRT).date()
+            # Backfill transporte data for orders synced before migration 0087.
+            _tp = raw_order.get("transporte") or {}
+            if isinstance(_tp, dict):
+                _ct = _tp.get("contato") or {}
+                _en = _tp.get("enderecoEntrega") or {}
+                if isinstance(_ct, dict) and _ct.get("nome"):
+                    values["nome_destinatario"] = _ct["nome"]
+                if isinstance(_en, dict) and _en.get("cep"):
+                    values["cep_destino"] = _en["cep"]
             await session.execute(
                 update(BlingOrder)
                 .where(BlingOrder.bling_id == bling_id)

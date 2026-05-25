@@ -80,3 +80,5 @@ class BlingOrder(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    nome_destinatario: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cep_destino: Mapped[str | None] = mapped_column(Text, nullable=True)
