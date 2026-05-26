@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _clean_optional_text(value: str | None) -> str | None:
@@ -75,6 +75,12 @@ class DevolutionCreate(BaseModel):
         if not value:
             raise ValueError("conta cannot be blank")
         return value
+
+    @model_validator(mode="after")
+    def validate_link_required(self) -> "DevolutionCreate":
+        if self.condicao_produto in ("Extraviado", "Manutenção") and not self.link_abertura:
+            raise ValueError("link_abertura obrigatório para Extraviado / Manutenção")
+        return self
 
 
 class DevolutionPatch(BaseModel):

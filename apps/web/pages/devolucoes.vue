@@ -133,6 +133,11 @@ const totalReembolsadas = computed(() => items.value.filter((r) => r.reembolso).
 const sheetInputClass = 'h-7 w-full rounded-none border-0 bg-transparent px-1 text-xs focus:bg-background focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-70'
 const sheetSelectClass = `${sheetInputClass} cursor-pointer`
 const sheetMoneyInputClass = `${sheetInputClass} text-right tabular-nums`
+const sheetInputRequiredClass = `${sheetInputClass} ring-1 ring-red-400`
+
+function linkRequired(condicao: string | null | undefined) {
+  return condicao === 'Extraviado' || condicao === 'Manutenção'
+}
 
 function apiError(e: any) {
   const detail = e?.data?.detail
@@ -312,6 +317,10 @@ function draftPayload() {
 async function createDevolution() {
   const body = draftPayload()
   if (!body || !canEdit.value) return
+  if (linkRequired(body.condicao_produto) && !body.link_abertura) {
+    lookupError.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
+    return
+  }
   creating.value = true
   lookupError.value = null
   try {
@@ -342,6 +351,10 @@ function rowPatchPayload(row: DevolutionRow) {
 
 async function saveRow(row: DevolutionRow) {
   if (!canEdit.value || !hasDirty(row.id) || isSaving(row.id)) return
+  if (linkRequired(row.condicao_produto) && !row.link_abertura) {
+    error.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
+    return
+  }
   setSaving(row.id, true)
   error.value = null
   try {
@@ -495,7 +508,11 @@ async function saveRow(row: DevolutionRow) {
                 </select>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model="draft.link_abertura" :class="sheetInputClass" />
+                <input
+                  v-model="draft.link_abertura"
+                  :class="linkRequired(draft.condicao_produto) && !draft.link_abertura ? sheetInputRequiredClass : sheetInputClass"
+                  :placeholder="linkRequired(draft.condicao_produto) ? 'obrigatório' : ''"
+                />
               </td>
               <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
                 <input v-model="draft.reembolso" type="checkbox" class="size-4 rounded border accent-primary" />
@@ -624,7 +641,8 @@ async function saveRow(row: DevolutionRow) {
                 <input
                   :value="row.link_abertura || ''"
                   :disabled="!canEdit"
-                  :class="sheetInputClass"
+                  :class="linkRequired(row.condicao_produto) && !row.link_abertura ? sheetInputRequiredClass : sheetInputClass"
+                  :placeholder="linkRequired(row.condicao_produto) ? 'obrigatório' : ''"
                   @input="(e) => setRowText(row, 'link_abertura', (e.target as HTMLInputElement).value)"
                   @blur="saveRow(row)"
                 />
