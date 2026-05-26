@@ -113,8 +113,31 @@ def match_pricing_to_product_keys(
                 continue
             if dept == "celular":
                 matched.update(by_base.get(key, set()))
-            else:
-                matched.update(by_exact.get(key, set()))
+                continue
+            exact_hit = by_exact.get(key, set())
+            if exact_hit:
+                matched.update(exact_hit)
+                continue
+            # Kit fallback (apenas dept=mala, sem '+', e SKU de kit com
+            # ≥2 dots numéricos como b005.8.18). Bling não registra venda
+            # do combo exato pra muitos kits 2-peças; expandimos no
+            # componente individual de cada tamanho (b005.8 + b005.18)
+            # pra refletir a demanda real desses tamanhos. SKUs com '+'
+            # (ex `b005.8.12.20.24+a075`) ficam de fora — operador pediu
+            # pra deixar zero.
+            if dept != "mala" or "+" in key:
+                continue
+            parts = key.split(".")
+            if len(parts) < 3:
+                continue
+            base = parts[0]
+            if not base:
+                continue
+            for size in parts[1:]:
+                if not size.isdigit():
+                    continue
+                component_key = f"{base}.{size}"
+                matched.update(by_exact.get(component_key, set()))
         if matched:
             out[pp.id] = matched
     return out
