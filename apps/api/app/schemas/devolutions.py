@@ -127,6 +127,7 @@ class DevolutionLookupOut(BaseModel):
     conta: str
     sku: str | None = None
     produtos: str | None = None
+    quantidade: int | None = None
     custo_produto: float | None = None
     nome_destinatario: str | None = None
     cep_destino: str | None = None

@@ -90,21 +90,22 @@ async def lookup_devolution_order(
             text(
                 f"""
                 SELECT
-                    MAX(v.data) AS data,
+                    v.data,
                     v.pedido_bling::text AS pedido_bling,
-                    MAX(v.pedido_marketplace)::text AS pedido_marketplace,
+                    v.pedido_marketplace::text AS pedido_marketplace,
                     btrim(v.loja_nome) AS conta,
-                    string_agg(DISTINCT v.sku, ', ' ORDER BY v.sku) AS sku,
-                    string_agg(DISTINCT v.produto, ' | ' ORDER BY v.produto) AS produtos,
-                    SUM(COALESCE(bo.preco_custo::numeric, 0) * COALESCE(v.quantidade, 1))::double precision AS custo_produto,
-                    MAX(v.nome_destinatario) AS nome_destinatario,
-                    MAX(v.cep_destino) AS cep_destino,
-                    MAX(v.endereco_destino) AS endereco_destino,
-                    MAX(v.numero_destino) AS numero_destino,
-                    MAX(v.complemento_destino) AS complemento_destino,
-                    MAX(v.bairro_destino) AS bairro_destino,
-                    MAX(v.cidade_destino) AS cidade_destino,
-                    MAX(v.uf_destino) AS uf_destino
+                    v.sku,
+                    v.produto AS produtos,
+                    v.quantidade,
+                    (COALESCE(bo.preco_custo::numeric, 0) * COALESCE(v.quantidade, 1))::double precision AS custo_produto,
+                    v.nome_destinatario,
+                    v.cep_destino,
+                    v.endereco_destino,
+                    v.numero_destino,
+                    v.complemento_destino,
+                    v.bairro_destino,
+                    v.cidade_destino,
+                    v.uf_destino
                 FROM "{SCHEMA}".vw_devolucoes v
                 LEFT JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
                 WHERE (
@@ -115,9 +116,8 @@ async def lookup_devolution_order(
                 )
                   AND v.loja_nome IS NOT NULL
                   AND btrim(v.loja_nome) <> ''
-                GROUP BY v.pedido_bling, btrim(v.loja_nome)
-                ORDER BY data DESC NULLS LAST
-                LIMIT 20
+                ORDER BY v.data DESC NULLS LAST, v.pedido_bling, v.sku
+                LIMIT 50
                 """  # noqa: S608
             ),
             {"pedido": pedido, "q_like": q_like},

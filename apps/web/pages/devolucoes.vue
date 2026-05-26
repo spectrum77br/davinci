@@ -51,6 +51,7 @@ type LookupRow = {
   conta: string
   sku: string | null
   produtos: string | null
+  quantidade: number | null
   custo_produto: number | null
   nome_destinatario: string | null
   cep_destino: string | null
@@ -425,6 +426,7 @@ async function saveRow(row: DevolutionRow) {
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px]">Cliente</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">CEP</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">SKU</th>
+              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[50px]">Qtd</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produto</th>
               <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Custo</th>
               <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]"></th>
@@ -439,6 +441,7 @@ async function saveRow(row: DevolutionRow) {
               <td class="px-2 py-1">{{ row.nome_destinatario || '—' }}</td>
               <td class="px-2 py-1 font-mono text-muted-foreground">{{ row.cep_destino || '—' }}</td>
               <td class="px-2 py-1 font-mono text-xs">{{ row.sku || '—' }}</td>
+              <td class="px-2 py-1 text-center tabular-nums">{{ row.quantidade ?? '—' }}</td>
               <td class="px-2 py-1 text-muted-foreground">{{ row.produtos || '—' }}</td>
               <td class="px-2 py-1 text-right tabular-nums">{{ brl(row.custo_produto) }}</td>
               <td class="px-2 py-1 text-right">
