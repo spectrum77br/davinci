@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Devolution, User
+from app.models import Devolution, Refund, User
 from app.schemas.devolutions import (
     DevolutionCreate,
     DevolutionLookupOut,
@@ -20,6 +20,27 @@ from app.schemas.devolutions import (
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/devolutions", tags=["devolutions"])
+
+_REFUND_CONDICOES = {"Extraviado", "Manutenção"}
+
+
+def _maybe_create_refund(session: AsyncSession, row: Devolution, condicao: str) -> None:
+    prejuizo = (
+        row.custo_produto or 0
+        if condicao == "Extraviado"
+        else row.custo_manutencao or 0
+    )
+    refund = Refund(
+        data=row.data,
+        pedido_bling=row.pedido_bling,
+        pedido_marketplace=row.pedido_marketplace,
+        conta=row.conta,
+        tipo=condicao,
+        prejuizo=prejuizo,
+        reembolso=0,
+    )
+    session.add(refund)
+    logger.info("refund_auto_created", pedido_bling=row.pedido_bling, tipo=condicao)
 settings = get_settings()
 SCHEMA = settings.database_schema
 
@@ -152,6 +173,8 @@ async def create_devolution(
         observacao=body.observacao,
     )
     session.add(row)
+    if body.condicao_produto in _REFUND_CONDICOES:
+        _maybe_create_refund(session, row, body.condicao_produto)
     await session.commit()
     await session.refresh(row)
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
@@ -175,8 +198,13 @@ async def patch_devolution(
     if data.get("conta") is None and "conta" in data:
         raise HTTPException(422, detail={"code": "conta_required"})
 
+    prev_condicao = row.condicao_produto
     for key, value in data.items():
         setattr(row, key, value)
+
+    new_condicao = row.condicao_produto
+    if new_condicao in _REFUND_CONDICOES and new_condicao != prev_condicao:
+        _maybe_create_refund(session, row, new_condicao)
 
     await session.commit()
     await session.refresh(row)

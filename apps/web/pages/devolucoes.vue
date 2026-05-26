@@ -489,7 +489,7 @@ async function saveRow(row: DevolutionRow) {
                 <input v-model.number="draft.custo_produto" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="draft.condicao_produto" :class="sheetSelectClass">
+                <select v-model="draft.condicao_produto" :class="sheetSelectClass" @change="(e) => { if ((e.target as HTMLSelectElement).value === 'Extraviado' || (e.target as HTMLSelectElement).value === 'Manutenção') draft!.reembolso = true }">
                   <option value="">—</option>
                   <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
                 </select>
@@ -609,7 +609,7 @@ async function saveRow(row: DevolutionRow) {
                 :value="row.condicao_produto || ''"
                 :disabled="!canEdit"
                 :class="sheetSelectClass"
-                @change="(e) => { setRowText(row, 'condicao_produto', (e.target as HTMLSelectElement).value); saveRow(row) }"
+                @change="(e) => { const v = (e.target as HTMLSelectElement).value; setRowText(row, 'condicao_produto', v); if (v === 'Extraviado' || v === 'Manutenção') setRowReembolso(row, true); saveRow(row) }"
               >
                 <option value="">—</option>
                 <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
