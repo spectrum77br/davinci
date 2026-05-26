@@ -142,7 +142,11 @@ function rebuildCotCells(valores: CotValor[]) {
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 const saveTimers = reactive<Record<string, ReturnType<typeof setTimeout>>>({})
-const showClosedLotes = ref(false)
+// Default true — fechar um lote NÃO deve sumir com ele da tabela
+// (operador quer ver os totais previstos/realizados depois de fechado).
+// O checkbox continua na UI pra quem quiser limpar a visão das
+// "rodadas antigas".
+const showClosedLotes = ref(true)
 const search = ref('')
 
 const visibleLotes = computed(() => lotes.value.filter((l) => showClosedLotes.value || l.is_aberto))
