@@ -755,22 +755,25 @@ async function removeCotProduto(prod: CotProduto) {
                  the per-cell inputs in tbody. Mirrors the operator's
                  Excel layout 1:1. -->
             <tr>
-              <th rowspan="8" class="col-head text-left">fornecedor</th>
-              <th rowspan="8" class="col-head text-left">modelo china</th>
-              <th rowspan="8" class="col-head text-left">cor china</th>
-              <th rowspan="8" class="col-head text-left">fechamento</th>
-              <th rowspan="8" class="col-head text-center">TSA</th>
-              <th rowspan="8" class="col-head text-left">modelo bling</th>
-              <th rowspan="8" class="col-head text-left">sku</th>
-              <th rowspan="8" class="col-head text-left">cor</th>
-              <th rowspan="8" class="col-head text-right">custo bling</th>
-              <th rowspan="8" class="col-head text-right">estoque bling</th>
-              <th rowspan="8" class="col-head text-right">consumo diário</th>
-              <th rowspan="8" class="col-head text-right">memória consumo</th>
-              <th rowspan="8" class="col-head text-right">reposição estoque</th>
-              <th rowspan="8" class="col-head text-right">saldo reposição</th>
-              <th rowspan="8" class="col-head text-left">nome gerado</th>
-              <th rowspan="8" class="col-head text-left">obs</th>
+              <!-- Widths fixados pra evitar que SKU/cor fiquem espremidos
+                   pelas colunas numéricas. `col-head` aplica position:sticky
+                   top:0 (mantém o cabeçalho visível ao rolar pra baixo). -->
+              <th rowspan="8" class="col-head text-left" style="min-width: 90px">fornecedor</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 90px">modelo china</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 70px">cor china</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 78px">fechamento</th>
+              <th rowspan="8" class="col-head text-center" style="min-width: 44px">TSA</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 95px">modelo bling</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 130px">sku</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 130px">cor</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 64px; max-width: 72px">custo bling</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 56px; max-width: 64px">estoque bling</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 56px; max-width: 64px">consumo diário</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 56px; max-width: 64px">memória consumo</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 60px; max-width: 68px">reposição estoque</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 60px; max-width: 68px">saldo reposição</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 140px">nome gerado</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 100px">obs</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
                 <td class="lote-label border-l">lote</td>
                 <td class="lote-value">
@@ -1292,9 +1295,17 @@ async function removeCotProduto(prod: CotProduto) {
   text-align: center;
   font-size: 11px;
   font-weight: 600;
-  background: hsl(var(--muted) / 0.7);
+  background: hsl(var(--muted));
   padding: 4px;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  /* Sticky vertical — mantém o cabeçalho visível ao rolar pra baixo.
+   * Aplicado só nas colunas com rowspan=8 (fornecedor..obs + bling +
+   * ações), que é o que o operador pediu ("só até obs"). As linhas
+   * 2-8 do thead (info dos lotes) NÃO ficam sticky e rolam normalmente. */
+  position: sticky;
+  top: 0;
+  z-index: 5;
 }
 .lote-label {
   background: hsl(var(--muted) / 0.5);

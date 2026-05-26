@@ -451,7 +451,11 @@ async def list_lotes(
 ) -> list[ImportLoteOut]:
     lotes = (
         await session.execute(
-            select(ImportLote).order_by(ImportLote.abertura.desc(), ImportLote.nome)
+            # Ordem natural por nome (ML25, ML26, ML27…) — o operador
+            # nomeia em sequência crescente. Ordenar por abertura.desc
+            # quebrava a sequência quando um lote novo recebia data
+            # mais recente que os anteriores.
+            select(ImportLote).order_by(ImportLote.nome)
         )
     ).scalars().all()
     return [await _enrich_lote(session, lt) for lt in lotes]
