@@ -63,6 +63,14 @@ class Product(Base, TimestampMixin):
     # whenever a payload carries both totals. Default 0 until the first
     # estoque event arrives.
     reserved_stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # saldoFisicoTotal / saldoVirtualTotal — populated by the explicit
+    # Bling refresh (POST /api/estoque/atualizar-bling). Distinct from
+    # `stock` / `reserved_stock` (which come from webhooks) because the
+    # refresh hits GET /estoques/saldos and is more reliable when a
+    # webhook is missed. Used by the estoque-negativo report
+    # (saldo_virtual_total < 0) and the sufixos exporter.
+    saldo_fisico: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    saldo_virtual_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     min_stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     bling_product_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Bling product flags (char(1) in DB, populated by the importer):

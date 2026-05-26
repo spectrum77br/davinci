@@ -5,7 +5,7 @@ import {
   Package, Megaphone, DollarSign, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
   Store, Tags, ClipboardList, ChevronLeft, ChevronRight, Warehouse,
-  Coins, FileText, Calculator, FlaskConical, Ship,
+  Coins, FileText, Calculator, FlaskConical, Ship, AlertTriangle, FileUp,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -85,6 +85,8 @@ const sections: Section[] = [
       { to: '/pricing/tabela', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
       { to: '/margem', label: 'Margem', icon: TrendingUp, resource: 'margem' },
       { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse, resource: 'controle_estoque' },
+      { to: '/estoque-negativo', label: 'Estoque Negativo', icon: AlertTriangle, resource: 'controle_estoque' },
+      { to: '/upload-nf', label: 'Upload NF', icon: FileUp, resource: 'controle_estoque' },
     ],
   },
   {

@@ -31,6 +31,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy import Date, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -928,3 +929,240 @@ async def patch_movement_obs(
     m.observacao = (observacao or "").strip() or None
     await session.commit()
     return {"ok": True, "movement_id": str(m.id), "observacao": m.observacao}
+
+
+# ─── ESTOQUE NEGATIVO / SUFIXOS / REFRESH BLING ───────────────────────────
+#
+# Migration from the standalone xml-up container into the DaVinci API.
+# Reads from products.saldo_fisico / saldo_virtual_total — both populated
+# by /atualizar-bling (which hits Bling's GET /estoques/saldos directly),
+# distinct from products.stock / reserved_stock (which come from
+# webhooks and may lag). The operator uses these views to spot
+# inventory drift before printing shipping labels.
+
+
+def _negativos_base_where() -> list:
+    """Shared filter: ativos OR situacao desconhecido, sem kits (+)."""
+    return [
+        or_(Product.situacao == "A", Product.situacao.is_(None)),
+        Product.sku.notlike("%+%"),
+    ]
+
+
+@router.get("/negativos")
+async def list_estoque_negativos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    search: str | None = Query(None),
+) -> dict[str, Any]:
+    """Produtos com saldo_virtual_total < 0 — visão global, sem tag.
+    Operador remove esses da fila de etiquetas antes do envio."""
+    where = _negativos_base_where()
+    where.append(Product.saldo_virtual_total < 0)
+    if search:
+        where.append(Product.sku.ilike(f"%{search.strip()}%"))
+
+    rows = (
+        await session.execute(
+            select(Product.sku, Product.saldo_fisico, Product.saldo_virtual_total)
+            .where(and_(*where))
+            .order_by(Product.saldo_fisico.desc().nulls_last(), Product.sku.asc())
+        )
+    ).all()
+    items = [
+        {
+            "codigo": r.sku,
+            "saldo_fisico": int(r.saldo_fisico or 0),
+            "saldo_virtual_total": int(r.saldo_virtual_total or 0),
+        }
+        for r in rows
+    ]
+    return {"success": True, "items": items, "total": len(items)}
+
+
+@router.get("/sufixos")
+async def list_estoque_sufixos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    suffixes: str = Query(default=".us,.sa"),
+) -> dict[str, Any]:
+    """Produtos cujo SKU termina nos sufixos passados (comma-separated).
+    Apenas saldo_fisico > 0, ordenado por saldo desc."""
+    sufs = [s.strip() for s in suffixes.split(",") if s.strip()]
+    if not sufs:
+        return {"success": True, "items": [], "total": 0, "suffixes": []}
+    where = _negativos_base_where()
+    where.append(Product.saldo_fisico > 0)
+    where.append(or_(*[Product.sku.ilike(f"%{s}") for s in sufs]))
+    rows = (
+        await session.execute(
+            select(Product.sku, Product.saldo_fisico, Product.saldo_virtual_total)
+            .where(and_(*where))
+            .order_by(Product.saldo_fisico.desc().nulls_last(), Product.sku.asc())
+        )
+    ).all()
+    items = [
+        {
+            "codigo": r.sku,
+            "saldo_fisico": int(r.saldo_fisico or 0),
+            "saldo_virtual_total": int(r.saldo_virtual_total or 0),
+        }
+        for r in rows
+    ]
+    return {"success": True, "items": items, "total": len(items), "suffixes": sufs}
+
+
+@router.get("/sufixos.csv")
+async def export_estoque_sufixos_csv(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    suffixes: str = Query(default=".us,.sa"),
+) -> Response:
+    """CSV exportável (separador `;` + BOM UTF-8 pra abrir limpo no Excel BR)."""
+    import csv as _csv
+    import io as _io
+    sufs = [s.strip() for s in suffixes.split(",") if s.strip()]
+    where = _negativos_base_where()
+    where.append(Product.saldo_fisico > 0)
+    if sufs:
+        where.append(or_(*[Product.sku.ilike(f"%{s}") for s in sufs]))
+    rows = (
+        await session.execute(
+            select(Product.sku, Product.saldo_fisico, Product.saldo_virtual_total)
+            .where(and_(*where))
+            .order_by(Product.saldo_fisico.desc().nulls_last(), Product.sku.asc())
+        )
+    ).all()
+    buf = _io.StringIO()
+    w = _csv.writer(buf, delimiter=";")
+    w.writerow(["codigo", "saldo_fisico", "saldo_virtual_total"])
+    for r in rows:
+        w.writerow([r.sku, int(r.saldo_fisico or 0), int(r.saldo_virtual_total or 0)])
+    fname = f"estoque_sufixos_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}.csv"
+    return Response(
+        content="﻿" + buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# Process-local lock for the refresh. Single-process deploy on prod
+# (uvicorn workers=1 per container) so an in-memory flag is enough.
+# Persisted in a dict so the status endpoint can read it without
+# importing private state.
+_refresh_state: dict[str, Any] = {"running": False, "started_at": None}
+
+
+@router.get("/atualizar/status")
+async def estoque_atualizar_status(
+    _u: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+) -> dict[str, Any]:
+    return {
+        "running": _refresh_state["running"],
+        "started_at": _refresh_state["started_at"],
+    }
+
+
+@router.post("/atualizar-bling")
+async def estoque_atualizar_bling(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
+) -> dict[str, Any]:
+    """Pull fresh saldoFisico / saldoVirtual from Bling for every active
+    simples SKU, write to products.saldo_fisico + saldo_virtual_total.
+    Distinct from /sync-stocks which writes to stock + reserved_stock
+    (the webhook-target fields). Use this one when the operator suspects
+    webhook drift before generating shipping labels.
+
+    Batched 50/call, 0.8s sleep between batches to stay under Bling's
+    3 req/s ceiling. Single-flight via _refresh_state — returns 409 if
+    another caller already started it."""
+    import asyncio
+    from app.services.marketing.bling_revenue import _resolve_bling_client
+
+    if _refresh_state["running"]:
+        raise HTTPException(409, detail={
+            "code": "refresh_already_running",
+            "started_at": _refresh_state["started_at"],
+        })
+
+    _refresh_state["running"] = True
+    _refresh_state["started_at"] = datetime.now(UTC).isoformat()
+    try:
+        where = [
+            or_(Product.situacao == "A", Product.situacao.is_(None)),
+            Product.sku.notlike("%+%"),
+            Product.bling_product_id.isnot(None),
+        ]
+        products = (
+            await session.execute(select(Product).where(and_(*where)))
+        ).scalars().all()
+        if not products:
+            return {"success": True, "updated": 0, "total_products": 0}
+
+        client = await _resolve_bling_client(session)
+        if client is None:
+            raise HTTPException(503, detail={"code": "bling_not_connected"})
+
+        by_bling_id: dict[int, Product] = {
+            int(p.bling_product_id): p for p in products if p.bling_product_id
+        }
+        bling_ids = list(by_bling_id.keys())
+        updated = 0
+        missing = 0
+        chunk_size = 50
+        for i in range(0, len(bling_ids), chunk_size):
+            chunk = bling_ids[i : i + chunk_size]
+            params: list[tuple[str, str]] = [("idsProdutos[]", str(bid)) for bid in chunk]
+            try:
+                r = await client._request("GET", "/estoques/saldos", params=params)
+                r.raise_for_status()
+                data = (r.json() or {}).get("data") or []
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "estoque_atualizar_bling_chunk_failed",
+                    err=str(e)[:200], chunk_start=i, chunk_len=len(chunk),
+                )
+                continue
+            for row in data:
+                prod_obj = (row.get("produto") or {})
+                try:
+                    bid = int(prod_obj.get("id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                p = by_bling_id.get(bid)
+                if p is None:
+                    continue
+                depositos = row.get("depositos") or []
+                if depositos:
+                    fisico = sum(int(d.get("saldoFisico") or 0) for d in depositos)
+                    virtual = sum(int(d.get("saldoVirtual") or 0) for d in depositos)
+                else:
+                    fisico_raw = row.get("saldoFisicoTotal")
+                    virtual_raw = row.get("saldoVirtualTotal")
+                    if fisico_raw is None and virtual_raw is None:
+                        missing += 1
+                        continue
+                    fisico = int(float(fisico_raw)) if fisico_raw is not None else 0
+                    virtual = int(float(virtual_raw)) if virtual_raw is not None else 0
+                p.saldo_fisico = fisico
+                p.saldo_virtual_total = virtual
+                updated += 1
+            if i + chunk_size < len(bling_ids):
+                await asyncio.sleep(0.8)
+        await session.commit()
+        logger.info(
+            "estoque_atualizar_bling_done",
+            user_id=str(user.id), total_products=len(products),
+            updated=updated, missing=missing,
+        )
+        return {
+            "success": True,
+            "requested": len(bling_ids),
+            "updated": updated,
+            "missing_bling_data": missing,
+            "total_products": len(products),
+        }
+    finally:
+        _refresh_state["running"] = False
+        _refresh_state["started_at"] = None
