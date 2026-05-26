@@ -189,12 +189,29 @@ def _row_from_item(
     transporte = raw_order.get("transporte") or {}
     if not isinstance(transporte, dict):
         transporte = {}
-    _contato = transporte.get("contato") or {}
-    if not isinstance(_contato, dict):
-        _contato = {}
-    _endereco = transporte.get("enderecoEntrega") or {}
-    if not isinstance(_endereco, dict):
-        _endereco = {}
+    _t_contato = transporte.get("contato") or {}
+    if not isinstance(_t_contato, dict):
+        _t_contato = {}
+    _t_endereco = transporte.get("enderecoEntrega") or {}
+    if not isinstance(_t_endereco, dict):
+        _t_endereco = {}
+
+    # Fallback to contato.nome / contato.endereco when transporte has no data.
+    # Amazon orders typically have no transporte.enderecoEntrega but do have the
+    # buyer's delivery address under contato.endereco.
+    _buyer = raw_order.get("contato") or {}
+    if not isinstance(_buyer, dict):
+        _buyer = {}
+    _buyer_endereco = _buyer.get("endereco") or {}
+    if not isinstance(_buyer_endereco, dict):
+        _buyer_endereco = {}
+
+    def _addr(tp_field: str, buyer_field: str | None = None) -> str | None:
+        return (
+            _t_endereco.get(tp_field)
+            or _buyer_endereco.get(buyer_field or tp_field)
+            or None
+        )
 
     return {
         "bling_id": _int(raw_order.get("id")),
@@ -236,14 +253,14 @@ def _row_from_item(
         "item_comissao_valor": _num(comissao.get("valor")),
         "categoria_id": categoria_id,
         "categoria_nome": categoria_nome,
-        "nome_destinatario": _contato.get("nome") or None,
-        "cep_destino": _endereco.get("cep") or None,
-        "endereco_destino": _endereco.get("endereco") or None,
-        "numero_destino": _endereco.get("numero") or None,
-        "complemento_destino": _endereco.get("complemento") or None,
-        "bairro_destino": _endereco.get("bairro") or None,
-        "cidade_destino": _endereco.get("municipio") or None,
-        "uf_destino": _endereco.get("uf") or None,
+        "nome_destinatario": _t_contato.get("nome") or _buyer.get("nome") or None,
+        "cep_destino": _addr("cep"),
+        "endereco_destino": _addr("endereco"),
+        "numero_destino": _addr("numero"),
+        "complemento_destino": _addr("complemento"),
+        "bairro_destino": _addr("bairro"),
+        "cidade_destino": _addr("municipio"),
+        "uf_destino": _addr("uf"),
     }
 
 
@@ -429,28 +446,38 @@ async def upsert_order(
             # the item set would leave the field NULL forever.
             if situacao == "15":
                 values["em_andamento_data"] = datetime.now(UTC).astimezone(_BRT).date()
-            # Backfill transporte data for orders synced before migration 0087.
+            # Backfill address data for orders synced before migrations 0088/0094.
+            # Prefer transporte.enderecoEntrega; fall back to contato.endereco
+            # (Amazon and some other marketplaces omit transporte address).
             _tp = raw_order.get("transporte") or {}
-            if isinstance(_tp, dict):
-                _ct = _tp.get("contato") or {}
-                _en = _tp.get("enderecoEntrega") or {}
-                if isinstance(_ct, dict) and _ct.get("nome"):
-                    values["nome_destinatario"] = _ct["nome"]
-                if isinstance(_en, dict):
-                    if _en.get("cep"):
-                        values["cep_destino"] = _en["cep"]
-                    if _en.get("endereco"):
-                        values["endereco_destino"] = _en["endereco"]
-                    if _en.get("numero"):
-                        values["numero_destino"] = _en["numero"]
-                    if _en.get("complemento"):
-                        values["complemento_destino"] = _en["complemento"]
-                    if _en.get("bairro"):
-                        values["bairro_destino"] = _en["bairro"]
-                    if _en.get("municipio"):
-                        values["cidade_destino"] = _en["municipio"]
-                    if _en.get("uf"):
-                        values["uf_destino"] = _en["uf"]
+            _tp = _tp if isinstance(_tp, dict) else {}
+            _ct = _tp.get("contato") or {}
+            _en = _tp.get("enderecoEntrega") or {}
+            _ct = _ct if isinstance(_ct, dict) else {}
+            _en = _en if isinstance(_en, dict) else {}
+            _buyer = raw_order.get("contato") or {}
+            _buyer = _buyer if isinstance(_buyer, dict) else {}
+            _ben = _buyer.get("endereco") or {}
+            _ben = _ben if isinstance(_ben, dict) else {}
+
+            def _v(tp_f: str, buyer_f: str | None = None) -> str | None:
+                return _en.get(tp_f) or _ben.get(buyer_f or tp_f) or None
+
+            nome = _ct.get("nome") or _buyer.get("nome") or None
+            if nome:
+                values["nome_destinatario"] = nome
+            for col, tp_f, buyer_f in [
+                ("cep_destino", "cep", None),
+                ("endereco_destino", "endereco", None),
+                ("numero_destino", "numero", None),
+                ("complemento_destino", "complemento", None),
+                ("bairro_destino", "bairro", None),
+                ("cidade_destino", "municipio", None),
+                ("uf_destino", "uf", None),
+            ]:
+                val = _v(tp_f, buyer_f)
+                if val:
+                    values[col] = val
             await session.execute(
                 update(BlingOrder)
                 .where(BlingOrder.bling_id == bling_id)

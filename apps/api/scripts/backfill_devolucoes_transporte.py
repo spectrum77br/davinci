@@ -72,18 +72,29 @@ async def main() -> None:
             try:
                 raw = await client.get_order(int(bling_id))
                 tp = raw.get("transporte") or {}
+                tp = tp if isinstance(tp, dict) else {}
                 ct = tp.get("contato") or {}
+                ct = ct if isinstance(ct, dict) else {}
                 en = tp.get("enderecoEntrega") or {}
-                nome = ct.get("nome") or None
-                cep = en.get("cep") or None
-                endereco = en.get("endereco") or None
-                numero = en.get("numero") or None
-                complemento = en.get("complemento") or None
-                bairro = en.get("bairro") or None
-                cidade = en.get("municipio") or None
-                uf = en.get("uf") or None
-                if not any([nome, cep, endereco, bairro, cidade, uf]):
-                    print(f"  {bling_id}: no transporte data in API")
+                en = en if isinstance(en, dict) else {}
+                buyer = raw.get("contato") or {}
+                buyer = buyer if isinstance(buyer, dict) else {}
+                ben = buyer.get("endereco") or {}
+                ben = ben if isinstance(ben, dict) else {}
+
+                def _v(tp_f: str) -> str | None:
+                    return en.get(tp_f) or ben.get(tp_f) or None
+
+                nome = ct.get("nome") or buyer.get("nome") or None
+                cep = _v("cep")
+                endereco = _v("endereco")
+                numero = _v("numero")
+                complemento = _v("complemento")
+                bairro = _v("bairro")
+                cidade = _v("municipio")
+                uf = _v("uf")
+                if not any([cep, endereco, bairro, cidade, uf]):
+                    print(f"  {bling_id}: no address data in API (nome={nome!r})")
                     skip += 1
                     continue
                 values: dict = {}
