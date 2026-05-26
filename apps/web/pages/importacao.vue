@@ -37,7 +37,7 @@ const canDelete = computed(() => {
 })
 
 // ── Types ─────────────────────────────────────────────────────────
-type Tab = 'mala' | 'resumo' | 'reposicao'
+type Tab = 'mala' | 'resumo' | 'reposicao' | 'cotacao'
 const tab = ref<Tab>('mala')
 
 type Config = { tempo_reposicao: number; tempo_estoque: number }
@@ -84,11 +84,60 @@ type ResumoRow = {
   obs: string | null
 }
 
+type CotFabricante = {
+  id: string
+  nome: string
+  obs1: string | null
+  obs2: string | null
+  obs3: string | null
+  obs4: string | null
+  ordem: number
+}
+type CotProduto = { id: string; nome: string; ordem: number }
+type CotValor = {
+  id: string
+  fabricante_id: string
+  produto_id: string
+  capacidade: string | null
+  valor_real: string | number | null
+  valor_usd: string | number | null
+}
+type CotacaoGrid = {
+  fabricantes: CotFabricante[]
+  produtos: CotProduto[]
+  valores: CotValor[]
+}
+
 // ── State ─────────────────────────────────────────────────────────
 const products = ref<Product[]>([])
 const lotes = ref<Lote[]>([])
 const resumo = ref<{ items: ResumoRow[]; total: string | number }>({ items: [], total: 0 })
 const config = ref<Config>({ tempo_reposicao: 150, tempo_estoque: 60 })
+const cotacao = ref<CotacaoGrid>({ fabricantes: [], produtos: [], valores: [] })
+// Cells map: cellKey(produto_id, fabricante_id) → { capacidade, valor_real, valor_usd }
+// as strings (inputs bind to strings; we coerce numbers on persist). Rebuilt
+// from cotacao.valores on every load and topped-up on the fly when the user
+// types into an empty cell (the row only gets POSTed if at least one field
+// has a value — empty cells stay client-side until they get content).
+const cotCells = reactive<Record<string, { capacidade: string; valor_real: string; valor_usd: string }>>({})
+function cotCellKey(prodId: string, fabId: string): string {
+  return `${prodId}::${fabId}`
+}
+function getCotCell(prodId: string, fabId: string) {
+  const k = cotCellKey(prodId, fabId)
+  if (!cotCells[k]) cotCells[k] = { capacidade: '', valor_real: '', valor_usd: '' }
+  return cotCells[k]
+}
+function rebuildCotCells(valores: CotValor[]) {
+  for (const k of Object.keys(cotCells)) delete cotCells[k]
+  for (const v of valores) {
+    cotCells[cotCellKey(v.produto_id, v.fabricante_id)] = {
+      capacidade: v.capacidade ?? '',
+      valor_real: v.valor_real == null ? '' : String(v.valor_real),
+      valor_usd: v.valor_usd == null ? '' : String(v.valor_usd),
+    }
+  }
+}
 
 const loading = ref(false)
 const errorText = ref<string | null>(null)
@@ -115,16 +164,19 @@ async function loadAll() {
   loading.value = true
   errorText.value = null
   try {
-    const [cfg, ps, ls, rs] = await Promise.all([
+    const [cfg, ps, ls, rs, ct] = await Promise.all([
       api<Config>('/api/importacao/config'),
       api<Product[]>('/api/importacao/products'),
       api<Lote[]>('/api/importacao/lotes'),
       api<{ items: ResumoRow[]; total: string | number }>('/api/importacao/resumo'),
+      api<CotacaoGrid>('/api/importacao/cotacao'),
     ])
     config.value = cfg
     products.value = ps
     lotes.value = ls
     resumo.value = rs
+    cotacao.value = ct
+    rebuildCotCells(ct.valores)
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -461,6 +513,130 @@ function loteTotal(prod: Product, loteId: string): number {
   const q = prod.lote_quantidades[loteId] || 0
   return q * Number(prod.custo_bling || 0)
 }
+
+// ── Cotação: handlers ─────────────────────────────────────────────
+// Autosave pattern mirrors the Mala tab: 500ms debounce per (row, field).
+// Fabricante and produto edits go to PATCH; cell edits go to PUT (upsert).
+
+function scheduleCotFab(fab: CotFabricante, field: keyof CotFabricante, value: any) {
+  ;(fab as any)[field] = value
+  const key = `cot_fab_${fab.id}_${String(field)}`
+  if (saveTimers[key]) clearTimeout(saveTimers[key])
+  saveTimers[key] = setTimeout(() => { void persistCotFab(fab, field) }, 500)
+}
+async function persistCotFab(fab: CotFabricante, field: keyof CotFabricante) {
+  delete saveTimers[`cot_fab_${fab.id}_${String(field)}`]
+  try {
+    await api(`/api/importacao/cotacao/fabricantes/${fab.id}`, {
+      method: 'PATCH',
+      body: { [field]: (fab as any)[field] },
+    })
+  } catch (e: any) {
+    errorText.value = `Falha ao salvar fabricante: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
+
+function scheduleCotProduto(p: CotProduto, value: string) {
+  p.nome = value
+  const key = `cot_prod_${p.id}`
+  if (saveTimers[key]) clearTimeout(saveTimers[key])
+  saveTimers[key] = setTimeout(() => { void persistCotProduto(p) }, 500)
+}
+async function persistCotProduto(p: CotProduto) {
+  delete saveTimers[`cot_prod_${p.id}`]
+  try {
+    await api(`/api/importacao/cotacao/produtos/${p.id}`, {
+      method: 'PATCH',
+      body: { nome: p.nome },
+    })
+  } catch (e: any) {
+    errorText.value = `Falha ao salvar produto: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
+
+function scheduleCotCell(
+  prodId: string,
+  fabId: string,
+  field: 'capacidade' | 'valor_real' | 'valor_usd',
+  value: string,
+) {
+  const cell = getCotCell(prodId, fabId)
+  cell[field] = value
+  const key = `cot_cell_${prodId}_${fabId}`
+  if (saveTimers[key]) clearTimeout(saveTimers[key])
+  saveTimers[key] = setTimeout(() => { void persistCotCell(prodId, fabId) }, 400)
+}
+async function persistCotCell(prodId: string, fabId: string) {
+  delete saveTimers[`cot_cell_${prodId}_${fabId}`]
+  const cell = getCotCell(prodId, fabId)
+  try {
+    await api('/api/importacao/cotacao/valores', {
+      method: 'PUT',
+      body: {
+        fabricante_id: fabId,
+        produto_id: prodId,
+        capacidade: cell.capacidade.trim() === '' ? null : cell.capacidade,
+        valor_real: cell.valor_real === '' ? null : Number(cell.valor_real),
+        valor_usd: cell.valor_usd === '' ? null : Number(cell.valor_usd),
+      },
+    })
+  } catch (e: any) {
+    errorText.value = `Falha ao salvar célula: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
+
+const addingCotFab = ref(false)
+async function addCotFabricante() {
+  if (addingCotFab.value) return
+  addingCotFab.value = true
+  try {
+    const fab = await api<CotFabricante>('/api/importacao/cotacao/fabricantes', { method: 'POST' })
+    cotacao.value.fabricantes = [...cotacao.value.fabricantes, fab]
+  } catch (e: any) {
+    errorText.value = `Falha ao criar fabricante: ${e?.data?.detail?.code || 'erro'}`
+  } finally {
+    addingCotFab.value = false
+  }
+}
+async function removeCotFabricante(fab: CotFabricante) {
+  if (!confirm(`Excluir fabricante "${fab.nome || '(sem nome)'}"? Isso apaga TODAS as cotações dele.`)) return
+  try {
+    await api(`/api/importacao/cotacao/fabricantes/${fab.id}`, { method: 'DELETE' })
+    cotacao.value.fabricantes = cotacao.value.fabricantes.filter((f) => f.id !== fab.id)
+    // Clean stale cell entries for this fabricante.
+    for (const k of Object.keys(cotCells)) {
+      if (k.endsWith(`::${fab.id}`)) delete cotCells[k]
+    }
+  } catch (e: any) {
+    errorText.value = `Falha ao excluir fabricante: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
+
+const addingCotProd = ref(false)
+async function addCotProduto() {
+  if (addingCotProd.value) return
+  addingCotProd.value = true
+  try {
+    const prod = await api<CotProduto>('/api/importacao/cotacao/produtos', { method: 'POST' })
+    cotacao.value.produtos = [...cotacao.value.produtos, prod]
+  } catch (e: any) {
+    errorText.value = `Falha ao incluir produto: ${e?.data?.detail?.code || 'erro'}`
+  } finally {
+    addingCotProd.value = false
+  }
+}
+async function removeCotProduto(prod: CotProduto) {
+  if (!confirm(`Excluir produto "${prod.nome || '(sem nome)'}"?`)) return
+  try {
+    await api(`/api/importacao/cotacao/produtos/${prod.id}`, { method: 'DELETE' })
+    cotacao.value.produtos = cotacao.value.produtos.filter((p) => p.id !== prod.id)
+    for (const k of Object.keys(cotCells)) {
+      if (k.startsWith(`${prod.id}::`)) delete cotCells[k]
+    }
+  } catch (e: any) {
+    errorText.value = `Falha ao excluir produto: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
 </script>
 
 <template>
@@ -470,13 +646,13 @@ function loteTotal(prod: Product, loteId: string): number {
       <h1 class="text-xl font-semibold">Importação</h1>
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
         <button
-          v-for="t in (['mala','resumo','reposicao'] as const)"
+          v-for="t in (['mala','resumo','reposicao','cotacao'] as const)"
           :key="t"
           class="px-3 py-1.5 rounded text-sm transition-colors"
           :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
           @click="tab = t"
         >
-          {{ t === 'mala' ? 'Mala' : t === 'resumo' ? 'Resumo' : 'Reposição' }}
+          {{ t === 'mala' ? 'Mala' : t === 'resumo' ? 'Resumo' : t === 'reposicao' ? 'Reposição' : 'Cotação' }}
         </button>
       </div>
       <button
@@ -876,6 +1052,147 @@ function loteTotal(prod: Product, loteId: string): number {
       </div>
     </div>
 
+    <!-- ─── TAB COTAÇÃO ──────────────────────────────────────────
+         Tabela INDEPENDENTE — não puxa de import_products, sem fórmulas.
+         Cabeçalho com 6 linhas por fabricante:
+           1) nome do fabricante (colspan=3 + botão excluir)
+           2..5) obs1..obs4 (colspan=3 cada, editáveis)
+           6) sub-cabeçalho capacidade | R$ | USD
+         Coluna fixa de produto à esquerda (rowspan=6). Per-célula upsert
+         direto (PUT /cotacao/valores) — célula vazia em todos os 3 campos
+         é deletada server-side. -->
+    <div v-if="tab === 'cotacao'" class="space-y-2">
+      <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
+        <span class="text-muted-foreground">
+          {{ cotacao.produtos.length }} produto(s) · {{ cotacao.fabricantes.length }} fabricante(s)
+        </span>
+        <button
+          v-if="canEdit"
+          class="ml-auto inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 hover:opacity-90 disabled:opacity-50"
+          :disabled="addingCotProd"
+          @click="addCotProduto"
+        >
+          <Plus class="size-3" /> Incluir Produto
+        </button>
+        <button
+          v-if="canEdit"
+          class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
+          :disabled="addingCotFab"
+          @click="addCotFabricante"
+        >
+          <Plus class="size-3" /> Criar Fabricante
+        </button>
+      </div>
+
+      <div class="border rounded-md overflow-x-auto">
+        <table class="cot-table text-xs border-collapse">
+          <thead>
+            <!-- Row 1: nome do fabricante -->
+            <tr>
+              <th rowspan="6" class="cot-prod-head text-left">Produto</th>
+              <template v-for="fab in cotacao.fabricantes" :key="`fab-head-${fab.id}`">
+                <th colspan="3" class="cot-fab-name border-l">
+                  <div class="flex items-center gap-1">
+                    <input
+                      class="cot-input font-semibold uppercase text-center flex-1"
+                      :value="fab.nome"
+                      :disabled="!canEdit"
+                      placeholder="nome do fabricante"
+                      @input="(e) => scheduleCotFab(fab, 'nome', (e.target as HTMLInputElement).value)"
+                    />
+                    <button
+                      v-if="canDelete"
+                      class="text-muted-foreground hover:text-destructive shrink-0"
+                      :title="`Excluir fabricante ${fab.nome}`"
+                      @click="removeCotFabricante(fab)"
+                    >
+                      <Trash2 class="size-3" />
+                    </button>
+                  </div>
+                </th>
+              </template>
+              <th v-if="canDelete" rowspan="6" class="cot-actions-head w-8"></th>
+            </tr>
+            <!-- Rows 2..5: obs1..obs4 -->
+            <tr v-for="i in 4" :key="`obs-row-${i}`">
+              <template v-for="fab in cotacao.fabricantes" :key="`fab-obs${i}-${fab.id}`">
+                <td colspan="3" class="cot-fab-obs border-l">
+                  <input
+                    class="cot-input"
+                    :value="(fab as any)[`obs${i}`] ?? ''"
+                    :disabled="!canEdit"
+                    :placeholder="`obs ${i}`"
+                    @input="(e) => scheduleCotFab(fab, (`obs${i}` as keyof CotFabricante), (e.target as HTMLInputElement).value)"
+                  />
+                </td>
+              </template>
+            </tr>
+            <!-- Row 6: sub-headers -->
+            <tr>
+              <template v-for="fab in cotacao.fabricantes" :key="`fab-subh-${fab.id}`">
+                <th class="cot-sub-head border-l">capacidade</th>
+                <th class="cot-sub-head">R$</th>
+                <th class="cot-sub-head">USD</th>
+              </template>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!loading && cotacao.produtos.length === 0">
+              <td :colspan="1 + cotacao.fabricantes.length * 3 + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
+                Nenhum produto. Clique em "Incluir Produto" para começar.
+              </td>
+            </tr>
+            <tr v-for="prod in cotacao.produtos" :key="prod.id" class="even:bg-muted/10 hover:bg-amber-50/40">
+              <td class="cot-prod-cell">
+                <input
+                  class="cot-input"
+                  :value="prod.nome"
+                  :disabled="!canEdit"
+                  placeholder="nome do produto"
+                  @input="(e) => scheduleCotProduto(prod, (e.target as HTMLInputElement).value)"
+                />
+              </td>
+              <template v-for="fab in cotacao.fabricantes" :key="`cell-${prod.id}-${fab.id}`">
+                <td class="border-l">
+                  <input
+                    class="cot-input"
+                    :value="getCotCell(prod.id, fab.id).capacidade"
+                    :disabled="!canEdit"
+                    @input="(e) => scheduleCotCell(prod.id, fab.id, 'capacidade', (e.target as HTMLInputElement).value)"
+                  />
+                </td>
+                <td>
+                  <input
+                    type="number"
+                    step="0.01"
+                    class="cot-input text-right"
+                    :value="getCotCell(prod.id, fab.id).valor_real"
+                    :disabled="!canEdit"
+                    @input="(e) => scheduleCotCell(prod.id, fab.id, 'valor_real', (e.target as HTMLInputElement).value)"
+                  />
+                </td>
+                <td>
+                  <input
+                    type="number"
+                    step="0.01"
+                    class="cot-input text-right"
+                    :value="getCotCell(prod.id, fab.id).valor_usd"
+                    :disabled="!canEdit"
+                    @input="(e) => scheduleCotCell(prod.id, fab.id, 'valor_usd', (e.target as HTMLInputElement).value)"
+                  />
+                </td>
+              </template>
+              <td v-if="canDelete" class="text-center">
+                <button class="text-muted-foreground hover:text-destructive" @click="removeCotProduto(prod)" :title="`Excluir ${prod.nome || 'produto'}`">
+                  <Trash2 class="size-3" />
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- ─── MODAL: Criar Produto ────────────────────────────────────
          Backed by saveNewProduct() — POSTs to /api/importacao/products.
          The "Nome gerado (preview)" line uses generateMalaName() which
@@ -1051,5 +1368,90 @@ function loteTotal(prod: Product, loteId: string): number {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 3px;
+}
+
+/* ── Cotação table ─────────────────────────────────────────────── */
+.cot-table {
+  /* width:auto + min-width keeps horizontal scroll natural when there
+   * are many fabricantes; the parent .overflow-x-auto handles the
+   * scrollbar. Fixed widths per col so the layout stays predictable. */
+  width: auto;
+  min-width: 100%;
+  border-collapse: collapse;
+}
+.cot-table th,
+.cot-table td {
+  border: 1px solid hsl(var(--border));
+  padding: 2px 4px;
+  vertical-align: middle;
+}
+.cot-prod-head {
+  background: hsl(var(--muted));
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  width: 200px;
+  min-width: 200px;
+  padding: 6px 8px;
+  /* Sticky left so the produto column stays visible when scrolling
+   * horizontally through many fabricantes. */
+  position: sticky;
+  left: 0;
+  z-index: 2;
+}
+.cot-prod-cell {
+  background: hsl(var(--background));
+  font-weight: 500;
+  width: 200px;
+  min-width: 200px;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+.cot-fab-name {
+  background: hsl(var(--muted) / 0.7);
+  padding: 4px 6px;
+  min-width: 240px;
+}
+.cot-fab-obs {
+  background: rgb(255 253 230 / 0.6);
+  padding: 2px 4px;
+}
+:global(.dark) .cot-fab-obs {
+  background: rgb(120 53 15 / 0.15);
+}
+.cot-sub-head {
+  background: hsl(var(--muted));
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: center;
+  padding: 3px 4px;
+  min-width: 80px;
+}
+.cot-actions-head {
+  background: hsl(var(--muted) / 0.7);
+}
+.cot-input {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 2px 4px;
+  font-size: 11px;
+  color: inherit;
+}
+.cot-input:focus {
+  outline: 1px solid hsl(var(--primary));
+  background: hsl(var(--background));
+}
+.cot-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.cot-input::placeholder {
+  color: hsl(var(--muted-foreground));
+  font-style: italic;
 }
 </style>

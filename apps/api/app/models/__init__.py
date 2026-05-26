@@ -38,6 +38,9 @@ from app.models.enums import (
     UserStatus,
 )
 from app.models.importacao import (
+    CotacaoFabricante,
+    CotacaoProduto,
+    CotacaoValor,
     ImportConfig,
     ImportLote,
     ImportLoteItem,
@@ -100,6 +103,9 @@ __all__ = [
     "CadastroTipo",
     "CellStatus",
     "Company",
+    "CotacaoFabricante",
+    "CotacaoProduto",
+    "CotacaoValor",
     "Department",
     "DNPConfig",
     "DNPProduto",

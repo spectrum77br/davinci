@@ -126,3 +126,66 @@ class ImportResumo(Base):
     lote_nome: Mapped[str | None] = mapped_column(String(50), nullable=True)
     saldo: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0"))
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# ── Cotação (aba independente — comparação produto × fabricante) ─────
+
+
+class CotacaoFabricante(Base, TimestampMixin):
+    """Bloco de coluna (3 sub-cols: capacidade/R$/USD) + 4 obs livres
+    no cabeçalho. `ordem` preserva a ordem de exibição na tabela."""
+    __tablename__ = "cotacao_fabricantes"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    nome: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    obs1: Mapped[str | None] = mapped_column(Text, nullable=True)
+    obs2: Mapped[str | None] = mapped_column(Text, nullable=True)
+    obs3: Mapped[str | None] = mapped_column(Text, nullable=True)
+    obs4: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ordem: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class CotacaoProduto(Base, TimestampMixin):
+    """Linha da tabela de cotação (um produto comparado entre fabricantes)."""
+    __tablename__ = "cotacao_produtos"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    nome: Mapped[str] = mapped_column(String(150), nullable=False, default="")
+    ordem: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class CotacaoValor(Base, TimestampMixin):
+    """Célula no cruzamento produto × fabricante. Tudo digitado manualmente,
+    sem fórmulas. capacidade é texto livre (operador escreve "20cm",
+    "8 peças", "tamanho M", etc.)."""
+    __tablename__ = "cotacao_valores"
+    __table_args__ = (
+        UniqueConstraint(
+            "fabricante_id", "produto_id",
+            name="uq_cotacao_valores_fab_prod",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    fabricante_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("cotacao_fabricantes.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    produto_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("cotacao_produtos.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    capacidade: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    valor_real: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    valor_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)

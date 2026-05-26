@@ -28,6 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
+    CotacaoFabricante,
+    CotacaoProduto,
+    CotacaoValor,
     ImportConfig,
     ImportLote,
     ImportLoteItem,
@@ -37,6 +40,13 @@ from app.models import (
     User,
 )
 from app.schemas.importacao import (
+    CotacaoFabricanteOut,
+    CotacaoFabricantePatch,
+    CotacaoGridOut,
+    CotacaoProdutoOut,
+    CotacaoProdutoPatch,
+    CotacaoValorOut,
+    CotacaoValorUpsert,
     ImportConfigOut,
     ImportConfigPatch,
     ImportLoteCreate,
@@ -606,3 +616,195 @@ async def delete_resumo(
         raise HTTPException(404, detail={"code": "resumo_not_found"})
     await session.delete(row)
     await session.commit()
+
+
+# ── Cotação ────────────────────────────────────────────────────────
+# Independente do resto do módulo — não puxa de import_products nem
+# tem fórmulas. Tabela produto × fabricante, tudo digitado manualmente.
+
+
+@router.get("/cotacao", response_model=CotacaoGridOut)
+async def get_cotacao_grid(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+) -> CotacaoGridOut:
+    fabricantes = (await session.execute(
+        select(CotacaoFabricante).order_by(
+            CotacaoFabricante.ordem, CotacaoFabricante.created_at,
+        )
+    )).scalars().all()
+    produtos = (await session.execute(
+        select(CotacaoProduto).order_by(
+            CotacaoProduto.ordem, CotacaoProduto.created_at,
+        )
+    )).scalars().all()
+    valores = (await session.execute(select(CotacaoValor))).scalars().all()
+    return CotacaoGridOut(
+        fabricantes=[CotacaoFabricanteOut.model_validate(f, from_attributes=True) for f in fabricantes],
+        produtos=[CotacaoProdutoOut.model_validate(p, from_attributes=True) for p in produtos],
+        valores=[CotacaoValorOut.model_validate(v, from_attributes=True) for v in valores],
+    )
+
+
+@router.post(
+    "/cotacao/fabricantes",
+    response_model=CotacaoFabricanteOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_cotacao_fabricante(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> CotacaoFabricanteOut:
+    """Cria um fabricante vazio. Nome/obs são preenchidos depois via PATCH
+    (autosave do frontend). `ordem` recebe MAX+1 para ir pro fim da lista."""
+    next_ordem = (await session.execute(
+        select(func.coalesce(func.max(CotacaoFabricante.ordem), -1) + 1)
+    )).scalar_one()
+    row = CotacaoFabricante(nome="", ordem=int(next_ordem))
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return CotacaoFabricanteOut.model_validate(row, from_attributes=True)
+
+
+@router.patch("/cotacao/fabricantes/{row_id}", response_model=CotacaoFabricanteOut)
+async def patch_cotacao_fabricante(
+    row_id: UUID,
+    body: CotacaoFabricantePatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> CotacaoFabricanteOut:
+    row = await session.get(CotacaoFabricante, row_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "fabricante_not_found"})
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(row, k, v)
+    await session.commit()
+    await session.refresh(row)
+    return CotacaoFabricanteOut.model_validate(row, from_attributes=True)
+
+
+@router.delete("/cotacao/fabricantes/{row_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_cotacao_fabricante(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "delete"))],
+) -> None:
+    row = await session.get(CotacaoFabricante, row_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "fabricante_not_found"})
+    # FK ON DELETE CASCADE wipes all valores in this fabricante's column.
+    await session.delete(row)
+    await session.commit()
+
+
+@router.post(
+    "/cotacao/produtos",
+    response_model=CotacaoProdutoOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_cotacao_produto(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> CotacaoProdutoOut:
+    next_ordem = (await session.execute(
+        select(func.coalesce(func.max(CotacaoProduto.ordem), -1) + 1)
+    )).scalar_one()
+    row = CotacaoProduto(nome="", ordem=int(next_ordem))
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return CotacaoProdutoOut.model_validate(row, from_attributes=True)
+
+
+@router.patch("/cotacao/produtos/{row_id}", response_model=CotacaoProdutoOut)
+async def patch_cotacao_produto(
+    row_id: UUID,
+    body: CotacaoProdutoPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> CotacaoProdutoOut:
+    row = await session.get(CotacaoProduto, row_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "produto_not_found"})
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(row, k, v)
+    await session.commit()
+    await session.refresh(row)
+    return CotacaoProdutoOut.model_validate(row, from_attributes=True)
+
+
+@router.delete("/cotacao/produtos/{row_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_cotacao_produto(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "delete"))],
+) -> None:
+    row = await session.get(CotacaoProduto, row_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "produto_not_found"})
+    await session.delete(row)
+    await session.commit()
+
+
+@router.put("/cotacao/valores", response_model=CotacaoValorOut)
+async def upsert_cotacao_valor(
+    body: CotacaoValorUpsert,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> CotacaoValorOut:
+    """Upsert da célula (fabricante × produto). Idempotente — frontend
+    chama a cada edição inline. Quando os 3 campos (capacidade,
+    valor_real, valor_usd) ficam todos nulos/vazios, a célula é
+    deletada para manter a tabela limpa."""
+    existing = (await session.execute(
+        select(CotacaoValor).where(
+            and_(
+                CotacaoValor.fabricante_id == body.fabricante_id,
+                CotacaoValor.produto_id == body.produto_id,
+            )
+        )
+    )).scalar_one_or_none()
+
+    is_empty = (
+        (body.capacidade is None or body.capacidade == "")
+        and body.valor_real is None
+        and body.valor_usd is None
+    )
+
+    if existing is None:
+        if is_empty:
+            # Nothing to store; return a synthetic empty row so the
+            # frontend has a stable response shape.
+            return CotacaoValorOut(
+                id=UUID(int=0),
+                fabricante_id=body.fabricante_id,
+                produto_id=body.produto_id,
+            )
+        row = CotacaoValor(
+            fabricante_id=body.fabricante_id,
+            produto_id=body.produto_id,
+            capacidade=body.capacidade or None,
+            valor_real=body.valor_real,
+            valor_usd=body.valor_usd,
+        )
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+        return CotacaoValorOut.model_validate(row, from_attributes=True)
+
+    if is_empty:
+        await session.delete(existing)
+        await session.commit()
+        return CotacaoValorOut(
+            id=UUID(int=0),
+            fabricante_id=body.fabricante_id,
+            produto_id=body.produto_id,
+        )
+
+    existing.capacidade = body.capacidade or None
+    existing.valor_real = body.valor_real
+    existing.valor_usd = body.valor_usd
+    await session.commit()
+    await session.refresh(existing)
+    return CotacaoValorOut.model_validate(existing, from_attributes=True)

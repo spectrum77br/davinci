@@ -146,3 +146,64 @@ class ImportResumoOut(BaseModel):
 class ImportResumoList(BaseModel):
     items: list[ImportResumoOut]
     total: Decimal
+
+
+# ── Cotação ────────────────────────────────────────────────────────────
+
+
+class CotacaoFabricanteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    nome: str
+    obs1: str | None = None
+    obs2: str | None = None
+    obs3: str | None = None
+    obs4: str | None = None
+    ordem: int
+
+
+class CotacaoFabricantePatch(BaseModel):
+    nome: str | None = None
+    obs1: str | None = None
+    obs2: str | None = None
+    obs3: str | None = None
+    obs4: str | None = None
+    ordem: int | None = None
+
+
+class CotacaoProdutoOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    nome: str
+    ordem: int
+
+
+class CotacaoProdutoPatch(BaseModel):
+    nome: str | None = None
+    ordem: int | None = None
+
+
+class CotacaoValorOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    fabricante_id: UUID
+    produto_id: UUID
+    capacidade: str | None = None
+    valor_real: Decimal | None = None
+    valor_usd: Decimal | None = None
+
+
+class CotacaoValorUpsert(BaseModel):
+    fabricante_id: UUID
+    produto_id: UUID
+    capacidade: str | None = None
+    valor_real: Decimal | None = None
+    valor_usd: Decimal | None = None
+
+
+class CotacaoGridOut(BaseModel):
+    """Grid completo da aba Cotação. Frontend monta o lookup
+    `valores[produto_id][fabricante_id] = {...}` a partir desta lista."""
+    fabricantes: list[CotacaoFabricanteOut]
+    produtos: list[CotacaoProdutoOut]
+    valores: list[CotacaoValorOut]
