@@ -7,12 +7,13 @@ See migration 0088_importacao_tables for table comments.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Date,
+    DateTime,
     ForeignKey,
     Integer,
     Numeric,
@@ -60,6 +61,15 @@ class ImportProduct(Base, TimestampMixin):
     consumo_diario: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     maior_media_30d: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Bling sync intent — NULL = never marked, 'pending' = operator clicked
+    # "Enviar pro Bling" (awaiting worker), 'sent' = created in Bling,
+    # 'error' = last attempt failed. The actual Bling write integration
+    # doesn't exist yet (BlingClient has no create_product); this column
+    # just persists the intent so a future worker can pick it up.
+    bling_sync_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    bling_sync_marked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
 
 class ImportLote(Base, TimestampMixin):

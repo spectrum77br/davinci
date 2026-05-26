@@ -16,6 +16,7 @@
 import { computed, reactive, ref } from 'vue'
 import {
   Plus, RefreshCw, Trash2, Save, Search, Download, X, AlertCircle,
+  Send, CheckCircle2, Clock,
 } from 'lucide-vue-next'
 
 definePageMeta({
@@ -58,6 +59,9 @@ type Product = {
   memoria_consumo: string | number | null
   reposicao_estoque: number | null
   saldo_reposicao: number | null
+  nome_gerado: string
+  bling_sync_status: string | null
+  bling_sync_marked_at: string | null
   lote_quantidades: Record<string, number>
 }
 type Lote = {
@@ -159,17 +163,108 @@ async function loadProductsOnly() {
   } catch { /* ignore */ }
 }
 
-async function addProduct() {
-  const sku = prompt('SKU do novo produto:')?.trim()
-  if (!sku) return
+// ── Criar produto: form modal ─────────────────────────────────────
+// Mirrors backend's generate_mala_name (services/importacao_naming.py).
+// Keep the two in sync — both rules + edge cases must produce the same
+// output so the live preview matches what gets stored on save.
+function generateMalaName(
+  modeloBling: string | null,
+  sku: string | null,
+  cor: string | null,
+): string {
+  const parts: string[] = ['Mala']
+  const m = (modeloBling ?? '').trim()
+  if (m) parts.push(m)
+
+  const sk = (sku ?? '').trim()
+  if (sk.includes('.')) {
+    const suffix = sk.split('.', 2)[1]?.trim() ?? ''
+    if (suffix && /^\d+$/.test(suffix)) parts.push(`tamanho ${suffix}`)
+  }
+
+  const base = parts.join(' ')
+  const c = (cor ?? '').trim()
+  return c ? `${base} - ${c}` : base
+}
+
+const showCreateModal = ref(false)
+const creatingProduct = ref(false)
+const newProduct = reactive({
+  fornecedor: '',
+  modelo_china: '',
+  cor_china: '',
+  modelo_bling: '',
+  sku: '',
+  cor: '',
+  custo_bling: '',
+  tsa: '' as string | number,
+  obs: '',
+})
+const newProductPreviewName = computed(() =>
+  generateMalaName(newProduct.modelo_bling, newProduct.sku, newProduct.cor),
+)
+
+function openCreateModal() {
+  newProduct.fornecedor = ''
+  newProduct.modelo_china = ''
+  newProduct.cor_china = ''
+  newProduct.modelo_bling = ''
+  newProduct.sku = ''
+  newProduct.cor = ''
+  newProduct.custo_bling = ''
+  newProduct.tsa = ''
+  newProduct.obs = ''
+  showCreateModal.value = true
+}
+
+async function saveNewProduct() {
+  if (!newProduct.sku.trim()) {
+    errorText.value = 'SKU obrigatório'
+    return
+  }
+  creatingProduct.value = true
   try {
+    const tsaNum = newProduct.tsa === '' ? null : Number(newProduct.tsa)
     const row = await api<Product>('/api/importacao/products', {
       method: 'POST',
-      body: { sku },
+      body: {
+        sku: newProduct.sku.trim(),
+        fornecedor: newProduct.fornecedor.trim() || null,
+        modelo_china: newProduct.modelo_china.trim() || null,
+        cor_china: newProduct.cor_china.trim() || null,
+        modelo_bling: newProduct.modelo_bling.trim() || null,
+        cor: newProduct.cor.trim() || null,
+        custo_bling: Number(newProduct.custo_bling) || 0,
+        tsa: tsaNum && tsaNum >= 1 && tsaNum <= 3 ? tsaNum : null,
+        obs: newProduct.obs.trim() || null,
+      },
     })
     products.value = [...products.value, row]
+    showCreateModal.value = false
   } catch (e: any) {
     errorText.value = `Falha ao adicionar: ${e?.data?.detail?.code || 'erro'}`
+  } finally {
+    creatingProduct.value = false
+  }
+}
+
+async function sendToBling(row: Product) {
+  // The backend just records intent — no real Bling call yet (BlingClient
+  // has no create_product method). Once the write integration ships, this
+  // same button will trigger the real sync.
+  if (row.bling_sync_status === 'pending') {
+    if (!confirm(`Produto ${row.sku} já está marcado como pendente. Marcar de novo?`)) return
+  } else if (row.bling_sync_status === 'sent') {
+    if (!confirm(`Produto ${row.sku} já foi enviado pro Bling. Reenviar?`)) return
+  }
+  try {
+    const updated = await api<Product>(`/api/importacao/products/${row.id}/sync-bling`, {
+      method: 'POST',
+    })
+    const idx = products.value.findIndex((p) => p.id === row.id)
+    if (idx >= 0) products.value[idx] = { ...products.value[idx], ...updated }
+  } catch (e: any) {
+    errorText.value = `Falha ao enviar pro Bling: ${e?.data?.detail?.code || 'erro'}`
   }
 }
 async function removeProduct(row: Product) {
@@ -454,9 +549,9 @@ function loteTotal(prod: Product, loteId: string): number {
         <button
           v-if="canEdit"
           class="ml-auto inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 hover:opacity-90"
-          @click="addProduct"
+          @click="openCreateModal"
         >
-          <Plus class="size-3" /> Adicionar produto
+          <Plus class="size-3" /> Criar produto
         </button>
         <button
           v-if="canEdit"
@@ -493,6 +588,7 @@ function loteTotal(prod: Product, loteId: string): number {
               <th rowspan="8" class="col-head text-right">memória consumo</th>
               <th rowspan="8" class="col-head text-right">reposição estoque</th>
               <th rowspan="8" class="col-head text-right">saldo reposição</th>
+              <th rowspan="8" class="col-head text-left">nome gerado</th>
               <th rowspan="8" class="col-head text-left">obs</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
                 <td class="lote-label border-l">lote</td>
@@ -504,6 +600,7 @@ function loteTotal(prod: Product, loteId: string): number {
                   </button>
                 </td>
               </template>
+              <th rowspan="8" v-if="canEdit" class="col-head text-center">bling</th>
               <th rowspan="8" v-if="canDelete" class="col-head w-8"></th>
             </tr>
             <tr>
@@ -567,8 +664,8 @@ function loteTotal(prod: Product, loteId: string): number {
           </thead>
           <tbody>
             <tr v-if="!loading && filteredProducts.length === 0">
-              <td :colspan="15 + visibleLotes.length * 2 + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
-                Nenhum produto. Clique em "Adicionar produto" para começar.
+              <td :colspan="16 + visibleLotes.length * 2 + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
+                Nenhum produto. Clique em "Criar produto" para começar.
               </td>
             </tr>
             <tr v-for="row in filteredProducts" :key="row.id" class="even:bg-muted/10 hover:bg-amber-50/40">
@@ -620,6 +717,9 @@ function loteTotal(prod: Product, loteId: string): number {
               <td class="calc text-right" :class="reposicaoClass(row.saldo_reposicao)">
                 {{ row.saldo_reposicao ?? '—' }}
               </td>
+              <td class="text-[11px] text-muted-foreground italic" :title="row.nome_gerado">
+                {{ row.nome_gerado || '—' }}
+              </td>
               <td><input class="cell-input" :value="row.obs ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'obs', (e.target as HTMLInputElement).value)" /></td>
               <!-- Per-lote cells align directly under the row-8 quant/total sub-headers. -->
@@ -635,6 +735,34 @@ function loteTotal(prod: Product, loteId: string): number {
                 </td>
                 <td class="calc text-right">{{ fmtMoney(loteTotal(row, lote.id)) }}</td>
               </template>
+              <td v-if="canEdit" class="text-center whitespace-nowrap">
+                <button
+                  class="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] hover:bg-muted"
+                  :class="{
+                    'bg-amber-50 text-amber-700 border-amber-300': row.bling_sync_status === 'pending',
+                    'bg-emerald-50 text-emerald-700 border-emerald-300': row.bling_sync_status === 'sent',
+                    'bg-red-50 text-red-700 border-red-300': row.bling_sync_status === 'error',
+                  }"
+                  :title="row.bling_sync_status === 'pending'
+                    ? `Pendente desde ${row.bling_sync_marked_at ?? ''} — aguardando integração de escrita do Bling`
+                    : row.bling_sync_status === 'sent'
+                      ? 'Já criado no Bling'
+                      : row.bling_sync_status === 'error'
+                        ? 'Falha no último envio'
+                        : 'Marcar como pronto para enviar ao Bling (a integração de escrita ainda não existe)'"
+                  @click="sendToBling(row)"
+                >
+                  <Clock v-if="row.bling_sync_status === 'pending'" class="size-3" />
+                  <CheckCircle2 v-else-if="row.bling_sync_status === 'sent'" class="size-3" />
+                  <Send v-else class="size-3" />
+                  <span>{{
+                    row.bling_sync_status === 'pending' ? 'Pendente'
+                    : row.bling_sync_status === 'sent' ? 'Enviado'
+                    : row.bling_sync_status === 'error' ? 'Erro'
+                    : 'Enviar'
+                  }}</span>
+                </button>
+              </td>
               <td v-if="canDelete" class="text-center">
                 <button class="text-muted-foreground hover:text-destructive" @click="removeProduct(row)" :title="`Excluir ${row.sku}`">
                   <Trash2 class="size-3" />
@@ -745,6 +873,96 @@ function loteTotal(prod: Product, loteId: string): number {
         <h2 class="font-semibold text-sm">Regra da "memória de consumo"</h2>
         <p>memória = MAX(consumo_diario_atual, maior_media_30_dias). Quando estoque = 0, usar a maior média (não o consumo atual, que seria 0).</p>
         <p class="text-muted-foreground">Nesta v1, consumo_diario e maior_media_30d são preenchidos manualmente na aba Mala. Integração com Bling para puxar essas métricas automaticamente está prevista.</p>
+      </div>
+    </div>
+
+    <!-- ─── MODAL: Criar Produto ────────────────────────────────────
+         Backed by saveNewProduct() — POSTs to /api/importacao/products.
+         The "Nome gerado (preview)" line uses generateMalaName() which
+         mirrors backend's generate_mala_name(). Both must stay in sync. -->
+    <div v-if="showCreateModal" class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" @click.self="showCreateModal = false">
+      <div class="bg-background rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div class="flex items-center justify-between border-b px-4 py-3">
+          <h3 class="font-semibold">Criar produto</h3>
+          <button class="text-muted-foreground hover:text-foreground" @click="showCreateModal = false">
+            <X class="size-4" />
+          </button>
+        </div>
+        <div class="p-4 space-y-4 text-sm">
+          <!-- Live preview of the canonical mala name. -->
+          <div class="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-900/20 px-3 py-2">
+            <div class="text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+              Nome gerado (preview)
+            </div>
+            <div class="font-mono text-sm">{{ newProductPreviewName }}</div>
+            <div class="text-[10px] text-muted-foreground mt-1">
+              Padrão: <code>Mala {{ '{' }}modelo bling{{ '}' }} tamanho {{ '{' }}n após o ponto no SKU{{ '}' }} - {{ '{' }}cor{{ '}' }}</code>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted-foreground">SKU <span class="text-red-600">*</span></span>
+              <input v-model="newProduct.sku" type="text" placeholder="b042.28" class="h-8 border rounded px-2 bg-background font-mono" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted-foreground">Modelo bling</span>
+              <input v-model="newProduct.modelo_bling" type="text" placeholder="Lisa M2" class="h-8 border rounded px-2 bg-background" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted-foreground">Cor</span>
+              <input v-model="newProduct.cor" type="text" placeholder="Roxo Escuro" class="h-8 border rounded px-2 bg-background" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted-foreground">Custo bling (R$)</span>
+              <input v-model="newProduct.custo_bling" type="number" step="0.01" min="0" placeholder="0,00" class="h-8 border rounded px-2 bg-background text-right" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted-foreground">Fornecedor</span>
+              <input v-model="newProduct.fornecedor" type="text" class="h-8 border rounded px-2 bg-background" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted-foreground">Modelo china</span>
+              <input v-model="newProduct.modelo_china" type="text" class="h-8 border rounded px-2 bg-background" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted-foreground">Cor china</span>
+              <input v-model="newProduct.cor_china" type="text" class="h-8 border rounded px-2 bg-background" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted-foreground">TSA (1, 2 ou 3)</span>
+              <input v-model="newProduct.tsa" type="number" min="1" max="3" step="1" placeholder="—" class="h-8 border rounded px-2 bg-background text-right" />
+            </label>
+            <label class="flex flex-col gap-1 md:col-span-2">
+              <span class="text-xs font-medium text-muted-foreground">Observação</span>
+              <textarea v-model="newProduct.obs" rows="2" class="border rounded px-2 py-1 bg-background"></textarea>
+            </label>
+          </div>
+
+          <!-- Metadados Bling — fixos pela regra de negócio (planilha-mãe). -->
+          <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs space-y-1">
+            <div class="font-semibold">Metadados Bling (fixos)</div>
+            <div>categoria: <code>mala</code> · tag: <code>mala</code></div>
+            <div class="text-muted-foreground">
+              Esses valores são gravados automaticamente ao enviar o produto pro Bling.
+              A integração de escrita ainda não foi implementada — o botão "Enviar pro Bling"
+              apenas marca o produto como <em>pendente</em> de sincronização.
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 border-t px-4 py-3 bg-muted/20">
+          <button class="rounded-md border px-3 py-1.5 text-sm hover:bg-muted" @click="showCreateModal = false">
+            Cancelar
+          </button>
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
+            :disabled="creatingProduct || !newProduct.sku.trim()"
+            @click="saveNewProduct"
+          >
+            <Save class="size-3.5" />
+            {{ creatingProduct ? 'Salvando…' : 'Salvar' }}
+          </button>
+        </div>
       </div>
     </div>
   </div>

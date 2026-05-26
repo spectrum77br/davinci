@@ -15,7 +15,7 @@ devolution adjustments).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
@@ -50,6 +50,7 @@ from app.schemas.importacao import (
     ImportResumoList,
     ImportResumoOut,
 )
+from app.services.importacao_naming import generate_mala_name
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/importacao", tags=["importacao"])
@@ -263,6 +264,9 @@ async def list_products(
             memoria_consumo=memoria,
             reposicao_estoque=reposicao,
             saldo_reposicao=saldo,
+            nome_gerado=generate_mala_name(p.modelo_bling, p.sku, p.cor),
+            bling_sync_status=p.bling_sync_status,
+            bling_sync_marked_at=p.bling_sync_marked_at,
             lote_quantidades=qty_by_pair.get(p.id, {}),
             created_at=p.created_at, updated_at=p.updated_at,
         ))
@@ -287,6 +291,9 @@ async def create_product(
         estoque_bling=row.estoque_bling, consumo_diario=row.consumo_diario,
         maior_media_30d=row.maior_media_30d, obs=row.obs,
         memoria_consumo=None, reposicao_estoque=None, saldo_reposicao=None,
+        nome_gerado=generate_mala_name(row.modelo_bling, row.sku, row.cor),
+        bling_sync_status=row.bling_sync_status,
+        bling_sync_marked_at=row.bling_sync_marked_at,
         lote_quantidades={},
         created_at=row.created_at, updated_at=row.updated_at,
     )
@@ -314,6 +321,70 @@ async def patch_product(
         estoque_bling=row.estoque_bling, consumo_diario=row.consumo_diario,
         maior_media_30d=row.maior_media_30d, obs=row.obs,
         memoria_consumo=None, reposicao_estoque=None, saldo_reposicao=None,
+        nome_gerado=generate_mala_name(row.modelo_bling, row.sku, row.cor),
+        bling_sync_status=row.bling_sync_status,
+        bling_sync_marked_at=row.bling_sync_marked_at,
+        lote_quantidades={},
+        created_at=row.created_at, updated_at=row.updated_at,
+    )
+
+
+@router.post(
+    "/products/{row_id}/sync-bling",
+    response_model=ImportProductOut,
+    status_code=status.HTTP_200_OK,
+)
+async def sync_product_to_bling(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> ImportProductOut:
+    """Marks the product as pending Bling sync.
+
+    Per the operator spec the canonical metadata is:
+      * nome:      generate_mala_name(modelo_bling, sku, cor)
+      * categoria: 'mala'
+      * tag:       'mala'
+      * custo:     row.custo_bling
+
+    TODO(bling-write-integration): BlingClient has no `create_product`
+    method yet — only reads + stock/price/situacao updates. When that
+    arrives, replace the status='pending' bookkeeping below with the
+    real POST /produtos call and flip to 'sent'/'error' based on the
+    response. The 'pending' rows queued here are the work-list for that
+    future worker.
+    """
+    row = await session.get(ImportProduct, row_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "product_not_found"})
+
+    row.bling_sync_status = "pending"
+    row.bling_sync_marked_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(row)
+
+    nome = generate_mala_name(row.modelo_bling, row.sku, row.cor)
+    logger.info(
+        "importacao_bling_sync_marked",
+        product_id=str(row.id),
+        sku=row.sku,
+        nome=nome,
+        categoria="mala",
+        tag="mala",
+        custo=str(row.custo_bling),
+    )
+
+    return ImportProductOut(
+        id=row.id,
+        fornecedor=row.fornecedor, modelo_china=row.modelo_china, cor_china=row.cor_china,
+        fechamento=row.fechamento, tsa=row.tsa, modelo_bling=row.modelo_bling,
+        sku=row.sku, cor=row.cor, custo_bling=row.custo_bling,
+        estoque_bling=row.estoque_bling, consumo_diario=row.consumo_diario,
+        maior_media_30d=row.maior_media_30d, obs=row.obs,
+        memoria_consumo=None, reposicao_estoque=None, saldo_reposicao=None,
+        nome_gerado=nome,
+        bling_sync_status=row.bling_sync_status,
+        bling_sync_marked_at=row.bling_sync_marked_at,
         lote_quantidades={},
         created_at=row.created_at, updated_at=row.updated_at,
     )
