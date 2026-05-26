@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder, Margens
@@ -278,3 +279,135 @@ async def test_patch_margem_local_only_marks_order_verified_without_changing_sit
     assert order.aprovado_por == user.id
     assert order.situacao == "12"
     assert order.verificado is True
+
+
+async def test_marketplace_status_updates_snapshot_without_view_refresh(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    order = BlingOrder(
+        bling_id=987654,
+        numero="123456",
+        item_codigo="sku-1",
+        item_index=0,
+        situacao="15",
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                bling_status_margem, verificado
+            )
+            VALUES (:id, '123456', 987654, 'sku-1', NULL, false)
+            """
+        ),
+        {"id": str(order.id)},
+    )
+    await db.commit()
+
+    response = await client.patch(
+        "/api/margens/marketplace/status/123456",
+        json={"status": "Aprovado", "sku": "sku-1", "local_only": True},
+    )
+
+    assert response.status_code == 200
+    snapshot = (
+        await db.execute(
+            text(
+                """
+                SELECT bling_status_margem, aprovado_por::text AS aprovado_por, verificado
+                FROM verificar_margem
+                WHERE bling_order_item_id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": str(order.id)},
+        )
+    ).mappings().one()
+    assert snapshot["bling_status_margem"] == "Aprovado"
+    assert snapshot["aprovado_por"] == str(user.id)
+    assert snapshot["verificado"] is True
+
+
+async def test_sync_from_marketplace_updates_snapshot_financials_without_view_refresh(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    order = BlingOrder(
+        bling_id=987654,
+        numero="123456",
+        item_codigo="sku-1",
+        item_index=0,
+        situacao="15",
+        valorbase=80,
+        taxacomissao=20,
+        custofrete=10,
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                plataforma_bling, item_proportion,
+                marketplace_valor_bruto_item, marketplace_taxas_item,
+                marketplace_frete_real_cobrado_item,
+                bling_valorbase_item, bling_taxacomissao_item,
+                bling_custofrete_item, bling_custo_produtos
+            )
+            VALUES (
+                :id, '123456', 987654, 'sku-1',
+                'ml', 1,
+                120, 10,
+                5,
+                80, 20,
+                10, 50
+            )
+            """
+        ),
+        {"id": str(order.id)},
+    )
+    await db.commit()
+
+    response = await client.post(f"/api/margens/marketplace/{order.id}/sync-from-marketplace")
+
+    assert response.status_code == 200
+    await db.refresh(order)
+    assert float(order.valorbase) == 120.0
+    assert float(order.taxacomissao) == 10.0
+    assert float(order.custofrete) == 5.0
+    snapshot = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    bling_valorbase_item,
+                    bling_taxacomissao_item,
+                    bling_custofrete_item,
+                    bling_lucro_calculado,
+                    bling_margem_calculado
+                FROM verificar_margem
+                WHERE bling_order_item_id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": str(order.id)},
+        )
+    ).mappings().one()
+    assert float(snapshot["bling_valorbase_item"]) == 120.0
+    assert float(snapshot["bling_taxacomissao_item"]) == 10.0
+    assert float(snapshot["bling_custofrete_item"]) == 5.0
+    assert float(snapshot["bling_lucro_calculado"]) == 55.0
+    assert float(snapshot["bling_margem_calculado"]) == 1.1

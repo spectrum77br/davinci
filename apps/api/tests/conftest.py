@@ -121,6 +121,37 @@ async def _setup_schema():
                 text(f'CREATE TYPE "{TEST_SCHEMA}".{name} AS ENUM ({vals})')
             )
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            text(
+                f"""
+                CREATE TABLE "{TEST_SCHEMA}".verificar_margem (
+                    bling_order_item_id uuid PRIMARY KEY,
+                    pedido_bling text,
+                    bling_id bigint,
+                    sku text,
+                    bling_status_margem text,
+                    aprovado_por uuid,
+                    verificado boolean,
+                    bling_valorbase_item numeric,
+                    bling_custofrete_item numeric,
+                    bling_taxacomissao_item numeric,
+                    bling_custo_produtos numeric,
+                    bling_lucro_calculado numeric,
+                    bling_margem_calculado numeric,
+                    plataforma_bling text,
+                    plataforma_financeiro text,
+                    marketplace_liquido_base_margem_item numeric,
+                    marketplace_valor_bruto_item numeric,
+                    marketplace_taxas_item numeric,
+                    marketplace_frete_real_cobrado_item numeric,
+                    marketplace_frete_item numeric,
+                    evento_freight numeric,
+                    item_proportion numeric,
+                    saldo_final numeric
+                )
+                """
+            )
+        )
     yield
     async with _test_engine.begin() as conn:
         await conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
@@ -138,6 +169,7 @@ _CLEANUP_TABLES = (
     "listing_requests",
     "listings",
     "pricing_overrides",
+    "verificar_margem",
     "pricing_products",
     "pricing_accounts",
     "audit_dismissed_skus",

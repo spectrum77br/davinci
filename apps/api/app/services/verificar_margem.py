@@ -1,3 +1,4 @@
+# ruff: noqa: S608
 """Refresh helpers for davinci.verificar_margem snapshot table.
 
 The table mirrors vw_conciliacao_margens_marketplace. Reads (margens page)
@@ -20,7 +21,23 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
+
 logger = structlog.get_logger()
+SCHEMA = get_settings().database_schema
+
+
+def _ident(name: str) -> str:
+    return f'"{name.replace(chr(34), chr(34) + chr(34))}"'
+
+
+def qualified_table(name: str) -> str:
+    return f"{_ident(SCHEMA)}.{_ident(name)}"
+
+
+SNAPSHOT_TABLE = qualified_table("verificar_margem")
+VIEW_TABLE = qualified_table("vw_conciliacao_margens_marketplace")
+VIEW_ALL_TABLE = qualified_table("vw_conciliacao_margens_marketplace_all")
 
 
 async def rebuild_all(session: AsyncSession) -> int:
@@ -37,17 +54,17 @@ async def rebuild_all(session: AsyncSession) -> int:
     """
     await session.execute(
         text(
-            "DELETE FROM davinci.verificar_margem v "
+            f"DELETE FROM {SNAPSHOT_TABLE} v "
             "WHERE v.bling_order_item_id IN ("
             "  SELECT bling_order_item_id "
-            "  FROM davinci.vw_conciliacao_margens_marketplace"
+            f"  FROM {VIEW_TABLE}"
             ")"
         )
     )
     result = await session.execute(
         text(
-            "INSERT INTO davinci.verificar_margem "
-            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace"
+            f"INSERT INTO {SNAPSHOT_TABLE} "
+            f"SELECT * FROM {VIEW_TABLE}"
         )
     )
     await session.commit()
@@ -62,13 +79,13 @@ async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
     verificar_margem e fiquem disponiveis na pagina de margens.
     """
     await session.execute(
-        text("DELETE FROM davinci.verificar_margem WHERE pedido_bling = :p"),
+        text(f"DELETE FROM {SNAPSHOT_TABLE} WHERE pedido_bling = :p"),
         {"p": pedido_bling},
     )
     result = await session.execute(
         text(
-            "INSERT INTO davinci.verificar_margem "
-            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace_all "
+            f"INSERT INTO {SNAPSHOT_TABLE} "
+            f"SELECT * FROM {VIEW_ALL_TABLE} "
             "WHERE pedido_bling = :p"
         ),
         {"p": pedido_bling},
@@ -83,13 +100,13 @@ async def refresh_for_bling_id(session: AsyncSession, bling_id: int) -> int:
     Le da view "_all" (sem janela de 20d), mesmo motivo de refresh_for_pedido.
     """
     await session.execute(
-        text("DELETE FROM davinci.verificar_margem WHERE bling_id = :b"),
+        text(f"DELETE FROM {SNAPSHOT_TABLE} WHERE bling_id = :b"),
         {"b": bling_id},
     )
     result = await session.execute(
         text(
-            "INSERT INTO davinci.verificar_margem "
-            "SELECT * FROM davinci.vw_conciliacao_margens_marketplace_all "
+            f"INSERT INTO {SNAPSHOT_TABLE} "
+            f"SELECT * FROM {VIEW_ALL_TABLE} "
             "WHERE bling_id = :b"
         ),
         {"b": bling_id},
@@ -122,5 +139,134 @@ async def refresh_silent(
             "verificar_margem_refresh_failed",
             pedido_bling=pedido_bling,
             bling_id=bling_id,
+            error=str(e)[:200],
+        )
+
+
+async def patch_status_for_pedido(
+    session: AsyncSession,
+    *,
+    pedido_bling: str,
+    status: str,
+    aprovado_por: str | None = None,
+    verificado: bool | None = None,
+) -> int:
+    """Patch user-facing approval status in the snapshot without rebuilding it."""
+    result = await session.execute(
+        text(
+            f"""
+            UPDATE {SNAPSHOT_TABLE}
+            SET bling_status_margem = :status,
+                aprovado_por = COALESCE(CAST(:aprovado_por AS uuid), aprovado_por),
+                verificado = COALESCE(CAST(:verificado AS boolean), verificado)
+            WHERE pedido_bling = :pedido_bling
+            """
+        ),
+        {
+            "pedido_bling": pedido_bling,
+            "status": status,
+            "aprovado_por": aprovado_por,
+            "verificado": verificado,
+        },
+    )
+    return result.rowcount or 0
+
+
+async def patch_status_for_pedido_silent(
+    session: AsyncSession,
+    *,
+    pedido_bling: str,
+    status: str,
+    aprovado_por: str | None = None,
+    verificado: bool | None = None,
+) -> None:
+    try:
+        await patch_status_for_pedido(
+            session,
+            pedido_bling=pedido_bling,
+            status=status,
+            aprovado_por=aprovado_por,
+            verificado=verificado,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "verificar_margem_status_patch_failed",
+            pedido_bling=pedido_bling,
+            status=status,
+            error=str(e)[:200],
+        )
+
+
+async def patch_financials_for_item(
+    session: AsyncSession,
+    *,
+    bling_order_item_id: str,
+    valorbase: object,
+    taxacomissao: object,
+    custofrete: object,
+) -> int:
+    """Patch Bling-derived money columns in the snapshot after an inline sync."""
+    result = await session.execute(
+        text(
+            f"""
+            UPDATE {SNAPSHOT_TABLE}
+            SET bling_valorbase_item = CAST(:valorbase AS numeric),
+                bling_taxacomissao_item = CAST(:taxacomissao AS numeric),
+                bling_custofrete_item = CAST(:custofrete AS numeric),
+                bling_lucro_calculado = CASE
+                    WHEN CAST(:valorbase AS numeric) IS NOT NULL
+                         AND COALESCE(bling_custo_produtos, 0::numeric) > 0::numeric
+                    THEN (
+                        CAST(:valorbase AS numeric)
+                        - COALESCE(CAST(:custofrete AS numeric), 0::numeric)
+                        - COALESCE(CAST(:taxacomissao AS numeric), 0::numeric)
+                    ) - bling_custo_produtos
+                    ELSE NULL::numeric
+                END,
+                bling_margem_calculado = CASE
+                    WHEN CAST(:valorbase AS numeric) IS NOT NULL
+                         AND COALESCE(bling_custo_produtos, 0::numeric) > 0::numeric
+                    THEN (
+                        (
+                            CAST(:valorbase AS numeric)
+                            - COALESCE(CAST(:custofrete AS numeric), 0::numeric)
+                            - COALESCE(CAST(:taxacomissao AS numeric), 0::numeric)
+                        ) - bling_custo_produtos
+                    ) / bling_custo_produtos
+                    ELSE NULL::numeric
+                END
+            WHERE bling_order_item_id = CAST(:bling_order_item_id AS uuid)
+            """
+        ),
+        {
+            "bling_order_item_id": bling_order_item_id,
+            "valorbase": valorbase,
+            "taxacomissao": taxacomissao,
+            "custofrete": custofrete,
+        },
+    )
+    return result.rowcount or 0
+
+
+async def patch_financials_for_item_silent(
+    session: AsyncSession,
+    *,
+    bling_order_item_id: str,
+    valorbase: object,
+    taxacomissao: object,
+    custofrete: object,
+) -> None:
+    try:
+        await patch_financials_for_item(
+            session,
+            bling_order_item_id=bling_order_item_id,
+            valorbase=valorbase,
+            taxacomissao=taxacomissao,
+            custofrete=custofrete,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "verificar_margem_financials_patch_failed",
+            bling_order_item_id=bling_order_item_id,
             error=str(e)[:200],
         )

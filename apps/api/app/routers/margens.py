@@ -25,12 +25,24 @@ from app.schemas.margens import (
 from app.security.cipher import decrypt_json
 from app.services.marketplaces.bling import BlingClient
 from app.services.verificar_margem import (
+    SNAPSHOT_TABLE as _VERIFICAR_MARGEM_TABLE,
+)
+from app.services.verificar_margem import (
+    patch_financials_for_item_silent as _patch_verificar_margem_financials_silent,
+)
+from app.services.verificar_margem import (
+    patch_status_for_pedido_silent as _patch_verificar_margem_status_silent,
+)
+from app.services.verificar_margem import (
+    qualified_table as _qualified_table,
+)
+from app.services.verificar_margem import (
     rebuild_all as _rebuild_verificar_margem,
-    refresh_silent as _refresh_verificar_margem_silent,
 )
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/margens", tags=["margens"])
+_BLING_ORDERS_TABLE = _qualified_table("bling_orders")
 
 SITUACAO_APROVADO = 6
 SITUACAO_ATENDIDO = 9
@@ -129,8 +141,8 @@ async def list_margens_marketplace(
 
     Reads from davinci.verificar_margem (snapshot of the view).
     The snapshot is repopulated every 30min by the worker cron, fully
-    rebuilt by the 'atualizar' UI button, and targeted-refreshed after
-    PATCHes so the user always sees their own edits immediately.
+    rebuilt by the 'atualizar' UI button. User-facing PATCHes update the
+    affected snapshot columns directly so edits appear immediately.
     """
     where = ["TRUE"]
     params: dict = {"limit": limit, "offset": offset}
@@ -176,17 +188,17 @@ async def list_margens_marketplace(
     where_sql = " AND ".join(where)
 
     count_sql = text(
-        f"SELECT count(*) FROM davinci.verificar_margem v WHERE {where_sql}"  # noqa: S608
+        f"SELECT count(*) FROM {_VERIFICAR_MARGEM_TABLE} v WHERE {where_sql}"  # noqa: S608
     )
     platforms_sql = text(
-        "SELECT DISTINCT COALESCE(plataforma_bling, plataforma_financeiro) AS p "
-        "FROM davinci.verificar_margem "
+        "SELECT DISTINCT COALESCE(plataforma_bling, plataforma_financeiro) AS p "  # noqa: S608
+        f"FROM {_VERIFICAR_MARGEM_TABLE} "
         "WHERE COALESCE(plataforma_bling, plataforma_financeiro) IS NOT NULL "
         "ORDER BY 1"
     )
     contas_sql = text(
-        "SELECT DISTINCT loja_nome "
-        "FROM davinci.verificar_margem "
+        "SELECT DISTINCT loja_nome "  # noqa: S608
+        f"FROM {_VERIFICAR_MARGEM_TABLE} "
         "WHERE loja_nome IS NOT NULL "
         "ORDER BY 1"
     )
@@ -239,10 +251,10 @@ async def list_margens_marketplace(
             {_ATTENTION_MARGEM_SQL}                              AS attention_margem,
             {_ATTENTION_FRETE_SQL}                               AS attention_frete,
             {_ATTENTION_SALDO_SQL}                               AS attention_saldo
-        FROM davinci.verificar_margem v
+        FROM {_VERIFICAR_MARGEM_TABLE} v
         LEFT JOIN LATERAL (
             SELECT bo.observacao
-            FROM davinci.bling_orders bo
+            FROM {_BLING_ORDERS_TABLE} bo
             WHERE bo.numero = v.pedido_bling
               AND bo.observacao IS NOT NULL
             LIMIT 1
@@ -294,7 +306,6 @@ async def patch_marketplace_observacao(
         pedido_bling=pedido_bling,
         rows=result.rowcount,
     )
-    await _refresh_verificar_margem_silent(session, pedido_bling=pedido_bling)
     return {"pedido_bling": pedido_bling, "observacao": next_value, "rows": result.rowcount}
 
 
@@ -334,7 +345,7 @@ async def sync_bling_from_marketplace(
                 ELSE {_FRETE_PLATAFORMA_SQL}
               END AS custofrete,
               v.pedido_bling
-            FROM davinci.verificar_margem v
+            FROM {_VERIFICAR_MARGEM_TABLE} v
             WHERE v.bling_order_item_id = :id
             LIMIT 1
             """  # noqa: S608
@@ -355,9 +366,16 @@ async def sync_bling_from_marketplace(
             custofrete=row.custofrete,
         )
     )
-    await session.commit()
     if result.rowcount == 0:
         raise HTTPException(404, detail={"code": "bling_order_not_found"})
+    await _patch_verificar_margem_financials_silent(
+        session,
+        bling_order_item_id=str(bling_order_item_id),
+        valorbase=row.valorbase,
+        taxacomissao=row.taxacomissao,
+        custofrete=row.custofrete,
+    )
+    await session.commit()
 
     logger.info(
         "marketplace_synced_to_bling",
@@ -367,7 +385,6 @@ async def sync_bling_from_marketplace(
         taxacomissao=str(row.taxacomissao),
         custofrete=str(row.custofrete),
     )
-    await _refresh_verificar_margem_silent(session, pedido_bling=str(row.pedido_bling))
     return {
         "ok": True,
         "valorbase": float(row.valorbase) if row.valorbase is not None else None,
@@ -391,12 +408,12 @@ async def sync_bling_from_saldo_final(
     """
     row = (await session.execute(
         text(
-            """
+            f"""
             SELECT v.saldo_final, v.pedido_bling
-            FROM davinci.verificar_margem v
+            FROM {_VERIFICAR_MARGEM_TABLE} v
             WHERE v.bling_order_item_id = :id
             LIMIT 1
-            """
+            """  # noqa: S608
         ),
         {"id": str(bling_order_item_id)},
     )).first()
@@ -414,9 +431,16 @@ async def sync_bling_from_saldo_final(
             custofrete=0,
         )
     )
-    await session.commit()
     if result.rowcount == 0:
         raise HTTPException(404, detail={"code": "bling_order_not_found"})
+    await _patch_verificar_margem_financials_silent(
+        session,
+        bling_order_item_id=str(bling_order_item_id),
+        valorbase=row.saldo_final,
+        taxacomissao=0,
+        custofrete=0,
+    )
+    await session.commit()
 
     logger.info(
         "saldo_final_synced_to_bling",
@@ -424,7 +448,6 @@ async def sync_bling_from_saldo_final(
         pedido_bling=row.pedido_bling,
         valorbase=str(row.saldo_final),
     )
-    await _refresh_verificar_margem_silent(session, pedido_bling=str(row.pedido_bling))
     return {
         "ok": True,
         "valorbase": float(row.saldo_final),
@@ -480,9 +503,13 @@ async def patch_marketplace_status(
             .where(BlingOrder.numero == pedido_bling)
             .values(status=new_status)
         )
+        await _patch_verificar_margem_status_silent(
+            session,
+            pedido_bling=pedido_bling,
+            status=new_status,
+        )
 
     await session.commit()
-    await _refresh_verificar_margem_silent(session, pedido_bling=pedido_bling)
     logger.info(
         "marketplace_status_patched",
         pedido_bling=pedido_bling,
@@ -630,6 +657,13 @@ async def _apply_bling_decision_by_pedido(
             verificado=True,
             **({"situacao": str(situacao_id)} if patch_bling else {}),
         )
+    )
+    await _patch_verificar_margem_status_silent(
+        session,
+        pedido_bling=str(pedido_bling),
+        status=new_status,
+        aprovado_por=str(actor_id),
+        verificado=True,
     )
 
 
