@@ -477,7 +477,7 @@ async function saveRow(row: DevolutionRow) {
               <td class="px-2 py-1 font-mono">{{ draft.sku || '—' }}</td>
               <td class="px-2 py-1 text-muted-foreground">{{ draft.produtos || '—' }}</td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-                <input v-model.number="draft.custo_produto" type="number" step="0.01" :class="sheetMoneyInputClass" />
+                <input v-model.number="draft.custo_produto" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <select v-model="draft.condicao_produto" :class="sheetSelectClass">
@@ -498,7 +498,7 @@ async function saveRow(row: DevolutionRow) {
                 </select>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model.number="draft.custo_manutencao" type="number" step="0.01" :class="sheetMoneyInputClass" />
+                <input v-model.number="draft.custo_manutencao" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input v-model="draft.tecnico" :class="sheetInputClass" />
@@ -585,8 +585,8 @@ async function saveRow(row: DevolutionRow) {
               <input
                 :value="row.custo_produto ?? ''"
                 :disabled="!canEdit"
-                type="number"
-                step="0.01"
+                type="text"
+                inputmode="decimal"
                 :class="sheetMoneyInputClass"
                 @input="(e) => setRowNumber(row, 'custo_produto', (e.target as HTMLInputElement).value)"
                 @blur="saveRow(row)"
@@ -656,8 +656,8 @@ async function saveRow(row: DevolutionRow) {
               <input
                 :value="row.custo_manutencao ?? ''"
                 :disabled="!canEdit"
-                type="number"
-                step="0.01"
+                type="text"
+                inputmode="decimal"
                 :class="sheetMoneyInputClass"
                 @input="(e) => setRowNumber(row, 'custo_manutencao', (e.target as HTMLInputElement).value)"
                 @blur="saveRow(row)"
