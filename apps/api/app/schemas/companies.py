@@ -2,23 +2,60 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 from stdnum.br import cnpj as br_cnpj
 from stdnum.exceptions import ValidationError as StdValidationError
 
 
-def _normalize_cnpj(v: Any) -> str | None:
+# 27 BR states + DF. Anything else in `uf` is treated as a foreign-
+# company marker — skips the strict CNPJ checksum so the operator can
+# register US LLCs, Chinese suppliers, etc. with their local tax id.
+_BR_UFS: frozenset[str] = frozenset({
+    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT",
+    "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO",
+    "RR", "SC", "SP", "SE", "TO",
+})
+
+
+def _normalize_uf(v: Any) -> str | None:
     if v is None or v == "":
         return None
-    raw = str(v)
-    digits = "".join(c for c in raw if c.isdigit())
+    s = str(v).upper().strip()
+    if len(s) != 2 or not s.isalpha():
+        raise ValueError("uf_invalid")
+    return s
+
+
+def _normalize_cnpj(v: Any, *, strict: bool) -> str | None:
+    """`strict=True` runs the BR checksum (raises on invalid). `False`
+    just keeps the digit characters (truncated to the 14-char column
+    width) — used when the company is foreign so a US EIN or Chinese
+    tax id can be stored without faking a BR CNPJ."""
+    if v is None or v == "":
+        return None
+    digits = "".join(c for c in str(v) if c.isdigit())
     if not digits:
         return None
-    try:
-        br_cnpj.validate(digits)
-    except StdValidationError as e:
-        raise ValueError(f"cnpj_invalid: {e}") from e
-    return digits
+    if strict:
+        try:
+            br_cnpj.validate(digits)
+        except StdValidationError as e:
+            raise ValueError(f"cnpj_invalid: {e}") from e
+    return digits[:14]
+
+
+def _normalize_company_payload(data: Any) -> Any:
+    """Cross-field normalisation: validates uf first, then applies the
+    appropriate cnpj rule based on whether uf is a BR state. Runs in
+    `mode='before'` so the inner field validators see the cleaned
+    values."""
+    if not isinstance(data, dict):
+        return data
+    uf = _normalize_uf(data.get("uf"))
+    data["uf"] = uf
+    strict = uf is None or uf in _BR_UFS
+    data["cnpj"] = _normalize_cnpj(data.get("cnpj"), strict=strict)
+    return data
 
 
 class CompanyBase(BaseModel):
@@ -31,20 +68,10 @@ class CompanyBase(BaseModel):
     site_url: str | None = None
     obs: str | None = None
 
-    @field_validator("cnpj", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _v_cnpj(cls, v: Any) -> str | None:
-        return _normalize_cnpj(v)
-
-    @field_validator("uf", mode="before")
-    @classmethod
-    def _v_uf(cls, v: Any) -> str | None:
-        if v is None or v == "":
-            return None
-        s = str(v).upper().strip()
-        if len(s) != 2 or not s.isalpha():
-            raise ValueError("uf_invalid")
-        return s
+    def _normalize(cls, data: Any) -> Any:
+        return _normalize_company_payload(data)
 
 
 class CompanyCreate(CompanyBase):
@@ -62,20 +89,10 @@ class CompanyPatch(BaseModel):
     obs: str | None = None
     enabled_marketplaces: list[str] | None = None
 
-    @field_validator("cnpj", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _v_cnpj(cls, v: Any) -> str | None:
-        return _normalize_cnpj(v)
-
-    @field_validator("uf", mode="before")
-    @classmethod
-    def _v_uf(cls, v: Any) -> str | None:
-        if v is None or v == "":
-            return None
-        s = str(v).upper().strip()
-        if len(s) != 2 or not s.isalpha():
-            raise ValueError("uf_invalid")
-        return s
+    def _normalize(cls, data: Any) -> Any:
+        return _normalize_company_payload(data)
 
 
 class CompanyOut(CompanyBase):

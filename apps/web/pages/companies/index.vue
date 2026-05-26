@@ -168,7 +168,18 @@ async function createCompany() {
     draft.value = { razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', obs: '' }
     await refresh()
   } catch (e: any) {
-    createErr.value = e?.data?.detail?.code || e?.message || 'erro'
+    // Two shapes: our HTTPException ({code: ...}) and Pydantic 422
+    // (list of {loc, msg}). Surface the latter as "campo: motivo".
+    const det = e?.data?.detail
+    if (Array.isArray(det)) {
+      createErr.value = det.map((x: any) => {
+        const field = Array.isArray(x?.loc) ? x.loc[x.loc.length - 1] : '?'
+        const msg = (x?.msg || '').replace(/^Value error,\s*/i, '')
+        return `${field}: ${msg}`
+      }).join(' · ')
+    } else {
+      createErr.value = det?.code || e?.message || 'erro'
+    }
   } finally {
     creating.value = false
   }
