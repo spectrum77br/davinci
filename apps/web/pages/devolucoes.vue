@@ -568,15 +568,16 @@ async function saveRow(row: DevolutionRow) {
     </div>
 
     <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
-      <table class="min-w-[1725px] text-xs border-collapse">
+      <table class="min-w-[1845px] text-xs border-collapse">
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
-            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="6">Identificação</th>
+            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="7">Identificação</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="8">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
           </tr>
           <tr class="border-b">
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">Data Devolução</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">Pedido Bling</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px]">Pedido Marketplace</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px]">Conta</th>
@@ -595,16 +596,17 @@ async function saveRow(row: DevolutionRow) {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="15" class="py-8 text-center text-muted-foreground">
+            <td colspan="16" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td colspan="15" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td colspan="16" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
+            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.created_at) }}</td>
             <td class="px-2 py-1 font-mono whitespace-nowrap">{{ row.pedido_bling || '—' }}</td>
             <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
             <td class="px-2 py-1 whitespace-nowrap">{{ row.conta }}</td>
