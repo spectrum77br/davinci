@@ -1,7 +1,7 @@
-"""Backfill nome_destinatario / cep_destino for devolucoes orders.
+"""Backfill transporte address fields for devolucoes orders.
 
 Fetches transporte data from Bling API for all orders in vw_devolucoes
-that still have NULL nome_destinatario or cep_destino.
+that still have NULL nome_destinatario, cep_destino, or endereco_destino.
 
 Run inside the API container:
   python scripts/backfill_devolucoes_transporte.py
@@ -52,7 +52,7 @@ async def main() -> None:
                     FROM davinci.bling_orders bo
                     JOIN davinci.vw_devolucoes v ON v.bling_order_item_id = bo.id
                     WHERE bo.bling_id IS NOT NULL
-                      AND (bo.nome_destinatario IS NULL OR bo.cep_destino IS NULL)
+                      AND (bo.nome_destinatario IS NULL OR bo.cep_destino IS NULL OR bo.endereco_destino IS NULL)
                     ORDER BY bo.bling_id
                     """
                 )
@@ -76,7 +76,13 @@ async def main() -> None:
                 en = tp.get("enderecoEntrega") or {}
                 nome = ct.get("nome") or None
                 cep = en.get("cep") or None
-                if not nome and not cep:
+                endereco = en.get("endereco") or None
+                numero = en.get("numero") or None
+                complemento = en.get("complemento") or None
+                bairro = en.get("bairro") or None
+                cidade = en.get("municipio") or None
+                uf = en.get("uf") or None
+                if not any([nome, cep, endereco, bairro, cidade, uf]):
                     print(f"  {bling_id}: no transporte data in API")
                     skip += 1
                     continue
@@ -85,12 +91,24 @@ async def main() -> None:
                     values["nome_destinatario"] = nome
                 if cep:
                     values["cep_destino"] = cep
+                if endereco:
+                    values["endereco_destino"] = endereco
+                if numero:
+                    values["numero_destino"] = numero
+                if complemento:
+                    values["complemento_destino"] = complemento
+                if bairro:
+                    values["bairro_destino"] = bairro
+                if cidade:
+                    values["cidade_destino"] = cidade
+                if uf:
+                    values["uf_destino"] = uf
                 await session.execute(
                     update(BlingOrder)
                     .where(BlingOrder.bling_id == bling_id)
                     .values(**values)
                 )
-                print(f"  {bling_id}: nome={nome!r} cep={cep!r}")
+                print(f"  {bling_id}: nome={nome!r} cep={cep!r} {uf}/{cidade}")
                 ok += 1
             except Exception as exc:
                 print(f"  {bling_id}: ERROR {exc}", file=sys.stderr)
