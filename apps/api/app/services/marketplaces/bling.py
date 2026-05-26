@@ -542,6 +542,69 @@ class BlingClient:
         except Exception:  # noqa: BLE001
             return None
 
+    async def product_exists_by_sku(self, sku: str) -> bool:
+        """Return True if any product (active or inactive) exists with this SKU in Bling."""
+        if not sku:
+            return False
+        try:
+            r = await self._request(
+                "GET", "/produtos", params={"codigo": sku, "pagina": 1, "limite": 1}
+            )
+            r.raise_for_status()
+            return len(r.json().get("data") or []) > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def find_next_z_sku(self) -> str:
+        """Find the first available sequential z-SKU (z0001, z0002, …) not yet in Bling."""
+        for n in range(1, 10000):
+            candidate = f"z{n:04d}"
+            if not await self.product_exists_by_sku(candidate):
+                return candidate
+        raise RuntimeError("z-SKU space exhausted (z0001–z9999 all taken)")
+
+    async def get_category_id_by_name(self, name: str) -> int | None:
+        """Return the Bling category ID matching `name` (case-insensitive), or None."""
+        try:
+            r = await self._request(
+                "GET", "/categorias/produtos", params={"pagina": 1, "limite": 100}
+            )
+            r.raise_for_status()
+            for item in r.json().get("data") or []:
+                label = item.get("descricao") or item.get("nome") or ""
+                if label.strip().lower() == name.strip().lower():
+                    return item.get("id")
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def create_product(
+        self,
+        *,
+        sku: str,
+        name: str,
+        price: float | None = None,
+        category_id: int | None = None,
+    ) -> dict:
+        """Create a product in Bling via POST /Api/v3/produtos.
+
+        Returns the `data` dict from Bling (contains at least `{"id": <int>}`).
+        """
+        body: dict[str, Any] = {
+            "nome": name,
+            "codigo": sku,
+            "tipo": "P",
+            "situacao": "A",
+            "formato": "S",
+        }
+        if price is not None:
+            body["preco"] = float(price)
+        if category_id is not None:
+            body["categoria"] = {"id": category_id}
+        r = await self._request("POST", "/produtos", json=body)
+        r.raise_for_status()
+        return r.json().get("data") or {}
+
     async def test_connection(self) -> TestResult:
         try:
             r = await self._request("GET", "/produtos", params={"pagina": 1, "limite": 1})

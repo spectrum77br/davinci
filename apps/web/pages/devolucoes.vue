@@ -16,6 +16,14 @@ import {
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'devolucoes', action: 'view' } })
 
+type BlingStockResult = {
+  ok: boolean
+  action: string
+  sku: string | null
+  bling_product_id: number | null
+  message: string
+}
+
 type DevolutionRow = {
   id: string
   data: string | null
@@ -35,6 +43,7 @@ type DevolutionRow = {
   observacao: string | null
   created_at: string
   updated_at: string
+  bling_stock_result?: BlingStockResult | null
 }
 
 type DevolutionPage = {
@@ -102,6 +111,37 @@ const TECNICOS = [
 
 const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
+
+// ── Toast system ─────────────────────────────────────────────────────
+type Toast = { id: number; kind: 'success' | 'error' | 'warning'; title: string; lines: string[] }
+const toasts = ref<Toast[]>([])
+let _toastId = 0
+function pushToast(t: Omit<Toast, 'id'>, ttl = 6000) {
+  const id = ++_toastId
+  toasts.value = [...toasts.value, { id, ...t }]
+  window.setTimeout(() => { toasts.value = toasts.value.filter((x) => x.id !== id) }, ttl)
+}
+function dismissToast(id: number) {
+  toasts.value = toasts.value.filter((x) => x.id !== id)
+}
+function showStockToast(sr: BlingStockResult) {
+  const lines = sr.message ? [sr.message] : []
+  if (sr.ok) {
+    const title = sr.action === 'product_created_usado'
+      ? 'Bling · produto criado'
+      : 'Bling · estoque atualizado'
+    pushToast({ kind: 'success', title, lines })
+  } else {
+    const titles: Record<string, string> = {
+      no_integration: 'Bling não conectado',
+      no_sku: 'SKU não informado',
+      sku_not_found: 'SKU não encontrado no Bling',
+      create_failed: 'Erro ao criar produto no Bling',
+      error: 'Erro no Bling',
+    }
+    pushToast({ kind: sr.action === 'error' ? 'error' : 'warning', title: titles[sr.action] ?? 'Bling · aviso', lines })
+  }
+}
 
 const items = ref<DevolutionRow[]>([])
 const total = ref(0)
@@ -328,6 +368,7 @@ async function createDevolution() {
     if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
     total.value += 1
     closeAdd()
+    if (created.bling_stock_result) showStockToast(created.bling_stock_result)
   } catch (e: any) {
     lookupError.value = apiError(e)
   } finally {
@@ -365,6 +406,7 @@ async function saveRow(row: DevolutionRow) {
     const idx = items.value.findIndex((i) => i.id === row.id)
     if (idx >= 0) items.value[idx] = updated
     clearDirty(row.id)
+    if (updated.bling_stock_result) showStockToast(updated.bling_stock_result)
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -755,6 +797,48 @@ async function saveRow(row: DevolutionRow) {
         </Button>
         <Button size="sm" variant="outline" :disabled="page >= totalPages || loading" @click="page = totalPages">»</Button>
       </div>
+    </div>
+
+    <!-- Bling stock result toasts — top-right, auto-dismiss after 6s -->
+    <div class="fixed top-4 right-4 z-[60] flex flex-col gap-2 w-[min(380px,calc(100vw-2rem))]">
+      <TransitionGroup
+        enter-active-class="transition duration-150 ease-out"
+        enter-from-class="opacity-0 translate-x-4"
+        enter-to-class="opacity-100 translate-x-0"
+        leave-active-class="transition duration-100 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-for="t in toasts"
+          :key="t.id"
+          class="rounded-lg border-2 shadow-lg px-3 py-2 text-sm"
+          :class="t.kind === 'success' ? 'border-emerald-400 bg-emerald-50' : t.kind === 'error' ? 'border-red-400 bg-red-50' : 'border-amber-400 bg-amber-50'"
+        >
+          <div class="flex items-start justify-between gap-2">
+            <div class="flex-1 min-w-0">
+              <div
+                class="font-semibold"
+                :class="t.kind === 'success' ? 'text-emerald-800' : t.kind === 'error' ? 'text-red-800' : 'text-amber-800'"
+              >{{ t.title }}</div>
+              <ul v-if="t.lines.length" class="mt-0.5 space-y-0.5 font-mono text-xs">
+                <li
+                  v-for="(ln, i) in t.lines"
+                  :key="i"
+                  :class="t.kind === 'success' ? 'text-emerald-700' : t.kind === 'error' ? 'text-red-700' : 'text-amber-700'"
+                >{{ ln }}</li>
+              </ul>
+            </div>
+            <button
+              class="shrink-0 opacity-60 hover:opacity-100"
+              :class="t.kind === 'success' ? 'text-emerald-800' : t.kind === 'error' ? 'text-red-800' : 'text-amber-800'"
+              @click="dismissToast(t.id)"
+            >
+              <X class="size-4" />
+            </button>
+          </div>
+        </div>
+      </TransitionGroup>
     </div>
   </div>
 </template>

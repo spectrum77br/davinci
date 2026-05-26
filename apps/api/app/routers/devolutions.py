@@ -11,11 +11,16 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import Devolution, Refund, User
 from app.schemas.devolutions import (
+    BlingStockResultOut,
     DevolutionCreate,
     DevolutionLookupOut,
     DevolutionOut,
     DevolutionPage,
     DevolutionPatch,
+)
+from app.services.devolution_stock_return import (
+    _STOCK_CONDICOES,
+    return_product_to_bling_stock,
 )
 
 logger = structlog.get_logger()
@@ -178,7 +183,12 @@ async def create_devolution(
     await session.commit()
     await session.refresh(row)
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
-    return DevolutionOut.model_validate(row)
+    out = DevolutionOut.model_validate(row)
+    if body.condicao_produto in _STOCK_CONDICOES:
+        sr = await return_product_to_bling_stock(session, row, body.condicao_produto)
+        if sr is not None:
+            out.bling_stock_result = BlingStockResultOut(**sr)
+    return out
 
 
 @router.patch("/{devolution_id}", response_model=DevolutionOut)
@@ -208,7 +218,12 @@ async def patch_devolution(
 
     await session.commit()
     await session.refresh(row)
-    return DevolutionOut.model_validate(row)
+    out = DevolutionOut.model_validate(row)
+    if new_condicao in _STOCK_CONDICOES and new_condicao != prev_condicao:
+        sr = await return_product_to_bling_stock(session, row, new_condicao)
+        if sr is not None:
+            out.bling_stock_result = BlingStockResultOut(**sr)
+    return out
 
 
 @router.delete("/{devolution_id}", status_code=status.HTTP_204_NO_CONTENT)

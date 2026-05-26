@@ -11,6 +11,14 @@ def _clean_optional_text(value: str | None) -> str | None:
     return value or None
 
 
+class BlingStockResultOut(BaseModel):
+    ok: bool
+    action: str
+    sku: str | None = None
+    bling_product_id: int | None = None
+    message: str = ""
+
+
 class DevolutionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -32,6 +40,7 @@ class DevolutionOut(BaseModel):
     observacao: str | None = None
     created_at: datetime
     updated_at: datetime
+    bling_stock_result: BlingStockResultOut | None = None
 
 
 class DevolutionCreate(BaseModel):
