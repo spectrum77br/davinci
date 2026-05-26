@@ -89,15 +89,6 @@ async def lookup_devolution_order(
         await session.execute(
             text(
                 f"""
-                WITH transporte AS (
-                    SELECT DISTINCT ON (numero)
-                        numero,
-                        nome_destinatario,
-                        cep_destino
-                    FROM "{SCHEMA}".bling_orders
-                    WHERE item_index = 0
-                    ORDER BY numero
-                )
                 SELECT
                     MAX(v.data) AS data,
                     v.pedido_bling::text AS pedido_bling,
@@ -105,16 +96,16 @@ async def lookup_devolution_order(
                     btrim(v.loja_nome) AS conta,
                     string_agg(DISTINCT v.sku, ', ' ORDER BY v.sku) AS sku,
                     string_agg(DISTINCT v.produto, ' | ' ORDER BY v.produto) AS produtos,
-                    SUM(v.bling_custo_produtos)::double precision AS custo_produto,
-                    MAX(t.nome_destinatario) AS nome_destinatario,
-                    MAX(t.cep_destino) AS cep_destino
-                FROM "{SCHEMA}".vw_conciliacao_margens_marketplace v
-                LEFT JOIN transporte t ON t.numero = v.pedido_bling
+                    SUM(COALESCE(bo.preco_custo::numeric, 0) * COALESCE(v.quantidade, 1))::double precision AS custo_produto,
+                    MAX(v.nome_destinatario) AS nome_destinatario,
+                    MAX(v.cep_destino) AS cep_destino
+                FROM "{SCHEMA}".vw_devolucoes v
+                LEFT JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
                 WHERE (
                     v.pedido_bling::text = :pedido
                     OR v.pedido_marketplace::text = :pedido
-                    OR t.nome_destinatario ILIKE :q_like
-                    OR t.cep_destino ILIKE :q_like
+                    OR v.nome_destinatario ILIKE :q_like
+                    OR v.cep_destino ILIKE :q_like
                 )
                   AND v.loja_nome IS NOT NULL
                   AND btrim(v.loja_nome) <> ''
