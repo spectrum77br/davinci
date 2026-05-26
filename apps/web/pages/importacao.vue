@@ -37,7 +37,10 @@ const canDelete = computed(() => {
 })
 
 // ── Types ─────────────────────────────────────────────────────────
-type Tab = 'mala' | 'resumo' | 'reposicao' | 'cotacao'
+// Aba "reposicao" foi removida — os parâmetros (tempo_reposicao/
+// tempo_estoque) continuam editáveis pela barra âmbar no topo da
+// aba Mala, que é onde realmente importam.
+type Tab = 'mala' | 'resumo' | 'cotacao'
 const tab = ref<Tab>('mala')
 
 type Config = { tempo_reposicao: number; tempo_estoque: number }
@@ -476,21 +479,19 @@ async function removeResumo(row: ResumoRow) {
   }
 }
 
-// ── Reposição: config ─────────────────────────────────────────────
-const savingConfig = ref(false)
+// ── Config (parâmetros da fórmula de reposição) ───────────────────
+// Editado pela barra âmbar no topo da aba Mala (a aba Reposição foi
+// removida). Cada @change dispara este PATCH + reload dos produtos
+// pra recalcular reposicao_estoque/saldo_reposicao.
 async function saveConfig() {
-  savingConfig.value = true
   try {
     config.value = await api<Config>('/api/importacao/config', {
       method: 'PATCH',
       body: { ...config.value },
     })
-    // Affects every product's reposicao_estoque.
     void loadProductsOnly()
   } catch (e: any) {
     errorText.value = `Falha ao salvar config: ${e?.data?.detail?.code || 'erro'}`
-  } finally {
-    savingConfig.value = false
   }
 }
 
@@ -650,13 +651,13 @@ async function removeCotProduto(prod: CotProduto) {
       <h1 class="text-xl font-semibold">Importação</h1>
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
         <button
-          v-for="t in (['mala','resumo','reposicao','cotacao'] as const)"
+          v-for="t in (['mala','resumo','cotacao'] as const)"
           :key="t"
           class="px-3 py-1.5 rounded text-sm transition-colors"
           :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
           @click="tab = t"
         >
-          {{ t === 'mala' ? 'Mala' : t === 'resumo' ? 'Resumo' : t === 'reposicao' ? 'Reposição' : 'Cotação' }}
+          {{ t === 'mala' ? 'Mala' : t === 'resumo' ? 'Resumo' : 'Cotação' }}
         </button>
       </div>
       <button
@@ -1011,48 +1012,6 @@ async function removeCotProduto(prod: CotProduto) {
             </tr>
           </tfoot>
         </table>
-      </div>
-    </div>
-
-    <!-- ─── TAB REPOSIÇÃO ────────────────────────────────────────── -->
-    <div v-if="tab === 'reposicao'" class="space-y-4 max-w-3xl">
-      <div class="border rounded-md p-4 space-y-3">
-        <h2 class="font-semibold">Parâmetros da fórmula</h2>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium text-muted-foreground">Tempo de reposição (dias)</span>
-            <input v-model.number="config.tempo_reposicao" type="number" :disabled="!canEdit"
-              class="h-8 border rounded px-2 bg-background" />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium text-muted-foreground">Tempo de estoque seguro (dias)</span>
-            <input v-model.number="config.tempo_estoque" type="number" :disabled="!canEdit"
-              class="h-8 border rounded px-2 bg-background" />
-          </label>
-        </div>
-        <button v-if="canEdit" class="inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
-          :disabled="savingConfig" @click="saveConfig">
-          <Save class="size-3.5" /> Salvar
-        </button>
-      </div>
-
-      <div class="border rounded-md p-4 bg-muted/20 space-y-2 text-sm">
-        <h2 class="font-semibold">Fórmula completa</h2>
-        <code class="block bg-background border rounded p-2 text-xs whitespace-pre-wrap">
-[(estoque_bling / memoria_consumo) - (tempo_reposicao + tempo_estoque)] × consumo_diario
-        </code>
-        <div class="text-xs space-y-1 mt-2">
-          <p><strong>E</strong>: estoque / memória = quantos dias o estoque atual dura</p>
-          <p><strong>F</strong>: tempo_reposicao + tempo_estoque = dias que preciso para a próxima carga chegar + segurança</p>
-          <p><strong>G</strong>: F − E = saldo de dias (positivo = falta, negativo = excedente)</p>
-          <p><strong>H</strong>: G × consumo_diario = total de unidades a repor (ou excedente)</p>
-        </div>
-      </div>
-
-      <div class="border rounded-md p-4 space-y-2 text-xs">
-        <h2 class="font-semibold text-sm">Regra da "memória de consumo"</h2>
-        <p>memória = MAX(consumo_diario_atual, maior_media_30_dias). Quando estoque = 0, usar a maior média (não o consumo atual, que seria 0).</p>
-        <p class="text-muted-foreground">Nesta v1, consumo_diario e maior_media_30d são preenchidos manualmente na aba Mala. Integração com Bling para puxar essas métricas automaticamente está prevista.</p>
       </div>
     </div>
 
