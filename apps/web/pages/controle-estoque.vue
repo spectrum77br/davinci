@@ -13,7 +13,10 @@
 //                from a wider window, so it auto-widens to last 7 days
 //                on first activation if the user hasn't picked a date).
 import { computed, onMounted, ref, watch } from 'vue'
-import { Boxes, Truck, ClipboardList, Loader2, RefreshCw } from 'lucide-vue-next'
+import {
+  Boxes, Truck, ClipboardList, Loader2, RefreshCw,
+  AlertTriangle, FileUp, Upload, Download, Trash2,
+} from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -70,7 +73,7 @@ type EnvioRow = {
 }
 
 // ── State ─────────────────────────────────────────────────────────────
-type Tab = 'estoque' | 'pedidos' | 'envios'
+type Tab = 'estoque' | 'pedidos' | 'envios' | 'estoque-negativo' | 'upload-nf'
 const tab = ref<Tab>('estoque')
 
 function isoToday(): string {
@@ -283,6 +286,180 @@ watch([enviosInicio, enviosFim, conferidoFilter], () => {
 watch(tagOverride, () => {
   if (tab.value === 'envios') void loadCurrentTab()
 })
+
+// ── Aba: Estoque Negativo (refresh-from-Bling + sufixos) ──────────────
+type SaldoRow = { codigo: string; saldo_fisico: number; saldo_virtual_total: number }
+const negativos = ref<SaldoRow[]>([])
+const sufixos = ref<SaldoRow[]>([])
+const negativosLoading = ref(false)
+const refreshing = ref(false)
+const refreshMsg = ref<string | null>(null)
+const suffixChoice = ref<string>('.us,.sa')
+const customSuffix = ref<string>('')
+const SUFFIX_PRESETS: { value: string; label: string }[] = [
+  { value: '.us,.sa', label: '.us + .sa (default)' },
+  { value: '.ci', label: '.ci' },
+  { value: '.ra', label: '.ra' },
+  { value: '.sp', label: '.sp' },
+  { value: '.cd', label: '.cd' },
+  { value: '.pi', label: '.pi' },
+  { value: '__custom__', label: 'personalizado…' },
+]
+const effectiveSuffixes = computed(() =>
+  suffixChoice.value === '__custom__' ? customSuffix.value.trim() : suffixChoice.value,
+)
+
+async function loadNegativos() {
+  negativosLoading.value = true
+  try {
+    const q = search.value.trim()
+    const r = await api<{ items: SaldoRow[] }>(
+      `/api/estoque/negativos${q ? `?search=${encodeURIComponent(q)}` : ''}`,
+    )
+    negativos.value = r.items || []
+  } catch (e: any) {
+    refreshMsg.value = `Falha negativos: ${e?.data?.detail?.code || e?.message || 'erro'}`
+  } finally {
+    negativosLoading.value = false
+  }
+}
+async function loadSufixos() {
+  const sufs = effectiveSuffixes.value
+  if (!sufs) { sufixos.value = []; return }
+  try {
+    const r = await api<{ items: SaldoRow[] }>(
+      `/api/estoque/sufixos?suffixes=${encodeURIComponent(sufs)}`,
+    )
+    sufixos.value = r.items || []
+  } catch (e: any) {
+    refreshMsg.value = `Falha sufixos: ${e?.data?.detail?.code || e?.message || 'erro'}`
+  }
+}
+async function refreshFromBling() {
+  refreshing.value = true
+  refreshMsg.value = null
+  try {
+    const r = await api<{
+      updated: number; total_products: number; missing_bling_data?: number
+    }>('/api/estoque/atualizar-bling', { method: 'POST' })
+    refreshMsg.value = `Atualizou ${r.updated}/${r.total_products} produtos` +
+      (r.missing_bling_data ? ` (${r.missing_bling_data} sem dado Bling)` : '')
+    await Promise.all([loadNegativos(), loadSufixos()])
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    if (code === 'refresh_already_running') {
+      refreshMsg.value = `Refresh já em andamento (${e?.data?.detail?.started_at})`
+    } else if (code === 'bling_not_connected') {
+      refreshMsg.value = 'Bling não conectado'
+    } else {
+      refreshMsg.value = e?.message || 'erro'
+    }
+  } finally {
+    refreshing.value = false
+  }
+}
+function downloadCsv() {
+  const sufs = effectiveSuffixes.value
+  if (!sufs) return
+  window.open(`/api/estoque/sufixos.csv?suffixes=${encodeURIComponent(sufs)}`, '_blank')
+}
+
+// ── Aba: Upload NF (XML → ML) ─────────────────────────────────────────
+type NfAttempt = { store: string; success: boolean; error: string | null; shipping_id: string | null }
+type NfResult = {
+  filename: string
+  success: boolean
+  order_id?: string | null
+  store_name?: string | null
+  shipping_id?: string | null
+  error?: string | null
+  attempts_details?: NfAttempt[]
+}
+const nfFiles = ref<File[]>([])
+const nfStores = ref<string[]>([])
+const nfSelectedStores = ref<Set<string>>(new Set())
+const nfProcessing = ref(false)
+const nfCurrentFile = ref<string | null>(null)
+const nfResults = ref<NfResult[]>([])
+const nfFileInputRef = ref<HTMLInputElement | null>(null)
+
+const nfSuccessCount = computed(() => nfResults.value.filter((r) => r.success).length)
+const nfFailCount = computed(() => nfResults.value.filter((r) => !r.success).length)
+
+async function loadNfStores() {
+  try {
+    const r = await api<{ stores: string[] }>('/api/nf/stores')
+    nfStores.value = r.stores || []
+    nfSelectedStores.value = new Set(nfStores.value)
+  } catch (e: any) {
+    console.error('Falha lojas NF:', e)
+  }
+}
+function onNfFileChange(ev: Event) {
+  const inp = ev.target as HTMLInputElement
+  if (!inp.files) return
+  const next = Array.from(inp.files)
+  nfFiles.value = [
+    ...nfFiles.value,
+    ...next.filter((nf) =>
+      !nfFiles.value.some((f) => f.name === nf.name && f.size === nf.size),
+    ),
+  ]
+  inp.value = ''
+}
+function removeNfFile(idx: number) {
+  nfFiles.value.splice(idx, 1)
+}
+function clearNfAll() {
+  nfFiles.value = []
+  nfResults.value = []
+  nfCurrentFile.value = null
+}
+function toggleNfStore(name: string) {
+  const s = new Set(nfSelectedStores.value)
+  if (s.has(name)) s.delete(name); else s.add(name)
+  nfSelectedStores.value = s
+}
+async function processNfFiles() {
+  if (!nfFiles.value.length || !nfSelectedStores.value.size) return
+  nfProcessing.value = true
+  nfResults.value = []
+  for (const file of nfFiles.value) {
+    nfCurrentFile.value = file.name
+    const fd = new FormData()
+    fd.append('file', file)
+    for (const s of nfSelectedStores.value) fd.append('selected_stores', s)
+    try {
+      const r = await api<NfResult>('/api/nf/upload', { method: 'POST', body: fd })
+      nfResults.value.push({ filename: file.name, ...r })
+    } catch (e: any) {
+      nfResults.value.push({
+        filename: file.name,
+        success: false,
+        error: e?.data?.detail?.code || e?.message || 'erro',
+        attempts_details: [],
+      })
+    }
+  }
+  nfCurrentFile.value = null
+  nfProcessing.value = false
+}
+
+// Lazy-load dos dados das novas abas + re-load no toggle de aba.
+watch(tab, async (newTab) => {
+  if (newTab === 'estoque-negativo') {
+    await Promise.all([loadNegativos(), loadSufixos()])
+  } else if (newTab === 'upload-nf' && !nfStores.value.length) {
+    await loadNfStores()
+  }
+})
+watch(effectiveSuffixes, () => {
+  if (tab.value === 'estoque-negativo') void loadSufixos()
+})
+watch(search, () => {
+  if (tab.value === 'estoque-negativo') void loadNegativos()
+})
+
 onMounted(() => {
   void loadCurrentTab()
   void refreshConferenciaHoje()
@@ -463,9 +640,9 @@ async function conferirTodos() {
         v-if="syncToast"
         class="text-xs text-muted-foreground bg-muted/40 border rounded px-2 py-1"
       >{{ syncToast }}</span>
-      <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
+      <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap">
         <button
-          v-for="t in (['estoque', 'pedidos', 'envios'] as const)"
+          v-for="t in (['estoque', 'pedidos', 'envios', 'estoque-negativo', 'upload-nf'] as const)"
           :key="t"
           class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
           :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
@@ -473,8 +650,16 @@ async function conferirTodos() {
         >
           <Boxes v-if="t === 'estoque'" class="size-4" />
           <ClipboardList v-else-if="t === 'pedidos'" class="size-4" />
-          <Truck v-else class="size-4" />
-          {{ t === 'estoque' ? 'Estoque' : t === 'pedidos' ? 'Pedidos' : 'Envios' }}
+          <Truck v-else-if="t === 'envios'" class="size-4" />
+          <AlertTriangle v-else-if="t === 'estoque-negativo'" class="size-4" />
+          <FileUp v-else class="size-4" />
+          {{
+            t === 'estoque' ? 'Estoque' :
+            t === 'pedidos' ? 'Pedidos' :
+            t === 'envios' ? 'Envios' :
+            t === 'estoque-negativo' ? 'Estoque Negativo' :
+            'Upload NF'
+          }}
         </button>
       </div>
     </div>
@@ -818,6 +1003,225 @@ async function conferirTodos() {
           </tr>
         </tfoot>
       </table>
+    </div>
+
+    <!-- TAB: ESTOQUE NEGATIVO ───────────────────────────────────────── -->
+    <div v-if="tab === 'estoque-negativo'" class="space-y-4">
+      <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
+        <span class="text-muted-foreground">
+          Lê de <code class="bg-background px-1 rounded">products.saldo_virtual_total</code> /
+          <code class="bg-background px-1 rounded">saldo_fisico</code> — atualize pelo Bling antes de gerar etiquetas.
+        </span>
+        <button
+          class="ml-auto inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 hover:opacity-90 disabled:opacity-50"
+          :disabled="refreshing"
+          @click="refreshFromBling"
+        >
+          <Loader2 v-if="refreshing" class="size-3 animate-spin" />
+          <RefreshCw v-else class="size-3" />
+          {{ refreshing ? 'Atualizando…' : 'Atualizar via Bling' }}
+        </button>
+        <span v-if="refreshMsg" class="text-xs text-muted-foreground bg-background border rounded px-2 py-1">
+          {{ refreshMsg }}
+        </span>
+      </div>
+
+      <!-- Saldo virtual negativo -->
+      <div class="space-y-2">
+        <div class="flex items-center gap-2">
+          <h3 class="font-semibold text-sm flex items-center gap-2">
+            <AlertTriangle class="size-4 text-amber-600" /> Saldo virtual &lt; 0
+          </h3>
+          <span class="text-xs text-muted-foreground">{{ negativos.length }} SKU(s)</span>
+        </div>
+        <div v-if="negativosLoading" class="text-center py-6 text-muted-foreground text-xs">
+          <Loader2 class="size-4 animate-spin mx-auto mb-1" /> Carregando…
+        </div>
+        <div v-else-if="negativos.length === 0" class="text-center py-6 text-muted-foreground text-xs">
+          Nenhum SKU com saldo virtual negativo.
+        </div>
+        <div v-else class="border rounded-md overflow-x-auto">
+          <table class="grid-table w-full text-xs border-collapse">
+            <thead>
+              <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
+                <th class="text-left">SKU</th>
+                <th class="text-right">Saldo Físico</th>
+                <th class="text-right">Saldo Virtual</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in negativos" :key="row.codigo" class="even:bg-muted/10 hover:bg-amber-50/40">
+                <td class="font-mono">{{ row.codigo }}</td>
+                <td class="text-right">{{ row.saldo_fisico }}</td>
+                <td class="text-right font-semibold text-red-700">{{ row.saldo_virtual_total }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Por sufixo -->
+      <div class="space-y-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <h3 class="font-semibold text-sm">Por sufixo (saldo físico &gt; 0)</h3>
+          <span class="text-xs text-muted-foreground">{{ sufixos.length }} SKU(s)</span>
+          <label class="inline-flex items-center gap-1 text-xs">
+            Sufixo:
+            <select v-model="suffixChoice" class="h-7 border rounded px-2 bg-background">
+              <option v-for="opt in SUFFIX_PRESETS" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+          </label>
+          <input
+            v-if="suffixChoice === '__custom__'"
+            v-model="customSuffix"
+            placeholder=".us,.sa,.ra"
+            class="h-7 border rounded px-2 text-xs bg-background"
+            @blur="loadSufixos"
+          />
+          <button
+            class="ml-auto inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
+            :disabled="sufixos.length === 0"
+            @click="downloadCsv"
+          >
+            <Download class="size-3" /> CSV
+          </button>
+        </div>
+        <div v-if="sufixos.length === 0" class="text-center py-6 text-muted-foreground text-xs">
+          Nenhum SKU encontrado para os sufixos selecionados.
+        </div>
+        <div v-else class="border rounded-md overflow-x-auto">
+          <table class="grid-table w-full text-xs border-collapse">
+            <thead>
+              <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
+                <th class="text-left">SKU</th>
+                <th class="text-right">Saldo Físico</th>
+                <th class="text-right">Saldo Virtual</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in sufixos" :key="row.codigo" class="even:bg-muted/10 hover:bg-amber-50/40">
+                <td class="font-mono">{{ row.codigo }}</td>
+                <td class="text-right font-semibold text-emerald-700">{{ row.saldo_fisico }}</td>
+                <td class="text-right">{{ row.saldo_virtual_total }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: UPLOAD NF ─────────────────────────────────────────────── -->
+    <div v-if="tab === 'upload-nf'" class="space-y-4">
+      <!-- Stores picker -->
+      <section class="border rounded-md p-3 space-y-2">
+        <div class="flex items-center justify-between">
+          <h3 class="font-semibold text-sm">Lojas ML alvo</h3>
+          <span class="text-xs text-muted-foreground">
+            {{ nfSelectedStores.size }} de {{ nfStores.length }} selecionada(s)
+          </span>
+        </div>
+        <div v-if="!nfStores.length" class="text-xs text-muted-foreground">
+          Nenhuma integração ML ativa encontrada.
+        </div>
+        <div v-else class="flex flex-wrap gap-1.5">
+          <button
+            v-for="s in nfStores"
+            :key="s"
+            type="button"
+            class="rounded-full border px-2.5 py-1 text-xs transition-colors"
+            :class="nfSelectedStores.has(s) ? 'bg-primary text-primary-foreground border-primary' : 'border-muted-foreground/40 hover:bg-muted'"
+            @click="toggleNfStore(s)"
+          >
+            {{ s }}
+          </button>
+        </div>
+      </section>
+
+      <!-- File picker -->
+      <section class="border rounded-md p-3 space-y-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <label class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm cursor-pointer hover:bg-muted">
+            <FileUp class="size-3.5" /> Selecionar XMLs
+            <input ref="nfFileInputRef" type="file" accept=".xml" multiple class="hidden" @change="onNfFileChange" />
+          </label>
+          <span class="text-xs text-muted-foreground">{{ nfFiles.length }} arquivo(s)</span>
+          <button
+            v-if="nfFiles.length"
+            class="ml-auto inline-flex items-center gap-1 rounded-md border border-destructive text-destructive px-2.5 py-1 text-xs hover:bg-destructive/10"
+            @click="clearNfAll"
+          >
+            <Trash2 class="size-3" /> Limpar
+          </button>
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
+            :disabled="nfProcessing || !nfFiles.length || !nfSelectedStores.size"
+            @click="processNfFiles"
+          >
+            <Loader2 v-if="nfProcessing" class="size-3.5 animate-spin" />
+            <Upload v-else class="size-3.5" />
+            {{ nfProcessing ? 'Enviando…' : `Enviar (${nfFiles.length})` }}
+          </button>
+        </div>
+        <ul v-if="nfFiles.length" class="text-xs space-y-1 border-t pt-2">
+          <li v-for="(f, idx) in nfFiles" :key="idx" class="flex items-center gap-2">
+            <FileUp class="size-3 text-muted-foreground shrink-0" />
+            <span class="truncate flex-1">{{ f.name }}</span>
+            <span class="text-muted-foreground">{{ (f.size / 1024).toFixed(0) }} KiB</span>
+            <button v-if="!nfProcessing" class="text-muted-foreground hover:text-destructive" @click="removeNfFile(idx)">
+              <Trash2 class="size-3" />
+            </button>
+          </li>
+        </ul>
+      </section>
+
+      <div
+        v-if="nfProcessing && nfCurrentFile"
+        class="rounded border bg-muted/20 px-3 py-2 text-sm flex items-center gap-2"
+      >
+        <Loader2 class="size-3 animate-spin" />
+        Processando: <strong>{{ nfCurrentFile }}</strong>
+        ({{ nfResults.length + 1 }} de {{ nfFiles.length }})
+      </div>
+
+      <!-- Results -->
+      <section v-if="nfResults.length" class="space-y-2">
+        <div class="flex items-center gap-3 text-sm">
+          <h3 class="font-semibold">Resultados</h3>
+          <span class="text-emerald-700">✓ {{ nfSuccessCount }}</span>
+          <span class="text-red-700">✕ {{ nfFailCount }}</span>
+        </div>
+        <div class="border rounded-md divide-y">
+          <div
+            v-for="(r, idx) in nfResults"
+            :key="idx"
+            class="p-3 text-xs"
+            :class="r.success ? 'bg-emerald-50/40' : 'bg-red-50/40'"
+          >
+            <div class="flex items-center gap-2 flex-wrap">
+              <span v-if="r.success" class="text-emerald-700 font-bold">✓</span>
+              <span v-else class="text-red-700 font-bold">✕</span>
+              <strong class="truncate">{{ r.filename }}</strong>
+              <span v-if="r.order_id" class="text-muted-foreground font-mono">pedido {{ r.order_id }}</span>
+              <span v-if="r.success" class="ml-auto text-emerald-800">→ {{ r.store_name }}</span>
+              <span v-else class="ml-auto text-red-700">{{ r.error || 'falha' }}</span>
+            </div>
+            <details v-if="r.attempts_details && r.attempts_details.length" class="mt-1.5">
+              <summary class="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
+                {{ r.attempts_details.length }} tentativa(s)
+              </summary>
+              <ul class="mt-1 pl-4 space-y-0.5 text-[11px]">
+                <li v-for="(a, i) in r.attempts_details" :key="i" class="flex items-center gap-2">
+                  <span v-if="a.success" class="text-emerald-700">✓</span>
+                  <span v-else class="text-red-700">✕</span>
+                  <span class="font-medium">{{ a.store }}</span>
+                  <span v-if="a.shipping_id" class="text-muted-foreground">ship={{ a.shipping_id }}</span>
+                  <span v-if="!a.success" class="text-muted-foreground italic">{{ a.error }}</span>
+                </li>
+              </ul>
+            </details>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </template>
