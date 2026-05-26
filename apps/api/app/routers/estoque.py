@@ -161,6 +161,20 @@ def _resolve_dates(
 # ─── SEÇÃO 1: ESTOQUE ────────────────────────────────────────────────────
 
 
+def _stock_filter_clause(estoque_filter: str | None):
+    """Returns a SQLAlchemy clause against Product.stock for the
+    'com' / 'sem' modes. None = no filter (the 'all'/default mode).
+
+    "com estoque" = Product.stock > 0 (virtual; what's available to sell)
+    "sem estoque" = Product.stock == 0 OR NULL (out of stock OR never synced)
+    """
+    if estoque_filter == "com":
+        return Product.stock > 0
+    if estoque_filter == "sem":
+        return or_(Product.stock == 0, Product.stock.is_(None))
+    return None  # 'all' or unset
+
+
 @router.get("/produtos")
 async def list_estoque_produtos(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -168,6 +182,7 @@ async def list_estoque_produtos(
     data_inicio: date | None = Query(None),
     data_fim: date | None = Query(None),
     tag: str | None = Query(None),  # admin-only override
+    estoque_filter: str | None = Query(None, pattern="^(all|com|sem)$"),
 ) -> dict[str, Any]:
     tags = _resolve_tags(user, tag)
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
@@ -188,6 +203,9 @@ async def list_estoque_produtos(
         # OR across each tag's pattern — operator with [ci, ra] sees
         # products ending in .ci OR .ra.
         where.append(or_(*[_sql_clause_for_tag(Product.sku, t) for t in tags]))
+    stock_clause = _stock_filter_clause(estoque_filter)
+    if stock_clause is not None:
+        where.append(stock_clause)
 
     products = (
         await session.execute(
@@ -543,11 +561,15 @@ async def list_estoque_envios(
 
 
 async def _count_active_products(
-    session: AsyncSession, tags: list[str] | None,
+    session: AsyncSession,
+    tags: list[str] | None,
+    estoque_filter: str | None = None,
 ) -> int:
     """Total de produtos visíveis na aba Estoque pro usuário (mesmo
     filtro de situacao/formato/SKU+/baseline da list_estoque_produtos).
-    Usado pra calcular % de conferência por dia."""
+    Usado pra calcular % de conferência por dia. `estoque_filter` é
+    forwardado pra manter o denominador alinhado com o que o operador
+    vê na tela quando filtra por com/sem estoque."""
     where: list = [
         Product.situacao == "A",
         Product.formato == "S",
@@ -556,6 +578,9 @@ async def _count_active_products(
     ]
     if tags is not None:
         where.append(or_(*[_sql_clause_for_tag(Product.sku, t) for t in tags]))
+    stock_clause = _stock_filter_clause(estoque_filter)
+    if stock_clause is not None:
+        where.append(stock_clause)
     n = (
         await session.execute(
             select(func.count()).select_from(Product).where(and_(*where))
@@ -571,6 +596,7 @@ async def _count_estoque_checks_by_day(
     data_inicio: date,
     data_fim: date,
     tags: list[str] | None,
+    estoque_filter: str | None = None,
 ) -> dict[str, int]:
     """{reference_date_iso: count_conferido_true} pra section='estoque'
     do usuário, no período. `tags` mirrors _count_active_products —
@@ -580,7 +606,10 @@ async def _count_estoque_checks_by_day(
 
     Filtro: StockCheck.reference_id é o SKU; aplicamos as mesmas
     regras de SKU usadas pelo tag-resolver + baseline exclusions pra
-    ficar 1:1 com o COUNT de produtos ativos."""
+    ficar 1:1 com o COUNT de produtos ativos.
+
+    `estoque_filter` é aplicado via JOIN em products — só quando
+    requisitado (caso default não paga o custo do JOIN)."""
     where: list = [
         StockCheck.user_id == user_id,
         StockCheck.section == "estoque",
@@ -593,16 +622,18 @@ async def _count_estoque_checks_by_day(
         where.append(
             or_(*[_sql_clause_for_tag(StockCheck.reference_id, t) for t in tags])
         )
-    rows = (
-        await session.execute(
-            select(
-                StockCheck.reference_date,
-                func.count().label("n"),
-            )
-            .where(and_(*where))
-            .group_by(StockCheck.reference_date)
-        )
-    ).all()
+
+    stmt = (
+        select(StockCheck.reference_date, func.count().label("n"))
+        .group_by(StockCheck.reference_date)
+    )
+    stock_clause = _stock_filter_clause(estoque_filter)
+    if stock_clause is not None:
+        # JOIN matches SKU exactly; checks for SKUs that no longer exist
+        # in products silently drop, which is the right behaviour here
+        # (stale checks shouldn't inflate the numerator).
+        stmt = stmt.join(Product, Product.sku == StockCheck.reference_id).where(stock_clause)
+    rows = (await session.execute(stmt.where(and_(*where)))).all()
     return {str(r.reference_date): int(r.n or 0) for r in rows}
 
 
@@ -611,16 +642,17 @@ async def conferencia_estoque_hoje(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
     tag: str | None = Query(None),
+    estoque_filter: str | None = Query(None, pattern="^(all|com|sem)$"),
 ) -> dict[str, Any]:
     """Foto da conferência da aba Estoque para HOJE — independente do
     dia que o operador está visualizando. Usado pelo bloqueio da aba
     Envios (só libera quando o dia atual está 100%)."""
     tags = _resolve_tags(user, tag)
     today = datetime.now(UTC).date()
-    total = await _count_active_products(session, tags)
+    total = await _count_active_products(session, tags, estoque_filter=estoque_filter)
     by_day = await _count_estoque_checks_by_day(
         session, user_id=user.id, data_inicio=today, data_fim=today,
-        tags=tags,
+        tags=tags, estoque_filter=estoque_filter,
     )
     conferido = by_day.get(today.isoformat(), 0)
     if total == 0:

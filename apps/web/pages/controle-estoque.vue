@@ -93,6 +93,12 @@ const enviosFim = ref(isoToday())
 const isAdmin = computed(() => auth.user?.role === 'admin')
 const tagOverride = ref<string>('')
 
+// Filter products by presence of stock. 'all' (default) = no filter,
+// 'com' = Product.stock > 0, 'sem' = stock == 0 OR NULL. Applied to
+// the /produtos list AND the conferência counter so denominators
+// match what the operator sees on screen.
+const estoqueFilter = ref<'all' | 'com' | 'sem'>('all')
+
 // Single source of truth for tag labels — keep in sync with backend
 // STOCK_TAGS list. The admin dropdown uses these; operadores never
 // see this UI (they have a fixed set from user.stock_tags).
@@ -161,6 +167,7 @@ async function refreshConferenciaHoje() {
   try {
     const params = new URLSearchParams()
     if (isAdmin.value && tagOverride.value) params.set('tag', tagOverride.value)
+    if (estoqueFilter.value !== 'all') params.set('estoque_filter', estoqueFilter.value)
     const r = await api<{ total: number; conferido: number; percent: number }>(
       `/api/estoque/conferencia-hoje${params.toString() ? `?${params.toString()}` : ''}`,
     )
@@ -180,6 +187,9 @@ function singleDayDates(): string {
   // tolerates either treating the window as a single point or a range.
   const parts = [`data_inicio=${dia.value}`, `data_fim=${dia.value}`]
   if (isAdmin.value && tagOverride.value) parts.push(`tag=${tagOverride.value}`)
+  // estoque_filter applies only to the Estoque tab (the /produtos call
+  // below). Pedidos and Envios ignore the param.
+  if (estoqueFilter.value !== 'all') parts.push(`estoque_filter=${estoqueFilter.value}`)
   return parts.join('&')
 }
 function rangeDates(): string {
@@ -260,6 +270,12 @@ watch(tab, () => {
 })
 watch([dia, tagOverride, statusFilter], () => {
   if (tab.value !== 'envios') void loadCurrentTab()
+})
+watch(estoqueFilter, () => {
+  // Refetch Estoque list (the only tab that uses the filter) AND the
+  // conferência counter so the percentage matches the visible set.
+  if (tab.value === 'estoque') void loadCurrentTab()
+  void refreshConferenciaHoje()
 })
 watch([enviosInicio, enviosFim, conferidoFilter], () => {
   if (tab.value === 'envios') void loadCurrentTab()
@@ -502,6 +518,18 @@ async function conferirTodos() {
           <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">
             {{ opt.label }}
           </option>
+        </select>
+      </label>
+      <!-- Stock-presence filter — only meaningful on the Estoque tab.
+           Backend ignores the param for Pedidos / Envios, so it's safe
+           to leave the dropdown visible everywhere, but we keep it
+           Estoque-only to avoid implying it affects the other tabs. -->
+      <label v-if="tab === 'estoque'" class="inline-flex items-center gap-1">
+        Estoque:
+        <select v-model="estoqueFilter" class="h-7 border rounded px-2 bg-background">
+          <option value="all">todos</option>
+          <option value="com">com estoque</option>
+          <option value="sem">sem estoque</option>
         </select>
       </label>
       <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
