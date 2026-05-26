@@ -96,8 +96,8 @@ async def lookup_devolution_order(
                     btrim(v.loja_nome) AS conta,
                     v.sku,
                     v.produto AS produtos,
-                    v.quantidade,
-                    (COALESCE(bo.preco_custo::numeric, 0) * COALESCE(v.quantidade, 1))::double precision AS custo_produto,
+                    1 AS quantidade,
+                    COALESCE(bo.preco_custo::numeric, 0)::double precision AS custo_produto,
                     v.nome_destinatario,
                     v.cep_destino,
                     v.endereco_destino,
@@ -108,6 +108,7 @@ async def lookup_devolution_order(
                     v.uf_destino
                 FROM "{SCHEMA}".vw_devolucoes v
                 LEFT JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
+                CROSS JOIN generate_series(1, GREATEST(1, COALESCE(v.quantidade::int, 1))) gs(unit_num)
                 WHERE (
                     v.pedido_bling::text = :pedido
                     OR v.pedido_marketplace::text = :pedido
@@ -116,7 +117,7 @@ async def lookup_devolution_order(
                 )
                   AND v.loja_nome IS NOT NULL
                   AND btrim(v.loja_nome) <> ''
-                ORDER BY v.data DESC NULLS LAST, v.pedido_bling, v.sku
+                ORDER BY v.data DESC NULLS LAST, v.pedido_bling, v.sku, gs.unit_num
                 LIMIT 50
                 """  # noqa: S608
             ),

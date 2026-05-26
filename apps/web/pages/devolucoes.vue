@@ -280,7 +280,6 @@ async function lookupOrder() {
   try {
     const res = await api<LookupRow[]>(`/api/devolutions/order-lookup?pedido=${encodeURIComponent(pedido)}`)
     lookupResults.value = res
-    if (res.length === 1) selectLookup(res[0])
     if (!res.length) lookupError.value = 'nenhum resultado encontrado'
   } catch (e: any) {
     lookupError.value = apiError(e)
@@ -415,7 +414,7 @@ async function saveRow(row: DevolutionRow) {
         <span v-if="lookupError" class="text-sm text-red-400">{{ lookupError }}</span>
       </div>
 
-      <div v-if="lookupResults.length > 1 && !draft" class="overflow-auto border-b">
+      <div v-if="lookupResults.length > 0 && !draft" class="overflow-auto border-b">
         <table class="w-full text-xs border-collapse">
           <thead class="bg-background">
             <tr>
