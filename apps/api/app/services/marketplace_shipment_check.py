@@ -79,7 +79,20 @@ _AMAZON_SHIPPED = {"Shipped"}
 # left the seller's hands (dropped_off, in_packing_list, in_hub, first_mile,
 # …). On the ML seller UI those all show up as "A caminho", so we treat
 # them as shipped on our side too.
-_ML_NOT_YET_SHIPPED_SUBSTATUS = {"pending", "printed", "ready_to_print"}
+# ML shipment substatuses that CONFIRM the package left the seller's
+# hands. Inclusion list, not exclusion — any unknown/new substatus
+# (e.g. `invoice_pending` which ML emits while the NF isn't generated
+# yet) is treated as NOT shipped. Previous "exclusion" approach
+# (everything outside {pending, printed, ready_to_print} = shipped)
+# caused 335 false-positive bumps on 2026-05-26 because invoice_pending
+# wasn't in the exclusion set.
+_ML_CONFIRMED_SHIPPED_SUBSTATUS = {
+    "dropped_off",       # delivered to agency / collection point
+    "in_hub",            # at ML distribution center
+    "first_mile",        # in first-mile transit (already picked up)
+    "in_packing_list",   # on the carrier's pickup list (handed over)
+    "picked_up",         # picked up by carrier
+}
 
 # Brasília is UTC-3 (no DST since 2019). em_andamento_data is the
 # operator-facing ship-date column on the planilha; storing it in BRT
@@ -385,9 +398,15 @@ async def _check_marketplace_shipped(
                 )
                 continue
 
+            # Skip cancelled orders outright — top-level status=cancelled
+            # means the buyer/seller dropped the order; no shipment is
+            # ever going to happen, no need to ask ML for a shipment row.
+            top_status = data.get("status")
+            if top_status == "cancelled":
+                continue
+
             # Pass 1 — order/shipping level says shipped/delivered outright.
             ship_status = ((data.get("shipping") or {}) or {}).get("status")
-            top_status = data.get("status")
             if (ship_status and str(ship_status).lower() in _ML_SHIPPED) or (
                 top_status and str(top_status).lower() in _ML_SHIPPED
             ):
@@ -399,16 +418,18 @@ async def _check_marketplace_shipped(
             # Pass 2 — order.status still "paid" but the shipment may
             # already be moving. ML's order endpoint lags the shipment
             # state: once the seller hands the package off and it gets
-            # scanned anywhere downstream (agency drop-off, hub, packing
-            # list, first mile), `/shipments/{id}` flips to
-            # status=ready_to_ship with a substatus that means "no longer
-            # with the seller", while the order resource still says
-            # status=paid. The seller's job ends the moment the package
-            # leaves their hands, so we whitelist by EXCLUSION: any
-            # ready_to_ship substatus that isn't one of the three pre-
-            # handoff states counts as shipped. (Previous version only
-            # caught dropped_off and missed in_hub / in_packing_list /
-            # first_mile.) Only fetch the shipment when pass 1 missed.
+            # scanned anywhere downstream (drop-off, hub, packing list,
+            # first mile), `/shipments/{id}` flips to status=ready_to_ship
+            # with a substatus that means "no longer with the seller",
+            # while the order resource still says status=paid.
+            #
+            # INCLUSION list — only confirmed-handoff substatuses count.
+            # The previous "exclusion" version (everything outside
+            # {pending, printed, ready_to_print} = shipped) falsely
+            # flipped 335 orders on 2026-05-26 because `invoice_pending`
+            # (NF not yet emitted) wasn't in the exclusion set. Inclusion
+            # is safer: any new substatus ML emits goes to NOT shipped
+            # until we explicitly whitelist it.
             shipment_id = (data.get("shipping") or {}).get("id")
             if shipment_id:
                 try:
@@ -422,14 +443,9 @@ async def _check_marketplace_shipped(
                     continue
                 substatus = str(ship_data.get("substatus") or "").lower()
                 ship_status2 = str(ship_data.get("status") or "").lower()
-                # Whitelist by exclusion: shipped/delivered outright, OR
-                # ready_to_ship with any substatus that isn't one of the
-                # three pre-handoff states. Real ship date from
-                # last_updated (the moment ML flipped substatus) or
-                # date_created on the shipment.
                 if ship_status2 in _ML_SHIPPED or (
                     ship_status2 == "ready_to_ship"
-                    and substatus not in _ML_NOT_YET_SHIPPED_SUBSTATUS
+                    and substatus in _ML_CONFIRMED_SHIPPED_SUBSTATUS
                 ):
                     shipped[int(o.bling_id)] = _iso_to_brt_date(
                         ship_data.get("last_updated") or ship_data.get("date_created")
