@@ -92,6 +92,13 @@ const CONDICOES_PRODUTO = [
   'Trocado',
 ] as const
 
+const TECNICOS = [
+  'SmarPlay',
+  'Bogota',
+  'Shark',
+  'Cybercell',
+] as const
+
 const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
 
@@ -501,7 +508,10 @@ async function saveRow(row: DevolutionRow) {
                 <input v-model.number="draft.custo_manutencao" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model="draft.tecnico" :class="sheetInputClass" />
+                <select v-model="draft.tecnico" :class="sheetSelectClass">
+                  <option value="">—</option>
+                  <option v-for="t in TECNICOS" :key="t" :value="t">{{ t }}</option>
+                </select>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input v-model="draft.devolver_estoque" :class="sheetInputClass" />
@@ -664,13 +674,19 @@ async function saveRow(row: DevolutionRow) {
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <input
+              <select
                 :value="row.tecnico || ''"
                 :disabled="!canEdit"
-                :class="sheetInputClass"
-                @input="(e) => setRowText(row, 'tecnico', (e.target as HTMLInputElement).value)"
-                @blur="saveRow(row)"
-              />
+                :class="sheetSelectClass"
+                @change="(e) => { setRowText(row, 'tecnico', (e.target as HTMLSelectElement).value); saveRow(row) }"
+              >
+                <option value="">—</option>
+                <option v-for="t in TECNICOS" :key="t" :value="t">{{ t }}</option>
+                <option
+                  v-if="row.tecnico && !(TECNICOS as readonly string[]).includes(row.tecnico)"
+                  :value="row.tecnico"
+                >{{ row.tecnico }}</option>
+              </select>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input
