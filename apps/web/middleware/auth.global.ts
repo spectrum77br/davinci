@@ -24,15 +24,26 @@ export default defineNuxtRouteMiddleware(async (to) => {
   }
 
   // Operador de estoque: role != admin AND at least one stock_tag set
-  // → locked to /controle-estoque. Any other route bounces back.
-  // The sidebar also hides every other item for these users, but the
-  // guard is the authoritative line — a typed URL or stale bookmark
-  // still gets caught here.
+  // AND no other resource granted via permissions. The lock is meant
+  // for "pure operators" — ground-floor users who only ever see the
+  // /controle-estoque planilha. The moment the admin grants ANY other
+  // permission (margem.view, tabela_precos.view, etc.) the user
+  // becomes a supervisor and the lock no longer applies — they get
+  // their tags inside /controle-estoque AND can navigate to the other
+  // granted pages. The sidebar mirrors this decision so the menu also
+  // expands for supervisors (see isOperator in AppSidebar.vue).
+  const perms = (auth.user?.permissions ?? {}) as Record<string, { view?: boolean; edit?: boolean; delete?: boolean } | undefined>
+  const hasOtherGrant = Object.entries(perms).some(
+    ([key, val]) =>
+      key !== 'controle_estoque'
+      && Boolean(val?.view || val?.edit || val?.delete),
+  )
   if (
     auth.isAuthenticated
     && auth.user?.status === 'active'
     && auth.user.role !== 'admin'
     && (auth.user.stock_tags?.length ?? 0) > 0
+    && !hasOtherGrant
     && to.path !== '/controle-estoque'
     && !to.path.startsWith('/login')
   ) {
