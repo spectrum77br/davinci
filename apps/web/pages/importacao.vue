@@ -743,7 +743,12 @@ async function removeCotProduto(prod: CotProduto) {
         </button>
       </div>
 
-      <div class="border rounded-md overflow-x-auto">
+      <!-- max-height + overflow:auto cria um container de scroll próprio
+           pra tabela. Sem isso, position:sticky nas células do cabeçalho
+           não tem âncora (overflow-x:auto sozinho não estabelece um
+           contexto de scroll vertical funcional). 100vh − 220px deixa
+           espaço pro header da página + barra de parâmetros. -->
+      <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 220px)">
         <table class="grid-table w-full text-xs border-collapse">
           <thead>
             <!-- 8-row header. Fixed left columns use rowspan=8 so their
@@ -755,23 +760,26 @@ async function removeCotProduto(prod: CotProduto) {
                  the per-cell inputs in tbody. Mirrors the operator's
                  Excel layout 1:1. -->
             <tr>
-              <!-- Widths fixados pra evitar que SKU/cor fiquem espremidos
-                   pelas colunas numéricas. `col-head` aplica position:sticky
-                   top:0 (mantém o cabeçalho visível ao rolar pra baixo). -->
-              <th rowspan="8" class="col-head text-left" style="min-width: 90px">fornecedor</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 90px">modelo china</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 70px">cor china</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 78px">fechamento</th>
+              <!-- min-widths fixados pra: SKU/cor confortáveis, e as
+                   colunas numéricas estreitas o suficiente pra caber
+                   as palavras inteiras (sem quebrar "memória" em
+                   "memóri/a"). Ordem: começa em fornecedor, palavras
+                   curtas (até ~7 chars) → 60-66px; "reposição"/"saldo"
+                   → 72-76px. -->
+              <th rowspan="8" class="col-head text-left" style="min-width: 96px">fornecedor</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 96px">modelo china</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 72px">cor china</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 80px">fechamento</th>
               <th rowspan="8" class="col-head text-center" style="min-width: 44px">TSA</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 95px">modelo bling</th>
+              <th rowspan="8" class="col-head text-left" style="min-width: 100px">modelo bling</th>
               <th rowspan="8" class="col-head text-left" style="min-width: 130px">sku</th>
               <th rowspan="8" class="col-head text-left" style="min-width: 130px">cor</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 64px; max-width: 72px">custo bling</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 56px; max-width: 64px">estoque bling</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 56px; max-width: 64px">consumo diário</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 56px; max-width: 64px">memória consumo</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 60px; max-width: 68px">reposição estoque</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 60px; max-width: 68px">saldo reposição</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 60px">custo bling</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 66px">estoque bling</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 66px">consumo diário</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 70px">memória consumo</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 76px">reposição estoque</th>
+              <th rowspan="8" class="col-head text-right" style="min-width: 76px">saldo reposição</th>
               <th rowspan="8" class="col-head text-left" style="min-width: 140px">nome gerado</th>
               <th rowspan="8" class="col-head text-left" style="min-width: 100px">obs</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
@@ -1297,8 +1305,13 @@ async function removeCotProduto(prod: CotProduto) {
   font-weight: 600;
   background: hsl(var(--muted));
   padding: 4px;
+  /* Quebra só em espaços (entre palavras), nunca no meio.
+   * `word-break: break-word` foi removido — não-padrão, quebrava
+   * "memória" em "memóri/a". */
   white-space: normal;
-  word-break: break-word;
+  word-break: normal;
+  overflow-wrap: normal;
+  line-height: 1.15;
   /* Sticky vertical — mantém o cabeçalho visível ao rolar pra baixo.
    * Aplicado só nas colunas com rowspan=8 (fornecedor..obs + bling +
    * ações), que é o que o operador pediu ("só até obs"). As linhas
