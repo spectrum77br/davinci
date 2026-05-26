@@ -238,6 +238,12 @@ def _row_from_item(
         "categoria_nome": categoria_nome,
         "nome_destinatario": _contato.get("nome") or None,
         "cep_destino": _endereco.get("cep") or None,
+        "endereco_destino": _endereco.get("endereco") or None,
+        "numero_destino": _endereco.get("numero") or None,
+        "complemento_destino": _endereco.get("complemento") or None,
+        "bairro_destino": _endereco.get("bairro") or None,
+        "cidade_destino": _endereco.get("municipio") or None,
+        "uf_destino": _endereco.get("uf") or None,
     }
 
 
@@ -430,8 +436,21 @@ async def upsert_order(
                 _en = _tp.get("enderecoEntrega") or {}
                 if isinstance(_ct, dict) and _ct.get("nome"):
                     values["nome_destinatario"] = _ct["nome"]
-                if isinstance(_en, dict) and _en.get("cep"):
-                    values["cep_destino"] = _en["cep"]
+                if isinstance(_en, dict):
+                    if _en.get("cep"):
+                        values["cep_destino"] = _en["cep"]
+                    if _en.get("endereco"):
+                        values["endereco_destino"] = _en["endereco"]
+                    if _en.get("numero"):
+                        values["numero_destino"] = _en["numero"]
+                    if _en.get("complemento"):
+                        values["complemento_destino"] = _en["complemento"]
+                    if _en.get("bairro"):
+                        values["bairro_destino"] = _en["bairro"]
+                    if _en.get("municipio"):
+                        values["cidade_destino"] = _en["municipio"]
+                    if _en.get("uf"):
+                        values["uf_destino"] = _en["uf"]
             await session.execute(
                 update(BlingOrder)
                 .where(BlingOrder.bling_id == bling_id)

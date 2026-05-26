@@ -130,3 +130,9 @@ class DevolutionLookupOut(BaseModel):
     custo_produto: float | None = None
     nome_destinatario: str | None = None
     cep_destino: str | None = None
+    endereco_destino: str | None = None
+    numero_destino: str | None = None
+    complemento_destino: str | None = None
+    bairro_destino: str | None = None
+    cidade_destino: str | None = None
+    uf_destino: str | None = None

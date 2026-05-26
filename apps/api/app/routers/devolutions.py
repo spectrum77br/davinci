@@ -98,7 +98,13 @@ async def lookup_devolution_order(
                     string_agg(DISTINCT v.produto, ' | ' ORDER BY v.produto) AS produtos,
                     SUM(COALESCE(bo.preco_custo::numeric, 0) * COALESCE(v.quantidade, 1))::double precision AS custo_produto,
                     MAX(v.nome_destinatario) AS nome_destinatario,
-                    MAX(v.cep_destino) AS cep_destino
+                    MAX(v.cep_destino) AS cep_destino,
+                    MAX(v.endereco_destino) AS endereco_destino,
+                    MAX(v.numero_destino) AS numero_destino,
+                    MAX(v.complemento_destino) AS complemento_destino,
+                    MAX(v.bairro_destino) AS bairro_destino,
+                    MAX(v.cidade_destino) AS cidade_destino,
+                    MAX(v.uf_destino) AS uf_destino
                 FROM "{SCHEMA}".vw_devolucoes v
                 LEFT JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
                 WHERE (
