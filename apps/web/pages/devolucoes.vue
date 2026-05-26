@@ -9,9 +9,7 @@ import {
   Package,
   Plus,
   RotateCcw,
-  Save,
   Search,
-  Trash2,
   Undo2,
   X,
 } from 'lucide-vue-next'
@@ -96,7 +94,6 @@ const CONDICOES_PRODUTO = [
 
 const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
-const canDelete = useCan('devolucoes', 'delete')
 
 const items = ref<DevolutionRow[]>([])
 const total = ref(0)
@@ -117,7 +114,6 @@ const draft = ref<DevolutionDraft | null>(null)
 
 const dirtyRows = ref<Set<string>>(new Set())
 const savingRows = ref<Set<string>>(new Set())
-const deletingRows = ref<Set<string>>(new Set())
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 const rangeStart = computed(() => total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1)
@@ -179,13 +175,6 @@ function setSaving(id: string, v: boolean) {
   savingRows.value = next
 }
 function isSaving(id: string) { return savingRows.value.has(id) }
-function setDeleting(id: string, v: boolean) {
-  const next = new Set(deletingRows.value)
-  if (v) next.add(id); else next.delete(id)
-  deletingRows.value = next
-}
-function isDeleting(id: string) { return deletingRows.value.has(id) }
-
 function numberOrNull(value: string) {
   if (value === '') return null
   const parsed = Number(value)
@@ -363,22 +352,6 @@ async function saveRow(row: DevolutionRow) {
   }
 }
 
-async function deleteRow(row: DevolutionRow) {
-  if (!canDelete.value || isDeleting(row.id)) return
-  const ok = window.confirm(`Excluir devolução do pedido ${row.pedido_bling || row.pedido_marketplace || row.id}?`)
-  if (!ok) return
-  setDeleting(row.id, true)
-  error.value = null
-  try {
-    await api(`/api/devolutions/${encodeURIComponent(row.id)}`, { method: 'DELETE' })
-    items.value = items.value.filter((i) => i.id !== row.id)
-    total.value = Math.max(0, total.value - 1)
-  } catch (e: any) {
-    error.value = apiError(e)
-  } finally {
-    setDeleting(row.id, false)
-  }
-}
 </script>
 
 <template>
@@ -566,13 +539,12 @@ async function deleteRow(row: DevolutionRow) {
     </div>
 
     <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
-      <table class="min-w-[1820px] text-xs border-collapse">
+      <table class="min-w-[1725px] text-xs border-collapse">
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="6">Identificação</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="8">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
-            <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Ações</th>
           </tr>
           <tr class="border-b">
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data</th>
@@ -590,18 +562,17 @@ async function deleteRow(row: DevolutionRow) {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Dev. estoque</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] border-l-[3px] border-gray-400 dark:border-gray-600"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="16" class="py-8 text-center text-muted-foreground">
+            <td colspan="15" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td colspan="16" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td colspan="15" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -618,6 +589,7 @@ async function deleteRow(row: DevolutionRow) {
                 step="0.01"
                 :class="sheetMoneyInputClass"
                 @input="(e) => setRowNumber(row, 'custo_produto', (e.target as HTMLInputElement).value)"
+                @blur="saveRow(row)"
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -625,7 +597,7 @@ async function deleteRow(row: DevolutionRow) {
                 :value="row.condicao_produto || ''"
                 :disabled="!canEdit"
                 :class="sheetSelectClass"
-                @change="(e) => setRowText(row, 'condicao_produto', (e.target as HTMLSelectElement).value)"
+                @change="(e) => { setRowText(row, 'condicao_produto', (e.target as HTMLSelectElement).value); saveRow(row) }"
               >
                 <option value="">—</option>
                 <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
@@ -642,6 +614,7 @@ async function deleteRow(row: DevolutionRow) {
                   :disabled="!canEdit"
                   :class="sheetInputClass"
                   @input="(e) => setRowText(row, 'link_abertura', (e.target as HTMLInputElement).value)"
+                  @blur="saveRow(row)"
                 />
                 <a
                   v-if="row.link_abertura"
@@ -661,7 +634,7 @@ async function deleteRow(row: DevolutionRow) {
                 :disabled="!canEdit"
                 type="checkbox"
                 class="size-4 rounded border accent-primary disabled:cursor-default disabled:opacity-70"
-                @change="(e) => setRowReembolso(row, (e.target as HTMLInputElement).checked)"
+                @change="(e) => { setRowReembolso(row, (e.target as HTMLInputElement).checked); saveRow(row) }"
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -669,7 +642,7 @@ async function deleteRow(row: DevolutionRow) {
                 :value="row.motivo_devolucao || ''"
                 :disabled="!canEdit"
                 :class="sheetSelectClass"
-                @change="(e) => setRowText(row, 'motivo_devolucao', (e.target as HTMLSelectElement).value)"
+                @change="(e) => { setRowText(row, 'motivo_devolucao', (e.target as HTMLSelectElement).value); saveRow(row) }"
               >
                 <option value="">—</option>
                 <option v-for="m in MOTIVOS_DEVOLUCAO" :key="m" :value="m">{{ m }}</option>
@@ -687,6 +660,7 @@ async function deleteRow(row: DevolutionRow) {
                 step="0.01"
                 :class="sheetMoneyInputClass"
                 @input="(e) => setRowNumber(row, 'custo_manutencao', (e.target as HTMLInputElement).value)"
+                @blur="saveRow(row)"
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -695,6 +669,7 @@ async function deleteRow(row: DevolutionRow) {
                 :disabled="!canEdit"
                 :class="sheetInputClass"
                 @input="(e) => setRowText(row, 'tecnico', (e.target as HTMLInputElement).value)"
+                @blur="saveRow(row)"
               />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -703,6 +678,7 @@ async function deleteRow(row: DevolutionRow) {
                 :disabled="!canEdit"
                 :class="sheetInputClass"
                 @input="(e) => setRowText(row, 'devolver_estoque', (e.target as HTMLInputElement).value)"
+                @blur="saveRow(row)"
               />
             </td>
             <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
@@ -711,32 +687,8 @@ async function deleteRow(row: DevolutionRow) {
                 :disabled="!canEdit"
                 :class="sheetInputClass"
                 @input="(e) => setRowText(row, 'observacao', (e.target as HTMLInputElement).value)"
+                @blur="saveRow(row)"
               />
-            </td>
-            <td class="px-2 py-1 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <div class="flex items-center justify-end gap-1">
-                <button
-                  type="button"
-                  class="inline-flex h-7 w-7 items-center justify-center rounded border text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-default disabled:opacity-40"
-                  :disabled="!canEdit || !hasDirty(row.id) || isSaving(row.id)"
-                  title="Salvar"
-                  @click="saveRow(row)"
-                >
-                  <Loader2 v-if="isSaving(row.id)" class="size-4 animate-spin" />
-                  <Save v-else class="size-4" />
-                </button>
-                <button
-                  v-if="canDelete"
-                  type="button"
-                  class="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-red-500/10 hover:text-red-500 disabled:cursor-default disabled:opacity-40"
-                  :disabled="isDeleting(row.id)"
-                  title="Excluir"
-                  @click="deleteRow(row)"
-                >
-                  <Loader2 v-if="isDeleting(row.id)" class="size-4 animate-spin" />
-                  <Trash2 v-else class="size-4" />
-                </button>
-              </div>
             </td>
           </tr>
         </tbody>
