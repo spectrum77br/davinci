@@ -71,9 +71,13 @@ class ImportProductOut(ImportProductBase):
     # the response so the frontend grid can show the canonical display
     # name without duplicating the rule. Always recomputed (never stored).
     nome_gerado: str = ""
-    # Bling sync intent — see model for state machine.
+    # Bling sync state — see model for state machine.
     bling_sync_status: str | None = None
     bling_sync_marked_at: datetime | None = None
+    bling_product_id: int | None = None
+    bling_sync_error: str | None = None
+    bling_sync_attempted_at: datetime | None = None
+    bling_sync_done_at: datetime | None = None
     # Quantities keyed by lote_id (str) → quantity. The frontend uses
     # this to render dynamic per-lote columns without needing a second
     # request per row.

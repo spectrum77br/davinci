@@ -65,6 +65,10 @@ type Product = {
   nome_gerado: string
   bling_sync_status: string | null
   bling_sync_marked_at: string | null
+  bling_product_id: number | null
+  bling_sync_error: string | null
+  bling_sync_attempted_at: string | null
+  bling_sync_done_at: string | null
   lote_quantidades: Record<string, number>
 }
 type Lote = {
@@ -842,8 +846,27 @@ watch([() => tab.value, kitMarkMap], () => {
     kitPollHandle = null
   }
 }, { deep: true })
+
+// Polling análogo na aba Mala: refresh do grid a cada 10s enquanto
+// houver produtos com bling_sync_status='pending'. Para automaticamente
+// quando todos viram 'sent'/'error'.
+let malaPollHandle: ReturnType<typeof setInterval> | null = null
+function hasPendingMalaProducts(): boolean {
+  return products.value.some((p) => p.bling_sync_status === 'pending')
+}
+watch([() => tab.value, products], () => {
+  const shouldPoll = tab.value === 'mala' && hasPendingMalaProducts()
+  if (shouldPoll && !malaPollHandle) {
+    malaPollHandle = setInterval(() => { void loadProductsOnly() }, 10_000)
+  } else if (!shouldPoll && malaPollHandle) {
+    clearInterval(malaPollHandle)
+    malaPollHandle = null
+  }
+}, { deep: true })
+
 onScopeDispose(() => {
   if (kitPollHandle) clearInterval(kitPollHandle)
+  if (malaPollHandle) clearInterval(malaPollHandle)
 })
 </script>
 
@@ -1138,13 +1161,13 @@ onScopeDispose(() => {
                     'bg-emerald-50 text-emerald-700 border-emerald-300': row.bling_sync_status === 'sent',
                     'bg-red-50 text-red-700 border-red-300': row.bling_sync_status === 'error',
                   }"
-                  :title="row.bling_sync_status === 'pending'
-                    ? `Pendente desde ${row.bling_sync_marked_at ?? ''} — aguardando integração de escrita do Bling`
-                    : row.bling_sync_status === 'sent'
-                      ? 'Já criado no Bling'
+                  :title="row.bling_sync_status === 'sent'
+                    ? `Bling id ${row.bling_product_id ?? '?'} (enviado em ${row.bling_sync_done_at?.slice(0, 16) ?? ''})`
+                    : row.bling_sync_status === 'pending'
+                      ? 'Aguardando worker criar no Bling…'
                       : row.bling_sync_status === 'error'
-                        ? 'Falha no último envio'
-                        : 'Marcar como pronto para enviar ao Bling (a integração de escrita ainda não existe)'"
+                        ? `Erro: ${row.bling_sync_error ?? 'desconhecido'} — clique pra reenviar`
+                        : 'Criar produto no Bling (categoria mala)'"
                   @click="sendToBling(row)"
                 >
                   <Clock v-if="row.bling_sync_status === 'pending'" class="size-3" />
@@ -1153,7 +1176,7 @@ onScopeDispose(() => {
                   <span>{{
                     row.bling_sync_status === 'pending' ? 'Pendente'
                     : row.bling_sync_status === 'sent' ? 'Enviado'
-                    : row.bling_sync_status === 'error' ? 'Erro'
+                    : row.bling_sync_status === 'error' ? 'Erro ↻'
                     : 'Enviar'
                   }}</span>
                 </button>
@@ -1509,11 +1532,11 @@ onScopeDispose(() => {
           <!-- Metadados Bling — fixos pela regra de negócio (planilha-mãe). -->
           <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs space-y-1">
             <div class="font-semibold">Metadados Bling (fixos)</div>
-            <div>categoria: <code>mala</code> · tag: <code>mala</code></div>
+            <div>categoria: <code>mala</code> · formato: <code>Simples</code></div>
             <div class="text-muted-foreground">
-              Esses valores são gravados automaticamente ao enviar o produto pro Bling.
-              A integração de escrita ainda não foi implementada — o botão "Enviar pro Bling"
-              apenas marca o produto como <em>pendente</em> de sincronização.
+              Ao clicar "Enviar pro Bling" o produto é criado no Bling
+              (formato Simples, categoria <code>mala</code>) e fica disponível
+              como componente para kits. Preço de venda continua manual no Bling.
             </div>
           </div>
         </div>

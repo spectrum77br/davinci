@@ -334,6 +334,10 @@ async def list_products(
             nome_gerado=generate_mala_name(p.modelo_bling, p.sku, p.cor),
             bling_sync_status=p.bling_sync_status,
             bling_sync_marked_at=p.bling_sync_marked_at,
+            bling_product_id=p.bling_product_id,
+            bling_sync_error=p.bling_sync_error,
+            bling_sync_attempted_at=p.bling_sync_attempted_at,
+            bling_sync_done_at=p.bling_sync_done_at,
             lote_quantidades=qty_by_pair.get(p.id, {}),
             created_at=p.created_at, updated_at=p.updated_at,
         ))
@@ -361,6 +365,10 @@ async def create_product(
         nome_gerado=generate_mala_name(row.modelo_bling, row.sku, row.cor),
         bling_sync_status=row.bling_sync_status,
         bling_sync_marked_at=row.bling_sync_marked_at,
+        bling_product_id=row.bling_product_id,
+        bling_sync_error=row.bling_sync_error,
+        bling_sync_attempted_at=row.bling_sync_attempted_at,
+        bling_sync_done_at=row.bling_sync_done_at,
         lote_quantidades={},
         created_at=row.created_at, updated_at=row.updated_at,
     )
@@ -391,6 +399,10 @@ async def patch_product(
         nome_gerado=generate_mala_name(row.modelo_bling, row.sku, row.cor),
         bling_sync_status=row.bling_sync_status,
         bling_sync_marked_at=row.bling_sync_marked_at,
+        bling_product_id=row.bling_product_id,
+        bling_sync_error=row.bling_sync_error,
+        bling_sync_attempted_at=row.bling_sync_attempted_at,
+        bling_sync_done_at=row.bling_sync_done_at,
         lote_quantidades={},
         created_at=row.created_at, updated_at=row.updated_at,
     )
@@ -406,41 +418,42 @@ async def sync_product_to_bling(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
 ) -> ImportProductOut:
-    """Marks the product as pending Bling sync.
-
-    Per the operator spec the canonical metadata is:
+    """Enfileira criação real do produto no Bling. Worker em
+    `app.services.import_product_bling_create`:
       * nome:      generate_mala_name(modelo_bling, sku, cor)
-      * categoria: 'mala'
-      * tag:       'mala'
-      * custo:     row.custo_bling
+      * categoria: 'mala' (via find_or_create_category)
+      * custo:     row.custo_bling (preço de venda NÃO é enviado —
+                   operador define no Bling)
+      * formato:   'S' (simples)
+    Após sucesso, cria Product local linkado pelo bling_product_id
+    pra que kits possam usar como componente.
 
-    TODO(bling-write-integration): BlingClient has no `create_product`
-    method yet — only reads + stock/price/situacao updates. When that
-    arrives, replace the status='pending' bookkeeping below with the
-    real POST /produtos call and flip to 'sent'/'error' based on the
-    response. The 'pending' rows queued here are the work-list for that
-    future worker.
+    Idempotente: worker pula se bling_product_id já preenchido.
     """
     row = await session.get(ImportProduct, row_id)
     if row is None:
         raise HTTPException(404, detail={"code": "product_not_found"})
 
+    # Reseta estado de erro anterior (operador pode clicar de novo
+    # após corrigir SKU inválido, falta de integration, etc).
+    now = datetime.now(UTC)
     row.bling_sync_status = "pending"
-    row.bling_sync_marked_at = datetime.now(UTC)
+    row.bling_sync_marked_at = now
+    row.bling_sync_attempted_at = now
+    row.bling_sync_error = None
     await session.commit()
     await session.refresh(row)
 
-    nome = generate_mala_name(row.modelo_bling, row.sku, row.cor)
-    logger.info(
-        "importacao_bling_sync_marked",
-        product_id=str(row.id),
-        sku=row.sku,
-        nome=nome,
-        categoria="mala",
-        tag="mala",
-        custo=str(row.custo_bling),
-    )
+    try:
+        pool = await get_arq_pool()
+        await pool.enqueue_job("sync_import_product_to_bling_job", str(row.id))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "import_product_enqueue_failed",
+            product_id=str(row.id), err=str(e)[:200],
+        )
 
+    nome = generate_mala_name(row.modelo_bling, row.sku, row.cor)
     return ImportProductOut(
         id=row.id,
         fornecedor=row.fornecedor, modelo_china=row.modelo_china, cor_china=row.cor_china,
@@ -452,6 +465,10 @@ async def sync_product_to_bling(
         nome_gerado=nome,
         bling_sync_status=row.bling_sync_status,
         bling_sync_marked_at=row.bling_sync_marked_at,
+        bling_product_id=row.bling_product_id,
+        bling_sync_error=row.bling_sync_error,
+        bling_sync_attempted_at=row.bling_sync_attempted_at,
+        bling_sync_done_at=row.bling_sync_done_at,
         lote_quantidades={},
         created_at=row.created_at, updated_at=row.updated_at,
     )

@@ -63,13 +63,21 @@ class ImportProduct(Base, TimestampMixin):
     consumo_diario: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     maior_media_30d: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Bling sync intent — NULL = never marked, 'pending' = operator clicked
-    # "Enviar pro Bling" (awaiting worker), 'sent' = created in Bling,
-    # 'error' = last attempt failed. The actual Bling write integration
-    # doesn't exist yet (BlingClient has no create_product); this column
-    # just persists the intent so a future worker can pick it up.
+    # Bling sync state — NULL = never marked, 'pending' = operator
+    # clicked "Enviar pro Bling" (worker enfileirado), 'sent' = produto
+    # simples criado no Bling com sucesso, 'error' = última tentativa
+    # falhou. Worker em `app.services.import_product_bling_create`.
     bling_sync_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     bling_sync_marked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    # Fase real (migration 0102): rastreio completo do ciclo.
+    bling_product_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    bling_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bling_sync_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    bling_sync_done_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
 
