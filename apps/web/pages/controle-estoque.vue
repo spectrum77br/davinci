@@ -582,6 +582,46 @@ const pedidosFiltered = computed(() => {
   )
 })
 
+// Pedidos distintos (não linhas) — `bling_orders` é multi-row por pedido
+// (uma linha por item), então `pedidosFiltered.length` conta itens.
+// O operador quer ver número de pedidos.
+const totalPedidos = computed(() =>
+  new Set(
+    pedidosFiltered.value.map((p) => p.pedido_bling).filter(Boolean),
+  ).size,
+)
+
+// Ordena por data envio (desc, primário) + pedido_bling (secundário) pra
+// que itens do mesmo pedido fiquem consecutivos. Adiciona meta-flags
+// usadas no render (`_isFirstOfGroup` controla render do número e
+// separador visual entre grupos).
+type PedidoRowWithGroup = PedidoRow & { _isFirstOfGroup: boolean; _groupSize: number }
+const pedidosFilteredGrouped = computed<PedidoRowWithGroup[]>(() => {
+  const sorted = [...pedidosFiltered.value].sort((a, b) => {
+    const da = a.data || ''
+    const db = b.data || ''
+    if (da !== db) return db.localeCompare(da)
+    return (a.pedido_bling || '').localeCompare(b.pedido_bling || '')
+  })
+  const groupSizes = new Map<string, number>()
+  for (const r of sorted) {
+    const key = r.pedido_bling || ''
+    groupSizes.set(key, (groupSizes.get(key) || 0) + 1)
+  }
+  const out: PedidoRowWithGroup[] = []
+  let lastPedido: string | null = null
+  for (const r of sorted) {
+    const isFirst = (r.pedido_bling || '') !== lastPedido
+    out.push({
+      ...r,
+      _isFirstOfGroup: isFirst,
+      _groupSize: groupSizes.get(r.pedido_bling || '') || 1,
+    })
+    lastPedido = r.pedido_bling || null
+  }
+  return out
+})
+
 // Tag extraction from SKU — mirrors the backend rule subset that's
 // derivable from the SKU string alone:
 //   * fake.* prefix      → 'fake'
@@ -906,7 +946,7 @@ async function conferirTodos() {
          extractPedidoTag(). -->
     <div v-if="tab === 'pedidos'" class="flex flex-wrap items-center gap-2 text-xs">
       <span class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-2.5 py-1 font-semibold">
-        Total: {{ pedidosFiltered.length }}
+        Total: {{ totalPedidos }} pedidos
       </span>
       <span
         v-for="bucket in pedidosCountByTag" :key="bucket.tag"
@@ -939,11 +979,16 @@ async function conferirTodos() {
             </td>
           </tr>
           <tr
-            v-for="row in pedidosFiltered" :key="row.id"
+            v-for="(row, idx) in pedidosFilteredGrouped" :key="row.id"
             class="hover:bg-muted/20"
+            :class="{ 'border-t-2 border-t-muted-foreground/30': row._isFirstOfGroup && idx > 0 }"
           >
-            <td class="whitespace-nowrap">{{ row.data ? row.data.slice(0, 10) : '—' }}</td>
-            <td class="font-mono text-[11px]">{{ row.pedido_bling || '—' }}</td>
+            <td class="whitespace-nowrap">
+              {{ row._isFirstOfGroup ? (row.data ? row.data.slice(0, 10) : '—') : '' }}
+            </td>
+            <td class="font-mono text-[11px]" :class="{ 'text-muted-foreground/40': !row._isFirstOfGroup }">
+              {{ row._isFirstOfGroup ? (row.pedido_bling || '—') : '' }}
+            </td>
             <td class="font-mono text-[11px]">{{ row.pedido_marketplace || '—' }}</td>
             <td>{{ row.loja || '—' }}</td>
             <td class="font-mono text-[11px]">{{ row.sku || '—' }}</td>
