@@ -298,19 +298,24 @@ async def lookup_marketplace(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("margem", "view"))],
     pedido: Annotated[str, Query(min_length=1)],
+    force_refresh: bool = Query(False),
 ) -> MargensMarketplacePage:
     """Busca pontual por um numero de pedido (Bling ou marketplace).
 
-    Estrategia em duas camadas:
-      1. Le primeiro do snapshot `verificar_margem` (fast path — coberto
-         pelo cron de 30min + insercoes manuais via hooks de refunds).
-      2. Se o snapshot nao tem o pedido mas ele existe em `bling_orders`,
-         dispara `refresh_for_pedido` (slow path, le da view completa
-         sem janela de 20d) e re-le do snapshot.
+    Fluxo em duas etapas:
+      1. Default (force_refresh=False): le apenas do snapshot
+         `verificar_margem` (fast path, milissegundos). Se vazio mas o
+         pedido existe em `bling_orders`, retorna
+         `historico_disponivel=True` para o frontend exibir um CTA.
+      2. Com force_refresh=True (clique no CTA): dispara
+         `refresh_for_pedido`, que le da view completa
+         `vw_conciliacao_margens_marketplace_all`. A view nao permite
+         pushdown do filtro por causa dos CTEs agregados, entao essa
+         etapa pode levar ~3 minutos.
 
-    Sem o filtro `situacao_nome != 'Cancelado'` aplicado no list — em
-    lookup pontual o usuario quer ver o pedido independente da
-    situacao (inclusive cancelado).
+    Sem o filtro `situacao_nome != 'Cancelado'` — em lookup pontual o
+    usuario quer ver o pedido independente da situacao (inclusive
+    cancelado).
     """
     pedido_clean = pedido.strip()
     if not pedido_clean:
@@ -322,33 +327,32 @@ async def lookup_marketplace(
         _build_marketplace_items_sql(_VERIFICAR_MARGEM_TABLE, where_sql, paginate=False)
     )
 
-    rows = (await session.execute(items_sql, params)).mappings().all()
+    async def _read_snapshot() -> list:
+        return list((await session.execute(items_sql, params)).mappings().all())
+
+    rows = await _read_snapshot()
+    historico_disponivel = False
 
     if not rows:
-        # Snapshot empty for this pedido — check if it exists in bling_orders.
-        # If yes, populate the snapshot from the full view (slow path).
-        exists_in_orders = (await session.execute(
+        bling_numero_row = (await session.execute(
             text(
-                "SELECT 1 FROM davinci.bling_orders "
+                "SELECT numero FROM davinci.bling_orders "
                 "WHERE numero = :p OR numeroloja = :p LIMIT 1"
             ),
             {"p": pedido_clean},
         )).first()
-        if exists_in_orders is not None:
-            # refresh_for_pedido handles bling-number; for marketplace numbers
-            # we resolve to the bling numero first to leverage the existing helper.
-            bling_numero_row = (await session.execute(
-                text(
-                    "SELECT numero FROM davinci.bling_orders "
-                    "WHERE numero = :p OR numeroloja = :p LIMIT 1"
-                ),
-                {"p": pedido_clean},
-            )).first()
-            if bling_numero_row is not None and bling_numero_row[0]:
-                await _refresh_verificar_margem_for_pedido(
-                    session, str(bling_numero_row[0])
-                )
-                rows = (await session.execute(items_sql, params)).mappings().all()
+        bling_numero = (
+            str(bling_numero_row[0]) if bling_numero_row and bling_numero_row[0] else None
+        )
+
+        if force_refresh and bling_numero:
+            # Slow path — opt-in via CTA. Re-reads from the full view
+            # (no 20d window) into the snapshot, then queries again.
+            await _refresh_verificar_margem_for_pedido(session, bling_numero)
+            rows = await _read_snapshot()
+        elif bling_numero:
+            # Snapshot miss but order exists — surface CTA flag.
+            historico_disponivel = True
 
     items = [MargensMarketplaceOut.model_validate(dict(r)) for r in rows]
     return MargensMarketplacePage(
@@ -358,6 +362,7 @@ async def lookup_marketplace(
         offset=0,
         platforms=[],
         contas=[],
+        historico_disponivel=historico_disponivel,
     )
 
 

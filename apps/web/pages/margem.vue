@@ -50,6 +50,7 @@ type PageResponse = {
   offset: number
   platforms: string[]
   contas: string[]
+  historico_disponivel?: boolean
 }
 
 type MargensStatus = 'Pendente' | 'Reprovado' | 'Aprovado'
@@ -97,6 +98,9 @@ type Tab = 'list' | 'lookup'
 const tab = ref<Tab>('list')
 const lookupInput = ref('')
 const lookupTerm = ref('')
+const historicoDisponivel = ref(false)
+const historicoLoading = ref(false)
+const historicoElapsedMs = ref(0)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
@@ -141,28 +145,58 @@ async function load() {
   }
 }
 
-async function lookup() {
+async function lookup(forceRefresh = false) {
   const term = lookupInput.value.trim()
   if (!term) {
     error.value = 'informe o numero do pedido'
     return
   }
-  loading.value = true
   error.value = null
   lookupTerm.value = term
+  historicoDisponivel.value = false
+
+  // Slow-path (force_refresh) gets its own visual state with elapsed timer.
+  // Fast-path (snapshot only) reuses the standard `loading` spinner.
+  let timerHandle: ReturnType<typeof setInterval> | null = null
+  if (forceRefresh) {
+    historicoLoading.value = true
+    historicoElapsedMs.value = 0
+    const started = Date.now()
+    timerHandle = setInterval(() => {
+      historicoElapsedMs.value = Date.now() - started
+    }, 250)
+  } else {
+    loading.value = true
+  }
+
   try {
     const params = new URLSearchParams()
     params.set('pedido', term)
+    if (forceRefresh) params.set('force_refresh', 'true')
     const res = await api<PageResponse>(`/api/margens/marketplace/lookup?${params.toString()}`)
     items.value = res.items
     total.value = res.total
+    historicoDisponivel.value = !!res.historico_disponivel
   } catch (e: any) {
     error.value = apiError(e)
     items.value = []
     total.value = 0
   } finally {
+    if (timerHandle) clearInterval(timerHandle)
     loading.value = false
+    historicoLoading.value = false
   }
+}
+
+function lookupHistorico() {
+  lookup(true)
+}
+
+function fmtElapsed(ms: number) {
+  const s = Math.floor(ms / 1000)
+  const m = Math.floor(s / 60)
+  const rem = s % 60
+  return m > 0 ? `${m}m ${String(rem).padStart(2, '0')}s` : `${s}s`
 }
 
 function switchTab(next: Tab) {
@@ -174,9 +208,11 @@ function switchTab(next: Tab) {
     items.value = []
     total.value = 0
     lookupTerm.value = ''
+    historicoDisponivel.value = false
   } else {
     lookupInput.value = ''
     lookupTerm.value = ''
+    historicoDisponivel.value = false
     page.value = 1
     load()
   }
@@ -520,10 +556,15 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
           v-model="lookupInput"
           class="pl-8 pr-3 py-1.5 text-sm rounded-md border bg-background w-72"
           placeholder="numero do pedido (Bling ou marketplace)"
-          @keydown.enter="lookup"
+          :disabled="historicoLoading"
+          @keydown.enter="lookup(false)"
         />
       </div>
-      <Button size="sm" :disabled="loading || !lookupInput.trim()" @click="lookup">
+      <Button
+        size="sm"
+        :disabled="loading || historicoLoading || !lookupInput.trim()"
+        @click="lookup(false)"
+      >
         <Search class="size-4 mr-1.5" />
         buscar
       </Button>
@@ -533,6 +574,67 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       <span v-else class="text-xs text-muted-foreground">
         digite o numero do pedido e clique em buscar
       </span>
+    </div>
+
+    <!-- Slow-path overlay: only when user opted-in via "buscar no historico" -->
+    <div
+      v-if="historicoLoading"
+      class="rounded-lg border border-amber-500/40 bg-amber-500/5 px-4 py-5"
+    >
+      <div class="flex items-start gap-4">
+        <svg
+          class="size-10 shrink-0 animate-spin text-amber-500"
+          viewBox="0 0 24 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-opacity="0.25" stroke-width="3" />
+          <path
+            d="M22 12a10 10 0 0 1-10 10"
+            stroke="currentColor"
+            stroke-width="3"
+            stroke-linecap="round"
+          />
+        </svg>
+        <div class="flex-1">
+          <div class="text-sm font-medium text-amber-700 dark:text-amber-300">
+            Buscando pedido <span class="font-mono">{{ lookupTerm }}</span> no historico…
+          </div>
+          <p class="mt-1 text-xs text-muted-foreground">
+            A view de conciliacao precisa materializar todos os pedidos antes
+            de filtrar, entao essa busca pode levar varios minutos. Pode deixar
+            essa aba aberta — o resultado aparece assim que terminar.
+          </p>
+          <div class="mt-2 text-xs font-mono tabular-nums text-amber-700 dark:text-amber-300">
+            {{ fmtElapsed(historicoElapsedMs) }} decorrido
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Snapshot miss + CTA to opt-in to slow path -->
+    <div
+      v-else-if="tab === 'lookup' && historicoDisponivel && !items.length"
+      class="rounded-lg border border-blue-500/40 bg-blue-500/5 px-4 py-4"
+    >
+      <div class="flex items-start gap-3">
+        <AlertCircle class="size-5 shrink-0 text-blue-500 mt-0.5" />
+        <div class="flex-1">
+          <div class="text-sm font-medium">
+            Pedido <span class="font-mono">{{ lookupTerm }}</span> nao esta no snapshot recente
+          </div>
+          <p class="mt-1 text-xs text-muted-foreground">
+            O pedido existe no Bling mas esta fora da janela de 20 dias do
+            cache. A busca no historico le a view completa de conciliacao e
+            pode levar varios minutos.
+          </p>
+          <Button size="sm" class="mt-3" @click="lookupHistorico">
+            <Search class="size-4 mr-1.5" />
+            buscar no historico
+          </Button>
+        </div>
+      </div>
     </div>
 
     <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
@@ -587,6 +689,10 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <td colspan="26" class="text-center py-8 text-muted-foreground">
               <template v-if="tab === 'lookup' && !lookupTerm">
                 digite o numero do pedido acima para buscar
+              </template>
+              <template v-else-if="tab === 'lookup' && historicoDisponivel">
+                <!-- a CTA "buscar no historico" ja foi exibida acima -->
+                snapshot vazio para este pedido
               </template>
               <template v-else-if="tab === 'lookup'">
                 nenhum item encontrado para o pedido <span class="font-mono">{{ lookupTerm }}</span>

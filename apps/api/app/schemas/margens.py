@@ -50,6 +50,10 @@ class MargensMarketplacePage(BaseModel):
     offset: int
     platforms: list[str]
     contas: list[str]
+    # Lookup-only: True when snapshot didn't have the pedido but bling_orders
+    # does — frontend offers a "buscar no historico" CTA that re-requests
+    # with force_refresh=true (slow path, ~3min).
+    historico_disponivel: bool = False
 
 
 class MargensMarketplaceOut(BaseModel):
