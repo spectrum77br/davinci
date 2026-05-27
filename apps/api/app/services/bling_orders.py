@@ -14,11 +14,6 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-# em_andamento_data is the operator-facing ship-date column on the
-# planilha. Stamp it in Brasília-local date — without this conversion,
-# orders shipped late evening BRT would land on the next calendar day.
-_BRT = ZoneInfo("America/Sao_Paulo")
-
 import structlog
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,9 +32,19 @@ from app.models import (
     Store,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+
+# Cutoff operacional (< 10h BRT = dia anterior). Webhooks/sync do Bling
+# que chegam de madrugada são quase sempre re-emissão do despacho da
+# véspera — sem o cutoff, esses eventos caem no dia errado da planilha.
+from app.services.marketplace_shipment_check import _operational_ship_date
 from app.services.marketplaces.bling import BlingClient
 from app.services.verificar_margem import refresh_silent as _verificar_margem_refresh_silent
 from app.worker_pool import get_arq_pool
+
+# em_andamento_data is the operator-facing ship-date column on the
+# planilha. Stamp it in Brasília-local date — without this conversion,
+# orders shipped late evening BRT would land on the next calendar day.
+_BRT = ZoneInfo("America/Sao_Paulo")
 
 logger = structlog.get_logger()
 
@@ -183,7 +188,7 @@ def _row_from_item(
     # Bling first then re-fetching the order). Date-only so it survives
     # the day-window queries in /api/estoque/pedidos and /api/estoque/envios.
     em_andamento_data = (
-        datetime.now(UTC).astimezone(_BRT).date() if situacao_id == "15" else None
+        _operational_ship_date(datetime.now(UTC)) if situacao_id == "15" else None
     )
 
     transporte = raw_order.get("transporte") or {}
@@ -445,7 +450,7 @@ async def upsert_order(
             # on this narrow path too. Otherwise webhooks that don't change
             # the item set would leave the field NULL forever.
             if situacao == "15":
-                values["em_andamento_data"] = datetime.now(UTC).astimezone(_BRT).date()
+                values["em_andamento_data"] = _operational_ship_date(datetime.now(UTC))
             # Backfill address data for orders synced before migrations 0088/0094.
             # Prefer transporte.enderecoEntrega; fall back to contato.endereco
             # (Amazon and some other marketplaces omit transporte address).

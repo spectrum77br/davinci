@@ -101,22 +101,43 @@ _ML_CONFIRMED_SHIPPED_SUBSTATUS = {
 # date instead of the day the sweep finally noticed.
 _BRT = ZoneInfo("America/Sao_Paulo")
 
+# Operador publica os despachos perto do meio-dia BRT (raramente
+# antes das 10h). Eventos de "shipped" emitidos pelos marketplaces
+# antes desse horário são quase sempre carrier-scans da madrugada
+# pro pacote despachado na véspera. Atribuímos esses eventos ao DIA
+# OPERACIONAL anterior pra alinhar com a planilha do operador.
+# Mudar este valor é o ponto único de controle — se o padrão de
+# publicação mudar (ex: virar pra manhã), basta ajustar aqui.
+_SHIP_DATE_CUTOFF_HOUR_BRT = 10
+
+
+def _operational_ship_date(ship_dt: datetime) -> date:
+    """Converte um datetime (com tz) em DATA OPERACIONAL.
+
+    Eventos antes do cutoff (BRT) caem no dia anterior, refletindo o
+    workflow do operador (despacho à tarde → carrier-scan na madrugada
+    seguinte = ainda 'do dia anterior' na ótica da operação).
+    """
+    brt_dt = ship_dt.astimezone(_BRT)
+    if brt_dt.hour < _SHIP_DATE_CUTOFF_HOUR_BRT:
+        return (brt_dt - timedelta(days=1)).date()
+    return brt_dt.date()
+
 
 def _shopee_ship_date(update_time: Any) -> date | None:
-    """Convert a Shopee update_time (unix-epoch seconds, UTC) to BRT date."""
+    """Shopee `update_time` (unix epoch UTC) → data operacional BRT."""
     if not update_time:
         return None
     try:
-        return datetime.fromtimestamp(int(update_time), tz=UTC).astimezone(_BRT).date()
+        dt = datetime.fromtimestamp(int(update_time), tz=UTC)
+        return _operational_ship_date(dt)
     except (TypeError, ValueError):
         return None
 
 
 def _iso_to_brt_date(iso_str: Any) -> date | None:
-    """Convert an ISO-8601 timestamp (ML last_updated, Amazon
-    LastUpdateDate, …) to a BRT-localised date. Marketplaces emit
-    "2026-05-23T14:30:00.000-03:00" or Z-suffixed UTC strings;
-    fromisoformat handles both since Python 3.11."""
+    """ISO-8601 (ML last_updated, Amazon LastUpdateDate, …) → data
+    operacional BRT. Aplica o cutoff de _operational_ship_date."""
     if not iso_str:
         return None
     try:
@@ -128,7 +149,7 @@ def _iso_to_brt_date(iso_str: Any) -> date | None:
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
-        return dt.astimezone(_BRT).date()
+        return _operational_ship_date(dt)
     except (TypeError, ValueError):
         return None
 
@@ -229,11 +250,12 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
 
                 # Local stamp — covers every row of this order (multi-item).
                 # Use the marketplace's reported ship-date when present;
-                # fall back to today-in-BRT only when the marketplace
-                # didn't surface a timestamp. The fallback is "best-
-                # available" — without a real date, we'd rather record
-                # the sweep day than leave the field NULL forever.
-                ship_date = real_ship_date or datetime.now(UTC).astimezone(_BRT).date()
+                # fall back to operational-today (BRT, com cutoff
+                # de _operational_ship_date) quando o marketplace não
+                # devolveu timestamp. Antes de 10h BRT a fallback vai
+                # pra ontem — quase certo que é despacho da véspera
+                # detectado na madrugada/cedo da manhã.
+                ship_date = real_ship_date or _operational_ship_date(datetime.now(UTC))
                 result = await session.execute(
                     update(BlingOrder)
                     .where(BlingOrder.bling_id == int(bling_id))
