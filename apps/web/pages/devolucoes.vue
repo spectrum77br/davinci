@@ -414,6 +414,27 @@ async function saveRow(row: DevolutionRow) {
   }
 }
 
+const backfilling = ref(false)
+async function backfillAddresses() {
+  if (!canEdit.value || backfilling.value) return
+  backfilling.value = true
+  try {
+    const res = await api<{ processed: number; updated: number; failed: number; message: string }>(
+      '/api/devolutions/backfill-addresses',
+      { method: 'POST' },
+    )
+    pushToast({
+      kind: res.updated > 0 ? 'success' : 'warning',
+      title: 'Backfill de endereços',
+      lines: [res.message, ...(res.failed > 0 ? [`${res.failed} falhou`] : [])],
+    })
+  } catch (e: any) {
+    pushToast({ kind: 'error', title: 'Erro no backfill', lines: [apiError(e)] })
+  } finally {
+    backfilling.value = false
+  }
+}
+
 </script>
 
 <template>
@@ -423,6 +444,10 @@ async function saveRow(row: DevolutionRow) {
         <Button size="sm" variant="outline" :disabled="loading" @click="load">
           <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
           atualizar
+        </Button>
+        <Button size="sm" variant="outline" :disabled="!canEdit || backfilling" @click="backfillAddresses">
+          <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': backfilling }" />
+          atualizar endereços
         </Button>
         <Button size="sm" :disabled="!canEdit" @click="openAdd">
           <Plus class="size-4 mr-1.5" />

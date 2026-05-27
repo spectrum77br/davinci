@@ -3,13 +3,13 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import desc, func, or_, select, text
+from sqlalchemy import desc, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Devolution, Refund, User
+from app.models import BlingOrder, Devolution, Refund, User
 from app.schemas.devolutions import (
     BlingStockResultOut,
     DevolutionCreate,
@@ -224,6 +224,106 @@ async def patch_devolution(
         if sr is not None:
             out.bling_stock_result = BlingStockResultOut(**sr)
     return out
+
+
+@router.post("/backfill-addresses", status_code=status.HTTP_200_OK)
+async def backfill_addresses(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+    limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    """Re-fetch delivery addresses from Bling for devolution orders that have
+    NULL nome_destinatario. Calls GET /pedidos/vendas/{bling_id} individually.
+    Returns counts of processed / updated / failed records.
+    """
+    from app.services.devolution_stock_return import _get_bling_client
+
+    _SITUACOES = ("83957", "83960", "83961", "83966")
+
+    # Find orders that need backfill
+    rows = (
+        await session.execute(
+            select(BlingOrder.id, BlingOrder.bling_id, BlingOrder.numero)
+            .where(
+                BlingOrder.situacao.in_(_SITUACOES),
+                BlingOrder.nome_destinatario.is_(None),
+                BlingOrder.bling_id.is_not(None),
+            )
+            .order_by(desc(BlingOrder.data))
+            .limit(limit)
+        )
+    ).all()
+
+    if not rows:
+        return {"processed": 0, "updated": 0, "failed": 0, "message": "Nenhum pedido sem endereço encontrado"}
+
+    client = await _get_bling_client(session)
+    if client is None:
+        raise HTTPException(503, detail={"code": "no_bling_integration"})
+
+    processed = updated = failed = 0
+
+    for row_id, bling_id, numero in rows:
+        processed += 1
+        try:
+            raw = await client.get_order(bling_id)
+            if not raw:
+                failed += 1
+                continue
+
+            # Extract address using same logic as bling_orders.py
+            transporte = raw.get("transporte") or {}
+            transporte = transporte if isinstance(transporte, dict) else {}
+            t_contato = transporte.get("contato") or {}
+            t_contato = t_contato if isinstance(t_contato, dict) else {}
+            t_endereco = transporte.get("enderecoEntrega") or {}
+            t_endereco = t_endereco if isinstance(t_endereco, dict) else {}
+            buyer = raw.get("contato") or {}
+            buyer = buyer if isinstance(buyer, dict) else {}
+            buyer_end = buyer.get("endereco") or {}
+            buyer_end = buyer_end if isinstance(buyer_end, dict) else {}
+
+            def _v(tp_f: str, buyer_f: str | None = None) -> str | None:
+                return t_endereco.get(tp_f) or buyer_end.get(buyer_f or tp_f) or None
+
+            values: dict = {}
+            nome = t_contato.get("nome") or buyer.get("nome") or None
+            if nome:
+                values["nome_destinatario"] = nome
+            for col, tp_f in [
+                ("cep_destino", "cep"),
+                ("endereco_destino", "endereco"),
+                ("numero_destino", "numero"),
+                ("complemento_destino", "complemento"),
+                ("bairro_destino", "bairro"),
+                ("cidade_destino", "municipio"),
+                ("uf_destino", "uf"),
+            ]:
+                val = _v(tp_f)
+                if val:
+                    values[col] = val
+
+            if values:
+                await session.execute(
+                    update(BlingOrder).where(BlingOrder.id == row_id).values(**values)
+                )
+                updated += 1
+                logger.info("devolution_address_backfill_ok", numero=numero, fields=list(values))
+            else:
+                logger.info("devolution_address_backfill_no_data", numero=numero)
+
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            logger.warning("devolution_address_backfill_error", numero=numero, error=str(exc))
+
+    await session.commit()
+    logger.info("devolution_address_backfill_done", processed=processed, updated=updated, failed=failed)
+    return {
+        "processed": processed,
+        "updated": updated,
+        "failed": failed,
+        "message": f"{updated} de {processed} pedidos atualizados com endereço",
+    }
 
 
 @router.delete("/{devolution_id}", status_code=status.HTTP_204_NO_CONTENT)
