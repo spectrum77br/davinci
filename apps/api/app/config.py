@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     bling_redirect_uri: str = ""
     bling_webhook_secret: str = ""
     bling_basic_auth: str = ""
+    # Fornecedor padrão usado pra ancorar precoCusto no POST /produtos.
+    # Bling V3 descarta precoCusto silenciosamente quando fornecedor.id
+    # está vazio — sempre que o sistema cria produto com custo, vincula
+    # ao contato com esse nome (resolvido via /contatos?pesquisa=).
+    bling_default_supplier_name: str = "000000111111111ll"
 
     shopee_partner_id: str = ""
     shopee_partner_key: str = ""

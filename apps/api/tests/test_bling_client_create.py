@@ -43,12 +43,34 @@ async def _capture_post_body(
 
 
 @pytest.mark.asyncio
-async def test_cost_price_sent_inside_fornecedor():
-    """Bling V3 só persiste precoCusto dentro de `fornecedor`."""
+async def test_cost_price_sent_inside_fornecedor_no_supplier():
+    """Sem supplier_id, vai só precoCusto no fornecedor (Bling vai
+    descartar mas o body fica válido)."""
     body = await _capture_post_body(sku="b042.30", name="Mala teste", cost_price=49.0)
     assert body["fornecedor"] == {"precoCusto": 49.0}
     # Top-level NÃO deve existir — Bling ignora e poderia conflitar.
     assert "precoCusto" not in body
+
+
+@pytest.mark.asyncio
+async def test_cost_price_with_supplier_id():
+    """supplier_id + cost_price → fornecedor.{id, precoCusto}.
+    Esse é o único shape que faz Bling V3 persistir o custo."""
+    body = await _capture_post_body(
+        sku="b042.30", name="Mala teste",
+        cost_price=49.0, supplier_id=16980149177,
+    )
+    assert body["fornecedor"] == {"id": 16980149177, "precoCusto": 49.0}
+
+
+@pytest.mark.asyncio
+async def test_supplier_id_alone_does_not_add_fornecedor():
+    """supplier_id sem cost_price NÃO cria fornecedor — precoCusto é o
+    gatilho do bloco."""
+    body = await _capture_post_body(
+        sku="b042.30", name="Mala teste", supplier_id=16980149177,
+    )
+    assert "fornecedor" not in body
 
 
 @pytest.mark.asyncio
@@ -98,7 +120,8 @@ async def test_price_and_cost_can_coexist():
     """price (top-level) = preço de venda;
     fornecedor.precoCusto = preço de custo."""
     body = await _capture_post_body(
-        sku="x", name="y", price=99.9, cost_price=49.0,
+        sku="x", name="y", price=99.9, cost_price=49.0, supplier_id=42,
     )
     assert body["preco"] == 99.9
     assert body["fornecedor"]["precoCusto"] == 49.0
+    assert body["fornecedor"]["id"] == 42

@@ -25,6 +25,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import session_scope
 from app.models import (
     ImportProduct,
@@ -32,6 +33,7 @@ from app.models import (
     IntegrationPlatform,
     Product,
 )
+from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.importacao_naming import generate_mala_name
 from app.services.marketplaces.bling import BlingClient
@@ -41,6 +43,37 @@ logger = structlog.get_logger()
 # Categoria fixa pros produtos criados pela aba Mala. Mesma decisão
 # operacional do kit ("mala kit") — diferenciar simples vs composto.
 _MALA_CATEGORY_NAME = "mala"
+
+# Cache TTL pro contato.id do fornecedor padrão. ID praticamente nunca
+# muda; 24h evita 1 GET /contatos a cada produto criado.
+_SUPPLIER_CACHE_TTL = 86400
+
+
+async def resolve_default_supplier_id(client: BlingClient) -> int | None:
+    """Resolve o contato.id do fornecedor padrão (Settings.
+    bling_default_supplier_name) via Redis-cached lookup. Retorna None
+    se o nome está vazio ou o contato não foi achado — caller decide
+    se loga warning. Bling V3 descarta precoCusto sem fornecedor.id,
+    então sem supplier o custo NÃO persiste."""
+    settings = get_settings()
+    name = settings.bling_default_supplier_name
+    if not name:
+        return None
+    cache_key = f"bling:default_supplier_id:{name}"
+    try:
+        cached = await redis.get(cache_key)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("supplier_cache_read_failed", err=str(e)[:120])
+        cached = None
+    if cached:
+        return int(cached)
+    sid = await client.find_contato_id_by_name(name)
+    if sid is not None:
+        try:
+            await redis.set(cache_key, str(sid), ex=_SUPPLIER_CACHE_TTL)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("supplier_cache_write_failed", err=str(e)[:120])
+    return sid
 
 
 async def _bling_client(
@@ -162,12 +195,24 @@ async def sync_import_product_to_bling(import_product_id: UUID | str) -> dict[st
 
         nome = generate_mala_name(row.modelo_bling, row.sku, row.cor)
 
+        # Fornecedor padrão (anchor de precoCusto). Sem ele Bling
+        # descarta precoCusto silenciosamente.
+        supplier_id = await resolve_default_supplier_id(client)
+        cost_value = float(row.custo_bling) if row.custo_bling else None
+        if cost_value and supplier_id is None:
+            logger.warning(
+                "import_product_sync_no_supplier",
+                id=str(import_product_id), sku=row.sku, custo=str(row.custo_bling),
+                supplier_name=get_settings().bling_default_supplier_name,
+            )
+
         try:
             data = await client.create_product(
                 sku=row.sku,
                 name=nome,
                 price=None,  # preço de VENDA continua manual no Bling
-                cost_price=float(row.custo_bling) if row.custo_bling else None,
+                cost_price=cost_value,
+                supplier_id=supplier_id,
                 category_id=category_id,
                 formato="S",
             )

@@ -75,9 +75,18 @@ async def import_row(db: AsyncSession) -> ImportProduct:
     return row
 
 
-def _install_bling_mock(monkeypatch, *, return_id: int = 99999, raise_exc: Exception | None = None):
+def _install_bling_mock(
+    monkeypatch,
+    *,
+    return_id: int = 99999,
+    raise_exc: Exception | None = None,
+    supplier_id: int | None = 16980149177,
+):
     async def fake_find_or_create_category(self, name):
         return 777
+
+    async def fake_find_contato_id_by_name(self, name):
+        return supplier_id
 
     async def fake_create_product(self, **kwargs):
         if raise_exc is not None:
@@ -86,6 +95,7 @@ def _install_bling_mock(monkeypatch, *, return_id: int = 99999, raise_exc: Excep
 
     from app.services.marketplaces.bling import BlingClient
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_find_or_create_category)
+    monkeypatch.setattr(BlingClient, "find_contato_id_by_name", fake_find_contato_id_by_name)
     monkeypatch.setattr(BlingClient, "create_product", fake_create_product)
 
 
@@ -228,8 +238,13 @@ async def test_passes_correct_payload_to_bling(
         captured["_category_name"] = name
         return 777
 
+    async def fake_supplier(self, name):
+        captured["_supplier_name"] = name
+        return 16980149177
+
     monkeypatch.setattr(BlingClient, "create_product", fake_create)
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
+    monkeypatch.setattr(BlingClient, "find_contato_id_by_name", fake_supplier)
 
     await sync_import_product_to_bling(import_row.id)
 
@@ -239,4 +254,7 @@ async def test_passes_correct_payload_to_bling(
     assert captured["category_id"] == 777
     assert captured["price"] is None  # preço de VENDA continua manual no Bling
     assert captured["cost_price"] == 49.0  # custo é enviado a partir de row.custo_bling
+    # supplier_id pode vir do Redis cache (de teste anterior) OU do
+    # mock fake_supplier — qualquer um dos dois caminhos é válido.
+    assert captured["supplier_id"] == 16980149177
     assert captured["_category_name"] == "mala"

@@ -39,6 +39,7 @@ from app.models import (
     Segment,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.import_product_bling_create import resolve_default_supplier_id
 from app.services.importacao_naming import (
     build_kit_pricing_sku,
     generate_kit_name,
@@ -313,12 +314,22 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
         # soma fica 0 → BlingClient omite precoCusto do payload.
         components_cost = sum(cost for _, _, cost in resolved)
 
+        # Fornecedor padrão — anchor obrigatório pra precoCusto persistir.
+        supplier_id = await resolve_default_supplier_id(client)
+        if components_cost > 0 and supplier_id is None:
+            logger.warning(
+                "kit_sync_no_supplier",
+                mark_id=str(mark_id), sku=kit_sku,
+                components_cost=components_cost,
+            )
+
         # Criar no Bling.
         try:
             data = await client.create_product(
                 sku=kit_sku,
                 name=kit_name,
                 cost_price=components_cost if components_cost > 0 else None,
+                supplier_id=supplier_id,
                 category_id=category_id,
                 formato="E",
                 estrutura=estrutura,

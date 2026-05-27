@@ -184,6 +184,9 @@ def _install_bling_mock(monkeypatch, *, return_id: int = 9999, raise_exc: Except
     async def fake_find_or_create_category(self, name):
         return 555
 
+    async def fake_find_contato_id_by_name(self, name):
+        return 16980149177
+
     async def fake_create_product(self, **kwargs):
         if raise_exc is not None:
             raise raise_exc
@@ -192,6 +195,7 @@ def _install_bling_mock(monkeypatch, *, return_id: int = 9999, raise_exc: Except
 
     from app.services.marketplaces.bling import BlingClient
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_find_or_create_category)
+    monkeypatch.setattr(BlingClient, "find_contato_id_by_name", fake_find_contato_id_by_name)
     monkeypatch.setattr(BlingClient, "create_product", fake_create_product)
 
 

@@ -585,6 +585,7 @@ class BlingClient:
         name: str,
         price: float | None = None,
         cost_price: float | None = None,
+        supplier_id: int | None = None,
         category_id: int | None = None,
         formato: str = "S",
         estrutura: dict | None = None,
@@ -599,9 +600,11 @@ class BlingClient:
           * "E" = Com composição (kit/composto)
 
         `cost_price` envia `precoCusto` dentro de `fornecedor`. Bling
-        V3 silenciosamente descarta `precoCusto` no top-level — só
-        persiste quando dentro do bloco `fornecedor` (verificado em
-        prod com b057.8 em 2026-05-27). Valores 0/None são omitidos.
+        V3 silenciosamente descarta `precoCusto` no top-level — e
+        TAMBÉM descarta quando o bloco `fornecedor` não tem um
+        `id` válido apontando pra um contato real. Por isso o
+        `supplier_id` é obrigatório pra o custo persistir (verificado
+        em prod com b057.8 em 2026-05-27). Valores 0/None são omitidos.
 
         Para composto, `estrutura` deve ter o shape (confirmado via
         SDK AlexandreBellas/bling-erp-api-js, src/entities/produtos):
@@ -625,9 +628,13 @@ class BlingClient:
             body["preco"] = float(price)
         if cost_price is not None and float(cost_price) > 0:
             # Bling V3 só persiste precoCusto quando dentro de `fornecedor`
-            # — top-level é silenciosamente ignorado. Detectado com b057.8
-            # em prod 2026-05-27.
-            body["fornecedor"] = {"precoCusto": float(cost_price)}
+            # COM `id` válido apontando pra um contato real. Sem o id,
+            # o bloco é descartado silenciosamente (detectado com b057.8
+            # em prod 2026-05-27).
+            fornecedor: dict[str, Any] = {"precoCusto": float(cost_price)}
+            if supplier_id:
+                fornecedor["id"] = int(supplier_id)
+            body["fornecedor"] = fornecedor
         if category_id is not None:
             body["categoria"] = {"id": category_id}
         if formato == "E" and estrutura is not None:
@@ -635,6 +642,30 @@ class BlingClient:
         r = await self._request("POST", "/produtos", json=body)
         r.raise_for_status()
         return r.json().get("data") or {}
+
+    async def find_contato_id_by_name(self, name: str) -> int | None:
+        """Resolve o contato.id pelo nome via GET /contatos?pesquisa=<name>.
+        Match exato case-insensitive. Retorna None se não encontrar.
+
+        Bling V3 não tem unique constraint em nome — se houver homônimos,
+        pega o primeiro. Pra o caso de uso atual (fornecedor padrão
+        único anchor de precoCusto), isso é suficiente.
+        """
+        target = (name or "").strip().lower()
+        if not target:
+            return None
+        try:
+            r = await self._request("GET", "/contatos", params={"pesquisa": name})
+            r.raise_for_status()
+            items = r.json().get("data") or []
+            for c in items:
+                if (c.get("nome") or "").strip().lower() == target:
+                    cid = c.get("id")
+                    if cid is not None:
+                        return int(cid)
+            return None
+        except Exception:  # noqa: BLE001
+            return None
 
     async def find_or_create_category(self, name: str) -> int:
         """Resolve category by name (case-insensitive). Creates a new one
