@@ -276,3 +276,16 @@ class ImportKitMark(Base):
     bling_sync_done_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+    # Fase 3 (migration 0101): após o Bling create dar 'sent', criar/
+    # atualizar pricing_product em /pricing/tabela. Agrupa cores do
+    # mesmo modelo×variation em uma só row (sku comma-separated).
+    pricing_product_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("pricing_products.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    pricing_sync_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    pricing_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pricing_sync_done_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )

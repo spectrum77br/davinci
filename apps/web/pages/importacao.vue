@@ -135,6 +135,10 @@ type KitMark = {
   bling_sync_error: string | null
   bling_sync_attempted_at: string | null
   bling_sync_done_at: string | null
+  pricing_product_id: string | null
+  pricing_sync_status: 'pending' | 'sent' | 'error' | null
+  pricing_sync_error: string | null
+  pricing_sync_done_at: string | null
 }
 type KitGrid = { variations: KitVariation[]; bases: KitBase[]; marks: KitMark[] }
 
@@ -726,6 +730,10 @@ async function toggleKitMark(baseId: string, varId: string) {
       bling_sync_error: null,
       bling_sync_attempted_at: null,
       bling_sync_done_at: null,
+      pricing_product_id: null,
+      pricing_sync_status: null,
+      pricing_sync_error: null,
+      pricing_sync_done_at: null,
     }
   }
   try {
@@ -757,12 +765,53 @@ async function resyncKitMark(mark: KitMark) {
   }
 }
 
+async function resyncKitPricing(mark: KitMark) {
+  try {
+    const updated = await api<KitMark>(`/api/importacao/kit/mark/${mark.id}/resync-pricing`, {
+      method: 'POST',
+    })
+    kitMarkMap[kitKey(mark.base_id, mark.variation_id)] = updated
+  } catch (e: any) {
+    errorText.value = `Falha ao reenviar pricing: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
+
 function kitMarkTitle(m: KitMark | undefined): string {
   if (!m) return 'Clique pra marcar'
-  if (m.bling_sync_status === 'sent') return `Bling: enviado (id ${m.bling_product_id})`
-  if (m.bling_sync_status === 'pending') return 'Aguardando envio pro Bling…'
-  if (m.bling_sync_status === 'error') return `Erro: ${m.bling_sync_error ?? 'desconhecido'}`
-  return 'Marcado'
+  const parts: string[] = []
+  if (m.bling_sync_status === 'sent') {
+    parts.push(`Bling: id ${m.bling_product_id}`)
+  } else if (m.bling_sync_status === 'pending') {
+    parts.push('Bling: aguardando…')
+  } else if (m.bling_sync_status === 'error') {
+    parts.push(`Bling erro: ${m.bling_sync_error ?? '?'}`)
+  }
+  if (m.pricing_sync_status === 'sent') {
+    parts.push('Pricing: criado')
+  } else if (m.pricing_sync_status === 'pending') {
+    parts.push('Pricing: aguardando…')
+  } else if (m.pricing_sync_status === 'error') {
+    parts.push(`Pricing erro: ${m.pricing_sync_error ?? '?'}`)
+  }
+  return parts.length > 0 ? parts.join(' | ') : 'Marcado'
+}
+
+// Cor da célula: error em qualquer um vermelho, pending âmbar, sent
+// (ou só Bling sent + pricing null) verde.
+function kitMarkColorClass(m: KitMark | undefined): string {
+  if (!m) return ''
+  if (m.bling_sync_status === 'error' || m.pricing_sync_status === 'error') {
+    return 'kit-mark-error'
+  }
+  if (m.bling_sync_status === 'pending' || m.pricing_sync_status === 'pending') {
+    return 'kit-mark-pending'
+  }
+  return 'kit-mark-sent'
+}
+
+function kitMarkHasError(m: KitMark | undefined): boolean {
+  if (!m) return false
+  return m.bling_sync_status === 'error' || m.pricing_sync_status === 'error'
 }
 
 // Polling leve: se há marks pending, refresh do grid a cada 10s.
@@ -777,7 +826,10 @@ async function reloadKitOnly() {
 }
 function hasPendingKitMarks(): boolean {
   for (const k in kitMarkMap) {
-    if (kitMarkMap[k].bling_sync_status === 'pending') return true
+    const m = kitMarkMap[k]
+    if (m.bling_sync_status === 'pending' || m.pricing_sync_status === 'pending') {
+      return true
+    }
   }
   return false
 }
@@ -1366,20 +1418,23 @@ onScopeDispose(() => {
                 @click="canEdit && toggleKitMark(b.id, v.id)"
               >
                 <template v-if="isKitMarked(b.id, v.id)">
-                  <span
-                    class="kit-mark"
-                    :class="{
-                      'kit-mark-sent': getKitMark(b.id, v.id)?.bling_sync_status === 'sent',
-                      'kit-mark-pending': getKitMark(b.id, v.id)?.bling_sync_status === 'pending',
-                      'kit-mark-error': getKitMark(b.id, v.id)?.bling_sync_status === 'error',
-                    }"
-                  >x</span>
+                  <span class="kit-mark" :class="kitMarkColorClass(getKitMark(b.id, v.id))">x</span>
+                  <!-- Resync (Bling) — visível se Bling status='error'. -->
                   <button
                     v-if="canEdit && getKitMark(b.id, v.id)?.bling_sync_status === 'error'"
                     class="kit-resync"
-                    title="Reenviar pro Bling"
+                    title="Reenviar tudo (Bling + Pricing)"
                     @click.stop="resyncKitMark(getKitMark(b.id, v.id)!)"
                   >↻</button>
+                  <!-- Resync só pricing — Bling ok mas pricing falhou. -->
+                  <button
+                    v-else-if="canEdit
+                      && getKitMark(b.id, v.id)?.bling_sync_status === 'sent'
+                      && getKitMark(b.id, v.id)?.pricing_sync_status === 'error'"
+                    class="kit-resync"
+                    title="Reenviar pricing (Bling já criado)"
+                    @click.stop="resyncKitPricing(getKitMark(b.id, v.id)!)"
+                  >↻ $</button>
                 </template>
               </td>
             </tr>

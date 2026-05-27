@@ -174,6 +174,7 @@ _CLEANUP_TABLES = (
     "pricing_overrides",
     "verificar_margem",
     "pricing_products",
+    "segments",
     "pricing_accounts",
     "audit_dismissed_skus",
     "pricing_push_idempotency",

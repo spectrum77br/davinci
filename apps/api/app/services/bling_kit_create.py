@@ -25,6 +25,7 @@ import httpx
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.db import session_scope
 from app.models import (
@@ -33,10 +34,18 @@ from app.models import (
     ImportKitVariation,
     Integration,
     IntegrationPlatform,
+    PricingProduct,
     Product,
+    Segment,
 )
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services.importacao_naming import generate_kit_name, parse_kit_variation
+from app.services.importacao_naming import (
+    build_kit_pricing_sku,
+    generate_kit_name,
+    kit_pricing_name,
+    kit_pricing_segment_slug,
+    parse_kit_variation,
+)
 from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
@@ -117,6 +126,97 @@ async def _set_mark_error(
     mark.bling_sync_status = "error"
     mark.bling_sync_error = error_msg[:1000]
     mark.bling_sync_attempted_at = datetime.now(UTC)
+    await session.commit()
+
+
+async def _resolve_kit_segment(
+    session: AsyncSession, variation_code: str,
+) -> Segment:
+    """Resolve o Segment correto pra esta variation. Sempre filho de
+    'mala' — query usa join self-FK pra garantir.
+    Erra se o segmento não existir no DB (operacional precisa criar)."""
+    slug = kit_pricing_segment_slug(variation_code)
+    parent = aliased(Segment)
+    seg = (await session.execute(
+        select(Segment)
+        .join(parent, parent.id == Segment.parent_id)
+        .where(Segment.slug == slug, parent.slug == "mala")
+        .limit(1)
+    )).scalar_one_or_none()
+    if seg is None:
+        raise ValueError(f"segment not found: parent=mala, slug={slug!r}")
+    return seg
+
+
+async def _ensure_pricing_product_for_kit(
+    session: AsyncSession,
+    mark: ImportKitMark,
+    base: ImportKitBase,
+    variation: ImportKitVariation,
+    *,
+    owner_user_id: UUID,
+) -> PricingProduct:
+    """Cria ou atualiza pricing_product correspondente ao kit.
+
+    Unicidade lógica: (user_id, name, segment_id). Várias cores da
+    mesma família compartilham uma row, com sku comma-separated.
+
+    Campos não-preenchidos automaticamente (operador faz à mão):
+      * cost_kit1..4
+      * bling_cost_price
+      * description, ean, model
+      * dimensões / dados fiscais
+      * department (NULL — agrupado só por segment_id em mala)
+    """
+    segment = await _resolve_kit_segment(session, variation.code)
+    name = kit_pricing_name(base.modelo_bling, variation.code)
+    new_sku_piece = build_kit_pricing_sku(base.sku_base, variation.code)
+
+    # Lookup existente.
+    existing = (await session.execute(
+        select(PricingProduct).where(
+            PricingProduct.user_id == owner_user_id,
+            PricingProduct.name == name,
+            PricingProduct.segment_id == segment.id,
+        ).limit(1)
+    )).scalar_one_or_none()
+
+    if existing is None:
+        pp = PricingProduct(
+            user_id=owner_user_id,
+            name=name,
+            sku=new_sku_piece,
+            segment_id=segment.id,
+        )
+        session.add(pp)
+        await session.flush()
+        logger.info(
+            "kit_pricing_created",
+            mark_id=str(mark.id), pricing_product_id=str(pp.id),
+            name=name, sku=new_sku_piece, segment=segment.slug,
+        )
+        return pp
+
+    # Já existe — adicionar new_sku_piece se ainda não está lá.
+    pieces = [s.strip() for s in (existing.sku or "").split(",") if s.strip()]
+    if new_sku_piece not in pieces:
+        pieces.append(new_sku_piece)
+        # Mantém ordem de inserção (estável + previsível pra operador).
+        existing.sku = ",".join(pieces)
+        await session.flush()
+        logger.info(
+            "kit_pricing_updated",
+            mark_id=str(mark.id), pricing_product_id=str(existing.id),
+            new_piece=new_sku_piece, total_pieces=len(pieces),
+        )
+    return existing
+
+
+async def _set_pricing_error(
+    session: AsyncSession, mark: ImportKitMark, error_msg: str,
+) -> None:
+    mark.pricing_sync_status = "error"
+    mark.pricing_sync_error = error_msg[:1000]
     await session.commit()
 
 
@@ -243,9 +343,96 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
             sku=kit_sku,
             components=len(resolved),
         )
+
+        # ── Fase 3: criar/atualizar pricing_product ─────────────────
+        # Falha aqui NÃO desfaz o Bling — só registra o erro na mark.
+        # Operador re-tenta via UI (POST /resync-pricing).
+        if mark.pricing_product_id is None:
+            try:
+                pp = await _ensure_pricing_product_for_kit(
+                    session, mark, base, variation,
+                    owner_user_id=integ.user_id,
+                )
+                mark.pricing_product_id = pp.id
+                mark.pricing_sync_status = "sent"
+                mark.pricing_sync_error = None
+                mark.pricing_sync_done_at = datetime.now(UTC)
+                await session.commit()
+            except Exception as e:  # noqa: BLE001
+                await _set_pricing_error(session, mark, f"pricing_sync_failed: {e}")
+                logger.exception(
+                    "kit_pricing_sync_failed",
+                    mark_id=str(mark_id),
+                    bling_product_id=int(new_bling_id),
+                )
+                return {
+                    "ok": True,
+                    "bling_product_id": int(new_bling_id),
+                    "pricing_error": str(e)[:200],
+                }
+
         return {"ok": True, "bling_product_id": int(new_bling_id)}
 
 
 async def create_bling_kit_for_mark_job(ctx: dict, mark_id: str) -> dict[str, Any]:
     """ARQ wrapper. Recebe mark_id como string (JSON-safe)."""
     return await create_bling_kit_for_mark(mark_id)
+
+
+async def retry_pricing_sync_for_mark(mark_id: UUID | str) -> dict[str, Any]:
+    """Re-tenta SÓ a parte de pricing_product, assumindo que o Bling
+    create já foi bem-sucedido. Usado pelo endpoint POST
+    /api/importacao/kit/mark/{id}/resync-pricing — operador pode
+    re-tentar a sync de pricing sem refazer o Bling."""
+    if isinstance(mark_id, str):
+        mark_id = UUID(mark_id)
+
+    async with session_scope() as session:
+        mark = (await session.execute(
+            select(ImportKitMark).where(ImportKitMark.id == mark_id)
+        )).scalar_one_or_none()
+        if mark is None:
+            return {"ok": False, "error": "mark_not_found"}
+        if mark.bling_product_id is None:
+            return {"ok": False, "error": "bling_not_synced_yet"}
+        if mark.pricing_product_id is not None:
+            return {
+                "ok": True,
+                "pricing_product_id": str(mark.pricing_product_id),
+                "skipped": True,
+            }
+
+        base = (await session.execute(
+            select(ImportKitBase).where(ImportKitBase.id == mark.base_id)
+        )).scalar_one_or_none()
+        variation = (await session.execute(
+            select(ImportKitVariation).where(ImportKitVariation.id == mark.variation_id)
+        )).scalar_one_or_none()
+        if base is None or variation is None:
+            return {"ok": False, "error": "base_or_variation_not_found"}
+
+        # Recupera owner_user_id da Integration (mesma fonte da fase 2).
+        integ = (await session.execute(
+            select(Integration)
+            .where(Integration.platform == IntegrationPlatform.BLING)
+            .limit(1)
+        )).scalar_one_or_none()
+        if integ is None:
+            await _set_pricing_error(session, mark, "no_bling_integration_for_user_lookup")
+            return {"ok": False, "error": "no_bling_integration"}
+
+        try:
+            pp = await _ensure_pricing_product_for_kit(
+                session, mark, base, variation,
+                owner_user_id=integ.user_id,
+            )
+            mark.pricing_product_id = pp.id
+            mark.pricing_sync_status = "sent"
+            mark.pricing_sync_error = None
+            mark.pricing_sync_done_at = datetime.now(UTC)
+            await session.commit()
+            return {"ok": True, "pricing_product_id": str(pp.id)}
+        except Exception as e:  # noqa: BLE001
+            await _set_pricing_error(session, mark, f"pricing_sync_failed: {e}")
+            logger.exception("kit_pricing_resync_failed", mark_id=str(mark_id))
+            return {"ok": False, "error": str(e)[:200]}

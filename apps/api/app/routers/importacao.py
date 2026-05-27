@@ -948,18 +948,24 @@ async def resync_kit_mark(
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
 ) -> ImportKitMarkOut:
     """Re-enfileira o job de criação no Bling pra uma mark — usado
-    quando a primeira tentativa falhou (status='error'). Limpa o
-    error/attempt fields e bota status='pending'."""
+    quando a primeira tentativa falhou (status='error'). Também
+    reseta o estado de pricing_sync caso operador queira refazer o
+    ciclo todo. Limpa error/attempt fields."""
     mark = (await session.execute(
         select(ImportKitMark).where(ImportKitMark.id == mark_id)
     )).scalar_one_or_none()
     if mark is None:
         raise HTTPException(404, detail={"code": "mark_not_found"})
     if mark.bling_product_id is not None:
-        # Já sincronizada — nada a fazer.
+        # Bling já criado — nada a fazer aqui. Pra pricing, use o
+        # endpoint /resync-pricing.
         return ImportKitMarkOut.model_validate(mark, from_attributes=True)
     mark.bling_sync_status = "pending"
     mark.bling_sync_error = None
+    # Reset pricing também — pricing depende do bling, então qualquer
+    # estado de pricing anterior fica inconsistente.
+    mark.pricing_sync_status = None
+    mark.pricing_sync_error = None
     await session.commit()
     await session.refresh(mark)
     try:
@@ -968,3 +974,49 @@ async def resync_kit_mark(
     except Exception as e:  # noqa: BLE001
         logger.warning("kit_resync_enqueue_failed", mark_id=str(mark.id), err=str(e)[:200])
     return ImportKitMarkOut.model_validate(mark, from_attributes=True)
+
+
+@router.post(
+    "/kit/mark/{mark_id}/resync-pricing",
+    response_model=ImportKitMarkOut,
+)
+async def resync_kit_pricing(
+    mark_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> ImportKitMarkOut:
+    """Re-tenta SÓ a parte de pricing_product (assume Bling já em
+    'sent'). Útil quando o Bling criou ok mas o pricing falhou e o
+    operador quer re-tentar sem refazer o Bling create."""
+    # Import inline pra evitar circular (router → services → router).
+    from app.services.bling_kit_create import retry_pricing_sync_for_mark
+
+    mark = (await session.execute(
+        select(ImportKitMark).where(ImportKitMark.id == mark_id)
+    )).scalar_one_or_none()
+    if mark is None:
+        raise HTTPException(404, detail={"code": "mark_not_found"})
+    if mark.bling_product_id is None:
+        raise HTTPException(
+            409,
+            detail={"code": "bling_not_synced_yet"},
+        )
+    # Reset pra pending e executa inline (sync rápido — só DB local).
+    mark.pricing_sync_status = "pending"
+    mark.pricing_sync_error = None
+    await session.commit()
+
+    result = await retry_pricing_sync_for_mark(mark_id)
+    # Re-fetch após o helper commitar.
+    refreshed = (await session.execute(
+        select(ImportKitMark).where(ImportKitMark.id == mark_id)
+    )).scalar_one_or_none()
+    if refreshed is None:
+        raise HTTPException(404, detail={"code": "mark_not_found"})
+    if not result.get("ok"):
+        # Caller pode inspecionar mark.pricing_sync_error.
+        logger.info(
+            "kit_pricing_resync_returned_error",
+            mark_id=str(mark_id), error=result.get("error"),
+        )
+    return ImportKitMarkOut.model_validate(refreshed, from_attributes=True)

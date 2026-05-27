@@ -1,4 +1,4 @@
-"""Importação — deterministic name generation for malas.
+"""Importação — deterministic name generation + kit pricing helpers.
 
 The operator's planilha-mãe (IMPORTAÇÃO.xlsx aba malas) prescribes a
 single naming convention for newly-created mala products:
@@ -18,6 +18,8 @@ The function is pure + deterministic — used by the router on create and
 by the frontend (mirrored logic in importacao.vue) for the live preview.
 """
 from __future__ import annotations
+
+import re
 
 
 def _size_from_sku(sku: str | None) -> str | None:
@@ -99,6 +101,146 @@ def parse_kit_variation(code: str) -> tuple[list[str], list[str]]:
         else:
             accessories.append(p.lower())
     return (sizes, accessories)
+
+
+# ── Fase 3 helpers (pricing_product sync) ────────────────────────────
+
+
+def extract_sizes(variation_code: str) -> list[int]:
+    """Lista de tamanhos numéricos da variation (em ordem). Ignora
+    acessórios (a075, bp003, etc).
+
+    "8+18"                              → [8, 18]
+    "12,14,16"                          → [12, 14, 16]
+    "12+20+24+a075+bp002+a076"          → [12, 20, 24]
+    "8+12+13+18+20+24"                  → [8, 12, 13, 18, 20, 24]
+    """
+    if not variation_code:
+        return []
+    out: list[int] = []
+    for part in re.split(r"[+,]", variation_code):
+        s = part.strip()
+        if s.isdigit():
+            out.append(int(s))
+    return out
+
+
+def has_accessories(variation_code: str) -> bool:
+    """True se a variation contém algum componente que NÃO é número
+    (acessórios começam com letra: a075, bp002, etc)."""
+    if not variation_code:
+        return False
+    for part in re.split(r"[+,]", variation_code):
+        s = part.strip()
+        if not s:
+            continue
+        if not s.isdigit():
+            # Qualquer parte não-numérica é tratada como acessório.
+            return True
+    return False
+
+
+# Variation especial que representa "kit completo" (todos os tamanhos
+# da família). Convenção em prod: SKU é o base puro, sem suffix.
+# Verificado via `SELECT name, sku FROM pricing_products
+# WHERE name LIKE '% 8+12+13+18+20+24'`. Apenas essa variation tem
+# esse comportamento — todas as outras seguem o padrão base.size.size.
+_COMPLETE_KIT_VARIATION = "8+12+13+18+20+24"
+
+
+def build_kit_pricing_sku(sku_base: str, variation_code: str) -> str:
+    """Constrói o SKU literal de um pricing_product de kit pra esta
+    base + variation. Convenções herdadas de pricing_products em prod:
+
+      base="b045", variation="8+18"
+        → "b045.8.18"
+      base="b045", variation="8+12+20+24"
+        → "b045.8.12.20.24"
+      base="b045", variation="12,14,16"
+        → "b045.12.14.16"  (vírgulas viram pontos, todos são tamanhos)
+      base="b045", variation="12+20+24+a075+bp002+a076"
+        → "b045.12.20.24+a075+bp002+a076"  (acessórios com '+' literal)
+      base="b045", variation="8+12+13+18+20+24" (kit completo)
+        → "b045"  (caso especial — SKU é base puro)
+    """
+    base = sku_base.strip()
+    code = (variation_code or "").strip()
+    if not code:
+        return base
+    if code == _COMPLETE_KIT_VARIATION:
+        return base
+
+    sizes = extract_sizes(code)
+    # Lista ordenada de acessórios na ordem em que aparecem no code.
+    accessories = [
+        p.strip() for p in re.split(r"[+,]", code)
+        if p.strip() and not p.strip().isdigit()
+    ]
+    size_part = ".".join(str(s) for s in sizes)
+    sku = f"{base}.{size_part}" if size_part else base
+    if accessories:
+        sku = f"{sku}+{'+'.join(accessories)}"
+    return sku
+
+
+def kit_pricing_segment_slug(variation_code: str) -> str:
+    """Slug do segmento (filho de 'mala') pra esta variation.
+
+    Regras derivadas dos pricing_products em prod:
+      * Tem acessórios     → '18-20' (todos '+ Acessorios' caem aqui)
+      * max(sizes) ≥ 24    → '24-acima'
+      * max ∈ (18, 20)     → '18-20'
+      * max == 12          → '12'
+      * max ≤ 8 ou vazio   → 'acessorios'  (ex: "maleta 8" cai aqui)
+    """
+    if has_accessories(variation_code):
+        return "18-20"
+    sizes = extract_sizes(variation_code)
+    if not sizes:
+        return "acessorios"
+    max_s = max(sizes)
+    if max_s >= 24:
+        return "24-acima"
+    if max_s in (18, 20):
+        return "18-20"
+    if max_s == 12:
+        return "12"
+    # max <= 8 (ou outros tamanhos pequenos)
+    return "acessorios"
+
+
+def kit_pricing_name(modelo_bling: str | None, variation_code: str) -> str:
+    """Nome canônico do pricing_product pra esta combinação de
+    modelo × variation. Espelha convenção em prod:
+
+      * Variation com acessórios → "{FAMILY_PREFIX} + Acessorios"
+        (FAMILY_PREFIX = primeiro token de modelo_bling: "M5", "P6",
+        "ME1"). Ex: "M5 mista" → "M5 + Acessorios".
+      * max(sizes) ≥ 18 → "{modelo} mala {variation}". Ex:
+        "M5 mista mala 8+18".
+      * max(sizes) ≤ 12 → "{modelo} maleta {variation}". Ex:
+        "M5 mista maleta 12", "M5 mista maleta 8+12".
+
+    Se modelo_bling for None/vazio, gera só o prefixo (degraded — o
+    operador vai consertar manualmente vendo a row sem prefix).
+    """
+    modelo = (modelo_bling or "").strip()
+    if has_accessories(variation_code):
+        family = modelo.split()[0] if modelo else "?"
+        return f"{family} + Acessorios"
+
+    sizes = extract_sizes(variation_code)
+    if sizes and max(sizes) >= 18:
+        tipo = "mala"
+    else:
+        tipo = "maleta"
+
+    parts = []
+    if modelo:
+        parts.append(modelo)
+    parts.append(tipo)
+    parts.append(variation_code)
+    return " ".join(parts)
 
 
 def generate_kit_name(
