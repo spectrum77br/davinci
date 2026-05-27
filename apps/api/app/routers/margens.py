@@ -28,9 +28,6 @@ from app.services.verificar_margem import (
     SNAPSHOT_TABLE as _VERIFICAR_MARGEM_TABLE,
 )
 from app.services.verificar_margem import (
-    VIEW_ALL_TABLE as _VIEW_ALL_TABLE,
-)
-from app.services.verificar_margem import (
     patch_financials_for_item_silent as _patch_verificar_margem_financials_silent,
 )
 from app.services.verificar_margem import (
@@ -41,6 +38,9 @@ from app.services.verificar_margem import (
 )
 from app.services.verificar_margem import (
     rebuild_all as _rebuild_verificar_margem,
+)
+from app.services.verificar_margem import (
+    refresh_for_pedido as _refresh_verificar_margem_for_pedido,
 )
 
 logger = structlog.get_logger()
@@ -301,25 +301,54 @@ async def lookup_marketplace(
 ) -> MargensMarketplacePage:
     """Busca pontual por um numero de pedido (Bling ou marketplace).
 
-    Le direto de `vw_conciliacao_margens_marketplace_all` (sem janela de
-    20d), entao serve pra inspecionar pedidos antigos que ja sairam do
-    snapshot `verificar_margem`. So executa quando o usuario informa o
-    pedido — nada e listado por padrao.
+    Estrategia em duas camadas:
+      1. Le primeiro do snapshot `verificar_margem` (fast path — coberto
+         pelo cron de 30min + insercoes manuais via hooks de refunds).
+      2. Se o snapshot nao tem o pedido mas ele existe em `bling_orders`,
+         dispara `refresh_for_pedido` (slow path, le da view completa
+         sem janela de 20d) e re-le do snapshot.
+
+    Sem o filtro `situacao_nome != 'Cancelado'` aplicado no list — em
+    lookup pontual o usuario quer ver o pedido independente da
+    situacao (inclusive cancelado).
     """
     pedido_clean = pedido.strip()
     if not pedido_clean:
         raise HTTPException(400, detail={"code": "pedido_required"})
 
-    where_sql = (
-        "v.situacao_nome != 'Cancelado' "
-        "AND (v.pedido_bling = :pedido OR v.pedido_marketplace = :pedido)"
-    )
+    where_sql = "(v.pedido_bling = :pedido OR v.pedido_marketplace = :pedido)"
     params = {"pedido": pedido_clean}
-
     items_sql = text(
-        _build_marketplace_items_sql(_VIEW_ALL_TABLE, where_sql, paginate=False)
+        _build_marketplace_items_sql(_VERIFICAR_MARGEM_TABLE, where_sql, paginate=False)
     )
+
     rows = (await session.execute(items_sql, params)).mappings().all()
+
+    if not rows:
+        # Snapshot empty for this pedido — check if it exists in bling_orders.
+        # If yes, populate the snapshot from the full view (slow path).
+        exists_in_orders = (await session.execute(
+            text(
+                "SELECT 1 FROM davinci.bling_orders "
+                "WHERE numero = :p OR numeroloja = :p LIMIT 1"
+            ),
+            {"p": pedido_clean},
+        )).first()
+        if exists_in_orders is not None:
+            # refresh_for_pedido handles bling-number; for marketplace numbers
+            # we resolve to the bling numero first to leverage the existing helper.
+            bling_numero_row = (await session.execute(
+                text(
+                    "SELECT numero FROM davinci.bling_orders "
+                    "WHERE numero = :p OR numeroloja = :p LIMIT 1"
+                ),
+                {"p": pedido_clean},
+            )).first()
+            if bling_numero_row is not None and bling_numero_row[0]:
+                await _refresh_verificar_margem_for_pedido(
+                    session, str(bling_numero_row[0])
+                )
+                rows = (await session.execute(items_sql, params)).mappings().all()
 
     items = [MargensMarketplaceOut.model_validate(dict(r)) for r in rows]
     return MargensMarketplacePage(
