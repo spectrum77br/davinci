@@ -28,6 +28,9 @@ from app.services.verificar_margem import (
     SNAPSHOT_TABLE as _VERIFICAR_MARGEM_TABLE,
 )
 from app.services.verificar_margem import (
+    VIEW_ALL_TABLE as _VIEW_ALL_TABLE,
+)
+from app.services.verificar_margem import (
     patch_financials_for_item_silent as _patch_verificar_margem_financials_silent,
 )
 from app.services.verificar_margem import (
@@ -106,6 +109,75 @@ _ATTENTION_TYPE_MAP = {
     "saldo":  _ATTENTION_SALDO_SQL,
     "all":    NEEDS_ATTENTION_SQL,
 }
+
+
+def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate: bool) -> str:
+    """Builds the per-item SELECT against either the snapshot table or the
+    full view (`vw_conciliacao_margens_marketplace_all`). Columns are
+    identical between sources, so the same shape is returned to the client.
+    """
+    limit_clause = "LIMIT :limit OFFSET :offset" if paginate else ""
+    sql = f"""
+        SELECT
+            v.bling_order_item_id,
+            v.bling_id,
+            v.data,
+            v.pedido_bling,
+            v.pedido_marketplace,
+            COALESCE(v.plataforma_bling, v.plataforma_financeiro) AS plataforma,
+            v.loja_nome                                          AS conta,
+            v.sku,
+            v.produto,
+            v.quantidade,
+            v.bling_custo_produtos                               AS custo_produto,
+            {_FRETE_PLATAFORMA_SQL}                              AS frete_plataforma,
+            (v.evento_frete_anuncio * v.item_proportion)         AS frete_anuncio,
+            v.frete_projetado_item                               AS frete_projetado,
+            CASE
+                WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
+                THEN 0::numeric
+                ELSE (v.marketplace_frete_item - v.marketplace_frete_real_cobrado_item)
+            END                                                  AS reembolso,
+            {_FRETE_RESULTADO_SQL}                               AS resultado_frete,
+            v.marketplace_liquido_base_margem_item               AS saldo_plataforma,
+            (v.bling_valorbase_item
+                - COALESCE(v.bling_custofrete_item, 0)
+                - COALESCE(v.bling_taxacomissao_item, 0))        AS saldo_bling,
+            v.marketplace_liquido_base_margem_item               AS saldo_efetivo,
+            v.marketplace_margem                                 AS margem,
+            v.bling_margem_calculado                             AS margem_bling,
+            v.margem_minima,
+            v.situacao_nome                                      AS situacao,
+            v.ajustes,
+            v.saldo_final,
+            CASE
+                WHEN v.bling_status_margem IN ('Aprovado', 'Reprovado')
+                    THEN v.bling_status_margem
+                WHEN {NEEDS_ATTENTION_SQL} THEN 'Pendente'
+                ELSE 'Aprovado'
+            END                                                  AS status,
+            v.pricing_account_id,
+            v.pricing_account_name,
+            v.pricing_account_listing_type,
+            v.pricing_leaf_segment_name,
+            v.bling_listing_type,
+            bo.observacao,
+            {_ATTENTION_MARGEM_SQL}                              AS attention_margem,
+            {_ATTENTION_FRETE_SQL}                               AS attention_frete,
+            {_ATTENTION_SALDO_SQL}                               AS attention_saldo
+        FROM {source_table} v
+        LEFT JOIN LATERAL (
+            SELECT bo.observacao
+            FROM {_BLING_ORDERS_TABLE} bo
+            WHERE bo.numero = v.pedido_bling
+              AND bo.observacao IS NOT NULL
+            LIMIT 1
+        ) bo ON TRUE
+        WHERE {where_sql}
+        ORDER BY v.data DESC NULLS LAST, v.pedido_bling DESC, v.bling_order_item_id
+        {limit_clause}
+    """  # noqa: S608
+    return sql
 
 
 @router.get("", response_model=list[MargensOut])
@@ -203,66 +275,7 @@ async def list_margens_marketplace(
         "ORDER BY 1"
     )
     items_sql = text(
-        f"""
-        SELECT
-            v.bling_order_item_id,
-            v.bling_id,
-            v.data,
-            v.pedido_bling,
-            v.pedido_marketplace,
-            COALESCE(v.plataforma_bling, v.plataforma_financeiro) AS plataforma,
-            v.loja_nome                                          AS conta,
-            v.sku,
-            v.produto,
-            v.quantidade,
-            v.bling_custo_produtos                               AS custo_produto,
-            {_FRETE_PLATAFORMA_SQL}                              AS frete_plataforma,
-            (v.evento_frete_anuncio * v.item_proportion)         AS frete_anuncio,
-            v.frete_projetado_item                               AS frete_projetado,
-            CASE
-                WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
-                THEN 0::numeric
-                ELSE (v.marketplace_frete_item - v.marketplace_frete_real_cobrado_item)
-            END                                                  AS reembolso,
-            {_FRETE_RESULTADO_SQL}                               AS resultado_frete,
-            v.marketplace_liquido_base_margem_item               AS saldo_plataforma,
-            (v.bling_valorbase_item
-                - COALESCE(v.bling_custofrete_item, 0)
-                - COALESCE(v.bling_taxacomissao_item, 0))        AS saldo_bling,
-            v.marketplace_liquido_base_margem_item               AS saldo_efetivo,
-            v.marketplace_margem                                 AS margem,
-            v.bling_margem_calculado                             AS margem_bling,
-            v.margem_minima,
-            v.situacao_nome                                      AS situacao,
-            v.ajustes,
-            v.saldo_final,
-            CASE
-                WHEN v.bling_status_margem IN ('Aprovado', 'Reprovado')
-                    THEN v.bling_status_margem
-                WHEN {NEEDS_ATTENTION_SQL} THEN 'Pendente'
-                ELSE 'Aprovado'
-            END                                                  AS status,
-            v.pricing_account_id,
-            v.pricing_account_name,
-            v.pricing_account_listing_type,
-            v.pricing_leaf_segment_name,
-            v.bling_listing_type,
-            bo.observacao,
-            {_ATTENTION_MARGEM_SQL}                              AS attention_margem,
-            {_ATTENTION_FRETE_SQL}                               AS attention_frete,
-            {_ATTENTION_SALDO_SQL}                               AS attention_saldo
-        FROM {_VERIFICAR_MARGEM_TABLE} v
-        LEFT JOIN LATERAL (
-            SELECT bo.observacao
-            FROM {_BLING_ORDERS_TABLE} bo
-            WHERE bo.numero = v.pedido_bling
-              AND bo.observacao IS NOT NULL
-            LIMIT 1
-        ) bo ON TRUE
-        WHERE {where_sql}
-        ORDER BY v.data DESC NULLS LAST, v.pedido_bling DESC, v.bling_order_item_id
-        LIMIT :limit OFFSET :offset
-        """  # noqa: S608
+        _build_marketplace_items_sql(_VERIFICAR_MARGEM_TABLE, where_sql, paginate=True)
     )
 
     total = (await session.execute(count_sql, params)).scalar_one()
@@ -277,6 +290,45 @@ async def list_margens_marketplace(
         offset=offset,
         platforms=platforms,
         contas=contas,
+    )
+
+
+@router.get("/marketplace/lookup", response_model=MargensMarketplacePage)
+async def lookup_marketplace(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("margem", "view"))],
+    pedido: Annotated[str, Query(min_length=1)],
+) -> MargensMarketplacePage:
+    """Busca pontual por um numero de pedido (Bling ou marketplace).
+
+    Le direto de `vw_conciliacao_margens_marketplace_all` (sem janela de
+    20d), entao serve pra inspecionar pedidos antigos que ja sairam do
+    snapshot `verificar_margem`. So executa quando o usuario informa o
+    pedido — nada e listado por padrao.
+    """
+    pedido_clean = pedido.strip()
+    if not pedido_clean:
+        raise HTTPException(400, detail={"code": "pedido_required"})
+
+    where_sql = (
+        "v.situacao_nome != 'Cancelado' "
+        "AND (v.pedido_bling = :pedido OR v.pedido_marketplace = :pedido)"
+    )
+    params = {"pedido": pedido_clean}
+
+    items_sql = text(
+        _build_marketplace_items_sql(_VIEW_ALL_TABLE, where_sql, paginate=False)
+    )
+    rows = (await session.execute(items_sql, params)).mappings().all()
+
+    items = [MargensMarketplaceOut.model_validate(dict(r)) for r in rows]
+    return MargensMarketplacePage(
+        items=items,
+        total=len(items),
+        limit=len(items),
+        offset=0,
+        platforms=[],
+        contas=[],
     )
 
 

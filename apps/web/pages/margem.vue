@@ -93,6 +93,11 @@ const statusFilter = ref<StatusFilter>('Pendente')
 const attentionType = ref<AttentionType>('all')
 const page = ref(1)
 
+type Tab = 'list' | 'lookup'
+const tab = ref<Tab>('list')
+const lookupInput = ref('')
+const lookupTerm = ref('')
+
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
 function apiError(e: any) {
@@ -135,7 +140,57 @@ async function load() {
     loading.value = false
   }
 }
+
+async function lookup() {
+  const term = lookupInput.value.trim()
+  if (!term) {
+    error.value = 'informe o numero do pedido'
+    return
+  }
+  loading.value = true
+  error.value = null
+  lookupTerm.value = term
+  try {
+    const params = new URLSearchParams()
+    params.set('pedido', term)
+    const res = await api<PageResponse>(`/api/margens/marketplace/lookup?${params.toString()}`)
+    items.value = res.items
+    total.value = res.total
+  } catch (e: any) {
+    error.value = apiError(e)
+    items.value = []
+    total.value = 0
+  } finally {
+    loading.value = false
+  }
+}
+
+function switchTab(next: Tab) {
+  if (tab.value === next) return
+  tab.value = next
+  error.value = null
+  if (next === 'lookup') {
+    // clear list to avoid confusing display; lookup only after submit
+    items.value = []
+    total.value = 0
+    lookupTerm.value = ''
+  } else {
+    lookupInput.value = ''
+    lookupTerm.value = ''
+    page.value = 1
+    load()
+  }
+}
+
 await load()
+
+async function reloadCurrent() {
+  if (tab.value === 'lookup') {
+    if (lookupTerm.value) await lookup()
+  } else {
+    await load()
+  }
+}
 
 async function refreshAndLoad() {
   loading.value = true
@@ -147,12 +202,13 @@ async function refreshAndLoad() {
     loading.value = false
     return
   }
-  await load()
+  await reloadCurrent()
 }
 
-// reload on filter change (debounced search)
+// reload on filter change (debounced search) — only in list mode
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 watch(search, () => {
+  if (tab.value !== 'list') return
   if (searchTimer) clearTimeout(searchTimer)
   searchTimer = setTimeout(() => {
     page.value = 1
@@ -160,22 +216,29 @@ watch(search, () => {
   }, 350)
 })
 watch(platform, () => {
+  if (tab.value !== 'list') return
   page.value = 1
   load()
 })
 watch(conta, () => {
+  if (tab.value !== 'list') return
   page.value = 1
   load()
 })
 watch(statusFilter, () => {
+  if (tab.value !== 'list') return
   page.value = 1
   load()
 })
 watch(attentionType, () => {
+  if (tab.value !== 'list') return
   page.value = 1
   load()
 })
-watch(page, () => load())
+watch(page, () => {
+  if (tab.value !== 'list') return
+  load()
+})
 
 function brl(v: number | null | undefined) {
   if (v == null) return '—'
@@ -289,7 +352,7 @@ async function syncFromMarketplace(row: MarketplaceRow) {
       method: 'POST',
     })
     error.value = null
-    await load()
+    await reloadCurrent()
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -312,7 +375,7 @@ async function syncFromSaldoFinal(row: MarketplaceRow) {
       method: 'POST',
     })
     error.value = null
-    await load()
+    await reloadCurrent()
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -383,7 +446,30 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       {{ error }}
     </div>
 
-    <div class="flex flex-wrap items-center gap-2">
+    <div class="flex items-center gap-1 border-b">
+      <button
+        type="button"
+        class="px-3 py-1.5 text-sm border-b-2 -mb-px transition-colors"
+        :class="tab === 'list'
+          ? 'border-primary text-foreground font-medium'
+          : 'border-transparent text-muted-foreground hover:text-foreground'"
+        @click="switchTab('list')"
+      >
+        Pendentes (30d)
+      </button>
+      <button
+        type="button"
+        class="px-3 py-1.5 text-sm border-b-2 -mb-px transition-colors"
+        :class="tab === 'lookup'
+          ? 'border-primary text-foreground font-medium'
+          : 'border-transparent text-muted-foreground hover:text-foreground'"
+        @click="switchTab('lookup')"
+      >
+        Buscar pedido
+      </button>
+    </div>
+
+    <div v-if="tab === 'list'" class="flex flex-wrap items-center gap-2">
       <div class="relative">
         <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
         <input
@@ -424,6 +510,28 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       </select>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ rangeStart }}–{{ rangeEnd }} de {{ total }}
+      </span>
+    </div>
+
+    <div v-else class="flex flex-wrap items-center gap-2">
+      <div class="relative">
+        <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+        <input
+          v-model="lookupInput"
+          class="pl-8 pr-3 py-1.5 text-sm rounded-md border bg-background w-72"
+          placeholder="numero do pedido (Bling ou marketplace)"
+          @keydown.enter="lookup"
+        />
+      </div>
+      <Button size="sm" :disabled="loading || !lookupInput.trim()" @click="lookup">
+        <Search class="size-4 mr-1.5" />
+        buscar
+      </Button>
+      <span v-if="lookupTerm" class="text-xs text-muted-foreground">
+        pedido <span class="font-mono">{{ lookupTerm }}</span> · {{ total }} {{ total === 1 ? 'item' : 'itens' }}
+      </span>
+      <span v-else class="text-xs text-muted-foreground">
+        digite o numero do pedido e clique em buscar
       </span>
     </div>
 
@@ -477,7 +585,15 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
           </tr>
           <tr v-else-if="!items.length">
             <td colspan="26" class="text-center py-8 text-muted-foreground">
-              sem registros
+              <template v-if="tab === 'lookup' && !lookupTerm">
+                digite o numero do pedido acima para buscar
+              </template>
+              <template v-else-if="tab === 'lookup'">
+                nenhum item encontrado para o pedido <span class="font-mono">{{ lookupTerm }}</span>
+              </template>
+              <template v-else>
+                sem registros
+              </template>
             </td>
           </tr>
           <tr
@@ -624,7 +740,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     </div>
 
     <!-- Pagination -->
-    <div v-if="total > PAGE_SIZE" class="flex items-center justify-between gap-2">
+    <div v-if="tab === 'list' && total > PAGE_SIZE" class="flex items-center justify-between gap-2">
       <span class="text-xs text-muted-foreground">
         página {{ page }} de {{ totalPages }} · {{ PAGE_SIZE }}/página
       </span>
