@@ -82,6 +82,114 @@ def _q2(v: Decimal | None) -> Decimal | None:
 # ---------------------------------------------------------------------------
 
 
+def build_match_indexes(
+    product_keys: Iterable[str],
+) -> tuple[
+    dict[str, set[str]],
+    dict[str, set[str]],
+    dict[str, list[tuple[str, frozenset[str]]]],
+]:
+    """Build the 3 indexes that `match_one_sku_to_keys` consults.
+
+    Returns (by_exact, by_base_celular, by_base_sizes):
+      * by_exact[k]            = {k}                 — lookup helper
+      * by_base_celular[base]  = every k.* with that base prefix
+      * by_base_sizes[base]    = list of (k, sizes-of-k) for every
+                                 base.size[.size...] key (no '+')
+
+    Same set of keys is shared across all dept rules — each rule
+    consumes a subset of the indexes. Built once per request.
+    """
+    keys = {k.strip().lower() for k in product_keys if k}
+    by_exact: dict[str, set[str]] = {}
+    by_base_celular: dict[str, set[str]] = {}
+    by_base_sizes: dict[str, list[tuple[str, frozenset[str]]]] = {}
+    for k in keys:
+        by_exact.setdefault(k, set()).add(k)
+        parts = k.split(".")
+        base = parts[0]
+        if base:
+            by_base_celular.setdefault(base, set()).add(k)
+            if "+" not in k and len(parts) >= 2:
+                sizes = frozenset(p for p in parts[1:] if p.isdigit())
+                if sizes:
+                    by_base_sizes.setdefault(base, []).append((k, sizes))
+    return by_exact, by_base_celular, by_base_sizes
+
+
+def match_one_sku_to_keys(
+    sku_key: str,
+    dept: str,
+    by_exact: dict[str, set[str]],
+    by_base_celular: dict[str, set[str]],
+    by_base_sizes: dict[str, list[tuple[str, frozenset[str]]]],
+) -> set[str]:
+    """Return the bling_order item_codigo keys that count as sales for
+    `sku_key`. Pure per-piece logic — caller handles comma-split,
+    aggregation, and dept resolution.
+
+    Per-dept rules:
+      * celular  : base-SKU prefix wins (everything before first dot)
+      * catalogo : exact only; pieces with '+' are skipped
+      * mala     : exact + bidirectional kit↔piece match (see below)
+      * default  : exact only
+
+    Mala bidirectional rule (piece without '+'):
+      1. exact key (if any)
+      2. every key in the same base whose sizes ⊇ piece's sizes —
+         single piece (b045.18) catches kits b045.X.18 / b045.18.Y;
+         kit (b045.18.20) catches bigger kits b045.X.18.20.Y.
+      3. for kit pieces (≥3 parts) WITHOUT exact, fall back to summing
+         each single-size component (b045.18.20 with no exact →
+         b045.18 + b045.20). Preserves the commit af9465c fallback —
+         covers 2-piece kits that don't sell as kits but whose
+         individual sizes do.
+    """
+    key = (sku_key or "").strip().lower()
+    if not key:
+        return set()
+    # Composite SKUs with '+' are zero by operator decision for both
+    # catalogo and mala (the two depts that use composite pricing
+    # SKUs like `b005.8.12.20.24+a075+bp003+a076`). Other depts
+    # default to exact match including '+' since their composites
+    # would map 1:1 in bling_orders if they existed.
+    if "+" in key and dept in ("catalogo", "mala"):
+        return set()
+    if dept == "celular":
+        return set(by_base_celular.get(key, set()))
+
+    matched: set[str] = set(by_exact.get(key, set()))
+
+    if dept != "mala":
+        return matched
+
+    parts = key.split(".")
+    if len(parts) < 2:
+        return matched
+    base = parts[0]
+    piece_sizes = frozenset(p for p in parts[1:] if p.isdigit())
+    if not base or not piece_sizes:
+        return matched
+
+    # Bidirectional superset: any bling_order key with same base whose
+    # sizes ⊇ piece's sizes. Skip self (already in matched via exact).
+    for bo_key, bo_sizes in by_base_sizes.get(base, ()):
+        if bo_key == key:
+            continue
+        if piece_sizes.issubset(bo_sizes):
+            matched.add(bo_key)
+
+    # Kit-only fallback (exact empty + ≥3 parts): single-size components.
+    if not by_exact.get(key) and len(parts) >= 3:
+        for size in parts[1:]:
+            if not size.isdigit():
+                continue
+            component_key = f"{base}.{size}"
+            matched.update(by_exact.get(component_key, set()))
+
+    return matched
+
+
 def match_pricing_to_product_keys(
     pricing_rows: Iterable[PricingProduct],
     product_keys: Iterable[str],
@@ -89,94 +197,19 @@ def match_pricing_to_product_keys(
 ) -> dict[UUID, set[str]]:
     """Returns {pricing_product_id: {matched product sku keys (lowercased)}}.
 
-    `segment_roots` is a `{segment_id: root_slug}` map (e.g. from
-    `_load_segment_roots`) used to dispatch the per-root SKU rule.
-
-    Per-dept matching rules:
-      * celular: base-SKU (everything before first dot) wins
-      * catalogo: exact only; pieces with '+' are skipped
-      * mala: bidirectional kit↔piece matching (see below)
-      * default: exact only
-
-    Mala bidirectional rule — every dept=mala piece without '+' matches:
-      1. its exact key in bling_orders (if any)
-      2. every key in the same base whose sizes set ⊇ piece's sizes
-         set. Catches:
-           * single piece (b045.18) → kits b045.X.18, b045.18.Y, etc.
-             (kit sales also consume the individual piece's stock)
-           * kit (b045.18.20) → bigger kits b045.X.18.20.Y, etc.
-      3. for kit pieces (≥3 parts) WITHOUT exact match, fall back to
-         summing each single-size component (b045.18.20 with no exact
-         → b045.18 + b045.20). Preserves commit af9465c behavior —
-         covers the case where a 2-piece kit didn't sell as kit but
-         the individual sizes did.
+    Thin wrapper over `match_one_sku_to_keys`: builds the indexes once
+    and iterates the pricing_rows × pieces grid, OR-merging per-piece
+    matches. Caller dispatches by dept via `segment_roots`.
     """
-    keys = {k.strip().lower() for k in product_keys if k}
-    by_base: dict[str, set[str]] = {}
-    by_exact: dict[str, set[str]] = {}
-    # by_base_sizes[base] → list of (full_key, sizes_set) for every
-    # bling_order key that follows the base.sizes pattern (single or
-    # multi-size). Used by the mala bidirectional rule. Excludes keys
-    # with '+' (operator wants those at zero).
-    by_base_sizes: dict[str, list[tuple[str, frozenset[str]]]] = {}
-    for k in keys:
-        by_exact.setdefault(k, set()).add(k)
-        parts = k.split(".")
-        base = parts[0]
-        if base:
-            by_base.setdefault(base, set()).add(k)
-            if "+" not in k and len(parts) >= 2:
-                sizes = frozenset(p for p in parts[1:] if p.isdigit())
-                if sizes:
-                    by_base_sizes.setdefault(base, []).append((k, sizes))
-
+    by_exact, by_base_celular, by_base_sizes = build_match_indexes(product_keys)
     out: dict[UUID, set[str]] = {}
     for pp in pricing_rows:
         dept = _dept_value(pp, segment_roots)
         matched: set[str] = set()
         for piece in (pp.sku or "").split(","):
-            key = piece.strip().lower()
-            if not key:
-                continue
-            if dept == "catalogo" and "+" in key:
-                continue
-            if dept == "celular":
-                matched.update(by_base.get(key, set()))
-                continue
-
-            exact_hit = by_exact.get(key, set())
-            matched.update(exact_hit)
-
-            # Mala bidirectional kit↔piece matching. Other depts stop here.
-            if dept != "mala" or "+" in key:
-                continue
-
-            parts = key.split(".")
-            if len(parts) < 2:
-                continue
-            base = parts[0]
-            piece_sizes = frozenset(p for p in parts[1:] if p.isdigit())
-            if not base or not piece_sizes:
-                continue
-
-            # Step 2: any bling_order key with same base whose sizes ⊇
-            # piece's sizes. Skip self (already added via exact_hit).
-            for bo_key, bo_sizes in by_base_sizes.get(base, ()):
-                if bo_key == key:
-                    continue
-                if piece_sizes.issubset(bo_sizes):
-                    matched.add(bo_key)
-
-            # Step 3 (kit only, exact empty): fall back to single-size
-            # components. Existing behavior from commit af9465c — kept
-            # so 2-piece kits without exact sale still capture demand
-            # from individual size sales.
-            if not exact_hit and len(parts) >= 3:
-                for size in parts[1:]:
-                    if not size.isdigit():
-                        continue
-                    component_key = f"{base}.{size}"
-                    matched.update(by_exact.get(component_key, set()))
+            matched |= match_one_sku_to_keys(
+                piece, dept, by_exact, by_base_celular, by_base_sizes,
+            )
         if matched:
             out[pp.id] = matched
     return out
@@ -393,6 +426,8 @@ async def scan_missing_skus(
 __all__ = [
     "scan_missing_skus",
     "match_pricing_to_product_keys",
+    "match_one_sku_to_keys",
+    "build_match_indexes",
     "build_product_lookup",
     "find_pricing_for_product_sku",
     "_load_segment_roots",

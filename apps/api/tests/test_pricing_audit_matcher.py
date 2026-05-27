@@ -13,7 +13,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from uuid import uuid4
 
-from app.services.pricing.audit import match_pricing_to_product_keys
+from app.services.pricing.audit import (
+    build_match_indexes,
+    match_one_sku_to_keys,
+    match_pricing_to_product_keys,
+)
 
 
 def _seg_roots(seg_id, slug):
@@ -204,3 +208,77 @@ def test_mala_piece_without_numeric_size_is_ignored_in_bidirectional():
     res = match_pricing_to_product_keys([pp], keys, roots)
     # Só exact — piece_sizes vazio aborta o superset.
     assert res[pp.id] == {"b045.kit2"}
+
+
+# ── Helpers standalone: match_one_sku_to_keys + build_match_indexes ─
+
+
+def _indexes(keys):
+    return build_match_indexes(keys)
+
+
+def test_helper_mala_single_piece_finds_kits():
+    bx, bc, bs = _indexes(["b045.12", "b045.12.18", "b045.18.24", "b046.18"])
+    assert match_one_sku_to_keys("b045.18", "mala", bx, bc, bs) == {
+        "b045.12.18", "b045.18.24",
+    }
+
+
+def test_helper_mala_single_piece_with_exact_keeps_exact():
+    bx, bc, bs = _indexes(["b045.18", "b045.12.18", "b045.18.24"])
+    assert match_one_sku_to_keys("b045.18", "mala", bx, bc, bs) == {
+        "b045.18", "b045.12.18", "b045.18.24",
+    }
+
+
+def test_helper_mala_kit_only_superset_with_all_sizes():
+    bx, bc, bs = _indexes(["b045.18.20", "b045.18.20.24", "b045.12.18.20", "b045.18.24"])
+    # `b045.18.24` tem sizes {18,24}, não cobre {18,20} — não conta.
+    assert match_one_sku_to_keys("b045.18.20", "mala", bx, bc, bs) == {
+        "b045.18.20", "b045.18.20.24", "b045.12.18.20",
+    }
+
+
+def test_helper_mala_no_dot_sku_only_exact():
+    """`a006` (sem ponto) só ganha exact — sem expansão."""
+    bx, bc, bs = _indexes(["a006", "a006.12", "a006.18"])
+    # Sem sizes, não vira superset. Só exact.
+    assert match_one_sku_to_keys("a006", "mala", bx, bc, bs) == {"a006"}
+
+
+def test_helper_mala_plus_returns_empty():
+    bx, bc, bs = _indexes(["b045.18+a075", "b045.18", "b045.12.18"])
+    assert match_one_sku_to_keys("b045.18+a075", "mala", bx, bc, bs) == set()
+
+
+def test_helper_celular_uses_base_prefix():
+    bx, bc, bs = _indexes(["dg078.sa", "dg078.pi", "dg079.sa"])
+    assert match_one_sku_to_keys("dg078", "celular", bx, bc, bs) == {
+        "dg078.sa", "dg078.pi",
+    }
+
+
+def test_helper_eletro_exact_only():
+    """Dept não-mala não-celular: só exact, mesmo com padrão de número."""
+    bx, bc, bs = _indexes(["xy.123", "xy.12.123"])
+    assert match_one_sku_to_keys("xy.123", "eletro", bx, bc, bs) == {"xy.123"}
+
+
+def test_helper_catalogo_plus_skipped():
+    bx, bc, bs = _indexes(["a.b+c", "a.b"])
+    assert match_one_sku_to_keys("a.b+c", "catalogo", bx, bc, bs) == set()
+
+
+def test_build_indexes_skips_plus_in_size_index():
+    """Keys com '+' entram em by_exact mas NÃO em by_base_sizes."""
+    bx, _, bs = build_match_indexes(["b045.18+a075", "b045.18"])
+    assert "b045.18+a075" in bx
+    # by_base_sizes só inclui b045.18 (sem '+')
+    assert bs["b045"] == [("b045.18", frozenset({"18"}))]
+
+
+def test_build_indexes_skips_non_numeric_size():
+    """Sizes não-numéricos (kit2, ra, ...) não entram em by_base_sizes."""
+    _, _, bs = build_match_indexes(["b045.kit2", "b045.18"])
+    # Só b045.18 (sizes numéricos) entra; b045.kit2 fica fora.
+    assert bs.get("b045") == [("b045.18", frozenset({"18"}))]

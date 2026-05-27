@@ -61,6 +61,7 @@ from app.schemas.importacao import (
     ImportResumoOut,
 )
 from app.services.importacao_naming import generate_mala_name
+from app.services.pricing.audit import build_match_indexes, match_one_sku_to_keys
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/importacao", tags=["importacao"])
@@ -202,32 +203,66 @@ async def list_products(
     # from bling_orders by item_codigo. consumo_diario = bucket30 / 30;
     # maior_media_30d = MAX(buckets) / 30. Excluded situacoes match the
     # pricing/sales-map endpoint so the two pages agree on what counts.
-    sales_by_sku: dict[str, dict[str, int]] = {}
+    #
+    # Matching uses the same helper as /pricing/sales-map (mala dept):
+    # exact match + size-overlap kit expansion. A piece SKU like
+    # `b045.18` that never sold standalone still picks up every kit
+    # b045.X.18.Y that does — each kit sale also consumes the
+    # individual piece's stock for replenishment purposes.
+    #
+    # TODO(import-dept-resolution): all import_products today are mala/
+    # acessórios, so hardcoding "mala" matches operator reality. When
+    # other dept slugs land here (eletrônico etc), look the dept up via
+    # pricing_products or an explicit segment_id column on import_products.
+    sales_by_key: dict[str, dict[str, int]] = {}
+    candidates_by_sku: dict[str, set[str]] = {}
     if skus_lower:
-        sales_rows = (await session.execute(text("""
-            SELECT
-                LOWER(item_codigo) AS sku,
-                SUM(CASE WHEN data >= now() - interval '30 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b30,
-                SUM(CASE WHEN data >= now() - interval '60 days'  AND data < now() - interval '30 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b60,
-                SUM(CASE WHEN data >= now() - interval '90 days'  AND data < now() - interval '60 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b90,
-                SUM(CASE WHEN data >= now() - interval '120 days' AND data < now() - interval '90 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b120,
-                SUM(CASE WHEN data >= now() - interval '150 days' AND data < now() - interval '120 days' THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b150,
-                SUM(CASE WHEN data >= now() - interval '180 days' AND data < now() - interval '150 days' THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b180
+        # 1) All distinct item_codigo keys present in bling_orders within
+        # the 180d window — fed into the matcher to build the indexes.
+        all_keys_rows = (await session.execute(text("""
+            SELECT DISTINCT LOWER(TRIM(item_codigo)) AS k
             FROM davinci.bling_orders
             WHERE item_codigo IS NOT NULL AND item_codigo <> ''
               AND data >= now() - interval '180 days'
               AND COALESCE(situacao, '') NOT IN ('Cancelado', 'Devolvido', '12')
-              AND LOWER(item_codigo) = ANY(:skus)
-            GROUP BY LOWER(item_codigo)
-        """), {"skus": skus_lower})).all()
-        sales_by_sku = {
-            r.sku: {
-                "b30": int(r.b30 or 0), "b60": int(r.b60 or 0),
-                "b90": int(r.b90 or 0), "b120": int(r.b120 or 0),
-                "b150": int(r.b150 or 0), "b180": int(r.b180 or 0),
+        """))).all()
+        all_keys = [r.k for r in all_keys_rows if r.k]
+        by_exact, by_base_celular, by_base_sizes = build_match_indexes(all_keys)
+
+        # 2) For each import SKU, get the candidate item_codigo set via
+        # the shared rules (dept=mala for now — see TODO above).
+        for sku_lc in skus_lower:
+            candidates_by_sku[sku_lc] = match_one_sku_to_keys(
+                sku_lc, "mala", by_exact, by_base_celular, by_base_sizes,
+            )
+
+        # 3) One aggregated query over the UNION of all candidate keys.
+        all_candidates = set().union(*candidates_by_sku.values()) if candidates_by_sku else set()
+        if all_candidates:
+            sales_rows = (await session.execute(text("""
+                SELECT
+                    LOWER(TRIM(item_codigo)) AS sku,
+                    SUM(CASE WHEN data >= now() - interval '30 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b30,
+                    SUM(CASE WHEN data >= now() - interval '60 days'  AND data < now() - interval '30 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b60,
+                    SUM(CASE WHEN data >= now() - interval '90 days'  AND data < now() - interval '60 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b90,
+                    SUM(CASE WHEN data >= now() - interval '120 days' AND data < now() - interval '90 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b120,
+                    SUM(CASE WHEN data >= now() - interval '150 days' AND data < now() - interval '120 days' THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b150,
+                    SUM(CASE WHEN data >= now() - interval '180 days' AND data < now() - interval '150 days' THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b180
+                FROM davinci.bling_orders
+                WHERE item_codigo IS NOT NULL AND item_codigo <> ''
+                  AND data >= now() - interval '180 days'
+                  AND COALESCE(situacao, '') NOT IN ('Cancelado', 'Devolvido', '12')
+                  AND LOWER(TRIM(item_codigo)) = ANY(:keys)
+                GROUP BY 1
+            """), {"keys": list(all_candidates)})).all()
+            sales_by_key = {
+                r.sku: {
+                    "b30": int(r.b30 or 0), "b60": int(r.b60 or 0),
+                    "b90": int(r.b90 or 0), "b120": int(r.b120 or 0),
+                    "b150": int(r.b150 or 0), "b180": int(r.b180 or 0),
+                }
+                for r in sales_rows
             }
-            for r in sales_rows
-        }
 
     out: list[ImportProductOut] = []
     for p in products:
@@ -242,7 +277,20 @@ async def list_products(
             eff_estoque = p.estoque_bling
 
         # Effective consumo + maior_media from sales buckets when present.
-        auto_sales = sales_by_sku.get(sku_lc)
+        # Sum every candidate key's bucket — for mala dept this includes
+        # exact + kit superset matches per match_one_sku_to_keys.
+        candidates = candidates_by_sku.get(sku_lc, set())
+        auto_sales: dict[str, int] | None = None
+        if candidates:
+            agg = dict.fromkeys(("b30", "b60", "b90", "b120", "b150", "b180"), 0)
+            for k in candidates:
+                buckets = sales_by_key.get(k)
+                if not buckets:
+                    continue
+                for b in agg:
+                    agg[b] += buckets[b]
+            if any(v > 0 for v in agg.values()):
+                auto_sales = agg
         if auto_sales:
             eff_consumo = Decimal(auto_sales["b30"]) / Decimal(30)
             biggest = max(
