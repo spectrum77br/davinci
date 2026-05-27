@@ -166,7 +166,8 @@ async def sync_import_product_to_bling(import_product_id: UUID | str) -> dict[st
             data = await client.create_product(
                 sku=row.sku,
                 name=nome,
-                price=None,  # operador define preço no Bling, não daqui
+                price=None,  # preço de VENDA continua manual no Bling
+                cost_price=float(row.custo_bling) if row.custo_bling else None,
                 category_id=category_id,
                 formato="S",
             )

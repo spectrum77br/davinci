@@ -237,5 +237,6 @@ async def test_passes_correct_payload_to_bling(
     assert captured["name"] == "Mala Lisa M2 tamanho 28 - Roxo Escuro"
     assert captured["formato"] == "S"
     assert captured["category_id"] == 777
-    assert captured["price"] is None  # preço NÃO é enviado
+    assert captured["price"] is None  # preço de VENDA continua manual no Bling
+    assert captured["cost_price"] == 49.0  # custo é enviado a partir de row.custo_bling
     assert captured["_category_name"] == "mala"

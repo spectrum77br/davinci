@@ -584,6 +584,7 @@ class BlingClient:
         sku: str,
         name: str,
         price: float | None = None,
+        cost_price: float | None = None,
         category_id: int | None = None,
         formato: str = "S",
         estrutura: dict | None = None,
@@ -596,6 +597,11 @@ class BlingClient:
           * "S" = Simples (default)
           * "V" = Com variações
           * "E" = Com composição (kit/composto)
+
+        `cost_price` envia `precoCusto` no top-level. Bling V3 aceita
+        precoCusto tanto top-level quanto em `fornecedor.precoCusto`
+        (nosso parser de GET lê das duas formas). Valores 0/None são
+        omitidos do body — Bling pode tratar 0 como "definido = grátis".
 
         Para composto, `estrutura` deve ter o shape (confirmado via
         SDK AlexandreBellas/bling-erp-api-js, src/entities/produtos):
@@ -617,6 +623,8 @@ class BlingClient:
         }
         if price is not None:
             body["preco"] = float(price)
+        if cost_price is not None and float(cost_price) > 0:
+            body["precoCusto"] = float(cost_price)
         if category_id is not None:
             body["categoria"] = {"id": category_id}
         if formato == "E" and estrutura is not None:
