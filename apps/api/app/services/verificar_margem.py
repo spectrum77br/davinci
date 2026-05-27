@@ -52,6 +52,7 @@ async def rebuild_all(session: AsyncSession) -> int:
     MVCC keeps concurrent SELECT readers on the pre-commit snapshot,
     so the ~17s rebuild does not block the margens page.
     """
+    # Remove rows whose bling_order_item_id is about to be refreshed from the view.
     await session.execute(
         text(
             f"DELETE FROM {SNAPSHOT_TABLE} v "
@@ -59,6 +60,17 @@ async def rebuild_all(session: AsyncSession) -> int:
             "  SELECT bling_order_item_id "
             f"  FROM {VIEW_TABLE}"
             ")"
+        )
+    )
+    # Remove orphan rows: snapshot entries whose UUID no longer exists in
+    # bling_orders (e.g. order re-synced with a new UUID).
+    await session.execute(
+        text(
+            f"DELETE FROM {SNAPSHOT_TABLE} v "
+            f"WHERE NOT EXISTS ("
+            f"  SELECT 1 FROM {qualified_table('bling_orders')} bo"
+            f"  WHERE bo.id = v.bling_order_item_id"
+            f")"
         )
     )
     result = await session.execute(
