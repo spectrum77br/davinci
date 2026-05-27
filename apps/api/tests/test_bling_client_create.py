@@ -43,14 +43,18 @@ async def _capture_post_body(
 
 
 @pytest.mark.asyncio
-async def test_cost_price_sent_as_preco_custo_top_level():
+async def test_cost_price_sent_inside_fornecedor():
+    """Bling V3 só persiste precoCusto dentro de `fornecedor`."""
     body = await _capture_post_body(sku="b042.30", name="Mala teste", cost_price=49.0)
-    assert body["precoCusto"] == 49.0
+    assert body["fornecedor"] == {"precoCusto": 49.0}
+    # Top-level NÃO deve existir — Bling ignora e poderia conflitar.
+    assert "precoCusto" not in body
 
 
 @pytest.mark.asyncio
 async def test_cost_price_omitted_when_none():
     body = await _capture_post_body(sku="b042.30", name="Mala teste", cost_price=None)
+    assert "fornecedor" not in body
     assert "precoCusto" not in body
 
 
@@ -59,13 +63,13 @@ async def test_cost_price_omitted_when_zero():
     """0 é tratado como 'não informado' — Bling pode interpretar 0 como
     'preço de custo é zero', o que é diferente da nossa intent."""
     body = await _capture_post_body(sku="b042.30", name="Mala teste", cost_price=0)
-    assert "precoCusto" not in body
+    assert "fornecedor" not in body
 
 
 @pytest.mark.asyncio
 async def test_cost_price_negative_also_omitted():
     body = await _capture_post_body(sku="b042.30", name="Mala teste", cost_price=-5)
-    assert "precoCusto" not in body
+    assert "fornecedor" not in body
 
 
 @pytest.mark.asyncio
@@ -91,9 +95,10 @@ async def test_composto_sends_estrutura():
 
 @pytest.mark.asyncio
 async def test_price_and_cost_can_coexist():
-    """price = preço de venda; precoCusto = preço de custo."""
+    """price (top-level) = preço de venda;
+    fornecedor.precoCusto = preço de custo."""
     body = await _capture_post_body(
         sku="x", name="y", price=99.9, cost_price=49.0,
     )
     assert body["preco"] == 99.9
-    assert body["precoCusto"] == 49.0
+    assert body["fornecedor"]["precoCusto"] == 49.0
