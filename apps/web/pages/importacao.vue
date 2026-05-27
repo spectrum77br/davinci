@@ -40,7 +40,7 @@ const canDelete = computed(() => {
 // Aba "reposicao" foi removida — os parâmetros (tempo_reposicao/
 // tempo_estoque) continuam editáveis pela barra âmbar no topo da
 // aba Mala, que é onde realmente importam.
-type Tab = 'mala' | 'resumo' | 'cotacao'
+type Tab = 'mala' | 'resumo' | 'cotacao' | 'kit'
 const tab = ref<Tab>('mala')
 
 type Config = { tempo_reposicao: number; tempo_estoque: number }
@@ -111,12 +111,46 @@ type CotacaoGrid = {
   valores: CotValor[]
 }
 
+type KitVariation = {
+  id: string
+  code: string
+  label: string
+  ordem: number
+  highlight: boolean
+  obs: string | null
+}
+type KitBase = {
+  id: string
+  modelo_bling: string | null
+  sku_base: string
+  cor: string | null
+  ordem: number
+}
+type KitMark = { base_id: string; variation_id: string }
+type KitGrid = { variations: KitVariation[]; bases: KitBase[]; marks: KitMark[] }
+
 // ── State ─────────────────────────────────────────────────────────
 const products = ref<Product[]>([])
 const lotes = ref<Lote[]>([])
 const resumo = ref<{ items: ResumoRow[]; total: string | number }>({ items: [], total: 0 })
 const config = ref<Config>({ tempo_reposicao: 150, tempo_estoque: 60 })
 const cotacao = ref<CotacaoGrid>({ fabricantes: [], produtos: [], valores: [] })
+
+// Kit grid state. `kitMarkSet` é a representação canônica das marcas
+// (Set<string> de chaves `${base_id}::${variation_id}`) — `kit.marks`
+// é mantido em sincronia só pra round-trip do payload (push otimista).
+const kit = ref<KitGrid>({ variations: [], bases: [], marks: [] })
+const kitMarkSet = reactive<Set<string>>(new Set())
+function kitKey(baseId: string, varId: string): string {
+  return `${baseId}::${varId}`
+}
+function isKitMarked(baseId: string, varId: string): boolean {
+  return kitMarkSet.has(kitKey(baseId, varId))
+}
+function rebuildKitMarkSet(marks: KitMark[]) {
+  kitMarkSet.clear()
+  for (const m of marks) kitMarkSet.add(kitKey(m.base_id, m.variation_id))
+}
 // Cells map: cellKey(produto_id, fabricante_id) → { capacidade, valor_real, valor_usd }
 // as strings (inputs bind to strings; we coerce numbers on persist). Rebuilt
 // from cotacao.valores on every load and topped-up on the fly when the user
@@ -171,12 +205,13 @@ async function loadAll() {
   loading.value = true
   errorText.value = null
   try {
-    const [cfg, ps, ls, rs, ct] = await Promise.all([
+    const [cfg, ps, ls, rs, ct, kt] = await Promise.all([
       api<Config>('/api/importacao/config'),
       api<Product[]>('/api/importacao/products'),
       api<Lote[]>('/api/importacao/lotes'),
       api<{ items: ResumoRow[]; total: string | number }>('/api/importacao/resumo'),
       api<CotacaoGrid>('/api/importacao/cotacao'),
+      api<KitGrid>('/api/importacao/kit'),
     ])
     config.value = cfg
     products.value = ps
@@ -184,6 +219,8 @@ async function loadAll() {
     resumo.value = rs
     cotacao.value = ct
     rebuildCotCells(ct.valores)
+    kit.value = kt
+    rebuildKitMarkSet(kt.marks)
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -642,6 +679,33 @@ async function removeCotProduto(prod: CotProduto) {
     errorText.value = `Falha ao excluir produto: ${e?.data?.detail?.code || 'erro'}`
   }
 }
+
+// ── Kit: toggle handler ────────────────────────────────────────────
+// Toggle otimista: muda kitMarkSet local, manda PUT, reverte em caso
+// de erro. Sem debounce — toggle é discreto.
+async function toggleKitMark(baseId: string, varId: string) {
+  const key = kitKey(baseId, varId)
+  const wasMarked = kitMarkSet.has(key)
+  if (wasMarked) {
+    kitMarkSet.delete(key)
+  } else {
+    kitMarkSet.add(key)
+  }
+  try {
+    await api('/api/importacao/kit/mark', {
+      method: 'PUT',
+      body: { base_id: baseId, variation_id: varId, marked: !wasMarked },
+    })
+  } catch (e: any) {
+    // Rollback
+    if (wasMarked) {
+      kitMarkSet.add(key)
+    } else {
+      kitMarkSet.delete(key)
+    }
+    errorText.value = `Falha ao salvar marca do kit: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
 </script>
 
 <template>
@@ -651,13 +715,13 @@ async function removeCotProduto(prod: CotProduto) {
       <h1 class="text-xl font-semibold">Importação</h1>
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
         <button
-          v-for="t in (['mala','resumo','cotacao'] as const)"
+          v-for="t in (['mala','resumo','cotacao','kit'] as const)"
           :key="t"
           class="px-3 py-1.5 rounded text-sm transition-colors"
           :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
           @click="tab = t"
         >
-          {{ t === 'mala' ? 'Mala' : t === 'resumo' ? 'Resumo' : 'Cotação' }}
+          {{ t === 'mala' ? 'Mala' : t === 'resumo' ? 'Resumo' : t === 'cotacao' ? 'Cotação' : 'Kit' }}
         </button>
       </div>
       <button
@@ -1167,6 +1231,60 @@ async function removeCotProduto(prod: CotProduto) {
       </div>
     </div>
 
+    <!-- ─── TAB KIT ──────────────────────────────────────────────────
+         Matriz produto × variação de kit. Seed fixo via migration
+         0099 — operador apenas toggle de "x". Integração com Bling /
+         Tabela de Preços fica pras fases 2/3. -->
+    <div v-if="tab === 'kit'" class="space-y-2">
+      <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
+        <span class="text-muted-foreground">
+          Matriz <strong>{{ kit.bases.length }}</strong> produtos × <strong>{{ kit.variations.length }}</strong> variações.
+          Clique pra marcar/desmarcar "x". Criação automática no Bling
+          (<em>categoria mala kit</em>) e item na Tabela de Preços ficam pra fase 2.
+        </span>
+      </div>
+
+      <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 220px)">
+        <table class="kit-table text-xs border-collapse">
+          <thead>
+            <tr>
+              <th class="kit-h kit-col-modelo">modelo</th>
+              <th class="kit-h kit-col-sku">sku</th>
+              <th class="kit-h kit-col-cor">cor</th>
+              <th
+                v-for="v in kit.variations" :key="v.id"
+                class="kit-h kit-h-var"
+                :class="{ 'kit-h-highlight': v.highlight }"
+                :title="v.obs || `Variação #${v.ordem}`"
+              >
+                {{ v.label }}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!loading && kit.bases.length === 0">
+              <td :colspan="3 + kit.variations.length" class="py-6 text-center text-muted-foreground">
+                Sem dados — verifique se a migration de seed (0099) rodou.
+              </td>
+            </tr>
+            <tr v-for="b in kit.bases" :key="b.id" class="even:bg-muted/10 hover:bg-amber-50/40">
+              <td class="kit-col-modelo">{{ b.modelo_bling ?? '—' }}</td>
+              <td class="kit-col-sku font-mono">{{ b.sku_base }}</td>
+              <td class="kit-col-cor">{{ b.cor ?? '—' }}</td>
+              <td
+                v-for="v in kit.variations" :key="`${b.id}-${v.id}`"
+                class="kit-cell"
+                :class="{ 'kit-cell-highlight': v.highlight, 'kit-cell-disabled': !canEdit }"
+                @click="canEdit && toggleKitMark(b.id, v.id)"
+              >
+                <span v-if="isKitMarked(b.id, v.id)" class="kit-mark">x</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- ─── MODAL: Criar Produto ────────────────────────────────────
          Backed by saveNewProduct() — POSTs to /api/importacao/products.
          The "Nome gerado (preview)" line uses generateMalaName() which
@@ -1440,5 +1558,97 @@ async function removeCotProduto(prod: CotProduto) {
 .cot-input::placeholder {
   color: hsl(var(--muted-foreground));
   font-style: italic;
+}
+
+/* ── Kit table ──────────────────────────────────────────────────── */
+.kit-table {
+  width: auto;
+  min-width: 100%;
+  border-collapse: collapse;
+}
+.kit-table th,
+.kit-table td {
+  border: 1px solid hsl(var(--border));
+  padding: 2px 6px;
+  vertical-align: middle;
+}
+.kit-h {
+  background: hsl(var(--muted));
+  font-weight: 600;
+  font-size: 11px;
+  text-align: center;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.kit-h-var {
+  white-space: nowrap;
+  min-width: 60px;
+  padding: 4px 6px;
+}
+.kit-h-highlight {
+  background: rgb(254 240 138);  /* yellow-200 */
+}
+:global(.dark) .kit-h-highlight {
+  background: rgb(133 77 14 / 0.4);  /* yellow-900 */
+}
+/* Sticky left cols: modelo (left:0), sku (left:120), cor (left:230) */
+.kit-col-modelo {
+  position: sticky;
+  left: 0;
+  background: hsl(var(--background));
+  min-width: 120px;
+  max-width: 120px;
+  z-index: 3;
+}
+.kit-col-sku {
+  position: sticky;
+  left: 120px;
+  background: hsl(var(--background));
+  min-width: 110px;
+  max-width: 110px;
+  z-index: 3;
+}
+.kit-col-cor {
+  position: sticky;
+  left: 230px;
+  background: hsl(var(--background));
+  min-width: 130px;
+  max-width: 130px;
+  z-index: 3;
+}
+/* Header sticky cols need higher z to sit on top of body sticky */
+thead .kit-col-modelo,
+thead .kit-col-sku,
+thead .kit-col-cor {
+  z-index: 4;
+  background: hsl(var(--muted));
+}
+.kit-cell {
+  text-align: center;
+  cursor: pointer;
+  min-width: 60px;
+  user-select: none;
+}
+.kit-cell:hover {
+  background: hsl(var(--muted) / 0.4);
+}
+.kit-cell-highlight {
+  background: rgb(254 252 232);  /* yellow-50 */
+}
+:global(.dark) .kit-cell-highlight {
+  background: rgb(133 77 14 / 0.15);
+}
+.kit-cell-highlight:hover {
+  background: rgb(254 240 138);  /* yellow-200 */
+}
+.kit-cell-disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.kit-mark {
+  color: rgb(21 128 61);  /* green-700 */
+  font-weight: 700;
+  font-size: 13px;
 }
 </style>

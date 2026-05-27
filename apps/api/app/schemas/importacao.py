@@ -207,3 +207,45 @@ class CotacaoGridOut(BaseModel):
     fabricantes: list[CotacaoFabricanteOut]
     produtos: list[CotacaoProdutoOut]
     valores: list[CotacaoValorOut]
+
+
+# ── Kit (aba Kit — matriz produto × variação) ────────────────────────
+
+
+class ImportKitVariationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    code: str
+    label: str
+    ordem: int
+    highlight: bool
+    obs: str | None = None
+
+
+class ImportKitBaseOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    modelo_bling: str | None = None
+    sku_base: str
+    cor: str | None = None
+    ordem: int
+
+
+class ImportKitMarkOut(BaseModel):
+    """Célula marcada — só base_id/variation_id, sem ID (frontend
+    monta o lookup `{base_id}::{variation_id}`)."""
+    model_config = ConfigDict(from_attributes=True)
+    base_id: UUID
+    variation_id: UUID
+
+
+class ImportKitGridOut(BaseModel):
+    variations: list[ImportKitVariationOut]
+    bases: list[ImportKitBaseOut]
+    marks: list[ImportKitMarkOut]
+
+
+class ImportKitMarkToggle(BaseModel):
+    base_id: UUID
+    variation_id: UUID
+    marked: bool

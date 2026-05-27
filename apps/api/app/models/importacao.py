@@ -12,6 +12,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -189,3 +190,76 @@ class CotacaoValor(Base, TimestampMixin):
     capacidade: Mapped[str | None] = mapped_column(String(50), nullable=True)
     valor_real: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     valor_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+
+
+# ── Kit (aba Kit — matriz produto × variação) ────────────────────────
+
+
+class ImportKitVariation(Base, TimestampMixin):
+    """Coluna da matriz: uma das 22 variações de kit (8, 12+18,
+    8+12+20+24+a075+bp003+a076, etc). Seed fixo via migration 0099.
+    `code` não é UNIQUE — Excel tem duplicata legítima nas posições
+    19/20 (operador anotou "corrigir, separar por cor de mochila")."""
+    __tablename__ = "import_kit_variations"
+    __table_args__ = (
+        UniqueConstraint("ordem", name="uq_import_kit_variations_ordem"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    code: Mapped[str] = mapped_column(String(100), nullable=False)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    ordem: Mapped[int] = mapped_column(Integer, nullable=False)
+    highlight: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ImportKitBase(Base, TimestampMixin):
+    """Linha da matriz: família-produto (M2 lisa b001 branca, P5 seta
+    b099, mochila bp001 bege, etc). Seed fixo via migration 0099."""
+    __tablename__ = "import_kit_bases"
+    __table_args__ = (
+        UniqueConstraint("sku_base", name="uq_import_kit_bases_sku_base"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    modelo_bling: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    sku_base: Mapped[str] = mapped_column(String(50), nullable=False)
+    cor: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    ordem: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ImportKitMark(Base):
+    """Célula: existe sse "x" marcado no cruzamento base × variação.
+    Sem TimestampMixin — toggle é alto-volume, só created_at importa
+    pra audit (deletes não deixam histórico)."""
+    __tablename__ = "import_kit_marks"
+    __table_args__ = (
+        UniqueConstraint(
+            "base_id", "variation_id", name="uq_import_kit_marks_base_var",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    base_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("import_kit_bases.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    variation_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("import_kit_variations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        server_default=text("now()"),
+    )

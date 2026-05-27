@@ -32,6 +32,9 @@ from app.models import (
     CotacaoProduto,
     CotacaoValor,
     ImportConfig,
+    ImportKitBase,
+    ImportKitMark,
+    ImportKitVariation,
     ImportLote,
     ImportLoteItem,
     ImportProduct,
@@ -49,6 +52,11 @@ from app.schemas.importacao import (
     CotacaoValorUpsert,
     ImportConfigOut,
     ImportConfigPatch,
+    ImportKitBaseOut,
+    ImportKitGridOut,
+    ImportKitMarkOut,
+    ImportKitMarkToggle,
+    ImportKitVariationOut,
     ImportLoteCreate,
     ImportLoteItemUpsert,
     ImportLoteOut,
@@ -860,3 +868,51 @@ async def upsert_cotacao_valor(
     await session.commit()
     await session.refresh(existing)
     return CotacaoValorOut.model_validate(existing, from_attributes=True)
+
+
+# ── Kit ────────────────────────────────────────────────────────────
+# Aba "Kit": matriz produto × variação. Variations e bases são seeded
+# fixos (migration 0099) — operador apenas toggle marks. Fase 1 só UI;
+# integração com Bling/Tabela de Preços fica pras fases 2/3.
+
+
+@router.get("/kit", response_model=ImportKitGridOut)
+async def get_kit_grid(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+) -> ImportKitGridOut:
+    variations = (await session.execute(
+        select(ImportKitVariation).order_by(ImportKitVariation.ordem)
+    )).scalars().all()
+    bases = (await session.execute(
+        select(ImportKitBase).order_by(ImportKitBase.ordem)
+    )).scalars().all()
+    marks = (await session.execute(select(ImportKitMark))).scalars().all()
+    return ImportKitGridOut(
+        variations=[ImportKitVariationOut.model_validate(v, from_attributes=True) for v in variations],
+        bases=[ImportKitBaseOut.model_validate(b, from_attributes=True) for b in bases],
+        marks=[ImportKitMarkOut.model_validate(m, from_attributes=True) for m in marks],
+    )
+
+
+@router.put("/kit/mark", status_code=status.HTTP_204_NO_CONTENT)
+async def toggle_kit_mark(
+    body: ImportKitMarkToggle,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> None:
+    """Toggle idempotente: cria mark se `marked=True` e não existe;
+    apaga se `marked=False` e existe."""
+    existing = (await session.execute(
+        select(ImportKitMark).where(
+            ImportKitMark.base_id == body.base_id,
+            ImportKitMark.variation_id == body.variation_id,
+        )
+    )).scalar_one_or_none()
+    if body.marked and existing is None:
+        session.add(ImportKitMark(
+            base_id=body.base_id, variation_id=body.variation_id,
+        ))
+    elif not body.marked and existing is not None:
+        await session.delete(existing)
+    await session.commit()

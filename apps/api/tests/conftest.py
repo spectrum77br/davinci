@@ -165,6 +165,9 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 
 _CLEANUP_TABLES = (
+    "import_kit_marks",
+    "import_kit_bases",
+    "import_kit_variations",
     "alerts",
     "listing_requests",
     "listings",
