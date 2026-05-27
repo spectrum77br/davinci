@@ -298,6 +298,64 @@ async def test_create_kit_no_bling_integration_errors(
 
 
 @pytest.mark.asyncio
+async def test_create_kit_sums_components_cost(
+    db: AsyncSession,
+    bling_integration: Integration,
+    kit_setup: dict[str, Any],
+    monkeypatch,
+):
+    """Custo do composto = soma dos bling_cost_price dos componentes."""
+    from decimal import Decimal
+    # Set custos nos componentes b045.8 e b045.18
+    kit_setup["p1"].bling_cost_price = Decimal("30.00")
+    kit_setup["p2"].bling_cost_price = Decimal("70.50")
+    db.add(kit_setup["p1"])
+    db.add(kit_setup["p2"])
+    await db.commit()
+
+    captured: dict[str, Any] = {}
+    from app.services.marketplaces.bling import BlingClient
+
+    async def fake_create(self, **kwargs):
+        captured.update(kwargs)
+        return {"id": 88888}
+
+    async def fake_cat(self, name):
+        return 555
+
+    monkeypatch.setattr(BlingClient, "create_product", fake_create)
+    monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
+
+    await create_bling_kit_for_mark(kit_setup["mark"].id)
+    assert captured["cost_price"] == pytest.approx(100.50)
+
+
+@pytest.mark.asyncio
+async def test_create_kit_omits_cost_when_components_have_no_price(
+    db: AsyncSession,
+    bling_integration: Integration,
+    kit_setup: dict[str, Any],
+    monkeypatch,
+):
+    """Componentes sem bling_cost_price → cost_price=None (omitido)."""
+    captured: dict[str, Any] = {}
+    from app.services.marketplaces.bling import BlingClient
+
+    async def fake_create(self, **kwargs):
+        captured.update(kwargs)
+        return {"id": 88888}
+
+    async def fake_cat(self, name):
+        return 555
+
+    monkeypatch.setattr(BlingClient, "create_product", fake_create)
+    monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
+
+    await create_bling_kit_for_mark(kit_setup["mark"].id)
+    assert captured["cost_price"] is None
+
+
+@pytest.mark.asyncio
 async def test_create_kit_passes_correct_estrutura_to_bling(
     db: AsyncSession,
     bling_integration: Integration,

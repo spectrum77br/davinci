@@ -100,23 +100,28 @@ def _resolve_component_skus(sku_base: str, variation_code: str) -> list[str]:
 
 async def _resolve_component_bling_ids(
     session: AsyncSession, skus: list[str],
-) -> tuple[list[tuple[str, int]], list[str]]:
-    """Retorna ([(sku, bling_id)...], [skus_missing_bling_id])."""
+) -> tuple[list[tuple[str, int, float]], list[str]]:
+    """Retorna ([(sku, bling_id, cost)...], [skus_missing_bling_id]).
+    `cost` é 0.0 quando o componente não tem bling_cost_price setado —
+    permite usar para `sum()` sem checagem de None."""
     if not skus:
         return [], []
     rows = (await session.execute(
-        select(Product.sku, Product.bling_product_id)
+        select(Product.sku, Product.bling_product_id, Product.bling_cost_price)
         .where(Product.sku.in_(skus))
     )).all()
-    id_by_sku: dict[str, int | None] = {r.sku.lower(): r.bling_product_id for r in rows}
-    resolved: list[tuple[str, int]] = []
+    by_sku: dict[str, tuple[int | None, float]] = {
+        r.sku.lower(): (r.bling_product_id, float(r.bling_cost_price or 0))
+        for r in rows
+    }
+    resolved: list[tuple[str, int, float]] = []
     missing: list[str] = []
     for sku in skus:
-        bid = id_by_sku.get(sku.lower())
-        if bid is None:
+        info = by_sku.get(sku.lower())
+        if info is None or info[0] is None:
             missing.append(sku)
         else:
-            resolved.append((sku, int(bid)))
+            resolved.append((sku, int(info[0]), info[1]))
     return resolved, missing
 
 
@@ -298,15 +303,22 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
             "lancamentoEstoque": _ESTRUTURA_LANCAMENTO,
             "componentes": [
                 {"produto": {"id": bling_id}, "quantidade": 1}
-                for _, bling_id in resolved
+                for _, bling_id, _cost in resolved
             ],
         }
+
+        # Custo do kit = soma dos custos dos componentes (decisão
+        # operacional). Cada componente já trouxe bling_cost_price em
+        # `resolved`. Quando todos os componentes estão sem custo a
+        # soma fica 0 → BlingClient omite precoCusto do payload.
+        components_cost = sum(cost for _, _, cost in resolved)
 
         # Criar no Bling.
         try:
             data = await client.create_product(
                 sku=kit_sku,
                 name=kit_name,
+                cost_price=components_cost if components_cost > 0 else None,
                 category_id=category_id,
                 formato="E",
                 estrutura=estrutura,
