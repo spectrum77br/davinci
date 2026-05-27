@@ -28,6 +28,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated, Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -45,6 +46,14 @@ from app.models.stock_movement import StockMovement
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/estoque", tags=["estoque"])
+
+# Operator is in Brazil — "hoje" no contexto da aba Controle de Estoque
+# significa hoje em São Paulo, não em UTC. Sem isso, das 21h às 24h locais
+# (00h–03h UTC do dia seguinte) o filtro de data mostra o dia errado:
+# pedidos lançados em 26/05 (BRT) caíam em 27/05 (UTC) e sumiam quando o
+# operador seleciona "26/05" no date-picker. Mesmo padrão usado em
+# bling_orders.py + marketplace_shipment_check.py + worker.py.
+_BRT = ZoneInfo("America/Sao_Paulo")
 
 _VALID_TAGS = frozenset({
     "ci", "pi", "ra", "sa", "sp",  # GERAL <UF> (suffix-mapped)
@@ -155,7 +164,7 @@ def _resolve_dates(
     data_inicio: date | None, data_fim: date | None
 ) -> tuple[date, date]:
     """Both default to today. Caller already received `date` objects."""
-    today = datetime.now(UTC).date()
+    today = datetime.now(_BRT).date()
     return (data_inicio or today, data_fim or today)
 
 
@@ -467,7 +476,7 @@ async def list_estoque_envios(
     tags = _resolve_tags(user, tag)
     # Envios tab defaults to last 7 days when no window is set, matching
     # the page's date-picker default.
-    today = datetime.now(UTC).date()
+    today = datetime.now(_BRT).date()
     if data_inicio is None and data_fim is None:
         data_inicio = today - timedelta(days=6)
         data_fim = today
@@ -649,7 +658,7 @@ async def conferencia_estoque_hoje(
     dia que o operador está visualizando. Usado pelo bloqueio da aba
     Envios (só libera quando o dia atual está 100%)."""
     tags = _resolve_tags(user, tag)
-    today = datetime.now(UTC).date()
+    today = datetime.now(_BRT).date()
     total = await _count_active_products(session, tags, estoque_filter=estoque_filter)
     by_day = await _count_estoque_checks_by_day(
         session, user_id=user.id, data_inicio=today, data_fim=today,
