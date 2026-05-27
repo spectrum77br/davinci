@@ -1,0 +1,296 @@
+"""Fase 2 da aba Kit: criação de produto composto no Bling.
+
+Cobertura:
+  * happy path: kit 2 componentes com bling_product_id resolvidos → 'sent'
+  * missing_component: 1 componente sem bling_product_id → 'error'
+  * idempotência: rodar 2x com bling_product_id já setado → no-op
+  * parse_kit_variation: vários formatos
+  * desmarcar não chama Bling (cobertura na test_importacao_kit.py)
+
+BlingClient é mockado via monkeypatch.setattr — não bate na API real.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+from typing import Any
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import (
+    ImportKitBase,
+    ImportKitMark,
+    ImportKitVariation,
+    Integration,
+    IntegrationPlatform,
+    Product,
+    User,
+    UserRole,
+    UserStatus,
+)
+from app.security.cipher import encrypt_json
+from app.services.bling_kit_create import create_bling_kit_for_mark
+from app.services.importacao_naming import parse_kit_variation
+
+# ── parse_kit_variation (pure function — sem fixtures) ──────────────
+
+
+def test_parse_simple_size():
+    assert parse_kit_variation("8") == (["8"], [])
+
+
+def test_parse_two_sizes():
+    assert parse_kit_variation("8+18") == (["8", "18"], [])
+
+
+def test_parse_comma_separated():
+    assert parse_kit_variation("12,14,16") == (["12", "14", "16"], [])
+
+
+def test_parse_kit_with_accessories():
+    sizes, acc = parse_kit_variation("12+20+24+a075+bp003+a076")
+    assert sizes == ["12", "20", "24"]
+    assert acc == ["a075", "bp003", "a076"]
+
+
+def test_parse_empty_returns_empty():
+    assert parse_kit_variation("") == ([], [])
+
+
+def test_parse_whitespace_pieces_are_skipped():
+    assert parse_kit_variation(" 8 + + 18 ") == (["8", "18"], [])
+
+
+# ── Worker tests (mocked Bling) ──────────────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def bling_integration(db: AsyncSession) -> Integration:
+    """Integration row pra Bling — credentials criptografadas mas o
+    cliente é mockado, então o valor não importa. Integration.user_id
+    é NOT NULL, então criamos um user dummy primeiro."""
+    owner = User(
+        open_id=f"email:owner-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        email=f"owner-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        role=UserRole.ADMIN,
+        status=UserStatus.ACTIVE,
+        permissions={},
+    )
+    db.add(owner)
+    await db.commit()
+    await db.refresh(owner)
+    integ = Integration(
+        user_id=owner.id,
+        platform=IntegrationPlatform.BLING,
+        name="Bling Test",
+        credentials=encrypt_json({
+            "access_token": "tok",
+            "refresh_token": "ref",
+            "client_id": "cid",
+            "client_secret": "csec",
+            "expires_at": int(datetime.now(UTC).timestamp()) + 3600,
+        }),
+    )
+    db.add(integ)
+    await db.commit()
+    await db.refresh(integ)
+    return integ
+
+
+@pytest_asyncio.fixture
+async def kit_setup(db: AsyncSession) -> dict[str, Any]:
+    """Cria base + variation + componentes em `products` com bling_product_id."""
+    v = ImportKitVariation(code="8+18", label="8+18", ordem=1, highlight=False)
+    b = ImportKitBase(modelo_bling="M5 mista", sku_base="b045", cor="preto", ordem=1)
+    # Products requer user_id (NOT NULL)
+    owner = User(
+        open_id=f"email:po-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        email=f"po-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        role=UserRole.ADMIN,
+        status=UserStatus.ACTIVE,
+        permissions={},
+    )
+    db.add_all([v, b, owner])
+    await db.commit()
+    await db.refresh(v)
+    await db.refresh(b)
+    await db.refresh(owner)
+
+    # Componentes: b045.8 e b045.18 em `products`
+    p1 = Product(
+        user_id=owner.id, sku="b045.8",
+        name="Mala b045 tamanho 8", bling_product_id=1001,
+    )
+    p2 = Product(
+        user_id=owner.id, sku="b045.18",
+        name="Mala b045 tamanho 18", bling_product_id=1002,
+    )
+    db.add_all([p1, p2])
+    await db.commit()
+
+    mark = ImportKitMark(
+        base_id=b.id, variation_id=v.id, bling_sync_status="pending",
+    )
+    db.add(mark)
+    await db.commit()
+    await db.refresh(mark)
+    return {"base": b, "variation": v, "mark": mark, "p1": p1, "p2": p2}
+
+
+def _install_bling_mock(monkeypatch, *, return_id: int = 9999, raise_exc: Exception | None = None):
+    """Substitui BlingClient.create_product e find_or_create_category
+    por mocks que devolvem dados controlados."""
+
+    async def fake_find_or_create_category(self, name):
+        return 555
+
+    async def fake_create_product(self, **kwargs):
+        if raise_exc is not None:
+            raise raise_exc
+        # Echo do shape esperado pelo serviço — `data["id"]`.
+        return {"id": return_id, "echo": kwargs}
+
+    from app.services.marketplaces.bling import BlingClient
+    monkeypatch.setattr(BlingClient, "find_or_create_category", fake_find_or_create_category)
+    monkeypatch.setattr(BlingClient, "create_product", fake_create_product)
+
+
+@pytest.mark.asyncio
+async def test_create_kit_happy_path(
+    db: AsyncSession,
+    bling_integration: Integration,
+    kit_setup: dict[str, Any],
+    monkeypatch,
+):
+    """2 componentes, ambos com bling_product_id → cria, status='sent'."""
+    _install_bling_mock(monkeypatch, return_id=88888)
+    result = await create_bling_kit_for_mark(kit_setup["mark"].id)
+    assert result["ok"] is True
+    assert result["bling_product_id"] == 88888
+
+    # Verificar DB: mark atualizada
+    await db.refresh(kit_setup["mark"])
+    m = kit_setup["mark"]
+    assert m.bling_product_id == 88888
+    assert m.bling_sync_status == "sent"
+    assert m.bling_sync_error is None
+    assert m.bling_sync_done_at is not None
+
+
+@pytest.mark.asyncio
+async def test_create_kit_missing_component_bling_id_errors(
+    db: AsyncSession,
+    bling_integration: Integration,
+    kit_setup: dict[str, Any],
+    monkeypatch,
+):
+    """1 componente sem bling_product_id → status='error', error msg detalha."""
+    _install_bling_mock(monkeypatch)
+    # Apaga o bling_product_id do componente p1
+    kit_setup["p1"].bling_product_id = None
+    db.add(kit_setup["p1"])
+    await db.commit()
+
+    result = await create_bling_kit_for_mark(kit_setup["mark"].id)
+    assert result["ok"] is False
+    assert "missing_component" in result["error"]
+
+    await db.refresh(kit_setup["mark"])
+    m = kit_setup["mark"]
+    assert m.bling_product_id is None
+    assert m.bling_sync_status == "error"
+    assert "b045.8" in (m.bling_sync_error or "")
+    assert m.bling_sync_attempted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_create_kit_idempotent_when_already_synced(
+    db: AsyncSession,
+    bling_integration: Integration,
+    kit_setup: dict[str, Any],
+    monkeypatch,
+):
+    """Mark já com bling_product_id → worker pula sem chamar Bling."""
+    # Pré-setar
+    mark = kit_setup["mark"]
+    mark.bling_product_id = 77777
+    mark.bling_sync_status = "sent"
+    db.add(mark)
+    await db.commit()
+
+    bling_calls = {"create_product": 0}
+
+    from app.services.marketplaces.bling import BlingClient
+
+    async def fake_create(self, **kwargs):
+        bling_calls["create_product"] += 1
+        return {"id": 99999}
+
+    async def fake_cat(self, name):
+        return 1
+
+    monkeypatch.setattr(BlingClient, "create_product", fake_create)
+    monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
+
+    result = await create_bling_kit_for_mark(mark.id)
+    assert result["ok"] is True
+    assert result.get("skipped") is True
+    assert result["bling_product_id"] == 77777
+    # Bling NÃO foi chamado
+    assert bling_calls["create_product"] == 0
+
+
+@pytest.mark.asyncio
+async def test_create_kit_no_bling_integration_errors(
+    db: AsyncSession,
+    kit_setup: dict[str, Any],
+    monkeypatch,
+):
+    """Sem Integration de Bling no DB → status='error'."""
+    # Não há `bling_integration` fixture aqui, então não tem integration.
+    _install_bling_mock(monkeypatch)
+    result = await create_bling_kit_for_mark(kit_setup["mark"].id)
+    assert result["ok"] is False
+    assert result["error"] == "no_bling_integration"
+
+    await db.refresh(kit_setup["mark"])
+    assert kit_setup["mark"].bling_sync_status == "error"
+
+
+@pytest.mark.asyncio
+async def test_create_kit_passes_correct_estrutura_to_bling(
+    db: AsyncSession,
+    bling_integration: Integration,
+    kit_setup: dict[str, Any],
+    monkeypatch,
+):
+    """Verifica que o payload pro Bling tem formato='E' + estrutura
+    com 2 componentes nos bling_product_ids corretos."""
+    captured: dict[str, Any] = {}
+
+    from app.services.marketplaces.bling import BlingClient
+
+    async def fake_create(self, **kwargs):
+        captured.update(kwargs)
+        return {"id": 88888}
+
+    async def fake_cat(self, name):
+        return 555
+
+    monkeypatch.setattr(BlingClient, "create_product", fake_create)
+    monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
+
+    await create_bling_kit_for_mark(kit_setup["mark"].id)
+
+    assert captured["formato"] == "E"
+    assert captured["sku"] == "b045.8+18"
+    assert captured["category_id"] == 555
+    est = captured["estrutura"]
+    assert est["tipoEstoque"] == "V"
+    assert est["lancamentoEstoque"] == "M"
+    comp_ids = sorted(c["produto"]["id"] for c in est["componentes"])
+    assert comp_ids == [1001, 1002]
+    for c in est["componentes"]:
+        assert c["quantidade"] == 1

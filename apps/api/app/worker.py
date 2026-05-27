@@ -28,6 +28,7 @@ from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_l
 from app.services.alerts import emit_alert
 from app.services.audit.runner import run_audit
 from app.services.auto_link import run_auto_link
+from app.services.bling_kit_create import create_bling_kit_for_mark_job
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
 from app.services.email import get_email_sender, render_otp_html
@@ -1041,6 +1042,7 @@ class WorkerSettings:
         refresh_bling_stock_run,
         ingest_bling_order_run,
         auto_create_product_from_bling_run,
+        create_bling_kit_for_mark_job,
         alerts_cleanup,
         low_stock_polling,
         import_listings_run,

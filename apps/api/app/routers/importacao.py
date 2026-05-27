@@ -22,7 +22,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import and_, desc, func, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -70,6 +70,7 @@ from app.schemas.importacao import (
 )
 from app.services.importacao_naming import generate_mala_name
 from app.services.pricing.audit import build_match_indexes, match_one_sku_to_keys
+from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/importacao", tags=["importacao"])
@@ -901,8 +902,14 @@ async def toggle_kit_mark(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
 ) -> None:
-    """Toggle idempotente: cria mark se `marked=True` e não existe;
-    apaga se `marked=False` e existe."""
+    """Toggle idempotente. Quando `marked=True` e a mark não existe,
+    cria com `bling_sync_status='pending'` e enfileira job ARQ
+    `create_bling_kit_for_mark_job` que cria o composto no Bling.
+
+    Quando `marked=False`, deleta a mark local. NÃO apaga o produto
+    no Bling — operação destrutiva fica pra ser feita manualmente.
+    A UI mostra warning antes de desmarcar rows com bling_product_id.
+    """
     existing = (await session.execute(
         select(ImportKitMark).where(
             ImportKitMark.base_id == body.base_id,
@@ -910,9 +917,54 @@ async def toggle_kit_mark(
         )
     )).scalar_one_or_none()
     if body.marked and existing is None:
-        session.add(ImportKitMark(
-            base_id=body.base_id, variation_id=body.variation_id,
-        ))
+        mark = ImportKitMark(
+            base_id=body.base_id,
+            variation_id=body.variation_id,
+            bling_sync_status="pending",
+        )
+        session.add(mark)
+        await session.commit()
+        await session.refresh(mark)
+        # Enfileirar criação do composto no Bling (fire-and-forget).
+        try:
+            pool = await get_arq_pool()
+            await pool.enqueue_job("create_bling_kit_for_mark_job", str(mark.id))
+        except Exception as e:  # noqa: BLE001
+            # Não derruba a UI se o ARQ estiver indisponível — operador
+            # pode usar resync depois.
+            logger.warning("kit_enqueue_failed", mark_id=str(mark.id), err=str(e)[:200])
     elif not body.marked and existing is not None:
         await session.delete(existing)
+        await session.commit()
+
+
+@router.post(
+    "/kit/mark/{mark_id}/resync",
+    response_model=ImportKitMarkOut,
+)
+async def resync_kit_mark(
+    mark_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> ImportKitMarkOut:
+    """Re-enfileira o job de criação no Bling pra uma mark — usado
+    quando a primeira tentativa falhou (status='error'). Limpa o
+    error/attempt fields e bota status='pending'."""
+    mark = (await session.execute(
+        select(ImportKitMark).where(ImportKitMark.id == mark_id)
+    )).scalar_one_or_none()
+    if mark is None:
+        raise HTTPException(404, detail={"code": "mark_not_found"})
+    if mark.bling_product_id is not None:
+        # Já sincronizada — nada a fazer.
+        return ImportKitMarkOut.model_validate(mark, from_attributes=True)
+    mark.bling_sync_status = "pending"
+    mark.bling_sync_error = None
     await session.commit()
+    await session.refresh(mark)
+    try:
+        pool = await get_arq_pool()
+        await pool.enqueue_job("create_bling_kit_for_mark_job", str(mark.id))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("kit_resync_enqueue_failed", mark_id=str(mark.id), err=str(e)[:200])
+    return ImportKitMarkOut.model_validate(mark, from_attributes=True)

@@ -13,7 +13,7 @@
 //   * estoque_bling / consumo_diario / maior_media_30d são colunas
 //     manuais nesta planilha. Bling sync é uma segunda PR.
 //   * Tabela vazia por padrão — operador adiciona produtos via UI.
-import { computed, reactive, ref } from 'vue'
+import { computed, onScopeDispose, reactive, ref, watch } from 'vue'
 import {
   Plus, RefreshCw, Trash2, Save, Search, Download, X, AlertCircle,
   Send, CheckCircle2, Clock,
@@ -126,7 +126,16 @@ type KitBase = {
   cor: string | null
   ordem: number
 }
-type KitMark = { base_id: string; variation_id: string }
+type KitMark = {
+  id: string
+  base_id: string
+  variation_id: string
+  bling_product_id: number | null
+  bling_sync_status: 'pending' | 'sent' | 'error' | null
+  bling_sync_error: string | null
+  bling_sync_attempted_at: string | null
+  bling_sync_done_at: string | null
+}
 type KitGrid = { variations: KitVariation[]; bases: KitBase[]; marks: KitMark[] }
 
 // ── State ─────────────────────────────────────────────────────────
@@ -136,20 +145,23 @@ const resumo = ref<{ items: ResumoRow[]; total: string | number }>({ items: [], 
 const config = ref<Config>({ tempo_reposicao: 150, tempo_estoque: 60 })
 const cotacao = ref<CotacaoGrid>({ fabricantes: [], produtos: [], valores: [] })
 
-// Kit grid state. `kitMarkSet` é a representação canônica das marcas
-// (Set<string> de chaves `${base_id}::${variation_id}`) — `kit.marks`
-// é mantido em sincronia só pra round-trip do payload (push otimista).
+// Kit grid state. `kitMarkMap` é o lookup canônico (key → mark) —
+// usado pra render e pra resync. Re-construído a cada loadKit. As
+// mudanças otimistas no toggle entram aqui também.
 const kit = ref<KitGrid>({ variations: [], bases: [], marks: [] })
-const kitMarkSet = reactive<Set<string>>(new Set())
+const kitMarkMap = reactive<Record<string, KitMark>>({})
 function kitKey(baseId: string, varId: string): string {
   return `${baseId}::${varId}`
 }
-function isKitMarked(baseId: string, varId: string): boolean {
-  return kitMarkSet.has(kitKey(baseId, varId))
+function getKitMark(baseId: string, varId: string): KitMark | undefined {
+  return kitMarkMap[kitKey(baseId, varId)]
 }
-function rebuildKitMarkSet(marks: KitMark[]) {
-  kitMarkSet.clear()
-  for (const m of marks) kitMarkSet.add(kitKey(m.base_id, m.variation_id))
+function isKitMarked(baseId: string, varId: string): boolean {
+  return kitKey(baseId, varId) in kitMarkMap
+}
+function rebuildKitMarkMap(marks: KitMark[]) {
+  for (const k of Object.keys(kitMarkMap)) delete kitMarkMap[k]
+  for (const m of marks) kitMarkMap[kitKey(m.base_id, m.variation_id)] = m
 }
 // Cells map: cellKey(produto_id, fabricante_id) → { capacidade, valor_real, valor_usd }
 // as strings (inputs bind to strings; we coerce numbers on persist). Rebuilt
@@ -220,7 +232,7 @@ async function loadAll() {
     cotacao.value = ct
     rebuildCotCells(ct.valores)
     kit.value = kt
-    rebuildKitMarkSet(kt.marks)
+    rebuildKitMarkMap(kt.marks)
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -681,31 +693,106 @@ async function removeCotProduto(prod: CotProduto) {
 }
 
 // ── Kit: toggle handler ────────────────────────────────────────────
-// Toggle otimista: muda kitMarkSet local, manda PUT, reverte em caso
-// de erro. Sem debounce — toggle é discreto.
+// Toggle otimista: muda kitMarkMap local, manda PUT, reverte em caso
+// de erro. Sem debounce — toggle é discreto. Desmarcar uma row que já
+// foi sincronizada com Bling exibe warning (destrutivo).
 async function toggleKitMark(baseId: string, varId: string) {
   const key = kitKey(baseId, varId)
-  const wasMarked = kitMarkSet.has(key)
+  const existing = kitMarkMap[key]
+  const wasMarked = existing !== undefined
+
+  // Warning na desmarcação se já sincronizado.
+  if (wasMarked && existing.bling_product_id !== null) {
+    const ok = confirm(
+      `Esse kit foi criado no Bling (id ${existing.bling_product_id}).\n\n`
+      + `Desmarcar aqui NÃO remove o produto no Bling — você precisa apagar lá manualmente se quiser.\n\n`
+      + `Continuar?`,
+    )
+    if (!ok) return
+  }
+
+  // Otimista: snapshot pra rollback.
+  const snapshot = existing ? { ...existing } : null
   if (wasMarked) {
-    kitMarkSet.delete(key)
+    delete kitMarkMap[key]
   } else {
-    kitMarkSet.add(key)
+    // Mark pending até o server confirmar (não temos id ainda).
+    kitMarkMap[key] = {
+      id: 'pending',
+      base_id: baseId,
+      variation_id: varId,
+      bling_product_id: null,
+      bling_sync_status: 'pending',
+      bling_sync_error: null,
+      bling_sync_attempted_at: null,
+      bling_sync_done_at: null,
+    }
   }
   try {
     await api('/api/importacao/kit/mark', {
       method: 'PUT',
       body: { base_id: baseId, variation_id: varId, marked: !wasMarked },
     })
+    // No-op: status real (sent/error) vem do polling/reload da próxima
+    // chamada de loadAll. Por ora a UI fica em 'pending' até refresh.
   } catch (e: any) {
     // Rollback
-    if (wasMarked) {
-      kitMarkSet.add(key)
+    if (wasMarked && snapshot) {
+      kitMarkMap[key] = snapshot
     } else {
-      kitMarkSet.delete(key)
+      delete kitMarkMap[key]
     }
     errorText.value = `Falha ao salvar marca do kit: ${e?.data?.detail?.code || 'erro'}`
   }
 }
+
+async function resyncKitMark(mark: KitMark) {
+  try {
+    const updated = await api<KitMark>(`/api/importacao/kit/mark/${mark.id}/resync`, {
+      method: 'POST',
+    })
+    kitMarkMap[kitKey(mark.base_id, mark.variation_id)] = updated
+  } catch (e: any) {
+    errorText.value = `Falha ao reenviar: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
+
+function kitMarkTitle(m: KitMark | undefined): string {
+  if (!m) return 'Clique pra marcar'
+  if (m.bling_sync_status === 'sent') return `Bling: enviado (id ${m.bling_product_id})`
+  if (m.bling_sync_status === 'pending') return 'Aguardando envio pro Bling…'
+  if (m.bling_sync_status === 'error') return `Erro: ${m.bling_sync_error ?? 'desconhecido'}`
+  return 'Marcado'
+}
+
+// Polling leve: se há marks pending, refresh do grid a cada 10s.
+// Para automaticamente quando não há mais pending. Limitado à aba kit.
+let kitPollHandle: ReturnType<typeof setInterval> | null = null
+async function reloadKitOnly() {
+  try {
+    const kt = await api<KitGrid>('/api/importacao/kit')
+    kit.value = kt
+    rebuildKitMarkMap(kt.marks)
+  } catch { /* ignore */ }
+}
+function hasPendingKitMarks(): boolean {
+  for (const k in kitMarkMap) {
+    if (kitMarkMap[k].bling_sync_status === 'pending') return true
+  }
+  return false
+}
+watch([() => tab.value, kitMarkMap], () => {
+  const shouldPoll = tab.value === 'kit' && hasPendingKitMarks()
+  if (shouldPoll && !kitPollHandle) {
+    kitPollHandle = setInterval(() => { void reloadKitOnly() }, 10_000)
+  } else if (!shouldPoll && kitPollHandle) {
+    clearInterval(kitPollHandle)
+    kitPollHandle = null
+  }
+}, { deep: true })
+onScopeDispose(() => {
+  if (kitPollHandle) clearInterval(kitPollHandle)
+})
 </script>
 
 <template>
@@ -1275,9 +1362,25 @@ async function toggleKitMark(baseId: string, varId: string) {
                 v-for="v in kit.variations" :key="`${b.id}-${v.id}`"
                 class="kit-cell"
                 :class="{ 'kit-cell-highlight': v.highlight, 'kit-cell-disabled': !canEdit }"
+                :title="kitMarkTitle(getKitMark(b.id, v.id))"
                 @click="canEdit && toggleKitMark(b.id, v.id)"
               >
-                <span v-if="isKitMarked(b.id, v.id)" class="kit-mark">x</span>
+                <template v-if="isKitMarked(b.id, v.id)">
+                  <span
+                    class="kit-mark"
+                    :class="{
+                      'kit-mark-sent': getKitMark(b.id, v.id)?.bling_sync_status === 'sent',
+                      'kit-mark-pending': getKitMark(b.id, v.id)?.bling_sync_status === 'pending',
+                      'kit-mark-error': getKitMark(b.id, v.id)?.bling_sync_status === 'error',
+                    }"
+                  >x</span>
+                  <button
+                    v-if="canEdit && getKitMark(b.id, v.id)?.bling_sync_status === 'error'"
+                    class="kit-resync"
+                    title="Reenviar pro Bling"
+                    @click.stop="resyncKitMark(getKitMark(b.id, v.id)!)"
+                  >↻</button>
+                </template>
               </td>
             </tr>
           </tbody>
@@ -1647,8 +1750,30 @@ thead .kit-col-cor {
   opacity: 0.7;
 }
 .kit-mark {
-  color: rgb(21 128 61);  /* green-700 */
+  color: rgb(21 128 61);  /* green-700 — default e 'sent' */
   font-weight: 700;
   font-size: 13px;
+}
+.kit-mark-sent {
+  color: rgb(21 128 61);  /* green-700 */
+}
+.kit-mark-pending {
+  color: rgb(217 119 6);  /* amber-600 */
+}
+.kit-mark-error {
+  color: rgb(220 38 38);  /* red-600 */
+}
+.kit-resync {
+  margin-left: 4px;
+  color: rgb(180 83 9);   /* amber-700 */
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+.kit-resync:hover {
+  color: rgb(146 64 14);  /* amber-800 */
 }
 </style>

@@ -12,6 +12,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -262,4 +263,16 @@ class ImportKitMark(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
         server_default=text("now()"),
+    )
+    # Estado de sincronização com o Bling. Migration 0100. O worker
+    # `create_bling_kit_for_mark` é idempotente — pula se
+    # bling_product_id já está preenchido.
+    bling_product_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    bling_sync_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    bling_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bling_sync_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    bling_sync_done_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
     )

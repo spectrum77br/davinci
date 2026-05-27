@@ -585,25 +585,83 @@ class BlingClient:
         name: str,
         price: float | None = None,
         category_id: int | None = None,
+        formato: str = "S",
+        estrutura: dict | None = None,
     ) -> dict:
         """Create a product in Bling via POST /Api/v3/produtos.
 
         Returns the `data` dict from Bling (contains at least `{"id": <int>}`).
+
+        formato:
+          * "S" = Simples (default)
+          * "V" = Com variações
+          * "E" = Com composição (kit/composto)
+
+        Para composto, `estrutura` deve ter o shape (confirmado via
+        SDK AlexandreBellas/bling-erp-api-js, src/entities/produtos):
+          {
+            "tipoEstoque": "F" | "V",            # F=Físico, V=Virtual
+            "lancamentoEstoque": "A" | "M" | "P", # A=Produto+Componente, M=Componente, P=Produto
+            "componentes": [
+              {"produto": {"id": <int>}, "quantidade": <float>},
+              ...
+            ]
+          }
         """
         body: dict[str, Any] = {
             "nome": name,
             "codigo": sku,
             "tipo": "P",
             "situacao": "A",
-            "formato": "S",
+            "formato": formato,
         }
         if price is not None:
             body["preco"] = float(price)
         if category_id is not None:
             body["categoria"] = {"id": category_id}
+        if formato == "E" and estrutura is not None:
+            body["estrutura"] = estrutura
         r = await self._request("POST", "/produtos", json=body)
         r.raise_for_status()
         return r.json().get("data") or {}
+
+    async def find_or_create_category(self, name: str) -> int:
+        """Resolve category by name (case-insensitive). Creates a new one
+        via POST /categorias/produtos if missing. Returns the category id.
+
+        Walks pages of GET /categorias/produtos until the name matches or
+        the list ends — categorias é catálogo pequeno (~dezenas), 1-2
+        páginas no pior caso.
+        """
+        target = name.strip().lower()
+        pagina = 1
+        while True:
+            r = await self._request(
+                "GET", "/categorias/produtos",
+                params={"pagina": pagina, "limite": 100},
+            )
+            r.raise_for_status()
+            items = r.json().get("data") or []
+            for item in items:
+                label = (item.get("descricao") or item.get("nome") or "").strip().lower()
+                if label == target:
+                    cid = item.get("id")
+                    if cid is not None:
+                        return int(cid)
+            if len(items) < 100:
+                break
+            pagina += 1
+        # Não achou → criar.
+        rc = await self._request(
+            "POST", "/categorias/produtos",
+            json={"descricao": name.strip()},
+        )
+        rc.raise_for_status()
+        data = rc.json().get("data") or {}
+        new_id = data.get("id")
+        if new_id is None:
+            raise RuntimeError(f"Bling created category but returned no id: {data}")
+        return int(new_id)
 
     async def test_connection(self) -> TestResult:
         try:

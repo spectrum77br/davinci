@@ -232,11 +232,18 @@ class ImportKitBaseOut(BaseModel):
 
 
 class ImportKitMarkOut(BaseModel):
-    """Célula marcada — só base_id/variation_id, sem ID (frontend
-    monta o lookup `{base_id}::{variation_id}`)."""
+    """Célula marcada. Inclui `id` (pra resync) e estado do sync com
+    o Bling (fase 2). Frontend usa `${base_id}::${variation_id}` como
+    chave do lookup."""
     model_config = ConfigDict(from_attributes=True)
+    id: UUID
     base_id: UUID
     variation_id: UUID
+    bling_product_id: int | None = None
+    bling_sync_status: str | None = None  # 'pending' | 'sent' | 'error'
+    bling_sync_error: str | None = None
+    bling_sync_attempted_at: datetime | None = None
+    bling_sync_done_at: datetime | None = None
 
 
 class ImportKitGridOut(BaseModel):
