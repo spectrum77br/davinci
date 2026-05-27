@@ -282,7 +282,12 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
             return {"ok": False, "error": f"category_resolve_failed: {e}"}
 
         # SKU + nome do kit.
-        kit_sku = f"{base.sku_base}.{variation.code}"
+        # SKU canônico — '.' entre tamanhos, '+' apenas pra acessórios.
+        # Reusa o mesmo helper que constrói o SKU do pricing_product
+        # (fase 3) pra garantir consistência: o que aparece no Bling
+        # bate com o que aparece em /pricing/tabela. Variation
+        # "8+18" → "base.8.18"; "12+20+24+a075..." → "base.12.20.24+a075...".
+        kit_sku = build_kit_pricing_sku(base.sku_base, variation.code)
         kit_name = generate_kit_name(
             base.modelo_bling, base.sku_base, variation.code, base.cor,
         )

@@ -278,7 +278,10 @@ def generate_kit_name(
         parts.append(modelo)
 
     if sizes:
-        parts.append(f"tamanhos {'+'.join(sizes)}")
+        # '.' entre tamanhos — convenção da operação: '.' separa
+        # tamanhos, '+' separa só acessórios. Mantém alinhado com o
+        # SKU (`build_kit_pricing_sku`).
+        parts.append(f"tamanhos {'.'.join(sizes)}")
     if accessories:
         parts.append("+ " + " + ".join(accessories))
 

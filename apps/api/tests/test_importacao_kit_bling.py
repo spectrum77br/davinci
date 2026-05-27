@@ -32,7 +32,11 @@ from app.models import (
 )
 from app.security.cipher import encrypt_json
 from app.services.bling_kit_create import create_bling_kit_for_mark
-from app.services.importacao_naming import parse_kit_variation
+from app.services.importacao_naming import (
+    build_kit_pricing_sku,
+    generate_kit_name,
+    parse_kit_variation,
+)
 
 # ── parse_kit_variation (pure function — sem fixtures) ──────────────
 
@@ -61,6 +65,40 @@ def test_parse_empty_returns_empty():
 
 def test_parse_whitespace_pieces_are_skipped():
     assert parse_kit_variation(" 8 + + 18 ") == (["8", "18"], [])
+
+
+# ── generate_kit_name + build_kit_pricing_sku — convenção '.' ─────
+
+
+def test_generate_kit_name_uses_dot_between_sizes():
+    """SKU convention: '.' separa tamanhos, '+' apenas pra acessórios."""
+    assert generate_kit_name(
+        "M5 mista", "b045", "8+18", "preto",
+    ) == "Kit Mala M5 mista tamanhos 8.18 - preto"
+
+
+def test_generate_kit_name_three_sizes():
+    assert generate_kit_name(
+        "M5 mista", "b045", "8+12+20+24", "preto",
+    ) == "Kit Mala M5 mista tamanhos 8.12.20.24 - preto"
+
+
+def test_generate_kit_name_with_accessories_keeps_plus():
+    """Acessórios continuam separados por '+' (após os tamanhos com '.')."""
+    name = generate_kit_name(
+        "M5 mista", "b045", "12+20+24+a075+bp002+a076", "preto",
+    )
+    assert "tamanhos 12.20.24" in name
+    assert "+ a075 + bp002 + a076" in name
+    assert " - preto" in name
+
+
+def test_build_kit_pricing_sku_aligned_with_name():
+    """O SKU usa o mesmo separador '.' que aparece no nome."""
+    assert build_kit_pricing_sku("b045", "8+18") == "b045.8.18"
+    assert build_kit_pricing_sku(
+        "b045", "12+20+24+a075+bp002+a076",
+    ) == "b045.12.20.24+a075+bp002+a076"
 
 
 # ── Worker tests (mocked Bling) ──────────────────────────────────────
@@ -285,7 +323,7 @@ async def test_create_kit_passes_correct_estrutura_to_bling(
     await create_bling_kit_for_mark(kit_setup["mark"].id)
 
     assert captured["formato"] == "E"
-    assert captured["sku"] == "b045.8+18"
+    assert captured["sku"] == "b045.8.18"
     assert captured["category_id"] == 555
     est = captured["estrutura"]
     assert est["tipoEstoque"] == "V"
