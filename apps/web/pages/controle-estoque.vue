@@ -582,6 +582,45 @@ const pedidosFiltered = computed(() => {
   )
 })
 
+// Tag extraction from SKU — mirrors the backend rule subset that's
+// derivable from the SKU string alone:
+//   * fake.* prefix      → 'fake'
+//   * .ci/.pi/.ra/.sa/.sp/.us/.cd suffix → that tag
+//   * .<numero> suffix   → 'mala' (number = tamanho, padrão das malas)
+//   * outros             → 'outros' (kits sem suffix, insumos, eletro, etc)
+// Composite SKUs (a+b+c) usam o primeiro pedaço — em produção quase
+// sempre todos os pedaços têm a mesma tag. NÃO replica a lógica
+// completa do backend (que considera SKUs sem dot etc); é uma
+// aproximação suficiente pro contador visual.
+const _TAG_SUFFIXES = new Set(['ci', 'pi', 'ra', 'sa', 'sp', 'us', 'cd'])
+function extractPedidoTag(sku: string | null): string {
+  if (!sku) return 'outros'
+  const firstPiece = sku.split('+')[0].toLowerCase().trim()
+  if (firstPiece.startsWith('fake.')) return 'fake'
+  const parts = firstPiece.split('.')
+  if (parts.length < 2) return 'outros'
+  const suffix = parts[parts.length - 1]
+  if (_TAG_SUFFIXES.has(suffix)) return suffix
+  // Suffix numérico (12, 24, 18, etc) = tamanho de mala
+  if (/^\d+$/.test(suffix)) return 'mala'
+  return 'outros'
+}
+
+// Breakdown por tag (com base em pedidosFiltered, então respeita
+// busca + filtros). Ordem fixa pra o display ficar estável.
+const _TAG_DISPLAY_ORDER = ['sa', 'ci', 'pi', 'ra', 'sp', 'us', 'cd', 'fake', 'mala', 'outros']
+const pedidosCountByTag = computed(() => {
+  const counts: Record<string, number> = {}
+  for (const p of pedidosFiltered.value) {
+    const t = extractPedidoTag(p.sku)
+    counts[t] = (counts[t] || 0) + 1
+  }
+  // Retorna só tags com contagem > 0, na ordem de display.
+  return _TAG_DISPLAY_ORDER
+    .map((t) => ({ tag: t, count: counts[t] || 0 }))
+    .filter((x) => x.count > 0)
+})
+
 // Percentual conferido na aba Estoque DO DIA VISÍVEL — usado pelo
 // header de progresso e pelo botão "Conferir todos". Difere de
 // `conferenciaHoje` que é sempre HOJE (fonte da verdade pro bloqueio).
@@ -862,6 +901,22 @@ async function conferirTodos() {
     </div>
 
     <!-- TAB: PEDIDOS ────────────────────────────────────────────────── -->
+    <!-- Stats bar: total + breakdown por tag. Reflete pedidosFiltered
+         (search + filtros). Tag extraída do SKU no frontend — ver
+         extractPedidoTag(). -->
+    <div v-if="tab === 'pedidos'" class="flex flex-wrap items-center gap-2 text-xs">
+      <span class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-2.5 py-1 font-semibold">
+        Total: {{ pedidosFiltered.length }}
+      </span>
+      <span
+        v-for="bucket in pedidosCountByTag" :key="bucket.tag"
+        class="inline-flex items-center gap-1 rounded-md border bg-background px-2 py-0.5"
+        :title="`Pedidos com tag ${bucket.tag.toUpperCase()}`"
+      >
+        <span class="uppercase font-semibold tracking-wide text-[10px]">{{ bucket.tag }}</span>
+        <span class="text-foreground font-mono">{{ bucket.count }}</span>
+      </span>
+    </div>
     <div v-if="tab === 'pedidos'" class="border rounded-md overflow-x-auto">
       <table class="grid-table w-full text-xs border-collapse">
         <thead>
