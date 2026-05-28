@@ -10,7 +10,6 @@ Revises: 0104_devolution_troca_fields
 Create Date: 2026-05-28
 """
 
-import sqlalchemy as sa
 from alembic import op
 
 revision = "0105_import_categoria"
@@ -31,24 +30,26 @@ _TABLES = (
 
 
 def upgrade() -> None:
+    # Idempotente (IF NOT EXISTS / guard) — a coluna pode já ter sido
+    # aplicada manualmente durante a reconciliação de um desencontro de
+    # alembic em prod; nesse caso o upgrade no-opa em vez de quebrar.
     for t in _TABLES:
-        op.add_column(
-            t,
-            sa.Column(
-                "categoria", sa.String(20),
-                nullable=False, server_default="mala",
-            ),
+        op.execute(
+            f'ALTER TABLE {t} ADD COLUMN IF NOT EXISTS '
+            f"categoria varchar(20) NOT NULL DEFAULT 'mala'"
         )
-        op.create_index(f"ix_{t}_categoria", t, ["categoria"])
-        op.create_check_constraint(
-            f"ck_{t}_categoria",
-            t,
-            "categoria IN ('mala','eletro','celular')",
+        op.execute(f'CREATE INDEX IF NOT EXISTS ix_{t}_categoria ON {t} (categoria)')
+        op.execute(
+            "DO $$ BEGIN "
+            f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_{t}_categoria') THEN "
+            f"ALTER TABLE {t} ADD CONSTRAINT ck_{t}_categoria "
+            "CHECK (categoria IN ('mala','eletro','celular')); "
+            "END IF; END $$;"
         )
 
 
 def downgrade() -> None:
     for t in _TABLES:
-        op.drop_constraint(f"ck_{t}_categoria", t, type_="check")
-        op.drop_index(f"ix_{t}_categoria", table_name=t)
-        op.drop_column(t, "categoria")
+        op.execute(f'ALTER TABLE {t} DROP CONSTRAINT IF EXISTS ck_{t}_categoria')
+        op.execute(f'DROP INDEX IF EXISTS ix_{t}_categoria')
+        op.execute(f'ALTER TABLE {t} DROP COLUMN IF EXISTS categoria')

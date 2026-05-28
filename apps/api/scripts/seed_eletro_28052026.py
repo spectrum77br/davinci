@@ -22,6 +22,7 @@ Uso:
 from __future__ import annotations
 
 import asyncio
+import os
 from decimal import Decimal, InvalidOperation
 
 from openpyxl import load_workbook
@@ -35,7 +36,9 @@ from app.models import (
     ImportProduct,
 )
 
-XLSX_PATH = "/Users/admmarketing/Downloads/i.eletro.xlsx"
+# Path do Excel — override via env ELETRO_XLSX (ex.: /tmp/i.eletro.xlsx
+# quando rodando dentro do container de prod).
+XLSX_PATH = os.environ.get("ELETRO_XLSX", "/Users/admmarketing/Downloads/i.eletro.xlsx")
 
 # (nome, primeira coluna do bloco capacidade/R$/USD)
 _FABRICANTES = [("tywit", 2), ("anbolife", 5), ("suplas", 8)]
