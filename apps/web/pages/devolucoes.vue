@@ -41,9 +41,19 @@ type DevolutionRow = {
   tecnico: string | null
   devolver_estoque: boolean
   observacao: string | null
+  troca_sku: string | null
+  troca_condicao: string | null
+  estoque_suffix: string | null
   created_at: string
   updated_at: string
   bling_stock_result?: BlingStockResult | null
+}
+
+// Campos extras coletados pelos modais antes de chamar o estoque Bling.
+type StockModalFields = {
+  troca_sku: string | null
+  troca_condicao: string | null
+  estoque_suffix: string | null
 }
 
 type DevolutionPage = {
@@ -164,6 +174,78 @@ const addedThisSession = ref<Set<string>>(new Set())
 
 const dirtyRows = ref<Set<string>>(new Set())
 const savingRows = ref<Set<string>>(new Set())
+
+// ── Modais de estoque (abrem ANTES das chamadas Bling) ───────────────
+const STOCK_TRIGGER_CONDICOES = ['Novo', 'Usado', 'Trocado']
+function isStockTrigger(condicao: string | null | undefined) {
+  return !!condicao && STOCK_TRIGGER_CONDICOES.includes(condicao)
+}
+
+type TrocaResult = { sku: string; condicao: 'Novo' | 'Usado' }
+const trocaModal = ref<{ open: boolean; soldSku: string | null; resolve: ((v: TrocaResult | null) => void) | null }>(
+  { open: false, soldSku: null, resolve: null },
+)
+function askTrocaSku(soldSku: string | null): Promise<TrocaResult | null> {
+  return new Promise((resolve) => { trocaModal.value = { open: true, soldSku, resolve } })
+}
+function onTrocaConfirm(payload: TrocaResult) {
+  trocaModal.value.resolve?.(payload)
+  trocaModal.value = { open: false, soldSku: null, resolve: null }
+}
+function onTrocaCancel() {
+  trocaModal.value.resolve?.(null)
+  trocaModal.value = { open: false, soldSku: null, resolve: null }
+}
+
+const sufixoModal = ref<{ open: boolean; sku: string; resolve: ((v: string | null) => void) | null }>(
+  { open: false, sku: '', resolve: null },
+)
+function askSufixo(sku: string): Promise<string | null> {
+  return new Promise((resolve) => { sufixoModal.value = { open: true, sku, resolve } })
+}
+function onSufixoConfirm(payload: { suffix: string }) {
+  sufixoModal.value.resolve?.(payload.suffix)
+  sufixoModal.value = { open: false, sku: '', resolve: null }
+}
+function onSufixoCancel() {
+  sufixoModal.value.resolve?.(null)
+  sufixoModal.value = { open: false, sku: '', resolve: null }
+}
+
+/**
+ * Abre, em sequência, os modais necessários antes de devolver ao estoque.
+ * Retorna os campos extras a enviar no body, ou `null` se o usuário
+ * cancelar qualquer modal (operação deve ser abortada — sem chamada Bling).
+ */
+async function resolveStockModals(
+  condicao: string | null,
+  sku: string | null,
+  devolverEstoque: boolean,
+): Promise<StockModalFields | null> {
+  const empty: StockModalFields = { troca_sku: null, troca_condicao: null, estoque_suffix: null }
+  if (!devolverEstoque || !isStockTrigger(condicao)) return empty
+
+  const out: StockModalFields = { ...empty }
+  let effSku = (sku || '').trim()
+
+  // Modal 1 — Trocado: usuário escolhe o SKU que realmente voltou + condição.
+  if (condicao === 'Trocado') {
+    const r = await askTrocaSku(sku)
+    if (!r) return null
+    out.troca_sku = r.sku
+    out.troca_condicao = r.condicao
+    effSku = r.sku.trim()
+  }
+
+  // Modal 2 — SKU efetivo terminado em `.sp`: escolher outro sufixo.
+  if (effSku.toLowerCase().endsWith('.sp')) {
+    const suffix = await askSufixo(effSku)
+    if (!suffix) return null
+    out.estoque_suffix = suffix
+  }
+
+  return out
+}
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
@@ -391,6 +473,9 @@ function draftPayload() {
     tecnico: draft.value.tecnico || null,
     devolver_estoque: draft.value.devolver_estoque,
     observacao: draft.value.observacao || null,
+    troca_sku: null as string | null,
+    troca_condicao: null as string | null,
+    estoque_suffix: null as string | null,
   }
 }
 
@@ -401,6 +486,10 @@ async function createDevolution() {
     lookupError.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
     return
   }
+  // Abre os modais (troca / sufixo .sp) antes de qualquer chamada Bling.
+  const extra = await resolveStockModals(body.condicao_produto, body.sku, body.devolver_estoque)
+  if (extra === null) return // usuário cancelou um modal → aborta
+  Object.assign(body, extra)
   creating.value = true
   lookupError.value = null
   try {
@@ -429,7 +518,45 @@ function rowPatchPayload(row: DevolutionRow) {
     tecnico: row.tecnico || null,
     devolver_estoque: row.devolver_estoque,
     observacao: row.observacao || null,
+    troca_sku: row.troca_sku,
+    troca_condicao: row.troca_condicao,
+    estoque_suffix: row.estoque_suffix,
   }
+}
+
+// Toggle "devolver estoque" inline: abre os modais antes de salvar/chamar Bling.
+async function toggleRowDevolverEstoque(row: DevolutionRow) {
+  if (!canEdit.value) return
+  const next = !row.devolver_estoque
+  if (next && isStockTrigger(row.condicao_produto)) {
+    const extra = await resolveStockModals(row.condicao_produto, row.sku, true)
+    if (extra === null) return // cancelado → não liga o toggle
+    row.troca_sku = extra.troca_sku
+    row.troca_condicao = extra.troca_condicao
+    row.estoque_suffix = extra.estoque_suffix
+  }
+  setRowDevolverEstoque(row, next)
+  await saveRow(row)
+}
+
+// Mudança de condição inline: se devolver_estoque on e condição dispara
+// estoque, abre os modais antes de salvar. Cancelar reverte a condição.
+async function changeRowCondicao(row: DevolutionRow, value: string) {
+  if (!canEdit.value) return
+  const prev = row.condicao_produto
+  setRowText(row, 'condicao_produto', value)
+  if (value === 'Extraviado' || value === 'Manutenção') setRowReembolso(row, true)
+  if (row.devolver_estoque && isStockTrigger(value)) {
+    const extra = await resolveStockModals(value, row.sku, true)
+    if (extra === null) {
+      setRowText(row, 'condicao_produto', prev ?? '')
+      return
+    }
+    row.troca_sku = extra.troca_sku
+    row.troca_condicao = extra.troca_condicao
+    row.estoque_suffix = extra.estoque_suffix
+  }
+  await saveRow(row)
 }
 
 async function saveRow(row: DevolutionRow) {
@@ -759,7 +886,7 @@ async function backfillAddresses() {
                 :value="row.condicao_produto || ''"
                 :disabled="!canEdit"
                 :class="sheetSelectClass"
-                @change="(e) => { const v = (e.target as HTMLSelectElement).value; setRowText(row, 'condicao_produto', v); if (v === 'Extraviado' || v === 'Manutenção') setRowReembolso(row, true); saveRow(row) }"
+                @change="(e) => changeRowCondicao(row, (e.target as HTMLSelectElement).value)"
               >
                 <option value="">—</option>
                 <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
@@ -851,7 +978,7 @@ async function backfillAddresses() {
                   'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-default disabled:opacity-70',
                   row.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
                 ]"
-                @click="setRowDevolverEstoque(row, !row.devolver_estoque); saveRow(row)"
+                @click="toggleRowDevolverEstoque(row)"
               >
                 <span
                   :class="[
@@ -940,5 +1067,19 @@ async function backfillAddresses() {
         </div>
       </TransitionGroup>
     </div>
+
+    <!-- Modais que abrem ANTES das chamadas de estoque/produtos Bling -->
+    <DevolucaoTrocaSkuModal
+      :open="trocaModal.open"
+      :sold-sku="trocaModal.soldSku"
+      @confirm="onTrocaConfirm"
+      @cancel="onTrocaCancel"
+    />
+    <DevolucaoSufixoModal
+      :open="sufixoModal.open"
+      :sku="sufixoModal.sku"
+      @confirm="onSufixoConfirm"
+      @cancel="onSufixoCancel"
+    />
   </div>
 </template>

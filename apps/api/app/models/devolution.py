@@ -32,3 +32,8 @@ class Devolution(Base, TimestampMixin):
     tecnico: Mapped[str | None] = mapped_column(Text, nullable=True)
     devolver_estoque: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Escolhas dos modais de devolução (ver alembic 0104). Persistidas para
+    # auditoria e para o PATCH re-rodar o estoque de forma determinística.
+    troca_sku: Mapped[str | None] = mapped_column(Text, nullable=True)
+    troca_condicao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estoque_suffix: Mapped[str | None] = mapped_column(Text, nullable=True)

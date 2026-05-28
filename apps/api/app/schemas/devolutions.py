@@ -38,6 +38,9 @@ class DevolutionOut(BaseModel):
     tecnico: str | None = None
     devolver_estoque: bool = False
     observacao: str | None = None
+    troca_sku: str | None = None
+    troca_condicao: str | None = None
+    estoque_suffix: str | None = None
     created_at: datetime
     updated_at: datetime
     bling_stock_result: BlingStockResultOut | None = None
@@ -59,6 +62,9 @@ class DevolutionCreate(BaseModel):
     tecnico: str | None = None
     devolver_estoque: bool = False
     observacao: str | None = None
+    troca_sku: str | None = None
+    troca_condicao: str | None = None
+    estoque_suffix: str | None = None
 
     @field_validator(
         "pedido_bling",
@@ -70,6 +76,9 @@ class DevolutionCreate(BaseModel):
         "motivo_devolucao",
         "tecnico",
         "observacao",
+        "troca_sku",
+        "troca_condicao",
+        "estoque_suffix",
         mode="before",
     )
     @classmethod
@@ -107,6 +116,9 @@ class DevolutionPatch(BaseModel):
     tecnico: str | None = None
     devolver_estoque: bool | None = None
     observacao: str | None = None
+    troca_sku: str | None = None
+    troca_condicao: str | None = None
+    estoque_suffix: str | None = None
 
     @field_validator(
         "pedido_bling",
@@ -119,6 +131,9 @@ class DevolutionPatch(BaseModel):
         "motivo_devolucao",
         "tecnico",
         "observacao",
+        "troca_sku",
+        "troca_condicao",
+        "estoque_suffix",
         mode="before",
     )
     @classmethod
@@ -131,6 +146,27 @@ class DevolutionPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class DevolutionProductOut(BaseModel):
+    """Item da busca de produtos do modal de troca (Modal 1)."""
+    sku: str
+    name: str
+    cost_price: float | None = None
+
+
+class SkuSuffixVariant(BaseModel):
+    suffix: str
+    sku: str
+    name: str | None = None
+    exists: bool
+
+
+class SkuSuffixesOut(BaseModel):
+    """Variantes de sufixo de um SKU para o modal `.sp` (Modal 2)."""
+    base: str
+    allowed_suffixes: list[str]
+    variants: list[SkuSuffixVariant]
 
 
 class DevolutionLookupOut(BaseModel):

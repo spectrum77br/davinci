@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import BlingOrder, Devolution, Refund, User
+from app.models import BlingOrder, Devolution, Product, Refund, User
 from app.schemas.devolutions import (
     BlingStockResultOut,
     DevolutionCreate,
@@ -17,9 +17,14 @@ from app.schemas.devolutions import (
     DevolutionOut,
     DevolutionPage,
     DevolutionPatch,
+    DevolutionProductOut,
+    SkuSuffixesOut,
+    SkuSuffixVariant,
 )
 from app.services.devolution_stock_return import (
-    _STOCK_CONDICOES,
+    _STOCK_TRIGGER_CONDICOES,
+    _SUFFIX_TAGS,
+    _sku_base,
     return_product_to_bling_stock,
 )
 
@@ -210,6 +215,67 @@ def _split_compound_skus(rows: list[dict]) -> list[dict]:
     return out
 
 
+@router.get("/product-search", response_model=list[DevolutionProductOut])
+async def search_products(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+    q: str = Query(..., min_length=1),
+    limit: int = Query(20, ge=1, le=50),
+) -> list[DevolutionProductOut]:
+    """Busca produtos por SKU/nome para o modal de troca (Modal 1).
+    Ativos primeiro; ordenado por SKU."""
+    q = q.strip()
+    if not q:
+        return []
+    like = f"%{q}%"
+    rows = (
+        await session.execute(
+            select(Product.sku, Product.name, Product.cost_price)
+            .where(or_(Product.sku.ilike(like), Product.name.ilike(like)))
+            .order_by((Product.situacao == "A").desc().nullslast(), Product.sku)
+            .limit(limit)
+        )
+    ).all()
+    return [
+        DevolutionProductOut(
+            sku=r.sku,
+            name=r.name,
+            cost_price=float(r.cost_price) if r.cost_price is not None else None,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/sku-suffixes", response_model=SkuSuffixesOut)
+async def sku_suffixes(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+    sku: str = Query(..., min_length=1),
+) -> SkuSuffixesOut:
+    """Para o modal `.sp` (Modal 2): dado um SKU, devolve a base, os sufixos
+    permitidos (já existentes no sistema — não cria novos) e quais variantes
+    `base.<suffix>` já existem na tabela products."""
+    base = _sku_base(sku.strip())
+    candidates = {f"{base}.{s}": s for s in _SUFFIX_TAGS}
+    rows = (
+        await session.execute(
+            select(Product.sku, Product.name)
+            .where(func.lower(Product.sku).in_([k.lower() for k in candidates]))
+        )
+    ).all()
+    found = {r.sku.lower(): r.name for r in rows}
+    variants = [
+        SkuSuffixVariant(
+            suffix=suffix,
+            sku=full_sku,
+            name=found.get(full_sku.lower()),
+            exists=full_sku.lower() in found,
+        )
+        for full_sku, suffix in candidates.items()
+    ]
+    return SkuSuffixesOut(base=base, allowed_suffixes=list(_SUFFIX_TAGS), variants=variants)
+
+
 @router.post("", response_model=DevolutionOut, status_code=status.HTTP_201_CREATED)
 async def create_devolution(
     body: DevolutionCreate,
@@ -232,6 +298,9 @@ async def create_devolution(
         tecnico=body.tecnico,
         devolver_estoque=body.devolver_estoque,
         observacao=body.observacao,
+        troca_sku=body.troca_sku,
+        troca_condicao=body.troca_condicao,
+        estoque_suffix=body.estoque_suffix,
     )
     session.add(row)
     if body.condicao_produto in _REFUND_CONDICOES:
@@ -240,8 +309,13 @@ async def create_devolution(
     await session.refresh(row)
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
     out = DevolutionOut.model_validate(row)
-    if body.condicao_produto in _STOCK_CONDICOES and body.devolver_estoque:
-        sr = await return_product_to_bling_stock(session, row, body.condicao_produto)
+    if body.condicao_produto in _STOCK_TRIGGER_CONDICOES and body.devolver_estoque:
+        sr = await return_product_to_bling_stock(
+            session, row, body.condicao_produto,
+            troca_sku=body.troca_sku,
+            troca_condicao=body.troca_condicao,
+            estoque_suffix=body.estoque_suffix,
+        )
         if sr is not None:
             out.bling_stock_result = BlingStockResultOut(**sr)
     return out
@@ -276,10 +350,15 @@ async def patch_devolution(
     await session.commit()
     await session.refresh(row)
     out = DevolutionOut.model_validate(row)
-    condicao_changed = new_condicao in _STOCK_CONDICOES and new_condicao != prev_condicao
+    condicao_changed = new_condicao in _STOCK_TRIGGER_CONDICOES and new_condicao != prev_condicao
     toggle_turned_on = row.devolver_estoque and not prev_devolver_estoque
-    if row.devolver_estoque and new_condicao in _STOCK_CONDICOES and (condicao_changed or toggle_turned_on):
-        sr = await return_product_to_bling_stock(session, row, new_condicao)
+    if row.devolver_estoque and new_condicao in _STOCK_TRIGGER_CONDICOES and (condicao_changed or toggle_turned_on):
+        sr = await return_product_to_bling_stock(
+            session, row, new_condicao,
+            troca_sku=row.troca_sku,
+            troca_condicao=row.troca_condicao,
+            estoque_suffix=row.estoque_suffix,
+        )
         if sr is not None:
             out.bling_stock_result = BlingStockResultOut(**sr)
     return out
