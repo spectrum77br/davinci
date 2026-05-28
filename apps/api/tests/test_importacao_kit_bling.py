@@ -193,10 +193,14 @@ def _install_bling_mock(monkeypatch, *, return_id: int = 9999, raise_exc: Except
         # Echo do shape esperado pelo serviço — `data["id"]`.
         return {"id": return_id, "echo": kwargs}
 
+    async def fake_link_supplier(self, **kwargs):
+        return {"id": 1}
+
     from app.services.marketplaces.bling import BlingClient
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_find_or_create_category)
     monkeypatch.setattr(BlingClient, "find_contato_id_by_name", fake_find_contato_id_by_name)
     monkeypatch.setattr(BlingClient, "create_product", fake_create_product)
+    monkeypatch.setattr(BlingClient, "link_supplier_to_product", fake_link_supplier)
 
 
 @pytest.mark.asyncio
@@ -308,7 +312,8 @@ async def test_create_kit_sums_components_cost(
     kit_setup: dict[str, Any],
     monkeypatch,
 ):
-    """Custo do composto = soma dos bling_cost_price dos componentes."""
+    """Custo do composto = soma dos bling_cost_price dos componentes,
+    enviado via link_supplier_to_product (não pelo create)."""
     from decimal import Decimal
     # Set custos nos componentes b045.8 e b045.18
     kit_setup["p1"].bling_cost_price = Decimal("30.00")
@@ -318,6 +323,7 @@ async def test_create_kit_sums_components_cost(
     await db.commit()
 
     captured: dict[str, Any] = {}
+    link_kwargs: dict[str, Any] = {}
     from app.services.marketplaces.bling import BlingClient
 
     async def fake_create(self, **kwargs):
@@ -327,11 +333,23 @@ async def test_create_kit_sums_components_cost(
     async def fake_cat(self, name):
         return 555
 
+    async def fake_supplier(self, name):
+        return 16980149177
+
+    async def fake_link(self, **kwargs):
+        link_kwargs.update(kwargs)
+        return {"id": 1}
+
     monkeypatch.setattr(BlingClient, "create_product", fake_create)
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
+    monkeypatch.setattr(BlingClient, "find_contato_id_by_name", fake_supplier)
+    monkeypatch.setattr(BlingClient, "link_supplier_to_product", fake_link)
 
     await create_bling_kit_for_mark(kit_setup["mark"].id)
-    assert captured["cost_price"] == pytest.approx(100.50)
+    assert "cost_price" not in captured  # custo não vai no create
+    assert link_kwargs["product_id"] == 88888
+    assert link_kwargs["supplier_id"] == 16980149177
+    assert link_kwargs["cost_price"] == pytest.approx(100.50)
 
 
 @pytest.mark.asyncio
@@ -341,8 +359,10 @@ async def test_create_kit_omits_cost_when_components_have_no_price(
     kit_setup: dict[str, Any],
     monkeypatch,
 ):
-    """Componentes sem bling_cost_price → cost_price=None (omitido)."""
+    """Componentes sem bling_cost_price → custo 0 → link_supplier NÃO
+    é chamado (e o create nunca recebe custo)."""
     captured: dict[str, Any] = {}
+    link_calls = {"n": 0}
     from app.services.marketplaces.bling import BlingClient
 
     async def fake_create(self, **kwargs):
@@ -352,11 +372,17 @@ async def test_create_kit_omits_cost_when_components_have_no_price(
     async def fake_cat(self, name):
         return 555
 
+    async def fake_link(self, **kwargs):
+        link_calls["n"] += 1
+        return {"id": 1}
+
     monkeypatch.setattr(BlingClient, "create_product", fake_create)
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
+    monkeypatch.setattr(BlingClient, "link_supplier_to_product", fake_link)
 
     await create_bling_kit_for_mark(kit_setup["mark"].id)
-    assert captured["cost_price"] is None
+    assert "cost_price" not in captured
+    assert link_calls["n"] == 0
 
 
 @pytest.mark.asyncio

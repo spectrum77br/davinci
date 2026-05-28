@@ -310,26 +310,14 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
 
         # Custo do kit = soma dos custos dos componentes (decisão
         # operacional). Cada componente já trouxe bling_cost_price em
-        # `resolved`. Quando todos os componentes estão sem custo a
-        # soma fica 0 → BlingClient omite precoCusto do payload.
+        # `resolved`. Linkado separado abaixo via POST /produtos/fornecedores.
         components_cost = sum(cost for _, _, cost in resolved)
-
-        # Fornecedor padrão — anchor obrigatório pra precoCusto persistir.
-        supplier_id = await resolve_default_supplier_id(client)
-        if components_cost > 0 and supplier_id is None:
-            logger.warning(
-                "kit_sync_no_supplier",
-                mark_id=str(mark_id), sku=kit_sku,
-                components_cost=components_cost,
-            )
 
         # Criar no Bling.
         try:
             data = await client.create_product(
                 sku=kit_sku,
                 name=kit_name,
-                cost_price=components_cost if components_cost > 0 else None,
-                supplier_id=supplier_id,
                 category_id=category_id,
                 formato="E",
                 estrutura=estrutura,
@@ -355,6 +343,31 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
         if new_bling_id is None:
             await _set_mark_error(session, mark, f"bling_no_id_returned: {data}")
             return {"ok": False, "error": "bling_no_id_returned"}
+
+        # Linkar fornecedor padrão + custo somado dos componentes (etapa
+        # separada — Bling V3 só persiste precoCusto via POST
+        # /produtos/fornecedores). Falha aqui NÃO desfaz o kit já criado.
+        if components_cost > 0:
+            supplier_id = await resolve_default_supplier_id(client)
+            if supplier_id:
+                try:
+                    await client.link_supplier_to_product(
+                        product_id=int(new_bling_id),
+                        supplier_id=supplier_id,
+                        cost_price=components_cost,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "kit_sync_link_supplier_failed",
+                        mark_id=str(mark_id), kit_id=int(new_bling_id),
+                        err=str(e)[:200],
+                    )
+            else:
+                logger.warning(
+                    "kit_sync_no_supplier",
+                    mark_id=str(mark_id), sku=kit_sku,
+                    components_cost=components_cost,
+                )
 
         # Sucesso — gravar.
         now = datetime.now(UTC)

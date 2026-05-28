@@ -195,24 +195,11 @@ async def sync_import_product_to_bling(import_product_id: UUID | str) -> dict[st
 
         nome = generate_mala_name(row.modelo_bling, row.sku, row.cor)
 
-        # Fornecedor padrão (anchor de precoCusto). Sem ele Bling
-        # descarta precoCusto silenciosamente.
-        supplier_id = await resolve_default_supplier_id(client)
-        cost_value = float(row.custo_bling) if row.custo_bling else None
-        if cost_value and supplier_id is None:
-            logger.warning(
-                "import_product_sync_no_supplier",
-                id=str(import_product_id), sku=row.sku, custo=str(row.custo_bling),
-                supplier_name=get_settings().bling_default_supplier_name,
-            )
-
         try:
             data = await client.create_product(
                 sku=row.sku,
                 name=nome,
                 price=None,  # preço de VENDA continua manual no Bling
-                cost_price=cost_value,
-                supplier_id=supplier_id,
                 category_id=category_id,
                 formato="S",
             )
@@ -242,6 +229,33 @@ async def sync_import_product_to_bling(import_product_id: UUID | str) -> dict[st
             return {"ok": False, "error": "bling_no_id_returned"}
 
         new_bling_id = int(new_bling_id)
+
+        # Linkar fornecedor padrão + custo (etapa separada — Bling V3 só
+        # persiste precoCusto via POST /produtos/fornecedores, nunca pelo
+        # body do create). Falha aqui NÃO aborta: o produto já existe e o
+        # operador pode rodar o backfill depois.
+        if row.custo_bling and float(row.custo_bling) > 0:
+            supplier_id = await resolve_default_supplier_id(client)
+            if supplier_id:
+                try:
+                    await client.link_supplier_to_product(
+                        product_id=new_bling_id,
+                        supplier_id=supplier_id,
+                        cost_price=float(row.custo_bling),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "import_product_sync_link_supplier_failed",
+                        id=str(import_product_id), bling_product_id=new_bling_id,
+                        sku=row.sku, err=str(e)[:200],
+                    )
+            else:
+                logger.warning(
+                    "import_product_sync_no_supplier",
+                    id=str(import_product_id), sku=row.sku,
+                    custo=str(row.custo_bling),
+                    supplier_name=get_settings().bling_default_supplier_name,
+                )
 
         # Cria Product local pra que kits possam usar como componente.
         await _ensure_local_product(

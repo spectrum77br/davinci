@@ -584,8 +584,6 @@ class BlingClient:
         sku: str,
         name: str,
         price: float | None = None,
-        cost_price: float | None = None,
-        supplier_id: int | None = None,
         category_id: int | None = None,
         formato: str = "S",
         estrutura: dict | None = None,
@@ -599,12 +597,11 @@ class BlingClient:
           * "V" = Com variações
           * "E" = Com composição (kit/composto)
 
-        `cost_price` envia `precoCusto` dentro de `fornecedor`. Bling
-        V3 silenciosamente descarta `precoCusto` no top-level — e
-        TAMBÉM descarta quando o bloco `fornecedor` não tem um
-        `id` válido apontando pra um contato real. Por isso o
-        `supplier_id` é obrigatório pra o custo persistir (verificado
-        em prod com b057.8 em 2026-05-27). Valores 0/None são omitidos.
+        O custo (precoCusto) NÃO entra aqui — Bling V3 descarta
+        silenciosamente o bloco `fornecedor` no body do POST /produtos.
+        O único caminho que faz o custo persistir é o endpoint separado
+        `POST /produtos/fornecedores` (ver `link_supplier_to_product`),
+        chamado pelo caller depois deste create retornar o id.
 
         Para composto, `estrutura` deve ter o shape (confirmado via
         SDK AlexandreBellas/bling-erp-api-js, src/entities/produtos):
@@ -626,20 +623,39 @@ class BlingClient:
         }
         if price is not None:
             body["preco"] = float(price)
-        if cost_price is not None and float(cost_price) > 0:
-            # Bling V3 só persiste precoCusto quando dentro de `fornecedor`
-            # COM `id` válido apontando pra um contato real. Sem o id,
-            # o bloco é descartado silenciosamente (detectado com b057.8
-            # em prod 2026-05-27).
-            fornecedor: dict[str, Any] = {"precoCusto": float(cost_price)}
-            if supplier_id:
-                fornecedor["id"] = int(supplier_id)
-            body["fornecedor"] = fornecedor
         if category_id is not None:
             body["categoria"] = {"id": category_id}
         if formato == "E" and estrutura is not None:
             body["estrutura"] = estrutura
         r = await self._request("POST", "/produtos", json=body)
+        r.raise_for_status()
+        return r.json().get("data") or {}
+
+    async def link_supplier_to_product(
+        self, *, product_id: int, supplier_id: int, cost_price: float,
+    ) -> dict:
+        """Cria o relacionamento produto↔fornecedor no Bling V3 com custo.
+
+        Endpoint: POST /produtos/fornecedores
+        Body:     {idProduto, idContato, precoCusto}
+
+        Esse é o único caminho que faz precoCusto persistir — o campo
+        `fornecedor` no body do POST /produtos é silenciosamente
+        descartado por Bling V3. Confirmado via teste em prod 2026-05-28
+        (placeholder 000000111111111ll, contato 16980149177 → precoCusto
+        apareceu corretamente).
+
+        Returns the data dict from Bling (contém `id` do relacionamento).
+        Custo <= 0 é no-op (retorna {}).
+        """
+        if cost_price <= 0:
+            return {}
+        body = {
+            "idProduto": int(product_id),
+            "idContato": int(supplier_id),
+            "precoCusto": float(cost_price),
+        }
+        r = await self._request("POST", "/produtos/fornecedores", json=body)
         r.raise_for_status()
         return r.json().get("data") or {}
 

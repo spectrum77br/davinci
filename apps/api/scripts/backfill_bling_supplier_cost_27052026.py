@@ -1,17 +1,18 @@
 """One-off: vincular fornecedor padrão + setar precoCusto nos produtos
 da Importação Mala que ficaram sem custo no Bling.
 
-Diferente do backfill anterior (v1) que enviava precoCusto sem
-fornecedor.id — Bling V3 descartava silenciosamente. Esta versão usa
-o fornecedor padrão (Settings.bling_default_supplier_name) como
-anchor obrigatório.
+Bling V3 descarta precoCusto tanto no body do POST /produtos quanto
+no PUT /produtos. O único caminho que persiste é o endpoint separado
+POST /produtos/fornecedores ({idProduto, idContato, precoCusto}) —
+ver BlingClient.link_supplier_to_product. Esta versão usa o fornecedor
+padrão (Settings.bling_default_supplier_name) como anchor.
 
 Estratégia:
   1. Resolve contato.id pelo nome do fornecedor padrão (1x no início)
   2. Lista import_products com bling_product_id + custo_bling > 0
   3. Pra cada um: GET no Bling. Se precoCusto já > 0, skip.
-     Senão: PUT com fornecedor.id + precoCusto + campos mínimos
-     (nome/codigo/tipo/situacao/formato — Bling V3 PUT é replace).
+     Senão: POST /produtos/fornecedores com {idProduto, idContato,
+     precoCusto}.
   4. Re-GET pra confirmar persistência.
 
 NÃO RODE sem aprovação. Tem `--dry-run` por padrão; --apply pra valer.
@@ -119,35 +120,25 @@ async def main(apply_flag: bool) -> None:
                 stats["would_patch"] += 1
                 continue
 
-            # PUT com campos mínimos + fornecedor (Bling V3 PUT é replace).
-            body = {
-                "nome": data.get("nome"),
-                "codigo": data.get("codigo"),
-                "tipo": data.get("tipo") or "P",
-                "situacao": data.get("situacao") or "A",
-                "formato": data.get("formato") or "S",
-                "fornecedor": {"id": sid, "precoCusto": target},
-            }
+            # POST /produtos/fornecedores — único caminho que persiste o
+            # custo (ver link_supplier_to_product).
             try:
-                p = await client._request(
-                    "PUT", f"/produtos/{r.bling_product_id}", json=body,
+                await client.link_supplier_to_product(
+                    product_id=r.bling_product_id,
+                    supplier_id=sid,
+                    cost_price=target,
                 )
-                if p.status_code not in (200, 204):
-                    print(f"  {r.sku}: PUT status={p.status_code} {p.text[:200]}")
-                    stats["errors"] += 1
-                    continue
-                # Re-GET pra confirmar persistência (Bling pode aceitar PUT
-                # mas descartar precoCusto se algo está faltando).
+                # Re-GET pra confirmar persistência.
                 g2 = await client._request("GET", f"/produtos/{r.bling_product_id}")
                 new_cost = _current_cost(g2.json().get("data") or {})
                 if new_cost > 0:
                     print(f"  ✓ {r.sku}: custo={new_cost}")
                     stats["patched"] += 1
                 else:
-                    print(f"  ✗ {r.sku}: PUT 200 mas precoCusto continua 0")
+                    print(f"  ✗ {r.sku}: link 201 mas precoCusto continua 0")
                     stats["errors"] += 1
             except Exception as e:  # noqa: BLE001
-                print(f"  {r.sku}: ERR PUT {str(e)[:120]}")
+                print(f"  {r.sku}: ERR link {str(e)[:120]}")
                 stats["errors"] += 1
 
         print("\n✅ Concluído")

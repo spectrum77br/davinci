@@ -93,10 +93,14 @@ def _install_bling_mock(
             raise raise_exc
         return {"id": return_id, "echo": kwargs}
 
+    async def fake_link_supplier(self, **kwargs):
+        return {"id": 1}
+
     from app.services.marketplaces.bling import BlingClient
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_find_or_create_category)
     monkeypatch.setattr(BlingClient, "find_contato_id_by_name", fake_find_contato_id_by_name)
     monkeypatch.setattr(BlingClient, "create_product", fake_create_product)
+    monkeypatch.setattr(BlingClient, "link_supplier_to_product", fake_link_supplier)
 
 
 @pytest.mark.asyncio
@@ -225,36 +229,46 @@ async def test_existing_local_product_gets_bling_id_link(
 async def test_passes_correct_payload_to_bling(
     db: AsyncSession, bling_integration: Integration, import_row: ImportProduct, monkeypatch,
 ):
-    """Verifica nome canônico + categoria + formato Simples."""
-    captured: dict[str, Any] = {}
+    """Create manda nome canônico + categoria + formato Simples, SEM custo.
+    O custo vai numa chamada separada a link_supplier_to_product."""
+    create_kwargs: dict[str, Any] = {}
+    link_kwargs: dict[str, Any] = {}
 
     from app.services.marketplaces.bling import BlingClient
 
     async def fake_create(self, **kwargs):
-        captured.update(kwargs)
+        create_kwargs.update(kwargs)
         return {"id": 88888}
 
     async def fake_cat(self, name):
-        captured["_category_name"] = name
+        create_kwargs["_category_name"] = name
         return 777
 
     async def fake_supplier(self, name):
-        captured["_supplier_name"] = name
         return 16980149177
+
+    async def fake_link(self, **kwargs):
+        link_kwargs.update(kwargs)
+        return {"id": 1}
 
     monkeypatch.setattr(BlingClient, "create_product", fake_create)
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
     monkeypatch.setattr(BlingClient, "find_contato_id_by_name", fake_supplier)
+    monkeypatch.setattr(BlingClient, "link_supplier_to_product", fake_link)
 
     await sync_import_product_to_bling(import_row.id)
 
-    assert captured["sku"] == "b042.28"
-    assert captured["name"] == "Mala Lisa M2 tamanho 28 - Roxo Escuro"
-    assert captured["formato"] == "S"
-    assert captured["category_id"] == 777
-    assert captured["price"] is None  # preço de VENDA continua manual no Bling
-    assert captured["cost_price"] == 49.0  # custo é enviado a partir de row.custo_bling
-    # supplier_id pode vir do Redis cache (de teste anterior) OU do
-    # mock fake_supplier — qualquer um dos dois caminhos é válido.
-    assert captured["supplier_id"] == 16980149177
-    assert captured["_category_name"] == "mala"
+    # create_product: sem cost_price/supplier_id (custo é separado agora).
+    assert create_kwargs["sku"] == "b042.28"
+    assert create_kwargs["name"] == "Mala Lisa M2 tamanho 28 - Roxo Escuro"
+    assert create_kwargs["formato"] == "S"
+    assert create_kwargs["category_id"] == 777
+    assert create_kwargs["price"] is None  # preço de VENDA continua manual
+    assert "cost_price" not in create_kwargs
+    assert "supplier_id" not in create_kwargs
+    assert create_kwargs["_category_name"] == "mala"
+
+    # link_supplier_to_product: leva o custo + fornecedor padrão.
+    assert link_kwargs["product_id"] == 88888
+    assert link_kwargs["supplier_id"] == 16980149177
+    assert link_kwargs["cost_price"] == 49.0
