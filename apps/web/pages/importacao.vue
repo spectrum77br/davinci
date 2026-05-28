@@ -16,7 +16,7 @@
 import { computed, onScopeDispose, reactive, ref, watch } from 'vue'
 import {
   Plus, RefreshCw, Trash2, Save, Search, Download, X, AlertCircle,
-  Send, CheckCircle2, Clock,
+  Send, CheckCircle2, Clock, Briefcase, Cpu, Smartphone,
 } from 'lucide-vue-next'
 
 definePageMeta({
@@ -40,8 +40,43 @@ const canDelete = computed(() => {
 // Aba "reposicao" foi removida — os parâmetros (tempo_reposicao/
 // tempo_estoque) continuam editáveis pela barra âmbar no topo da
 // aba Mala, que é onde realmente importam.
+// Sub-tab interno: 'mala' é a aba principal "Importação" (mantido o key
+// histórico pra não renomear toda a página; o label mostra "Importação").
 type Tab = 'mala' | 'resumo' | 'cotacao' | 'kit'
 const tab = ref<Tab>('mala')
+
+// ── Categoria (selector top-level, espelha /pricing/tabela) ───────────
+type Categoria = 'mala' | 'eletro' | 'celular'
+const CATEGORIAS = [
+  { key: 'mala' as const, label: 'Mala', icon: Briefcase },
+  { key: 'eletro' as const, label: 'Eletro', icon: Cpu },
+  { key: 'celular' as const, label: 'Celular', icon: Smartphone },
+]
+// Eletro não tem aba Kit (produtos não viram composto).
+const SUBTABS_BY_CATEGORIA: Record<Categoria, readonly Tab[]> = {
+  mala: ['mala', 'resumo', 'cotacao', 'kit'],
+  eletro: ['mala', 'resumo', 'cotacao'],
+  celular: ['mala', 'resumo', 'cotacao', 'kit'],
+}
+const route = useRoute()
+const router = useRouter()
+const categoria = ref<Categoria>(
+  (typeof route.query.cat === 'string'
+    && (['mala', 'eletro', 'celular'] as const).includes(route.query.cat as Categoria))
+    ? (route.query.cat as Categoria)
+    : 'mala',
+)
+const isEletro = computed(() => categoria.value === 'eletro')
+const availableSubtabs = computed(() => SUBTABS_BY_CATEGORIA[categoria.value])
+const countByCategoria = ref<Record<string, number>>({})
+function subtabLabel(t: Tab): string {
+  return t === 'mala' ? 'Importação'
+    : t === 'resumo' ? 'Resumo'
+    : t === 'cotacao' ? 'Cotação' : 'Kit'
+}
+function catQs(): string {
+  return `categoria=${categoria.value}`
+}
 
 type Config = { tempo_reposicao: number; tempo_estoque: number }
 type Product = {
@@ -224,14 +259,16 @@ const filteredProducts = computed(() => {
 async function loadAll() {
   loading.value = true
   errorText.value = null
+  const qs = catQs()
+  const hasKit = availableSubtabs.value.includes('kit')
   try {
-    const [cfg, ps, ls, rs, ct, kt] = await Promise.all([
+    const [cfg, ps, ls, rs, ct, counts] = await Promise.all([
       api<Config>('/api/importacao/config'),
-      api<Product[]>('/api/importacao/products'),
-      api<Lote[]>('/api/importacao/lotes'),
-      api<{ items: ResumoRow[]; total: string | number }>('/api/importacao/resumo'),
-      api<CotacaoGrid>('/api/importacao/cotacao'),
-      api<KitGrid>('/api/importacao/kit'),
+      api<Product[]>(`/api/importacao/products?${qs}`),
+      api<Lote[]>(`/api/importacao/lotes?${qs}`),
+      api<{ items: ResumoRow[]; total: string | number }>(`/api/importacao/resumo?${qs}`),
+      api<CotacaoGrid>(`/api/importacao/cotacao?${qs}`),
+      api<Record<string, number>>('/api/importacao/categoria-counts'),
     ])
     config.value = cfg
     products.value = ps
@@ -239,8 +276,16 @@ async function loadAll() {
     resumo.value = rs
     cotacao.value = ct
     rebuildCotCells(ct.valores)
-    kit.value = kt
-    rebuildKitMarkMap(kt.marks)
+    countByCategoria.value = counts
+    // Kit só pra mala/celular — eletro não tem; reseta o grid.
+    if (hasKit) {
+      const kt = await api<KitGrid>(`/api/importacao/kit?${qs}`)
+      kit.value = kt
+      rebuildKitMarkMap(kt.marks)
+    } else {
+      kit.value = { variations: [], bases: [], marks: [] }
+      rebuildKitMarkMap([])
+    }
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -248,6 +293,18 @@ async function loadAll() {
   }
 }
 await loadAll()
+
+// Troca de categoria: reseta a sub-tab se não existir na nova, atualiza
+// a URL (?cat=) e recarrega tudo.
+function setCategoria(c: Categoria) {
+  if (c === categoria.value) return
+  if (!SUBTABS_BY_CATEGORIA[c].includes(tab.value)) tab.value = 'mala'
+  categoria.value = c
+}
+watch(categoria, (c) => {
+  void router.replace({ query: { ...route.query, cat: c } })
+  void loadAll()
+})
 
 // ── Mala: cell editing ────────────────────────────────────────────
 function scheduleSave(row: Product, field: keyof Product, value: any) {
@@ -275,7 +332,7 @@ async function persistProduct(row: Product, field: keyof Product) {
 
 async function loadProductsOnly() {
   try {
-    products.value = await api<Product[]>('/api/importacao/products')
+    products.value = await api<Product[]>(`/api/importacao/products?${catQs()}`)
   } catch { /* ignore */ }
 }
 
@@ -316,8 +373,15 @@ const newProduct = reactive({
   tsa: '' as string | number,
   obs: '',
 })
+// Dispatch por categoria — espelha generate_product_name do backend.
+function generateProductName(
+  cat: Categoria, modeloBling: string | null, sku: string | null, cor: string | null,
+): string {
+  if (cat === 'eletro') return (modeloBling ?? '').trim() || 'Produto eletro'
+  return generateMalaName(modeloBling, sku, cor)  // mala + celular
+}
 const newProductPreviewName = computed(() =>
-  generateMalaName(newProduct.modelo_bling, newProduct.sku, newProduct.cor),
+  generateProductName(categoria.value, newProduct.modelo_bling, newProduct.sku, newProduct.cor),
 )
 
 function openCreateModal() {
@@ -344,6 +408,7 @@ async function saveNewProduct() {
     const row = await api<Product>('/api/importacao/products', {
       method: 'POST',
       body: {
+        categoria: categoria.value,
         sku: newProduct.sku.trim(),
         fornecedor: newProduct.fornecedor.trim() || null,
         modelo_china: newProduct.modelo_china.trim() || null,
@@ -401,7 +466,7 @@ async function addLote() {
   try {
     const lote = await api<Lote>('/api/importacao/lotes', {
       method: 'POST',
-      body: { nome, abertura },
+      body: { nome, abertura, categoria: categoria.value },
     })
     lotes.value = [lote, ...lotes.value]
   } catch (e: any) {
@@ -484,12 +549,12 @@ async function persistLoteItem(prod: Product, loteId: string, qty: number) {
   }
 }
 async function loadLotesOnly() {
-  try { lotes.value = await api<Lote[]>('/api/importacao/lotes') } catch { /* ignore */ }
+  try { lotes.value = await api<Lote[]>(`/api/importacao/lotes?${catQs()}`) } catch { /* ignore */ }
 }
 async function loadResumoOnly() {
   try {
     resumo.value = await api<{ items: ResumoRow[]; total: string | number }>(
-      '/api/importacao/resumo',
+      `/api/importacao/resumo?${catQs()}`,
     )
   } catch { /* ignore */ }
 }
@@ -511,6 +576,7 @@ async function addResumo() {
     await api('/api/importacao/resumo', {
       method: 'POST',
       body: {
+        categoria: categoria.value,
         data: newResumo.data,
         lote_nome: newResumo.lote_nome.trim() || null,
         saldo: Number(newResumo.saldo),
@@ -652,7 +718,7 @@ async function addCotFabricante() {
   if (addingCotFab.value) return
   addingCotFab.value = true
   try {
-    const fab = await api<CotFabricante>('/api/importacao/cotacao/fabricantes', { method: 'POST' })
+    const fab = await api<CotFabricante>(`/api/importacao/cotacao/fabricantes?${catQs()}`, { method: 'POST' })
     cotacao.value.fabricantes = [...cotacao.value.fabricantes, fab]
   } catch (e: any) {
     errorText.value = `Falha ao criar fabricante: ${e?.data?.detail?.code || 'erro'}`
@@ -679,7 +745,7 @@ async function addCotProduto() {
   if (addingCotProd.value) return
   addingCotProd.value = true
   try {
-    const prod = await api<CotProduto>('/api/importacao/cotacao/produtos', { method: 'POST' })
+    const prod = await api<CotProduto>(`/api/importacao/cotacao/produtos?${catQs()}`, { method: 'POST' })
     cotacao.value.produtos = [...cotacao.value.produtos, prod]
   } catch (e: any) {
     errorText.value = `Falha ao incluir produto: ${e?.data?.detail?.code || 'erro'}`
@@ -823,7 +889,7 @@ function kitMarkHasError(m: KitMark | undefined): boolean {
 let kitPollHandle: ReturnType<typeof setInterval> | null = null
 async function reloadKitOnly() {
   try {
-    const kt = await api<KitGrid>('/api/importacao/kit')
+    const kt = await api<KitGrid>(`/api/importacao/kit?${catQs()}`)
     kit.value = kt
     rebuildKitMarkMap(kt.marks)
   } catch { /* ignore */ }
@@ -872,18 +938,34 @@ onScopeDispose(() => {
 
 <template>
   <div class="space-y-3 p-4">
+    <!-- Selector top-level de categoria (Mala / Eletro / Celular) -->
+    <div class="flex flex-wrap gap-2">
+      <button
+        v-for="cat in CATEGORIAS"
+        :key="cat.key"
+        class="inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors"
+        :class="categoria === cat.key
+          ? 'bg-primary text-primary-foreground'
+          : 'bg-card border hover:bg-muted'"
+        @click="setCategoria(cat.key)"
+      >
+        <component :is="cat.icon" class="size-4" />
+        {{ cat.label }} ({{ countByCategoria[cat.key] ?? 0 }})
+      </button>
+    </div>
+
     <!-- Header + tab nav -->
     <div class="flex flex-wrap items-center gap-3">
       <h1 class="text-xl font-semibold">Importação</h1>
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
         <button
-          v-for="t in (['mala','resumo','cotacao','kit'] as const)"
+          v-for="t in availableSubtabs"
           :key="t"
           class="px-3 py-1.5 rounded text-sm transition-colors"
           :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
           @click="tab = t"
         >
-          {{ t === 'mala' ? 'Mala' : t === 'resumo' ? 'Resumo' : t === 'cotacao' ? 'Cotação' : 'Kit' }}
+          {{ subtabLabel(t) }}
         </button>
       </div>
       <button
@@ -993,13 +1075,13 @@ onScopeDispose(() => {
                    curtas (até ~7 chars) → 60-66px; "reposição"/"saldo"
                    → 72-76px. -->
               <th rowspan="8" class="col-head text-left" style="min-width: 96px">fornecedor</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 96px">modelo china</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 72px">cor china</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 80px">fechamento</th>
-              <th rowspan="8" class="col-head text-center" style="min-width: 44px">TSA</th>
+              <th v-if="!isEletro" rowspan="8" class="col-head text-left" style="min-width: 96px">modelo china</th>
+              <th v-if="!isEletro" rowspan="8" class="col-head text-left" style="min-width: 72px">cor china</th>
+              <th v-if="!isEletro" rowspan="8" class="col-head text-left" style="min-width: 80px">fechamento</th>
+              <th v-if="!isEletro" rowspan="8" class="col-head text-center" style="min-width: 44px">TSA</th>
               <th rowspan="8" class="col-head text-left" style="min-width: 100px">modelo bling</th>
               <th rowspan="8" class="col-head text-left" style="min-width: 130px">sku</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 130px">cor</th>
+              <th v-if="!isEletro" rowspan="8" class="col-head text-left" style="min-width: 130px">cor</th>
               <th rowspan="8" class="col-head text-right" style="min-width: 60px">custo bling</th>
               <th rowspan="8" class="col-head text-right" style="min-width: 66px">estoque bling</th>
               <th rowspan="8" class="col-head text-right" style="min-width: 66px">consumo diário</th>
@@ -1082,20 +1164,22 @@ onScopeDispose(() => {
           </thead>
           <tbody>
             <tr v-if="!loading && filteredProducts.length === 0">
-              <td :colspan="16 + visibleLotes.length * 2 + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
-                Nenhum produto. Clique em "Criar produto" para começar.
+              <td :colspan="(isEletro ? 11 : 16) + visibleLotes.length * 2 + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
+                {{ categoria === 'celular'
+                  ? 'Categoria Celular em construção. Clique em "Criar produto" pra começar.'
+                  : 'Nenhum produto. Clique em "Criar produto" para começar.' }}
               </td>
             </tr>
             <tr v-for="row in filteredProducts" :key="row.id" class="even:bg-muted/10 hover:bg-amber-50/40">
               <td><input class="cell-input" :value="row.fornecedor ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'fornecedor', (e.target as HTMLInputElement).value)" /></td>
-              <td><input class="cell-input" :value="row.modelo_china ?? ''" :disabled="!canEdit"
+              <td v-if="!isEletro"><input class="cell-input" :value="row.modelo_china ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'modelo_china', (e.target as HTMLInputElement).value)" /></td>
-              <td><input class="cell-input" :value="row.cor_china ?? ''" :disabled="!canEdit"
+              <td v-if="!isEletro"><input class="cell-input" :value="row.cor_china ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'cor_china', (e.target as HTMLInputElement).value)" /></td>
-              <td><input class="cell-input" :value="row.fechamento ?? ''" :disabled="!canEdit"
+              <td v-if="!isEletro"><input class="cell-input" :value="row.fechamento ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'fechamento', (e.target as HTMLInputElement).value)" /></td>
-              <td class="text-center">
+              <td v-if="!isEletro" class="text-center">
                 <!-- TSA = count of locks. Blank = no TSA, 1/2/3 = number of cadeados. -->
                 <input
                   type="number"
@@ -1115,7 +1199,7 @@ onScopeDispose(() => {
                 @input="(e) => scheduleSave(row, 'modelo_bling', (e.target as HTMLInputElement).value)" /></td>
               <td class="font-mono"><input class="cell-input" :value="row.sku ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'sku', (e.target as HTMLInputElement).value)" /></td>
-              <td><input class="cell-input" :value="row.cor ?? ''" :disabled="!canEdit"
+              <td v-if="!isEletro"><input class="cell-input" :value="row.cor ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'cor', (e.target as HTMLInputElement).value)" /></td>
               <td><input type="number" step="0.01" class="cell-input text-right" :value="row.custo_bling" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'custo_bling', Number((e.target as HTMLInputElement).value) || 0)" /></td>
@@ -1167,7 +1251,7 @@ onScopeDispose(() => {
                       ? 'Aguardando worker criar no Bling…'
                       : row.bling_sync_status === 'error'
                         ? `Erro: ${row.bling_sync_error ?? 'desconhecido'} — clique pra reenviar`
-                        : 'Criar produto no Bling (categoria mala)'"
+                        : `Criar produto no Bling (categoria ${categoria})`"
                   @click="sendToBling(row)"
                 >
                   <Clock v-if="row.bling_sync_status === 'pending'" class="size-3" />
@@ -1486,7 +1570,8 @@ onScopeDispose(() => {
             </div>
             <div class="font-mono text-sm">{{ newProductPreviewName }}</div>
             <div class="text-[10px] text-muted-foreground mt-1">
-              Padrão: <code>Mala {{ '{' }}modelo bling{{ '}' }} tamanho {{ '{' }}n após o ponto no SKU{{ '}' }} - {{ '{' }}cor{{ '}' }}</code>
+              <template v-if="isEletro">Eletro: nome = <code>{{ '{' }}modelo bling{{ '}' }}</code></template>
+              <template v-else>Padrão: <code>Mala {{ '{' }}modelo bling{{ '}' }} tamanho {{ '{' }}n após o ponto no SKU{{ '}' }} - {{ '{' }}cor{{ '}' }}</code></template>
             </div>
           </div>
 
@@ -1499,7 +1584,7 @@ onScopeDispose(() => {
               <span class="text-xs font-medium text-muted-foreground">Modelo bling</span>
               <input v-model="newProduct.modelo_bling" type="text" placeholder="Lisa M2" class="h-8 border rounded px-2 bg-background" />
             </label>
-            <label class="flex flex-col gap-1">
+            <label v-if="!isEletro" class="flex flex-col gap-1">
               <span class="text-xs font-medium text-muted-foreground">Cor</span>
               <input v-model="newProduct.cor" type="text" placeholder="Roxo Escuro" class="h-8 border rounded px-2 bg-background" />
             </label>
@@ -1511,15 +1596,15 @@ onScopeDispose(() => {
               <span class="text-xs font-medium text-muted-foreground">Fornecedor</span>
               <input v-model="newProduct.fornecedor" type="text" class="h-8 border rounded px-2 bg-background" />
             </label>
-            <label class="flex flex-col gap-1">
+            <label v-if="!isEletro" class="flex flex-col gap-1">
               <span class="text-xs font-medium text-muted-foreground">Modelo china</span>
               <input v-model="newProduct.modelo_china" type="text" class="h-8 border rounded px-2 bg-background" />
             </label>
-            <label class="flex flex-col gap-1">
+            <label v-if="!isEletro" class="flex flex-col gap-1">
               <span class="text-xs font-medium text-muted-foreground">Cor china</span>
               <input v-model="newProduct.cor_china" type="text" class="h-8 border rounded px-2 bg-background" />
             </label>
-            <label class="flex flex-col gap-1">
+            <label v-if="!isEletro" class="flex flex-col gap-1">
               <span class="text-xs font-medium text-muted-foreground">TSA (1, 2 ou 3)</span>
               <input v-model="newProduct.tsa" type="number" min="1" max="3" step="1" placeholder="—" class="h-8 border rounded px-2 bg-background text-right" />
             </label>
@@ -1532,11 +1617,12 @@ onScopeDispose(() => {
           <!-- Metadados Bling — fixos pela regra de negócio (planilha-mãe). -->
           <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs space-y-1">
             <div class="font-semibold">Metadados Bling (fixos)</div>
-            <div>categoria: <code>mala</code> · formato: <code>Simples</code></div>
+            <div>categoria: <code>{{ categoria }}</code> · formato: <code>Simples</code></div>
             <div class="text-muted-foreground">
               Ao clicar "Enviar pro Bling" o produto é criado no Bling
-              (formato Simples, categoria <code>mala</code>) e fica disponível
-              como componente para kits. Preço de venda continua manual no Bling.
+              (formato Simples, categoria <code>{{ categoria }}</code>) e fica
+              disponível como componente para kits. Preço de venda continua
+              manual no Bling.
             </div>
           </div>
         </div>

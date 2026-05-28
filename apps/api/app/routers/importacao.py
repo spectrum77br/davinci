@@ -118,6 +118,25 @@ async def patch_config(
     return ImportConfigOut.model_validate(row, from_attributes=True)
 
 
+# ── Categoria counts (selector top-level) ───────────────────────────
+
+
+@router.get("/categoria-counts")
+async def categoria_counts(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+) -> dict[str, int]:
+    """Contagem de import_products por categoria — alimenta o selector
+    top-level (Mala (N) / Eletro (M) / Celular (K))."""
+    rows = (await session.execute(
+        select(ImportProduct.categoria, func.count()).group_by(ImportProduct.categoria)
+    )).all()
+    counts: dict[str, int] = dict.fromkeys(_CATEGORIAS, 0)
+    for cat, n in rows:
+        counts[cat] = int(n)
+    return counts
+
+
 # ── Products ─────────────────────────────────────────────────────────
 
 
