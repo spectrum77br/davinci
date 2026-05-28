@@ -1,6 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -34,6 +35,7 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/devolutions", tags=["devolutions"])
 
 _REFUND_CONDICOES = {"Extraviado", "Manutenção"}
+SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 
 def _maybe_create_refund(session: AsyncSession, row: Devolution, condicao: str) -> None:
@@ -81,12 +83,22 @@ async def list_devolutions(
     offset: int = Query(0, ge=0),
     search: str | None = Query(None),
     reembolso: bool | None = Query(None),
+    tag: str | None = Query(None),
+    data_devolvido_estoque: date | None = Query(None),
 ) -> DevolutionPage:
     where = []
     if search and search.strip():
         where.append(_search_clause(search.strip()))
     if reembolso is not None:
         where.append(Devolution.reembolso.is_(reembolso))
+    if tag and tag.strip() and tag.strip().lower() != "all":
+        normalized_tag = tag.strip().lower().lstrip(".")
+        where.append(Devolution.tag == f".{normalized_tag}")
+    if data_devolvido_estoque is not None:
+        start = datetime.combine(data_devolvido_estoque, time.min, tzinfo=SAO_PAULO)
+        end = start + timedelta(days=1)
+        where.append(Devolution.data_devolvido_estoque >= start.astimezone(UTC))
+        where.append(Devolution.data_devolvido_estoque < end.astimezone(UTC))
 
     stmt = (
         select(Devolution)

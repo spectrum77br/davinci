@@ -6,7 +6,6 @@ import {
   Clock,
   ExternalLink,
   Loader2,
-  Package,
   Plus,
   RotateCcw,
   Search,
@@ -92,6 +91,7 @@ type DevolutionDraft = LookupRow & {
 type ReembolsoFilter = 'all' | 'true' | 'false'
 
 const PAGE_SIZE = 100
+const TAG_FILTERS = ['ci', 'pi', 'ra', 'sa', 'sp', 'us', 'cd'] as const
 
 const MOTIVOS_DEVOLUCAO = [
   'Mudou de ideia',
@@ -164,6 +164,8 @@ const error = ref<string | null>(null)
 
 const search = ref('')
 const reembolsoFilter = ref<ReembolsoFilter>('all')
+const tagFilter = ref('all')
+const dataDevolvidoEstoqueFilter = ref('')
 
 const addOpen = ref(false)
 const lookupPedido = ref('')
@@ -283,7 +285,6 @@ function isAlreadyAdded(row: LookupRow) {
 }
 const rangeStart = computed(() => total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1)
 const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
-const totalCustoProduto = computed(() => items.value.reduce((a, r) => a + (r.custo_produto ?? 0), 0))
 const totalCustoManutencao = computed(() => items.value.reduce((a, r) => a + (r.custo_manutencao ?? 0), 0))
 const totalReembolsadas = computed(() => items.value.filter((r) => r.reembolso).length)
 
@@ -384,6 +385,8 @@ async function load() {
     params.set('offset', String((page.value - 1) * PAGE_SIZE))
     if (search.value.trim()) params.set('search', search.value.trim())
     if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
+    if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
+    if (dataDevolvidoEstoqueFilter.value) params.set('data_devolvido_estoque', dataDevolvidoEstoqueFilter.value)
     const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
     items.value = res.items
     total.value = res.total
@@ -405,7 +408,7 @@ watch(search, () => {
     load()
   }, 300)
 })
-watch(reembolsoFilter, () => { page.value = 1; load() })
+watch([reembolsoFilter, tagFilter, dataDevolvidoEstoqueFilter], () => { page.value = 1; load() })
 watch(page, () => load())
 
 function openAdd() {
@@ -632,10 +635,9 @@ async function backfillAddresses() {
       {{ error }}
     </div>
 
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+    <div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
       <StatCard label="Total devoluções" :value="total" :icon="Undo2" />
       <StatCard label="Reembolsadas" :value="totalReembolsadas" :icon="Clock" tone="warning" />
-      <StatCard v-if="isAdmin" label="Custo produto (pág.)" :value="brl(totalCustoProduto)" :icon="Package" />
       <StatCard label="Custo manutenção (pág.)" :value="brl(totalCustoManutencao)" tone="danger" />
     </div>
 
@@ -822,8 +824,18 @@ async function backfillAddresses() {
         <option value="true">reembolsadas</option>
         <option value="false">sem reembolso</option>
       </select>
+      <select v-model="tagFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
+        <option value="all">todas tags</option>
+        <option v-for="tag in TAG_FILTERS" :key="tag" :value="tag">.{{ tag }}</option>
+      </select>
+      <input
+        v-model="dataDevolvidoEstoqueFilter"
+        type="date"
+        title="Data devolvido estoque"
+        class="h-9 rounded-md border bg-background px-2 text-sm"
+      />
       <span class="ml-auto text-xs text-muted-foreground">
-        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · reembolsadas {{ totalReembolsadas }}<template v-if="isAdmin"> · custo produto {{ brl(totalCustoProduto) }}</template> · manutenção {{ brl(totalCustoManutencao) }}
+        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · reembolsadas {{ totalReembolsadas }} · manutenção {{ brl(totalCustoManutencao) }}
       </span>
     </div>
 
