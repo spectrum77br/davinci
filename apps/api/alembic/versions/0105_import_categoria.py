@@ -5,16 +5,16 @@ index + CHECK constraint nas 8 tabelas que o selector top-level filtra.
 import_config (singleton), import_lote_items e cotacao_valores NÃO
 recebem — o contexto vem da FK pro pai.
 
-Revision ID: 0104_import_categoria
-Revises: 0103_devolver_estoque_bool
+Revision ID: 0105_import_categoria
+Revises: 0104_devolution_troca_fields
 Create Date: 2026-05-28
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0104_import_categoria"
-down_revision = "0103_devolver_estoque_bool"
+revision = "0105_import_categoria"
+down_revision = "0104_devolution_troca_fields"
 branch_labels = None
 depends_on = None
 
