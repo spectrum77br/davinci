@@ -591,6 +591,26 @@ const totalPedidos = computed(() =>
   ).size,
 )
 
+// Breakdown enviado/não-enviado — distinct pedido_bling pra bater com
+// totalPedidos (em_andamento_data é consistente entre itens do mesmo
+// pedido, então cada pedido cai inteiro num dos dois lados).
+const pedidosEnviadosCount = computed(() =>
+  new Set(
+    pedidosFiltered.value
+      .filter((p) => p.status === 'enviado')
+      .map((p) => p.pedido_bling)
+      .filter(Boolean),
+  ).size,
+)
+const pedidosNaoEnviadosCount = computed(() =>
+  new Set(
+    pedidosFiltered.value
+      .filter((p) => p.status === 'nao_enviado')
+      .map((p) => p.pedido_bling)
+      .filter(Boolean),
+  ).size,
+)
+
 // Ordena por data envio (desc, primário) + pedido_bling (secundário) pra
 // que itens do mesmo pedido fiquem consecutivos. Adiciona meta-flags
 // usadas no render (`_isFirstOfGroup` controla render do número e
@@ -947,6 +967,12 @@ async function conferirTodos() {
     <div v-if="tab === 'pedidos'" class="flex flex-wrap items-center gap-2 text-xs">
       <span class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-2.5 py-1 font-semibold">
         Total: {{ totalPedidos }} pedidos
+      </span>
+      <span class="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 text-white px-2.5 py-1 font-semibold">
+        Enviados: {{ pedidosEnviadosCount }}
+      </span>
+      <span class="inline-flex items-center gap-1.5 rounded-md bg-red-600 text-white px-2.5 py-1 font-semibold">
+        Não enviados: {{ pedidosNaoEnviadosCount }}
       </span>
       <span
         v-for="bucket in pedidosCountByTag" :key="bucket.tag"

@@ -337,11 +337,13 @@ async def list_estoque_pedidos(
     status_filter: str | None = Query(None, alias="status"),  # enviado | nao_enviado
     tag: str | None = Query(None),
 ) -> dict[str, Any]:
-    """Lista pedidos enviado-etiqueta. Filtra por `em_andamento_data`
-    (data efetiva do envio) — pedidos que ainda não foram bipados
-    aparecem apenas quando `status_filter='nao_enviado'` é pedido
-    explicitamente; nesse modo cai pra `BlingOrder.data` como filtro
-    (sem em_andamento_data nada por que filtrar)."""
+    """Lista TODOS os pedidos com etiqueta gerada (situacao=15),
+    independente de `em_andamento_data`. O badge na UI distingue os
+    dois estados: verde "Enviado" (em_andamento_data preenchida pela
+    API do marketplace) vs vermelho "Não enviado" (etiqueta gerada,
+    aguardando confirmação). Data de referência do filtro: ship date
+    se já enviado, senão data do pedido (COALESCE). Os filtros
+    explícitos `enviado` / `nao_enviado` continuam disponíveis."""
     tags = _resolve_tags(user, tag)
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
@@ -352,17 +354,25 @@ async def list_estoque_pedidos(
         # ordered item's SKU.
         where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
 
+    # situacao=15 é a base. Mostramos TODOS, independente de
+    # em_andamento_data — o badge na UI distingue verde/vermelho. Data
+    # de referência: ship date se já enviado, senão data do pedido.
+    effective_date = func.coalesce(
+        BlingOrder.em_andamento_data,
+        cast(BlingOrder.data, Date),
+    )
+    where.append(effective_date >= data_inicio)
+    where.append(effective_date <= data_fim)
+
     if status_filter == "nao_enviado":
         where.append(BlingOrder.em_andamento_data.is_(None))
-        where.append(cast(BlingOrder.data, Date) >= data_inicio)
-        where.append(cast(BlingOrder.data, Date) <= data_fim)
         order_by = BlingOrder.data.desc()
-    else:
-        # Default + "enviado" filter: scope by the SHIP date.
+    elif status_filter == "enviado":
         where.append(BlingOrder.em_andamento_data.isnot(None))
-        where.append(BlingOrder.em_andamento_data >= data_inicio)
-        where.append(BlingOrder.em_andamento_data <= data_fim)
         order_by = BlingOrder.em_andamento_data.desc()
+    else:
+        # status='todos' ou None → mostra ambos, sort por effective_date.
+        order_by = effective_date.desc()
 
     orders = (
         await session.execute(
