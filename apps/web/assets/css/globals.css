@@ -84,6 +84,19 @@
     border: 2px solid hsl(var(--background));
   }
   ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.4); }
+
+  /* Remove spinner arrows nos inputs number em todo o sistema — esses
+     controles do browser interferem nas planilhas inline-edit
+     (Importação, Simulação, DNP, Suprimentos/Certificações, Consórcio,
+     Cotação, etc.) e poluem visualmente células numéricas. */
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
 }
 
 @layer components {

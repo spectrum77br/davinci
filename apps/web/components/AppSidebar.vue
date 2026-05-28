@@ -98,15 +98,15 @@ const sections: Section[] = [
     label: 'Financeiro',
     items: [
       { to: '/financeiro/consorcio', label: 'Consórcio', icon: Coins, resource: 'financeiro_consorcio' },
-      { to: '/financeiro/suprimentos', label: 'Suprimentos', icon: FileText, resource: 'financeiro_suprimentos' },
-      { to: '/financeiro/simulacao', label: 'Simulação', icon: Calculator, resource: 'financeiro_simulacao' },
-      { to: '/financeiro/dnp', label: 'DNP', icon: FlaskConical, resource: 'financeiro_dnp' },
     ],
   },
   {
-    label: 'Importação',
+    label: 'Suprimentos',
     items: [
+      { to: '/financeiro/suprimentos', label: 'Certificações', icon: FileText, resource: 'financeiro_suprimentos' },
       { to: '/importacao', label: 'Importação', icon: Ship, resource: 'importacao' },
+      { to: '/financeiro/simulacao', label: 'Simulação', icon: Calculator, resource: 'financeiro_simulacao' },
+      { to: '/financeiro/dnp', label: 'DNP', icon: FlaskConical, resource: 'financeiro_dnp' },
     ],
   },
   {

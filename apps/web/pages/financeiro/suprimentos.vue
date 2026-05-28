@@ -126,7 +126,7 @@ const totalRows = computed(() => rows.value.length)
   <div class="space-y-3 p-4">
     <div class="flex flex-wrap items-center gap-3">
       <div class="flex items-center gap-2">
-        <h1 class="text-xl font-semibold">Suprimentos — Certificações</h1>
+        <h1 class="text-xl font-semibold">Certificações</h1>
         <span class="text-xs text-muted-foreground">{{ totalRows }} {{ totalRows === 1 ? 'item' : 'itens' }}</span>
       </div>
       <div class="text-[10px] text-muted-foreground inline-flex items-center gap-3 ml-2">
