@@ -648,7 +648,23 @@ async function backfillAddresses() {
                 </select>
               </td>
               <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model="draft.devolver_estoque" type="checkbox" class="size-4 rounded border accent-primary" />
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="draft.devolver_estoque"
+                  :class="[
+                    'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
+                    draft.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
+                  ]"
+                  @click="draft.devolver_estoque = !draft.devolver_estoque"
+                >
+                  <span
+                    :class="[
+                      'inline-block size-4 transform rounded-full bg-white shadow transition-transform',
+                      draft.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
+                    ]"
+                  />
+                </button>
               </td>
               <td class="px-2 py-1 text-right border-l-[3px] border-gray-400 dark:border-gray-600">
                 <Button size="sm" :disabled="creating || !canEdit" @click="createDevolution">
@@ -826,13 +842,24 @@ async function backfillAddresses() {
               </select>
             </td>
             <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-              <input
-                :checked="row.devolver_estoque"
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="row.devolver_estoque"
                 :disabled="!canEdit"
-                type="checkbox"
-                class="size-4 rounded border accent-primary disabled:cursor-default disabled:opacity-70"
-                @change="(e) => { setRowDevolverEstoque(row, (e.target as HTMLInputElement).checked); saveRow(row) }"
-              />
+                :class="[
+                  'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-default disabled:opacity-70',
+                  row.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
+                ]"
+                @click="setRowDevolverEstoque(row, !row.devolver_estoque); saveRow(row)"
+              >
+                <span
+                  :class="[
+                    'inline-block size-4 transform rounded-full bg-white shadow transition-transform',
+                    row.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
+                  ]"
+                />
+              </button>
             </td>
             <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <input
