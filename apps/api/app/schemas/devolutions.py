@@ -36,7 +36,7 @@ class DevolutionOut(BaseModel):
     motivo_devolucao: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
-    devolver_estoque: str | None = None
+    devolver_estoque: bool = False
     observacao: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -57,7 +57,7 @@ class DevolutionCreate(BaseModel):
     motivo_devolucao: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
-    devolver_estoque: str | None = None
+    devolver_estoque: bool = False
     observacao: str | None = None
 
     @field_validator(
@@ -69,7 +69,6 @@ class DevolutionCreate(BaseModel):
         "link_abertura",
         "motivo_devolucao",
         "tecnico",
-        "devolver_estoque",
         "observacao",
         mode="before",
     )
@@ -106,7 +105,7 @@ class DevolutionPatch(BaseModel):
     motivo_devolucao: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
-    devolver_estoque: str | None = None
+    devolver_estoque: bool | None = None
     observacao: str | None = None
 
     @field_validator(
@@ -119,7 +118,6 @@ class DevolutionPatch(BaseModel):
         "link_abertura",
         "motivo_devolucao",
         "tecnico",
-        "devolver_estoque",
         "observacao",
         mode="before",
     )

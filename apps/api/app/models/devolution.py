@@ -30,5 +30,5 @@ class Devolution(Base, TimestampMixin):
     motivo_devolucao: Mapped[str | None] = mapped_column(Text, nullable=True)
     custo_manutencao: Mapped[float | None] = mapped_column(Float, nullable=True)
     tecnico: Mapped[str | None] = mapped_column(Text, nullable=True)
-    devolver_estoque: Mapped[str | None] = mapped_column(Text, nullable=True)
+    devolver_estoque: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)

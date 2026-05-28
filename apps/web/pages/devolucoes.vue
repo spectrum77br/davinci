@@ -39,7 +39,7 @@ type DevolutionRow = {
   motivo_devolucao: string | null
   custo_manutencao: number | null
   tecnico: string | null
-  devolver_estoque: string | null
+  devolver_estoque: boolean
   observacao: string | null
   created_at: string
   updated_at: string
@@ -73,7 +73,7 @@ type DevolutionDraft = LookupRow & {
   motivo_devolucao: string
   custo_manutencao: number | null
   tecnico: string
-  devolver_estoque: string
+  devolver_estoque: boolean
   observacao: string
 }
 
@@ -242,10 +242,15 @@ function setRowNumber(row: DevolutionRow, field: 'custo_produto' | 'custo_manute
 
 function setRowText(
   row: DevolutionRow,
-  field: 'condicao_produto' | 'link_abertura' | 'motivo_devolucao' | 'tecnico' | 'devolver_estoque' | 'observacao',
+  field: 'condicao_produto' | 'link_abertura' | 'motivo_devolucao' | 'tecnico' | 'observacao',
   value: string,
 ) {
   row[field] = value || null
+  markDirty(row.id)
+}
+
+function setRowDevolverEstoque(row: DevolutionRow, value: boolean) {
+  row.devolver_estoque = value
   markDirty(row.id)
 }
 
@@ -311,7 +316,7 @@ function selectLookup(row: LookupRow) {
     motivo_devolucao: '',
     custo_manutencao: null,
     tecnico: '',
-    devolver_estoque: '',
+    devolver_estoque: false,
     observacao: '',
   }
 }
@@ -350,7 +355,7 @@ function draftPayload() {
     motivo_devolucao: draft.value.motivo_devolucao || null,
     custo_manutencao: draft.value.custo_manutencao,
     tecnico: draft.value.tecnico || null,
-    devolver_estoque: draft.value.devolver_estoque || null,
+    devolver_estoque: draft.value.devolver_estoque,
     observacao: draft.value.observacao || null,
   }
 }
@@ -386,7 +391,7 @@ function rowPatchPayload(row: DevolutionRow) {
     motivo_devolucao: row.motivo_devolucao || null,
     custo_manutencao: row.custo_manutencao,
     tecnico: row.tecnico || null,
-    devolver_estoque: row.devolver_estoque || null,
+    devolver_estoque: row.devolver_estoque,
     observacao: row.observacao || null,
   }
 }
@@ -600,8 +605,8 @@ async function backfillAddresses() {
                   <option v-for="t in TECNICOS" :key="t" :value="t">{{ t }}</option>
                 </select>
               </td>
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model="draft.devolver_estoque" :class="sheetInputClass" />
+              <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
+                <input v-model="draft.devolver_estoque" type="checkbox" class="size-4 rounded border accent-primary" />
               </td>
               <td class="px-2 py-1 text-right border-l-[3px] border-gray-400 dark:border-gray-600">
                 <Button size="sm" :disabled="creating || !canEdit" @click="createDevolution">
@@ -778,13 +783,13 @@ async function backfillAddresses() {
                 >{{ row.tecnico }}</option>
               </select>
             </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
+            <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
               <input
-                :value="row.devolver_estoque || ''"
+                :checked="row.devolver_estoque"
                 :disabled="!canEdit"
-                :class="sheetInputClass"
-                @input="(e) => setRowText(row, 'devolver_estoque', (e.target as HTMLInputElement).value)"
-                @blur="saveRow(row)"
+                type="checkbox"
+                class="size-4 rounded border accent-primary disabled:cursor-default disabled:opacity-70"
+                @change="(e) => { setRowDevolverEstoque(row, (e.target as HTMLInputElement).checked); saveRow(row) }"
               />
             </td>
             <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">

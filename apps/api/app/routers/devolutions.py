@@ -184,7 +184,7 @@ async def create_devolution(
     await session.refresh(row)
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
     out = DevolutionOut.model_validate(row)
-    if body.condicao_produto in _STOCK_CONDICOES:
+    if body.condicao_produto in _STOCK_CONDICOES and body.devolver_estoque:
         sr = await return_product_to_bling_stock(session, row, body.condicao_produto)
         if sr is not None:
             out.bling_stock_result = BlingStockResultOut(**sr)
@@ -209,6 +209,7 @@ async def patch_devolution(
         raise HTTPException(422, detail={"code": "conta_required"})
 
     prev_condicao = row.condicao_produto
+    prev_devolver_estoque = row.devolver_estoque
     for key, value in data.items():
         setattr(row, key, value)
 
@@ -219,7 +220,9 @@ async def patch_devolution(
     await session.commit()
     await session.refresh(row)
     out = DevolutionOut.model_validate(row)
-    if new_condicao in _STOCK_CONDICOES and new_condicao != prev_condicao:
+    condicao_changed = new_condicao in _STOCK_CONDICOES and new_condicao != prev_condicao
+    toggle_turned_on = row.devolver_estoque and not prev_devolver_estoque
+    if row.devolver_estoque and new_condicao in _STOCK_CONDICOES and (condicao_changed or toggle_turned_on):
         sr = await return_product_to_bling_stock(session, row, new_condicao)
         if sr is not None:
             out.bling_stock_result = BlingStockResultOut(**sr)
