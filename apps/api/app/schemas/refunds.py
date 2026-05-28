@@ -128,6 +128,7 @@ class RefundLookupOut(BaseModel):
     plataforma: str | None = None
     conta: str
     custo_produto: float | None = None
+    custo_manutencao: float | None = None
 
 
 class RefundOrderCostOut(BaseModel):

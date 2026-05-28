@@ -113,8 +113,12 @@ async def lookup_refund_order(
                     MAX(v.pedido_marketplace)::text AS pedido_marketplace,
                     COALESCE(v.plataforma_bling, v.plataforma_financeiro)::text AS plataforma,
                     btrim(v.loja_nome) AS conta,
-                    SUM(v.bling_custo_produtos)::double precision AS custo_produto
+                    SUM(v.bling_custo_produtos)::double precision AS custo_produto,
+                    MAX(d.custo_manutencao)::double precision AS custo_manutencao
                 FROM "{SCHEMA}".vw_conciliacao_margens_marketplace v
+                LEFT JOIN "{SCHEMA}".devolutions d
+                    ON d.pedido_bling = v.pedido_bling::text
+                    AND btrim(d.conta) = btrim(v.loja_nome)
                 WHERE (v.pedido_bling::text = :pedido OR v.pedido_marketplace::text = :pedido)
                   AND v.loja_nome IS NOT NULL
                   AND btrim(v.loja_nome) <> ''

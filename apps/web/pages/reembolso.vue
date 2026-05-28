@@ -48,6 +48,7 @@ type LookupRow = {
   plataforma: string | null
   conta: string
   custo_produto: number | null
+  custo_manutencao: number | null
 }
 
 type RefundDraft = LookupRow & {
@@ -177,6 +178,9 @@ function onDraftTipoChange() {
   if (!draft.value) return
   if (draft.value.tipo === 'Extraviado' && draft.value.custo_produto != null) {
     draft.value.prejuizo = draft.value.custo_produto
+  }
+  if (draft.value.tipo === 'Manutenção' && draft.value.custo_manutencao != null) {
+    draft.value.prejuizo = draft.value.custo_manutencao
   }
   if (draft.value.tipo === 'Cliente' && draft.value.reembolso != null && draft.value.reembolso > 0) {
     draft.value.reembolso = -draft.value.reembolso
