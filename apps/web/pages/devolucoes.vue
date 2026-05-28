@@ -557,9 +557,9 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
-              <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manut.</th>
+              <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Dev. estoque</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
               <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] border-l-[3px] border-gray-400 dark:border-gray-600"></th>
             </tr>
           </thead>
@@ -636,7 +636,7 @@ async function backfillAddresses() {
         <option value="false">sem reembolso</option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">
-        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · reembolsadas {{ totalReembolsadas }}<template v-if="isAdmin"> · custo prod {{ brl(totalCustoProduto) }}</template> · manut {{ brl(totalCustoManutencao) }}
+        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · reembolsadas {{ totalReembolsadas }}<template v-if="isAdmin"> · custo produto {{ brl(totalCustoProduto) }}</template> · manutenção {{ brl(totalCustoManutencao) }}
       </span>
     </div>
 
@@ -661,9 +661,9 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manut.</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Dev. estoque</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
           </tr>
         </thead>
