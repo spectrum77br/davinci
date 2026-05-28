@@ -1,0 +1,77 @@
+"""Safety-net pra webhooks perdidos do Bling: re-sincroniza pedidos
+suspeitos de stale a cada 10 minutos.
+
+Bling V3 perde webhooks com frequência — pedidos ficam num estado
+intermediário no DB (situacao 6 ou 83965 sem em_andamento_data)
+enquanto no Bling já avançaram. Este módulo lista os candidatos; o
+cron (`bling_orders_safety_net_tick` em worker.py) força o refetch via
+`ingest_bling_order_run`, que é idempotente.
+
+Complementa (não substitui) o `check_marketplace_shipped_orders`:
+aquele confronta 83965 contra a API do marketplace; este re-busca o
+estado real direto do Bling, pegando também os 6→83965 perdidos.
+"""
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
+
+import structlog
+from sqlalchemy import Date, and_, cast, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import BlingOrder, Integration, IntegrationPlatform
+
+logger = structlog.get_logger()
+
+# Situações intermediárias do fluxo de envio. Com em_andamento_data NULL
+# são candidatos a estarem stale (webhook do Bling pode ter se perdido).
+_STALE_CANDIDATE_SITUACOES = ("6", "83965")
+
+# Limite por ciclo pra não estourar rate limit do Bling (~3 req/s).
+_MAX_PER_CYCLE = 30
+
+# Idade mínima da última sync local pra considerar candidato — evita
+# disputa com webhooks recém-chegados.
+_MIN_STALENESS_MINUTES = 15
+
+# Pedidos criados há mais que isso = zumbis (entregues/cancelados sem
+# atualizar). Não vale a pena ressuscitar.
+_MAX_AGE_DAYS = 14
+
+
+async def find_stale_order_ids(session: AsyncSession) -> list[tuple[int, UUID]]:
+    """Retorna (bling_id, user_id) de pedidos suspeitos de estarem stale.
+
+    Single-tenant: usa o user_id da única Integration BLING ativa — é o
+    mesmo argumento que o webhook passa pro `ingest_bling_order_run`.
+    Filtra item_index==0 (row canônica), então cada pedido aparece 1x.
+    """
+    now = datetime.now(UTC)
+    cutoff_age = now.date() - timedelta(days=_MAX_AGE_DAYS)
+    cutoff_staleness = now - timedelta(minutes=_MIN_STALENESS_MINUTES)
+
+    integ = (await session.execute(
+        select(Integration).where(
+            Integration.platform == IntegrationPlatform.BLING,
+            Integration.status == "active",
+        ).limit(1)
+    )).scalar_one_or_none()
+    if integ is None:
+        return []
+
+    rows = (await session.execute(
+        select(BlingOrder.bling_id)
+        .where(and_(
+            BlingOrder.situacao.in_(_STALE_CANDIDATE_SITUACOES),
+            BlingOrder.em_andamento_data.is_(None),
+            cast(BlingOrder.data, Date) >= cutoff_age,
+            BlingOrder.updated_at < cutoff_staleness,
+            BlingOrder.bling_id.isnot(None),
+            BlingOrder.item_index == 0,
+        ))
+        .order_by(BlingOrder.updated_at.asc())
+        .limit(_MAX_PER_CYCLE)
+    )).all()
+
+    return [(int(r[0]), integ.user_id) for r in rows]

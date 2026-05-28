@@ -1014,6 +1014,47 @@ async def audit_run(
         )
 
 
+async def bling_orders_safety_net_tick(ctx: dict) -> None:
+    """A cada 10 min: pega até 30 pedidos suspeitos de stale (situacao
+    6/83965 sem em_andamento_data, criados ≤14d, sem update há >15min) e
+    força refetch via ingest_bling_order_run. Captura webhooks do Bling
+    perdidos. Complementa (não substitui) check_marketplace_shipped_orders.
+    Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false."""
+    if not get_settings().enable_bling_orders_safety_net:
+        return
+
+    from app.services.bling_orders_safety_net import find_stale_order_ids
+
+    async with session_scope() as session:
+        candidates = await find_stale_order_ids(session)
+
+    if not candidates:
+        logger.info("bling_orders_safety_net_no_candidates")
+        return
+
+    pool = await get_arq_pool()
+    enqueued = 0
+    for bling_id, user_id in candidates:
+        try:
+            await pool.enqueue_job(
+                "ingest_bling_order_run",
+                bling_id,
+                str(user_id),
+                "safety_net",
+            )
+            enqueued += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "bling_safety_net_enqueue_failed",
+                bling_id=bling_id, err=str(e)[:200],
+            )
+
+    logger.info(
+        "bling_orders_safety_net_tick_done",
+        candidates=len(candidates), enqueued=enqueued,
+    )
+
+
 # ---------------------------------------------------------------- lifecycle
 
 
@@ -1029,6 +1070,7 @@ async def shutdown(ctx: dict) -> None:
 
 _FIVE_MIN = {0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55}
 _TWO_MIN = set(range(0, 60, 2))
+_TEN_MIN = {0, 10, 20, 30, 40, 50}
 
 
 class WorkerSettings:
@@ -1057,6 +1099,7 @@ class WorkerSettings:
         sync_marketplace_financials_for_order_run,
         verificar_margem_snapshot,
         check_marketplace_shipped_orders,
+        bling_orders_safety_net_tick,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -1108,6 +1151,9 @@ class WorkerSettings:
         # marketplace's shipment state. Marketplace SHIPPED → Bling 15
         # + stamp em_andamento_data so the order shows on /controle-estoque.
         cron(check_marketplace_shipped_orders, minute=_FIVE_MIN, run_at_startup=False),
+        # Safety-net: re-sincroniza pedidos suspeitos de stale (webhooks
+        # perdidos do Bling) a cada 10 min. Refetch via ingest_bling_order_run.
+        cron(bling_orders_safety_net_tick, minute=_TEN_MIN, run_at_startup=False),
     ]
     max_jobs = 10
     job_timeout = 1800
@@ -1127,6 +1173,7 @@ __all__ = [
     "auto_link_run",
     "alerts_cleanup",
     "background_jobs_gc",
+    "bling_orders_safety_net_tick",
     "bling_token_refresh",
     "daily_sync_scheduler",
     "failed_jobs_alert_scan",

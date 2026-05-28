@@ -120,6 +120,10 @@ class Settings(BaseSettings):
     # explicitly applied. Locally we enable it via ENABLE_MARKETING=true.
     enable_marketing: bool = False
 
+    # Safety-net cron que re-sincroniza pedidos suspeitos de stale com o
+    # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.
+    enable_bling_orders_safety_net: bool = True
+
     @property
     def is_prod(self) -> bool:
         return self.env == "production"
