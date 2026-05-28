@@ -51,6 +51,11 @@ type LookupRow = {
   custo_manutencao: number | null
 }
 
+type LookupPage = {
+  items: LookupRow[]
+  historico_disponivel: boolean
+}
+
 type RefundDraft = LookupRow & {
   tipo: RefundTipo | ''
   prejuizo: number | null
@@ -84,6 +89,9 @@ const lookupPedido = ref('')
 const lookupLoading = ref(false)
 const lookupResults = ref<LookupRow[]>([])
 const lookupError = ref<string | null>(null)
+const historicoDisponivel = ref(false)
+const historicoLoading = ref(false)
+const historicoElapsedMs = ref(0)
 const creating = ref(false)
 const draft = ref<RefundDraft | null>(null)
 
@@ -245,6 +253,9 @@ function openAdd() {
   lookupPedido.value = ''
   lookupResults.value = []
   lookupError.value = null
+  historicoDisponivel.value = false
+  historicoLoading.value = false
+  historicoElapsedMs.value = 0
   draft.value = null
 }
 
@@ -253,6 +264,9 @@ function closeAdd() {
   lookupPedido.value = ''
   lookupResults.value = []
   lookupError.value = null
+  historicoDisponivel.value = false
+  historicoLoading.value = false
+  historicoElapsedMs.value = 0
   draft.value = null
 }
 
@@ -268,23 +282,52 @@ function selectLookup(row: LookupRow) {
   }
 }
 
-async function lookupOrder() {
+function fmtElapsed(ms: number) {
+  const s = Math.floor(ms / 1000)
+  const m = Math.floor(s / 60)
+  const rem = s % 60
+  return m > 0 ? `${m}m ${String(rem).padStart(2, '0')}s` : `${s}s`
+}
+
+async function lookupOrder(forceRefresh = false) {
   const pedido = lookupPedido.value.trim()
   if (!pedido) return
-  lookupLoading.value = true
   lookupError.value = null
   lookupResults.value = []
+  historicoDisponivel.value = false
   draft.value = null
+  let timerHandle: ReturnType<typeof setInterval> | null = null
+  if (forceRefresh) {
+    historicoLoading.value = true
+    historicoElapsedMs.value = 0
+    const started = Date.now()
+    timerHandle = setInterval(() => {
+      historicoElapsedMs.value = Date.now() - started
+    }, 250)
+  } else {
+    lookupLoading.value = true
+  }
   try {
-    const res = await api<LookupRow[]>(`/api/refunds/order-lookup?pedido=${encodeURIComponent(pedido)}`)
-    lookupResults.value = res
-    if (res.length === 1) selectLookup(res[0])
-    if (!res.length) lookupError.value = 'pedido não encontrado'
+    const params = new URLSearchParams({ pedido })
+    if (forceRefresh) params.set('force_refresh', 'true')
+    const res = await api<LookupPage>(`/api/refunds/order-lookup?${params.toString()}`)
+    lookupResults.value = res.items
+    historicoDisponivel.value = !!res.historico_disponivel
+    if (res.items.length === 1) selectLookup(res.items[0])
+    if (!res.items.length && !historicoDisponivel.value) {
+      lookupError.value = forceRefresh ? 'pedido não encontrado no histórico' : 'pedido não encontrado'
+    }
   } catch (e: any) {
     lookupError.value = apiError(e)
   } finally {
+    if (timerHandle) clearInterval(timerHandle)
     lookupLoading.value = false
+    historicoLoading.value = false
   }
+}
+
+function lookupHistorico() {
+  lookupOrder(true)
 }
 
 function draftPayload() {
@@ -388,20 +431,66 @@ async function saveRow(row: RefundRow): Promise<void> {
               v-model="lookupPedido"
               class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
               placeholder="Bling ou marketplace"
-              @keydown.enter.prevent="lookupOrder"
+              :disabled="historicoLoading"
+              @keydown.enter.prevent="lookupOrder(false)"
             />
           </div>
         </label>
-        <Button size="sm" :disabled="lookupLoading || !lookupPedido.trim()" @click="lookupOrder">
+        <Button size="sm" :disabled="lookupLoading || historicoLoading || !lookupPedido.trim()" @click="lookupOrder(false)">
           <Loader2 v-if="lookupLoading" class="size-4 mr-1.5 animate-spin" />
           <Search v-else class="size-4 mr-1.5" />
           buscar
         </Button>
-        <Button size="sm" variant="ghost" @click="closeAdd">
+        <Button size="sm" variant="ghost" :disabled="historicoLoading" @click="closeAdd">
           <X class="size-4 mr-1.5" />
           fechar
         </Button>
         <span v-if="lookupError" class="text-sm text-red-400">{{ lookupError }}</span>
+      </div>
+
+      <div
+        v-if="historicoLoading"
+        class="border-b border-amber-500/30 bg-amber-500/5 px-4 py-4"
+      >
+        <div class="flex items-start gap-3">
+          <Loader2 class="mt-0.5 size-5 shrink-0 animate-spin text-amber-500" />
+          <div class="flex-1">
+            <div class="text-sm font-medium text-amber-700 dark:text-amber-300">
+              Buscando pedido <span class="font-mono">{{ lookupPedido.trim() }}</span> no historico…
+            </div>
+            <p class="mt-1 text-xs text-muted-foreground">
+              A view de conciliacao precisa materializar todos os pedidos antes
+              de filtrar, entao essa busca pode levar varios minutos. Pode deixar
+              essa aba aberta; o resultado aparece assim que terminar.
+            </p>
+            <div class="mt-2 text-xs font-mono tabular-nums text-amber-700 dark:text-amber-300">
+              {{ fmtElapsed(historicoElapsedMs) }} decorrido
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-else-if="historicoDisponivel && !lookupResults.length && !draft"
+        class="border-b border-blue-500/30 bg-blue-500/5 px-4 py-4"
+      >
+        <div class="flex items-start gap-3">
+          <AlertCircle class="mt-0.5 size-5 shrink-0 text-blue-500" />
+          <div class="flex-1">
+            <div class="text-sm font-medium">
+              Pedido <span class="font-mono">{{ lookupPedido.trim() }}</span> nao esta no historico recente
+            </div>
+            <p class="mt-1 text-xs text-muted-foreground">
+              Ele existe no Bling, mas esta fora da janela de 20 dias da
+              conciliacao rapida. A busca no historico le a view completa e
+              pode levar varios minutos.
+            </p>
+            <Button size="sm" class="mt-3" @click="lookupHistorico">
+              <Search class="size-4 mr-1.5" />
+              buscar no historico
+            </Button>
+          </div>
+        </div>
       </div>
 
       <div v-if="lookupResults.length > 1 && !draft" class="overflow-auto border-b">

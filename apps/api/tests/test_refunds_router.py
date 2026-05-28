@@ -121,7 +121,7 @@ async def test_cliente_reembolso_is_clamped_to_non_positive(client, make_user, a
     assert other.json()["reembolso"] == 5.0
 
 
-async def test_lookup_refund_order_reads_conciliation_view(
+async def test_lookup_refund_order_reads_recent_conciliation_view(
     client,
     db: AsyncSession,
     make_user,
@@ -130,7 +130,9 @@ async def test_lookup_refund_order_reads_conciliation_view(
     user = await make_user(permissions=_refund_permissions(edit=False, delete=False))
     auth_as(user)
     schema = get_settings().database_schema
-    await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_conciliacao_margens_marketplace'))
+    await db.execute(
+        text(f'DROP VIEW IF EXISTS "{schema}".vw_conciliacao_margens_marketplace')
+    )
     await db.execute(
         text(
             f"""
@@ -150,16 +152,132 @@ async def test_lookup_refund_order_reads_conciliation_view(
     response = await client.get("/api/refunds/order-lookup?pedido=MLB999")
 
     assert response.status_code == 200
-    assert response.json() == [
-        {
-            "data": "2026-05-20T12:00:00Z",
-            "pedido_bling": "123456",
-            "pedido_marketplace": "MLB999",
-            "plataforma": "ml",
-            "conta": "Conta View",
-            "custo_produto": 19.75,
-        }
-    ]
+    assert response.json() == {
+        "items": [
+            {
+                "data": "2026-05-20T12:00:00Z",
+                "pedido_bling": "123456",
+                "pedido_marketplace": "MLB999",
+                "plataforma": "ml",
+                "conta": "Conta View",
+                "custo_produto": 19.75,
+                "custo_manutencao": None,
+            }
+        ],
+        "historico_disponivel": False,
+    }
+
+
+async def test_lookup_refund_order_surfaces_history_cta_when_recent_view_misses(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    user = await make_user(permissions=_refund_permissions(edit=False, delete=False))
+    auth_as(user)
+    schema = get_settings().database_schema
+    await db.execute(
+        text(f'DROP VIEW IF EXISTS "{schema}".vw_conciliacao_margens_marketplace')
+    )
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace AS
+            SELECT * FROM (VALUES
+                ('2026-05-20T12:00:00+00:00'::timestamptz, '999999'::text, 'MLB999'::text,
+                 'ml'::text, NULL::text, 'Conta View'::text, 12.50::numeric)
+            ) AS t(data, pedido_bling, pedido_marketplace, plataforma_bling,
+                   plataforma_financeiro, loja_nome, bling_custo_produtos)
+            WHERE false
+            """  # noqa: S608
+        )
+    )
+    await db.execute(
+        text(
+            """
+            INSERT INTO bling_orders (numero, numeroloja)
+            VALUES ('123456', 'OLD999')
+            """
+        )
+    )
+    await db.commit()
+
+    response = await client.get("/api/refunds/order-lookup?pedido=OLD999")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "historico_disponivel": True}
+
+
+async def test_lookup_refund_order_reads_full_view_when_history_requested(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    user = await make_user(permissions=_refund_permissions(edit=False, delete=False))
+    auth_as(user)
+    schema = get_settings().database_schema
+    await db.execute(
+        text(f'DROP VIEW IF EXISTS "{schema}".vw_conciliacao_margens_marketplace')
+    )
+    await db.execute(
+        text(f'DROP VIEW IF EXISTS "{schema}".vw_conciliacao_margens_marketplace_all')
+    )
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace AS
+            SELECT * FROM (VALUES
+                ('2026-05-20T12:00:00+00:00'::timestamptz, '999999'::text, 'MLB999'::text,
+                 'ml'::text, NULL::text, 'Conta View'::text, 12.50::numeric)
+            ) AS t(data, pedido_bling, pedido_marketplace, plataforma_bling,
+                   plataforma_financeiro, loja_nome, bling_custo_produtos)
+            WHERE false
+            """  # noqa: S608
+        )
+    )
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace_all AS
+            SELECT * FROM (VALUES
+                ('2026-04-20T12:00:00+00:00'::timestamptz, '123456'::text, 'OLD999'::text,
+                 'shopee'::text, NULL::text, 'Conta Historico'::text, 42.00::numeric)
+            ) AS t(data, pedido_bling, pedido_marketplace, plataforma_bling,
+                   plataforma_financeiro, loja_nome, bling_custo_produtos)
+            """  # noqa: S608
+        )
+    )
+    await db.execute(
+        text(
+            """
+            INSERT INTO bling_orders (numero, numeroloja)
+            VALUES ('123456', 'OLD999')
+            """
+        )
+    )
+    await db.commit()
+
+    response = await client.get(
+        "/api/refunds/order-lookup?pedido=OLD999&force_refresh=true"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "data": "2026-04-20T12:00:00Z",
+                "pedido_bling": "123456",
+                "pedido_marketplace": "OLD999",
+                "plataforma": "shopee",
+                "conta": "Conta Historico",
+                "custo_produto": 42.0,
+                "custo_manutencao": None,
+            }
+        ],
+        "historico_disponivel": False,
+    }
 
 
 async def test_order_cost_sums_bling_custo_produtos(

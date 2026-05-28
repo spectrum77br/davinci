@@ -131,6 +131,13 @@ class RefundLookupOut(BaseModel):
     custo_manutencao: float | None = None
 
 
+class RefundLookupPage(BaseModel):
+    items: list[RefundLookupOut]
+    # Lookup-only: True when the recent conciliation view missed the order but
+    # bling_orders has it, so the frontend can offer the slow history search.
+    historico_disponivel: bool = False
+
+
 class RefundOrderCostOut(BaseModel):
     pedido_bling: str
     conta: str

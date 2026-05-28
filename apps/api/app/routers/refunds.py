@@ -13,6 +13,7 @@ from app.models import Refund, User
 from app.schemas.refunds import (
     RefundCreate,
     RefundLookupOut,
+    RefundLookupPage,
     RefundOrderCostOut,
     RefundOut,
     RefundPage,
@@ -24,6 +25,14 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/refunds", tags=["refunds"])
 settings = get_settings()
 SCHEMA = settings.database_schema
+
+
+def _ident(name: str) -> str:
+    return f'"{name.replace(chr(34), chr(34) + chr(34))}"'
+
+
+def _qualified_table(name: str) -> str:
+    return f"{_ident(SCHEMA)}.{_ident(name)}"
 
 
 def _search_clause(search: str):
@@ -93,48 +102,93 @@ async def list_refunds(
     )
 
 
-@router.get("/order-lookup", response_model=list[RefundLookupOut])
-async def lookup_refund_order(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("reembolso", "view"))],
-    pedido: str = Query(..., min_length=1),
-) -> list[RefundLookupOut]:
-    pedido = pedido.strip()
-    if not pedido:
-        raise HTTPException(422, detail={"code": "pedido_required"})
+def _lookup_refund_sql(view_name: str) -> str:
+    return f"""
+        SELECT
+            MAX(v.data) AS data,
+            v.pedido_bling::text AS pedido_bling,
+            MAX(v.pedido_marketplace)::text AS pedido_marketplace,
+            COALESCE(v.plataforma_bling, v.plataforma_financeiro)::text AS plataforma,
+            btrim(v.loja_nome) AS conta,
+            SUM(v.bling_custo_produtos)::double precision AS custo_produto,
+            MAX(d.custo_manutencao)::double precision AS custo_manutencao
+        FROM {_qualified_table(view_name)} v
+        LEFT JOIN {_qualified_table("devolutions")} d
+            ON d.pedido_bling = v.pedido_bling::text
+            AND btrim(d.conta) = btrim(v.loja_nome)
+        WHERE (
+            v.pedido_bling::text = :pedido
+            OR v.pedido_marketplace::text = :pedido
+            OR (
+                CAST(:pedido_bling AS text) IS NOT NULL
+                AND v.pedido_bling::text = CAST(:pedido_bling AS text)
+            )
+        )
+          AND v.loja_nome IS NOT NULL
+          AND btrim(v.loja_nome) <> ''
+        GROUP BY
+            v.pedido_bling,
+            COALESCE(v.plataforma_bling, v.plataforma_financeiro),
+            btrim(v.loja_nome)
+        ORDER BY MAX(v.data) DESC NULLS LAST
+        LIMIT 20
+        """  # noqa: S608
 
-    rows = (
+
+async def _find_bling_numero(session: AsyncSession, pedido: str) -> str | None:
+    row = (
         await session.execute(
             text(
                 f"""
-                SELECT
-                    MAX(v.data) AS data,
-                    v.pedido_bling::text AS pedido_bling,
-                    MAX(v.pedido_marketplace)::text AS pedido_marketplace,
-                    COALESCE(v.plataforma_bling, v.plataforma_financeiro)::text AS plataforma,
-                    btrim(v.loja_nome) AS conta,
-                    SUM(v.bling_custo_produtos)::double precision AS custo_produto,
-                    MAX(d.custo_manutencao)::double precision AS custo_manutencao
-                FROM "{SCHEMA}".vw_conciliacao_margens_marketplace v
-                LEFT JOIN "{SCHEMA}".devolutions d
-                    ON d.pedido_bling = v.pedido_bling::text
-                    AND btrim(d.conta) = btrim(v.loja_nome)
-                WHERE (v.pedido_bling::text = :pedido OR v.pedido_marketplace::text = :pedido)
-                  AND v.loja_nome IS NOT NULL
-                  AND btrim(v.loja_nome) <> ''
-                GROUP BY
-                    v.pedido_bling,
-                    COALESCE(v.plataforma_bling, v.plataforma_financeiro),
-                    btrim(v.loja_nome)
-                ORDER BY MAX(v.data) DESC NULLS LAST
-                LIMIT 20
+                SELECT numero
+                FROM {_qualified_table("bling_orders")}
+                WHERE numero = :pedido OR numeroloja = :pedido
+                ORDER BY data DESC NULLS LAST
+                LIMIT 1
                 """  # noqa: S608
             ),
             {"pedido": pedido},
         )
-    ).mappings().all()
+    ).first()
+    return str(row[0]) if row and row[0] else None
 
-    return [RefundLookupOut.model_validate(dict(row)) for row in rows]
+
+@router.get("/order-lookup", response_model=RefundLookupPage)
+async def lookup_refund_order(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("reembolso", "view"))],
+    pedido: str = Query(..., min_length=1),
+    force_refresh: bool = Query(False),
+) -> RefundLookupPage:
+    pedido = pedido.strip()
+    if not pedido:
+        raise HTTPException(422, detail={"code": "pedido_required"})
+
+    params = {"pedido": pedido, "pedido_bling": None}
+
+    async def _read_from(view_name: str) -> list:
+        return list(
+            (
+                await session.execute(text(_lookup_refund_sql(view_name)), params)
+            ).mappings().all()
+        )
+
+    rows = await _read_from("vw_conciliacao_margens_marketplace")
+    historico_disponivel = False
+
+    if not rows:
+        bling_numero = await _find_bling_numero(session, pedido)
+        if bling_numero:
+            if force_refresh:
+                params["pedido_bling"] = bling_numero
+                rows = await _read_from("vw_conciliacao_margens_marketplace_all")
+            else:
+                historico_disponivel = True
+
+    return RefundLookupPage(
+        items=[RefundLookupOut.model_validate(dict(row)) for row in rows],
+        historico_disponivel=historico_disponivel,
+    )
 
 
 @router.get("/order-cost", response_model=RefundOrderCostOut)
