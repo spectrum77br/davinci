@@ -151,7 +151,63 @@ async def lookup_devolution_order(
         )
     ).mappings().all()
 
-    return [DevolutionLookupOut.model_validate(dict(row)) for row in rows]
+    expanded = _split_compound_skus([dict(r) for r in rows])
+
+    part_skus = sorted({
+        s for r in expanded
+        if (s := (r["sku"] or "").strip().lower())
+    })
+    products: dict[str, dict] = {}
+    if part_skus:
+        prod_rows = (
+            await session.execute(
+                text(
+                    f"""
+                    SELECT DISTINCT ON (lower(btrim(sku)))
+                        lower(btrim(sku)) AS k,
+                        name,
+                        cost_price::double precision AS cost_price
+                    FROM "{SCHEMA}".products
+                    WHERE lower(btrim(sku)) = ANY(:keys)
+                    ORDER BY lower(btrim(sku)), situacao = 'A' DESC NULLS LAST
+                    """  # noqa: S608
+                ),
+                {"keys": part_skus},
+            )
+        ).mappings().all()
+        products = {p["k"]: dict(p) for p in prod_rows}
+
+    for r in expanded:
+        if not r.get("_compound"):
+            continue
+        prod = products.get((r["sku"] or "").strip().lower())
+        if prod:
+            r["produtos"] = prod["name"]
+            if prod["cost_price"] is not None:
+                r["custo_produto"] = prod["cost_price"]
+
+    return [DevolutionLookupOut.model_validate({k: v for k, v in r.items() if not k.startswith("_")}) for r in expanded]
+
+
+def _split_compound_skus(rows: list[dict]) -> list[dict]:
+    """Expand rows whose SKU is a '+'-joined kit into one row per component SKU.
+
+    Component name/cost are resolved later from the products table; the split
+    cost here is only a fallback for components missing from the catalog.
+    """
+    out: list[dict] = []
+    for row in rows:
+        sku = (row.get("sku") or "").strip()
+        if "+" in sku:
+            parts = [p.strip() for p in sku.split("+") if p.strip()]
+            if len(parts) > 1:
+                base_cost = row.get("custo_produto") or 0.0
+                split_cost = base_cost / len(parts) if base_cost else base_cost
+                for part in parts:
+                    out.append({**row, "sku": part, "custo_produto": split_cost, "_compound": True})
+                continue
+        out.append(row)
+    return out
 
 
 @router.post("", response_model=DevolutionOut, status_code=status.HTTP_201_CREATED)
