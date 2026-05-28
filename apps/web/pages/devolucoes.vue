@@ -111,6 +111,7 @@ const TECNICOS = [
 
 const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
+const isAdmin = useIsAdmin()
 
 // ── Toast system ─────────────────────────────────────────────────────
 type Toast = { id: number; kind: 'success' | 'error' | 'warning'; title: string; lines: string[] }
@@ -464,7 +465,7 @@ async function backfillAddresses() {
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
       <StatCard label="Total devoluções" :value="total" :icon="Undo2" />
       <StatCard label="Reembolsadas" :value="totalReembolsadas" :icon="Clock" tone="warning" />
-      <StatCard label="Custo produto (pág.)" :value="brl(totalCustoProduto)" :icon="Package" />
+      <StatCard v-if="isAdmin" label="Custo produto (pág.)" :value="brl(totalCustoProduto)" :icon="Package" />
       <StatCard label="Custo manutenção (pág.)" :value="brl(totalCustoManutencao)" tone="danger" />
     </div>
 
@@ -507,7 +508,7 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">SKU</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[50px]">Qtd</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produto</th>
-              <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Custo</th>
+              <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Custo</th>
               <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]"></th>
             </tr>
           </thead>
@@ -522,7 +523,7 @@ async function backfillAddresses() {
               <td class="px-2 py-1 font-mono text-xs">{{ row.sku || '—' }}</td>
               <td class="px-2 py-1 text-center tabular-nums">{{ row.quantidade ?? '—' }}</td>
               <td class="px-2 py-1 text-muted-foreground">{{ row.produtos || '—' }}</td>
-              <td class="px-2 py-1 text-right tabular-nums">{{ brl(row.custo_produto) }}</td>
+              <td v-if="isAdmin" class="px-2 py-1 text-right tabular-nums">{{ brl(row.custo_produto) }}</td>
               <td class="px-2 py-1 text-right">
                 <Button size="sm" variant="outline" @click="selectLookup(row)">usar</Button>
               </td>
@@ -536,7 +537,7 @@ async function backfillAddresses() {
           <thead class="bg-background">
             <tr>
               <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="6">Identificação</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="8">Devolução</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 8 : 7">Devolução</th>
               <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Ação</th>
             </tr>
             <tr>
@@ -546,7 +547,7 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px]">Conta</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]">SKU</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produtos</th>
-              <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
+              <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
@@ -565,7 +566,7 @@ async function backfillAddresses() {
               <td class="px-2 py-1">{{ draft.conta }}</td>
               <td class="px-2 py-1 font-mono">{{ draft.sku || '—' }}</td>
               <td class="px-2 py-1 text-muted-foreground">{{ draft.produtos || '—' }}</td>
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+              <td v-if="isAdmin" class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
                 <input v-model.number="draft.custo_produto" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -630,7 +631,7 @@ async function backfillAddresses() {
         <option value="false">sem reembolso</option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">
-        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · reembolsadas {{ totalReembolsadas }} · custo prod {{ brl(totalCustoProduto) }} · manut {{ brl(totalCustoManutencao) }}
+        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · reembolsadas {{ totalReembolsadas }}<template v-if="isAdmin"> · custo prod {{ brl(totalCustoProduto) }}</template> · manut {{ brl(totalCustoManutencao) }}
       </span>
     </div>
 
@@ -639,7 +640,7 @@ async function backfillAddresses() {
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="7">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="8">Devolução</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 8 : 7">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
           </tr>
           <tr class="border-b">
@@ -650,7 +651,7 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px]">Conta</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]">SKU</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produtos</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
+            <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
@@ -663,13 +664,13 @@ async function backfillAddresses() {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="16" class="py-8 text-center text-muted-foreground">
+            <td :colspan="isAdmin ? 16 : 15" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td colspan="16" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="isAdmin ? 16 : 15" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -679,7 +680,7 @@ async function backfillAddresses() {
             <td class="px-2 py-1 whitespace-nowrap">{{ row.conta }}</td>
             <td class="px-2 py-1 font-mono text-xs">{{ row.sku || '—' }}</td>
             <td class="px-2 py-1 text-muted-foreground">{{ row.produtos || '—' }}</td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+            <td v-if="isAdmin" class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <input
                 :value="row.custo_produto ?? ''"
                 :disabled="!canEdit"
