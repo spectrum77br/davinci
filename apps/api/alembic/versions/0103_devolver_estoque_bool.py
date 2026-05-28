@@ -8,8 +8,8 @@ Create Date: 2026-05-28
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0103"
-down_revision = "0102"
+revision = "0103_devolver_estoque_bool"
+down_revision = "0102_import_products_bling_sync_v2"
 branch_labels = None
 depends_on = None
 
