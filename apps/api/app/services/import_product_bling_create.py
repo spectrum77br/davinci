@@ -35,14 +35,10 @@ from app.models import (
 )
 from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services.importacao_naming import generate_mala_name
+from app.services.importacao_naming import generate_product_name
 from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
-
-# Categoria fixa pros produtos criados pela aba Mala. Mesma decisão
-# operacional do kit ("mala kit") — diferenciar simples vs composto.
-_MALA_CATEGORY_NAME = "mala"
 
 # Cache TTL pro contato.id do fornecedor padrão. ID praticamente nunca
 # muda; 24h evita 1 GET /contatos a cada produto criado.
@@ -182,9 +178,10 @@ async def sync_import_product_to_bling(import_product_id: UUID | str) -> dict[st
             await _set_error(session, row, "no_bling_integration")
             return {"ok": False, "error": "no_bling_integration"}
 
-        # Categoria.
+        # Categoria no Bling = a categoria local (mala/eletro/celular).
+        # find_or_create_category reusa o id se já existir (case-insensitive).
         try:
-            category_id = await client.find_or_create_category(_MALA_CATEGORY_NAME)
+            category_id = await client.find_or_create_category(row.categoria)
         except Exception as e:  # noqa: BLE001
             await _set_error(session, row, f"category_resolve_failed: {e}")
             logger.warning(
@@ -193,7 +190,7 @@ async def sync_import_product_to_bling(import_product_id: UUID | str) -> dict[st
             )
             return {"ok": False, "error": f"category_resolve_failed: {e}"}
 
-        nome = generate_mala_name(row.modelo_bling, row.sku, row.cor)
+        nome = generate_product_name(row.categoria, row.modelo_bling, row.sku, row.cor)
 
         try:
             data = await client.create_product(

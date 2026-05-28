@@ -46,6 +46,10 @@ class ImportProduct(Base, TimestampMixin):
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
         server_default=text("gen_random_uuid()"),
     )
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="mala",
+        server_default=text("'mala'"), index=True,
+    )
     fornecedor: Mapped[str | None] = mapped_column(String(100), nullable=True)
     modelo_china: Mapped[str | None] = mapped_column(String(100), nullable=True)
     cor_china: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -89,6 +93,10 @@ class ImportLote(Base, TimestampMixin):
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
         server_default=text("gen_random_uuid()"),
     )
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="mala",
+        server_default=text("'mala'"), index=True,
+    )
     nome: Mapped[str] = mapped_column(String(50), nullable=False)
     abertura: Mapped[date] = mapped_column(Date, nullable=False)
     fechamento: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -127,6 +135,10 @@ class ImportResumo(Base):
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
         server_default=text("gen_random_uuid()"),
     )
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="mala",
+        server_default=text("'mala'"), index=True,
+    )
     data: Mapped[date] = mapped_column(Date, nullable=False)
     lote_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -150,6 +162,10 @@ class CotacaoFabricante(Base, TimestampMixin):
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
         server_default=text("gen_random_uuid()"),
     )
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="mala",
+        server_default=text("'mala'"), index=True,
+    )
     nome: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     obs1: Mapped[str | None] = mapped_column(Text, nullable=True)
     obs2: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -165,6 +181,10 @@ class CotacaoProduto(Base, TimestampMixin):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
         server_default=text("gen_random_uuid()"),
+    )
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="mala",
+        server_default=text("'mala'"), index=True,
     )
     nome: Mapped[str] = mapped_column(String(150), nullable=False, default="")
     ordem: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -218,6 +238,10 @@ class ImportKitVariation(Base, TimestampMixin):
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
         server_default=text("gen_random_uuid()"),
     )
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="mala",
+        server_default=text("'mala'"), index=True,
+    )
     code: Mapped[str] = mapped_column(String(100), nullable=False)
     label: Mapped[str] = mapped_column(String(100), nullable=False)
     ordem: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -236,6 +260,10 @@ class ImportKitBase(Base, TimestampMixin):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
         server_default=text("gen_random_uuid()"),
+    )
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="mala",
+        server_default=text("'mala'"), index=True,
     )
     modelo_bling: Mapped[str | None] = mapped_column(String(100), nullable=True)
     sku_base: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -257,6 +285,10 @@ class ImportKitMark(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
         server_default=text("gen_random_uuid()"),
+    )
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="mala",
+        server_default=text("'mala'"), index=True,
     )
     base_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),

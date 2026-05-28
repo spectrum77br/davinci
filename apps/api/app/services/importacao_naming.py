@@ -66,6 +66,34 @@ def generate_mala_name(
     return base
 
 
+def generate_eletro_name(modelo_bling: str | None) -> str:
+    """Eletro não tem cor/tamanho — nome = só o modelo."""
+    return (modelo_bling or "Produto eletro").strip()
+
+
+def generate_celular_name(
+    modelo_bling: str | None, sku: str | None, cor: str | None,
+) -> str:
+    """Celular ainda em definição — por ora espelha mala."""
+    return generate_mala_name(modelo_bling, sku, cor)
+
+
+def generate_product_name(
+    categoria: str,
+    modelo_bling: str | None,
+    sku: str | None,
+    cor: str | None,
+) -> str:
+    """Dispatch do nome canônico por categoria."""
+    if categoria == "mala":
+        return generate_mala_name(modelo_bling, sku, cor)
+    if categoria == "eletro":
+        return generate_eletro_name(modelo_bling)
+    if categoria == "celular":
+        return generate_celular_name(modelo_bling, sku, cor)
+    raise ValueError(f"unknown categoria: {categoria}")
+
+
 def parse_kit_variation(code: str) -> tuple[list[str], list[str]]:
     """Quebra o code de uma variation de kit em (tamanhos_numericos, acessorios).
 

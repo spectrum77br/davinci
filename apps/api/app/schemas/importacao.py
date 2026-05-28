@@ -25,6 +25,9 @@ class ImportConfigPatch(BaseModel):
 
 
 class ImportProductBase(BaseModel):
+    # Categoria do selector top-level (mala/eletro/celular). Imutável após
+    # criar — por isso fica fora do ImportProductPatch.
+    categoria: str = "mala"
     fornecedor: str | None = None
     modelo_china: str | None = None
     cor_china: str | None = None
@@ -92,6 +95,7 @@ class ImportProductOut(ImportProductBase):
 class ImportLoteCreate(BaseModel):
     nome: str
     abertura: date
+    categoria: str = "mala"
 
 
 class ImportLotePatch(BaseModel):
@@ -104,6 +108,7 @@ class ImportLotePatch(BaseModel):
 class ImportLoteOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    categoria: str = "mala"
     nome: str
     abertura: date
     fechamento: date | None = None
@@ -132,11 +137,13 @@ class ImportResumoCreate(BaseModel):
     lote_nome: str | None = None
     saldo: Decimal
     obs: str | None = None
+    categoria: str = "mala"
 
 
 class ImportResumoOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    categoria: str = "mala"
     data: date
     lote_id: UUID | None = None
     lote_nome: str | None = None

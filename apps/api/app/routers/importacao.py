@@ -21,7 +21,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,7 +68,7 @@ from app.schemas.importacao import (
     ImportResumoList,
     ImportResumoOut,
 )
-from app.services.importacao_naming import generate_mala_name
+from app.services.importacao_naming import generate_product_name
 from app.services.pricing.audit import build_match_indexes, match_one_sku_to_keys
 from app.worker_pool import get_arq_pool
 
@@ -76,6 +76,11 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/importacao", tags=["importacao"])
 
 _ZERO = Decimal("0")
+
+# Selector top-level: cada categoria tem seus próprios dados. Filtro
+# aplicado em todos os GETs; create grava a categoria recebida.
+_CATEGORIAS = ("mala", "eletro", "celular")
+_CategoriaQ = Annotated[str, Query(pattern="^(mala|eletro|celular)$")]
 
 
 # ── Config singleton ─────────────────────────────────────────────────
@@ -171,10 +176,13 @@ class _Effective:
 async def list_products(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+    categoria: _CategoriaQ = "mala",
 ) -> list[ImportProductOut]:
     products = (
         await session.execute(
-            select(ImportProduct).order_by(ImportProduct.sku)
+            select(ImportProduct)
+            .where(ImportProduct.categoria == categoria)
+            .order_by(ImportProduct.sku)
         )
     ).scalars().all()
 
@@ -321,6 +329,7 @@ async def list_products(
         )
         out.append(ImportProductOut(
             id=p.id,
+            categoria=p.categoria,
             fornecedor=p.fornecedor, modelo_china=p.modelo_china, cor_china=p.cor_china,
             fechamento=p.fechamento, tsa=p.tsa, modelo_bling=p.modelo_bling,
             sku=p.sku, cor=p.cor, custo_bling=p.custo_bling,
@@ -331,7 +340,7 @@ async def list_products(
             memoria_consumo=memoria,
             reposicao_estoque=reposicao,
             saldo_reposicao=saldo,
-            nome_gerado=generate_mala_name(p.modelo_bling, p.sku, p.cor),
+            nome_gerado=generate_product_name(p.categoria, p.modelo_bling, p.sku, p.cor),
             bling_sync_status=p.bling_sync_status,
             bling_sync_marked_at=p.bling_sync_marked_at,
             bling_product_id=p.bling_product_id,
@@ -356,13 +365,14 @@ async def create_product(
     await session.refresh(row)
     return ImportProductOut(
         id=row.id,
+        categoria=row.categoria,
         fornecedor=row.fornecedor, modelo_china=row.modelo_china, cor_china=row.cor_china,
         fechamento=row.fechamento, tsa=row.tsa, modelo_bling=row.modelo_bling,
         sku=row.sku, cor=row.cor, custo_bling=row.custo_bling,
         estoque_bling=row.estoque_bling, consumo_diario=row.consumo_diario,
         maior_media_30d=row.maior_media_30d, obs=row.obs,
         memoria_consumo=None, reposicao_estoque=None, saldo_reposicao=None,
-        nome_gerado=generate_mala_name(row.modelo_bling, row.sku, row.cor),
+        nome_gerado=generate_product_name(row.categoria, row.modelo_bling, row.sku, row.cor),
         bling_sync_status=row.bling_sync_status,
         bling_sync_marked_at=row.bling_sync_marked_at,
         bling_product_id=row.bling_product_id,
@@ -390,13 +400,14 @@ async def patch_product(
     await session.refresh(row)
     return ImportProductOut(
         id=row.id,
+        categoria=row.categoria,
         fornecedor=row.fornecedor, modelo_china=row.modelo_china, cor_china=row.cor_china,
         fechamento=row.fechamento, tsa=row.tsa, modelo_bling=row.modelo_bling,
         sku=row.sku, cor=row.cor, custo_bling=row.custo_bling,
         estoque_bling=row.estoque_bling, consumo_diario=row.consumo_diario,
         maior_media_30d=row.maior_media_30d, obs=row.obs,
         memoria_consumo=None, reposicao_estoque=None, saldo_reposicao=None,
-        nome_gerado=generate_mala_name(row.modelo_bling, row.sku, row.cor),
+        nome_gerado=generate_product_name(row.categoria, row.modelo_bling, row.sku, row.cor),
         bling_sync_status=row.bling_sync_status,
         bling_sync_marked_at=row.bling_sync_marked_at,
         bling_product_id=row.bling_product_id,
@@ -453,9 +464,10 @@ async def sync_product_to_bling(
             product_id=str(row.id), err=str(e)[:200],
         )
 
-    nome = generate_mala_name(row.modelo_bling, row.sku, row.cor)
+    nome = generate_product_name(row.categoria, row.modelo_bling, row.sku, row.cor)
     return ImportProductOut(
         id=row.id,
+        categoria=row.categoria,
         fornecedor=row.fornecedor, modelo_china=row.modelo_china, cor_china=row.cor_china,
         fechamento=row.fechamento, tsa=row.tsa, modelo_bling=row.modelo_bling,
         sku=row.sku, cor=row.cor, custo_bling=row.custo_bling,
@@ -511,7 +523,7 @@ async def _enrich_lote(
     saldo = previsto - realizado
     prazo = (lote.fechamento - lote.abertura).days if lote.fechamento else None
     return ImportLoteOut(
-        id=lote.id, nome=lote.nome, abertura=lote.abertura,
+        id=lote.id, categoria=lote.categoria, nome=lote.nome, abertura=lote.abertura,
         fechamento=lote.fechamento, realizado=realizado,
         previsto=previsto, saldo=saldo, prazo=prazo,
         is_aberto=lote.fechamento is None,
@@ -522,6 +534,7 @@ async def _enrich_lote(
 async def list_lotes(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+    categoria: _CategoriaQ = "mala",
 ) -> list[ImportLoteOut]:
     lotes = (
         await session.execute(
@@ -529,7 +542,9 @@ async def list_lotes(
             # nomeia em sequência crescente. Ordenar por abertura.desc
             # quebrava a sequência quando um lote novo recebia data
             # mais recente que os anteriores.
-            select(ImportLote).order_by(ImportLote.nome)
+            select(ImportLote)
+            .where(ImportLote.categoria == categoria)
+            .order_by(ImportLote.nome)
         )
     ).scalars().all()
     return [await _enrich_lote(session, lt) for lt in lotes]
@@ -541,7 +556,7 @@ async def create_lote(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
 ) -> ImportLoteOut:
-    row = ImportLote(nome=body.nome, abertura=body.abertura)
+    row = ImportLote(nome=body.nome, abertura=body.abertura, categoria=body.categoria)
     session.add(row)
     await session.commit()
     await session.refresh(row)
@@ -577,6 +592,7 @@ async def patch_lote(
             lote_id=row.id,
             lote_nome=row.nome,
             saldo=enriched.saldo,
+            categoria=row.categoria,
         )
         session.add(resumo_row)
         await session.commit()
@@ -653,6 +669,7 @@ async def upsert_lote_item(
 async def list_resumo(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+    categoria: _CategoriaQ = "mala",
 ) -> ImportResumoList:
     rows = (
         await session.execute(
@@ -660,7 +677,9 @@ async def list_resumo(
             # by (data, id) so rows with the same data stay in insert
             # order (UUID v4 isn't time-ordered but the secondary sort
             # at least makes the response stable across calls).
-            select(ImportResumo).order_by(ImportResumo.data, ImportResumo.id)
+            select(ImportResumo)
+            .where(ImportResumo.categoria == categoria)
+            .order_by(ImportResumo.data, ImportResumo.id)
         )
     ).scalars().all()
     total = sum((Decimal(r.saldo) for r in rows), _ZERO)
@@ -705,18 +724,28 @@ async def delete_resumo(
 async def get_cotacao_grid(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+    categoria: _CategoriaQ = "mala",
 ) -> CotacaoGridOut:
     fabricantes = (await session.execute(
-        select(CotacaoFabricante).order_by(
-            CotacaoFabricante.ordem, CotacaoFabricante.created_at,
-        )
+        select(CotacaoFabricante)
+        .where(CotacaoFabricante.categoria == categoria)
+        .order_by(CotacaoFabricante.ordem, CotacaoFabricante.created_at)
     )).scalars().all()
     produtos = (await session.execute(
-        select(CotacaoProduto).order_by(
-            CotacaoProduto.ordem, CotacaoProduto.created_at,
-        )
+        select(CotacaoProduto)
+        .where(CotacaoProduto.categoria == categoria)
+        .order_by(CotacaoProduto.ordem, CotacaoProduto.created_at)
     )).scalars().all()
-    valores = (await session.execute(select(CotacaoValor))).scalars().all()
+    # Valores são scoped pela categoria via os fabricantes/produtos que
+    # referenciam — basta restringir aos fabricantes desta categoria
+    # (cada fabricante pertence a uma só categoria).
+    fab_ids = [f.id for f in fabricantes]
+    valores = (
+        (await session.execute(
+            select(CotacaoValor).where(CotacaoValor.fabricante_id.in_(fab_ids))
+        )).scalars().all()
+        if fab_ids else []
+    )
     return CotacaoGridOut(
         fabricantes=[CotacaoFabricanteOut.model_validate(f, from_attributes=True) for f in fabricantes],
         produtos=[CotacaoProdutoOut.model_validate(p, from_attributes=True) for p in produtos],
@@ -732,13 +761,16 @@ async def get_cotacao_grid(
 async def create_cotacao_fabricante(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+    categoria: _CategoriaQ = "mala",
 ) -> CotacaoFabricanteOut:
     """Cria um fabricante vazio. Nome/obs são preenchidos depois via PATCH
-    (autosave do frontend). `ordem` recebe MAX+1 para ir pro fim da lista."""
+    (autosave do frontend). `ordem` recebe MAX+1 (por categoria) para ir
+    pro fim da lista."""
     next_ordem = (await session.execute(
         select(func.coalesce(func.max(CotacaoFabricante.ordem), -1) + 1)
+        .where(CotacaoFabricante.categoria == categoria)
     )).scalar_one()
-    row = CotacaoFabricante(nome="", ordem=int(next_ordem))
+    row = CotacaoFabricante(nome="", ordem=int(next_ordem), categoria=categoria)
     session.add(row)
     await session.commit()
     await session.refresh(row)
@@ -784,11 +816,13 @@ async def delete_cotacao_fabricante(
 async def create_cotacao_produto(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+    categoria: _CategoriaQ = "mala",
 ) -> CotacaoProdutoOut:
     next_ordem = (await session.execute(
         select(func.coalesce(func.max(CotacaoProduto.ordem), -1) + 1)
+        .where(CotacaoProduto.categoria == categoria)
     )).scalar_one()
-    row = CotacaoProduto(nome="", ordem=int(next_ordem))
+    row = CotacaoProduto(nome="", ordem=int(next_ordem), categoria=categoria)
     session.add(row)
     await session.commit()
     await session.refresh(row)
@@ -898,14 +932,24 @@ async def upsert_cotacao_valor(
 async def get_kit_grid(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+    categoria: _CategoriaQ = "mala",
 ) -> ImportKitGridOut:
+    # Eletro não tem aba Kit (produtos não viram composto).
+    if categoria == "eletro":
+        raise HTTPException(404, detail={"code": "kit_not_available_for_categoria"})
     variations = (await session.execute(
-        select(ImportKitVariation).order_by(ImportKitVariation.ordem)
+        select(ImportKitVariation)
+        .where(ImportKitVariation.categoria == categoria)
+        .order_by(ImportKitVariation.ordem)
     )).scalars().all()
     bases = (await session.execute(
-        select(ImportKitBase).order_by(ImportKitBase.ordem)
+        select(ImportKitBase)
+        .where(ImportKitBase.categoria == categoria)
+        .order_by(ImportKitBase.ordem)
     )).scalars().all()
-    marks = (await session.execute(select(ImportKitMark))).scalars().all()
+    marks = (await session.execute(
+        select(ImportKitMark).where(ImportKitMark.categoria == categoria)
+    )).scalars().all()
     return ImportKitGridOut(
         variations=[ImportKitVariationOut.model_validate(v, from_attributes=True) for v in variations],
         bases=[ImportKitBaseOut.model_validate(b, from_attributes=True) for b in bases],
@@ -934,9 +978,12 @@ async def toggle_kit_mark(
         )
     )).scalar_one_or_none()
     if body.marked and existing is None:
+        # Mark herda a categoria da sua base (kit é mala/celular).
+        base = await session.get(ImportKitBase, body.base_id)
         mark = ImportKitMark(
             base_id=body.base_id,
             variation_id=body.variation_id,
+            categoria=base.categoria if base else "mala",
             bling_sync_status="pending",
         )
         session.add(mark)
