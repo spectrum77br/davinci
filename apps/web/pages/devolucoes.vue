@@ -160,11 +160,43 @@ const lookupResults = ref<LookupRow[]>([])
 const lookupError = ref<string | null>(null)
 const creating = ref(false)
 const draft = ref<DevolutionDraft | null>(null)
+const addedThisSession = ref<Set<string>>(new Set())
 
 const dirtyRows = ref<Set<string>>(new Set())
 const savingRows = ref<Set<string>>(new Set())
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
+
+const expandedLookupResults = computed<LookupRow[]>(() => {
+  const rows: LookupRow[] = []
+  for (const row of lookupResults.value) {
+    if (row.sku && row.sku.includes('+')) {
+      const skus = row.sku.split('+').map((s) => s.trim()).filter(Boolean)
+      const splitCost = row.custo_produto != null ? row.custo_produto / skus.length : null
+      for (const s of skus) {
+        rows.push({ ...row, sku: s, custo_produto: splitCost })
+      }
+    } else {
+      rows.push(row)
+    }
+  }
+  return rows
+})
+
+const alreadyAddedKeys = computed(() => {
+  const keys = new Set<string>()
+  for (const row of items.value) {
+    keys.add(`${row.pedido_bling}|${row.sku}`)
+  }
+  for (const k of addedThisSession.value) {
+    keys.add(k)
+  }
+  return keys
+})
+
+function isAlreadyAdded(row: LookupRow) {
+  return alreadyAddedKeys.value.has(`${row.pedido_bling}|${row.sku}`)
+}
 const rangeStart = computed(() => total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1)
 const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
 const totalCustoProduto = computed(() => items.value.reduce((a, r) => a + (r.custo_produto ?? 0), 0))
@@ -298,6 +330,7 @@ function openAdd() {
   lookupResults.value = []
   lookupError.value = null
   draft.value = null
+  addedThisSession.value = new Set()
 }
 function closeAdd() {
   addOpen.value = false
@@ -305,6 +338,7 @@ function closeAdd() {
   lookupResults.value = []
   lookupError.value = null
   draft.value = null
+  addedThisSession.value = new Set()
 }
 
 function selectLookup(row: LookupRow) {
@@ -373,7 +407,9 @@ async function createDevolution() {
     const created = await api<DevolutionRow>('/api/devolutions', { method: 'POST', body })
     if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
     total.value += 1
-    closeAdd()
+    addedThisSession.value = new Set([...addedThisSession.value, `${created.pedido_bling}|${created.sku}`])
+    draft.value = null
+    pushToast({ kind: 'success', title: 'Devolução adicionada', lines: [created.sku ? `SKU ${created.sku}` : `Pedido ${created.pedido_bling}`] })
     if (created.bling_stock_result) showStockToast(created.bling_stock_result)
   } catch (e: any) {
     lookupError.value = apiError(e)
@@ -500,7 +536,7 @@ async function backfillAddresses() {
         <span v-if="lookupError" class="text-sm text-red-400">{{ lookupError }}</span>
       </div>
 
-      <div v-if="lookupResults.length > 0 && !draft" class="overflow-auto border-b">
+      <div v-if="expandedLookupResults.length > 0" class="overflow-auto border-b">
         <table class="w-full text-xs border-collapse">
           <thead class="bg-background">
             <tr>
@@ -518,7 +554,12 @@ async function backfillAddresses() {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="row in lookupResults" :key="`${row.pedido_bling}-${row.conta}`" class="border-t hover:brightness-95 dark:hover:brightness-110">
+            <tr
+              v-for="row in expandedLookupResults"
+              :key="`${row.pedido_bling}-${row.sku}-${row.conta}`"
+              class="border-t"
+              :class="isAlreadyAdded(row) ? 'opacity-50' : 'hover:brightness-95 dark:hover:brightness-110'"
+            >
               <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
               <td class="px-2 py-1 font-mono">{{ row.pedido_bling || '—' }}</td>
               <td class="px-2 py-1 font-mono text-muted-foreground">{{ row.pedido_marketplace || '—' }}</td>
@@ -530,7 +571,8 @@ async function backfillAddresses() {
               <td class="px-2 py-1 text-muted-foreground">{{ row.produtos || '—' }}</td>
               <td v-if="isAdmin" class="px-2 py-1 text-right tabular-nums">{{ brl(row.custo_produto) }}</td>
               <td class="px-2 py-1 text-right">
-                <Button size="sm" variant="outline" @click="selectLookup(row)">usar</Button>
+                <span v-if="isAlreadyAdded(row)" class="text-[11px] text-muted-foreground">adicionado</span>
+                <Button v-else size="sm" variant="outline" @click="selectLookup(row)">usar</Button>
               </td>
             </tr>
           </tbody>
