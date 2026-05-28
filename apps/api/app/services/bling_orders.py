@@ -132,8 +132,17 @@ def _row_from_item(
     category_names_by_id: dict[int, str] | None = None,
     product_categories_by_id: dict[int, tuple[int | None, str]] | None = None,
     product_categories_by_sku: dict[str, tuple[int | None, str]] | None = None,
+    preserved_em_andamento=None,
 ) -> dict[str, Any]:
-    """Flatten one (order, item) pair into a `bling_orders` row dict."""
+    """Flatten one (order, item) pair into a `bling_orders` row dict.
+
+    `preserved_em_andamento`: ship-date já gravado antes deste re-ingest
+    (passado pelo caller que faz delete+reinsert). Quando presente, é
+    mantido — em_andamento_data é a data do PRIMEIRO "Em andamento" e
+    NÃO deve mudar em webhooks subsequentes (taxa/endereço chegam dias
+    depois e re-disparam o webhook). Só carimba data nova quando não há
+    valor preservado E situacao=15.
+    """
     loja = raw_order.get("loja") or {}
     if not isinstance(loja, dict):
         loja = {}
@@ -182,14 +191,17 @@ def _row_from_item(
         if isinstance(raw_order.get("situacao"), dict)
         else (str(raw_order.get("situacao")) if raw_order.get("situacao") is not None else None)
     )
-    # situacao=15 ("Em andamento") = order shipped. Stamp em_andamento_data
-    # the moment we see it, regardless of which path delivered the event
-    # (Bling webhook OR the marketplace_shipment_check sweep bumping
-    # Bling first then re-fetching the order). Date-only so it survives
-    # the day-window queries in /api/estoque/pedidos and /api/estoque/envios.
-    em_andamento_data = (
-        _operational_ship_date(datetime.now(UTC)) if situacao_id == "15" else None
-    )
+    # situacao=15 ("Em andamento") = order shipped. em_andamento_data é
+    # a data do PRIMEIRO "Em andamento" — fato histórico, não muda em
+    # webhooks subsequentes. Preserva o valor já gravado quando o caller
+    # passa preserved_em_andamento (delete+reinsert path); só calcula
+    # data nova quando não há valor anterior E situacao=15.
+    if preserved_em_andamento is not None:
+        em_andamento_data = preserved_em_andamento
+    elif situacao_id == "15":
+        em_andamento_data = _operational_ship_date(datetime.now(UTC))
+    else:
+        em_andamento_data = None
 
     transporte = raw_order.get("transporte") or {}
     if not isinstance(transporte, dict):
@@ -446,11 +458,15 @@ async def upsert_order(
         old_sig = await _existing_itens_signature(session, bling_id)
         if new_sig == old_sig:
             values: dict[str, Any] = {"situacao": situacao}
-            # situacao=15 ("Em andamento") = shipped — stamp em_andamento_data
-            # on this narrow path too. Otherwise webhooks that don't change
-            # the item set would leave the field NULL forever.
+            # situacao=15 ("Em andamento") = shipped. Carimba em_andamento_data
+            # SÓ se ainda estiver NULL — COALESCE preserva o ship-date
+            # original. Sem isso, cada webhook de pedido já despachado
+            # (taxa/endereço chegam dias depois) empurrava a data pra "hoje".
             if situacao == "15":
-                values["em_andamento_data"] = _operational_ship_date(datetime.now(UTC))
+                values["em_andamento_data"] = func.coalesce(
+                    BlingOrder.em_andamento_data,
+                    _operational_ship_date(datetime.now(UTC)),
+                )
             # Backfill address data for orders synced before migrations 0088/0094.
             # Prefer transporte.enderecoEntrega; fall back to contato.endereco
             # (Amazon and some other marketplaces omit transporte address).
@@ -527,6 +543,18 @@ async def upsert_order(
         product_categories_by_sku,
     ) = await _product_categories_by_item(session, itens)
 
+    # Captura o ship-date já gravado ANTES de deletar — o delete+reinsert
+    # perderia a data original e _row_from_item carimbaria "hoje".
+    # em_andamento_data é fato histórico (data do 1º "Em andamento").
+    preserved_em_andamento = (await session.execute(
+        select(BlingOrder.em_andamento_data)
+        .where(
+            BlingOrder.bling_id == bling_id,
+            BlingOrder.em_andamento_data.isnot(None),
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+
     await session.execute(
         delete(BlingOrder).where(BlingOrder.bling_id == bling_id)
     )
@@ -541,6 +569,7 @@ async def upsert_order(
             category_names_by_id=category_names_by_id,
             product_categories_by_id=product_categories_by_id,
             product_categories_by_sku=product_categories_by_sku,
+            preserved_em_andamento=preserved_em_andamento,
         )
         session.add(BlingOrder(**row))
         return 1
@@ -556,6 +585,7 @@ async def upsert_order(
             category_names_by_id=category_names_by_id,
             product_categories_by_id=product_categories_by_id,
             product_categories_by_sku=product_categories_by_sku,
+            preserved_em_andamento=preserved_em_andamento,
         )
         sku = (row.get("item_codigo") or "").strip() if row.get("item_codigo") else None
         if sku and sku in cost_by_sku:
