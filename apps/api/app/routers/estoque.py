@@ -33,7 +33,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import Date, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -93,12 +93,15 @@ _BASELINE_NUMERIC_SKUS = tuple(str(n) for n in range(1, 31))
 # distinct values: id=15 has 735/928 rows with em_andamento_data set,
 # the highest correspondence rate of any situação. id=12 is cancelado;
 # 83953/83957 are custom statuses for this shop.
-# Situações visíveis na aba Pedidos: 83965 ("Enviado Etiqueta", custom do
-# shop = etiqueta gerada aguardando confirmação do marketplace) + 15
-# (default Bling, já confirmado). O badge verde/vermelho depende de
-# em_andamento_data, NÃO da situação — um 83965 já confirmado pelo worker
-# (em_andamento_data preenchida) fica verde mesmo antes do Bling movê-lo p/ 15.
-_SITUACOES_VISIVEIS: tuple[str, ...] = ("83965", "15")
+# Situação custom do shop para "Enviado Etiqueta" (etiqueta gerada,
+# esperando marketplace confirmar envio).
+_SITUACAO_ENVIADO_ETIQUETA = "83965"
+# Situação default Bling para "Atendido" (marketplace confirmou,
+# em_andamento_data deveria estar preenchida).
+_SITUACAO_ATENDIDO = "15"
+# Pedidos pendentes mais antigos que isso = zumbis (webhook perdido) —
+# ficam escondidos da aba.
+_PENDENTE_MAX_AGE_DIAS = 14
 
 
 def _baseline_sku_exclusions(column):
@@ -342,30 +345,41 @@ async def list_estoque_pedidos(
     status_filter: str | None = Query(None, alias="status"),  # enviado | nao_enviado
     tag: str | None = Query(None),
 ) -> dict[str, Any]:
-    """Lista TODOS os pedidos com etiqueta gerada (situacao IN 83965, 15),
-    independente de `em_andamento_data`. O badge na UI distingue os
-    dois estados: verde "Enviado" (em_andamento_data preenchida pela
-    API do marketplace) vs vermelho "Não enviado" (etiqueta gerada,
-    aguardando confirmação). Data de referência do filtro: ship date se
-    já enviado, senão HOJE (BRT) — pendentes "fixam" no dia atual e
-    aparecem todo dia no filtro de hoje até a confirmação chegar. Os
-    filtros explícitos `enviado` / `nao_enviado` continuam disponíveis."""
+    """Lista pedidos da aba via 2 caminhos paralelos:
+      * PENDENTE: situacao=83965 (Enviado Etiqueta) + sem em_andamento_data
+        + criado nos últimos 14 dias (anti-zumbi) → badge vermelho.
+      * ENVIADO:  situacao IN (83965, 15) + em_andamento_data preenchida
+        → badge verde.
+    Qualquer outra combinação fica escondida: `15` sem em_andamento_data
+    é anomalia (já atendido, não é "não enviado"); 83965 com >14 dias é
+    zumbi de webhook perdido; outras situações custom não pertencem ao
+    fluxo. Data de referência: ship date se confirmado, senão HOJE (BRT)
+    — pendente "fixa" no dia atual e aparece todo dia até confirmar."""
     tags = _resolve_tags(user, tag)
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
-    where: list = [BlingOrder.situacao.in_(_SITUACOES_VISIVEIS)]
+    # HOJE em BRT — usado tanto no corte anti-zumbi quanto no "pin" da
+    # data efetiva dos pendentes. BRT explícito (não func.now()::date,
+    # que daria a data UTC e divergiria do filtro à noite).
+    today_brt = datetime.now(_BRT).date()
+
+    pendente_clause = and_(
+        BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA,
+        BlingOrder.em_andamento_data.is_(None),
+        cast(BlingOrder.data, Date) >= today_brt - timedelta(days=_PENDENTE_MAX_AGE_DIAS),
+    )
+    enviado_clause = and_(
+        BlingOrder.situacao.in_((_SITUACAO_ENVIADO_ETIQUETA, _SITUACAO_ATENDIDO)),
+        BlingOrder.em_andamento_data.isnot(None),
+    )
+    where: list = [or_(pendente_clause, enviado_clause)]
     if tags is not None:
         # Same OR-pattern as the produtos endpoint, but applied to
         # BlingOrder.item_codigo since pedidos are filtered by the
         # ordered item's SKU.
         where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
 
-    # Mostramos TODOS (83965 + 15), independente de em_andamento_data — o
-    # badge na UI distingue verde/vermelho. Data de referência: ship date
-    # se confirmado, senão HOJE (BRT) — assim o pendente nunca "some" do
-    # filtro de hoje enquanto não confirma. Usa BRT explícito (não
-    # func.now()::date, que daria a data UTC e divergiria à noite).
-    today_brt = datetime.now(_BRT).date()
+    # Data de referência: ship date se confirmado, senão HOJE (BRT).
     effective_date = func.coalesce(BlingOrder.em_andamento_data, today_brt)
     where.append(effective_date >= data_inicio)
     where.append(effective_date <= data_fim)
