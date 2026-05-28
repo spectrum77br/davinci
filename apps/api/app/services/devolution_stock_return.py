@@ -61,6 +61,24 @@ def _sku_base(sku: str) -> str:
     return sku
 
 
+def _sku_tag(sku: str | None) -> str | None:
+    """Extrai as tags de sufixo regional de um SKU (possivelmente composto).
+
+    Cada componente (`+`-joined) contribui com seu sufixo conhecido prefixado
+    por ponto. `x001.sp` → `.sp`; `a.ra+b.pi` → `.ra.pi`. Retorna `None` quando
+    nenhum componente tem sufixo reconhecido."""
+    if not sku:
+        return None
+    tags: list[str] = []
+    for part in sku.split("+"):
+        part = part.strip()
+        if "." in part:
+            tail = part.rsplit(".", 1)[1].lower()
+            if tail in _SUFFIX_TAGS:
+                tags.append(f".{tail}")
+    return "".join(tags) or None
+
+
 def _result(
     ok: bool,
     action: str,

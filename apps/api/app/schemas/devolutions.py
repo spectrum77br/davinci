@@ -41,6 +41,8 @@ class DevolutionOut(BaseModel):
     troca_sku: str | None = None
     troca_condicao: str | None = None
     estoque_suffix: str | None = None
+    tag: str | None = None
+    data_devolvido_estoque: datetime | None = None
     created_at: datetime
     updated_at: datetime
     bling_stock_result: BlingStockResultOut | None = None

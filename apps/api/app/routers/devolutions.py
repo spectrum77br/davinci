@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -25,6 +26,7 @@ from app.services.devolution_stock_return import (
     _STOCK_TRIGGER_CONDICOES,
     _SUFFIX_TAGS,
     _sku_base,
+    _sku_tag,
     return_product_to_bling_stock,
 )
 
@@ -62,6 +64,7 @@ def _search_clause(search: str):
         Devolution.pedido_marketplace.ilike(q),
         Devolution.conta.ilike(q),
         Devolution.sku.ilike(q),
+        Devolution.tag.ilike(q),
         Devolution.produtos.ilike(q),
         Devolution.condicao_produto.ilike(q),
         Devolution.motivo_devolucao.ilike(q),
@@ -301,6 +304,8 @@ async def create_devolution(
         troca_sku=body.troca_sku,
         troca_condicao=body.troca_condicao,
         estoque_suffix=body.estoque_suffix,
+        tag=_sku_tag(body.sku),
+        data_devolvido_estoque=datetime.now(UTC) if body.devolver_estoque else None,
     )
     session.add(row)
     if body.condicao_produto in _REFUND_CONDICOES:
@@ -342,10 +347,16 @@ async def patch_devolution(
     prev_devolver_estoque = row.devolver_estoque
     for key, value in data.items():
         setattr(row, key, value)
+    if "sku" in data:
+        row.tag = _sku_tag(row.sku)
 
     new_condicao = row.condicao_produto
     if new_condicao in _REFUND_CONDICOES and new_condicao != prev_condicao:
         _maybe_create_refund(session, row, new_condicao)
+
+    # Carimba a data quando o toggle "devolver estoque" passa a TRUE.
+    if row.devolver_estoque and (not prev_devolver_estoque or row.data_devolvido_estoque is None):
+        row.data_devolvido_estoque = datetime.now(UTC)
 
     await session.commit()
     await session.refresh(row)

@@ -37,3 +37,9 @@ class Devolution(Base, TimestampMixin):
     troca_sku: Mapped[str | None] = mapped_column(Text, nullable=True)
     troca_condicao: Mapped[str | None] = mapped_column(Text, nullable=True)
     estoque_suffix: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Tags de sufixo regional dos SKUs do pedido (`.sp`, `.ra`, …); ver 0105.
+    tag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Setado quando o toggle "devolver estoque" passa a TRUE (auto no router).
+    data_devolvido_estoque: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
