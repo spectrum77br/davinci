@@ -71,6 +71,11 @@ def _looks_like_cf_html(resp: httpx.Response) -> bool:
     return "<html" in head or "cloudflare" in head or "just a moment" in head
 
 
+# Cache do depósito padrão por integração (id estável; raramente muda). O Bling
+# exige idDeposito no POST /estoques, então resolvemos uma vez e reusamos.
+_DEFAULT_DEPOSIT_CACHE: dict[Any, int] = {}
+
+
 class BlingClient:
     def __init__(
         self,
@@ -363,6 +368,26 @@ class BlingClient:
         )
         r.raise_for_status()
 
+    async def get_default_deposit_id(self) -> int | None:
+        """idDeposito do depósito padrão (padrao=True, senão o primeiro ativo).
+        Cacheado por integração — o Bling exige idDeposito no POST /estoques."""
+        key = self._integration_id
+        if key in _DEFAULT_DEPOSIT_CACHE:
+            return _DEFAULT_DEPOSIT_CACHE[key]
+        try:
+            r = await self._request("GET", "/depositos", params={"pagina": 1, "limite": 100})
+            r.raise_for_status()
+            deps = r.json().get("data") or []
+        except Exception:  # noqa: BLE001
+            return None
+        chosen = next((d.get("id") for d in deps if d.get("padrao")), None)
+        if chosen is None and deps:
+            chosen = deps[0].get("id")
+        if chosen is None:
+            return None
+        _DEFAULT_DEPOSIT_CACHE[key] = int(chosen)
+        return int(chosen)
+
     async def update_stock_by_id(
         self,
         bling_product_id: int,
@@ -370,11 +395,13 @@ class BlingClient:
         *,
         bling_store_id: int | None = None,
         operation: str = "B",
+        deposit_id: int | None = None,
     ) -> dict:
         """Raw Bling stock write. POST /Api/v3/estoques.
 
-        When `bling_store_id` is provided it is sent as `idLoja` so the change
-        reflects on the correct channel inside Bling. Body shape per Bling docs:
+        `idDeposito` é obrigatório no Bling V3 — quando `deposit_id` não é
+        passado, resolvemos o depósito padrão automaticamente. `bling_store_id`
+        vira `idLoja` para refletir no canal certo. Body:
             { "produto": {"id": <id>}, "operacao": "B"|"S"|"E", "quantidade": <qty>,
               "deposito": {"id": <id>}, "idLoja": <int?> }
         """
@@ -383,6 +410,10 @@ class BlingClient:
             "operacao": operation,
             "quantidade": qty,
         }
+        if deposit_id is None:
+            deposit_id = await self.get_default_deposit_id()
+        if deposit_id is not None:
+            body["deposito"] = {"id": deposit_id}
         if bling_store_id is not None:
             body["idLoja"] = bling_store_id
         r = await self._request("POST", "/estoques", json=body)
