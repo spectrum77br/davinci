@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { SquarePen, Plus, RefreshCw, Trash2, Zap, Search, KeyRound } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'integracoes', action: 'view' } })
@@ -44,6 +44,20 @@ const stores = ref<Store[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const testingId = ref<string | null>(null)
+// Cooldown CF do Bling por integração (epoch de fim). Enquanto ativo o
+// botão "testar" fica desabilitado com contagem regressiva — não adianta
+// bater na API (re-armaria o cooldown).
+const cooldownUntil = ref<Record<string, number>>({})
+const nowTs = ref(Math.floor(Date.now() / 1000))
+let _cooldownTimer: ReturnType<typeof setInterval> | null = null
+onMounted(() => {
+  _cooldownTimer = setInterval(() => { nowTs.value = Math.floor(Date.now() / 1000) }, 1000)
+})
+onUnmounted(() => { if (_cooldownTimer) clearInterval(_cooldownTimer) })
+function cooldownLeft(id: string): number {
+  const until = cooldownUntil.value[id]
+  return until ? Math.max(0, until - nowTs.value) : 0
+}
 const showNew = ref(false)
 const filter = ref('')
 
@@ -129,10 +143,23 @@ const grouped = computed(() => {
 async function testIntegration(i: Integration) {
   testingId.value = i.id
   try {
-    const r = await api<{ ok: boolean; detail: string | null }>(
+    const r = await api<{
+      ok: boolean; detail: string | null
+      code?: string; ttl_seconds?: number; retry_after_epoch?: number
+    }>(
       `/api/integrations/${i.id}/test`,
       { method: 'POST' }
     )
+    if (r.code === 'bling_cf_cooldown_active' && r.retry_after_epoch) {
+      cooldownUntil.value = { ...cooldownUntil.value, [i.id]: r.retry_after_epoch }
+      error.value = r.detail || 'Bling em cooldown (Cloudflare rate-limit). Tente mais tarde.'
+      return
+    }
+    if (r.code === 'bling_reauth_needed') {
+      error.value = r.detail || 'Reconectar Bling — refresh_token expirou'
+      await refresh()
+      return
+    }
     if (!r.ok) error.value = `teste falhou: ${r.detail || 'erro'}`
     await refresh()
   } catch (e: any) {
@@ -248,8 +275,10 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
             </div>
           </div>
           <div class="flex gap-2 pt-1 flex-wrap">
-            <Button size="sm" variant="outline" :disabled="testingId === i.id" @click="testIntegration(i)">
-              <Zap class="size-3 mr-1" /> {{ testingId === i.id ? 'testando…' : 'testar' }}
+            <Button size="sm" variant="outline" :disabled="testingId === i.id || cooldownLeft(i.id) > 0" @click="testIntegration(i)">
+              <Zap class="size-3 mr-1" /> {{ cooldownLeft(i.id) > 0
+                ? `Aguardando cooldown (${Math.ceil(cooldownLeft(i.id) / 60)}m)`
+                : (testingId === i.id ? 'testando…' : 'testar') }}
             </Button>
             <Button
               v-if="canEdit && i.platform === 'tiktok'"

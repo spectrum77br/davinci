@@ -1,3 +1,4 @@
+import time
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
 from typing import Annotated
@@ -213,6 +214,33 @@ async def test_integration(
     i = (await session.execute(select(Integration).where(Integration.id == integration_id))).scalar_one_or_none()
     if i is None:
         raise HTTPException(404, detail={"code": "integration_not_found"})
+
+    # Bling: NÃO dispara HTTP durante cooldown CF (o teste falharia e
+    # re-armaria o cooldown) nem com reauth pendente. Retorna resposta
+    # amigável pra UI mostrar contagem regressiva / pedir reconexão.
+    if i.platform == IntegrationPlatform.BLING:
+        if i.status == "reauth_needed":
+            return TestConnectionOut(
+                ok=False,
+                code="bling_reauth_needed",
+                detail="Reconectar Bling — refresh_token expirou",
+            )
+        from app.redis_client import redis as _redis
+        blocked = await _redis.get("bling:cf_cooldown_until")
+        if blocked is not None:
+            try:
+                ttl = int(blocked) - int(time.time())
+            except (TypeError, ValueError):
+                ttl = 0
+            if ttl > 0:
+                return TestConnectionOut(
+                    ok=False,
+                    code="bling_cf_cooldown_active",
+                    ttl_seconds=ttl,
+                    retry_after_epoch=int(blocked),
+                    detail=f"Bling em cooldown CF, aguarde {ttl // 60}min{ttl % 60}s",
+                )
+
     creds = decrypt_json(i.credentials)
     client = client_for(i.platform, creds, on_token_refresh=_make_token_save_callback(session, i), integration_id=i.id)
     result = await client.test_connection()

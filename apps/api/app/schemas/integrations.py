@@ -39,6 +39,12 @@ class TestConnectionOut(BaseModel):
     ok: bool
     detail: str | None = None
     info: dict | None = None
+    # Preenchidos quando o teste é bloqueado antes de bater na API (ex:
+    # cooldown CF do Bling, reauth necessário) — pra UI dar mensagem
+    # amigável + desabilitar o botão com a contagem regressiva.
+    code: str | None = None
+    ttl_seconds: int | None = None
+    retry_after_epoch: int | None = None
 
 
 class OAuthStartOut(BaseModel):

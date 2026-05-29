@@ -183,7 +183,10 @@ class BlingClient:
                     rt_prefix=rt[:8],
                 )
                 if r.status_code == 429 and "cloudflare" in body_preview.lower():
-                    CF_COOLDOWN_S = 1800
+                    # 1h (não 30min): empiricamente o ban CF do Bling dura
+                    # mais que 30min, então 1800s causava loop "cooldown
+                    # expira → 1º request 429 → cooldown re-armado".
+                    CF_COOLDOWN_S = 3600
                     until = int(time.time()) + CF_COOLDOWN_S
                     await _redis.set(
                         "bling:cf_cooldown_until", str(until), ex=CF_COOLDOWN_S
