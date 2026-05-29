@@ -611,6 +611,36 @@ const pedidosNaoEnviadosCount = computed(() =>
   ).size,
 )
 
+// Pendentes (não enviados) criados em dias ANTERIORES a hoje, agrupados
+// por data de criação. Pendentes criados hoje não contam (são esperados).
+// Conta pedidos distintos (pedido_bling), igual aos outros contadores.
+// "Hoje" = data local do navegador (não UTC) — operador está no BRT.
+function _localToday(): string {
+  const n = new Date()
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`
+}
+const pendentesAntigosByDay = computed(() => {
+  const todayStr = _localToday()
+  const byDay: Record<string, Set<string>> = {}
+  for (const p of pedidosFiltered.value) {
+    if (p.status !== 'nao_enviado' || !p.pedido_bling) continue
+    const dataCriacao = (p.data_pedido || p.data || '').slice(0, 10)
+    if (!dataCriacao || dataCriacao >= todayStr) continue
+    if (!byDay[dataCriacao]) byDay[dataCriacao] = new Set<string>()
+    byDay[dataCriacao].add(p.pedido_bling)
+  }
+  return Object.entries(byDay)
+    .map(([date, set]) => ({ date, count: set.size }))
+    .sort((a, b) => a.date.localeCompare(b.date))
+})
+const totalPendentesAntigos = computed(() =>
+  pendentesAntigosByDay.value.reduce((s, g) => s + g.count, 0),
+)
+function formatDateBR(iso: string): string {
+  const [, m, d] = iso.split('-')
+  return `${d}/${m}`
+}
+
 // Ordena por data envio (desc, primário) + pedido_bling (secundário) pra
 // que itens do mesmo pedido fiquem consecutivos. Adiciona meta-flags
 // usadas no render (`_isFirstOfGroup` controla render do número e
@@ -974,6 +1004,28 @@ async function conferirTodos() {
       <span class="inline-flex items-center gap-1.5 rounded-md bg-red-600 text-white px-2.5 py-1 font-semibold">
         Não enviados: {{ pedidosNaoEnviadosCount }}
       </span>
+      <div v-if="totalPendentesAntigos > 0" class="relative inline-block group">
+        <span class="inline-flex items-center gap-1.5 rounded-md bg-amber-500 text-white px-2.5 py-1 font-semibold cursor-help">
+          ⚠️ {{ totalPendentesAntigos }} atrasado{{ totalPendentesAntigos !== 1 ? 's' : '' }}
+        </span>
+        <div class="absolute hidden group-hover:block top-full left-0 mt-1 bg-popover border rounded-md shadow-lg p-3 z-20 min-w-[180px]">
+          <div class="text-xs font-semibold text-muted-foreground mb-2">
+            Pendentes por dia de criação:
+          </div>
+          <div class="space-y-1">
+            <div
+              v-for="grupo in pendentesAntigosByDay"
+              :key="grupo.date"
+              class="flex items-center justify-between gap-3 text-xs"
+            >
+              <span>{{ formatDateBR(grupo.date) }}</span>
+              <span class="font-semibold text-amber-600">
+                {{ grupo.count }} {{ grupo.count !== 1 ? 'pedidos' : 'pedido' }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
       <span
         v-for="bucket in pedidosCountByTag" :key="bucket.tag"
         class="inline-flex items-center gap-1 rounded-md border bg-background px-2 py-0.5"
