@@ -1,11 +1,14 @@
 import re
 from datetime import UTC, date, datetime, time, timedelta
+from io import BytesIO
 from typing import Annotated
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
 from sqlalchemy import desc, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,6 +80,31 @@ def _search_clause(search: str):
     )
 
 
+def _build_where(
+    search: str | None,
+    reembolso: bool | None,
+    tag: str | None,
+    data_devolucao: date | None,
+    condicao: str | None,
+) -> list:
+    where = []
+    if search and search.strip():
+        where.append(_search_clause(search.strip()))
+    if reembolso is not None:
+        where.append(Devolution.reembolso.is_(reembolso))
+    if tag and tag.strip() and tag.strip().lower() != "all":
+        where.append(Devolution.tag == tag.strip().lower().lstrip("."))
+    if condicao and condicao.strip() and condicao.strip().lower() != "all":
+        where.append(Devolution.condicao_produto == condicao.strip())
+    # "Data de devolução" = quando o registro entrou no sistema (created_at).
+    if data_devolucao is not None:
+        start = datetime.combine(data_devolucao, time.min, tzinfo=SAO_PAULO)
+        end = start + timedelta(days=1)
+        where.append(Devolution.created_at >= start.astimezone(UTC))
+        where.append(Devolution.created_at < end.astimezone(UTC))
+    return where
+
+
 @router.get("", response_model=DevolutionPage)
 async def list_devolutions(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -87,21 +115,9 @@ async def list_devolutions(
     reembolso: bool | None = Query(None),
     tag: str | None = Query(None),
     data_devolucao: date | None = Query(None),
+    condicao: str | None = Query(None),
 ) -> DevolutionPage:
-    where = []
-    if search and search.strip():
-        where.append(_search_clause(search.strip()))
-    if reembolso is not None:
-        where.append(Devolution.reembolso.is_(reembolso))
-    if tag and tag.strip() and tag.strip().lower() != "all":
-        normalized_tag = tag.strip().lower().lstrip(".")
-        where.append(Devolution.tag == normalized_tag)
-    # "Data de devolução" = quando o registro entrou no sistema (created_at).
-    if data_devolucao is not None:
-        start = datetime.combine(data_devolucao, time.min, tzinfo=SAO_PAULO)
-        end = start + timedelta(days=1)
-        where.append(Devolution.created_at >= start.astimezone(UTC))
-        where.append(Devolution.created_at < end.astimezone(UTC))
+    where = _build_where(search, reembolso, tag, data_devolucao, condicao)
 
     stmt = (
         select(Devolution)
@@ -120,6 +136,86 @@ async def list_devolutions(
         total=int(total or 0),
         limit=limit,
         offset=offset,
+    )
+
+
+def _fmt_dt_sp(dt: datetime | None) -> str:
+    """Datetime → 'dd/mm/aaaa HH:MM' no fuso de São Paulo (vazio se None)."""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(SAO_PAULO).strftime("%d/%m/%Y %H:%M")
+
+
+_EXPORT_COLUMNS: list[tuple[str, str]] = [
+    ("Data", "data"),
+    ("Data Devolução", "created_at"),
+    ("Pedido Bling", "pedido_bling"),
+    ("Pedido Marketplace", "pedido_marketplace"),
+    ("Conta", "conta"),
+    ("SKU", "sku"),
+    ("Tag", "tag"),
+    ("Produtos", "produtos"),
+    ("Custo produto", "custo_produto"),
+    ("Condição", "condicao_produto"),
+    ("Link abertura", "link_abertura"),
+    ("Reembolso", "reembolso"),
+    ("Motivo", "motivo_devolucao"),
+    ("Custo manutenção", "custo_manutencao"),
+    ("Técnico", "tecnico"),
+    ("Qtd", "quantidade"),
+    ("Devolver estoque", "devolver_estoque"),
+    ("Data devolvido estoque", "data_devolvido_estoque"),
+    ("Observação", "observacao"),
+]
+
+
+@router.get("/export.xlsx")
+async def export_devolutions(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+    search: str | None = Query(None),
+    reembolso: bool | None = Query(None),
+    tag: str | None = Query(None),
+    data_devolucao: date | None = Query(None),
+    condicao: str | None = Query(None),
+) -> StreamingResponse:
+    """Exporta as devoluções (com os mesmos filtros da lista) em XLSX."""
+    where = _build_where(search, reembolso, tag, data_devolucao, condicao)
+    rows = (
+        await session.execute(
+            select(Devolution)
+            .where(*where)
+            .order_by(desc(Devolution.data).nulls_last(), desc(Devolution.created_at))
+        )
+    ).scalars().all()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Devoluções"
+    ws.append([label for label, _ in _EXPORT_COLUMNS])
+
+    for r in rows:
+        line = []
+        for _, field in _EXPORT_COLUMNS:
+            value = getattr(r, field, None)
+            if field in ("data", "created_at", "data_devolvido_estoque"):
+                line.append(_fmt_dt_sp(value))
+            elif field in ("reembolso", "devolver_estoque"):
+                line.append("Sim" if value else "Não")
+            else:
+                line.append(value if value is not None else "")
+        ws.append(line)
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    stamp = datetime.now(SAO_PAULO).strftime("%Y%m%d_%H%M")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="devolucoes_{stamp}.xlsx"'},
     )
 
 

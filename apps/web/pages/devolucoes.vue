@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Download,
   ExternalLink,
   Loader2,
   Plus,
@@ -195,7 +196,9 @@ const error = ref<string | null>(null)
 const search = ref('')
 const reembolsoFilter = ref<ReembolsoFilter>('all')
 const tagFilter = ref('all')
+const condicaoFilter = ref('all')
 const dataDevolucaoFilter = ref('')
+const exporting = ref(false)
 
 const addOpen = ref(false)
 const lookupPedido = ref('')
@@ -464,6 +467,7 @@ async function load() {
     if (search.value.trim()) params.set('search', search.value.trim())
     if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
     if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
+    if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
     if (dataDevolucaoFilter.value) params.set('data_devolucao', dataDevolucaoFilter.value)
     const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
     items.value = res.items
@@ -473,6 +477,32 @@ async function load() {
     error.value = apiError(e)
   } finally {
     loading.value = false
+  }
+}
+
+async function exportXlsx() {
+  if (exporting.value) return
+  exporting.value = true
+  try {
+    const params = new URLSearchParams()
+    if (search.value.trim()) params.set('search', search.value.trim())
+    if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
+    if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
+    if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
+    if (dataDevolucaoFilter.value) params.set('data_devolucao', dataDevolucaoFilter.value)
+    const blob = await api<Blob>(`/api/devolutions/export.xlsx?${params.toString()}`, { responseType: 'blob' as any })
+    const href = URL.createObjectURL(blob as any)
+    const a = document.createElement('a')
+    a.href = href
+    a.download = `devolucoes_${new Date().toISOString().slice(0, 10)}.xlsx`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(href)
+  } catch (e: any) {
+    pushToast({ kind: 'error', title: 'Erro ao exportar', lines: [apiError(e)] })
+  } finally {
+    exporting.value = false
   }
 }
 
@@ -486,7 +516,7 @@ watch(search, () => {
     load()
   }, 300)
 })
-watch([reembolsoFilter, tagFilter, dataDevolucaoFilter], () => { page.value = 1; load() })
+watch([reembolsoFilter, tagFilter, condicaoFilter, dataDevolucaoFilter], () => { page.value = 1; load() })
 watch(page, () => load())
 
 function openAdd() {
@@ -959,12 +989,20 @@ async function backfillAddresses() {
         <option value="all">todas tags</option>
         <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">{{ opt.label }}</option>
       </select>
+      <select v-model="condicaoFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
+        <option value="all">todas condições</option>
+        <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
+      </select>
       <input
         v-model="dataDevolucaoFilter"
         type="date"
         title="Data devolução"
         class="h-9 rounded-md border bg-background px-2 text-sm"
       />
+      <Button size="sm" variant="outline" :disabled="exporting" @click="exportXlsx">
+        <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exporting }" />
+        exportar xlsx
+      </Button>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · reembolsadas {{ totalReembolsadas }} · manutenção {{ brl(totalCustoManutencao) }}
       </span>
