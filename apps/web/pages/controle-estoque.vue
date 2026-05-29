@@ -615,14 +615,13 @@ const pedidosNaoEnviadosCount = computed(() =>
 // data passada — ou seja, `em_andamento_data` (data_envio) preenchida e
 // anterior a hoje, mas a agência ainda não confirmou (situacao≠15).
 // Pedidos sem em_andamento_data (etiqueta ainda não gerada) são
-// pendentes NORMAIS, não atrasados. Conta pedidos distintos
-// (pedido_bling). "Hoje" = data local do navegador (não UTC).
-function _localToday(): string {
-  const n = new Date()
-  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`
-}
+// pendentes NORMAIS, não atrasados. Conta pedidos distintos (pedido_bling).
+// Só aparece no filtro de HOJE — em dias passados o pendente já está
+// visível na lista, o chip seria alerta redundante. `dia` usa isoToday()
+// (UTC), então comparamos com o mesmo helper pra ficar consistente.
 const pendentesAntigosByDay = computed(() => {
-  const todayStr = _localToday()
+  const todayStr = isoToday()
+  if (dia.value !== todayStr) return []
   const byDay: Record<string, Set<string>> = {}
   for (const p of pedidosFiltered.value) {
     if (p.status !== 'nao_enviado' || !p.pedido_bling) continue
