@@ -104,7 +104,13 @@ def _user_is_admin(user: User) -> bool:
 def _resolve_tags(user: User, override: str | None) -> list[str] | None:
     """Returns the list of tags to OR-filter products by. `None` means
     "no tag filter" (admin viewing all). Empty list also collapses to
-    None — UI sends "" for "todas" on the admin dropdown."""
+    None — UI sends "" for "todas" no dropdown.
+
+    Admin: honra `override` se vier; senão None (vê tudo).
+    Non-admin: se vier `override` E estiver entre as stock_tags do user,
+    restringe ao override (sub-seleção — ex. churchill tem todas as 9 tags
+    e filtra uma por vez pela UI). Senão, devolve todas as stock_tags.
+    Segurança preservada: usuário não consegue ver tag fora do seu set."""
     if user.role == UserRole.ADMIN:
         if override:
             ov = override.strip().lower()
@@ -112,10 +118,23 @@ def _resolve_tags(user: User, override: str | None) -> list[str] | None:
                 raise HTTPException(400, detail={"code": "invalid_tag"})
             return [ov]
         return None
-    tags = [t for t in (user.stock_tags or []) if isinstance(t, str) and t.lower() in _VALID_TAGS]
-    if not tags:
+
+    allowed = [
+        t.lower() for t in (user.stock_tags or [])
+        if isinstance(t, str) and t.lower() in _VALID_TAGS
+    ]
+    if not allowed:
         raise HTTPException(403, detail={"code": "no_stock_tag"})
-    return [t.lower() for t in tags]
+
+    if override:
+        ov = override.strip().lower()
+        if ov not in _VALID_TAGS:
+            raise HTTPException(400, detail={"code": "invalid_tag"})
+        if ov not in allowed:
+            raise HTTPException(403, detail={"code": "tag_not_allowed"})
+        return [ov]
+
+    return allowed
 
 
 def _resolve_dates(
