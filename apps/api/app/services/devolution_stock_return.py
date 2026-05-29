@@ -154,7 +154,11 @@ def _order_situacao_target(rows: list[Devolution]) -> int | None:
     por Novo/Usado só quando TODOS os itens estão resolvidos; um Trocado força
     resolvido. Manutenção pendente mantém o pedido "em manutenção" até o
     técnico escolher Novo/Usado/Sucata.
+
+    "Entregue" é neutro (o cliente ficou com o item) — ignorado no cálculo; se
+    TODOS os itens forem Entregue, não há patch.
     """
+    rows = [r for r in rows if (r.condicao_produto or "").strip() != "Entregue"]
     if not rows:
         return None
     res = [_resolution_of(r) for r in rows]
