@@ -20,7 +20,7 @@ watch(() => props.open, (open) => {
 const OPTIONS: { value: 'Novo' | 'Usado' | 'Sucata'; hint: string }[] = [
   { value: 'Novo', hint: 'volta ao estoque · pedido resolvido' },
   { value: 'Usado', hint: 'volta ao estoque (salvado) · pedido resolvido' },
-  { value: 'Sucata', hint: 'não volta ao estoque · pedido vira Sucata' },
+  { value: 'Sucata', hint: 'não volta ao estoque · pedido resolvido' },
 ]
 
 function confirm() {

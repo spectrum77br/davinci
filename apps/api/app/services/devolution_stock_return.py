@@ -57,8 +57,9 @@ _STOCK_TRIGGER_CONDICOES = _STOCK_CONDICOES | {"Trocado", "Manutenção"}
 # Situações do pedido no Bling (idSituacao).
 SITUACAO_RESOLVIDO = 545902
 SITUACAO_EXTRAVIADO = 83960
-SITUACAO_SUCATA = 545901
 SITUACAO_MANUTENCAO = 84677
+# 545901 ("Manutenção - Sucata") existe mas o Bling rejeita a transição (400);
+# por isso Sucata resolve para 545902 (resolvido).
 
 # Sufixos regionais válidos — fonte única em app.services.sku_tags.
 _SUFFIX_TAGS = _SKU_SUFFIX_TAGS
@@ -131,15 +132,16 @@ async def _get_bling_client(session: AsyncSession) -> BlingClient | None:
 
 def _resolution_of(row: Devolution) -> str:
     """Classifica a 'resolução' do item:
-    extraviado | sucata | manutencao (pendente) | resolvido | unresolved."""
+    extraviado | manutencao (pendente) | resolvido | unresolved.
+
+    Manutenção→Sucata resolve como 'resolvido' (o pedido vai para 545902 —
+    o Bling rejeita a situação 545901 "Sucata" na transição)."""
     c = (row.condicao_produto or "").strip()
     if c == "Extraviado":
         return "extraviado"
     if c == "Manutenção":
         d = (row.manutencao_destino or "").strip()
-        if d == "Sucata":
-            return "sucata"
-        if d in _STOCK_CONDICOES:
+        if d in _STOCK_CONDICOES or d == "Sucata":
             return "resolvido"
         return "manutencao"  # ainda em manutenção (destino não escolhido)
     if c in ("Novo", "Usado", "Trocado"):
@@ -150,9 +152,9 @@ def _resolution_of(row: Devolution) -> str:
 def _order_situacao_target(rows: list[Devolution]) -> int | None:
     """Situação única do pedido pela precedência pior→melhor.
 
-    Extraviado > Sucata > Manutenção(pendente) > Trocado/Resolvido. "Resolvido"
-    por Novo/Usado só quando TODOS os itens estão resolvidos; um Trocado força
-    resolvido. Manutenção pendente mantém o pedido "em manutenção" até o
+    Extraviado > Manutenção(pendente) > Trocado/Resolvido. "Resolvido" por
+    Novo/Usado/Sucata só quando TODOS os itens estão resolvidos; um Trocado
+    força resolvido. Manutenção pendente mantém o pedido "em manutenção" até o
     técnico escolher Novo/Usado/Sucata.
 
     "Entregue" é neutro (o cliente ficou com o item) — ignorado no cálculo; se
@@ -165,8 +167,6 @@ def _order_situacao_target(rows: list[Devolution]) -> int | None:
     conds = [(r.condicao_produto or "").strip() for r in rows]
     if "extraviado" in res:
         return SITUACAO_EXTRAVIADO
-    if "sucata" in res:
-        return SITUACAO_SUCATA
     if "manutencao" in res:
         return SITUACAO_MANUTENCAO
     if "Trocado" in conds:
