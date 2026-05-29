@@ -460,13 +460,15 @@ async def list_estoque_pedidos(
         loja_name = (
             store_name_by_id.get(bling_store_id) if bling_store_id is not None else None
         ) or (o.loja or "")
-        # "data" on the front-end shows the SHIP date; fall back to the
-        # order create date if em_andamento_data isn't set (only happens
-        # for the nao_enviado filter).
-        ship_or_create = o.em_andamento_data or (o.data.date() if o.data else None)
+        # Coluna "DATA ENVIO" na tela: SEMPRE a data de criação do pedido
+        # (= quando o cliente comprou no marketplace). NÃO confundir com a
+        # data em que o pedido aparece no filtro — isso é `effective_date`
+        # na query (COALESCE(em_andamento_data, hoje)). `data_envio`
+        # continua no JSON pra quem quiser o ship date confirmado.
+        data_criacao = o.data.date() if o.data else None
         result.append({
             "id": str(o.id),
-            "data": ship_or_create.isoformat() if ship_or_create else None,
+            "data": data_criacao.isoformat() if data_criacao else None,
             "data_pedido": o.data.isoformat() if o.data else None,
             "data_envio": o.em_andamento_data.isoformat() if o.em_andamento_data else None,
             "pedido_bling": o.numero,
@@ -475,7 +477,10 @@ async def list_estoque_pedidos(
             "sku": o.item_codigo,
             "produto": o.item_descricao,
             "quantidade": o.item_quantidade or 1,
-            "status": "enviado" if o.em_andamento_data else "nao_enviado",
+            # Badge por situacao (não por em_andamento_data): 15 (Atendido)
+            # = agência confirmou → verde; 83965 (Enviado Etiqueta) =
+            # etiqueta gerada mas sem confirmação → vermelho.
+            "status": "enviado" if o.situacao == _SITUACAO_ATENDIDO else "nao_enviado",
             "conferido": check["conferido"],
             "observacao": check["observacao"],
             "bling_id": o.bling_id,
