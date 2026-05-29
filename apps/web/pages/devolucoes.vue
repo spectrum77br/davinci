@@ -309,8 +309,9 @@ async function resolveStockModals(
     effCondicao = r.condicao
   }
 
-  // Mala/Eletro: volta direto no próprio SKU, sem modal de tag/bin.
-  if (isMalaOrEletro(effSku)) {
+  // Mala/Eletro NOVO: volta direto no próprio SKU, sem modal de tag/bin.
+  // Usado segue a lógica de usados (modal → cria z000N.<tag>).
+  if (effCondicao === 'Novo' && isMalaOrEletro(effSku)) {
     out.estoque_destino_sku = effSku
     return out
   }

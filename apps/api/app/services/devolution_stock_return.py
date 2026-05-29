@@ -291,9 +291,9 @@ async def return_product_to_bling_stock(
         # 3) Legado: modal `.sp` antigo (sufixo regional direto).
         if row.estoque_suffix and (suffix := row.estoque_suffix.strip().lower().lstrip(".")):
             return await _return_with_suffix(client, eff_sku, suffix, row, qty, obs, ctx)
-        # 4) Mala/Eletro: entrada direta no próprio SKU (salvaguarda — o front já
-        #    manda estoque_destino_sku, mas garante no PATCH/uso direto da API).
-        if _is_mala_or_eletro(eff_sku):
+        # 4) Mala/Eletro NOVO: entrada direta no próprio SKU (salvaguarda — o
+        #    front já manda estoque_destino_sku). Usado segue a lógica de usados.
+        if eff_condicao == "Novo" and _is_mala_or_eletro(eff_sku):
             return await _return_to_existing(session, client, eff_sku, qty, obs, ctx)
         # 5) Sem destino do modal — comportamento direto pelo SKU.
         if eff_condicao == "Novo":

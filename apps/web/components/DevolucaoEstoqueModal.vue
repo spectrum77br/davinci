@@ -52,8 +52,13 @@ async function fetchVariants() {
 const existing = computed(() => (data.value?.variants ?? []).filter((v) => v.exists))
 // Quando NÃO há nenhuma variante, o operador escolhe uma tag pra criar z000N.<tag>.
 const hasExisting = computed(() => existing.value.length > 0)
-// Tags candidatas pra criação (exclui `sp`, a origem "a redirecionar").
-const tagChoices = computed(() => (data.value?.allowed_suffixes ?? []).filter((s) => s !== 'sp'))
+// Tags candidatas pra criação do z000N.<tag>: sufixos regionais (exclui `sp`,
+// a origem "a redirecionar") + mala/eletro (usados que viram avulso).
+const tagChoices = computed(() => [
+  ...(data.value?.allowed_suffixes ?? []).filter((s) => s !== 'sp'),
+  'mala',
+  'eletro',
+])
 
 const canConfirm = computed(() =>
   hasExisting.value ? !!selectedExisting.value : !!selectedTag.value,
