@@ -350,6 +350,10 @@ function draftPayload() {
 async function createRefund() {
   const body = draftPayload()
   if (!body || !canEdit.value) return
+  if (!body.tipo) {
+    lookupError.value = 'Selecione o tipo antes de adicionar o pedido.'
+    return
+  }
   creating.value = true
   lookupError.value = null
   try {
@@ -556,8 +560,8 @@ async function saveRow(row: RefundRow): Promise<void> {
               <td class="px-2 py-1 uppercase">{{ draft.plataforma || '—' }}</td>
               <td class="px-2 py-1">{{ draft.conta }}</td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-                <select v-model="draft.tipo" :class="sheetSelectClass" @change="onDraftTipoChange">
-                  <option value="">—</option>
+                <select v-model="draft.tipo" :class="[sheetSelectClass, !draft.tipo ? 'ring-1 ring-red-500/60' : '']" @change="onDraftTipoChange">
+                  <option value="">— obrigatório</option>
                   <option v-for="tipo in TIPO_OPTIONS" :key="tipo" :value="tipo">{{ tipo }}</option>
                 </select>
               </td>
@@ -584,7 +588,7 @@ async function saveRow(row: RefundRow): Promise<void> {
                 <input v-model="draft.observacao" :class="sheetInputClass" />
               </td>
               <td class="px-2 py-1 text-right border-l-[3px] border-gray-400 dark:border-gray-600">
-                <Button size="sm" :disabled="creating || !canEdit" @click="createRefund">
+                <Button size="sm" :disabled="creating || !canEdit || !draft.tipo" @click="createRefund">
                   <Loader2 v-if="creating" class="size-4 mr-1.5 animate-spin" />
                   <Plus v-else class="size-4 mr-1.5" />
                   adicionar
