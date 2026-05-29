@@ -368,14 +368,25 @@ async def create_devolution(
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
     out = DevolutionOut.model_validate(row)
 
-    # Estoque: Novo/Usado/Trocado/Manutenção só com o toggle ligado.
-    should_stock = body.condicao_produto in _STOCK_TRIGGER_CONDICOES and body.devolver_estoque
+    # Gatilho no ADD: Novo/Usado/Trocado processam sempre; Manutenção só com o
+    # toggle "devolver estoque"; Extraviado não mexe no estoque.
+    condicao = body.condicao_produto
+    should_stock = condicao in ("Novo", "Usado", "Trocado") or (
+        condicao == "Manutenção" and body.devolver_estoque
+    )
+    if should_stock and not row.devolver_estoque:
+        # Processou o estoque → marca o toggle e carimba a data.
+        row.devolver_estoque = True
+        row.data_devolvido_estoque = datetime.now(UTC)
+        await session.commit()
+        await session.refresh(row)
+        out = DevolutionOut.model_validate(row)
     if should_stock:
         sr = await return_product_to_bling_stock(session, row)
         if sr is not None:
             out.bling_stock_result = BlingStockResultOut(**sr)
-    # Situação do pedido: Extraviado patcha já no add; demais só quando há estoque.
-    if (body.condicao_produto == "Extraviado" or should_stock) and row.pedido_bling:
+    # Situação do pedido: Extraviado patcha já no add; demais quando há estoque.
+    if (condicao == "Extraviado" or should_stock) and row.pedido_bling:
         await apply_order_situacao(session, row.pedido_bling)
     return out
 

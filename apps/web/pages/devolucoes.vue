@@ -578,11 +578,19 @@ async function createAllDevolutions() {
   let added = 0
   try {
     for (const d of [...drafts.value]) {
+      // No ADD: Novo/Usado/Trocado processam estoque sempre; Manutenção só com
+      // o toggle "devolver estoque" ligado; Extraviado não mexe no estoque.
+      const processAtAdd = ['Novo', 'Usado', 'Trocado'].includes(d.condicao_produto)
+        || (d.condicao_produto === 'Manutenção' && d.devolver_estoque)
+      let extra: StockModalFields | null = null
+      if (processAtAdd) {
+        // Abre os modais (manutenção / troca / destino) antes da chamada Bling.
+        extra = await resolveStockModals(d.condicao_produto, d.sku, true)
+        if (extra === null) { remaining.push(d); continue } // modal cancelado → mantém
+        d.devolver_estoque = true // processou o estoque → liga o toggle
+      }
       const body = buildPayload(d)
-      // Abre os modais (manutenção / troca / destino) antes de qualquer chamada Bling.
-      const extra = await resolveStockModals(body.condicao_produto, body.sku, body.devolver_estoque)
-      if (extra === null) { remaining.push(d); continue } // modal cancelado → mantém
-      Object.assign(body, extra)
+      if (extra) Object.assign(body, extra)
       try {
         const created = await api<DevolutionRow>('/api/devolutions', { method: 'POST', body })
         if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
