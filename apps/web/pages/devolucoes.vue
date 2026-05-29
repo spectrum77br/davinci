@@ -318,6 +318,7 @@ const sheetInputClass = 'h-7 w-full rounded-none border-0 bg-transparent px-1 te
 const sheetSelectClass = `${sheetInputClass} cursor-pointer`
 const sheetMoneyInputClass = `${sheetInputClass} text-right tabular-nums`
 const sheetInputRequiredClass = `${sheetInputClass} ring-1 ring-red-400`
+const sheetSelectRequiredClass = `${sheetSelectClass} ring-1 ring-red-400`
 
 function linkRequired(condicao: string | null | undefined) {
   return condicao === 'Extraviado' || condicao === 'Manutenção'
@@ -472,10 +473,6 @@ function selectAllProducts() {
     }))
 }
 
-function removeDraft(index: number) {
-  drafts.value = drafts.value.filter((_, i) => i !== index)
-}
-
 async function lookupOrder() {
   const pedido = lookupPedido.value.trim()
   if (!pedido) return
@@ -523,6 +520,10 @@ function buildPayload(d: DevolutionDraft) {
 async function createAllDevolutions() {
   if (!canEdit.value || !drafts.value.length) return
   for (const d of drafts.value) {
+    if (!d.condicao_produto) {
+      lookupError.value = 'Escolha a condição de todos os produtos'
+      return
+    }
     if (linkRequired(d.condicao_produto) && !d.link_abertura) {
       lookupError.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
       return
@@ -773,7 +774,6 @@ async function backfillAddresses() {
             <tr>
               <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="6">Identificação</th>
               <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 8 : 7">Devolução</th>
-              <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1"></th>
             </tr>
             <tr>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Data</th>
@@ -790,7 +790,6 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
-              <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] border-l-[3px] border-gray-400 dark:border-gray-600"></th>
             </tr>
           </thead>
           <tbody>
@@ -805,7 +804,7 @@ async function backfillAddresses() {
                 <input v-model.number="d.custo_produto" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="d.condicao_produto" :class="sheetSelectClass" @change="(e) => { if ((e.target as HTMLSelectElement).value === 'Extraviado' || (e.target as HTMLSelectElement).value === 'Manutenção') d.reembolso = true }">
+                <select v-model="d.condicao_produto" :class="d.condicao_produto ? sheetSelectClass : sheetSelectRequiredClass" @change="(e) => { if ((e.target as HTMLSelectElement).value === 'Extraviado' || (e.target as HTMLSelectElement).value === 'Manutenção') d.reembolso = true }">
                   <option value="">—</option>
                   <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
                 </select>
@@ -852,16 +851,6 @@ async function backfillAddresses() {
                       d.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
                     ]"
                   />
-                </button>
-              </td>
-              <td class="px-2 py-1 text-center border-l-[3px] border-gray-400 dark:border-gray-600">
-                <button
-                  type="button"
-                  title="Remover este produto"
-                  class="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-                  @click="removeDraft(i)"
-                >
-                  <X class="size-4" />
                 </button>
               </td>
             </tr>
