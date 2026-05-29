@@ -28,6 +28,7 @@ from app.services.devolution_stock_return import (
     _SUFFIX_TAGS,
     _sku_base,
     _sku_tag,
+    apply_order_situacao,
     return_product_to_bling_stock,
 )
 
@@ -316,6 +317,10 @@ async def create_devolution(
         troca_sku=body.troca_sku,
         troca_condicao=body.troca_condicao,
         estoque_suffix=body.estoque_suffix,
+        quantidade=body.quantidade or 1,
+        estoque_destino_sku=body.estoque_destino_sku,
+        estoque_nova_tag=body.estoque_nova_tag,
+        manutencao_destino=body.manutencao_destino,
         tag=_sku_tag(body.sku),
         data_devolvido_estoque=datetime.now(UTC) if body.devolver_estoque else None,
     )
@@ -326,15 +331,16 @@ async def create_devolution(
     await session.refresh(row)
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
     out = DevolutionOut.model_validate(row)
-    if body.condicao_produto in _STOCK_TRIGGER_CONDICOES and body.devolver_estoque:
-        sr = await return_product_to_bling_stock(
-            session, row, body.condicao_produto,
-            troca_sku=body.troca_sku,
-            troca_condicao=body.troca_condicao,
-            estoque_suffix=body.estoque_suffix,
-        )
+
+    # Estoque: Novo/Usado/Trocado/Manutenção só com o toggle ligado.
+    should_stock = body.condicao_produto in _STOCK_TRIGGER_CONDICOES and body.devolver_estoque
+    if should_stock:
+        sr = await return_product_to_bling_stock(session, row)
         if sr is not None:
             out.bling_stock_result = BlingStockResultOut(**sr)
+    # Situação do pedido: Extraviado patcha já no add; demais só quando há estoque.
+    if (body.condicao_produto == "Extraviado" or should_stock) and row.pedido_bling:
+        await apply_order_situacao(session, row.pedido_bling)
     return out
 
 
@@ -373,17 +379,22 @@ async def patch_devolution(
     await session.commit()
     await session.refresh(row)
     out = DevolutionOut.model_validate(row)
-    condicao_changed = new_condicao in _STOCK_TRIGGER_CONDICOES and new_condicao != prev_condicao
+
+    condicao_changed = new_condicao != prev_condicao
     toggle_turned_on = row.devolver_estoque and not prev_devolver_estoque
-    if row.devolver_estoque and new_condicao in _STOCK_TRIGGER_CONDICOES and (condicao_changed or toggle_turned_on):
-        sr = await return_product_to_bling_stock(
-            session, row, new_condicao,
-            troca_sku=row.troca_sku,
-            troca_condicao=row.troca_condicao,
-            estoque_suffix=row.estoque_suffix,
-        )
+    should_stock = (
+        new_condicao in _STOCK_TRIGGER_CONDICOES
+        and row.devolver_estoque
+        and (condicao_changed or toggle_turned_on)
+    )
+    if should_stock:
+        sr = await return_product_to_bling_stock(session, row)
         if sr is not None:
             out.bling_stock_result = BlingStockResultOut(**sr)
+    # Extraviado patcha a situação ao virar Extraviado (sem depender do toggle).
+    extraviado_now = new_condicao == "Extraviado" and condicao_changed
+    if (extraviado_now or should_stock) and row.pedido_bling:
+        await apply_order_situacao(session, row.pedido_bling)
     return out
 
 

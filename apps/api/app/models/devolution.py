@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, Text, text
+from sqlalchemy import Boolean, DateTime, Float, Integer, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -37,6 +37,18 @@ class Devolution(Base, TimestampMixin):
     troca_sku: Mapped[str | None] = mapped_column(Text, nullable=True)
     troca_condicao: Mapped[str | None] = mapped_column(Text, nullable=True)
     estoque_suffix: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Unidades a lançar no estoque Bling (ver alembic 0110). Hoje a busca
+    # expande 1 linha por unidade, então fica 1; guardado p/ a entrada e o
+    # estoque inicial do produto z criado.
+    quantidade: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    # Destino do estoque escolhido no modal (ver alembic 0110):
+    #   estoque_destino_sku — bin já existente `base.<sufixo>` (entrada direta);
+    #   estoque_nova_tag     — tag pra criar produto novo `z000N.<tag>` quando
+    #                          nenhuma variante existe.
+    estoque_destino_sku: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estoque_nova_tag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "Novo"/"Usado"/"Sucata" escolhido no modal quando condição == Manutenção.
+    manutencao_destino: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Tags de sufixo regional dos SKUs do pedido (`.sp`, `.ra`, …); ver 0105.
     tag: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Setado quando o toggle "devolver estoque" passa a TRUE (auto no router).

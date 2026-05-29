@@ -41,6 +41,10 @@ class DevolutionOut(BaseModel):
     troca_sku: str | None = None
     troca_condicao: str | None = None
     estoque_suffix: str | None = None
+    quantidade: int = 1
+    estoque_destino_sku: str | None = None
+    estoque_nova_tag: str | None = None
+    manutencao_destino: str | None = None
     tag: str | None = None
     data_devolvido_estoque: datetime | None = None
     created_at: datetime
@@ -67,6 +71,10 @@ class DevolutionCreate(BaseModel):
     troca_sku: str | None = None
     troca_condicao: str | None = None
     estoque_suffix: str | None = None
+    quantidade: int = 1
+    estoque_destino_sku: str | None = None
+    estoque_nova_tag: str | None = None
+    manutencao_destino: str | None = None
 
     @field_validator(
         "pedido_bling",
@@ -81,6 +89,9 @@ class DevolutionCreate(BaseModel):
         "troca_sku",
         "troca_condicao",
         "estoque_suffix",
+        "estoque_destino_sku",
+        "estoque_nova_tag",
+        "manutencao_destino",
         mode="before",
     )
     @classmethod
@@ -121,6 +132,10 @@ class DevolutionPatch(BaseModel):
     troca_sku: str | None = None
     troca_condicao: str | None = None
     estoque_suffix: str | None = None
+    quantidade: int | None = None
+    estoque_destino_sku: str | None = None
+    estoque_nova_tag: str | None = None
+    manutencao_destino: str | None = None
 
     @field_validator(
         "pedido_bling",
@@ -136,6 +151,9 @@ class DevolutionPatch(BaseModel):
         "troca_sku",
         "troca_condicao",
         "estoque_suffix",
+        "estoque_destino_sku",
+        "estoque_nova_tag",
+        "manutencao_destino",
         mode="before",
     )
     @classmethod
