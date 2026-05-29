@@ -349,9 +349,12 @@ async def scan_missing_skus(
         if not pp_list:
             issues.append("Fora da tabela de preços")
         else:
-            # "Custo divergente" only for simple products (formato != 'E')
-            # — kits store the total cost in Bling but unit costs in the
-            # pricing table, so comparing them is meaningless.
+            # "Custo divergente" só pra produtos SIMPLES. Compostos
+            # guardam o custo TOTAL no Bling mas custos unitários por
+            # componente na tabela, então comparar não faz sentido.
+            # Composto = formato='E' (composto puro no Bling) OU SKU com
+            # '+' (convenção local de kit/bundle, ex dg052.ci+a001.ci —
+            # esses ficam como formato='S' no Bling mas não são simples).
             #
             # When the same SKU appears in multiple departments (celular +
             # catalogo etc.), each row has its own cost_kit1. EVERY row
@@ -360,7 +363,8 @@ async def scan_missing_skus(
             # department that doesn't match is reported so the user knows
             # exactly which row to fix.
             is_kit = (p.formato or '').upper() == 'E'
-            if not is_kit and bling_cost is not None:
+            has_composite_marker = '+' in (p.sku or '')
+            if not is_kit and not has_composite_marker and bling_cost is not None:
                 bling_int = int(round(bling_cost))
                 for pp in pp_list:
                     kit1 = _q2(pp.cost_kit1) if pp.cost_kit1 else None
