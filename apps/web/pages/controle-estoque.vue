@@ -94,6 +94,15 @@ const enviosFim = ref(isoToday())
 
 // Admin-only tag override.
 const isAdmin = computed(() => auth.user?.role === 'admin')
+
+// Operador específico (churchill) tem acesso ao filtro de tag, mesmo não
+// sendo admin (stock_tags dele cobre todas as 9 tags). Hardcoded por nome
+// — se aparecer outro caso, vira permissão. Backend continua validando a
+// tag contra user.stock_tags, então segurança não muda.
+const canUseTagFilter = computed(() => {
+  if (isAdmin.value) return true
+  return (auth.user?.name || '').toLowerCase() === 'churchill'
+})
 const tagOverride = ref<string>('')
 
 // Filter products by presence of stock. 'all' (default) = no filter,
@@ -131,7 +140,7 @@ async function syncFromBling() {
   syncToast.value = null
   try {
     const params = new URLSearchParams()
-    if (isAdmin.value && tagOverride.value) params.set('tag', tagOverride.value)
+    if (canUseTagFilter.value && tagOverride.value) params.set('tag', tagOverride.value)
     const r = await api<{ updated: number; total_products: number; missing_bling_data: number }>(
       `/api/estoque/sync-stocks${params.toString() ? `?${params.toString()}` : ''}`,
       { method: 'POST' },
@@ -173,7 +182,7 @@ const conferenciaHoje = ref<{ total: number; conferido: number; percent: number 
 async function refreshConferenciaHoje() {
   try {
     const params = new URLSearchParams()
-    if (isAdmin.value && tagOverride.value) params.set('tag', tagOverride.value)
+    if (canUseTagFilter.value && tagOverride.value) params.set('tag', tagOverride.value)
     if (estoqueFilter.value !== 'all') params.set('estoque_filter', estoqueFilter.value)
     const r = await api<{ total: number; conferido: number; percent: number }>(
       `/api/estoque/conferencia-hoje${params.toString() ? `?${params.toString()}` : ''}`,
@@ -193,7 +202,7 @@ function singleDayDates(): string {
   // Estoque + Pedidos send the same value for both endpoints — backend
   // tolerates either treating the window as a single point or a range.
   const parts = [`data_inicio=${dia.value}`, `data_fim=${dia.value}`]
-  if (isAdmin.value && tagOverride.value) parts.push(`tag=${tagOverride.value}`)
+  if (canUseTagFilter.value && tagOverride.value) parts.push(`tag=${tagOverride.value}`)
   // estoque_filter applies only to the Estoque tab (the /produtos call
   // below). Pedidos and Envios ignore the param.
   if (estoqueFilter.value !== 'all') parts.push(`estoque_filter=${estoqueFilter.value}`)
@@ -204,7 +213,7 @@ function rangeDates(): string {
     `data_inicio=${enviosInicio.value}`,
     `data_fim=${enviosFim.value}`,
   ]
-  if (isAdmin.value && tagOverride.value) parts.push(`tag=${tagOverride.value}`)
+  if (canUseTagFilter.value && tagOverride.value) parts.push(`tag=${tagOverride.value}`)
   return parts.join('&')
 }
 
@@ -826,7 +835,7 @@ async function conferirTodos() {
           </select>
         </label>
       </template>
-      <label v-if="isAdmin" class="inline-flex items-center gap-1">
+      <label v-if="canUseTagFilter" class="inline-flex items-center gap-1">
         Tag:
         <select v-model="tagOverride" class="h-7 border rounded px-2 bg-background">
           <option value="">todas</option>
