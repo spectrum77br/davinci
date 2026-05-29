@@ -93,7 +93,7 @@ async def list_devolutions(
         where.append(Devolution.reembolso.is_(reembolso))
     if tag and tag.strip() and tag.strip().lower() != "all":
         normalized_tag = tag.strip().lower().lstrip(".")
-        where.append(Devolution.tag == f".{normalized_tag}")
+        where.append(Devolution.tag == normalized_tag)
     if data_devolvido_estoque is not None:
         start = datetime.combine(data_devolvido_estoque, time.min, tzinfo=SAO_PAULO)
         end = start + timedelta(days=1)

@@ -31,7 +31,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import Date, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +43,8 @@ from app.models.company import Store
 from app.models.integration import Integration
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
+from app.services.sku_tags import VALID_TAGS as _VALID_TAGS
+from app.services.sku_tags import sql_clause_for_tag as _sql_clause_for_tag
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/estoque", tags=["estoque"])
@@ -55,32 +57,9 @@ router = APIRouter(prefix="/api/estoque", tags=["estoque"])
 # bling_orders.py + marketplace_shipment_check.py + worker.py.
 _BRT = ZoneInfo("America/Sao_Paulo")
 
-_VALID_TAGS = frozenset({
-    "ci", "pi", "ra", "sa", "sp",  # GERAL <UF> (suffix-mapped)
-    "us",                            # USADOS (suffix .us)
-    "cd",                            # CENTRO DE DISTRIBUIÇÃO (suffix .cd in prod)
-    "fake",                          # FAKE (prefix fake.)
-    "mala",                          # MALA (defined by exclusion — see helper)
-    "eletro", "insumos",             # Bling tag-only — no SKU pattern in prod
-})
-
-# Suffixes (".ci", ".pi", …) that belong to OTHER tags. Used both for
-# direct matching and — inverted — as the "mala" exclusion rule.
-_SUFFIX_TAGS = ("ci", "pi", "ra", "sa", "sp", "us", "cd")
-_PREFIX_TAGS = ("fake",)
-
-# Extra ILIKE exclusions for the `mala` tag. Real mala SKUs follow
-# `<letter><digits>.<digits>` (b005.20, a001.5, …); everything else in
-# the catalog that survives the suffix/prefix exclusion is noise:
-# caixas/embalagens, S001…S015 services, sucatas, kits/personalizados,
-# x-prefixed SKUs (sorveteiras, etc), ha (sorveteiras), i1 internals,
-# bp mochilas, teste/SISTEMA placeholders. Case-insensitive — `s0%`
-# matches both `s0…` and `S0…`. Subset patterns (e.g. `x09%`) collapse
-# into their supersets (`x0%`).
-_MALA_EXCLUDE_PATTERNS = (
-    "caixa%", "s0%", "%sucata%", "%personalizado%", "kit%",
-    "x0%", "ha%", "i1%", "bp%", "teste%", "sistema%",
-)
+# Classificação SKU → tag (constantes + clause SQL) vive em
+# app.services.sku_tags, fonte única compartilhada com Devoluções —
+# importada acima como _VALID_TAGS / _sql_clause_for_tag.
 
 # Universal junk-SKU exclusions — applied to every produtos/sync-stocks
 # view regardless of tag. These SKUs (numeric labels 1-30, `n9`
@@ -114,41 +93,6 @@ def _baseline_sku_exclusions(column):
         column.notin_(_BASELINE_NUMERIC_SKUS),
         func.lower(column) != "n9",
     ]
-
-
-def _sql_clause_for_tag(column, tag: str):
-    """Returns an SQLAlchemy boolean expression matching items whose SKU
-    column belongs to the given operator tag.
-
-    Suffix tags (ci/pi/ra/sa/sp/us/cd) match `column ILIKE '%.{tag}'`.
-    `fake` matches `column ILIKE 'fake.%'`. `mala` is defined by
-    EXCLUSION — every simples SKU (no `+`) that doesn't end in a known
-    suffix or start with a known prefix. `eletro`/`insumos` still have
-    no SKU pattern in prod (would require a Bling product-tags column),
-    so they match nothing; the operator gets an empty result until that
-    data source is wired up.
-    """
-    from sqlalchemy import and_, literal
-
-    if tag in _SUFFIX_TAGS:
-        return column.ilike(f"%.{tag}")
-    if tag in _PREFIX_TAGS:
-        return column.ilike(f"{tag}.%")
-    if tag == "mala":
-        clauses = [column.notilike("%+%")]
-        clauses += [column.notilike(f"%.{s}") for s in _SUFFIX_TAGS]
-        clauses += [column.notilike(f"{p}.%") for p in _PREFIX_TAGS]
-        clauses += [column.notilike(p) for p in _MALA_EXCLUDE_PATTERNS]
-        clauses.append(func.lower(column) != "n9")
-        # Numeric-only SKUs (1-30 in prod) are caixa labels, never malas.
-        # Belt-and-suspenders: PostgreSQL regex + an explicit NOT IN
-        # against the known 1-30 range so the rule holds even if the
-        # collation or DB engine ever surprises us.
-        clauses.append(column.op("!~")("^[0-9]+$"))
-        clauses.append(column.notin_([str(n) for n in range(1, 31)]))
-        return and_(*clauses)
-    # eletro / insumos — no pattern available yet.
-    return literal(False)
 
 
 def _user_is_admin(user: User) -> bool:
@@ -1202,6 +1146,7 @@ async def estoque_atualizar_bling(
     3 req/s ceiling. Single-flight via _refresh_state — returns 409 if
     another caller already started it."""
     import asyncio
+
     from app.services.marketing.bling_revenue import _resolve_bling_client
 
     if _refresh_state["running"]:

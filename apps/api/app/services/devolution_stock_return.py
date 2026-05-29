@@ -31,6 +31,8 @@ from app.models import Integration
 from app.models.enums import IntegrationPlatform
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import BlingClient
+from app.services.sku_tags import SUFFIX_TAGS as _SKU_SUFFIX_TAGS
+from app.services.sku_tags import classify_sku_tag
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,9 +46,9 @@ _STOCK_CONDICOES = {"Novo", "Usado"}
 # entra aqui porque a entrada é definida pelo modal (troca_sku/troca_condicao).
 _STOCK_TRIGGER_CONDICOES = _STOCK_CONDICOES | {"Trocado"}
 
-# Sufixos regionais válidos (espelha _SUFFIX_TAGS em routers/estoque.py).
+# Sufixos regionais válidos — fonte única em app.services.sku_tags.
 # Usado para identificar/strip da base do SKU ao redirecionar via modal.
-_SUFFIX_TAGS = ("ci", "pi", "ra", "sa", "sp", "us", "cd")
+_SUFFIX_TAGS = _SKU_SUFFIX_TAGS
 
 type StockResult = dict[str, Any]
 
@@ -62,20 +64,10 @@ def _sku_base(sku: str) -> str:
 
 
 def _sku_tag(sku: str | None) -> str | None:
-    """Extrai a tag de sufixo regional de um SKU (possivelmente composto).
-
-    Para kits (`+`-joined), todos os componentes reais compartilham o mesmo
-    sufixo; por isso `a.sp+b.sp` vira apenas `.sp`. Retorna `None` quando
-    nenhum componente tem sufixo reconhecido."""
-    if not sku:
-        return None
-    for part in sku.split("+"):
-        part = part.strip()
-        if "." in part:
-            tail = part.rsplit(".", 1)[1].lower()
-            if tail in _SUFFIX_TAGS:
-                return f".{tail}"
-    return None
+    """Tag de operador do SKU (sem ponto), espelhando o Controle de Estoque.
+    Delega à fonte única `classify_sku_tag` — sufixo regional, fake, mala
+    (`b`+dígito), eletro (`u`). Retorna None quando nada casa."""
+    return classify_sku_tag(sku)
 
 
 def _result(

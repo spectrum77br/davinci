@@ -91,7 +91,29 @@ type DevolutionDraft = LookupRow & {
 type ReembolsoFilter = 'all' | 'true' | 'false'
 
 const PAGE_SIZE = 100
-const TAG_FILTERS = ['ci', 'pi', 'ra', 'sa', 'sp', 'us', 'cd'] as const
+// Mesmas tags/rótulos do Controle de Estoque (pages/controle-estoque.vue).
+// A tag da devolução é derivada do SKU pela mesma regra do backend
+// (app/services/sku_tags.py), então o visual aqui espelha aquela tela.
+const TAG_OPTIONS: { slug: string; label: string }[] = [
+  { slug: 'ci', label: 'CI' },
+  { slug: 'pi', label: 'PI' },
+  { slug: 'ra', label: 'RA' },
+  { slug: 'sa', label: 'SA' },
+  { slug: 'sp', label: 'SP' },
+  { slug: 'us', label: 'Usados' },
+  { slug: 'cd', label: 'Centro de Distribuição' },
+  { slug: 'fake', label: 'Fake' },
+  { slug: 'mala', label: 'Mala' },
+  { slug: 'eletro', label: 'Eletro' },
+  { slug: 'insumos', label: 'Insumos' },
+]
+const TAG_LABELS: Record<string, string> = Object.fromEntries(
+  TAG_OPTIONS.map(o => [o.slug, o.label]),
+)
+const tagLabel = (tag: string | null): string => {
+  if (!tag) return '—'
+  return TAG_LABELS[tag.replace(/^\./, '').toLowerCase()] ?? tag
+}
 
 const MOTIVOS_DEVOLUCAO = [
   'Mudou de ideia',
@@ -826,7 +848,7 @@ async function backfillAddresses() {
       </select>
       <select v-model="tagFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
         <option value="all">todas tags</option>
-        <option v-for="tag in TAG_FILTERS" :key="tag" :value="tag">.{{ tag }}</option>
+        <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">{{ opt.label }}</option>
       </select>
       <input
         v-model="dataDevolvidoEstoqueFilter"
@@ -885,7 +907,7 @@ async function backfillAddresses() {
             <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
             <td class="px-2 py-1 whitespace-nowrap">{{ row.conta }}</td>
             <td class="px-2 py-1 font-mono text-xs">{{ row.sku || '—' }}</td>
-            <td class="px-2 py-1 font-mono text-xs text-muted-foreground">{{ row.tag || '—' }}</td>
+            <td class="px-2 py-1 text-xs text-muted-foreground whitespace-nowrap">{{ tagLabel(row.tag) }}</td>
             <td class="px-2 py-1 text-muted-foreground">{{ row.produtos || '—' }}</td>
             <td v-if="isAdmin" class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <input
