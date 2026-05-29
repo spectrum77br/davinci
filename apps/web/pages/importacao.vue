@@ -16,7 +16,7 @@
 import { computed, onScopeDispose, reactive, ref, watch } from 'vue'
 import {
   Plus, RefreshCw, Trash2, Save, Search, Download, X, AlertCircle,
-  Send, CheckCircle2, Clock, Briefcase, Cpu, Smartphone,
+  Send, CheckCircle2, Clock, Briefcase, Zap, Smartphone,
 } from 'lucide-vue-next'
 
 definePageMeta({
@@ -49,7 +49,7 @@ const tab = ref<Tab>('mala')
 type Categoria = 'mala' | 'eletro' | 'celular'
 const CATEGORIAS = [
   { key: 'mala' as const, label: 'Mala', icon: Briefcase },
-  { key: 'eletro' as const, label: 'Eletro', icon: Cpu },
+  { key: 'eletro' as const, label: 'Eletro', icon: Zap },
   { key: 'celular' as const, label: 'Celular', icon: Smartphone },
 ]
 // Eletro não tem aba Kit (produtos não viram composto).
