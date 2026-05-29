@@ -611,10 +611,12 @@ const pedidosNaoEnviadosCount = computed(() =>
   ).size,
 )
 
-// Pendentes (não enviados) criados em dias ANTERIORES a hoje, agrupados
-// por data de criação. Pendentes criados hoje não contam (são esperados).
-// Conta pedidos distintos (pedido_bling), igual aos outros contadores.
-// "Hoje" = data local do navegador (não UTC) — operador está no BRT.
+// "Atrasado" = pendente (badge vermelho) cuja ETIQUETA foi gerada em
+// data passada — ou seja, `em_andamento_data` (data_envio) preenchida e
+// anterior a hoje, mas a agência ainda não confirmou (situacao≠15).
+// Pedidos sem em_andamento_data (etiqueta ainda não gerada) são
+// pendentes NORMAIS, não atrasados. Conta pedidos distintos
+// (pedido_bling). "Hoje" = data local do navegador (não UTC).
 function _localToday(): string {
   const n = new Date()
   return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`
@@ -624,10 +626,10 @@ const pendentesAntigosByDay = computed(() => {
   const byDay: Record<string, Set<string>> = {}
   for (const p of pedidosFiltered.value) {
     if (p.status !== 'nao_enviado' || !p.pedido_bling) continue
-    const dataCriacao = (p.data_pedido || p.data || '').slice(0, 10)
-    if (!dataCriacao || dataCriacao >= todayStr) continue
-    if (!byDay[dataCriacao]) byDay[dataCriacao] = new Set<string>()
-    byDay[dataCriacao].add(p.pedido_bling)
+    const dataEnvio = (p.data_envio || '').slice(0, 10)
+    if (!dataEnvio || dataEnvio >= todayStr) continue
+    if (!byDay[dataEnvio]) byDay[dataEnvio] = new Set<string>()
+    byDay[dataEnvio].add(p.pedido_bling)
   }
   return Object.entries(byDay)
     .map(([date, set]) => ({ date, count: set.size }))

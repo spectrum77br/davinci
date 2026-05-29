@@ -151,6 +151,12 @@ def _sql_clause_for_tag(column, tag: str):
     return literal(False)
 
 
+def _user_is_admin(user: User) -> bool:
+    """True se admin — vê conferências (StockCheck) de TODOS os usuários.
+    Operador comum continua vendo só os próprios checks (pra desmarcar)."""
+    return getattr(user, "role", None) == UserRole.ADMIN
+
+
 def _resolve_tags(user: User, override: str | None) -> list[str] | None:
     """Returns the list of tags to OR-filter products by. `None` means
     "no tag filter" (admin viewing all). Empty list also collapses to
@@ -292,18 +298,28 @@ async def list_estoque_produtos(
             if m.origem:
                 slot["saida_origens"].append(m.origem)
 
-    checks_rows = (
-        await session.execute(
-            select(StockCheck.reference_id, StockCheck.conferido)
-            .where(
-                StockCheck.user_id == user.id,
-                StockCheck.section == "estoque",
-                StockCheck.reference_date >= data_inicio,
-                StockCheck.reference_date <= data_fim,
+    check_where = [
+        StockCheck.section == "estoque",
+        StockCheck.reference_date >= data_inicio,
+        StockCheck.reference_date <= data_fim,
+    ]
+    if _user_is_admin(user):
+        # Admin: dia conferido se QUALQUER usuário marcou conferido.
+        checks_rows = (await session.execute(
+            select(
+                StockCheck.reference_id,
+                func.bool_or(StockCheck.conferido).label("any_conf"),
             )
-        )
-    ).all()
-    checks = {r.reference_id: bool(r.conferido) for r in checks_rows}
+            .where(and_(*check_where))
+            .group_by(StockCheck.reference_id)
+        )).all()
+        checks = {r.reference_id: bool(r.any_conf) for r in checks_rows}
+    else:
+        check_where.append(StockCheck.user_id == user.id)
+        checks_rows = (await session.execute(
+            select(StockCheck.reference_id, StockCheck.conferido).where(and_(*check_where))
+        )).all()
+        checks = {r.reference_id: bool(r.conferido) for r in checks_rows}
 
     result: list[dict[str, Any]] = []
     for p in products:
@@ -433,21 +449,38 @@ async def list_estoque_pedidos(
     order_ids = [str(o.id) for o in orders]
     checks_map: dict[str, dict[str, Any]] = {}
     if order_ids:
-        checks_rows = (
-            await session.execute(
-                select(StockCheck.reference_id, StockCheck.conferido, StockCheck.observacao)
-                .where(
-                    StockCheck.user_id == user.id,
-                    StockCheck.section == "pedido",
-                    StockCheck.reference_id.in_(order_ids),
+        check_where = [
+            StockCheck.section == "pedido",
+            StockCheck.reference_id.in_(order_ids),
+        ]
+        if _user_is_admin(user):
+            # Admin: conferido se QUALQUER usuário marcou; observações
+            # de todos concatenadas.
+            checks_rows = (await session.execute(
+                select(
+                    StockCheck.reference_id,
+                    func.bool_or(StockCheck.conferido).label("any_conf"),
+                    func.string_agg(StockCheck.observacao, " | ").label("observacao"),
                 )
-            )
-        ).all()
-        for r in checks_rows:
-            checks_map[r.reference_id] = {
-                "conferido": bool(r.conferido),
-                "observacao": r.observacao,
-            }
+                .where(and_(*check_where))
+                .group_by(StockCheck.reference_id)
+            )).all()
+            for r in checks_rows:
+                checks_map[r.reference_id] = {
+                    "conferido": bool(r.any_conf),
+                    "observacao": r.observacao,
+                }
+        else:
+            check_where.append(StockCheck.user_id == user.id)
+            checks_rows = (await session.execute(
+                select(StockCheck.reference_id, StockCheck.conferido, StockCheck.observacao)
+                .where(and_(*check_where))
+            )).all()
+            for r in checks_rows:
+                checks_map[r.reference_id] = {
+                    "conferido": bool(r.conferido),
+                    "observacao": r.observacao,
+                }
 
     result: list[dict[str, Any]] = []
     for o in orders:
@@ -538,18 +571,28 @@ async def list_estoque_envios(
         )
     ).all()
 
-    checks_rows = (
-        await session.execute(
-            select(StockCheck.reference_id, StockCheck.conferido)
-            .where(
-                StockCheck.user_id == user.id,
-                StockCheck.section == "envio",
-                StockCheck.reference_date >= data_inicio,
-                StockCheck.reference_date <= data_fim,
+    check_where = [
+        StockCheck.section == "envio",
+        StockCheck.reference_date >= data_inicio,
+        StockCheck.reference_date <= data_fim,
+    ]
+    if _user_is_admin(user):
+        # Admin: dia conferido se QUALQUER usuário marcou conferido.
+        checks_rows = (await session.execute(
+            select(
+                StockCheck.reference_id,
+                func.bool_or(StockCheck.conferido).label("any_conf"),
             )
-        )
-    ).all()
-    checks = {r.reference_id: bool(r.conferido) for r in checks_rows}
+            .where(and_(*check_where))
+            .group_by(StockCheck.reference_id)
+        )).all()
+        checks = {r.reference_id: bool(r.any_conf) for r in checks_rows}
+    else:
+        check_where.append(StockCheck.user_id == user.id)
+        checks_rows = (await session.execute(
+            select(StockCheck.reference_id, StockCheck.conferido).where(and_(*check_where))
+        )).all()
+        checks = {r.reference_id: bool(r.conferido) for r in checks_rows}
 
     # Per-day stock conferência aggregate. Total de produtos é fixo
     # (não varia por dia); conferidos vem por reference_date a partir
@@ -558,7 +601,7 @@ async def list_estoque_envios(
     total_produtos = await _count_active_products(session, tags)
     estoque_checks_by_day = await _count_estoque_checks_by_day(
         session, user_id=user.id, data_inicio=data_inicio, data_fim=data_fim,
-        tags=tags,
+        tags=tags, is_admin=_user_is_admin(user),
     )
 
     items: list[dict[str, Any]] = []
@@ -642,6 +685,7 @@ async def _count_estoque_checks_by_day(
     data_fim: date,
     tags: list[str] | None,
     estoque_filter: str | None = None,
+    is_admin: bool = False,
 ) -> dict[str, int]:
     """{reference_date_iso: count_conferido_true} pra section='estoque'
     do usuário, no período. `tags` mirrors _count_active_products —
@@ -656,20 +700,26 @@ async def _count_estoque_checks_by_day(
     `estoque_filter` é aplicado via JOIN em products — só quando
     requisitado (caso default não paga o custo do JOIN)."""
     where: list = [
-        StockCheck.user_id == user_id,
         StockCheck.section == "estoque",
         StockCheck.conferido.is_(True),
         StockCheck.reference_date >= data_inicio,
         StockCheck.reference_date <= data_fim,
         *_baseline_sku_exclusions(StockCheck.reference_id),
     ]
+    if not is_admin:
+        where.append(StockCheck.user_id == user_id)
     if tags is not None:
         where.append(
             or_(*[_sql_clause_for_tag(StockCheck.reference_id, t) for t in tags])
         )
 
+    # Admin agrega todos os usuários — conta SKUs DISTINTOS por dia pra
+    # não duplicar quando 2 operadores conferem o mesmo SKU no mesmo dia.
+    n_expr = (
+        func.count(func.distinct(StockCheck.reference_id)) if is_admin else func.count()
+    )
     stmt = (
-        select(StockCheck.reference_date, func.count().label("n"))
+        select(StockCheck.reference_date, n_expr.label("n"))
         .group_by(StockCheck.reference_date)
     )
     stock_clause = _stock_filter_clause(estoque_filter)
