@@ -611,24 +611,23 @@ const pedidosNaoEnviadosCount = computed(() =>
   ).size,
 )
 
-// "Atrasado" = pendente (badge vermelho) cuja ETIQUETA foi gerada em
-// data passada — ou seja, `em_andamento_data` (data_envio) preenchida e
-// anterior a hoje, mas a agência ainda não confirmou (situacao≠15).
-// Pedidos sem em_andamento_data (etiqueta ainda não gerada) são
-// pendentes NORMAIS, não atrasados. Conta pedidos distintos (pedido_bling).
-// Só aparece no filtro de HOJE — em dias passados o pendente já está
-// visível na lista, o chip seria alerta redundante. `dia` usa isoToday()
-// (UTC), então comparamos com o mesmo helper pra ficar consistente.
+// "Atrasado" = pendente (não enviado) CRIADO em dia anterior a hoje e
+// ainda não confirmado. No filtro de hoje, todos os pendentes carregados
+// têm em_andamento_data=NULL (o effective_date do backend fixa o pendente
+// em hoje), então o que distingue "atrasado" é a DATA DE CRIAÇÃO antiga —
+// não a data da etiqueta. Agrupa por data de criação, conta pedidos
+// distintos. Só aparece no filtro de HOJE (em dias passados o pendente já
+// está visível na lista; o chip seria redundante).
 const pendentesAntigosByDay = computed(() => {
   const todayStr = isoToday()
   if (dia.value !== todayStr) return []
   const byDay: Record<string, Set<string>> = {}
   for (const p of pedidosFiltered.value) {
     if (p.status !== 'nao_enviado' || !p.pedido_bling) continue
-    const dataEnvio = (p.data_envio || '').slice(0, 10)
-    if (!dataEnvio || dataEnvio >= todayStr) continue
-    if (!byDay[dataEnvio]) byDay[dataEnvio] = new Set<string>()
-    byDay[dataEnvio].add(p.pedido_bling)
+    const criacao = (p.data_pedido || p.data || '').slice(0, 10)
+    if (!criacao || criacao >= todayStr) continue
+    if (!byDay[criacao]) byDay[criacao] = new Set<string>()
+    byDay[criacao].add(p.pedido_bling)
   }
   return Object.entries(byDay)
     .map(([date, set]) => ({ date, count: set.size }))
