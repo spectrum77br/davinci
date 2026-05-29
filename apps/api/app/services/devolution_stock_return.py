@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models import BlingOrder, Devolution, Integration, Product
 from app.models.enums import IntegrationPlatform
@@ -277,7 +277,7 @@ async def return_product_to_bling_stock(
     try:
         # 1) Destino existente escolhido no modal: entrada direta nesse bin.
         if row.estoque_destino_sku and (dest_sku := row.estoque_destino_sku.strip()):
-            return await _return_to_existing(client, dest_sku, qty, ctx)
+            return await _return_to_existing(session, client, dest_sku, qty, ctx)
         # 2) Criar produto novo z000N.<tag> (nenhuma variante existia).
         if row.estoque_nova_tag and (tag := row.estoque_nova_tag.strip().lower().lstrip(".")):
             return await _create_z_product(
@@ -289,28 +289,58 @@ async def return_product_to_bling_stock(
         # 4) Mala/Eletro: entrada direta no próprio SKU (salvaguarda — o front já
         #    manda estoque_destino_sku, mas garante no PATCH/uso direto da API).
         if _is_mala_or_eletro(eff_sku):
-            return await _return_to_existing(client, eff_sku, qty, ctx)
+            return await _return_to_existing(session, client, eff_sku, qty, ctx)
         # 5) Sem destino do modal — comportamento direto pelo SKU.
         if eff_condicao == "Novo":
-            return await _return_novo(client, eff_sku, qty, ctx)
-        return await _return_usado(client, eff_sku, row, qty, ctx)
+            return await _return_novo(session, client, eff_sku, qty, ctx)
+        return await _return_usado(session, client, eff_sku, row, qty, ctx)
     except Exception as exc:  # noqa: BLE001
         logger.error("devolution_stock_return_error", error=str(exc), **ctx)
         return _result(False, "error", message=str(exc))
 
 
+async def _local_bling_product_id(session: AsyncSession, sku: str) -> int | None:
+    """bling_product_id da tabela local products (ativo primeiro). Robusto para
+    SKUs com ponto (ex.: b043.12), que a busca por código no Bling não acha."""
+    if not sku:
+        return None
+    pid = (
+        await session.execute(
+            select(Product.bling_product_id)
+            .where(
+                func.lower(func.btrim(Product.sku)) == sku.strip().lower(),
+                Product.bling_product_id.is_not(None),
+            )
+            .order_by((Product.situacao == "A").desc().nullslast())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return int(pid) if pid else None
+
+
+async def _resolve_product_id(
+    session: AsyncSession, client: BlingClient, sku: str
+) -> int | None:
+    """Resolve o bling_product_id: tabela local primeiro, fallback na busca
+    por código no Bling."""
+    pid = await _local_bling_product_id(session, sku)
+    if pid:
+        return pid
+    product = await client.find_active_product_by_sku(sku)
+    return int(product["id"]) if product else None
+
+
 async def _return_to_existing(
-    client: BlingClient, dest_sku: str, qty: int, ctx: dict
+    session: AsyncSession, client: BlingClient, dest_sku: str, qty: int, ctx: dict
 ) -> StockResult:
     """Entrada de N unidades num bin já existente escolhido no modal."""
-    product = await client.find_active_product_by_sku(dest_sku)
-    if product is None:
+    pid = await _resolve_product_id(session, client, dest_sku)
+    if pid is None:
         logger.warning("devolution_stock_dest_not_found", dest_sku=dest_sku, **ctx)
         return _result(
             False, "sku_not_found", sku=dest_sku,
             message=f"SKU {dest_sku} não encontrado no Bling",
         )
-    pid = int(product["id"])
     await client.update_stock_by_id(pid, qty=qty, operation="E")
     logger.info("devolution_stock_entry_existing", dest_sku=dest_sku, bling_product_id=pid, **ctx)
     return _result(
@@ -351,16 +381,25 @@ async def _create_z_product(
     """Cria `z000N.<tag>` clonando nome/categoria do original e lança qty."""
     target_sku = await _next_z_sku_for_tag(session, client, tag)
 
-    original = await client.find_active_product_by_sku(eff_sku) if eff_sku else None
-    base_name = ((original or {}).get("name") or row.produtos or eff_sku or target_sku).strip()
+    # Produto original: resolve id pela tabela local (robusto p/ SKUs com ponto)
+    # e busca o detalhe no Bling para clonar nome/categoria.
+    category_id = None
+    bling_name = None
+    orig_pid = await _resolve_product_id(session, client, eff_sku) if eff_sku else None
+    if orig_pid:
+        try:
+            raw = await client.get_product(orig_pid)
+            bling_name = (raw or {}).get("nome")
+            cat = (raw or {}).get("categoria")
+            if isinstance(cat, dict):
+                category_id = cat.get("id")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "devolution_stock_clone_original_failed", orig_pid=orig_pid, error=str(exc)
+            )
+    base_name = (bling_name or row.produtos or eff_sku or target_sku).strip()
     suffix_label = " AVULSO SALVADO" if eff_condicao == "Usado" else " AVULSO"
     name = f"{base_name}{suffix_label}"
-
-    category_id = None
-    raw = (original or {}).get("raw") if isinstance(original, dict) else None
-    cat = (raw or {}).get("categoria") if isinstance(raw, dict) else None
-    if isinstance(cat, dict):
-        category_id = cat.get("id")
 
     price = float(row.custo_produto) if row.custo_produto else None
     new_data = await client.create_product(
@@ -429,20 +468,21 @@ async def _return_with_suffix(
     )
 
 
-async def _return_novo(client: BlingClient, sku: str, qty: int, ctx: dict) -> StockResult:
+async def _return_novo(
+    session: AsyncSession, client: BlingClient, sku: str, qty: int, ctx: dict
+) -> StockResult:
     if not sku:
         logger.warning("devolution_stock_novo_no_sku", **ctx)
         return _result(False, "no_sku", message="Produto sem SKU — estoque não atualizado")
 
-    product = await client.find_active_product_by_sku(sku)
-    if product is None:
+    pid = await _resolve_product_id(session, client, sku)
+    if pid is None:
         logger.warning("devolution_stock_novo_sku_not_found", **ctx)
         return _result(
             False, "sku_not_found", sku=sku,
             message=f"SKU {sku} não encontrado no Bling",
         )
 
-    pid = int(product["id"])
     await client.update_stock_by_id(pid, qty=qty, operation="E")
     logger.info("devolution_stock_entry_novo", bling_product_id=pid, **ctx)
     return _result(
@@ -452,7 +492,7 @@ async def _return_novo(client: BlingClient, sku: str, qty: int, ctx: dict) -> St
 
 
 async def _return_usado(
-    client: BlingClient, sku: str, row: Devolution, qty: int, ctx: dict
+    session: AsyncSession, client: BlingClient, sku: str, row: Devolution, qty: int, ctx: dict
 ) -> StockResult:
     sku = sku or ""
     if not sku:
@@ -464,7 +504,8 @@ async def _return_usado(
     else:
         sku_usado = sku + ".us"
 
-    product = await client.find_active_product_by_sku(sku_usado) if sku_usado else None
+    pid_usado = await _resolve_product_id(session, client, sku_usado) if sku_usado else None
+    product = {"id": pid_usado} if pid_usado else None
 
     if product is not None:
         pid = int(product["id"])
