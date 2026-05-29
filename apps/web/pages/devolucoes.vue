@@ -195,7 +195,7 @@ const lookupLoading = ref(false)
 const lookupResults = ref<LookupRow[]>([])
 const lookupError = ref<string | null>(null)
 const creating = ref(false)
-const draft = ref<DevolutionDraft | null>(null)
+const drafts = ref<DevolutionDraft[]>([])
 const addedThisSession = ref<Set<string>>(new Set())
 
 const dirtyRows = ref<Set<string>>(new Set())
@@ -305,6 +305,10 @@ const alreadyAddedKeys = computed(() => {
 function isAlreadyAdded(row: LookupRow) {
   return alreadyAddedKeys.value.has(`${row.pedido_bling}|${row.sku}`)
 }
+// Produtos do pedido ainda não adicionados — todos entram de uma vez no rascunho.
+const selectableLookupCount = computed(
+  () => expandedLookupResults.value.filter((r) => !isAlreadyAdded(r)).length,
+)
 const rangeStart = computed(() => total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1)
 const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
 const totalCustoManutencao = computed(() => items.value.reduce((a, r) => a + (r.custo_manutencao ?? 0), 0))
@@ -438,7 +442,7 @@ function openAdd() {
   lookupPedido.value = ''
   lookupResults.value = []
   lookupError.value = null
-  draft.value = null
+  drafts.value = []
   addedThisSession.value = new Set()
 }
 function closeAdd() {
@@ -446,22 +450,30 @@ function closeAdd() {
   lookupPedido.value = ''
   lookupResults.value = []
   lookupError.value = null
-  draft.value = null
+  drafts.value = []
   addedThisSession.value = new Set()
 }
 
-function selectLookup(row: LookupRow) {
-  draft.value = {
-    ...row,
-    condicao_produto: '',
-    link_abertura: '',
-    reembolso: false,
-    motivo_devolucao: '',
-    custo_manutencao: null,
-    tecnico: '',
-    devolver_estoque: false,
-    observacao: '',
-  }
+// Um único "usar" para o pedido: traz TODOS os produtos (que ainda não foram
+// adicionados) como linhas de rascunho, cada uma com sua própria condição.
+function selectAllProducts() {
+  drafts.value = expandedLookupResults.value
+    .filter((row) => !isAlreadyAdded(row))
+    .map((row) => ({
+      ...row,
+      condicao_produto: '',
+      link_abertura: '',
+      reembolso: false,
+      motivo_devolucao: '',
+      custo_manutencao: null,
+      tecnico: '',
+      devolver_estoque: false,
+      observacao: '',
+    }))
+}
+
+function removeDraft(index: number) {
+  drafts.value = drafts.value.filter((_, i) => i !== index)
 }
 
 async function lookupOrder() {
@@ -470,7 +482,7 @@ async function lookupOrder() {
   lookupLoading.value = true
   lookupError.value = null
   lookupResults.value = []
-  draft.value = null
+  drafts.value = []
   try {
     const res = await api<LookupRow[]>(`/api/devolutions/order-lookup?pedido=${encodeURIComponent(pedido)}`)
     lookupResults.value = res
@@ -482,53 +494,67 @@ async function lookupOrder() {
   }
 }
 
-function draftPayload() {
-  if (!draft.value) return null
+function buildPayload(d: DevolutionDraft) {
   return {
-    data: draft.value.data,
-    pedido_bling: draft.value.pedido_bling,
-    pedido_marketplace: draft.value.pedido_marketplace,
-    conta: draft.value.conta,
-    sku: draft.value.sku,
-    produtos: draft.value.produtos,
-    custo_produto: draft.value.custo_produto,
-    condicao_produto: draft.value.condicao_produto || null,
-    link_abertura: draft.value.link_abertura || null,
-    reembolso: draft.value.reembolso,
-    motivo_devolucao: draft.value.motivo_devolucao || null,
-    custo_manutencao: draft.value.custo_manutencao,
-    tecnico: draft.value.tecnico || null,
-    devolver_estoque: draft.value.devolver_estoque,
-    observacao: draft.value.observacao || null,
+    data: d.data,
+    pedido_bling: d.pedido_bling,
+    pedido_marketplace: d.pedido_marketplace,
+    conta: d.conta,
+    sku: d.sku,
+    produtos: d.produtos,
+    custo_produto: d.custo_produto,
+    condicao_produto: d.condicao_produto || null,
+    link_abertura: d.link_abertura || null,
+    reembolso: d.reembolso,
+    motivo_devolucao: d.motivo_devolucao || null,
+    custo_manutencao: d.custo_manutencao,
+    tecnico: d.tecnico || null,
+    devolver_estoque: d.devolver_estoque,
+    observacao: d.observacao || null,
     troca_sku: null as string | null,
     troca_condicao: null as string | null,
     estoque_suffix: null as string | null,
   }
 }
 
-async function createDevolution() {
-  const body = draftPayload()
-  if (!body || !canEdit.value) return
-  if (linkRequired(body.condicao_produto) && !body.link_abertura) {
-    lookupError.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
-    return
+// Adiciona TODOS os produtos do rascunho de uma vez. Cada produto pode disparar
+// os modais de estoque (troca / sufixo .sp), resolvidos em sequência. Produtos
+// que falharem ou cujo modal for cancelado continuam no rascunho para nova tentativa.
+async function createAllDevolutions() {
+  if (!canEdit.value || !drafts.value.length) return
+  for (const d of drafts.value) {
+    if (linkRequired(d.condicao_produto) && !d.link_abertura) {
+      lookupError.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
+      return
+    }
   }
-  // Abre os modais (troca / sufixo .sp) antes de qualquer chamada Bling.
-  const extra = await resolveStockModals(body.condicao_produto, body.sku, body.devolver_estoque)
-  if (extra === null) return // usuário cancelou um modal → aborta
-  Object.assign(body, extra)
   creating.value = true
   lookupError.value = null
+  const remaining: DevolutionDraft[] = []
+  let added = 0
   try {
-    const created = await api<DevolutionRow>('/api/devolutions', { method: 'POST', body })
-    if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
-    total.value += 1
-    addedThisSession.value = new Set([...addedThisSession.value, `${created.pedido_bling}|${created.sku}`])
-    draft.value = null
-    pushToast({ kind: 'success', title: 'Devolução adicionada', lines: [created.sku ? `SKU ${created.sku}` : `Pedido ${created.pedido_bling}`] })
-    if (created.bling_stock_result) showStockToast(created.bling_stock_result)
-  } catch (e: any) {
-    lookupError.value = apiError(e)
+    for (const d of [...drafts.value]) {
+      const body = buildPayload(d)
+      // Abre os modais (troca / sufixo .sp) antes de qualquer chamada Bling.
+      const extra = await resolveStockModals(body.condicao_produto, body.sku, body.devolver_estoque)
+      if (extra === null) { remaining.push(d); continue } // modal cancelado → mantém
+      Object.assign(body, extra)
+      try {
+        const created = await api<DevolutionRow>('/api/devolutions', { method: 'POST', body })
+        if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
+        total.value += 1
+        addedThisSession.value = new Set([...addedThisSession.value, `${created.pedido_bling}|${created.sku}`])
+        added += 1
+        if (created.bling_stock_result) showStockToast(created.bling_stock_result)
+      } catch (e: any) {
+        lookupError.value = apiError(e)
+        remaining.push(d)
+      }
+    }
+    drafts.value = remaining
+    if (added > 0) {
+      pushToast({ kind: 'success', title: 'Devoluções adicionadas', lines: [`${added} produto${added === 1 ? '' : 's'}`] })
+    }
   } finally {
     creating.value = false
   }
@@ -703,7 +729,6 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[50px]">Qtd</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produto</th>
               <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Custo</th>
-              <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]"></th>
             </tr>
           </thead>
           <tbody>
@@ -711,7 +736,7 @@ async function backfillAddresses() {
               v-for="row in expandedLookupResults"
               :key="`${row.pedido_bling}-${row.sku}-${row.conta}`"
               class="border-t"
-              :class="isAlreadyAdded(row) ? 'opacity-50' : 'hover:brightness-95 dark:hover:brightness-110'"
+              :class="isAlreadyAdded(row) ? 'opacity-50' : ''"
             >
               <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
               <td class="px-2 py-1 font-mono">{{ row.pedido_bling || '—' }}</td>
@@ -723,22 +748,32 @@ async function backfillAddresses() {
               <td class="px-2 py-1 text-center tabular-nums">{{ row.quantidade ?? '—' }}</td>
               <td class="px-2 py-1 text-muted-foreground">{{ row.produtos || '—' }}</td>
               <td v-if="isAdmin" class="px-2 py-1 text-right tabular-nums">{{ brl(row.custo_produto) }}</td>
-              <td class="px-2 py-1 text-right">
-                <span v-if="isAlreadyAdded(row)" class="text-[11px] text-muted-foreground">adicionado</span>
-                <Button v-else size="sm" variant="outline" @click="selectLookup(row)">usar</Button>
-              </td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <div v-if="draft" class="overflow-auto">
+      <!-- Um único "usar" para o pedido inteiro — traz todos os produtos como rascunho. -->
+      <div
+        v-if="expandedLookupResults.length > 0 && !drafts.length"
+        class="flex flex-wrap items-center gap-3 border-b px-3 py-2"
+      >
+        <Button size="sm" :disabled="!canEdit || selectableLookupCount === 0" @click="selectAllProducts">
+          <Plus class="size-4 mr-1.5" />
+          usar {{ selectableLookupCount }} produto{{ selectableLookupCount === 1 ? '' : 's' }}
+        </Button>
+        <span v-if="selectableLookupCount === 0" class="text-xs text-muted-foreground">
+          todos os produtos deste pedido já foram adicionados
+        </span>
+      </div>
+
+      <div v-if="drafts.length" class="overflow-auto">
         <table class="min-w-[1600px] w-full text-xs border-collapse">
           <thead class="bg-background">
             <tr>
               <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="6">Identificação</th>
               <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 8 : 7">Devolução</th>
-              <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Ação</th>
+              <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1"></th>
             </tr>
             <tr>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Data</th>
@@ -759,43 +794,43 @@ async function backfillAddresses() {
             </tr>
           </thead>
           <tbody>
-            <tr class="border-t">
-              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(draft.data) }}</td>
-              <td class="px-2 py-1 font-mono">{{ draft.pedido_bling || '—' }}</td>
-              <td class="px-2 py-1 font-mono text-muted-foreground">{{ draft.pedido_marketplace || '—' }}</td>
-              <td class="px-2 py-1">{{ draft.conta }}</td>
-              <td class="px-2 py-1 font-mono">{{ draft.sku || '—' }}</td>
-              <td class="px-2 py-1 text-muted-foreground">{{ draft.produtos || '—' }}</td>
+            <tr v-for="(d, i) in drafts" :key="i" class="border-t">
+              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(d.data) }}</td>
+              <td class="px-2 py-1 font-mono">{{ d.pedido_bling || '—' }}</td>
+              <td class="px-2 py-1 font-mono text-muted-foreground">{{ d.pedido_marketplace || '—' }}</td>
+              <td class="px-2 py-1">{{ d.conta }}</td>
+              <td class="px-2 py-1 font-mono">{{ d.sku || '—' }}</td>
+              <td class="px-2 py-1 text-muted-foreground">{{ d.produtos || '—' }}</td>
               <td v-if="isAdmin" class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-                <input v-model.number="draft.custo_produto" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
+                <input v-model.number="d.custo_produto" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="draft.condicao_produto" :class="sheetSelectClass" @change="(e) => { if ((e.target as HTMLSelectElement).value === 'Extraviado' || (e.target as HTMLSelectElement).value === 'Manutenção') draft!.reembolso = true }">
+                <select v-model="d.condicao_produto" :class="sheetSelectClass" @change="(e) => { if ((e.target as HTMLSelectElement).value === 'Extraviado' || (e.target as HTMLSelectElement).value === 'Manutenção') d.reembolso = true }">
                   <option value="">—</option>
                   <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
                 </select>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input
-                  v-model="draft.link_abertura"
-                  :class="linkRequired(draft.condicao_produto) && !draft.link_abertura ? sheetInputRequiredClass : sheetInputClass"
-                  :placeholder="linkRequired(draft.condicao_produto) ? 'obrigatório' : ''"
+                  v-model="d.link_abertura"
+                  :class="linkRequired(d.condicao_produto) && !d.link_abertura ? sheetInputRequiredClass : sheetInputClass"
+                  :placeholder="linkRequired(d.condicao_produto) ? 'obrigatório' : ''"
                 />
               </td>
               <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model="draft.reembolso" type="checkbox" class="size-4 rounded border accent-primary" />
+                <input v-model="d.reembolso" type="checkbox" class="size-4 rounded border accent-primary" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="draft.motivo_devolucao" :class="sheetSelectClass">
+                <select v-model="d.motivo_devolucao" :class="sheetSelectClass">
                   <option value="">—</option>
                   <option v-for="m in MOTIVOS_DEVOLUCAO" :key="m" :value="m">{{ m }}</option>
                 </select>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model.number="draft.custo_manutencao" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
+                <input v-model.number="d.custo_manutencao" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="draft.tecnico" :class="sheetSelectClass">
+                <select v-model="d.tecnico" :class="sheetSelectClass">
                   <option value="">—</option>
                   <option v-for="t in TECNICOS" :key="t" :value="t">{{ t }}</option>
                 </select>
@@ -804,31 +839,44 @@ async function backfillAddresses() {
                 <button
                   type="button"
                   role="switch"
-                  :aria-checked="draft.devolver_estoque"
+                  :aria-checked="d.devolver_estoque"
                   :class="[
                     'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
-                    draft.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
+                    d.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
                   ]"
-                  @click="draft.devolver_estoque = !draft.devolver_estoque"
+                  @click="d.devolver_estoque = !d.devolver_estoque"
                 >
                   <span
                     :class="[
                       'inline-block size-4 transform rounded-full bg-white shadow transition-transform',
-                      draft.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
+                      d.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
                     ]"
                   />
                 </button>
               </td>
-              <td class="px-2 py-1 text-right border-l-[3px] border-gray-400 dark:border-gray-600">
-                <Button size="sm" :disabled="creating || !canEdit" @click="createDevolution">
-                  <Loader2 v-if="creating" class="size-4 mr-1.5 animate-spin" />
-                  <Plus v-else class="size-4 mr-1.5" />
-                  adicionar
-                </Button>
+              <td class="px-2 py-1 text-center border-l-[3px] border-gray-400 dark:border-gray-600">
+                <button
+                  type="button"
+                  title="Remover este produto"
+                  class="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                  @click="removeDraft(i)"
+                >
+                  <X class="size-4" />
+                </button>
               </td>
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- Um único "adicionar" cria todos os produtos do rascunho de uma vez. -->
+      <div v-if="drafts.length" class="flex flex-wrap items-center justify-end gap-3 border-t px-3 py-2">
+        <span v-if="lookupError" class="mr-auto text-sm text-red-400">{{ lookupError }}</span>
+        <Button size="sm" :disabled="creating || !canEdit" @click="createAllDevolutions">
+          <Loader2 v-if="creating" class="size-4 mr-1.5 animate-spin" />
+          <Plus v-else class="size-4 mr-1.5" />
+          adicionar {{ drafts.length }} produto{{ drafts.length === 1 ? '' : 's' }}
+        </Button>
       </div>
     </div>
 
