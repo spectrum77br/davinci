@@ -519,9 +519,39 @@ async def list_estoque_pedidos(
             "bling_id": o.bling_id,
         })
 
+    # Atrasados (INDEPENDENTE do filtro de data): pedidos com etiqueta
+    # gerada em dia PASSADO e ainda não confirmados pela agência
+    # (situacao=83965 + em_andamento_data preenchida < hoje). O
+    # effective_date desses é a própria em_andamento_data (passada), então
+    # eles NÃO aparecem no filtro de hoje — por isso a contagem vem à
+    # parte. O chip "atrasados" no topo da aba os mostra quando o operador
+    # está no dia de hoje. Respeita o filtro de tag (mesma regra da lista).
+    atr_where: list = [
+        BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA,
+        BlingOrder.em_andamento_data.isnot(None),
+        BlingOrder.em_andamento_data < today_brt,
+        BlingOrder.item_index == 0,
+        BlingOrder.bling_id.isnot(None),
+    ]
+    if tags is not None:
+        atr_where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
+    atrasados_rows = (await session.execute(
+        select(
+            BlingOrder.em_andamento_data,
+            func.count(func.distinct(BlingOrder.bling_id)),
+        )
+        .where(and_(*atr_where))
+        .group_by(BlingOrder.em_andamento_data)
+    )).all()
+    atrasados = sorted(
+        ({"date": d.isoformat(), "count": int(n)} for d, n in atrasados_rows if d),
+        key=lambda x: x["date"],
+    )
+
     return {
         "data": result,
         "periodo": {"inicio": str(data_inicio), "fim": str(data_fim)},
+        "atrasados": atrasados,
     }
 
 

@@ -153,6 +153,10 @@ const search = ref('')
 // Data
 const produtos = ref<ProdutoRow[]>([])
 const pedidos = ref<PedidoRow[]>([])
+// Atrasados vêm do backend (independente do filtro): pedidos com etiqueta
+// gerada em dia passado e ainda não confirmados. O chip do topo os exibe
+// só quando o operador está no filtro de hoje.
+const pedidosAtrasadosRaw = ref<{ date: string; count: number }[]>([])
 const envios = ref<{
   items: EnvioRow[]
   total: number          // sum of conferido envios (footer "Total")
@@ -224,11 +228,15 @@ async function loadPedidos() {
   try {
     const qs = [singleDayDates()]
     if (statusFilter.value !== 'all') qs.push(`status=${statusFilter.value}`)
-    const r = await api<{ data: PedidoRow[] }>(`/api/estoque/pedidos?${qs.join('&')}`)
+    const r = await api<{ data: PedidoRow[]; atrasados?: { date: string; count: number }[] }>(
+      `/api/estoque/pedidos?${qs.join('&')}`,
+    )
     pedidos.value = r.data || []
+    pedidosAtrasadosRaw.value = r.atrasados || []
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'load_failed'
     pedidos.value = []
+    pedidosAtrasadosRaw.value = []
   } finally {
     loading.value = false
   }
@@ -611,32 +619,20 @@ const pedidosNaoEnviadosCount = computed(() =>
   ).size,
 )
 
-// "Atrasado" = pendente (não enviado) que SOBROU de um dia anterior —
-// apareceu no filtro de hoje mas NÃO foi criado hoje. No filtro de hoje
-// todos os pendentes têm em_andamento_data=NULL (o effective_date do
-// backend os fixa em hoje), então o que distingue é a data de criação:
-// criado ANTES do dia que está sendo visto. Os criados hoje ficam de fora.
-// Robusto a fuso: "hoje" do guard = data LOCAL do navegador (BRT); o corte
-// usa o próprio `dia` selecionado (não isoToday/UTC). Só aparece no filtro
-// de hoje — em dias passados o pendente já está visível na lista.
+// "Atrasado" = pedido com ETIQUETA gerada em dia passado e ainda não
+// confirmado pela agência (situacao=83965 + em_andamento_data < hoje).
+// Esse dado vem do backend (`atrasados`), porque o effective_date desses
+// pedidos é a data da etiqueta (passada) — eles NÃO aparecem no filtro de
+// hoje, então o frontend não conseguiria derivá-los do que está carregado.
+// O chip só aparece no filtro de HOJE (data local/BRT) — é um alerta do
+// que sobrou de dias anteriores.
 function _localToday(): string {
   const n = new Date()
   return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`
 }
 const pendentesAntigosByDay = computed(() => {
   if (dia.value !== _localToday()) return []
-  const byDay: Record<string, Set<string>> = {}
-  for (const p of pedidosFiltered.value) {
-    if (p.status !== 'nao_enviado' || !p.pedido_bling) continue
-    const criacao = (p.data_pedido || p.data || '').slice(0, 10)
-    // Criado ANTES do dia visto (= antes de hoje). Os de hoje ficam fora.
-    if (!criacao || criacao >= dia.value) continue
-    if (!byDay[criacao]) byDay[criacao] = new Set<string>()
-    byDay[criacao].add(p.pedido_bling)
-  }
-  return Object.entries(byDay)
-    .map(([date, set]) => ({ date, count: set.size }))
-    .sort((a, b) => a.date.localeCompare(b.date))
+  return pedidosAtrasadosRaw.value
 })
 const totalPendentesAntigos = computed(() =>
   pendentesAntigosByDay.value.reduce((s, g) => s + g.count, 0),
