@@ -588,10 +588,10 @@ async function createAllDevolutions() {
   let added = 0
   try {
     for (const d of [...drafts.value]) {
-      // No ADD: Novo/Usado/Trocado processam estoque sempre; Manutenção só com
-      // o toggle "devolver estoque" ligado; Extraviado não mexe no estoque.
+      // No ADD: só Novo/Usado/Trocado processam estoque. Manutenção e Extraviado
+      // não mexem no estoque no add (Manutenção volta ao estoque depois, pelo
+      // toggle na linha já inserida).
       const processAtAdd = ['Novo', 'Usado', 'Trocado'].includes(d.condicao_produto)
-        || (d.condicao_produto === 'Manutenção' && d.devolver_estoque)
       let extra: StockModalFields | null = null
       if (processAtAdd) {
         // Abre os modais (manutenção / troca / destino) antes da chamada Bling.

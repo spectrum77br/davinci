@@ -58,6 +58,7 @@ _STOCK_TRIGGER_CONDICOES = _STOCK_CONDICOES | {"Trocado", "Manutenção"}
 SITUACAO_RESOLVIDO = 545902
 SITUACAO_EXTRAVIADO = 83960
 SITUACAO_SUCATA = 545901
+SITUACAO_MANUTENCAO = 84677
 
 # Sufixos regionais válidos — fonte única em app.services.sku_tags.
 _SUFFIX_TAGS = _SKU_SUFFIX_TAGS
@@ -129,7 +130,8 @@ async def _get_bling_client(session: AsyncSession) -> BlingClient | None:
 # ── Situação do pedido ───────────────────────────────────────────────────
 
 def _resolution_of(row: Devolution) -> str:
-    """Classifica a 'resolução' do item: extraviado|sucata|resolvido|unresolved."""
+    """Classifica a 'resolução' do item:
+    extraviado | sucata | manutencao (pendente) | resolvido | unresolved."""
     c = (row.condicao_produto or "").strip()
     if c == "Extraviado":
         return "extraviado"
@@ -139,7 +141,7 @@ def _resolution_of(row: Devolution) -> str:
             return "sucata"
         if d in _STOCK_CONDICOES:
             return "resolvido"
-        return "unresolved"
+        return "manutencao"  # ainda em manutenção (destino não escolhido)
     if c in ("Novo", "Usado", "Trocado"):
         return "resolvido"
     return "unresolved"
@@ -148,8 +150,10 @@ def _resolution_of(row: Devolution) -> str:
 def _order_situacao_target(rows: list[Devolution]) -> int | None:
     """Situação única do pedido pela precedência pior→melhor.
 
-    Extraviado > Sucata > Trocado/Resolvido. "Resolvido" por Novo/Usado só
-    quando TODOS os itens estão resolvidos; um Trocado força resolvido.
+    Extraviado > Sucata > Manutenção(pendente) > Trocado/Resolvido. "Resolvido"
+    por Novo/Usado só quando TODOS os itens estão resolvidos; um Trocado força
+    resolvido. Manutenção pendente mantém o pedido "em manutenção" até o
+    técnico escolher Novo/Usado/Sucata.
     """
     if not rows:
         return None
@@ -159,6 +163,8 @@ def _order_situacao_target(rows: list[Devolution]) -> int | None:
         return SITUACAO_EXTRAVIADO
     if "sucata" in res:
         return SITUACAO_SUCATA
+    if "manutencao" in res:
+        return SITUACAO_MANUTENCAO
     if "Trocado" in conds:
         return SITUACAO_RESOLVIDO
     if all(r == "resolvido" for r in res):
