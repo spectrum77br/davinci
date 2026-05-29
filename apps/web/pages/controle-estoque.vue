@@ -886,9 +886,7 @@ async function conferirTodos() {
           <col style="width: 80px" />   <!-- SKU -->
           <col style="width: 160px" />  <!-- Produto -->
           <col style="width: 50px" />   <!-- Entrada Qtd -->
-          <col style="width: 110px" />  <!-- Entrada Obs -->
           <col style="width: 50px" />   <!-- Saída Qtd -->
-          <col style="width: 100px" />  <!-- Saída Nº Pedidos -->
           <col style="width: 60px" />   <!-- Saldo Atual -->
           <col style="width: 55px" />   <!-- Saldo Reserva -->
           <col style="width: 40px" />   <!-- Conf -->
@@ -896,8 +894,8 @@ async function conferirTodos() {
         <thead>
           <tr class="bg-muted/50">
             <th class="text-left text-[11px] font-semibold" colspan="2">Identificação</th>
-            <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20" colspan="2">Entrada</th>
-            <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20" colspan="2">Saída</th>
+            <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20">Entrada</th>
+            <th class="text-center text-[11px] font-semibold bg-amber-50 dark:bg-amber-900/20">Saída</th>
             <th class="text-center text-[11px] font-semibold bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Saldo</th>
             <th class="text-center text-[11px] font-semibold bg-gray-100 dark:bg-gray-800/40">Conf.</th>
           </tr>
@@ -905,9 +903,7 @@ async function conferirTodos() {
             <th class="text-left">SKU</th>
             <th class="text-left">Produto</th>
             <th class="text-right bg-amber-50/60 dark:bg-amber-900/10">Qtd</th>
-            <th class="text-left bg-amber-50/60 dark:bg-amber-900/10">Obs</th>
             <th class="text-right bg-amber-50/60 dark:bg-amber-900/10">Qtd</th>
-            <th class="text-left bg-amber-50/60 dark:bg-amber-900/10">Nº Pedidos</th>
             <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10">Atual</th>
             <th class="text-right bg-emerald-50/60 dark:bg-emerald-900/10">Reserva</th>
             <th class="text-center bg-gray-100/60 dark:bg-gray-800/30">✓</th>
@@ -915,7 +911,7 @@ async function conferirTodos() {
         </thead>
         <tbody>
           <tr v-if="produtosFiltered.length === 0">
-            <td colspan="9" class="py-6 text-center text-muted-foreground">
+            <td colspan="7" class="py-6 text-center text-muted-foreground">
               Nenhum produto para esse filtro.
             </td>
           </tr>
@@ -926,8 +922,7 @@ async function conferirTodos() {
           >
             <td class="font-mono text-[11px] truncate" :title="row.sku">{{ row.sku }}</td>
             <td class="truncate" :title="row.nome">{{ row.nome }}</td>
-            <!-- Entrada Qtd + Obs are split into 2 cells but visually
-                 aligned: same vertical stack of N entradas in each. -->
+            <!-- Entrada: só Qtd (stack vertical das N entradas). -->
             <td class="bg-amber-50/40 dark:bg-amber-900/5 align-top text-right">
               <div v-if="row.entradas.length === 0" class="text-muted-foreground/60">—</div>
               <div v-else class="space-y-0.5">
@@ -939,35 +934,11 @@ async function conferirTodos() {
                 </div>
               </div>
             </td>
-            <td class="bg-amber-50/40 dark:bg-amber-900/5 align-top p-0">
-              <div v-if="row.entradas.length === 0" class="p-0.5">
-                <input
-                  :value="row._skuObsValue ?? ''"
-                  placeholder="—"
-                  class="obs-input"
-                  @blur="(ev) => saveSkuObs(row, (ev.target as HTMLInputElement).value)"
-                  @keyup.enter="($event.target as HTMLInputElement).blur()"
-                />
-              </div>
-              <div v-else class="space-y-0.5 p-0.5">
-                <input
-                  v-for="(e, idx) in row.entradas" :key="e.movement_id"
-                  :value="e.obs"
-                  placeholder="—"
-                  class="obs-input"
-                  @blur="(ev) => patchMovementObs(e.movement_id, (ev.target as HTMLInputElement).value, row, idx)"
-                  @keyup.enter="($event.target as HTMLInputElement).blur()"
-                />
-              </div>
-            </td>
             <td
               class="text-right bg-amber-50/40 dark:bg-amber-900/5"
               :class="row.saida_qty_total > 0 ? 'font-semibold text-amber-700 dark:text-amber-300' : 'text-muted-foreground/60'"
             >
               {{ row.saida_qty_total || '—' }}
-            </td>
-            <td class="truncate bg-amber-50/40 dark:bg-amber-900/5" :title="row.saida_origens">
-              {{ row.saida_origens || '—' }}
             </td>
             <td
               class="text-right bg-emerald-50/40 dark:bg-emerald-900/5 font-semibold"
