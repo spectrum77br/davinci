@@ -62,6 +62,13 @@ SITUACAO_SUCATA = 545901
 # Sufixos regionais válidos — fonte única em app.services.sku_tags.
 _SUFFIX_TAGS = _SKU_SUFFIX_TAGS
 
+# Mala (b+dígito) e Eletro (u…) voltam direto no próprio SKU — sem tag/bin.
+_MALA_OR_ELETRO_RE = re.compile(r"^(b[0-9]|u)", re.IGNORECASE)
+
+
+def _is_mala_or_eletro(sku: str | None) -> bool:
+    return bool(_MALA_OR_ELETRO_RE.match((sku or "").strip()))
+
 type StockResult = dict[str, Any]
 
 
@@ -273,7 +280,11 @@ async def return_product_to_bling_stock(
         # 3) Legado: modal `.sp` antigo (sufixo regional direto).
         if row.estoque_suffix and (suffix := row.estoque_suffix.strip().lower().lstrip(".")):
             return await _return_with_suffix(client, eff_sku, suffix, row, qty, ctx)
-        # 4) Sem destino do modal — comportamento direto pelo SKU.
+        # 4) Mala/Eletro: entrada direta no próprio SKU (salvaguarda — o front já
+        #    manda estoque_destino_sku, mas garante no PATCH/uso direto da API).
+        if _is_mala_or_eletro(eff_sku):
+            return await _return_to_existing(client, eff_sku, qty, ctx)
+        # 5) Sem destino do modal — comportamento direto pelo SKU.
         if eff_condicao == "Novo":
             return await _return_novo(client, eff_sku, qty, ctx)
         return await _return_usado(client, eff_sku, row, qty, ctx)

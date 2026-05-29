@@ -214,6 +214,10 @@ const STOCK_TRIGGER_CONDICOES = ['Novo', 'Usado', 'Trocado', 'Manutenção']
 function isStockTrigger(condicao: string | null | undefined) {
   return !!condicao && STOCK_TRIGGER_CONDICOES.includes(condicao)
 }
+// Mala (b+dígito) e Eletro (u…) voltam direto no próprio SKU — sem modal de tag.
+function isMalaOrEletro(sku: string | null | undefined) {
+  return /^(b[0-9]|u)/i.test((sku || '').trim())
+}
 
 type TrocaResult = { sku: string; condicao: 'Novo' | 'Usado' }
 const trocaModal = ref<{ open: boolean; soldSku: string | null; resolve: ((v: TrocaResult | null) => void) | null }>(
@@ -302,6 +306,12 @@ async function resolveStockModals(
     out.troca_condicao = r.condicao
     effSku = r.sku.trim()
     effCondicao = r.condicao
+  }
+
+  // Mala/Eletro: volta direto no próprio SKU, sem modal de tag/bin.
+  if (isMalaOrEletro(effSku)) {
+    out.estoque_destino_sku = effSku
+    return out
   }
 
   // Destino de estoque: bin existente ou criação de produto novo (z000N.<tag>).
