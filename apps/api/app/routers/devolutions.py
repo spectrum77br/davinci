@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated
 from uuid import UUID
@@ -85,7 +86,7 @@ async def list_devolutions(
     search: str | None = Query(None),
     reembolso: bool | None = Query(None),
     tag: str | None = Query(None),
-    data_devolvido_estoque: date | None = Query(None),
+    data_devolucao: date | None = Query(None),
 ) -> DevolutionPage:
     where = []
     if search and search.strip():
@@ -95,11 +96,12 @@ async def list_devolutions(
     if tag and tag.strip() and tag.strip().lower() != "all":
         normalized_tag = tag.strip().lower().lstrip(".")
         where.append(Devolution.tag == normalized_tag)
-    if data_devolvido_estoque is not None:
-        start = datetime.combine(data_devolvido_estoque, time.min, tzinfo=SAO_PAULO)
+    # "Data de devolução" = quando o registro entrou no sistema (created_at).
+    if data_devolucao is not None:
+        start = datetime.combine(data_devolucao, time.min, tzinfo=SAO_PAULO)
         end = start + timedelta(days=1)
-        where.append(Devolution.data_devolvido_estoque >= start.astimezone(UTC))
-        where.append(Devolution.data_devolvido_estoque < end.astimezone(UTC))
+        where.append(Devolution.created_at >= start.astimezone(UTC))
+        where.append(Devolution.created_at < end.astimezone(UTC))
 
     stmt = (
         select(Devolution)
@@ -172,7 +174,7 @@ async def lookup_devolution_order(
         )
     ).mappings().all()
 
-    expanded = _split_compound_skus([dict(r) for r in rows])
+    expanded = _split_mala_sizes(_split_compound_skus([dict(r) for r in rows]))
 
     part_skus = sorted({
         s for r in expanded
@@ -227,6 +229,40 @@ def _split_compound_skus(rows: list[dict]) -> list[dict]:
                 for part in parts:
                     out.append({**row, "sku": part, "custo_produto": split_cost, "_compound": True})
                 continue
+        out.append(row)
+    return out
+
+
+_MALA_BASE_RE = re.compile(r"^b[0-9]", re.IGNORECASE)
+_MALA_SIZE_RE = re.compile(r"^[0-9]+$")
+
+
+def _split_mala_sizes(rows: list[dict]) -> list[dict]:
+    """Mala com vários tamanhos no SKU é, na verdade, várias malas distintas.
+
+    `b004.12.18` = base `b004` + tamanhos `12` e `18` → duas malas separadas
+    `b004.12` e `b004.18`, uma linha por tamanho. Só dispara quando a base é
+    de mala (`b` + dígito) e TODOS os segmentos após a base são numéricos
+    (tamanho) — assim sufixos regionais (`.sp`, `.us`…) nunca são divididos.
+    Nome/custo de cada tamanho são resolvidos depois na tabela products; o
+    custo dividido aqui é só fallback.
+    """
+    out: list[dict] = []
+    for row in rows:
+        sku = (row.get("sku") or "").strip()
+        parts = sku.split(".")
+        if (
+            len(parts) >= 3
+            and _MALA_BASE_RE.match(parts[0])
+            and all(_MALA_SIZE_RE.match(p) for p in parts[1:])
+        ):
+            base = parts[0]
+            sizes = parts[1:]
+            base_cost = row.get("custo_produto") or 0.0
+            split_cost = base_cost / len(sizes) if base_cost else base_cost
+            for size in sizes:
+                out.append({**row, "sku": f"{base}.{size}", "custo_produto": split_cost, "_compound": True})
+            continue
         out.append(row)
     return out
 

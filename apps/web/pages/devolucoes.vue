@@ -194,7 +194,7 @@ const error = ref<string | null>(null)
 const search = ref('')
 const reembolsoFilter = ref<ReembolsoFilter>('all')
 const tagFilter = ref('all')
-const dataDevolvidoEstoqueFilter = ref('')
+const dataDevolucaoFilter = ref('')
 
 const addOpen = ref(false)
 const lookupPedido = ref('')
@@ -452,7 +452,7 @@ async function load() {
     if (search.value.trim()) params.set('search', search.value.trim())
     if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
     if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
-    if (dataDevolvidoEstoqueFilter.value) params.set('data_devolvido_estoque', dataDevolvidoEstoqueFilter.value)
+    if (dataDevolucaoFilter.value) params.set('data_devolucao', dataDevolucaoFilter.value)
     const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
     items.value = res.items
     total.value = res.total
@@ -474,7 +474,7 @@ watch(search, () => {
     load()
   }, 300)
 })
-watch([reembolsoFilter, tagFilter, dataDevolvidoEstoqueFilter], () => { page.value = 1; load() })
+watch([reembolsoFilter, tagFilter, dataDevolucaoFilter], () => { page.value = 1; load() })
 watch(page, () => load())
 
 function openAdd() {
@@ -940,9 +940,9 @@ async function backfillAddresses() {
         <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">{{ opt.label }}</option>
       </select>
       <input
-        v-model="dataDevolvidoEstoqueFilter"
+        v-model="dataDevolucaoFilter"
         type="date"
-        title="Data devolvido estoque"
+        title="Data devolução"
         class="h-9 rounded-md border bg-background px-2 text-sm"
       />
       <span class="ml-auto text-xs text-muted-foreground">
