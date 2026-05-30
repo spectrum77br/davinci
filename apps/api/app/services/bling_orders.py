@@ -11,11 +11,12 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -577,10 +578,7 @@ async def upsert_order(
         product_categories_by_sku,
     ) = await _product_categories_by_item(session, itens)
 
-    await session.execute(
-        delete(BlingOrder).where(BlingOrder.bling_id == bling_id)
-    )
-
+    rows: list[dict[str, Any]] = []
     if not itens:
         # Order with no items — keep one summary row at item_index=0.
         row = _row_from_item(
@@ -593,27 +591,62 @@ async def upsert_order(
             product_categories_by_sku=product_categories_by_sku,
             em_andamento_data_final=nova_data,
         )
-        session.add(BlingOrder(**row))
-        return 1
+        row["preco_custo"] = None
+        rows.append(row)
+    else:
+        for idx, item in enumerate(itens):
+            if not isinstance(item, dict):
+                continue
+            row = _row_from_item(
+                raw_order,
+                item,
+                item_index=idx,
+                store_id=store_id,
+                category_names_by_id=category_names_by_id,
+                product_categories_by_id=product_categories_by_id,
+                product_categories_by_sku=product_categories_by_sku,
+                em_andamento_data_final=nova_data,
+            )
+            sku = (row.get("item_codigo") or "").strip() if row.get("item_codigo") else None
+            row["preco_custo"] = cost_by_sku.get(sku) if sku else None
+            rows.append(row)
 
-    for idx, item in enumerate(itens):
-        if not isinstance(item, dict):
-            continue
-        row = _row_from_item(
-            raw_order,
-            item,
-            item_index=idx,
-            store_id=store_id,
-            category_names_by_id=category_names_by_id,
-            product_categories_by_id=product_categories_by_id,
-            product_categories_by_sku=product_categories_by_sku,
-            em_andamento_data_final=nova_data,
+    if not rows:
+        return 0
+
+    # Upsert por (bling_id, item_index) em vez de DELETE+INSERT: preserva
+    # bling_orders.id entre re-ingests. O uuid4 trocava a cada re-ingest e
+    # defasava o PK guardado no snapshot verificar_margem — causando
+    # bling_order_not_found na página de margens. A UNIQUE (bling_id,
+    # item_index) (migration 0111) também serializa webhooks concorrentes
+    # que antes geravam linhas duplicadas. id é gerado aqui (não via default
+    # do ORM) porque pg_insert não dispara defaults Python; na colisão o id
+    # NÃO entra no SET, então o id existente é preservado. Colunas fora de
+    # _row_from_item (status, observacao, aprovado_por, entregue_at, …) também
+    # ficam de fora do SET e são preservadas — antes o DELETE+INSERT as perdia.
+    for row in rows:
+        row["id"] = uuid4()
+    stmt = pg_insert(BlingOrder).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["bling_id", "item_index"],
+        set_={
+            col: getattr(stmt.excluded, col)
+            for col in rows[0]
+            if col not in ("id", "bling_id", "item_index")
+        },
+    )
+    await session.execute(stmt)
+
+    # Remove itens que saíram do pedido (existiam antes, não vieram agora),
+    # sem tocar nos ids dos que permanecem.
+    kept_item_index = [row["item_index"] for row in rows]
+    await session.execute(
+        delete(BlingOrder).where(
+            BlingOrder.bling_id == bling_id,
+            BlingOrder.item_index.notin_(kept_item_index),
         )
-        sku = (row.get("item_codigo") or "").strip() if row.get("item_codigo") else None
-        if sku and sku in cost_by_sku:
-            row["preco_custo"] = cost_by_sku[sku]
-        session.add(BlingOrder(**row))
-    return len(itens)
+    )
+    return len(rows)
 
 
 async def mark_order_excluido(

@@ -395,6 +395,42 @@ async def patch_marketplace_observacao(
     return {"pedido_bling": pedido_bling, "observacao": next_value, "rows": result.rowcount}
 
 
+async def _update_bling_item_resilient(
+    session: AsyncSession,
+    *,
+    bling_order_item_id: UUID,
+    pedido_bling: str | None,
+    sku: str | None,
+    values: dict,
+) -> bool:
+    """UPDATE de bling_orders para um item da página de margens, curando um
+    PK de snapshot defasado.
+
+    O snapshot `verificar_margem` guarda `bling_orders.id` (um uuid4 que
+    troca a cada re-ingest, porque `upsert_order` faz DELETE+INSERT). Se o
+    pedido foi re-ingerido depois que a página/snapshot foi montada, o `id`
+    cacheado não casa mais e o UPDATE tocaria 0 linhas → o usuário via
+    `bling_order_not_found` numa ação que deveria funcionar. Quando isso
+    acontece, re-resolve pela identidade estável do pedido (numero +
+    item_codigo; no snapshot `sku` == `bling_orders.item_codigo`) e repete.
+    Retorna True se alguma linha foi atualizada.
+    """
+    result = await session.execute(
+        update(BlingOrder).where(BlingOrder.id == bling_order_item_id).values(**values)
+    )
+    if result.rowcount:
+        return True
+    if pedido_bling is None:
+        return False
+    target = await _find_bling_order_by_pedido(session, str(pedido_bling), sku)
+    if target is None:
+        return False
+    result = await session.execute(
+        update(BlingOrder).where(BlingOrder.id == target.id).values(**values)
+    )
+    return bool(result.rowcount)
+
+
 @router.post("/marketplace/{bling_order_item_id}/sync-from-marketplace")
 async def sync_bling_from_marketplace(
     bling_order_item_id: UUID,
@@ -430,7 +466,8 @@ async def sync_bling_from_marketplace(
                 THEN 0::numeric
                 ELSE {_FRETE_PLATAFORMA_SQL}
               END AS custofrete,
-              v.pedido_bling
+              v.pedido_bling,
+              v.sku
             FROM {_VERIFICAR_MARGEM_TABLE} v
             WHERE v.bling_order_item_id = :id
             LIMIT 1
@@ -443,16 +480,18 @@ async def sync_bling_from_marketplace(
     if row.valorbase is None and row.taxacomissao is None and row.custofrete is None:
         raise HTTPException(400, detail={"code": "no_marketplace_data"})
 
-    result = await session.execute(
-        update(BlingOrder)
-        .where(BlingOrder.id == bling_order_item_id)
-        .values(
-            valorbase=row.valorbase,
-            taxacomissao=row.taxacomissao,
-            custofrete=row.custofrete,
-        )
+    updated = await _update_bling_item_resilient(
+        session,
+        bling_order_item_id=bling_order_item_id,
+        pedido_bling=row.pedido_bling,
+        sku=row.sku,
+        values={
+            "valorbase": row.valorbase,
+            "taxacomissao": row.taxacomissao,
+            "custofrete": row.custofrete,
+        },
     )
-    if result.rowcount == 0:
+    if not updated:
         raise HTTPException(404, detail={"code": "bling_order_not_found"})
     await _patch_verificar_margem_financials_silent(
         session,
@@ -495,7 +534,7 @@ async def sync_bling_from_saldo_final(
     row = (await session.execute(
         text(
             f"""
-            SELECT v.saldo_final, v.pedido_bling
+            SELECT v.saldo_final, v.pedido_bling, v.sku
             FROM {_VERIFICAR_MARGEM_TABLE} v
             WHERE v.bling_order_item_id = :id
             LIMIT 1
@@ -508,16 +547,18 @@ async def sync_bling_from_saldo_final(
     if row.saldo_final is None:
         raise HTTPException(400, detail={"code": "no_saldo_final"})
 
-    result = await session.execute(
-        update(BlingOrder)
-        .where(BlingOrder.id == bling_order_item_id)
-        .values(
-            valorbase=row.saldo_final,
-            taxacomissao=0,
-            custofrete=0,
-        )
+    updated = await _update_bling_item_resilient(
+        session,
+        bling_order_item_id=bling_order_item_id,
+        pedido_bling=row.pedido_bling,
+        sku=row.sku,
+        values={
+            "valorbase": row.saldo_final,
+            "taxacomissao": 0,
+            "custofrete": 0,
+        },
     )
-    if result.rowcount == 0:
+    if not updated:
         raise HTTPException(404, detail={"code": "bling_order_not_found"})
     await _patch_verificar_margem_financials_silent(
         session,
