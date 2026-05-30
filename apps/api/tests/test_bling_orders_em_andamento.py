@@ -1,77 +1,71 @@
-"""Preservação de em_andamento_data no re-ingest de bling_orders.
+"""Regra de em_andamento_data (data operacional na aba Pedidos).
 
-Bug (regressão 2026-05-28): webhooks subsequentes de pedido já
-despachado (taxa/endereço chegam dias depois) re-carimbavam
-em_andamento_data com "hoje", empurrando pedidos antigos pro dia
-atual. Fix: em_andamento_data é a data do PRIMEIRO "Em andamento"
-e não muda — `_row_from_item` preserva o valor passado em
-`preserved_em_andamento`.
+Decidida em _next_em_andamento_data (services/bling_orders.py):
+- transição PARA 15 (agência confirmou AGORA) carimba o DIA DA CONFIRMAÇÃO,
+  sobrescrevendo o provisório do 83965 (etiqueta 30 + confirmação 31 => 31);
+- já em 15 (re-disparo taxa/endereço) PRESERVA — não empurra pra hoje (bug
+  2026-05-28);
+- 83965 sem data recebe PROVISÓRIO = dia da etiqueta (pra não flutuar);
+- situacao 6 e demais ficam sem data.
 """
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
-from app.services.bling_orders import _row_from_item
-
-_RAW_SHIPPED = {"situacao": {"id": 15}, "loja": {}, "itens": []}
-_RAW_OPEN = {"situacao": {"id": 6}, "loja": {}, "itens": []}
-_RAW_ETIQUETA = {"situacao": {"id": 83965}, "loja": {}, "itens": []}
+from app.services.bling_orders import _next_em_andamento_data, _row_from_item
 
 
-def test_first_ship_stamps_today_when_no_preserved():
-    """1ª vez em situacao=15 sem valor anterior → carimba hoje (BRT op)."""
-    row = _row_from_item(_RAW_SHIPPED, {}, item_index=0, store_id=None)
-    today_brt = _row_today()
-    assert row["em_andamento_data"] == today_brt
-
-
-def test_preserved_date_is_kept_on_reingest():
-    """Webhook subsequente (situacao ainda 15) preserva a data original."""
-    old = date(2026, 5, 26)
-    row = _row_from_item(
-        _RAW_SHIPPED, {}, item_index=0, store_id=None,
-        preserved_em_andamento=old,
-    )
-    assert row["em_andamento_data"] == old
-
-
-def test_open_status_without_preserved_is_none():
-    row = _row_from_item(_RAW_OPEN, {}, item_index=0, store_id=None)
-    assert row["em_andamento_data"] is None
-
-
-def test_open_status_with_preserved_keeps_history():
-    """Pedido que voltou de 15 → 6 mantém o ship-date histórico."""
-    old = date(2026, 5, 26)
-    row = _row_from_item(
-        _RAW_OPEN, {}, item_index=0, store_id=None,
-        preserved_em_andamento=old,
-    )
-    assert row["em_andamento_data"] == old
-
-
-def test_83965_stamps_today_when_no_preserved():
-    """Entrar em 83965 (Enviado Etiqueta) já carimba a data — antes só
-    carimbava em 15, então pedidos parados em 83965 flutuavam pra hoje."""
-    row = _row_from_item(_RAW_ETIQUETA, {}, item_index=0, store_id=None)
-    today_brt = _row_today()
-    assert row["em_andamento_data"] == today_brt
-
-
-def test_83965_to_15_preserves_existing_date():
-    """Transição 83965 → 15 (agência confirmou) preserva a data carimbada
-    no 83965. O badge muda de vermelho pra verde por situacao, mas o
-    dia NÃO muda."""
-    stamped_at_83965 = date(2026, 5, 26)
-    row = _row_from_item(
-        _RAW_SHIPPED, {}, item_index=0, store_id=None,
-        preserved_em_andamento=stamped_at_83965,
-    )
-    assert row["em_andamento_data"] == stamped_at_83965
-
-
-def _row_today() -> date:
-    """Data operacional de hoje — espelha _operational_ship_date(now())
-    sem reimportar (cutoff 10h BRT)."""
+def _hoje_op() -> date:
     from app.services.marketplace_shipment_check import _operational_ship_date
     return _operational_ship_date(datetime.now(UTC))
+
+
+def _next(nova, antiga, data_existente):
+    return _next_em_andamento_data(
+        nova_situacao=nova, situacao_antiga=antiga,
+        data_existente=data_existente, agora=datetime.now(UTC),
+    )
+
+
+def test_transicao_83965_para_15_vai_pro_dia_da_confirmacao():
+    # etiqueta provisória em 26/05; confirma HOJE => passa a ser HOJE, não 26/05
+    assert _next("15", "83965", date(2026, 5, 26)) == _hoje_op()
+
+
+def test_transicao_6_para_15_carimba_hoje():
+    assert _next("15", "6", None) == _hoje_op()
+    assert _next("15", None, None) == _hoje_op()
+
+
+def test_ja_em_15_redisparo_preserva():
+    assert _next("15", "15", date(2026, 5, 26)) == date(2026, 5, 26)
+
+
+def test_83965_sem_data_carimba_provisorio_hoje():
+    assert _next("83965", "6", None) == _hoje_op()
+    assert _next("83965", None, None) == _hoje_op()
+
+
+def test_83965_com_data_preserva():
+    assert _next("83965", "83965", date(2026, 5, 26)) == date(2026, 5, 26)
+
+
+def test_6_sem_data_fica_none():
+    assert _next("6", None, None) is None
+
+
+def test_6_com_data_mantem_historico():
+    assert _next("6", "83965", date(2026, 5, 26)) == date(2026, 5, 26)
+
+
+def test_row_from_item_repassa_data_final():
+    raw = {"situacao": {"id": 15}, "loja": {}, "itens": []}
+    row = _row_from_item(raw, {}, item_index=0, store_id=None,
+                         em_andamento_data_final=date(2026, 5, 30))
+    assert row["em_andamento_data"] == date(2026, 5, 30)
+
+
+def test_row_from_item_sem_data_fica_none():
+    raw = {"situacao": {"id": 6}, "loja": {}, "itens": []}
+    row = _row_from_item(raw, {}, item_index=0, store_id=None)
+    assert row["em_andamento_data"] is None

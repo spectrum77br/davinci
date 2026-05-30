@@ -9,7 +9,7 @@ fetched via `GET /pedidos/vendas/{id}` and split into one row per item.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -139,16 +139,14 @@ def _row_from_item(
     category_names_by_id: dict[int, str] | None = None,
     product_categories_by_id: dict[int, tuple[int | None, str]] | None = None,
     product_categories_by_sku: dict[str, tuple[int | None, str]] | None = None,
-    preserved_em_andamento=None,
+    em_andamento_data_final: date | None = None,
 ) -> dict[str, Any]:
     """Flatten one (order, item) pair into a `bling_orders` row dict.
 
-    `preserved_em_andamento`: ship-date já gravado antes deste re-ingest
-    (passado pelo caller que faz delete+reinsert). Quando presente, é
-    mantido — em_andamento_data é a data do PRIMEIRO "Em andamento" e
-    NÃO deve mudar em webhooks subsequentes (taxa/endereço chegam dias
-    depois e re-disparam o webhook). Só carimba data nova quando não há
-    valor preservado E situacao=15.
+    `em_andamento_data_final`: data já decidida pelo caller via
+    `_next_em_andamento_data` (que conhece a situação ANTERIOR e aplica a
+    regra de transição). Este helper só repassa — toda a lógica de
+    transição 83965/15 mora no caller.
     """
     loja = raw_order.get("loja") or {}
     if not isinstance(loja, dict):
@@ -198,20 +196,10 @@ def _row_from_item(
         if isinstance(raw_order.get("situacao"), dict)
         else (str(raw_order.get("situacao")) if raw_order.get("situacao") is not None else None)
     )
-    # em_andamento_data = data do PRIMEIRO "despachado" (83965 Enviado
-    # Etiqueta OU 15 Atendido). Fato histórico, não muda em webhooks
-    # subsequentes. Preserva o valor já gravado quando o caller passa
-    # preserved_em_andamento (delete+reinsert path); só calcula data nova
-    # quando não há valor anterior E a situação é 83965 ou 15. Carimbar já
-    # no 83965 evita o "flutuar" do pedido pra HOJE no filtro da aba —
-    # antes só carimbávamos no 15 e pedidos parados em 83965 nunca
-    # ganhavam data, grudando em hoje todo dia.
-    if preserved_em_andamento is not None:
-        em_andamento_data = preserved_em_andamento
-    elif situacao_id in _SHIP_STAMP_SITUACOES:
-        em_andamento_data = _operational_ship_date(datetime.now(UTC))
-    else:
-        em_andamento_data = None
+    # em_andamento_data é decidida pelo caller (upsert_order via
+    # _next_em_andamento_data) e passada pronta — a regra de transição
+    # 83965->15 mora no caller, que conhece a situação ANTERIOR.
+    em_andamento_data = em_andamento_data_final
 
     transporte = raw_order.get("transporte") or {}
     if not isinstance(transporte, dict):
@@ -297,6 +285,33 @@ def _situacao_id(raw_order: dict[str, Any]) -> str | None:
         sid = s.get("id")
         return str(sid) if sid is not None else None
     return str(s) if s is not None else None
+
+
+def _next_em_andamento_data(
+    *,
+    nova_situacao: str | None,
+    situacao_antiga: str | None,
+    data_existente: date | None,
+    agora: datetime,
+) -> date | None:
+    """Decide a em_andamento_data (data operacional na planilha de Pedidos).
+
+    - Transição PARA 15 (Atendido = agência confirmou AGORA): carimba o DIA DA
+      CONFIRMAÇÃO, sobrescrevendo o provisório do 83965. É o que a operação
+      quer: etiqueta dia 30 + confirmação dia 31 => pedido fica no dia 31.
+    - Já estava em 15 (re-disparo de taxa/endereço dias depois): preserva — não
+      empurra pra hoje (bug 2026-05-28).
+    - 83965 (Enviado Etiqueta) sem data ainda: provisório = dia da etiqueta, só
+      pra não 'flutuar' pra HOJE no filtro. Badge segue vermelho (é por situacao).
+    - Demais (6 Em aberto etc.): mantém o que houver (normalmente NULL).
+    """
+    if nova_situacao == "15" and situacao_antiga != "15":
+        return _operational_ship_date(agora)
+    if data_existente is not None:
+        return data_existente
+    if nova_situacao in _SHIP_STAMP_SITUACOES:
+        return _operational_ship_date(agora)
+    return None
 
 
 async def _cost_price_by_sku(
@@ -456,11 +471,24 @@ async def upsert_order(
     if not isinstance(itens, list):
         itens = []
 
-    existing_count = (
+    # Estado anterior do pedido (pra decidir em_andamento_data). situacao_antiga
+    # distingue "virou 15 agora" (confirmação => carimba dia da confirmação) de
+    # "já era 15" (re-disparo => preserva). data_existente = ship-date já gravado.
+    prev_rows = (
         await session.execute(
-            select(func.count(BlingOrder.id)).where(BlingOrder.bling_id == bling_id)
+            select(BlingOrder.situacao, BlingOrder.em_andamento_data)
+            .where(BlingOrder.bling_id == bling_id)
         )
-    ).scalar() or 0
+    ).all()
+    existing_count = len(prev_rows)
+    situacao_antiga = prev_rows[0][0] if prev_rows else None
+    data_existente = next((r[1] for r in prev_rows if r[1] is not None), None)
+    nova_data = _next_em_andamento_data(
+        nova_situacao=situacao,
+        situacao_antiga=situacao_antiga,
+        data_existente=data_existente,
+        agora=datetime.now(UTC),
+    )
 
     # Non-6 + existing rows + itens unchanged → narrow UPDATE only.
     if situacao != "6" and existing_count > 0:
@@ -468,17 +496,11 @@ async def upsert_order(
         old_sig = await _existing_itens_signature(session, bling_id)
         if new_sig == old_sig:
             values: dict[str, Any] = {"situacao": situacao}
-            # Despachado (83965 Enviado Etiqueta OU 15 Atendido): carimba
-            # em_andamento_data SÓ se ainda estiver NULL — COALESCE preserva
-            # o ship-date original. Sem isso, cada webhook de pedido já
-            # despachado (taxa/endereço chegam dias depois) empurrava a data
-            # pra "hoje". Cobrir 83965 (não só 15) evita pedidos parados em
-            # Enviado Etiqueta com data NULL flutuando no filtro.
-            if situacao in _SHIP_STAMP_SITUACOES:
-                values["em_andamento_data"] = func.coalesce(
-                    BlingOrder.em_andamento_data,
-                    _operational_ship_date(datetime.now(UTC)),
-                )
+            # em_andamento_data decidida por _next_em_andamento_data: transição
+            # p/ 15 -> dia da confirmação (sobrescreve); já em 15 -> preserva;
+            # 83965 sem data -> provisório (dia da etiqueta), pra não flutuar.
+            if nova_data is not None:
+                values["em_andamento_data"] = nova_data
             # Backfill address data for orders synced before migrations 0088/0094.
             # Prefer transporte.enderecoEntrega; fall back to contato.endereco
             # (Amazon and some other marketplaces omit transporte address).
@@ -555,18 +577,6 @@ async def upsert_order(
         product_categories_by_sku,
     ) = await _product_categories_by_item(session, itens)
 
-    # Captura o ship-date já gravado ANTES de deletar — o delete+reinsert
-    # perderia a data original e _row_from_item carimbaria "hoje".
-    # em_andamento_data é fato histórico (data do 1º "Em andamento").
-    preserved_em_andamento = (await session.execute(
-        select(BlingOrder.em_andamento_data)
-        .where(
-            BlingOrder.bling_id == bling_id,
-            BlingOrder.em_andamento_data.isnot(None),
-        )
-        .limit(1)
-    )).scalar_one_or_none()
-
     await session.execute(
         delete(BlingOrder).where(BlingOrder.bling_id == bling_id)
     )
@@ -581,7 +591,7 @@ async def upsert_order(
             category_names_by_id=category_names_by_id,
             product_categories_by_id=product_categories_by_id,
             product_categories_by_sku=product_categories_by_sku,
-            preserved_em_andamento=preserved_em_andamento,
+            em_andamento_data_final=nova_data,
         )
         session.add(BlingOrder(**row))
         return 1
@@ -597,7 +607,7 @@ async def upsert_order(
             category_names_by_id=category_names_by_id,
             product_categories_by_id=product_categories_by_id,
             product_categories_by_sku=product_categories_by_sku,
-            preserved_em_andamento=preserved_em_andamento,
+            em_andamento_data_final=nova_data,
         )
         sku = (row.get("item_codigo") or "").strip() if row.get("item_codigo") else None
         if sku and sku in cost_by_sku:
