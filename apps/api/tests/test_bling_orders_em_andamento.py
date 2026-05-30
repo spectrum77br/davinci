@@ -15,6 +15,7 @@ from app.services.bling_orders import _row_from_item
 
 _RAW_SHIPPED = {"situacao": {"id": 15}, "loja": {}, "itens": []}
 _RAW_OPEN = {"situacao": {"id": 6}, "loja": {}, "itens": []}
+_RAW_ETIQUETA = {"situacao": {"id": 83965}, "loja": {}, "itens": []}
 
 
 def test_first_ship_stamps_today_when_no_preserved():
@@ -47,6 +48,26 @@ def test_open_status_with_preserved_keeps_history():
         preserved_em_andamento=old,
     )
     assert row["em_andamento_data"] == old
+
+
+def test_83965_stamps_today_when_no_preserved():
+    """Entrar em 83965 (Enviado Etiqueta) já carimba a data — antes só
+    carimbava em 15, então pedidos parados em 83965 flutuavam pra hoje."""
+    row = _row_from_item(_RAW_ETIQUETA, {}, item_index=0, store_id=None)
+    today_brt = _row_today()
+    assert row["em_andamento_data"] == today_brt
+
+
+def test_83965_to_15_preserves_existing_date():
+    """Transição 83965 → 15 (agência confirmou) preserva a data carimbada
+    no 83965. O badge muda de vermelho pra verde por situacao, mas o
+    dia NÃO muda."""
+    stamped_at_83965 = date(2026, 5, 26)
+    row = _row_from_item(
+        _RAW_SHIPPED, {}, item_index=0, store_id=None,
+        preserved_em_andamento=stamped_at_83965,
+    )
+    assert row["em_andamento_data"] == stamped_at_83965
 
 
 def _row_today() -> date:

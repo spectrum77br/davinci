@@ -46,6 +46,13 @@ from app.worker_pool import get_arq_pool
 # orders shipped late evening BRT would land on the next calendar day.
 _BRT = ZoneInfo("America/Sao_Paulo")
 
+# Situações que significam "despachado": 83965 (Enviado Etiqueta = etiqueta
+# gerada) ou 15 (Atendido = agência confirmou). em_andamento_data é carimbada
+# já no 83965 — é quando o operador despacha. Antes só carimbávamos no 15, então
+# pedidos parados em 83965 ficavam com data NULL e "flutuavam" pra HOJE todo dia
+# no filtro da aba (effective_date = COALESCE(em_andamento_data, hoje)).
+_SHIP_STAMP_SITUACOES = ("15", "83965")
+
 logger = structlog.get_logger()
 
 
@@ -191,14 +198,17 @@ def _row_from_item(
         if isinstance(raw_order.get("situacao"), dict)
         else (str(raw_order.get("situacao")) if raw_order.get("situacao") is not None else None)
     )
-    # situacao=15 ("Em andamento") = order shipped. em_andamento_data é
-    # a data do PRIMEIRO "Em andamento" — fato histórico, não muda em
-    # webhooks subsequentes. Preserva o valor já gravado quando o caller
-    # passa preserved_em_andamento (delete+reinsert path); só calcula
-    # data nova quando não há valor anterior E situacao=15.
+    # em_andamento_data = data do PRIMEIRO "despachado" (83965 Enviado
+    # Etiqueta OU 15 Atendido). Fato histórico, não muda em webhooks
+    # subsequentes. Preserva o valor já gravado quando o caller passa
+    # preserved_em_andamento (delete+reinsert path); só calcula data nova
+    # quando não há valor anterior E a situação é 83965 ou 15. Carimbar já
+    # no 83965 evita o "flutuar" do pedido pra HOJE no filtro da aba —
+    # antes só carimbávamos no 15 e pedidos parados em 83965 nunca
+    # ganhavam data, grudando em hoje todo dia.
     if preserved_em_andamento is not None:
         em_andamento_data = preserved_em_andamento
-    elif situacao_id == "15":
+    elif situacao_id in _SHIP_STAMP_SITUACOES:
         em_andamento_data = _operational_ship_date(datetime.now(UTC))
     else:
         em_andamento_data = None
@@ -458,11 +468,13 @@ async def upsert_order(
         old_sig = await _existing_itens_signature(session, bling_id)
         if new_sig == old_sig:
             values: dict[str, Any] = {"situacao": situacao}
-            # situacao=15 ("Em andamento") = shipped. Carimba em_andamento_data
-            # SÓ se ainda estiver NULL — COALESCE preserva o ship-date
-            # original. Sem isso, cada webhook de pedido já despachado
-            # (taxa/endereço chegam dias depois) empurrava a data pra "hoje".
-            if situacao == "15":
+            # Despachado (83965 Enviado Etiqueta OU 15 Atendido): carimba
+            # em_andamento_data SÓ se ainda estiver NULL — COALESCE preserva
+            # o ship-date original. Sem isso, cada webhook de pedido já
+            # despachado (taxa/endereço chegam dias depois) empurrava a data
+            # pra "hoje". Cobrir 83965 (não só 15) evita pedidos parados em
+            # Enviado Etiqueta com data NULL flutuando no filtro.
+            if situacao in _SHIP_STAMP_SITUACOES:
                 values["em_andamento_data"] = func.coalesce(
                     BlingOrder.em_andamento_data,
                     _operational_ship_date(datetime.now(UTC)),
