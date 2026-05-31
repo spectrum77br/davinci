@@ -297,16 +297,20 @@ def _next_em_andamento_data(
 ) -> date | None:
     """Decide a em_andamento_data (data operacional na planilha de Pedidos).
 
-    - Transição PARA 15 (Atendido = agência confirmou AGORA): carimba o DIA DA
-      CONFIRMAÇÃO, sobrescrevendo o provisório do 83965. É o que a operação
-      quer: etiqueta dia 30 + confirmação dia 31 => pedido fica no dia 31.
-    - Já estava em 15 (re-disparo de taxa/endereço dias depois): preserva — não
-      empurra pra hoje (bug 2026-05-28).
-    - 83965 (Enviado Etiqueta) sem data ainda: provisório = dia da etiqueta, só
-      pra não 'flutuar' pra HOJE no filtro. Badge segue vermelho (é por situacao).
+    - Transição **83965 → 15** (etiqueta confirmada pela agência AGORA):
+      carimba o DIA DA CONFIRMAÇÃO, sobrescrevendo o provisório do 83965.
+      Único caso de overwrite. Operação: etiqueta dia 30 + confirmação dia
+      31 => pedido fica no dia 31.
+    - Qualquer outra transição pra 15 (15↔15 re-disparo de taxa/endereço,
+      oscilação 83953→15 do Bling, etc.): PRESERVA a data existente — não
+      empurra pra hoje. A condição estreita `== "83965"` evita o bug em
+      que `!= "15"` (commit 1fe10b6) pegava todas as voltas pra 15 e
+      re-carimbava o dia do sync.
+    - 83965 (Enviado Etiqueta) sem data ainda: provisório = dia da etiqueta,
+      só pra não 'flutuar' pra HOJE no filtro. Badge segue vermelho.
     - Demais (6 Em aberto etc.): mantém o que houver (normalmente NULL).
     """
-    if nova_situacao == "15" and situacao_antiga != "15":
+    if nova_situacao == "15" and situacao_antiga == "83965":
         return _operational_ship_date(agora)
     if data_existente is not None:
         return data_existente
@@ -473,8 +477,9 @@ async def upsert_order(
         itens = []
 
     # Estado anterior do pedido (pra decidir em_andamento_data). situacao_antiga
-    # distingue "virou 15 agora" (confirmação => carimba dia da confirmação) de
-    # "já era 15" (re-disparo => preserva). data_existente = ship-date já gravado.
+    # distingue 83965→15 (etiqueta confirmada agora => carimba dia da confirmação;
+    # único caso de overwrite) de qualquer outra volta pra 15 (oscilação Bling
+    # 15↔83953 etc. => preserva). data_existente = ship-date já gravado.
     prev_rows = (
         await session.execute(
             select(BlingOrder.situacao, BlingOrder.em_andamento_data)
@@ -497,9 +502,10 @@ async def upsert_order(
         old_sig = await _existing_itens_signature(session, bling_id)
         if new_sig == old_sig:
             values: dict[str, Any] = {"situacao": situacao}
-            # em_andamento_data decidida por _next_em_andamento_data: transição
-            # p/ 15 -> dia da confirmação (sobrescreve); já em 15 -> preserva;
-            # 83965 sem data -> provisório (dia da etiqueta), pra não flutuar.
+            # em_andamento_data decidida por _next_em_andamento_data: só a
+            # transição 83965→15 sobrescreve (dia da confirmação); demais
+            # voltas pra 15 (oscilação Bling) preservam; 83965 sem data ganha
+            # provisório (dia da etiqueta) pra não flutuar pra hoje no filtro.
             if nova_data is not None:
                 values["em_andamento_data"] = nova_data
             # Backfill address data for orders synced before migrations 0088/0094.

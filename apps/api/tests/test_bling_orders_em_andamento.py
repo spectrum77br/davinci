@@ -41,6 +41,13 @@ def test_ja_em_15_redisparo_preserva():
     assert _next("15", "15", date(2026, 5, 26)) == date(2026, 5, 26)
 
 
+def test_oscilacao_83953_para_15_preserva():
+    """Bling oscila reportando situacao (ex.: 15 → 83953 → 15 a cada sync).
+    A volta 83953→15 NÃO é confirmação real — preserva a data já gravada
+    em vez de sobrescrever pro dia do sync. Só 83965→15 sobrescreve."""
+    assert _next("15", "83953", date(2026, 5, 28)) == date(2026, 5, 28)
+
+
 def test_83965_sem_data_carimba_provisorio_hoje():
     assert _next("83965", "6", None) == _hoje_op()
     assert _next("83965", None, None) == _hoje_op()
