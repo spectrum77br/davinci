@@ -553,7 +553,7 @@ async def backfill_addresses(
     """
     from app.services.devolution_stock_return import _get_bling_client
 
-    _SITUACOES = ("83957", "83960", "83961", "83966")
+    _SITUACOES = ("83957", "83960", "83961", "83966", "84677")
 
     # Find orders that need backfill
     rows = (
