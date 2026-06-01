@@ -81,6 +81,13 @@ _SITUACAO_ATENDIDO = "15"
 # Situação pós-15: pedido já entregue ao cliente. Ainda deve aparecer na aba
 # (mesmo dia, badge verde) — operacionalmente é "enviado/entregue", não some.
 _SITUACAO_ENTREGUE = "83953"
+# Cliente pediu devolução — pedido continua "do dia" em que foi enviado,
+# permanece visível na aba (badge verde). A devolução em si é tratada em
+# outro fluxo; a aba de Pedidos não esconde o histórico de envio.
+_SITUACAO_AGUARDANDO_DEVOLUCAO = "83957"
+# Caso de devolução já tratado pelo time — mesmo critério: pedido foi
+# enviado no dia, fica visível.
+_SITUACAO_RESOLVIDO = "545902"
 # Pedidos pendentes mais antigos que isso = zumbis (webhook perdido) —
 # ficam escondidos da aba.
 _PENDENTE_MAX_AGE_DIAS = 14
@@ -330,8 +337,11 @@ async def list_estoque_pedidos(
     """Lista pedidos da aba via 2 caminhos paralelos:
       * PENDENTE: situacao=83965 (Enviado Etiqueta) + sem em_andamento_data
         + criado nos últimos 14 dias (anti-zumbi) → badge vermelho.
-      * ENVIADO:  situacao IN (83965, 15, 83953) + em_andamento_data preenchida
-        → badge verde (exceto 83965, que fica vermelho mesmo com data).
+      * ENVIADO:  situacao IN (83965, 15, 83953, 83957, 545902) +
+        em_andamento_data preenchida → badge verde (exceto 83965, que fica
+        vermelho mesmo com data). 83957=Aguardando Devolução e 545902=
+        Resolvido continuam visíveis: pedido já saiu do estoque, fluxo de
+        devolução é tratado em outra aba.
     Qualquer outra combinação fica escondida: `15` sem em_andamento_data
     é anomalia (já atendido, não é "não enviado"); 83965 com >14 dias é
     zumbi de webhook perdido; outras situações custom não pertencem ao
@@ -352,7 +362,13 @@ async def list_estoque_pedidos(
     )
     enviado_clause = and_(
         BlingOrder.situacao.in_(
-            (_SITUACAO_ENVIADO_ETIQUETA, _SITUACAO_ATENDIDO, _SITUACAO_ENTREGUE)
+            (
+                _SITUACAO_ENVIADO_ETIQUETA,
+                _SITUACAO_ATENDIDO,
+                _SITUACAO_ENTREGUE,
+                _SITUACAO_AGUARDANDO_DEVOLUCAO,
+                _SITUACAO_RESOLVIDO,
+            )
         ),
         BlingOrder.em_andamento_data.isnot(None),
     )
@@ -478,12 +494,20 @@ async def list_estoque_pedidos(
             "sku": o.item_codigo,
             "produto": o.item_descricao,
             "quantidade": o.item_quantidade or 1,
-            # Badge por situacao (não por em_andamento_data): 15 (Atendido)
-            # = agência confirmou ou 83953 (Entregue) = entregue ao cliente
-            # → verde; 83965 (Enviado Etiqueta) = etiqueta gerada mas
-            # agência não confirmou → vermelho.
+            # Badge por situacao (não por em_andamento_data):
+            #   - 15 (Em andamento/Atendido), 83953 (Entregue), 83957
+            #     (Aguardando Devolução), 545902 (Resolvido) → verde
+            #     (pedido foi enviado, segue no histórico do dia mesmo se
+            #     entrou em fluxo de devolução).
+            #   - 83965 (Enviado Etiqueta) → vermelho (etiqueta gerada
+            #     mas agência ainda não confirmou).
             "status": "enviado"
-            if o.situacao in (_SITUACAO_ATENDIDO, _SITUACAO_ENTREGUE)
+            if o.situacao in (
+                _SITUACAO_ATENDIDO,
+                _SITUACAO_ENTREGUE,
+                _SITUACAO_AGUARDANDO_DEVOLUCAO,
+                _SITUACAO_RESOLVIDO,
+            )
             else "nao_enviado",
             "conferido": check["conferido"],
             "observacao": check["observacao"],

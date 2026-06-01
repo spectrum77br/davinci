@@ -57,6 +57,14 @@ async def four_orders(db: AsyncSession) -> dict[str, int]:
             bling_id=910004, numero="910004", item_codigo="sku-6",
             item_index=0, situacao="6", em_andamento_data=d,
         ),
+        BlingOrder(
+            bling_id=910005, numero="910005", item_codigo="sku-83957",
+            item_index=0, situacao="83957", em_andamento_data=date(2026, 5, 25),
+        ),
+        BlingOrder(
+            bling_id=910006, numero="910006", item_codigo="sku-545902",
+            item_index=0, situacao="545902", em_andamento_data=date(2026, 5, 23),
+        ),
     ]
     db.add_all(orders)
     await db.commit()
@@ -90,3 +98,28 @@ async def test_aba_inclui_83953_como_enviado(
 
     # 6 NÃO aparece (não pertence ao fluxo da aba)
     assert "910004" not in by_numero
+
+
+@pytest.mark.asyncio
+async def test_aba_inclui_devolucao_e_resolvido_como_enviado(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], four_orders: dict[str, int],
+):
+    """83957 (Aguardando Devolução) e 545902 (Resolvido) ficam visíveis
+    como verde — pedido já saiu do estoque, fluxo de devolução é tratado
+    em outra aba."""
+    auth_as(admin_view)
+    # Janela 23-25/05 cobre os 2 cenários novos.
+    r = await client.get(
+        "/api/estoque/pedidos?data_inicio=2026-05-23&data_fim=2026-05-25"
+    )
+    assert r.status_code == 200, r.text
+    by_numero = {p["pedido_bling"]: p for p in r.json()["data"]}
+
+    # 83957 (Aguardando Devolução) — verde
+    assert "910005" in by_numero
+    assert by_numero["910005"]["status"] == "enviado"
+
+    # 545902 (Resolvido) — verde
+    assert "910006" in by_numero
+    assert by_numero["910006"]["status"] == "enviado"
