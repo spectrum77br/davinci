@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.
     enable_bling_orders_safety_net: bool = True
 
+    # Varredura horária por período: lista pedidos alterados nas últimas 2h
+    # (dataAlteracao do Bling) e re-ingere — recupera QUALQUER webhook
+    # perdido, situação-agnóstica. Desligável via ENABLE_BLING_ORDERS_PERIOD_SYNC=false.
+    enable_bling_orders_period_sync: bool = True
+
     @property
     def is_prod(self) -> bool:
         return self.env == "production"

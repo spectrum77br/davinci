@@ -300,6 +300,8 @@ class BlingClient:
         *,
         data_inicial: str | None = None,
         data_final: str | None = None,
+        data_alteracao_inicial: str | None = None,
+        data_alteracao_final: str | None = None,
         id_situacao: int | None = None,
         id_loja: int | None = None,
         pagina: int = 1,
@@ -308,6 +310,11 @@ class BlingClient:
         """Single page of `/pedidos/vendas` with the marketing module's
         filter set. Bling v3 expects YYYY-MM-DD for dates and integer ids
         for situação/loja.
+
+        `data_alteracao_inicial`/`data_alteracao_final` filtram pela data
+        de ÚLTIMA ALTERAÇÃO do pedido e exigem timestamp completo
+        (`YYYY-MM-DD HH:MM:SS`, horário de Brasília) — usado pela varredura
+        horária que recupera webhooks perdidos.
 
         situação 9 = "Atendido" (NF emitida) — the canonical "faturado"
         signal the aggregator uses as authoritative revenue. Other useful
@@ -318,6 +325,10 @@ class BlingClient:
             params["dataInicial"] = data_inicial
         if data_final:
             params["dataFinal"] = data_final
+        if data_alteracao_inicial:
+            params["dataAlteracaoInicial"] = data_alteracao_inicial
+        if data_alteracao_final:
+            params["dataAlteracaoFinal"] = data_alteracao_final
         if id_situacao is not None:
             params["idSituacao"] = id_situacao
         if id_loja is not None:
@@ -331,6 +342,8 @@ class BlingClient:
         *,
         data_inicial: str | None = None,
         data_final: str | None = None,
+        data_alteracao_inicial: str | None = None,
+        data_alteracao_final: str | None = None,
         id_situacao: int | None = None,
         id_loja: int | None = None,
         page_size: int = 100,
@@ -343,6 +356,8 @@ class BlingClient:
         while page <= 50:
             items = await self.list_pedidos_vendas(
                 data_inicial=data_inicial, data_final=data_final,
+                data_alteracao_inicial=data_alteracao_inicial,
+                data_alteracao_final=data_alteracao_final,
                 id_situacao=id_situacao, id_loja=id_loja,
                 pagina=page, limite=page_size,
             )

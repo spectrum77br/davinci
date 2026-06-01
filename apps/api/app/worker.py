@@ -1067,6 +1067,49 @@ async def bling_orders_safety_net_tick(ctx: dict) -> None:
     )
 
 
+async def bling_orders_period_sync_tick(ctx: dict) -> None:
+    """De hora em hora: lista os pedidos do Bling alterados nas últimas 2h
+    (pela dataAlteracao) e re-ingere cada um via ingest_bling_order_run.
+    Situação-agnóstico → recupera QUALQUER webhook perdido, inclusive
+    transições que a safety-net não cobre (ex.: 15 → devolução 83957).
+    Desligável via ENABLE_BLING_ORDERS_PERIOD_SYNC=false."""
+    if not get_settings().enable_bling_orders_period_sync:
+        return
+
+    from app.services.bling_orders_period_sync import (
+        find_recently_changed_bling_ids,
+    )
+
+    async with session_scope() as session:
+        bling_ids, user_id = await find_recently_changed_bling_ids(session)
+
+    if not bling_ids or user_id is None:
+        logger.info("bling_orders_period_sync_no_candidates")
+        return
+
+    pool = await get_arq_pool()
+    enqueued = 0
+    for bling_id in bling_ids:
+        try:
+            await pool.enqueue_job(
+                "ingest_bling_order_run",
+                bling_id,
+                str(user_id),
+                "period_sync",
+            )
+            enqueued += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "bling_period_sync_enqueue_failed",
+                bling_id=bling_id, err=str(e)[:200],
+            )
+
+    logger.info(
+        "bling_orders_period_sync_tick_done",
+        candidates=len(bling_ids), enqueued=enqueued,
+    )
+
+
 # ---------------------------------------------------------------- lifecycle
 
 
@@ -1112,6 +1155,7 @@ class WorkerSettings:
         verificar_margem_snapshot,
         check_marketplace_shipped_orders,
         bling_orders_safety_net_tick,
+        bling_orders_period_sync_tick,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -1170,6 +1214,11 @@ class WorkerSettings:
         # Safety-net: re-sincroniza pedidos suspeitos de stale (webhooks
         # perdidos do Bling) a cada 10 min. Refetch via ingest_bling_order_run.
         cron(bling_orders_safety_net_tick, minute=_TEN_MIN, run_at_startup=False),
+        # Varredura por período: de hora em hora (:20) lista pedidos
+        # alterados nas últimas 2h (dataAlteracao) e re-ingere. Pega webhooks
+        # perdidos de QUALQUER transição (situação-agnóstica), inclusive as
+        # que a safety-net não cobre (ex.: 15 → devolução).
+        cron(bling_orders_period_sync_tick, minute={20}, run_at_startup=False),
     ]
     max_jobs = 10
     job_timeout = 1800
@@ -1190,6 +1239,7 @@ __all__ = [
     "alerts_cleanup",
     "background_jobs_gc",
     "bling_orders_safety_net_tick",
+    "bling_orders_period_sync_tick",
     "bling_token_refresh",
     "daily_sync_scheduler",
     "failed_jobs_alert_scan",
