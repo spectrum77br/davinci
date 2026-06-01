@@ -101,8 +101,11 @@ async def sync_ml_integration(
 
     # ─── Bling authoritative revenue ────────────────────────────────────
     bling = await get_bling_revenue(session, integration, start=start_day, end=today)
-    bling_total = bling.total if bling else 0.0
-    account_revenue = bling_total if bling else daily.revenue
+    # Pega APENAS o faturamento de HOJE (não o somatório da janela). Gravar
+    # o total da janela no row de hoje inflava agregados 7d/30d ~2x
+    # (totais sobrepostos somavam de novo). shopee_sync já fazia certo.
+    bling_today = bling.by_day.get(today, 0.0) if bling else 0.0
+    account_revenue = bling_today if bling else daily.revenue
     account_acos = (
         round(daily.spend / account_revenue * 100, 2)
         if account_revenue > 0

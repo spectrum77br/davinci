@@ -89,7 +89,10 @@ async def sync_amazon_integration(
 
     # Bling authoritative revenue
     bling = await get_bling_revenue(session, integration, start=start_day, end=today)
-    account_revenue = bling.total if bling else amazon_sales
+    # Pega APENAS o faturamento de HOJE (não o somatório da janela). Veja
+    # ml_sync.py — mesmo bug histórico inflava agregados 7d/30d.
+    bling_today = bling.by_day.get(today, 0.0) if bling else 0.0
+    account_revenue = bling_today if bling else amazon_sales
     account_acos = (
         round(spend / account_revenue * 100, 2) if account_revenue > 0 else None
     )
