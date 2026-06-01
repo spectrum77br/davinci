@@ -42,16 +42,19 @@ logger = structlog.get_logger()
 # Optional Bling situação filter. The default-9 ("Atendido / NF emitida")
 # turned out to be wrong for prod's Bling — that account uses custom
 # situação IDs (15, 83953-83965) and never set anything to 9 in 30 days.
-# Leaving this None means: don't filter server-side; the client-side
-# `_EXCLUDED_SITUACOES` set drops cancelled + draft pedidos. Set to a
-# specific int (e.g. 9 or 15) here to re-enable strict filtering once
-# the per-shop "faturado" id is known.
+# Leaving this None means: don't filter server-side; o filtro client-side
+# `_INCLUDED_SITUACOES` (whitelist) só conta 15 (Em andamento) e 83953
+# (Entregue). Set a specific int here pra re-habilitar filtro server-side.
 BLING_SITUACAO_FATURADO: int | None = None
 
-# Situações we always exclude even when no positive filter is set:
-#   12 = Cancelado (refund/cancel, no revenue)
-#    6 = Em digitação (draft, not confirmed yet)
-_EXCLUDED_SITUACOES: frozenset[int] = frozenset({12, 6})
+# Situações que contam como faturamento real (whitelist).
+# Inversão da lista anterior (_EXCLUDED_SITUACOES) — mais seguro: qualquer
+# situação custom nova no Bling NÃO infla o faturamento acidentalmente.
+#   15    = Em andamento (pedido enviado, em rota)
+#   83953 = Entregue (cliente recebeu)
+# Outras situações (83965 Enviado Etiqueta, 83957 Aguardando Devolução,
+# 83963 Devolvido Estoque, 12 Cancelado, 6 Em digitação, etc.) NÃO contam.
+_INCLUDED_SITUACOES: frozenset[int] = frozenset({15, 83953})
 
 
 @dataclass(slots=True)
@@ -168,14 +171,15 @@ async def get_bling_revenue(
             id_situacao=BLING_SITUACAO_FATURADO,  # None → no server-side filter
             id_loja=loja_id,
         ):
-            # Exclude cancelled / draft pedidos client-side so revenue
-            # doesn't get inflated by orders that never shipped.
+            # Só conta se a situação está na whitelist (Em andamento ou
+            # Entregue). Antes era blacklist (excluía Cancelado/Em digitação)
+            # — qualquer situação custom nova inflava o faturamento.
             sit_id = (pedido.get("situacao") or {}).get("id")
             try:
                 sit_int = int(sit_id) if sit_id is not None else None
             except (TypeError, ValueError):
                 sit_int = None
-            if sit_int in _EXCLUDED_SITUACOES:
+            if sit_int not in _INCLUDED_SITUACOES:
                 continue
             d = _parse_bling_date(pedido.get("dataEmissao") or pedido.get("data"))
             v = _pedido_total(pedido)
