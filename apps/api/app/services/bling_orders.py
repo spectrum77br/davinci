@@ -464,11 +464,11 @@ async def upsert_order(
     raw_order: dict[str, Any],
 ) -> int:
     """Persist a Bling order. Strategy:
-    - situacao=6 ("Em andamento"): full replace + snapshot `preco_custo` from
-      `products.bling_cost_price`.
-    - other situations: if itens unchanged vs. DB, only UPDATE `situacao`
-      (preserves preco_custo, taxas_checked_at, etc. populated by the daily
-      sync); if itens differ or no row exists yet, full replace.
+    - full replace (situacao=6, pedido novo, ou itens diferentes): snapshot
+      `preco_custo` from `products.bling_cost_price` para CADA item — todo
+      pedido que entra carimba o custo, em qualquer situacao.
+    - itens inalterados vs. DB (não-6): só UPDATE `situacao` (preserva
+      preco_custo, taxas_checked_at, etc.), evitando re-stamp desnecessário.
     """
     bling_id = _int(raw_order.get("id"))
     if bling_id is None:
@@ -555,10 +555,13 @@ async def upsert_order(
     bling_loja_id = _int(loja.get("id")) if isinstance(loja, dict) else None
     store_id = await _resolve_store_id(session, bling_loja_id)
 
-    # situacao=6 → snapshot unit cost from products.bling_cost_price.
+    # Snapshot unit cost from products.bling_cost_price em QUALQUER situacao —
+    # todo pedido que entra carimba o custo (antes só situacao=6, então pedidos
+    # criados direto em outra situacao ficavam com preco_custo NULL). Re-ingest
+    # com itens iguais não passa por aqui (narrow UPDATE acima preserva o valor).
     cost_by_sku: dict[str, float] = {}
     category_ids: set[int] = set()
-    if situacao == "6" and itens:
+    if itens:
         skus: set[str] = set()
         for it in itens:
             if not isinstance(it, dict):
