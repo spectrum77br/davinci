@@ -78,6 +78,9 @@ _SITUACAO_ENVIADO_ETIQUETA = "83965"
 # Situação default Bling para "Atendido" (marketplace confirmou,
 # em_andamento_data deveria estar preenchida).
 _SITUACAO_ATENDIDO = "15"
+# Situação pós-15: pedido já entregue ao cliente. Ainda deve aparecer na aba
+# (mesmo dia, badge verde) — operacionalmente é "enviado/entregue", não some.
+_SITUACAO_ENTREGUE = "83953"
 # Pedidos pendentes mais antigos que isso = zumbis (webhook perdido) —
 # ficam escondidos da aba.
 _PENDENTE_MAX_AGE_DIAS = 14
@@ -327,8 +330,8 @@ async def list_estoque_pedidos(
     """Lista pedidos da aba via 2 caminhos paralelos:
       * PENDENTE: situacao=83965 (Enviado Etiqueta) + sem em_andamento_data
         + criado nos últimos 14 dias (anti-zumbi) → badge vermelho.
-      * ENVIADO:  situacao IN (83965, 15) + em_andamento_data preenchida
-        → badge verde.
+      * ENVIADO:  situacao IN (83965, 15, 83953) + em_andamento_data preenchida
+        → badge verde (exceto 83965, que fica vermelho mesmo com data).
     Qualquer outra combinação fica escondida: `15` sem em_andamento_data
     é anomalia (já atendido, não é "não enviado"); 83965 com >14 dias é
     zumbi de webhook perdido; outras situações custom não pertencem ao
@@ -348,7 +351,9 @@ async def list_estoque_pedidos(
         cast(BlingOrder.data, Date) >= today_brt - timedelta(days=_PENDENTE_MAX_AGE_DIAS),
     )
     enviado_clause = and_(
-        BlingOrder.situacao.in_((_SITUACAO_ENVIADO_ETIQUETA, _SITUACAO_ATENDIDO)),
+        BlingOrder.situacao.in_(
+            (_SITUACAO_ENVIADO_ETIQUETA, _SITUACAO_ATENDIDO, _SITUACAO_ENTREGUE)
+        ),
         BlingOrder.em_andamento_data.isnot(None),
     )
     where: list = [or_(pendente_clause, enviado_clause)]
@@ -474,9 +479,12 @@ async def list_estoque_pedidos(
             "produto": o.item_descricao,
             "quantidade": o.item_quantidade or 1,
             # Badge por situacao (não por em_andamento_data): 15 (Atendido)
-            # = agência confirmou → verde; 83965 (Enviado Etiqueta) =
-            # etiqueta gerada mas sem confirmação → vermelho.
-            "status": "enviado" if o.situacao == _SITUACAO_ATENDIDO else "nao_enviado",
+            # = agência confirmou ou 83953 (Entregue) = entregue ao cliente
+            # → verde; 83965 (Enviado Etiqueta) = etiqueta gerada mas
+            # agência não confirmou → vermelho.
+            "status": "enviado"
+            if o.situacao in (_SITUACAO_ATENDIDO, _SITUACAO_ENTREGUE)
+            else "nao_enviado",
             "conferido": check["conferido"],
             "observacao": check["observacao"],
             "bling_id": o.bling_id,
