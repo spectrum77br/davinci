@@ -51,6 +51,7 @@ from app.services.marketplaces.shopee import ShopeeClient
 from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
+from app.services.product_cost_sync import run_sync_product_bling_costs
 from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.sync_orchestrator import SyncOrchestrator
 from app.worker_pool import get_arq_pool
@@ -496,6 +497,17 @@ async def daily_sync_scheduler(ctx: dict) -> None:
             logger.info(
                 "daily_sync_enqueued", user_id=str(us.user_id), job_id=str(job.id)
             )
+
+
+async def product_bling_cost_sync(ctx: dict) -> None:
+    """Diário: atualiza `products.bling_cost_price` de TODOS os produtos a
+    partir da listagem `/produtos` do Bling (a lista traz precoCusto; o
+    detalhe /produtos/{id} não). Os pedidos snapshotam esse custo ao entrar
+    em situacao=6, então o refresh diário mantém o custo de cada pedido novo
+    atualizado."""
+    async with session_scope() as s:
+        summary = await run_sync_product_bling_costs(s)
+    logger.info("product_bling_cost_sync_done", **summary)
 
 
 async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_s: int) -> None:
@@ -1105,6 +1117,10 @@ class WorkerSettings:
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
         # 06:00 UTC = 03:00 BRT — quiet window, also the daily-sync mass enqueue trigger.
         cron(daily_sync_scheduler, minute=_FIVE_MIN, run_at_startup=False),
+        # Daily refresh de products.bling_cost_price (todos os produtos) via
+        # listagem /produtos. 06:50 UTC = 03:50 BRT — janela tranquila, antes
+        # do PDF de faturamento (05:00 BRT). Pedidos snapshotam esse custo.
+        cron(product_bling_cost_sync, hour={6}, minute=50, run_at_startup=False),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         cron(shopee_token_refresh, hour={0, 4, 8, 12, 16, 20}, minute=0, run_at_startup=False),
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
@@ -1180,6 +1196,7 @@ __all__ = [
     "import_listings_run",
     "ingest_bling_order_run",
     "low_stock_polling",
+    "product_bling_cost_sync",
     "ml_backfill_run",
     "ml_token_refresh",
     "marketplace_financials_retry",

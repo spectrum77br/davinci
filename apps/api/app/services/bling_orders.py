@@ -322,11 +322,15 @@ def _next_em_andamento_data(
 async def _cost_price_by_sku(
     session: AsyncSession, skus: set[str]
 ) -> dict[str, float]:
+    """Custo unitário p/ snapshot do pedido = `products.bling_cost_price`
+    (custo sincronizado diariamente do Bling), não `cost_price`."""
     if not skus:
         return {}
     rows = (
         await session.execute(
-            select(Product.sku, Product.cost_price).where(Product.sku.in_(skus))
+            select(Product.sku, Product.bling_cost_price).where(
+                Product.sku.in_(skus)
+            )
         )
     ).all()
     return {sku: float(cost) for sku, cost in rows if cost is not None}
@@ -461,7 +465,7 @@ async def upsert_order(
 ) -> int:
     """Persist a Bling order. Strategy:
     - situacao=6 ("Em andamento"): full replace + snapshot `preco_custo` from
-      `products.cost_price`.
+      `products.bling_cost_price`.
     - other situations: if itens unchanged vs. DB, only UPDATE `situacao`
       (preserves preco_custo, taxas_checked_at, etc. populated by the daily
       sync); if itens differ or no row exists yet, full replace.
@@ -551,7 +555,7 @@ async def upsert_order(
     bling_loja_id = _int(loja.get("id")) if isinstance(loja, dict) else None
     store_id = await _resolve_store_id(session, bling_loja_id)
 
-    # situacao=6 → snapshot unit cost from products.cost_price.
+    # situacao=6 → snapshot unit cost from products.bling_cost_price.
     cost_by_sku: dict[str, float] = {}
     category_ids: set[int] = set()
     if situacao == "6" and itens:
