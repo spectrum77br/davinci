@@ -643,14 +643,18 @@ function loteTotal(prod: Product, loteId: string): number {
 }
 
 // Cor de fundo alternada por paridade do número do lote (ML25, ML26, …).
-// Ímpar = bege; par = cinza. Cobre header (8 rows) + body (quant/total).
+// Ímpar = bege amber-100; par = cinza slate-200. Cobre header (8 rows)
+// + body (quant/total). `!bg-*` é OBRIGATÓRIO — o CSS scoped da página
+// seta `background:` direto em .lote-label/.lote-value/.col-quant/etc,
+// e classes Tailwind sem `!important` perdem na cascata pra essas
+// regras. Strings inteiras (não interpoladas) pra não cair no purge.
 function loteBgClass(loteName: string | null | undefined): string {
   const m = (loteName || '').match(/(\d+)/)
   if (!m) return ''
   const n = parseInt(m[1], 10)
   return n % 2 === 0
-    ? 'bg-gray-200 dark:bg-gray-700/40'
-    : 'bg-amber-50 dark:bg-amber-900/20'
+    ? '!bg-slate-200 !text-slate-700 dark:!bg-slate-700/60 dark:!text-slate-100'
+    : '!bg-amber-100 !text-amber-900 dark:!bg-amber-900/40 dark:!text-amber-100'
 }
 
 // ── Cotação: handlers ─────────────────────────────────────────────
