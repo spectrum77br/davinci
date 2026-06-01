@@ -1181,7 +1181,24 @@ async function backfillAddresses() {
                 />
               </button>
             </td>
-            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10">{{ fmtDateTime(row.data_devolvido_estoque) }}</td>
+            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10">
+              <div class="flex flex-col items-start gap-0.5">
+                <span>{{ fmtDateTime(row.data_devolvido_estoque) }}</span>
+                <span
+                  v-if="row.estoque_mov_sku && !row.estoque_mov_revertido_at"
+                  :title="`Estoque devolvido no Bling: +${row.estoque_mov_qty ?? 1} un. em ${row.estoque_mov_sku}`"
+                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                >{{ row.estoque_mov_sku }}</span>
+                <span
+                  v-else-if="row.estoque_mov_sku && row.estoque_mov_revertido_at"
+                  :title="`Estoque estornado em ${fmtDateTime(row.estoque_mov_revertido_at)} · baixa de ${row.estoque_mov_qty ?? 1} un. em ${row.estoque_mov_sku}`"
+                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"
+                >
+                  <Undo2 class="size-2.5 shrink-0" />
+                  <span class="line-through">{{ row.estoque_mov_sku }}</span>
+                </span>
+              </div>
+            </td>
             <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <input
                 :value="row.observacao || ''"
