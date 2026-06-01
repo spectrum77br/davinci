@@ -238,7 +238,7 @@ async def lookup_devolution_order(
                     v.data,
                     v.pedido_bling::text AS pedido_bling,
                     v.pedido_marketplace::text AS pedido_marketplace,
-                    btrim(v.loja_nome) AS conta,
+                    COALESCE(NULLIF(btrim(v.loja_nome), ''), 'Loja ' || v.bling_loja_id) AS conta,
                     v.sku,
                     v.produto AS produtos,
                     1 AS quantidade,
@@ -260,8 +260,6 @@ async def lookup_devolution_order(
                     OR v.nome_destinatario ILIKE :q_like
                     OR v.cep_destino ILIKE :q_like
                 )
-                  AND v.loja_nome IS NOT NULL
-                  AND btrim(v.loja_nome) <> ''
                 ORDER BY v.data DESC NULLS LAST, v.pedido_bling, v.sku, gs.unit_num
                 LIMIT 50
                 """  # noqa: S608
