@@ -32,6 +32,7 @@ from app.routers import products as products_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
 from app.routers import settings as settings_router
+from app.routers import situacao_audit as situacao_audit_router
 from app.routers import stores as stores_router
 from app.routers import sync as sync_router
 from app.routers import tarefas as tarefas_router
@@ -151,6 +152,7 @@ app.include_router(discrepancies_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(metrics_router.router)
 app.include_router(margens_router.router)
+app.include_router(situacao_audit_router.router)
 app.include_router(tarefas_router.router)
 app.include_router(refunds_router.router)
 app.include_router(devolutions_router.router)

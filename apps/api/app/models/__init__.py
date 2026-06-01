@@ -3,6 +3,7 @@ from app.models.audit import AuditFinding, AuditRun, AuditUpload
 from app.models.auth_code import AuthCode
 from app.models.base import Base
 from app.models.bling_order import BlingOrder
+from app.models.bling_situacao_audit import BlingSituacaoAudit
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.devolution import Devolution
 from app.models.financeiro import (
@@ -100,6 +101,7 @@ __all__ = [
     "BackgroundJobType",
     "Base",
     "BlingOrder",
+    "BlingSituacaoAudit",
     "Cadastro",
     "CadastroStatus",
     "CadastroStore",

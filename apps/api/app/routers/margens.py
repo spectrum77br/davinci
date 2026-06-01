@@ -24,6 +24,7 @@ from app.schemas.margens import (
 )
 from app.security.cipher import decrypt_json
 from app.services.marketplaces.bling import BlingClient
+from app.services.situacao_audit import record_situacao_change
 from app.services.verificar_margem import (
     SNAPSHOT_TABLE as _VERIFICAR_MARGEM_TABLE,
 )
@@ -777,6 +778,16 @@ async def _apply_bling_decision_by_pedido(
                         "message": message or "Falha ao atualizar situacao no Bling",
                     },
                 ) from e
+        await record_situacao_change(
+            session,
+            pedido_bling=str(pedido_bling),
+            bling_id=order.bling_id,
+            sku=sku,
+            situacao_antiga=current_situacao_id,
+            situacao_nova=situacao_id,
+            origem="margens",
+            mudado_por=actor_id,
+        )
     else:
         logger.info(
             "bling_situacao_skipped",

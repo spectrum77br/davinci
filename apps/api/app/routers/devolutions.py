@@ -426,7 +426,7 @@ async def sku_suffixes(
 async def create_devolution(
     body: DevolutionCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
 ) -> DevolutionOut:
     # Manutenção: NÃO devolve estoque no add — só depois, pelo toggle na linha.
     # Aqui só registramos e patchamos a situação (84677, "em manutenção").
@@ -483,7 +483,8 @@ async def create_devolution(
     # Situação do pedido: Extraviado e Manutenção patcham já no add; Novo/Usado/
     # Trocado quando processam o estoque.
     if (condicao in ("Extraviado", "Manutenção") or should_stock) and row.pedido_bling:
-        await apply_order_situacao(session, row.pedido_bling)
+        await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
+        await session.commit()  # persiste a linha de auditoria de situação
     return out
 
 
@@ -492,7 +493,7 @@ async def patch_devolution(
     devolution_id: UUID,
     body: DevolutionPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
 ) -> DevolutionOut:
     row = (
         await session.execute(select(Devolution).where(Devolution.id == devolution_id))
@@ -537,7 +538,8 @@ async def patch_devolution(
     # Extraviado patcha a situação ao virar Extraviado (sem depender do toggle).
     extraviado_now = new_condicao == "Extraviado" and condicao_changed
     if (extraviado_now or should_stock) and row.pedido_bling:
-        await apply_order_situacao(session, row.pedido_bling)
+        await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
+        await session.commit()  # persiste a linha de auditoria de situação
     return out
 
 

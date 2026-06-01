@@ -48,6 +48,7 @@ from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
+from app.services.situacao_audit import record_situacao_change
 
 logger = structlog.get_logger()
 
@@ -176,6 +177,10 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
         for o in candidates:
             if o.loja:
                 by_loja[str(o.loja)].append(o)
+        # bling_id (int) → pedido canônico, p/ a trilha de auditoria de situação.
+        cand_by_id: dict[int, BlingOrder] = {
+            int(o.bling_id): o for o in candidates if o.bling_id is not None
+        }
 
         bling_integration = await _get_bling_integration(session)
         if bling_integration is None:
@@ -223,6 +228,18 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                         int(bling_id), _SHIPPED_SITUACAO,
                     )
                     summary["bling_updated"] += 1
+                    _cand = cand_by_id.get(int(bling_id))
+                    if _cand is not None:
+                        await record_situacao_change(
+                            session,
+                            pedido_bling=str(_cand.numero),
+                            bling_id=bling_id,
+                            sku=_cand.item_codigo,
+                            situacao_antiga=_cand.situacao,
+                            situacao_nova=_SHIPPED_SITUACAO,
+                            origem="job_envio",
+                            mudado_por=None,
+                        )
                 except httpx.HTTPStatusError as e:
                     # Bling returns 4xx if the order is already in the
                     # target situacao — treat as success and still stamp

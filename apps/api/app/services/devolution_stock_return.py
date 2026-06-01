@@ -42,10 +42,13 @@ from app.models import BlingOrder, Devolution, Integration, Product
 from app.models.enums import IntegrationPlatform
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import BlingClient
+from app.services.situacao_audit import record_situacao_change
 from app.services.sku_tags import SUFFIX_TAGS as _SKU_SUFFIX_TAGS
 from app.services.sku_tags import classify_sku_tag
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
@@ -178,11 +181,17 @@ def _order_situacao_target(rows: list[Devolution]) -> int | None:
 
 
 async def apply_order_situacao(
-    session: AsyncSession, pedido_bling: str | None
+    session: AsyncSession,
+    pedido_bling: str | None,
+    *,
+    actor_id: UUID | None = None,
 ) -> StockResult | None:
     """Recalcula e aplica a situação do pedido no Bling a partir de TODOS os
     itens de devolução do mesmo `pedido_bling` (== BlingOrder.numero).
-    Best-effort: nunca levanta para o caller."""
+    Best-effort: nunca levanta para o caller.
+
+    `actor_id` é o usuário que disparou a mudança (vindo do router), gravado na
+    trilha de auditoria. None = sistema."""
     pedido = (pedido_bling or "").strip()
     if not pedido:
         return None
@@ -193,13 +202,15 @@ async def apply_order_situacao(
     if target is None:
         return None
 
-    bling_id = (
+    order_row = (
         await session.execute(
-            select(BlingOrder.bling_id)
+            select(BlingOrder.bling_id, BlingOrder.situacao)
             .where(BlingOrder.numero == pedido, BlingOrder.bling_id.is_not(None))
             .limit(1)
         )
-    ).scalar_one_or_none()
+    ).first()
+    bling_id = order_row.bling_id if order_row else None
+    situacao_antiga = order_row.situacao if order_row else None
     if not bling_id:
         logger.warning("devolution_situacao_no_bling_id", pedido_bling=pedido, target=target)
         return _result(
@@ -215,6 +226,15 @@ async def apply_order_situacao(
         logger.info(
             "devolution_situacao_patched",
             pedido_bling=pedido, bling_id=int(bling_id), situacao=target,
+        )
+        await record_situacao_change(
+            session,
+            pedido_bling=pedido,
+            bling_id=bling_id,
+            situacao_antiga=situacao_antiga,
+            situacao_nova=target,
+            origem="devolucao",
+            mudado_por=actor_id,
         )
         return _result(True, "situacao_patched", message=f"Pedido {pedido} → situação {target}")
     except Exception as exc:  # noqa: BLE001
