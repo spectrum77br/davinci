@@ -401,7 +401,7 @@ async function syncFromMarketplace(row: MarketplaceRow) {
 const syncingSaldoFinal = ref<Set<string>>(new Set())
 function isSyncingSaldoFinal(id: string): boolean { return syncingSaldoFinal.value.has(id) }
 
-async function syncFromSaldoFinal(row: MarketplaceRow) {
+async function syncFromSaldoFinal(row: MarketplaceRow, valorBase?: number) {
   if (!canEdit.value) return
   const id = row.bling_order_item_id
   if (syncingSaldoFinal.value.has(id)) return
@@ -409,6 +409,7 @@ async function syncFromSaldoFinal(row: MarketplaceRow) {
   try {
     await api(`/api/margens/marketplace/${encodeURIComponent(id)}/sync-saldo-final`, {
       method: 'POST',
+      body: valorBase != null ? { valor_base: valorBase } : undefined,
     })
     error.value = null
     await reloadCurrent()
@@ -419,6 +420,37 @@ async function syncFromSaldoFinal(row: MarketplaceRow) {
     next.delete(id)
     syncingSaldoFinal.value = next
   }
+}
+
+// ---------- Edição inline de Saldo Final (grava valor_base no Bling) ----------
+
+const editingSaldoFinal = ref<string | null>(null)
+const saldoFinalDraft = ref('')
+
+function startEditSaldoFinal(row: MarketplaceRow) {
+  if (!canEdit.value || !row.pedido_bling) return
+  editingSaldoFinal.value = row.bling_order_item_id
+  saldoFinalDraft.value = row.saldo_final != null ? String(row.saldo_final) : ''
+}
+
+function cancelEditSaldoFinal() {
+  editingSaldoFinal.value = null
+  saldoFinalDraft.value = ''
+}
+
+async function saveSaldoFinal(row: MarketplaceRow) {
+  const raw = saldoFinalDraft.value.trim().replace(',', '.')
+  const next = Number(raw)
+  if (raw === '' || Number.isNaN(next)) {
+    cancelEditSaldoFinal()
+    return
+  }
+  if (row.saldo_final != null && Math.abs(next - row.saldo_final) < 0.005) {
+    cancelEditSaldoFinal()
+    return
+  }
+  cancelEditSaldoFinal()
+  await syncFromSaldoFinal(row, next)
 }
 
 // ---------- Edição inline de observação ----------
@@ -787,7 +819,24 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
               {{ r.ajustes != null && r.ajustes !== 0 ? brl(r.ajustes) : '—' }}
             </td>
             <td class="px-2 py-1 whitespace-nowrap font-medium">
-              <div class="flex items-center justify-end gap-2">
+              <div v-if="editingSaldoFinal === r.bling_order_item_id" class="flex items-center justify-end gap-1">
+                <input
+                  v-model="saldoFinalDraft"
+                  type="text"
+                  inputmode="decimal"
+                  class="w-24 px-2 py-1 text-xs text-right tabular-nums rounded-md border bg-background"
+                  autofocus
+                  @keydown.enter="saveSaldoFinal(r)"
+                  @keydown.esc="cancelEditSaldoFinal"
+                />
+                <button class="p-1 text-emerald-500 hover:opacity-80" :title="`Grava como valor base no Bling (zera taxa e comissão)`" @click="saveSaldoFinal(r)">
+                  <Check class="size-3.5" />
+                </button>
+                <button class="p-1 text-muted-foreground hover:opacity-80" @click="cancelEditSaldoFinal">
+                  <X class="size-3.5" />
+                </button>
+              </div>
+              <div v-else class="flex items-center justify-end gap-2">
                 <button
                   v-if="canEdit && r.saldo_final != null && r.saldo_bling != null && Math.abs(r.saldo_final - r.saldo_bling) > 0.01"
                   type="button"
@@ -799,7 +848,17 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                   <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
                   <span v-else>→</span>
                 </button>
-                <span class="text-right tabular-nums">{{ brl(r.saldo_final) }}</span>
+                <button
+                  type="button"
+                  class="flex items-center gap-1 text-right tabular-nums hover:text-foreground disabled:cursor-default"
+                  :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id)"
+                  :title="canEdit && r.pedido_bling ? `Editar Saldo Final → grava valor base no Bling (zera taxa e comissão)` : ''"
+                  @click="startEditSaldoFinal(r)"
+                >
+                  <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
+                  <span>{{ brl(r.saldo_final) }}</span>
+                  <Pencil v-if="canEdit && r.pedido_bling" class="size-3 shrink-0 opacity-40" />
+                </button>
               </div>
             </td>
             <td class="px-2 py-1 border-l-[3px] border-gray-400 dark:border-gray-600">

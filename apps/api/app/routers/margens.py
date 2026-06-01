@@ -7,7 +7,7 @@ from uuid import UUID
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -370,6 +370,10 @@ class MarketplaceObsPatch(BaseModel):
     observacao: str | None = None
 
 
+class SaldoFinalPatch(BaseModel):
+    valor_base: float | None = None
+
+
 @router.patch("/marketplace/observacao/{pedido_bling}")
 async def patch_marketplace_observacao(
     pedido_bling: str,
@@ -523,14 +527,18 @@ async def sync_bling_from_saldo_final(
     bling_order_item_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("margem", "edit"))],
+    body: Annotated[SaldoFinalPatch | None, Body()] = None,
 ) -> dict:
     """One-shot apply: grava o Saldo Final como `valor_base` no Bling.
 
-    Mesmo padrao do sync-from-marketplace, mas usando `saldo_final` (saldo
-    efetivo do marketplace ajustado por prejuizo/reembolso da tabela
-    refunds) como valor liquido. Zera custofrete e taxacomissao para que
-    (valor_base − taxa − frete) = saldo_final.
+    Sem body, usa o `saldo_final` calculado (saldo efetivo do marketplace
+    ajustado por prejuizo/reembolso da tabela refunds). Com `valor_base` no
+    body, usa o valor editado manualmente pelo usuario. Em ambos os casos
+    zera custofrete e taxacomissao para que (valor_base − taxa − frete) seja
+    a renda final.
     """
+    override = body.valor_base if body is not None else None
+
     row = (await session.execute(
         text(
             f"""
@@ -544,7 +552,9 @@ async def sync_bling_from_saldo_final(
     )).first()
     if row is None:
         raise HTTPException(404, detail={"code": "row_not_found"})
-    if row.saldo_final is None:
+
+    valorbase = override if override is not None else row.saldo_final
+    if valorbase is None:
         raise HTTPException(400, detail={"code": "no_saldo_final"})
 
     updated = await _update_bling_item_resilient(
@@ -553,7 +563,7 @@ async def sync_bling_from_saldo_final(
         pedido_bling=row.pedido_bling,
         sku=row.sku,
         values={
-            "valorbase": row.saldo_final,
+            "valorbase": valorbase,
             "taxacomissao": 0,
             "custofrete": 0,
         },
@@ -563,7 +573,7 @@ async def sync_bling_from_saldo_final(
     await _patch_verificar_margem_financials_silent(
         session,
         bling_order_item_id=str(bling_order_item_id),
-        valorbase=row.saldo_final,
+        valorbase=valorbase,
         taxacomissao=0,
         custofrete=0,
     )
@@ -573,11 +583,12 @@ async def sync_bling_from_saldo_final(
         "saldo_final_synced_to_bling",
         bling_order_item_id=str(bling_order_item_id),
         pedido_bling=row.pedido_bling,
-        valorbase=str(row.saldo_final),
+        valorbase=str(valorbase),
+        manual=override is not None,
     )
     return {
         "ok": True,
-        "valorbase": float(row.saldo_final),
+        "valorbase": float(valorbase),
         "taxacomissao": 0.0,
         "custofrete": 0.0,
     }
