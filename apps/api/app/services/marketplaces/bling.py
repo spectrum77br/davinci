@@ -252,10 +252,35 @@ class BlingClient:
         return r
 
     async def list_lojas(self) -> list[dict]:
-        r = await self._request("GET", "/lojas")
-        r.raise_for_status()
-        body = r.json()
-        return body.get("data", [])
+        """Lista os canais de venda do Bling (id, nome, tipo, situacao).
+
+        Bling v3 aposentou o GET /lojas (passou a responder 404). O
+        substituto e /canais-venda, que pagina por `pagina`/`limite` e
+        retorna `descricao` (nao `nome`). Normalizamos `nome` <- `descricao`
+        para preservar o shape esperado por quem consome (registro de loja),
+        e percorremos as paginas ate vir vazio.
+
+        So retornamos canais ativos (`situacao == 1`): o /canais-venda
+        devolve tambem dezenas de canais desativados/legados (situacao 2,
+        ex.: "Shopee - 85.") que poluiriam o seletor de cadastro de loja.
+        """
+        out: list[dict] = []
+        page = 1
+        while True:
+            r = await self._request(
+                "GET", "/canais-venda", params={"pagina": page, "limite": 100}
+            )
+            r.raise_for_status()
+            rows = r.json().get("data", []) or []
+            if not rows:
+                break
+            for row in rows:
+                if row.get("situacao") != 1:
+                    continue
+                row.setdefault("nome", row.get("descricao"))
+                out.append(row)
+            page += 1
+        return out
 
     async def list_products_page(
         self,
