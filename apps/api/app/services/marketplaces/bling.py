@@ -725,7 +725,14 @@ class BlingClient:
             "PUT", f"/produtos/estruturas/{int(product_id)}", json=estrutura,
         )
         r.raise_for_status()
-        return r.json().get("data") or {}
+        # Bling responde sem body (SDK tipa como Promise<null>); só
+        # tentar parsear se houver content-type JSON.
+        if r.content and "json" in (r.headers.get("content-type") or ""):
+            try:
+                return r.json().get("data") or {}
+            except ValueError:
+                return {}
+        return {}
 
     async def link_supplier_to_product(
         self, *, product_id: int, supplier_id: int, cost_price: float,
