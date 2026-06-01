@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
@@ -256,10 +256,20 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                 # pra ontem — quase certo que é despacho da véspera
                 # detectado na madrugada/cedo da manhã.
                 ship_date = real_ship_date or _operational_ship_date(datetime.now(UTC))
+                # Só carimba em_andamento_data quando ainda está NULL — nunca
+                # sobrescreve data correta de pedido já marcado como enviado
+                # (ex.: marketplace reporta D+1/D+2 por delay de processamento
+                # e re-carimbava dia errado). Situação sempre atualiza — esse
+                # serviço existe justamente pra promover pedidos a situacao=15.
                 result = await session.execute(
                     update(BlingOrder)
                     .where(BlingOrder.bling_id == int(bling_id))
-                    .values(em_andamento_data=ship_date, situacao=str(_SHIPPED_SITUACAO))
+                    .values(
+                        em_andamento_data=func.coalesce(
+                            BlingOrder.em_andamento_data, ship_date,
+                        ),
+                        situacao=str(_SHIPPED_SITUACAO),
+                    )
                 )
                 summary["local_updated"] += result.rowcount or 0
 
