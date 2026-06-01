@@ -114,11 +114,6 @@ function rowStatusClass(row: Row): string {
   return ''
 }
 
-function fmtMoney(n: number | null): string {
-  if (n == null) return ''
-  return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
-}
-
 const totalRows = computed(() => rows.value.length)
 </script>
 
@@ -220,7 +215,6 @@ const totalRows = computed(() => rows.value.length)
         </tbody>
       </table>
     </div>
-    <p class="text-[10px] text-muted-foreground">Valor: {{ fmtMoney(rows.reduce((a, r) => a + (r.valor || 0), 0)) }} total</p>
   </div>
 </template>
 
