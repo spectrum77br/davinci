@@ -35,8 +35,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
+from app.config import get_settings
 from app.models import BlingOrder, Devolution, Integration, Product
 from app.models.enums import IntegrationPlatform
 from app.security.cipher import decrypt_json, encrypt_json
@@ -290,7 +291,7 @@ async def return_product_to_bling_stock(
             )
         # 3) Legado: modal `.sp` antigo (sufixo regional direto).
         if row.estoque_suffix and (suffix := row.estoque_suffix.strip().lower().lstrip(".")):
-            return await _return_with_suffix(client, eff_sku, suffix, row, qty, obs, ctx)
+            return await _return_with_suffix(session, client, eff_sku, suffix, row, qty, obs, ctx)
         # 4) Mala/Eletro NOVO: entrada direta no próprio SKU (salvaguarda — o
         #    front já manda estoque_destino_sku). Usado segue a lógica de usados.
         if eff_condicao == "Novo" and _is_mala_or_eletro(eff_sku):
@@ -333,6 +334,105 @@ async def _resolve_product_id(
         return pid
     product = await client.find_active_product_by_sku(sku)
     return int(product["id"]) if product else None
+
+
+def _sku_root(sku: str) -> str:
+    """Raiz do SKU p/ achar variantes semelhantes: 1º componente do kit, sem
+    qualquer extensão após o 1º ponto. `b048.12` → `b048`; `x001.ra` → `x001`."""
+    first = (sku or "").split("+")[0].strip()
+    return first.split(".")[0].lower()
+
+
+async def _resolve_cost_from_similar(session: AsyncSession, sku: str | None) -> float | None:
+    """Custo (cost_price) de um produto original/semelhante na tabela local.
+
+    Prioridade: SKU exato → qualquer variante com a mesma raiz (`b048.*`),
+    sempre exigindo cost_price > 0 e preferindo ativo. `None` se nada bater.
+    O exato vem primeiro porque cada variante tem custo próprio (b048.12 ≠
+    b048); a raiz é só fallback quando a variante exata não existe."""
+    if not sku:
+        return None
+    s = sku.strip().lower()
+    root = _sku_root(s)
+    if not root:
+        return None
+    exact = func.lower(func.btrim(Product.sku)) == s
+    val = (
+        await session.execute(
+            select(Product.cost_price)
+            .where(
+                or_(
+                    exact,
+                    func.lower(Product.sku) == root,
+                    func.lower(Product.sku).like(f"{root}.%"),
+                ),
+                Product.cost_price.is_not(None),
+                Product.cost_price > 0,
+            )
+            .order_by(exact.desc(), (Product.situacao == "A").desc().nullslast())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return float(val) if val is not None else None
+
+
+async def _resolve_cost(
+    session: AsyncSession, row: Devolution, eff_sku: str | None
+) -> float | None:
+    """Custo a gravar no produto avulso: o custo da própria devolução quando
+    presente (>0); senão busca do produto original/semelhante pelo SKU."""
+    if row.custo_produto and row.custo_produto > 0:
+        return float(row.custo_produto)
+    return await _resolve_cost_from_similar(session, eff_sku)
+
+
+# Fornecedor padrão (âncora do precoCusto no Bling V3) — resolvido 1x e cacheado.
+_default_supplier_id: int | None = None
+_default_supplier_resolved = False
+
+
+async def _get_default_supplier_id(client: BlingClient) -> int | None:
+    """Resolve (e cacheia) o contato.id do fornecedor padrão do config."""
+    global _default_supplier_id, _default_supplier_resolved
+    if _default_supplier_resolved:
+        return _default_supplier_id
+    name = get_settings().bling_default_supplier_name
+    try:
+        _default_supplier_id = (
+            await client.find_contato_id_by_name(name) if name else None
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("devolution_supplier_resolve_failed", error=str(exc))
+        _default_supplier_id = None
+    _default_supplier_resolved = True
+    return _default_supplier_id
+
+
+async def _persist_cost(
+    client: BlingClient, product_id: int, cost: float | None, ctx: dict
+) -> None:
+    """Persiste o precoCusto do produto recém-criado via fornecedor padrão.
+    No-op silencioso quando não há custo (>0) ou fornecedor resolvível —
+    nunca derruba o fluxo de estoque (a entrada já foi/será lançada)."""
+    if not cost or cost <= 0:
+        return
+    supplier_id = await _get_default_supplier_id(client)
+    if not supplier_id:
+        logger.warning("devolution_stock_cost_no_supplier", **ctx)
+        return
+    try:
+        await client.link_supplier_to_product(
+            product_id=int(product_id), supplier_id=int(supplier_id), cost_price=float(cost)
+        )
+        logger.info(
+            "devolution_stock_cost_linked",
+            bling_product_id=int(product_id), cost=float(cost), **ctx,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "devolution_stock_cost_link_failed",
+            bling_product_id=int(product_id), error=str(exc), **ctx,
+        )
 
 
 async def _return_to_existing(
@@ -406,9 +506,9 @@ async def _create_z_product(
     suffix_label = " AVULSO SALVADO" if eff_condicao == "Usado" else " AVULSO"
     name = f"{base_name}{suffix_label}"
 
-    price = float(row.custo_produto) if row.custo_produto else None
+    cost = await _resolve_cost(session, row, eff_sku)
     new_data = await client.create_product(
-        sku=target_sku, name=name, price=price, category_id=category_id
+        sku=target_sku, name=name, price=cost, category_id=category_id
     )
     product_id = (new_data or {}).get("id")
     if not product_id:
@@ -419,6 +519,7 @@ async def _create_z_product(
         )
 
     pid = int(product_id)
+    await _persist_cost(client, pid, cost, ctx)
     await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs)
     logger.info(
         "devolution_stock_created_avulso",
@@ -431,7 +532,8 @@ async def _create_z_product(
 
 
 async def _return_with_suffix(
-    client: BlingClient, eff_sku: str, suffix: str, row: Devolution, qty: int, obs: str, ctx: dict
+    session: AsyncSession, client: BlingClient, eff_sku: str, suffix: str,
+    row: Devolution, qty: int, obs: str, ctx: dict,
 ) -> StockResult:
     """Legado (modal `.sp`): entrada em base.<suffix>; cria se não existir."""
     if not eff_sku:
@@ -452,8 +554,8 @@ async def _return_with_suffix(
         )
 
     nome = row.produtos or f"{target_sku}"
-    price = float(row.custo_produto) if row.custo_produto else None
-    new_data = await client.create_product(sku=target_sku, name=nome, price=price)
+    cost = await _resolve_cost(session, row, eff_sku)
+    new_data = await client.create_product(sku=target_sku, name=nome, price=cost)
     product_id = (new_data or {}).get("id")
     if not product_id:
         logger.warning("devolution_stock_suffix_create_no_id", target_sku=target_sku, **ctx)
@@ -463,6 +565,7 @@ async def _return_with_suffix(
         )
 
     pid = int(product_id)
+    await _persist_cost(client, pid, cost, ctx)
     await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs)
     logger.info(
         "devolution_stock_created_suffix", target_sku=target_sku, bling_product_id=pid, **ctx
@@ -527,11 +630,11 @@ async def _return_usado(
     # Não encontrado — cria sob o próximo z-SKU (sem tag, fallback legado)
     z_sku = await client.find_next_z_sku()
     nome = row.produtos or (f"Usado - {sku}" if sku else "Produto Usado")
-    price = float(row.custo_produto) if row.custo_produto else None
+    cost = await _resolve_cost(session, row, sku)
     category_id = await client.get_category_id_by_name("Usado")
 
     new_data = await client.create_product(
-        sku=z_sku, name=nome, price=price, category_id=category_id
+        sku=z_sku, name=nome, price=cost, category_id=category_id
     )
     product_id = (new_data or {}).get("id")
     if not product_id:
@@ -542,6 +645,7 @@ async def _return_usado(
         )
 
     pid = int(product_id)
+    await _persist_cost(client, pid, cost, ctx)
     await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs)
     logger.info(
         "devolution_stock_created_usado",
