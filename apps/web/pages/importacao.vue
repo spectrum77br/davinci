@@ -642,6 +642,17 @@ function loteTotal(prod: Product, loteId: string): number {
   return q * Number(prod.custo_bling || 0)
 }
 
+// Cor de fundo alternada por paridade do número do lote (ML25, ML26, …).
+// Ímpar = bege; par = cinza. Cobre header (8 rows) + body (quant/total).
+function loteBgClass(loteName: string | null | undefined): string {
+  const m = (loteName || '').match(/(\d+)/)
+  if (!m) return ''
+  const n = parseInt(m[1], 10)
+  return n % 2 === 0
+    ? 'bg-gray-200 dark:bg-gray-700/40'
+    : 'bg-amber-50 dark:bg-amber-900/20'
+}
+
 // ── Cotação: handlers ─────────────────────────────────────────────
 // Autosave pattern mirrors the Mala tab: 500ms debounce per (row, field).
 // Fabricante and produto edits go to PATCH; cell edits go to PUT (upsert).
@@ -1058,7 +1069,7 @@ onScopeDispose(() => {
            espaço pro header da página + barra de parâmetros. -->
       <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 220px)">
         <table class="grid-table w-full text-xs border-collapse">
-          <thead>
+          <thead class="thead-sticky">
             <!-- 8-row header. Fixed left columns use rowspan=8 so their
                  label sits centered across the full header height.
                  Each lote occupies 2 cols (label + value) and fills
@@ -1088,11 +1099,10 @@ onScopeDispose(() => {
               <th rowspan="8" class="col-head text-right" style="min-width: 70px">memória consumo</th>
               <th rowspan="8" class="col-head text-right" style="min-width: 76px">reposição estoque</th>
               <th rowspan="8" class="col-head text-right" style="min-width: 76px">saldo reposição</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 140px">nome gerado</th>
               <th rowspan="8" class="col-head text-left" style="min-width: 100px">obs</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
-                <td class="lote-label border-l">lote</td>
-                <td class="lote-value">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">lote</td>
+                <td class="lote-value" :class="loteBgClass(lote.nome)">
                   <span class="font-semibold uppercase">{{ lote.nome }}</span>
                   <button v-if="canEdit && lote.is_aberto" class="ml-2 text-[10px] underline hover:text-primary" @click="fecharLote(lote)">fechar</button>
                   <button v-if="canDelete" class="ml-1 text-destructive" @click="removeLote(lote)" :title="`Excluir ${lote.nome}`">
@@ -1105,8 +1115,8 @@ onScopeDispose(() => {
             </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r2-${lote.id}`">
-                <td class="lote-label border-l">abertura</td>
-                <td class="lote-value editable">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">abertura</td>
+                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
                   <input type="date" :value="lote.abertura" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px]"
                     @input="(e) => schedulePatchLote(lote, 'abertura', (e.target as HTMLInputElement).value)" />
@@ -1115,8 +1125,8 @@ onScopeDispose(() => {
             </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r3-${lote.id}`">
-                <td class="lote-label border-l">fechamento</td>
-                <td class="lote-value editable">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">fechamento</td>
+                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
                   <input type="date" :value="lote.fechamento ?? ''" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px]"
                     @input="(e) => schedulePatchLote(lote, 'fechamento', (e.target as HTMLInputElement).value || null)" />
@@ -1125,14 +1135,14 @@ onScopeDispose(() => {
             </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r4-${lote.id}`">
-                <td class="lote-label border-l">previsto</td>
-                <td class="lote-value calculated">{{ fmtMoney(lote.previsto) }}</td>
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">previsto</td>
+                <td class="lote-value calculated" :class="loteBgClass(lote.nome)">{{ fmtMoney(lote.previsto) }}</td>
               </template>
             </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r5-${lote.id}`">
-                <td class="lote-label border-l">realizado</td>
-                <td class="lote-value editable">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">realizado</td>
+                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
                   <input type="number" step="0.01" :value="lote.realizado" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px] text-right"
                     @input="(e) => schedulePatchLote(lote, 'realizado', Number((e.target as HTMLInputElement).value) || 0)" />
@@ -1141,30 +1151,31 @@ onScopeDispose(() => {
             </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r6-${lote.id}`">
-                <td class="lote-label border-l">saldo</td>
-                <td class="lote-value calculated" :class="Number(lote.saldo) > 0 ? 'text-red-700' : 'text-emerald-700'">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">saldo</td>
+                <td class="lote-value calculated"
+                  :class="[loteBgClass(lote.nome), Number(lote.saldo) > 0 ? 'text-red-700' : 'text-emerald-700']">
                   {{ fmtMoney(lote.saldo) }}
                 </td>
               </template>
             </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r7-${lote.id}`">
-                <td class="lote-label border-l">prazo</td>
-                <td class="lote-value calculated">{{ lote.prazo != null ? lote.prazo + 'd' : '—' }}</td>
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">prazo</td>
+                <td class="lote-value calculated" :class="loteBgClass(lote.nome)">{{ lote.prazo != null ? lote.prazo + 'd' : '—' }}</td>
               </template>
             </tr>
             <tr>
               <!-- Row 8 = the actual sub-headers for the body data cells.
                    These align directly above the quant/total cells in tbody. -->
               <template v-for="lote in visibleLotes" :key="`lote-r8-${lote.id}`">
-                <th class="col-quant border-l">quant</th>
-                <th class="col-total">total</th>
+                <th class="col-quant border-l" :class="loteBgClass(lote.nome)">quant</th>
+                <th class="col-total" :class="loteBgClass(lote.nome)">total</th>
               </template>
             </tr>
           </thead>
           <tbody>
             <tr v-if="!loading && filteredProducts.length === 0">
-              <td :colspan="(isEletro ? 11 : 16) + visibleLotes.length * 2 + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
+              <td :colspan="(isEletro ? 10 : 15) + visibleLotes.length * 2 + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
                 {{ categoria === 'celular'
                   ? 'Categoria Celular em construção. Clique em "Criar produto" pra começar.'
                   : 'Nenhum produto. Clique em "Criar produto" para começar.' }}
@@ -1219,14 +1230,11 @@ onScopeDispose(() => {
               <td class="calc text-right" :class="reposicaoClass(row.saldo_reposicao)">
                 {{ row.saldo_reposicao ?? '—' }}
               </td>
-              <td class="text-[11px] text-muted-foreground italic" :title="row.nome_gerado">
-                {{ row.nome_gerado || '—' }}
-              </td>
               <td><input class="cell-input" :value="row.obs ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'obs', (e.target as HTMLInputElement).value)" /></td>
               <!-- Per-lote cells align directly under the row-8 quant/total sub-headers. -->
               <template v-for="lote in visibleLotes" :key="`cell-${row.id}-${lote.id}`">
-                <td class="border-l">
+                <td class="border-l" :class="loteBgClass(lote.nome)">
                   <input
                     type="number"
                     class="cell-input text-right"
@@ -1235,7 +1243,7 @@ onScopeDispose(() => {
                     @input="(e) => scheduleLoteItem(row, lote.id, Number((e.target as HTMLInputElement).value) || 0)"
                   />
                 </td>
-                <td class="calc text-right">{{ fmtMoney(loteTotal(row, lote.id)) }}</td>
+                <td class="calc text-right" :class="loteBgClass(lote.nome)">{{ fmtMoney(loteTotal(row, lote.id)) }}</td>
               </template>
               <td v-if="canEdit" class="text-center whitespace-nowrap">
                 <button
@@ -1654,7 +1662,18 @@ onScopeDispose(() => {
 .grid-table td.calc {
   background: hsl(var(--muted) / 0.5);
   color: hsl(var(--muted-foreground));
-  font-style: italic;
+}
+/* Sticky <thead>: cabeçalho inteiro (8 linhas + lotes) fica fixo no topo
+ * ao rolar. Substitui o sticky por-célula que existia em .col-head — o
+ * thead inteiro viaja junto agora, então as 8 linhas dos lotes
+ * (abertura/fechamento/previsto/realizado/saldo/prazo/quant) ficam
+ * sempre visíveis. Cada <th>/<td> já tem background-color próprio
+ * (col-head, lote-label, lote-value, col-quant/col-total), então não
+ * fica transparente sobre o body. */
+.thead-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 .cell-input {
   width: 100%;
@@ -1697,13 +1716,6 @@ onScopeDispose(() => {
   word-break: normal;
   overflow-wrap: normal;
   line-height: 1.15;
-  /* Sticky vertical — mantém o cabeçalho visível ao rolar pra baixo.
-   * Aplicado só nas colunas com rowspan=8 (fornecedor..obs + bling +
-   * ações), que é o que o operador pediu ("só até obs"). As linhas
-   * 2-8 do thead (info dos lotes) NÃO ficam sticky e rolam normalmente. */
-  position: sticky;
-  top: 0;
-  z-index: 5;
 }
 .lote-label {
   background: hsl(var(--muted) / 0.5);
