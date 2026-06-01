@@ -134,7 +134,17 @@ async def run_sync_marketplace_financials_for_bling_order(
             "store_id": str(store.id) if store else None,
         }
 
-    snapshot = await _fetch_snapshot(session, integration, external_order_id)
+    # SKUs of every line of this Bling order — used to match ML pack
+    # sub-orders so a consolidated (whole-pack) Bling order aggregates all
+    # siblings, while a split (one-order-per-sub) Bling order does not.
+    bling_skus = {
+        str(r.item_codigo).strip().lower()
+        for r in rows
+        if r.item_codigo and str(r.item_codigo).strip()
+    } or None
+    snapshot = await _fetch_snapshot(
+        session, integration, external_order_id, bling_skus=bling_skus
+    )
     financial = await _persist_snapshot(
         session,
         snapshot,
@@ -257,6 +267,8 @@ async def _fetch_snapshot(
     session: AsyncSession,
     integration: Integration,
     external_order_id: str,
+    *,
+    bling_skus: set[str] | None = None,
 ) -> FinancialSnapshot:
     if integration.platform not in SUPPORTED_PLATFORMS:
         return FinancialSnapshot(
@@ -289,7 +301,7 @@ async def _fetch_snapshot(
         if integration.platform == IntegrationPlatform.ML and isinstance(
             client, MercadoLivreClient
         ):
-            return await _fetch_ml(client, external_order_id)
+            return await _fetch_ml(client, external_order_id, bling_skus=bling_skus)
         if integration.platform == IntegrationPlatform.AMAZON and isinstance(client, AmazonClient):
             return await _fetch_amazon(client, external_order_id)
         if integration.platform == IntegrationPlatform.TIKTOK and isinstance(client, TikTokClient):
@@ -623,7 +635,52 @@ def _shopee_freight_drafts(
     ]
 
 
-async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnapshot:
+def _ml_order_item_skus(order: Any) -> set[str]:
+    """Lowercased seller SKUs of an ML order's items (seller_sku or
+    seller_custom_field). Used to match pack sub-orders to a Bling order."""
+    skus: set[str] = set()
+    items = order.get("order_items") if isinstance(order, dict) else None
+    if not isinstance(items, list):
+        return skus
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        item = entry.get("item") if isinstance(entry.get("item"), dict) else {}
+        for key in (item.get("seller_sku"), item.get("seller_custom_field")):
+            value = _text_value(key)
+            if value:
+                skus.add(value.lower())
+    return skus
+
+
+def _ml_order_commission(order: Any) -> Decimal:
+    """sum(sale_fee * quantity) over an ML order's items."""
+    commission = Decimal("0")
+    items = order.get("order_items") if isinstance(order, dict) else None
+    if not isinstance(items, list):
+        return commission
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sale_fee = _money(item.get("sale_fee")) or Decimal("0")
+        qty = _money(item.get("quantity")) or Decimal("1")
+        commission += sale_fee * qty
+    return commission
+
+
+def _ml_order_discount(order: Any) -> Decimal | None:
+    payments = order.get("payments") if isinstance(order, dict) else None
+    if not isinstance(payments, list):
+        return None
+    return _sum_money(p.get("coupon_amount") for p in payments if isinstance(p, dict))
+
+
+async def _fetch_ml(
+    client: MercadoLivreClient,
+    order_id: str,
+    *,
+    bling_skus: set[str] | None = None,
+) -> FinancialSnapshot:
     order = await client.get_order(order_id)
     billing: dict[str, Any] | None = None
     billing_error: str | None = None
@@ -633,17 +690,53 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
         billing_error = str(e)[:500]
 
     currency = _currency_from(order) or "BRL"
-    items = order.get("order_items") if isinstance(order, dict) else []
-    if not isinstance(items, list):
-        items = []
-    commission = Decimal("0")
-    for item in items:
-        if not isinstance(item, dict):
+
+    # --- Pack expansion -------------------------------------------------
+    # ML groups items bought together into a *pack*; each item can be a
+    # separate order_id (sharing one shipment). Bling, however, may
+    # consolidate the whole pack under a single order whose `numeroloja` is
+    # just ONE of the sub-order ids. Fetching only that sub-order undercounts
+    # gross/commission and wrecks the marketplace margin. So when the order
+    # belongs to a pack we aggregate the sibling orders that correspond to
+    # this Bling order's lines (matched by SKU, to avoid double counting when
+    # Bling instead split the pack into multiple orders).
+    matched_orders: list[dict[str, Any]] = [order] if isinstance(order, dict) else []
+    pack_order_ids: list[str] = []
+    pack_error: str | None = None
+    primary_id = _text_value(order.get("id")) if isinstance(order, dict) else None
+    pack_id = _text_value(order.get("pack_id")) if isinstance(order, dict) else None
+    skus_filter = {s.lower() for s in bling_skus} if bling_skus else None
+    if pack_id:
+        try:
+            pack = await client.get_pack(pack_id)
+            pack_order_ids = [
+                oid
+                for o in (pack.get("orders") or [])
+                if isinstance(o, dict) and (oid := _text_value(o.get("id")))
+            ]
+        except Exception as e:  # noqa: BLE001
+            pack_error = str(e)[:300]
+        for oid in pack_order_ids:
+            if oid in {_text_value(order_id), primary_id}:
+                continue
+            try:
+                sibling = await client.get_order(oid)
+            except Exception:  # noqa: BLE001 — skip unreachable sibling, keep going
+                continue
+            if skus_filter is not None and not (_ml_order_item_skus(sibling) & skus_filter):
+                continue
+            matched_orders.append(sibling)
+
+    # --- Aggregate money across matched orders --------------------------
+    gross = _sum_money(o.get("total_amount") for o in matched_orders)
+    commission = sum((_ml_order_commission(o) for o in matched_orders), Decimal("0"))
+    discount = None
+    for o in matched_orders:
+        part = _ml_order_discount(o)
+        if part is None:
             continue
-        sale_fee = _money(item.get("sale_fee")) or Decimal("0")
-        qty = _money(item.get("quantity")) or Decimal("1")
-        commission += sale_fee * qty
-    gross = _money(order.get("total_amount")) if isinstance(order, dict) else None
+        discount = (discount or Decimal("0")) + part
+
     payments = order.get("payments") if isinstance(order, dict) else []
     if not isinstance(payments, list):
         payments = []
@@ -651,14 +744,13 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
     payment_shipping_cost = (
         _money(payment.get("shipping_cost")) if isinstance(payment, dict) else None
     )
-    # ML's `payment.coupon_amount` is a seller-financed discount applied at
-    # checkout (most commonly the R$2 catalog/promo contribution). The order
-    # payload has no field separating seller-paid from MP-paid coupons, so we
-    # always deduct it from net here; once the billing detail posts ML reflects
+    # `payment.coupon_amount` (deducted above per matched order) is a
+    # seller-financed discount applied at checkout (most commonly the R$2
+    # catalog/promo contribution). Once the billing detail posts ML reflects
     # the actual deduction and any mismatch gets reconciled then.
-    discount = _sum_money(
-        p.get("coupon_amount") for p in payments if isinstance(p, dict)
-    )
+    # Freight is shipment-level: every sub-order of a pack shares one
+    # shipping_id, so the primary order's reconciliation already carries the
+    # full-pack freight (and `_ml_actual_freight_total` dedups by shipping_id).
     freights = await _fetch_ml_freight_reconciliations(client, order, order_id, currency)
     freight_actual_total = _ml_actual_freight_total(freights)
     freight = freight_actual_total or payment_shipping_cost
@@ -724,6 +816,15 @@ async def _fetch_ml(client: MercadoLivreClient, order_id: str) -> FinancialSnaps
             "payment_shipping_cost": str(payment_shipping_cost)
             if payment_shipping_cost is not None
             else None,
+            "pack_id": pack_id,
+            "pack_order_ids": pack_order_ids or None,
+            "pack_matched_order_ids": [
+                _text_value(o.get("id")) for o in matched_orders
+            ]
+            if pack_id
+            else None,
+            "pack_error": pack_error,
+            "sibling_orders": [o for o in matched_orders[1:]] or None,
         },
         events=events,
         freights=freights,

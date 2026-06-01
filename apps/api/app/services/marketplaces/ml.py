@@ -195,6 +195,14 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_pack(self, pack_id: str) -> dict:
+        """Fetch a pack (cart) and its sibling orders. ML groups items bought
+        together into a pack; each item can be a separate order_id sharing one
+        shipment. Returns `{id, orders: [{id, ...}], ...}`."""
+        r = await self._request("GET", f"/packs/{pack_id}")
+        r.raise_for_status()
+        return r.json() or {}
+
     async def get_shipment(self, shipment_id: str) -> dict:
         """Fetch shipment details. Used by the shipment-check sweep to read
         `substatus=dropped_off`, which fires when the seller hands the
