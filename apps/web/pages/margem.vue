@@ -819,7 +819,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
               {{ r.ajustes != null && r.ajustes !== 0 ? brl(r.ajustes) : '—' }}
             </td>
             <td class="px-2 py-1 whitespace-nowrap font-medium">
-              <div v-if="editingSaldoFinal === r.bling_order_item_id" class="flex items-center justify-end gap-1">
+              <div v-if="editingSaldoFinal === r.bling_order_item_id" class="flex items-center justify-end">
                 <input
                   v-model="saldoFinalDraft"
                   type="text"
@@ -828,13 +828,8 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                   autofocus
                   @keydown.enter="saveSaldoFinal(r)"
                   @keydown.esc="cancelEditSaldoFinal"
+                  @blur="saveSaldoFinal(r)"
                 />
-                <button class="p-1 text-emerald-500 hover:opacity-80" :title="`Grava como valor base no Bling (zera taxa e comissão)`" @click="saveSaldoFinal(r)">
-                  <Check class="size-3.5" />
-                </button>
-                <button class="p-1 text-muted-foreground hover:opacity-80" @click="cancelEditSaldoFinal">
-                  <X class="size-3.5" />
-                </button>
               </div>
               <div v-else class="flex items-center justify-end gap-2">
                 <button
@@ -850,14 +845,13 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                 </button>
                 <button
                   type="button"
-                  class="flex items-center gap-1 text-right tabular-nums hover:text-foreground disabled:cursor-default"
+                  class="text-right tabular-nums hover:text-foreground disabled:cursor-default"
                   :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id)"
                   :title="canEdit && r.pedido_bling ? `Editar Saldo Final → grava valor base no Bling (zera taxa e comissão)` : ''"
                   @click="startEditSaldoFinal(r)"
                 >
                   <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
                   <span>{{ brl(r.saldo_final) }}</span>
-                  <Pencil v-if="canEdit && r.pedido_bling" class="size-3 shrink-0 opacity-40" />
                 </button>
               </div>
             </td>
