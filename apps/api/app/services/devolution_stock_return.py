@@ -245,6 +245,67 @@ async def apply_order_situacao(
         return _result(False, "situacao_error", message=str(exc))
 
 
+# ── Registro / estorno do movimento de estoque ──────────────────────────────
+
+def record_stock_movement(row: Devolution, sr: StockResult | None) -> None:
+    """Grava em `row` o que foi efetivamente lançado no Bling, pra permitir o
+    estorno depois. Só registra entradas reais (ok + produto resolvido); no-op
+    pra falhas, 'sucata_no_stock' e afins. Limpa um estorno anterior — uma nova
+    entrada zera o `revertido_at`. NÃO faz commit (o caller persiste)."""
+    if not sr or not sr.get("ok") or not sr.get("bling_product_id"):
+        return
+    row.estoque_mov_sku = sr.get("sku")
+    row.estoque_mov_bling_id = int(sr["bling_product_id"])
+    row.estoque_mov_action = sr.get("action")
+    row.estoque_mov_qty = max(1, int(row.quantidade or 1))
+    row.estoque_mov_revertido_at = None
+
+
+async def reverse_stock_movement(
+    session: AsyncSession, row: Devolution
+) -> StockResult | None:
+    """Estorna (dá baixa "S") a entrada de estoque registrada em `row`, quando o
+    operador desliga "devolver estoque" depois — ex.: item entrou como Usado e
+    numa verificação posterior virou Sucata, então não pode ficar vendável.
+
+    Best-effort: nunca levanta. Retorna None quando não há nada a estornar
+    (sem movimento registrado ou já estornado). Damos BAIXA na mesma quantidade
+    (não excluímos o produto): o z-SKU criado fica com estoque 0 e some das
+    vendas, sem quebrar histórico/movimentos no Bling."""
+    pid = row.estoque_mov_bling_id
+    if not pid or row.estoque_mov_revertido_at is not None:
+        return None
+    qty = max(1, int(row.estoque_mov_qty or row.quantidade or 1))
+    mov_sku = row.estoque_mov_sku or row.sku
+    obs = (
+        f"Estorno devolução pedido {row.pedido_bling}"
+        if row.pedido_bling
+        else "Estorno devolução"
+    )
+    ctx = {
+        "devolution_id": str(row.id),
+        "bling_product_id": int(pid),
+        "mov_sku": mov_sku,
+        "qty": qty,
+    }
+
+    client = await _get_bling_client(session)
+    if client is None:
+        logger.warning("devolution_stock_reverse_no_integration", **ctx)
+        return _result(False, "no_integration", message="Nenhuma integração Bling encontrada")
+    try:
+        await client.update_stock_by_id(int(pid), qty=qty, operation="S", observacao=obs)
+        row.estoque_mov_revertido_at = datetime.now(UTC)
+        logger.info("devolution_stock_reversed", **ctx)
+        return _result(
+            True, "stock_reversed", sku=mov_sku, bling_product_id=int(pid),
+            message=f"Estoque estornado · −{qty} em {mov_sku or pid}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("devolution_stock_reverse_error", error=str(exc), **ctx)
+        return _result(False, "error", sku=mov_sku, message=str(exc))
+
+
 # ── Estoque ────────────────────────────────────────────────────────────────
 
 async def return_product_to_bling_stock(

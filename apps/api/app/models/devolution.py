@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, Text, text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, Integer, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -53,5 +53,17 @@ class Devolution(Base, TimestampMixin):
     tag: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Setado quando o toggle "devolver estoque" passa a TRUE (auto no router).
     data_devolvido_estoque: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Movimento de estoque efetivamente lançado no Bling (ver alembic 0115).
+    # Guardado pra poder ESTORNAR (dar baixa "S") quando o toggle "devolver
+    # estoque" é desligado depois — ex.: Usado que vira Sucata. `*_action`
+    # distingue bin existente de produto z criado; `*_revertido_at` marca o
+    # estorno já feito (evita estornar duas vezes).
+    estoque_mov_sku: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estoque_mov_bling_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    estoque_mov_action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estoque_mov_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estoque_mov_revertido_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

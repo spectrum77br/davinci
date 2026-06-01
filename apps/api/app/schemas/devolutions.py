@@ -47,6 +47,11 @@ class DevolutionOut(BaseModel):
     manutencao_destino: str | None = None
     tag: str | None = None
     data_devolvido_estoque: datetime | None = None
+    estoque_mov_sku: str | None = None
+    estoque_mov_bling_id: int | None = None
+    estoque_mov_action: str | None = None
+    estoque_mov_qty: int | None = None
+    estoque_mov_revertido_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     bling_stock_result: BlingStockResultOut | None = None

@@ -33,7 +33,9 @@ from app.services.devolution_stock_return import (
     _sku_base,
     _sku_tag,
     apply_order_situacao,
+    record_stock_movement,
     return_product_to_bling_stock,
+    reverse_stock_movement,
 )
 
 logger = structlog.get_logger()
@@ -480,6 +482,11 @@ async def create_devolution(
         sr = await return_product_to_bling_stock(session, row)
         if sr is not None:
             out.bling_stock_result = BlingStockResultOut(**sr)
+            record_stock_movement(row, sr)  # persiste p/ permitir estorno depois
+            await session.commit()
+            await session.refresh(row)
+            out = DevolutionOut.model_validate(row)
+            out.bling_stock_result = BlingStockResultOut(**sr)
     # Situação do pedido: Extraviado e Manutenção patcham já no add; Novo/Usado/
     # Trocado quando processam o estoque.
     if (condicao in ("Extraviado", "Manutenção") or should_stock) and row.pedido_bling:
@@ -522,24 +529,49 @@ async def patch_devolution(
 
     await session.commit()
     await session.refresh(row)
-    out = DevolutionOut.model_validate(row)
 
     condicao_changed = new_condicao != prev_condicao
     toggle_turned_on = row.devolver_estoque and not prev_devolver_estoque
+    toggle_turned_off = prev_devolver_estoque and not row.devolver_estoque
     should_stock = (
         new_condicao in _STOCK_TRIGGER_CONDICOES
         and row.devolver_estoque
         and (condicao_changed or toggle_turned_on)
     )
+
+    final_sr: dict | None = None
+    has_pending_mov = (
+        row.estoque_mov_bling_id is not None and row.estoque_mov_revertido_at is None
+    )
+    # Estorna a entrada anterior quando o operador desliga "devolver estoque" OU
+    # quando vamos relançar por mudança de condição/destino — evita estoque
+    # duplicado e tira de venda o item que, p.ex., entrou Usado e virou Sucata.
+    if has_pending_mov and (toggle_turned_off or should_stock):
+        rev = await reverse_stock_movement(session, row)
+        await session.commit()
+        await session.refresh(row)
+        if toggle_turned_off:
+            final_sr = rev
+
     if should_stock:
         sr = await return_product_to_bling_stock(session, row)
         if sr is not None:
-            out.bling_stock_result = BlingStockResultOut(**sr)
+            recorded = bool(sr.get("ok") and sr.get("bling_product_id"))
+            record_stock_movement(row, sr)
+            await session.commit()
+            await session.refresh(row)
+            if recorded or final_sr is None:
+                final_sr = sr
+
     # Extraviado patcha a situação ao virar Extraviado (sem depender do toggle).
     extraviado_now = new_condicao == "Extraviado" and condicao_changed
     if (extraviado_now or should_stock) and row.pedido_bling:
         await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
         await session.commit()  # persiste a linha de auditoria de situação
+
+    out = DevolutionOut.model_validate(row)
+    if final_sr is not None:
+        out.bling_stock_result = BlingStockResultOut(**final_sr)
     return out
 
 

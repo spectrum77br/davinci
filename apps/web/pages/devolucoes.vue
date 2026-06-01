@@ -50,6 +50,11 @@ type DevolutionRow = {
   manutencao_destino: string | null
   tag: string | null
   data_devolvido_estoque: string | null
+  estoque_mov_sku: string | null
+  estoque_mov_bling_id: number | null
+  estoque_mov_action: string | null
+  estoque_mov_qty: number | null
+  estoque_mov_revertido_at: string | null
   created_at: string
   updated_at: string
   bling_stock_result?: BlingStockResult | null
@@ -173,7 +178,9 @@ function showStockToast(sr: BlingStockResult) {
   if (sr.ok) {
     const title = sr.action === 'product_created_usado'
       ? 'Bling · produto criado'
-      : 'Bling · estoque atualizado'
+      : sr.action === 'stock_reversed'
+        ? 'Bling · estoque estornado'
+        : 'Bling · estoque atualizado'
     pushToast({ kind: 'success', title, lines })
   } else {
     const titles: Record<string, string> = {
