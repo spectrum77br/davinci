@@ -242,14 +242,20 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
             logger.warning("kit_sync_mark_missing", mark_id=str(mark_id))
             return {"ok": False, "error": "mark_not_found"}
 
-        # Idempotência: já sincronizado.
-        if mark.bling_product_id is not None:
+        # Idempotência:
+        #   * status="sent" → kit completo, nada a fazer.
+        #   * bling_product_id setado + status != "sent" (ex: "partial",
+        #     "error" pós-criação) → pula POST /produtos e tenta SÓ a
+        #     estrutura novamente. Permite recovery sem criar produto
+        #     duplicado no Bling.
+        existing_bling_id = mark.bling_product_id
+        if existing_bling_id is not None and mark.bling_sync_status == "sent":
             logger.info(
                 "kit_sync_already_done",
                 mark_id=str(mark_id),
-                bling_product_id=mark.bling_product_id,
+                bling_product_id=existing_bling_id,
             )
-            return {"ok": True, "bling_product_id": mark.bling_product_id, "skipped": True}
+            return {"ok": True, "bling_product_id": existing_bling_id, "skipped": True}
 
         base = (await session.execute(
             select(ImportKitBase).where(ImportKitBase.id == mark.base_id)
@@ -313,36 +319,69 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
         # `resolved`. Linkado separado abaixo via POST /produtos/fornecedores.
         components_cost = sum(cost for _, _, cost in resolved)
 
-        # Criar no Bling.
+        # Criar no Bling. `estrutura` NÃO entra no POST /produtos
+        # (Bling V3 descarta silenciosamente os componentes). Vai numa
+        # 2ª chamada logo abaixo, no PUT /produtos/estruturas/{id}.
+        # Se existing_bling_id já existe (status=partial), reusa-o e
+        # pula direto pra etapa da estrutura.
+        if existing_bling_id is not None:
+            new_bling_id: int | None = existing_bling_id
+        else:
+            try:
+                data = await client.create_product(
+                    sku=kit_sku,
+                    name=kit_name,
+                    category_id=category_id,
+                    formato="E",
+                )
+            except httpx.HTTPStatusError as e:
+                body_excerpt = (e.response.text or "")[:500]
+                await _set_mark_error(
+                    session, mark,
+                    f"bling_http_{e.response.status_code}: {body_excerpt}",
+                )
+                logger.warning(
+                    "kit_sync_bling_http",
+                    mark_id=str(mark_id), sku=kit_sku,
+                    status=e.response.status_code, body=body_excerpt,
+                )
+                return {"ok": False, "error": "bling_http_error"}
+            except Exception as e:  # noqa: BLE001
+                await _set_mark_error(session, mark, f"bling_call_failed: {e}")
+                logger.exception("kit_sync_bling_call_failed", mark_id=str(mark_id))
+                return {"ok": False, "error": f"bling_call_failed: {e}"}
+
+            new_bling_id = data.get("id")
+            if new_bling_id is None:
+                await _set_mark_error(session, mark, f"bling_no_id_returned: {data}")
+                return {"ok": False, "error": "bling_no_id_returned"}
+
+        # PUT /produtos/estruturas/{id} pra gravar os componentes.
+        # Falha aqui deixa o produto criado mas SEM estrutura — status
+        # "partial" sinaliza isso pro operador re-tentar via UI sem
+        # refazer o produto. O id já é o do kit no Bling, então
+        # mark.bling_product_id é gravado abaixo de qualquer jeito.
+        estrutura_failed_msg: str | None = None
         try:
-            data = await client.create_product(
-                sku=kit_sku,
-                name=kit_name,
-                category_id=category_id,
-                formato="E",
-                estrutura=estrutura,
+            await client.update_product_estrutura(
+                product_id=int(new_bling_id), estrutura=estrutura,
             )
         except httpx.HTTPStatusError as e:
             body_excerpt = (e.response.text or "")[:500]
-            await _set_mark_error(
-                session, mark,
-                f"bling_http_{e.response.status_code}: {body_excerpt}",
+            estrutura_failed_msg = (
+                f"estrutura_http_{e.response.status_code}: {body_excerpt}"
             )
             logger.warning(
-                "kit_sync_bling_http",
-                mark_id=str(mark_id), sku=kit_sku,
+                "kit_sync_estrutura_http",
+                mark_id=str(mark_id), kit_id=int(new_bling_id),
                 status=e.response.status_code, body=body_excerpt,
             )
-            return {"ok": False, "error": "bling_http_error"}
         except Exception as e:  # noqa: BLE001
-            await _set_mark_error(session, mark, f"bling_call_failed: {e}")
-            logger.exception("kit_sync_bling_call_failed", mark_id=str(mark_id))
-            return {"ok": False, "error": f"bling_call_failed: {e}"}
-
-        new_bling_id = data.get("id")
-        if new_bling_id is None:
-            await _set_mark_error(session, mark, f"bling_no_id_returned: {data}")
-            return {"ok": False, "error": "bling_no_id_returned"}
+            estrutura_failed_msg = f"estrutura_call_failed: {e}"
+            logger.exception(
+                "kit_sync_estrutura_call_failed",
+                mark_id=str(mark_id), kit_id=int(new_bling_id),
+            )
 
         # Linkar fornecedor padrão + custo somado dos componentes (etapa
         # separada — Bling V3 só persiste precoCusto via POST
@@ -369,11 +408,19 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
                     components_cost=components_cost,
                 )
 
-        # Sucesso — gravar.
+        # Sucesso — gravar. Status:
+        #   * "sent" — produto + estrutura ok
+        #   * "partial" — produto criado mas estrutura falhou (componentes
+        #     ausentes; operador retrigga via UI pra completar). bling_product_id
+        #     ainda é gravado pra permitir o retry idempotente.
         now = datetime.now(UTC)
         mark.bling_product_id = int(new_bling_id)
-        mark.bling_sync_status = "sent"
-        mark.bling_sync_error = None
+        if estrutura_failed_msg:
+            mark.bling_sync_status = "partial"
+            mark.bling_sync_error = estrutura_failed_msg[:1000]
+        else:
+            mark.bling_sync_status = "sent"
+            mark.bling_sync_error = None
         mark.bling_sync_attempted_at = now
         mark.bling_sync_done_at = now
         await session.commit()
@@ -383,6 +430,7 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
             bling_product_id=int(new_bling_id),
             sku=kit_sku,
             components=len(resolved),
+            status=mark.bling_sync_status,
         )
 
         # ── Fase 3: criar/atualizar pricing_product ─────────────────

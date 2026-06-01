@@ -664,7 +664,6 @@ class BlingClient:
         price: float | None = None,
         category_id: int | None = None,
         formato: str = "S",
-        estrutura: dict | None = None,
     ) -> dict:
         """Create a product in Bling via POST /Api/v3/produtos.
 
@@ -673,24 +672,15 @@ class BlingClient:
         formato:
           * "S" = Simples (default)
           * "V" = Com variações
-          * "E" = Com composição (kit/composto)
+          * "E" = Com composição (kit/composto) — estrutura NÃO entra
+            aqui (descartada silenciosamente); use `update_product_estrutura`
+            depois do create.
 
-        O custo (precoCusto) NÃO entra aqui — Bling V3 descarta
+        O custo (precoCusto) também NÃO entra aqui — Bling V3 descarta
         silenciosamente o bloco `fornecedor` no body do POST /produtos.
         O único caminho que faz o custo persistir é o endpoint separado
         `POST /produtos/fornecedores` (ver `link_supplier_to_product`),
         chamado pelo caller depois deste create retornar o id.
-
-        Para composto, `estrutura` deve ter o shape (confirmado via
-        SDK AlexandreBellas/bling-erp-api-js, src/entities/produtos):
-          {
-            "tipoEstoque": "F" | "V",            # F=Físico, V=Virtual
-            "lancamentoEstoque": "A" | "M" | "P", # A=Produto+Componente, M=Componente, P=Produto
-            "componentes": [
-              {"produto": {"id": <int>}, "quantidade": <float>},
-              ...
-            ]
-          }
         """
         body: dict[str, Any] = {
             "nome": name,
@@ -703,9 +693,37 @@ class BlingClient:
             body["preco"] = float(price)
         if category_id is not None:
             body["categoria"] = {"id": category_id}
-        if formato == "E" and estrutura is not None:
-            body["estrutura"] = estrutura
         r = await self._request("POST", "/produtos", json=body)
+        r.raise_for_status()
+        return r.json().get("data") or {}
+
+    async def update_product_estrutura(
+        self, *, product_id: int, estrutura: dict,
+    ) -> dict:
+        """Set/replace a composed product's estrutura via PUT
+        /Api/v3/produtos/estruturas/{id}.
+
+        Mesmo padrão de `link_supplier_to_product`: o bloco `estrutura`
+        no body do POST /produtos é silenciosamente descartado por
+        Bling V3 (testado 2026-06-01 com kit b057.8.18 — formato="E" e
+        tipoEstoque foram preservados, mas `lancamentoEstoque` e
+        `componentes` voltaram zerados). Único caminho que faz os
+        componentes persistirem é este endpoint dedicado, mapeado pelo
+        SDK AlexandreBellas/bling-erp-api-js como `produtosEstruturas`.
+
+        Body shape (mesmo do create_product):
+          {
+            "tipoEstoque": "F" | "V",
+            "lancamentoEstoque": "A" | "M" | "P",
+            "componentes": [
+              {"produto": {"id": <int>}, "quantidade": <float>},
+              ...
+            ]
+          }
+        """
+        r = await self._request(
+            "PUT", f"/produtos/estruturas/{int(product_id)}", json=estrutura,
+        )
         r.raise_for_status()
         return r.json().get("data") or {}
 
