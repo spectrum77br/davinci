@@ -95,6 +95,10 @@ class ImportProduct(Base, TimestampMixin):
     valor_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     valor_brl_realizado: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     frete_type: Mapped[str | None] = mapped_column(String(20), nullable=True, default="regular")
+    # Coluna J ("media do custo") da aba Importação Celular (migration 0122).
+    # Editável manualmente — sem fórmula, sem auto-recálculo. Operador
+    # registra o que de fato custou em remessas anteriores.
+    custo_realizado: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
 
 
 class ImportCotacaoParams(Base, TimestampMixin):
@@ -151,6 +155,12 @@ class ImportLote(Base, TimestampMixin):
     # Quando setado, sobrescreve — Celular permite operador editar
     # diretamente no header de lote ativo.
     previsto_manual: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # Params da fórmula do "custo BRL" do body, POR LOTE (migration 0122).
+    # Celular: prefilled da ImportCotacaoParams na criação; operador edita
+    # por lote (taxa/frete podem variar entre remessas). Mala: NULL.
+    taxa: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    frete_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    adicional: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
 
 
 class ImportLoteItem(Base, TimestampMixin):
@@ -179,6 +189,13 @@ class ImportLoteItem(Base, TimestampMixin):
     pago: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("FALSE"),
     )
+    # Aba Importação Celular (migration 0122). Valor unitário em USD do
+    # produto NAQUELE LOTE — mesmo produto em lotes diferentes pode ter
+    # valor distinto (remessas com câmbio/preço diferentes).
+    # `ImportProduct.valor_usd` (etapa 3) continua existindo: é a
+    # referência global usada pela aba Cotação. Frontend usa item.valor_usd
+    # quando há lote selecionado; cai pro produto.valor_usd como default.
+    valor_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
 
 
 class ImportResumo(Base):

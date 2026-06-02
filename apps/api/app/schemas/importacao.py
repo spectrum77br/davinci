@@ -76,6 +76,9 @@ class ImportProductBase(BaseModel):
     valor_usd: Decimal | None = None
     valor_brl_realizado: Decimal | None = None
     frete_type: str | None = "regular"
+    # "media do custo" (migration 0122) — editável na coluna J da
+    # aba Importação Celular.
+    custo_realizado: Decimal | None = None
 
 
 class ImportProductCreate(ImportProductBase):
@@ -96,6 +99,7 @@ class ImportProductPatch(BaseModel):
     consumo_diario: Decimal | None = None
     maior_media_30d: Decimal | None = None
     obs: str | None = None
+    custo_realizado: Decimal | None = None
 
 
 class ImportProductOut(ImportProductBase):
@@ -120,6 +124,10 @@ class ImportProductOut(ImportProductBase):
     # this to render dynamic per-lote columns without needing a second
     # request per row.
     lote_quantidades: dict[str, int] = {}
+    # Paralelo a lote_quantidades, só pra Celular: valor unitário em
+    # USD do produto NAQUELE lote. Ausente / valor null → operador
+    # ainda não preencheu.
+    lote_valores_usd: dict[str, Decimal | None] = {}
     created_at: datetime
     updated_at: datetime
 
@@ -133,6 +141,10 @@ class ImportLoteCreate(BaseModel):
     categoria: str = "mala"
     transportadora: str | None = None
     obs: str | None = None
+    # Pra celular, se não passar, backend prefilla com ImportCotacaoParams.
+    taxa: Decimal | None = None
+    frete_pct: Decimal | None = None
+    adicional: Decimal | None = None
 
 
 class ImportLotePatch(BaseModel):
@@ -145,6 +157,10 @@ class ImportLotePatch(BaseModel):
     # Override do previsto computed. Pra zerar de volta pro computed,
     # mande explicitamente null (model_dump exclude_unset=True respeita).
     previsto_manual: Decimal | None = None
+    # Params da fórmula do custo BRL por lote (Celular, migration 0122).
+    taxa: Decimal | None = None
+    frete_pct: Decimal | None = None
+    adicional: Decimal | None = None
 
 
 class ImportLoteOut(BaseModel):
@@ -161,6 +177,10 @@ class ImportLoteOut(BaseModel):
     # Frontend usa pra saber se mostra o valor como editável (manual) ou
     # como label (computed).
     previsto_manual: Decimal | None = None
+    # Params do custo BRL por lote (Celular). Em Mala ficam NULL.
+    taxa: Decimal | None = None
+    frete_pct: Decimal | None = None
+    adicional: Decimal | None = None
     # Computed by the router:
     previsto: Decimal = Decimal("0")
     saldo: Decimal = Decimal("0")
@@ -174,6 +194,9 @@ class ImportLoteOut(BaseModel):
 class ImportLoteItemUpsert(BaseModel):
     product_id: UUID
     quantidade: int
+    # Pra celular: valor unitário em USD POR LOTE. Quando None, item
+    # fica sem valor próprio (cai pra produto.valor_usd no frontend).
+    valor_usd: Decimal | None = None
 
 
 class ImportLoteItemPatch(BaseModel):

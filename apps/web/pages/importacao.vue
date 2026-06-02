@@ -118,6 +118,10 @@ type Product = {
   valor_usd: string | number | null
   valor_brl_realizado: string | number | null
   frete_type: 'regular' | 'swap' | 'acessorios' | null
+  // Aba Importação Celular (etapa atual).
+  custo_realizado: string | number | null
+  // Paralelo a lote_quantidades — valor_usd por lote (Celular).
+  lote_valores_usd: Record<string, string | number | null>
 }
 type CotacaoParams = {
   categoria: string
@@ -165,6 +169,13 @@ type Lote = {
   saldo: string | number
   prazo: number | null
   is_aberto: boolean
+  // Params do custo BRL por lote (Celular — migration 0122). NULL em
+  // Mala. Quando NULL em Celular (lotes antigos), o frontend usa
+  // cotacaoParams como fallback.
+  transportadora?: string | null
+  taxa?: string | number | null
+  frete_pct?: string | number | null
+  adicional?: string | number | null
 }
 type ResumoRow = {
   id: string
@@ -233,58 +244,6 @@ type KitGrid = { variations: KitVariation[]; bases: KitBase[]; marks: KitMark[] 
 // ── State ─────────────────────────────────────────────────────────
 const products = ref<Product[]>([])
 const lotes = ref<Lote[]>([])
-
-// Lote ativo (header da aba Importação Celular). Persiste via query
-// param `?lote=<id>` pra URL ser compartilhável. Null quando categoria
-// != celular ou quando não há lote aberto. Os campos computed
-// (realizado/saldo/prazo) saem do _enrich_lote do backend — recarregar
-// `lotes` (loadAll) atualiza tudo junto.
-const loteAtivoId = ref<string | null>(
-  typeof route.query.lote === 'string' ? route.query.lote : null,
-)
-const loteAtivo = computed<Lote | null>(() => {
-  if (!isCelular.value || lotes.value.length === 0) return null
-  if (loteAtivoId.value) {
-    const m = lotes.value.find((l) => l.id === loteAtivoId.value)
-    if (m) return m
-  }
-  // Default: lote sem fechamento mais recente (abertura.desc); senão
-  // o primeiro da lista (ordenada por nome no backend).
-  const aberto = [...lotes.value]
-    .filter((l) => !l.fechamento)
-    .sort((a, b) => (a.abertura < b.abertura ? 1 : -1))[0]
-  return aberto || lotes.value[0] || null
-})
-
-function onLoteAtivoChange(id: string) {
-  loteAtivoId.value = id
-  // Mantém o ?lote=<id> na URL sem reload. Compartilhável + back/forward
-  // do browser preserva a seleção.
-  void router.replace({ query: { ...route.query, lote: id } })
-}
-
-const _loteAtivoTimers: Record<string, ReturnType<typeof setTimeout>> = {}
-function schedulePatchLoteAtivo(
-  field: 'abertura' | 'fechamento' | 'previsto_manual',
-  value: any,
-) {
-  const l = loteAtivo.value
-  if (l == null) return
-  ;(l as any)[field] = value
-  const key = `loteAtivo_${field}`
-  if (_loteAtivoTimers[key]) clearTimeout(_loteAtivoTimers[key])
-  _loteAtivoTimers[key] = setTimeout(async () => {
-    try {
-      await api(`/api/importacao/lotes/${l.id}`, {
-        method: 'PATCH', body: { [field]: value },
-      })
-      // Refresh lotes pra repuxar realizado/saldo/prazo computed.
-      lotes.value = await api<Lote[]>(`/api/importacao/lotes?${catQs()}`)
-    } catch (e: any) {
-      errorText.value = `Falha ao salvar ${field}: ${e?.data?.detail?.code || 'erro'}`
-    }
-  }, 500)
-}
 const resumo = ref<{ items: ResumoRow[]; total: string | number }>({ items: [], total: 0 })
 const config = ref<Config>({ tempo_reposicao: 150, tempo_estoque: 60 })
 const cotacao = ref<CotacaoGrid>({ fabricantes: [], produtos: [], valores: [] })
@@ -457,18 +416,22 @@ function calcularPrevisto(prod: Product): number | null {
   return usd * (1 + pct) * cambio + adic
 }
 
-// Custo BRL pra coluna "custo" da aba Importação Celular. Diferença
-// vs calcularPrevisto: SEMPRE usa frete_regular_pct (não o frete_type
-// do produto). Convenção operacional — a coluna "custo" é a referência
-// de compra padrão; quem precisa do frete-por-tipo usa a aba Cotação.
-// Validação: usd=332 → 332 × 5.10 × 1.16 + 12 = 1976.11.
-function custoBRL(prod: Product): number | null {
-  const usdRaw = prod.valor_usd
+// Custo BRL pras sub-cells dinâmicas por lote da aba Importação Celular.
+// Diferença vs calcularPrevisto: usa params do PRÓPRIO LOTE (taxa,
+// frete_pct, adicional), não os globais da Cotação. Cada remessa pode
+// ter câmbio/frete diferentes. Fallback pra cotacaoParams quando os
+// campos do lote ainda estão null (lote criado antes da migration 0122).
+//
+// `value_usd` é o valor POR LOTE (lote_valores_usd[lote.id] do produto);
+// fallback pro produto.valor_usd quando o item ainda não tem.
+function custoBRL(prod: Product, lote: Lote): number | null {
+  const perLote = prod.lote_valores_usd?.[lote.id]
+  const usdRaw = perLote != null && perLote !== '' ? perLote : prod.valor_usd
   const usd = usdRaw == null || usdRaw === '' ? null : Number(usdRaw)
   if (usd == null || !Number.isFinite(usd) || usd <= 0) return null
-  const cambio = Number(cotacaoParams.value.taxa_cambio)
-  const frete = Number(cotacaoParams.value.frete_regular_pct)
-  const adic = Number(cotacaoParams.value.adicional)
+  const cambio = Number(lote.taxa ?? cotacaoParams.value.taxa_cambio)
+  const frete = Number(lote.frete_pct ?? cotacaoParams.value.frete_regular_pct)
+  const adic = Number(lote.adicional ?? cotacaoParams.value.adicional)
   if (!Number.isFinite(cambio) || !Number.isFinite(frete) || !Number.isFinite(adic)) return null
   return usd * cambio * (1 + frete) + adic
 }
@@ -824,6 +787,33 @@ async function persistLoteItem(prod: Product, loteId: string, qty: number) {
   } catch (e: any) {
     errorText.value = `Falha ao salvar quantidade: ${e?.data?.detail?.code || 'erro'}`
   }
+}
+
+// Aba Importação Celular: valor USD por (produto, lote). Reusa o
+// endpoint PUT /lotes/{id}/items mantendo `quantidade` atual e
+// adicionando `valor_usd`. Body vazia → null no DB (limpa o valor).
+function scheduleLoteItemValor(prod: Product, loteId: string, raw: string) {
+  const s = String(raw).replace(',', '.').trim()
+  const novo = s === '' ? null : Number(s)
+  if (novo != null && !Number.isFinite(novo)) return
+  // Optimistic update.
+  prod.lote_valores_usd = { ...(prod.lote_valores_usd || {}), [loteId]: novo }
+  const key = `item_valor_${prod.id}_${loteId}`
+  if (saveTimers[key]) clearTimeout(saveTimers[key])
+  saveTimers[key] = setTimeout(async () => {
+    delete saveTimers[key]
+    const qty = prod.lote_quantidades?.[loteId] || 0
+    try {
+      await api(`/api/importacao/lotes/${loteId}/items`, {
+        method: 'PUT',
+        body: { product_id: prod.id, quantidade: qty, valor_usd: novo },
+      })
+      // Realizado/saldo do lote depende disso → recarrega.
+      void loadLotesOnly()
+    } catch (e: any) {
+      errorText.value = `Falha ao salvar valor USD: ${e?.data?.detail?.code || 'erro'}`
+    }
+  }, 400)
 }
 async function loadLotesOnly() {
   try { lotes.value = await api<Lote[]>(`/api/importacao/lotes?${catQs()}`) } catch { /* ignore */ }
@@ -1275,53 +1265,6 @@ onScopeDispose(() => {
 
     <!-- ─── TAB MALA ─────────────────────────────────────────────── -->
     <div v-if="tab === 'mala'" class="space-y-2">
-      <!-- ─── Header de Lote Ativo (Celular) ─────────────────────
-           Só pra celular — resumo do lote aberto mais recente.
-           Mostra nome, abertura, fechamento, previsto (override
-           editável), realizado (computed), saldo, prazo. Permite
-           dropdown pra trocar de lote (persiste via ?lote= na URL). -->
-      <div v-if="isCelular" class="border rounded-md p-3 bg-emerald-50/60 dark:bg-emerald-900/20 text-xs">
-        <div v-if="loteAtivo == null" class="text-muted-foreground italic">
-          Nenhum lote aberto. Clique em "Criar lote" pra começar.
-        </div>
-        <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <label class="flex flex-col gap-1">
-            <span class="text-[10px] uppercase tracking-wide text-muted-foreground">Lote</span>
-            <select class="h-7 border rounded px-2 bg-background font-semibold"
-              :value="loteAtivoId" @change="onLoteAtivoChange(($event.target as HTMLSelectElement).value)">
-              <option v-for="lt in lotes" :key="lt.id" :value="lt.id">{{ lt.nome }}</option>
-            </select>
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-[10px] uppercase tracking-wide text-muted-foreground">Abertura</span>
-            <input type="date" class="h-7 border rounded px-2 bg-background"
-              :value="loteAtivo.abertura" :disabled="!canEdit"
-              @change="(e) => schedulePatchLoteAtivo('abertura', (e.target as HTMLInputElement).value)" />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-[10px] uppercase tracking-wide text-muted-foreground">Fechamento</span>
-            <input type="date" class="h-7 border rounded px-2 bg-background"
-              :value="loteAtivo.fechamento ?? ''" :disabled="!canEdit"
-              @change="(e) => schedulePatchLoteAtivo('fechamento', (e.target as HTMLInputElement).value || null)" />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-[10px] uppercase tracking-wide text-muted-foreground">
-              Previsto <span v-if="loteAtivo.previsto_manual == null" class="italic">(auto)</span>
-            </span>
-            <input type="number" step="0.01" class="h-7 border rounded px-2 bg-background text-right"
-              :value="loteAtivo.previsto" :disabled="!canEdit"
-              @change="(e) => schedulePatchLoteAtivo('previsto_manual', Number((e.target as HTMLInputElement).value) || 0)" />
-          </label>
-          <div class="md:col-span-4 flex flex-wrap gap-4 text-[11px] pt-2 border-t">
-            <span><strong>Realizado:</strong> {{ fmtMoney(loteAtivo.realizado) }}</span>
-            <span :class="Number(loteAtivo.saldo) > 0 ? 'text-red-700' : 'text-emerald-700'">
-              <strong>Saldo:</strong> {{ fmtMoney(loteAtivo.saldo) }}
-            </span>
-            <span><strong>Prazo:</strong> {{ loteAtivo.prazo != null ? loteAtivo.prazo + ' dias' : '—' }}</span>
-          </div>
-        </div>
-      </div>
-
       <!-- Replenishment parameters — same fields as the Reposição tab,
            surfaced here so the operator can tweak them while reading
            the table. Both inputs PATCH the same singleton config row
@@ -1413,27 +1356,27 @@ onScopeDispose(() => {
                    "memóri/a"). Ordem: começa em fornecedor, palavras
                    curtas (até ~7 chars) → 60-66px; "reposição"/"saldo"
                    → 72-76px. -->
-              <th rowspan="8" class="col-head text-left" style="min-width: 96px">fornecedor</th>
-              <th v-if="showMalaCols" rowspan="8" class="col-head text-left" style="min-width: 96px">modelo china</th>
-              <th v-if="showMalaCols" rowspan="8" class="col-head text-left" style="min-width: 72px">cor china</th>
-              <th v-if="showMalaCols" rowspan="8" class="col-head text-left" style="min-width: 80px">fechamento</th>
-              <th v-if="showMalaCols" rowspan="8" class="col-head text-center" style="min-width: 44px">TSA</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 100px">modelo bling</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 130px">sku</th>
-              <th v-if="showMalaCols" rowspan="8" class="col-head text-left" style="min-width: 130px">cor</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 60px">custo bling</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 66px">estoque bling</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 66px">consumo diário</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 70px">memória consumo</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 76px">reposição estoque</th>
-              <th rowspan="8" class="col-head text-right" style="min-width: 76px">saldo reposição</th>
-              <th rowspan="8" class="col-head text-left" style="min-width: 100px">obs</th>
-              <!-- Celular: 2 colunas extras antes dos lotes dinâmicos.
-                   `valor` (USD, editável) + `custo` (R$, computed pela
-                   fórmula da aba Cotação). Compartilham fonte com a
-                   aba Cotação — operador edita aqui ou lá, mesmo campo. -->
-              <th v-if="isCelular" rowspan="8" class="col-head text-right" style="min-width: 70px">valor</th>
-              <th v-if="isCelular" rowspan="8" class="col-head text-right" style="min-width: 86px">custo</th>
+              <th :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 96px">fornecedor</th>
+              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 96px">modelo china</th>
+              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 72px">cor china</th>
+              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 80px">fechamento</th>
+              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-center" style="min-width: 44px">TSA</th>
+              <th :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 100px">modelo bling</th>
+              <th :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 130px">sku</th>
+              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 130px">cor</th>
+              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 60px">custo bling</th>
+              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 66px">estoque bling</th>
+              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 66px">consumo diário</th>
+              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 70px">memória consumo</th>
+              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 76px">reposição estoque</th>
+              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 76px">saldo reposição</th>
+              <!-- Mala: `obs` fica nas colunas fixas. Celular não usa
+                   obs nesta tabela (operador anotou que é unused no
+                   Excel celular); ficar oculto pra não confundir. -->
+              <th v-if="!isCelular" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 100px">obs</th>
+              <!-- Celular: `custo realizado` (coluna J do Excel — "media
+                   do custo", editável manualmente). -->
+              <th v-if="isCelular" :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 90px">custo realizado</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">lote</td>
                 <td class="lote-value" :class="loteBgClass(lote.nome)">
@@ -1444,8 +1387,8 @@ onScopeDispose(() => {
                   </button>
                 </td>
               </template>
-              <th rowspan="8" v-if="canEdit" class="col-head text-center">bling</th>
-              <th rowspan="8" v-if="canDelete" class="col-head w-8"></th>
+              <th :rowspan="isCelular ? 12 : 8" v-if="canEdit" class="col-head text-center">bling</th>
+              <th :rowspan="isCelular ? 12 : 8" v-if="canDelete" class="col-head w-8"></th>
             </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r2-${lote.id}`">
@@ -1498,18 +1441,65 @@ onScopeDispose(() => {
                 <td class="lote-value calculated" :class="loteBgClass(lote.nome)">{{ lote.prazo != null ? lote.prazo + 'd' : '—' }}</td>
               </template>
             </tr>
+            <!-- 4 rows extras só pra Celular (transportadora, taxa,
+                 frete %, adicional). Mala ignora. -->
+            <tr v-if="isCelular">
+              <template v-for="lote in visibleLotes" :key="`lote-r8c-${lote.id}`">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">transportadora</td>
+                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                  <input type="text" :value="lote.transportadora ?? ''" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px]"
+                    @input="(e) => schedulePatchLote(lote, 'transportadora', (e.target as HTMLInputElement).value || null)" />
+                </td>
+              </template>
+            </tr>
+            <tr v-if="isCelular">
+              <template v-for="lote in visibleLotes" :key="`lote-r9c-${lote.id}`">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">taxa</td>
+                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                  <input type="number" step="0.0001" :value="lote.taxa ?? ''" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right"
+                    @input="(e) => schedulePatchLote(lote, 'taxa', Number((e.target as HTMLInputElement).value) || null)" />
+                </td>
+              </template>
+            </tr>
+            <tr v-if="isCelular">
+              <template v-for="lote in visibleLotes" :key="`lote-r10c-${lote.id}`">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">frete %</td>
+                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                  <input type="number" step="0.0001" :value="lote.frete_pct ?? ''" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right"
+                    @input="(e) => schedulePatchLote(lote, 'frete_pct', Number((e.target as HTMLInputElement).value) || null)" />
+                </td>
+              </template>
+            </tr>
+            <tr v-if="isCelular">
+              <template v-for="lote in visibleLotes" :key="`lote-r11c-${lote.id}`">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">adicional</td>
+                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                  <input type="number" step="0.01" :value="lote.adicional ?? ''" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right"
+                    @input="(e) => schedulePatchLote(lote, 'adicional', Number((e.target as HTMLInputElement).value) || null)" />
+                </td>
+              </template>
+            </tr>
             <tr>
-              <!-- Row 8 = the actual sub-headers for the body data cells.
-                   These align directly above the quant/total cells in tbody. -->
-              <template v-for="lote in visibleLotes" :key="`lote-r8-${lote.id}`">
+              <!-- Última row do thead = sub-headers que alinham com as
+                   cells do body. Mala: quant | total. Celular: quant |
+                   valor | custo (3 cols por lote). -->
+              <template v-for="lote in visibleLotes" :key="`lote-rh-${lote.id}`">
                 <th class="col-quant border-l" :class="loteBgClass(lote.nome)">quant</th>
-                <th class="col-total" :class="loteBgClass(lote.nome)">total</th>
+                <template v-if="isCelular">
+                  <th class="col-total" :class="loteBgClass(lote.nome)">valor</th>
+                  <th class="col-total" :class="loteBgClass(lote.nome)">custo</th>
+                </template>
+                <th v-else class="col-total" :class="loteBgClass(lote.nome)">total</th>
               </template>
             </tr>
           </thead>
           <tbody>
             <tr v-if="!loading && filteredProducts.length === 0">
-              <td :colspan="(isEletro ? 10 : isCelular ? 12 : 15) + visibleLotes.length * 2 + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
+              <td :colspan="(isEletro ? 10 : isCelular ? 10 : 15) + visibleLotes.length * (isCelular ? 3 : 2) + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
                 {{ categoria === 'celular'
                   ? 'Categoria Celular em construção. Clique em "Criar produto" pra começar.'
                   : 'Nenhum produto. Clique em "Criar produto" para começar.' }}
@@ -1564,21 +1554,20 @@ onScopeDispose(() => {
               <td class="calc text-right" :class="reposicaoClass(row.saldo_reposicao)">
                 {{ row.saldo_reposicao ?? '—' }}
               </td>
-              <td><input class="cell-input" :value="row.obs ?? ''" :disabled="!canEdit"
+              <!-- obs só aparece em Mala/Eletro. -->
+              <td v-if="!isCelular"><input class="cell-input" :value="row.obs ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'obs', (e.target as HTMLInputElement).value)" /></td>
-              <!-- Celular: valor (USD, editável) + custo (R$ computed).
-                   Compartilha valor_usd com a aba Cotação — autosave
-                   via PATCH /cotacao/produto/{id}. custoBRL() lê
-                   cotacaoParams reativamente. -->
+              <!-- Celular: custo_realizado ("media do custo", editável). -->
               <td v-if="isCelular">
                 <input type="number" step="0.01" class="cell-input text-right"
-                  :value="row.valor_usd ?? ''" :disabled="!canEdit"
-                  @change="(e) => scheduleSaveCotacaoProduto(row, 'valor_usd', (e.target as HTMLInputElement).value)" />
+                  :value="row.custo_realizado ?? ''" placeholder="media do custo"
+                  :disabled="!canEdit"
+                  @change="(e) => scheduleSave(row, 'custo_realizado', Number((e.target as HTMLInputElement).value) || null)" />
               </td>
-              <td v-if="isCelular" class="calc text-right">
-                {{ fmtMoney(custoBRL(row)) }}
-              </td>
-              <!-- Per-lote cells align directly under the row-8 quant/total sub-headers. -->
+              <!-- Per-lote cells align directly under the last-row
+                   sub-headers. Mala: 2 cells (quant + total). Celular:
+                   3 cells (quant + valor USD editável + custo BRL
+                   computed via custoBRL(prod, lote)). -->
               <template v-for="lote in visibleLotes" :key="`cell-${row.id}-${lote.id}`">
                 <td class="border-l" :class="loteBgClass(lote.nome)">
                   <input
@@ -1589,7 +1578,20 @@ onScopeDispose(() => {
                     @input="(e) => scheduleLoteItem(row, lote.id, Number((e.target as HTMLInputElement).value) || 0)"
                   />
                 </td>
-                <td class="calc text-right" :class="loteBgClass(lote.nome)">{{ fmtMoney(loteTotal(row, lote.id)) }}</td>
+                <template v-if="isCelular">
+                  <td :class="loteBgClass(lote.nome)">
+                    <input
+                      type="number" step="0.01" class="cell-input text-right"
+                      :value="row.lote_valores_usd?.[lote.id] ?? ''"
+                      :disabled="!canEdit"
+                      @change="(e) => scheduleLoteItemValor(row, lote.id, (e.target as HTMLInputElement).value)"
+                    />
+                  </td>
+                  <td class="calc text-right" :class="loteBgClass(lote.nome)">
+                    {{ fmtMoney(custoBRL(row, lote)) }}
+                  </td>
+                </template>
+                <td v-else class="calc text-right" :class="loteBgClass(lote.nome)">{{ fmtMoney(loteTotal(row, lote.id)) }}</td>
               </template>
               <td v-if="canEdit" class="text-center whitespace-nowrap">
                 <button
