@@ -664,6 +664,7 @@ class BlingClient:
         price: float | None = None,
         category_id: int | None = None,
         formato: str = "S",
+        estrutura: dict | None = None,
     ) -> dict:
         """Create a product in Bling via POST /Api/v3/produtos.
 
@@ -672,11 +673,23 @@ class BlingClient:
         formato:
           * "S" = Simples (default)
           * "V" = Com variações
-          * "E" = Com composição (kit/composto) — estrutura NÃO entra
-            aqui (descartada silenciosamente); use `update_product_estrutura`
-            depois do create.
+          * "E" = Com composição (kit/composto). Bling V3 (rev. 2026-06)
+            agora EXIGE `estrutura` completa no POST quando formato="E".
+            Antes descartava silenciosamente (fix 261bda0 separou em PUT);
+            comportamento mudou — voltamos a enviar tudo no POST.
+            `update_product_estrutura` permanece como reforço pra retry.
 
-        O custo (precoCusto) também NÃO entra aqui — Bling V3 descarta
+        `estrutura` shape:
+          {
+            "tipoEstoque": "F" | "V",            # F=Físico, V=Virtual
+            "lancamentoEstoque": "A" | "M" | "P", # A=Produto+Componente, M=Componente, P=Produto
+            "componentes": [
+              {"produto": {"id": <int>}, "quantidade": <float>},
+              ...
+            ]
+          }
+
+        O custo (precoCusto) NÃO entra aqui — Bling V3 descarta
         silenciosamente o bloco `fornecedor` no body do POST /produtos.
         O único caminho que faz o custo persistir é o endpoint separado
         `POST /produtos/fornecedores` (ver `link_supplier_to_product`),
@@ -693,6 +706,8 @@ class BlingClient:
             body["preco"] = float(price)
         if category_id is not None:
             body["categoria"] = {"id": category_id}
+        if formato == "E" and estrutura is not None:
+            body["estrutura"] = estrutura
         r = await self._request("POST", "/produtos", json=body)
         r.raise_for_status()
         return r.json().get("data") or {}

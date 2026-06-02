@@ -396,10 +396,10 @@ async def test_create_kit_passes_correct_estrutura_to_bling(
     kit_setup: dict[str, Any],
     monkeypatch,
 ):
-    """Verifica que o payload pro Bling tem formato='E' no POST /produtos
-    e que `estrutura` (com 2 componentes nos bling_product_ids corretos)
-    é mandada pelo PUT /produtos/estruturas separado — Bling V3 descarta
-    estrutura silenciosamente no POST, então virou 2 chamadas."""
+    """Verifica que o POST /produtos recebe formato='E' + estrutura
+    completa (Bling V3 rev. 2026-06 exige no POST). PUT /produtos/
+    estruturas continua sendo chamado como reforço defensivo —
+    mesma estrutura."""
     captured_create: dict[str, Any] = {}
     captured_estrutura: dict[str, Any] = {}
 
@@ -422,14 +422,22 @@ async def test_create_kit_passes_correct_estrutura_to_bling(
 
     await create_bling_kit_for_mark(kit_setup["mark"].id)
 
+    # POST /produtos: formato + estrutura completa.
     assert captured_create["formato"] == "E"
     assert captured_create["sku"] == "b045.8.18"
     assert captured_create["category_id"] == 555
-    assert captured_estrutura["product_id"] == 88888
-    est = captured_estrutura["estrutura"]
-    assert est["tipoEstoque"] == "V"
-    assert est["lancamentoEstoque"] == "M"
-    comp_ids = sorted(c["produto"]["id"] for c in est["componentes"])
-    assert comp_ids == [1001, 1002]
-    for c in est["componentes"]:
+    est_post = captured_create["estrutura"]
+    assert est_post["tipoEstoque"] == "V"
+    assert est_post["lancamentoEstoque"] == "M"
+    comp_ids_post = sorted(c["produto"]["id"] for c in est_post["componentes"])
+    assert comp_ids_post == [1001, 1002]
+    for c in est_post["componentes"]:
         assert c["quantidade"] == 1
+
+    # PUT /produtos/estruturas/{id}: chamado como reforço, mesma estrutura.
+    assert captured_estrutura["product_id"] == 88888
+    est_put = captured_estrutura["estrutura"]
+    assert est_put["tipoEstoque"] == "V"
+    assert est_put["lancamentoEstoque"] == "M"
+    comp_ids_put = sorted(c["produto"]["id"] for c in est_put["componentes"])
+    assert comp_ids_put == [1001, 1002]

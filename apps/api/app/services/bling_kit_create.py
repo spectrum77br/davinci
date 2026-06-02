@@ -349,9 +349,12 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
         # `resolved`. Linkado separado abaixo via POST /produtos/fornecedores.
         components_cost = sum(cost for _, _, cost in resolved)
 
-        # Criar no Bling. `estrutura` NÃO entra no POST /produtos
-        # (Bling V3 descarta silenciosamente os componentes). Vai numa
-        # 2ª chamada logo abaixo, no PUT /produtos/estruturas/{id}.
+        # Criar no Bling. Estrutura no POST: Bling V3 (rev. 2026-06)
+        # exige estrutura completa no POST quando formato="E". Antes
+        # o campo era descartado silenciosamente (fix 261bda0 separou
+        # em PUT). Comportamento mudou — voltamos a enviar tudo no POST.
+        # PUT abaixo continua como reforço defensivo (retry quando
+        # status=partial e pra garantir consistência).
         # Se existing_bling_id já existe (status=partial), reusa-o e
         # pula direto pra etapa da estrutura.
         if existing_bling_id is not None:
@@ -363,6 +366,7 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
                     name=kit_name,
                     category_id=category_id,
                     formato="E",
+                    estrutura=estrutura,
                 )
             except httpx.HTTPStatusError as e:
                 body_excerpt = (e.response.text or "")[:500]
