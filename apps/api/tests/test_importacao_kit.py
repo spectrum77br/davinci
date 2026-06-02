@@ -119,13 +119,18 @@ async def test_put_mark_true_creates_idempotent(
     auth_as(user_kit_edit)
     payload = {"base_id": seeded_kit["b2"], "variation_id": seeded_kit["v2"], "marked": True}
     r = await client.put("/api/importacao/kit/mark", json=payload)
-    assert r.status_code == 204, r.text
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["base_id"] == seeded_kit["b2"]
+    assert body["variation_id"] == seeded_kit["v2"]
+    assert body["id"]  # id real (não placeholder)
     # Mark criada
     rows = (await db.execute(select(ImportKitMark))).scalars().all()
     assert len(rows) == 2  # 1 seeded + 1 novo
-    # Idempotente: 2ª chamada não duplica
+    # Idempotente: 2ª chamada não duplica — retorna a row existente.
     r2 = await client.put("/api/importacao/kit/mark", json=payload)
-    assert r2.status_code == 204
+    assert r2.status_code == 200
+    assert r2.json()["id"] == body["id"]
     rows2 = (await db.execute(select(ImportKitMark))).scalars().all()
     assert len(rows2) == 2
 
@@ -141,13 +146,15 @@ async def test_put_mark_false_deletes_idempotent(
     auth_as(user_kit_edit)
     payload = {"base_id": seeded_kit["b1"], "variation_id": seeded_kit["v1"], "marked": False}
     r = await client.put("/api/importacao/kit/mark", json=payload)
-    assert r.status_code == 204
+    assert r.status_code == 200
+    assert r.json() is None  # mark deletada → body=null
     # Mark deletada
     rows = (await db.execute(select(ImportKitMark))).scalars().all()
     assert len(rows) == 0
     # Idempotente: deletar de novo é no-op
     r2 = await client.put("/api/importacao/kit/mark", json=payload)
-    assert r2.status_code == 204
+    assert r2.status_code == 200
+    assert r2.json() is None
     rows2 = (await db.execute(select(ImportKitMark))).scalars().all()
     assert len(rows2) == 0
 
@@ -163,3 +170,53 @@ async def test_put_mark_requires_edit_permission(
     payload = {"base_id": seeded_kit["b2"], "variation_id": seeded_kit["v2"], "marked": True}
     r = await client.put("/api/importacao/kit/mark", json=payload)
     assert r.status_code == 403, r.text
+
+
+@pytest.mark.asyncio
+async def test_put_mark_base_inexistente_404(
+    client: AsyncClient,
+    user_kit_edit: User,
+    auth_as: Callable[[User | None], None],
+    seeded_kit: dict,
+):
+    """Antes o backend silenciosamente fazia fallback `categoria='mala'`
+    quando base_id era inválido. Agora 404."""
+    import uuid as _uuid
+    auth_as(user_kit_edit)
+    payload = {
+        "base_id": str(_uuid.uuid4()),  # UUID fictício
+        "variation_id": seeded_kit["v1"],
+        "marked": True,
+    }
+    r = await client.put("/api/importacao/kit/mark", json=payload)
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "kit_base_not_found"
+
+
+@pytest.mark.asyncio
+async def test_put_mark_categoria_mismatch_422(
+    db: AsyncSession,
+    client: AsyncClient,
+    user_kit_edit: User,
+    auth_as: Callable[[User | None], None],
+    seeded_kit: dict,
+):
+    """Cruzar base de mala com variation de celular → 422. Antes não
+    havia checagem, criava marks com categoria inconsistente."""
+    import uuid as _uuid
+    auth_as(user_kit_edit)
+    # Variation celular nova
+    v_cel = ImportKitVariation(
+        id=_uuid.uuid4(), categoria="celular",
+        code="a999", label="Tst", ordem=99, highlight=False,
+    )
+    db.add(v_cel)
+    await db.commit()
+    payload = {
+        "base_id": seeded_kit["b1"],  # mala
+        "variation_id": str(v_cel.id),  # celular
+        "marked": True,
+    }
+    r = await client.put("/api/importacao/kit/mark", json=payload)
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "kit_categoria_mismatch"

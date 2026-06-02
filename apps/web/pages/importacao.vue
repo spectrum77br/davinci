@@ -1107,12 +1107,21 @@ async function toggleKitMark(baseId: string, varId: string) {
     }
   }
   try {
-    await api('/api/importacao/kit/mark', {
+    // Backend retorna a mark criada (com id real do DB) ou null se
+    // desmarcou. Antes era 204 sem body — frontend mantinha placeholder
+    // local com id='pending' que nunca casava com a row real, e se o
+    // backend de alguma forma não persistisse, o operador ficava com
+    // "x laranja" eternamente sem worker pra processar.
+    const result = await api<KitMark | null>('/api/importacao/kit/mark', {
       method: 'PUT',
       body: { base_id: baseId, variation_id: varId, marked: !wasMarked },
     })
-    // No-op: status real (sent/error) vem do polling/reload da próxima
-    // chamada de loadAll. Por ora a UI fica em 'pending' até refresh.
+    if (result != null) {
+      // Sobrescreve o placeholder com a mark real (id verdadeiro,
+      // status atualizado pelo backend).
+      kitMarkMap[key] = result
+    }
+    // Se result=null, mark foi deletada — kitMarkMap já está sem ela.
   } catch (e: any) {
     // Rollback
     if (wasMarked && snapshot) {

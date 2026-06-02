@@ -1635,20 +1635,46 @@ async def get_kit_grid(
     )
 
 
-@router.put("/kit/mark", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/kit/mark", response_model=ImportKitMarkOut | None)
 async def toggle_kit_mark(
     body: ImportKitMarkToggle,
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
-) -> None:
+) -> ImportKitMarkOut | None:
     """Toggle idempotente. Quando `marked=True` e a mark não existe,
     cria com `bling_sync_status='pending'` e enfileira job ARQ
     `create_bling_kit_for_mark_job` que cria o composto no Bling.
+    Retorna a mark criada (com id real) — frontend usa pra atualizar
+    o cache otimista, evitando drift entre placeholder 'pending' e
+    o id verdadeiro do DB.
 
-    Quando `marked=False`, deleta a mark local. NÃO apaga o produto
-    no Bling — operação destrutiva fica pra ser feita manualmente.
-    A UI mostra warning antes de desmarcar rows com bling_product_id.
+    Quando `marked=False`, deleta a mark local e retorna null. NÃO
+    apaga o produto no Bling — operação destrutiva fica pra ser feita
+    manualmente. A UI mostra warning antes de desmarcar rows com
+    bling_product_id.
+
+    Validações estritas (anti-silent-fallback):
+      * base + variation devem existir → 404
+      * base.categoria == variation.categoria → 422 (cruzamento entre
+        mala/celular é bug do cliente, não recupera silenciosamente)
     """
+    # Validações antes de qualquer write. Antes o código fazia
+    # `categoria = base.categoria if base else 'mala'` — mascara base_id
+    # inválido como mark mala, que depois falhava silenciosamente na FK
+    # ou criava lixo. Rejeita explicitamente.
+    base = await session.get(ImportKitBase, body.base_id)
+    if base is None:
+        raise HTTPException(404, detail={"code": "kit_base_not_found"})
+    variation = await session.get(ImportKitVariation, body.variation_id)
+    if variation is None:
+        raise HTTPException(404, detail={"code": "kit_variation_not_found"})
+    if (base.categoria or "").lower() != (variation.categoria or "").lower():
+        raise HTTPException(422, detail={
+            "code": "kit_categoria_mismatch",
+            "base_categoria": base.categoria,
+            "variation_categoria": variation.categoria,
+        })
+
     existing = (await session.execute(
         select(ImportKitMark).where(
             ImportKitMark.base_id == body.base_id,
@@ -1656,17 +1682,21 @@ async def toggle_kit_mark(
         )
     )).scalar_one_or_none()
     if body.marked and existing is None:
-        # Mark herda a categoria da sua base (kit é mala/celular).
-        base = await session.get(ImportKitBase, body.base_id)
+        # Mark herda a categoria da base (== da variation, já validado).
         mark = ImportKitMark(
             base_id=body.base_id,
             variation_id=body.variation_id,
-            categoria=base.categoria if base else "mala",
+            categoria=base.categoria,
             bling_sync_status="pending",
         )
         session.add(mark)
         await session.commit()
         await session.refresh(mark)
+        logger.info(
+            "kit_mark_created",
+            mark_id=str(mark.id), categoria=mark.categoria,
+            base_id=str(mark.base_id), variation_id=str(mark.variation_id),
+        )
         # Enfileirar criação do composto no Bling (fire-and-forget).
         try:
             pool = await get_arq_pool()
@@ -1675,9 +1705,18 @@ async def toggle_kit_mark(
             # Não derruba a UI se o ARQ estiver indisponível — operador
             # pode usar resync depois.
             logger.warning("kit_enqueue_failed", mark_id=str(mark.id), err=str(e)[:200])
-    elif not body.marked and existing is not None:
+        return ImportKitMarkOut.model_validate(mark, from_attributes=True)
+    if not body.marked and existing is not None:
+        deleted_id = str(existing.id)
         await session.delete(existing)
         await session.commit()
+        logger.info("kit_mark_deleted", mark_id=deleted_id, categoria=base.categoria)
+        return None
+    # No-op: marked=True e já existe, OU marked=False e nada a deletar.
+    # Retorna a row atual (se houver) pro frontend manter consistência.
+    if existing is not None:
+        return ImportKitMarkOut.model_validate(existing, from_attributes=True)
+    return None
 
 
 @router.post(
