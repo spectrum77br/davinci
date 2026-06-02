@@ -298,12 +298,10 @@ async def lookup_devolution_order(
         products = {p["k"]: dict(p) for p in prod_rows}
 
     for r in expanded:
-        if not r.get("_compound"):
-            continue
         prod = products.get((r["sku"] or "").strip().lower())
         if prod:
             r["produtos"] = prod["name"]
-            if prod["cost_price"] is not None:
+            if r.get("_compound") and prod["cost_price"] is not None:
                 r["custo_produto"] = prod["cost_price"]
 
     return [DevolutionLookupOut.model_validate({k: v for k, v in r.items() if not k.startswith("_")}) for r in expanded]
