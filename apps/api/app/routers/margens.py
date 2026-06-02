@@ -55,7 +55,7 @@ SITUACAO_REPROVADO = 83955
 # "Needs attention" flag — rows the user must triage. Three independent triggers:
 #   1) margin below the configured minimum
 #   2) seller paid more shipping than projected (negative frete result)
-#   3) Bling-computed net diverges from marketplace net by more than 1%
+#   3) Bling-computed net diverges from marketplace net by more than R$0,01
 # Rows that don't trigger any of these are treated as auto-approved in the UI
 # (status filter "Pendente" hides them; "Aprovado" includes them).
 # Frete Plataforma (per-item) — mirrors what the UI displays in that column.
@@ -83,6 +83,12 @@ _ATTENTION_MARGEM_SQL = (
 _ATTENTION_FRETE_SQL = (
     f"(v.frete_projetado_item IS NOT NULL AND {_FRETE_RESULTADO_SQL} < 0)"
 )
+# Divergence = |saldo_bling − saldo_plataforma| > R$0,01. This MUST match the
+# per-row "corrigir" trigger in the UI (margem.vue: Math.abs(saldo_plataforma -
+# saldo_bling) > 0.01), otherwise rows show the divergence marker in the detail
+# but get filtered out of the "saldo divergente" list. A relative 1% threshold
+# was used before and hid real divergences on high-value items (e.g. a R$60 gap
+# on a R$7.000 Macbook = 0.85%, below 1%, but still a divergence to fix).
 _ATTENTION_SALDO_SQL = (
     "(v.marketplace_liquido_base_margem_item IS NOT NULL "
     " AND v.bling_valorbase_item IS NOT NULL "
@@ -91,13 +97,13 @@ _ATTENTION_SALDO_SQL = (
     "        - COALESCE(v.bling_custofrete_item, 0)"
     "        - COALESCE(v.bling_taxacomissao_item, 0))"
     "       - v.marketplace_liquido_base_margem_item"
-    "    ) > 0.01 * ABS(v.marketplace_liquido_base_margem_item))"
+    "    ) > 0.01)"
 )
 
 # "Needs attention" flag — rows the user must triage. Three independent triggers:
 #   1) margin below the configured minimum
 #   2) seller paid more shipping than projected (negative frete result)
-#   3) Bling-computed net diverges from marketplace net by more than 1%
+#   3) Bling-computed net diverges from marketplace net by more than R$0,01
 # Rows that don't trigger any of these are treated as auto-approved in the UI
 # (status filter "Pendente" hides them; "Aprovado" includes them).
 NEEDS_ATTENTION_SQL = (
@@ -225,15 +231,16 @@ async def list_margens_marketplace(
     if conta:
         where.append("v.loja_nome = :conta")
         params["conta"] = conta
-    # attention_type narrows which "needs attention" trigger qualifies a row.
-    # When the user picks a specific trigger (frete/margem/saldo), only rows
-    # that hit that trigger are returned — regardless of the chosen status.
-    # When attention_type='all' (default), status alone drives the filter.
+    # attention_type narrows which "needs attention" trigger qualifies a row
+    # (frete/margem/saldo). It is ANDed with the status filter, so e.g.
+    # status=Pendente + attention_type=saldo returns only pending rows that are
+    # saldo-divergent — matching the "Pendentes (30d)" workflow. When
+    # attention_type='all' (default), status alone drives the filter.
     attention_sql = _ATTENTION_TYPE_MAP.get(attention_type or "all", NEEDS_ATTENTION_SQL)
     attention_active = attention_type and attention_type != "all"
     if attention_active:
         where.append(attention_sql)
-    if status and not attention_active:
+    if status:
         # Effective status:
         #   Aprovado/Reprovado in DB → respected as-is
         #   NULL/Pendente in DB     → derived from NEEDS_ATTENTION_SQL

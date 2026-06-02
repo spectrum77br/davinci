@@ -336,16 +336,20 @@ async def test_marketplace_status_updates_snapshot_without_view_refresh(
     assert snapshot["verificado"] is True
 
 
-async def test_marketplace_attention_filter_ignores_status(
+async def test_marketplace_saldo_filter_uses_absolute_cent_threshold(
     client,
     db: AsyncSession,
     make_user,
     auth_as,
 ):
-    """A saldo-divergent row already marked 'Aprovado' must still surface when
-    the user picks the 'saldo' attention filter, even with the default
-    status='Pendente'. Picking a specific trigger overrides the status filter.
-    Regression: status was AND-ed on top, hiding ~all divergent rows.
+    """The 'saldo' attention filter must flag ANY divergence above R$0,01,
+    matching the per-row 'corrigir' marker in the UI
+    (Math.abs(saldo_plataforma - saldo_bling) > 0.01).
+
+    Regression: the filter used a relative 1% threshold, so a real R$60
+    divergence on a R$7.000 item (0.85%) showed the marker in the detail but
+    was filtered out of the 'saldo divergente' list. A high-value, still-pending
+    order with a sub-1% (but >R$0,01) gap must now appear.
     """
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
@@ -359,8 +363,8 @@ async def test_marketplace_attention_filter_ignores_status(
     db.add(order)
     await db.commit()
     await db.refresh(order)
-    # saldo_bling (100) vs saldo_plataforma (50) → divergence well above 1%.
-    # Already approved in Bling, so the default status='Pendente' would hide it.
+    # saldo_plataforma=7000, saldo_bling=6940 → R$60 gap = 0.857% (< 1%, > R$0,01).
+    # Pending (bling_status_margem NULL) so it must show under status=Pendente.
     await db.execute(
         text(
             """
@@ -374,9 +378,9 @@ async def test_marketplace_attention_filter_ignores_status(
             VALUES (
                 :id, '123456', 987654, 'sku-1',
                 'Em aberto', 'ml', 1,
-                100, 0, 0,
-                50,
-                'Aprovado'
+                6940, 0, 0,
+                7000,
+                NULL
             )
             """
         ),
@@ -384,7 +388,7 @@ async def test_marketplace_attention_filter_ignores_status(
     )
     await db.commit()
 
-    # Default status=Pendente + saldo filter → row must appear.
+    # Pending + saldo filter → the sub-1% (but > R$0,01) divergence must appear.
     response = await client.get(
         "/api/margens/marketplace?attention_type=saldo&status=Pendente"
     )
@@ -394,11 +398,56 @@ async def test_marketplace_attention_filter_ignores_status(
     assert body["items"][0]["pedido_bling"] == "123456"
     assert body["items"][0]["attention_saldo"] is True
 
-    # Sanity: without the saldo filter, the default Pendente status hides it
-    # (it's already Aprovado).
-    response_no_filter = await client.get("/api/margens/marketplace?status=Pendente")
-    assert response_no_filter.status_code == 200
-    assert response_no_filter.json()["total"] == 0
+
+async def test_marketplace_saldo_filter_ignores_sub_cent_noise(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """A gap of R$0,01 or less is rounding noise, not a divergence — it must NOT
+    appear in the 'saldo' filter (mirrors the UI's > 0.01 cutoff)."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    order = BlingOrder(
+        bling_id=987655,
+        numero="123457",
+        item_codigo="sku-2",
+        item_index=0,
+        situacao="15",
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    # R$0,01 gap → not flagged (strictly greater-than).
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                situacao_nome, plataforma_bling, item_proportion,
+                bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
+                marketplace_liquido_base_margem_item,
+                bling_status_margem
+            )
+            VALUES (
+                :id, '123457', 987655, 'sku-2',
+                'Em aberto', 'ml', 1,
+                100.00, 0, 0,
+                100.01,
+                NULL
+            )
+            """
+        ),
+        {"id": str(order.id)},
+    )
+    await db.commit()
+
+    response = await client.get(
+        "/api/margens/marketplace?attention_type=saldo&status=Pendente"
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
 
 
 async def test_sync_from_marketplace_updates_snapshot_financials_without_view_refresh(
