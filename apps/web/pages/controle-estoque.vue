@@ -741,6 +741,13 @@ const conferidoPercent = computed(() => {
 // da aba Estoque conferido HOJE (não do dia que ele estiver visualizando).
 const canAccessEnvios = computed(() => {
   if (isAdmin.value) return true
+  // Bypass específico pro churchill (sub-gerente): mesmo perfil
+  // operacional dos admins em termos de acesso a Envios, mas com
+  // role=user pra manter outras restrições do admin. Mesma pessoa
+  // que já tem bypass em `canUseTagFilter` acima (lá identificada
+  // por name). Se outro sub-gerente entrar no time, refatorar pra
+  // permission discreta (User.permissions JSONB).
+  if (auth.user?.email === 'maconer06@tuta.com') return true
   return conferenciaHoje.value.percent >= 100
 })
 
