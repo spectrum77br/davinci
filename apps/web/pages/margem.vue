@@ -422,34 +422,39 @@ async function syncFromSaldoFinal(row: MarketplaceRow, valorBase?: number) {
   }
 }
 
-// ---------- Edição inline de Saldo Final (grava valor_base no Bling) ----------
+async function syncSaldoEfetivoAsFinal(row: MarketplaceRow) {
+  if (row.saldo_efetivo == null) return
+  await syncFromSaldoFinal(row, row.saldo_efetivo)
+}
 
-const editingSaldoFinal = ref<string | null>(null)
-const saldoFinalDraft = ref('')
+// ---------- Edição inline de Saldo Efetivo (grava como final no Bling) ----------
 
-function startEditSaldoFinal(row: MarketplaceRow) {
+const editingSaldoEfetivo = ref<string | null>(null)
+const saldoEfetivoDraft = ref('')
+
+function startEditSaldoEfetivo(row: MarketplaceRow) {
   if (!canEdit.value || !row.pedido_bling) return
-  editingSaldoFinal.value = row.bling_order_item_id
-  saldoFinalDraft.value = row.saldo_final != null ? String(row.saldo_final) : ''
+  editingSaldoEfetivo.value = row.bling_order_item_id
+  saldoEfetivoDraft.value = row.saldo_efetivo != null ? String(row.saldo_efetivo) : ''
 }
 
-function cancelEditSaldoFinal() {
-  editingSaldoFinal.value = null
-  saldoFinalDraft.value = ''
+function cancelEditSaldoEfetivo() {
+  editingSaldoEfetivo.value = null
+  saldoEfetivoDraft.value = ''
 }
 
-async function saveSaldoFinal(row: MarketplaceRow) {
-  const raw = saldoFinalDraft.value.trim().replace(',', '.')
+async function saveSaldoEfetivo(row: MarketplaceRow) {
+  const raw = saldoEfetivoDraft.value.trim().replace(',', '.')
   const next = Number(raw)
   if (raw === '' || Number.isNaN(next)) {
-    cancelEditSaldoFinal()
+    cancelEditSaldoEfetivo()
     return
   }
-  if (row.saldo_final != null && Math.abs(next - row.saldo_final) < 0.005) {
-    cancelEditSaldoFinal()
+  if (row.saldo_efetivo != null && Math.abs(next - row.saldo_efetivo) < 0.005) {
+    cancelEditSaldoEfetivo()
     return
   }
-  cancelEditSaldoFinal()
+  cancelEditSaldoEfetivo()
   await syncFromSaldoFinal(row, next)
 }
 
@@ -679,7 +684,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="5">Frete</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="3">Saldo</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-blue-50 dark:bg-blue-900/20" colspan="3">Margem</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="3">Situação</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Situação</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Aprovação</th>
           </tr>
           <tr class="border-b">
@@ -700,25 +705,23 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Frete Resultado</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Saldo Plataforma</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-emerald-50 dark:bg-emerald-900/20">Saldo Bling</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-emerald-50 dark:bg-emerald-900/20">Saldo Efetivo</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-emerald-50 dark:bg-emerald-900/20">Saldo Efetivo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Margem</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20">Margem Bling</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-blue-50 dark:bg-blue-900/20">Margem Mínima</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] border-l-[3px] border-gray-400 dark:border-gray-600">Situação</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">Ajustes</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Saldo Final</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] border-l-[3px] border-gray-400 dark:border-gray-600">Status</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px]">Observação</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="26" class="text-center py-8 text-muted-foreground">
+            <td colspan="24" class="text-center py-8 text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td colspan="26" class="text-center py-8 text-muted-foreground">
+            <td colspan="24" class="text-center py-8 text-muted-foreground">
               <template v-if="tab === 'lookup' && !lookupTerm">
                 digite o numero do pedido acima para buscar
               </template>
@@ -779,7 +782,19 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">{{ brl(r.saldo_plataforma) }}</td>
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 text-muted-foreground">{{ brl(r.saldo_bling) }}</td>
             <td class="px-2 py-1 whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 font-medium">
-              <div class="flex items-center justify-end gap-2">
+              <div v-if="editingSaldoEfetivo === r.bling_order_item_id" class="flex items-center justify-end">
+                <input
+                  v-model="saldoEfetivoDraft"
+                  type="text"
+                  inputmode="decimal"
+                  class="w-24 px-2 py-1 text-xs text-right tabular-nums rounded-md border bg-background"
+                  autofocus
+                  @keydown.enter="saveSaldoEfetivo(r)"
+                  @keydown.esc="cancelEditSaldoEfetivo"
+                  @blur="saveSaldoEfetivo(r)"
+                />
+              </div>
+              <div v-else class="flex items-center justify-end gap-2">
                 <button
                   v-if="canEdit && r.saldo_plataforma != null && r.saldo_bling != null && Math.abs(r.saldo_plataforma - r.saldo_bling) > 0.01"
                   type="button"
@@ -791,7 +806,28 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                   <Loader2 v-if="isSyncing(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
                   <span v-else>→</span>
                 </button>
-                <span class="text-right tabular-nums">{{ brl(r.saldo_efetivo) }}</span>
+                <button
+                  v-if="canEdit && r.saldo_efetivo != null && (r.saldo_bling == null || Math.abs(r.saldo_efetivo - r.saldo_bling) > 0.01)"
+                  type="button"
+                  :disabled="isSyncingSaldoFinal(r.bling_order_item_id)"
+                  class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-default"
+                  :title="`Grava o Saldo Efetivo como valor final no Bling (zera taxa e frete)`"
+                  @click="syncSaldoEfetivoAsFinal(r)"
+                >
+                  <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
+                  <Check v-else class="h-3 w-3" />
+                </button>
+                <button
+                  type="button"
+                  class="flex items-center justify-end gap-1 text-right tabular-nums hover:text-foreground disabled:cursor-default"
+                  :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id)"
+                  :title="canEdit && r.pedido_bling ? `Editar Saldo Efetivo → grava o valor como final no Bling (zera taxa e frete)` : ''"
+                  @click="startEditSaldoEfetivo(r)"
+                >
+                  <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
+                  <span>{{ brl(r.saldo_efetivo) }}</span>
+                  <Pencil v-if="canEdit" class="size-3 shrink-0 opacity-50" />
+                </button>
               </div>
             </td>
             <td
@@ -812,49 +848,6 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             </td>
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 text-muted-foreground">{{ pct(r.margem_minima) }}</td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground border-l-[3px] border-gray-400 dark:border-gray-600">{{ r.situacao || '—' }}</td>
-            <td
-              class="px-2 py-1 text-right tabular-nums whitespace-nowrap"
-              :class="r.ajustes != null && r.ajustes !== 0 ? 'text-red-600 dark:text-red-400 font-medium' : 'text-muted-foreground'"
-            >
-              {{ r.ajustes != null && r.ajustes !== 0 ? brl(r.ajustes) : '—' }}
-            </td>
-            <td class="px-2 py-1 whitespace-nowrap font-medium">
-              <div v-if="editingSaldoFinal === r.bling_order_item_id" class="flex items-center justify-end">
-                <input
-                  v-model="saldoFinalDraft"
-                  type="text"
-                  inputmode="decimal"
-                  class="w-24 px-2 py-1 text-xs text-right tabular-nums rounded-md border bg-background"
-                  autofocus
-                  @keydown.enter="saveSaldoFinal(r)"
-                  @keydown.esc="cancelEditSaldoFinal"
-                  @blur="saveSaldoFinal(r)"
-                />
-              </div>
-              <div v-else class="flex items-center justify-end gap-2">
-                <button
-                  v-if="canEdit && r.saldo_final != null && r.saldo_bling != null && Math.abs(r.saldo_final - r.saldo_bling) > 0.01"
-                  type="button"
-                  :disabled="isSyncingSaldoFinal(r.bling_order_item_id)"
-                  class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-default"
-                  :title="`Grava o Saldo Final como valor base no Bling (zera taxa e frete)`"
-                  @click="syncFromSaldoFinal(r)"
-                >
-                  <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
-                  <span v-else>→</span>
-                </button>
-                <button
-                  type="button"
-                  class="text-right tabular-nums hover:text-foreground disabled:cursor-default"
-                  :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id)"
-                  :title="canEdit && r.pedido_bling ? `Editar Saldo Final → grava valor base no Bling (zera taxa e comissão)` : ''"
-                  @click="startEditSaldoFinal(r)"
-                >
-                  <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
-                  <span>{{ brl(r.saldo_final) }}</span>
-                </button>
-              </div>
-            </td>
             <td class="px-2 py-1 border-l-[3px] border-gray-400 dark:border-gray-600">
               <select
                 :value="r.status ?? 'Pendente'"
