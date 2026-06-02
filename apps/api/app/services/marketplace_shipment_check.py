@@ -301,7 +301,16 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
 async def _load_candidates(session: AsyncSession) -> list[BlingOrder]:
     """One row per (bling_id, numeroloja, loja) — we use item_index=0
     as the canonical row to avoid hitting the marketplace N times for
-    one multi-item order."""
+    one multi-item order.
+
+    Critério: situação em _OPEN_SITUACOES (`83965` etiqueta gerada /
+    `6` em aberto) + dentro da janela temporal. Antes filtrava
+    `em_andamento_data IS NULL` também, mas o fix e081e0d carimba
+    data já em 83965 (provisório = dia da etiqueta), então 100% dos
+    pedidos novos em 83965 têm data — o IS NULL zerava os candidatos.
+    O COALESCE no UPDATE (commit 4d3e088) garante que a data atual
+    não é sobrescrita quando o marketplace responde divergente.
+    """
     cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
     rows = (
         await session.execute(
@@ -309,7 +318,6 @@ async def _load_candidates(session: AsyncSession) -> list[BlingOrder]:
             .where(
                 and_(
                     BlingOrder.situacao.in_(_OPEN_SITUACOES),
-                    BlingOrder.em_andamento_data.is_(None),
                     BlingOrder.created_at >= cutoff,
                     BlingOrder.item_index == 0,  # one row per order
                     BlingOrder.numeroloja.isnot(None),
