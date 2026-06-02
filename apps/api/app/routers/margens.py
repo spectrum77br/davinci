@@ -233,7 +233,7 @@ async def list_margens_marketplace(
     attention_active = attention_type and attention_type != "all"
     if attention_active:
         where.append(attention_sql)
-    if status:
+    if status and not attention_active:
         # Effective status:
         #   Aprovado/Reprovado in DB → respected as-is
         #   NULL/Pendente in DB     → derived from NEEDS_ATTENTION_SQL

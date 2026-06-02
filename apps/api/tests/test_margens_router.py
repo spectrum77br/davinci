@@ -336,6 +336,71 @@ async def test_marketplace_status_updates_snapshot_without_view_refresh(
     assert snapshot["verificado"] is True
 
 
+async def test_marketplace_attention_filter_ignores_status(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """A saldo-divergent row already marked 'Aprovado' must still surface when
+    the user picks the 'saldo' attention filter, even with the default
+    status='Pendente'. Picking a specific trigger overrides the status filter.
+    Regression: status was AND-ed on top, hiding ~all divergent rows.
+    """
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    order = BlingOrder(
+        bling_id=987654,
+        numero="123456",
+        item_codigo="sku-1",
+        item_index=0,
+        situacao="15",
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    # saldo_bling (100) vs saldo_plataforma (50) → divergence well above 1%.
+    # Already approved in Bling, so the default status='Pendente' would hide it.
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                situacao_nome, plataforma_bling, item_proportion,
+                bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
+                marketplace_liquido_base_margem_item,
+                bling_status_margem
+            )
+            VALUES (
+                :id, '123456', 987654, 'sku-1',
+                'Em aberto', 'ml', 1,
+                100, 0, 0,
+                50,
+                'Aprovado'
+            )
+            """
+        ),
+        {"id": str(order.id)},
+    )
+    await db.commit()
+
+    # Default status=Pendente + saldo filter → row must appear.
+    response = await client.get(
+        "/api/margens/marketplace?attention_type=saldo&status=Pendente"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["pedido_bling"] == "123456"
+    assert body["items"][0]["attention_saldo"] is True
+
+    # Sanity: without the saldo filter, the default Pendente status hides it
+    # (it's already Aprovado).
+    response_no_filter = await client.get("/api/margens/marketplace?status=Pendente")
+    assert response_no_filter.status_code == 200
+    assert response_no_filter.json()["total"] == 0
+
+
 async def test_sync_from_marketplace_updates_snapshot_financials_without_view_refresh(
     client,
     db: AsyncSession,
