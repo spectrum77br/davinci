@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -31,8 +31,8 @@ from app.services.auto_link import run_auto_link
 from app.services.bling_kit_create import create_bling_kit_for_mark_job
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
-from app.services.import_product_bling_create import sync_import_product_to_bling_job
 from app.services.email import get_email_sender, render_otp_html
+from app.services.import_product_bling_create import sync_import_product_to_bling_job
 from app.services.listings_import import (
     _create_product_links_for_matched,
     _link_by_sku,
@@ -43,7 +43,6 @@ from app.services.marketplace_financials import (
     run_due_marketplace_financial_retries,
     run_sync_marketplace_financials_for_bling_order,
 )
-from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.marketplace_shipment_check import run_check_marketplace_shipped_orders
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
@@ -53,8 +52,9 @@ from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.product_cost_sync import run_sync_product_bling_costs
 from app.services.refresh_bling_stock import run_refresh_bling_stock
+from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.sync_orchestrator import SyncOrchestrator
-from app.worker_pool import get_arq_pool
+from app.worker_pool import ARQ_UI_QUEUE, get_arq_pool
 
 logger = structlog.get_logger()
 _settings = get_settings()
@@ -647,7 +647,7 @@ async def background_jobs_gc(ctx: dict) -> None:
 def _next_month_partition_bounds(now: datetime) -> tuple[str, str, str]:
     """Returns (partition_name, start_iso_date, end_iso_date) for month N+1
     relative to `now` (UTC)."""
-    first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+    first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0, tzinfo=UTC)
     nxt = (first + timedelta(days=32)).replace(day=1)
     end = (nxt + timedelta(days=32)).replace(day=1)
     name = f"sync_logs_y{nxt.year:04d}m{nxt.month:02d}"
@@ -1229,9 +1229,38 @@ class WorkerSettings:
     on_shutdown = shutdown
 
 
+class WorkerSettingsUI:
+    """Worker dedicado pra jobs disparados pela UI — baixa latência,
+    apenas 2 funções (criar kit no Bling + enviar produto pro Bling).
+    Roda em paralelo ao WorkerSettings (fila default) — assim clicks
+    do operador não esperam pelos 17+ min de backlog de webhooks.
+
+    Sem cron_jobs (todos os crons rodam no worker default)."""
+
+    redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
+    functions = [
+        sync_import_product_to_bling_job,
+        create_bling_kit_for_mark_job,
+    ]
+    queue_name = ARQ_UI_QUEUE
+    # Concorrência baixa — jobs UI são curtos (1-2 chamadas Bling) e
+    # vêm em rajadas pequenas. 5 paralelos cobre pico sem encher rate
+    # limit do Bling.
+    max_jobs = 5
+    # 60s é mais que suficiente — POST + PUT + supplier_link no Bling
+    # leva ~5s no happy path. Erro/timeout no Bling vai pro retry.
+    job_timeout = 60
+    keep_result = 3600
+    max_tries = 3
+    retry_jobs = True
+    on_startup = startup
+    on_shutdown = shutdown
+
+
 # Re-export for tests / introspection
 __all__ = [
     "WorkerSettings",
+    "WorkerSettingsUI",
     "audit_run",
     "auth_codes_cleanup",
     "auto_import_link",

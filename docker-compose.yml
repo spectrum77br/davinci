@@ -64,6 +64,22 @@ services:
       - ./data/uploads:/data/uploads
     networks: [davinci_net]
 
+  # Worker dedicado pra jobs disparados pela UI (criar kit, enviar
+  # produto pro Bling). Roda em paralelo ao `worker` (fila default) —
+  # webhooks de marketplace não bloqueiam clicks do operador.
+  # Mesma imagem, comando diferente: WorkerSettingsUI usa
+  # queue_name=davinci_ui, max_jobs=5, job_timeout=60s.
+  worker_ui:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["uv", "run", "arq", "app.worker.WorkerSettingsUI"]
+    env_file: .env
+    volumes:
+      - ./data/uploads:/data/uploads
+    networks: [davinci_net]
+
   web:
     build:
       context: ./apps/web

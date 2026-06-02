@@ -81,7 +81,7 @@ from app.schemas.importacao import (
 )
 from app.services.importacao_naming import generate_product_name, parse_kit_variation
 from app.services.pricing.audit import build_match_indexes, match_one_sku_to_keys
-from app.worker_pool import get_arq_pool
+from app.worker_pool import get_arq_ui_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/importacao", tags=["importacao"])
@@ -679,7 +679,7 @@ async def sync_product_to_bling(
     await session.refresh(row)
 
     try:
-        pool = await get_arq_pool()
+        pool = await get_arq_ui_pool()
         await pool.enqueue_job("sync_import_product_to_bling_job", str(row.id))
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -1699,7 +1699,7 @@ async def toggle_kit_mark(
         )
         # Enfileirar criação do composto no Bling (fire-and-forget).
         try:
-            pool = await get_arq_pool()
+            pool = await get_arq_ui_pool()
             await pool.enqueue_job("create_bling_kit_for_mark_job", str(mark.id))
         except Exception as e:  # noqa: BLE001
             # Não derruba a UI se o ARQ estiver indisponível — operador
@@ -1750,7 +1750,7 @@ async def resync_kit_mark(
     await session.commit()
     await session.refresh(mark)
     try:
-        pool = await get_arq_pool()
+        pool = await get_arq_ui_pool()
         await pool.enqueue_job("create_bling_kit_for_mark_job", str(mark.id))
     except Exception as e:  # noqa: BLE001
         logger.warning("kit_resync_enqueue_failed", mark_id=str(mark.id), err=str(e)[:200])
