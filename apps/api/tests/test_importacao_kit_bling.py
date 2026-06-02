@@ -196,11 +196,15 @@ def _install_bling_mock(monkeypatch, *, return_id: int = 9999, raise_exc: Except
     async def fake_link_supplier(self, **kwargs):
         return {"id": 1}
 
+    async def fake_update_product_estrutura(self, **kwargs):
+        return {}
+
     from app.services.marketplaces.bling import BlingClient
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_find_or_create_category)
     monkeypatch.setattr(BlingClient, "find_contato_id_by_name", fake_find_contato_id_by_name)
     monkeypatch.setattr(BlingClient, "create_product", fake_create_product)
     monkeypatch.setattr(BlingClient, "link_supplier_to_product", fake_link_supplier)
+    monkeypatch.setattr(BlingClient, "update_product_estrutura", fake_update_product_estrutura)
 
 
 @pytest.mark.asyncio
@@ -392,28 +396,37 @@ async def test_create_kit_passes_correct_estrutura_to_bling(
     kit_setup: dict[str, Any],
     monkeypatch,
 ):
-    """Verifica que o payload pro Bling tem formato='E' + estrutura
-    com 2 componentes nos bling_product_ids corretos."""
-    captured: dict[str, Any] = {}
+    """Verifica que o payload pro Bling tem formato='E' no POST /produtos
+    e que `estrutura` (com 2 componentes nos bling_product_ids corretos)
+    é mandada pelo PUT /produtos/estruturas separado — Bling V3 descarta
+    estrutura silenciosamente no POST, então virou 2 chamadas."""
+    captured_create: dict[str, Any] = {}
+    captured_estrutura: dict[str, Any] = {}
 
     from app.services.marketplaces.bling import BlingClient
 
     async def fake_create(self, **kwargs):
-        captured.update(kwargs)
+        captured_create.update(kwargs)
         return {"id": 88888}
+
+    async def fake_estrutura(self, **kwargs):
+        captured_estrutura.update(kwargs)
+        return {}
 
     async def fake_cat(self, name):
         return 555
 
     monkeypatch.setattr(BlingClient, "create_product", fake_create)
+    monkeypatch.setattr(BlingClient, "update_product_estrutura", fake_estrutura)
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
 
     await create_bling_kit_for_mark(kit_setup["mark"].id)
 
-    assert captured["formato"] == "E"
-    assert captured["sku"] == "b045.8.18"
-    assert captured["category_id"] == 555
-    est = captured["estrutura"]
+    assert captured_create["formato"] == "E"
+    assert captured_create["sku"] == "b045.8.18"
+    assert captured_create["category_id"] == 555
+    assert captured_estrutura["product_id"] == 88888
+    est = captured_estrutura["estrutura"]
     assert est["tipoEstoque"] == "V"
     assert est["lancamentoEstoque"] == "M"
     comp_ids = sorted(c["produto"]["id"] for c in est["componentes"])

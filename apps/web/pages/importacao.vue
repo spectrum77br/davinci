@@ -1498,7 +1498,7 @@ onScopeDispose(() => {
         <span class="text-muted-foreground">
           Matriz <strong>{{ kit.bases.length }}</strong> produtos × <strong>{{ kit.variations.length }}</strong> variações.
           Clique pra marcar/desmarcar "x". Criação automática no Bling
-          (<em>categoria mala kit</em>) e item na Tabela de Preços ficam pra fase 2.
+          (<em>categoria {{ categoria }} kit</em>)<template v-if="categoria === 'mala'"> e item na Tabela de Preços ficam pra fase 2</template>.
         </span>
       </div>
 

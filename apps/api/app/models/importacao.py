@@ -230,8 +230,12 @@ class ImportKitVariation(Base, TimestampMixin):
     `code` não é UNIQUE — Excel tem duplicata legítima nas posições
     19/20 (operador anotou "corrigir, separar por cor de mochila")."""
     __tablename__ = "import_kit_variations"
+    # UNIQUE composta por categoria — cada categoria (mala/celular)
+    # tem seu próprio range de ordem (mala 1-22, celular 1-4).
+    # Migration 0117 fez essa transição (antes era UNIQUE(ordem) global).
     __table_args__ = (
-        UniqueConstraint("ordem", name="uq_import_kit_variations_ordem"),
+        UniqueConstraint("categoria", "ordem", name="uq_import_kit_variations_cat_ordem"),
+        UniqueConstraint("categoria", "code", name="uq_import_kit_variations_cat_code"),
     )
 
     id: Mapped[UUID] = mapped_column(

@@ -41,7 +41,10 @@ from app.models import (
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.import_product_bling_create import resolve_default_supplier_id
 from app.services.importacao_naming import (
+    build_celular_kit_sku,
     build_kit_pricing_sku,
+    celular_kit_components,
+    generate_celular_kit_name,
     generate_kit_name,
     kit_pricing_name,
     kit_pricing_segment_slug,
@@ -51,10 +54,13 @@ from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
 
-# Nome da categoria Bling onde os kits criados vão parar. Operador
-# definiu isso. Pode ser ajustado no Bling se necessário — o helper
-# `find_or_create_category` cria automaticamente se não existir.
-_KIT_CATEGORY_NAME = "mala kit"
+# Nome da categoria Bling onde os kits criados vão parar. Mapeado por
+# categoria DaVinci — operador definiu cada nome. `find_or_create_category`
+# cria automaticamente no Bling se não existir.
+_KIT_CATEGORY_NAMES: dict[str, str] = {
+    "mala": "mala kit",
+    "celular": "celular kit",
+}
 
 # Defaults pra estrutura do composto no Bling:
 #   * tipoEstoque="V" (virtual): estoque do kit é derivado dos componentes
@@ -87,10 +93,22 @@ async def _bling_client(session: AsyncSession) -> tuple[BlingClient | None, Inte
     return BlingClient(creds, on_token_refresh=_persist, integration_id=integ.id), integ
 
 
-def _resolve_component_skus(sku_base: str, variation_code: str) -> list[str]:
+def _resolve_component_skus(
+    sku_base: str, variation_code: str, *, categoria: str = "mala",
+) -> list[str]:
     """variation_code → lista de SKUs de componente em ordem.
-    Tamanhos numéricos viram `{sku_base}.{N}`; acessórios vão como-são.
+
+    Por categoria:
+      * mala: tamanhos numéricos viram `{sku_base}.{N}`; acessórios
+        (a075, bp003…) vão como-são. variation_code "8+18" →
+        ["{base}.8", "{base}.18"]; "12+a075" → ["{base}.12", "a075"].
+      * celular: variation_code é uma combinação de acessórios (a001,
+        a003, a004); o sku_base É o telefone, vai como componente
+        principal junto. "a001" → [sku_base, "a001"]; "a003+a004" →
+        [sku_base, "a003", "a004"]. Ver `celular_kit_components`.
     """
+    if categoria == "celular":
+        return celular_kit_components(sku_base, variation_code)
     sizes, accessories = parse_kit_variation(variation_code)
     skus: list[str] = []
     for size in sizes:
@@ -267,8 +285,16 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
             await _set_mark_error(session, mark, "base_or_variation_not_found")
             return {"ok": False, "error": "base_or_variation_not_found"}
 
+        # Categoria do mark dita TODAS as decisões abaixo (resolver
+        # componentes, categoria Bling, formato do SKU, formato do nome,
+        # fase 3 pricing). Mala e Celular têm convenções distintas;
+        # categoria do mark herda da base.
+        kit_cat = (base.categoria or "mala").lower()
+
         # Resolver componentes.
-        comp_skus = _resolve_component_skus(base.sku_base, variation.code)
+        comp_skus = _resolve_component_skus(
+            base.sku_base, variation.code, categoria=kit_cat,
+        )
         if not comp_skus:
             await _set_mark_error(session, mark, f"no_components_parsed_from={variation.code!r}")
             return {"ok": False, "error": "no_components_parsed"}
@@ -285,24 +311,27 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
             await _set_mark_error(session, mark, "no_bling_integration")
             return {"ok": False, "error": "no_bling_integration"}
 
-        # Categoria.
+        # Categoria Bling — mapa por categoria DaVinci. Default mala
+        # pra qualquer categoria nova/desconhecida que apareça.
+        bling_category_name = _KIT_CATEGORY_NAMES.get(kit_cat, _KIT_CATEGORY_NAMES["mala"])
         try:
-            category_id = await client.find_or_create_category(_KIT_CATEGORY_NAME)
+            category_id = await client.find_or_create_category(bling_category_name)
         except Exception as e:  # noqa: BLE001
             await _set_mark_error(session, mark, f"category_resolve_failed: {e}")
             logger.warning("kit_sync_category_failed", mark_id=str(mark_id), err=str(e)[:200])
             return {"ok": False, "error": f"category_resolve_failed: {e}"}
 
-        # SKU + nome do kit.
-        # SKU canônico — '.' entre tamanhos, '+' apenas pra acessórios.
-        # Reusa o mesmo helper que constrói o SKU do pricing_product
-        # (fase 3) pra garantir consistência: o que aparece no Bling
-        # bate com o que aparece em /pricing/tabela. Variation
-        # "8+18" → "base.8.18"; "12+20+24+a075..." → "base.12.20.24+a075...".
-        kit_sku = build_kit_pricing_sku(base.sku_base, variation.code)
-        kit_name = generate_kit_name(
-            base.modelo_bling, base.sku_base, variation.code, base.cor,
-        )
+        # SKU + nome do kit — convenção diferente por categoria.
+        #   mala: "{base}.{tam1}.{tam2}+{acc1}+{acc2}" (build_kit_pricing_sku)
+        #   celular: "{base}+{variation_code}" (build_celular_kit_sku)
+        if kit_cat == "celular":
+            kit_sku = build_celular_kit_sku(base.sku_base, variation.code)
+            kit_name = generate_celular_kit_name(base.modelo_bling, variation.label)
+        else:
+            kit_sku = build_kit_pricing_sku(base.sku_base, variation.code)
+            kit_name = generate_kit_name(
+                base.modelo_bling, base.sku_base, variation.code, base.cor,
+            )
 
         # Estrutura.
         estrutura = {
@@ -434,6 +463,14 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
         )
 
         # ── Fase 3: criar/atualizar pricing_product ─────────────────
+        # Por enquanto SÓ mala — celular vai ter integração com a Tabela
+        # de Preços na Etapa 3 (cotação com níveis de frete), quando a
+        # taxonomia de segments-filhos for finalizada. Pra celular o
+        # mark fica com pricing_sync_status=None (operador entende que
+        # é estado intencional, não erro).
+        if kit_cat != "mala":
+            return {"ok": True, "bling_product_id": int(new_bling_id)}
+
         # Falha aqui NÃO desfaz o Bling — só registra o erro na mark.
         # Operador re-tenta via UI (POST /resync-pricing).
         if mark.pricing_product_id is None:
@@ -499,6 +536,12 @@ async def retry_pricing_sync_for_mark(mark_id: UUID | str) -> dict[str, Any]:
         )).scalar_one_or_none()
         if base is None or variation is None:
             return {"ok": False, "error": "base_or_variation_not_found"}
+
+        # Fase 3 (pricing_product) só suportada pra mala nesta etapa.
+        # Celular vai entrar na Etapa 3 quando a taxonomia de segments
+        # for finalizada.
+        if (base.categoria or "mala").lower() != "mala":
+            return {"ok": False, "error": "pricing_sync_not_available_for_categoria"}
 
         # Recupera owner_user_id da Integration (mesma fonte da fase 2).
         integ = (await session.execute(

@@ -94,6 +94,65 @@ def generate_product_name(
     raise ValueError(f"unknown categoria: {categoria}")
 
 
+# ── Celular: kit = telefone + acessório(s) ──────────────────────────
+
+
+def celular_kit_components(sku_base: str, variation_code: str) -> list[str]:
+    """Componentes de um kit Celular: o próprio telefone (sku_base) +
+    os acessórios definidos pelo variation_code.
+
+    Variations fixas (seed 0117):
+      "a001"        → [sku_base, "a001"]
+      "a003"        → [sku_base, "a003"]
+      "a004"        → [sku_base, "a004"]
+      "a003+a004"   → [sku_base, "a003", "a004"]
+
+    Acessórios são SKUs standalone gravados em `products`; o caller
+    resolve cada um pra bling_product_id e monta a estrutura.
+    """
+    acessorios = [p.strip() for p in (variation_code or "").split("+") if p.strip()]
+    return [sku_base] + acessorios
+
+
+def build_celular_kit_sku(sku_base: str, variation_code: str) -> str:
+    """SKU literal do kit Celular: base + '+' + variation_code.
+    Exemplos:
+      ("i220.sa", "a001")        → "i220.sa+a001"
+      ("i220.sa", "a003+a004")   → "i220.sa+a003+a004"
+    """
+    code = (variation_code or "").strip()
+    if not code:
+        return sku_base
+    return f"{sku_base}+{code}"
+
+
+def generate_celular_kit_name(
+    modelo_bling: str | None, variation_label: str | None,
+) -> str:
+    """Nome canônico de um kit Celular: `<modelo> + <label_acessorio>`.
+
+    Exemplo:
+      modelo="Apple iPhone Air 256 GB - Branco", label="Fone com fio"
+        → "Apple iPhone Air 256 GB - Branco + Fone com fio"
+
+    Sem prefixo "Kit" — operador validou que pra celular o nome do
+    composto é a concat direta. Mala usa "Kit Mala ... tamanhos ..."
+    (`generate_kit_name`) — convenção diferente por categoria.
+    """
+    modelo = (modelo_bling or "").strip()
+    label = (variation_label or "").strip()
+    if not modelo and not label:
+        return ""
+    if not label:
+        return modelo
+    if not modelo:
+        return label
+    return f"{modelo} + {label}"
+
+
+# ── Mala: kit = variations dinâmicas (tamanhos + acessórios) ────────
+
+
 def parse_kit_variation(code: str) -> tuple[list[str], list[str]]:
     """Quebra o code de uma variation de kit em (tamanhos_numericos, acessorios).
 
