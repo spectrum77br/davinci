@@ -335,11 +335,21 @@ async def list_products(
     _u: Annotated[User, Depends(require_permission("importacao", "view"))],
     categoria: _CategoriaQ = "mala",
 ) -> list[ImportProductOut]:
+    # Ordena por modelo_bling alfabético (case-insensitive) — mesma
+    # convenção que GET /kit usa pra bases (commit 298b661). Antes era
+    # por sku, o que em celular punha Fossibot (sku dg*) antes de Apple
+    # (sku i*). Mala já bate visualmente porque sku/modelo são alinhados
+    # lá. NULLs no fim. `sku` é tiebreaker quando 2 SKUs têm o mesmo
+    # modelo (i228.sp vs i228.sa pra "Macbook Air M5 Cinza").
     products = (
         await session.execute(
             select(ImportProduct)
             .where(ImportProduct.categoria == categoria)
-            .order_by(ImportProduct.sku)
+            .order_by(
+                ImportProduct.modelo_bling.is_(None),
+                func.lower(ImportProduct.modelo_bling),
+                ImportProduct.sku,
+            )
         )
     ).scalars().all()
 

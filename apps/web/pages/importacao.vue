@@ -1916,7 +1916,7 @@ onScopeDispose(() => {
           <thead class="thead-sticky">
             <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
               <th class="text-left">Produto</th>
-              <th class="text-right" style="width: 120px">Realizado (R$)</th>
+              <th class="text-right" style="width: 120px">Valor (R$)</th>
               <th class="text-right" style="width: 100px">USD</th>
               <th class="text-left" style="width: 130px">Tipo Frete</th>
               <th class="text-right" style="width: 130px">Previsto (R$)</th>
