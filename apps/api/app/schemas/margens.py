@@ -85,6 +85,7 @@ class MargensMarketplaceOut(BaseModel):
     margem: float | None = None
     margem_bling: float | None = None
     margem_minima: float | None = None
+    situacao_id: int | None = None
     situacao: str | None = None
     ajustes: float | None = None
     saldo_final: float | None = None

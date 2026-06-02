@@ -370,14 +370,14 @@ async def test_marketplace_saldo_filter_uses_absolute_cent_threshold(
             """
             INSERT INTO verificar_margem (
                 bling_order_item_id, pedido_bling, bling_id, sku,
-                situacao_nome, plataforma_bling, item_proportion,
+                situacao, situacao_nome, plataforma_bling, item_proportion,
                 bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
                 marketplace_liquido_base_margem_item,
                 bling_status_margem
             )
             VALUES (
                 :id, '123456', 987654, 'sku-1',
-                'Em aberto', 'ml', 1,
+                '6', 'Em aberto', 'ml', 1,
                 6940, 0, 0,
                 7000,
                 NULL
@@ -425,16 +425,68 @@ async def test_marketplace_saldo_filter_ignores_sub_cent_noise(
             """
             INSERT INTO verificar_margem (
                 bling_order_item_id, pedido_bling, bling_id, sku,
-                situacao_nome, plataforma_bling, item_proportion,
+                situacao, situacao_nome, plataforma_bling, item_proportion,
                 bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
                 marketplace_liquido_base_margem_item,
                 bling_status_margem
             )
             VALUES (
                 :id, '123457', 987655, 'sku-2',
-                'Em aberto', 'ml', 1,
+                '6', 'Em aberto', 'ml', 1,
                 100.00, 0, 0,
                 100.01,
+                NULL
+            )
+            """
+        ),
+        {"id": str(order.id)},
+    )
+    await db.commit()
+
+    response = await client.get(
+        "/api/margens/marketplace?attention_type=saldo&status=Pendente"
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+
+
+async def test_marketplace_saldo_filter_only_considers_situacao_6(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Saldo divergence is only triaged for orders in situação 6. A real gap
+    (R$60) on an order in any other situação must NOT appear in the 'saldo'
+    filter, matching the per-row 'corrigir' marker gate in the UI."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    order = BlingOrder(
+        bling_id=987656,
+        numero="123458",
+        item_codigo="sku-3",
+        item_index=0,
+        situacao="9",
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    # Same R$60 gap as the passing test, but situação 9 (not 6) → excluded.
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                situacao, situacao_nome, plataforma_bling, item_proportion,
+                bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
+                marketplace_liquido_base_margem_item,
+                bling_status_margem
+            )
+            VALUES (
+                :id, '123458', 987656, 'sku-3',
+                '9', 'Atendido', 'ml', 1,
+                6940, 0, 0,
+                7000,
                 NULL
             )
             """

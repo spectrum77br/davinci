@@ -133,6 +133,7 @@ async def _setup_schema():
                     produto text,
                     quantidade integer,
                     data timestamptz,
+                    situacao text,
                     situacao_nome text,
                     loja_nome text,
                     bling_status_margem text,
