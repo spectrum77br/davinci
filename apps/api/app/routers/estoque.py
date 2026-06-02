@@ -384,11 +384,25 @@ async def list_estoque_pedidos(
     where.append(effective_date >= data_inicio)
     where.append(effective_date <= data_fim)
 
+    # Filtros por status — alinhado com o `status` do payload (que é por
+    # situacao, não por em_andamento_data). `nao_enviado` = badge vermelho =
+    # situacao=83965 (Enviado Etiqueta — agência ainda não confirmou),
+    # INDEPENDENTE de ter ou não em_andamento_data carimbada (o sync de
+    # etiqueta já carimba a data provisória). Filtrar por em_andamento_data
+    # IS NULL aqui escondia os 83965 com data — operador via 108 no
+    # contador mas tabela vazia no filtro "não enviado".
     if status_filter == "nao_enviado":
-        where.append(BlingOrder.em_andamento_data.is_(None))
-        order_by = BlingOrder.data.desc()
+        where.append(BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA)
+        order_by = effective_date.desc()
     elif status_filter == "enviado":
-        where.append(BlingOrder.em_andamento_data.isnot(None))
+        where.append(BlingOrder.situacao.in_(
+            (
+                _SITUACAO_ATENDIDO,
+                _SITUACAO_ENTREGUE,
+                _SITUACAO_AGUARDANDO_DEVOLUCAO,
+                _SITUACAO_RESOLVIDO,
+            )
+        ))
         order_by = BlingOrder.em_andamento_data.desc()
     else:
         # status='todos' ou None → mostra ambos, sort por effective_date.

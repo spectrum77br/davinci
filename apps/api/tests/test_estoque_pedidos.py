@@ -123,3 +123,51 @@ async def test_aba_inclui_devolucao_e_resolvido_como_enviado(
     # 545902 (Resolvido) — verde
     assert "910006" in by_numero
     assert by_numero["910006"]["status"] == "enviado"
+
+
+@pytest.mark.asyncio
+async def test_filtro_status_nao_enviado_inclui_83965_com_data(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], four_orders: dict[str, int],
+):
+    """Bug guard: filtro status=nao_enviado deve retornar pedidos
+    situacao=83965 mesmo quando têm em_andamento_data carimbada (o
+    sync de etiqueta carimba data provisória). Antes do fix o filtro
+    usava `em_andamento_data IS NULL` — divergia do classificador do
+    payload (que é por situacao) e zerava a aba mesmo havendo 83965s."""
+    auth_as(admin_view)
+    r = await client.get(
+        "/api/estoque/pedidos?data_inicio=2026-05-28&data_fim=2026-05-28"
+        "&status=nao_enviado"
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    numeros = {p["pedido_bling"] for p in data}
+    # 83965 com em_andamento_data SET (sku-83965 → 910003) deve aparecer.
+    assert "910003" in numeros, "83965 com data carimbada deveria estar em 'nao_enviado'"
+    # Todos os retornados são status=nao_enviado.
+    assert all(p["status"] == "nao_enviado" for p in data)
+    # 15/83953 (enviados) NÃO aparecem.
+    assert "910001" not in numeros
+    assert "910002" not in numeros
+
+
+@pytest.mark.asyncio
+async def test_filtro_status_enviado_exclui_83965(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], four_orders: dict[str, int],
+):
+    """Espelho: status=enviado lista 15/83953 (e 83957/545902 se em range),
+    NÃO inclui 83965 mesmo se em_andamento_data setada."""
+    auth_as(admin_view)
+    r = await client.get(
+        "/api/estoque/pedidos?data_inicio=2026-05-28&data_fim=2026-05-28"
+        "&status=enviado"
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    numeros = {p["pedido_bling"] for p in data}
+    assert "910001" in numeros  # situacao=15
+    assert "910002" in numeros  # situacao=83953
+    assert "910003" not in numeros  # situacao=83965 — não é "enviado"
+    assert all(p["status"] == "enviado" for p in data)
