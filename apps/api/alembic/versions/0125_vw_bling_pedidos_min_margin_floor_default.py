@@ -96,7 +96,15 @@ def _refresh_snapshot() -> None:
         f"DELETE FROM {snap} v WHERE NOT EXISTS "
         f"(SELECT 1 FROM {bo} bo WHERE bo.id = v.bling_order_item_id)"
     )
-    op.execute(f"INSERT INTO {snap} SELECT * FROM {view}")
+    # ON CONFLICT DO NOTHING: tolera corrida com writers concorrentes
+    # (app/worker fazem refresh_for_pedido por evento). Sem isso, uma linha
+    # inserida pelo app entre o DELETE e o INSERT estoura o PK e aborta a
+    # migration. O rebuild_all original so nao sofre disso por rodar as 5h
+    # sem trafego.
+    op.execute(
+        f"INSERT INTO {snap} SELECT * FROM {view} "
+        "ON CONFLICT (bling_order_item_id) DO NOTHING"
+    )
 
 
 def upgrade() -> None:
