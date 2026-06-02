@@ -313,7 +313,7 @@ function platformRowBg(platform: string | null): string {
 function freteProjMissingReason(r: MarketplaceRow): string | null {
   if (r.frete_projetado != null) return null
   if (!r.pricing_leaf_segment_name) {
-    return `SKU "${r.sku}" sem cadastro em pricing_products — cadastre em /pricing aba Produtos.`
+    return `Loja: ${r.conta ?? '—'} · SKU "${r.sku}" sem cadastro em pricing_products — cadastre em /pricing aba Produtos.`
   }
   if (!r.pricing_account_name) {
     return `Sem pricing_account p/ esta loja+segmento (${r.pricing_leaf_segment_name}). Cadastre em /pricing aba Contas.`
