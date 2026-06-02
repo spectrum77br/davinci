@@ -277,7 +277,12 @@ async def lookup_devolution_order(
         s for r in expanded
         if (s := (r["sku"] or "").strip().lower())
     })
+    base_skus = sorted({
+        base for sku in part_skus
+        if (base := _sku_base(sku).strip().lower()) and base != sku
+    })
     products: dict[str, dict] = {}
+    base_products: dict[str, dict] = {}
     if part_skus:
         prod_rows = (
             await session.execute(
@@ -296,13 +301,39 @@ async def lookup_devolution_order(
             )
         ).mappings().all()
         products = {p["k"]: dict(p) for p in prod_rows}
+    if base_skus:
+        base_rows = (
+            await session.execute(
+                text(
+                    f"""
+                    SELECT DISTINCT ON (lower(split_part(btrim(sku), '.', 1)))
+                        lower(split_part(btrim(sku), '.', 1)) AS k,
+                        name
+                    FROM "{SCHEMA}".products
+                    WHERE lower(split_part(btrim(sku), '.', 1)) = ANY(:keys)
+                      AND btrim(sku) NOT LIKE '%+%'
+                      AND (formato IS NULL OR formato <> 'E')
+                    ORDER BY
+                        lower(split_part(btrim(sku), '.', 1)),
+                        situacao = 'A' DESC NULLS LAST,
+                        (name ILIKE '%USADO%' OR name ILIKE '%AVULSO%') ASC,
+                        sku
+                    """  # noqa: S608
+                ),
+                {"keys": base_skus},
+            )
+        ).mappings().all()
+        base_products = {p["k"]: dict(p) for p in base_rows}
 
     for r in expanded:
-        prod = products.get((r["sku"] or "").strip().lower())
+        sku_key = (r["sku"] or "").strip().lower()
+        prod = products.get(sku_key)
         if prod:
             r["produtos"] = prod["name"]
             if r.get("_compound") and prod["cost_price"] is not None:
                 r["custo_produto"] = prod["cost_price"]
+        elif fallback := base_products.get(_sku_base(sku_key).strip().lower()):
+            r["produtos"] = fallback["name"]
 
     return [DevolutionLookupOut.model_validate({k: v for k, v in r.items() if not k.startswith("_")}) for r in expanded]
 
