@@ -67,8 +67,16 @@ function quem(row: MargemAudit) {
   return row.mudado_por_nome || row.mudado_por_email || row.mudado_por.slice(0, 8)
 }
 
-function val(v: string | null) {
-  return v === null || v === '' ? '—' : v
+function val(row: MargemAudit, v: string | null) {
+  if (v === null || v === '') return '—'
+  // Saldo Final é dinheiro: formata em 2 casas (evita float cru tipo 145.5399999…).
+  if (row.acao === 'saldo_final') {
+    const n = Number(v)
+    if (Number.isFinite(n)) {
+      return n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    }
+  }
+  return v
 }
 
 async function load() {
@@ -180,13 +188,13 @@ onMounted(() => {
             <td class="font-mono text-xs">{{ row.pedido_bling }}</td>
             <td class="text-xs">{{ row.sku || '—' }}</td>
             <td><span :class="acaoPill(row.acao)">{{ acaoLabel(row.acao) }}</span></td>
-            <td class="text-xs">
-              <span class="text-muted-foreground">{{ val(row.valor_antigo) }}</span>
+            <td class="text-xs tabular-nums whitespace-nowrap">
+              <span class="text-muted-foreground">{{ val(row, row.valor_antigo) }}</span>
               <ArrowRight class="inline size-3 mx-1 text-muted-foreground" />
-              <span class="font-medium">{{ val(row.valor_novo) }}</span>
+              <span class="font-medium">{{ val(row, row.valor_novo) }}</span>
             </td>
             <td class="text-xs">{{ origemLabel(row.origem) }}</td>
-            <td class="text-xs">{{ quem(row) }}</td>
+            <td class="text-xs whitespace-nowrap">{{ quem(row) }}</td>
           </tr>
         </tbody>
       </table>

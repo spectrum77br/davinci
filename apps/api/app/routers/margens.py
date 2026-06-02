@@ -592,13 +592,14 @@ async def sync_bling_from_saldo_final(
         taxacomissao=0,
         custofrete=0,
     )
+    _old_vb = row.bling_valorbase_item
     await record_margem_audit(
         session,
         acao="saldo_final",
         pedido_bling=str(row.pedido_bling),
         sku=row.sku,
-        valor_antigo=row.bling_valorbase_item,
-        valor_novo=valorbase,
+        valor_antigo=None if _old_vb is None else f"{float(_old_vb):.2f}",
+        valor_novo=f"{float(valorbase):.2f}",
         origem="margens",
         mudado_por=user.id,
     )
