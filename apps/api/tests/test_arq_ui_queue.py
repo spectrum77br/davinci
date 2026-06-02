@@ -9,17 +9,26 @@ from __future__ import annotations
 
 from app.worker import (
     WorkerSettings,
+    WorkerSettingsMarketplace,
     WorkerSettingsUI,
+    check_marketplace_shipped_orders,
     create_bling_kit_for_mark_job,
     sync_import_product_to_bling_job,
 )
-from app.worker_pool import ARQ_DEFAULT_QUEUE, ARQ_UI_QUEUE
+from app.worker_pool import (
+    ARQ_DEFAULT_QUEUE,
+    ARQ_MARKETPLACE_QUEUE,
+    ARQ_UI_QUEUE,
+)
 
 
 def test_filas_separadas():
-    """Default e UI usam queue names distintos."""
+    """Default, UI e Marketplace usam queue names distintos."""
     assert ARQ_DEFAULT_QUEUE != ARQ_UI_QUEUE
+    assert ARQ_DEFAULT_QUEUE != ARQ_MARKETPLACE_QUEUE
+    assert ARQ_UI_QUEUE != ARQ_MARKETPLACE_QUEUE
     assert ARQ_UI_QUEUE == "davinci_ui"
+    assert ARQ_MARKETPLACE_QUEUE == "davinci_marketplace"
 
 
 def test_worker_ui_so_tem_jobs_ui():
@@ -58,3 +67,45 @@ def test_worker_default_ainda_tem_os_2_jobs():
     fns = WorkerSettings.functions
     assert sync_import_product_to_bling_job in fns
     assert create_bling_kit_for_mark_job in fns
+
+
+# ── WorkerSettingsMarketplace ────────────────────────────────────────
+
+
+def test_worker_marketplace_so_tem_check_shipped():
+    """Worker marketplace registra APENAS check_marketplace_shipped_orders.
+    Outros crons/syncs ficam no default."""
+    fns = WorkerSettingsMarketplace.functions
+    assert len(fns) == 1
+    assert check_marketplace_shipped_orders in fns
+
+
+def test_worker_marketplace_queue_correta():
+    assert WorkerSettingsMarketplace.queue_name == ARQ_MARKETPLACE_QUEUE
+
+
+def test_worker_marketplace_tem_cron_a_cada_5min():
+    """O cron tem que estar registrado AQUI (não no default). Padrão
+    `minute=_FIVE_MIN` = {0,5,10,...,55}."""
+    crons = WorkerSettingsMarketplace.cron_jobs
+    assert len(crons) == 1
+    # Cron do arq usa `coroutine` attr pra função; o name expõe o fn.
+    assert "check_marketplace_shipped_orders" in (crons[0].name or "")
+
+
+def test_worker_marketplace_timeouts_e_concorrencia():
+    """Tick demora ~tens of seconds (consulta N marketplaces) — timeout
+    2 min cobre. Concorrência baixa: a cada 5 min, overlap raro."""
+    assert WorkerSettingsMarketplace.job_timeout == 120
+    assert WorkerSettingsMarketplace.max_jobs <= 5
+
+
+def test_default_nao_tem_mais_cron_de_check_shipped():
+    """Cron MOVIDO pro marketplace worker — não pode estar duplicado
+    no default (rodaria 2x a cada 5 min, hits dobrado nos marketplaces).
+    Função fica em `functions` do default como fallback de enqueue manual."""
+    default_crons = WorkerSettings.cron_jobs
+    cron_names = [c.name or "" for c in default_crons]
+    assert not any("check_marketplace_shipped_orders" in n for n in cron_names)
+    # Mas a função continua registrada (fallback enqueue manual).
+    assert check_marketplace_shipped_orders in WorkerSettings.functions

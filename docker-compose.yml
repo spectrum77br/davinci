@@ -80,6 +80,21 @@ services:
       - ./data/uploads:/data/uploads
     networks: [davinci_net]
 
+  # Worker dedicado pro cron `check_marketplace_shipped_orders` (a cada
+  # 5 min). Antes rodava no default e disputava com webhooks marketplace
+  # em pico (100+/min), atrasando o tick 15-20 min. Fila `davinci_marketplace`
+  # garante execução cravada.
+  worker_marketplace:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["uv", "run", "arq", "app.worker.WorkerSettingsMarketplace"]
+    env_file: .env
+    volumes:
+      - ./data/uploads:/data/uploads
+    networks: [davinci_net]
+
   web:
     build:
       context: ./apps/web

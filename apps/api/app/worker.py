@@ -54,7 +54,7 @@ from app.services.product_cost_sync import run_sync_product_bling_costs
 from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.sync_orchestrator import SyncOrchestrator
-from app.worker_pool import ARQ_UI_QUEUE, get_arq_pool
+from app.worker_pool import ARQ_MARKETPLACE_QUEUE, ARQ_UI_QUEUE, get_arq_pool
 
 logger = structlog.get_logger()
 _settings = get_settings()
@@ -1207,10 +1207,12 @@ class WorkerSettings:
             run_at_startup=False,
         ),
         cron(verificar_margem_snapshot, minute={0, 30}, run_at_startup=False),
-        # Sweeps bling_orders stuck in 'Em aberto' (83965) against the
-        # marketplace's shipment state. Marketplace SHIPPED → Bling 15
-        # + stamp em_andamento_data so the order shows on /controle-estoque.
-        cron(check_marketplace_shipped_orders, minute=_FIVE_MIN, run_at_startup=False),
+        # Cron `check_marketplace_shipped_orders` MOVIDO pra
+        # WorkerSettingsMarketplace (fila `davinci_marketplace`). Função
+        # continua em `functions` deste worker como fallback (enqueue
+        # manual via /admin/run-job pega aqui também). Em pico, cron
+        # disputava fila com webhooks de marketplace e atrasava 15-20
+        # min mesmo configurado a cada 5.
         # Safety-net: re-sincroniza pedidos suspeitos de stale (webhooks
         # perdidos do Bling) a cada 10 min. Refetch via ingest_bling_order_run.
         cron(bling_orders_safety_net_tick, minute=_TEN_MIN, run_at_startup=False),
@@ -1257,9 +1259,43 @@ class WorkerSettingsUI:
     on_shutdown = shutdown
 
 
+class WorkerSettingsMarketplace:
+    """Worker dedicado pro cron `check_marketplace_shipped_orders`
+    (sweeps de 83965 → 15 quando marketplace confirma envio). Antes
+    rodava no default e disputava com 100+ webhooks/min em pico —
+    tick atrasava 15-20 min mesmo configurado a cada 5.
+
+    Sweeps `bling_orders` em 'Em aberto' (83965) contra o estado
+    de envio do marketplace. Marketplace SHIPPED → Bling 15 +
+    stamp em_andamento_data → pedido sai da fila do estoque.
+    """
+
+    redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
+    functions = [
+        check_marketplace_shipped_orders,
+    ]
+    cron_jobs = [
+        cron(check_marketplace_shipped_orders, minute=_FIVE_MIN, run_at_startup=False),
+    ]
+    queue_name = ARQ_MARKETPLACE_QUEUE
+    # Concorrência baixa — só roda 1 instance a cada 5 min, com lock
+    # interno via advisory. 3 paralelos cobre overrun se o tick anterior
+    # demorar mais que 5 min (overlap protegido pelo lock).
+    max_jobs = 3
+    # 2 min cobre consulta a N marketplaces; mais que isso indica
+    # marketplace fora do ar, melhor abortar e re-tentar no próximo tick.
+    job_timeout = 120
+    keep_result = 3600
+    max_tries = 3
+    retry_jobs = True
+    on_startup = startup
+    on_shutdown = shutdown
+
+
 # Re-export for tests / introspection
 __all__ = [
     "WorkerSettings",
+    "WorkerSettingsMarketplace",
     "WorkerSettingsUI",
     "audit_run",
     "auth_codes_cleanup",
