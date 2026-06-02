@@ -114,7 +114,7 @@ const sections: Section[] = [
     label: 'Sistema',
     items: [
       { to: '/sincronizacoes', label: 'Sincronizações', icon: RefreshCw, resource: 'sincronizacoes' },
-      { to: '/margem-audit', label: 'Auditoria da Margem', icon: ClipboardList, ownerOnly: true },
+      { to: '/margem-audit', label: 'Auditoria de pedidos', icon: ClipboardList, ownerOnly: true },
       { to: '/integrations', label: 'Integrações', icon: Plug, resource: 'integracoes' },
       { to: '/alertas', label: 'Alertas', icon: Bell, resource: 'alertas' },
     ],

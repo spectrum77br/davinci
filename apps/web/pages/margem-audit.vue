@@ -122,8 +122,8 @@ onMounted(() => {
 <template>
   <div class="space-y-5">
     <PageHeader
-      title="Auditoria da Margem"
-      description="Quem e quando alterou situação, Saldo Final ou Observação de pedidos pelo app."
+      title="Auditoria de pedidos"
+      description="Quem e quando alterou situação, Saldo Final ou Observação de pedidos pelo app (margem, devolução, job de envio)."
     >
       <template #actions>
         <Button size="sm" variant="outline" @click="refreshAll">
