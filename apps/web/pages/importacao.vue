@@ -2014,7 +2014,9 @@ onScopeDispose(() => {
             <tr>
               <th class="kit-h kit-col-modelo">modelo</th>
               <th class="kit-h kit-col-sku">sku</th>
-              <th class="kit-h kit-col-cor">cor</th>
+              <!-- Celular: cor já está embutida no modelo_bling
+                   ("Apple iPad 11 128 GB - Amarelo"); coluna omitida. -->
+              <th v-if="!isCelular" class="kit-h kit-col-cor">cor</th>
               <th
                 v-for="v in kit.variations" :key="v.id"
                 class="kit-h kit-h-var"
@@ -2027,14 +2029,14 @@ onScopeDispose(() => {
           </thead>
           <tbody>
             <tr v-if="!loading && kit.bases.length === 0">
-              <td :colspan="3 + kit.variations.length" class="py-6 text-center text-muted-foreground">
+              <td :colspan="(isCelular ? 2 : 3) + kit.variations.length" class="py-6 text-center text-muted-foreground">
                 Sem dados — verifique se a migration de seed (0099) rodou.
               </td>
             </tr>
             <tr v-for="b in kit.bases" :key="b.id" class="even:bg-muted/10 hover:bg-amber-50/40">
               <td class="kit-col-modelo">{{ b.modelo_bling ?? '—' }}</td>
               <td class="kit-col-sku font-mono">{{ b.sku_base }}</td>
-              <td class="kit-col-cor">{{ b.cor ?? '—' }}</td>
+              <td v-if="!isCelular" class="kit-col-cor">{{ b.cor ?? '—' }}</td>
               <td
                 v-for="v in kit.variations" :key="`${b.id}-${v.id}`"
                 class="kit-cell"

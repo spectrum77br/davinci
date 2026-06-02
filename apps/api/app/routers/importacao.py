@@ -1600,10 +1600,20 @@ async def get_kit_grid(
         .where(ImportKitVariation.categoria == categoria)
         .order_by(ImportKitVariation.ordem)
     )).scalars().all()
+    # Bases ordenadas alfabeticamente por modelo_bling (case-insensitive).
+    # Antes era por `ordem` (1..N do seed) — em celular o seed usou
+    # row_number OVER (ORDER BY sku), então os SKUs `dg*` (Fossibot)
+    # apareciam antes dos `i*` (Apple), confundindo o operador. Pra mala
+    # o modelo já casa razoavelmente com o sku, então alfabético não
+    # muda visualmente. Fallback (NULLs no final) via `is_(None)`.
     bases = (await session.execute(
         select(ImportKitBase)
         .where(ImportKitBase.categoria == categoria)
-        .order_by(ImportKitBase.ordem)
+        .order_by(
+            ImportKitBase.modelo_bling.is_(None),
+            func.lower(ImportKitBase.modelo_bling),
+            ImportKitBase.sku_base,
+        )
     )).scalars().all()
     marks = (await session.execute(
         select(ImportKitMark).where(ImportKitMark.categoria == categoria)

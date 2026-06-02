@@ -97,9 +97,12 @@ async def test_get_kit_returns_variations_bases_and_marks(
     assert len(data["variations"]) == 2
     assert len(data["bases"]) == 2
     assert len(data["marks"]) == 1
-    # Ordenado por ordem
+    # Variations: ordenadas por `ordem`.
     assert data["variations"][0]["ordem"] == 1
-    assert data["bases"][0]["sku_base"] == "b001"
+    # Bases: ordenadas alfabeticamente por modelo_bling (LOWER).
+    # "M1 listrada" (b005) vem antes de "M2 lisa" (b001).
+    assert data["bases"][0]["sku_base"] == "b005"
+    assert data["bases"][1]["sku_base"] == "b001"
     # Mark refere o cruzamento certo
     assert data["marks"][0]["base_id"] == seeded_kit["b1"]
     assert data["marks"][0]["variation_id"] == seeded_kit["v1"]
