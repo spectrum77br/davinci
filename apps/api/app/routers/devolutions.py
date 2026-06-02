@@ -459,7 +459,7 @@ async def stock_correction(
         estoque_nova_tag=body.estoque_nova_tag,
         manutencao_destino=body.manutencao_destino,
     )
-    sr = await return_product_to_bling_stock(session, row)
+    sr = await return_product_to_bling_stock(session, row, obs_override=body.observacao)
     if sr is None:
         raise HTTPException(
             422,

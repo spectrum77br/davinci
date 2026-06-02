@@ -222,6 +222,7 @@ const savingRows = ref<Set<string>>(new Set())
 
 // ── Correção de estoque (entrada manual, sem criar devolução) ────────────
 // Reaproveita os modais de destino (resolveStockModals) e a lógica Novo/Usado.
+type ProductHit = { sku: string; name: string; cost_price: number | null }
 const CONDICOES_CORRECAO = ['Novo', 'Usado'] as const
 const correcaoOpen = ref(false)
 const correcaoSku = ref('')
@@ -229,8 +230,15 @@ const correcaoCondicao = ref<(typeof CONDICOES_CORRECAO)[number]>('Novo')
 const correcaoQtd = ref(1)
 const correcaoProduto = ref('')
 const correcaoCusto = ref('')
+const correcaoObs = ref('')
 const correcaoSubmitting = ref(false)
 const correcaoError = ref<string | null>(null)
+// Busca de produto (mesma lógica do pedido): mostra SKUs existentes e
+// pré-preenche nome + custo ao selecionar.
+const correcaoResults = ref<ProductHit[]>([])
+const correcaoSearching = ref(false)
+const correcaoShowResults = ref(false)
+let correcaoSearchTimer: ReturnType<typeof setTimeout> | null = null
 
 // ── Modais de estoque (abrem ANTES das chamadas Bling) ───────────────
 // Condições que disparam estoque/situação ao adicionar ou ligar o toggle.
@@ -562,11 +570,45 @@ function openCorrecao() {
   correcaoQtd.value = 1
   correcaoProduto.value = ''
   correcaoCusto.value = ''
+  correcaoObs.value = ''
   correcaoError.value = null
+  correcaoResults.value = []
+  correcaoShowResults.value = false
   correcaoOpen.value = true
 }
 function closeCorrecao() {
   correcaoOpen.value = false
+}
+
+// Busca incremental de produtos (debounced) — mesma fonte do modal de troca.
+function onCorrecaoSkuInput() {
+  correcaoShowResults.value = true
+  if (correcaoSearchTimer) clearTimeout(correcaoSearchTimer)
+  correcaoSearchTimer = setTimeout(runCorrecaoSearch, 300)
+}
+async function runCorrecaoSearch() {
+  const term = correcaoSku.value.trim()
+  if (!term) { correcaoResults.value = []; return }
+  correcaoSearching.value = true
+  try {
+    correcaoResults.value = await api<ProductHit[]>(`/api/devolutions/product-search?q=${encodeURIComponent(term)}`)
+  } catch {
+    correcaoResults.value = []
+  } finally {
+    correcaoSearching.value = false
+  }
+}
+// Selecionar um produto preenche SKU + nome + custo (igual ao fluxo do pedido).
+function pickCorrecaoProduct(r: ProductHit) {
+  correcaoSku.value = r.sku
+  correcaoProduto.value = r.name
+  correcaoCusto.value = r.cost_price != null ? String(r.cost_price) : ''
+  correcaoResults.value = []
+  correcaoShowResults.value = false
+}
+function onCorrecaoSkuBlur() {
+  // Atraso pra permitir que o clique numa opção registre antes de esconder.
+  window.setTimeout(() => { correcaoShowResults.value = false }, 150)
 }
 
 // Correção de estoque: abre os MESMOS modais de destino da página
@@ -591,6 +633,7 @@ async function submitCorrecao() {
         quantidade: qtd,
         produtos: correcaoProduto.value.trim() || null,
         custo_produto: numberOrNull(correcaoCusto.value),
+        observacao: correcaoObs.value.trim() || null,
         troca_sku: extra.troca_sku,
         troca_condicao: extra.troca_condicao,
         estoque_destino_sku: extra.estoque_destino_sku,
@@ -1367,15 +1410,41 @@ async function backfillAddresses() {
           </Button>
         </div>
 
-        <label class="block space-y-1">
+        <div class="space-y-1">
           <span class="text-[11px] font-medium text-muted-foreground">SKU</span>
-          <input
-            v-model="correcaoSku"
-            class="h-9 w-full rounded-md border bg-background px-3 text-sm font-mono"
-            placeholder="ex.: x001.sp"
-            @keydown.enter.prevent="submitCorrecao"
-          />
-        </label>
+          <div class="relative">
+            <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+            <input
+              v-model="correcaoSku"
+              autocomplete="off"
+              class="h-9 w-full rounded-md border bg-background pl-8 pr-3 text-sm font-mono"
+              placeholder="buscar SKU ou nome do produto"
+              @input="onCorrecaoSkuInput"
+              @focus="correcaoShowResults = true"
+              @blur="onCorrecaoSkuBlur"
+              @keydown.enter.prevent
+            />
+            <div
+              v-if="correcaoShowResults && (correcaoSearching || correcaoResults.length)"
+              class="absolute z-10 mt-1 w-full rounded-md border bg-background shadow-lg max-h-56 overflow-auto"
+            >
+              <div v-if="correcaoSearching" class="py-3 text-center text-xs text-muted-foreground">
+                <Loader2 class="size-3.5 inline animate-spin mr-1.5" /> buscando…
+              </div>
+              <button
+                v-for="r in correcaoResults"
+                :key="r.sku"
+                type="button"
+                class="flex w-full items-center gap-2 border-t px-2 py-1.5 text-left text-xs first:border-t-0 hover:bg-primary/10"
+                @mousedown.prevent="pickCorrecaoProduct(r)"
+              >
+                <span class="shrink-0 font-mono">{{ r.sku }}</span>
+                <span class="flex-1 truncate text-muted-foreground">{{ r.name }}</span>
+                <span v-if="isAdmin" class="shrink-0 tabular-nums text-muted-foreground">{{ brl(r.cost_price) }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
 
         <div class="space-y-1">
           <span class="text-[11px] font-medium text-muted-foreground">Condição</span>
@@ -1418,6 +1487,16 @@ async function backfillAddresses() {
             v-model="correcaoProduto"
             class="h-9 w-full rounded-md border bg-background px-3 text-sm"
             placeholder="nome do produto"
+          />
+        </label>
+
+        <label class="block space-y-1">
+          <span class="text-[11px] font-medium text-muted-foreground">Observação</span>
+          <input
+            v-model="correcaoObs"
+            class="h-9 w-full rounded-md border bg-background px-3 text-sm"
+            placeholder="observação do movimento no Bling"
+            @keydown.enter.prevent="submitCorrecao"
           />
         </label>
 

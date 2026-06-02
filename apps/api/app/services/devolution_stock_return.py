@@ -310,10 +310,13 @@ async def reverse_stock_movement(
 # ── Estoque ────────────────────────────────────────────────────────────────
 
 async def return_product_to_bling_stock(
-    session: AsyncSession, row: Devolution
+    session: AsyncSession, row: Devolution, *, obs_override: str | None = None
 ) -> StockResult | None:
     """Best-effort: lê as escolhas dos modais persistidas em `row` e devolve as
-    unidades ao estoque Bling. Retorna um dict de resultado; nunca levanta."""
+    unidades ao estoque Bling. Retorna um dict de resultado; nunca levanta.
+
+    `obs_override` define a observação do movimento no Bling (usado pela correção
+    manual de estoque); quando ausente, usa "Devolução pedido <n>"."""
     condicao = (row.condicao_produto or "").strip()
     if condicao not in _STOCK_TRIGGER_CONDICOES:
         return None
@@ -345,7 +348,9 @@ async def return_product_to_bling_stock(
         eff_condicao = condicao
 
     qty = max(1, int(row.quantidade or 1))
-    obs = f"Devolução pedido {row.pedido_bling}" if row.pedido_bling else "Devolução"
+    obs = (obs_override or "").strip() or (
+        f"Devolução pedido {row.pedido_bling}" if row.pedido_bling else "Devolução"
+    )
     ctx = {
         "devolution_id": str(row.id),
         "condicao": condicao,

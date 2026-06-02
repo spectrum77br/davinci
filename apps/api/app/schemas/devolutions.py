@@ -176,6 +176,7 @@ class StockCorrectionIn(BaseModel):
     quantidade: int = Field(default=1, ge=1)
     produtos: str | None = None
     custo_produto: float | None = None
+    observacao: str | None = None
     troca_sku: str | None = None
     troca_condicao: str | None = None
     estoque_destino_sku: str | None = None
@@ -184,6 +185,7 @@ class StockCorrectionIn(BaseModel):
 
     @field_validator(
         "produtos",
+        "observacao",
         "troca_sku",
         "troca_condicao",
         "estoque_destino_sku",
