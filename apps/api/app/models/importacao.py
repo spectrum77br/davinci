@@ -233,9 +233,13 @@ class ImportKitVariation(Base, TimestampMixin):
     # UNIQUE composta por categoria — cada categoria (mala/celular)
     # tem seu próprio range de ordem (mala 1-22, celular 1-4).
     # Migration 0117 fez essa transição (antes era UNIQUE(ordem) global).
+    # Não há UNIQUE em (categoria, code) global porque mala tem code
+    # duplicado legítimo (pos 19/20). A migration 0117 cria PARTIAL
+    # UNIQUE só pra celular via raw SQL (CREATE UNIQUE INDEX ... WHERE
+    # categoria = 'celular') — não modelável em SQLAlchemy
+    # UniqueConstraint, fica fora do __table_args__.
     __table_args__ = (
         UniqueConstraint("categoria", "ordem", name="uq_import_kit_variations_cat_ordem"),
-        UniqueConstraint("categoria", "code", name="uq_import_kit_variations_cat_code"),
     )
 
     id: Mapped[UUID] = mapped_column(

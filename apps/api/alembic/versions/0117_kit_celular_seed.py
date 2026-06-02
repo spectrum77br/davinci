@@ -12,20 +12,20 @@ impedia categorias diferentes de usarem o mesmo número de ordem
 
   1. Troca UNIQUE(ordem) por UNIQUE(categoria, ordem) — cada categoria
      tem seu próprio range de ordem.
-  2. Adiciona UNIQUE(categoria, code) — base pro ON CONFLICT idempotente
-     deste seed e dos próximos.
+  2. Cria PARTIAL UNIQUE INDEX em `code WHERE categoria = 'celular'` —
+     pra ON CONFLICT idempotente deste seed. NÃO pode ser UNIQUE em
+     (categoria, code) global porque mala tem duplicata legítima de
+     code na posição 19/20 (anotado no model: "corrigir, separar por
+     cor de mochila"). Partial cobre só celular.
   3. Insere as 4 variations de Celular (a001 Fone com fio, a003 Fone
      sem fio, a004 Relógio, a003+a004 Fone sem fio + Relógio).
   4. Insere 115 bases derivadas dos import_products categoria='celular'
      (seed 0116). `cor` é extraída do final do modelo_bling via regex.
 
-Idempotente: ON CONFLICT em variations; bases usam INSERT ... SELECT
-... WHERE NOT EXISTS pra não duplicar (não há UNIQUE em sku_base+
-categoria, só em sku_base global).
+Idempotente: ON CONFLICT (code) WHERE categoria='celular' nas variations;
+bases usam INSERT ... SELECT ... WHERE NOT EXISTS.
 
 Downgrade: remove rows celular, restaura UNIQUE(ordem) original.
-Restauração assume que apenas mala existia antes — válido neste
-ponto (eletro não tem kit).
 """
 
 from sqlalchemy import text
@@ -61,12 +61,17 @@ def upgrade() -> None:
         f"CREATE UNIQUE INDEX IF NOT EXISTS uq_import_kit_variations_cat_ordem "
         f"ON {SCHEMA}.import_kit_variations (categoria, ordem)"
     )
+    # PARTIAL UNIQUE pra celular only — mala tem code duplicado legítimo
+    # (posições 19/20, doc no model), então UNIQUE em (categoria, code)
+    # global falharia.
     op.execute(
-        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_import_kit_variations_cat_code "
-        f"ON {SCHEMA}.import_kit_variations (categoria, code)"
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_import_kit_variations_celular_code "
+        f"ON {SCHEMA}.import_kit_variations (code) "
+        f"WHERE categoria = 'celular'"
     )
 
-    # 2) Seed das 4 variations celular.
+    # 2) Seed das 4 variations celular. ON CONFLICT usa o partial index
+    # acima como arbiter (precisa do mesmo WHERE pra inferrer).
     conn = op.get_bind()
     var_stmt = text(
         f"""
@@ -74,7 +79,7 @@ def upgrade() -> None:
             (categoria, code, label, ordem, highlight)
         VALUES
             ('celular', :code, :label, :ordem, FALSE)
-        ON CONFLICT (categoria, code) DO UPDATE SET
+        ON CONFLICT (code) WHERE categoria = 'celular' DO UPDATE SET
             label = EXCLUDED.label,
             ordem = EXCLUDED.ordem
         """  # noqa: S608
@@ -127,7 +132,7 @@ def downgrade() -> None:
     # Restaura UNIQUE(ordem) global. Assume que só mala persiste com
     # variations neste ponto (eletro não tem kit).
     op.execute(
-        f"DROP INDEX IF EXISTS {SCHEMA}.uq_import_kit_variations_cat_code"
+        f"DROP INDEX IF EXISTS {SCHEMA}.uq_import_kit_variations_celular_code"
     )
     op.execute(
         f"DROP INDEX IF EXISTS {SCHEMA}.uq_import_kit_variations_cat_ordem"
