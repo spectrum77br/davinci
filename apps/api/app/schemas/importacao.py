@@ -21,6 +21,36 @@ class ImportConfigPatch(BaseModel):
     tempo_estoque: int | None = None
 
 
+# ── Cotação (parâmetros globais por categoria + patch por produto) ─────
+
+
+class ImportCotacaoParamsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    categoria: str
+    taxa_cambio: Decimal
+    frete_regular_pct: Decimal
+    frete_swap_pct: Decimal
+    frete_acessorios_pct: Decimal
+    adicional: Decimal
+
+
+class ImportCotacaoParamsPatch(BaseModel):
+    taxa_cambio: Decimal | None = None
+    frete_regular_pct: Decimal | None = None
+    frete_swap_pct: Decimal | None = None
+    frete_acessorios_pct: Decimal | None = None
+    adicional: Decimal | None = None
+
+
+class ImportProductCotacaoPatch(BaseModel):
+    """Patch só dos 3 campos da aba Cotação. Endpoint separado pra
+    deixar o autosave do ImportProductPatch (aba Importação/Mala) e
+    o autosave da Cotação isolados."""
+    valor_usd: Decimal | None = None
+    valor_brl_realizado: Decimal | None = None
+    frete_type: str | None = None
+
+
 # ── Product ────────────────────────────────────────────────────────────
 
 
@@ -41,6 +71,11 @@ class ImportProductBase(BaseModel):
     consumo_diario: Decimal | None = None
     maior_media_30d: Decimal | None = None
     obs: str | None = None
+    # Cotação (aba Cotação do Celular, migration 0119). `valor_brl_previsto`
+    # NÃO entra aqui — é calculado em tempo real no frontend.
+    valor_usd: Decimal | None = None
+    valor_brl_realizado: Decimal | None = None
+    frete_type: str | None = "regular"
 
 
 class ImportProductCreate(ImportProductBase):

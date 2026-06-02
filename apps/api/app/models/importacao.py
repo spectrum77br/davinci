@@ -84,6 +84,47 @@ class ImportProduct(Base, TimestampMixin):
     bling_sync_done_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+    # ── Cotação (aba Cotação do Celular, migration 0119) ───────────
+    # valor_usd: custo unitário em USD (operador preenche).
+    # valor_brl_realizado: valor R$ pago em pedidos anteriores
+    #   (operador preenche, serve de comparação com previsto).
+    # frete_type: 'regular' | 'swap' | 'acessorios' — define
+    #   qual frete_pct usar na fórmula do previsto. Default 'regular'.
+    # `valor_brl_previsto` NÃO é coluna — é calculado em tempo real no
+    # frontend a partir desses + ImportCotacaoParams.
+    valor_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    valor_brl_realizado: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    frete_type: Mapped[str | None] = mapped_column(String(20), nullable=True, default="regular")
+
+
+class ImportCotacaoParams(Base, TimestampMixin):
+    """Parâmetros globais da aba Cotação por categoria. Seed inicial só
+    pra celular (migration 0119) com defaults validados pelo operador;
+    mala/eletro podem ter sua linha futura."""
+    __tablename__ = "import_cotacao_params"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True, default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, unique=True, index=True,
+    )
+    taxa_cambio: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), nullable=False, default=Decimal("5.10"),
+    )
+    frete_regular_pct: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), nullable=False, default=Decimal("0.16"),
+    )
+    frete_swap_pct: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), nullable=False, default=Decimal("0.06"),
+    )
+    frete_acessorios_pct: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), nullable=False, default=Decimal("0.20"),
+    )
+    adicional: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("12.00"),
+    )
 
 
 class ImportLote(Base, TimestampMixin):

@@ -32,6 +32,7 @@ from app.models import (
     CotacaoProduto,
     CotacaoValor,
     ImportConfig,
+    ImportCotacaoParams,
     ImportKitBase,
     ImportKitMark,
     ImportKitVariation,
@@ -52,6 +53,8 @@ from app.schemas.importacao import (
     CotacaoValorUpsert,
     ImportConfigOut,
     ImportConfigPatch,
+    ImportCotacaoParamsOut,
+    ImportCotacaoParamsPatch,
     ImportKitBaseOut,
     ImportKitGridOut,
     ImportKitMarkOut,
@@ -61,6 +64,7 @@ from app.schemas.importacao import (
     ImportLoteItemUpsert,
     ImportLoteOut,
     ImportLotePatch,
+    ImportProductCotacaoPatch,
     ImportProductCreate,
     ImportProductOut,
     ImportProductPatch,
@@ -116,6 +120,132 @@ async def patch_config(
     await session.commit()
     await session.refresh(row)
     return ImportConfigOut.model_validate(row, from_attributes=True)
+
+
+# ── Cotação params (aba Cotação do Celular, etapa 3) ──────────────
+
+
+# Defaults validados pelo operador 2026-06-02 (mesma fonte do seed da
+# migration 0119): câmbio R$ 5,10, frete regular 16%, swap 6%,
+# acessórios 20%, adicional R$ 12. Usados quando o GET é chamado pra
+# uma categoria sem row na tabela (auto-cria com esses valores).
+_COTACAO_DEFAULTS: dict[str, Decimal] = {
+    "taxa_cambio": Decimal("5.10"),
+    "frete_regular_pct": Decimal("0.16"),
+    "frete_swap_pct": Decimal("0.06"),
+    "frete_acessorios_pct": Decimal("0.20"),
+    "adicional": Decimal("12.00"),
+}
+
+
+def _validate_cotacao_params(body: ImportCotacaoParamsPatch) -> None:
+    """Limites operacionais: percentuais em [0, 1], câmbio > 0,
+    adicional >= 0. Reject cedo evita gravar valores inviáveis."""
+    fields = body.model_dump(exclude_unset=True)
+    if (v := fields.get("taxa_cambio")) is not None and Decimal(v) <= 0:
+        raise HTTPException(422, detail={"code": "taxa_cambio_must_be_positive"})
+    if (v := fields.get("adicional")) is not None and Decimal(v) < 0:
+        raise HTTPException(422, detail={"code": "adicional_must_be_non_negative"})
+    for pct_key in ("frete_regular_pct", "frete_swap_pct", "frete_acessorios_pct"):
+        v = fields.get(pct_key)
+        if v is not None and not (Decimal("0") <= Decimal(v) <= Decimal("1")):
+            raise HTTPException(422, detail={"code": f"{pct_key}_out_of_range"})
+
+
+@router.get("/cotacao/params", response_model=ImportCotacaoParamsOut)
+async def get_cotacao_params(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+    categoria: _CategoriaQ = "celular",
+) -> ImportCotacaoParamsOut:
+    """Parâmetros globais da fórmula `previsto = usd*(1+frete)*câmbio + adic`.
+    Auto-cria a row com defaults na primeira chamada por categoria."""
+    row = (await session.execute(
+        select(ImportCotacaoParams).where(ImportCotacaoParams.categoria == categoria)
+    )).scalar_one_or_none()
+    if row is None:
+        row = ImportCotacaoParams(categoria=categoria, **_COTACAO_DEFAULTS)
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+    return ImportCotacaoParamsOut.model_validate(row, from_attributes=True)
+
+
+@router.patch("/cotacao/params", response_model=ImportCotacaoParamsOut)
+async def patch_cotacao_params(
+    body: ImportCotacaoParamsPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+    categoria: _CategoriaQ = "celular",
+) -> ImportCotacaoParamsOut:
+    _validate_cotacao_params(body)
+    row = (await session.execute(
+        select(ImportCotacaoParams).where(ImportCotacaoParams.categoria == categoria)
+    )).scalar_one_or_none()
+    if row is None:
+        row = ImportCotacaoParams(categoria=categoria, **_COTACAO_DEFAULTS)
+        session.add(row)
+    for k, v in body.model_dump(exclude_unset=True).items():
+        if v is not None:
+            setattr(row, k, v)
+    await session.commit()
+    await session.refresh(row)
+    return ImportCotacaoParamsOut.model_validate(row, from_attributes=True)
+
+
+@router.patch("/cotacao/produto/{produto_id}", response_model=ImportProductOut)
+async def patch_cotacao_import_product(
+    produto_id: UUID,
+    body: ImportProductCotacaoPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> ImportProductOut:
+    """Atualiza SÓ os 3 campos da cotação (valor_usd, valor_brl_realizado,
+    frete_type) de um produto. Separado do PATCH /products/{id} pra
+    deixar autosave isolado (aba Importação não esmaga a aba Cotação
+    e vice-versa)."""
+    row = await session.get(ImportProduct, produto_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "import_product_not_found"})
+    fields = body.model_dump(exclude_unset=True)
+    if "frete_type" in fields and fields["frete_type"] not in ("regular", "swap", "acessorios"):
+        raise HTTPException(422, detail={"code": "invalid_frete_type"})
+    for k, v in fields.items():
+        setattr(row, k, v)
+    await session.commit()
+    await session.refresh(row)
+    # Frontend não usa estes campos computados aqui (a aba Cotação é
+    # uma lista plana), mas o response_model exige; preenche default 0
+    # pra não custar query extra.
+    return ImportProductOut(
+        id=row.id,
+        categoria=row.categoria,
+        fornecedor=row.fornecedor,
+        modelo_china=row.modelo_china,
+        cor_china=row.cor_china,
+        fechamento=row.fechamento,
+        tsa=row.tsa,
+        modelo_bling=row.modelo_bling,
+        sku=row.sku,
+        cor=row.cor,
+        custo_bling=row.custo_bling,
+        estoque_bling=row.estoque_bling,
+        consumo_diario=row.consumo_diario,
+        maior_media_30d=row.maior_media_30d,
+        obs=row.obs,
+        valor_usd=row.valor_usd,
+        valor_brl_realizado=row.valor_brl_realizado,
+        frete_type=row.frete_type,
+        nome_gerado=generate_product_name(row.categoria, row.modelo_bling, row.sku, row.cor),
+        bling_sync_status=row.bling_sync_status,
+        bling_sync_marked_at=row.bling_sync_marked_at,
+        bling_product_id=row.bling_product_id,
+        bling_sync_error=row.bling_sync_error,
+        bling_sync_attempted_at=row.bling_sync_attempted_at,
+        bling_sync_done_at=row.bling_sync_done_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 # ── Categoria counts (selector top-level) ───────────────────────────
@@ -366,6 +496,9 @@ async def list_products(
             bling_sync_error=p.bling_sync_error,
             bling_sync_attempted_at=p.bling_sync_attempted_at,
             bling_sync_done_at=p.bling_sync_done_at,
+            valor_usd=p.valor_usd,
+            valor_brl_realizado=p.valor_brl_realizado,
+            frete_type=p.frete_type or "regular",
             lote_quantidades=qty_by_pair.get(p.id, {}),
             created_at=p.created_at, updated_at=p.updated_at,
         ))
@@ -398,6 +531,9 @@ async def create_product(
         bling_sync_error=row.bling_sync_error,
         bling_sync_attempted_at=row.bling_sync_attempted_at,
         bling_sync_done_at=row.bling_sync_done_at,
+        valor_usd=row.valor_usd,
+        valor_brl_realizado=row.valor_brl_realizado,
+        frete_type=row.frete_type or "regular",
         lote_quantidades={},
         created_at=row.created_at, updated_at=row.updated_at,
     )
@@ -433,6 +569,9 @@ async def patch_product(
         bling_sync_error=row.bling_sync_error,
         bling_sync_attempted_at=row.bling_sync_attempted_at,
         bling_sync_done_at=row.bling_sync_done_at,
+        valor_usd=row.valor_usd,
+        valor_brl_realizado=row.valor_brl_realizado,
+        frete_type=row.frete_type or "regular",
         lote_quantidades={},
         created_at=row.created_at, updated_at=row.updated_at,
     )
@@ -500,6 +639,9 @@ async def sync_product_to_bling(
         bling_sync_error=row.bling_sync_error,
         bling_sync_attempted_at=row.bling_sync_attempted_at,
         bling_sync_done_at=row.bling_sync_done_at,
+        valor_usd=row.valor_usd,
+        valor_brl_realizado=row.valor_brl_realizado,
+        frete_type=row.frete_type or "regular",
         lote_quantidades={},
         created_at=row.created_at, updated_at=row.updated_at,
     )

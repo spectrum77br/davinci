@@ -105,6 +105,18 @@ type Product = {
   bling_sync_attempted_at: string | null
   bling_sync_done_at: string | null
   lote_quantidades: Record<string, number>
+  // Cotação (aba Cotação do Celular, etapa 3).
+  valor_usd: string | number | null
+  valor_brl_realizado: string | number | null
+  frete_type: 'regular' | 'swap' | 'acessorios' | null
+}
+type CotacaoParams = {
+  categoria: string
+  taxa_cambio: string | number
+  frete_regular_pct: string | number
+  frete_swap_pct: string | number
+  frete_acessorios_pct: string | number
+  adicional: string | number
 }
 type Lote = {
   id: string
@@ -188,6 +200,18 @@ const resumo = ref<{ items: ResumoRow[]; total: string | number }>({ items: [], 
 const config = ref<Config>({ tempo_reposicao: 150, tempo_estoque: 60 })
 const cotacao = ref<CotacaoGrid>({ fabricantes: [], produtos: [], valores: [] })
 
+// Cotação Celular (etapa 3) — params globais + recálculo reativo do
+// previsto BRL por produto. params é singleton-por-categoria, mas
+// guardamos só o da categoria atual aqui (recarrega ao trocar).
+const cotacaoParams = ref<CotacaoParams>({
+  categoria: 'celular',
+  taxa_cambio: 5.10,
+  frete_regular_pct: 0.16,
+  frete_swap_pct: 0.06,
+  frete_acessorios_pct: 0.20,
+  adicional: 12.00,
+})
+
 // Kit grid state. `kitMarkMap` é o lookup canônico (key → mark) —
 // usado pra render e pra resync. Re-construído a cada loadKit. As
 // mudanças otimistas no toggle entram aqui também.
@@ -255,6 +279,71 @@ const filteredProducts = computed(() => {
   )
 })
 
+// ── Cotação Celular: cálculo do previsto + autosave ──────────────
+// Fórmula validada pelo operador 2026-06-02:
+//   previsto = valor_usd * (1 + frete_pct) * taxa_cambio + adicional
+// Sempre calculado em tempo real — NÃO persistir o previsto.
+function calcularPrevisto(prod: Product): number | null {
+  const usdRaw = prod.valor_usd
+  const usd = usdRaw == null || usdRaw === '' ? null : Number(usdRaw)
+  if (usd == null || !Number.isFinite(usd) || usd <= 0) return null
+  const frete = (prod.frete_type ?? 'regular') as 'regular' | 'swap' | 'acessorios'
+  const pctRaw = cotacaoParams.value[`frete_${frete}_pct` as const]
+  const pct = Number(pctRaw)
+  const cambio = Number(cotacaoParams.value.taxa_cambio)
+  const adic = Number(cotacaoParams.value.adicional)
+  if (!Number.isFinite(pct) || !Number.isFinite(cambio) || !Number.isFinite(adic)) return null
+  return usd * (1 + pct) * cambio + adic
+}
+
+const _cotacaoSaveTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+
+function scheduleSaveCotacaoParam<K extends keyof CotacaoParams>(field: K, value: string) {
+  // Aceita inputs em formato BR (vírgula) ou decimal puro.
+  const normalized = String(value).replace(',', '.').trim()
+  const n = normalized === '' ? null : Number(normalized)
+  if (n == null || !Number.isFinite(n)) return
+  ;(cotacaoParams.value as any)[field] = n
+  const key = `param_${String(field)}`
+  if (_cotacaoSaveTimers[key]) clearTimeout(_cotacaoSaveTimers[key])
+  _cotacaoSaveTimers[key] = setTimeout(async () => {
+    try {
+      const out = await api<CotacaoParams>(
+        `/api/importacao/cotacao/params?${catQs()}`,
+        { method: 'PATCH', body: { [field]: n } },
+      )
+      cotacaoParams.value = out
+    } catch (e: any) {
+      errorText.value = `Falha ao salvar ${String(field)}: ${e?.data?.detail?.code || 'erro'}`
+    }
+  }, 600)
+}
+
+function scheduleSaveCotacaoProduto(
+  prod: Product,
+  field: 'valor_usd' | 'valor_brl_realizado' | 'frete_type',
+  value: any,
+) {
+  let normalized: any = value
+  if (field !== 'frete_type') {
+    const s = String(value).replace(',', '.').trim()
+    normalized = s === '' ? null : Number(s)
+    if (normalized != null && !Number.isFinite(normalized)) return
+  }
+  ;(prod as any)[field] = normalized
+  const key = `prod_${prod.id}_${field}`
+  if (_cotacaoSaveTimers[key]) clearTimeout(_cotacaoSaveTimers[key])
+  _cotacaoSaveTimers[key] = setTimeout(async () => {
+    try {
+      await api(`/api/importacao/cotacao/produto/${prod.id}`, {
+        method: 'PATCH', body: { [field]: normalized },
+      })
+    } catch (e: any) {
+      errorText.value = `Falha ao salvar ${String(field)}: ${e?.data?.detail?.code || 'erro'}`
+    }
+  }, 600)
+}
+
 // ── Loaders ───────────────────────────────────────────────────────
 async function loadAll() {
   loading.value = true
@@ -285,6 +374,14 @@ async function loadAll() {
     } else {
       kit.value = { variations: [], bases: [], marks: [] }
       rebuildKitMarkMap([])
+    }
+    // Cotação params — só relevante pra celular nesta etapa. Endpoint
+    // auto-cria a row na 1ª chamada com defaults, então é seguro chamar
+    // sempre (operador acaba inicializando ao abrir a aba pela 1ª vez).
+    if (categoria.value === 'celular') {
+      try {
+        cotacaoParams.value = await api<CotacaoParams>(`/api/importacao/cotacao/params?${qs}`)
+      } catch { /* deixa defaults — UI mostra valores razoáveis */ }
     }
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -1357,7 +1454,7 @@ onScopeDispose(() => {
          Coluna fixa de produto à esquerda (rowspan=6). Per-célula upsert
          direto (PUT /cotacao/valores) — célula vazia em todos os 3 campos
          é deletada server-side. -->
-    <div v-if="tab === 'cotacao'" class="space-y-2">
+    <div v-if="tab === 'cotacao' && categoria !== 'celular'" class="space-y-2">
       <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
         <span class="text-muted-foreground">
           {{ cotacao.produtos.length }} produto(s) · {{ cotacao.fabricantes.length }} fabricante(s)
@@ -1482,6 +1579,121 @@ onScopeDispose(() => {
                 <button class="text-muted-foreground hover:text-destructive" @click="removeCotProduto(prod)" :title="`Excluir ${prod.nome || 'produto'}`">
                   <Trash2 class="size-3" />
                 </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ─── TAB COTAÇÃO (Celular) ────────────────────────────────
+         UI distinta da Cotação de Mala (matriz fabricantes×produtos).
+         Pra celular, calcula previsto = usd*(1+frete)*câmbio + adic
+         em tempo real, sem persistir. Params globais editáveis no
+         topo + tabela 115 produtos com 3 inputs por linha. -->
+    <div v-if="tab === 'cotacao' && categoria === 'celular'" class="space-y-3">
+      <div class="border rounded-md p-3 bg-muted/30 text-xs">
+        <div class="text-[10px] uppercase tracking-wide text-muted-foreground mb-2 font-semibold">
+          Parâmetros da fórmula (salvam ao sair do campo)
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <label class="flex flex-col gap-1">
+            <span class="text-[10px] text-muted-foreground">Taxa USD→BRL</span>
+            <input
+              type="number" step="0.0001" min="0"
+              class="h-7 border rounded px-2 bg-background text-right"
+              :value="cotacaoParams.taxa_cambio" :disabled="!canEdit"
+              @change="(e) => scheduleSaveCotacaoParam('taxa_cambio', (e.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-[10px] text-muted-foreground">Adicional (R$)</span>
+            <input
+              type="number" step="0.01" min="0"
+              class="h-7 border rounded px-2 bg-background text-right"
+              :value="cotacaoParams.adicional" :disabled="!canEdit"
+              @change="(e) => scheduleSaveCotacaoParam('adicional', (e.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-[10px] text-muted-foreground">Frete regular (0–1)</span>
+            <input
+              type="number" step="0.0001" min="0" max="1"
+              class="h-7 border rounded px-2 bg-background text-right"
+              :value="cotacaoParams.frete_regular_pct" :disabled="!canEdit"
+              @change="(e) => scheduleSaveCotacaoParam('frete_regular_pct', (e.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-[10px] text-muted-foreground">Frete swap (0–1)</span>
+            <input
+              type="number" step="0.0001" min="0" max="1"
+              class="h-7 border rounded px-2 bg-background text-right"
+              :value="cotacaoParams.frete_swap_pct" :disabled="!canEdit"
+              @change="(e) => scheduleSaveCotacaoParam('frete_swap_pct', (e.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-[10px] text-muted-foreground">Frete acessórios (0–1)</span>
+            <input
+              type="number" step="0.0001" min="0" max="1"
+              class="h-7 border rounded px-2 bg-background text-right"
+              :value="cotacaoParams.frete_acessorios_pct" :disabled="!canEdit"
+              @change="(e) => scheduleSaveCotacaoParam('frete_acessorios_pct', (e.target as HTMLInputElement).value)"
+            />
+          </label>
+        </div>
+      </div>
+
+      <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 320px)">
+        <table class="grid-table w-full text-xs border-collapse">
+          <thead class="thead-sticky">
+            <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
+              <th class="text-left">Produto</th>
+              <th class="text-right" style="width: 120px">Realizado (R$)</th>
+              <th class="text-right" style="width: 100px">USD</th>
+              <th class="text-left" style="width: 130px">Tipo Frete</th>
+              <th class="text-right" style="width: 130px">Previsto (R$)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!loading && filteredProducts.length === 0">
+              <td colspan="5" class="py-6 text-center text-muted-foreground">
+                Nenhum produto na categoria celular.
+              </td>
+            </tr>
+            <tr v-for="prod in filteredProducts" :key="prod.id" class="even:bg-muted/10">
+              <td>
+                <div class="font-medium">{{ prod.modelo_bling || '—' }}</div>
+                <div class="text-[10px] text-muted-foreground font-mono">{{ prod.sku }}</div>
+              </td>
+              <td>
+                <input
+                  type="number" step="0.01" class="cell-input text-right"
+                  :value="prod.valor_brl_realizado ?? ''" :disabled="!canEdit"
+                  @change="(e) => scheduleSaveCotacaoProduto(prod, 'valor_brl_realizado', (e.target as HTMLInputElement).value)"
+                />
+              </td>
+              <td>
+                <input
+                  type="number" step="0.01" class="cell-input text-right"
+                  :value="prod.valor_usd ?? ''" :disabled="!canEdit"
+                  @change="(e) => scheduleSaveCotacaoProduto(prod, 'valor_usd', (e.target as HTMLInputElement).value)"
+                />
+              </td>
+              <td>
+                <select
+                  class="cell-input"
+                  :value="prod.frete_type ?? 'regular'" :disabled="!canEdit"
+                  @change="(e) => scheduleSaveCotacaoProduto(prod, 'frete_type', (e.target as HTMLSelectElement).value)"
+                >
+                  <option value="regular">Regular</option>
+                  <option value="swap">Swap</option>
+                  <option value="acessorios">Acessórios</option>
+                </select>
+              </td>
+              <td class="text-right font-semibold">
+                {{ fmtMoney(calcularPrevisto(prod)) }}
               </td>
             </tr>
           </tbody>
