@@ -49,7 +49,10 @@ type ProdutoRow = {
 }
 type PedidoRow = {
   id: string
-  data: string | null         // ship date (em_andamento_data) — shown in column
+  // Data de CRIAÇÃO do pedido no Bling (o.data.date()). NÃO confundir
+  // com data_envio (= em_andamento_data, ship date) — a coluna
+  // "DATA ENVIO" da aba Pedidos usa data_envio, não este campo.
+  data: string | null
   data_pedido: string | null
   data_envio: string | null
   pedido_bling: string | null
@@ -515,7 +518,10 @@ async function toggleProduto(row: ProdutoRow) {
 async function togglePedido(row: PedidoRow) {
   const next = !row.conferido
   row.conferido = next
-  const refDate = (row.data || dia.value).slice(0, 10)
+  // reference_date é informacional pra section=pedido (backend filtra
+  // só por reference_id); usar data_envio mantém alinhado com a coluna
+  // "DATA ENVIO" exibida ao operador.
+  const refDate = (row.data_envio || dia.value).slice(0, 10)
   try {
     await toggleCheck('pedido', row.id, refDate, next, row.observacao)
   } catch {
@@ -524,7 +530,7 @@ async function togglePedido(row: PedidoRow) {
 }
 async function patchPedidoObs(row: PedidoRow, newObs: string) {
   row.observacao = newObs
-  const refDate = (row.data || dia.value).slice(0, 10)
+  const refDate = (row.data_envio || dia.value).slice(0, 10)
   try {
     await toggleCheck('pedido', row.id, refDate, row.conferido, newObs)
   } catch { /* next reload reverts */ }
@@ -1043,7 +1049,7 @@ async function conferirTodos() {
             :class="{ 'border-t-2 border-t-muted-foreground/30': row._isFirstOfGroup && idx > 0 }"
           >
             <td class="whitespace-nowrap">
-              {{ row._isFirstOfGroup ? (row.data ? row.data.slice(0, 10) : '—') : '' }}
+              {{ row._isFirstOfGroup ? (row.data_envio ? row.data_envio.slice(0, 10) : '—') : '' }}
             </td>
             <td class="font-mono text-[11px]" :class="{ 'text-muted-foreground/40': !row._isFirstOfGroup }">
               {{ row._isFirstOfGroup ? (row.pedido_bling || '—') : '' }}
