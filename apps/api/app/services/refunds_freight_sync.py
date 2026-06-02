@@ -1,9 +1,9 @@
 """Auto-popula refunds tipo='Logistica' a partir da view de margens marketplace.
 
 Espelha o filtro "frete attention" da página margens (`_ATTENTION_FRETE_SQL`
-em app/routers/margens.py): linhas onde o frete projetado pelo nosso
-pricing é menor que o que o marketplace efetivamente cobrou. Uma linha
-de refund por (pedido_bling, conta), tipo='Logistica'.
+em app/routers/margens.py): linhas onde o frete real cobrado pelo marketplace
+é maior que o frete anúncio do item. Uma linha de refund por
+(pedido_bling, conta), tipo='Logistica'.
 
 Política: nunca atualiza, nunca sobrescreve. Se já existe um refund
 Logistica para o (pedido_bling, conta) — manual ou auto-gerado — o
@@ -47,18 +47,26 @@ _FRETE_PLATAFORMA_SQL = (
     "END"
 )
 
+# Espelha _FRETE_ANUNCIO_SQL em app/routers/margens.py.
+# Intencionalmente sem item_proportion: o frete anúncio cheio fica em cada
+# produto do pedido.
+_FRETE_ANUNCIO_SQL = "v.evento_frete_anuncio"
+
+# Espelha _FRETE_RESULTADO_SQL em app/routers/margens.py.
+_FRETE_RESULTADO_SQL = f"(({_FRETE_PLATAFORMA_SQL}) - ({_FRETE_ANUNCIO_SQL}))"
+
 # Filtro espelha _ATTENTION_FRETE_SQL: vendedor pagou mais frete que o
-# projetado. Ambas as expressões precisam ser não-nulas (sem dados
+# frete anúncio. Ambas as expressões precisam ser não-nulas (sem dados
 # financeiros sincronizados ainda → skipa).
 _FRETE_ATTENTION_FILTER = (
-    f"v.frete_projetado_item IS NOT NULL "
+    f"({_FRETE_ANUNCIO_SQL}) IS NOT NULL "
     f"AND ({_FRETE_PLATAFORMA_SQL}) IS NOT NULL "
-    f"AND (v.frete_projetado_item - ({_FRETE_PLATAFORMA_SQL})) < 0"
+    f"AND {_FRETE_RESULTADO_SQL} > 0"
 )
 
 # Agrega por (pedido_bling, conta). Prejuizo = SUM(frete_plataforma -
-# frete_projetado) sobre os itens onde o gatilho disparou — número
-# positivo representando a perda.
+# frete_anuncio) sobre os itens onde o gatilho disparou — número positivo
+# representando a perda.
 _AGG_SELECT_SQL = f"""
 SELECT
     MAX(v.data) AS data,
@@ -66,7 +74,7 @@ SELECT
     MAX(v.pedido_marketplace)::text AS pedido_marketplace,
     COALESCE(v.plataforma_bling, v.plataforma_financeiro)::text AS plataforma,
     btrim(v.loja_nome) AS conta,
-    SUM(({_FRETE_PLATAFORMA_SQL}) - v.frete_projetado_item) AS prejuizo
+    SUM({_FRETE_RESULTADO_SQL}) AS prejuizo
 FROM {{schema}}.vw_conciliacao_margens_marketplace v
 WHERE {_FRETE_ATTENTION_FILTER}
   AND v.pedido_bling IS NOT NULL

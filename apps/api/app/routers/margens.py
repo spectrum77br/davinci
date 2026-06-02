@@ -54,7 +54,7 @@ SITUACAO_REPROVADO = 83955
 
 # "Needs attention" flag — rows the user must triage. Three independent triggers:
 #   1) margin below the configured minimum
-#   2) seller paid more shipping than projected (negative frete result)
+#   2) seller paid more shipping than the listing/ad freight value
 #   3) Bling-computed net diverges from marketplace net by more than R$0,01
 # Rows that don't trigger any of these are treated as auto-approved in the UI
 # (status filter "Pendente" hides them; "Aprovado" includes them).
@@ -73,15 +73,21 @@ _FRETE_PLATAFORMA_SQL = (
     "ELSE v.marketplace_frete_real_cobrado_item "
     "END"
 )
-# Frete Resultado (per-item) = Frete Projetado − Frete Plataforma
-_FRETE_RESULTADO_SQL = f"(v.frete_projetado_item - ({_FRETE_PLATAFORMA_SQL}))"
+# Frete Anuncio is intentionally not prorated: the listing/ad freight quote is
+# attached to each product row at full value, even when the order has multiple
+# items.
+_FRETE_ANUNCIO_SQL = "v.evento_frete_anuncio"
+
+# Frete Resultado (per-item) = Frete Plataforma − Frete Anuncio.
+# Positive means the marketplace charged more than the listing/ad quote.
+_FRETE_RESULTADO_SQL = f"(({_FRETE_PLATAFORMA_SQL}) - ({_FRETE_ANUNCIO_SQL}))"
 
 _ATTENTION_MARGEM_SQL = (
     "(v.marketplace_margem IS NOT NULL AND v.margem_minima IS NOT NULL "
     " AND v.marketplace_margem < v.margem_minima)"
 )
 _ATTENTION_FRETE_SQL = (
-    f"(v.frete_projetado_item IS NOT NULL AND {_FRETE_RESULTADO_SQL} < 0)"
+    f"(({_FRETE_ANUNCIO_SQL}) IS NOT NULL AND {_FRETE_RESULTADO_SQL} > 0)"
 )
 # Divergence = |saldo_bling − saldo_plataforma| > R$0,01. This MUST match the
 # per-row "corrigir" trigger in the UI (margem.vue: Math.abs(saldo_plataforma -
@@ -102,7 +108,7 @@ _ATTENTION_SALDO_SQL = (
 
 # "Needs attention" flag — rows the user must triage. Three independent triggers:
 #   1) margin below the configured minimum
-#   2) seller paid more shipping than projected (negative frete result)
+#   2) seller paid more shipping than the listing/ad freight value
 #   3) Bling-computed net diverges from marketplace net by more than R$0,01
 # Rows that don't trigger any of these are treated as auto-approved in the UI
 # (status filter "Pendente" hides them; "Aprovado" includes them).
@@ -138,7 +144,7 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             v.quantidade,
             v.bling_custo_produtos                               AS custo_produto,
             {_FRETE_PLATAFORMA_SQL}                              AS frete_plataforma,
-            (v.evento_frete_anuncio * v.item_proportion)         AS frete_anuncio,
+            {_FRETE_ANUNCIO_SQL}                                 AS frete_anuncio,
             v.frete_projetado_item                               AS frete_projetado,
             CASE
                 WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'

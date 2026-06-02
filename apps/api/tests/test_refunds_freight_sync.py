@@ -33,6 +33,7 @@ async def _setup_view(db: AsyncSession, rows: list[dict]) -> None:
                     NULL::text AS loja_nome,
                     NULL::numeric AS frete_projetado_item,
                     NULL::numeric AS evento_freight,
+                    NULL::numeric AS evento_frete_anuncio,
                     NULL::numeric AS item_proportion,
                     NULL::numeric AS marketplace_frete_real_cobrado_item
                 WHERE false
@@ -50,6 +51,7 @@ async def _setup_view(db: AsyncSession, rows: list[dict]) -> None:
                 {f"'{r['loja_nome']}'::text" if r.get('loja_nome') else "NULL::text"} AS loja_nome,
                 {r['frete_projetado_item']}::numeric AS frete_projetado_item,
                 {r.get('evento_freight', 'NULL')}::numeric AS evento_freight,
+                {r.get('evento_frete_anuncio', 'NULL')}::numeric AS evento_frete_anuncio,
                 {r.get('item_proportion', '1')}::numeric AS item_proportion,
                 {r.get('marketplace_frete_real_cobrado_item', 'NULL')}::numeric AS marketplace_frete_real_cobrado_item
             """
@@ -90,8 +92,8 @@ async def _select_refund(db: AsyncSession, pedido_bling: str) -> dict | None:
     return dict(row) if row else None
 
 
-async def test_creates_refund_for_non_shopee_when_charged_exceeds_projected(db: AsyncSession):
-    # ML order: frete projetado R$10 mas marketplace cobrou R$15.
+async def test_creates_refund_for_non_shopee_when_charged_exceeds_anuncio(db: AsyncSession):
+    # ML order: frete anuncio R$10 mas marketplace cobrou R$15.
     # Esperado prejuizo = 15 - 10 = 5.
     await _setup_view(
         db,
@@ -103,6 +105,7 @@ async def test_creates_refund_for_non_shopee_when_charged_exceeds_projected(db: 
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja ML",
                 "frete_projetado_item": 10,
+                "evento_frete_anuncio": 10,
                 "marketplace_frete_real_cobrado_item": 15,
             }
         ],
@@ -121,8 +124,48 @@ async def test_creates_refund_for_non_shopee_when_charged_exceeds_projected(db: 
     assert float(refund["prejuizo"]) == pytest.approx(5.0)
 
 
-async def test_skips_when_projected_exceeds_charged(db: AsyncSession):
-    # Marketplace cobrou menos que o projetado — sem perda, sem refund.
+async def test_ml_frete_anuncio_is_not_prorated_per_item(db: AsyncSession):
+    # Pedido com 2 itens: item_proportion=0.5, mas frete anuncio fica cheio
+    # em cada item. Exemplo real: 104,175 - 78,26 = 25,915 por item.
+    await _setup_view(
+        db,
+        [
+            {
+                "data": "2026-06-01T00:00:00+00:00",
+                "pedido_bling": "278867",
+                "pedido_marketplace": "2000016712859896",
+                "plataforma_bling": "ml",
+                "loja_nome": "ML Marquezini",
+                "frete_projetado_item": 90,
+                "evento_frete_anuncio": 78.26,
+                "item_proportion": 0.5,
+                "marketplace_frete_real_cobrado_item": 104.175,
+            },
+            {
+                "data": "2026-06-01T00:00:00+00:00",
+                "pedido_bling": "278867",
+                "pedido_marketplace": "2000016712859896",
+                "plataforma_bling": "ml",
+                "loja_nome": "ML Marquezini",
+                "frete_projetado_item": 90,
+                "evento_frete_anuncio": 78.26,
+                "item_proportion": 0.5,
+                "marketplace_frete_real_cobrado_item": 104.175,
+            },
+        ],
+    )
+
+    result = await upsert_freight_refund_for_bling_order(db, pedido_bling="278867")
+    await db.commit()
+
+    assert result["ok"] is True
+    refund = await _select_refund(db, "278867")
+    assert refund is not None
+    assert float(refund["prejuizo"]) == pytest.approx(51.83)
+
+
+async def test_skips_when_anuncio_exceeds_charged(db: AsyncSession):
+    # Marketplace cobrou menos que o frete anuncio — sem perda, sem refund.
     await _setup_view(
         db,
         [
@@ -131,6 +174,7 @@ async def test_skips_when_projected_exceeds_charged(db: AsyncSession):
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja ML",
                 "frete_projetado_item": 20,
+                "evento_frete_anuncio": 20,
                 "marketplace_frete_real_cobrado_item": 12,
             }
         ],
@@ -153,6 +197,7 @@ async def test_skips_when_no_financial_data_yet(db: AsyncSession):
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja ML",
                 "frete_projetado_item": 10,
+                "evento_frete_anuncio": 10,
             }
         ],
     )
@@ -173,6 +218,7 @@ async def test_does_not_create_duplicate_on_re_run(db: AsyncSession):
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja ML",
                 "frete_projetado_item": 10,
+                "evento_frete_anuncio": 10,
                 "marketplace_frete_real_cobrado_item": 15,
             }
         ],
@@ -214,6 +260,7 @@ async def test_never_overwrites_existing_logistica_refund(db: AsyncSession):
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja ML",
                 "frete_projetado_item": 10,
+                "evento_frete_anuncio": 10,
                 "marketplace_frete_real_cobrado_item": 50,
             }
         ],
@@ -241,6 +288,7 @@ async def test_shopee_uses_evento_freight_with_floor_at_zero(db: AsyncSession):
                 "loja_nome": "Loja Shopee",
                 "frete_projetado_item": 5,
                 "evento_freight": 8,
+                "evento_frete_anuncio": 5,
                 "item_proportion": 1,
             }
         ],
@@ -265,6 +313,7 @@ async def test_backfill_processes_all_qualifying_pedidos(db: AsyncSession):
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja A",
                 "frete_projetado_item": 5,
+                "evento_frete_anuncio": 5,
                 "marketplace_frete_real_cobrado_item": 8,
             },
             # Qualifica.
@@ -273,14 +322,16 @@ async def test_backfill_processes_all_qualifying_pedidos(db: AsyncSession):
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja A",
                 "frete_projetado_item": 2,
+                "evento_frete_anuncio": 2,
                 "marketplace_frete_real_cobrado_item": 9,
             },
-            # Não qualifica (cobrado < projetado).
+            # Não qualifica (cobrado < anuncio).
             {
                 "pedido_bling": "PED-102",
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja A",
                 "frete_projetado_item": 20,
+                "evento_frete_anuncio": 20,
                 "marketplace_frete_real_cobrado_item": 5,
             },
         ],

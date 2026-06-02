@@ -450,6 +450,64 @@ async def test_marketplace_saldo_filter_ignores_sub_cent_noise(
     assert response.json()["total"] == 0
 
 
+async def test_marketplace_frete_result_uses_full_anuncio_per_item(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    order = BlingOrder(
+        bling_id=25959686080,
+        numero="278867",
+        numeroloja="2000016712859896",
+        item_codigo="b008.12.18",
+        item_index=0,
+        situacao="15",
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, pedido_marketplace,
+                bling_id, sku, produto, situacao_nome,
+                plataforma_bling, loja_nome, item_proportion,
+                marketplace_frete_real_cobrado_item,
+                evento_frete_anuncio, frete_projetado_item,
+                bling_status_margem
+            )
+            VALUES (
+                :id, '278867', '2000016712859896',
+                25959686080, 'b008.12.18', 'Kit Malas',
+                'Em aberto', 'ml', 'ML Marquezini', 0.5,
+                104.175,
+                78.26, 90,
+                NULL
+            )
+            """
+        ),
+        {"id": str(order.id)},
+    )
+    await db.commit()
+
+    response = await client.get(
+        "/api/margens/marketplace?attention_type=frete&status=Pendente"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["pedido_bling"] == "278867"
+    assert item["frete_anuncio"] == pytest.approx(78.26)
+    assert item["resultado_frete"] == pytest.approx(25.915)
+    assert item["attention_frete"] is True
+
+
 async def test_sync_from_marketplace_updates_snapshot_financials_without_view_refresh(
     client,
     db: AsyncSession,
