@@ -797,7 +797,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
               </div>
               <div v-else class="flex items-center justify-end gap-2">
                 <button
-                  v-if="canEdit && r.situacao_id === 6 && r.saldo_plataforma != null && r.saldo_bling != null && Math.abs(r.saldo_plataforma - r.saldo_bling) > 0.01"
+                  v-if="canEdit && [6, 83965].includes(r.situacao_id) && r.saldo_plataforma != null && r.saldo_bling != null && Math.abs(r.saldo_plataforma - r.saldo_bling) > 0.01"
                   type="button"
                   :disabled="isSyncing(r.bling_order_item_id)"
                   class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-default"

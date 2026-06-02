@@ -450,14 +450,14 @@ async def test_marketplace_saldo_filter_ignores_sub_cent_noise(
     assert response.json()["total"] == 0
 
 
-async def test_marketplace_saldo_filter_only_considers_situacao_6(
+async def test_marketplace_saldo_filter_only_considers_shippable_situacoes(
     client,
     db: AsyncSession,
     make_user,
     auth_as,
 ):
-    """Saldo divergence is only triaged for orders in situação 6. A real gap
-    (R$60) on an order in any other situação must NOT appear in the 'saldo'
+    """Saldo divergence is only triaged for orders in situação 6 ou 83965. A real
+    gap (R$60) on an order in any other situação must NOT appear in the 'saldo'
     filter, matching the per-row 'corrigir' marker gate in the UI."""
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
@@ -471,7 +471,7 @@ async def test_marketplace_saldo_filter_only_considers_situacao_6(
     db.add(order)
     await db.commit()
     await db.refresh(order)
-    # Same R$60 gap as the passing test, but situação 9 (not 6) → excluded.
+    # Same R$60 gap as the passing test, but situação 9 (not 6/83965) → excluded.
     await db.execute(
         text(
             """
@@ -500,6 +500,59 @@ async def test_marketplace_saldo_filter_only_considers_situacao_6(
     )
     assert response.status_code == 200
     assert response.json()["total"] == 0
+
+
+async def test_marketplace_saldo_filter_includes_situacao_83965(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Situação 83965 (Enviado Etiqueta) também conta como saldo-divergente —
+    mesmo gap R$60, mas em 83965 → deve aparecer no filtro 'saldo'."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    order = BlingOrder(
+        bling_id=987657,
+        numero="123459",
+        item_codigo="sku-4",
+        item_index=0,
+        situacao="83965",
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                situacao, situacao_nome, plataforma_bling, item_proportion,
+                bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
+                marketplace_liquido_base_margem_item,
+                bling_status_margem
+            )
+            VALUES (
+                :id, '123459', 987657, 'sku-4',
+                '83965', 'Enviado Etiqueta', 'ml', 1,
+                6940, 0, 0,
+                7000,
+                NULL
+            )
+            """
+        ),
+        {"id": str(order.id)},
+    )
+    await db.commit()
+
+    response = await client.get(
+        "/api/margens/marketplace?attention_type=saldo&status=Pendente"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["pedido_bling"] == "123459"
+    assert body["items"][0]["attention_saldo"] is True
 
 
 async def test_marketplace_frete_result_uses_full_anuncio_per_item(

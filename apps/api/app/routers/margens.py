@@ -51,6 +51,13 @@ _BLING_ORDERS_TABLE = _qualified_table("bling_orders")
 SITUACAO_APROVADO = 6
 SITUACAO_ATENDIDO = 9
 SITUACAO_REPROVADO = 83955
+SITUACAO_ENVIADO_ETIQUETA = 83965
+
+# Situações em que uma divergência de saldo é triada (vira "saldo divergente").
+# 6 = "Em aberto" (pré-faturamento) e 83965 = "Enviado Etiqueta" (etiqueta
+# gerada). Mantido como tupla de strings porque bling_orders.situacao é text.
+_SITUACOES_SALDO_DIVERGENTE = (str(SITUACAO_APROVADO), str(SITUACAO_ENVIADO_ETIQUETA))
+_SITUACOES_SALDO_DIVERGENTE_IN = ", ".join(f"'{s}'" for s in _SITUACOES_SALDO_DIVERGENTE)
 
 # "Needs attention" flag — rows the user must triage. Three independent triggers:
 #   1) margin below the configured minimum
@@ -90,15 +97,15 @@ _ATTENTION_FRETE_SQL = (
     f"(({_FRETE_ANUNCIO_SQL}) IS NOT NULL AND {_FRETE_RESULTADO_SQL} > 0)"
 )
 # Divergence = |saldo_bling − saldo_plataforma| > R$0,01, restricted to orders
-# in situação 6 (only those count as saldo-divergent for triage). This MUST match
-# the per-row "corrigir" trigger in the UI (margem.vue: situacao_id === 6 &&
-# Math.abs(saldo_plataforma - saldo_bling) > 0.01), otherwise rows show the
-# divergence marker in the detail but get filtered out of the "saldo divergente"
-# list. A relative 1% threshold was used before and hid real divergences on
-# high-value items (e.g. a R$60 gap on a R$7.000 Macbook = 0.85%, below 1%, but
-# still a divergence to fix).
+# in situação 6 ou 83965 (only those count as saldo-divergent for triage). This
+# MUST match the per-row "corrigir" trigger in the UI (margem.vue:
+# [6, 83965].includes(situacao_id) && Math.abs(saldo_plataforma - saldo_bling) >
+# 0.01), otherwise rows show the divergence marker in the detail but get filtered
+# out of the "saldo divergente" list. A relative 1% threshold was used before and
+# hid real divergences on high-value items (e.g. a R$60 gap on a R$7.000 Macbook
+# = 0.85%, below 1%, but still a divergence to fix).
 _ATTENTION_SALDO_SQL = (
-    f"(v.situacao = '{SITUACAO_APROVADO}' "
+    f"(v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN}) "
     " AND v.marketplace_liquido_base_margem_item IS NOT NULL "
     " AND v.bling_valorbase_item IS NOT NULL "
     " AND ABS("
