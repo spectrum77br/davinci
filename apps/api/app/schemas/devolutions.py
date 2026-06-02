@@ -166,6 +166,44 @@ class DevolutionPatch(BaseModel):
         return _clean_optional_text(value)
 
 
+class StockCorrectionIn(BaseModel):
+    """Correção manual de estoque: adiciona unidades de um SKU ao estoque Bling
+    com a MESMA lógica de devolução (Novo/Usado → bin existente ou z000N.<tag>),
+    sem criar registro de devolução nem alterar situação de pedido."""
+
+    sku: str = Field(min_length=1)
+    condicao_produto: str = Field(min_length=1)
+    quantidade: int = Field(default=1, ge=1)
+    produtos: str | None = None
+    custo_produto: float | None = None
+    troca_sku: str | None = None
+    troca_condicao: str | None = None
+    estoque_destino_sku: str | None = None
+    estoque_nova_tag: str | None = None
+    manutencao_destino: str | None = None
+
+    @field_validator(
+        "produtos",
+        "troca_sku",
+        "troca_condicao",
+        "estoque_destino_sku",
+        "estoque_nova_tag",
+        "manutencao_destino",
+        mode="before",
+    )
+    @classmethod
+    def clean_optional_text(cls, value: str | None) -> str | None:
+        return _clean_optional_text(value)
+
+    @field_validator("sku", "condicao_produto")
+    @classmethod
+    def clean_required(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("cannot be blank")
+        return value
+
+
 class DevolutionPage(BaseModel):
     items: list[DevolutionOut]
     total: int

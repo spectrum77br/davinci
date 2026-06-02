@@ -7,6 +7,7 @@ import {
   Download,
   ExternalLink,
   Loader2,
+  PackagePlus,
   Plus,
   RotateCcw,
   Search,
@@ -218,6 +219,18 @@ const addedThisSession = ref<Set<string>>(new Set())
 
 const dirtyRows = ref<Set<string>>(new Set())
 const savingRows = ref<Set<string>>(new Set())
+
+// ── Correção de estoque (entrada manual, sem criar devolução) ────────────
+// Reaproveita os modais de destino (resolveStockModals) e a lógica Novo/Usado.
+const CONDICOES_CORRECAO = ['Novo', 'Usado'] as const
+const correcaoOpen = ref(false)
+const correcaoSku = ref('')
+const correcaoCondicao = ref<(typeof CONDICOES_CORRECAO)[number]>('Novo')
+const correcaoQtd = ref(1)
+const correcaoProduto = ref('')
+const correcaoCusto = ref('')
+const correcaoSubmitting = ref(false)
+const correcaoError = ref<string | null>(null)
 
 // ── Modais de estoque (abrem ANTES das chamadas Bling) ───────────────
 // Condições que disparam estoque/situação ao adicionar ou ligar o toggle.
@@ -543,6 +556,58 @@ function closeAdd() {
   addedThisSession.value = new Set()
 }
 
+function openCorrecao() {
+  correcaoSku.value = ''
+  correcaoCondicao.value = 'Novo'
+  correcaoQtd.value = 1
+  correcaoProduto.value = ''
+  correcaoCusto.value = ''
+  correcaoError.value = null
+  correcaoOpen.value = true
+}
+function closeCorrecao() {
+  correcaoOpen.value = false
+}
+
+// Correção de estoque: abre os MESMOS modais de destino da página
+// (bin existente / criação de z000N.<tag>) e lança a entrada no Bling via API,
+// sem criar registro de devolução nem mexer na situação de pedido.
+async function submitCorrecao() {
+  if (!canEdit.value || correcaoSubmitting.value) return
+  const sku = correcaoSku.value.trim()
+  if (!sku) { correcaoError.value = 'Informe o SKU'; return }
+  const qtd = Math.max(1, Math.floor(Number(correcaoQtd.value) || 1))
+  correcaoError.value = null
+  // Resolve o destino pelos modais (Novo/Usado seguem a lógica já existente).
+  const extra = await resolveStockModals(correcaoCondicao.value, sku, true)
+  if (extra === null) return // modal cancelado → aborta sem chamar a API
+  correcaoSubmitting.value = true
+  try {
+    const sr = await api<BlingStockResult>('/api/devolutions/stock-correction', {
+      method: 'POST',
+      body: {
+        sku,
+        condicao_produto: correcaoCondicao.value,
+        quantidade: qtd,
+        produtos: correcaoProduto.value.trim() || null,
+        custo_produto: numberOrNull(correcaoCusto.value),
+        troca_sku: extra.troca_sku,
+        troca_condicao: extra.troca_condicao,
+        estoque_destino_sku: extra.estoque_destino_sku,
+        estoque_nova_tag: extra.estoque_nova_tag,
+        manutencao_destino: extra.manutencao_destino,
+      },
+    })
+    showStockToast(sr)
+    if (sr.ok) closeCorrecao()
+    else correcaoError.value = sr.message || 'falha ao atualizar estoque'
+  } catch (e: any) {
+    correcaoError.value = apiError(e)
+  } finally {
+    correcaoSubmitting.value = false
+  }
+}
+
 // Um único "usar" para o pedido: traz TODOS os produtos (que ainda não foram
 // adicionados) como linhas de rascunho, cada uma com sua própria condição.
 function selectAllProducts() {
@@ -784,6 +849,10 @@ async function backfillAddresses() {
         <Button size="sm" :disabled="!canEdit" @click="openAdd">
           <Plus class="size-4 mr-1.5" />
           adicionar pedido
+        </Button>
+        <Button size="sm" variant="outline" :disabled="!canEdit" @click="openCorrecao">
+          <PackagePlus class="size-4 mr-1.5" />
+          correção de estoque
         </Button>
       </template>
     </PageHeader>
@@ -1277,6 +1346,92 @@ async function backfillAddresses() {
           </div>
         </div>
       </TransitionGroup>
+    </div>
+
+    <!-- Correção de estoque: entrada manual via API, sem criar devolução -->
+    <div
+      v-if="correcaoOpen"
+      class="fixed inset-0 bg-black/60 flex items-center justify-center z-40 p-4"
+      @click.self="closeCorrecao"
+    >
+      <div class="bg-background border rounded-lg w-full max-w-md p-5 space-y-4">
+        <div class="flex items-start">
+          <div>
+            <h2 class="text-lg font-semibold">Correção de estoque</h2>
+            <p class="text-sm text-muted-foreground">
+              Adiciona unidades de um SKU direto ao estoque Bling — sem criar devolução.
+            </p>
+          </div>
+          <Button class="ml-auto" size="sm" variant="ghost" @click="closeCorrecao">
+            <X class="size-4" />
+          </Button>
+        </div>
+
+        <label class="block space-y-1">
+          <span class="text-[11px] font-medium text-muted-foreground">SKU</span>
+          <input
+            v-model="correcaoSku"
+            class="h-9 w-full rounded-md border bg-background px-3 text-sm font-mono"
+            placeholder="ex.: x001.sp"
+            @keydown.enter.prevent="submitCorrecao"
+          />
+        </label>
+
+        <div class="space-y-1">
+          <span class="text-[11px] font-medium text-muted-foreground">Condição</span>
+          <div class="flex gap-2">
+            <button
+              v-for="c in CONDICOES_CORRECAO"
+              :key="c"
+              type="button"
+              class="flex-1 rounded-md border px-3 py-2 text-sm transition-colors"
+              :class="correcaoCondicao === c ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
+              @click="correcaoCondicao = c"
+            >{{ c }}</button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <label class="space-y-1">
+            <span class="text-[11px] font-medium text-muted-foreground">Quantidade</span>
+            <input
+              v-model.number="correcaoQtd"
+              type="number"
+              min="1"
+              class="h-9 w-full rounded-md border bg-background px-3 text-sm tabular-nums"
+            />
+          </label>
+          <label v-if="isAdmin" class="space-y-1">
+            <span class="text-[11px] font-medium text-muted-foreground">Custo (opcional)</span>
+            <input
+              v-model="correcaoCusto"
+              type="text"
+              inputmode="decimal"
+              class="h-9 w-full rounded-md border bg-background px-3 text-sm text-right tabular-nums"
+            />
+          </label>
+        </div>
+
+        <label class="block space-y-1">
+          <span class="text-[11px] font-medium text-muted-foreground">Produto (opcional, p/ criar avulso)</span>
+          <input
+            v-model="correcaoProduto"
+            class="h-9 w-full rounded-md border bg-background px-3 text-sm"
+            placeholder="nome do produto"
+          />
+        </label>
+
+        <p v-if="correcaoError" class="text-sm text-red-400">{{ correcaoError }}</p>
+
+        <div class="flex justify-end gap-2 pt-1">
+          <Button size="sm" variant="ghost" @click="closeCorrecao">cancelar</Button>
+          <Button size="sm" :disabled="correcaoSubmitting || !canEdit || !correcaoSku.trim()" @click="submitCorrecao">
+            <Loader2 v-if="correcaoSubmitting" class="size-4 mr-1.5 animate-spin" />
+            <PackagePlus v-else class="size-4 mr-1.5" />
+            seguir
+          </Button>
+        </div>
+      </div>
     </div>
 
     <!-- Modais que abrem ANTES das chamadas de estoque/produtos Bling -->

@@ -26,6 +26,7 @@ from app.schemas.devolutions import (
     DevolutionProductOut,
     SkuSuffixesOut,
     SkuSuffixVariant,
+    StockCorrectionIn,
 )
 from app.services.devolution_stock_return import (
     _STOCK_TRIGGER_CONDICOES,
@@ -422,6 +423,54 @@ async def sku_suffixes(
         for full_sku, suffix in candidates.items()
     ]
     return SkuSuffixesOut(base=base, allowed_suffixes=list(_SUFFIX_TAGS), variants=variants)
+
+
+@router.post("/stock-correction", response_model=BlingStockResultOut)
+async def stock_correction(
+    body: StockCorrectionIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> BlingStockResultOut:
+    """Correção manual de estoque: adiciona unidades de um SKU ao estoque Bling
+    reaproveitando a MESMA lógica de devolução (Novo/Usado → bin existente ou
+    criação de z000N.<tag>), porém SEM gravar registro de devolução nem alterar
+    a situação de nenhum pedido."""
+    condicao = body.condicao_produto
+    if condicao not in _STOCK_TRIGGER_CONDICOES:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "condicao_invalida",
+                "message": f"Condição {condicao!r} não dispara estoque",
+            },
+        )
+    # Linha transiente (NÃO adicionada à sessão): só carrega os campos que
+    # return_product_to_bling_stock lê. Nada é persistido.
+    row = Devolution(
+        conta="Correção de Estoque",
+        sku=body.sku,
+        produtos=body.produtos,
+        custo_produto=body.custo_produto,
+        condicao_produto=condicao,
+        quantidade=body.quantidade or 1,
+        troca_sku=body.troca_sku,
+        troca_condicao=body.troca_condicao,
+        estoque_destino_sku=body.estoque_destino_sku,
+        estoque_nova_tag=body.estoque_nova_tag,
+        manutencao_destino=body.manutencao_destino,
+    )
+    sr = await return_product_to_bling_stock(session, row)
+    if sr is None:
+        raise HTTPException(
+            422,
+            detail={"code": "no_stock_action", "message": "Nenhuma ação de estoque para essa condição"},
+        )
+    logger.info(
+        "stock_correction_done",
+        sku=body.sku, condicao=condicao, qty=body.quantidade,
+        action=sr.get("action"), ok=sr.get("ok"),
+    )
+    return BlingStockResultOut(**sr)
 
 
 @router.post("", response_model=DevolutionOut, status_code=status.HTTP_201_CREATED)
