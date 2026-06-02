@@ -15,6 +15,7 @@ devolution adjustments).
 """
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated
@@ -62,6 +63,7 @@ from app.schemas.importacao import (
     ImportKitGridOut,
     ImportKitMarkOut,
     ImportKitMarkToggle,
+    ImportKitVariationCreate,
     ImportKitVariationOut,
     ImportLoteCreate,
     ImportLoteItemPatch,
@@ -77,7 +79,7 @@ from app.schemas.importacao import (
     ImportResumoOut,
     ImportResumoPatch,
 )
-from app.services.importacao_naming import generate_product_name
+from app.services.importacao_naming import generate_product_name, parse_kit_variation
 from app.services.pricing.audit import build_match_indexes, match_one_sku_to_keys
 from app.worker_pool import get_arq_pool
 
@@ -1479,6 +1481,109 @@ async def upsert_cotacao_valor(
 # Aba "Kit": matriz produto × variação. Variations e bases são seeded
 # fixos (migration 0099) — operador apenas toggle marks. Fase 1 só UI;
 # integração com Bling/Tabela de Preços fica pras fases 2/3.
+
+
+# Regex pra code de variação celular: `aXXX` ou combinação `aX+aY+...`.
+# Ex válidos: a001, a003, a003+a004, a007+a012. Inválidos: 8+18 (mala),
+# bp001, vazio.
+_CELULAR_CODE_RE = re.compile(r"^a\d+(\+a\d+)*$")
+
+
+def _validate_kit_variation_code(categoria: str, code: str) -> None:
+    """Valida o `code` de uma variation de kit conforme a categoria.
+
+    Mala: requer ao menos 1 tamanho numérico (acessórios opcionais).
+      Aceita "8", "8+18", "12+20+24+a075", "12,14,16". Reusa o parser
+      que o resto do pipeline já usa (parse_kit_variation).
+
+    Celular: padrão estrito `a\\d+(\\+a\\d+)*`. Operador só usa
+      acessórios standalone como variation; tamanhos numéricos não
+      fazem sentido (celular não tem variação por tamanho).
+
+    Levanta HTTPException 422 com `code: invalid_variation_code` se
+    rejeitar. Mensagem específica por categoria no `message`."""
+    code = (code or "").strip()
+    if not code:
+        raise HTTPException(422, detail={
+            "code": "invalid_variation_code", "message": "code is required",
+        })
+    if categoria == "celular":
+        if not _CELULAR_CODE_RE.match(code):
+            raise HTTPException(422, detail={
+                "code": "invalid_variation_code",
+                "message": "celular: use formato 'aXXX' ou 'aXXX+aYYY'",
+            })
+        return
+    # Mala: parse e exige pelo menos 1 tamanho numérico (acessórios soltos
+    # podem ser na celular; mala kit precisa do tamanho como âncora).
+    sizes, _accessories = parse_kit_variation(code)
+    if not sizes:
+        raise HTTPException(422, detail={
+            "code": "invalid_variation_code",
+            "message": "mala: requer pelo menos 1 tamanho numérico (ex: 8, 12+20)",
+        })
+
+
+@router.post(
+    "/kit/variations",
+    response_model=ImportKitVariationOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_kit_variation(
+    body: ImportKitVariationCreate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> ImportKitVariationOut:
+    """Cria uma nova variação de kit. Categoria + code validados aqui;
+    `ordem` calculada como MAX(ordem) + 1 dentro da categoria. Conflito
+    em (categoria, code) → 409."""
+    cat = (body.categoria or "").lower().strip()
+    if cat not in ("mala", "celular"):
+        raise HTTPException(422, detail={
+            "code": "invalid_categoria",
+            "message": "categoria deve ser 'mala' ou 'celular' (eletro não tem kit)",
+        })
+    _validate_kit_variation_code(cat, body.code)
+    label = (body.label or "").strip()
+    if not label:
+        raise HTTPException(422, detail={"code": "label_required"})
+    if len(label) > 60:
+        raise HTTPException(422, detail={"code": "label_too_long", "max": 60})
+
+    # Conflito por (categoria, code). Celular tem UNIQUE parcial no DB
+    # (migration 0117) — IntegrityError viraria 500; antecipamos com
+    # SELECT pra ter 409 limpo. Mala tem duplicata legítima histórica
+    # (pos 19/20) então NÃO há UNIQUE de DB — só este check evita
+    # criar mais duplicatas via UI.
+    code = body.code.strip()
+    existing = (await session.execute(
+        select(ImportKitVariation).where(
+            ImportKitVariation.categoria == cat,
+            ImportKitVariation.code == code,
+        ).limit(1)
+    )).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(409, detail={
+            "code": "variation_code_exists",
+            "message": f"Já existe variação {cat} com esse código",
+            "existing_id": str(existing.id),
+        })
+
+    # Próxima ordem na categoria. `coalesce` garante MAX+1 mesmo quando
+    # a categoria não tem nenhuma variation ainda (start em 1).
+    next_ordem = (await session.execute(
+        select(func.coalesce(func.max(ImportKitVariation.ordem), 0) + 1)
+        .where(ImportKitVariation.categoria == cat)
+    )).scalar() or 1
+
+    row = ImportKitVariation(
+        categoria=cat, code=code, label=label,
+        ordem=int(next_ordem), highlight=False,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return ImportKitVariationOut.model_validate(row, from_attributes=True)
 
 
 @router.get("/kit", response_model=ImportKitGridOut)

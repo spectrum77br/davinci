@@ -362,6 +362,14 @@ class ImportKitVariationOut(BaseModel):
     obs: str | None = None
 
 
+class ImportKitVariationCreate(BaseModel):
+    """POST /importacao/kit/variations body. `categoria` ∈ (mala, celular);
+    `code` é validado conforme a categoria pelo router."""
+    categoria: str
+    code: str
+    label: str
+
+
 class ImportKitBaseOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID

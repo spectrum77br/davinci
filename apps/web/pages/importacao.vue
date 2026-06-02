@@ -337,6 +337,24 @@ async function salvarFreteAjuste() {
 // mudanças otimistas no toggle entram aqui também.
 const kit = ref<KitGrid>({ variations: [], bases: [], marks: [] })
 const kitMarkMap = reactive<Record<string, KitMark>>({})
+
+// "Criar Kit": 2 modais separados (Celular/Mala) com regras próprias.
+// Cada categoria abre o seu — não é unificado pra cada um evoluir
+// independente. Spec dos modais em components/CreateKitVariationXModal.
+const createKitCelularOpen = ref(false)
+const createKitMalaOpen = ref(false)
+
+async function onKitVariationCreated(_v: { id: string; code: string; label: string; ordem: number }) {
+  // Refetch da aba pra trazer a coluna nova. Marks ficam vazias até o
+  // operador clicar na célula do produto correspondente.
+  try {
+    const kt = await api<KitGrid>(`/api/importacao/kit?${catQs()}`)
+    kit.value = kt
+    rebuildKitMarkMap(kt.marks)
+  } catch (e: any) {
+    errorText.value = e?.data?.detail?.code || 'falha_refetch_kit'
+  }
+}
 function kitKey(baseId: string, varId: string): string {
   return `${baseId}::${varId}`
 }
@@ -1960,7 +1978,35 @@ onScopeDispose(() => {
           Clique pra marcar/desmarcar "x". Criação automática no Bling
           (<em>categoria {{ categoria }} kit</em>)<template v-if="categoria === 'mala'"> e item na Tabela de Preços ficam pra fase 2</template>.
         </span>
+        <!-- "Criar Kit" — botão separado por categoria (cada um abre
+             seu próprio modal com regras específicas). Eletro não tem
+             aba kit, então só aparece em mala/celular. -->
+        <button
+          v-if="canEdit && categoria === 'celular'"
+          class="ml-auto inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 hover:opacity-90"
+          @click="createKitCelularOpen = true"
+        >
+          <Plus class="size-3" /> Criar Kit
+        </button>
+        <button
+          v-if="canEdit && categoria === 'mala'"
+          class="ml-auto inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 hover:opacity-90"
+          @click="createKitMalaOpen = true"
+        >
+          <Plus class="size-3" /> Criar Kit
+        </button>
       </div>
+
+      <CreateKitVariationCelularModal
+        :open="createKitCelularOpen"
+        @close="createKitCelularOpen = false"
+        @created="onKitVariationCreated"
+      />
+      <CreateKitVariationMalaModal
+        :open="createKitMalaOpen"
+        @close="createKitMalaOpen = false"
+        @created="onKitVariationCreated"
+      />
 
       <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 220px)">
         <table class="kit-table text-xs border-collapse">
