@@ -118,3 +118,95 @@ async def test_link_supplier_noop_when_cost_zero_or_negative():
             product_id=1, supplier_id=2, cost_price=-5,
         ) == {}
     assert route.call_count == 0
+
+
+# ── Upsert via "Registro duplicado" (code 279) ───────────────────────
+
+
+_DUPLICATE_PAYLOAD = {
+    "error": {
+        "type": "VALIDATION_ERROR",
+        "message": "Registro duplicado",
+        "fields": [
+            {"code": 279, "msg": "Registro duplicado", "element": "produto"},
+        ],
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_link_supplier_duplicate_fallbacks_to_put_via_get():
+    """POST 400 + code=279 → GET pra achar link_id existente → PUT
+    pra atualizar precoCusto. Shape do PUT é `{produto:{id},
+    fornecedor:{id}, precoCusto}` (NÃO `{idProduto, idContato, ...}`
+    do POST — V3 segue padrão nested no update)."""
+    client = _make_client()
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(f"{BLING_API_BASE}/produtos/fornecedores").mock(
+            return_value=httpx.Response(400, json=_DUPLICATE_PAYLOAD),
+        )
+        get_route = mock.get(f"{BLING_API_BASE}/produtos/fornecedores").mock(
+            return_value=httpx.Response(200, json={
+                "data": [{"id": 999, "produto": {"id": 12345}, "precoCusto": 10.0}],
+            }),
+        )
+        put_route = mock.put(f"{BLING_API_BASE}/produtos/fornecedores/999").mock(
+            return_value=httpx.Response(204),
+        )
+        data = await client.link_supplier_to_product(
+            product_id=12345, supplier_id=16980149177, cost_price=49.0,
+        )
+
+    # GET filtra por (idProduto, idFornecedor) — params da query string.
+    get_params = dict(get_route.calls[0].request.url.params)
+    assert get_params == {"idProduto": "12345", "idFornecedor": "16980149177"}
+
+    # PUT envia shape nested.
+    put_body = json.loads(put_route.calls[0].request.content)
+    assert put_body == {
+        "produto": {"id": 12345},
+        "fornecedor": {"id": 16980149177},
+        "precoCusto": 49.0,
+    }
+    # Bling V3 PUT pode retornar 204 sem body — função tolera.
+    assert data == {}
+
+
+@pytest.mark.asyncio
+async def test_link_supplier_duplicate_but_get_empty_returns_empty():
+    """Race condition rara: POST 400 duplicado mas GET sem registros.
+    Função retorna {} sem raise — não derruba caller."""
+    client = _make_client()
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(f"{BLING_API_BASE}/produtos/fornecedores").mock(
+            return_value=httpx.Response(400, json=_DUPLICATE_PAYLOAD),
+        )
+        mock.get(f"{BLING_API_BASE}/produtos/fornecedores").mock(
+            return_value=httpx.Response(200, json={"data": []}),
+        )
+        data = await client.link_supplier_to_product(
+            product_id=12345, supplier_id=16980149177, cost_price=49.0,
+        )
+    assert data == {}
+
+
+@pytest.mark.asyncio
+async def test_link_supplier_non_duplicate_400_raises():
+    """400 com outro código (ex: 99 = validação genérica) NÃO faz
+    fallback — propaga o erro pro caller resolver."""
+    other_err = {
+        "error": {
+            "type": "VALIDATION_ERROR",
+            "message": "Outro erro",
+            "fields": [{"code": 99, "msg": "qualquer outro"}],
+        },
+    }
+    client = _make_client()
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(f"{BLING_API_BASE}/produtos/fornecedores").mock(
+            return_value=httpx.Response(400, json=other_err),
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.link_supplier_to_product(
+                product_id=12345, supplier_id=16980149177, cost_price=49.0,
+            )

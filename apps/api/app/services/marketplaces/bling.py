@@ -752,18 +752,16 @@ class BlingClient:
     async def link_supplier_to_product(
         self, *, product_id: int, supplier_id: int, cost_price: float,
     ) -> dict:
-        """Cria o relacionamento produto↔fornecedor no Bling V3 com custo.
+        """Upsert do relacionamento produto↔fornecedor no Bling V3 com custo.
 
-        Endpoint: POST /produtos/fornecedores
-        Body:     {idProduto, idContato, precoCusto}
+        Tenta POST /produtos/fornecedores (cria); se já existir (Bling
+        retorna 400 + code=279 "Registro duplicado"), busca o link
+        existente via GET e atualiza com PUT. Comportamento upsert
+        efetivo — único caminho que faz precoCusto persistir, e que
+        funciona tanto na 1ª chamada quanto em re-runs (companion ao
+        restore de componentes do bling_kit_create, que pode tentar
+        re-aplicar custo em link já existente).
 
-        Esse é o único caminho que faz precoCusto persistir — o campo
-        `fornecedor` no body do POST /produtos é silenciosamente
-        descartado por Bling V3. Confirmado via teste em prod 2026-05-28
-        (placeholder 000000111111111ll, contato 16980149177 → precoCusto
-        apareceu corretamente).
-
-        Returns the data dict from Bling (contém `id` do relacionamento).
         Custo <= 0 é no-op (retorna {}).
         """
         if cost_price <= 0:
@@ -773,9 +771,71 @@ class BlingClient:
             "idContato": int(supplier_id),
             "precoCusto": float(cost_price),
         }
-        r = await self._request("POST", "/produtos/fornecedores", json=body)
+        try:
+            r = await self._request("POST", "/produtos/fornecedores", json=body)
+            r.raise_for_status()
+            return r.json().get("data") or {}
+        except httpx.HTTPStatusError as e:
+            # Bling V3: 400 + code=279 "Registro duplicado" = link já
+            # existe pra esse (produto, fornecedor). Cai pro update.
+            if e.response.status_code != 400:
+                raise
+            try:
+                err_fields = (e.response.json().get("error") or {}).get("fields") or []
+            except ValueError:
+                raise e from None
+            is_duplicate = any(f.get("code") == 279 for f in err_fields)
+            if not is_duplicate:
+                raise
+            return await self._update_existing_supplier_link(
+                product_id=product_id,
+                supplier_id=supplier_id,
+                cost_price=cost_price,
+            )
+
+    async def _update_existing_supplier_link(
+        self, *, product_id: int, supplier_id: int, cost_price: float,
+    ) -> dict:
+        """Quando POST retorna duplicado: lista os links do produto
+        pelo fornecedor, pega o id da relação e atualiza via PUT.
+
+        Endpoints (Bling V3, SDK AlexandreBellas/bling-erp-api-js):
+          GET  /produtos/fornecedores?idProduto=X&idFornecedor=Y
+          PUT  /produtos/fornecedores/{idProdutoFornecedor}
+            body: {produto:{id}, fornecedor:{id}, precoCusto}
+              (shape nested — NÃO é {idProduto, idContato, precoCusto}
+              como no POST; PUT segue o padrão `produto:{id}` do V3.)
+        """
+        r = await self._request(
+            "GET", "/produtos/fornecedores",
+            params={"idProduto": int(product_id), "idFornecedor": int(supplier_id)},
+        )
         r.raise_for_status()
-        return r.json().get("data") or {}
+        items = r.json().get("data") or []
+        if not items:
+            # Inconsistência rara: Bling disse duplicado no POST mas
+            # GET veio vazio. Sem id pra atualizar — desiste sem raise
+            # pra não derrubar o caller (fluxo de restore de custos).
+            return {}
+        link_id = items[0].get("id")
+        if link_id is None:
+            return {}
+        put_body = {
+            "produto": {"id": int(product_id)},
+            "fornecedor": {"id": int(supplier_id)},
+            "precoCusto": float(cost_price),
+        }
+        r = await self._request(
+            "PUT", f"/produtos/fornecedores/{int(link_id)}", json=put_body,
+        )
+        r.raise_for_status()
+        # PUT pode responder sem body (vimos isso em update_product_estrutura).
+        if r.content and "json" in (r.headers.get("content-type") or ""):
+            try:
+                return r.json().get("data") or {}
+            except ValueError:
+                return {}
+        return {}
 
     async def find_contato_id_by_name(self, name: str) -> int | None:
         """Resolve o contato.id pelo nome via GET /contatos?pesquisa=<name>.
