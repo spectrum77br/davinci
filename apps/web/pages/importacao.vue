@@ -1557,12 +1557,13 @@ onScopeDispose(() => {
               <!-- obs só aparece em Mala/Eletro. -->
               <td v-if="!isCelular"><input class="cell-input" :value="row.obs ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'obs', (e.target as HTMLInputElement).value)" /></td>
-              <!-- Celular: custo_realizado ("media do custo", editável). -->
-              <td v-if="isCelular">
-                <input type="number" step="0.01" class="cell-input text-right"
-                  :value="row.custo_realizado ?? ''" placeholder="media do custo"
-                  :disabled="!canEdit"
-                  @change="(e) => scheduleSave(row, 'custo_realizado', Number((e.target as HTMLInputElement).value) || null)" />
+              <!-- Celular: custo_realizado (read-only, computed pelo
+                   backend como média ponderada por qty do custoBRL
+                   dos lotes onde o produto aparece). Atualiza quando
+                   operador edita valor_usd ou params do lote → próximo
+                   loadProductsOnly traz o novo valor. -->
+              <td v-if="isCelular" class="calc text-right">
+                {{ fmtMoney(row.custo_realizado) }}
               </td>
               <!-- Per-lote cells align directly under the last-row
                    sub-headers. Mala: 2 cells (quant + total). Celular:

@@ -241,7 +241,7 @@ async def patch_cotacao_import_product(
         valor_usd=row.valor_usd,
         valor_brl_realizado=row.valor_brl_realizado,
         frete_type=row.frete_type,
-        custo_realizado=row.custo_realizado,
+        custo_realizado=None,
         nome_gerado=generate_product_name(row.categoria, row.modelo_bling, row.sku, row.cor),
         bling_sync_status=row.bling_sync_status,
         bling_sync_marked_at=row.bling_sync_marked_at,
@@ -357,6 +357,12 @@ async def list_products(
     # Paralelo a qty_by_pair, valor_usd por (produto, lote) — só celular
     # usa, mas montamos pra todos sem custo extra (1 loop só).
     valor_usd_by_pair: dict[UUID, dict[str, Decimal | None]] = {}
+    # Acumuladores pro custo_realizado computed (média ponderada por qty
+    # do custoBRL de cada lote onde o produto aparece). Σ(qty × custoBRL)
+    # no numerador, Σ(qty) no denominador. Só items com valor_usd não-null
+    # e qty > 0 entram — sem ambos não há "custo" pra ponderar.
+    custo_realizado_num: dict[UUID, Decimal] = {}
+    custo_realizado_den: dict[UUID, int] = {}
     for item, lote in open_items:
         qty_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = item.quantidade
         valor_usd_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = item.valor_usd
@@ -364,6 +370,26 @@ async def list_products(
             qty_by_product_open[item.product_id] = (
                 qty_by_product_open.get(item.product_id, 0) + (item.quantidade or 0)
             )
+        qty = int(item.quantidade or 0)
+        if qty <= 0 or item.valor_usd is None:
+            continue
+        # custoBRL = valor_usd × taxa × (1 + frete_pct) + adicional, com
+        # params do PRÓPRIO LOTE. NULLs em qualquer param → linha ignorada
+        # (não dá pra calcular). Mantém celular consistente com o body.
+        if lote.taxa is None or lote.frete_pct is None or lote.adicional is None:
+            continue
+        custo_brl = (
+            Decimal(item.valor_usd) * Decimal(lote.taxa)
+            * (Decimal("1") + Decimal(lote.frete_pct))
+            + Decimal(lote.adicional)
+        )
+        custo_realizado_num[item.product_id] = (
+            custo_realizado_num.get(item.product_id, Decimal("0"))
+            + Decimal(qty) * custo_brl
+        )
+        custo_realizado_den[item.product_id] = (
+            custo_realizado_den.get(item.product_id, 0) + qty
+        )
 
     # ── Auto-pull: estoque_bling from products.stock by SKU ───────────
     skus_lower = [(p.sku or "").lower() for p in products if p.sku]
@@ -509,7 +535,12 @@ async def list_products(
             valor_usd=p.valor_usd,
             valor_brl_realizado=p.valor_brl_realizado,
             frete_type=p.frete_type or "regular",
-            custo_realizado=p.custo_realizado,
+            custo_realizado=(
+                (custo_realizado_num[p.id] / Decimal(custo_realizado_den[p.id]))
+                .quantize(Decimal("0.01"))
+                if custo_realizado_den.get(p.id, 0) > 0
+                else None
+            ),
             lote_quantidades=qty_by_pair.get(p.id, {}),
             lote_valores_usd=valor_usd_by_pair.get(p.id, {}),
             created_at=p.created_at, updated_at=p.updated_at,
@@ -546,7 +577,10 @@ async def create_product(
         valor_usd=row.valor_usd,
         valor_brl_realizado=row.valor_brl_realizado,
         frete_type=row.frete_type or "regular",
-        custo_realizado=row.custo_realizado,
+        # custo_realizado NÃO computado aqui (resposta de create/patch
+        # de UM produto, não tem o cross-join com lote items). Frontend
+        # busca via /products?categoria=... depois pra ter o valor real.
+        custo_realizado=None,
         lote_quantidades={},
         lote_valores_usd={},
         created_at=row.created_at, updated_at=row.updated_at,
@@ -586,7 +620,10 @@ async def patch_product(
         valor_usd=row.valor_usd,
         valor_brl_realizado=row.valor_brl_realizado,
         frete_type=row.frete_type or "regular",
-        custo_realizado=row.custo_realizado,
+        # custo_realizado NÃO computado aqui (resposta de create/patch
+        # de UM produto, não tem o cross-join com lote items). Frontend
+        # busca via /products?categoria=... depois pra ter o valor real.
+        custo_realizado=None,
         lote_quantidades={},
         lote_valores_usd={},
         created_at=row.created_at, updated_at=row.updated_at,
@@ -658,7 +695,10 @@ async def sync_product_to_bling(
         valor_usd=row.valor_usd,
         valor_brl_realizado=row.valor_brl_realizado,
         frete_type=row.frete_type or "regular",
-        custo_realizado=row.custo_realizado,
+        # custo_realizado NÃO computado aqui (resposta de create/patch
+        # de UM produto, não tem o cross-join com lote items). Frontend
+        # busca via /products?categoria=... depois pra ter o valor real.
+        custo_realizado=None,
         lote_quantidades={},
         lote_valores_usd={},
         created_at=row.created_at, updated_at=row.updated_at,

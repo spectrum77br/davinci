@@ -95,10 +95,10 @@ class ImportProduct(Base, TimestampMixin):
     valor_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     valor_brl_realizado: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     frete_type: Mapped[str | None] = mapped_column(String(20), nullable=True, default="regular")
-    # Coluna J ("media do custo") da aba Importação Celular (migration 0122).
-    # Editável manualmente — sem fórmula, sem auto-recálculo. Operador
-    # registra o que de fato custou em remessas anteriores.
-    custo_realizado: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # Nota: `custo_realizado` NÃO é coluna — foi adicionado na migration
+    # 0122 e dropado na 0123. É computed no GET /products como média
+    # ponderada Σ(qty × custoBRL_lote) / Σ(qty) dos ImportLoteItem do
+    # produto. ImportProductOut.custo_realizado é populado pelo router.
 
 
 class ImportCotacaoParams(Base, TimestampMixin):
