@@ -142,6 +142,10 @@ class ImportLote(Base, TimestampMixin):
     abertura: Mapped[date] = mapped_column(Date, nullable=False)
     fechamento: Mapped[date | None] = mapped_column(Date, nullable=True)
     realizado: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0"))
+    # Aba Frete do Celular (migration 0120). Não exigidos pra mala — ficam
+    # NULL e a aba Frete da mala (se existir no futuro) decide se usa.
+    transportadora: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    obs: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ImportLoteItem(Base, TimestampMixin):
@@ -165,6 +169,11 @@ class ImportLoteItem(Base, TimestampMixin):
         nullable=False,
     )
     quantidade: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Aba Frete do Celular (migration 0120). FALSE por default. Não toca
+    # em items existentes (TRUE só após operador marcar manualmente).
+    pago: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("FALSE"),
+    )
 
 
 class ImportResumo(Base):
@@ -189,6 +198,10 @@ class ImportResumo(Base):
     lote_nome: Mapped[str | None] = mapped_column(String(50), nullable=True)
     saldo: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0"))
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Setado em "ajuste manual de frete" (aba Frete > botão Ajuste). Quando
+    # NÃO null, a linha aparece na agregação da aba Frete; quando null,
+    # é só um lançamento avulso normal (aba Resumo, etapas anteriores).
+    transportadora: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
 # ── Cotação (aba independente — comparação produto × fabricante) ─────

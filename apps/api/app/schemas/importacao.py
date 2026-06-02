@@ -131,6 +131,8 @@ class ImportLoteCreate(BaseModel):
     nome: str
     abertura: date
     categoria: str = "mala"
+    transportadora: str | None = None
+    obs: str | None = None
 
 
 class ImportLotePatch(BaseModel):
@@ -138,6 +140,8 @@ class ImportLotePatch(BaseModel):
     abertura: date | None = None
     fechamento: date | None = None
     realizado: Decimal | None = None
+    transportadora: str | None = None
+    obs: str | None = None
 
 
 class ImportLoteOut(BaseModel):
@@ -148,6 +152,8 @@ class ImportLoteOut(BaseModel):
     abertura: date
     fechamento: date | None = None
     realizado: Decimal
+    transportadora: str | None = None
+    obs: str | None = None
     # Computed by the router:
     previsto: Decimal = Decimal("0")
     saldo: Decimal = Decimal("0")
@@ -163,6 +169,57 @@ class ImportLoteItemUpsert(BaseModel):
     quantidade: int
 
 
+class ImportLoteItemPatch(BaseModel):
+    """Patch só dos atributos editáveis do item via aba Frete. `pago`
+    é o único campo hoje; outros (quantidade) usam o upsert via lote."""
+    pago: bool | None = None
+
+
+# ── Frete (aba Frete do Celular, etapa 4) ─────────────────────────────
+
+
+class ImportFreteRow(BaseModel):
+    """Linha agregada da aba Frete. Mistura:
+      * items de lotes (uma linha por lote_item — modelo, qtd, valor)
+      * ajustes manuais (linha de ImportResumo com transportadora set,
+        modelo/qtd/valor todos None — só saldo)
+    `id` é o id da fonte (lote_item ou resumo); `kind` distingue."""
+    kind: str  # 'item' | 'ajuste'
+    id: UUID
+    transportadora: str | None = None
+    lote_id: UUID | None = None
+    lote_nome: str | None = None
+    abertura: date | None = None
+    fechamento: date | None = None
+    modelo_bling: str | None = None
+    sku: str | None = None
+    quantidade: int | None = None
+    valor_unit: Decimal | None = None
+    total: Decimal | None = None
+    frete_pct: Decimal | None = None
+    saldo: Decimal | None = None
+    pago: bool = False
+    obs: str | None = None
+
+
+class ImportFreteList(BaseModel):
+    rows: list[ImportFreteRow]
+    transportadoras: list[str]  # distinct, pra dropdown
+    # Cards de resumo no topo da aba.
+    total_a_entregar: Decimal = Decimal("0")  # lotes sem fechamento
+    saldo_a_pagar: Decimal = Decimal("0")     # lotes fechados, !pago
+
+
+class ImportFreteAjusteCreate(BaseModel):
+    """Body do POST /lote_ajuste — cria uma row em import_resumo com
+    `transportadora` setada (linha avulsa que aparece na aba Frete)."""
+    transportadora: str
+    abertura: date
+    saldo: Decimal
+    obs: str | None = None
+    categoria: str = "celular"
+
+
 # ── Resumo ─────────────────────────────────────────────────────────────
 
 
@@ -173,6 +230,11 @@ class ImportResumoCreate(BaseModel):
     saldo: Decimal
     obs: str | None = None
     categoria: str = "mala"
+    transportadora: str | None = None
+
+
+class ImportResumoPatch(BaseModel):
+    obs: str | None = None
 
 
 class ImportResumoOut(BaseModel):
@@ -184,6 +246,7 @@ class ImportResumoOut(BaseModel):
     lote_nome: str | None = None
     saldo: Decimal
     obs: str | None = None
+    transportadora: str | None = None
     # ImportResumo is intentionally append-only (no TimestampMixin)
     # so the model doesn't expose created_at — keep the schema in sync
     # or the GET endpoint 500s on Pydantic validation.

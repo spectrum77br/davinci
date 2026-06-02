@@ -55,12 +55,16 @@ from app.schemas.importacao import (
     ImportConfigPatch,
     ImportCotacaoParamsOut,
     ImportCotacaoParamsPatch,
+    ImportFreteAjusteCreate,
+    ImportFreteList,
+    ImportFreteRow,
     ImportKitBaseOut,
     ImportKitGridOut,
     ImportKitMarkOut,
     ImportKitMarkToggle,
     ImportKitVariationOut,
     ImportLoteCreate,
+    ImportLoteItemPatch,
     ImportLoteItemUpsert,
     ImportLoteOut,
     ImportLotePatch,
@@ -71,6 +75,7 @@ from app.schemas.importacao import (
     ImportResumoCreate,
     ImportResumoList,
     ImportResumoOut,
+    ImportResumoPatch,
 )
 from app.services.importacao_naming import generate_product_name
 from app.services.pricing.audit import build_match_indexes, match_one_sku_to_keys
@@ -874,6 +879,215 @@ async def delete_resumo(
         raise HTTPException(404, detail={"code": "resumo_not_found"})
     await session.delete(row)
     await session.commit()
+
+
+@router.patch("/resumo/{row_id}", response_model=ImportResumoOut)
+async def patch_resumo(
+    row_id: UUID,
+    body: ImportResumoPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> ImportResumoOut:
+    """Atualiza `obs` de uma linha do Resumo (operador anota motivo de
+    ajuste, etc.). Demais campos imutáveis pós-create."""
+    row = await session.get(ImportResumo, row_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "resumo_not_found"})
+    for k, v in body.model_dump(exclude_unset=True).items():
+        if v is not None:
+            setattr(row, k, v)
+    await session.commit()
+    await session.refresh(row)
+    return ImportResumoOut.model_validate(row, from_attributes=True)
+
+
+# ── Frete (aba Frete do Celular, etapa 4) ──────────────────────────
+
+
+def _frete_pct_for(prod: ImportProduct, cot_params: ImportCotacaoParams | None) -> Decimal:
+    """Resolve o frete_pct efetivo do produto a partir do tipo +
+    parâmetros globais. Default 0 quando não há params (categorias sem
+    aba Cotação configurada). Garante Decimal pra não confundir
+    Decimal*float em multiplicações abaixo."""
+    if cot_params is None:
+        return _ZERO
+    t = (prod.frete_type or "regular").lower()
+    val = {
+        "regular": cot_params.frete_regular_pct,
+        "swap": cot_params.frete_swap_pct,
+        "acessorios": cot_params.frete_acessorios_pct,
+    }.get(t)
+    return Decimal(val) if val is not None else _ZERO
+
+
+def _valor_unit_for(prod: ImportProduct) -> Decimal:
+    """Valor unitário operacional pra aba Frete:
+    `valor_brl_realizado` (preenchido pelo operador na aba Cotação);
+    fallback pra `custo_bling` quando ainda não foi preenchido."""
+    v = prod.valor_brl_realizado
+    if v is not None and Decimal(v) > 0:
+        return Decimal(v)
+    return Decimal(prod.custo_bling or 0)
+
+
+@router.get("/frete", response_model=ImportFreteList)
+async def list_frete(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+    categoria: _CategoriaQ = "celular",
+    transportadora: str | None = None,
+    pago: bool | None = None,
+) -> ImportFreteList:
+    """Agregação da aba Frete. Combina (1) items dos lotes com seus
+    produtos linkados + (2) ajustes manuais (linhas de ImportResumo
+    com transportadora setada, na mesma categoria).
+
+    - `valor_unit`: ImportProduct.valor_brl_realizado || custo_bling
+    - `frete_pct`: do ImportProduct.frete_type + ImportCotacaoParams
+    - `saldo`: total * frete_pct, mas SÓ quando lote tem fechamento
+      (linhas pendentes mostram saldo=None na UI)
+    Cards no topo:
+    - `total_a_entregar`: SUM(total) de items em lotes sem fechamento
+    - `saldo_a_pagar`: SUM(saldo) de items com fechamento E !pago
+    """
+    cot_params = (await session.execute(
+        select(ImportCotacaoParams).where(ImportCotacaoParams.categoria == categoria)
+    )).scalar_one_or_none()
+
+    # Items dos lotes desta categoria + produto.
+    items_q = (
+        select(ImportLoteItem, ImportLote, ImportProduct)
+        .join(ImportLote, ImportLote.id == ImportLoteItem.lote_id)
+        .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
+        .where(ImportLote.categoria == categoria)
+        .order_by(ImportLote.abertura.desc(), ImportLote.nome, ImportProduct.sku)
+    )
+    if transportadora:
+        items_q = items_q.where(ImportLote.transportadora == transportadora)
+    if pago is not None:
+        items_q = items_q.where(ImportLoteItem.pago == pago)
+
+    item_rows = (await session.execute(items_q)).all()
+
+    rows: list[ImportFreteRow] = []
+    total_a_entregar = _ZERO
+    saldo_a_pagar = _ZERO
+    transportadora_set: set[str] = set()
+
+    for item, lote, prod in item_rows:
+        if lote.transportadora:
+            transportadora_set.add(lote.transportadora)
+        valor_unit = _valor_unit_for(prod)
+        total = valor_unit * Decimal(item.quantidade or 0)
+        frete_pct = _frete_pct_for(prod, cot_params)
+        is_fechado = lote.fechamento is not None
+        saldo = (total * frete_pct).quantize(Decimal("0.01")) if is_fechado else None
+        rows.append(ImportFreteRow(
+            kind="item",
+            id=item.id,
+            transportadora=lote.transportadora,
+            lote_id=lote.id,
+            lote_nome=lote.nome,
+            abertura=lote.abertura,
+            fechamento=lote.fechamento,
+            modelo_bling=prod.modelo_bling,
+            sku=prod.sku,
+            quantidade=item.quantidade,
+            valor_unit=valor_unit,
+            total=total.quantize(Decimal("0.01")),
+            frete_pct=frete_pct,
+            saldo=saldo,
+            pago=bool(item.pago),
+            obs=None,
+        ))
+        if not is_fechado:
+            total_a_entregar += total
+        elif saldo is not None and not item.pago:
+            saldo_a_pagar += saldo
+
+    # Ajustes manuais — entries de ImportResumo com transportadora set.
+    ajustes_q = (
+        select(ImportResumo)
+        .where(
+            ImportResumo.categoria == categoria,
+            ImportResumo.transportadora.isnot(None),
+        )
+        .order_by(ImportResumo.data.desc())
+    )
+    if transportadora:
+        ajustes_q = ajustes_q.where(ImportResumo.transportadora == transportadora)
+
+    for aj in (await session.execute(ajustes_q)).scalars().all():
+        if aj.transportadora:
+            transportadora_set.add(aj.transportadora)
+        saldo_aj = Decimal(aj.saldo or 0)
+        rows.append(ImportFreteRow(
+            kind="ajuste",
+            id=aj.id,
+            transportadora=aj.transportadora,
+            lote_id=None,
+            lote_nome=aj.lote_nome,
+            abertura=aj.data,
+            fechamento=None,
+            modelo_bling=None,
+            sku=None,
+            quantidade=None,
+            valor_unit=None,
+            total=None,
+            frete_pct=None,
+            saldo=saldo_aj,
+            pago=False,
+            obs=aj.obs,
+        ))
+        # Ajustes contam direto no "saldo a pagar" (sem conceito de
+        # fechamento — operador já definiu o valor manualmente).
+        saldo_a_pagar += saldo_aj
+
+    return ImportFreteList(
+        rows=rows,
+        transportadoras=sorted(transportadora_set),
+        total_a_entregar=total_a_entregar.quantize(Decimal("0.01")),
+        saldo_a_pagar=saldo_a_pagar.quantize(Decimal("0.01")),
+    )
+
+
+@router.patch("/lote_item/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def patch_lote_item(
+    item_id: UUID,
+    body: ImportLoteItemPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> None:
+    """Hoje só atualiza `pago` (toggle do checkbox na aba Frete)."""
+    row = await session.get(ImportLoteItem, item_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "lote_item_not_found"})
+    for k, v in body.model_dump(exclude_unset=True).items():
+        if v is not None:
+            setattr(row, k, v)
+    await session.commit()
+
+
+@router.post("/lote_ajuste", response_model=ImportResumoOut, status_code=status.HTTP_201_CREATED)
+async def create_lote_ajuste(
+    body: ImportFreteAjusteCreate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> ImportResumoOut:
+    """Ajuste manual de frete — cria uma row em ImportResumo com
+    transportadora setada. Aparece (1) na aba Frete (agregação) e (2)
+    na aba Resumo (lançamento avulso, comportamento existente)."""
+    row = ImportResumo(
+        categoria=body.categoria,
+        data=body.abertura,
+        saldo=body.saldo,
+        obs=body.obs,
+        transportadora=body.transportadora,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return ImportResumoOut.model_validate(row, from_attributes=True)
 
 
 # ── Cotação ────────────────────────────────────────────────────────

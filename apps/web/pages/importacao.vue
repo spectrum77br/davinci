@@ -42,7 +42,7 @@ const canDelete = computed(() => {
 // aba Mala, que é onde realmente importam.
 // Sub-tab interno: 'mala' é a aba principal "Importação" (mantido o key
 // histórico pra não renomear toda a página; o label mostra "Importação").
-type Tab = 'mala' | 'resumo' | 'cotacao' | 'kit'
+type Tab = 'mala' | 'resumo' | 'cotacao' | 'kit' | 'frete'
 const tab = ref<Tab>('mala')
 
 // ── Categoria (selector top-level, espelha /pricing/tabela) ───────────
@@ -52,11 +52,13 @@ const CATEGORIAS = [
   { key: 'eletro' as const, label: 'Eletro', icon: Zap },
   { key: 'celular' as const, label: 'Celular', icon: Smartphone },
 ]
-// Eletro não tem aba Kit (produtos não viram composto).
+// Eletro não tem aba Kit (produtos não viram composto). Aba Frete é
+// específica do Celular (etapa 4) — operacional de transportadora,
+// saldo a pagar, ajustes manuais.
 const SUBTABS_BY_CATEGORIA: Record<Categoria, readonly Tab[]> = {
   mala: ['mala', 'resumo', 'cotacao', 'kit'],
   eletro: ['mala', 'resumo', 'cotacao'],
-  celular: ['mala', 'resumo', 'cotacao', 'kit'],
+  celular: ['mala', 'resumo', 'cotacao', 'kit', 'frete'],
 }
 const route = useRoute()
 const router = useRouter()
@@ -72,7 +74,8 @@ const countByCategoria = ref<Record<string, number>>({})
 function subtabLabel(t: Tab): string {
   return t === 'mala' ? 'Importação'
     : t === 'resumo' ? 'Resumo'
-    : t === 'cotacao' ? 'Cotação' : 'Kit'
+    : t === 'cotacao' ? 'Cotação'
+    : t === 'frete' ? 'Frete' : 'Kit'
 }
 function catQs(): string {
   return `categoria=${categoria.value}`
@@ -117,6 +120,32 @@ type CotacaoParams = {
   frete_swap_pct: string | number
   frete_acessorios_pct: string | number
   adicional: string | number
+}
+
+// ── Frete (etapa 4) ─────────────────────────────────────────────
+type FreteRow = {
+  kind: 'item' | 'ajuste'
+  id: string
+  transportadora: string | null
+  lote_id: string | null
+  lote_nome: string | null
+  abertura: string | null  // YYYY-MM-DD
+  fechamento: string | null
+  modelo_bling: string | null
+  sku: string | null
+  quantidade: number | null
+  valor_unit: string | number | null
+  total: string | number | null
+  frete_pct: string | number | null
+  saldo: string | number | null
+  pago: boolean
+  obs: string | null
+}
+type FreteList = {
+  rows: FreteRow[]
+  transportadoras: string[]
+  total_a_entregar: string | number
+  saldo_a_pagar: string | number
 }
 type Lote = {
   id: string
@@ -211,6 +240,78 @@ const cotacaoParams = ref<CotacaoParams>({
   frete_acessorios_pct: 0.20,
   adicional: 12.00,
 })
+
+// Frete (aba Frete do Celular, etapa 4).
+const frete = ref<FreteList>({
+  rows: [],
+  transportadoras: [],
+  total_a_entregar: 0,
+  saldo_a_pagar: 0,
+})
+const freteFiltroTransp = ref<string>('')
+const freteOcultaPagos = ref<boolean>(true)
+const freteAjusteModalOpen = ref(false)
+const freteAjusteForm = reactive<{
+  transportadora: string; abertura: string; saldo: string; obs: string
+}>({
+  transportadora: '', abertura: new Date().toISOString().slice(0, 10),
+  saldo: '', obs: '',
+})
+
+async function reloadFrete() {
+  if (categoria.value !== 'celular') return
+  const qs = new URLSearchParams({ categoria: categoria.value })
+  if (freteFiltroTransp.value) qs.set('transportadora', freteFiltroTransp.value)
+  if (freteOcultaPagos.value) qs.set('pago', 'false')
+  try {
+    frete.value = await api<FreteList>(`/api/importacao/frete?${qs.toString()}`)
+  } catch (e: any) {
+    errorText.value = e?.data?.detail?.code || 'erro_frete'
+  }
+}
+
+async function toggleFretePago(r: FreteRow) {
+  if (r.kind !== 'item' || !canEdit.value) return
+  const novo = !r.pago
+  r.pago = novo  // otimista
+  try {
+    await api(`/api/importacao/lote_item/${r.id}`, {
+      method: 'PATCH', body: { pago: novo },
+    })
+    await reloadFrete()
+  } catch (e: any) {
+    r.pago = !novo  // revert
+    errorText.value = e?.data?.detail?.code || 'erro_pago'
+  }
+}
+
+async function salvarFreteAjuste() {
+  const saldoNum = Number(String(freteAjusteForm.saldo).replace(',', '.'))
+  if (!freteAjusteForm.transportadora.trim() || !freteAjusteForm.abertura
+      || !Number.isFinite(saldoNum)) {
+    errorText.value = 'transportadora, abertura e saldo são obrigatórios'
+    return
+  }
+  try {
+    await api('/api/importacao/lote_ajuste', {
+      method: 'POST',
+      body: {
+        transportadora: freteAjusteForm.transportadora.trim(),
+        abertura: freteAjusteForm.abertura,
+        saldo: saldoNum,
+        obs: freteAjusteForm.obs.trim() || null,
+        categoria: categoria.value,
+      },
+    })
+    freteAjusteModalOpen.value = false
+    freteAjusteForm.transportadora = ''
+    freteAjusteForm.saldo = ''
+    freteAjusteForm.obs = ''
+    await reloadFrete()
+  } catch (e: any) {
+    errorText.value = e?.data?.detail?.code || 'erro_ajuste'
+  }
+}
 
 // Kit grid state. `kitMarkMap` é o lookup canônico (key → mark) —
 // usado pra render e pra resync. Re-construído a cada loadKit. As
@@ -382,6 +483,9 @@ async function loadAll() {
       try {
         cotacaoParams.value = await api<CotacaoParams>(`/api/importacao/cotacao/params?${qs}`)
       } catch { /* deixa defaults — UI mostra valores razoáveis */ }
+      // Frete (etapa 4): carrega ao montar; futuras edições no
+      // filtro/toggle disparam reloadFrete() direto.
+      await reloadFrete()
     }
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -1862,6 +1966,158 @@ onScopeDispose(() => {
             <Save class="size-3.5" />
             {{ creatingProduct ? 'Salvando…' : 'Salvar' }}
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── TAB FRETE (Celular, etapa 4) ─────────────────────────
+         Agrega items dos lotes + ajustes manuais. `valor_unit` e
+         `frete_pct` derivam de ImportProduct (aba Cotação) — não há
+         input por linha aqui exceto o checkbox `pago`. -->
+    <div v-if="tab === 'frete' && categoria === 'celular'" class="space-y-3">
+      <!-- Cards de resumo no topo. -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="border rounded-md p-3 bg-amber-50 dark:bg-amber-900/20">
+          <div class="text-[10px] uppercase tracking-wide text-amber-700 dark:text-amber-300 font-semibold">
+            Total a entregar
+          </div>
+          <div class="text-lg font-semibold mt-1">{{ fmtMoney(frete.total_a_entregar) }}</div>
+          <div class="text-[10px] text-muted-foreground">lotes ainda sem fechamento</div>
+        </div>
+        <div class="border rounded-md p-3 bg-red-50 dark:bg-red-900/20">
+          <div class="text-[10px] uppercase tracking-wide text-red-700 dark:text-red-300 font-semibold">
+            Saldo a pagar
+          </div>
+          <div class="text-lg font-semibold mt-1">{{ fmtMoney(frete.saldo_a_pagar) }}</div>
+          <div class="text-[10px] text-muted-foreground">lotes fechados + ajustes, ainda não pagos</div>
+        </div>
+      </div>
+
+      <!-- Filtros + botão de ajuste. -->
+      <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
+        <label class="inline-flex items-center gap-1">
+          <span class="text-muted-foreground">Transportadora:</span>
+          <select
+            class="h-7 border rounded px-2 bg-background"
+            v-model="freteFiltroTransp" @change="reloadFrete"
+          >
+            <option value="">— todas —</option>
+            <option v-for="t in frete.transportadoras" :key="t" :value="t">{{ t }}</option>
+          </select>
+        </label>
+        <label class="inline-flex items-center gap-1 ml-2">
+          <input type="checkbox" v-model="freteOcultaPagos" @change="reloadFrete" />
+          <span>oculta pagos</span>
+        </label>
+        <button
+          v-if="canEdit"
+          class="ml-auto inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 hover:opacity-90"
+          @click="freteAjusteModalOpen = true"
+        >
+          <Plus class="size-3" /> Ajuste manual
+        </button>
+      </div>
+
+      <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 360px)">
+        <table class="grid-table w-full text-xs border-collapse">
+          <thead class="thead-sticky">
+            <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
+              <th class="text-left">Transportadora</th>
+              <th class="text-left">Lote</th>
+              <th class="text-left">Abertura</th>
+              <th class="text-left">Fechamento</th>
+              <th class="text-left">Modelo</th>
+              <th class="text-right">Qtd</th>
+              <th class="text-right">Valor Unit.</th>
+              <th class="text-right">Total</th>
+              <th class="text-right">Frete %</th>
+              <th class="text-right">Saldo</th>
+              <th class="text-center">Pago</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!loading && frete.rows.length === 0">
+              <td colspan="11" class="py-6 text-center text-muted-foreground">
+                Nenhum item — crie um lote (aba Importação) ou um ajuste manual.
+              </td>
+            </tr>
+            <tr v-for="r in frete.rows" :key="`${r.kind}-${r.id}`"
+              :class="r.kind === 'ajuste' ? 'bg-amber-50/40 dark:bg-amber-900/10' : 'even:bg-muted/10'">
+              <td>{{ r.transportadora || '—' }}</td>
+              <td>{{ r.lote_nome || (r.kind === 'ajuste' ? '(ajuste)' : '—') }}</td>
+              <td>{{ r.abertura || '—' }}</td>
+              <td>{{ r.fechamento || (r.kind === 'item' ? 'Pendente' : '—') }}</td>
+              <td>
+                <span v-if="r.modelo_bling">{{ r.modelo_bling }}</span>
+                <span v-else class="italic text-muted-foreground">{{ r.obs || '(sem modelo)' }}</span>
+              </td>
+              <td class="text-right">{{ r.quantidade ?? '—' }}</td>
+              <td class="text-right">{{ r.valor_unit == null ? '—' : fmtMoney(r.valor_unit) }}</td>
+              <td class="text-right">{{ r.total == null ? '—' : fmtMoney(r.total) }}</td>
+              <td class="text-right">
+                <span v-if="r.frete_pct != null">{{ (Number(r.frete_pct) * 100).toFixed(0) }}%</span>
+                <span v-else>—</span>
+              </td>
+              <td class="text-right font-semibold"
+                :class="r.saldo != null && Number(r.saldo) > 0 ? 'text-red-700' : ''">
+                {{ r.saldo == null ? 'Pendente' : fmtMoney(r.saldo) }}
+              </td>
+              <td class="text-center">
+                <input
+                  v-if="r.kind === 'item'"
+                  type="checkbox" :checked="r.pago" :disabled="!canEdit"
+                  @change="toggleFretePago(r)"
+                />
+                <span v-else class="text-muted-foreground text-[10px]">—</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Modal: Ajuste manual de frete -->
+      <div v-if="freteAjusteModalOpen"
+        class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+        @click.self="freteAjusteModalOpen = false">
+        <div class="bg-background rounded-lg shadow-xl w-full max-w-md">
+          <div class="flex items-center justify-between border-b px-4 py-3">
+            <h3 class="font-semibold text-sm">Ajuste manual de frete</h3>
+            <button class="text-muted-foreground hover:text-foreground"
+              @click="freteAjusteModalOpen = false">
+              <X class="size-4" />
+            </button>
+          </div>
+          <div class="p-4 space-y-3 text-sm">
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] text-muted-foreground">Transportadora *</span>
+              <input v-model="freteAjusteForm.transportadora"
+                class="h-8 border rounded px-2 bg-background" placeholder="ex: Cargo X" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] text-muted-foreground">Data *</span>
+              <input v-model="freteAjusteForm.abertura" type="date"
+                class="h-8 border rounded px-2 bg-background" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] text-muted-foreground">
+                Saldo (R$) * — negativo se for desconto/crédito
+              </span>
+              <input v-model="freteAjusteForm.saldo" type="number" step="0.01"
+                class="h-8 border rounded px-2 bg-background text-right" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] text-muted-foreground">Observação</span>
+              <input v-model="freteAjusteForm.obs"
+                class="h-8 border rounded px-2 bg-background"
+                placeholder="motivo, referência etc." />
+            </label>
+          </div>
+          <div class="flex gap-2 justify-end border-t px-4 py-3">
+            <button class="rounded-md border px-3 py-1 text-sm"
+              @click="freteAjusteModalOpen = false">Cancelar</button>
+            <button class="rounded-md bg-primary text-primary-foreground px-3 py-1 text-sm"
+              @click="salvarFreteAjuste">Salvar</button>
+          </div>
         </div>
       </div>
     </div>

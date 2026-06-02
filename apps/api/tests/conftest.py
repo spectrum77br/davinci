@@ -168,6 +168,13 @@ _CLEANUP_TABLES = (
     "import_kit_marks",
     "import_kit_bases",
     "import_kit_variations",
+    # Tabelas da aba Importação (etapas 1-4 do Celular). Ordem: filhas
+    # antes das pais — items refs lotes+products, resumo refs lotes.
+    "import_lote_items",
+    "import_resumo",
+    "import_lotes",
+    "import_products",
+    "import_cotacao_params",
     "alerts",
     "listing_requests",
     "listings",
