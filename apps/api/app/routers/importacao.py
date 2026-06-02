@@ -672,28 +672,105 @@ async def _enrich_lote(
     session: AsyncSession,
     lote: ImportLote,
 ) -> ImportLoteOut:
-    """Computes previsto = SUM(quant × custo) + saldo + prazo."""
-    previsto_row = await session.execute(
-        select(
-            func.coalesce(
-                func.sum(ImportLoteItem.quantidade * ImportProduct.custo_bling),
-                0,
+    """Enrichment do lote pra resposta da UI. Convenções por categoria:
+
+    `previsto`:
+      * Se `lote.previsto_manual` setado (não null) → usa override.
+        Celular usa isso pelo header de lote ativo (operador edita).
+      * Senão → computed via SUM(quantidade × custo_bling) dos items.
+        Mala usa isso (comportamento original preservado).
+
+    `realizado`:
+      * Mala/Eletro → lê `lote.realizado` (coluna gravada, operador edita).
+      * Celular → computed via SUM(custoBRL(valor_usd) × estoque_bling)
+        usando ImportCotacaoParams da categoria. Operador edita
+        valor_usd por produto (aba Cotação); `realizado` é derivado.
+
+    `saldo` = previsto - realizado. `prazo` = (fechamento - abertura).days.
+    """
+    is_celular = (lote.categoria or "").lower() == "celular"
+
+    # previsto: override (manual) > computed (SUM qty × custo_bling).
+    if lote.previsto_manual is not None:
+        previsto = Decimal(lote.previsto_manual)
+    else:
+        previsto_row = await session.execute(
+            select(
+                func.coalesce(
+                    func.sum(ImportLoteItem.quantidade * ImportProduct.custo_bling),
+                    0,
+                )
             )
+            .select_from(ImportLoteItem)
+            .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
+            .where(ImportLoteItem.lote_id == lote.id)
         )
-        .select_from(ImportLoteItem)
-        .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
-        .where(ImportLoteItem.lote_id == lote.id)
-    )
-    previsto = Decimal(previsto_row.scalar() or 0)
-    realizado = Decimal(lote.realizado or 0)
+        previsto = Decimal(previsto_row.scalar() or 0)
+
+    # realizado: branch por categoria.
+    if is_celular:
+        # Pra celular: SUM(custoBRL × estoque) — custoBRL =
+        # valor_usd × câmbio × (1 + frete_regular_pct) + adicional.
+        # Adicional aplica por linha (não somatório separado) — coerente
+        # com a aba Cotação. estoque NULL → 0 (linha não contribui).
+        cot = (await session.execute(
+            select(ImportCotacaoParams).where(ImportCotacaoParams.categoria == "celular")
+        )).scalar_one_or_none()
+        cambio = Decimal(cot.taxa_cambio) if cot else Decimal("5.10")
+        frete = Decimal(cot.frete_regular_pct) if cot else Decimal("0.16")
+        adic = Decimal(cot.adicional) if cot else Decimal("12.00")
+        realizado_row = await session.execute(
+            select(ImportProduct.valor_usd, ImportProduct.estoque_bling)
+            .select_from(ImportLoteItem)
+            .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
+            .where(ImportLoteItem.lote_id == lote.id)
+        )
+        realizado = Decimal("0")
+        for usd, est in realizado_row.all():
+            if usd is None or est is None or Decimal(usd) <= 0 or int(est) <= 0:
+                continue
+            custo_unit = Decimal(usd) * cambio * (Decimal("1") + frete) + adic
+            realizado += custo_unit * Decimal(int(est))
+        realizado = realizado.quantize(Decimal("0.01"))
+    else:
+        realizado = Decimal(lote.realizado or 0)
+
     saldo = previsto - realizado
     prazo = (lote.fechamento - lote.abertura).days if lote.fechamento else None
     return ImportLoteOut(
         id=lote.id, categoria=lote.categoria, nome=lote.nome, abertura=lote.abertura,
         fechamento=lote.fechamento, realizado=realizado,
+        transportadora=lote.transportadora, obs=lote.obs,
+        previsto_manual=lote.previsto_manual,
         previsto=previsto, saldo=saldo, prazo=prazo,
         is_aberto=lote.fechamento is None,
     )
+
+
+@router.get("/lote-ativo", response_model=ImportLoteOut | None)
+async def get_lote_ativo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+    categoria: _CategoriaQ = "celular",
+) -> ImportLoteOut | None:
+    """Lote ativo = mais recente sem fechamento. Usado pelo header da
+    aba Importação Celular como resumo. Retorna null se não houver
+    lote aberto pra essa categoria — frontend mostra "Nenhum lote
+    ativo" e botão pra criar."""
+    lote = (
+        await session.execute(
+            select(ImportLote)
+            .where(
+                ImportLote.categoria == categoria,
+                ImportLote.fechamento.is_(None),
+            )
+            .order_by(ImportLote.abertura.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if lote is None:
+        return None
+    return await _enrich_lote(session, lote)
 
 
 @router.get("/lotes", response_model=list[ImportLoteOut])

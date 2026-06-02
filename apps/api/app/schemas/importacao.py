@@ -142,6 +142,9 @@ class ImportLotePatch(BaseModel):
     realizado: Decimal | None = None
     transportadora: str | None = None
     obs: str | None = None
+    # Override do previsto computed. Pra zerar de volta pro computed,
+    # mande explicitamente null (model_dump exclude_unset=True respeita).
+    previsto_manual: Decimal | None = None
 
 
 class ImportLoteOut(BaseModel):
@@ -154,6 +157,10 @@ class ImportLoteOut(BaseModel):
     realizado: Decimal
     transportadora: str | None = None
     obs: str | None = None
+    # Override do previsto (quando NULL, _enrich_lote calcula via SUM).
+    # Frontend usa pra saber se mostra o valor como editável (manual) ou
+    # como label (computed).
+    previsto_manual: Decimal | None = None
     # Computed by the router:
     previsto: Decimal = Decimal("0")
     saldo: Decimal = Decimal("0")

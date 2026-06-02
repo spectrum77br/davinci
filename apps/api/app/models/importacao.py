@@ -146,6 +146,11 @@ class ImportLote(Base, TimestampMixin):
     # NULL e a aba Frete da mala (se existir no futuro) decide se usa.
     transportadora: Mapped[str | None] = mapped_column(String(100), nullable=True)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Override do `previsto` computed (migration 0121). Quando NULL,
+    # _enrich_lote calcula via SUM(qty × custo_bling) — Mala usa assim.
+    # Quando setado, sobrescreve — Celular permite operador editar
+    # diretamente no header de lote ativo.
+    previsto_manual: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
 
 class ImportLoteItem(Base, TimestampMixin):
