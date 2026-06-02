@@ -97,33 +97,64 @@ def generate_product_name(
 # ── Celular: kit = telefone + acessório(s) ──────────────────────────
 
 
+def _celular_tag(sku_base: str) -> str | None:
+    """Tag (sufixo após o último '.') do sku_base — representa a
+    loja/variante do estoque. Os acessórios existem no Bling como
+    `a001.sa`, `a001.pi`, `a001.ra`, etc; o kit precisa apontar pra
+    variante da MESMA tag do telefone. Retorna None se sku_base
+    não tem '.', sinalizando fallback sem tag."""
+    parts = (sku_base or "").rsplit(".", 1)
+    if len(parts) != 2 or not parts[1]:
+        return None
+    return parts[1]
+
+
 def celular_kit_components(sku_base: str, variation_code: str) -> list[str]:
     """Componentes de um kit Celular: o próprio telefone (sku_base) +
-    os acessórios definidos pelo variation_code.
+    os acessórios definidos pelo variation_code, com a TAG do sku_base
+    propagada pra cada acessório.
 
-    Variations fixas (seed 0117):
-      "a001"        → [sku_base, "a001"]
-      "a003"        → [sku_base, "a003"]
-      "a004"        → [sku_base, "a004"]
-      "a003+a004"   → [sku_base, "a003", "a004"]
+    Variations fixas (seed 0117) com tag (ex: sku_base="i205.sa"):
+      "a001"        → ["i205.sa", "a001.sa"]
+      "a003"        → ["i205.sa", "a003.sa"]
+      "a004"        → ["i205.sa", "a004.sa"]
+      "a003+a004"   → ["i205.sa", "a003.sa", "a004.sa"]
+
+    Sku_base sem tag (sem '.', fallback raro): acessórios ficam sem
+    sufixo. Não deveria acontecer com produtos populados — só guarda
+    de borda.
 
     Acessórios são SKUs standalone gravados em `products`; o caller
     resolve cada um pra bling_product_id e monta a estrutura.
     """
     acessorios = [p.strip() for p in (variation_code or "").split("+") if p.strip()]
-    return [sku_base] + acessorios
+    tag = _celular_tag(sku_base)
+    if tag is None:
+        return [sku_base] + acessorios
+    return [sku_base] + [f"{a}.{tag}" for a in acessorios]
 
 
 def build_celular_kit_sku(sku_base: str, variation_code: str) -> str:
-    """SKU literal do kit Celular: base + '+' + variation_code.
+    """SKU literal do kit Celular: base + '+' + cada acessório com a
+    tag do base. Tag = sufixo após o último '.' no sku_base (loja
+    variante). Acessórios existem no Bling como `a001.sa`, `a001.pi`,
+    etc — o SKU do kit deve apontar pra variante correspondente.
+
     Exemplos:
-      ("i220.sa", "a001")        → "i220.sa+a001"
-      ("i220.sa", "a003+a004")   → "i220.sa+a003+a004"
+      ("i205.sa", "a001")        → "i205.sa+a001.sa"
+      ("i205.sa", "a003+a004")   → "i205.sa+a003.sa+a004.sa"
+      ("dg052.ci", "a001")       → "dg052.ci+a001.ci"
+      ("dg024.ra", "a003+a004")  → "dg024.ra+a003.ra+a004.ra"
+      ("xyz", "a001")            → "xyz+a001"   (base sem tag, fallback)
     """
     code = (variation_code or "").strip()
     if not code:
         return sku_base
-    return f"{sku_base}+{code}"
+    tag = _celular_tag(sku_base)
+    if tag is None:
+        return f"{sku_base}+{code}"
+    accessories = [a for a in code.split("+") if a]
+    return f"{sku_base}+" + "+".join(f"{a}.{tag}" for a in accessories)
 
 
 def generate_celular_kit_name(

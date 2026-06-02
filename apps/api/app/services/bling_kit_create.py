@@ -102,10 +102,11 @@ def _resolve_component_skus(
       * mala: tamanhos numéricos viram `{sku_base}.{N}`; acessórios
         (a075, bp003…) vão como-são. variation_code "8+18" →
         ["{base}.8", "{base}.18"]; "12+a075" → ["{base}.12", "a075"].
-      * celular: variation_code é uma combinação de acessórios (a001,
-        a003, a004); o sku_base É o telefone, vai como componente
-        principal junto. "a001" → [sku_base, "a001"]; "a003+a004" →
-        [sku_base, "a003", "a004"]. Ver `celular_kit_components`.
+      * celular: sku_base É o telefone, vai como componente principal;
+        cada acessório herda a TAG do sku_base (sufixo após '.').
+        sku_base="i205.sa" + "a001"        → ["i205.sa", "a001.sa"];
+        sku_base="dg024.ra" + "a003+a004"  → ["dg024.ra","a003.ra","a004.ra"].
+        Ver `celular_kit_components`.
     """
     if categoria == "celular":
         return celular_kit_components(sku_base, variation_code)
