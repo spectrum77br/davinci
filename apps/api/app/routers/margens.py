@@ -23,8 +23,8 @@ from app.schemas.margens import (
     MargensPatch,
 )
 from app.security.cipher import decrypt_json
+from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
-from app.services.situacao_audit import record_situacao_change
 from app.services.verificar_margem import (
     SNAPSHOT_TABLE as _VERIFICAR_MARGEM_TABLE,
 )
@@ -380,18 +380,32 @@ async def patch_marketplace_observacao(
     pedido_bling: str,
     body: MarketplaceObsPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("margem", "edit"))],
+    user: Annotated[User, Depends(require_permission("margem", "edit"))],
 ) -> dict:
     """Salva observacao em todas as linhas (itens) do pedido em bling_orders."""
     next_value = (body.observacao or "").strip() or None
+    prev_value = (
+        await session.execute(
+            select(BlingOrder.observacao).where(BlingOrder.numero == pedido_bling).limit(1)
+        )
+    ).scalar_one_or_none()
     result = await session.execute(
         update(BlingOrder)
         .where(BlingOrder.numero == pedido_bling)
         .values(observacao=next_value)
     )
-    await session.commit()
     if result.rowcount == 0:
         raise HTTPException(404, detail={"code": "bling_order_not_found"})
+    await record_margem_audit(
+        session,
+        acao="observacao",
+        pedido_bling=pedido_bling,
+        valor_antigo=prev_value,
+        valor_novo=next_value,
+        origem="margens",
+        mudado_por=user.id,
+    )
+    await session.commit()
     logger.info(
         "marketplace_observacao_patched",
         pedido_bling=pedido_bling,
@@ -527,7 +541,7 @@ async def sync_bling_from_marketplace(
 async def sync_bling_from_saldo_final(
     bling_order_item_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("margem", "edit"))],
+    user: Annotated[User, Depends(require_permission("margem", "edit"))],
     body: Annotated[SaldoFinalPatch | None, Body()] = None,
 ) -> dict:
     """One-shot apply: grava o Saldo Final como `valor_base` no Bling.
@@ -543,7 +557,7 @@ async def sync_bling_from_saldo_final(
     row = (await session.execute(
         text(
             f"""
-            SELECT v.saldo_final, v.pedido_bling, v.sku
+            SELECT v.saldo_final, v.pedido_bling, v.sku, v.bling_valorbase_item
             FROM {_VERIFICAR_MARGEM_TABLE} v
             WHERE v.bling_order_item_id = :id
             LIMIT 1
@@ -577,6 +591,16 @@ async def sync_bling_from_saldo_final(
         valorbase=valorbase,
         taxacomissao=0,
         custofrete=0,
+    )
+    await record_margem_audit(
+        session,
+        acao="saldo_final",
+        pedido_bling=str(row.pedido_bling),
+        sku=row.sku,
+        valor_antigo=row.bling_valorbase_item,
+        valor_novo=valorbase,
+        origem="margens",
+        mudado_por=user.id,
     )
     await session.commit()
 
@@ -778,13 +802,14 @@ async def _apply_bling_decision_by_pedido(
                         "message": message or "Falha ao atualizar situacao no Bling",
                     },
                 ) from e
-        await record_situacao_change(
+        await record_margem_audit(
             session,
+            acao="situacao",
             pedido_bling=str(pedido_bling),
             bling_id=order.bling_id,
             sku=sku,
-            situacao_antiga=current_situacao_id,
-            situacao_nova=situacao_id,
+            valor_antigo=current_situacao_id,
+            valor_novo=situacao_id,
             origem="margens",
             mudado_por=actor_id,
         )

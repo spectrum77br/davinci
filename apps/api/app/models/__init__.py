@@ -3,7 +3,6 @@ from app.models.audit import AuditFinding, AuditRun, AuditUpload
 from app.models.auth_code import AuthCode
 from app.models.base import Base
 from app.models.bling_order import BlingOrder
-from app.models.bling_situacao_audit import BlingSituacaoAudit
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.devolution import Devolution
 from app.models.financeiro import (
@@ -53,6 +52,7 @@ from app.models.importacao import (
 )
 from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
+from app.models.margem_audit import MargemAudit
 from app.models.margens import Margens
 from app.models.marketing import (
     MarketingAccount,
@@ -101,7 +101,6 @@ __all__ = [
     "BackgroundJobType",
     "Base",
     "BlingOrder",
-    "BlingSituacaoAudit",
     "Cadastro",
     "CadastroStatus",
     "CadastroStore",
@@ -129,6 +128,7 @@ __all__ = [
     "ListingRequestStatus",
     "ListingStatus",
     "MARKETPLACES",
+    "MargemAudit",
     "Margens",
     "MarketingAccount",
     "MarketingCampaign",

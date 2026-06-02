@@ -53,6 +53,15 @@ async def require_admin(user: Annotated[User, Depends(require_active_user)]) -> 
     return user
 
 
+async def require_owner(user: Annotated[User, Depends(require_active_user)]) -> User:
+    """Restringe ao dono da conta (spectrum77) — identificado pelo
+    `owner_open_id` do settings. Mais estrito que require_admin (que cobre
+    qualquer admin)."""
+    if user.open_id != _settings.owner_open_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "owner_only"})
+    return user
+
+
 def require_permission(resource: str, action: Literal["view", "edit", "delete"]):
     async def dep(user: Annotated[User, Depends(require_active_user)]) -> User:
         if user.role == UserRole.ADMIN:

@@ -44,11 +44,11 @@ from app.db import session_scope
 from app.models import BlingOrder, Integration, IntegrationPlatform
 from app.models.company import Store
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
-from app.services.situacao_audit import record_situacao_change
 
 logger = structlog.get_logger()
 
@@ -230,13 +230,14 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                     summary["bling_updated"] += 1
                     _cand = cand_by_id.get(int(bling_id))
                     if _cand is not None:
-                        await record_situacao_change(
+                        await record_margem_audit(
                             session,
+                            acao="situacao",
                             pedido_bling=str(_cand.numero),
                             bling_id=bling_id,
                             sku=_cand.item_codigo,
-                            situacao_antiga=_cand.situacao,
-                            situacao_nova=_SHIPPED_SITUACAO,
+                            valor_antigo=_cand.situacao,
+                            valor_novo=_SHIPPED_SITUACAO,
                             origem="job_envio",
                             mudado_por=None,
                         )

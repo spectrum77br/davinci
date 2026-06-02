@@ -41,8 +41,8 @@ from app.config import get_settings
 from app.models import BlingOrder, Devolution, Integration, Product
 from app.models.enums import IntegrationPlatform
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
-from app.services.situacao_audit import record_situacao_change
 from app.services.sku_tags import SUFFIX_TAGS as _SKU_SUFFIX_TAGS
 from app.services.sku_tags import classify_sku_tag
 
@@ -227,12 +227,13 @@ async def apply_order_situacao(
             "devolution_situacao_patched",
             pedido_bling=pedido, bling_id=int(bling_id), situacao=target,
         )
-        await record_situacao_change(
+        await record_margem_audit(
             session,
+            acao="situacao",
             pedido_bling=pedido,
             bling_id=bling_id,
-            situacao_antiga=situacao_antiga,
-            situacao_nova=target,
+            valor_antigo=situacao_antiga,
+            valor_novo=target,
             origem="devolucao",
             mudado_por=actor_id,
         )

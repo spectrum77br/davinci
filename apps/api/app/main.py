@@ -16,23 +16,23 @@ from app.routers import companies as companies_router
 from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
 from app.routers import devolutions as devolutions_router
-from app.routers import financeiro as financeiro_router
-from app.routers import importacao as importacao_router
-from app.routers import nf_upload as nf_upload_router
 from app.routers import discrepancies as discrepancies_router
 from app.routers import estoque as estoque_router
+from app.routers import financeiro as financeiro_router
+from app.routers import importacao as importacao_router
 from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
+from app.routers import margem_audit as margem_audit_router
 from app.routers import margens as margens_router
 from app.routers import metrics as metrics_router
+from app.routers import nf_upload as nf_upload_router
 from app.routers import oauth as oauth_router
 from app.routers import pricing as pricing_router
 from app.routers import products as products_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
 from app.routers import settings as settings_router
-from app.routers import situacao_audit as situacao_audit_router
 from app.routers import stores as stores_router
 from app.routers import sync as sync_router
 from app.routers import tarefas as tarefas_router
@@ -152,7 +152,7 @@ app.include_router(discrepancies_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(metrics_router.router)
 app.include_router(margens_router.router)
-app.include_router(situacao_audit_router.router)
+app.include_router(margem_audit_router.router)
 app.include_router(tarefas_router.router)
 app.include_router(refunds_router.router)
 app.include_router(devolutions_router.router)

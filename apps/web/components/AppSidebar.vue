@@ -64,6 +64,7 @@ type Item = {
   icon: any
   resource?: string
   adminOnly?: boolean
+  ownerOnly?: boolean
   featureFlag?: 'marketing'
 }
 
@@ -113,7 +114,7 @@ const sections: Section[] = [
     label: 'Sistema',
     items: [
       { to: '/sincronizacoes', label: 'Sincronizações', icon: RefreshCw, resource: 'sincronizacoes' },
-      { to: '/situacao-audit', label: 'Auditoria de situações', icon: ClipboardList, resource: 'sincronizacoes' },
+      { to: '/margem-audit', label: 'Auditoria da Margem', icon: ClipboardList, ownerOnly: true },
       { to: '/integrations', label: 'Integrações', icon: Plug, resource: 'integracoes' },
       { to: '/alertas', label: 'Alertas', icon: Bell, resource: 'alertas' },
     ],
@@ -154,6 +155,8 @@ const isOperator = computed(() => {
   return !hasOtherAccess
 })
 
+const isOwner = computed(() => auth.user?.email === 'spectrum77@tuta.com')
+
 const visibleSections = computed(() => {
   if (isOperator.value) {
     return [
@@ -169,6 +172,7 @@ const visibleSections = computed(() => {
       ...s,
       items: s.items.filter((it) => {
         if (it.adminOnly && !auth.isAdmin) return false
+        if (it.ownerOnly && !isOwner.value) return false
         if (it.featureFlag === 'marketing' && !enableMarketing.value) return false
         return true
       }),
