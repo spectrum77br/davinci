@@ -610,6 +610,17 @@ async def sync_bling_from_saldo_final(
         origem="margens",
         mudado_por=user.id,
     )
+    # Gravar o Saldo Efetivo como final tambem aprova o pedido no DaVinci
+    # (status='Aprovado', verificado=True). update_bling=False: o pedido ja foi
+    # patcheado financeiramente acima, nao mexemos na situacao do Bling aqui.
+    await _apply_bling_decision_by_pedido(
+        session,
+        user.id,
+        pedido_bling=row.pedido_bling,
+        sku=row.sku,
+        new_status="Aprovado",
+        update_bling=False,
+    )
     await session.commit()
 
     logger.info(
@@ -624,6 +635,7 @@ async def sync_bling_from_saldo_final(
         "valorbase": float(valorbase),
         "taxacomissao": 0.0,
         "custofrete": 0.0,
+        "status": "Aprovado",
     }
 
 
