@@ -317,7 +317,10 @@ async def test_create_kit_sums_components_cost(
     monkeypatch,
 ):
     """Custo do composto = soma dos bling_cost_price dos componentes,
-    enviado via link_supplier_to_product (não pelo create)."""
+    enviado via link_supplier_to_product (não pelo create).
+    Companion: cada componente recebe link_supplier_to_product separado
+    com SEU PRÓPRIO custo — Bling V3 zera o precoCusto dos componentes
+    ao criar o kit, então re-aplicamos pra restaurar."""
     from decimal import Decimal
     # Set custos nos componentes b045.8 e b045.18
     kit_setup["p1"].bling_cost_price = Decimal("30.00")
@@ -327,7 +330,7 @@ async def test_create_kit_sums_components_cost(
     await db.commit()
 
     captured: dict[str, Any] = {}
-    link_kwargs: dict[str, Any] = {}
+    link_calls: list[dict[str, Any]] = []
     from app.services.marketplaces.bling import BlingClient
 
     async def fake_create(self, **kwargs):
@@ -341,8 +344,8 @@ async def test_create_kit_sums_components_cost(
         return 16980149177
 
     async def fake_link(self, **kwargs):
-        link_kwargs.update(kwargs)
-        return {"id": 1}
+        link_calls.append(dict(kwargs))
+        return {"id": len(link_calls)}
 
     monkeypatch.setattr(BlingClient, "create_product", fake_create)
     monkeypatch.setattr(BlingClient, "find_or_create_category", fake_cat)
@@ -351,9 +354,22 @@ async def test_create_kit_sums_components_cost(
 
     await create_bling_kit_for_mark(kit_setup["mark"].id)
     assert "cost_price" not in captured  # custo não vai no create
-    assert link_kwargs["product_id"] == 88888
-    assert link_kwargs["supplier_id"] == 16980149177
-    assert link_kwargs["cost_price"] == pytest.approx(100.50)
+
+    # Chamada 1: kit recebe o custo somado.
+    assert link_calls[0]["product_id"] == 88888
+    assert link_calls[0]["supplier_id"] == 16980149177
+    assert link_calls[0]["cost_price"] == pytest.approx(100.50)
+
+    # Chamadas 2-N: 1 por componente, com SEU custo (restore após Bling
+    # zerar). bling_product_id dos componentes vem de kit_setup (1001/1002),
+    # custos 30.00 e 70.50.
+    by_product = {c["product_id"]: c for c in link_calls[1:]}
+    assert set(by_product.keys()) == {1001, 1002}
+    custos_componentes = sorted(c["cost_price"] for c in by_product.values())
+    assert custos_componentes == [pytest.approx(30.00), pytest.approx(70.50)]
+    # Todos com o mesmo fornecedor (default).
+    for c in by_product.values():
+        assert c["supplier_id"] == 16980149177
 
 
 @pytest.mark.asyncio

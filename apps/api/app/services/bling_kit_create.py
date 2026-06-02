@@ -420,27 +420,63 @@ async def create_bling_kit_for_mark(mark_id: UUID | str) -> dict[str, Any]:
         # Linkar fornecedor padrão + custo somado dos componentes (etapa
         # separada — Bling V3 só persiste precoCusto via POST
         # /produtos/fornecedores). Falha aqui NÃO desfaz o kit já criado.
-        if components_cost > 0:
-            supplier_id = await resolve_default_supplier_id(client)
-            if supplier_id:
+        supplier_id = (
+            await resolve_default_supplier_id(client) if components_cost > 0 else None
+        )
+        if components_cost > 0 and supplier_id:
+            try:
+                await client.link_supplier_to_product(
+                    product_id=int(new_bling_id),
+                    supplier_id=supplier_id,
+                    cost_price=components_cost,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "kit_sync_link_supplier_failed",
+                    mark_id=str(mark_id), kit_id=int(new_bling_id),
+                    err=str(e)[:200],
+                )
+        elif components_cost > 0:
+            logger.warning(
+                "kit_sync_no_supplier",
+                mark_id=str(mark_id), sku=kit_sku,
+                components_cost=components_cost,
+            )
+
+        # Bling V3 zera precoCusto dos componentes quando um produto vira
+        # parte de um kit (formato="E") — comportamento do Bling, não do
+        # DaVinci. Re-aplicamos o custo de cada componente via POST
+        # /produtos/fornecedores. Custo unitário vem de `resolved`
+        # (snapshot do `Product.bling_cost_price` no momento do _resolve_
+        # component_bling_ids). Falha em 1 componente NÃO desfaz o kit —
+        # só loga warning pro operador re-aplicar manual se precisar.
+        if supplier_id:
+            for comp_sku, comp_bling_id, comp_cost in resolved:
+                if comp_cost <= 0:
+                    continue
                 try:
                     await client.link_supplier_to_product(
-                        product_id=int(new_bling_id),
+                        product_id=int(comp_bling_id),
                         supplier_id=supplier_id,
-                        cost_price=components_cost,
+                        cost_price=comp_cost,
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
-                        "kit_sync_link_supplier_failed",
-                        mark_id=str(mark_id), kit_id=int(new_bling_id),
+                        "kit_sync_restore_component_cost_failed",
+                        mark_id=str(mark_id),
+                        kit_id=int(new_bling_id),
+                        component_sku=comp_sku,
+                        component_bling_id=int(comp_bling_id),
+                        component_cost=comp_cost,
                         err=str(e)[:200],
                     )
-            else:
-                logger.warning(
-                    "kit_sync_no_supplier",
-                    mark_id=str(mark_id), sku=kit_sku,
-                    components_cost=components_cost,
-                )
+                else:
+                    logger.info(
+                        "kit_sync_component_cost_restored",
+                        mark_id=str(mark_id),
+                        component_sku=comp_sku,
+                        cost=comp_cost,
+                    )
 
         # Sucesso — gravar. Status:
         #   * "sent" — produto + estrutura ok
