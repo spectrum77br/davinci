@@ -640,10 +640,25 @@ async def upsert_order(
     for row in rows:
         row["id"] = uuid4()
     stmt = pg_insert(BlingOrder).values(rows)
+    # em_andamento_data usa COALESCE(nova, velha) pra NUNCA sobrescrever
+    # valor existente com NULL. `_next_em_andamento_data` é a fonte de
+    # verdade: quando devolve uma data, é uma decisão legítima (incluindo
+    # overwrite 83965→15); quando devolve None, NÃO é "limpa a data" e
+    # sim "não tenho info, não mexe". Ordem importa — `coalesce(excluded,
+    # table)` pega a nova se não-NULL, senão preserva a velha. Inverter
+    # quebraria o overwrite legítimo.
+    # Sem este fix: 774 pedidos em prod 22-30/05 tiveram em_andamento_data
+    # nullada (situações 83953/83957/545902). Camada redundante com o
+    # trigger DB `bling_orders_protect_data` — defesa em profundidade.
+    protected_cols = {"em_andamento_data"}
     stmt = stmt.on_conflict_do_update(
         index_elements=["bling_id", "item_index"],
         set_={
-            col: getattr(stmt.excluded, col)
+            col: (
+                func.coalesce(getattr(stmt.excluded, col), getattr(BlingOrder, col))
+                if col in protected_cols
+                else getattr(stmt.excluded, col)
+            )
             for col in rows[0]
             if col not in ("id", "bling_id", "item_index")
         },
