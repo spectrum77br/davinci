@@ -19,6 +19,7 @@ import {
   Send, CheckCircle2, Clock, Briefcase, Zap, Smartphone,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
+import { parseBRNumber, formatBRNumber, formatPercent } from '~/lib/number'
 
 definePageMeta({
   middleware: ['permission'],
@@ -768,6 +769,14 @@ function schedulePatchLote(lote: Lote, field: keyof Lote, value: any) {
   if (saveTimers[key]) clearTimeout(saveTimers[key])
   saveTimers[key] = setTimeout(() => { void persistLote(lote, field) }, 500)
 }
+
+// Frete %: operador pensa em "14" (percentual), banco guarda "0.14"
+// (decimal NUMERIC(6,4)). Converte na entrada; saída já é via
+// formatPercent (multiplica por 100 pra exibir).
+function onFretePctChange(lote: Lote, raw: string) {
+  const n = parseBRNumber(raw)
+  schedulePatchLote(lote, 'frete_pct', n == null ? null : n / 100)
+}
 async function persistLote(lote: Lote, field: keyof Lote) {
   const key = `lote_${lote.id}_${String(field)}`
   delete saveTimers[key]
@@ -1485,9 +1494,9 @@ onScopeDispose(() => {
               <template v-for="lote in visibleLotes" :key="`lote-r9c-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">taxa</td>
                 <td class="lote-value editable" :class="loteBgClass(lote.nome)">
-                  <input type="number" step="0.0001" :value="lote.taxa ?? ''" :disabled="!canEdit"
-                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right"
-                    @input="(e) => schedulePatchLote(lote, 'taxa', Number((e.target as HTMLInputElement).value) || null)" />
+                  <input inputmode="decimal" :value="lote.taxa == null ? '' : formatBRNumber(Number(lote.taxa), 4)" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right" placeholder="5,08"
+                    @change="(e) => schedulePatchLote(lote, 'taxa', parseBRNumber((e.target as HTMLInputElement).value))" />
                 </td>
               </template>
             </tr>
@@ -1495,9 +1504,9 @@ onScopeDispose(() => {
               <template v-for="lote in visibleLotes" :key="`lote-r10c-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">frete %</td>
                 <td class="lote-value editable" :class="loteBgClass(lote.nome)">
-                  <input type="number" step="0.0001" :value="lote.frete_pct ?? ''" :disabled="!canEdit"
-                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right"
-                    @input="(e) => schedulePatchLote(lote, 'frete_pct', Number((e.target as HTMLInputElement).value) || null)" />
+                  <input inputmode="decimal" :value="lote.frete_pct == null ? '' : formatPercent(Number(lote.frete_pct), 2)" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right" placeholder="14"
+                    @change="(e) => onFretePctChange(lote, (e.target as HTMLInputElement).value)" />
                 </td>
               </template>
             </tr>
@@ -1505,9 +1514,9 @@ onScopeDispose(() => {
               <template v-for="lote in visibleLotes" :key="`lote-r11c-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">adicional</td>
                 <td class="lote-value editable" :class="loteBgClass(lote.nome)">
-                  <input type="number" step="0.01" :value="lote.adicional ?? ''" :disabled="!canEdit"
-                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right"
-                    @input="(e) => schedulePatchLote(lote, 'adicional', Number((e.target as HTMLInputElement).value) || null)" />
+                  <input inputmode="decimal" :value="lote.adicional == null ? '' : formatBRNumber(Number(lote.adicional), 2)" :disabled="!canEdit"
+                    class="w-full bg-transparent border-0 p-0 text-[11px] text-right" placeholder="12,50"
+                    @change="(e) => schedulePatchLote(lote, 'adicional', parseBRNumber((e.target as HTMLInputElement).value))" />
                 </td>
               </template>
             </tr>
