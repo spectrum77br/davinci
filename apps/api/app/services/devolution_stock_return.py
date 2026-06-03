@@ -71,6 +71,9 @@ _SUFFIX_TAGS = _SKU_SUFFIX_TAGS
 # Mala (b+dígito) e Eletro (u…) voltam direto no próprio SKU — sem tag/bin.
 _MALA_OR_ELETRO_RE = re.compile(r"^(b[0-9]|u)", re.IGNORECASE)
 
+# Sentinel em `estoque_nova_tag` para "criar z000N sem sufixo" (z0093, não z0093.us).
+NOVA_TAG_SEM = "-"
+
 
 def _is_mala_or_eletro(sku: str | None) -> bool:
     return bool(_MALA_OR_ELETRO_RE.match((sku or "").strip()))
@@ -371,8 +374,9 @@ async def return_product_to_bling_stock(
         # 1) Destino existente escolhido no modal: entrada direta nesse bin.
         if row.estoque_destino_sku and (dest_sku := row.estoque_destino_sku.strip()):
             return await _return_to_existing(session, client, dest_sku, qty, obs, ctx)
-        # 2) Criar produto novo z000N.<tag> (nenhuma variante existia).
-        if row.estoque_nova_tag and (tag := row.estoque_nova_tag.strip().lower().lstrip(".")):
+        # 2) Criar produto novo z000N(.<tag>) — sentinel "-" = sem sufixo.
+        if row.estoque_nova_tag and (raw_nt := row.estoque_nova_tag.strip()):
+            tag = None if raw_nt == NOVA_TAG_SEM else raw_nt.lower().lstrip(".")
             return await _create_z_product(
                 client, session, tag, eff_sku, eff_condicao, row, qty, obs, ctx
             )
@@ -554,12 +558,14 @@ async def _max_z_in_products(session: AsyncSession) -> int:
     return max_n
 
 
-async def _next_z_sku_for_tag(session: AsyncSession, client: BlingClient, tag: str) -> str:
-    """Próximo `z000N.<tag>` sequencial pelo maior z em products, garantindo
-    que ainda não exista no Bling."""
+async def _next_z_sku_for_tag(
+    session: AsyncSession, client: BlingClient, tag: str | None
+) -> str:
+    """Próximo `z000N.<tag>` (ou `z000N` sem sufixo quando tag=None) sequencial
+    pelo maior z em products, garantindo que ainda não exista no Bling."""
     n = await _max_z_in_products(session) + 1
     while n < 100000:
-        candidate = f"z{n:04d}.{tag}"
+        candidate = f"z{n:04d}.{tag}" if tag else f"z{n:04d}"
         if not await client.product_exists_by_sku(candidate):
             return candidate
         n += 1
@@ -567,10 +573,11 @@ async def _next_z_sku_for_tag(session: AsyncSession, client: BlingClient, tag: s
 
 
 async def _create_z_product(
-    client: BlingClient, session: AsyncSession, tag: str,
+    client: BlingClient, session: AsyncSession, tag: str | None,
     eff_sku: str, eff_condicao: str, row: Devolution, qty: int, obs: str, ctx: dict,
 ) -> StockResult:
-    """Cria `z000N.<tag>` clonando nome/categoria do original e lança qty."""
+    """Cria `z000N.<tag>` (ou `z000N` sem sufixo se tag=None) clonando
+    nome/categoria do original e lança qty."""
     target_sku = await _next_z_sku_for_tag(session, client, tag)
 
     # Produto original: resolve id pela tabela local (robusto p/ SKUs com ponto)

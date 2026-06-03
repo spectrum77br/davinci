@@ -20,6 +20,9 @@ const emit = defineEmits<{
 
 const { api } = useApi()
 
+// Sentinel: criar z000N sem sufixo (alinhado ao backend NOVA_TAG_SEM).
+const SEM_TAG = '-'
+
 const loading = ref(false)
 const errorMsg = ref<string | null>(null)
 const data = ref<SuffixesResponse | null>(null)
@@ -131,6 +134,12 @@ function confirm() {
             Nenhum estoque encontrado para esse SKU — escolha a tag do produto novo.
           </p>
           <div class="grid grid-cols-3 sm:grid-cols-4 gap-2">
+            <button
+              type="button"
+              class="rounded-md border px-3 py-2 text-center font-mono text-sm transition-colors"
+              :class="selectedTag === SEM_TAG ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
+              @click="pickTag(SEM_TAG)"
+            >z000N</button>
             <button
               v-for="t in tagChoices"
               :key="t"
