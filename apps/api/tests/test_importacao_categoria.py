@@ -20,7 +20,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ImportProduct, User, UserRole, UserStatus
-from app.services.importacao_naming import generate_mala_name, generate_product_name
+from app.services.importacao_naming import (
+    generate_celular_name,
+    generate_mala_name,
+    generate_product_name,
+)
 
 PERM_EDIT = {"importacao": {"view": True, "edit": True, "delete": False}}
 
@@ -132,9 +136,22 @@ def test_generate_product_name_eletro():
     assert generate_product_name("eletro", "Smart TV LG 55", None, None) == "Smart TV LG 55"
 
 
-def test_generate_product_name_celular_mirrors_mala():
-    got = generate_product_name("celular", "iPhone 15", "i015.us", None)
-    assert got == generate_mala_name("iPhone 15", "i015.us", None)
+def test_generate_product_name_celular_usa_modelo_bling_direto():
+    """Spec G1: 'nome seguir → modelo bling'. Sem prefixo 'Mala', sem
+    tamanho extraído do SKU — cor já vem dentro do modelo."""
+    got = generate_product_name(
+        "celular", "Apple Watch SE 3 GPS 40mm - Preto", "i230.sa", "Preto",
+    )
+    assert got == "Apple Watch SE 3 GPS 40mm - Preto"
+
+
+def test_generate_celular_name_fallback_quando_modelo_none():
+    assert generate_celular_name(None, "i230.sa", "Preto") == "Produto celular"
+
+
+def test_generate_celular_name_trima_modelo():
+    got = generate_celular_name("  Hotwav A17 Pro Max  ", "h017.sa", None)
+    assert got == "Hotwav A17 Pro Max"
 
 
 def test_generate_product_name_mala():

@@ -74,8 +74,15 @@ def generate_eletro_name(modelo_bling: str | None) -> str:
 def generate_celular_name(
     modelo_bling: str | None, sku: str | None, cor: str | None,
 ) -> str:
-    """Celular ainda em definição — por ora espelha mala."""
-    return generate_mala_name(modelo_bling, sku, cor)
+    """Celular usa só o modelo_bling — cor já está embutida no nome
+    (ex: 'Apple Watch SE 3 GPS 40mm - Preto'). Sem prefixo 'Mala' nem
+    sufixo de tamanho. Spec do Excel operacional (aba importação
+    celular, célula G1): 'nome seguir → modelo bling'.
+
+    `sku` e `cor` são aceitos pra manter assinatura igual às outras
+    categorias, mas não entram no nome.
+    """
+    return (modelo_bling or "").strip() or "Produto celular"
 
 
 def generate_product_name(

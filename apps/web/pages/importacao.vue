@@ -634,11 +634,14 @@ const newProduct = reactive({
   obs: '',
 })
 // Dispatch por categoria — espelha generate_product_name do backend.
+// Celular usa só modelo_bling (cor já embutida no nome). Spec do
+// Excel operacional G1: "nome seguir → modelo bling".
 function generateProductName(
   cat: Categoria, modeloBling: string | null, sku: string | null, cor: string | null,
 ): string {
   if (cat === 'eletro') return (modeloBling ?? '').trim() || 'Produto eletro'
-  return generateMalaName(modeloBling, sku, cor)  // mala + celular
+  if (cat === 'celular') return (modeloBling ?? '').trim() || 'Produto celular'
+  return generateMalaName(modeloBling, sku, cor)
 }
 const newProductPreviewName = computed(() =>
   generateProductName(categoria.value, newProduct.modelo_bling, newProduct.sku, newProduct.cor),
