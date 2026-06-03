@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { Plus, RefreshCw, X, Trash2 } from 'lucide-vue-next'
+import { isoToday } from '~/lib/date'
 
 const { api } = useApi()
 const auth = useAuthStore()
@@ -69,7 +70,7 @@ if (isAdmin.value) await loadUsers()
 const showNew = ref(false)
 const draft = ref<{ responsavel_id: string; data_inicio: string; tarefa: string }>({
   responsavel_id: '',
-  data_inicio: new Date().toISOString().slice(0, 10),
+  data_inicio: isoToday(),
   tarefa: '',
 })
 const creating = ref(false)
@@ -78,7 +79,7 @@ const createErr = ref<string | null>(null)
 function openNew() {
   draft.value = {
     responsavel_id: '',
-    data_inicio: new Date().toISOString().slice(0, 10),
+    data_inicio: isoToday(),
     tarefa: '',
   }
   createErr.value = null

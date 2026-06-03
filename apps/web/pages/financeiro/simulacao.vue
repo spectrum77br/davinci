@@ -12,6 +12,7 @@
 //      form atual, para reaproveitar nas próximas cotações.
 import { computed, reactive, ref, watch } from 'vue'
 import { Plus, RefreshCw, Trash2, Save } from 'lucide-vue-next'
+import { isoToday } from '~/lib/date'
 
 definePageMeta({
   middleware: ['permission'],
@@ -140,7 +141,7 @@ async function novaCotacao() {
       method: 'POST',
       body: {
         numero_cotacao: '',
-        data: new Date().toISOString().slice(0, 10),
+        data: isoToday(),
         // Defaults explícitos pra UI já mostrar as alíquotas finais
         aliquota_taxas_gerais: 0.03,
         aliquota_impostos_fed: 0.035,

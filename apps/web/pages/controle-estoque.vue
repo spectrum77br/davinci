@@ -17,6 +17,7 @@ import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, FileUp, Upload, Download, Trash2,
 } from 'lucide-vue-next'
+import { isoDaysAgo, isoToday } from '~/lib/date'
 
 definePageMeta({
   middleware: ['permission'],
@@ -78,15 +79,6 @@ type EnvioRow = {
 // ── State ─────────────────────────────────────────────────────────────
 type Tab = 'estoque' | 'pedidos' | 'envios' | 'estoque-negativo' | 'upload-nf'
 const tab = ref<Tab>('estoque')
-
-function isoToday(): string {
-  return new Date().toISOString().slice(0, 10)
-}
-function isoDaysAgo(days: number): string {
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  return d.toISOString().slice(0, 10)
-}
 
 // Single-day filter for Estoque + Pedidos. Envios uses a 7-day window
 // that auto-resets on first activation (see watch below) — operators

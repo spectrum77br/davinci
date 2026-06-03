@@ -5,6 +5,7 @@ import {
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
   ChevronDown, Download, Undo2, Redo2, Search, Tags,
 } from 'lucide-vue-next'
+import { isoToday } from '~/lib/date'
 
 definePageMeta({
   middleware: ['permission'],
@@ -1796,7 +1797,7 @@ function handleExportExcel() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `tabela-precos-${department.value}-${new Date().toISOString().slice(0, 10)}.csv`
+  a.download = `tabela-precos-${department.value}-${isoToday()}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }

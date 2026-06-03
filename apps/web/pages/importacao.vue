@@ -18,6 +18,7 @@ import {
   Plus, RefreshCw, Trash2, Save, Search, Download, X, AlertCircle,
   Send, CheckCircle2, Clock, Briefcase, Zap, Smartphone,
 } from 'lucide-vue-next'
+import { isoToday } from '~/lib/date'
 
 definePageMeta({
   middleware: ['permission'],
@@ -273,7 +274,7 @@ const freteAjusteModalOpen = ref(false)
 const freteAjusteForm = reactive<{
   transportadora: string; abertura: string; saldo: string; obs: string
 }>({
-  transportadora: '', abertura: new Date().toISOString().slice(0, 10),
+  transportadora: '', abertura: isoToday(),
   saldo: '', obs: '',
 })
 
@@ -720,7 +721,7 @@ async function removeProduct(row: Product) {
 async function addLote() {
   const nome = prompt('Nome do novo lote (ex: ml27):')?.trim()
   if (!nome) return
-  const abertura = new Date().toISOString().slice(0, 10)
+  const abertura = isoToday()
   try {
     const lote = await api<Lote>('/api/importacao/lotes', {
       method: 'POST',
@@ -735,7 +736,7 @@ async function addLote() {
 async function fecharLote(lote: Lote) {
   if (lote.fechamento) return
   if (!confirm(`Fechar o lote ${lote.nome} hoje? Isso cria um lançamento no Resumo.`)) return
-  const fechamento = new Date().toISOString().slice(0, 10)
+  const fechamento = isoToday()
   try {
     const updated = await api<Lote>(`/api/importacao/lotes/${lote.id}`, {
       method: 'PATCH',
@@ -846,7 +847,7 @@ async function loadResumoOnly() {
 
 // ── Resumo: add manual entry ──────────────────────────────────────
 const newResumo = reactive({
-  data: new Date().toISOString().slice(0, 10),
+  data: isoToday(),
   lote_nome: '',
   saldo: '',
   obs: '',

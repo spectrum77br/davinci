@@ -14,6 +14,7 @@ import {
   Undo2,
   X,
 } from 'lucide-vue-next'
+import { isoToday } from '~/lib/date'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'devolucoes', action: 'view' } })
 
@@ -522,7 +523,7 @@ async function exportXlsx() {
     const href = URL.createObjectURL(blob as any)
     const a = document.createElement('a')
     a.href = href
-    a.download = `devolucoes_${new Date().toISOString().slice(0, 10)}.xlsx`
+    a.download = `devolucoes_${isoToday()}.xlsx`
     document.body.appendChild(a)
     a.click()
     a.remove()
