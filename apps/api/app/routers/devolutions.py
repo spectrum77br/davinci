@@ -233,6 +233,10 @@ async def lookup_devolution_order(
         raise HTTPException(422, detail={"code": "pedido_required"})
 
     q_like = f"%{pedido}%"
+    # Termo só de dígitos é nº de pedido/CEP: não buscar dentro do nome do
+    # destinatário, pois nicknames de marketplace embutem datas/números que
+    # casariam por substring e trariam pedidos de outros clientes.
+    name_clause = "" if pedido.isdigit() else "OR v.nome_destinatario ILIKE :q_like"
     rows = (
         await session.execute(
             text(
@@ -260,8 +264,8 @@ async def lookup_devolution_order(
                 WHERE (
                     v.pedido_bling::text = :pedido
                     OR v.pedido_marketplace::text = :pedido
-                    OR v.nome_destinatario ILIKE :q_like
                     OR v.cep_destino ILIKE :q_like
+                    {name_clause}
                 )
                 ORDER BY v.data DESC NULLS LAST, v.pedido_bling, v.sku, gs.unit_num
                 LIMIT 50

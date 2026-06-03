@@ -138,3 +138,86 @@ async def test_order_lookup_uses_base_catalog_name_when_split_sku_missing(
     assert rows[2]["sku"] == "a004.pi"
     assert rows[2]["produtos"] == "Relogio Uranyx USW10 - Laranja"
     assert rows[2]["custo_produto"] == 65
+
+
+async def test_order_lookup_numeric_does_not_match_recipient_name_substring(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Buscar nº de pedido não pode trazer outro pedido só porque os dígitos
+    aparecem dentro do nickname embutido no nome do destinatário."""
+    user = await make_user(permissions=_devolution_permissions(edit=False, delete=False))
+    auth_as(user)
+    schema = get_settings().database_schema
+
+    await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_devolucoes AS
+            SELECT * FROM (VALUES
+                (
+                    '2025-10-30T03:00:00+00:00'::timestamptz,
+                    '230724'::text,
+                    '2000013615898090'::text,
+                    'Loja 205370233'::text,
+                    NULL::bigint,
+                    'dg017.pi'::text,
+                    'Uranyx Fossibot F109S 24.256 - Preto'::text,
+                    1::integer,
+                    NULL::uuid,
+                    NULL::text,
+                    NULL::text,
+                    NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+                ),
+                (
+                    '2026-04-07T21:00:00+00:00'::timestamptz,
+                    '267954'::text,
+                    '2000015897926172'::text,
+                    'ML Vlta'::text,
+                    NULL::bigint,
+                    'a004.sp'::text,
+                    'Relogio Uranyx USW10 - Laranja'::text,
+                    1::integer,
+                    NULL::uuid,
+                    'Davi Santos Machado (santosdavi20230724154447)'::text,
+                    NULL::text,
+                    NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+                )
+            ) AS t(
+                data,
+                pedido_bling,
+                pedido_marketplace,
+                loja_nome,
+                bling_loja_id,
+                sku,
+                produto,
+                quantidade,
+                bling_order_item_id,
+                nome_destinatario,
+                cep_destino,
+                endereco_destino,
+                numero_destino,
+                complemento_destino,
+                bairro_destino,
+                cidade_destino,
+                uf_destino
+            )
+            """  # noqa: S608
+        )
+    )
+    await db.commit()
+
+    try:
+        response = await client.get("/api/devolutions/order-lookup?pedido=230724")
+    finally:
+        await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+        await db.commit()
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 1
+    assert rows[0]["pedido_bling"] == "230724"
+    assert all(r["pedido_bling"] != "267954" for r in rows)
