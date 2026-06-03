@@ -60,13 +60,21 @@ const tagChoices = computed(() => [
   'eletro',
 ])
 
-const canConfirm = computed(() =>
-  hasExisting.value ? !!selectedExisting.value : !!selectedTag.value,
-)
+// Bin existente e "criar novo z" são mutuamente exclusivos.
+const canConfirm = computed(() => !!selectedExisting.value || !!selectedTag.value)
+
+function pickExisting(sku: string) {
+  selectedExisting.value = sku
+  selectedTag.value = null
+}
+function pickTag(tag: string) {
+  selectedTag.value = tag
+  selectedExisting.value = null
+}
 
 function confirm() {
   if (!canConfirm.value) return
-  if (hasExisting.value) emit('confirm', { destino_sku: selectedExisting.value! })
+  if (selectedExisting.value) emit('confirm', { destino_sku: selectedExisting.value })
   else emit('confirm', { nova_tag: selectedTag.value! })
 }
 </script>
@@ -96,26 +104,31 @@ function confirm() {
       <template v-else-if="data">
         <p class="text-xs text-muted-foreground">Base: <span class="font-mono">{{ data.base }}</span></p>
 
-        <!-- Há bins existentes: o operador só pode escolher entre eles. -->
-        <div v-if="hasExisting" class="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          <button
-            v-for="v in existing"
-            :key="v.sku"
-            type="button"
-            class="flex flex-col items-start rounded-md border px-3 py-2 text-left transition-colors"
-            :class="selectedExisting === v.sku ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
-            @click="selectedExisting = v.sku"
-          >
-            <span class="font-mono text-sm">{{ v.sku }}</span>
-            <span class="mt-0.5 text-[11px] text-muted-foreground truncate w-full">{{ v.name || '—' }}</span>
-          </button>
+        <!-- Bins já existentes: entrada direta de N unidades. -->
+        <div v-if="hasExisting" class="space-y-1.5">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Estoques existentes</p>
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <button
+              v-for="v in existing"
+              :key="v.sku"
+              type="button"
+              class="flex flex-col items-start rounded-md border px-3 py-2 text-left transition-colors"
+              :class="selectedExisting === v.sku ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
+              @click="pickExisting(v.sku)"
+            >
+              <span class="font-mono text-sm">{{ v.sku }}</span>
+              <span class="mt-0.5 text-[11px] text-muted-foreground truncate w-full">{{ v.name || '—' }}</span>
+            </button>
+          </div>
         </div>
 
-        <!-- Nenhum bin existe: criar produto novo z000N.<tag>. -->
-        <template v-else>
-          <p class="text-xs text-amber-600 dark:text-amber-400">
-            Nenhum estoque encontrado para esse SKU. Um produto novo será criado
-            (<span class="font-mono">z000N.&lt;tag&gt;</span>) com a tag escolhida.
+        <!-- Criar produto novo z000N.<tag> — sempre disponível (mesmo com bins). -->
+        <div class="space-y-1.5">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Criar novo (<span class="font-mono normal-case">z000N.&lt;tag&gt;</span>)
+          </p>
+          <p v-if="!hasExisting" class="text-xs text-amber-600 dark:text-amber-400">
+            Nenhum estoque encontrado para esse SKU — escolha a tag do produto novo.
           </p>
           <div class="grid grid-cols-3 sm:grid-cols-4 gap-2">
             <button
@@ -124,10 +137,10 @@ function confirm() {
               type="button"
               class="rounded-md border px-3 py-2 text-center font-mono text-sm uppercase transition-colors"
               :class="selectedTag === t ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
-              @click="selectedTag = t"
+              @click="pickTag(t)"
             >.{{ t }}</button>
           </div>
-        </template>
+        </div>
       </template>
 
       <div class="flex justify-end gap-2 pt-1">
