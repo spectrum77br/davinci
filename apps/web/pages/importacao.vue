@@ -151,6 +151,10 @@ type Product = {
   custo_realizado: string | number | null
   // Paralelo a lote_quantidades — valor_usd por lote (Celular).
   lote_valores_usd: Record<string, string | number | null>
+  // Paralelo — custo BRL manual por lote (Celular, lotes sem
+  // taxa/frete). Migration 0128. Quando preenchido, substitui a
+  // fórmula no realizado do lote.
+  lote_custos_manuais: Record<string, string | number | null>
 }
 type CotacaoParams = {
   categoria: string
@@ -870,6 +874,43 @@ function scheduleLoteItemValor(prod: Product, loteId: string, raw: string) {
       void loadLotesOnly()
     } catch (e: any) {
       errorText.value = `Falha ao salvar valor USD: ${e?.data?.detail?.code || 'erro'}`
+    }
+  }, 400)
+}
+// Aba Importação Celular: custo BRL manual por (produto, lote) — usado
+// só em lotes sem taxa/frete (ex: i48, acessórios em massa). Persiste
+// via PATCH /lote_item/{id} (já existia pra `pago`, migration 0128 abriu
+// pro custo_manual também). raw vazio → null (limpa).
+function scheduleLoteItemCustoManual(prod: Product, loteId: string, raw: string) {
+  const novo = parseBRNumber(raw)
+  prod.lote_custos_manuais = { ...(prod.lote_custos_manuais || {}), [loteId]: novo }
+  const key = `item_custo_${prod.id}_${loteId}`
+  if (saveTimers[key]) clearTimeout(saveTimers[key])
+  saveTimers[key] = setTimeout(async () => {
+    delete saveTimers[key]
+    try {
+      // O PATCH endpoint é por item_id, não por (lote, product). Precisamos
+      // primeiro garantir que o item existe — usa o upsert PUT com a
+      // quantidade atual (mantém) e depois o PATCH com custo_manual.
+      const qty = prod.lote_quantidades?.[loteId] || 0
+      const upserted = await api<{ item_id?: string }>(
+        `/api/importacao/lotes/${loteId}/items`,
+        { method: 'PUT', body: { product_id: prod.id, quantidade: qty } },
+      )
+      const itemId = upserted?.item_id
+      if (itemId) {
+        await api(`/api/importacao/lote_item/${itemId}`, {
+          method: 'PATCH', body: { custo_manual: novo },
+        })
+      } else {
+        // Fallback: o upsert antigo não retornava item_id. Refetch da
+        // lista de lotes/produtos pra obter o id e tentar de novo via
+        // próxima edição. Por hora avisa o operador.
+        errorText.value = 'Não foi possível salvar o custo manual — recarregue a página.'
+      }
+      void loadLotesOnly()
+    } catch (e: any) {
+      errorText.value = `Falha ao salvar custo manual: ${e?.data?.detail?.code || 'erro'}`
     }
   }, 400)
 }
@@ -1742,8 +1783,23 @@ onScopeDispose(() => {
                       @change="(e) => scheduleLoteItemValor(row, lote.id, (e.target as HTMLInputElement).value)"
                     />
                   </td>
-                  <td class="calc text-right" :class="loteBgClass(lote.nome)">
+                  <!-- Lote sem taxa/frete (ex: I48) → custo BRL é
+                       digitado manual. Senão → calculado via fórmula. -->
+                  <td
+                    v-if="lote.taxa != null && lote.frete_pct != null"
+                    class="calc text-right"
+                    :class="loteBgClass(lote.nome)"
+                  >
                     {{ fmtMoney(custoBRL(row, lote)) }}
+                  </td>
+                  <td v-else :class="loteBgClass(lote.nome)">
+                    <input
+                      inputmode="decimal"
+                      class="cell-input text-right" placeholder="0,00"
+                      :value="row.lote_custos_manuais?.[lote.id] == null ? '' : formatBRNumber(Number(row.lote_custos_manuais?.[lote.id]), 2)"
+                      :disabled="!canEdit"
+                      @change="(e) => scheduleLoteItemCustoManual(row, lote.id, (e.target as HTMLInputElement).value)"
+                    />
                   </td>
                 </template>
                 <td v-else class="calc text-right" :class="loteBgClass(lote.nome)">{{ fmtMoney(loteTotal(row, lote.id)) }}</td>

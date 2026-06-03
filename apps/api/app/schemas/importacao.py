@@ -129,6 +129,11 @@ class ImportProductOut(ImportProductBase):
     # USD do produto NAQUELE lote. Ausente / valor null → operador
     # ainda não preencheu.
     lote_valores_usd: dict[str, Decimal | None] = {}
+    # Paralelo, só pra Celular: custo BRL manual unitário do produto
+    # NAQUELE lote. Usado quando o lote não tem taxa/frete e a fórmula
+    # valor_usd × taxa × (1+frete) + adicional não se aplica (migration
+    # 0128). Ausente / null → operador ainda não preencheu.
+    lote_custos_manuais: dict[str, Decimal | None] = {}
     created_at: datetime
     updated_at: datetime
 
@@ -201,9 +206,16 @@ class ImportLoteItemUpsert(BaseModel):
 
 
 class ImportLoteItemPatch(BaseModel):
-    """Patch só dos atributos editáveis do item via aba Frete. `pago`
-    é o único campo hoje; outros (quantidade) usam o upsert via lote."""
+    """Patch de atributos editáveis do item.
+
+    - `pago`: toggle da aba Frete.
+    - `custo_manual`: aba Importação Celular — custo BRL unitário
+      digitado pelo operador quando o lote não tem taxa/frete (a
+      fórmula valor_usd × taxa × (1+frete) + adicional não se aplica).
+      `None` explícito limpa.
+    """
     pago: bool | None = None
+    custo_manual: Decimal | None = None
 
 
 # ── Frete (aba Frete do Celular, etapa 4) ─────────────────────────────

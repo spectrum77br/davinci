@@ -63,6 +63,11 @@ async def _seed_frete_basics(db: AsyncSession) -> dict[str, str]:
         abertura=date(2026, 4, 22),
         fechamento=None,
         transportadora="Cargo X",
+        # Aba Frete (migration 0128) filtra lotes sem taxa/frete_pct —
+        # acessórios em massa (i48) ficam fora. Preencher aqui pra
+        # manter o lote do teste dentro da agregação.
+        taxa=Decimal("5.10"),
+        frete_pct=Decimal("0.16"),
     )
     db.add(lote)
     await db.flush()

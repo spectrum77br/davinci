@@ -196,6 +196,12 @@ class ImportLoteItem(Base, TimestampMixin):
     # referência global usada pela aba Cotação. Frontend usa item.valor_usd
     # quando há lote selecionado; cai pro produto.valor_usd como default.
     valor_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # Migration 0128. Custo BRL unitário manual — usado quando o lote
+    # não tem taxa/frete_pct (ex: I48, acessórios em massa sem
+    # transportadora regular). Nesse caso a fórmula valor_usd × taxa
+    # × (1+frete) + adicional não se aplica e o operador digita o
+    # custo BRL direto. Quando o lote TEM taxa/frete, é ignorado.
+    custo_manual: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
 
 
 class ImportResumo(Base):

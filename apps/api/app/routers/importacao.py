@@ -377,6 +377,9 @@ async def list_products(
     # Paralelo a qty_by_pair, valor_usd por (produto, lote) — só celular
     # usa, mas montamos pra todos sem custo extra (1 loop só).
     valor_usd_by_pair: dict[UUID, dict[str, Decimal | None]] = {}
+    # Custo BRL manual por (produto, lote) — usado em lotes sem
+    # taxa/frete (i48 e similares). Migration 0128.
+    custo_manual_by_pair: dict[UUID, dict[str, Decimal | None]] = {}
     # Acumuladores pro custo_realizado computed (média ponderada por qty
     # do custoBRL de cada lote onde o produto aparece). Σ(qty × custoBRL)
     # no numerador, Σ(qty) no denominador. Só items com valor_usd não-null
@@ -386,6 +389,7 @@ async def list_products(
     for item, lote in open_items:
         qty_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = item.quantidade
         valor_usd_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = item.valor_usd
+        custo_manual_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = item.custo_manual
         if lote.fechamento is None:
             qty_by_product_open[item.product_id] = (
                 qty_by_product_open.get(item.product_id, 0) + (item.quantidade or 0)
@@ -563,6 +567,7 @@ async def list_products(
             ),
             lote_quantidades=qty_by_pair.get(p.id, {}),
             lote_valores_usd=valor_usd_by_pair.get(p.id, {}),
+            lote_custos_manuais=custo_manual_by_pair.get(p.id, {}),
             created_at=p.created_at, updated_at=p.updated_at,
         ))
     return out
@@ -603,6 +608,7 @@ async def create_product(
         custo_realizado=None,
         lote_quantidades={},
         lote_valores_usd={},
+        lote_custos_manuais={},
         created_at=row.created_at, updated_at=row.updated_at,
     )
 
@@ -646,6 +652,7 @@ async def patch_product(
         custo_realizado=None,
         lote_quantidades={},
         lote_valores_usd={},
+        lote_custos_manuais={},
         created_at=row.created_at, updated_at=row.updated_at,
     )
 
@@ -721,6 +728,7 @@ async def sync_product_to_bling(
         custo_realizado=None,
         lote_quantidades={},
         lote_valores_usd={},
+        lote_custos_manuais={},
         created_at=row.created_at, updated_at=row.updated_at,
     )
 
@@ -755,9 +763,13 @@ async def _enrich_lote(
 
     `realizado`:
       * Mala/Eletro → lê `lote.realizado` (coluna gravada, operador edita).
-      * Celular → computed via SUM(custoBRL(valor_usd) × estoque_bling)
-        usando ImportCotacaoParams da categoria. Operador edita
-        valor_usd por produto (aba Cotação); `realizado` é derivado.
+      * Celular com taxa+frete_pct → SUM(custoBRL(valor_usd) × qty)
+        usando params do próprio lote (fallback ImportCotacaoParams pra
+        `adicional` quando não setado).
+      * Celular sem taxa OU sem frete_pct (ex: i48, acessórios em
+        massa) → SUM(item.custo_manual × qty). A fórmula USD×taxa não
+        se aplica; operador digita o BRL direto por linha (migration
+        0128).
 
     `saldo` = previsto - realizado. `prazo` = (fechamento - abertura).days.
     """
@@ -782,40 +794,49 @@ async def _enrich_lote(
 
     # realizado: branch por categoria.
     if is_celular:
-        # Pra celular: SUM(custoBRL × quantidade) — custoBRL usa params
-        # do PRÓPRIO LOTE (taxa/frete_pct/adicional) e valor_usd POR LOTE
-        # (item.valor_usd; fallback pra produto.valor_usd quando item
-        # ainda não tem). `quantidade` é a do ImportLoteItem (= qty do
-        # produto naquele lote, não estoque global).
-        cot_fallback = (await session.execute(
-            select(ImportCotacaoParams).where(ImportCotacaoParams.categoria == "celular")
-        )).scalar_one_or_none()
-        cambio = Decimal(lote.taxa) if lote.taxa is not None else (
-            Decimal(cot_fallback.taxa_cambio) if cot_fallback else Decimal("5.10")
-        )
-        frete = Decimal(lote.frete_pct) if lote.frete_pct is not None else (
-            Decimal(cot_fallback.frete_regular_pct) if cot_fallback else Decimal("0.16")
-        )
-        adic = Decimal(lote.adicional) if lote.adicional is not None else (
-            Decimal(cot_fallback.adicional) if cot_fallback else Decimal("12.00")
-        )
-        realizado_row = await session.execute(
-            select(
-                ImportLoteItem.quantidade,
-                ImportLoteItem.valor_usd,
-                ImportProduct.valor_usd,
+        has_formula = lote.taxa is not None and lote.frete_pct is not None
+        if has_formula:
+            # Pra celular com taxa+frete: SUM(custoBRL × qty) — params
+            # do próprio LOTE (taxa/frete_pct/adicional) e valor_usd
+            # POR LOTE (item.valor_usd; fallback pra produto.valor_usd
+            # quando item ainda não tem).
+            cot_fallback = (await session.execute(
+                select(ImportCotacaoParams).where(ImportCotacaoParams.categoria == "celular")
+            )).scalar_one_or_none()
+            cambio = Decimal(lote.taxa)
+            frete = Decimal(lote.frete_pct)
+            adic = Decimal(lote.adicional) if lote.adicional is not None else (
+                Decimal(cot_fallback.adicional) if cot_fallback else Decimal("0")
             )
-            .select_from(ImportLoteItem)
-            .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
-            .where(ImportLoteItem.lote_id == lote.id)
-        )
-        realizado = Decimal("0")
-        for qty, item_usd, prod_usd in realizado_row.all():
-            usd = item_usd if item_usd is not None else prod_usd
-            if usd is None or qty is None or Decimal(usd) <= 0 or int(qty) <= 0:
-                continue
-            custo_unit = Decimal(usd) * cambio * (Decimal("1") + frete) + adic
-            realizado += custo_unit * Decimal(int(qty))
+            realizado_row = await session.execute(
+                select(
+                    ImportLoteItem.quantidade,
+                    ImportLoteItem.valor_usd,
+                    ImportProduct.valor_usd,
+                )
+                .select_from(ImportLoteItem)
+                .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
+                .where(ImportLoteItem.lote_id == lote.id)
+            )
+            realizado = Decimal("0")
+            for qty, item_usd, prod_usd in realizado_row.all():
+                usd = item_usd if item_usd is not None else prod_usd
+                if usd is None or qty is None or Decimal(usd) <= 0 or int(qty) <= 0:
+                    continue
+                custo_unit = Decimal(usd) * cambio * (Decimal("1") + frete) + adic
+                realizado += custo_unit * Decimal(int(qty))
+        else:
+            # Lote sem taxa/frete (i48 e similares): custo BRL é digitado
+            # manualmente por linha em item.custo_manual.
+            manual_rows = await session.execute(
+                select(ImportLoteItem.quantidade, ImportLoteItem.custo_manual)
+                .where(ImportLoteItem.lote_id == lote.id)
+            )
+            realizado = Decimal("0")
+            for qty, cm in manual_rows.all():
+                if cm is None or qty is None or int(qty) <= 0:
+                    continue
+                realizado += Decimal(cm) * Decimal(int(qty))
         realizado = realizado.quantize(Decimal("0.01"))
     else:
         realizado = Decimal(lote.realizado or 0)
@@ -1011,19 +1032,29 @@ async def upsert_lote_item(
 
     fields = body.model_dump(exclude_unset=True)
     if existing is None:
-        session.add(ImportLoteItem(
+        new_item = ImportLoteItem(
             lote_id=lote_id, product_id=body.product_id,
             quantidade=body.quantidade,
             valor_usd=body.valor_usd,
-        ))
+        )
+        session.add(new_item)
+        await session.commit()
+        item_id = new_item.id
     else:
         existing.quantidade = body.quantidade
         if "valor_usd" in fields:
             existing.valor_usd = body.valor_usd
-    await session.commit()
-    return {"ok": True, "quantidade": body.quantidade, "valor_usd": (
-        float(body.valor_usd) if body.valor_usd is not None else None
-    )}
+        await session.commit()
+        item_id = existing.id
+    return {
+        "ok": True,
+        "quantidade": body.quantidade,
+        "valor_usd": float(body.valor_usd) if body.valor_usd is not None else None,
+        # item_id retornado pra o frontend conseguir disparar um PATCH
+        # subsequente em campos específicos (ex: custo_manual em lotes
+        # sem taxa/frete). Migration 0128.
+        "item_id": str(item_id),
+    }
 
 
 # ── Resumo (lançamentos financeiros) ──────────────────────────────
@@ -1152,12 +1183,18 @@ async def list_frete(
         select(ImportCotacaoParams).where(ImportCotacaoParams.categoria == categoria)
     )).scalar_one_or_none()
 
-    # Items dos lotes desta categoria + produto.
+    # Items dos lotes desta categoria + produto. Filtra lotes sem
+    # taxa OU frete_pct — acessórios em massa (I48) chegam sem
+    # transportadora regular e a fórmula valor_usd × taxa × (1+frete)
+    # não se aplica. Custo nesses casos é digitado em custo_manual
+    # (migration 0128) e o lote inteiro fica fora da aba Frete.
     items_q = (
         select(ImportLoteItem, ImportLote, ImportProduct)
         .join(ImportLote, ImportLote.id == ImportLoteItem.lote_id)
         .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
         .where(ImportLote.categoria == categoria)
+        .where(ImportLote.taxa.isnot(None))
+        .where(ImportLote.frete_pct.isnot(None))
         .order_by(ImportLote.abertura.desc(), ImportLote.nome, ImportProduct.sku)
     )
     if transportadora:
@@ -1256,13 +1293,21 @@ async def patch_lote_item(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
 ) -> None:
-    """Hoje só atualiza `pago` (toggle do checkbox na aba Frete)."""
+    """Atualiza `pago` (toggle da aba Frete) ou `custo_manual` (input
+    do custo BRL na aba Importação quando o lote não tem taxa/frete).
+    `custo_manual=None` no body limpa o campo (volta a usar fórmula,
+    se aplicável)."""
     row = await session.get(ImportLoteItem, item_id)
     if row is None:
         raise HTTPException(404, detail={"code": "lote_item_not_found"})
-    for k, v in body.model_dump(exclude_unset=True).items():
-        if v is not None:
-            setattr(row, k, v)
+    fields = body.model_dump(exclude_unset=True)
+    # `pago` é boolean — limpar não faz sentido, manter o skip-None
+    # original.
+    if "pago" in fields and fields["pago"] is not None:
+        row.pago = fields["pago"]
+    # `custo_manual` aceita None explícito pra limpar.
+    if "custo_manual" in fields:
+        row.custo_manual = fields["custo_manual"]
     await session.commit()
 
 
