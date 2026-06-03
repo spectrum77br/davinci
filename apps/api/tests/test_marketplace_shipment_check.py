@@ -244,3 +244,51 @@ async def test_load_candidates_exclui_fora_da_janela(db: AsyncSession):
     await db.refresh(o)
     rows = await _load_candidates(db)
     assert all(r.bling_id != 901006 for r in rows)
+
+
+# ─── _operational_ship_date: sem cutoff ──────────────────────────────
+
+
+def test_operational_ship_date_meia_manha_brt_mantem_dia():
+    """12:30 UTC = 9:30 BRT do dia 03/06. Antes o cutoff de 10h jogava
+    pra 02/06. Agora retorna 03/06 — dia em que a etiqueta foi gerada
+    (regressão guard do bug reproduzido com 91 pedidos)."""
+    from datetime import UTC, datetime
+
+    from app.services.marketplace_shipment_check import _operational_ship_date
+
+    dt = datetime(2026, 6, 3, 12, 30, tzinfo=UTC)
+    assert _operational_ship_date(dt) == date(2026, 6, 3)
+
+
+def test_operational_ship_date_madrugada_brt_mantem_dia():
+    """5:00 UTC = 2:00 BRT do dia 03/06. Antes voltava pra 02/06."""
+    from datetime import UTC, datetime
+
+    from app.services.marketplace_shipment_check import _operational_ship_date
+
+    dt = datetime(2026, 6, 3, 5, 0, tzinfo=UTC)
+    assert _operational_ship_date(dt) == date(2026, 6, 3)
+
+
+def test_operational_ship_date_noite_brt_dia_anterior():
+    """2:30 UTC do dia 03/06 = 23:30 BRT do dia 02/06. Naturalmente
+    é 02/06 BRT — confirma que conversão de fuso (não cutoff) preserva
+    a semântica de noite virando dia anterior por convenção de tz."""
+    from datetime import UTC, datetime
+
+    from app.services.marketplace_shipment_check import _operational_ship_date
+
+    dt = datetime(2026, 6, 3, 2, 30, tzinfo=UTC)
+    assert _operational_ship_date(dt) == date(2026, 6, 2)
+
+
+def test_operational_ship_date_apos_10h_brt_inalterado():
+    """13:30 UTC = 10:30 BRT do dia 03/06. Caso que sempre funcionou —
+    garantia de que a remoção do cutoff não regrediu eventos > 10h."""
+    from datetime import UTC, datetime
+
+    from app.services.marketplace_shipment_check import _operational_ship_date
+
+    dt = datetime(2026, 6, 3, 13, 30, tzinfo=UTC)
+    assert _operational_ship_date(dt) == date(2026, 6, 3)

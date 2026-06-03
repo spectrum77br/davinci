@@ -102,27 +102,19 @@ _ML_CONFIRMED_SHIPPED_SUBSTATUS = {
 # date instead of the day the sweep finally noticed.
 _BRT = ZoneInfo("America/Sao_Paulo")
 
-# Operador publica os despachos perto do meio-dia BRT (raramente
-# antes das 10h). Eventos de "shipped" emitidos pelos marketplaces
-# antes desse horário são quase sempre carrier-scans da madrugada
-# pro pacote despachado na véspera. Atribuímos esses eventos ao DIA
-# OPERACIONAL anterior pra alinhar com a planilha do operador.
-# Mudar este valor é o ponto único de controle — se o padrão de
-# publicação mudar (ex: virar pra manhã), basta ajustar aqui.
-_SHIP_DATE_CUTOFF_HOUR_BRT = 10
-
-
 def _operational_ship_date(ship_dt: datetime) -> date:
-    """Converte um datetime (com tz) em DATA OPERACIONAL.
+    """Retorna a data BRT em que o evento aconteceu. Sem cutoff —
+    operador quer ver o dia exato em que a etiqueta foi gerada,
+    independente do horário.
 
-    Eventos antes do cutoff (BRT) caem no dia anterior, refletindo o
-    workflow do operador (despacho à tarde → carrier-scan na madrugada
-    seguinte = ainda 'do dia anterior' na ótica da operação).
+    Cutoff anterior de 10h BRT (eventos antes caíam no dia anterior)
+    foi removido em 2026-06-03 por decisão operacional: confundia
+    operador ao mostrar pedidos carimbados no dia errado quando
+    gerava etiqueta cedo (ex: 6h-9h BRT). Reprodução em 03/06: 91
+    pedidos com etiqueta gerada entre 6h-9h BRT do dia 03 cairam
+    em 02/06 e foram corrigidos manualmente.
     """
-    brt_dt = ship_dt.astimezone(_BRT)
-    if brt_dt.hour < _SHIP_DATE_CUTOFF_HOUR_BRT:
-        return (brt_dt - timedelta(days=1)).date()
-    return brt_dt.date()
+    return ship_dt.astimezone(_BRT).date()
 
 
 def _shopee_ship_date(update_time: Any) -> date | None:
@@ -137,8 +129,8 @@ def _shopee_ship_date(update_time: Any) -> date | None:
 
 
 def _iso_to_brt_date(iso_str: Any) -> date | None:
-    """ISO-8601 (ML last_updated, Amazon LastUpdateDate, …) → data
-    operacional BRT. Aplica o cutoff de _operational_ship_date."""
+    """ISO-8601 (ML last_updated, Amazon LastUpdateDate, …) → data BRT
+    via _operational_ship_date (sem cutoff)."""
     if not iso_str:
         return None
     try:
