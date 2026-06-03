@@ -1419,7 +1419,7 @@ onScopeDispose(() => {
               <th v-if="isCelular" :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 90px">custo realizado</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">lote</td>
-                <td class="lote-value" :class="loteBgClass(lote.nome)">
+                <td class="lote-value" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
                   <span class="font-semibold uppercase">{{ lote.nome }}</span>
                   <button v-if="canEdit && lote.is_aberto" class="ml-2 text-[10px] underline hover:text-primary" @click="fecharLote(lote)">fechar</button>
                   <button v-if="canDelete" class="ml-1 text-destructive" @click="removeLote(lote)" :title="`Excluir ${lote.nome}`">
@@ -1433,7 +1433,7 @@ onScopeDispose(() => {
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r2-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">abertura</td>
-                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                <td class="lote-value editable" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
                   <input type="date" :value="lote.abertura" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px]"
                     @input="(e) => schedulePatchLote(lote, 'abertura', (e.target as HTMLInputElement).value)" />
@@ -1443,7 +1443,7 @@ onScopeDispose(() => {
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r3-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">fechamento</td>
-                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                <td class="lote-value editable" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
                   <input type="date" :value="lote.fechamento ?? ''" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px]"
                     @input="(e) => schedulePatchLote(lote, 'fechamento', (e.target as HTMLInputElement).value || null)" />
@@ -1453,13 +1453,13 @@ onScopeDispose(() => {
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r4-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">previsto</td>
-                <td class="lote-value calculated" :class="loteBgClass(lote.nome)">{{ fmtMoney(lote.previsto) }}</td>
+                <td class="lote-value calculated" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">{{ fmtMoney(lote.previsto) }}</td>
               </template>
             </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r5-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">realizado</td>
-                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                <td class="lote-value editable" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
                   <input type="number" step="0.01" :value="lote.realizado" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px] text-right"
                     @input="(e) => schedulePatchLote(lote, 'realizado', Number((e.target as HTMLInputElement).value) || 0)" />
@@ -1469,7 +1469,7 @@ onScopeDispose(() => {
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r6-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">saldo</td>
-                <td class="lote-value calculated"
+                <td class="lote-value calculated" :colspan="isCelular ? 2 : 1"
                   :class="[loteBgClass(lote.nome), Number(lote.saldo) > 0 ? 'text-red-700' : 'text-emerald-700']">
                   {{ fmtMoney(lote.saldo) }}
                 </td>
@@ -1478,7 +1478,7 @@ onScopeDispose(() => {
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r7-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">prazo</td>
-                <td class="lote-value calculated" :class="loteBgClass(lote.nome)">{{ lote.prazo != null ? lote.prazo + 'd' : '—' }}</td>
+                <td class="lote-value calculated" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">{{ lote.prazo != null ? lote.prazo + 'd' : '—' }}</td>
               </template>
             </tr>
             <!-- 4 rows extras só pra Celular (transportadora, taxa,
@@ -1486,7 +1486,7 @@ onScopeDispose(() => {
             <tr v-if="isCelular">
               <template v-for="lote in visibleLotes" :key="`lote-r8c-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">transportadora</td>
-                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                <td class="lote-value editable" colspan="2" :class="loteBgClass(lote.nome)">
                   <input type="text" :value="lote.transportadora ?? ''" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px]"
                     @input="(e) => schedulePatchLote(lote, 'transportadora', (e.target as HTMLInputElement).value || null)" />
@@ -1496,7 +1496,7 @@ onScopeDispose(() => {
             <tr v-if="isCelular">
               <template v-for="lote in visibleLotes" :key="`lote-r9c-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">taxa</td>
-                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                <td class="lote-value editable" colspan="2" :class="loteBgClass(lote.nome)">
                   <input inputmode="decimal" :value="lote.taxa == null ? '' : formatBRNumber(Number(lote.taxa), 4)" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px] text-right" placeholder="5,08"
                     @change="(e) => schedulePatchLote(lote, 'taxa', parseBRNumber((e.target as HTMLInputElement).value))" />
@@ -1506,7 +1506,7 @@ onScopeDispose(() => {
             <tr v-if="isCelular">
               <template v-for="lote in visibleLotes" :key="`lote-r10c-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">frete %</td>
-                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                <td class="lote-value editable" colspan="2" :class="loteBgClass(lote.nome)">
                   <input inputmode="decimal" :value="lote.frete_pct == null ? '' : formatPercent(Number(lote.frete_pct), 2)" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px] text-right" placeholder="14"
                     @change="(e) => onFretePctChange(lote, (e.target as HTMLInputElement).value)" />
@@ -1516,7 +1516,7 @@ onScopeDispose(() => {
             <tr v-if="isCelular">
               <template v-for="lote in visibleLotes" :key="`lote-r11c-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">adicional</td>
-                <td class="lote-value editable" :class="loteBgClass(lote.nome)">
+                <td class="lote-value editable" colspan="2" :class="loteBgClass(lote.nome)">
                   <input inputmode="decimal" :value="lote.adicional == null ? '' : formatBRNumber(Number(lote.adicional), 2)" :disabled="!canEdit"
                     class="w-full bg-transparent border-0 p-0 text-[11px] text-right" placeholder="12,50"
                     @change="(e) => schedulePatchLote(lote, 'adicional', parseBRNumber((e.target as HTMLInputElement).value))" />
