@@ -591,6 +591,19 @@ async def list_estoque_envios(
         data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
     where: list = [
+        # Espelha o enviado_clause da aba Pedidos (linha ~363): só
+        # pedidos efetivamente enviados (badge verde) contam como envios
+        # físicos. Antes filtrava só por `em_andamento_data not null`,
+        # incluindo 83965 (Etiqueta), 83955 (Aguardando Cancelamento),
+        # 12 (Cancelado) — abas Pedidos vs Envios divergiam. Agora batem.
+        BlingOrder.situacao.in_(
+            (
+                _SITUACAO_ATENDIDO,
+                _SITUACAO_ENTREGUE,
+                _SITUACAO_AGUARDANDO_DEVOLUCAO,
+                _SITUACAO_RESOLVIDO,
+            )
+        ),
         BlingOrder.em_andamento_data.isnot(None),
         BlingOrder.em_andamento_data >= data_inicio,
         BlingOrder.em_andamento_data <= data_fim,
