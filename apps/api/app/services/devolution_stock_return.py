@@ -614,7 +614,7 @@ async def _create_z_product(
 
     pid = int(product_id)
     await _persist_cost(client, pid, cost, ctx)
-    await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs)
+    await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs, custo=cost)
     logger.info(
         "devolution_stock_created_avulso",
         target_sku=target_sku, bling_product_id=pid, name=name, **ctx,
@@ -660,7 +660,7 @@ async def _return_with_suffix(
 
     pid = int(product_id)
     await _persist_cost(client, pid, cost, ctx)
-    await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs)
+    await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs, custo=cost)
     logger.info(
         "devolution_stock_created_suffix", target_sku=target_sku, bling_product_id=pid, **ctx
     )
@@ -740,7 +740,7 @@ async def _return_usado(
 
     pid = int(product_id)
     await _persist_cost(client, pid, cost, ctx)
-    await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs)
+    await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs, custo=cost)
     logger.info(
         "devolution_stock_created_usado",
         z_sku=z_sku, bling_product_id=pid, original_sku=sku or None, **ctx,

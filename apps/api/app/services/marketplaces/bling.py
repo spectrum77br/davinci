@@ -437,15 +437,20 @@ class BlingClient:
         operation: str = "B",
         deposit_id: int | None = None,
         observacao: str | None = None,
+        custo: float | None = None,
     ) -> dict:
         """Raw Bling stock write. POST /Api/v3/estoques.
 
         `idDeposito` é obrigatório no Bling V3 — quando `deposit_id` não é
         passado, resolvemos o depósito padrão automaticamente. `bling_store_id`
         vira `idLoja` para refletir no canal certo. `observacao` vira
-        `observacoes` (aparece na coluna Observação do extrato de estoque). Body:
+        `observacoes` (aparece na coluna Observação do extrato de estoque).
+        `custo` (>0) vira `custo` no body — o preço de custo do LANÇAMENTO,
+        que alimenta o custo médio do Bling e a coluna "Preço de Custo" do
+        extrato; sem ele a entrada fica com custo 0. Body:
             { "produto": {"id": <id>}, "operacao": "B"|"S"|"E", "quantidade": <qty>,
-              "deposito": {"id": <id>}, "idLoja": <int?>, "observacoes": <str?> }
+              "deposito": {"id": <id>}, "idLoja": <int?>, "observacoes": <str?>,
+              "custo": <float?> }
         """
         body: dict[str, Any] = {
             "produto": {"id": bling_product_id},
@@ -460,6 +465,8 @@ class BlingClient:
             body["idLoja"] = bling_store_id
         if observacao:
             body["observacoes"] = observacao
+        if custo is not None and custo > 0:
+            body["custo"] = float(custo)
         r = await self._request("POST", "/estoques", json=body)
         r.raise_for_status()
         return r.json().get("data") or {}
