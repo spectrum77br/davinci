@@ -2519,6 +2519,16 @@ onScopeDispose(() => {
   background: hsl(var(--muted) / 0.5);
   color: hsl(var(--muted-foreground));
 }
+/* Sticky horizontal nas colunas fixas (aba Importação Celular).
+ * `.calc` (estoque_bling, consumo_diario, memória, reposição, saldo,
+ * custo_realizado) aplica bg semi-transparente — hsl/0.5 — que vence
+ * o utility `bg-background` por especificidade. Sem essa regra, cells
+ * de lote vazam atrás das colunas fixas durante o scroll horizontal.
+ * Specificity (0,2,2) > .grid-table td.calc (0,2,1). Header (.col-head)
+ * já é opaco, não precisa override. */
+.grid-table tbody td.sticky {
+  background: hsl(var(--background));
+}
 /* Sticky <thead>: cabeçalho inteiro (8 linhas + lotes) fica fixo no topo
  * ao rolar. Substitui o sticky por-célula que existia em .col-head — o
  * thead inteiro viaja junto agora, então as 8 linhas dos lotes
