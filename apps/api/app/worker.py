@@ -47,6 +47,7 @@ from app.services.marketplace_shipment_check import run_check_marketplace_shippe
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
+from app.services.kit_components_sync import run_sync_kit_components
 from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
@@ -508,6 +509,16 @@ async def product_bling_cost_sync(ctx: dict) -> None:
     async with session_scope() as s:
         summary = await run_sync_product_bling_costs(s)
     logger.info("product_bling_cost_sync_done", **summary)
+
+
+async def kit_components_sync(ctx: dict) -> None:
+    """Semanal: regrava `bling_kit_components` lendo a estrutura de cada kit
+    ativo (formato='E') no Bling. O order-lookup de devoluções usa esse cache
+    pra explodir um SKU de kit nos componentes e devolver estoque ao produto
+    certo. A estrutura muda raramente, por isso semanal."""
+    async with session_scope() as s:
+        summary = await run_sync_kit_components(s)
+    logger.info("kit_components_sync_done", **summary)
 
 
 async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_s: int) -> None:
@@ -1156,6 +1167,7 @@ class WorkerSettings:
         check_marketplace_shipped_orders,
         bling_orders_safety_net_tick,
         bling_orders_period_sync_tick,
+        kit_components_sync,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -1165,6 +1177,9 @@ class WorkerSettings:
         # listagem /produtos. 06:50 UTC = 03:50 BRT — janela tranquila, antes
         # do PDF de faturamento (05:00 BRT). Pedidos snapshotam esse custo.
         cron(product_bling_cost_sync, hour={6}, minute=50, run_at_startup=False),
+        # Semanal: cache da composição dos kits (bling_kit_components). Domingo
+        # 04:30 UTC = 01:30 BRT — janela tranquila. Estrutura muda raramente.
+        cron(kit_components_sync, weekday="sun", hour=4, minute=30, run_at_startup=False),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         cron(shopee_token_refresh, hour={0, 4, 8, 12, 16, 20}, minute=0, run_at_startup=False),
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
@@ -1310,6 +1325,7 @@ __all__ = [
     "failed_jobs_alert_scan",
     "import_listings_run",
     "ingest_bling_order_run",
+    "kit_components_sync",
     "low_stock_polling",
     "product_bling_cost_sync",
     "ml_backfill_run",

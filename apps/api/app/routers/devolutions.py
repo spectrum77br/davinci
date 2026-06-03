@@ -271,7 +271,8 @@ async def lookup_devolution_order(
         )
     ).mappings().all()
 
-    expanded = _split_mala_sizes(_split_compound_skus([dict(r) for r in rows]))
+    exploded_kits = await _split_kit_composition(session, [dict(r) for r in rows])
+    expanded = _split_mala_sizes(_split_compound_skus(exploded_kits))
 
     part_skus = sorted({
         s for r in expanded
@@ -336,6 +337,92 @@ async def lookup_devolution_order(
             r["produtos"] = fallback["name"]
 
     return [DevolutionLookupOut.model_validate({k: v for k, v in r.items() if not k.startswith("_")}) for r in expanded]
+
+
+async def _kit_components_for_skus(
+    session: AsyncSession, skus: set[str]
+) -> dict[str, list[dict]]:
+    """Mapeia SKU de kit (lower/trim) → lista de componentes a partir do cache
+    `bling_kit_components`. Cada componente: {sku, name, cost, qty}. Casado pelo
+    `bling_product_id` do kit e do componente na tabela `products`."""
+    if not skus:
+        return {}
+    rows = (
+        await session.execute(
+            text(
+                f"""
+                SELECT
+                    lower(btrim(kp.sku)) AS kit_sku,
+                    cp.sku               AS comp_sku,
+                    cp.name              AS comp_name,
+                    cp.cost_price        AS comp_cost,
+                    kc.quantidade        AS qty
+                FROM "{SCHEMA}".bling_kit_components kc
+                JOIN "{SCHEMA}".products kp ON kp.bling_product_id = kc.kit_bling_product_id
+                JOIN "{SCHEMA}".products cp ON cp.bling_product_id = kc.component_bling_product_id
+                WHERE lower(btrim(kp.sku)) = ANY(:skus)
+                ORDER BY kit_sku, cp.sku
+                """  # noqa: S608
+            ),
+            {"skus": sorted(skus)},
+        )
+    ).mappings().all()
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["kit_sku"], []).append({
+            "sku": r["comp_sku"],
+            "name": r["comp_name"],
+            "cost": r["comp_cost"],
+            "qty": r["qty"],
+        })
+    return out
+
+
+async def _split_kit_composition(
+    session: AsyncSession, rows: list[dict]
+) -> list[dict]:
+    """Explode linhas cujo SKU é um kit composto (formato='E') nos componentes
+    individuais, usando o cache `bling_kit_components`. Uma linha-unidade por
+    componente × quantidade (ex.: `b011` → b011.8, b011.12, b011.12, b011.18,
+    b011.20, b011.24). Faz loop pra resolver kits aninhados (componente que é
+    ele mesmo um kit); kits ausentes do cache caem nos splitters de string.
+
+    A composição de um SKU base (ex.: `b011`) ou nomeado (`b011.kit5`) não está
+    na string — vive na estrutura do Bling — então esse passo roda ANTES dos
+    splitters por string, que ficam no-op sobre os componentes simples."""
+    work = list(rows)
+    for _ in range(5):  # teto de profundidade p/ kits aninhados
+        skus = {
+            s for r in work
+            if (s := (r.get("sku") or "").strip().lower())
+        }
+        comp_map = await _kit_components_for_skus(session, skus)
+        if not comp_map:
+            break
+        out: list[dict] = []
+        changed = False
+        for r in work:
+            comps = comp_map.get((r.get("sku") or "").strip().lower())
+            if not comps:
+                out.append(r)
+                continue
+            changed = True
+            base_cost = r.get("custo_produto") or 0.0
+            for c in comps:
+                cost = float(c["cost"]) if c["cost"] is not None else base_cost
+                for _u in range(max(1, int(c["qty"] or 1))):
+                    out.append({
+                        **r,
+                        "sku": c["sku"],
+                        "produtos": c["name"] or r.get("produtos"),
+                        "custo_produto": cost,
+                        "quantidade": 1,
+                        "_compound": True,
+                    })
+        work = out
+        if not changed:
+            break
+    return work
 
 
 def _split_compound_skus(rows: list[dict]) -> list[dict]:
