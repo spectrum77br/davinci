@@ -77,6 +77,33 @@ const isCelular = computed(() => categoria.value === 'celular')
 // muda pra Eletro ou Celular. Mantém isEletro como flag separada pra
 // preservar o invariante de zero regressão.
 const showMalaCols = computed(() => !isEletro.value && !isCelular.value)
+
+// Colunas fixas com sticky horizontal (Celular). Mesmo padrão da aba
+// Tabela de Preços (pricing/[tab].vue): position: sticky + left: Xpx
+// + bg opaco + z-index alto. Largura de cada coluna = offset acumulado
+// pra próxima. Mantém o offset visualmente alinhado com o min-width
+// declarado em cada <th>/<td> sticky abaixo. Ordem é a ordem de
+// renderização no DOM — qualquer reordenação aqui precisa bater com
+// o template.
+const STICKY_WIDTHS_CELULAR: Record<string, number> = {
+  modelo_bling: 180,
+  sku: 130,
+  custo_bling: 60,
+  estoque_bling: 66,
+  consumo_diario: 66,
+  memoria_consumo: 70,
+  reposicao_estoque: 76,
+  saldo_reposicao: 76,
+  custo_realizado: 90,
+}
+function stickyLeftCelular(key: string): string {
+  let left = 0
+  for (const k of Object.keys(STICKY_WIDTHS_CELULAR)) {
+    if (k === key) return `${left}px`
+    left += STICKY_WIDTHS_CELULAR[k]
+  }
+  return '0px'
+}
 const availableSubtabs = computed(() => SUBTABS_BY_CATEGORIA[categoria.value])
 const countByCategoria = ref<Record<string, number>>({})
 function subtabLabel(t: Tab): string {
@@ -1396,27 +1423,72 @@ onScopeDispose(() => {
                    "memóri/a"). Ordem: começa em fornecedor, palavras
                    curtas (até ~7 chars) → 60-66px; "reposição"/"saldo"
                    → 72-76px. -->
-              <th :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 96px">fornecedor</th>
+              <th v-if="!isCelular" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 96px">fornecedor</th>
               <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 96px">modelo china</th>
               <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 72px">cor china</th>
               <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 80px">fechamento</th>
               <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-center" style="min-width: 44px">TSA</th>
-              <th :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 100px">modelo bling</th>
-              <th :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 130px">sku</th>
+              <th
+                :rowspan="isCelular ? 12 : 8"
+                class="col-head text-left"
+                :class="isCelular ? 'sticky bg-background z-30' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '180px' } : { minWidth: '100px' }"
+              >modelo bling</th>
+              <th
+                :rowspan="isCelular ? 12 : 8"
+                class="col-head text-left"
+                :class="isCelular ? 'sticky bg-background z-30' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('sku'), minWidth: '130px' } : { minWidth: '130px' }"
+              >sku</th>
               <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 130px">cor</th>
-              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 60px">custo bling</th>
-              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 66px">estoque bling</th>
-              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 66px">consumo diário</th>
-              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 70px">memória consumo</th>
-              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 76px">reposição estoque</th>
-              <th :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 76px">saldo reposição</th>
+              <th
+                :rowspan="isCelular ? 12 : 8"
+                class="col-head text-right"
+                :class="isCelular ? 'sticky bg-background z-30' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('custo_bling'), minWidth: '60px' } : { minWidth: '60px' }"
+              >custo bling</th>
+              <th
+                :rowspan="isCelular ? 12 : 8"
+                class="col-head text-right"
+                :class="isCelular ? 'sticky bg-background z-30' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('estoque_bling'), minWidth: '66px' } : { minWidth: '66px' }"
+              >estoque bling</th>
+              <th
+                :rowspan="isCelular ? 12 : 8"
+                class="col-head text-right"
+                :class="isCelular ? 'sticky bg-background z-30' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('consumo_diario'), minWidth: '66px' } : { minWidth: '66px' }"
+              >consumo diário</th>
+              <th
+                :rowspan="isCelular ? 12 : 8"
+                class="col-head text-right"
+                :class="isCelular ? 'sticky bg-background z-30' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('memoria_consumo'), minWidth: '70px' } : { minWidth: '70px' }"
+              >memória consumo</th>
+              <th
+                :rowspan="isCelular ? 12 : 8"
+                class="col-head text-right"
+                :class="isCelular ? 'sticky bg-background z-30' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('reposicao_estoque'), minWidth: '76px' } : { minWidth: '76px' }"
+              >reposição estoque</th>
+              <th
+                :rowspan="isCelular ? 12 : 8"
+                class="col-head text-right"
+                :class="isCelular ? 'sticky bg-background z-30' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('saldo_reposicao'), minWidth: '76px' } : { minWidth: '76px' }"
+              >saldo reposição</th>
               <!-- Mala: `obs` fica nas colunas fixas. Celular não usa
                    obs nesta tabela (operador anotou que é unused no
                    Excel celular); ficar oculto pra não confundir. -->
               <th v-if="!isCelular" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 100px">obs</th>
               <!-- Celular: `custo realizado` (coluna J do Excel — "media
                    do custo", editável manualmente). -->
-              <th v-if="isCelular" :rowspan="isCelular ? 12 : 8" class="col-head text-right" style="min-width: 90px">custo realizado</th>
+              <th
+                v-if="isCelular"
+                :rowspan="isCelular ? 12 : 8"
+                class="col-head text-right sticky bg-background z-30"
+                :style="{ left: stickyLeftCelular('custo_realizado'), minWidth: '90px' }"
+              >custo realizado</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">lote</td>
                 <td class="lote-value" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
@@ -1546,7 +1618,7 @@ onScopeDispose(() => {
               </td>
             </tr>
             <tr v-for="row in filteredProducts" :key="row.id" class="even:bg-muted/10 hover:bg-amber-50/40">
-              <td><input class="cell-input" :value="row.fornecedor ?? ''" :disabled="!canEdit"
+              <td v-if="!isCelular"><input class="cell-input" :value="row.fornecedor ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'fornecedor', (e.target as HTMLInputElement).value)" /></td>
               <td v-if="showMalaCols"><input class="cell-input" :value="row.modelo_china ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'modelo_china', (e.target as HTMLInputElement).value)" /></td>
@@ -1570,28 +1642,66 @@ onScopeDispose(() => {
                   }"
                 />
               </td>
-              <td><input class="cell-input" :value="row.modelo_bling ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'modelo_bling', (e.target as HTMLInputElement).value)" /></td>
-              <td class="font-mono"><input class="cell-input" :value="row.sku ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'sku', (e.target as HTMLInputElement).value)" /></td>
+              <td
+                :class="isCelular ? 'sticky bg-background z-10' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '180px' } : undefined"
+              >
+                <input class="cell-input" :value="row.modelo_bling ?? ''" :disabled="!canEdit"
+                  @input="(e) => scheduleSave(row, 'modelo_bling', (e.target as HTMLInputElement).value)" />
+              </td>
+              <td
+                class="font-mono"
+                :class="isCelular ? 'sticky bg-background z-10' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('sku'), minWidth: '130px' } : undefined"
+              >
+                <input class="cell-input" :value="row.sku ?? ''" :disabled="!canEdit"
+                  @input="(e) => scheduleSave(row, 'sku', (e.target as HTMLInputElement).value)" />
+              </td>
               <td v-if="showMalaCols"><input class="cell-input" :value="row.cor ?? ''" :disabled="!canEdit"
                 @input="(e) => scheduleSave(row, 'cor', (e.target as HTMLInputElement).value)" /></td>
-              <td><input type="number" step="0.01" class="cell-input text-right" :value="row.custo_bling" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'custo_bling', Number((e.target as HTMLInputElement).value) || 0)" /></td>
+              <td
+                :class="isCelular ? 'sticky bg-background z-10' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('custo_bling'), minWidth: '60px' } : undefined"
+              >
+                <input type="number" step="0.01" class="cell-input text-right" :value="row.custo_bling" :disabled="!canEdit"
+                  @input="(e) => scheduleSave(row, 'custo_bling', Number((e.target as HTMLInputElement).value) || 0)" />
+              </td>
               <!-- estoque_bling auto-pulled from products.stock by SKU in
                    the router; consumo_diario = bling_orders last 30d / 30.
                    Both read-only — the operator can't override the source. -->
-              <td class="calc text-right" :title="'Auto: products.stock por SKU'">
+              <td
+                class="calc text-right"
+                :class="isCelular ? 'sticky bg-background z-10' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('estoque_bling'), minWidth: '66px' } : undefined"
+                :title="'Auto: products.stock por SKU'"
+              >
                 {{ row.estoque_bling ?? '—' }}
               </td>
-              <td class="calc text-right" :title="'Auto: bling_orders 30d ÷ 30'">
+              <td
+                class="calc text-right"
+                :class="isCelular ? 'sticky bg-background z-10' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('consumo_diario'), minWidth: '66px' } : undefined"
+                :title="'Auto: bling_orders 30d ÷ 30'"
+              >
                 {{ fmtNum2(row.consumo_diario) }}
               </td>
-              <td class="calc text-right">{{ fmtNum2(row.memoria_consumo) }}</td>
-              <td class="calc text-right" :class="reposicaoClass(row.reposicao_estoque)">
+              <td
+                class="calc text-right"
+                :class="isCelular ? 'sticky bg-background z-10' : ''"
+                :style="isCelular ? { left: stickyLeftCelular('memoria_consumo'), minWidth: '70px' } : undefined"
+              >{{ fmtNum2(row.memoria_consumo) }}</td>
+              <td
+                class="calc text-right"
+                :class="[reposicaoClass(row.reposicao_estoque), isCelular ? 'sticky bg-background z-10' : '']"
+                :style="isCelular ? { left: stickyLeftCelular('reposicao_estoque'), minWidth: '76px' } : undefined"
+              >
                 {{ row.reposicao_estoque ?? '—' }}
               </td>
-              <td class="calc text-right" :class="reposicaoClass(row.saldo_reposicao)">
+              <td
+                class="calc text-right"
+                :class="[reposicaoClass(row.saldo_reposicao), isCelular ? 'sticky bg-background z-10' : '']"
+                :style="isCelular ? { left: stickyLeftCelular('saldo_reposicao'), minWidth: '76px' } : undefined"
+              >
                 {{ row.saldo_reposicao ?? '—' }}
               </td>
               <!-- obs só aparece em Mala/Eletro. -->
@@ -1602,7 +1712,11 @@ onScopeDispose(() => {
                    dos lotes onde o produto aparece). Atualiza quando
                    operador edita valor_usd ou params do lote → próximo
                    loadProductsOnly traz o novo valor. -->
-              <td v-if="isCelular" class="calc text-right">
+              <td
+                v-if="isCelular"
+                class="calc text-right sticky bg-background z-10"
+                :style="{ left: stickyLeftCelular('custo_realizado'), minWidth: '90px' }"
+              >
                 {{ fmtMoney(row.custo_realizado) }}
               </td>
               <!-- Per-lote cells align directly under the last-row
@@ -2438,6 +2552,12 @@ onScopeDispose(() => {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 3px;
+}
+.col-quant {
+  min-width: 40px;
+}
+.col-total {
+  min-width: 70px;
 }
 
 /* ── Cotação table ─────────────────────────────────────────────── */
