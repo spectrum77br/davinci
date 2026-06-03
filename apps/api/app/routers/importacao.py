@@ -291,8 +291,12 @@ def _compute_product_fields(
                        distorted by stock-out; use the historical peak)
 
     Then:
-      * reposicao_estoque = (dias_necessarios − duração_estoque) * consumo_diario
+      * reposicao_estoque = (dias_necessarios − duração_estoque) * memoria
       * saldo_reposicao = reposicao_estoque − pedidos_em_aberto
+
+    Usar `memoria` (e não `consumo_diario` direto) garante que produtos
+    em ruptura — onde consumo_diario virou ~0 porque o estoque zerou —
+    ainda gerem reposição proporcional à demanda histórica.
     """
     consumo = Decimal(p.consumo_diario) if p.consumo_diario is not None else None
     media = Decimal(p.maior_media_30d) if p.maior_media_30d is not None else None
@@ -312,7 +316,11 @@ def _compute_product_fields(
     duracao = Decimal(estoque) / memoria  # days the current stock lasts
     necessario = Decimal(cfg.tempo_reposicao + cfg.tempo_estoque)
     saldo_dias = necessario - duracao
-    reposicao_dec = saldo_dias * consumo
+    # Spec do operador: usar `memoria` (que já gate por estoque) em vez
+    # de consumo_diario direto. Em ruptura (estoque=0), consumo_diario
+    # cai pra ~0 e a fórmula antiga zerava a reposição mesmo havendo
+    # demanda histórica via maior_media_30d.
+    reposicao_dec = saldo_dias * memoria
     reposicao = int(reposicao_dec)
     saldo = reposicao - pedidos_em_aberto
     return memoria, reposicao, saldo
