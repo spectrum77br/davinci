@@ -555,6 +555,68 @@ async def test_marketplace_saldo_filter_includes_situacao_83965(
     assert body["items"][0]["attention_saldo"] is True
 
 
+async def test_marketplace_margem_filter_excludes_aguardando_devolucao(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Margem baixa não triata pedidos em "Aguardando Devolução" (situação
+    83957). Duas linhas com margem < mínima: a em 83957 some do filtro 'margem',
+    a em outra situação aparece."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    excluido = BlingOrder(
+        bling_id=987658,
+        numero="123460",
+        item_codigo="sku-5",
+        item_index=0,
+        situacao="83957",
+    )
+    incluido = BlingOrder(
+        bling_id=987659,
+        numero="123461",
+        item_codigo="sku-6",
+        item_index=0,
+        situacao="15",
+    )
+    db.add_all([excluido, incluido])
+    await db.commit()
+    await db.refresh(excluido)
+    await db.refresh(incluido)
+    # Ambos com margem 5% < mínima 20% → "margem baixa".
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                situacao, situacao_nome, plataforma_bling, item_proportion,
+                marketplace_margem, margem_minima,
+                bling_status_margem
+            )
+            VALUES
+                (:ex, '123460', 987658, 'sku-5',
+                 '83957', 'Aguardando Devolução', 'ml', 1,
+                 5, 20, NULL),
+                (:inc, '123461', 987659, 'sku-6',
+                 '15', 'Em andamento', 'ml', 1,
+                 5, 20, NULL)
+            """
+        ),
+        {"ex": str(excluido.id), "inc": str(incluido.id)},
+    )
+    await db.commit()
+
+    response = await client.get(
+        "/api/margens/marketplace?attention_type=margem&status=Pendente"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    pedidos = {item["pedido_bling"] for item in body["items"]}
+    assert "123461" in pedidos
+    assert "123460" not in pedidos
+
+
 async def test_marketplace_frete_result_uses_full_anuncio_per_item(
     client,
     db: AsyncSession,

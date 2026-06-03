@@ -52,6 +52,7 @@ SITUACAO_APROVADO = 6
 SITUACAO_ATENDIDO = 9
 SITUACAO_REPROVADO = 83955
 SITUACAO_ENVIADO_ETIQUETA = 83965
+SITUACAO_AGUARDANDO_DEVOLUCAO = 83957
 
 # Situações em que uma divergência de saldo é triada (vira "saldo divergente").
 # 6 = "Em aberto" (pré-faturamento) e 83965 = "Enviado Etiqueta" (etiqueta
@@ -89,9 +90,14 @@ _FRETE_ANUNCIO_SQL = "v.evento_frete_anuncio"
 # Positive means the marketplace charged more than the listing/ad quote.
 _FRETE_RESULTADO_SQL = f"(({_FRETE_PLATAFORMA_SQL}) - ({_FRETE_ANUNCIO_SQL}))"
 
+# Margem baixa = margem abaixo da mínima configurada. Pedidos em "Aguardando
+# Devolução" (situação 83957) são excluídos: a venda está em processo de
+# devolução, então margem baixa ali não é algo a triar. IS DISTINCT FROM
+# preserva linhas com situacao NULL (continuam contando como margem baixa).
 _ATTENTION_MARGEM_SQL = (
-    "(v.marketplace_margem IS NOT NULL AND v.margem_minima IS NOT NULL "
-    " AND v.marketplace_margem < v.margem_minima)"
+    f"(v.marketplace_margem IS NOT NULL AND v.margem_minima IS NOT NULL "
+    f" AND v.marketplace_margem < v.margem_minima "
+    f" AND v.situacao IS DISTINCT FROM '{SITUACAO_AGUARDANDO_DEVOLUCAO}')"
 )
 _ATTENTION_FRETE_SQL = (
     f"(({_FRETE_ANUNCIO_SQL}) IS NOT NULL AND {_FRETE_RESULTADO_SQL} > 0)"
