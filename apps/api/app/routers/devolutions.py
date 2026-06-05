@@ -245,7 +245,7 @@ async def lookup_devolution_order(
                     v.data,
                     v.pedido_bling::text AS pedido_bling,
                     v.pedido_marketplace::text AS pedido_marketplace,
-                    COALESCE(NULLIF(btrim(v.loja_nome), ''), 'Loja ' || v.bling_loja_id) AS conta,
+                    COALESCE(NULLIF(btrim(v.loja_nome), ''), 'Loja ' || v.bling_loja_id, 'Sem loja') AS conta,
                     v.sku,
                     v.produto AS produtos,
                     1 AS quantidade,
