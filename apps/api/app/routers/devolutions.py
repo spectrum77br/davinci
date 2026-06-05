@@ -335,7 +335,12 @@ async def lookup_devolution_order(
         prod = products.get(sku_key)
         if prod:
             r["produtos"] = prod["name"]
-            if r.get("_compound") and prod["cost_price"] is not None:
+            # Custo do catálogo é autoritativo p/ componentes de kit/split; p/ SKU
+            # simples ele só preenche quando o pedido não trouxe custo (preco_custo
+            # nulo/0 — ex.: pedidos de Manutenção criados sem custo no Bling).
+            if prod["cost_price"] is not None and (
+                r.get("_compound") or not r.get("custo_produto")
+            ):
                 r["custo_produto"] = prod["cost_price"]
         elif fallback := base_products.get(_sku_base(sku_key).strip().lower()):
             r["produtos"] = fallback["name"]

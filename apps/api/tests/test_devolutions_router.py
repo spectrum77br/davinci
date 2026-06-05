@@ -223,19 +223,40 @@ async def test_order_lookup_numeric_does_not_match_recipient_name_substring(
     assert all(r["pedido_bling"] != "267954" for r in rows)
 
 
-async def test_order_lookup_null_store_falls_back_to_sem_loja(
+async def test_order_lookup_null_store_and_missing_cost_fall_back(
     client,
     db: AsyncSession,
     make_user,
     auth_as,
 ):
-    """Pedido sem loja (loja_nome E bling_loja_id NULL — ex.: Manutenção) não
-    pode estourar 500 por `conta` nulo: deve cair no fallback 'Sem loja'."""
+    """Pedido de Manutenção sem loja (loja_nome E bling_loja_id NULL) e sem custo
+    no pedido (preco_custo NULL): `conta` cai em 'Sem loja' (sem estourar 500) e
+    `custo_produto` é preenchido pelo cost_price do catálogo (SKU simples)."""
     user = await make_user(permissions=_devolution_permissions(edit=False, delete=False))
     auth_as(user)
     schema = get_settings().database_schema
+    order_item_id = UUID("55555555-5555-5555-5555-555555555555")
 
     await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+    await db.execute(
+        text(
+            """
+            INSERT INTO products (id, user_id, sku, name, cost_price, situacao)
+            VALUES (:pid, :uid, 'b038.24', 'Mala Chanfrada M3 tamanho 24 - Bordo', 126, 'A')
+            """
+        ),
+        {"pid": UUID("66666666-6666-6666-6666-666666666666"), "uid": user.id},
+    )
+    # preco_custo NULL = pedido sem custo (ex.: Manutenção criada sem custo no Bling)
+    await db.execute(
+        text(
+            """
+            INSERT INTO bling_orders (id, numero, item_codigo, preco_custo)
+            VALUES (:oid, '217586', 'b038.24', NULL)
+            """
+        ),
+        {"oid": order_item_id},
+    )
     await db.execute(
         text(
             f"""
@@ -250,7 +271,7 @@ async def test_order_lookup_null_store_falls_back_to_sem_loja(
                     'b038.24'::text,
                     'Mala b038 24'::text,
                     1::integer,
-                    NULL::uuid,
+                    '{order_item_id}'::uuid,
                     NULL::text,
                     NULL::text,
                     NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
@@ -290,3 +311,4 @@ async def test_order_lookup_null_store_falls_back_to_sem_loja(
     assert len(rows) == 1
     assert rows[0]["pedido_bling"] == "217586"
     assert rows[0]["conta"] == "Sem loja"
+    assert rows[0]["custo_produto"] == 126
