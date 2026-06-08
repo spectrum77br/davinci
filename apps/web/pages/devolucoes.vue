@@ -163,18 +163,17 @@ const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
 const isAdmin = useIsAdmin()
 
-// Visibilidade do toggle "Devolver estoque": só o spectrum77 vê em todas as
-// linhas; o sthevem7 vê apenas quando a condição é "Manutenção" (só as
-// manutenções). Demais usuários nunca veem o toggle.
+// Devolução de estoque é AUTOMÁTICA no insert para todas as condições que
+// disparam estoque (Novo/Usado/Trocado) — sem toggle. A ÚNICA exceção é
+// "Manutenção", que continua manual: aí o toggle aparece e é necessário.
+// Mesmo nas Manutenções, só spectrum77 e sthevem7 podem ver/usar o toggle.
 const _auth = useAuthStore()
 const STOCK_TOGGLE_OWNER = 'spectrum77@tuta.com'
 const STOCK_TOGGLE_MANUTENCAO_USER = 'sthevem7@tuta.com'
 function canSeeStockToggle(condicao?: string | null): boolean {
+  if (condicao !== 'Manutenção') return false
   const email = _auth.user?.email?.toLowerCase()
-  if (!email) return false
-  if (email === STOCK_TOGGLE_OWNER) return true
-  if (email === STOCK_TOGGLE_MANUTENCAO_USER && condicao === 'Manutenção') return true
-  return false
+  return email === STOCK_TOGGLE_OWNER || email === STOCK_TOGGLE_MANUTENCAO_USER
 }
 
 // ── Toast system ─────────────────────────────────────────────────────
@@ -750,10 +749,13 @@ async function createAllDevolutions() {
   let added = 0
   try {
     for (const d of [...drafts.value]) {
-      // No ADD: só Novo/Usado/Trocado processam estoque. Manutenção e Extraviado
-      // não mexem no estoque no add (Manutenção volta ao estoque depois, pelo
-      // toggle na linha já inserida).
-      const processAtAdd = ['Novo', 'Usado', 'Trocado'].includes(d.condicao_produto)
+      // No ADD: Novo/Usado/Trocado SEMPRE processam estoque (automático, sem
+      // toggle). Manutenção só processa se o operador ligou o toggle (continua
+      // manual); senão pode ser devolvida ao estoque depois, pela linha salva.
+      // Extraviado e demais condições não mexem no estoque.
+      const processAtAdd =
+        ['Novo', 'Usado', 'Trocado'].includes(d.condicao_produto) ||
+        (d.condicao_produto === 'Manutenção' && d.devolver_estoque)
       let extra: StockModalFields | null = null
       if (processAtAdd) {
         // Abre os modais (manutenção / troca / destino) antes da chamada Bling.
