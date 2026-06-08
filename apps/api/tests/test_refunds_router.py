@@ -237,15 +237,21 @@ async def test_lookup_refund_order_reads_full_view_when_history_requested(
             """  # noqa: S608
         )
     )
+    # force_refresh now reads vw_bling_pedidos directly (predicate pushdown),
+    # not the heavy vw_conciliacao_margens_marketplace_all view.
+    await db.execute(
+        text(f'DROP VIEW IF EXISTS "{schema}".vw_bling_pedidos')
+    )
     await db.execute(
         text(
             f"""
-            CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace_all AS
+            CREATE VIEW "{schema}".vw_bling_pedidos AS
             SELECT * FROM (VALUES
                 ('2026-04-20T12:00:00+00:00'::timestamptz, '123456'::text, 'OLD999'::text,
-                 'shopee'::text, NULL::text, 'Conta Historico'::text, 42.00::numeric)
-            ) AS t(data, pedido_bling, pedido_marketplace, plataforma_bling,
-                   plataforma_financeiro, loja_nome, bling_custo_produtos)
+                 'shopee'::text, 'Conta Historico'::text, 777::bigint,
+                 42.00::numeric, 1::numeric)
+            ) AS t(data, numero, numeroloja, marketplace, loja_nome, bling_id,
+                   preco_custo, item_quantidade)
             """  # noqa: S608
         )
     )

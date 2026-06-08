@@ -135,6 +135,56 @@ def _lookup_refund_sql(view_name: str) -> str:
         """  # noqa: S608
 
 
+def _lookup_refund_all_sql() -> str:
+    # force_refresh path (orders outside the default view's 20-day window).
+    # Reads vw_bling_pedidos directly so the pedido predicate pushes down to an
+    # index scan, instead of materializing the full margins view
+    # (vw_conciliacao_margens_marketplace_all). That view has no date filter and
+    # builds the entire pricing/freight/event machinery before the outer WHERE
+    # can apply (>2 min -> proxy 502). The lookup only needs Bling-side columns,
+    # which all come from vw_bling_pedidos plus the cheap financials lateral
+    # (for the plataforma fallback). Output columns match _lookup_refund_sql.
+    return f"""
+        SELECT
+            MAX(bp.data) AS data,
+            bp.numero::text AS pedido_bling,
+            MAX(bp.numeroloja)::text AS pedido_marketplace,
+            COALESCE(bp.marketplace, f.platform::text)::text AS plataforma,
+            btrim(bp.loja_nome) AS conta,
+            SUM(bp.preco_custo * bp.item_quantidade::numeric)::double precision AS custo_produto,
+            MAX(d.custo_manutencao)::double precision AS custo_manutencao
+        FROM {_qualified_table("vw_bling_pedidos")} bp
+        LEFT JOIN LATERAL (
+            SELECT mf.platform
+            FROM {_qualified_table("marketplace_order_financials")} mf
+            WHERE mf.bling_id = bp.bling_id
+              AND (bp.numeroloja IS NULL OR mf.external_order_id = bp.numeroloja)
+            ORDER BY (CASE WHEN mf.external_order_id = bp.numeroloja THEN 0 ELSE 1 END),
+                     mf.fetched_at DESC NULLS LAST, mf.created_at DESC
+            LIMIT 1
+        ) f ON true
+        LEFT JOIN {_qualified_table("devolutions")} d
+            ON d.pedido_bling = bp.numero::text
+            AND btrim(d.conta) = btrim(bp.loja_nome)
+        WHERE (
+            bp.numero::text = :pedido
+            OR bp.numeroloja::text = :pedido
+            OR (
+                CAST(:pedido_bling AS text) IS NOT NULL
+                AND bp.numero::text = CAST(:pedido_bling AS text)
+            )
+        )
+          AND bp.loja_nome IS NOT NULL
+          AND btrim(bp.loja_nome) <> ''
+        GROUP BY
+            bp.numero,
+            COALESCE(bp.marketplace, f.platform::text),
+            btrim(bp.loja_nome)
+        ORDER BY MAX(bp.data) DESC NULLS LAST
+        LIMIT 20
+        """  # noqa: S608
+
+
 async def _find_bling_numero(session: AsyncSession, pedido: str) -> str | None:
     row = (
         await session.execute(
@@ -166,14 +216,10 @@ async def lookup_refund_order(
 
     params = {"pedido": pedido, "pedido_bling": None}
 
-    async def _read_from(view_name: str) -> list:
-        return list(
-            (
-                await session.execute(text(_lookup_refund_sql(view_name)), params)
-            ).mappings().all()
-        )
+    async def _execute(sql: str) -> list:
+        return list((await session.execute(text(sql), params)).mappings().all())
 
-    rows = await _read_from("vw_conciliacao_margens_marketplace")
+    rows = await _execute(_lookup_refund_sql("vw_conciliacao_margens_marketplace"))
     historico_disponivel = False
 
     if not rows:
@@ -181,7 +227,7 @@ async def lookup_refund_order(
         if bling_numero:
             if force_refresh:
                 params["pedido_bling"] = bling_numero
-                rows = await _read_from("vw_conciliacao_margens_marketplace_all")
+                rows = await _execute(_lookup_refund_all_sql())
             else:
                 historico_disponivel = True
 
