@@ -12,7 +12,6 @@ import {
   RotateCcw,
   Search,
   Undo2,
-  Wrench,
   X,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
@@ -474,6 +473,19 @@ function prazoOverdue(v: string | null): boolean {
   today.setHours(0, 0, 0, 0)
   return d.getTime() < today.getTime()
 }
+// Dias restantes até o prazo (negativo = vencido). Compara só a data.
+function prazoDiasLabel(v: string | null): string {
+  if (!v) return ''
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return ''
+  d.setHours(0, 0, 0, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const dias = Math.round((d.getTime() - today.getTime()) / 86_400_000)
+  if (dias > 0) return `faltam ${dias}d`
+  if (dias === 0) return 'vence hoje'
+  return `vencido há ${-dias}d`
+}
 
 function markDirty(id: string) {
   const next = new Set(dirtyRows.value)
@@ -863,13 +875,19 @@ async function changeRowCondicao(row: DevolutionRow, value: string) {
   const prev = row.condicao_produto
   setRowText(row, 'condicao_produto', value)
   if (value === 'Extraviado' || value === 'Manutenção') setRowReembolso(row, true)
-  if (row.devolver_estoque && isStockTrigger(value)) {
+  // Novo/Usado/Trocado: estoque é automático — ao mudar a condição já abre o
+  // modal (quando precisa) e devolve ao estoque, sem depender do toggle.
+  // Manutenção: continua manual (só processa se o toggle já estiver ligado).
+  const autoStock = ['Novo', 'Usado', 'Trocado'].includes(value)
+  const manualStock = value === 'Manutenção' && row.devolver_estoque
+  if (autoStock || manualStock) {
     const extra = await resolveStockModals(value, row.sku, true)
     if (extra === null) {
       setRowText(row, 'condicao_produto', prev ?? '')
       return
     }
     applyStockModalFields(row, extra)
+    if (autoStock) setRowDevolverEstoque(row, true)
   }
   await saveRow(row)
 }
@@ -1346,37 +1364,26 @@ async function backfillAddresses() {
               </select>
             </td>
             <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-              <div class="flex flex-col items-center gap-1">
-                <button
-                  v-if="canSeeStockToggle(row.condicao_produto)"
-                  type="button"
-                  role="switch"
-                  :aria-checked="row.devolver_estoque"
-                  :disabled="!canEdit"
-                  :class="[
-                    'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-default disabled:opacity-70',
-                    row.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
-                  ]"
-                  @click="toggleRowDevolverEstoque(row)"
-                >
-                  <span
-                    :class="[
-                      'inline-block size-4 transform rounded-full bg-white shadow transition-transform',
-                      row.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
-                    ]"
-                  />
-                </button>
-                <span v-else class="text-muted-foreground">—</span>
-                <!-- Flag read-only "passou em manutenção" (auto, só Manutenção). -->
+              <button
+                v-if="canSeeStockToggle(row.condicao_produto)"
+                type="button"
+                role="switch"
+                :aria-checked="row.devolver_estoque"
+                :disabled="!canEdit"
+                :class="[
+                  'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-default disabled:opacity-70',
+                  row.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
+                ]"
+                @click="toggleRowDevolverEstoque(row)"
+              >
                 <span
-                  v-if="row.condicao_produto === 'Manutenção' && row.manutencao"
-                  title="Já passou em manutenção"
-                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
-                >
-                  <Wrench class="size-2.5 shrink-0" />
-                  manutenção feita
-                </span>
-              </div>
+                  :class="[
+                    'inline-block size-4 transform rounded-full bg-white shadow transition-transform',
+                    row.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
+                  ]"
+                />
+              </button>
+              <span v-else class="text-muted-foreground">—</span>
             </td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10">
               <div class="flex flex-col items-start gap-0.5">
@@ -1397,13 +1404,14 @@ async function backfillAddresses() {
               </div>
             </td>
             <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">
-              <span
+              <div
                 v-if="row.condicao_produto === 'Manutenção' && row.prazo"
-                :title="prazoOverdue(row.prazo) ? 'Prazo vencido (30 dias da inserção)' : 'Prazo: 30 dias da inserção'"
-                :class="prazoOverdue(row.prazo)
-                  ? 'font-medium text-red-600 dark:text-red-400'
-                  : 'text-muted-foreground'"
-              >{{ fmtDate(row.prazo) }}</span>
+                class="flex flex-col gap-0.5"
+                :title="'Prazo: 30 dias da inserção'"
+              >
+                <span :class="prazoOverdue(row.prazo) ? 'font-medium text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ fmtDate(row.prazo) }}</span>
+                <span class="text-[10px]" :class="prazoOverdue(row.prazo) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ prazoDiasLabel(row.prazo) }}</span>
+              </div>
               <span v-else class="text-muted-foreground">—</span>
             </td>
             <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
