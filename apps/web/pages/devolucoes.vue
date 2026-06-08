@@ -171,12 +171,15 @@ const isAdmin = useIsAdmin()
 // "Manutenção", que continua manual: aí o toggle aparece e é necessário.
 // Mesmo nas Manutenções, só spectrum77 e sthevem7 podem ver/usar o toggle.
 const _auth = useAuthStore()
-const STOCK_TOGGLE_OWNER = 'spectrum77@tuta.com'
-const STOCK_TOGGLE_MANUTENCAO_USER = 'sthevem7@tuta.com'
+const STOCK_TOGGLE_USERS = [
+  'spectrum77@tuta.com',
+  'sthevem7@tuta.com',
+  'joffer4@tuta.com',
+]
 function canSeeStockToggle(condicao?: string | null): boolean {
   if (condicao !== 'Manutenção') return false
   const email = _auth.user?.email?.toLowerCase()
-  return email === STOCK_TOGGLE_OWNER || email === STOCK_TOGGLE_MANUTENCAO_USER
+  return !!email && STOCK_TOGGLE_USERS.includes(email)
 }
 
 // ── Toast system ─────────────────────────────────────────────────────
