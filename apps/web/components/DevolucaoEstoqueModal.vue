@@ -115,8 +115,9 @@ function confirm() {
       <template v-else-if="data">
         <p class="text-xs text-muted-foreground">Base: <span class="font-mono">{{ data.base }}</span></p>
 
-        <!-- Bins já existentes: entrada direta de N unidades. -->
-        <div v-if="hasExisting" class="space-y-1.5">
+        <!-- Bins já existentes: entrada direta de N unidades. Oculto para Usado,
+             que sempre vira produto z (não entra em bin regional existente). -->
+        <div v-if="hasExisting && !isUsado" class="space-y-1.5">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Estoques existentes</p>
           <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
@@ -138,8 +139,11 @@ function confirm() {
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             Criar novo (<span class="font-mono normal-case">z000N.&lt;tag&gt;</span>)
           </p>
-          <p v-if="!hasExisting" class="text-xs text-amber-600 dark:text-amber-400">
+          <p v-if="!hasExisting && !isUsado" class="text-xs text-amber-600 dark:text-amber-400">
             Nenhum estoque encontrado para esse SKU — escolha a tag do produto novo.
+          </p>
+          <p v-else-if="isUsado" class="text-xs text-muted-foreground">
+            Usado sempre vira produto z — escolha a tag.
           </p>
           <div class="grid grid-cols-3 sm:grid-cols-4 gap-2">
             <button
