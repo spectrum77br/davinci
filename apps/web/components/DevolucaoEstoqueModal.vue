@@ -55,15 +55,15 @@ async function fetchVariants() {
 const existing = computed(() => (data.value?.variants ?? []).filter((v) => v.exists))
 // Quando NÃO há nenhuma variante, o operador escolhe uma tag pra criar z000N.<tag>.
 const hasExisting = computed(() => existing.value.length > 0)
-// Produto "z" (avulso/usado, base começa com `z` — ex. zt030, z0099): só pode
-// ir pra mala ou eletro; os sufixos regionais não se aplicam.
-const isZProduct = computed(() => (data.value?.base ?? '').trim().toLowerCase().startsWith('z'))
+// Usado sempre vira produto "z" (z000N.<tag>): só pode ir pra mala ou eletro;
+// os sufixos regionais não se aplicam a usado.
+const isUsado = computed(() => (props.condicao ?? '').trim().toLowerCase() === 'usado')
 
 // Tags candidatas pra criação do z000N.<tag>: sufixos regionais (exclui `sp`,
 // a origem "a redirecionar") + mala/eletro (usados que viram avulso).
-// Para produto "z", restringe a mala/eletro.
+// Para Usado, restringe a mala/eletro.
 const tagChoices = computed(() => {
-  if (isZProduct.value) return ['mala', 'eletro']
+  if (isUsado.value) return ['mala', 'eletro']
   return [
     ...(data.value?.allowed_suffixes ?? []).filter((s) => s !== 'sp'),
     'mala',
