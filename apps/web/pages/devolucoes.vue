@@ -221,7 +221,9 @@ const search = ref('')
 const reembolsoFilter = ref<ReembolsoFilter>('all')
 const tagFilter = ref('all')
 const condicaoFilter = ref('all')
-const dataDevolucaoFilter = ref('')
+// Filtro de período (data de devolução = created_at). Inclusivo nas duas pontas.
+const dataInicioFilter = ref('')
+const dataFimFilter = ref('')
 const exporting = ref(false)
 
 const addOpen = ref(false)
@@ -512,7 +514,8 @@ async function load() {
     if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
     if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
     if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
-    if (dataDevolucaoFilter.value) params.set('data_devolucao', dataDevolucaoFilter.value)
+    if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
+    if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
     const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
     items.value = res.items
     total.value = res.total
@@ -533,7 +536,8 @@ async function exportXlsx() {
     if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
     if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
     if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
-    if (dataDevolucaoFilter.value) params.set('data_devolucao', dataDevolucaoFilter.value)
+    if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
+    if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
     const blob = await api<Blob>(`/api/devolutions/export.xlsx?${params.toString()}`, { responseType: 'blob' as any })
     const href = URL.createObjectURL(blob as any)
     const a = document.createElement('a')
@@ -560,7 +564,7 @@ watch(search, () => {
     load()
   }, 300)
 })
-watch([reembolsoFilter, tagFilter, condicaoFilter, dataDevolucaoFilter], () => { page.value = 1; load() })
+watch([reembolsoFilter, tagFilter, condicaoFilter, dataInicioFilter, dataFimFilter], () => { page.value = 1; load() })
 watch(page, () => load())
 
 function openAdd() {
@@ -1133,12 +1137,33 @@ async function backfillAddresses() {
         <option value="all">todas condições</option>
         <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
       </select>
-      <input
-        v-model="dataDevolucaoFilter"
-        type="date"
-        title="Data devolução"
-        class="h-9 rounded-md border bg-background px-2 text-sm"
-      />
+      <div class="flex items-center gap-1.5 h-9 rounded-md border bg-background px-2" title="Período da data de devolução">
+        <span class="text-xs text-muted-foreground">de</span>
+        <input
+          v-model="dataInicioFilter"
+          type="date"
+          :max="dataFimFilter || undefined"
+          title="Data inicial"
+          class="bg-transparent text-sm focus:outline-none"
+        />
+        <span class="text-xs text-muted-foreground">até</span>
+        <input
+          v-model="dataFimFilter"
+          type="date"
+          :min="dataInicioFilter || undefined"
+          title="Data final"
+          class="bg-transparent text-sm focus:outline-none"
+        />
+        <button
+          v-if="dataInicioFilter || dataFimFilter"
+          type="button"
+          title="Limpar período"
+          class="text-muted-foreground hover:text-foreground"
+          @click="dataInicioFilter = ''; dataFimFilter = ''"
+        >
+          <X class="size-3.5" />
+        </button>
+      </div>
       <Button size="sm" variant="outline" :disabled="exporting" @click="exportXlsx">
         <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exporting }" />
         exportar xlsx

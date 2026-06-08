@@ -87,7 +87,8 @@ def _build_where(
     search: str | None,
     reembolso: bool | None,
     tag: str | None,
-    data_devolucao: date | None,
+    data_inicio: date | None,
+    data_fim: date | None,
     condicao: str | None,
 ) -> list:
     where = []
@@ -100,10 +101,12 @@ def _build_where(
     if condicao and condicao.strip() and condicao.strip().lower() != "all":
         where.append(Devolution.condicao_produto == condicao.strip())
     # "Data de devolução" = quando o registro entrou no sistema (created_at).
-    if data_devolucao is not None:
-        start = datetime.combine(data_devolucao, time.min, tzinfo=SAO_PAULO)
-        end = start + timedelta(days=1)
+    # Período inclusivo: [data_inicio 00:00, data_fim 23:59:59] no fuso de SP.
+    if data_inicio is not None:
+        start = datetime.combine(data_inicio, time.min, tzinfo=SAO_PAULO)
         where.append(Devolution.created_at >= start.astimezone(UTC))
+    if data_fim is not None:
+        end = datetime.combine(data_fim, time.min, tzinfo=SAO_PAULO) + timedelta(days=1)
         where.append(Devolution.created_at < end.astimezone(UTC))
     return where
 
@@ -117,10 +120,11 @@ async def list_devolutions(
     search: str | None = Query(None),
     reembolso: bool | None = Query(None),
     tag: str | None = Query(None),
-    data_devolucao: date | None = Query(None),
+    data_inicio: date | None = Query(None),
+    data_fim: date | None = Query(None),
     condicao: str | None = Query(None),
 ) -> DevolutionPage:
-    where = _build_where(search, reembolso, tag, data_devolucao, condicao)
+    where = _build_where(search, reembolso, tag, data_inicio, data_fim, condicao)
 
     stmt = (
         select(Devolution)
@@ -182,11 +186,12 @@ async def export_devolutions(
     search: str | None = Query(None),
     reembolso: bool | None = Query(None),
     tag: str | None = Query(None),
-    data_devolucao: date | None = Query(None),
+    data_inicio: date | None = Query(None),
+    data_fim: date | None = Query(None),
     condicao: str | None = Query(None),
 ) -> StreamingResponse:
     """Exporta as devoluções (com os mesmos filtros da lista) em XLSX."""
-    where = _build_where(search, reembolso, tag, data_devolucao, condicao)
+    where = _build_where(search, reembolso, tag, data_inicio, data_fim, condicao)
     rows = (
         await session.execute(
             select(Devolution)
