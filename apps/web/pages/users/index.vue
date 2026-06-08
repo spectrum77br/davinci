@@ -48,6 +48,7 @@ await refresh()
 const draft = ref({
   email: '',
   name: '',
+  password: '',
   tuta: '',
   upseller: '',
   bling_login: '',
@@ -62,12 +63,12 @@ async function createUser() {
   createErr.value = null
   try {
     const body: Record<string, any> = { email: draft.value.email }
-    for (const k of ['name', 'tuta', 'upseller', 'bling_login', 'adspower', 'duoke'] as const) {
+    for (const k of ['name', 'password', 'tuta', 'upseller', 'bling_login', 'adspower', 'duoke'] as const) {
       if (draft.value[k]) body[k] = draft.value[k]
     }
     await api('/api/users', { method: 'POST', body })
     showNew.value = false
-    draft.value = { email: '', name: '', tuta: '', upseller: '', bling_login: '', adspower: '', duoke: '' }
+    draft.value = { email: '', name: '', password: '', tuta: '', upseller: '', bling_login: '', adspower: '', duoke: '' }
     await refresh()
   } catch (e: any) {
     createErr.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -228,6 +229,13 @@ function fmtDate(s: string | null) {
           <div>
             <Label>Nome</Label>
             <Input v-model="draft.name" />
+          </div>
+          <div>
+            <Label>Senha</Label>
+            <Input v-model="draft.password" type="text" autocomplete="new-password" placeholder="opcional — mín. 8 caracteres" />
+            <p class="text-[11px] text-muted-foreground mt-1">
+              Se deixar em branco, defina depois em "permissões". Sem senha, o usuário só entra por código.
+            </p>
           </div>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>

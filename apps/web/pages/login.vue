@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Mail, ShieldCheck, Loader2 } from 'lucide-vue-next'
+import { Mail, ShieldCheck, Loader2, Lock } from 'lucide-vue-next'
 
 definePageMeta({ layout: false })
 
@@ -9,8 +9,11 @@ const config = useRuntimeConfig()
 const siteKey = (config.public as any)?.turnstile?.siteKey as string | undefined
 const turnstileEnabled = computed(() => Boolean(siteKey))
 
-const step = ref<'email' | 'code'>('email')
+// 'password' = login padrão (e-mail + senha).
+// 'otp-email' / 'otp-code' = recuperação por código no e-mail ("Esqueci minha senha").
+const step = ref<'password' | 'otp-email' | 'otp-code'>('password')
 const email = ref('')
+const password = ref('')
 const code = ref('')
 const turnstileToken = ref('')
 const prefix = ref('')
@@ -33,6 +36,24 @@ function startCooldown(s = 30) {
   }, 1000)
 }
 
+function goToNext(requiresApproval: boolean) {
+  const next = (route.query.next as string) || (requiresApproval ? '/pending-approval' : '/')
+  return navigateTo(next)
+}
+
+async function submitPassword() {
+  error.value = null
+  loading.value = true
+  try {
+    const r = await auth.login(email.value.trim().toLowerCase(), password.value)
+    await goToNext(r.requires_approval)
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    loading.value = false
+  }
+}
+
 async function submitEmail() {
   error.value = null
   if (turnstileEnabled.value && !turnstileToken.value) {
@@ -44,7 +65,7 @@ async function submitEmail() {
     const r = await auth.requestOtp(email.value.trim().toLowerCase(), turnstileToken.value || undefined)
     prefix.value = r.prefix
     expiresAt.value = new Date(r.expires_at)
-    step.value = 'code'
+    step.value = 'otp-code'
     startCooldown(30)
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -58,8 +79,7 @@ async function submitCode() {
   loading.value = true
   try {
     const r = await auth.verifyOtp(email.value.trim().toLowerCase(), code.value.trim().toUpperCase())
-    const next = (route.query.next as string) || (r.requires_approval ? '/pending-approval' : '/')
-    await navigateTo(next)
+    await goToNext(r.requires_approval)
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -80,6 +100,17 @@ async function resend() {
   }
 }
 
+function useOtp() {
+  error.value = null
+  step.value = 'otp-email'
+}
+
+function backToPassword() {
+  error.value = null
+  code.value = ''
+  step.value = 'password'
+}
+
 const now = useNow({ interval: 1000 })
 const remaining = computed(() => {
   if (!expiresAt.value) return ''
@@ -92,10 +123,11 @@ const remaining = computed(() => {
 
 const errorLabel = computed(() => {
   const map: Record<string, string> = {
+    invalid_credentials: 'E-mail ou senha incorretos.',
     turnstile_required: 'Confirme que você não é um robô.',
     turnstile_failed: 'Verificação anti-bot falhou. Recarregue.',
     invalid_email: 'E-mail inválido.',
-    rate_limited: 'Muitos pedidos. Aguarde antes de tentar novamente.',
+    rate_limited: 'Muitas tentativas. Aguarde antes de tentar novamente.',
     code_invalid: 'Código incorreto.',
     code_not_found: 'Código não encontrado ou expirado. Peça um novo.',
     nonce_mismatch: 'Sessão divergente. Reabra o login no mesmo navegador.',
@@ -116,19 +148,66 @@ const errorLabel = computed(() => {
           </div>
           <span class="text-lg font-semibold">DaVinci</span>
         </div>
-        <CardTitle v-if="step === 'email'" class="text-xl">Entrar</CardTitle>
+        <CardTitle v-if="step === 'password'" class="text-xl">Entrar</CardTitle>
+        <CardTitle v-else-if="step === 'otp-email'" class="text-xl">Entrar por código</CardTitle>
         <CardTitle v-else class="text-xl">Confirme o código</CardTitle>
         <CardDescription>
-          {{ step === 'email' ? 'Login por código no seu e-mail.' : 'Olhe sua caixa de entrada.' }}
+          <template v-if="step === 'password'">Acesse com seu e-mail e senha.</template>
+          <template v-else-if="step === 'otp-email'">Enviamos um código de acesso ao seu e-mail.</template>
+          <template v-else>Olhe sua caixa de entrada.</template>
         </CardDescription>
       </CardHeader>
 
       <CardContent>
-        <form v-if="step === 'email'" class="space-y-4" @submit.prevent="submitEmail">
+        <!-- Login por senha (padrão) -->
+        <form v-if="step === 'password'" class="space-y-4" @submit.prevent="submitPassword">
           <div class="space-y-2">
             <Label for="email">E-mail</Label>
             <Input
               id="email"
+              v-model="email"
+              type="email"
+              required
+              autofocus
+              autocomplete="username"
+              placeholder="voce@empresa.com"
+            />
+          </div>
+          <div class="space-y-2">
+            <Label for="password">Senha</Label>
+            <Input
+              id="password"
+              v-model="password"
+              type="password"
+              required
+              autocomplete="current-password"
+              placeholder="••••••••"
+            />
+          </div>
+          <Button type="submit" class="w-full" :disabled="loading">
+            <Loader2 v-if="loading" class="size-4 mr-2 animate-spin" />
+            Entrar
+          </Button>
+          <p class="text-center text-xs text-muted-foreground">
+            Esqueceu a senha? Procure um administrador para redefinir.
+          </p>
+          <div class="text-center">
+            <button
+              type="button"
+              class="text-[11px] text-muted-foreground/60 hover:text-foreground"
+              @click="useOtp"
+            >
+              Acesso por código (administradores)
+            </button>
+          </div>
+        </form>
+
+        <!-- Recuperação: pedir código por e-mail -->
+        <form v-else-if="step === 'otp-email'" class="space-y-4" @submit.prevent="submitEmail">
+          <div class="space-y-2">
+            <Label for="otp-email">E-mail</Label>
+            <Input
+              id="otp-email"
               v-model="email"
               type="email"
               required
@@ -143,8 +222,18 @@ const errorLabel = computed(() => {
             <Loader2 v-if="loading" class="size-4 mr-2 animate-spin" />
             Enviar código
           </Button>
+          <div class="text-center">
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              @click="backToPassword"
+            >
+              <Lock class="size-3" /> Voltar ao login com senha
+            </button>
+          </div>
         </form>
 
+        <!-- Recuperação: confirmar código -->
         <form v-else class="space-y-4" @submit.prevent="submitCode">
           <div class="rounded-md border border-primary/40 bg-primary/5 p-3">
             <div class="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
@@ -182,7 +271,7 @@ const errorLabel = computed(() => {
             <button
               type="button"
               class="text-muted-foreground hover:text-foreground"
-              @click="step = 'email'"
+              @click="step = 'otp-email'"
             >
               ← Trocar e-mail
             </button>

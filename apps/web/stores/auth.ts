@@ -48,6 +48,19 @@ export const useAuthStore = defineStore('auth', {
       this.fetched = true
     },
 
+    async login(email: string, password: string) {
+      const r = await $fetch<{
+        user: AuthUser
+        requires_approval: boolean
+      }>(`/api/auth/login`, {
+        method: 'POST',
+        credentials: 'include',
+        body: { email, password },
+      })
+      this.user = r.user
+      return r
+    },
+
     async requestOtp(email: string, turnstileToken?: string) {
       return $fetch<{ prefix: string; expires_at: string }>(
         `/api/auth/request`,

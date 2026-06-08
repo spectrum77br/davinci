@@ -19,6 +19,7 @@ type UserDetail = {
   duoke: string | null
   stock_tags: string[] | null
   permissions: Partial<Record<Resource, Partial<ResourcePerm>>>
+  has_password: boolean
   disabled_at: string | null
 }
 
@@ -136,6 +137,36 @@ function setColumn(action: Action, on: boolean) {
 
 const isAdminUser = computed(() => user.value?.role === 'admin')
 const isSelf = computed(() => user.value?.id === auth.user?.id)
+
+// Definir/resetar senha. Backend bloqueia mexer na senha de OUTRO admin
+// (cannot_set_admin_password) — espelhamos com o disabled abaixo.
+const PASSWORD_MIN = 8
+const newPassword = ref('')
+const settingPassword = ref(false)
+const passwordMsg = ref<string | null>(null)
+const canSetPassword = computed(() => !isAdminUser.value || isSelf.value)
+
+async function setPassword() {
+  passwordMsg.value = null
+  if (newPassword.value.length < PASSWORD_MIN) {
+    passwordMsg.value = `A senha precisa de pelo menos ${PASSWORD_MIN} caracteres.`
+    return
+  }
+  settingPassword.value = true
+  try {
+    await api(`/api/users/${userId}/password`, {
+      method: 'POST',
+      body: { password: newPassword.value },
+    })
+    newPassword.value = ''
+    passwordMsg.value = 'Senha definida.'
+    if (user.value) user.value.has_password = true
+  } catch (e: any) {
+    passwordMsg.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    settingPassword.value = false
+  }
+}
 
 async function saveCadastral() {
   saving.value = true
@@ -285,6 +316,47 @@ async function removeUser() {
             <Save class="size-4 mr-1" /> {{ saving ? 'salvando…' : 'Salvar dados' }}
           </Button>
         </div>
+      </CardContent>
+    </Card>
+
+    <!-- Senha -->
+    <Card>
+      <CardHeader>
+        <CardTitle>Senha de acesso</CardTitle>
+        <CardDescription>
+          O usuário entra com o e-mail acima + esta senha. Quem esquecer a senha
+          deve pedir um reset aqui — não há recuperação automática.
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-4">
+        <div class="flex items-center gap-2 text-sm">
+          <span class="text-muted-foreground">Status:</span>
+          <span v-if="user.has_password" class="px-2 py-0.5 rounded border text-emerald-500">
+            senha definida
+          </span>
+          <span v-else class="px-2 py-0.5 rounded border text-amber-500">
+            sem senha — entra só por código
+          </span>
+        </div>
+        <div v-if="canSetPassword" class="flex flex-col sm:flex-row gap-2 sm:items-end">
+          <div class="flex-1">
+            <Label>{{ user.has_password ? 'Nova senha' : 'Definir senha' }}</Label>
+            <Input
+              v-model="newPassword"
+              type="text"
+              autocomplete="new-password"
+              :placeholder="`mín. ${PASSWORD_MIN} caracteres`"
+            />
+          </div>
+          <Button :disabled="settingPassword || !newPassword" @click="setPassword">
+            <Save class="size-4 mr-1" />
+            {{ settingPassword ? 'salvando…' : (user.has_password ? 'Resetar senha' : 'Definir senha') }}
+          </Button>
+        </div>
+        <p v-else class="text-sm text-amber-500">
+          Não é possível alterar a senha de outro administrador.
+        </p>
+        <p v-if="passwordMsg" class="text-sm text-muted-foreground">{{ passwordMsg }}</p>
       </CardContent>
     </Card>
 

@@ -43,6 +43,11 @@ class User(Base, TimestampMixin):
         server_default=text("'pending'"),
     )
 
+    # bcrypt hash da senha (SHA-256 pre-hash). Null = sem senha definida;
+    # o usuário entra pelo OTP até um admin definir uma senha. Nunca
+    # guarda a senha em claro. Ver app/security/password.py.
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     tuta: Mapped[str | None] = mapped_column(String(255), nullable=True)
     upseller: Mapped[str | None] = mapped_column(String(255), nullable=True)
     bling_login: Mapped[str | None] = mapped_column(String(255), nullable=True)

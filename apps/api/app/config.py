@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     otp_prefix_len: int = 4
     otp_code_len: int = 8
 
+    # Login por senha. min_length é o piso aceito ao DEFINIR uma senha
+    # (admin). Os rate limits do login (por hora) protegem contra
+    # brute-force — mais folgados que o OTP porque não disparam e-mail.
+    password_min_length: int = 8
+    login_rate_per_ip: int = 20
+    login_rate_per_email: int = 8
+
     log_level: str = "info"
     sentry_dsn: str = ""
 

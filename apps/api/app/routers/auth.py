@@ -21,6 +21,7 @@ from app.security.otp import (
     hash_code,
     verify_code,
 )
+from app.security.password import dummy_verify, verify_password
 from app.services.rate_limit import RateLimitError, sliding_window_check
 from app.services.turnstile import verify_turnstile
 from app.worker_pool import get_arq_pool
@@ -46,6 +47,11 @@ class RequestOtpResp(BaseModel):
 class VerifyOtpBody(BaseModel):
     email: EmailStr
     code: str = Field(min_length=4, max_length=16)
+
+
+class LoginBody(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
 
 
 class UserOut(BaseModel):
@@ -247,6 +253,81 @@ async def verify_otp(
     _clear_cookie(resp, NONCE_COOKIE)
 
     logger.info("otp_verified", email=email, role=user.role.value, status=user.status.value)
+
+    return VerifyOtpResp(
+        user=UserOut(
+            id=str(user.id),
+            open_id=user.open_id,
+            email=user.email,
+            name=user.name,
+            role=user.role.value,
+            status=user.status.value,
+            permissions=user.permissions,
+            stock_tags=user.stock_tags or None,
+        ),
+        requires_approval=user.status == UserStatus.PENDING,
+    )
+
+
+@router.post("/login", response_model=VerifyOtpResp)
+async def login_password(
+    body: LoginBody,
+    req: Request,
+    resp: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> VerifyOtpResp:
+    """Login por e-mail + senha (definida pelo admin). Erros são genéricos
+    (`invalid_credentials`) e o caminho de usuário inexistente roda um
+    bcrypt decoy — nada vaza quais e-mails existem. O OTP (POST /request +
+    /verify) continua disponível como recuperação."""
+    email = body.email.lower().strip()
+    ip = _client_ip(req)
+
+    try:
+        if ip:
+            await sliding_window_check(
+                key=f"login:rl:ip:{ip}",
+                limit=_settings.login_rate_per_ip,
+                window_seconds=3600,
+            )
+        await sliding_window_check(
+            key=f"login:rl:email:{email}",
+            limit=_settings.login_rate_per_email,
+            window_seconds=3600,
+        )
+    except RateLimitError as e:
+        resp.headers["Retry-After"] = str(e.retry_after)
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"code": "rate_limited", "retry_after": e.retry_after},
+        ) from None
+
+    user_res = await session.execute(select(User).where(User.email == email))
+    user = user_res.scalar_one_or_none()
+
+    if user is None or user.password_hash is None:
+        # Spend the same bcrypt cost as a real verify (anti-enumeration).
+        dummy_verify()
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail={"code": "invalid_credentials"}
+        )
+
+    if not verify_password(body.password, user.password_hash):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail={"code": "invalid_credentials"}
+        )
+
+    if user.status == UserStatus.SUSPENDED:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "suspended"})
+
+    user.last_login_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(user)
+
+    token, exp, _jti = issue_session_token(sub=user.open_id, role=user.role.value)
+    _set_session_cookie(resp, token, exp)
+
+    logger.info("password_login", email=email, role=user.role.value, status=user.status.value)
 
     return VerifyOtpResp(
         user=UserOut(

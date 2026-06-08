@@ -161,6 +161,77 @@ async def test_me_permissions_admin_bypass(client, make_user, auth_as):
 
 
 @pytest.mark.asyncio
+async def test_create_user_with_password(client, make_user, auth_as):
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    r = await client.post(
+        "/api/users",
+        json={"email": "comsenha@davinci-test.com", "password": "segredo123"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["has_password"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_user_password_too_short(client, make_user, auth_as):
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    r = await client.post(
+        "/api/users",
+        json={"email": "curta@davinci-test.com", "password": "123"},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "password_too_short"
+
+
+@pytest.mark.asyncio
+async def test_admin_sets_user_password(client, make_user, auth_as):
+    admin = await make_user(role=UserRole.ADMIN)
+    target = await make_user(email="semsenha@davinci-test.com")
+    auth_as(admin)
+
+    # Antes: sem senha.
+    r = await client.get(f"/api/users/{target.id}")
+    assert r.json()["has_password"] is False
+
+    r = await client.post(
+        f"/api/users/{target.id}/password",
+        json={"password": "novasenha123"},
+    )
+    assert r.status_code == 204, r.text
+
+    # Depois: com senha.
+    r = await client.get(f"/api/users/{target.id}")
+    assert r.json()["has_password"] is True
+
+
+@pytest.mark.asyncio
+async def test_set_password_too_short(client, make_user, auth_as):
+    admin = await make_user(role=UserRole.ADMIN)
+    target = await make_user(email="alvo@davinci-test.com")
+    auth_as(admin)
+    r = await client.post(
+        f"/api/users/{target.id}/password",
+        json={"password": "abc"},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "password_too_short"
+
+
+@pytest.mark.asyncio
+async def test_cannot_set_other_admin_password(client, make_user, auth_as):
+    admin1 = await make_user(role=UserRole.ADMIN, email="adm1@davinci-test.com")
+    admin2 = await make_user(role=UserRole.ADMIN, email="adm2@davinci-test.com")
+    auth_as(admin1)
+    r = await client.post(
+        f"/api/users/{admin2.id}/password",
+        json={"password": "tentativa123"},
+    )
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "cannot_set_admin_password"
+
+
+@pytest.mark.asyncio
 async def test_delete_user_soft_deletes(client, make_user, auth_as):
     admin = await make_user(role=UserRole.ADMIN)
     target = await make_user(email="del@davinci-test.com")

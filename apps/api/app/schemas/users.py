@@ -44,6 +44,8 @@ class UserOut(BaseModel):
     duoke: str | None = None
     stock_tags: list[str] | None = None
     permissions: dict
+    # Apenas indica se há senha definida — o hash nunca sai da API.
+    has_password: bool = False
     last_login_at: datetime | None = None
     disabled_at: datetime | None = None
     created_at: datetime | None = None
@@ -60,6 +62,9 @@ class UserListOut(BaseModel):
 class UserCreate(BaseModel):
     email: EmailStr
     name: str | None = None
+    # Senha inicial opcional. Se omitida, o usuário entra por OTP até um
+    # admin definir uma senha. Validada contra password_min_length no router.
+    password: str | None = Field(default=None, max_length=128)
     tuta: str | None = None
     upseller: str | None = None
     bling_login: str | None = None
@@ -67,6 +72,10 @@ class UserCreate(BaseModel):
     duoke: str | None = None
     stock_tags: list[str] | None = None
     permissions: Permissions | None = None
+
+
+class PasswordSet(BaseModel):
+    password: str = Field(max_length=128)
 
 
 class UserPatch(BaseModel):

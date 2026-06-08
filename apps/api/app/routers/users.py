@@ -8,12 +8,14 @@ from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user, require_admin
 from app.models import User, UserRole, UserStatus
 from app.schemas.permissions import Permissions
 from app.schemas.users import (
     MePermissionsOut,
+    PasswordSet,
     PermissionsPatch,
     UserCreate,
     UserListOut,
@@ -21,6 +23,9 @@ from app.schemas.users import (
     UserPatch,
     _normalize_stock_tags,
 )
+from app.security.password import hash_password
+
+_settings = get_settings()
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -41,6 +46,7 @@ def _to_out(u: User) -> UserOut:
         duoke=u.duoke,
         stock_tags=u.stock_tags or None,
         permissions=u.permissions or {},
+        has_password=u.password_hash is not None,
         last_login_at=u.last_login_at,
         disabled_at=u.disabled_at,
         created_at=getattr(u, "created_at", None),
@@ -146,10 +152,20 @@ async def create_user(
 
     perms = (body.permissions or Permissions.from_jsonb({})).to_jsonb()
 
+    password_hash = None
+    if body.password is not None:
+        if len(body.password) < _settings.password_min_length:
+            raise HTTPException(
+                400,
+                detail={"code": "password_too_short", "min": _settings.password_min_length},
+            )
+        password_hash = hash_password(body.password)
+
     u = User(
         open_id=open_id,
         email=email,
         name=body.name,
+        password_hash=password_hash,
         tuta=body.tuta,
         upseller=body.upseller,
         bling_login=body.bling_login,
@@ -235,6 +251,36 @@ async def patch_permissions(
     await session.commit()
     await session.refresh(u)
     return _to_out(u)
+
+
+@router.post("/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
+async def set_user_password(
+    user_id: UUID,
+    body: PasswordSet,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(require_admin)],
+) -> None:
+    """Admin define ou reseta a senha de um usuário. Senha em claro nunca
+    é logada/retornada. Um admin não pode mexer na senha de OUTRO admin
+    (só na própria) — mesma regra de patch_permissions."""
+    if len(body.password) < _settings.password_min_length:
+        raise HTTPException(
+            400,
+            detail={"code": "password_too_short", "min": _settings.password_min_length},
+        )
+
+    res = await session.execute(select(User).where(User.id == user_id))
+    u = res.scalar_one_or_none()
+    if u is None:
+        raise HTTPException(404, detail={"code": "user_not_found"})
+
+    if u.role == UserRole.ADMIN and u.id != admin.id:
+        raise HTTPException(403, detail={"code": "cannot_set_admin_password"})
+
+    u.password_hash = hash_password(body.password)
+    await session.commit()
+    logger.info("user_password_set", id=str(u.id), by=str(admin.id))
+    return None
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
