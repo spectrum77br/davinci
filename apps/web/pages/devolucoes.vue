@@ -54,6 +54,7 @@ type DevolutionRow = {
   manutencao_destino: string | null
   tag: string | null
   data_devolvido_estoque: string | null
+  prazo: string | null
   estoque_mov_sku: string | null
   estoque_mov_bling_id: number | null
   estoque_mov_action: string | null
@@ -454,6 +455,22 @@ function fmtDateTime(v: string | null) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+// Prazo: só a data (dd/mm/aa). Vencido = data no passado (ignora a hora).
+function fmtDate(v: string | null) {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return v
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' })
+}
+function prazoOverdue(v: string | null): boolean {
+  if (!v) return false
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return false
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return d.getTime() < today.getTime()
 }
 
 function markDirty(id: string) {
@@ -1178,7 +1195,7 @@ async function backfillAddresses() {
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="8">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 9 : 8">Devolução</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 10 : 9">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
           </tr>
           <tr class="border-b">
@@ -1199,18 +1216,19 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Data devolvido estoque</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prazo</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="isAdmin ? 18 : 17" class="py-8 text-center text-muted-foreground">
+            <td :colspan="isAdmin ? 19 : 18" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="isAdmin ? 18 : 17" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="isAdmin ? 19 : 18" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -1369,6 +1387,16 @@ async function backfillAddresses() {
                   <span class="line-through">{{ row.estoque_mov_sku }}</span>
                 </span>
               </div>
+            </td>
+            <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">
+              <span
+                v-if="row.condicao_produto === 'Manutenção' && row.prazo"
+                :title="prazoOverdue(row.prazo) ? 'Prazo vencido (30 dias da inserção)' : 'Prazo: 30 dias da inserção'"
+                :class="prazoOverdue(row.prazo)
+                  ? 'font-medium text-red-600 dark:text-red-400'
+                  : 'text-muted-foreground'"
+              >{{ fmtDate(row.prazo) }}</span>
+              <span v-else class="text-muted-foreground">—</span>
             </td>
             <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <input

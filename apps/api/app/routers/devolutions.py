@@ -175,6 +175,7 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Devolver estoque", "devolver_estoque"),
     ("Passou manutenção", "manutencao"),
     ("Data devolvido estoque", "data_devolvido_estoque"),
+    ("Prazo", "prazo"),
     ("Observação", "observacao"),
 ]
 
@@ -209,7 +210,7 @@ async def export_devolutions(
         line = []
         for _, field in _EXPORT_COLUMNS:
             value = getattr(r, field, None)
-            if field in ("data", "created_at", "data_devolvido_estoque"):
+            if field in ("data", "created_at", "data_devolvido_estoque", "prazo"):
                 line.append(_fmt_dt_sp(value))
             elif field in ("reembolso", "devolver_estoque", "manutencao"):
                 line.append("Sim" if value else "Não")
@@ -650,6 +651,11 @@ async def create_devolution(
         _maybe_create_refund(session, row, body.condicao_produto)
     await session.commit()
     await session.refresh(row)
+    # Prazo (30 dias da inserção) só para Manutenção.
+    if body.condicao_produto == "Manutenção" and row.prazo is None:
+        row.prazo = row.created_at + timedelta(days=30)
+        await session.commit()
+        await session.refresh(row)
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
     out = DevolutionOut.model_validate(row)
 
@@ -723,6 +729,13 @@ async def patch_devolution(
     # Carimba a data quando o toggle "devolver estoque" passa a TRUE.
     if row.devolver_estoque and (not prev_devolver_estoque or row.data_devolvido_estoque is None):
         row.data_devolvido_estoque = datetime.now(UTC)
+
+    # Prazo (30 dias da inserção) só para Manutenção; limpa se sair de Manutenção.
+    if new_condicao == "Manutenção":
+        if row.prazo is None:
+            row.prazo = row.created_at + timedelta(days=30)
+    elif row.prazo is not None:
+        row.prazo = None
 
     await session.commit()
     await session.refresh(row)

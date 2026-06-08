@@ -59,6 +59,9 @@ class Devolution(Base, TimestampMixin):
     data_devolvido_estoque: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Prazo = created_at + 30 dias. Só para Manutenção (NULL nas demais).
+    # Preenchido no create/patch quando a condição é Manutenção. Ver alembic 0130.
+    prazo: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Movimento de estoque efetivamente lançado no Bling (ver alembic 0115).
     # Guardado pra poder ESTORNAR (dar baixa "S") quando o toggle "devolver
     # estoque" é desligado depois — ex.: Usado que vira Sucata. `*_action`
