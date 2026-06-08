@@ -225,6 +225,8 @@ const condicaoFilter = ref('all')
 // Filtro de período (data de devolução = created_at). Inclusivo nas duas pontas.
 const dataInicioFilter = ref('')
 const dataFimFilter = ref('')
+// Mostrar só pedidos que já passaram em manutenção (manutencao = true).
+const manutencaoFilter = ref(false)
 const exporting = ref(false)
 
 const addOpen = ref(false)
@@ -533,6 +535,7 @@ async function load() {
     if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
     if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
     if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
+    if (manutencaoFilter.value) params.set('manutencao', 'true')
     const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
     items.value = res.items
     total.value = res.total
@@ -555,6 +558,7 @@ async function exportXlsx() {
     if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
     if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
     if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
+    if (manutencaoFilter.value) params.set('manutencao', 'true')
     const blob = await api<Blob>(`/api/devolutions/export.xlsx?${params.toString()}`, { responseType: 'blob' as any })
     const href = URL.createObjectURL(blob as any)
     const a = document.createElement('a')
@@ -581,7 +585,7 @@ watch(search, () => {
     load()
   }, 300)
 })
-watch([reembolsoFilter, tagFilter, condicaoFilter, dataInicioFilter, dataFimFilter], () => { page.value = 1; load() })
+watch([reembolsoFilter, tagFilter, condicaoFilter, dataInicioFilter, dataFimFilter, manutencaoFilter], () => { page.value = 1; load() })
 watch(page, () => load())
 
 function openAdd() {
@@ -1181,6 +1185,10 @@ async function backfillAddresses() {
           <X class="size-3.5" />
         </button>
       </div>
+      <label class="flex items-center gap-1.5 h-9 rounded-md border bg-background px-2.5 text-sm cursor-pointer select-none" title="Mostrar só pedidos que já passaram em manutenção">
+        <input v-model="manutencaoFilter" type="checkbox" class="size-4 rounded border accent-primary" />
+        <span class="whitespace-nowrap">só manutenção feita</span>
+      </label>
       <Button size="sm" variant="outline" :disabled="exporting" @click="exportXlsx">
         <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exporting }" />
         exportar xlsx

@@ -90,12 +90,15 @@ def _build_where(
     data_inicio: date | None,
     data_fim: date | None,
     condicao: str | None,
+    manutencao: bool | None = None,
 ) -> list:
     where = []
     if search and search.strip():
         where.append(_search_clause(search.strip()))
     if reembolso is not None:
         where.append(Devolution.reembolso.is_(reembolso))
+    if manutencao:
+        where.append(Devolution.manutencao.is_(True))
     if tag and tag.strip() and tag.strip().lower() != "all":
         where.append(Devolution.tag == tag.strip().lower().lstrip("."))
     if condicao and condicao.strip() and condicao.strip().lower() != "all":
@@ -123,8 +126,9 @@ async def list_devolutions(
     data_inicio: date | None = Query(None),
     data_fim: date | None = Query(None),
     condicao: str | None = Query(None),
+    manutencao: bool | None = Query(None),
 ) -> DevolutionPage:
-    where = _build_where(search, reembolso, tag, data_inicio, data_fim, condicao)
+    where = _build_where(search, reembolso, tag, data_inicio, data_fim, condicao, manutencao)
 
     stmt = (
         select(Devolution)
@@ -190,9 +194,10 @@ async def export_devolutions(
     data_inicio: date | None = Query(None),
     data_fim: date | None = Query(None),
     condicao: str | None = Query(None),
+    manutencao: bool | None = Query(None),
 ) -> StreamingResponse:
     """Exporta as devoluções (com os mesmos filtros da lista) em XLSX."""
-    where = _build_where(search, reembolso, tag, data_inicio, data_fim, condicao)
+    where = _build_where(search, reembolso, tag, data_inicio, data_fim, condicao, manutencao)
     rows = (
         await session.execute(
             select(Devolution)
