@@ -138,9 +138,31 @@ const showRefreshStock = ref(false)
 const selectedAutoLinkIds = ref<Set<string>>(new Set())
 const selectedSyncAllIds = ref<Set<string>>(new Set())
 
-// Per-product sync popover
+// Per-product sync popover. O popover é renderizado via <Teleport>
+// pra fora do .table-card (que tem overflow-hidden pro rounded-xl) —
+// senão o conteúdo é clipado pela borda inferior da tabela e o
+// operador na última row da página não vê as opções. `Anchor` guarda
+// o getBoundingClientRect do botão no momento do clique; o popover
+// é posicionado em `position: fixed` a partir dele, e fecha no
+// scroll ou click-outside (anchor invalida).
 const syncPopoverProductId = ref<string | null>(null)
 const syncPopoverSelectedIds = ref<Set<string>>(new Set())
+const syncPopoverAnchor = ref<DOMRect | null>(null)
+const SYNC_POPOVER_WIDTH = 288 // = Tailwind w-72
+const syncPopoverStyle = computed((): Record<string, string> => {
+  const r = syncPopoverAnchor.value
+  if (!r) return { display: 'none' }
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1024
+  // Right-align com o botão (como o popover original `right-0 top-full`).
+  // Clamp pra não vazar nas bordas do viewport.
+  const left = Math.max(8, Math.min(vw - SYNC_POPOVER_WIDTH - 8, r.right - SYNC_POPOVER_WIDTH))
+  return {
+    position: 'fixed',
+    top: `${r.bottom + 4}px`,
+    left: `${left}px`,
+    width: `${SYNC_POPOVER_WIDTH}px`,
+  }
+})
 
 // Feature 1: CSV import
 const showImportCsv = ref(false)
@@ -620,18 +642,40 @@ async function syncProduct(id: string, integrationIds?: string[]) {
   }
 }
 
-function openSyncPopover(p: Product) {
+function openSyncPopover(p: Product, ev: MouseEvent) {
   // Pre-selecionar todas as integrações que têm link com este produto.
   syncPopoverSelectedIds.value = new Set(
     p.links.map((l) => l.integration_id).filter(Boolean) as string[],
   )
   syncPopoverProductId.value = p.id
+  // Ancora no rect do botão clicado pra posicionar o popover teleportado.
+  syncPopoverAnchor.value = (
+    ev.currentTarget as HTMLElement
+  ).getBoundingClientRect()
+  // `capture: true` pega scroll em qualquer container (ex: o overflow-auto
+  // do `.table-card` quando voltar a ser scrollável). Adiamos o
+  // click-outside um tick pra não capturar o próprio clique que abriu.
+  window.addEventListener('scroll', closeSyncPopover, true)
+  setTimeout(() => document.addEventListener('mousedown', onSyncPopoverDocClick), 0)
 }
 
 function closeSyncPopover() {
   syncPopoverProductId.value = null
   syncPopoverSelectedIds.value = new Set()
+  syncPopoverAnchor.value = null
+  window.removeEventListener('scroll', closeSyncPopover, true)
+  document.removeEventListener('mousedown', onSyncPopoverDocClick)
 }
+
+function onSyncPopoverDocClick(ev: MouseEvent) {
+  const el = document.getElementById('sync-popover-floating')
+  if (el && !el.contains(ev.target as Node)) closeSyncPopover()
+}
+
+onUnmounted(() => {
+  window.removeEventListener('scroll', closeSyncPopover, true)
+  document.removeEventListener('mousedown', onSyncPopoverDocClick)
+})
 
 function toggleSyncPopoverIntegration(id: string) {
   if (syncPopoverSelectedIds.value.has(id)) syncPopoverSelectedIds.value.delete(id)
@@ -1233,7 +1277,7 @@ onUnmounted(() => {
                     class="text-cyan-600 hover:text-cyan-700 hover:bg-cyan-50"
                     :disabled="syncingProduct.has(p.id)"
                     :title="syncingProduct.has(p.id) ? 'sincronizando…' : 'Sincronizar este SKU'"
-                    @click="syncPopoverProductId === p.id ? closeSyncPopover() : openSyncPopover(p)"
+                    @click="(ev: MouseEvent) => syncPopoverProductId === p.id ? closeSyncPopover() : openSyncPopover(p, ev)"
                   >
                     <RefreshCw class="size-4" :class="syncingProduct.has(p.id) ? 'animate-spin' : ''" />
                   </Button>
@@ -1248,10 +1292,17 @@ onUnmounted(() => {
                     <Trash2 class="size-4" />
                   </Button>
 
-                  <!-- Per-product sync popover -->
+                  <!-- Per-product sync popover. Teleportado pra <body>
+                       porque o .table-card tem overflow-hidden (pro
+                       rounded-xl) e clipa qualquer absolute dentro de uma
+                       <td>. position: fixed via syncPopoverStyle ancora
+                       no rect do botão. -->
+                  <Teleport to="body">
                   <div
                     v-if="syncPopoverProductId === p.id"
-                    class="absolute right-0 top-full mt-1 z-30 w-72 rounded-md border bg-background shadow-lg p-3 text-left"
+                    id="sync-popover-floating"
+                    class="z-50 rounded-md border bg-background shadow-lg p-3 text-left"
+                    :style="syncPopoverStyle"
                     @click.stop
                   >
                     <div class="space-y-3">
@@ -1294,6 +1345,7 @@ onUnmounted(() => {
                       </div>
                     </div>
                   </div>
+                  </Teleport>
                 </div>
               </td>
             </tr>
