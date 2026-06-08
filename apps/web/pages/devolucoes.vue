@@ -163,6 +163,20 @@ const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
 const isAdmin = useIsAdmin()
 
+// Visibilidade do toggle "Devolver estoque": só o spectrum77 vê em todas as
+// linhas; o sthevem7 vê apenas quando a condição é "Manutenção" (só as
+// manutenções). Demais usuários nunca veem o toggle.
+const _auth = useAuthStore()
+const STOCK_TOGGLE_OWNER = 'spectrum77@tuta.com'
+const STOCK_TOGGLE_MANUTENCAO_USER = 'sthevem7@tuta.com'
+function canSeeStockToggle(condicao?: string | null): boolean {
+  const email = _auth.user?.email?.toLowerCase()
+  if (!email) return false
+  if (email === STOCK_TOGGLE_OWNER) return true
+  if (email === STOCK_TOGGLE_MANUTENCAO_USER && condicao === 'Manutenção') return true
+  return false
+}
+
 // ── Toast system ─────────────────────────────────────────────────────
 type Toast = { id: number; kind: 'success' | 'error' | 'warning'; title: string; lines: string[] }
 const toasts = ref<Toast[]>([])
@@ -1058,6 +1072,7 @@ async function backfillAddresses() {
               </td>
               <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
                 <button
+                  v-if="canSeeStockToggle(d.condicao_produto)"
                   type="button"
                   role="switch"
                   :aria-checked="d.devolver_estoque"
@@ -1074,6 +1089,7 @@ async function backfillAddresses() {
                     ]"
                   />
                 </button>
+                <span v-else class="text-muted-foreground">—</span>
               </td>
             </tr>
           </tbody>
@@ -1276,6 +1292,7 @@ async function backfillAddresses() {
             </td>
             <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
               <button
+                v-if="canSeeStockToggle(row.condicao_produto)"
                 type="button"
                 role="switch"
                 :aria-checked="row.devolver_estoque"
@@ -1293,6 +1310,7 @@ async function backfillAddresses() {
                   ]"
                 />
               </button>
+              <span v-else class="text-muted-foreground">—</span>
             </td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10">
               <div class="flex flex-col items-start gap-0.5">
