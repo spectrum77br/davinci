@@ -159,6 +159,7 @@ const TECNICOS = [
   'Bogota',
   'Shark',
   'Cybercell',
+  'Factor',
 ] as const
 
 const { api } = useApi()
