@@ -86,7 +86,7 @@ const showMalaCols = computed(() => !isEletro.value && !isCelular.value)
 // renderização no DOM — qualquer reordenação aqui precisa bater com
 // o template.
 const STICKY_WIDTHS_CELULAR: Record<string, number> = {
-  modelo_bling: 180,
+  modelo_bling: 300,
   sku: 130,
   custo_bling: 60,
   estoque_bling: 66,
@@ -1473,7 +1473,7 @@ onScopeDispose(() => {
                 :rowspan="isCelular ? 12 : 8"
                 class="col-head text-left"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '180px' } : { minWidth: '100px' }"
+                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : { minWidth: '100px' }"
               >modelo bling</th>
               <th
                 :rowspan="isCelular ? 12 : 8"
@@ -1685,7 +1685,7 @@ onScopeDispose(() => {
               </td>
               <td
                 :class="isCelular ? 'sticky bg-background z-10' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '180px' } : undefined"
+                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : undefined"
               >
                 <input class="cell-input" :value="row.modelo_bling ?? ''" :disabled="!canEdit"
                   @input="(e) => scheduleSave(row, 'modelo_bling', (e.target as HTMLInputElement).value)" />
