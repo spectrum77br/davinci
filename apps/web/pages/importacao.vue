@@ -2539,7 +2539,10 @@ onScopeDispose(() => {
 .thead-sticky {
   position: sticky;
   top: 0;
-  z-index: 10;
+  /* 20 (não 10): empatava com as colunas sticky do corpo (z-10) e
+   * era coberto ao rolar vertical na aba Celular. Bate com o padrão
+   * da Tabela de Preços (thead z-20, corpo z-10). */
+  z-index: 20;
 }
 .cell-input {
   width: 100%;
