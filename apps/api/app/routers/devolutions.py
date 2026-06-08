@@ -728,6 +728,19 @@ async def patch_devolution(
         row.tag = _sku_tag(row.sku)
 
     new_condicao = row.condicao_produto
+    # Ao SAIR de Manutenção: custo de manutenção é obrigatório (registra o reparo)
+    # e o pedido passa a constar como "passou em manutenção".
+    if prev_condicao == "Manutenção" and new_condicao != "Manutenção":
+        if not row.custo_manutencao:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "custo_manutencao_required",
+                    "message": "Custo de manutenção obrigatório ao sair de Manutenção",
+                },
+            )
+        row.manutencao = True
+
     if new_condicao in _REFUND_CONDICOES and new_condicao != prev_condicao:
         _maybe_create_refund(session, row, new_condicao)
 

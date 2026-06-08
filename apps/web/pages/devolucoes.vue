@@ -878,6 +878,17 @@ async function changeRowCondicao(row: DevolutionRow, value: string) {
   if (!canEdit.value) return
   const prev = row.condicao_produto
   setRowText(row, 'condicao_produto', value)
+  // Ao SAIR de Manutenção, o custo de manutenção é obrigatório (registra o
+  // reparo antes de marcar que o pedido passou em manutenção).
+  if (prev === 'Manutenção' && value !== 'Manutenção' && !row.custo_manutencao) {
+    pushToast({
+      kind: 'warning',
+      title: 'Custo de manutenção obrigatório',
+      lines: ['Preencha o custo de manutenção antes de mudar a condição.'],
+    })
+    setRowText(row, 'condicao_produto', prev ?? '')
+    return
+  }
   if (value === 'Extraviado' || value === 'Manutenção') setRowReembolso(row, true)
   // Novo/Usado/Trocado: estoque é automático — ao mudar a condição já abre o
   // modal (quando precisa) e devolve ao estoque, sem depender do toggle.
@@ -1209,7 +1220,7 @@ async function backfillAddresses() {
       </div>
       <label class="flex items-center gap-1.5 h-9 rounded-md border bg-background px-2.5 text-sm cursor-pointer select-none" title="Mostrar só pedidos que já passaram em manutenção">
         <input v-model="manutencaoFilter" type="checkbox" class="size-4 rounded border accent-primary" />
-        <span class="whitespace-nowrap">só manutenção feita</span>
+        <span class="whitespace-nowrap">apenas manutenção</span>
       </label>
       <Button size="sm" variant="outline" :disabled="exporting" @click="exportXlsx">
         <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exporting }" />
