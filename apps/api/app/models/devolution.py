@@ -31,6 +31,10 @@ class Devolution(Base, TimestampMixin):
     custo_manutencao: Mapped[float | None] = mapped_column(Float, nullable=True)
     tecnico: Mapped[str | None] = mapped_column(Text, nullable=True)
     devolver_estoque: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # True quando a devolução (condição Manutenção) já PASSOU em manutenção —
+    # marcado automaticamente ao devolver ao estoque (inclui Sucata). É um fato
+    # histórico: não volta a false. Ver alembic 0129.
+    manutencao: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Escolhas dos modais de devolução (ver alembic 0104). Persistidas para
     # auditoria e para o PATCH re-rodar o estoque de forma determinística.

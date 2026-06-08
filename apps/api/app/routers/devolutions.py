@@ -169,6 +169,7 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Técnico", "tecnico"),
     ("Qtd", "quantidade"),
     ("Devolver estoque", "devolver_estoque"),
+    ("Passou manutenção", "manutencao"),
     ("Data devolvido estoque", "data_devolvido_estoque"),
     ("Observação", "observacao"),
 ]
@@ -205,7 +206,7 @@ async def export_devolutions(
             value = getattr(r, field, None)
             if field in ("data", "created_at", "data_devolvido_estoque"):
                 line.append(_fmt_dt_sp(value))
-            elif field in ("reembolso", "devolver_estoque"):
+            elif field in ("reembolso", "devolver_estoque", "manutencao"):
                 line.append("Sim" if value else "Não")
             else:
                 line.append(value if value is not None else "")
@@ -604,9 +605,15 @@ async def create_devolution(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
 ) -> DevolutionOut:
-    # Manutenção: NÃO devolve estoque no add — só depois, pelo toggle na linha.
-    # Aqui só registramos e patchamos a situação (84677, "em manutenção").
-    devolver_no_add = bool(body.devolver_estoque) and body.condicao_produto != "Manutenção"
+    # Estoque no ADD: Novo/Usado/Trocado sempre processam (automático). Manutenção
+    # só processa se o operador ligou o toggle no rascunho (já decidiu Novo/Usado/
+    # Sucata no modal). Extraviado nunca devolve estoque.
+    devolver_no_add = bool(body.devolver_estoque) and body.condicao_produto in (
+        "Novo",
+        "Usado",
+        "Trocado",
+        "Manutenção",
+    )
     row = Devolution(
         data=body.data,
         pedido_bling=body.pedido_bling,
@@ -641,17 +648,28 @@ async def create_devolution(
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
     out = DevolutionOut.model_validate(row)
 
-    # Gatilho no ADD: Novo/Usado/Trocado processam estoque sempre. Manutenção e
-    # Extraviado não mexem no estoque no add — só patcham a situação do pedido.
+    # Gatilho no ADD: Novo/Usado/Trocado processam estoque sempre. Manutenção só
+    # quando o toggle veio ligado (devolver_no_add). Extraviado não mexe no estoque.
     condicao = body.condicao_produto
-    should_stock = condicao in ("Novo", "Usado", "Trocado")
-    if should_stock and not row.devolver_estoque:
-        # Processou o estoque → marca o toggle e carimba a data.
-        row.devolver_estoque = True
-        row.data_devolvido_estoque = datetime.now(UTC)
-        await session.commit()
-        await session.refresh(row)
-        out = DevolutionOut.model_validate(row)
+    should_stock = condicao in ("Novo", "Usado", "Trocado") or (
+        condicao == "Manutenção" and devolver_no_add
+    )
+    if should_stock:
+        changed = False
+        if not row.devolver_estoque:
+            row.devolver_estoque = True
+            changed = True
+        if row.data_devolvido_estoque is None:
+            row.data_devolvido_estoque = datetime.now(UTC)
+            changed = True
+        # Manutenção que volta ao estoque já passou em manutenção (inclui Sucata).
+        if condicao == "Manutenção" and not row.manutencao:
+            row.manutencao = True
+            changed = True
+        if changed:
+            await session.commit()
+            await session.refresh(row)
+            out = DevolutionOut.model_validate(row)
     if should_stock:
         sr = await return_product_to_bling_stock(session, row)
         if sr is not None:
@@ -728,6 +746,9 @@ async def patch_devolution(
             final_sr = rev
 
     if should_stock:
+        # Manutenção que volta ao estoque já passou em manutenção (inclui Sucata).
+        if new_condicao == "Manutenção" and not row.manutencao:
+            row.manutencao = True
         sr = await return_product_to_bling_stock(session, row)
         if sr is not None:
             recorded = bool(sr.get("ok") and sr.get("bling_product_id"))
@@ -736,6 +757,10 @@ async def patch_devolution(
             await session.refresh(row)
             if recorded or final_sr is None:
                 final_sr = sr
+        else:
+            # Sem ação de estoque (ex.: Sucata), mas persiste o flag de manutenção.
+            await session.commit()
+            await session.refresh(row)
 
     # Extraviado patcha a situação ao virar Extraviado (sem depender do toggle).
     extraviado_now = new_condicao == "Extraviado" and condicao_changed

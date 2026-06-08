@@ -37,6 +37,7 @@ class DevolutionOut(BaseModel):
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool = False
+    manutencao: bool = False
     observacao: str | None = None
     troca_sku: str | None = None
     troca_condicao: str | None = None

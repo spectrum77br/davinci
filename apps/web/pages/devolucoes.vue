@@ -12,6 +12,7 @@ import {
   RotateCcw,
   Search,
   Undo2,
+  Wrench,
   X,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
@@ -42,6 +43,7 @@ type DevolutionRow = {
   custo_manutencao: number | null
   tecnico: string | null
   devolver_estoque: boolean
+  manutencao: boolean
   observacao: string | null
   troca_sku: string | null
   troca_condicao: string | null
@@ -1293,26 +1295,37 @@ async function backfillAddresses() {
               </select>
             </td>
             <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-              <button
-                v-if="canSeeStockToggle(row.condicao_produto)"
-                type="button"
-                role="switch"
-                :aria-checked="row.devolver_estoque"
-                :disabled="!canEdit"
-                :class="[
-                  'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-default disabled:opacity-70',
-                  row.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
-                ]"
-                @click="toggleRowDevolverEstoque(row)"
-              >
-                <span
+              <div class="flex flex-col items-center gap-1">
+                <button
+                  v-if="canSeeStockToggle(row.condicao_produto)"
+                  type="button"
+                  role="switch"
+                  :aria-checked="row.devolver_estoque"
+                  :disabled="!canEdit"
                   :class="[
-                    'inline-block size-4 transform rounded-full bg-white shadow transition-transform',
-                    row.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
+                    'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-default disabled:opacity-70',
+                    row.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
                   ]"
-                />
-              </button>
-              <span v-else class="text-muted-foreground">—</span>
+                  @click="toggleRowDevolverEstoque(row)"
+                >
+                  <span
+                    :class="[
+                      'inline-block size-4 transform rounded-full bg-white shadow transition-transform',
+                      row.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
+                    ]"
+                  />
+                </button>
+                <span v-else class="text-muted-foreground">—</span>
+                <!-- Flag read-only "passou em manutenção" (auto, só Manutenção). -->
+                <span
+                  v-if="row.condicao_produto === 'Manutenção' && row.manutencao"
+                  title="Já passou em manutenção"
+                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                >
+                  <Wrench class="size-2.5 shrink-0" />
+                  manutenção feita
+                </span>
+              </div>
             </td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10">
               <div class="flex flex-col items-start gap-0.5">
