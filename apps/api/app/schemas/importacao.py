@@ -264,6 +264,9 @@ class ImportFreteAjusteCreate(BaseModel):
     abertura: date
     saldo: Decimal
     obs: str | None = None
+    # Identificador opcional do ajuste (ex: "AJ-001"). Espelha o
+    # `lote_nome` exibido na aba Frete; patchable via PATCH /resumo.
+    lote_nome: str | None = None
     categoria: str = "celular"
 
 
@@ -281,6 +284,14 @@ class ImportResumoCreate(BaseModel):
 
 
 class ImportResumoPatch(BaseModel):
+    """Edição de uma linha do Resumo. Originalmente só `obs`; estendido
+    pra cobrir ajustes manuais da aba Frete (transportadora, data,
+    saldo, lote_nome). Esvaziar `transportadora` removeria a row da aba
+    Frete — bloqueado no router."""
+    transportadora: str | None = None
+    data: date | None = None
+    saldo: Decimal | None = None
+    lote_nome: str | None = None
     obs: str | None = None
 
 

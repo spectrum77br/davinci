@@ -1134,12 +1134,25 @@ async def patch_resumo(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
 ) -> ImportResumoOut:
-    """Atualiza `obs` de uma linha do Resumo (operador anota motivo de
-    ajuste, etc.). Demais campos imutáveis pós-create."""
+    """Atualiza campos editáveis de uma linha do Resumo. Cobre tanto
+    "anotar obs" (uso original) quanto "editar ajuste manual de frete"
+    (transportadora/data/saldo/lote_nome).
+
+    Esvaziar `transportadora` removeria a row da aba Frete (filtro é
+    `transportadora IS NOT NULL` em list_frete) — bloqueado aqui pra
+    evitar perda silenciosa.
+    """
     row = await session.get(ImportResumo, row_id)
     if row is None:
         raise HTTPException(404, detail={"code": "resumo_not_found"})
-    for k, v in body.model_dump(exclude_unset=True).items():
+    fields = body.model_dump(exclude_unset=True)
+    if "transportadora" in fields:
+        v = fields["transportadora"]
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise HTTPException(
+                422, detail={"code": "transportadora_required"},
+            )
+    for k, v in fields.items():
         if v is not None:
             setattr(row, k, v)
     await session.commit()
@@ -1330,6 +1343,7 @@ async def create_lote_ajuste(
         data=body.abertura,
         saldo=body.saldo,
         obs=body.obs,
+        lote_nome=body.lote_nome,
         transportadora=body.transportadora,
     )
     session.add(row)

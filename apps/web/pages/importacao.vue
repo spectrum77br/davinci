@@ -15,7 +15,7 @@
 //   * Tabela vazia por padrão — operador adiciona produtos via UI.
 import { computed, onScopeDispose, reactive, ref, watch } from 'vue'
 import {
-  Plus, RefreshCw, Trash2, Save, Search, Download, X, AlertCircle,
+  Pencil, Plus, RefreshCw, Trash2, Save, Search, Download, X, AlertCircle,
   Send, CheckCircle2, Clock, Briefcase, Zap, Smartphone,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
@@ -303,12 +303,60 @@ const frete = ref<FreteList>({
 const freteFiltroTransp = ref<string>('')
 const freteOcultaPagos = ref<boolean>(true)
 const freteAjusteModalOpen = ref(false)
+// Quando setado, o modal entra em modo EDIT (PATCH /resumo/{id}).
+// null = modo CREATE (POST /lote_ajuste).
+const ajusteEditId = ref<string | null>(null)
 const freteAjusteForm = reactive<{
-  transportadora: string; abertura: string; saldo: string; obs: string
+  transportadora: string; abertura: string; saldo: string; obs: string;
+  lote_nome: string
 }>({
   transportadora: '', abertura: isoToday(),
-  saldo: '', obs: '',
+  saldo: '', obs: '', lote_nome: '',
 })
+
+function resetAjusteForm() {
+  ajusteEditId.value = null
+  freteAjusteForm.transportadora = ''
+  freteAjusteForm.abertura = isoToday()
+  freteAjusteForm.saldo = ''
+  freteAjusteForm.obs = ''
+  freteAjusteForm.lote_nome = ''
+}
+
+function openCreateAjuste() {
+  resetAjusteForm()
+  freteAjusteModalOpen.value = true
+}
+
+function openEditAjuste(r: FreteRow) {
+  if (r.kind !== 'ajuste') return
+  ajusteEditId.value = r.id
+  freteAjusteForm.transportadora = r.transportadora ?? ''
+  freteAjusteForm.abertura = r.abertura ?? isoToday()
+  freteAjusteForm.saldo = r.saldo == null ? '' : String(r.saldo)
+  freteAjusteForm.obs = r.obs ?? ''
+  freteAjusteForm.lote_nome = r.lote_nome ?? ''
+  freteAjusteModalOpen.value = true
+}
+
+function closeAjusteModal() {
+  freteAjusteModalOpen.value = false
+  resetAjusteForm()
+}
+
+async function deleteAjuste(r: FreteRow) {
+  if (r.kind !== 'ajuste') return
+  const saldoStr = r.saldo == null ? '' : `US$ ${Number(r.saldo).toFixed(2)}`
+  const msg = `Excluir esse ajuste?\n\nTransportadora: ${r.transportadora ?? '—'}\n`
+    + `Data: ${r.abertura ?? '—'}\nSaldo: ${saldoStr}\n\nNão dá pra desfazer.`
+  if (!window.confirm(msg)) return
+  try {
+    await api(`/api/importacao/resumo/${r.id}`, { method: 'DELETE' })
+    await reloadFrete()
+  } catch (e: any) {
+    errorText.value = e?.data?.detail?.code || 'erro_delete_ajuste'
+  }
+}
 
 async function reloadFrete() {
   if (categoria.value !== 'celular') return
@@ -345,20 +393,33 @@ async function salvarFreteAjuste() {
     return
   }
   try {
-    await api('/api/importacao/lote_ajuste', {
-      method: 'POST',
-      body: {
-        transportadora: freteAjusteForm.transportadora.trim(),
-        abertura: freteAjusteForm.abertura,
-        saldo: saldoNum,
-        obs: freteAjusteForm.obs.trim() || null,
-        categoria: categoria.value,
-      },
-    })
-    freteAjusteModalOpen.value = false
-    freteAjusteForm.transportadora = ''
-    freteAjusteForm.saldo = ''
-    freteAjusteForm.obs = ''
+    if (ajusteEditId.value) {
+      // Edit: PATCH /resumo/{id}. `data` em vez de `abertura` (schema
+      // do Resumo). `lote_nome` é opcional e patchable.
+      await api(`/api/importacao/resumo/${ajusteEditId.value}`, {
+        method: 'PATCH',
+        body: {
+          transportadora: freteAjusteForm.transportadora.trim(),
+          data: freteAjusteForm.abertura,
+          saldo: saldoNum,
+          lote_nome: freteAjusteForm.lote_nome.trim() || null,
+          obs: freteAjusteForm.obs.trim() || null,
+        },
+      })
+    } else {
+      await api('/api/importacao/lote_ajuste', {
+        method: 'POST',
+        body: {
+          transportadora: freteAjusteForm.transportadora.trim(),
+          abertura: freteAjusteForm.abertura,
+          saldo: saldoNum,
+          lote_nome: freteAjusteForm.lote_nome.trim() || null,
+          obs: freteAjusteForm.obs.trim() || null,
+          categoria: categoria.value,
+        },
+      })
+    }
+    closeAjusteModal()
     await reloadFrete()
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || 'erro_ajuste'
@@ -2442,7 +2503,7 @@ onScopeDispose(() => {
         <button
           v-if="canEdit"
           class="ml-auto inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 hover:opacity-90"
-          @click="freteAjusteModalOpen = true"
+          @click="openCreateAjuste"
         >
           <Plus class="size-3" /> Ajuste manual
         </button>
@@ -2463,11 +2524,12 @@ onScopeDispose(() => {
               <th class="text-right">Frete %</th>
               <th class="text-right">Saldo (US$)</th>
               <th class="text-center">Pago</th>
+              <th class="text-center">Ações</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="!loading && frete.rows.length === 0">
-              <td colspan="11" class="py-6 text-center text-muted-foreground">
+              <td colspan="12" class="py-6 text-center text-muted-foreground">
                 Nenhum item — crie um lote (aba Importação) ou um ajuste manual.
               </td>
             </tr>
@@ -2507,20 +2569,43 @@ onScopeDispose(() => {
                 />
                 <span v-else class="text-muted-foreground text-[10px]">—</span>
               </td>
+              <!-- Ações: só em ajustes manuais (linhas de item já têm
+                   o checkbox Pago e são gerenciadas pela aba Importação). -->
+              <td class="text-center">
+                <div v-if="r.kind === 'ajuste' && canEdit" class="inline-flex items-center gap-1">
+                  <button
+                    class="rounded p-1 hover:bg-muted text-muted-foreground hover:text-foreground"
+                    title="Editar ajuste"
+                    @click="openEditAjuste(r)"
+                  >
+                    <Pencil class="size-3.5" />
+                  </button>
+                  <button
+                    class="rounded p-1 hover:bg-red-50 hover:text-red-700"
+                    title="Excluir ajuste"
+                    @click="deleteAjuste(r)"
+                  >
+                    <Trash2 class="size-3.5" />
+                  </button>
+                </div>
+                <span v-else class="text-muted-foreground text-[10px]">—</span>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <!-- Modal: Ajuste manual de frete -->
+      <!-- Modal: Ajuste manual de frete (create ou edit conforme `ajusteEditId`). -->
       <div v-if="freteAjusteModalOpen"
         class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
-        @click.self="freteAjusteModalOpen = false">
+        @click.self="closeAjusteModal">
         <div class="bg-background rounded-lg shadow-xl w-full max-w-md">
           <div class="flex items-center justify-between border-b px-4 py-3">
-            <h3 class="font-semibold text-sm">Ajuste manual de frete</h3>
+            <h3 class="font-semibold text-sm">
+              {{ ajusteEditId ? 'Editar ajuste de frete' : 'Ajuste manual de frete' }}
+            </h3>
             <button class="text-muted-foreground hover:text-foreground"
-              @click="freteAjusteModalOpen = false">
+              @click="closeAjusteModal">
               <X class="size-4" />
             </button>
           </div>
@@ -2537,10 +2622,16 @@ onScopeDispose(() => {
             </label>
             <label class="flex flex-col gap-1">
               <span class="text-[10px] text-muted-foreground">
-                Saldo (R$) * — negativo se for desconto/crédito
+                Saldo (US$) * — negativo se for desconto/crédito
               </span>
               <input v-model="freteAjusteForm.saldo" type="number" step="0.01"
                 class="h-8 border rounded px-2 bg-background text-right" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] text-muted-foreground">Identificador do ajuste</span>
+              <input v-model="freteAjusteForm.lote_nome"
+                class="h-8 border rounded px-2 bg-background"
+                placeholder="ex: AJ-001 (opcional)" />
             </label>
             <label class="flex flex-col gap-1">
               <span class="text-[10px] text-muted-foreground">Observação</span>
@@ -2551,9 +2642,11 @@ onScopeDispose(() => {
           </div>
           <div class="flex gap-2 justify-end border-t px-4 py-3">
             <button class="rounded-md border px-3 py-1 text-sm"
-              @click="freteAjusteModalOpen = false">Cancelar</button>
+              @click="closeAjusteModal">Cancelar</button>
             <button class="rounded-md bg-primary text-primary-foreground px-3 py-1 text-sm"
-              @click="salvarFreteAjuste">Salvar</button>
+              @click="salvarFreteAjuste">
+              {{ ajusteEditId ? 'Salvar' : 'Criar' }}
+            </button>
           </div>
         </div>
       </div>

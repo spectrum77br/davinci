@@ -216,3 +216,88 @@ async def test_frete_filtro_transportadora(
     r = await client.get("/api/importacao/frete?categoria=celular&transportadora=Cargo%20X")
     body = r.json()
     assert all(x["transportadora"] == "Cargo X" for x in body["rows"])
+
+
+# ── PATCH /resumo (edição de ajustes manuais) ───────────────────────
+
+
+async def _create_ajuste(db: AsyncSession) -> str:
+    """Cria 1 ajuste manual via INSERT direto pra cobrir PATCH/DELETE
+    sem depender do fluxo completo de seed da aba Frete."""
+    row = ImportResumo(
+        categoria="celular", data=date(2026, 5, 1),
+        saldo=Decimal("250.00"), obs="frete extra",
+        transportadora="Transportadora Original",
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return str(row.id)
+
+
+@pytest.mark.asyncio
+async def test_patch_resumo_aceita_todos_campos_editaveis(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None], user_imp_edit,
+):
+    """Os 5 campos (transportadora/data/saldo/lote_nome/obs) — todos
+    são patchable. Campos não enviados ficam intactos."""
+    auth_as(await user_imp_edit())
+    row_id = await _create_ajuste(db)
+
+    r = await client.patch(f"/api/importacao/resumo/{row_id}", json={
+        "transportadora": "Nova Transp",
+        "data": "2026-05-15",
+        "saldo": "500.00",
+        "lote_nome": "AJ-001",
+        "obs": "corrigido",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["transportadora"] == "Nova Transp"
+    assert body["data"] == "2026-05-15"
+    assert Decimal(body["saldo"]) == Decimal("500.00")
+    assert body["lote_nome"] == "AJ-001"
+    assert body["obs"] == "corrigido"
+
+
+@pytest.mark.asyncio
+async def test_patch_resumo_so_obs_continua_funcionando(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None], user_imp_edit,
+):
+    """Regressão: comportamento antigo (PATCH só com obs) preservado."""
+    auth_as(await user_imp_edit())
+    row_id = await _create_ajuste(db)
+
+    r = await client.patch(f"/api/importacao/resumo/{row_id}", json={"obs": "nota nova"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["obs"] == "nota nova"
+    assert body["transportadora"] == "Transportadora Original"
+    assert Decimal(body["saldo"]) == Decimal("250.00")
+
+
+@pytest.mark.asyncio
+async def test_patch_resumo_rejeita_transportadora_vazia(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None], user_imp_edit,
+):
+    """Esvaziar transportadora removeria o ajuste da aba Frete
+    silenciosamente. Rejeitar com 422."""
+    auth_as(await user_imp_edit())
+    row_id = await _create_ajuste(db)
+
+    for bad in ("", "   "):
+        r = await client.patch(
+            f"/api/importacao/resumo/{row_id}", json={"transportadora": bad},
+        )
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"]["code"] == "transportadora_required"
+
+    # null também
+    r = await client.patch(
+        f"/api/importacao/resumo/{row_id}", json={"transportadora": None},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["code"] == "transportadora_required"
