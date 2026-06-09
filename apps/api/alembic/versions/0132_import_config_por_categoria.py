@@ -48,6 +48,17 @@ def upgrade() -> None:
         f"CREATE UNIQUE INDEX IF NOT EXISTS ix_import_config_categoria "
         f"ON {SCHEMA}.import_config (categoria)"
     )
+    # Sincroniza a sequence com MAX(id) antes do INSERT do celular.
+    # Era singleton com id=1 fixo (default=1 no model antigo), então em
+    # prod a sequence ficou em last_value=1, is_called=false → o
+    # próximo nextval devolveria 1, COLIDINDO com a PK do row da mala.
+    # `ON CONFLICT (categoria)` só pega o índice de categoria — conflito
+    # de PK não é coberto e a transação aborta. Sem isso, o INSERT
+    # abaixo falha e a migration inteira é revertida.
+    op.execute(
+        f"SELECT setval('{SCHEMA}.import_config_id_seq', "  # noqa: S608
+        f"(SELECT COALESCE(MAX(id), 1) FROM {SCHEMA}.import_config), true)"
+    )
     # Semeia 'celular' com defaults (150/60). 'eletro' será auto-criado
     # pelo get_config no 1º acesso, mantém schema simples.
     op.execute(
