@@ -435,19 +435,41 @@ const saveTimers = reactive<Record<string, ReturnType<typeof setTimeout>>>({})
 // "rodadas antigas".
 const showClosedLotes = ref(true)
 const search = ref('')
+// Filtro extra da aba Importação por coluna "saldo reposição":
+//   - 'todos'    → sem filtro
+//   - 'positivo' → saldo_reposicao > 0  (precisa repor)
+//   - 'negativo' → saldo_reposicao < 0  (já tem sobra)
+//   - 'nenhum'   → saldo_reposicao null OU 0 (sem dados / neutro)
+// Aplicado client-side, depois do filtro de texto.
+type SaldoFilter = 'todos' | 'positivo' | 'negativo' | 'nenhum'
+const saldoFilter = ref<SaldoFilter>('todos')
 
 const visibleLotes = computed(() => lotes.value.filter((l) => showClosedLotes.value || l.is_aberto))
 
 const filteredProducts = computed(() => {
   const q = search.value.trim().toLowerCase()
-  if (!q) return products.value
-  return products.value.filter(
-    (p) =>
-      (p.sku || '').toLowerCase().includes(q)
-      || (p.modelo_bling || '').toLowerCase().includes(q)
-      || (p.cor || '').toLowerCase().includes(q)
-      || (p.fornecedor || '').toLowerCase().includes(q),
-  )
+  let list = products.value
+  if (q) {
+    list = list.filter(
+      (p) =>
+        (p.sku || '').toLowerCase().includes(q)
+        || (p.modelo_bling || '').toLowerCase().includes(q)
+        || (p.cor || '').toLowerCase().includes(q)
+        || (p.fornecedor || '').toLowerCase().includes(q),
+    )
+  }
+  const mode = saldoFilter.value
+  if (mode !== 'todos') {
+    list = list.filter((p) => {
+      const s = p.saldo_reposicao
+      if (s == null) return mode === 'nenhum'
+      const n = Number(s)
+      if (mode === 'positivo') return n > 0
+      if (mode === 'negativo') return n < 0
+      return n === 0  // 'nenhum' inclui 0
+    })
+  }
+  return list
 })
 
 // ── Cotação Celular: cálculo do previsto + autosave ──────────────
@@ -1436,6 +1458,15 @@ onScopeDispose(() => {
         </div>
         <label class="inline-flex items-center gap-1 cursor-pointer">
           <input type="checkbox" v-model="showClosedLotes" /> mostrar lotes fechados
+        </label>
+        <label class="inline-flex items-center gap-1">
+          <span class="text-muted-foreground">saldo reposição:</span>
+          <select v-model="saldoFilter" class="h-7 border rounded px-2 bg-background">
+            <option value="todos">todos</option>
+            <option value="positivo">positivo</option>
+            <option value="negativo">negativo</option>
+            <option value="nenhum">nenhum</option>
+          </select>
         </label>
         <span class="text-muted-foreground">
           {{ filteredProducts.length }} SKUs · {{ visibleLotes.length }} lote(s)
