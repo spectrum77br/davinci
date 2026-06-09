@@ -984,7 +984,7 @@ async function backfillAddresses() {
 
     <div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
       <StatCard label="Total devoluções" :value="total" :icon="Undo2" />
-      <StatCard label="Reembolsadas" :value="totalReembolsadas" :icon="Clock" tone="warning" />
+      <StatCard label="Enviada para Reembolso" :value="totalReembolsadas" :icon="Clock" tone="warning" />
       <StatCard label="Custo manutenção (pág.)" :value="brl(totalCustoManutencao)" tone="danger" />
     </div>
 
@@ -1180,7 +1180,7 @@ async function backfillAddresses() {
       </div>
       <select v-model="reembolsoFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
         <option value="all">todas</option>
-        <option value="true">reembolsadas</option>
+        <option value="true">enviada para reembolso</option>
         <option value="false">sem reembolso</option>
       </select>
       <select v-model="tagFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
@@ -1227,7 +1227,7 @@ async function backfillAddresses() {
         exportar xlsx
       </Button>
       <span class="ml-auto text-xs text-muted-foreground">
-        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · reembolsadas {{ totalReembolsadas }} · manutenção {{ brl(totalCustoManutencao) }}
+        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · enviada p/ reembolso {{ totalReembolsadas }} · manutenção {{ brl(totalCustoManutencao) }}
       </span>
     </div>
 
