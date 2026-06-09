@@ -2631,10 +2631,16 @@ onScopeDispose(() => {
   letter-spacing: 0.04em;
   padding: 3px;
 }
+/* width + min-width juntos: em table-layout:auto o browser pode comprimir
+ * colunas sem `width` explícito, deixando a tabela mais curta que a soma
+ * dos `min-width` e travando o scroll antes do último lote (Celular tem
+ * 15 lotes × 3 sub-cells = 45 colunas). Mesmo padrão da .cot-prod-head. */
 .col-quant {
+  width: 40px;
   min-width: 40px;
 }
 .col-total {
+  width: 70px;
   min-width: 70px;
 }
 
