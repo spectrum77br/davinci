@@ -6,14 +6,6 @@ from app.models.bling_kit_component import BlingKitComponent
 from app.models.bling_order import BlingOrder
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.devolution import Devolution
-from app.models.financeiro import (
-    DNPConfig,
-    DNPProduto,
-    FinanceiroConsorcio,
-    FinanceiroSimulacao,
-    FinanceiroSuprimentos,
-    NCMCache,
-)
 from app.models.enums import (
     MARKETPLACES,
     PLATFORMS,
@@ -37,6 +29,15 @@ from app.models.enums import (
     SyncLogAction,
     UserRole,
     UserStatus,
+)
+from app.models.estoque_dia_finalizado import EstoqueDiaFinalizado
+from app.models.financeiro import (
+    DNPConfig,
+    DNPProduto,
+    FinanceiroConsorcio,
+    FinanceiroSimulacao,
+    FinanceiroSuprimentos,
+    NCMCache,
 )
 from app.models.importacao import (
     CotacaoFabricante,
@@ -116,6 +117,7 @@ __all__ = [
     "DNPConfig",
     "DNPProduto",
     "Devolution",
+    "EstoqueDiaFinalizado",
     "FinanceiroConsorcio",
     "FinanceiroSimulacao",
     "FinanceiroSuprimentos",

@@ -34,11 +34,12 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import Date, and_, cast, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import BlingOrder, Product, User, UserRole
+from app.models import BlingOrder, EstoqueDiaFinalizado, Product, User, UserRole
 from app.models.company import Store
 from app.models.integration import Integration
 from app.models.stock_check import StockCheck
@@ -655,6 +656,14 @@ async def list_estoque_envios(
         session, user_id=user.id, data_inicio=data_inicio, data_fim=data_fim,
         tags=tags, is_admin=_user_is_admin(user),
     )
+    # Dias travados como "total" (admin já tinha ticado CONFERIDO no
+    # envio). Sem essa trava, o badge regredia pra "parcial" assim que
+    # entrasse produto novo na tag. Migration 0133.
+    locks = {row.data for row in (await session.execute(
+        select(EstoqueDiaFinalizado.data).where(
+            EstoqueDiaFinalizado.data.between(data_inicio, data_fim),
+        )
+    )).all()}
 
     items: list[dict[str, Any]] = []
     total_envios = 0
@@ -671,7 +680,10 @@ async def list_estoque_envios(
         if conferido_filter == "nao_conferidos" and conf:
             continue
         estoque_conferidos = estoque_checks_by_day.get(dia_str, 0)
-        if total_produtos == 0:
+        if r.dia in locks:
+            # Dia travado: ignora o count atual de produtos.
+            conferencia_estoque = "total"
+        elif total_produtos == 0:
             conferencia_estoque = "nenhuma"
         elif estoque_conferidos >= total_produtos:
             conferencia_estoque = "total"
@@ -857,6 +869,22 @@ async def toggle_estoque_check(
         existing.conferido = conferido
         if observacao is not None:
             existing.observacao = observacao or None
+
+    # Trava permanente do badge `conferencia_estoque` quando admin
+    # finaliza o dia (✓ em section='envio'). Migration 0133. Lock NÃO
+    # é removido se o admin destickar — é um carimbo "fechei esse dia",
+    # não um espelho do estado atual.
+    if (
+        section == "envio"
+        and conferido is True
+        and user.role == UserRole.ADMIN
+    ):
+        stmt = (
+            pg_insert(EstoqueDiaFinalizado)
+            .values(data=reference_date)
+            .on_conflict_do_nothing(index_elements=["data"])
+        )
+        await session.execute(stmt)
 
     await session.commit()
     return {"ok": True}
