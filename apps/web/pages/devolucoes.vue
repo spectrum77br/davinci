@@ -880,7 +880,7 @@ async function changeRowCondicao(row: DevolutionRow, value: string) {
   setRowText(row, 'condicao_produto', value)
   // Ao SAIR de Manutenção, o custo de manutenção é obrigatório (registra o
   // reparo antes de marcar que o pedido passou em manutenção).
-  if (prev === 'Manutenção' && value !== 'Manutenção' && !row.custo_manutencao) {
+  if (prev === 'Manutenção' && value !== 'Manutenção' && (row.custo_manutencao == null || (row.custo_manutencao as unknown) === '')) {
     pushToast({
       kind: 'warning',
       title: 'Custo de manutenção obrigatório',
