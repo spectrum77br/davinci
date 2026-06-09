@@ -1447,7 +1447,7 @@ onScopeDispose(() => {
            contexto de scroll vertical funcional). 100vh − 220px deixa
            espaço pro header da página + barra de parâmetros. -->
       <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 220px)">
-        <table class="grid-table w-full text-xs border-collapse">
+        <table class="grid-table text-xs border-collapse">
           <thead class="thead-sticky">
             <!-- 8-row header. Fixed left columns use rowspan=8 so their
                  label sits centered across the full header height.
@@ -2509,6 +2509,15 @@ onScopeDispose(() => {
 </template>
 
 <style scoped>
+.grid-table {
+  /* width:auto + min-width keeps horizontal scroll natural when there
+   * are many columns. Sem isso (w-full sozinho), as colunas dos lotes
+   * comprimem pro min-content e o scroll trava antes do último lote.
+   * Mesmo padrão de .cot-table / .kit-table. min-width:100% preenche
+   * o container quando há poucos lotes (Mala). */
+  width: auto;
+  min-width: 100%;
+}
 .grid-table th,
 .grid-table td {
   border: 1px solid hsl(var(--border));
