@@ -7,18 +7,24 @@ SKU aqui — assim as duas telas nunca divergem.
 Vocabulário (SEM ponto à frente): ci/pi/ra/sa/sp/us/cd, fake, mala, eletro,
 insumos. `insumos` ainda não tem padrão de SKU → nunca casa.
 
-Precedência (sufixo vence):
-  1. sufixo regional/usado   `.ci/.pi/.ra/.sa/.sp/.us/.cd`
+Precedência:
+  0. z (prefixo)      → `us`, EXCETO `z*.mala`→`mala` / `z*.eletro`→`eletro`
+                         z* representa AVULSO SALVADO (usados). Operacional-
+                         mente vai pra aba `us` do Controle de Estoque,
+                         exceto malas/eletros usadas — que continuam visíveis
+                         pros operadores correspondentes.
+  1. sufixo regional   `.ci/.pi/.ra/.sa/.sp/.us/.cd`
   2. fake    prefixo  `fake.`
   3. mala    prefixo  `b` + dígito  (`^b[0-9]`) — exclui `bp001` (mochila)
   4. eletro  prefixo  `u`           (`^u`)
   5. resto → None
 
 Kits (`a+b`) são avaliados componente a componente; a primeira regra que
-casar QUALQUER componente vence, seguindo a precedência acima. Os dados de
-prod confirmam que componentes `b`/`u` sempre aparecem no início do kit e
-que kits com sufixo regional terminam nesse sufixo — por isso o clause SQL
-(`^b[0-9]` / `^u` / `%.{suf}`) produz exatamente o mesmo resultado.
+casar QUALQUER componente vence, seguindo a precedência acima — incluindo
+a regra 0. Os dados de prod confirmam que componentes `b`/`u` sempre
+aparecem no início do kit e que kits com sufixo regional terminam nesse
+sufixo — por isso o clause SQL (`^b[0-9]` / `^u` / `%.{suf}`) produz
+exatamente o mesmo resultado.
 """
 
 from __future__ import annotations
@@ -51,6 +57,15 @@ def classify_sku_tag(sku: str | None) -> str | None:
     parts = [p.strip().lower() for p in sku.split("+") if p.strip()]
     if not parts:
         return None
+    # 0. Prefixo z (AVULSO SALVADO — usados). Carve-out: z*.mala fica
+    #    em `mala` e z*.eletro fica em `eletro`. Demais z's vão pra `us`.
+    for p in parts:
+        if p.startswith("z"):
+            if p.endswith(".mala"):
+                return "mala"
+            if p.endswith(".eletro"):
+                return "eletro"
+            return "us"
     # 1. sufixo regional/usado (sufixo vence)
     for p in parts:
         tail = _suffix_of(p)
@@ -87,18 +102,41 @@ def sql_clause_for_tag(column, tag: str):
     só recebe SKUs simples, onde primeiro == último == único componente.
     Para SKUs simples os dois são idênticos (validado contra prod).
     """
-    from sqlalchemy import and_, literal
+    from sqlalchemy import and_, literal, not_, or_
+
+    # Regra 0 do classifier no SQL: z* (AVULSO SALVADO) vai pra `us`,
+    # com carve-out pra z*.mala (mala) e z*.eletro (eletro).
+    is_z = column.op("~*")("^z")
+    z_mala = and_(is_z, column.ilike("%.mala"))
+    z_eletro = and_(is_z, column.ilike("%.eletro"))
+    z_us = and_(
+        is_z,
+        not_(column.ilike("%.mala")),
+        not_(column.ilike("%.eletro")),
+    )
 
     if tag in SUFFIX_TAGS:
-        return column.ilike(f"%.{tag}")
+        suffix_match = column.ilike(f"%.{tag}")
+        if tag == "us":
+            # `.us` natural + z* (sem .mala/.eletro) caem aqui.
+            return or_(suffix_match, z_us)
+        # Sufixos regionais não-us: z* sai daqui (foi pra us).
+        return and_(suffix_match, not_(is_z))
 
     # prefixo (fake/mala/eletro): exclui SKUs com sufixo regional (sufixo vence)
     not_suffixed = [column.notilike(f"%.{s}") for s in SUFFIX_TAGS]
     if tag == "fake":
         return and_(column.ilike("fake.%"), *not_suffixed)
     if tag == "mala":
-        return and_(column.op("~*")("^b[0-9]"), *not_suffixed)
+        # Mala "natural" (^b[0-9] sem sufixo) ∪ z*.mala (malas usadas).
+        return or_(
+            and_(column.op("~*")("^b[0-9]"), *not_suffixed),
+            z_mala,
+        )
     if tag == "eletro":
-        return and_(column.op("~*")("^u"), *not_suffixed)
+        return or_(
+            and_(column.op("~*")("^u"), *not_suffixed),
+            z_eletro,
+        )
     # insumos — sem padrão de SKU ainda.
     return literal(False)
