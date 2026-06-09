@@ -1,7 +1,7 @@
 """refunds: coluna created_by (rastreio de quem cadastrou o reembolso)
 
-Revision ID: 0132_refund_created_by
-Revises: 0131_user_password
+Revision ID: 0133_refund_created_by
+Revises: 0132_import_config_por_categoria
 
 Adiciona rastreabilidade de autoria nas linhas de reembolso. O handler
 POST /api/refunds passa a gravar o usuário autenticado em created_by. A
@@ -15,8 +15,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = "0132_refund_created_by"
-down_revision = "0131_user_password"
+revision = "0133_refund_created_by"
+down_revision = "0132_import_config_por_categoria"
 branch_labels = None
 depends_on = None
 
