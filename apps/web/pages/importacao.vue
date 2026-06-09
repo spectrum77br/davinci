@@ -2600,16 +2600,27 @@ onScopeDispose(() => {
   font-size: 11px;
   font-weight: 600;
   text-align: right;
-  padding: 2px 6px;
-  white-space: nowrap;
-  width: 80px;
+  padding: 2px 4px;
+  /* width antigo 80px forçava a sub-col QUANT a ser sempre 80px (pra
+   * caber "transportadora" nowrap). Reduzindo pra 50px + permitindo
+   * wrap, QUANT vira ~50px e cada lote fica mais estreito (~150px),
+   * cabendo mais lotes por tela. "transportadora" quebra em 2 linhas,
+   * row da transportadora fica um pouco mais alta — trade aceito. */
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.1;
+  width: 50px;
   color: hsl(var(--muted-foreground));
 }
 .lote-value {
   font-size: 11px;
   text-align: left;
   padding: 2px 6px;
-  min-width: 110px;
+  /* min-width antigo 110px expandia cols sticky do lote (valor+custo =
+   * 50+50 = 100) puxando cada lote pra ~170px. 100 bate exato com
+   * 2× col-total e mantém cada lote compacto (~130px). */
+  min-width: 100px;
   background: hsl(var(--background));
 }
 .lote-value.calculated {
@@ -2634,14 +2645,19 @@ onScopeDispose(() => {
 /* width + min-width juntos: em table-layout:auto o browser pode comprimir
  * colunas sem `width` explícito, deixando a tabela mais curta que a soma
  * dos `min-width` e travando o scroll antes do último lote (Celular tem
- * 15 lotes × 3 sub-cells = 45 colunas). Mesmo padrão da .cot-prod-head. */
+ * 15 lotes × 3 sub-cells = 45 colunas). Mesmo padrão da .cot-prod-head.
+ *
+ * Larguras compactas pra caber MAIS lotes simultaneamente no Celular —
+ * operador prefere ver ~7 lotes por tela em vez de ~5. Valores grandes
+ * tipo "R$ 256.000,00" no `previsto` (colspan=2 ⇒ 100px) ficam apertados
+ * mas legíveis no font 11px. Mala (poucos lotes) não sente diferença. */
 .col-quant {
-  width: 40px;
-  min-width: 40px;
+  width: 32px;
+  min-width: 32px;
 }
 .col-total {
-  width: 70px;
-  min-width: 70px;
+  width: 50px;
+  min-width: 50px;
 }
 
 /* ── Cotação table ─────────────────────────────────────────────── */
