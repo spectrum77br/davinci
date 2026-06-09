@@ -13,6 +13,14 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
+    # `server_settings.application_name` é honrado pelo asyncpg na
+    # negociação de cada conexão. Aparece em pg_stat_activity e fica
+    # disponível via `current_setting('application_name', true)` dentro
+    # de triggers (audit_em_andamento_data_fn — migration 0135),
+    # identificando qual processo escreveu sem precisar rastrear PID.
+    connect_args={
+        "server_settings": {"application_name": _settings.app_name},
+    },
 )
 
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

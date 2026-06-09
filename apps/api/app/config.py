@@ -18,6 +18,12 @@ class Settings(BaseSettings):
 
     database_url: str
     database_schema: str = "davinci"
+    # Etiqueta passada pro Postgres via asyncpg `server_settings`. Cada
+    # processo (api / worker / worker_ui / worker_marketplace) recebe um
+    # nome diferente via docker-compose (env APP_NAME), alimentando
+    # audit triggers (audit_em_andamento_data_fn) e pg_stat_activity
+    # sem precisar rastrear PID. Default mantém dev local sem env.
+    app_name: str = "davinci-api"
 
     redis_url: str = "redis://redis:6379/0"
     arq_redis_url: str = "redis://redis:6379/1"
