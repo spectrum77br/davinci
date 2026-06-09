@@ -31,10 +31,18 @@ from app.models.base import Base, TimestampMixin
 
 
 class ImportConfig(Base, TimestampMixin):
-    """Singleton (id=1) com os parâmetros da fórmula de reposição."""
+    """Parâmetros da fórmula de reposição POR CATEGORIA (migration 0132).
+
+    Antes era singleton (id=1) com tempo_reposicao/tempo_estoque globais
+    — o valor da mala vazava pro celular. Agora uma row por categoria
+    (mala/celular/eletro), espelhando o padrão de ImportCotacaoParams.
+    """
     __tablename__ = "import_config"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    categoria: Mapped[str] = mapped_column(
+        String(20), nullable=False, unique=True, index=True,
+    )
     tempo_reposicao: Mapped[int] = mapped_column(Integer, nullable=False, default=150)
     tempo_estoque: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
 

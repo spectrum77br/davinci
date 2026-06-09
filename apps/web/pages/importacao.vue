@@ -116,7 +116,7 @@ function catQs(): string {
   return `categoria=${categoria.value}`
 }
 
-type Config = { tempo_reposicao: number; tempo_estoque: number }
+type Config = { categoria: string; tempo_reposicao: number; tempo_estoque: number }
 type Product = {
   id: string
   fornecedor: string | null
@@ -278,7 +278,7 @@ type KitGrid = { variations: KitVariation[]; bases: KitBase[]; marks: KitMark[] 
 const products = ref<Product[]>([])
 const lotes = ref<Lote[]>([])
 const resumo = ref<{ items: ResumoRow[]; total: string | number }>({ items: [], total: 0 })
-const config = ref<Config>({ tempo_reposicao: 150, tempo_estoque: 60 })
+const config = ref<Config>({ categoria: 'mala', tempo_reposicao: 150, tempo_estoque: 60 })
 const cotacao = ref<CotacaoGrid>({ fabricantes: [], produtos: [], valores: [] })
 
 // Cotação Celular (etapa 3) — params globais + recálculo reativo do
@@ -543,7 +543,7 @@ async function loadAll() {
   const hasKit = availableSubtabs.value.includes('kit')
   try {
     const [cfg, ps, ls, rs, ct, counts] = await Promise.all([
-      api<Config>('/api/importacao/config'),
+      api<Config>(`/api/importacao/config?${qs}`),
       api<Product[]>(`/api/importacao/products?${qs}`),
       api<Lote[]>(`/api/importacao/lotes?${qs}`),
       api<{ items: ResumoRow[]; total: string | number }>(`/api/importacao/resumo?${qs}`),
@@ -974,9 +974,15 @@ async function removeResumo(row: ResumoRow) {
 // pra recalcular reposicao_estoque/saldo_reposicao.
 async function saveConfig() {
   try {
-    config.value = await api<Config>('/api/importacao/config', {
+    // Config é por categoria (migration 0132). O body do PATCH só leva
+    // tempo_reposicao/tempo_estoque — a categoria vai por query string,
+    // pra qual row alterar.
+    config.value = await api<Config>(`/api/importacao/config?${catQs()}`, {
       method: 'PATCH',
-      body: { ...config.value },
+      body: {
+        tempo_reposicao: config.value.tempo_reposicao,
+        tempo_estoque: config.value.tempo_estoque,
+      },
     })
     void loadProductsOnly()
   } catch (e: any) {

@@ -12,6 +12,10 @@ from pydantic import BaseModel, ConfigDict
 
 class ImportConfigOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+    # Categoria foi adicionada em 0132 (config era singleton, virou
+    # uma row por categoria). Exposta pra o frontend confirmar qual
+    # config está editando.
+    categoria: str
     tempo_reposicao: int
     tempo_estoque: int
 

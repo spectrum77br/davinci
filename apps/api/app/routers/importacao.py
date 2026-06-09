@@ -94,20 +94,37 @@ _CATEGORIAS = ("mala", "eletro", "celular")
 _CategoriaQ = Annotated[str, Query(pattern="^(mala|eletro|celular)$")]
 
 
-# ── Config singleton ─────────────────────────────────────────────────
+# ── Config por categoria ─────────────────────────────────────────────
+
+
+# Defaults pra auto-criar a row da categoria no 1º acesso. Os mesmos
+# valores que a seed da migration 0132 grava pra 'celular'. Mala já
+# tem a row carimbada da era singleton (qualquer valor que o operador
+# tinha antes do split).
+_CONFIG_DEFAULTS = {"tempo_reposicao": 150, "tempo_estoque": 60}
+
+
+async def _get_or_create_config(session: AsyncSession, categoria: str) -> ImportConfig:
+    """Busca a row de `import_config` pra categoria; cria com defaults
+    se não existir. Espelha get_cotacao_params (também por categoria)."""
+    row = (await session.execute(
+        select(ImportConfig).where(ImportConfig.categoria == categoria)
+    )).scalar_one_or_none()
+    if row is None:
+        row = ImportConfig(categoria=categoria, **_CONFIG_DEFAULTS)
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+    return row
 
 
 @router.get("/config", response_model=ImportConfigOut)
 async def get_config(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+    categoria: _CategoriaQ = "celular",
 ) -> ImportConfigOut:
-    row = await session.get(ImportConfig, 1)
-    if row is None:
-        row = ImportConfig(id=1, tempo_reposicao=150, tempo_estoque=60)
-        session.add(row)
-        await session.commit()
-        await session.refresh(row)
+    row = await _get_or_create_config(session, categoria)
     return ImportConfigOut.model_validate(row, from_attributes=True)
 
 
@@ -116,11 +133,9 @@ async def patch_config(
     body: ImportConfigPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+    categoria: _CategoriaQ = "celular",
 ) -> ImportConfigOut:
-    row = await session.get(ImportConfig, 1)
-    if row is None:
-        row = ImportConfig(id=1)
-        session.add(row)
+    row = await _get_or_create_config(session, categoria)
     for k, v in body.model_dump(exclude_unset=True).items():
         if v is not None:
             setattr(row, k, v)
@@ -361,9 +376,11 @@ async def list_products(
         )
     ).scalars().all()
 
-    cfg = await session.get(ImportConfig, 1)
-    if cfg is None:
-        cfg = ImportConfig(id=1, tempo_reposicao=150, tempo_estoque=60)
+    # Config (tempo_reposicao + tempo_estoque) agora é por categoria
+    # (migration 0132). Cada cell de reposição/saldo usa esses valores
+    # via _compute_product_fields — antes vazava o valor da mala pro
+    # celular porque era singleton.
+    cfg = await _get_or_create_config(session, categoria)
 
     # Open-lote items: aggregate for pedidos_em_aberto + per-(lote,product) map.
     open_items = (
