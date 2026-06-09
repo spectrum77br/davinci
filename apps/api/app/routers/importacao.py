@@ -1166,12 +1166,15 @@ async def list_frete(
     - `valor_unit`: item.valor_usd (preço unitário no lote)
     - `total`: valor_usd × quantidade
     - `frete_pct`: lote.frete_pct (frete do LOTE — não do produto)
-    - `saldo`: total × frete_pct, SÓ quando lote tem fechamento
-      (linhas pendentes mostram saldo=None na UI)
+    - `saldo`: total × frete_pct sempre que `total` existir — projeção
+      pré-fechamento e débito pós-fechamento. O frontend distingue
+      visualmente (vermelho só pra dívida real: lote fechado + !pago).
 
     Cards no topo (todos em US$):
     - `total_a_entregar`: SUM(total) de items em lotes sem fechamento
-    - `saldo_a_pagar`: SUM(saldo) de items com fechamento E !pago
+    - `saldo_a_pagar`: SUM(saldo) de items com fechamento E !pago.
+      O gate "só conta no a pagar quando fechado" vive APENAS no
+      acumulador abaixo (if/elif), NÃO na computação do saldo da linha.
     """
     # Items dos lotes desta categoria + produto. Filtra:
     # - `lote.frete_pct IS NOT NULL`: frete % é parte da fórmula, sem ele
@@ -1216,7 +1219,7 @@ async def list_frete(
         is_fechado = lote.fechamento is not None
         saldo = (
             (total * frete_pct).quantize(Decimal("0.01"))
-            if (is_fechado and total is not None)
+            if total is not None
             else None
         )
         rows.append(ImportFreteRow(

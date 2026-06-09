@@ -77,8 +77,10 @@ async def test_frete_list_agrega_item_aberto(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None], user_imp_edit,
 ):
-    """Lote sem fechamento: saldo=null (pendente), total entra em
-    `total_a_entregar` (em USD)."""
+    """Lote sem fechamento: saldo agora é COMPUTADO mesmo no aberto
+    (projeção). total entra em `total_a_entregar`; o aberto NÃO entra
+    em `saldo_a_pagar` (gate vive no acumulador). Frontend distingue
+    visualmente: vermelho só pra dívida real (fechado + !pago)."""
     auth_as(await user_imp_edit())
     await _seed_frete_basics(db)
 
@@ -95,10 +97,12 @@ async def test_frete_list_agrega_item_aberto(
     assert Decimal(row["valor_unit"]) == Decimal("332.00")
     assert Decimal(row["total"]) == Decimal("3320.00")  # 10 × 332
     assert Decimal(row["frete_pct"]) == Decimal("0.16")
-    assert row["saldo"] is None  # sem fechamento → pendente
+    # Projeção: 3320 × 0.16 = 531.20. Aberto, mas saldo já é exibido.
+    assert Decimal(row["saldo"]) == Decimal("531.20")
     assert row["pago"] is False
     assert body["transportadoras"] == ["Cargo X"]
     assert Decimal(body["total_a_entregar"]) == Decimal("3320.00")
+    # Aberto NÃO entra em saldo_a_pagar — gate vive no acumulador.
     assert Decimal(body["saldo_a_pagar"]) == Decimal("0.00")
 
 

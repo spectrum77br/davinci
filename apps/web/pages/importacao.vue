@@ -2488,8 +2488,15 @@ onScopeDispose(() => {
                 <span v-if="r.frete_pct != null">{{ (Number(r.frete_pct) * 100).toFixed(1) }}%</span>
                 <span v-else>—</span>
               </td>
-              <td class="text-right font-semibold"
-                :class="r.saldo != null && Number(r.saldo) > 0 ? 'text-red-700' : ''">
+              <!-- Saldo aparece como projeção (lote aberto) ou débito
+                   (fechado + !pago). Vermelho bold SÓ pra dívida real
+                   — abertos e pagos ficam em cor neutra pra não dar
+                   falsa impressão de débito. -->
+              <td
+                :class="r.saldo != null && r.fechamento != null && !r.pago && Number(r.saldo) > 0
+                  ? 'text-right font-semibold text-red-700'
+                  : 'text-right text-muted-foreground'"
+              >
                 {{ r.saldo == null ? 'Pendente' : fmtUsd(r.saldo) }}
               </td>
               <td class="text-center">
