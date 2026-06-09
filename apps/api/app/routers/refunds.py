@@ -274,7 +274,7 @@ async def get_order_cost(
 async def create_refund(
     body: RefundCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("reembolso", "edit"))],
+    u: Annotated[User, Depends(require_permission("reembolso", "edit"))],
 ) -> RefundOut:
     row = Refund(
         data=body.data,
@@ -289,11 +289,17 @@ async def create_refund(
         operacao=body.operacao,
         conferido=False,
         observacao=body.observacao,
+        created_by=u.id,
     )
     session.add(row)
     await session.commit()
     await session.refresh(row)
-    logger.info("refund_created", id=str(row.id), pedido_bling=row.pedido_bling)
+    logger.info(
+        "refund_created",
+        id=str(row.id),
+        pedido_bling=row.pedido_bling,
+        created_by=str(u.id),
+    )
     return RefundOut.model_validate(row)
 
 

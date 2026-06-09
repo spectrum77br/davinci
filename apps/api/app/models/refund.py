@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, Text, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,3 +29,10 @@ class Refund(Base, TimestampMixin):
     operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     conferido: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Rastreio interno de autoria (DB-only): preenchido no POST /api/refunds a
+    # partir do usuário autenticado. NÃO é exposto em RefundOut nem na UI.
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
