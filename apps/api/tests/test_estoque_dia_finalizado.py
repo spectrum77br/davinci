@@ -3,7 +3,7 @@ um dia (section='envio'). Antes, o badge regredia de "total" → "parcial"
 sempre que entrasse produto novo na tag, porque o `total_produtos`
 current era comparado com o histórico `estoque_conferidos`.
 
-Migration 0133 cria estoque_dia_finalizado. O router lê o set de datas
+Migration 0134 cria estoque_dia_finalizado. O router lê o set de datas
 travadas pro período e força "total" no badge nesses dias.
 """
 from __future__ import annotations

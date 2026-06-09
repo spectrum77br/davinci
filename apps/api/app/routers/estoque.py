@@ -667,7 +667,7 @@ async def list_estoque_envios(
     )
     # Dias travados como "total" (admin já tinha ticado CONFERIDO no
     # envio). Sem essa trava, o badge regredia pra "parcial" assim que
-    # entrasse produto novo na tag. Migration 0133.
+    # entrasse produto novo na tag. Migration 0134.
     locks = {row.data for row in (await session.execute(
         select(EstoqueDiaFinalizado.data).where(
             EstoqueDiaFinalizado.data.between(data_inicio, data_fim),
@@ -880,7 +880,7 @@ async def toggle_estoque_check(
             existing.observacao = observacao or None
 
     # Trava permanente do badge `conferencia_estoque` quando admin
-    # finaliza o dia (✓ em section='envio'). Migration 0133. Lock NÃO
+    # finaliza o dia (✓ em section='envio'). Migration 0134. Lock NÃO
     # é removido se o admin destickar — é um carimbo "fechei esse dia",
     # não um espelho do estado atual.
     if (

@@ -1,7 +1,7 @@
 """estoque_dia_finalizado — trava CONF. ESTOQUE de dias finalizados
 
-Revision ID: 0133_estoque_dia_finalizado
-Revises: 0132_import_config_por_categoria
+Revision ID: 0134_estoque_dia_finalizado
+Revises: 0133_refund_created_by
 Create Date: 2026-06-09
 
 Em /api/estoque/envios, o badge `conferencia_estoque` era recalculado
@@ -22,8 +22,8 @@ Downgrade dropa a tabela (sem perda de dados em stock_checks).
 
 from alembic import op
 
-revision = "0133_estoque_dia_finalizado"
-down_revision = "0132_import_config_por_categoria"
+revision = "0134_estoque_dia_finalizado"
+down_revision = "0133_refund_created_by"
 branch_labels = None
 depends_on = None
 
