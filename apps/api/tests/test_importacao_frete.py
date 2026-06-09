@@ -14,7 +14,6 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
-    ImportCotacaoParams,
     ImportLote,
     ImportLoteItem,
     ImportProduct,
@@ -35,23 +34,15 @@ def user_imp_edit(make_user):
 
 async def _seed_frete_basics(db: AsyncSession) -> dict[str, str]:
     """Cria 1 produto celular + 1 lote (com transportadora) + 1 item
-    (quantidade 10). Frete params com valores conhecidos pra checar
-    saldo na agregação."""
-    db.add(ImportCotacaoParams(
-        categoria="celular",
-        taxa_cambio=Decimal("5.10"),
-        frete_regular_pct=Decimal("0.16"),
-        frete_swap_pct=Decimal("0.06"),
-        frete_acessorios_pct=Decimal("0.20"),
-        adicional=Decimal("12.00"),
-    ))
+    (quantidade 10). Aba Frete agora é toda em USD: o valor unitário
+    vem de `item.valor_usd` e o frete_pct vem direto do LOTE — não
+    mais do produto via ImportCotacaoParams."""
     prod = ImportProduct(
         id=uuid4(),
         categoria="celular",
         sku="i220.sa",
         modelo_bling="Apple iPhone 17 Pro - Azul",
         custo_bling=Decimal("0"),
-        valor_brl_realizado=Decimal("332.00"),
         frete_type="regular",
     )
     db.add(prod)
@@ -63,10 +54,8 @@ async def _seed_frete_basics(db: AsyncSession) -> dict[str, str]:
         abertura=date(2026, 4, 22),
         fechamento=None,
         transportadora="Cargo X",
-        # Aba Frete (migration 0128) filtra lotes sem taxa/frete_pct —
-        # acessórios em massa (i48) ficam fora. Preencher aqui pra
-        # manter o lote do teste dentro da agregação.
-        taxa=Decimal("5.10"),
+        # Aba Frete só filtra lotes sem frete_pct (a `taxa`/câmbio é
+        # irrelevante porque tudo é em USD).
         frete_pct=Decimal("0.16"),
     )
     db.add(lote)
@@ -74,6 +63,9 @@ async def _seed_frete_basics(db: AsyncSession) -> dict[str, str]:
     item = ImportLoteItem(
         id=uuid4(),
         lote_id=lote.id, product_id=prod.id, quantidade=10,
+        # Valor unitário em USD — usado na aba Frete (substitui o
+        # antigo valor_brl_realizado do produto).
+        valor_usd=Decimal("332.00"),
     )
     db.add(item)
     await db.commit()
@@ -86,7 +78,7 @@ async def test_frete_list_agrega_item_aberto(
     auth_as: Callable[[User | None], None], user_imp_edit,
 ):
     """Lote sem fechamento: saldo=null (pendente), total entra em
-    `total_a_entregar`."""
+    `total_a_entregar` (em USD)."""
     auth_as(await user_imp_edit())
     await _seed_frete_basics(db)
 
@@ -115,7 +107,7 @@ async def test_frete_list_lote_fechado_calcula_saldo(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None], user_imp_edit,
 ):
-    """Lote com fechamento: saldo = total × frete_pct (10×332×0.16 = 531.20).
+    """Lote com fechamento: saldo = total × frete_pct (10×332×0.16 = 531.20 USD).
     Como pago=false, entra em `saldo_a_pagar`."""
     auth_as(await user_imp_edit())
     ids = await _seed_frete_basics(db)

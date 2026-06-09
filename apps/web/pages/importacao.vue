@@ -991,6 +991,15 @@ function fmtMoney(v: string | number | null | undefined): string {
   if (!Number.isFinite(n)) return '—'
   return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 }
+// USD com prefixo "US$" — usado na aba Frete (valores em dólar). O
+// `style: currency / currency: USD` produz "US$1,234.56"; queremos
+// "US$ 1.234,56" no padrão BR. Por isso formatamos o número à mão.
+function fmtUsd(v: string | number | null | undefined): string {
+  if (v == null || v === '') return '—'
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '—'
+  return `US$ ${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
 function fmtNum2(v: string | number | null | undefined): string {
   if (v == null || v === '') return '—'
   const n = Number(v)
@@ -2363,16 +2372,16 @@ onScopeDispose(() => {
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div class="border rounded-md p-3 bg-amber-50 dark:bg-amber-900/20">
           <div class="text-[10px] uppercase tracking-wide text-amber-700 dark:text-amber-300 font-semibold">
-            Total a entregar
+            Total a entregar (US$)
           </div>
-          <div class="text-lg font-semibold mt-1">{{ fmtMoney(frete.total_a_entregar) }}</div>
+          <div class="text-lg font-semibold mt-1">{{ fmtUsd(frete.total_a_entregar) }}</div>
           <div class="text-[10px] text-muted-foreground">lotes ainda sem fechamento</div>
         </div>
         <div class="border rounded-md p-3 bg-red-50 dark:bg-red-900/20">
           <div class="text-[10px] uppercase tracking-wide text-red-700 dark:text-red-300 font-semibold">
-            Saldo a pagar
+            Saldo a pagar (US$)
           </div>
-          <div class="text-lg font-semibold mt-1">{{ fmtMoney(frete.saldo_a_pagar) }}</div>
+          <div class="text-lg font-semibold mt-1">{{ fmtUsd(frete.saldo_a_pagar) }}</div>
           <div class="text-[10px] text-muted-foreground">lotes fechados + ajustes, ainda não pagos</div>
         </div>
       </div>
@@ -2412,10 +2421,10 @@ onScopeDispose(() => {
               <th class="text-left">Fechamento</th>
               <th class="text-left">Modelo</th>
               <th class="text-right">Qtd</th>
-              <th class="text-right">Valor Unit.</th>
-              <th class="text-right">Total</th>
+              <th class="text-right">Valor Unit. (US$)</th>
+              <th class="text-right">Total (US$)</th>
               <th class="text-right">Frete %</th>
-              <th class="text-right">Saldo</th>
+              <th class="text-right">Saldo (US$)</th>
               <th class="text-center">Pago</th>
             </tr>
           </thead>
@@ -2436,15 +2445,15 @@ onScopeDispose(() => {
                 <span v-else class="italic text-muted-foreground">{{ r.obs || '(sem modelo)' }}</span>
               </td>
               <td class="text-right">{{ r.quantidade ?? '—' }}</td>
-              <td class="text-right">{{ r.valor_unit == null ? '—' : fmtMoney(r.valor_unit) }}</td>
-              <td class="text-right">{{ r.total == null ? '—' : fmtMoney(r.total) }}</td>
+              <td class="text-right">{{ r.valor_unit == null ? '—' : fmtUsd(r.valor_unit) }}</td>
+              <td class="text-right">{{ r.total == null ? '—' : fmtUsd(r.total) }}</td>
               <td class="text-right">
-                <span v-if="r.frete_pct != null">{{ (Number(r.frete_pct) * 100).toFixed(0) }}%</span>
+                <span v-if="r.frete_pct != null">{{ (Number(r.frete_pct) * 100).toFixed(1) }}%</span>
                 <span v-else>—</span>
               </td>
               <td class="text-right font-semibold"
                 :class="r.saldo != null && Number(r.saldo) > 0 ? 'text-red-700' : ''">
-                {{ r.saldo == null ? 'Pendente' : fmtMoney(r.saldo) }}
+                {{ r.saldo == null ? 'Pendente' : fmtUsd(r.saldo) }}
               </td>
               <td class="text-center">
                 <input

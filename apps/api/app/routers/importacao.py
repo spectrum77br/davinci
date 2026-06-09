@@ -1133,32 +1133,6 @@ async def patch_resumo(
 # ── Frete (aba Frete do Celular, etapa 4) ──────────────────────────
 
 
-def _frete_pct_for(prod: ImportProduct, cot_params: ImportCotacaoParams | None) -> Decimal:
-    """Resolve o frete_pct efetivo do produto a partir do tipo +
-    parâmetros globais. Default 0 quando não há params (categorias sem
-    aba Cotação configurada). Garante Decimal pra não confundir
-    Decimal*float em multiplicações abaixo."""
-    if cot_params is None:
-        return _ZERO
-    t = (prod.frete_type or "regular").lower()
-    val = {
-        "regular": cot_params.frete_regular_pct,
-        "swap": cot_params.frete_swap_pct,
-        "acessorios": cot_params.frete_acessorios_pct,
-    }.get(t)
-    return Decimal(val) if val is not None else _ZERO
-
-
-def _valor_unit_for(prod: ImportProduct) -> Decimal:
-    """Valor unitário operacional pra aba Frete:
-    `valor_brl_realizado` (preenchido pelo operador na aba Cotação);
-    fallback pra `custo_bling` quando ainda não foi preenchido."""
-    v = prod.valor_brl_realizado
-    if v is not None and Decimal(v) > 0:
-        return Decimal(v)
-    return Decimal(prod.custo_bling or 0)
-
-
 @router.get("/frete", response_model=ImportFreteList)
 async def list_frete(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1171,30 +1145,32 @@ async def list_frete(
     produtos linkados + (2) ajustes manuais (linhas de ImportResumo
     com transportadora setada, na mesma categoria).
 
-    - `valor_unit`: ImportProduct.valor_brl_realizado || custo_bling
-    - `frete_pct`: do ImportProduct.frete_type + ImportCotacaoParams
-    - `saldo`: total * frete_pct, mas SÓ quando lote tem fechamento
+    Fórmula (em DÓLAR — Excel do operador):
+    - `valor_unit`: item.valor_usd (preço unitário no lote)
+    - `total`: valor_usd × quantidade
+    - `frete_pct`: lote.frete_pct (frete do LOTE — não do produto)
+    - `saldo`: total × frete_pct, SÓ quando lote tem fechamento
       (linhas pendentes mostram saldo=None na UI)
-    Cards no topo:
+
+    Cards no topo (todos em US$):
     - `total_a_entregar`: SUM(total) de items em lotes sem fechamento
     - `saldo_a_pagar`: SUM(saldo) de items com fechamento E !pago
     """
-    cot_params = (await session.execute(
-        select(ImportCotacaoParams).where(ImportCotacaoParams.categoria == categoria)
-    )).scalar_one_or_none()
-
-    # Items dos lotes desta categoria + produto. Filtra lotes sem
-    # taxa OU frete_pct — acessórios em massa (I48) chegam sem
-    # transportadora regular e a fórmula valor_usd × taxa × (1+frete)
-    # não se aplica. Custo nesses casos é digitado em custo_manual
-    # (migration 0128) e o lote inteiro fica fora da aba Frete.
+    # Items dos lotes desta categoria + produto. Filtra:
+    # - `lote.frete_pct IS NOT NULL`: frete % é parte da fórmula, sem ele
+    #   não há como calcular saldo.
+    # - `item.custo_manual IS NULL`: lotes de custo digitado na mão (I48,
+    #   acessórios em massa) ficam fora — não passam por transportadora
+    #   regular. Diferente do filtro antigo (taxa IS NOT NULL), que
+    #   sumia indevidamente lotes válidos sem câmbio definido (ex: AG257),
+    #   porque a aba Frete é toda em USD — câmbio não entra.
     items_q = (
         select(ImportLoteItem, ImportLote, ImportProduct)
         .join(ImportLote, ImportLote.id == ImportLoteItem.lote_id)
         .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
         .where(ImportLote.categoria == categoria)
-        .where(ImportLote.taxa.isnot(None))
         .where(ImportLote.frete_pct.isnot(None))
+        .where(ImportLoteItem.custo_manual.is_(None))
         .order_by(ImportLote.abertura.desc(), ImportLote.nome, ImportProduct.sku)
     )
     if transportadora:
@@ -1212,11 +1188,20 @@ async def list_frete(
     for item, lote, prod in item_rows:
         if lote.transportadora:
             transportadora_set.add(lote.transportadora)
-        valor_unit = _valor_unit_for(prod)
-        total = valor_unit * Decimal(item.quantidade or 0)
-        frete_pct = _frete_pct_for(prod, cot_params)
+        # Tudo em USD. `valor_usd` é o preço unitário do produto NAQUELE
+        # lote (item.valor_usd). Quando None, a linha aparece sem
+        # valor/total/saldo — operador ainda não preencheu na aba
+        # Importação.
+        valor_unit = Decimal(item.valor_usd) if item.valor_usd is not None else None
+        qty = Decimal(item.quantidade or 0)
+        total = valor_unit * qty if valor_unit is not None else None
+        frete_pct = Decimal(lote.frete_pct)
         is_fechado = lote.fechamento is not None
-        saldo = (total * frete_pct).quantize(Decimal("0.01")) if is_fechado else None
+        saldo = (
+            (total * frete_pct).quantize(Decimal("0.01"))
+            if (is_fechado and total is not None)
+            else None
+        )
         rows.append(ImportFreteRow(
             kind="item",
             id=item.id,
@@ -1229,13 +1214,13 @@ async def list_frete(
             sku=prod.sku,
             quantidade=item.quantidade,
             valor_unit=valor_unit,
-            total=total.quantize(Decimal("0.01")),
+            total=total.quantize(Decimal("0.01")) if total is not None else None,
             frete_pct=frete_pct,
             saldo=saldo,
             pago=bool(item.pago),
             obs=None,
         ))
-        if not is_fechado:
+        if not is_fechado and total is not None:
             total_a_entregar += total
         elif saldo is not None and not item.pago:
             saldo_a_pagar += saldo
