@@ -8,16 +8,15 @@ Vocabulário (SEM ponto à frente): ci/pi/ra/sa/sp/us/cd, fake, mala, eletro,
 insumos. `insumos` ainda não tem padrão de SKU → nunca casa.
 
 Precedência:
-  0. z (prefixo)      → `us`, EXCETO `z*.mala`→`mala` / `z*.eletro`→`eletro`
-                         z* representa AVULSO SALVADO (usados). Operacional-
-                         mente vai pra aba `us` do Controle de Estoque,
-                         exceto malas/eletros usadas — que continuam visíveis
-                         pros operadores correspondentes.
-  1. sufixo regional   `.ci/.pi/.ra/.sa/.sp/.us/.cd`
-  2. fake    prefixo  `fake.`
-  3. mala    prefixo  `b` + dígito  (`^b[0-9]`) — exclui `bp001` (mochila)
-  4. eletro  prefixo  `u`           (`^u`)
-  5. resto → None
+  -1. `_SKU_TAG_OVERRIDES` (SKU exato vence tudo — manter SKU do Bling
+      mas direcionar pra outra tag)
+   0. z (prefixo): z*.mala→mala / z*.eletro→eletro / z* SEM sufixo → us
+                   (z* COM sufixo regional cai na regra 1)
+   1. sufixo regional   `.ci/.pi/.ra/.sa/.sp/.us/.cd`  (z*.pi cai aqui)
+   2. fake    prefixo  `fake.`
+   3. mala    prefixo  `b` + dígito  (`^b[0-9]`) — exclui `bp001` (mochila)
+   4. eletro  prefixo  `u`           (`^u`)
+   5. resto → None
 
 Kits (`a+b`) são avaliados componente a componente; a primeira regra que
 casar QUALQUER componente vence, seguindo a precedência acima — incluindo
@@ -38,6 +37,23 @@ PREFIX_TAGS = ("fake",)
 # Conjunto completo de tags válidas (usado para validar input do admin).
 VALID_TAGS = frozenset({*SUFFIX_TAGS, *PREFIX_TAGS, "mala", "eletro", "insumos"})
 
+# Overrides por SKU exato. Operador quer manter o nome do Bling (sem
+# renomear) mas direcionar pra outra tag. Vence sufixo, prefixo, regra
+# do z — vence tudo. Lowercase pra bater com a normalização do
+# classifier (`p.strip().lower()`).
+_SKU_TAG_OVERRIDES: dict[str, str] = {
+    # 6 itens .us que pertencem a sa
+    "dg001.us": "sa",
+    "dg011.us": "sa",
+    "dg017.us": "sa",
+    "dg023.us": "sa",
+    "dg061.us": "sa",
+    "zr010.us": "sa",
+    # 2 malas que ficaram com sufixo .us
+    "b000.us": "mala",
+    "z0097.us": "mala",
+}
+
 _MALA_RE = re.compile(r"^b[0-9]")
 _ELETRO_RE = re.compile(r"^u")
 
@@ -54,18 +70,30 @@ def classify_sku_tag(sku: str | None) -> str | None:
     """Retorna a tag de operador de um SKU (sem ponto à frente), ou None."""
     if not sku:
         return None
+    # Override por SKU exato — precedência máxima. Avaliado sobre o SKU
+    # inteiro (não componente de kit) porque é uma lista hand-curada.
+    sku_lower = sku.strip().lower()
+    if sku_lower in _SKU_TAG_OVERRIDES:
+        return _SKU_TAG_OVERRIDES[sku_lower]
     parts = [p.strip().lower() for p in sku.split("+") if p.strip()]
     if not parts:
         return None
-    # 0. Prefixo z (AVULSO SALVADO — usados). Carve-out: z*.mala fica
-    #    em `mala` e z*.eletro fica em `eletro`. Demais z's vão pra `us`.
+    # 0. Prefixo z (AVULSO SALVADO). Só vale pra z*.mala (mala),
+    #    z*.eletro (eletro), ou z* SEM sufixo (→ us). z* COM sufixo
+    #    regional (z*.pi, z*.ra, z*.us, etc.) NÃO casa aqui — cai na
+    #    regra 1 e o sufixo vence.
     for p in parts:
-        if p.startswith("z"):
-            if p.endswith(".mala"):
-                return "mala"
-            if p.endswith(".eletro"):
-                return "eletro"
+        if not p.startswith("z"):
+            continue
+        if p.endswith(".mala"):
+            return "mala"
+        if p.endswith(".eletro"):
+            return "eletro"
+        if "." not in p:
             return "us"
+        # tem ponto = tem sufixo → não casa a regra 0, deixa a regra 1
+        # (sufixo) cuidar. Continuamos o loop pra procurar outro
+        # componente do kit que possa casar a regra 0.
     # 1. sufixo regional/usado (sufixo vence)
     for p in parts:
         tail = _suffix_of(p)
@@ -102,41 +130,62 @@ def sql_clause_for_tag(column, tag: str):
     só recebe SKUs simples, onde primeiro == último == único componente.
     Para SKUs simples os dois são idênticos (validado contra prod).
     """
-    from sqlalchemy import and_, literal, not_, or_
+    from sqlalchemy import and_, func, literal, or_
 
-    # Regra 0 do classifier no SQL: z* (AVULSO SALVADO) vai pra `us`,
-    # com carve-out pra z*.mala (mala) e z*.eletro (eletro).
+    def _apply_sku_overrides(base, column, tag):
+        """Aplica os overrides do classifier no SQL:
+          - SKUs cujo override aponta pra `tag` ENTRAM (OR);
+          - SKUs cujo override aponta pra OUTRA tag SAEM (AND NOT IN).
+        Mantém o classifier e o clause batendo 1:1 pros 8 SKUs da
+        lista. lower() pro `func.lower(column).in_` casar a normalização
+        do classifier."""
+        to_this = sorted(s for s, t in _SKU_TAG_OVERRIDES.items() if t == tag)
+        away = sorted(s for s, t in _SKU_TAG_OVERRIDES.items() if t != tag)
+        clause = base
+        if to_this:
+            clause = or_(clause, func.lower(column).in_(to_this))
+        if away:
+            clause = and_(clause, func.lower(column).notin_(away))
+        return clause
+
+    # Regra 0 do classifier no SQL: z* SEM sufixo (sem ponto) vai pra
+    # `us`; z*.mala / z*.eletro entram nas tags correspondentes via OR.
+    # z* COM sufixo regional NÃO é tratado aqui — cai na regra 1 (clause
+    # de sufixo) sem precisar excluir explicitamente.
     is_z = column.op("~*")("^z")
+    z_no_suffix = and_(is_z, column.notlike("%.%"))
     z_mala = and_(is_z, column.ilike("%.mala"))
     z_eletro = and_(is_z, column.ilike("%.eletro"))
-    z_us = and_(
-        is_z,
-        not_(column.ilike("%.mala")),
-        not_(column.ilike("%.eletro")),
-    )
 
     if tag in SUFFIX_TAGS:
         suffix_match = column.ilike(f"%.{tag}")
         if tag == "us":
-            # `.us` natural + z* (sem .mala/.eletro) caem aqui.
-            return or_(suffix_match, z_us)
-        # Sufixos regionais não-us: z* sai daqui (foi pra us).
-        return and_(suffix_match, not_(is_z))
+            # `.us` natural + z* SEM sufixo (z0099, z0101 etc.) caem aqui.
+            base = or_(suffix_match, z_no_suffix)
+        else:
+            # Regional não-us: z*.{regional} agora casa naturalmente
+            # via suffix_match (revert do exclude anterior).
+            base = suffix_match
+        return _apply_sku_overrides(base, column, tag)
 
     # prefixo (fake/mala/eletro): exclui SKUs com sufixo regional (sufixo vence)
     not_suffixed = [column.notilike(f"%.{s}") for s in SUFFIX_TAGS]
     if tag == "fake":
-        return and_(column.ilike("fake.%"), *not_suffixed)
+        base = and_(column.ilike("fake.%"), *not_suffixed)
+        return _apply_sku_overrides(base, column, "fake")
     if tag == "mala":
         # Mala "natural" (^b[0-9] sem sufixo) ∪ z*.mala (malas usadas).
-        return or_(
+        base = or_(
             and_(column.op("~*")("^b[0-9]"), *not_suffixed),
             z_mala,
         )
+        return _apply_sku_overrides(base, column, "mala")
     if tag == "eletro":
-        return or_(
+        base = or_(
             and_(column.op("~*")("^u"), *not_suffixed),
             z_eletro,
         )
-    # insumos — sem padrão de SKU ainda.
+        return _apply_sku_overrides(base, column, "eletro")
+    # insumos — sem padrão de SKU ainda. Não tem override que aponte
+    # pra cá, então não precisa de _apply_sku_overrides.
     return literal(False)
