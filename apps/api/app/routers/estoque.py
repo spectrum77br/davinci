@@ -106,10 +106,19 @@ def _baseline_sku_exclusions(column):
     ]
 
 
-def _user_is_admin(user: User) -> bool:
-    """True se admin — vê conferências (StockCheck) de TODOS os usuários.
-    Operador comum continua vendo só os próprios checks (pra desmarcar)."""
-    return getattr(user, "role", None) == UserRole.ADMIN
+def _user_sees_all_checks(user: User) -> bool:
+    """True se o user pode ver conferências (StockCheck) agregadas de
+    TODOS os usuários — admins por padrão, e qualquer user com a flag
+    permissions['controle_estoque_see_all']=true (papel de gerente).
+
+    Esta função controla SÓ a visualização agregada (bool_or em
+    StockCheck). NÃO concede outros poderes de admin (tag override em
+    _resolve_tags, ticar section='envio' em toggle_estoque_check) —
+    esses continuam gated por user.role == UserRole.ADMIN."""
+    if user.role == UserRole.ADMIN:
+        return True
+    perms = user.permissions or {}
+    return bool(perms.get("controle_estoque_see_all", False))
 
 
 def _resolve_tags(user: User, override: str | None) -> list[str] | None:
@@ -277,7 +286,7 @@ async def list_estoque_produtos(
         StockCheck.reference_date >= data_inicio,
         StockCheck.reference_date <= data_fim,
     ]
-    if _user_is_admin(user):
+    if _user_sees_all_checks(user):
         # Admin: dia conferido se QUALQUER usuário marcou conferido.
         checks_rows = (await session.execute(
             select(
@@ -452,7 +461,7 @@ async def list_estoque_pedidos(
             StockCheck.section == "pedido",
             StockCheck.reference_id.in_(order_ids),
         ]
-        if _user_is_admin(user):
+        if _user_sees_all_checks(user):
             # Admin: conferido se QUALQUER usuário marcou; observações
             # de todos concatenadas.
             checks_rows = (await session.execute(
@@ -629,7 +638,7 @@ async def list_estoque_envios(
         StockCheck.reference_date >= data_inicio,
         StockCheck.reference_date <= data_fim,
     ]
-    if _user_is_admin(user):
+    if _user_sees_all_checks(user):
         # Admin: dia conferido se QUALQUER usuário marcou conferido.
         checks_rows = (await session.execute(
             select(
@@ -654,7 +663,7 @@ async def list_estoque_envios(
     total_produtos = await _count_active_products(session, tags)
     estoque_checks_by_day = await _count_estoque_checks_by_day(
         session, user_id=user.id, data_inicio=data_inicio, data_fim=data_fim,
-        tags=tags, is_admin=_user_is_admin(user),
+        tags=tags, is_admin=_user_sees_all_checks(user),
     )
     # Dias travados como "total" (admin já tinha ticado CONFERIDO no
     # envio). Sem essa trava, o badge regredia pra "parcial" assim que
