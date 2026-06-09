@@ -504,6 +504,10 @@ const search = ref('')
 // Aplicado client-side, depois do filtro de texto.
 type SaldoFilter = 'todos' | 'positivo' | 'negativo' | 'nenhum'
 const saldoFilter = ref<SaldoFilter>('todos')
+// Filtro análogo pra coluna "reposição estoque" (decidir o que
+// comprar). Operam em AND com o saldoFilter.
+type ReposicaoFilter = 'todos' | 'positivo' | 'negativo' | 'nenhum'
+const reposicaoFilter = ref<ReposicaoFilter>('todos')
 
 const visibleLotes = computed(() => lotes.value.filter((l) => showClosedLotes.value || l.is_aberto))
 
@@ -527,6 +531,17 @@ const filteredProducts = computed(() => {
       const n = Number(s)
       if (mode === 'positivo') return n > 0
       if (mode === 'negativo') return n < 0
+      return n === 0  // 'nenhum' inclui 0
+    })
+  }
+  const repMode = reposicaoFilter.value
+  if (repMode !== 'todos') {
+    list = list.filter((p) => {
+      const r = p.reposicao_estoque
+      if (r == null) return repMode === 'nenhum'
+      const n = Number(r)
+      if (repMode === 'positivo') return n > 0
+      if (repMode === 'negativo') return n < 0
       return n === 0  // 'nenhum' inclui 0
     })
   }
@@ -1523,6 +1538,15 @@ onScopeDispose(() => {
         <label class="inline-flex items-center gap-1">
           <span class="text-muted-foreground">saldo reposição:</span>
           <select v-model="saldoFilter" class="h-7 border rounded px-2 bg-background">
+            <option value="todos">todos</option>
+            <option value="positivo">positivo</option>
+            <option value="negativo">negativo</option>
+            <option value="nenhum">nenhum</option>
+          </select>
+        </label>
+        <label class="inline-flex items-center gap-1">
+          <span class="text-muted-foreground">reposição estoque:</span>
+          <select v-model="reposicaoFilter" class="h-7 border rounded px-2 bg-background">
             <option value="todos">todos</option>
             <option value="positivo">positivo</option>
             <option value="negativo">negativo</option>
