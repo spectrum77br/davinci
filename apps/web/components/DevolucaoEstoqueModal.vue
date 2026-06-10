@@ -137,7 +137,7 @@ function confirm() {
         <!-- Criar produto novo z000N.<tag> — sempre disponível (mesmo com bins). -->
         <div class="space-y-1.5">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Criar novo (<span class="font-mono normal-case">z000N.&lt;tag&gt;</span>)
+            Criar novo (<span class="font-mono normal-case">zXXXX.&lt;tag&gt;</span>)
           </p>
           <p v-if="!hasExisting && !isUsado" class="text-xs text-amber-600 dark:text-amber-400">
             Nenhum estoque encontrado para esse SKU — escolha a tag do produto novo.
@@ -145,21 +145,27 @@ function confirm() {
           <p v-else-if="isUsado" class="text-xs text-muted-foreground">
             Usado sempre vira produto z — escolha a tag.
           </p>
-          <div class="grid grid-cols-3 sm:grid-cols-4 gap-2">
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
               type="button"
-              class="rounded-md border px-3 py-2 text-center font-mono text-sm transition-colors"
+              class="flex flex-col items-center rounded-md border px-3 py-2 text-center transition-colors"
               :class="selectedTag === SEM_TAG ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
               @click="pickTag(SEM_TAG)"
-            >z000N</button>
+            >
+              <span class="font-mono text-sm">zXXXX</span>
+              <span class="mt-0.5 text-[11px] text-muted-foreground">sem tag → vira us</span>
+            </button>
             <button
               v-for="t in tagChoices"
               :key="t"
               type="button"
-              class="rounded-md border px-3 py-2 text-center font-mono text-sm uppercase transition-colors"
+              class="flex flex-col items-center rounded-md border px-3 py-2 text-center transition-colors"
               :class="selectedTag === t ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
               @click="pickTag(t)"
-            >.{{ t }}</button>
+            >
+              <span class="font-mono text-sm">zXXXX.{{ t }}</span>
+              <span class="mt-0.5 text-[11px] text-muted-foreground">tag {{ t }}</span>
+            </button>
           </div>
         </div>
       </template>
