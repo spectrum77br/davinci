@@ -571,13 +571,16 @@ function calcularPrevisto(prod: Product): number | null {
 // ter câmbio/frete diferentes. Fallback pra cotacaoParams quando os
 // campos do lote ainda estão null (lote criado antes da migration 0122).
 //
-// `value_usd` é o valor POR LOTE (lote_valores_usd[lote.id] do produto);
-// fallback pro produto.valor_usd quando o item ainda não tem.
+// Custo só existe quando o item DESSE lote tem qty E valor_usd
+// preenchidos. Sem fallback pro prod.valor_usd geral — era o bug que
+// mostrava custo "hipotético" mesmo sem compra real naquele lote.
 function custoBRL(prod: Product, lote: Lote): number | null {
+  const qty = Number(prod.lote_quantidades?.[lote.id] ?? 0)
+  if (!(qty > 0)) return null
   const perLote = prod.lote_valores_usd?.[lote.id]
-  const usdRaw = perLote != null && perLote !== '' ? perLote : prod.valor_usd
-  const usd = usdRaw == null || usdRaw === '' ? null : Number(usdRaw)
-  if (usd == null || !Number.isFinite(usd) || usd <= 0) return null
+  if (perLote == null || perLote === '') return null
+  const usd = Number(perLote)
+  if (!Number.isFinite(usd) || usd <= 0) return null
   const cambio = Number(lote.taxa ?? cotacaoParams.value.taxa_cambio)
   const frete = Number(lote.frete_pct ?? cotacaoParams.value.frete_regular_pct)
   const adic = Number(lote.adicional ?? cotacaoParams.value.adicional)
