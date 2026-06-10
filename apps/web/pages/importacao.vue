@@ -2213,6 +2213,7 @@ onScopeDispose(() => {
           <thead class="thead-sticky">
             <tr class="bg-emerald-800 text-white text-[10px] uppercase tracking-wide">
               <th class="text-left">Produto</th>
+              <th class="text-left" style="width: 130px">SKU</th>
               <th class="text-right" style="width: 120px">Valor (R$)</th>
               <th class="text-right" style="width: 100px">USD</th>
               <th class="text-left" style="width: 130px">Tipo Frete</th>
@@ -2221,15 +2222,13 @@ onScopeDispose(() => {
           </thead>
           <tbody>
             <tr v-if="!loading && filteredProducts.length === 0">
-              <td colspan="5" class="py-6 text-center text-muted-foreground">
+              <td colspan="6" class="py-6 text-center text-muted-foreground">
                 Nenhum produto na categoria celular.
               </td>
             </tr>
             <tr v-for="prod in filteredProducts" :key="prod.id" class="even:bg-muted/10">
-              <td>
-                <div class="font-medium">{{ prod.modelo_bling || '—' }}</div>
-                <div class="text-[10px] text-muted-foreground font-mono">{{ prod.sku }}</div>
-              </td>
+              <td class="font-medium">{{ prod.modelo_bling || '—' }}</td>
+              <td class="text-[10px] text-muted-foreground font-mono">{{ prod.sku }}</td>
               <td>
                 <input
                   type="number" step="0.01" class="cell-input text-right"
