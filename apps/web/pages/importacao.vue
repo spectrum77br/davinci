@@ -1613,7 +1613,6 @@ onScopeDispose(() => {
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('sku'), minWidth: '130px' } : { minWidth: '130px' }"
               >sku</th>
-              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 130px">cor</th>
               <th
                 :rowspan="isCelular ? 12 : 8"
                 class="col-head text-right"
@@ -1784,7 +1783,7 @@ onScopeDispose(() => {
           </thead>
           <tbody>
             <tr v-if="!loading && filteredProducts.length === 0">
-              <td :colspan="(isEletro ? 9 : isCelular ? 10 : 10) + visibleLotes.length * (isCelular ? 3 : 2) + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
+              <td :colspan="(isEletro ? 9 : isCelular ? 10 : 9) + visibleLotes.length * (isCelular ? 3 : 2) + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
                 {{ categoria === 'celular'
                   ? 'Categoria Celular em construção. Clique em "Criar produto" pra começar.'
                   : 'Nenhum produto. Clique em "Criar produto" para começar.' }}
@@ -1806,8 +1805,6 @@ onScopeDispose(() => {
                 <input class="cell-input" :value="row.sku ?? ''" :disabled="!canEdit"
                   @input="(e) => scheduleSave(row, 'sku', (e.target as HTMLInputElement).value)" />
               </td>
-              <td v-if="showMalaCols"><input class="cell-input" :value="row.cor ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'cor', (e.target as HTMLInputElement).value)" /></td>
               <td
                 :class="isCelular ? 'sticky bg-background z-10' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('custo_bling'), minWidth: '60px' } : undefined"
