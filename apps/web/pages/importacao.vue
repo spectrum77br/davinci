@@ -1592,14 +1592,12 @@ onScopeDispose(() => {
               <!-- min-widths fixados pra: SKU/cor confortáveis, e as
                    colunas numéricas estreitas o suficiente pra caber
                    as palavras inteiras (sem quebrar "memória" em
-                   "memóri/a"). Ordem: começa em fornecedor, palavras
-                   curtas (até ~7 chars) → 60-66px; "reposição"/"saldo"
-                   → 72-76px. -->
-              <th v-if="!isCelular" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 96px">fornecedor</th>
-              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 96px">modelo china</th>
-              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 72px">cor china</th>
-              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 80px">fechamento</th>
-              <th v-if="showMalaCols" :rowspan="isCelular ? 12 : 8" class="col-head text-center" style="min-width: 44px">TSA</th>
+                   "memóri/a"). Palavras curtas (até ~7 chars) → 60-66px;
+                   "reposição"/"saldo" → 72-76px.
+                   fornecedor/modelo china/cor china/fechamento/TSA
+                   foram removidos da exibição — `modelo bling` já vem
+                   consolidado do Bling. Campos seguem no DB (sync ainda
+                   grava) e no modal "Criar produto". -->
               <th
                 :rowspan="isCelular ? 12 : 8"
                 class="col-head text-left"
@@ -1783,37 +1781,13 @@ onScopeDispose(() => {
           </thead>
           <tbody>
             <tr v-if="!loading && filteredProducts.length === 0">
-              <td :colspan="(isEletro ? 10 : isCelular ? 10 : 15) + visibleLotes.length * (isCelular ? 3 : 2) + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
+              <td :colspan="(isEletro ? 9 : isCelular ? 10 : 10) + visibleLotes.length * (isCelular ? 3 : 2) + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
                 {{ categoria === 'celular'
                   ? 'Categoria Celular em construção. Clique em "Criar produto" pra começar.'
                   : 'Nenhum produto. Clique em "Criar produto" para começar.' }}
               </td>
             </tr>
             <tr v-for="row in filteredProducts" :key="row.id" class="even:bg-muted/10 hover:bg-amber-50/40">
-              <td v-if="!isCelular"><input class="cell-input" :value="row.fornecedor ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'fornecedor', (e.target as HTMLInputElement).value)" /></td>
-              <td v-if="showMalaCols"><input class="cell-input" :value="row.modelo_china ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'modelo_china', (e.target as HTMLInputElement).value)" /></td>
-              <td v-if="showMalaCols"><input class="cell-input" :value="row.cor_china ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'cor_china', (e.target as HTMLInputElement).value)" /></td>
-              <td v-if="showMalaCols"><input class="cell-input" :value="row.fechamento ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'fechamento', (e.target as HTMLInputElement).value)" /></td>
-              <td v-if="showMalaCols" class="text-center">
-                <!-- TSA = count of locks. Blank = no TSA, 1/2/3 = number of cadeados. -->
-                <input
-                  type="number"
-                  min="1"
-                  max="3"
-                  step="1"
-                  class="cell-input text-center"
-                  :value="row.tsa ?? ''"
-                  :disabled="!canEdit"
-                  @input="(e) => {
-                    const v = (e.target as HTMLInputElement).value;
-                    scheduleSave(row, 'tsa', v === '' ? null : Math.max(1, Math.min(3, Number(v))));
-                  }"
-                />
-              </td>
               <td
                 :class="isCelular ? 'sticky bg-background z-10' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : undefined"
