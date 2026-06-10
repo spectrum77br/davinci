@@ -1602,7 +1602,7 @@ onScopeDispose(() => {
                 :rowspan="isCelular ? 12 : 8"
                 class="col-head text-left"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : { minWidth: '100px' }"
+                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : { minWidth: '500px' }"
               >modelo bling</th>
               <th
                 :rowspan="isCelular ? 12 : 8"
@@ -1790,7 +1790,7 @@ onScopeDispose(() => {
             <tr v-for="row in filteredProducts" :key="row.id" class="even:bg-muted/10 hover:bg-amber-50/40">
               <td
                 :class="isCelular ? 'sticky bg-background z-10' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : undefined"
+                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : { minWidth: '500px' }"
               >
                 <input class="cell-input" :value="row.modelo_bling ?? ''" :disabled="!canEdit"
                   @input="(e) => scheduleSave(row, 'modelo_bling', (e.target as HTMLInputElement).value)" />
