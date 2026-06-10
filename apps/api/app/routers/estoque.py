@@ -1132,14 +1132,33 @@ def _negativos_base_where() -> list:
     ]
 
 
+_ESTOQUE_NEGATIVO_EMAILS = frozenset({"sa.geral@tutamail.com"})
+_ESTOQUE_NEGATIVO_NAMES = frozenset({"churchill"})
+
+
+def _require_estoque_negativo_access(user: User) -> None:
+    """Acesso à aba "Estoque Negativo" restrito a admin, gerente (churchill)
+    e cairo SA (sa.geral@tutamail.com). Demais operadores recebem 403 —
+    a tab nem aparece no frontend, mas garantimos no backend também."""
+    if user.role == UserRole.ADMIN:
+        return
+    if (user.email or "").lower() in _ESTOQUE_NEGATIVO_EMAILS:
+        return
+    if (getattr(user, "name", None) or "").lower() in _ESTOQUE_NEGATIVO_NAMES:
+        return
+    raise HTTPException(403, detail={"code": "estoque_negativo_forbidden"})
+
+
 @router.get("/negativos")
 async def list_estoque_negativos(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
     search: str | None = Query(None),
 ) -> dict[str, Any]:
     """Produtos com saldo_virtual_total < 0 — visão global, sem tag.
+    Acesso restrito (admin/churchill/cairo SA).
     Operador remove esses da fila de etiquetas antes do envio."""
+    _require_estoque_negativo_access(user)
     where = _negativos_base_where()
     where.append(Product.saldo_virtual_total < 0)
     if search:
@@ -1166,11 +1185,13 @@ async def list_estoque_negativos(
 @router.get("/sufixos")
 async def list_estoque_sufixos(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
     suffixes: str = Query(default=".us,.sa"),
 ) -> dict[str, Any]:
     """Produtos cujo SKU termina nos sufixos passados (comma-separated).
-    Apenas saldo_fisico > 0, ordenado por saldo desc."""
+    Apenas saldo_fisico > 0, ordenado por saldo desc.
+    Acesso restrito (admin/churchill/cairo SA) — anexo à aba Estoque Negativo."""
+    _require_estoque_negativo_access(user)
     sufs = [s.strip() for s in suffixes.split(",") if s.strip()]
     if not sufs:
         return {"success": True, "items": [], "total": 0, "suffixes": []}
@@ -1198,10 +1219,12 @@ async def list_estoque_sufixos(
 @router.get("/sufixos.csv")
 async def export_estoque_sufixos_csv(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
     suffixes: str = Query(default=".us,.sa"),
 ) -> Response:
-    """CSV exportável (separador `;` + BOM UTF-8 pra abrir limpo no Excel BR)."""
+    """CSV exportável (separador `;` + BOM UTF-8 pra abrir limpo no Excel BR).
+    Acesso restrito (admin/churchill/cairo SA)."""
+    _require_estoque_negativo_access(user)
     import csv as _csv
     import io as _io
     sufs = [s.strip() for s in suffixes.split(",") if s.strip()]

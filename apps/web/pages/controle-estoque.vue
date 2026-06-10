@@ -100,6 +100,22 @@ const canUseTagFilter = computed(() => {
 })
 const tagOverride = ref<string>('')
 
+// Aba "Estoque Negativo" só aparece para admin, churchill (gerente) e
+// cairo SA (sa.geral@tutamail.com). Operadores das demais tags não veem.
+const canSeeEstoqueNegativo = computed(() => {
+  if (isAdmin.value) return true
+  const name = (auth.user?.name || '').toLowerCase()
+  if (name === 'churchill') return true
+  const email = (auth.user?.email || '').toLowerCase()
+  return email === 'sa.geral@tutamail.com'
+})
+const visibleTabs = computed<readonly Tab[]>(() => {
+  const base: Tab[] = ['estoque', 'pedidos', 'envios']
+  if (canSeeEstoqueNegativo.value) base.push('estoque-negativo')
+  base.push('upload-nf')
+  return base
+})
+
 // Filter products by presence of stock. 'all' (default) = no filter,
 // 'com' = Product.stock > 0, 'sem' = stock == 0 OR NULL. Applied to
 // the /produtos list AND the conferência counter so denominators
@@ -786,7 +802,7 @@ async function conferirTodos() {
       >{{ syncToast }}</span>
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap">
         <button
-          v-for="t in (['estoque', 'pedidos', 'envios', 'estoque-negativo', 'upload-nf'] as const)"
+          v-for="t in visibleTabs"
           :key="t"
           class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
           :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
@@ -1170,7 +1186,7 @@ async function conferirTodos() {
     </div>
 
     <!-- TAB: ESTOQUE NEGATIVO ───────────────────────────────────────── -->
-    <div v-if="tab === 'estoque-negativo'" class="space-y-4">
+    <div v-if="tab === 'estoque-negativo' && canSeeEstoqueNegativo" class="space-y-4">
       <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
         <span class="text-muted-foreground">
           Lê de <code class="bg-background px-1 rounded">products.saldo_virtual_total</code> /
