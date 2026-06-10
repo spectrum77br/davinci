@@ -57,7 +57,10 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-    networks: [davinci_net]
+    networks:
+      davinci_net:
+        aliases:
+          - api
 
   worker:
     build:
@@ -70,7 +73,10 @@ services:
       APP_NAME: davinci-worker
     volumes:
       - ./data/uploads:/data/uploads
-    networks: [davinci_net]
+    networks:
+      davinci_net:
+        aliases:
+          - worker
 
   # Worker dedicado pra jobs disparados pela UI (criar kit, enviar
   # produto pro Bling). Roda em paralelo ao `worker` (fila default) —
@@ -88,7 +94,10 @@ services:
       APP_NAME: davinci-worker-ui
     volumes:
       - ./data/uploads:/data/uploads
-    networks: [davinci_net]
+    networks:
+      davinci_net:
+        aliases:
+          - worker_ui
 
   # Worker dedicado pro cron `check_marketplace_shipped_orders` (a cada
   # 5 min). Antes rodava no default e disputava com webhooks marketplace
@@ -105,7 +114,10 @@ services:
       APP_NAME: davinci-worker-marketplace
     volumes:
       - ./data/uploads:/data/uploads
-    networks: [davinci_net]
+    networks:
+      davinci_net:
+        aliases:
+          - worker_marketplace
 
   web:
     build:
@@ -115,4 +127,7 @@ services:
     env_file: .env
     depends_on:
       - api
-    networks: [davinci_net]
+    networks:
+      davinci_net:
+        aliases:
+          - web
