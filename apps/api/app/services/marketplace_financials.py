@@ -748,9 +748,13 @@ async def _fetch_ml(
     # seller-financed discount applied at checkout (most commonly the R$2
     # catalog/promo contribution). Once the billing detail posts ML reflects
     # the actual deduction and any mismatch gets reconciled then.
-    # Freight is shipment-level: every sub-order of a pack shares one
-    # shipping_id, so the primary order's reconciliation already carries the
-    # full-pack freight (and `_ml_actual_freight_total` dedups by shipping_id).
+    # Freight is shipment-level: every sub-order of a pack/carrinho shares
+    # one shipping_id and /shipments/costs returns the WHOLE shipment cost.
+    # `_fetch_ml_freight_reconciliations` prorates it by this order's share
+    # of the shipment (`_ml_order_freight_share`), so multi-order shipments
+    # don't dump the full freight on a single order
+    # (`_ml_actual_freight_total` still dedups by shipping_id within the
+    # order).
     freights = await _fetch_ml_freight_reconciliations(client, order, order_id, currency)
     freight_actual_total = _ml_actual_freight_total(freights)
     freight = freight_actual_total or payment_shipping_cost
@@ -880,6 +884,17 @@ async def _fetch_ml_freight_reconciliations(
             dimensions_by_item = _ml_dimensions_by_item(shipment_items_payload)
         except Exception as e:  # noqa: BLE001
             shipment_items_error = f"shipment_items: {str(e)[:300]}"
+        # Envio de carrinho: um shipping_id pode agrupar VARIOS pedidos do
+        # mesmo comprador, e /shipments/costs traz o custo do pacote
+        # INTEIRO. Atribuir tudo a um pedido só inflava o frete real (ex.:
+        # envio 47116394474: 30 un / 29 pedidos, custo 228,00 = 30 x 7,60;
+        # o pedido 2000016540781180, com 1 un, ficava com 228 e gerava
+        # refund Logistica falso de 220,40). Rateia pela participação do
+        # pedido no pacote (peso x qty; fallback qty).
+        if freight_actual is not None:
+            share = _ml_order_freight_share(shipment_items_payload, order_id)
+            if share is not None and share < 1:
+                freight_actual = _money_from_decimal(freight_actual * share)
     else:
         costs_error = "missing_shipping_id"
 
@@ -972,6 +987,44 @@ async def _fetch_ml_freight_reconciliations(
             )
         )
     return rows
+
+
+def _ml_order_freight_share(
+    shipment_items_payload: dict[str, Any] | list[Any] | None,
+    order_id: str | None,
+) -> Decimal | None:
+    """Participação do pedido no custo do envio (0 < share <= 1).
+
+    Pondera por peso x quantidade quando todos os itens têm peso; senão
+    por quantidade. Retorna None se o payload não permitir calcular
+    (sem itens, pedido ausente do envio, totais zerados) — nesse caso o
+    chamador mantém o custo cheio (comportamento antigo).
+    """
+    if not isinstance(shipment_items_payload, list) or not order_id:
+        return None
+    total = Decimal("0")
+    mine = Decimal("0")
+    weights: list[Decimal | None] = []
+    rows: list[tuple[str | None, Decimal, Decimal | None]] = []
+    for it in shipment_items_payload:
+        if not isinstance(it, dict):
+            continue
+        qty = _decimal_value(it.get("quantity")) or Decimal("1")
+        dims = it.get("dimensions") if isinstance(it.get("dimensions"), dict) else {}
+        weight = _decimal_value(dims.get("weight"))
+        weights.append(weight)
+        rows.append((_text_value(it.get("order_id")), qty, weight))
+    if not rows:
+        return None
+    use_weight = all(w is not None and w > 0 for w in weights)
+    for it_order_id, qty, weight in rows:
+        value = qty * weight if use_weight else qty
+        total += value
+        if it_order_id == str(order_id):
+            mine += value
+    if total <= 0 or mine <= 0:
+        return None
+    return mine / total
 
 
 def _ml_sender_cost(payload: dict[str, Any] | None) -> Decimal | None:

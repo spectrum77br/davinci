@@ -61,3 +61,45 @@ def test_promised_line_total_multiplies_by_quantity():
     assert _ml_promised_line_total(Decimal("10"), None) == Decimal("10")
     assert _ml_promised_line_total(Decimal("10"), Decimal("0")) == Decimal("10")
     assert _ml_promised_line_total(None, Decimal("3")) is None
+
+
+def _shipment_item(order_id: str, qty: int = 1, weight: int | None = 327) -> dict:
+    dims = {"weight": weight} if weight is not None else {}
+    return {"order_id": order_id, "quantity": qty, "dimensions": dims}
+
+
+def test_order_freight_share_cart_shipment():
+    # Caso real do envio 47116394474: 30 un / 29 pedidos, custo 228,00.
+    # O pedido 2000016540781180 (1 un) deve ficar com 1/30 -> 7,60.
+    from app.services.marketplace_financials import _ml_order_freight_share
+
+    items = [_shipment_item(f"order-{i}") for i in range(29)]
+    items.append(_shipment_item("order-0"))  # um pedido com 2 unidades
+    share = _ml_order_freight_share(items, "order-1")
+    assert share == Decimal("1") / Decimal("30")
+    assert (Decimal("228.00") * share).quantize(Decimal("0.01")) == Decimal("7.60")
+
+
+def test_order_freight_share_single_order_is_full():
+    from app.services.marketplace_financials import _ml_order_freight_share
+
+    items = [_shipment_item("order-1", qty=2)]
+    assert _ml_order_freight_share(items, "order-1") == Decimal("1")
+
+
+def test_order_freight_share_weight_weighted():
+    from app.services.marketplace_financials import _ml_order_freight_share
+
+    items = [
+        _shipment_item("order-1", qty=1, weight=300),
+        _shipment_item("order-2", qty=1, weight=100),
+    ]
+    assert _ml_order_freight_share(items, "order-1") == Decimal("0.75")
+
+
+def test_order_freight_share_unusable_payload_returns_none():
+    from app.services.marketplace_financials import _ml_order_freight_share
+
+    assert _ml_order_freight_share(None, "order-1") is None
+    assert _ml_order_freight_share([], "order-1") is None
+    assert _ml_order_freight_share([_shipment_item("other")], "order-1") is None
