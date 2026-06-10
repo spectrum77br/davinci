@@ -1003,8 +1003,13 @@ def _ml_free_shipping_quote(
         )
     if list_cost is None:
         return None, rate, None
-    effective_rate = rate if rate is not None else Decimal("0")
-    promised = _money_from_decimal(list_cost * (Decimal("1") - effective_rate))
+    # `list_cost` já vem com o desconto aplicado pelo ML: o payload traz
+    # discount.promoted_amount = preço cheio e list_cost = valor final que o
+    # vendedor paga (confirmado contra senders[0].cost e a tela da venda).
+    # Aplicar (1 - rate) aqui descontava DUAS vezes (ex.: pedido
+    # 2000016853024850 -> 11,82 em vez de 23,65). O rate fica armazenado
+    # apenas como informativo.
+    promised = _money_from_decimal(list_cost)
     return list_cost, rate, promised
 
 
@@ -1013,9 +1018,10 @@ def _ml_frete_anuncio_total(
 ) -> Decimal | None:
     """Sum `freight_promised_amount` across ML freight rows.
 
-    `freight_promised_amount` per item = list_cost * (1 - discount.rate)
-    from /shipping_options/free — the freight the seller "would pay"
-    according to the listing's quote. Returns None if no item has a quote.
+    `freight_promised_amount` per item = list_cost from
+    /shipping_options/free (já líquido de desconto) — the freight the
+    seller "would pay" according to the listing's quote. Returns None if
+    no item has a quote.
     """
     total = Decimal("0")
     seen = False
