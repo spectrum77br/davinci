@@ -913,6 +913,7 @@ async def _fetch_ml_freight_reconciliations(
             try:
                 quote_payload = await client.get_free_shipping_options(seller_id, item_id)
                 list_cost, rate, promised = _ml_free_shipping_quote(quote_payload)
+                promised = _ml_promised_line_total(promised, quantity)
             except Exception as e:  # noqa: BLE001
                 quote_error = f"shipping_options_free: {str(e)[:300]}"
         elif not seller_id:
@@ -1013,15 +1014,34 @@ def _ml_free_shipping_quote(
     return list_cost, rate, promised
 
 
+def _ml_promised_line_total(
+    promised: Decimal | None, quantity: Decimal | None
+) -> Decimal | None:
+    """Frete prometido TOTAL da linha = cotação unitária x quantidade.
+
+    A cotação de /shipping_options/free é por unidade, mas o ML cobra o
+    frete grátis por unidade vendida (ex.: pedido 2000016849422942,
+    qty=2: cobrado 13,50 = 6,75 x 2 — confirmado em 81/113 pedidos ML de
+    linha única com qty>1). Sem multiplicar, todo pedido multi-unidade
+    parecia ter prejuízo de frete e gerava refund Logistica falso.
+    `freight_list_cost_amount` segue unitário (cotação crua).
+    """
+    if promised is None:
+        return None
+    if quantity is None or quantity <= 0:
+        return promised
+    return _money_from_decimal(promised * quantity)
+
+
 def _ml_frete_anuncio_total(
     freights: list[FreightReconciliationDraft],
 ) -> Decimal | None:
     """Sum `freight_promised_amount` across ML freight rows.
 
-    `freight_promised_amount` per item = list_cost from
-    /shipping_options/free (já líquido de desconto) — the freight the
-    seller "would pay" according to the listing's quote. Returns None if
-    no item has a quote.
+    `freight_promised_amount` per row = list_cost from
+    /shipping_options/free (já líquido de desconto) x quantidade da
+    linha — the freight the seller "would pay" for the line according
+    to the listing's quote. Returns None if no item has a quote.
     """
     total = Decimal("0")
     seen = False

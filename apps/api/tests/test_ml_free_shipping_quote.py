@@ -49,3 +49,15 @@ def test_promised_equals_list_cost_without_discount():
 def test_missing_coverage_returns_nones():
     assert _ml_free_shipping_quote({}) == (None, None, None)
     assert _ml_free_shipping_quote(None) == (None, None, None)
+
+
+def test_promised_line_total_multiplies_by_quantity():
+    # Caso real do pedido 2000016849422942: cotação 6,75/un, qty 2 ->
+    # ML cobrou 13,50. Sem a multiplicação o pedido parecia ter prejuízo.
+    from app.services.marketplace_financials import _ml_promised_line_total
+
+    assert _ml_promised_line_total(Decimal("6.75"), Decimal("2")) == Decimal("13.50")
+    assert _ml_promised_line_total(Decimal("23.65"), Decimal("1")) == Decimal("23.65")
+    assert _ml_promised_line_total(Decimal("10"), None) == Decimal("10")
+    assert _ml_promised_line_total(Decimal("10"), Decimal("0")) == Decimal("10")
+    assert _ml_promised_line_total(None, Decimal("3")) is None
