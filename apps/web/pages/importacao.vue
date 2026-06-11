@@ -1962,14 +1962,15 @@ onScopeDispose(() => {
                     :disabled="!canEdit"
                     @input="(e) => scheduleLoteItem(row, lote.id, Number((e.target as HTMLInputElement).value) || 0)"
                   />
-                  <!-- Dropdown destino do estoque no Bling. Só aparece
-                       em Celular, com lote aberto, item já criado
-                       (item_id existe) e quantidade > 0. Default = SKU
-                       do produto; operador escolhe se quiser
-                       redirecionar (ex.: i203.sa → i203.sp). -->
+                  <!-- Dropdown destino do estoque no Bling. Em Celular,
+                       sempre visível enquanto houver item_id e qty > 0
+                       (mesmo com lote fechado — permite o operador
+                       corrigir um SKU que foi pulado/errou e
+                       reprocessar automaticamente). Default = SKU do
+                       produto; operador escolhe se quiser redirecionar
+                       (ex.: i203.sa → i203.sp). -->
                   <select
                     v-if="isCelular
-                      && lote.fechamento == null
                       && row.lote_item_ids?.[lote.id]
                       && (row.lote_quantidades[lote.id] || 0) > 0"
                     class="mt-0.5 w-full text-[10px] border rounded px-1 py-0.5 bg-white"

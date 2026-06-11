@@ -1375,10 +1375,35 @@ async def patch_lote_item(
         row.custo_manual = fields["custo_manual"]
     # `bling_stock_target_sku` aceita None explícito pra limpar (volta
     # a usar o SKU do ImportProduct na hora de mandar pro Bling).
+    target_sku_changed = False
     if "bling_stock_target_sku" in fields:
         v = fields["bling_stock_target_sku"]
-        row.bling_stock_target_sku = v.strip() if isinstance(v, str) and v.strip() else None
+        new_target = v.strip() if isinstance(v, str) and v.strip() else None
+        target_sku_changed = row.bling_stock_target_sku != new_target
+        row.bling_stock_target_sku = new_target
     await session.commit()
+
+    # Se o operador trocou o SKU destino e o item já tinha sido tentado
+    # (skipped/error sem pushed_at), re-enfileira o job pro lote. O
+    # service é idempotente — só items com bling_stock_pushed_at IS NULL
+    # são processados, então não duplica os já enviados. Cobre o caso
+    # "lote fechou, 1 item pulou por SKU errado, operador escolhe o
+    # certo, retry automático" sem precisar reabrir o lote.
+    if target_sku_changed and row.bling_stock_pushed_at is None and (
+        row.bling_stock_status in ("skipped", "error")
+    ):
+        lote_id = (await session.execute(
+            select(ImportLote.id, ImportLote.fechamento)
+            .where(ImportLote.id == row.lote_id)
+        )).one_or_none()
+        if lote_id is not None and lote_id.fechamento is not None:
+            pool = await get_arq_ui_pool()
+            await pool.enqueue_job("push_lote_stock_to_bling_job", str(row.lote_id))
+            logger.info(
+                "importacao_lote_bling_stock_retry_enqueued",
+                lote_id=str(row.lote_id), item_id=str(row.id),
+                target_sku=row.bling_stock_target_sku,
+            )
 
 
 # Suffixes de tag usados no SKU (.ci/.pi/.ra/.sa/.sp/.us/.cd). Espelha
