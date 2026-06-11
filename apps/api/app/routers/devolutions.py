@@ -525,7 +525,7 @@ async def search_products(
     limit: int = Query(20, ge=1, le=50),
 ) -> list[DevolutionProductOut]:
     """Busca produtos por SKU/nome para o modal de troca (Modal 1).
-    Ativos primeiro; ordenado por SKU."""
+    Só ativos (NULL=desconhecido passa); ordenado por SKU."""
     q = q.strip()
     if not q:
         return []
@@ -534,7 +534,8 @@ async def search_products(
         await session.execute(
             select(Product.sku, Product.name, Product.cost_price)
             .where(or_(Product.sku.ilike(like), Product.name.ilike(like)))
-            .order_by((Product.situacao == "A").desc().nullslast(), Product.sku)
+            .where(or_(Product.situacao == "A", Product.situacao.is_(None)))
+            .order_by(Product.sku)
             .limit(limit)
         )
     ).all()
@@ -563,6 +564,8 @@ async def sku_suffixes(
         await session.execute(
             select(Product.sku, Product.name)
             .where(func.lower(Product.sku).in_([k.lower() for k in candidates]))
+            # Inativo/Excluído não pode receber entrada de estoque; NULL=desconhecido passa.
+            .where(or_(Product.situacao == "A", Product.situacao.is_(None)))
         )
     ).all()
     found = {r.sku.lower(): r.name for r in rows}
