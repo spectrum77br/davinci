@@ -22,7 +22,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
@@ -32,6 +32,7 @@ from app.models import (
     ImportProduct,
     Integration,
     IntegrationPlatform,
+    Product,
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import BlingClient
@@ -65,6 +66,36 @@ async def _bling_client(
         await session.flush()
 
     return BlingClient(creds, on_token_refresh=_persist, integration_id=integ.id), integ
+
+
+async def _resolve_bling_product_id(
+    session: AsyncSession, client: BlingClient, sku: str,
+) -> int | None:
+    """Resolve o bling_product_id pelo SKU. Estratégia em cascata:
+    1) tabela local `products` (rápido, sem rede)
+    2) busca por código no Bling V3 (find_active_product_by_sku)
+    Retorna None se nenhum dos dois acha — caller decide skip."""
+    if not sku:
+        return None
+    pid = (await session.execute(
+        select(Product.bling_product_id)
+        .where(
+            func.lower(func.btrim(Product.sku)) == sku.strip().lower(),
+            Product.bling_product_id.is_not(None),
+        )
+        .order_by((Product.situacao == "A").desc().nullslast())
+        .limit(1)
+    )).scalar_one_or_none()
+    if pid:
+        return int(pid)
+    try:
+        product = await client.find_active_product_by_sku(sku)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "import_lote_stock_find_sku_failed", sku=sku, error=str(exc)[:200],
+        )
+        return None
+    return int(product["id"]) if product else None
 
 
 async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
@@ -118,9 +149,19 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
                 item.bling_stock_error = "quantidade_zero"
                 summary["skipped"] += 1
                 continue
-            if not product.bling_product_id:
+            # Resolve o bling_product_id: ImportProduct → Product local → Bling
+            # find by SKU. Se acharmos via SKU, salva de volta em ImportProduct
+            # pra próximas execuções não bater no Bling.
+            bling_pid: int | None = (
+                int(product.bling_product_id) if product.bling_product_id else None
+            )
+            if bling_pid is None:
+                bling_pid = await _resolve_bling_product_id(session, client, product.sku)
+                if bling_pid is not None:
+                    product.bling_product_id = bling_pid
+            if bling_pid is None:
                 item.bling_stock_status = "skipped"
-                item.bling_stock_error = "produto_sem_bling_product_id"
+                item.bling_stock_error = "sku_nao_encontrado_no_bling"
                 summary["skipped"] += 1
                 logger.warning(
                     "import_lote_stock_item_no_bling_product",
@@ -131,7 +172,7 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
 
             try:
                 await client.update_stock_by_id(
-                    int(product.bling_product_id),
+                    bling_pid,
                     qty=int(item.quantidade),
                     operation="E",
                     observacao=obs,
@@ -144,7 +185,7 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
                     "import_lote_stock_item_sent",
                     lote_id=str(lote_id), item_id=str(item.id),
                     sku=product.sku, qty=int(item.quantidade),
-                    bling_product_id=int(product.bling_product_id),
+                    bling_product_id=bling_pid,
                 )
             except Exception as exc:  # noqa: BLE001
                 item.bling_stock_status = "error"
