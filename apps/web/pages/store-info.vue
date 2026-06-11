@@ -340,7 +340,7 @@ async function commitEdit() {
     return cancelEdit()
   }
 
-  const raw = editValue.value.trim()
+  const raw = String(editValue.value ?? '').trim()
   const payload: Record<string, unknown> = {}
 
   if (field === 'platform') {

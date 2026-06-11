@@ -123,7 +123,7 @@ function toggleSalesTeam(n: number) {
 // form.sales_teams (dedup) e nas opções visíveis.
 const newSalesTeam = ref<string>('')
 function addSalesTeam() {
-  const raw = newSalesTeam.value.trim()
+  const raw = String(newSalesTeam.value ?? '').trim()
   if (!raw) return
   const n = parseInt(raw, 10)
   if (Number.isNaN(n) || n <= 0) return
