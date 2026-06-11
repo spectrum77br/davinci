@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.models import BlingOrder, SituacaoBling
 
 pytestmark = pytest.mark.asyncio
 
@@ -341,3 +342,35 @@ async def test_order_cost_sums_bling_custo_produtos(
     )
     assert empty.status_code == 200
     assert empty.json()["custo_produto"] is None
+
+
+async def test_list_refunds_includes_current_bling_situacao(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    user = await make_user(permissions=_refund_permissions())
+    auth_as(user)
+
+    db.add(SituacaoBling(id=9, nome="Atendido"))
+    db.add(BlingOrder(numero="555001", situacao="9"))
+    # Situacao sem entrada no catalogo -> cai no id cru.
+    db.add(BlingOrder(numero="555002", situacao="83965"))
+    await db.commit()
+
+    for pedido in ("555001", "555002", "555003"):
+        created = await client.post(
+            "/api/refunds",
+            json={"pedido_bling": pedido, "conta": "Loja Teste"},
+        )
+        assert created.status_code == 201
+
+    response = await client.get("/api/refunds")
+    assert response.status_code == 200
+    by_pedido = {item["pedido_bling"]: item for item in response.json()["items"]}
+
+    assert by_pedido["555001"]["situacao_bling"] == "Atendido"
+    assert by_pedido["555002"]["situacao_bling"] == "83965"
+    # Pedido sem linha em bling_orders -> sem situacao.
+    assert by_pedido["555003"]["situacao_bling"] is None

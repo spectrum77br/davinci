@@ -42,6 +42,9 @@ class RefundOut(BaseModel):
     observacao: str | None = None
     created_at: datetime
     updated_at: datetime
+    # Situacao ATUAL do pedido no Bling (lookup em bling_orders na listagem;
+    # nao persiste no refund).
+    situacao_bling: str | None = None
 
 
 class RefundCreate(BaseModel):

@@ -3,13 +3,13 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import desc, func, or_, select, text
+from sqlalchemy import Text, cast, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Refund, User
+from app.models import BlingOrder, Refund, SituacaoBling, User
 from app.schemas.refunds import (
     RefundCreate,
     RefundLookupOut,
@@ -53,6 +53,29 @@ def _search_clause(search: str):
     )
 
 
+async def _situacoes_by_pedido(
+    session: AsyncSession, pedidos: set[str]
+) -> dict[str, str]:
+    """Situacao Bling ATUAL por numero de pedido (nome via situacao_bling;
+    fallback no id cru quando o catalogo nao tem a situacao)."""
+    if not pedidos:
+        return {}
+    rows = await session.execute(
+        select(
+            BlingOrder.numero,
+            func.max(func.coalesce(SituacaoBling.nome, BlingOrder.situacao)),
+        )
+        .join(
+            SituacaoBling,
+            cast(SituacaoBling.id, Text) == BlingOrder.situacao,
+            isouter=True,
+        )
+        .where(BlingOrder.numero.in_(pedidos))
+        .group_by(BlingOrder.numero)
+    )
+    return {str(numero): nome for numero, nome in rows.all() if numero and nome}
+
+
 @router.get("", response_model=RefundPage)
 async def list_refunds(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -94,8 +117,18 @@ async def list_refunds(
     total = (await session.execute(count_stmt)).scalar_one()
     platforms = [p for p in (await session.execute(platforms_stmt)).scalars().all() if p]
 
+    situacoes = await _situacoes_by_pedido(
+        session, {item.pedido_bling for item in items if item.pedido_bling}
+    )
+    out_items = []
+    for item in items:
+        out = RefundOut.model_validate(item)
+        if item.pedido_bling:
+            out.situacao_bling = situacoes.get(item.pedido_bling)
+        out_items.append(out)
+
     return RefundPage(
-        items=[RefundOut.model_validate(item) for item in items],
+        items=out_items,
         total=int(total or 0),
         limit=limit,
         offset=offset,

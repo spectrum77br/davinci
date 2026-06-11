@@ -29,6 +29,7 @@ type RefundRow = {
   operacao: string | null
   conferido: boolean
   observacao: string | null
+  situacao_bling: string | null
   created_at: string
   updated_at: string
 }
@@ -71,6 +72,18 @@ const PAGE_SIZE = 100
 
 const { api } = useApi()
 const canEdit = useCan('reembolso', 'edit')
+
+// Coluna "Situação Bling" restrita a estes usuários.
+const _auth = useAuthStore()
+const SITUACAO_BLING_USERS = [
+  'spectrum77@tuta.com',
+  'joffer4@tuta.com',
+  'maconer06@tuta.com',
+]
+const canSeeSituacaoBling = computed(() => {
+  const email = _auth.user?.email?.toLowerCase()
+  return !!email && SITUACAO_BLING_USERS.includes(email)
+})
 
 const items = ref<RefundRow[]>([])
 const total = ref(0)
@@ -631,7 +644,7 @@ async function saveRow(row: RefundRow): Promise<void> {
       <table class="min-w-[1440px] text-xs border-collapse">
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
-            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="5">Identificação</th>
+            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" :colspan="canSeeSituacaoBling ? 6 : 5">Identificação</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="5">Reembolso</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Conferência</th>
           </tr>
@@ -641,6 +654,7 @@ async function saveRow(row: RefundRow): Promise<void> {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px]">Pedido Marketplace</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[105px]">Plataforma</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px]">Conta</th>
+            <th v-if="canSeeSituacaoBling" class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px]">Situação Bling</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[145px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Tipo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prejuízo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
@@ -652,13 +666,13 @@ async function saveRow(row: RefundRow): Promise<void> {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="12" class="py-8 text-center text-muted-foreground">
+            <td :colspan="canSeeSituacaoBling ? 13 : 12" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td colspan="12" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="canSeeSituacaoBling ? 13 : 12" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -666,6 +680,7 @@ async function saveRow(row: RefundRow): Promise<void> {
             <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
             <td class="px-2 py-1 uppercase whitespace-nowrap">{{ row.plataforma || '—' }}</td>
             <td class="px-2 py-1 whitespace-nowrap">{{ row.conta }}</td>
+            <td v-if="canSeeSituacaoBling" class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ row.situacao_bling || '—' }}</td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <select
                 :value="row.tipo || ''"

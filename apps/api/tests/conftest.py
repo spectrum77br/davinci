@@ -212,6 +212,7 @@ _CLEANUP_TABLES = (
     "margens",
     "refunds",
     "bling_orders",
+    "situacao_bling",
     "background_jobs",
     "integrations",
     "stores",
