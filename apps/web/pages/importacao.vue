@@ -501,6 +501,13 @@ function rebuildCotCells(valores: CotValor[]) {
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 const saveTimers = reactive<Record<string, ReturnType<typeof setTimeout>>>({})
+
+// PATCHes em voo do dropdown de SKU destino. Antes de bater "fechamento"
+// no backend (que dispara o push pro Bling), drenamos todas pra garantir
+// que a escolha do operador chegou no DB primeiro. Sem isso o job pode
+// rodar com target_sku antigo e o estoque vai pro lugar errado, ficando
+// "sent" e bloqueando re-envio por idempotência.
+const pendingItemTargetPatches = new Map<string, Promise<unknown>>()
 // Default true — fechar um lote NÃO deve sumir com ele da tabela
 // (operador quer ver os totais previstos/realizados depois de fechado).
 // O checkbox continua na UI pra quem quiser limpar a visão das
@@ -926,6 +933,12 @@ function onFretePctChange(lote: Lote, raw: string) {
 async function persistLote(lote: Lote, field: keyof Lote) {
   const key = `lote_${lote.id}_${String(field)}`
   delete saveTimers[key]
+  // Fechamento dispara push pro Bling. Drena PATCHes de target_sku em
+  // voo pra evitar race (item ainda sem override salvo → push vai pro
+  // SKU default e marca como 'sent', bloqueando re-envio).
+  if (field === 'fechamento' && lote[field] && pendingItemTargetPatches.size > 0) {
+    await Promise.allSettled(Array.from(pendingItemTargetPatches.values()))
+  }
   try {
     const updated = await api<Lote>(`/api/importacao/lotes/${lote.id}`, {
       method: 'PATCH',
@@ -1066,12 +1079,18 @@ async function setLoteItemTargetSku(
 ) {
   const novo = raw && raw.trim() && raw.trim() !== prod.sku ? raw.trim() : null
   prod.lote_target_skus = { ...(prod.lote_target_skus || {}), [loteId]: novo }
-  try {
-    await api(`/api/importacao/lote_item/${itemId}`, {
-      method: 'PATCH', body: { bling_stock_target_sku: novo },
-    })
-  } catch (e: any) {
+  const req = api(`/api/importacao/lote_item/${itemId}`, {
+    method: 'PATCH', body: { bling_stock_target_sku: novo },
+  }).catch((e: any) => {
     errorText.value = `Falha ao salvar SKU destino: ${e?.data?.detail?.code || 'erro'}`
+  })
+  pendingItemTargetPatches.set(itemId, req)
+  try {
+    await req
+  } finally {
+    if (pendingItemTargetPatches.get(itemId) === req) {
+      pendingItemTargetPatches.delete(itemId)
+    }
   }
 }
 
