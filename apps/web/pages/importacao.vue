@@ -214,6 +214,12 @@ type Lote = {
   taxa?: string | number | null
   frete_pct?: string | number | null
   adicional?: string | number | null
+  // Migration 0138 (Celular). Agregado da entrada de estoque no Bling
+  // ao fechar o lote. Frontend usa pra renderizar o badge no header.
+  bling_stock_total?: number
+  bling_stock_sent?: number
+  bling_stock_skipped?: number
+  bling_stock_errors?: number
 }
 type ResumoRow = {
   id: string
@@ -1723,6 +1729,30 @@ onScopeDispose(() => {
                   <button v-if="canDelete" class="ml-1 text-destructive" @click="removeLote(lote)" :title="`Excluir ${lote.nome}`">
                     <Trash2 class="size-3 inline" />
                   </button>
+                  <!-- Badge "Bling estoque": só Celular, só lote fechado. Cores:
+                       verde = tudo sent; vermelho = qualquer erro;
+                       amarelo = só skipped; cinza = sem items. -->
+                  <span
+                    v-if="isCelular && lote.fechamento && (lote.bling_stock_total ?? 0) > 0"
+                    class="ml-2 inline-block rounded px-1.5 py-0.5 text-[9px] font-medium border"
+                    :class="{
+                      'bg-emerald-50 text-emerald-700 border-emerald-300':
+                        (lote.bling_stock_errors ?? 0) === 0
+                        && (lote.bling_stock_skipped ?? 0) === 0
+                        && (lote.bling_stock_sent ?? 0) > 0,
+                      'bg-red-50 text-red-700 border-red-300':
+                        (lote.bling_stock_errors ?? 0) > 0,
+                      'bg-amber-50 text-amber-700 border-amber-300':
+                        (lote.bling_stock_errors ?? 0) === 0
+                        && (lote.bling_stock_skipped ?? 0) > 0,
+                    }"
+                    :title="`Bling: ${lote.bling_stock_sent ?? 0} enviados, ${lote.bling_stock_skipped ?? 0} pulados, ${lote.bling_stock_errors ?? 0} erros`"
+                  >
+                    Bling
+                    <template v-if="(lote.bling_stock_errors ?? 0) > 0">✗ {{ lote.bling_stock_errors }} erro<span v-if="(lote.bling_stock_errors ?? 0) > 1">s</span></template>
+                    <template v-else-if="(lote.bling_stock_skipped ?? 0) > 0">⚠ {{ lote.bling_stock_skipped }} pulado<span v-if="(lote.bling_stock_skipped ?? 0) > 1">s</span></template>
+                    <template v-else>✓ {{ lote.bling_stock_sent }} enviado<span v-if="(lote.bling_stock_sent ?? 0) > 1">s</span></template>
+                  </span>
                 </td>
               </template>
               <th :rowspan="isCelular ? 12 : 8" v-if="canEdit" class="col-head text-center">bling</th>

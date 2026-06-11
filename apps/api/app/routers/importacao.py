@@ -869,6 +869,29 @@ async def _enrich_lote(
 
     saldo = previsto - realizado
     prazo = (lote.fechamento - lote.abertura).days if lote.fechamento else None
+
+    # Migration 0138: agregados pro badge "Bling stock" no header do
+    # lote. Só vale pra Celular (única categoria que dispara entrada de
+    # estoque ao fechar); pras outras fica tudo zerado.
+    stock_total = stock_sent = stock_skipped = stock_errors = 0
+    if lote.categoria == "celular":
+        st_rows = (await session.execute(
+            select(
+                ImportLoteItem.bling_stock_status,
+                func.count().label("c"),
+            )
+            .where(ImportLoteItem.lote_id == lote.id)
+            .group_by(ImportLoteItem.bling_stock_status)
+        )).all()
+        for status_val, cnt in st_rows:
+            stock_total += int(cnt)
+            if status_val == "sent":
+                stock_sent += int(cnt)
+            elif status_val == "skipped":
+                stock_skipped += int(cnt)
+            elif status_val == "error":
+                stock_errors += int(cnt)
+
     return ImportLoteOut(
         id=lote.id, categoria=lote.categoria, nome=lote.nome, abertura=lote.abertura,
         fechamento=lote.fechamento, realizado=realizado,
@@ -877,6 +900,10 @@ async def _enrich_lote(
         taxa=lote.taxa, frete_pct=lote.frete_pct, adicional=lote.adicional,
         previsto=previsto, saldo=saldo, prazo=prazo,
         is_aberto=lote.fechamento is None,
+        bling_stock_total=stock_total,
+        bling_stock_sent=stock_sent,
+        bling_stock_skipped=stock_skipped,
+        bling_stock_errors=stock_errors,
     )
 
 

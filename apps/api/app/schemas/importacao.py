@@ -203,6 +203,14 @@ class ImportLoteOut(BaseModel):
     saldo: Decimal = Decimal("0")
     prazo: int | None = None  # days between abertura and fechamento
     is_aberto: bool = True
+    # Migration 0138 (Celular). Agregado da entrada de estoque no Bling
+    # disparada ao fechar o lote. Frontend mostra um badge no header
+    # do lote. NULL = nunca rodou (lote aberto); preenchido = job rodou
+    # e gerou esses contadores. Usado só pra display.
+    bling_stock_total: int = 0
+    bling_stock_sent: int = 0
+    bling_stock_skipped: int = 0
+    bling_stock_errors: int = 0
 
 
 # ── LoteItem (quantity per SKU per lote) ───────────────────────────────
