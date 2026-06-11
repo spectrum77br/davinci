@@ -78,11 +78,26 @@ def require_permission(resource: str, action: Literal["view", "edit", "delete"])
 
 
 def user_scope(model, user):
-    """SQLAlchemy where-predicate — CRM mode, single shared tenant.
+    """SQLAlchemy where-predicate.
 
-    All authenticated users see all rows; access is gated by `require_permission`,
-    not by row ownership. Kept as a function so existing callsites compile.
+    Fase 1 (escopo por equipe): admin e usuário sem equipe veem tudo.
+    Usuário com equipe só enxerga lojas (store_info) cuja sales_team está
+    entre user.sales_teams. Demais tabelas seguem sem filtro (Fase 2
+    estende módulo a módulo).
     """
     from sqlalchemy import true
 
+    from app.models.pricing import StoreInfo  # import tardio evita ciclo
+
+    # Admin vê tudo.
+    if user.role == UserRole.ADMIN:
+        return true()
+
+    teams = user.sales_teams or []
+
+    # Escopo por equipe só na tabela de Lojas, por enquanto.
+    if model is StoreInfo and teams:
+        return StoreInfo.sales_team.in_(teams)
+
+    # Sem equipe, ou qualquer outra tabela: comportamento atual (vê tudo).
     return true()
