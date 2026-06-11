@@ -4,8 +4,9 @@
 // Três abas:
 //   * Mala      — planilha principal de SKUs × lotes. Cada lote vira
 //                 um par de colunas (qtd + total computado).
-//   * Resumo    — lançamentos financeiros (lotes fechados + ajustes
-//                 manuais). Linha de total no rodapé.
+//   * Resumo    — lançamentos financeiros (lotes fechados + lançamentos
+//                 avulsos). Ajustes manuais de frete NÃO entram aqui —
+//                 vivem só na aba Frete. Linha de total no rodapé.
 //   * Reposição — parâmetros da fórmula de reposição + card explicando
 //                 o cálculo passo a passo.
 //

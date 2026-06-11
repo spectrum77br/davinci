@@ -162,12 +162,13 @@ async def test_patch_lote_item_pago_remove_de_saldo_a_pagar(
 
 
 @pytest.mark.asyncio
-async def test_post_lote_ajuste_aparece_em_frete_e_resumo(
+async def test_post_lote_ajuste_aparece_so_em_frete(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None], user_imp_edit,
 ):
     """Ajuste manual cria row em ImportResumo com transportadora set.
-    Aparece na aba Frete (kind=ajuste) E na aba Resumo (lançamento)."""
+    Aparece SÓ na aba Frete (kind=ajuste) — NÃO entra no Resumo, que
+    filtra transportadora IS NULL (só lotes fechados + avulsos)."""
     auth_as(await user_imp_edit())
     await _seed_frete_basics(db)
 
@@ -191,12 +192,12 @@ async def test_post_lote_ajuste_aparece_em_frete_e_resumo(
     assert Decimal(body["saldo_a_pagar"]) == Decimal("250.00")
     assert set(body["transportadoras"]) == {"Cargo X", "Outra Transp"}
 
-    # Aba Resumo: mesma row aparece via /resumo.
+    # Aba Resumo: ajuste manual de frete NÃO aparece (transportadora set).
+    # O Resumo é só lançamento financeiro (lotes fechados + avulsos).
     rr = await client.get("/api/importacao/resumo?categoria=celular")
     rbody = rr.json()
-    assert len(rbody["items"]) == 1
-    assert Decimal(rbody["items"][0]["saldo"]) == Decimal("250.00")
-    assert rbody["items"][0]["transportadora"] == "Outra Transp"
+    assert rbody["items"] == []
+    assert Decimal(rbody["total"]) == Decimal("0")
 
 
 @pytest.mark.asyncio

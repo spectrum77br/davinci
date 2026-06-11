@@ -1162,6 +1162,11 @@ async def list_resumo(
             # at least makes the response stable across calls).
             select(ImportResumo)
             .where(ImportResumo.categoria == categoria)
+            # Ajuste manual de frete (transportadora setada) pertence só à
+            # aba Frete — não é lançamento financeiro do Resumo. list_frete
+            # usa o filtro simétrico (transportadora IS NOT NULL); aqui
+            # ficamos só com lotes fechados + lançamentos avulsos.
+            .where(ImportResumo.transportadora.is_(None))
             .order_by(ImportResumo.data, ImportResumo.id)
         )
     ).scalars().all()
@@ -1500,8 +1505,9 @@ async def create_lote_ajuste(
     _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
 ) -> ImportResumoOut:
     """Ajuste manual de frete — cria uma row em ImportResumo com
-    transportadora setada. Aparece (1) na aba Frete (agregação) e (2)
-    na aba Resumo (lançamento avulso, comportamento existente)."""
+    transportadora setada. Aparece SÓ na aba Frete (agregação); o
+    Resumo filtra `transportadora IS NULL`, então o ajuste não entra
+    como lançamento financeiro."""
     row = ImportResumo(
         categoria=body.categoria,
         data=body.abertura,
