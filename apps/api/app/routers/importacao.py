@@ -1000,11 +1000,35 @@ async def patch_lote(
 
     # Capture fechamento transition for the auto-resumo trigger.
     was_open = row.fechamento is None
+    was_closed = row.fechamento is not None
     data = body.model_dump(exclude_unset=True)
     for k, v in data.items():
         setattr(row, k, v)
     await session.commit()
     await session.refresh(row)
+
+    # Transition closed → open (operador apagou a data de fechamento):
+    # reseta o estado de push do Bling pros items desse lote, pra que ao
+    # re-fechar o sistema reenvie pro target_sku corrigido. Útil quando
+    # o operador percebe que escolheu o destino errado no dropdown.
+    # NÃO reverte o que já foi mandado pro Bling — operador ajusta lá.
+    if was_closed and row.categoria == "celular" and row.fechamento is None:
+        from sqlalchemy import update as sql_update
+
+        await session.execute(
+            sql_update(ImportLoteItem)
+            .where(ImportLoteItem.lote_id == row.id)
+            .values(
+                bling_stock_status=None,
+                bling_stock_error=None,
+                bling_stock_pushed_at=None,
+            )
+        )
+        await session.commit()
+        logger.info(
+            "importacao_lote_bling_stock_reset",
+            lote_id=str(row.id), nome=row.nome,
+        )
 
     # If this PATCH transitioned the lote from open → closed, auto-create
     # the resumo entry with the lote's current saldo. The operator can
