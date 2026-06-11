@@ -168,6 +168,7 @@ async function saveSlotPopover(accId: string) {
 const PLATFORMS = [
   { value: 'mercadolivre', label: 'ML' },
   { value: 'shopee', label: 'Shopee' },
+  { value: 'shein', label: 'Shein' },
   { value: 'amazon', label: 'Amazon' },
   { value: 'temu', label: 'Temu' },
   { value: 'aliexpress', label: 'AliExpress' },
@@ -345,7 +346,7 @@ const accountsGrouped = computed<{ platform: string; label: string; rows: Accoun
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key)!.push(a)
   }
-  const order = ['amazon', 'magalu', 'mercadolivre', 'shopee', 'temu', 'aliexpress', 'tiktok']
+  const order = ['amazon', 'magalu', 'mercadolivre', 'shopee', 'shein', 'temu', 'aliexpress', 'tiktok']
   return Array.from(groups.entries())
     .sort(([a], [b]) => {
       const ia = order.indexOf(a)
@@ -1551,11 +1552,11 @@ async function sendManualReport() {
 // =========================================================== grid extras (features)
 
 // Feature 1: account groups by platform + kit (SSH order)
-// Platform order chosen to match the SSH UI:
-//   amazon → magalu → mercadolivre → shopee → temu → aliexpress → tiktok
+// Platform order chosen to match the SSH UI (Shein sits next to Shopee):
+//   amazon → magalu → mercadolivre → shopee → shein → temu → aliexpress → tiktok
 const PLATFORM_ORDER: Record<string, number> = {
   amazon: 0, magalu: 1, mercadolivre: 2, shopee: 3,
-  temu: 4, aliexpress: 5, tiktok: 6,
+  shein: 4, temu: 5, aliexpress: 6, tiktok: 7,
 }
 
 // Same SSH order is reused by the body iteration so each data column lines
@@ -1707,6 +1708,7 @@ const negativeMarginCount = computed(() => {
 function platformBg(platform: string): string {
   switch (platform) {
     case 'shopee': return 'bg-orange-50/50'
+    case 'shein': return 'bg-teal-50/50'
     case 'amazon': return 'bg-yellow-50/50'
     case 'temu': return 'bg-purple-50/50'
     case 'aliexpress': return 'bg-red-50/50'
@@ -1721,6 +1723,7 @@ function platformHeaderBg(platform: string): string {
     case 'magalu':       return 'bg-blue-50 dark:bg-blue-900/30'
     case 'mercadolivre': return 'bg-muted'
     case 'shopee':       return 'bg-orange-50 dark:bg-orange-900/30'
+    case 'shein':        return 'bg-teal-50 dark:bg-teal-900/30'
     case 'temu':         return 'bg-purple-50 dark:bg-purple-900/30'
     case 'aliexpress':   return 'bg-red-50 dark:bg-red-900/30'
     case 'tiktok':       return 'bg-pink-50 dark:bg-pink-900/30'

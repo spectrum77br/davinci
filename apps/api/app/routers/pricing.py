@@ -1809,10 +1809,12 @@ _STORE_TO_PRICING_PLATFORM = {
     "temu": "temu",
     "aliexpress": "aliexpress",
     "magalu": "magalu",
-    # SSH parity: Shein is operationally a Shopee-platform pricing surface,
-    # not its own pricing platform. Mapping it to "shopee" lets badge wiring
-    # and account creation reuse the existing PricingPlatform.SHOPEE row.
-    "shein": "shopee",
+    # Shein is its OWN pricing platform (PricingPlatform.SHEIN — already in the
+    # code enum and the prod DB enum). It used to be collapsed into "shopee"
+    # for SSH parity, but that made Shein and Shopee rows sharing an
+    # account_name (e.g. "kia") share departments and price columns. Shein now
+    # gets its own pricing accounts, columns and price table.
+    "shein": "shein",
 }
 
 
@@ -1932,6 +1934,7 @@ async def _compute_store_info_badges(
                 PricingAccount.name,
                 PricingAccount.platform,
                 PricingAccount.segment_id,
+                PricingAccount.store_info_id,
             ).where(user_scope(PricingAccount, user))
         )
     ).all()
@@ -1942,17 +1945,28 @@ async def _compute_store_info_badges(
     )
     splat = (row.platform or "").strip().lower()
     depts: set[str] = set()
-    if sname:
-        for name, plat, seg_id in acc_rows:
-            slug = roots_by_id.get(seg_id)
-            if not slug:
-                continue
-            plat_val = plat.value if hasattr(plat, "value") else str(plat)
-            pname = (name or "").strip().lower()
-            if not pname or plat_val.lower() != splat_alias:
-                continue
-            if pname == sname or pname.startswith(sname + " "):
+    for name, plat, seg_id, sinfo_id in acc_rows:
+        slug = roots_by_id.get(seg_id)
+        if not slug:
+            continue
+        # FK is authoritative: an account already wired to a store_info
+        # (store_info_id set) contributes its department ONLY to that exact
+        # row. Name/platform matching is a fallback for legacy FK-less
+        # accounts (e.g. SSH-seeded ML rows). Without this gate, Shein and
+        # Shopee rows that share account_name collide, because
+        # `_STORE_TO_PRICING_PLATFORM` collapses Shein → Shopee.
+        if sinfo_id is not None:
+            if sinfo_id == row.id:
                 depts.add(slug)
+            continue
+        if not sname:
+            continue
+        plat_val = plat.value if hasattr(plat, "value") else str(plat)
+        pname = (name or "").strip().lower()
+        if not pname or plat_val.lower() != splat_alias:
+            continue
+        if pname == sname or pname.startswith(sname + " "):
+            depts.add(slug)
 
     integ_rows = (
         await session.execute(select(Integration.name, Integration.platform))
@@ -2004,11 +2018,14 @@ async def list_store_info(
             .order_by(StoreInfo.sort_order, StoreInfo.platform)
         )
     ).scalars().all()
-    # Wire badges to pricing_accounts by *(platform, account_name)* — that is
-    # how SSH does it. `pricing_accounts.store_info_id` is empty in prod
-    # (116/116 NULL), so a FK join returns nothing.
+    # Badge wiring is FK-first: when `pricing_accounts.store_info_id` is set the
+    # account belongs to exactly that store_info row. Only FK-less rows (legacy
+    # SSH-seeded data) fall back to *(platform, account_name)* matching. This
+    # FK gate is what stops Shein and Shopee rows sharing an account_name from
+    # cross-contaminating — `_STORE_TO_PRICING_PLATFORM` collapses Shein →
+    # Shopee, so without it `(shopee, "kia")` would match both.
     #
-    # Per-platform matching rules (mirrors SSH):
+    # Per-platform fallback rules (FK-less rows, mirrors SSH):
     #   * Tipo            (`departments`)  — same platform AND
     #                                         (exact OR prefix `<sname> `)
     #   * Tab. Preço      (`has_pricing`)  — same platform AND exact match
@@ -2018,17 +2035,23 @@ async def list_store_info(
     roots_by_id, _, _ = await _segment_index(session)
     acc_rows = (
         await session.execute(
-            select(PricingAccount.name, PricingAccount.platform, PricingAccount.segment_id)
-            .where(user_scope(PricingAccount, user))
+            select(
+                PricingAccount.name,
+                PricingAccount.platform,
+                PricingAccount.segment_id,
+                PricingAccount.store_info_id,
+            ).where(user_scope(PricingAccount, user))
         )
     ).all()
-    accs_normalized: list[tuple[str, str, str]] = []
-    for name, plat, seg_id in acc_rows:
+    accs_normalized: list[tuple[str, str, str, UUID | None]] = []
+    for name, plat, seg_id, sinfo_id in acc_rows:
         slug = roots_by_id.get(seg_id)
         if not slug:
             continue
         plat_val = plat.value if hasattr(plat, "value") else str(plat)
-        accs_normalized.append(((name or "").strip().lower(), plat_val.lower(), slug))
+        accs_normalized.append(
+            ((name or "").strip().lower(), plat_val.lower(), slug, sinfo_id)
+        )
 
     # has_integration: strict (lower(name), platform) match against integrations.
     # Both store_info.platform and integrations.platform use short codes (ml,
@@ -2050,16 +2073,22 @@ async def list_store_info(
         )
         splat = (r.platform or "").strip().lower()
         depts: set[str] = set()
-        if sname:
-            for pname, pplat, pdept in accs_normalized:
-                if pplat != splat_alias or not pname:
-                    continue
-                # SSH semantics: exact OR prefix `<sname> ` both count for
-                # has_pricing. So "barbosa" matches "barbosa classico" /
-                # "barbosa premium" — even when no exact "barbosa" pricing
-                # account exists for that platform.
-                if pname == sname or pname.startswith(sname + " "):
+        for pname, pplat, pdept, psinfo_id in accs_normalized:
+            # FK authoritative (see _compute_store_info_badges): a wired
+            # account counts only for its own store_info row; name matching is
+            # the FK-less fallback.
+            if psinfo_id is not None:
+                if psinfo_id == r.id:
                     depts.add(pdept)
+                continue
+            if not sname or pplat != splat_alias or not pname:
+                continue
+            # SSH semantics: exact OR prefix `<sname> ` both count for
+            # has_pricing. So "barbosa" matches "barbosa classico" /
+            # "barbosa premium" — even when no exact "barbosa" pricing
+            # account exists for that platform.
+            if pname == sname or pname.startswith(sname + " "):
+                depts.add(pdept)
         has_integ = bool(sname and (sname, splat) in integ_keys)
         out_list.append(
             _store_info_out(r, list(depts), has_pricing=bool(depts), has_integration=has_integ)
@@ -2299,9 +2328,13 @@ async def unbind_store_info_department(
     ],
 ) -> None:
     """Removes the pricing_accounts that wire `store_info_id` to a root segment
-    matching `slug`. Mirrors the badge match in `list_store_info`: deletes
-    rows with FK `store_info_id` set, **plus** rows whose `(platform, name)`
-    matches the store_info entry — the SSH-style implicit name binding.
+    matching `slug`. Mirrors the FK-first badge match in `list_store_info`:
+    deletes rows whose FK `store_info_id` points at THIS store_info, **plus**
+    FK-less rows whose `(platform, name)` matches the store_info entry — the
+    SSH-style implicit name binding. The `store_info_id IS NULL` guard on the
+    name branch is critical: without it, unbinding e.g. Shein "kia" would also
+    delete the Shopee "kia" account (same collapsed platform + name) even
+    though it is FK-wired to a different store_info row.
     """
     sid = await _resolve_root_segment_id(session, slug)
     if sid is None:
@@ -2326,12 +2359,15 @@ async def unbind_store_info_department(
     except ValueError:
         pricing_plat = None
 
-    # Build the delete predicate: FK match OR (same platform + same name).
+    # Build the delete predicate: FK match OR (FK-less + same platform + same
+    # name). The `store_info_id IS NULL` guard keeps the name branch from
+    # nuking an account that is FK-wired to a *different* store_info row.
     cond = PricingAccount.store_info_id == store_info_id
     if sname and pricing_plat is not None:
         cond = or_(
             cond,
             and_(
+                PricingAccount.store_info_id.is_(None),
                 PricingAccount.platform == pricing_plat,
                 func.lower(PricingAccount.name) == sname,
             ),
