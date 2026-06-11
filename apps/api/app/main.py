@@ -18,6 +18,7 @@ from app.routers import dev as dev_router
 from app.routers import devolutions as devolutions_router
 from app.routers import discrepancies as discrepancies_router
 from app.routers import estoque as estoque_router
+from app.routers import faturamento as faturamento_router
 from app.routers import financeiro as financeiro_router
 from app.routers import importacao as importacao_router
 from app.routers import integrations as integrations_router
@@ -157,6 +158,7 @@ app.include_router(tarefas_router.router)
 app.include_router(refunds_router.router)
 app.include_router(devolutions_router.router)
 app.include_router(estoque_router.router)
+app.include_router(faturamento_router.router)
 app.include_router(financeiro_router.router)
 app.include_router(importacao_router.router)
 app.include_router(nf_upload_router.router)

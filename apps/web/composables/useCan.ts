@@ -8,6 +8,7 @@ export type Resource =
   | 'tabela_precos_produtos'
   | 'tabela_precos_concorrencia'
   | 'margem'
+  | 'faturamento'
   | 'controle_estoque'
   | 'financeiro_consorcio'
   | 'financeiro_suprimentos'
@@ -40,6 +41,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     label: 'Operação',
     resources: [
       'margem',
+      'faturamento',
       'controle_estoque',
       'produtos',
       'anuncios',
@@ -98,6 +100,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   tabela_precos_produtos: 'Tabela Preços — Produtos',
   tabela_precos_concorrencia: 'Tabela Preços — Concorrência',
   margem: 'Margem',
+  faturamento: 'Faturamento',
   controle_estoque: 'Controle de Estoque',
   financeiro_consorcio: 'Consórcio',
   financeiro_suprimentos: 'Suprimentos',
