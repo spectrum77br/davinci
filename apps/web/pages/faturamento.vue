@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Loader2, RefreshCw } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, Loader2, RefreshCw } from 'lucide-vue-next'
 import { isoToday, isoDaysAgo } from '~/lib/date'
 
 definePageMeta({
@@ -28,22 +28,44 @@ type FaturamentoOut = {
   end: string
 }
 
-// Período: presets + custom (range). Default 90 dias.
-type Preset = '7' | '30' | '90' | 'custom'
-const preset = ref<Preset>('90')
+// Período: por mês (default = mês atual). Modo "Personalizado" mantém
+// o range arbitrário antigo (dois date inputs).
+type Mode = 'month' | 'custom'
+const mode = ref<Mode>('month')
+const month = ref<string>(isoToday().slice(0, 7)) // YYYY-MM
+const maxMonth = isoToday().slice(0, 7) // trava navegação no futuro
 const customStart = ref<string>(isoDaysAgo(90))
 const customEnd = ref<string>(isoToday())
+
+function monthLabel(ym: string): string {
+  const [y, m] = ym.split('-').map(Number)
+  return new Date(y, m - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
+}
+function shiftMonth(delta: number) {
+  const [y, m] = month.value.split('-').map(Number)
+  const d = new Date(y, m - 1 + delta, 1)
+  const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+  if (ym > maxMonth) return
+  month.value = ym
+  void load()
+}
 
 const loading = ref(false)
 const error = ref<string | null>(null)
 const data = ref<FaturamentoOut | null>(null)
 
 function periodoParams(): { start: string; end: string } {
-  if (preset.value === 'custom') {
+  if (mode.value === 'custom') {
     return { start: `${customStart.value}T00:00:00`, end: `${customEnd.value}T23:59:59` }
   }
-  const days = preset.value === '7' ? 7 : preset.value === '30' ? 30 : 90
-  return { start: `${isoDaysAgo(days)}T00:00:00`, end: `${isoToday()}T23:59:59` }
+  // Mês: [dia 1 00:00, dia 1 do mês seguinte 00:00). Backend filtra data < end.
+  const [y, m] = month.value.split('-').map(Number)
+  const ny = m === 12 ? y + 1 : y
+  const nm = m === 12 ? 1 : m + 1
+  return {
+    start: `${month.value}-01T00:00:00`,
+    end: `${ny}-${String(nm).padStart(2, '0')}-01T00:00:00`,
+  }
 }
 
 async function load() {
@@ -60,9 +82,9 @@ async function load() {
   }
 }
 
-function setPreset(p: Preset) {
-  preset.value = p
-  if (p !== 'custom') void load()
+function setMode(m: Mode) {
+  mode.value = m
+  if (m === 'month') void load()
 }
 
 await load()
@@ -98,23 +120,48 @@ function fmtInt(n: number | null | undefined): string {
       <span class="text-xs text-muted-foreground">Período:</span>
       <div class="inline-flex rounded-md border overflow-hidden">
         <button
-          v-for="p in (['7','30','90'] as const)"
-          :key="p"
           class="px-3 py-1 text-xs hover:bg-muted"
-          :class="preset === p ? 'bg-primary text-primary-foreground' : ''"
-          @click="setPreset(p)"
+          :class="mode === 'month' ? 'bg-primary text-primary-foreground' : ''"
+          @click="setMode('month')"
         >
-          {{ p }} dias
+          Mês
         </button>
         <button
           class="px-3 py-1 text-xs hover:bg-muted border-l"
-          :class="preset === 'custom' ? 'bg-primary text-primary-foreground' : ''"
-          @click="preset = 'custom'"
+          :class="mode === 'custom' ? 'bg-primary text-primary-foreground' : ''"
+          @click="mode = 'custom'"
         >
-          custom
+          Personalizado
         </button>
       </div>
-      <template v-if="preset === 'custom'">
+      <template v-if="mode === 'month'">
+        <div class="inline-flex items-center gap-1">
+          <button
+            class="rounded-md border px-1.5 py-1 hover:bg-muted"
+            title="Mês anterior"
+            @click="shiftMonth(-1)"
+          >
+            <ChevronLeft class="size-4" />
+          </button>
+          <input
+            v-model="month"
+            type="month"
+            :max="maxMonth"
+            class="h-7 border rounded px-2 bg-background text-xs"
+            @change="load"
+          />
+          <button
+            class="rounded-md border px-1.5 py-1 hover:bg-muted disabled:opacity-40"
+            title="Próximo mês"
+            :disabled="month >= maxMonth"
+            @click="shiftMonth(1)"
+          >
+            <ChevronRight class="size-4" />
+          </button>
+        </div>
+        <span class="text-xs text-muted-foreground capitalize">{{ monthLabel(month) }}</span>
+      </template>
+      <template v-else>
         <input v-model="customStart" type="date" class="h-7 border rounded px-2 bg-background text-xs" />
         <span class="text-xs text-muted-foreground">a</span>
         <input v-model="customEnd" type="date" class="h-7 border rounded px-2 bg-background text-xs" />
@@ -146,7 +193,7 @@ function fmtInt(n: number | null | undefined): string {
           </tr>
           <tr v-else-if="!data?.itens.length">
             <td colspan="5" class="text-center py-8 text-muted-foreground">
-              Nenhum faturamento entregue no período.
+              Nenhum faturamento no período.
               <span v-if="!isAdmin">
                 <br />Você vê apenas lojas das suas equipes de vendas.
               </span>
