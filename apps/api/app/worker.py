@@ -32,6 +32,7 @@ from app.services.bling_kit_create import create_bling_kit_for_mark_job
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
 from app.services.email import get_email_sender, render_otp_html
+from app.services.import_lote_bling_stock import push_lote_stock_to_bling_job
 from app.services.import_product_bling_create import sync_import_product_to_bling_job
 from app.services.listings_import import (
     _create_product_links_for_matched,
@@ -1153,6 +1154,7 @@ class WorkerSettings:
         auto_create_product_from_bling_run,
         create_bling_kit_for_mark_job,
         sync_import_product_to_bling_job,
+        push_lote_stock_to_bling_job,
         alerts_cleanup,
         low_stock_polling,
         import_listings_run,
@@ -1258,6 +1260,7 @@ class WorkerSettingsUI:
     functions = [
         sync_import_product_to_bling_job,
         create_bling_kit_for_mark_job,
+        push_lote_stock_to_bling_job,
     ]
     queue_name = ARQ_UI_QUEUE
     # Concorrência baixa — jobs UI são curtos (1-2 chamadas Bling) e

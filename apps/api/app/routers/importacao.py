@@ -988,6 +988,17 @@ async def patch_lote(
             "importacao_lote_auto_resumo",
             lote_id=str(row.id), nome=row.nome, saldo=str(enriched.saldo),
         )
+        # Celular: enfileira entrada de estoque no Bling pra cada item.
+        # Operação 'E' (soma) — operador pediu só a quantidade, sem custo.
+        # Job é idempotente (pula items com bling_stock_pushed_at), então
+        # re-fechar um lote (ex.: reabrir/fechar de novo) não duplica.
+        if row.categoria == "celular":
+            pool = await get_arq_ui_pool()
+            await pool.enqueue_job("push_lote_stock_to_bling_job", str(row.id))
+            logger.info(
+                "importacao_lote_bling_stock_enqueued",
+                lote_id=str(row.id), nome=row.nome,
+            )
 
     return await _enrich_lote(session, row)
 

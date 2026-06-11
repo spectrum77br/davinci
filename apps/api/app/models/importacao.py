@@ -210,6 +210,15 @@ class ImportLoteItem(Base, TimestampMixin):
     # × (1+frete) + adicional não se aplica e o operador digita o
     # custo BRL direto. Quando o lote TEM taxa/frete, é ignorado.
     custo_manual: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # Migration 0136. Rastreio da entrada de estoque no Bling disparada
+    # ao fechar o lote (categoria 'celular'). status: NULL | 'pending'
+    # | 'sent' | 'error' | 'skipped'. `pushed_at` preenchido => job
+    # pula em re-execuções (idempotente).
+    bling_stock_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    bling_stock_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bling_stock_pushed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
 
 class ImportResumo(Base):
