@@ -1,7 +1,7 @@
 """refunds: tracking de URL e resolução de chamados
 
-Revision ID: 0138_refunds_chamado_tracking
-Revises: 0137_import_lote_item_bling_stock
+Revision ID: 0139_refunds_chamado_tracking
+Revises: 0138_import_lote_item_target_sku
 
 Adiciona campos usados pela automação Hermes que monitora respostas dos
 chamados de frete no Mercado Livre.
@@ -10,8 +10,8 @@ chamados de frete no Mercado Livre.
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0138_refunds_chamado_tracking"
-down_revision = "0137_import_lote_item_bling_stock"
+revision = "0139_refunds_chamado_tracking"
+down_revision = "0138_import_lote_item_target_sku"
 branch_labels = None
 depends_on = None
 
