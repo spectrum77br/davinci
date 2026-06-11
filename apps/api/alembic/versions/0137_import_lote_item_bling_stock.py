@@ -1,7 +1,7 @@
 """import_lote_items: campos pra entrada de estoque no Bling ao fechar lote
 
-Revision ID: 0136_import_lote_item_bling_stock
-Revises: 0135_audit_em_andamento_data
+Revision ID: 0137_import_lote_item_bling_stock
+Revises: 0136_sales_teams
 Create Date: 2026-06-11
 
 Ao fechar um lote da categoria 'celular' (PATCH /lotes/{id} setando
@@ -20,8 +20,8 @@ Idempotente. Downgrade reverso.
 
 from alembic import op
 
-revision = "0136_import_lote_item_bling_stock"
-down_revision = "0135_audit_em_andamento_data"
+revision = "0137_import_lote_item_bling_stock"
+down_revision = "0136_sales_teams"
 branch_labels = None
 depends_on = None
 
