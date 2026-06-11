@@ -177,6 +177,7 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Técnico", "tecnico"),
     ("Qtd", "quantidade"),
     ("Devolver estoque", "devolver_estoque"),
+    ("SKU novo", "estoque_mov_sku"),
     ("Passou manutenção", "manutencao"),
     ("Data devolvido estoque", "data_devolvido_estoque"),
     ("Prazo", "prazo"),
@@ -219,6 +220,12 @@ async def export_devolutions(
                 line.append(_fmt_dt_sp(value))
             elif field in ("reembolso", "devolver_estoque", "manutencao"):
                 line.append("Sim" if value else "Não")
+            elif field == "estoque_mov_sku":
+                # SKU em que o item voltou ao estoque Bling; marca estornos.
+                if value and r.estoque_mov_revertido_at is not None:
+                    line.append(f"{value} (estornado)")
+                else:
+                    line.append(value or "")
             else:
                 line.append(value if value is not None else "")
         ws.append(line)
