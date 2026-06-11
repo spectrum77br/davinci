@@ -21,6 +21,7 @@ from app.schemas.users import (
     UserListOut,
     UserOut,
     UserPatch,
+    _normalize_sales_teams,
     _normalize_stock_tags,
 )
 from app.security.password import hash_password
@@ -45,6 +46,7 @@ def _to_out(u: User) -> UserOut:
         adspower=u.adspower,
         duoke=u.duoke,
         stock_tags=u.stock_tags or None,
+        sales_teams=u.sales_teams or None,
         permissions=u.permissions or {},
         has_password=u.password_hash is not None,
         last_login_at=u.last_login_at,
@@ -172,6 +174,7 @@ async def create_user(
         adspower=body.adspower,
         duoke=body.duoke,
         stock_tags=_normalize_stock_tags(body.stock_tags),
+        sales_teams=_normalize_sales_teams(body.sales_teams),
         role=UserRole.USER,
         status=UserStatus.PENDING,
         permissions=perms,
@@ -223,6 +226,11 @@ async def patch_user(
     # the schema helper so create + patch share the rule.
     if "stock_tags" in data:
         u.stock_tags = _normalize_stock_tags(data["stock_tags"])
+
+    # sales_teams: lista de números positivos. Normalisation dedupes/
+    # sorts/drops non-positives; lista vazia → null.
+    if "sales_teams" in data:
+        u.sales_teams = _normalize_sales_teams(data["sales_teams"])
 
     await session.commit()
     await session.refresh(u)

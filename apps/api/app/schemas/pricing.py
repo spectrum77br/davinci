@@ -351,6 +351,8 @@ class StoreInfoBase(BaseModel):
     upseseller: bool | None = None
     duoker: bool | None = None
     uf_restrictions: list[str] | None = None
+    # Equipe de Vendas (migration 0136). Número inteiro; NULL = sem equipe.
+    sales_team: int | None = None
 
 
 class StoreInfoCreate(StoreInfoBase):
@@ -378,6 +380,7 @@ class StoreInfoPatch(BaseModel):
     upseseller: bool | None = None
     duoker: bool | None = None
     uf_restrictions: list[str] | None = None
+    sales_team: int | None = None
 
 
 class StoreInfoOut(StoreInfoBase):

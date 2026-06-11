@@ -30,6 +30,28 @@ def _normalize_stock_tags(raw: list | None) -> list[str] | None:
     return out or None
 
 
+def _normalize_sales_teams(raw: list | None) -> list[int] | None:
+    """Coerce ints/strings → positive ints; dedupe; sort ascending.
+    Empty list becomes None so the DB stays null when the admin clears
+    all teams. Espelha _normalize_stock_tags trocando "lista de slugs"
+    por "lista de números inteiros positivos"."""
+    if raw is None:
+        return None
+    out: list[int] = []
+    seen: set[int] = set()
+    for v in raw:
+        try:
+            if isinstance(v, bool):  # bool é subclasse de int, descartar
+                continue
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return sorted(out) or None
+
+
 class UserOut(BaseModel):
     id: str
     open_id: str
@@ -43,6 +65,7 @@ class UserOut(BaseModel):
     adspower: str | None = None
     duoke: str | None = None
     stock_tags: list[str] | None = None
+    sales_teams: list[int] | None = None
     permissions: dict
     # Apenas indica se há senha definida — o hash nunca sai da API.
     has_password: bool = False
@@ -71,6 +94,7 @@ class UserCreate(BaseModel):
     adspower: str | None = None
     duoke: str | None = None
     stock_tags: list[str] | None = None
+    sales_teams: list[int] | None = None
     permissions: Permissions | None = None
 
 
@@ -89,6 +113,9 @@ class UserPatch(BaseModel):
     # Pass a list of slugs (any subset of STOCK_TAGS) or [] / null to
     # clear. Backend dedupes / lowercases / drops unknowns.
     stock_tags: list[str] | None = None
+    # Pass a list of positive integers or [] / null to clear. Backend
+    # dedupes/sorts/drops non-positives.
+    sales_teams: list[int] | None = None
     status: str | None = Field(default=None, pattern="^(pending|active|suspended)$")
 
 

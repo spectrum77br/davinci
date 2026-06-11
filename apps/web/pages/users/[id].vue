@@ -18,6 +18,7 @@ type UserDetail = {
   adspower: string | null
   duoke: string | null
   stock_tags: string[] | null
+  sales_teams: number[] | null
   permissions: Partial<Record<Resource, Partial<ResourcePerm>>>
   has_password: boolean
   disabled_at: string | null
@@ -66,8 +67,31 @@ const form = reactive({
   adspower: '',
   duoke: '',
   stock_tags: [] as string[],
+  sales_teams: [] as number[],
   status: 'pending' as 'pending' | 'active' | 'suspended',
 })
+
+// Opções de equipe = união { equipes já presentes nas lojas } ∪ { equipes
+// do próprio user }. Carregado uma vez ao montar a página. Permite que
+// um admin selecione equipes sem precisar criar a loja antes.
+const salesTeamOptions = ref<number[]>([])
+
+async function loadSalesTeamOptions() {
+  try {
+    const rows = await api<Array<{ sales_team: number | null }>>(
+      '/api/pricing/store-info',
+    )
+    const set = new Set<number>()
+    for (const r of rows) {
+      if (typeof r.sales_team === 'number' && r.sales_team > 0) set.add(r.sales_team)
+    }
+    // Inclui equipes que o user já tem (caso uma loja tenha sido removida).
+    for (const t of user.value?.sales_teams || []) set.add(t)
+    salesTeamOptions.value = [...set].sort((a, b) => a - b)
+  } catch {
+    salesTeamOptions.value = [...(user.value?.sales_teams || [])].sort((a, b) => a - b)
+  }
+}
 
 function resetForm() {
   if (!user.value) return
@@ -79,6 +103,7 @@ function resetForm() {
   form.adspower = user.value.adspower || ''
   form.duoke = user.value.duoke || ''
   form.stock_tags = [...(user.value.stock_tags || [])]
+  form.sales_teams = [...(user.value.sales_teams || [])]
   form.status = user.value.status
 }
 
@@ -86,6 +111,27 @@ function toggleStockTag(slug: string) {
   const i = form.stock_tags.indexOf(slug)
   if (i >= 0) form.stock_tags.splice(i, 1)
   else form.stock_tags.push(slug)
+}
+
+function toggleSalesTeam(n: number) {
+  const i = form.sales_teams.indexOf(n)
+  if (i >= 0) form.sales_teams.splice(i, 1)
+  else form.sales_teams.push(n)
+}
+
+// Input do "+ adicionar equipe" — inteiro positivo. Inclui em
+// form.sales_teams (dedup) e nas opções visíveis.
+const newSalesTeam = ref<string>('')
+function addSalesTeam() {
+  const raw = newSalesTeam.value.trim()
+  if (!raw) return
+  const n = parseInt(raw, 10)
+  if (Number.isNaN(n) || n <= 0) return
+  if (!form.sales_teams.includes(n)) form.sales_teams.push(n)
+  if (!salesTeamOptions.value.includes(n)) {
+    salesTeamOptions.value = [...salesTeamOptions.value, n].sort((a, b) => a - b)
+  }
+  newSalesTeam.value = ''
 }
 
 const perms = reactive<Record<Resource, ResourcePerm>>(
@@ -105,6 +151,7 @@ function resetPerms() {
 }
 
 await load()
+await loadSalesTeamOptions()
 
 // Cascade rules: delete → edit → view
 function onChange(r: Resource, action: Action) {
@@ -181,6 +228,8 @@ async function saveCadastral() {
     // Operator-of-stock tags — empty array clears (backend treats []
     // and null identically).
     body.stock_tags = [...form.stock_tags]
+    // Equipes de Vendas (mesma semântica de stock_tags).
+    body.sales_teams = [...form.sales_teams]
     user.value = await api<UserDetail>(`/api/users/${userId}`, { method: 'PATCH', body })
     resetPerms()
   } catch (e: any) {
@@ -299,6 +348,48 @@ async function removeUser() {
               /controle-estoque e mostra a união de produtos das tags selecionadas.
               <span v-if="form.stock_tags.length">
                 Selecionadas: <code>{{ form.stock_tags.join(', ') }}</code>
+              </span>
+            </p>
+          </div>
+          <div class="md:col-span-2">
+            <Label>Equipes de Vendas</Label>
+            <div
+              v-if="salesTeamOptions.length"
+              class="grid grid-cols-2 md:grid-cols-6 gap-1.5 mt-1 border rounded-md p-2 bg-background"
+            >
+              <label
+                v-for="n in salesTeamOptions"
+                :key="n"
+                class="inline-flex items-center gap-1.5 text-sm cursor-pointer hover:bg-muted/50 rounded px-1.5 py-0.5"
+              >
+                <input
+                  type="checkbox"
+                  :checked="form.sales_teams.includes(n)"
+                  @change="toggleSalesTeam(n)"
+                />
+                <span>{{ n }}</span>
+              </label>
+            </div>
+            <p v-else class="text-[11px] text-muted-foreground mt-1 italic">
+              Nenhuma equipe cadastrada ainda. Use o campo abaixo pra adicionar.
+            </p>
+            <div class="flex items-center gap-2 mt-2">
+              <Input
+                v-model="newSalesTeam"
+                type="number" min="1" step="1"
+                placeholder="+ adicionar equipe (nº)"
+                class="w-48"
+                @keydown.enter.prevent="addSalesTeam"
+              />
+              <Button type="button" variant="outline" size="sm" @click="addSalesTeam">
+                Adicionar
+              </Button>
+            </div>
+            <p class="text-[11px] text-muted-foreground mt-1">
+              Multi-select de equipes de vendas (números). A loja é vinculada à equipe
+              na página Lojas; aqui você seleciona quais equipes esse usuário pertence.
+              <span v-if="form.sales_teams.length">
+                Selecionadas: <code>{{ form.sales_teams.join(', ') }}</code>
               </span>
             </p>
           </div>

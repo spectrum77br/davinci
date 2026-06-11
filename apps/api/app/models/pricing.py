@@ -246,6 +246,9 @@ class StoreInfo(Base, TimestampMixin):
     segment: Mapped[str | None] = mapped_column(String(128), nullable=True)
     freight: Mapped[str | None] = mapped_column(String(128), nullable=True)
     cpf_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Equipe de Vendas (número inteiro). Uma loja pertence a no máximo
+    # uma equipe; NULL = sem equipe atribuída. Migration 0136.
+    sales_team: Mapped[int | None] = mapped_column(Integer, nullable=True)
     account_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     server: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cnpj: Mapped[str | None] = mapped_column(String(32), nullable=True)

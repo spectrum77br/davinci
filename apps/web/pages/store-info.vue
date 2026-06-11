@@ -37,6 +37,7 @@ type StoreInfo = {
   upseseller: boolean | null
   duoker: boolean | null
   uf_restrictions: string[] | null
+  sales_team: number | null
   created_at: string
   updated_at: string
 }
@@ -349,6 +350,15 @@ async function commitEdit() {
     const n = parseInt(raw)
     if (Number.isNaN(n)) return cancelEdit()
     payload.sort_order = n
+  } else if (field === 'sales_team') {
+    // Vazio limpa a equipe; senão exige inteiro positivo.
+    if (!raw) {
+      payload.sales_team = null
+    } else {
+      const n = parseInt(raw, 10)
+      if (Number.isNaN(n) || n <= 0) return cancelEdit()
+      payload.sales_team = n
+    }
   } else if (field === 'password') {
     payload.password = raw || null
   } else {
@@ -524,6 +534,7 @@ async function copyText(text: string) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Conta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Frete</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Equipe</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Servidor</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">CNPJ</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">E-mail</th>
@@ -544,12 +555,12 @@ async function copyText(text: string) {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colSpan="16" class="text-center py-6 text-muted-foreground">
+            <td colSpan="17" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!sorted.length && !showAdd">
-            <td colSpan="16" class="text-center py-8 text-muted-foreground">Nenhuma loja cadastrada.</td>
+            <td colSpan="17" class="text-center py-8 text-muted-foreground">Nenhuma loja cadastrada.</td>
           </tr>
 
           <!-- add row -->
@@ -569,7 +580,7 @@ async function copyText(text: string) {
                 @keydown.escape="showAdd = false"
               />
             </td>
-            <td v-for="i in 13" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
+            <td v-for="i in 14" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
             <td class="border border-border px-1 py-1 text-center">
               <div class="flex gap-0.5 justify-center">
                 <button class="p-1 text-emerald-600 hover:bg-emerald-50 rounded" :disabled="adding" @click="submitNew">
@@ -648,11 +659,55 @@ async function copyText(text: string) {
                 </button>
               </div>
             </td>
-            <!-- text fields -->
+            <!-- text fields: freight + cpf_name (responsável) -->
             <template
-              v-for="f in [
-                'freight', 'cpf_name', 'server', 'cnpj', 'email', 'phone',
-              ]"
+              v-for="f in ['freight', 'cpf_name']"
+              :key="f"
+            >
+              <td
+                class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+                :class="{
+                  'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, f),
+                  'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, f),
+                }"
+                @click="!isEditing(row.id, f) && startEdit(row, f)"
+              >
+                <input
+                  v-if="isEditing(row.id, f)"
+                  :ref="setEditInputRef"
+                  v-model="editValue" type="text"
+                  class="w-full text-xs bg-transparent outline-none"
+                  @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+                />
+                <span v-else :class="{ 'text-muted-foreground': !((row as any)[f]) }">
+                  {{ (row as any)[f] || '—' }}
+                </span>
+              </td>
+            </template>
+            <!-- Equipe de Vendas: inteiro positivo ou vazio (sem equipe).
+                 Mesma UX de edição inline; type=number no input. -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'sales_team'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'sales_team'),
+              }"
+              @click="!isEditing(row.id, 'sales_team') && startEdit(row, 'sales_team')"
+            >
+              <input
+                v-if="isEditing(row.id, 'sales_team')"
+                :ref="setEditInputRef"
+                v-model="editValue" type="number" min="1" step="1"
+                class="w-full text-xs bg-transparent outline-none text-center"
+                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+              />
+              <span v-else :class="{ 'text-muted-foreground': row.sales_team == null }">
+                {{ row.sales_team ?? '—' }}
+              </span>
+            </td>
+            <!-- text fields: server / cnpj / email / phone -->
+            <template
+              v-for="f in ['server', 'cnpj', 'email', 'phone']"
               :key="f"
             >
               <td

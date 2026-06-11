@@ -68,3 +68,9 @@ class User(Base, TimestampMixin):
     # eletro/insumos. Tag-to-SKU mapping lives in services/marketing
     # ... actually in routers/estoque.py (TAG_PATTERNS).
     stock_tags: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+
+    # Equipes de Vendas (multi). Lista de números inteiros que identificam
+    # equipes — espelha o padrão de stock_tags, trocando "lista de slugs"
+    # por "lista de inteiros". O número é a etiqueta da equipe; o vínculo
+    # loja↔equipe vive em StoreInfo.sales_team (migration 0136).
+    sales_teams: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True)
