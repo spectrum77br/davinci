@@ -435,6 +435,42 @@ async function loadAudit() {
   }
 }
 
+// Botão "Atualizar estoque do Bling" no painel de pendências: dispara o job
+// refresh-bling-stock (puxa saldo do Bling página a página e regrava em
+// products), aguarda terminar e recarrega a auditoria. Corrige números
+// defasados — ex. kit com componente zerado que ficou com estoque em cache.
+// O endpoint exige produtos:edit, então gateamos o botão pela mesma permissão.
+const canRefreshStock = useCan('produtos', 'edit')
+const stockRefreshing = ref(false)
+
+async function refreshBlingStock() {
+  if (stockRefreshing.value) return
+  stockRefreshing.value = true
+  try {
+    const { job_id } = await api<{ job_id: string }>('/api/jobs/refresh-bling-stock', {
+      method: 'POST',
+    })
+    for (let i = 0; i < 120; i++) {
+      await new Promise((r) => setTimeout(r, 1500))
+      const job = await api<BatchJob>(`/api/jobs/${job_id}`)
+      if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
+        if (job.status === 'succeeded') {
+          toast.success('Estoque atualizado', 'Puxado do Bling')
+          await loadAudit()
+        } else {
+          toast.error('Falha ao atualizar estoque', job.error || undefined)
+        }
+        return
+      }
+    }
+    toast.warning('Atualização ainda rodando', 'Clique em Atualizar daqui a pouco')
+  } catch (e: any) {
+    toast.error('Erro ao atualizar estoque', e?.data?.detail?.code || e?.message || undefined)
+  } finally {
+    stockRefreshing.value = false
+  }
+}
+
 const auditPending = computed(() => auditRows.value.filter((r) => !r.dismissed))
 const auditDismissed = computed(() => auditRows.value.filter((r) => r.dismissed))
 
@@ -2435,6 +2471,15 @@ watch(department, async () => {
             </span>
           </div>
           <div class="flex gap-2">
+            <button
+              v-if="canRefreshStock"
+              class="btn btn-sm"
+              :disabled="stockRefreshing"
+              title="Puxa o estoque atual do Bling e regrava — corrige números defasados (ex. kit com componente zerado)"
+              @click="refreshBlingStock"
+            >
+              <RefreshCw class="h-3.5 w-3.5 mr-1" :class="{ 'animate-spin': stockRefreshing }" /> Atualizar estoque do Bling
+            </button>
             <button class="btn btn-sm" :disabled="auditLoading" @click="loadAudit">
               <RefreshCw class="h-3.5 w-3.5 mr-1" :class="{ 'animate-spin': auditLoading }" /> Atualizar
             </button>
