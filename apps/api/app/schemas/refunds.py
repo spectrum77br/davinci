@@ -35,6 +35,8 @@ class RefundOut(BaseModel):
     prejuizo: float | None = None
     reembolso: float | None = None
     chamado: str | None = None
+    chamado_url: str | None = None
+    chamado_resolvido: bool = False
     operacao: str | None = None
     conferido: bool
     observacao: str | None = None
@@ -52,6 +54,8 @@ class RefundCreate(BaseModel):
     prejuizo: float | None = None
     reembolso: float | None = None
     chamado: str | None = None
+    chamado_url: str | None = None
+    chamado_resolvido: bool = False
     operacao: str | None = None
     observacao: str | None = None
 
@@ -61,6 +65,7 @@ class RefundCreate(BaseModel):
         "plataforma",
         "tipo",
         "chamado",
+        "chamado_url",
         "operacao",
         "observacao",
         mode="before",
@@ -93,6 +98,8 @@ class RefundPatch(BaseModel):
     prejuizo: float | None = None
     reembolso: float | None = None
     chamado: str | None = None
+    chamado_url: str | None = None
+    chamado_resolvido: bool | None = None
     operacao: str | None = None
     conferido: bool | None = None
     observacao: str | None = None
@@ -104,6 +111,7 @@ class RefundPatch(BaseModel):
         "conta",
         "tipo",
         "chamado",
+        "chamado_url",
         "operacao",
         "observacao",
         mode="before",

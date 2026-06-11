@@ -26,6 +26,10 @@ class Refund(Base, TimestampMixin):
     prejuizo: Mapped[float | None] = mapped_column(Float, nullable=True)
     reembolso: Mapped[float | None] = mapped_column(Float, nullable=True)
     chamado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chamado_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chamado_resolvido: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     conferido: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)

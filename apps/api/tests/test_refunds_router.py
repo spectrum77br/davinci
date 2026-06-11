@@ -37,6 +37,8 @@ async def test_create_refund_starts_unchecked_and_can_be_patched(client, make_us
             "tipo": "Cliente",
             "prejuizo": 10.5,
             "reembolso": 7.25,
+            "chamado_url": "https://www.mercadolivre.com.br/cases/123",
+            "chamado_resolvido": False,
         },
     )
 
@@ -45,10 +47,18 @@ async def test_create_refund_starts_unchecked_and_can_be_patched(client, make_us
     assert created["conferido"] is False
     assert created["tipo"] == "Cliente"
     assert created["conta"] == "Loja Teste"
+    assert created["chamado_url"] == "https://www.mercadolivre.com.br/cases/123"
+    assert created["chamado_resolvido"] is False
 
     patch = await client.patch(
         f"/api/refunds/{created['id']}",
-        json={"conferido": True, "tipo": "Logistica", "chamado": "CH-1"},
+        json={
+            "conferido": True,
+            "tipo": "Logistica",
+            "chamado": "CH-1",
+            "chamado_url": "https://www.mercadolivre.com.br/cases/CH-1",
+            "chamado_resolvido": True,
+        },
     )
 
     assert patch.status_code == 200
@@ -56,6 +66,8 @@ async def test_create_refund_starts_unchecked_and_can_be_patched(client, make_us
     assert updated["conferido"] is True
     assert updated["tipo"] == "Logistica"
     assert updated["chamado"] == "CH-1"
+    assert updated["chamado_url"] == "https://www.mercadolivre.com.br/cases/CH-1"
+    assert updated["chamado_resolvido"] is True
 
 
 async def test_cliente_reembolso_is_clamped_to_non_positive(client, make_user, auth_as):
