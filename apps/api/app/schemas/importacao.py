@@ -138,6 +138,13 @@ class ImportProductOut(ImportProductBase):
     # valor_usd × taxa × (1+frete) + adicional não se aplica (migration
     # 0128). Ausente / null → operador ainda não preencheu.
     lote_custos_manuais: dict[str, Decimal | None] = {}
+    # Migration 0138 (Celular). Override por (produto, lote) do SKU
+    # destino pra entrada de estoque no Bling. Frontend usa pra mostrar
+    # o valor atual do dropdown; null = comportamento default (vai pro
+    # SKU do próprio ImportProduct). Paralelo a `lote_item_ids` — o
+    # PATCH precisa do item_id.
+    lote_target_skus: dict[str, str | None] = {}
+    lote_item_ids: dict[str, str] = {}
     created_at: datetime
     updated_at: datetime
 
@@ -217,9 +224,13 @@ class ImportLoteItemPatch(BaseModel):
       digitado pelo operador quando o lote não tem taxa/frete (a
       fórmula valor_usd × taxa × (1+frete) + adicional não se aplica).
       `None` explícito limpa.
+    - `bling_stock_target_sku`: aba Importação Celular — SKU destino
+      override pra entrada de estoque no Bling ao fechar lote.
+      `None` explícito limpa (volta a usar o SKU do ImportProduct).
     """
     pago: bool | None = None
     custo_manual: Decimal | None = None
+    bling_stock_target_sku: str | None = None
 
 
 # ── Frete (aba Frete do Celular, etapa 4) ─────────────────────────────

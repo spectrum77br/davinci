@@ -23,7 +23,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -397,6 +397,11 @@ async def list_products(
     # Custo BRL manual por (produto, lote) — usado em lotes sem
     # taxa/frete (i48 e similares). Migration 0128.
     custo_manual_by_pair: dict[UUID, dict[str, Decimal | None]] = {}
+    # Override do SKU destino da entrada de estoque no Bling, por
+    # (produto, lote). Frontend usa pro dropdown da aba Celular.
+    # `item_id_by_pair` pareado pra o PATCH /lote_item/{id}. Migration 0138.
+    target_sku_by_pair: dict[UUID, dict[str, str | None]] = {}
+    item_id_by_pair: dict[UUID, dict[str, str]] = {}
     # Acumuladores pro custo_realizado computed (média ponderada por qty
     # do custoBRL de cada lote onde o produto aparece). Σ(qty × custoBRL)
     # no numerador, Σ(qty) no denominador. Só items com valor_usd não-null
@@ -407,6 +412,8 @@ async def list_products(
         qty_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = item.quantidade
         valor_usd_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = item.valor_usd
         custo_manual_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = item.custo_manual
+        target_sku_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = item.bling_stock_target_sku
+        item_id_by_pair.setdefault(item.product_id, {})[str(item.lote_id)] = str(item.id)
         if lote.fechamento is None:
             qty_by_product_open[item.product_id] = (
                 qty_by_product_open.get(item.product_id, 0) + (item.quantidade or 0)
@@ -585,6 +592,8 @@ async def list_products(
             lote_quantidades=qty_by_pair.get(p.id, {}),
             lote_valores_usd=valor_usd_by_pair.get(p.id, {}),
             lote_custos_manuais=custo_manual_by_pair.get(p.id, {}),
+            lote_target_skus=target_sku_by_pair.get(p.id, {}),
+            lote_item_ids=item_id_by_pair.get(p.id, {}),
             created_at=p.created_at, updated_at=p.updated_at,
         ))
     return out
@@ -1337,7 +1346,75 @@ async def patch_lote_item(
     # `custo_manual` aceita None explícito pra limpar.
     if "custo_manual" in fields:
         row.custo_manual = fields["custo_manual"]
+    # `bling_stock_target_sku` aceita None explícito pra limpar (volta
+    # a usar o SKU do ImportProduct na hora de mandar pro Bling).
+    if "bling_stock_target_sku" in fields:
+        v = fields["bling_stock_target_sku"]
+        row.bling_stock_target_sku = v.strip() if isinstance(v, str) and v.strip() else None
     await session.commit()
+
+
+# Suffixes de tag usados no SKU (.ci/.pi/.ra/.sa/.sp/.us/.cd). Espelha
+# SUFFIX_TAGS em app.services.sku_tags. Usado pra calcular o "prefixo
+# base" do SKU (ex.: i203.sa → i203) no endpoint de variantes.
+_SKU_SUFFIX_RE = re.compile(r"\.(ci|pi|ra|sa|sp|us|cd)$", re.IGNORECASE)
+
+
+@router.get("/lote_item/{item_id}/sku-variants")
+async def list_lote_item_sku_variants(
+    item_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+) -> dict:
+    """Lista os SKUs disponíveis no Bling com o mesmo prefixo base do
+    SKU do item (ex.: i203.sa, i203.sp pra um item com SKU i203.sa).
+    Usado pelo dropdown 'destino' na aba Importação Celular.
+
+    Base = SKU sem o sufixo de tag (.ci/.pi/.ra/.sa/.sp/.us/.cd).
+    Inclui o próprio base sem sufixo se existir como produto ativo.
+    Só retorna produtos com `bling_product_id` setado (caso contrário
+    o service não conseguiria enviar estoque)."""
+    row = (await session.execute(
+        select(ImportLoteItem.bling_stock_target_sku, ImportProduct.sku)
+        .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
+        .where(ImportLoteItem.id == item_id)
+    )).one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "lote_item_not_found"})
+    target_sku, product_sku = row
+    base_sku = _SKU_SUFFIX_RE.sub("", (product_sku or "").strip())
+    if not base_sku:
+        return {"base": "", "current": target_sku or product_sku, "variants": []}
+
+    base_lower = base_sku.lower()
+    variant_re = rf"^{re.escape(base_lower)}\.(ci|pi|ra|sa|sp|us|cd)$"
+    rows = (await session.execute(
+        select(Product.sku, Product.name)
+        .where(
+            or_(
+                func.lower(func.btrim(Product.sku)) == base_lower,
+                func.lower(func.btrim(Product.sku)).op("~")(variant_re),
+            ),
+            Product.bling_product_id.is_not(None),
+            or_(Product.situacao == "A", Product.situacao.is_(None)),
+        )
+    )).all()
+    seen: dict[str, str | None] = {}
+    for sku, name in rows:
+        k = (sku or "").strip()
+        if not k:
+            continue
+        if k.lower() not in seen:
+            seen[k.lower()] = name
+    variants = [
+        {"sku": k, "name": v}
+        for k, v in sorted(seen.items(), key=lambda kv: kv[0])
+    ]
+    return {
+        "base": base_sku,
+        "current": target_sku or product_sku,
+        "variants": variants,
+    }
 
 
 @router.post("/lote_ajuste", response_model=ImportResumoOut, status_code=status.HTTP_201_CREATED)

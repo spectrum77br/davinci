@@ -155,6 +155,11 @@ type Product = {
   // taxa/frete). Migration 0128. Quando preenchido, substitui a
   // fórmula no realizado do lote.
   lote_custos_manuais: Record<string, string | number | null>
+  // Migration 0138 (Celular). Override do SKU destino da entrada de
+  // estoque no Bling, por lote. NULL = vai pro SKU do próprio produto.
+  // `lote_item_ids` pareado pra o PATCH no dropdown.
+  lote_target_skus?: Record<string, string | null>
+  lote_item_ids?: Record<string, string>
 }
 type CotacaoParams = {
   categoria: string
@@ -1015,6 +1020,55 @@ function scheduleLoteItemCustoManual(prod: Product, loteId: string, raw: string)
     }
   }, 400)
 }
+// Aba Importação Celular: cache de variantes de SKU por item_id. Lazy
+// load no focus do dropdown (POR ITEM, porque o "prefixo base" muda
+// entre produtos). Migration 0138.
+const variantsByItem = ref<Record<string, Array<{ sku: string; name: string | null }>>>({})
+
+async function loadSkuVariants(itemId: string) {
+  if (!itemId || variantsByItem.value[itemId]) return
+  try {
+    const r = await api<{ variants: Array<{ sku: string; name: string | null }> }>(
+      `/api/importacao/lote_item/${itemId}/sku-variants`,
+    )
+    variantsByItem.value = { ...variantsByItem.value, [itemId]: r.variants || [] }
+  } catch {
+    variantsByItem.value = { ...variantsByItem.value, [itemId]: [] }
+  }
+}
+
+// Opções do dropdown de destino. Combina: SKU do produto + SKU
+// atualmente selecionado (se diferente) + variantes carregadas (lazy).
+// Set garante dedupe. Cobre o caso "variantes ainda não carregadas mas
+// já existe target_sku setado" — a opção atual aparece de qualquer jeito.
+function loteItemSkuOptions(prod: Product, loteId: string): string[] {
+  const itemId = prod.lote_item_ids?.[loteId] || ''
+  const current = prod.lote_target_skus?.[loteId] || prod.sku
+  const all = new Set<string>()
+  if (prod.sku) all.add(prod.sku)
+  if (current) all.add(current)
+  for (const v of variantsByItem.value[itemId] || []) {
+    if (v.sku) all.add(v.sku)
+  }
+  return Array.from(all).sort()
+}
+
+// Persiste a escolha do SKU destino no item. raw vazio → null (limpa
+// override, volta a usar o SKU do próprio ImportProduct).
+async function setLoteItemTargetSku(
+  prod: Product, loteId: string, itemId: string, raw: string,
+) {
+  const novo = raw && raw.trim() && raw.trim() !== prod.sku ? raw.trim() : null
+  prod.lote_target_skus = { ...(prod.lote_target_skus || {}), [loteId]: novo }
+  try {
+    await api(`/api/importacao/lote_item/${itemId}`, {
+      method: 'PATCH', body: { bling_stock_target_sku: novo },
+    })
+  } catch (e: any) {
+    errorText.value = `Falha ao salvar SKU destino: ${e?.data?.detail?.code || 'erro'}`
+  }
+}
+
 async function loadLotesOnly() {
   try { lotes.value = await api<Lote[]>(`/api/importacao/lotes?${catQs()}`) } catch { /* ignore */ }
 }
@@ -1878,6 +1932,25 @@ onScopeDispose(() => {
                     :disabled="!canEdit"
                     @input="(e) => scheduleLoteItem(row, lote.id, Number((e.target as HTMLInputElement).value) || 0)"
                   />
+                  <!-- Dropdown destino do estoque no Bling. Só aparece
+                       em Celular, com lote aberto, item já criado
+                       (item_id existe) e quantidade > 0. Default = SKU
+                       do produto; operador escolhe se quiser
+                       redirecionar (ex.: i203.sa → i203.sp). -->
+                  <select
+                    v-if="isCelular
+                      && lote.fechamento == null
+                      && row.lote_item_ids?.[lote.id]
+                      && (row.lote_quantidades[lote.id] || 0) > 0"
+                    class="mt-0.5 w-full text-[10px] border rounded px-1 py-0.5 bg-white"
+                    :value="row.lote_target_skus?.[lote.id] || row.sku"
+                    :disabled="!canEdit"
+                    title="Destino da entrada de estoque no Bling"
+                    @focus="() => loadSkuVariants(row.lote_item_ids![lote.id])"
+                    @change="(e) => setLoteItemTargetSku(row, lote.id, row.lote_item_ids![lote.id], (e.target as HTMLSelectElement).value)"
+                  >
+                    <option v-for="sku in loteItemSkuOptions(row, lote.id)" :key="sku" :value="sku">{{ sku }}</option>
+                  </select>
                 </td>
                 <template v-if="isCelular">
                   <td :class="loteBgClass(lote.nome)">

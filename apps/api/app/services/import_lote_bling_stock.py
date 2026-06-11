@@ -149,15 +149,25 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
                 item.bling_stock_error = "quantidade_zero"
                 summary["skipped"] += 1
                 continue
-            # Resolve o bling_product_id: ImportProduct → Product local → Bling
-            # find by SKU. Se acharmos via SKU, salva de volta em ImportProduct
-            # pra próximas execuções não bater no Bling.
-            bling_pid: int | None = (
-                int(product.bling_product_id) if product.bling_product_id else None
-            )
+            # SKU destino: override do item (operador escolheu redirecionar
+            # via dropdown na aba Celular) tem prioridade sobre o SKU do
+            # ImportProduct. Útil quando o lote tem i203.sa mas o operador
+            # quer a entrada em i203.sp (mesmo modelo, tag diferente).
+            target_sku = (item.bling_stock_target_sku or product.sku or "").strip()
+
+            # Resolve o bling_product_id. Se NÃO houver override, tenta o
+            # `product.bling_product_id` salvo (rápido). Em qualquer outro
+            # caso, resolve pelo SKU (local + Bling). Só persiste de volta
+            # em ImportProduct quando o target_sku é o SKU dele mesmo.
+            bling_pid: int | None = None
+            same_sku = target_sku.lower() == (product.sku or "").strip().lower()
+            if same_sku and product.bling_product_id:
+                bling_pid = int(product.bling_product_id)
             if bling_pid is None:
-                bling_pid = await _resolve_bling_product_id(session, client, product.sku)
-                if bling_pid is not None:
+                bling_pid = await _resolve_bling_product_id(
+                    session, client, target_sku,
+                )
+                if bling_pid is not None and same_sku and not product.bling_product_id:
                     product.bling_product_id = bling_pid
             if bling_pid is None:
                 item.bling_stock_status = "skipped"
@@ -166,7 +176,8 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
                 logger.warning(
                     "import_lote_stock_item_no_bling_product",
                     lote_id=str(lote_id), item_id=str(item.id),
-                    product_id=str(product.id), sku=product.sku,
+                    product_id=str(product.id),
+                    sku=product.sku, target_sku=target_sku,
                 )
                 continue
 
@@ -184,7 +195,8 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
                 logger.info(
                     "import_lote_stock_item_sent",
                     lote_id=str(lote_id), item_id=str(item.id),
-                    sku=product.sku, qty=int(item.quantidade),
+                    sku=product.sku, target_sku=target_sku,
+                    qty=int(item.quantidade),
                     bling_product_id=bling_pid,
                 )
             except Exception as exc:  # noqa: BLE001

@@ -219,6 +219,13 @@ class ImportLoteItem(Base, TimestampMixin):
     bling_stock_pushed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+    # Migration 0138. Override do SKU destino da entrada de estoque no
+    # Bling. NULL = vai pro SKU do ImportProduct (default); preenchido =
+    # operador escolheu redirecionar (ex.: i203.sa → i203.sp). Só celular
+    # usa — frontend só expõe o dropdown nessa categoria.
+    bling_stock_target_sku: Mapped[str | None] = mapped_column(
+        String(50), nullable=True,
+    )
 
 
 class ImportResumo(Base):
