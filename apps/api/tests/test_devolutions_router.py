@@ -85,7 +85,7 @@ async def test_order_lookup_uses_base_catalog_name_when_split_sku_missing(
                     'dg019.pi+a003.pi+a004.pi'::text,
                     'Uranyx Fossibot F105 12.64 - Preto + Fone U9 + Relogio'::text,
                     1::integer,
-                    CAST(:order_item_id AS uuid),
+                    '{order_item_id}'::uuid,
                     NULL::text,
                     NULL::text,
                     NULL::text,
@@ -115,8 +115,7 @@ async def test_order_lookup_uses_base_catalog_name_when_split_sku_missing(
                 uf_destino
             )
             """  # noqa: S608
-        ),
-        {"order_item_id": order_item_id},
+        )
     )
     await db.commit()
 
@@ -312,3 +311,88 @@ async def test_order_lookup_null_store_and_missing_cost_fall_back(
     assert rows[0]["pedido_bling"] == "217586"
     assert rows[0]["conta"] == "Sem loja"
     assert rows[0]["custo_produto"] == 126
+
+
+async def test_order_lookup_returns_all_units_of_large_order(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Pedido com mais de 50 unidades (ex.: 280451 com 99) deve voltar completo:
+    o limite de 50 protege buscas fuzzy por nº de PEDIDOS, não pode truncar as
+    unidades explodidas de um mesmo pedido (regressão do LIMIT 50 por linha)."""
+    user = await make_user(permissions=_devolution_permissions(edit=False, delete=False))
+    auth_as(user)
+    schema = get_settings().database_schema
+
+    await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_devolucoes AS
+            SELECT * FROM (VALUES
+                (
+                    '2026-06-01T03:00:00+00:00'::timestamptz,
+                    '280451'::text,
+                    NULL::text,
+                    'Shopee Jlas'::text,
+                    NULL::bigint,
+                    'a900.pi'::text,
+                    'Fone Atacado'::text,
+                    60::integer,
+                    NULL::uuid,
+                    NULL::text,
+                    NULL::text,
+                    NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+                ),
+                (
+                    '2026-06-01T03:00:00+00:00'::timestamptz,
+                    '280451'::text,
+                    NULL::text,
+                    'Shopee Jlas'::text,
+                    NULL::bigint,
+                    'a901.pi'::text,
+                    'Relogio Atacado'::text,
+                    39::integer,
+                    NULL::uuid,
+                    NULL::text,
+                    NULL::text,
+                    NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+                )
+            ) AS t(
+                data,
+                pedido_bling,
+                pedido_marketplace,
+                loja_nome,
+                bling_loja_id,
+                sku,
+                produto,
+                quantidade,
+                bling_order_item_id,
+                nome_destinatario,
+                cep_destino,
+                endereco_destino,
+                numero_destino,
+                complemento_destino,
+                bairro_destino,
+                cidade_destino,
+                uf_destino
+            )
+            """  # noqa: S608
+        )
+    )
+    await db.commit()
+
+    try:
+        response = await client.get("/api/devolutions/order-lookup?pedido=280451")
+    finally:
+        await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+        await db.commit()
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 99
+    skus = [r["sku"] for r in rows]
+    assert skus.count("a900.pi") == 60
+    assert skus.count("a901.pi") == 39

@@ -253,34 +253,43 @@ async def lookup_devolution_order(
         await session.execute(
             text(
                 f"""
-                SELECT
-                    v.data,
-                    v.pedido_bling::text AS pedido_bling,
-                    v.pedido_marketplace::text AS pedido_marketplace,
-                    COALESCE(NULLIF(btrim(v.loja_nome), ''), 'Loja ' || v.bling_loja_id, 'Sem loja') AS conta,
-                    v.sku,
-                    v.produto AS produtos,
-                    1 AS quantidade,
-                    COALESCE(bo.preco_custo::numeric, 0)::double precision AS custo_produto,
-                    v.nome_destinatario,
-                    v.cep_destino,
-                    v.endereco_destino,
-                    v.numero_destino,
-                    v.complemento_destino,
-                    v.bairro_destino,
-                    v.cidade_destino,
-                    v.uf_destino
-                FROM "{SCHEMA}".vw_devolucoes v
-                LEFT JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
-                CROSS JOIN generate_series(1, GREATEST(1, COALESCE(v.quantidade::int, 1))) gs(unit_num)
-                WHERE (
-                    v.pedido_bling::text = :pedido
-                    OR v.pedido_marketplace::text = :pedido
-                    OR v.cep_destino ILIKE :q_like
-                    {name_clause}
-                )
-                ORDER BY v.data DESC NULLS LAST, v.pedido_bling, v.sku, gs.unit_num
-                LIMIT 50
+                SELECT t.* FROM (
+                    SELECT
+                        v.data,
+                        v.pedido_bling::text AS pedido_bling,
+                        v.pedido_marketplace::text AS pedido_marketplace,
+                        COALESCE(NULLIF(btrim(v.loja_nome), ''), 'Loja ' || v.bling_loja_id, 'Sem loja') AS conta,
+                        v.sku,
+                        v.produto AS produtos,
+                        1 AS quantidade,
+                        COALESCE(bo.preco_custo::numeric, 0)::double precision AS custo_produto,
+                        v.nome_destinatario,
+                        v.cep_destino,
+                        v.endereco_destino,
+                        v.numero_destino,
+                        v.complemento_destino,
+                        v.bairro_destino,
+                        v.cidade_destino,
+                        v.uf_destino,
+                        gs.unit_num AS _unit_num,
+                        -- Limita por nº de PEDIDOS (proteção p/ buscas fuzzy por
+                        -- CEP/nome), nunca por unidade: um pedido grande precisa
+                        -- voltar com todas as unidades.
+                        DENSE_RANK() OVER (
+                            ORDER BY v.data DESC NULLS LAST, v.pedido_bling
+                        ) AS _pedido_rank
+                    FROM "{SCHEMA}".vw_devolucoes v
+                    LEFT JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
+                    CROSS JOIN generate_series(1, GREATEST(1, COALESCE(v.quantidade::int, 1))) gs(unit_num)
+                    WHERE (
+                        v.pedido_bling::text = :pedido
+                        OR v.pedido_marketplace::text = :pedido
+                        OR v.cep_destino ILIKE :q_like
+                        {name_clause}
+                    )
+                ) t
+                WHERE t._pedido_rank <= 50
+                ORDER BY t.data DESC NULLS LAST, t.pedido_bling, t.sku, t._unit_num
                 """  # noqa: S608
             ),
             {"pedido": pedido, "q_like": q_like},
