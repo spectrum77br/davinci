@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, reactive } from 'vue'
-import { Plus, RefreshCw, X, ExternalLink } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, ExternalLink, Trash2 } from 'lucide-vue-next'
 import {
   MARKETPLACES,
   MARKETPLACE_SHORT,
@@ -61,6 +61,7 @@ const search = ref<string>('')
 const showNew = ref(false)
 
 const canEdit = useCan('empresa', 'edit')
+const canDelete = useCan('empresa', 'delete')
 
 async function refresh() {
   loading.value = true
@@ -468,6 +469,22 @@ async function removeStoreCell(row: GridRow, mk: Marketplace) {
   }
 }
 
+async function deleteCompany(row: GridRow) {
+  if (!canDelete.value) return
+  const { razao_social, apelido } = row.company
+  // Cascade: apaga lojas, store_info e vínculos de Cadastros da empresa.
+  if (!confirm(
+    `Excluir a empresa "${apelido}" (${razao_social})?\n\n` +
+    `Isso apaga TODAS as lojas, contas e vínculos dela. Não dá pra desfazer.`,
+  )) return
+  try {
+    await api(`/api/companies/${row.company.id}`, { method: 'DELETE' })
+    await refresh()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro ao excluir'
+  }
+}
+
 async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
   if (!canEdit.value) return
   const enabled = new Set(row.company.enabled_marketplaces || [])
@@ -560,6 +577,14 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 >
                   <ExternalLink class="size-3 text-muted-foreground" />
                 </NuxtLink>
+                <button
+                  v-if="canDelete"
+                  class="opacity-0 group-hover:opacity-100 shrink-0 p-0.5 hover:bg-destructive/10 rounded"
+                  title="Excluir empresa"
+                  @click.stop="deleteCompany(row)"
+                >
+                  <Trash2 class="size-3 text-destructive" />
+                </button>
               </div>
             </td>
             <td
