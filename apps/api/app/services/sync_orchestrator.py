@@ -23,12 +23,13 @@ import asyncio
 import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Iterable
 from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import and_, select, text, update
+from sqlalchemy import and_, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
@@ -38,6 +39,7 @@ from app.models import (
     AlertType,
     BackgroundJob,
     BackgroundJobStatus,
+    ImportProduct,
     Integration,
     IntegrationPlatform,
     LinkSyncStatus,
@@ -227,6 +229,27 @@ class SyncOrchestrator:
             product.observation = parsed["observation"]
         if parsed.get("bling_cost_price") is not None:
             product.bling_cost_price = parsed["bling_cost_price"]
+            # Real-time: o MESMO custo fresco do Bling propaga agora pra
+            # import_products.custo_bling (casado por SKU), na mesma
+            # transação que atualiza products.bling_cost_price. Esse refresh
+            # roda toda vez que o produto sincroniza (webhook de estoque,
+            # sync manual), então a aba Importação acompanha o custo do
+            # Bling na hora — o cron diário (run_sync_import_bling_costs)
+            # fica só de safety-net. quantize HALF_UP p/ bater com o
+            # func.round(.,2) do cron (custo_bling é Numeric(10,2)) e não
+            # ficar pingando 1 centavo. IS DISTINCT FROM: só grava se mudou.
+            new_custo = Decimal(str(parsed["bling_cost_price"])).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            await self.session.execute(
+                update(ImportProduct)
+                .where(
+                    ImportProduct.sku == product.sku,
+                    ImportProduct.custo_bling.is_distinct_from(new_custo),
+                )
+                .values(custo_bling=new_custo, updated_at=func.now())
+                .execution_options(synchronize_session=False)
+            )
         if parsed.get("price") is not None:
             product.price = parsed["price"]
         if parsed.get("name"):
