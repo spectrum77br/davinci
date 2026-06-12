@@ -1975,29 +1975,31 @@ onScopeDispose(() => {
                    computed via custoBRL(prod, lote)). -->
               <template v-for="lote in visibleLotes" :key="`cell-${row.id}-${lote.id}`">
                 <td class="border-l lote-quant-cell" :class="[loteBgClass(lote.nome), { 'lote-quant-cell-cel': isCelular }]">
-                  <div class="quant-stack">
+                  <div class="quant-cell-wrap">
                     <input
                       type="number"
                       class="cell-input text-right"
+                      :class="{ 'quant-input-cel': isCelular && row.lote_item_ids?.[lote.id] && (row.lote_quantidades[lote.id] || 0) > 0 }"
                       :value="row.lote_quantidades[lote.id] ?? ''"
                       :disabled="!canEdit"
                       @input="(e) => scheduleLoteItem(row, lote.id, Number((e.target as HTMLInputElement).value) || 0)"
                     />
-                    <!-- Dropdown destino do estoque no Bling. Em Celular,
-                         sempre visível enquanto houver item_id e qty > 0
-                         (mesmo com lote fechado — permite o operador
-                         corrigir um SKU que foi pulado/errou e
-                         reprocessar automaticamente). Default = SKU do
-                         produto; operador escolhe se quiser redirecionar
-                         (ex.: i203.sa → i203.sp). -->
+                    <!-- Seletor de SKU destino DENTRO da célula da quantidade.
+                         Native <select> reduzido a uma setinha no canto (não
+                         clipa em overflow, ao contrário de popover custom).
+                         Clicar abre a lista de destinos; o número continua
+                         editável. Caret fica âmbar quando há override ativo
+                         (target != SKU do produto). Só Celular + item_id +
+                         qty>0 (permite corrigir mesmo com lote fechado). -->
                     <select
                       v-if="isCelular
                         && row.lote_item_ids?.[lote.id]
                         && (row.lote_quantidades[lote.id] || 0) > 0"
-                      class="quant-dest-select"
+                      class="quant-dest-overlay"
+                      :class="{ 'has-override': !!row.lote_target_skus?.[lote.id] && row.lote_target_skus[lote.id] !== row.sku }"
                       :value="row.lote_target_skus?.[lote.id] || row.sku"
                       :disabled="!canEdit"
-                      title="Destino da entrada de estoque no Bling"
+                      :title="`Destino no Bling: ${row.lote_target_skus?.[lote.id] || row.sku} (clique pra mudar)`"
                       @focus="() => loadSkuVariants(row.lote_item_ids![lote.id])"
                       @change="(e) => setLoteItemTargetSku(row, lote.id, row.lote_item_ids![lote.id], (e.target as HTMLSelectElement).value)"
                     >
@@ -2929,46 +2931,76 @@ onScopeDispose(() => {
   min-width: 50px;
 }
 
-/* Célula de quantidade do body. Input em cima + dropdown de SKU destino
- * (só Celular) empilhados, ambos ocupando 100% da MESMA largura → colunas
- * uniformes (antes o dropdown alargava só as células com qty, deixando a
- * grade torta). Mala continua compacto (sem .lote-quant-cell-cel). */
+/* Célula de quantidade do body. O input de qty ocupa a célula inteira; o
+ * seletor de SKU destino (só Celular) vira um caret sobreposto no canto
+ * direito — clica no número e abre a lista de destinos sem deslocar o
+ * layout (native select evita clipping do overflow da tabela). Mala
+ * continua compacto (sem .lote-quant-cell-cel). */
+/* Divisor entre lotes: a 1ª célula de cada grupo de lote leva `border-l`
+ * (Tailwind 1px) — fraco e some no meio da grade. Reforça pra 2px sólido
+ * usando a cor de borda do tema, deixando claro onde um lote termina e o
+ * próximo começa, alinhado em todas as linhas (header + body). */
+.lote-label.border-l,
+.col-quant.border-l,
+.col-total.border-l,
+.lote-quant-cell.border-l {
+  border-left: 2px solid hsl(var(--border)) !important;
+}
 .lote-quant-cell {
   padding: 2px 3px;
-  vertical-align: top;
+  vertical-align: middle;
 }
 .lote-quant-cell-cel {
-  /* largura fixa que acomoda o SKU do dropdown (ex.: "i203.sp") sem cortar,
-   * mantendo todas as colunas quant do Celular do mesmo tamanho. */
-  width: 62px;
-  min-width: 62px;
+  /* largura fixa pra todas as colunas quant do Celular ficarem iguais. */
+  width: 56px;
+  min-width: 56px;
 }
-.quant-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  align-items: stretch;
+.quant-cell-wrap {
+  position: relative;
   width: 100%;
 }
-.quant-stack > .cell-input {
+.quant-cell-wrap > .cell-input {
   width: 100%;
   box-sizing: border-box;
 }
-.quant-dest-select {
-  width: 100%;
-  box-sizing: border-box;
-  font-size: 10px;
-  line-height: 1.2;
-  border: 1px solid hsl(var(--border));
-  border-radius: 4px;
-  padding: 1px 2px;
-  background: hsl(var(--background));
-  color: inherit;
+/* deixa espaço à direita pro caret do seletor de destino não cobrir o número */
+.quant-input-cel {
+  padding-right: 14px;
+}
+/* seletor sobreposto: invisível exceto pelo caret no canto direito.
+ * appearance:none + texto transparente → só o caret (background) aparece;
+ * o select cobre só a faixa do caret pra não bloquear a edição do número. */
+.quant-dest-overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 16px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  color: transparent;
   cursor: pointer;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  /* caret desenhado via background (não usa o nativo, que ficaria escondido) */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%2394a3b8' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
 }
-.quant-dest-select:disabled {
+.quant-dest-overlay > option {
+  color: hsl(var(--foreground));
+  background: hsl(var(--background));
+}
+/* destino != SKU padrão → caret âmbar pra sinalizar override */
+.quant-dest-overlay.has-override {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%23d97706' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E");
+}
+.quant-dest-overlay:disabled {
   cursor: default;
-  opacity: 0.6;
+  opacity: 0.4;
 }
 
 /* ── Cotação table ─────────────────────────────────────────────── */
