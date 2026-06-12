@@ -24,3 +24,7 @@ class FaturamentoOut(BaseModel):
     total_faturamento: float
     start: datetime
     end: datetime
+    # Equipes que o usuário pode filtrar (admin → todas as equipes com loja
+    # cadastrada; não-admin → suas sales_teams). `team` = filtro aplicado.
+    teams: list[int] = []
+    team: int | None = None

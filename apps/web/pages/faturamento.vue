@@ -26,6 +26,8 @@ type FaturamentoOut = {
   total_faturamento: number
   start: string
   end: string
+  teams: number[]
+  team: number | null
 }
 
 // Período: por mês (default = mês atual). Modo "Personalizado" mantém
@@ -54,6 +56,11 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const data = ref<FaturamentoOut | null>(null)
 
+// Filtro de equipe: null = todas as lojas do escopo do usuário. O <select> só
+// aparece quando o backend devolve mais de uma equipe (admin ou multi-equipe).
+const team = ref<number | null>(null)
+const teams = computed(() => data.value?.teams ?? [])
+
 function periodoParams(): { start: string; end: string } {
   if (mode.value === 'custom') {
     return { start: `${customStart.value}T00:00:00`, end: `${customEnd.value}T23:59:59` }
@@ -74,6 +81,7 @@ async function load() {
   try {
     const { start, end } = periodoParams()
     const qs = new URLSearchParams({ start, end })
+    if (team.value != null) qs.set('team', String(team.value))
     data.value = await api<FaturamentoOut>(`/api/faturamento?${qs.toString()}`)
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -169,6 +177,20 @@ function fmtInt(n: number | null | undefined): string {
           class="ml-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 text-xs hover:opacity-90"
           @click="load"
         >Aplicar</button>
+      </template>
+
+      <!-- Filtro de equipe: só aparece quando há mais de uma equipe disponível
+           (admin ou usuário multi-equipe). null = todas as lojas do escopo. -->
+      <template v-if="teams.length > 1">
+        <span class="ml-2 text-xs text-muted-foreground">Equipe:</span>
+        <select
+          v-model.number="team"
+          class="h-7 border rounded px-2 bg-background text-xs"
+          @change="load"
+        >
+          <option :value="null">Todas as equipes</option>
+          <option v-for="t in teams" :key="t" :value="t">Equipe {{ t }}</option>
+        </select>
       </template>
     </div>
 

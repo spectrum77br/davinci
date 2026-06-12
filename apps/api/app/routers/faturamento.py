@@ -26,13 +26,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
-from app.models import BlingOrder, StoreInfo, User
+from app.models import BlingOrder, StoreInfo, User, UserRole
 from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut
 
 router = APIRouter(prefix="/api/faturamento", tags=["faturamento"])
@@ -48,6 +48,7 @@ async def list_faturamento(
     user: Annotated[User, Depends(require_permission("faturamento", "view"))],
     start: datetime | None = Query(None),
     end: datetime | None = Query(None),
+    team: int | None = Query(None),
 ) -> FaturamentoOut:
     """Resumo por loja, no período, dos pedidos entregues.
 
@@ -59,6 +60,34 @@ async def list_faturamento(
         end = datetime.now(UTC)
     if start is None:
         start = end - timedelta(days=90)
+
+    # Equipes que ESTE usuário pode filtrar. Admin → todas as equipes com
+    # loja cadastrada em store_info. Não-admin → suas próprias sales_teams
+    # (mesma base do user_scope, que já restringe as linhas visíveis).
+    if user.role == UserRole.ADMIN:
+        teams_avail = (
+            (
+                await session.execute(
+                    select(StoreInfo.sales_team)
+                    .where(StoreInfo.sales_team.isnot(None))
+                    .distinct()
+                    .order_by(StoreInfo.sales_team)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    else:
+        teams_avail = sorted(user.sales_teams or [])
+
+    # Filtro explícito de equipe: só vale se o usuário tem acesso a ela.
+    if team is not None and team not in teams_avail:
+        raise HTTPException(status_code=403, detail={"code": "team_not_allowed"})
+
+    # user_scope já restringe ao escopo do usuário; `team` afunila mais.
+    scope_clauses = [user_scope(StoreInfo, user)]
+    if team is not None:
+        scope_clauses.append(StoreInfo.sales_team == team)
 
     # CTE com max(total) por bling_id pra deduplicar — bling_orders tem uma
     # linha por item, total repete. Carrega `loja` (id da loja Bling) como
@@ -101,7 +130,7 @@ async def list_faturamento(
             StoreInfo,
             StoreInfo.bling_store_id == ord_cte.c.bling_store_id,
         )
-        .where(user_scope(StoreInfo, user))
+        .where(*scope_clauses)
         .group_by(
             ord_cte.c.bling_store_id,
             StoreInfo.platform,
@@ -147,4 +176,6 @@ async def list_faturamento(
         total_faturamento=round(total_faturamento, 2),
         start=start,
         end=end,
+        teams=list(teams_avail),
+        team=team,
     )
