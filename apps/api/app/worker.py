@@ -29,6 +29,7 @@ from app.services.alerts import emit_alert
 from app.services.audit.runner import run_audit
 from app.services.auto_link import run_auto_link
 from app.services.bling_kit_create import create_bling_kit_for_mark_job
+from app.services.bling_notas_token_refresh import run_refresh_bling_notas_tokens
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
 from app.services.email import get_email_sender, render_otp_html
@@ -588,6 +589,16 @@ async def bling_token_refresh(ctx: dict) -> None:
     single refresh per cycle is enough; the hourly cron + 30min window means
     at most one /oauth/token call per access token lifetime."""
     await _refresh_tokens_for(IntegrationPlatform.BLING, expiring_within_s=1800)
+
+
+async def bling_notas_token_refresh(ctx: dict) -> None:
+    """Refresh dos tokens das contas `bling_notas` (apps OAuth de emissão
+    de NF, separados da integração principal). AT do Bling dura 6h; o cron
+    a cada 5h (00/05/10/15/20 UTC) mantém o token sempre válido com uma
+    única chamada /oauth/token por conta por ciclo."""
+    async with session_scope() as s:
+        summary = await run_refresh_bling_notas_tokens(s)
+    logger.info("bling_notas_token_refresh_done", **summary)
 
 
 async def shopee_token_refresh(ctx: dict) -> None:
@@ -1181,6 +1192,7 @@ class WorkerSettings:
         check_marketplace_shipped_orders,
         bling_orders_safety_net_tick,
         bling_orders_period_sync_tick,
+        bling_notas_token_refresh,
         kit_components_sync,
     ]
     cron_jobs = [
@@ -1195,6 +1207,15 @@ class WorkerSettings:
         # 04:30 UTC = 01:30 BRT — janela tranquila. Estrutura muda raramente.
         cron(kit_components_sync, weekday="sun", hour=4, minute=30, run_at_startup=False),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
+        # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps
+        # 5/5/5/5/4h — sempre abaixo da expiração. minute=45 evita colidir
+        # com o refresh da integração principal (:15) no mesmo rate slot.
+        cron(
+            bling_notas_token_refresh,
+            hour={0, 5, 10, 15, 20},
+            minute=45,
+            run_at_startup=False,
+        ),
         cron(shopee_token_refresh, hour={0, 4, 8, 12, 16, 20}, minute=0, run_at_startup=False),
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(tiktok_token_refresh, hour={0, 6, 12, 18}, minute=45, run_at_startup=False),
@@ -1333,6 +1354,7 @@ __all__ = [
     "auto_link_run",
     "alerts_cleanup",
     "background_jobs_gc",
+    "bling_notas_token_refresh",
     "bling_orders_safety_net_tick",
     "bling_orders_period_sync_tick",
     "bling_token_refresh",
