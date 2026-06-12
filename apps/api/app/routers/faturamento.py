@@ -7,6 +7,11 @@ Definições fixadas com o operador:
 - bling_orders tem UMA LINHA POR ITEM (item_index), e `total` se repete em
   cada linha do mesmo pedido. Pra somar o faturamento sem inflar é
   obrigatório DEDUPLICAR por pedido primeiro: max(total) GROUP BY bling_id.
+- Agrupamento por LOJA usa `bling_orders.loja` (id da loja no Bling), NÃO o
+  FK store_id. Motivo: ~16k pedidos entregues têm store_id NULL (a ingestão
+  nem sempre vincula a Store), e um INNER join em Store descartava esses
+  pedidos — escondendo ~R$24M de receita real. `loja` está preenchido em
+  quase 100% dos pedidos e casa 1:1 com store_info.bling_store_id.
 - Escopo por equipe via user_scope(StoreInfo, user). Admin vê tudo;
   usuário com sales_teams vê só lojas em store_info cuja sales_team está
   na lista; usuário sem equipe vê tudo (comportamento atual da Fase 1).
@@ -22,13 +27,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import Text, cast, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
 from app.models import BlingOrder, StoreInfo, User
-from app.models.company import Store
 from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut
 
 router = APIRouter(prefix="/api/faturamento", tags=["faturamento"])
@@ -56,12 +60,14 @@ async def list_faturamento(
     if start is None:
         start = end - timedelta(days=90)
 
-    # CTE com max(total) por bling_id pra deduplicar — bling_orders tem
-    # uma linha por item, total repete.
+    # CTE com max(total) por bling_id pra deduplicar — bling_orders tem uma
+    # linha por item, total repete. Carrega `loja` (id da loja Bling) como
+    # chave do relatório; store_id FK é NULL em ~16k entregues e dropava
+    # esses pedidos num INNER join.
     ord_cte = (
         select(
             BlingOrder.bling_id.label("bling_id"),
-            BlingOrder.store_id.label("store_id"),
+            BlingOrder.loja.label("bling_store_id"),
             func.max(BlingOrder.total).label("total"),
         )
         .where(
@@ -69,14 +75,13 @@ async def list_faturamento(
             BlingOrder.data >= start,
             BlingOrder.data < end,
         )
-        .group_by(BlingOrder.bling_id, BlingOrder.store_id)
+        .group_by(BlingOrder.bling_id, BlingOrder.loja)
         .cte("ord")
     )
 
     stmt = (
         select(
-            Store.id.label("store_id"),
-            Store.bling_store_id.label("bling_store_id"),
+            ord_cte.c.bling_store_id.label("bling_store_id"),
             StoreInfo.platform.label("tipo"),
             StoreInfo.account_name.label("loja"),
             StoreInfo.sales_team.label("sales_team"),
@@ -86,19 +91,19 @@ async def list_faturamento(
             ).label("faturamento"),
         )
         .select_from(ord_cte)
-        .join(Store, ord_cte.c.store_id == Store.id)
-        # LEFT JOIN: lojas sem store_info entram (com tipo/loja NULL). Pro
-        # filtro de escopo por equipe, o LEFT JOIN vira INNER na prática
-        # quando user.sales_teams está set — lojas sem store_info ou com
-        # sales_team fora da lista são removidas pelo where do user_scope.
+        # LEFT JOIN em store_info pelo id da loja Bling — recupera nome/
+        # plataforma/equipe quando cadastrada; pedidos de loja sem cadastro
+        # entram com tipo/loja NULL e AINDA contam no total. bling_store_id é
+        # único em store_info, então não há fan-out. Pro escopo por equipe, o
+        # where(user_scope) remove linhas sem store_info quando o usuário tem
+        # sales_teams (LEFT vira INNER na prática), igual antes.
         .outerjoin(
             StoreInfo,
-            StoreInfo.bling_store_id == cast(Store.bling_store_id, Text),
+            StoreInfo.bling_store_id == ord_cte.c.bling_store_id,
         )
         .where(user_scope(StoreInfo, user))
         .group_by(
-            Store.id,
-            Store.bling_store_id,
+            ord_cte.c.bling_store_id,
             StoreInfo.platform,
             StoreInfo.account_name,
             StoreInfo.sales_team,
@@ -114,7 +119,7 @@ async def list_faturamento(
     for r in rows:
         ped = int(r.pedidos or 0)
         fat = float(r.faturamento or 0)
-        # COALESCE pra exibição: account_name → platform → bling_store_id.
+        # COALESCE pra exibição: account_name → platform → id da loja Bling.
         loja_label = (
             r.loja
             or r.tipo
@@ -122,7 +127,11 @@ async def list_faturamento(
             or "Sem cadastro"
         )
         itens.append(FaturamentoLinha(
-            store_id=str(r.store_id),
+            # Chave única da linha = id da loja Bling (sentinel pros poucos
+            # pedidos sem `loja`). Não é mais o UUID de Store.
+            store_id=(
+                str(r.bling_store_id) if r.bling_store_id is not None else "sem-loja"
+            ),
             loja=loja_label,
             tipo=r.tipo,
             pedidos=ped,
