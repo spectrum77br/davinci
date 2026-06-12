@@ -1661,7 +1661,7 @@ onScopeDispose(() => {
            contexto de scroll vertical funcional). 100vh − 220px deixa
            espaço pro header da página + barra de parâmetros. -->
       <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 220px)">
-        <table class="grid-table text-xs border-collapse">
+        <table class="grid-table estoque-grid text-xs border-collapse">
           <thead class="thead-sticky">
             <!-- 8-row header. Fixed left columns use rowspan=8 so their
                  label sits centered across the full header height.
@@ -2964,6 +2964,17 @@ onScopeDispose(() => {
 }
 :global(.dark) .lote-divider-anchor {
   border-right-color: hsl(var(--foreground) / 0.5) !important;
+}
+/* Divisores HORIZONTAIS entre linhas (produtos). O `--border` do tema é
+ * cinza claro e some no fundo branco — operador não enxerga onde uma linha
+ * termina e outra começa, principalmente na área dos lotes. Escurece a
+ * borda inferior de cada célula do corpo (foreground/0.35) só nesta grade
+ * (Celular/Mala/Eletro), sem afetar cotação/kit. */
+.estoque-grid tbody td {
+  border-bottom-color: hsl(var(--foreground) / 0.35) !important;
+}
+:global(.dark) .estoque-grid tbody td {
+  border-bottom-color: hsl(var(--foreground) / 0.3) !important;
 }
 .lote-quant-cell {
   padding: 2px 3px;
