@@ -94,6 +94,7 @@ const sections: Section[] = [
     items: [
       { to: '/devolucoes', label: 'Devoluções', icon: Undo2, resource: 'devolucoes' },
       { to: '/reembolso', label: 'Reembolso', icon: Receipt, resource: 'reembolso' },
+      { to: '/notas-fiscais', label: 'Notas Fiscais', icon: FileText, resource: 'notas_fiscais' },
     ],
   },
   {

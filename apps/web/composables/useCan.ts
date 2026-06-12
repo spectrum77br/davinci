@@ -17,6 +17,7 @@ export type Resource =
   | 'importacao'
   | 'devolucoes'
   | 'reembolso'
+  | 'notas_fiscais'
   | 'sincronizacoes'
   | 'sync_logs'
   | 'integracoes'
@@ -56,7 +57,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     label: 'Pós-venda',
-    resources: ['devolucoes', 'reembolso'],
+    resources: ['devolucoes', 'reembolso', 'notas_fiscais'],
   },
   {
     // Financeiro = só Consórcio. Certificações, Importação, Simulação e DNP
@@ -110,6 +111,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   importacao: 'Importação',
   devolucoes: 'Devoluções',
   reembolso: 'Reembolso',
+  notas_fiscais: 'Notas Fiscais',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',
   integracoes: 'Integrações',

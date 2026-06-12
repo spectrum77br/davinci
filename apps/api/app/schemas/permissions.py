@@ -14,6 +14,8 @@ Resource = Literal[
     "controle_estoque",
     "devolucoes",
     "reembolso",
+    # Notas Fiscais — consulta/export de NF-e das contas bling_notas.
+    "notas_fiscais",
     # Legacy single-bucket — no longer used by any route after the
     # financeiro_* split below, but kept in the literal so stored
     # permissions JSON containing the old key still validates.

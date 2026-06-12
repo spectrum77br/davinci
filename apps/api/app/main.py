@@ -28,6 +28,7 @@ from app.routers import margem_audit as margem_audit_router
 from app.routers import margens as margens_router
 from app.routers import metrics as metrics_router
 from app.routers import nf_upload as nf_upload_router
+from app.routers import notas_fiscais as notas_fiscais_router
 from app.routers import oauth as oauth_router
 from app.routers import pricing as pricing_router
 from app.routers import products as products_router
@@ -91,7 +92,7 @@ _OPENAPI_TAGS = [
     {"name": "devolutions", "description": "Devoluções por pedido — controle manual de retorno de produto."},
     {"name": "financeiro", "description": "Consórcio, suprimentos (certificações) e simulação de cotações de importação."},
     {"name": "importacao", "description": "Controle de pedidos de importação de malas — SKUs, lotes, resumo financeiro."},
-    {"name": "notas_fiscais", "description": "Upload de XML de NF-e → envio automático ao Mercado Livre."},
+    {"name": "notas_fiscais", "description": "NF-e — upload de XML → ML e consulta/export (XML/XLSX) das contas bling_notas."},
 ]
 
 app = FastAPI(
@@ -162,6 +163,7 @@ app.include_router(faturamento_router.router)
 app.include_router(financeiro_router.router)
 app.include_router(importacao_router.router)
 app.include_router(nf_upload_router.router)
+app.include_router(notas_fiscais_router.router)
 app.include_router(dev_router.router)
 
 if settings.enable_marketing:
