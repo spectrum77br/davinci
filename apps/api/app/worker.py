@@ -52,7 +52,10 @@ from app.services.kit_components_sync import run_sync_kit_components
 from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
-from app.services.product_cost_sync import run_sync_product_bling_costs
+from app.services.product_cost_sync import (
+    run_sync_import_bling_costs,
+    run_sync_product_bling_costs,
+)
 from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.sync_orchestrator import SyncOrchestrator
@@ -506,10 +509,19 @@ async def product_bling_cost_sync(ctx: dict) -> None:
     partir da listagem `/produtos` do Bling (a lista traz precoCusto; o
     detalhe /produtos/{id} não). Os pedidos snapshotam esse custo ao entrar
     em situacao=6, então o refresh diário mantém o custo de cada pedido novo
-    atualizado."""
+    atualizado.
+
+    Em seguida propaga esse custo fresco pra `import_products.custo_bling`
+    (casando por SKU) — a aba Importação passa a seguir o Bling sozinha,
+    igual à Tabela de Preços, sem ajuste manual."""
     async with session_scope() as s:
         summary = await run_sync_product_bling_costs(s)
     logger.info("product_bling_cost_sync_done", **summary)
+    # Sessão nova: o sync de products já commitou. Se a propagação pra
+    # Importação falhar, o refresh de products permanece.
+    async with session_scope() as s:
+        import_summary = await run_sync_import_bling_costs(s)
+    logger.info("import_bling_cost_sync_done", **import_summary)
 
 
 async def kit_components_sync(ctx: dict) -> None:

@@ -22,10 +22,10 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Integration, IntegrationPlatform, Product
+from app.models import ImportProduct, Integration, IntegrationPlatform, Product
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import BlingClient
 
@@ -99,3 +99,44 @@ async def run_sync_product_bling_costs(session: AsyncSession) -> dict:
     await session.commit()
     logger.info("product_cost_sync_done", **summary)
     return summary
+
+
+async def run_sync_import_bling_costs(session: AsyncSession) -> dict:
+    """Propaga o custo fresco do Bling pra `import_products.custo_bling`.
+
+    Fonte = `products.bling_cost_price` (atualizado logo antes por
+    `run_sync_product_bling_costs`), casado por SKU. Roda no mesmo cron
+    diário, logo depois daquele — assim a aba Importação segue o custo do
+    Bling sozinha, do mesmo jeito que a Tabela de Preços (que também
+    espelha o custo do Bling, sem digitação manual).
+
+    Só toca linhas linkadas (cujo SKU casa num produto com custo != NULL)
+    e cujo valor de fato mudou (IS DISTINCT FROM), pra o `updated_at`
+    seguir significativo. `max()` por SKU é defensivo contra SKU duplicado
+    em `products` (não deveria existir, mas evita ambiguidade no UPDATE).
+    `round(.., 2)` porque `custo_bling` é Numeric(10,2) e `bling_cost_price`
+    é Numeric(14,4) — sem arredondar, um custo com >2 decimais re-gravaria
+    o mesmo valor toda rodada.
+    """
+    fresh_cost = (
+        select(func.round(func.max(Product.bling_cost_price), 2))
+        .where(
+            Product.sku == ImportProduct.sku,
+            Product.bling_cost_price.isnot(None),
+        )
+        .scalar_subquery()
+    )
+    stmt = (
+        update(ImportProduct)
+        .where(
+            fresh_cost.isnot(None),
+            ImportProduct.custo_bling.is_distinct_from(fresh_cost),
+        )
+        .values(custo_bling=fresh_cost, updated_at=func.now())
+        .execution_options(synchronize_session=False)
+    )
+    result = await session.execute(stmt)
+    await session.commit()
+    updated = result.rowcount or 0
+    logger.info("import_cost_sync_done", updated=updated)
+    return {"updated": updated}
