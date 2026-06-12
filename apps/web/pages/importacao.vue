@@ -1974,34 +1974,36 @@ onScopeDispose(() => {
                    3 cells (quant + valor USD editável + custo BRL
                    computed via custoBRL(prod, lote)). -->
               <template v-for="lote in visibleLotes" :key="`cell-${row.id}-${lote.id}`">
-                <td class="border-l" :class="loteBgClass(lote.nome)">
-                  <input
-                    type="number"
-                    class="cell-input text-right"
-                    :value="row.lote_quantidades[lote.id] ?? ''"
-                    :disabled="!canEdit"
-                    @input="(e) => scheduleLoteItem(row, lote.id, Number((e.target as HTMLInputElement).value) || 0)"
-                  />
-                  <!-- Dropdown destino do estoque no Bling. Em Celular,
-                       sempre visível enquanto houver item_id e qty > 0
-                       (mesmo com lote fechado — permite o operador
-                       corrigir um SKU que foi pulado/errou e
-                       reprocessar automaticamente). Default = SKU do
-                       produto; operador escolhe se quiser redirecionar
-                       (ex.: i203.sa → i203.sp). -->
-                  <select
-                    v-if="isCelular
-                      && row.lote_item_ids?.[lote.id]
-                      && (row.lote_quantidades[lote.id] || 0) > 0"
-                    class="mt-0.5 w-full text-[10px] border rounded px-1 py-0.5 bg-white"
-                    :value="row.lote_target_skus?.[lote.id] || row.sku"
-                    :disabled="!canEdit"
-                    title="Destino da entrada de estoque no Bling"
-                    @focus="() => loadSkuVariants(row.lote_item_ids![lote.id])"
-                    @change="(e) => setLoteItemTargetSku(row, lote.id, row.lote_item_ids![lote.id], (e.target as HTMLSelectElement).value)"
-                  >
-                    <option v-for="sku in loteItemSkuOptions(row, lote.id)" :key="sku" :value="sku">{{ sku }}</option>
-                  </select>
+                <td class="border-l lote-quant-cell" :class="[loteBgClass(lote.nome), { 'lote-quant-cell-cel': isCelular }]">
+                  <div class="quant-stack">
+                    <input
+                      type="number"
+                      class="cell-input text-right"
+                      :value="row.lote_quantidades[lote.id] ?? ''"
+                      :disabled="!canEdit"
+                      @input="(e) => scheduleLoteItem(row, lote.id, Number((e.target as HTMLInputElement).value) || 0)"
+                    />
+                    <!-- Dropdown destino do estoque no Bling. Em Celular,
+                         sempre visível enquanto houver item_id e qty > 0
+                         (mesmo com lote fechado — permite o operador
+                         corrigir um SKU que foi pulado/errou e
+                         reprocessar automaticamente). Default = SKU do
+                         produto; operador escolhe se quiser redirecionar
+                         (ex.: i203.sa → i203.sp). -->
+                    <select
+                      v-if="isCelular
+                        && row.lote_item_ids?.[lote.id]
+                        && (row.lote_quantidades[lote.id] || 0) > 0"
+                      class="quant-dest-select"
+                      :value="row.lote_target_skus?.[lote.id] || row.sku"
+                      :disabled="!canEdit"
+                      title="Destino da entrada de estoque no Bling"
+                      @focus="() => loadSkuVariants(row.lote_item_ids![lote.id])"
+                      @change="(e) => setLoteItemTargetSku(row, lote.id, row.lote_item_ids![lote.id], (e.target as HTMLSelectElement).value)"
+                    >
+                      <option v-for="sku in loteItemSkuOptions(row, lote.id)" :key="sku" :value="sku">{{ sku }}</option>
+                    </select>
+                  </div>
                 </td>
                 <template v-if="isCelular">
                   <td :class="loteBgClass(lote.nome)">
@@ -2925,6 +2927,48 @@ onScopeDispose(() => {
 .col-total {
   width: 50px;
   min-width: 50px;
+}
+
+/* Célula de quantidade do body. Input em cima + dropdown de SKU destino
+ * (só Celular) empilhados, ambos ocupando 100% da MESMA largura → colunas
+ * uniformes (antes o dropdown alargava só as células com qty, deixando a
+ * grade torta). Mala continua compacto (sem .lote-quant-cell-cel). */
+.lote-quant-cell {
+  padding: 2px 3px;
+  vertical-align: top;
+}
+.lote-quant-cell-cel {
+  /* largura fixa que acomoda o SKU do dropdown (ex.: "i203.sp") sem cortar,
+   * mantendo todas as colunas quant do Celular do mesmo tamanho. */
+  width: 62px;
+  min-width: 62px;
+}
+.quant-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: stretch;
+  width: 100%;
+}
+.quant-stack > .cell-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.quant-dest-select {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 10px;
+  line-height: 1.2;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  padding: 1px 2px;
+  background: hsl(var(--background));
+  color: inherit;
+  cursor: pointer;
+}
+.quant-dest-select:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* ── Cotação table ─────────────────────────────────────────────── */
