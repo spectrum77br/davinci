@@ -1738,7 +1738,7 @@ onScopeDispose(() => {
               <th
                 v-if="isCelular"
                 :rowspan="isCelular ? 12 : 8"
-                class="col-head text-right sticky bg-background z-30"
+                class="col-head text-right sticky bg-background z-30 lote-divider-anchor"
                 :style="{ left: stickyLeftCelular('custo_realizado'), minWidth: '90px' }"
               >custo realizado</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
@@ -1964,7 +1964,7 @@ onScopeDispose(() => {
                    loadProductsOnly traz o novo valor. -->
               <td
                 v-if="isCelular"
-                class="calc text-right sticky bg-background z-10"
+                class="calc text-right sticky bg-background z-10 lote-divider-anchor"
                 :style="{ left: stickyLeftCelular('custo_realizado'), minWidth: '90px' }"
               >
                 {{ fmtMoney(row.custo_realizado) }}
@@ -2952,6 +2952,18 @@ onScopeDispose(() => {
 :global(.dark) .col-total.border-l,
 :global(.dark) .lote-quant-cell.border-l {
   border-left-color: hsl(var(--foreground) / 0.5) !important;
+}
+/* No Celular as colunas fixas (modelo…custo_realizado) são sticky e a
+ * última (custo_realizado, z-30 no header / z-10 no body) pinta POR CIMA
+ * da borda colapsada da 1ª célula de lote — escondendo o 1º divisor no
+ * corpo da tabela. Desenhar o divisor como border-RIGHT na própria célula
+ * sticky garante que ele apareça em cima. Mala/Eletro não têm colunas
+ * sticky, então herdam o border-left normal. */
+.lote-divider-anchor {
+  border-right: 2px solid hsl(var(--foreground) / 0.7) !important;
+}
+:global(.dark) .lote-divider-anchor {
+  border-right-color: hsl(var(--foreground) / 0.5) !important;
 }
 .lote-quant-cell {
   padding: 2px 3px;
