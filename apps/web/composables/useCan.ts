@@ -36,43 +36,44 @@ export type ResourceGroup = {
   resources: Resource[]
 }
 
+// Ordem e agrupamento ESPELHAM a barra lateral (components/AppSidebar.vue):
+// Operação → Pós-venda → Financeiro → Suprimentos → Sistema → Cadastros →
+// Admin. Manter os dois em sincronia pra a tela de Permissões refletir o menu.
 export const RESOURCE_GROUPS: ResourceGroup[] = [
   {
     label: 'Operação',
     resources: [
-      'margem',
-      'faturamento',
-      'controle_estoque',
       'produtos',
       'anuncios',
       'tabela_precos',
       'tabela_precos_contas',
       'tabela_precos_produtos',
       'tabela_precos_concorrencia',
+      'margem',
+      'faturamento',
+      'controle_estoque',
     ],
-  },
-  {
-    // Financeiro = the four import-business planilhas. Margem and
-    // Controle de Estoque belong in Operação because they're day-to-day
-    // operator tools, not accounting/procurement planilhas.
-    label: 'Financeiro',
-    resources: [
-      'financeiro_consorcio',
-      'financeiro_suprimentos',
-      'financeiro_simulacao',
-      'financeiro_dnp',
-    ],
-  },
-  {
-    // Importação = controle de pedidos de importação (módulo separado
-    // de Financeiro porque é o ciclo de compra/lote, não os planilhas
-    // financeiras propriamente ditas).
-    label: 'Importação',
-    resources: ['importacao'],
   },
   {
     label: 'Pós-venda',
     resources: ['devolucoes', 'reembolso'],
+  },
+  {
+    // Financeiro = só Consórcio. Certificações, Importação, Simulação e DNP
+    // são do ciclo de compra/importação e foram pra Suprimentos (igual menu).
+    label: 'Financeiro',
+    resources: ['financeiro_consorcio'],
+  },
+  {
+    // Suprimentos = ciclo de compra/importação. `financeiro_suprimentos` é a
+    // página "Certificações" (rota /financeiro/suprimentos no menu).
+    label: 'Suprimentos',
+    resources: [
+      'financeiro_suprimentos',
+      'importacao',
+      'financeiro_simulacao',
+      'financeiro_dnp',
+    ],
   },
   {
     label: 'Sistema',
@@ -103,7 +104,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   faturamento: 'Faturamento',
   controle_estoque: 'Controle de Estoque',
   financeiro_consorcio: 'Consórcio',
-  financeiro_suprimentos: 'Suprimentos',
+  financeiro_suprimentos: 'Certificações',
   financeiro_simulacao: 'Simulação',
   financeiro_dnp: 'DNP',
   importacao: 'Importação',
