@@ -374,3 +374,57 @@ async def test_list_refunds_includes_current_bling_situacao(
     assert by_pedido["555002"]["situacao_bling"] == "83965"
     # Pedido sem linha em bling_orders -> sem situacao.
     assert by_pedido["555003"]["situacao_bling"] is None
+
+
+async def test_export_refunds_xlsx_respects_filters(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    user = await make_user(permissions=_refund_permissions())
+    auth_as(user)
+
+    db.add(SituacaoBling(id=9, nome="Atendido"))
+    db.add(BlingOrder(numero="777001", situacao="9"))
+    await db.commit()
+
+    for pedido, tipo in (("777001", "Cliente"), ("777002", "Logistica")):
+        created = await client.post(
+            "/api/refunds",
+            json={"pedido_bling": pedido, "conta": "Loja Teste", "tipo": tipo},
+        )
+        assert created.status_code == 201
+
+    response = await client.get("/api/refunds/export.xlsx?tipo=Cliente")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    wb = load_workbook(BytesIO(response.content))
+    rows = list(wb.active.iter_rows(values_only=True))
+    header = rows[0]
+    assert header[0] == "Data"
+    assert "Situação Bling" in header
+
+    data_rows = rows[1:]
+    assert len(data_rows) == 1
+    row = dict(zip(header, data_rows[0], strict=True))
+    assert row["Pedido Bling"] == "777001"
+    assert row["Tipo"] == "Cliente"
+    assert row["Situação Bling"] == "Atendido"
+    assert row["Conferido"] == "Não"
+
+
+async def test_export_refunds_xlsx_requires_view_permission(client, make_user, auth_as):
+    user = await make_user(permissions={})
+    auth_as(user)
+
+    response = await client.get("/api/refunds/export.xlsx")
+
+    assert response.status_code == 403

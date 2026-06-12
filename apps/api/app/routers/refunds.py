@@ -1,8 +1,13 @@
+from datetime import UTC, datetime
+from io import BytesIO
 from typing import Annotated
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
 from sqlalchemy import Text, cast, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +30,7 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/refunds", tags=["refunds"])
 settings = get_settings()
 SCHEMA = settings.database_schema
+SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 
 def _ident(name: str) -> str:
@@ -76,6 +82,25 @@ async def _situacoes_by_pedido(
     return {str(numero): nome for numero, nome in rows.all() if numero and nome}
 
 
+def _build_where(
+    search: str | None,
+    platform: str | None,
+    tipo: str | None,
+    conferido: bool | None,
+) -> list:
+    where = []
+    if search and search.strip():
+        clause, _q = _search_clause(search.strip())
+        where.append(clause)
+    if platform:
+        where.append(Refund.plataforma == platform)
+    if tipo:
+        where.append(Refund.tipo == tipo)
+    if conferido is not None:
+        where.append(Refund.conferido.is_(conferido))
+    return where
+
+
 @router.get("", response_model=RefundPage)
 async def list_refunds(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -87,16 +112,7 @@ async def list_refunds(
     tipo: str | None = Query(None),
     conferido: bool | None = Query(None),
 ) -> RefundPage:
-    where = []
-    if search and search.strip():
-        clause, _q = _search_clause(search.strip())
-        where.append(clause)
-    if platform:
-        where.append(Refund.plataforma == platform)
-    if tipo:
-        where.append(Refund.tipo == tipo)
-    if conferido is not None:
-        where.append(Refund.conferido.is_(conferido))
+    where = _build_where(search, platform, tipo, conferido)
 
     stmt = (
         select(Refund)
@@ -133,6 +149,88 @@ async def list_refunds(
         limit=limit,
         offset=offset,
         platforms=platforms,
+    )
+
+
+def _fmt_dt_sp(dt: datetime | None) -> str:
+    """Datetime → 'dd/mm/aaaa HH:MM' no fuso de São Paulo (vazio se None)."""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(SAO_PAULO).strftime("%d/%m/%Y %H:%M")
+
+
+_EXPORT_COLUMNS: list[tuple[str, str]] = [
+    ("Data", "data"),
+    ("Pedido Bling", "pedido_bling"),
+    ("Pedido Marketplace", "pedido_marketplace"),
+    ("Plataforma", "plataforma"),
+    ("Conta", "conta"),
+    ("Tipo", "tipo"),
+    ("Prejuízo", "prejuizo"),
+    ("Reembolso", "reembolso"),
+    ("Chamado", "chamado"),
+    ("Link chamado", "chamado_url"),
+    ("Chamado resolvido", "chamado_resolvido"),
+    ("Operação", "operacao"),
+    ("Conferido", "conferido"),
+    ("Situação Bling", "situacao_bling"),
+    ("Observação", "observacao"),
+    ("Criado em", "created_at"),
+]
+
+
+@router.get("/export.xlsx")
+async def export_refunds(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("reembolso", "view"))],
+    search: str | None = Query(None),
+    platform: str | None = Query(None),
+    tipo: str | None = Query(None),
+    conferido: bool | None = Query(None),
+) -> StreamingResponse:
+    """Exporta os reembolsos (com os mesmos filtros da lista) em XLSX."""
+    where = _build_where(search, platform, tipo, conferido)
+    rows = (
+        await session.execute(
+            select(Refund)
+            .where(*where)
+            .order_by(desc(Refund.data).nulls_last(), desc(Refund.created_at))
+        )
+    ).scalars().all()
+
+    situacoes = await _situacoes_by_pedido(
+        session, {r.pedido_bling for r in rows if r.pedido_bling}
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Reembolsos"
+    ws.append([label for label, _ in _EXPORT_COLUMNS])
+
+    for r in rows:
+        line = []
+        for _, field in _EXPORT_COLUMNS:
+            if field == "situacao_bling":
+                line.append(situacoes.get(r.pedido_bling or "", ""))
+            elif field in ("data", "created_at"):
+                line.append(_fmt_dt_sp(getattr(r, field, None)))
+            elif field in ("conferido", "chamado_resolvido"):
+                line.append("Sim" if getattr(r, field, False) else "Não")
+            else:
+                value = getattr(r, field, None)
+                line.append(value if value is not None else "")
+        ws.append(line)
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    stamp = datetime.now(SAO_PAULO).strftime("%Y%m%d_%H%M")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="reembolsos_{stamp}.xlsx"'},
     )
 
 

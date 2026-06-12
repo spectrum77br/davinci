@@ -3,12 +3,14 @@ import {
   AlertCircle,
   ChevronLeft,
   ChevronRight,
+  Download,
   Loader2,
   Plus,
   RotateCcw,
   Search,
   X,
 } from 'lucide-vue-next'
+import { isoToday } from '~/lib/date'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'reembolso', action: 'view' } })
 
@@ -83,6 +85,16 @@ const SITUACAO_BLING_USERS = [
 const canSeeSituacaoBling = computed(() => {
   const email = _auth.user?.email?.toLowerCase()
   return !!email && SITUACAO_BLING_USERS.includes(email)
+})
+
+// Botão "exportar xlsx" restrito a estes usuários.
+const EXPORT_XLSX_USERS = [
+  'spectrum77@tuta.com',
+  'maconer06@tuta.com',
+]
+const canExportXlsx = computed(() => {
+  const email = _auth.user?.email?.toLowerCase()
+  return !!email && EXPORT_XLSX_USERS.includes(email)
 })
 
 const items = ref<RefundRow[]>([])
@@ -242,6 +254,34 @@ async function load() {
     error.value = apiError(e)
   } finally {
     loading.value = false
+  }
+}
+
+const exporting = ref(false)
+
+async function exportXlsx() {
+  if (exporting.value) return
+  exporting.value = true
+  error.value = null
+  try {
+    const params = new URLSearchParams()
+    if (search.value.trim()) params.set('search', search.value.trim())
+    if (platform.value !== 'all') params.set('platform', platform.value)
+    if (tipoFilter.value !== 'all') params.set('tipo', tipoFilter.value)
+    if (conferidoFilter.value !== 'all') params.set('conferido', conferidoFilter.value)
+    const blob = await api<Blob>(`/api/refunds/export.xlsx?${params.toString()}`, { responseType: 'blob' as any })
+    const href = URL.createObjectURL(blob as any)
+    const a = document.createElement('a')
+    a.href = href
+    a.download = `reembolsos_${isoToday()}.xlsx`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(href)
+  } catch (e: any) {
+    error.value = apiError(e)
+  } finally {
+    exporting.value = false
   }
 }
 
@@ -422,6 +462,10 @@ async function saveRow(row: RefundRow): Promise<void> {
   <div class="space-y-5">
     <PageHeader title="Reembolso" description="Controle de reembolsos por pedido da conciliação marketplace.">
       <template #actions>
+        <Button v-if="canExportXlsx" size="sm" variant="outline" :disabled="exporting" @click="exportXlsx">
+          <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exporting }" />
+          exportar xlsx
+        </Button>
         <Button size="sm" variant="outline" :disabled="loading" @click="load">
           <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
           atualizar
