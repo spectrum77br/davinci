@@ -2938,13 +2938,20 @@ onScopeDispose(() => {
  * continua compacto (sem .lote-quant-cell-cel). */
 /* Divisor entre lotes: a 1ª célula de cada grupo de lote leva `border-l`
  * (Tailwind 1px) — fraco e some no meio da grade. Reforça pra 2px sólido
- * usando a cor de borda do tema, deixando claro onde um lote termina e o
- * próximo começa, alinhado em todas as linhas (header + body). */
+ * numa cor BEM escura (quase preta) pra destacar onde um lote termina e o
+ * próximo começa, alinhado em todas as linhas (header + body). O cinza do
+ * tema sumia no fundo claro. */
 .lote-label.border-l,
 .col-quant.border-l,
 .col-total.border-l,
 .lote-quant-cell.border-l {
-  border-left: 2px solid hsl(var(--border)) !important;
+  border-left: 2px solid hsl(var(--foreground) / 0.7) !important;
+}
+:global(.dark) .lote-label.border-l,
+:global(.dark) .col-quant.border-l,
+:global(.dark) .col-total.border-l,
+:global(.dark) .lote-quant-cell.border-l {
+  border-left-color: hsl(var(--foreground) / 0.5) !important;
 }
 .lote-quant-cell {
   padding: 2px 3px;
