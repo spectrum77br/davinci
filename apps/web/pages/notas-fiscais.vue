@@ -151,9 +151,11 @@ async function exportXlsx() {
   exportingXlsx.value = true
   error.value = null
   try {
+    const from = dateFrom.value.replaceAll('-', '')
+    const to = dateTo.value.replaceAll('-', '')
     await downloadBlob(
       `/api/notas-fiscais/export.xlsx?${buildParams().toString()}`,
-      `notas_fiscais_${dateFrom.value}_${dateTo.value}.xlsx`,
+      `NF-e_Report_excel_${from}_ate_${to}.xlsx`,
     )
   } catch (e: any) {
     error.value = apiError(e)

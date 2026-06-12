@@ -6,10 +6,12 @@ GET /nfe/{id} (detalhe, que traz o link do XML autorizado).
 
 Fluxo:
   * lista: 1 chamada /nfe por página (100/pg) por conta selecionada.
-  * export XLSX: mesma lista, planilha com os campos da listagem.
-  * export XML: lista + 1 chamada de detalhe por nota (pra resolver o link
-    do XML) + download do arquivo. O detalhe passa pelo rate gate global
-    do Bling (5 req/s compartilhado), então o export é limitado a
+  * exports (XML e XLSX): lista + 1 chamada de detalhe por nota (pra
+    resolver o link do XML) + download do arquivo. O XLSX segue o layout
+    do "NF-e Report" (28 colunas) e os campos fiscais (CNPJ, série, CFOP,
+    ICMS/ST/IPI/PIS/COFINS, dest. UF/CEP) vêm do próprio XML — por isso
+    os dois exports pagam o mesmo custo. O detalhe passa pelo rate gate
+    global do Bling (5 req/s compartilhado), então ambos são limitados a
     MAX_XML_NOTAS por request pra não estourar o timeout do proxy.
 
 Tokens: o cron `bling_notas_token_refresh` renova a cada 5h (AT dura 6h);
@@ -19,6 +21,7 @@ helpers do próprio cron (commit imediato — o Bling rotaciona o RT).
 from __future__ import annotations
 
 import asyncio
+import xml.etree.ElementTree as ET
 import zipfile
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
@@ -31,6 +34,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
+from openpyxl.styles import Font
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,7 +58,7 @@ SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 # Bling pagina /nfe em até 100 itens; trava de segurança por conta.
 PAGE_SIZE = 100
 MAX_PAGES_PER_CONTA = 60  # 6.000 notas por conta por consulta
-# Export XML = 1 chamada de detalhe por nota a 5 req/s globais — acima
+# Exports = 1 chamada de detalhe por nota a 5 req/s globais — acima
 # disso o request passa de ~2min e o proxy derruba com 502.
 MAX_XML_NOTAS = 500
 MAX_RANGE_DAYS = 184
@@ -300,71 +304,6 @@ async def list_notas(
     )
 
 
-@router.get("/export.xlsx")
-async def export_xlsx(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(_PERM)],
-    date_from: date = Query(...),
-    date_to: date = Query(...),
-    conta: _ContaIds = [],  # noqa: B006
-) -> StreamingResponse:
-    _validate_range(date_from, date_to)
-    rows, erros = await _fetch_all(session, conta, date_from, date_to)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Notas Fiscais"
-    ws.append(
-        [
-            "Conta",
-            "Número",
-            "Data emissão",
-            "Data operação",
-            "Tipo",
-            "Situação",
-            "Cliente",
-            "Documento",
-            "Valor",
-        ]
-    )
-    for r in rows:
-        o = _to_out(r)
-        ws.append(
-            [
-                o.conta,
-                o.numero or "",
-                o.data_emissao or "",
-                o.data_operacao or "",
-                o.tipo or "",
-                o.situacao or "",
-                o.cliente or "",
-                o.documento or "",
-                o.valor if o.valor is not None else "",
-            ]
-        )
-    if erros:
-        ws_err = wb.create_sheet("Erros")
-        ws_err.append(["Conta com falha"])
-        for e in erros:
-            ws_err.append([e])
-
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    stamp = datetime.now(SAO_PAULO).strftime("%Y%m%d_%H%M")
-    return StreamingResponse(
-        buf,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        headers={
-            "Content-Disposition": (
-                f'attachment; filename="notas_fiscais_{stamp}.xlsx"'
-            )
-        },
-    )
-
-
 async def _download_xml(url: str) -> bytes | None:
     """XML fica num link assinado (S3) — fora da API, sem rate gate."""
     try:
@@ -377,6 +316,30 @@ async def _download_xml(url: str) -> bytes | None:
         return None
 
 
+async def _fetch_nota_xml(
+    token: str, nota: dict
+) -> tuple[dict, bytes | None, str | None]:
+    """(detalhe, xml_bytes, motivo_falha) de uma nota.
+
+    `motivo_falha` preenchido quando o XML não está disponível (nota não
+    autorizada, link vencido, erro HTTP) — os exports transformam isso em
+    aviso sem derrubar o restante do lote.
+    """
+    try:
+        payload = await _bling_get(token, f"/nfe/{nota['id']}")
+    except Exception as e:  # noqa: BLE001
+        return {}, None, f"erro no detalhe ({str(e)[:120]})"
+    detail: dict[str, Any] = payload.get("data") or {}
+    xml_url = detail.get("xml")
+    if not xml_url:
+        situ = SITUACOES.get(nota.get("situacao"), "?")
+        return detail, None, f"sem XML disponível (situação {situ})"
+    content = await _download_xml(xml_url)
+    if content is None:
+        return detail, None, "falha ao baixar o XML"
+    return detail, content, None
+
+
 def _xml_filename(conta: str, detail: dict, nota: dict) -> str:
     chave = detail.get("chaveAcesso") or ""
     if chave:
@@ -385,6 +348,140 @@ def _xml_filename(conta: str, detail: dict, nota: dict) -> str:
         base = f"nfe_{nota.get('numero') or nota.get('id')}"
     safe_conta = conta.replace("/", "_")
     return f"{safe_conta}/{base}.xml"
+
+
+def _check_export_size(rows: list[dict], erros: list[str]) -> None:
+    if not rows and erros:
+        raise HTTPException(502, detail={"code": "bling_falhou", "erros": erros})
+    if len(rows) > MAX_XML_NOTAS:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "muitas_notas",
+                "message": (
+                    f"{len(rows)} notas no período — o export é limitado a "
+                    f"{MAX_XML_NOTAS} por vez, reduza o período ou as contas"
+                ),
+            },
+        )
+
+
+# ─── parse do XML da NF-e (campos do layout "NF-e Report") ────────────
+
+_OPERACAO = {"0": "Inbound", "1": "Outbound"}
+_FIN_NFE = {"1": "normal", "2": "complementar", "3": "ajuste", "4": "devolucao"}
+# Situações Bling com NF-e efetivamente emitida.
+_SITUACOES_ISSUED = {5, 6, 7}
+
+
+def _first_el(scope: ET.Element | None, name: str) -> ET.Element | None:
+    """Primeiro elemento com esse localname (ignora namespace), em qualquer
+    profundidade — mesma abordagem namespace-agnóstica do nf_upload."""
+    if scope is None:
+        return None
+    for el in scope.iter():
+        if el.tag.rsplit("}", 1)[-1] == name:
+            return el
+    return None
+
+
+def _el_text(scope: ET.Element | None, name: str) -> str:
+    el = _first_el(scope, name)
+    return (el.text or "").strip() if el is not None else ""
+
+
+def _el_money(scope: ET.Element | None, name: str) -> float:
+    try:
+        return float(_el_text(scope, name) or 0)
+    except ValueError:
+        return 0.0
+
+
+def _parse_nfe_xml(content: bytes) -> dict | None:
+    """Campos fiscais do XML autorizado (emit, dest, ide, ICMSTot)."""
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return None
+    ide = _first_el(root, "ide")
+    emit = _first_el(root, "emit")
+    dest = _first_el(root, "dest")
+    tot = _first_el(root, "ICMSTot")
+    det = _first_el(root, "det")
+    chave = _el_text(root, "chNFe")
+    if not chave:
+        inf = _first_el(root, "infNFe")
+        if inf is not None:
+            chave = (inf.get("Id") or "").removeprefix("NFe")
+    dh = _el_text(ide, "dhEmi") or _el_text(ide, "dEmi")
+    return {
+        "conta_nf": _el_text(emit, "xNome"),
+        "cnpj": _el_text(emit, "CNPJ"),
+        "serie": _el_text(ide, "serie"),
+        "numero": _el_text(ide, "nNF"),
+        "operacao": _OPERACAO.get(_el_text(ide, "tpNF"), ""),
+        "chave": chave,
+        "tipo": _FIN_NFE.get(_el_text(ide, "finNFe"), "normal"),
+        "cfop": _el_text(det, "CFOP"),
+        "cliente": _el_text(dest, "xNome"),
+        "uf_dest": _el_text(dest, "UF"),
+        "cep": _el_text(dest, "CEP"),
+        "valor_nf": _el_money(tot, "vNF"),
+        "base_icms": _el_money(tot, "vBC"),
+        "vlr_icms": _el_money(tot, "vICMS"),
+        "base_st": _el_money(tot, "vBCST"),
+        "vlr_st": _el_money(tot, "vST"),
+        "vlr_fcp_st": _el_money(tot, "vFCPST"),
+        "vlr_ipi": _el_money(tot, "vIPI"),
+        "vlr_ipi_dev": _el_money(tot, "vIPIDevol"),
+        "vlr_pis": _el_money(tot, "vPIS"),
+        "vlr_cofins": _el_money(tot, "vCOFINS"),
+        "vlr_seguro": _el_money(tot, "vSeg"),
+        "vlr_outros": _el_money(tot, "vOutro"),
+        "vlr_desconto": _el_money(tot, "vDesc"),
+        "vlr_frete": _el_money(tot, "vFrete"),
+        "data": dh[:19].replace("T", " "),
+    }
+
+
+def _estado_nota(situacao: int | None) -> str:
+    if situacao in _SITUACOES_ISSUED:
+        return "Issued"
+    if situacao == 2:
+        return "Cancelled"
+    return SITUACOES.get(situacao, str(situacao or ""))
+
+
+_XLSX_HEADERS = [
+    "Conta da Nota Fiscal",
+    "CNPJ",
+    "Nº de Série",
+    "Nº da NF-e",
+    "Operação",
+    "Chave",
+    "Tipo",
+    "CFOP",
+    "Cliente",
+    "Destinatário",
+    "CEP",
+    "Valor da Nota Fiscal",
+    "Base ICMS",
+    "Vlr.ICMS",
+    "Base ST",
+    "Vlr.ST",
+    "Vlr.FCP-ST",
+    "Valr.IPI",
+    "Vlr.IPIDev.",
+    "Vlr.PIS",
+    "Vlr.COFINS",
+    "Vlr.Seguro",
+    "Vlr.Outros",
+    "Vlr.Desconto",
+    "Vlr.Frete",
+    "Estado",
+    "Data",
+    "Observação",
+]
 
 
 @router.get("/export.xml")
@@ -402,19 +499,7 @@ async def export_xml(
     """
     _validate_range(date_from, date_to)
     rows, erros = await _fetch_all(session, conta, date_from, date_to)
-    if not rows and erros:
-        raise HTTPException(502, detail={"code": "bling_falhou", "erros": erros})
-    if len(rows) > MAX_XML_NOTAS:
-        raise HTTPException(
-            422,
-            detail={
-                "code": "muitas_notas",
-                "message": (
-                    f"{len(rows)} notas no período — o export XML é limitado "
-                    f"a {MAX_XML_NOTAS} por vez, reduza o período ou as contas"
-                ),
-            },
-        )
+    _check_export_size(rows, erros)
 
     avisos: list[str] = list(erros)
     buf = BytesIO()
@@ -423,22 +508,9 @@ async def export_xml(
         for r in rows:
             nota = r["nota"]
             label = f"{r['conta']} nº {nota.get('numero') or nota.get('id')}"
-            try:
-                detail_payload = await _bling_get(
-                    r["token"], f"/nfe/{nota['id']}"
-                )
-            except Exception as e:  # noqa: BLE001
-                avisos.append(f"{label}: erro no detalhe ({str(e)[:120]})")
-                continue
-            detail: dict[str, Any] = detail_payload.get("data") or {}
-            xml_url = detail.get("xml")
-            if not xml_url:
-                situ = SITUACOES.get(nota.get("situacao"), "?")
-                avisos.append(f"{label}: sem XML disponível (situação {situ})")
-                continue
-            content = await _download_xml(xml_url)
+            detail, content, motivo = await _fetch_nota_xml(r["token"], nota)
             if content is None:
-                avisos.append(f"{label}: falha ao baixar o XML")
+                avisos.append(f"{label}: {motivo}")
                 continue
             name = _xml_filename(r["conta"], detail, nota)
             if name in seen:
@@ -465,4 +537,138 @@ async def export_xml(
                 f'attachment; filename="notas_fiscais_xml_{stamp}.zip"'
             )
         },
+    )
+
+
+@router.get("/export.xlsx")
+async def export_xlsx(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_PERM)],
+    date_from: date = Query(...),
+    date_to: date = Query(...),
+    conta: _ContaIds = [],  # noqa: B006
+) -> StreamingResponse:
+    """Planilha no layout "NF-e Report" — campos fiscais extraídos do XML
+    de cada nota. Nota sem XML entra com os dados da listagem (número,
+    cliente, estado) e as colunas fiscais em branco, mais a aba "Avisos".
+    """
+    _validate_range(date_from, date_to)
+    rows, erros = await _fetch_all(session, conta, date_from, date_to)
+    _check_export_size(rows, erros)
+
+    avisos: list[str] = list(erros)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "NF-e"
+    ws.append(_XLSX_HEADERS)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    for r in rows:
+        nota = r["nota"]
+        label = f"{r['conta']} nº {nota.get('numero') or nota.get('id')}"
+        estado = _estado_nota(nota.get("situacao"))
+        detail, content, motivo = await _fetch_nota_xml(r["token"], nota)
+        parsed = _parse_nfe_xml(content) if content else None
+        if parsed is None:
+            if motivo:
+                avisos.append(f"{label}: {motivo}")
+            else:
+                avisos.append(f"{label}: XML inválido (não parseou)")
+            # Fallback: o que a listagem tem; colunas fiscais em branco.
+            contato = nota.get("contato") or {}
+            ws.append(
+                [
+                    r["conta"],
+                    "",
+                    "",
+                    str(nota.get("numero") or ""),
+                    "",
+                    detail.get("chaveAcesso") or "",
+                    "",
+                    "",
+                    contato.get("nome") or "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    estado,
+                    (nota.get("dataEmissao") or "")[:19],
+                    "",
+                ]
+            )
+            continue
+        ws.append(
+            [
+                parsed["conta_nf"],
+                parsed["cnpj"],
+                parsed["serie"],
+                parsed["numero"],
+                parsed["operacao"],
+                parsed["chave"],
+                parsed["tipo"],
+                parsed["cfop"],
+                parsed["cliente"],
+                parsed["uf_dest"],
+                parsed["cep"],
+                parsed["valor_nf"],
+                parsed["base_icms"],
+                parsed["vlr_icms"],
+                parsed["base_st"],
+                parsed["vlr_st"],
+                parsed["vlr_fcp_st"],
+                parsed["vlr_ipi"],
+                parsed["vlr_ipi_dev"],
+                parsed["vlr_pis"],
+                parsed["vlr_cofins"],
+                parsed["vlr_seguro"],
+                parsed["vlr_outros"],
+                parsed["vlr_desconto"],
+                parsed["vlr_frete"],
+                estado,
+                parsed["data"],
+                "",
+            ]
+        )
+
+    if avisos:
+        ws_av = wb.create_sheet("Avisos")
+        ws_av.append(["Aviso"])
+        ws_av["A1"].font = Font(bold=True)
+        for a in avisos:
+            ws_av.append([a])
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    now_sp = datetime.now(SAO_PAULO)
+    fname = (
+        f"NF-e_Report_excel_{date_from.strftime('%Y%m%d')}"
+        f"_ate_{date_to.strftime('%Y%m%d')}_{now_sp.strftime('%m%d%H%M%S')}.xlsx"
+    )
+    logger.info(
+        "nf_export_xlsx",
+        notas=len(rows),
+        avisos=len(avisos),
+        date_from=str(date_from),
+        date_to=str(date_to),
+    )
+    return StreamingResponse(
+        buf,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
