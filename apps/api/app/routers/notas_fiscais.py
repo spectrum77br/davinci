@@ -23,25 +23,36 @@ from __future__ import annotations
 import asyncio
 import xml.etree.ElementTree as ET
 import zipfile
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
-from typing import Annotated, Any
+from pathlib import Path
+from typing import Annotated, Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import BlingNota, User
+from app.models import (
+    BackgroundJob,
+    BackgroundJobStatus,
+    BackgroundJobType,
+    BlingNota,
+    User,
+)
+from app.models.enums import UserRole
+from app.schemas.products import JobCreatedOut
 from app.services.bling_notas_token_refresh import (
     _apply_token_payload,
     _post_oauth_token,
@@ -50,6 +61,7 @@ from app.services.marketplaces.bling import (
     BLING_API_BASE,
     _acquire_bling_rate_slot,
 )
+from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/notas-fiscais", tags=["notas_fiscais"])
@@ -484,6 +496,124 @@ _XLSX_HEADERS = [
 ]
 
 
+XLSX_MEDIA = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+ZIP_MEDIA = "application/zip"
+# Teto do export síncrono é MAX_XML_NOTAS (500). O job async sobe o teto
+# mas precisa caber no job_timeout do worker (1800s) a ~3-5 req/s no rate
+# gate global do Bling — 3000 notas ≈ 10-16 min, com folga.
+MAX_EXPORT_NOTAS_ASYNC = 3000
+
+_OnProgress = Callable[[int], Awaitable[None]] | None
+
+
+def _xlsx_fname(date_from: date, date_to: date) -> str:
+    now_sp = datetime.now(SAO_PAULO)
+    return (
+        f"NF-e_Report_excel_{date_from.strftime('%Y%m%d')}"
+        f"_ate_{date_to.strftime('%Y%m%d')}_{now_sp.strftime('%m%d%H%M%S')}.xlsx"
+    )
+
+
+def _xml_zip_fname() -> str:
+    return f"notas_fiscais_xml_{datetime.now(SAO_PAULO).strftime('%Y%m%d_%H%M')}.zip"
+
+
+def _xlsx_row(r: dict, parsed: dict | None, detail: dict, estado: str) -> list:
+    """Uma linha (28 colunas) do layout NF-e Report. Sem XML parseado, cai
+    pro fallback com o que a listagem tem e colunas fiscais em branco."""
+    nota = r["nota"]
+    if parsed is None:
+        contato = nota.get("contato") or {}
+        return [
+            r["conta"], "", "", str(nota.get("numero") or ""), "",
+            detail.get("chaveAcesso") or "", "", "",
+            contato.get("nome") or "", "", "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "",
+            estado, (nota.get("dataEmissao") or "")[:19], "",
+        ]
+    return [
+        parsed["conta_nf"], parsed["cnpj"], parsed["serie"], parsed["numero"],
+        parsed["operacao"], parsed["chave"], parsed["tipo"], parsed["cfop"],
+        parsed["cliente"], parsed["uf_dest"], parsed["cep"], parsed["valor_nf"],
+        parsed["base_icms"], parsed["vlr_icms"], parsed["base_st"],
+        parsed["vlr_st"], parsed["vlr_fcp_st"], parsed["vlr_ipi"],
+        parsed["vlr_ipi_dev"], parsed["vlr_pis"], parsed["vlr_cofins"],
+        parsed["vlr_seguro"], parsed["vlr_outros"], parsed["vlr_desconto"],
+        parsed["vlr_frete"], estado, parsed["data"], "",
+    ]
+
+
+async def build_xml_zip(
+    rows: list[dict], erros: list[str], on_progress: _OnProgress = None
+) -> tuple[bytes, int]:
+    """ZIP com os XMLs das notas (uma pasta por conta). Notas sem XML
+    disponível entram no `_avisos.txt`. Retorna (bytes, nº de avisos).
+    `on_progress(done)` é chamado a cada nota (export async)."""
+    avisos: list[str] = list(erros)
+    buf = BytesIO()
+    seen: set[str] = set()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, r in enumerate(rows):
+            nota = r["nota"]
+            label = f"{r['conta']} nº {nota.get('numero') or nota.get('id')}"
+            detail, content, motivo = await _fetch_nota_xml(r["token"], nota)
+            if content is None:
+                avisos.append(f"{label}: {motivo}")
+            else:
+                name = _xml_filename(r["conta"], detail, nota)
+                if name in seen:
+                    name = name.replace(".xml", f"_{nota['id']}.xml")
+                seen.add(name)
+                zf.writestr(name, content)
+            if on_progress is not None:
+                await on_progress(i + 1)
+        if avisos:
+            zf.writestr("_avisos.txt", "\n".join(avisos))
+    return buf.getvalue(), len(avisos)
+
+
+async def build_xlsx(
+    rows: list[dict], erros: list[str], on_progress: _OnProgress = None
+) -> tuple[bytes, int]:
+    """Planilha no layout "NF-e Report" — campos fiscais extraídos do XML de
+    cada nota. Nota sem XML entra com os dados da listagem e colunas fiscais
+    em branco, mais a aba "Avisos". Retorna (bytes, nº de avisos)."""
+    avisos: list[str] = list(erros)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "NF-e"
+    ws.append(_XLSX_HEADERS)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    for i, r in enumerate(rows):
+        nota = r["nota"]
+        label = f"{r['conta']} nº {nota.get('numero') or nota.get('id')}"
+        estado = _estado_nota(nota.get("situacao"))
+        detail, content, motivo = await _fetch_nota_xml(r["token"], nota)
+        parsed = _parse_nfe_xml(content) if content else None
+        if parsed is None:
+            avisos.append(
+                f"{label}: {motivo or 'XML inválido (não parseou)'}"
+            )
+        ws.append(_xlsx_row(r, parsed, detail, estado))
+        if on_progress is not None:
+            await on_progress(i + 1)
+
+    if avisos:
+        ws_av = wb.create_sheet("Avisos")
+        ws_av.append(["Aviso"])
+        ws_av["A1"].font = Font(bold=True)
+        for a in avisos:
+            ws_av.append([a])
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), len(avisos)
+
+
 @router.get("/export.xml")
 async def export_xml(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -492,50 +622,23 @@ async def export_xml(
     date_to: date = Query(...),
     conta: _ContaIds = [],  # noqa: B006
 ) -> StreamingResponse:
-    """ZIP com os XMLs das notas do período (uma pasta por conta).
-
-    Notas sem XML disponível (não autorizadas, canceladas antes da
-    autorização, etc.) entram no `_avisos.txt` dentro do zip.
-    """
+    """ZIP com os XMLs das notas do período (síncrono, até MAX_XML_NOTAS)."""
     _validate_range(date_from, date_to)
     rows, erros = await _fetch_all(session, conta, date_from, date_to)
     _check_export_size(rows, erros)
-
-    avisos: list[str] = list(erros)
-    buf = BytesIO()
-    seen: set[str] = set()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for r in rows:
-            nota = r["nota"]
-            label = f"{r['conta']} nº {nota.get('numero') or nota.get('id')}"
-            detail, content, motivo = await _fetch_nota_xml(r["token"], nota)
-            if content is None:
-                avisos.append(f"{label}: {motivo}")
-                continue
-            name = _xml_filename(r["conta"], detail, nota)
-            if name in seen:
-                name = name.replace(".xml", f"_{nota['id']}.xml")
-            seen.add(name)
-            zf.writestr(name, content)
-        if avisos:
-            zf.writestr("_avisos.txt", "\n".join(avisos))
-
-    buf.seek(0)
-    stamp = datetime.now(SAO_PAULO).strftime("%Y%m%d_%H%M")
+    data, n_avisos = await build_xml_zip(rows, erros)
     logger.info(
         "nf_export_xml",
         notas=len(rows),
-        avisos=len(avisos),
+        avisos=n_avisos,
         date_from=str(date_from),
         date_to=str(date_to),
     )
     return StreamingResponse(
-        buf,
-        media_type="application/zip",
+        BytesIO(data),
+        media_type=ZIP_MEDIA,
         headers={
-            "Content-Disposition": (
-                f'attachment; filename="notas_fiscais_xml_{stamp}.zip"'
-            )
+            "Content-Disposition": f'attachment; filename="{_xml_zip_fname()}"'
         },
     )
 
@@ -548,127 +651,95 @@ async def export_xlsx(
     date_to: date = Query(...),
     conta: _ContaIds = [],  # noqa: B006
 ) -> StreamingResponse:
-    """Planilha no layout "NF-e Report" — campos fiscais extraídos do XML
-    de cada nota. Nota sem XML entra com os dados da listagem (número,
-    cliente, estado) e as colunas fiscais em branco, mais a aba "Avisos".
-    """
+    """Planilha "NF-e Report" do período (síncrono, até MAX_XML_NOTAS)."""
     _validate_range(date_from, date_to)
     rows, erros = await _fetch_all(session, conta, date_from, date_to)
     _check_export_size(rows, erros)
-
-    avisos: list[str] = list(erros)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "NF-e"
-    ws.append(_XLSX_HEADERS)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-
-    for r in rows:
-        nota = r["nota"]
-        label = f"{r['conta']} nº {nota.get('numero') or nota.get('id')}"
-        estado = _estado_nota(nota.get("situacao"))
-        detail, content, motivo = await _fetch_nota_xml(r["token"], nota)
-        parsed = _parse_nfe_xml(content) if content else None
-        if parsed is None:
-            if motivo:
-                avisos.append(f"{label}: {motivo}")
-            else:
-                avisos.append(f"{label}: XML inválido (não parseou)")
-            # Fallback: o que a listagem tem; colunas fiscais em branco.
-            contato = nota.get("contato") or {}
-            ws.append(
-                [
-                    r["conta"],
-                    "",
-                    "",
-                    str(nota.get("numero") or ""),
-                    "",
-                    detail.get("chaveAcesso") or "",
-                    "",
-                    "",
-                    contato.get("nome") or "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    estado,
-                    (nota.get("dataEmissao") or "")[:19],
-                    "",
-                ]
-            )
-            continue
-        ws.append(
-            [
-                parsed["conta_nf"],
-                parsed["cnpj"],
-                parsed["serie"],
-                parsed["numero"],
-                parsed["operacao"],
-                parsed["chave"],
-                parsed["tipo"],
-                parsed["cfop"],
-                parsed["cliente"],
-                parsed["uf_dest"],
-                parsed["cep"],
-                parsed["valor_nf"],
-                parsed["base_icms"],
-                parsed["vlr_icms"],
-                parsed["base_st"],
-                parsed["vlr_st"],
-                parsed["vlr_fcp_st"],
-                parsed["vlr_ipi"],
-                parsed["vlr_ipi_dev"],
-                parsed["vlr_pis"],
-                parsed["vlr_cofins"],
-                parsed["vlr_seguro"],
-                parsed["vlr_outros"],
-                parsed["vlr_desconto"],
-                parsed["vlr_frete"],
-                estado,
-                parsed["data"],
-                "",
-            ]
-        )
-
-    if avisos:
-        ws_av = wb.create_sheet("Avisos")
-        ws_av.append(["Aviso"])
-        ws_av["A1"].font = Font(bold=True)
-        for a in avisos:
-            ws_av.append([a])
-
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    now_sp = datetime.now(SAO_PAULO)
-    fname = (
-        f"NF-e_Report_excel_{date_from.strftime('%Y%m%d')}"
-        f"_ate_{date_to.strftime('%Y%m%d')}_{now_sp.strftime('%m%d%H%M%S')}.xlsx"
-    )
+    data, n_avisos = await build_xlsx(rows, erros)
     logger.info(
         "nf_export_xlsx",
         notas=len(rows),
-        avisos=len(avisos),
+        avisos=n_avisos,
         date_from=str(date_from),
         date_to=str(date_to),
     )
     return StreamingResponse(
-        buf,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        BytesIO(data),
+        media_type=XLSX_MEDIA,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{_xlsx_fname(date_from, date_to)}"'
+            )
+        },
+    )
+
+
+# ─── export assíncrono (lotes grandes, via worker) ────────────────────
+
+
+class ExportJobIn(BaseModel):
+    fmt: Literal["xlsx", "xml"] = "xlsx"
+    date_from: date
+    date_to: date
+    conta: list[UUID] = []
+
+
+@router.post(
+    "/export-job",
+    response_model=JobCreatedOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def enqueue_export_job(
+    body: ExportJobIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM)],
+) -> JobCreatedOut:
+    """Enfileira o export como BackgroundJob — sem o teto de 500 do
+    síncrono (o worker foge do timeout do proxy). O front faz polling em
+    GET /api/jobs/{id} e baixa em GET /export-job/{id}/download."""
+    _validate_range(body.date_from, body.date_to)
+    job = BackgroundJob(
+        type=BackgroundJobType.EXPORT_NOTAS_FISCAIS,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={
+            "fmt": body.fmt,
+            "date_from": body.date_from.isoformat(),
+            "date_to": body.date_to.isoformat(),
+            "conta": [str(c) for c in body.conta],
+        },
+    )
+    session.add(job)
+    await session.flush()
+
+    pool = await get_arq_pool()
+    arq = await pool.enqueue_job("export_notas_run", str(job.id))
+    if arq is not None:
+        job.arq_job_id = arq.job_id
+    await session.commit()
+    return JobCreatedOut(job_id=job.id)
+
+
+@router.get("/export-job/{job_id}/download")
+async def download_export_job(
+    job_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM)],
+) -> FileResponse:
+    """Baixa o arquivo gerado por um export job concluído."""
+    job = await session.get(BackgroundJob, job_id)
+    if job is None or job.type != BackgroundJobType.EXPORT_NOTAS_FISCAIS:
+        raise HTTPException(404, detail={"code": "job_not_found"})
+    if user.role != UserRole.ADMIN and job.created_by != user.id:
+        raise HTTPException(404, detail={"code": "job_not_found"})
+    if job.status != BackgroundJobStatus.SUCCEEDED:
+        raise HTTPException(409, detail={"code": "job_nao_concluido"})
+    rel = (job.result or {}).get("file_path")
+    abs_path = Path(get_settings().uploads_dir) / rel if rel else None
+    if not rel or abs_path is None or not abs_path.exists():
+        raise HTTPException(404, detail={"code": "arquivo_indisponivel"})
+    return FileResponse(
+        abs_path,
+        media_type=job.result.get("media_type") or "application/octet-stream",
+        filename=job.result.get("filename") or abs_path.name,
     )

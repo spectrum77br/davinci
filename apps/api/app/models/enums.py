@@ -93,6 +93,7 @@ class BackgroundJobType(StrEnum):
     BACKFILL_ML_STOCK = "backfill_ml_stock"
     REFRESH_BLING_STOCK = "refresh_bling_stock"
     AUTO_IMPORT_LINK = "auto_import_link"
+    EXPORT_NOTAS_FISCAIS = "export_notas_fiscais"
 
 
 class BackgroundJobStatus(StrEnum):

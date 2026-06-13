@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import {
   AlertCircle,
+  CheckCircle2,
   Download,
   FileArchive,
   Loader2,
   Search,
+  XCircle,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
@@ -61,28 +63,29 @@ const canQuery = computed(
 )
 const busy = computed(() => loading.value || exportingXml.value || exportingXlsx.value)
 
-function detailMessage(detail: any, e: any) {
-  if (detail && typeof detail === 'object') return detail.message || detail.code || e?.message || 'erro'
-  return detail || e?.message || 'erro'
+function detailParts(detail: any, e: any): { code: string | null; message: string } {
+  if (detail && typeof detail === 'object')
+    return { code: detail.code ?? null, message: detail.message || detail.code || e?.message || 'erro' }
+  return { code: null, message: detail || e?.message || 'erro' }
 }
 
 function apiError(e: any) {
-  return detailMessage(e?.data?.detail, e)
+  return detailParts(e?.data?.detail, e).message
 }
 
 // Os exports usam responseType 'blob', então o ofetch entrega o corpo do
-// erro como Blob em e.data — precisamos ler/parsear pra achar o detail.
-async function apiErrorBlob(e: any) {
+// erro como Blob em e.data — precisamos ler/parsear pra achar o detail
+// (e o code, pra distinguir o caso "muitas_notas" → export em background).
+async function parseBlobError(e: any): Promise<{ code: string | null; message: string }> {
   const data = e?.data
   if (data instanceof Blob) {
     try {
-      const parsed = JSON.parse(await data.text())
-      return detailMessage(parsed?.detail, e)
+      return detailParts(JSON.parse(await data.text())?.detail, e)
     } catch {
-      return e?.message || 'erro'
+      return { code: null, message: e?.message || 'erro' }
     }
   }
-  return apiError(e)
+  return detailParts(e?.data?.detail, e)
 }
 
 function toggleConta(id: string) {
@@ -158,7 +161,10 @@ async function exportXml() {
       `notas_fiscais_xml_${dateFrom.value}_${dateTo.value}.zip`,
     )
   } catch (e: any) {
-    error.value = await apiErrorBlob(e)
+    const { code, message } = await parseBlobError(e)
+    // >500 notas estouram o download direto — cai pro export em background.
+    if (code === 'muitas_notas') await startExportJob('xml')
+    else error.value = message
   } finally {
     exportingXml.value = false
   }
@@ -176,11 +182,96 @@ async function exportXlsx() {
       `NF-e_Report_excel_${from}_ate_${to}.xlsx`,
     )
   } catch (e: any) {
-    error.value = await apiErrorBlob(e)
+    const { code, message } = await parseBlobError(e)
+    if (code === 'muitas_notas') await startExportJob('xlsx')
+    else error.value = message
   } finally {
     exportingXlsx.value = false
   }
 }
+
+// ─── export em background (lotes >500 notas, gerado pelo worker) ───────
+
+type ExportJob = {
+  id: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  total: number
+  processed: number
+  result: { filename?: string; notas?: number; avisos?: number; fmt?: string }
+  error: string | null
+}
+
+const exportJob = ref<ExportJob | null>(null)
+const exportJobNote = ref<string | null>(null)
+const downloadingJob = ref(false)
+let exportPoll: ReturnType<typeof setInterval> | null = null
+
+function stopExportPoll() {
+  if (exportPoll) {
+    clearInterval(exportPoll)
+    exportPoll = null
+  }
+}
+
+function pollExportJob(jobId: string) {
+  stopExportPoll()
+  const tick = async () => {
+    try {
+      const j = await api<ExportJob>(`/api/jobs/${jobId}`)
+      exportJob.value = j
+      if (j.status === 'succeeded' || j.status === 'failed' || j.status === 'cancelled') {
+        stopExportPoll()
+        exportJobNote.value = null
+      }
+    } catch {
+      /* mantém o polling — erro transitório */
+    }
+  }
+  void tick()
+  exportPoll = setInterval(tick, 2000)
+}
+
+async function startExportJob(fmt: 'xlsx' | 'xml') {
+  stopExportPoll()
+  exportJob.value = null
+  error.value = null
+  exportJobNote.value =
+    'O período tem mais de 500 notas — gerando o arquivo em segundo plano. '
+    + 'Pode levar alguns minutos; você pode continuar usando o sistema.'
+  try {
+    const r = await api<{ job_id: string }>('/api/notas-fiscais/export-job', {
+      method: 'POST',
+      body: {
+        fmt,
+        date_from: dateFrom.value,
+        date_to: dateTo.value,
+        conta: Array.from(selected.value),
+      },
+    })
+    pollExportJob(r.job_id)
+  } catch (e: any) {
+    exportJobNote.value = null
+    error.value = apiError(e)
+  }
+}
+
+async function downloadExportJob() {
+  const j = exportJob.value
+  if (!j || j.status !== 'succeeded' || downloadingJob.value) return
+  downloadingJob.value = true
+  try {
+    await downloadBlob(
+      `/api/notas-fiscais/export-job/${j.id}/download`,
+      j.result?.filename || 'notas_fiscais_export',
+    )
+  } catch (e: any) {
+    error.value = (await parseBlobError(e)).message
+  } finally {
+    downloadingJob.value = false
+  }
+}
+
+onUnmounted(stopExportPoll)
 
 function fmtDateTime(v: string | null) {
   if (!v) return '—'
@@ -224,6 +315,39 @@ await loadContas()
     <div v-if="error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
       <AlertCircle class="size-4" />
       {{ error }}
+    </div>
+
+    <div
+      v-if="exportJob || exportJobNote"
+      class="rounded-md border px-3 py-2.5 text-sm"
+      :class="exportJob?.status === 'failed'
+        ? 'border-red-500/40 bg-red-500/10 text-red-400'
+        : exportJob?.status === 'succeeded'
+          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+          : 'border-blue-500/40 bg-blue-500/10 text-blue-600 dark:text-blue-400'"
+    >
+      <div class="flex items-center gap-2">
+        <Loader2 v-if="!exportJob || exportJob.status === 'pending' || exportJob.status === 'running'" class="size-4 animate-spin shrink-0" />
+        <CheckCircle2 v-else-if="exportJob.status === 'succeeded'" class="size-4 shrink-0" />
+        <XCircle v-else class="size-4 shrink-0" />
+
+        <span v-if="!exportJob || exportJob.status === 'pending'">
+          {{ exportJobNote || 'preparando export em segundo plano…' }}
+        </span>
+        <span v-else-if="exportJob.status === 'running'">
+          gerando export… {{ exportJob.processed }}<span v-if="exportJob.total">/{{ exportJob.total }}</span> notas processadas
+        </span>
+        <span v-else-if="exportJob.status === 'succeeded'" class="flex flex-wrap items-center gap-x-2 gap-y-1">
+          export pronto — {{ exportJob.result?.notas ?? 0 }} nota{{ exportJob.result?.notas === 1 ? '' : 's' }}<template v-if="exportJob.result?.avisos">, {{ exportJob.result.avisos }} aviso{{ exportJob.result.avisos === 1 ? '' : 's' }}</template>
+          <Button size="sm" variant="outline" :disabled="downloadingJob" @click="downloadExportJob">
+            <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': downloadingJob }" />
+            baixar
+          </Button>
+        </span>
+        <span v-else>
+          falha ao gerar o export: {{ exportJob.error || 'erro desconhecido' }}
+        </span>
+      </div>
     </div>
 
     <div class="rounded-md border bg-background px-3 py-3 space-y-3">

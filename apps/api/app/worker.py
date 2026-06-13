@@ -57,6 +57,7 @@ from app.services.product_cost_sync import (
     run_sync_import_bling_costs,
     run_sync_product_bling_costs,
 )
+from app.services.notas_fiscais_export import run_export_notas
 from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.sync_orchestrator import SyncOrchestrator
@@ -295,6 +296,13 @@ async def refresh_bling_stock_run(
     to local product_links + products. No marketplace push."""
     async with session_scope() as s:
         await run_refresh_bling_stock(s, job_id=UUID(job_id))
+
+
+async def export_notas_run(ctx: dict, job_id: str) -> None:
+    """Export assíncrono de NF-e (xlsx/zip) pra lotes grandes — foge do
+    timeout do proxy do export síncrono."""
+    async with session_scope() as s:
+        await run_export_notas(s, job_id=UUID(job_id))
 
 
 async def auto_create_product_from_bling_run(
@@ -1173,6 +1181,7 @@ class WorkerSettings:
         sync_product_run,
         ml_backfill_run,
         refresh_bling_stock_run,
+        export_notas_run,
         ingest_bling_order_run,
         auto_create_product_from_bling_run,
         create_bling_kit_for_mark_job,
