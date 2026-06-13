@@ -61,10 +61,28 @@ const canQuery = computed(
 )
 const busy = computed(() => loading.value || exportingXml.value || exportingXlsx.value)
 
-function apiError(e: any) {
-  const detail = e?.data?.detail
+function detailMessage(detail: any, e: any) {
   if (detail && typeof detail === 'object') return detail.message || detail.code || e?.message || 'erro'
   return detail || e?.message || 'erro'
+}
+
+function apiError(e: any) {
+  return detailMessage(e?.data?.detail, e)
+}
+
+// Os exports usam responseType 'blob', então o ofetch entrega o corpo do
+// erro como Blob em e.data — precisamos ler/parsear pra achar o detail.
+async function apiErrorBlob(e: any) {
+  const data = e?.data
+  if (data instanceof Blob) {
+    try {
+      const parsed = JSON.parse(await data.text())
+      return detailMessage(parsed?.detail, e)
+    } catch {
+      return e?.message || 'erro'
+    }
+  }
+  return apiError(e)
 }
 
 function toggleConta(id: string) {
@@ -140,7 +158,7 @@ async function exportXml() {
       `notas_fiscais_xml_${dateFrom.value}_${dateTo.value}.zip`,
     )
   } catch (e: any) {
-    error.value = apiError(e)
+    error.value = await apiErrorBlob(e)
   } finally {
     exportingXml.value = false
   }
@@ -158,7 +176,7 @@ async function exportXlsx() {
       `NF-e_Report_excel_${from}_ate_${to}.xlsx`,
     )
   } catch (e: any) {
-    error.value = apiError(e)
+    error.value = await apiErrorBlob(e)
   } finally {
     exportingXlsx.value = false
   }
