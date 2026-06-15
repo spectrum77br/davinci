@@ -54,6 +54,7 @@ from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.product_cost_sync import (
+    run_restamp_order_costs,
     run_sync_import_bling_costs,
     run_sync_product_bling_costs,
 )
@@ -526,6 +527,12 @@ async def product_bling_cost_sync(ctx: dict) -> None:
     async with session_scope() as s:
         summary = await run_sync_product_bling_costs(s)
     logger.info("product_bling_cost_sync_done", **summary)
+    # Com o custo dos produtos já fresco, re-carimba pedidos recentes que
+    # entraram com preco_custo NULL (SKU novo cujo custo só chegou agora).
+    # Sessão nova: o sync de products já commitou.
+    async with session_scope() as s:
+        restamp_summary = await run_restamp_order_costs(s)
+    logger.info("order_cost_restamp_done", **restamp_summary)
     # Sessão nova: o sync de products já commitou. Se a propagação pra
     # Importação falhar, o refresh de products permanece.
     async with session_scope() as s:

@@ -18,14 +18,20 @@ não têm o custo atualizado por aqui (e não precisam). Por isso `seen`
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ImportProduct, Integration, IntegrationPlatform, Product
+from app.models import (
+    BlingOrder,
+    ImportProduct,
+    Integration,
+    IntegrationPlatform,
+    Product,
+)
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces.bling import BlingClient
 
@@ -99,6 +105,50 @@ async def run_sync_product_bling_costs(session: AsyncSession) -> dict:
     await session.commit()
     logger.info("product_cost_sync_done", **summary)
     return summary
+
+
+async def run_restamp_order_costs(
+    session: AsyncSession, *, window_days: int = 60
+) -> dict:
+    """Re-carimba `bling_orders.preco_custo` em linhas recentes que ficaram NULL.
+
+    O custo do pedido é um snapshot tirado de `products.bling_cost_price` no
+    momento da ingestão (ver `bling_orders._cost_price_by_sku`). SKUs novos
+    (ex.: variantes recém-criadas) viram pedido ANTES do sync diário preencher
+    o custo do produto, então a linha entra com `preco_custo = NULL` — e o
+    caminho de re-ingestão "narrow UPDATE" (`upsert_order`) nunca re-carimba.
+    Resultado: a página de margens mostra "—" no Item Custo para sempre.
+
+    Este passo roda logo após `run_sync_product_bling_costs` (custo já fresco)
+    e preenche essas linhas com o custo agora disponível, casando por SKU exato
+    (`item_codigo` = `products.sku`), restrito aos últimos `window_days` dias de
+    ingestão — não reescreve histórico antigo com o custo de hoje. O snapshot
+    `verificar_margem` reflete via o cron de 30min que reconstrói da view.
+    """
+    fresh_cost = (
+        select(func.max(Product.bling_cost_price))
+        .where(
+            Product.sku == BlingOrder.item_codigo,
+            Product.bling_cost_price.isnot(None),
+        )
+        .scalar_subquery()
+    )
+    cutoff = datetime.now(UTC) - timedelta(days=window_days)
+    stmt = (
+        update(BlingOrder)
+        .where(
+            BlingOrder.preco_custo.is_(None),
+            BlingOrder.created_at >= cutoff,
+            fresh_cost.isnot(None),
+        )
+        .values(preco_custo=fresh_cost)
+        .execution_options(synchronize_session=False)
+    )
+    result = await session.execute(stmt)
+    await session.commit()
+    updated = result.rowcount or 0
+    logger.info("order_cost_restamp_done", updated=updated, window_days=window_days)
+    return {"updated": updated}
 
 
 async def run_sync_import_bling_costs(session: AsyncSession) -> dict:
