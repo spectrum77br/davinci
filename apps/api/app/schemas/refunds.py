@@ -14,6 +14,16 @@ def _clean_optional_text(value: str | None) -> str | None:
     return value or None
 
 
+def _clean_optional_number(value: object) -> object:
+    """Empty/whitespace strings -> None for optional float fields.
+    Frontend number inputs (v-model.number) can emit '' when cleared, which
+    would otherwise 422. Real numbers (and numeric strings) pass through to
+    pydantic's normal coercion."""
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
 def _clamp_cliente_reembolso(tipo: str | None, reembolso: float | None) -> float | None:
     """Mirror frontend behavior: when tipo='Cliente', reembolso must be <= 0.
     Positive values are auto-negated. Negative/null/zero pass through."""
@@ -77,6 +87,11 @@ class RefundCreate(BaseModel):
     def clean_optional_text(cls, value: str | None) -> str | None:
         return _clean_optional_text(value)
 
+    @field_validator("prejuizo", "reembolso", mode="before")
+    @classmethod
+    def clean_optional_number(cls, value: object) -> object:
+        return _clean_optional_number(value)
+
     @field_validator("conta")
     @classmethod
     def clean_conta(cls, value: str) -> str:
@@ -122,6 +137,11 @@ class RefundPatch(BaseModel):
     @classmethod
     def clean_optional_text(cls, value: str | None) -> str | None:
         return _clean_optional_text(value)
+
+    @field_validator("prejuizo", "reembolso", mode="before")
+    @classmethod
+    def clean_optional_number(cls, value: object) -> object:
+        return _clean_optional_number(value)
 
 
 class RefundPage(BaseModel):

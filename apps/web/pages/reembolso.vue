@@ -392,8 +392,12 @@ function draftPayload() {
     plataforma: draft.value.plataforma,
     conta: draft.value.conta,
     tipo: draft.value.tipo || null,
-    prejuizo: draft.value.prejuizo,
-    reembolso: draft.value.reembolso,
+    // Coage via numberOrNull: o input de prejuízo usa v-model.number, que guarda
+    // '' (string vazia) quando o campo é editado e limpo. '' renderiza como campo
+    // vazio mas serializa como prejuizo:'' → o backend rejeita (422). Aqui '' / NaN
+    // viram null pros dois campos numéricos no ponto de serialização.
+    prejuizo: numberOrNull(String(draft.value.prejuizo ?? '')),
+    reembolso: numberOrNull(String(draft.value.reembolso ?? '')),
     chamado: draft.value.chamado || null,
     operacao: draft.value.operacao || null,
     observacao: draft.value.observacao || null,
