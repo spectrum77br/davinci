@@ -7,19 +7,17 @@ Definições fixadas com o operador:
 - bling_orders tem UMA LINHA POR ITEM (item_index), e `total` se repete em
   cada linha do mesmo pedido. Pra somar o faturamento sem inflar é
   obrigatório DEDUPLICAR por pedido primeiro: max(total) GROUP BY bling_id.
-- Agrupamento por LOJA usa `bling_orders.loja` (id da loja no Bling), NÃO o
-  FK store_id. Motivo: ~16k pedidos entregues têm store_id NULL (a ingestão
-  nem sempre vincula a Store), e um INNER join em Store descartava esses
-  pedidos — escondendo ~R$24M de receita real. `loja` está preenchido em
-  quase 100% dos pedidos e casa 1:1 com store_info.bling_store_id.
-- Escopo por equipe via user_scope(StoreInfo, user). Admin vê tudo;
-  usuário com sales_teams vê só lojas em store_info cuja sales_team está
-  na lista; usuário sem equipe vê tudo (comportamento atual da Fase 1).
+- O relatório PARTE DO ROSTER de lojas (store_info), NÃO dos pedidos: toda
+  loja do escopo aparece, mesmo SEM venda no período (zerada). Os pedidos,
+  agregados por `bling_orders.loja` (id da loja Bling, casa 1:1 com
+  store_info.bling_store_id), entram via LEFT JOIN — loja sem pedido = 0.
+- Pedidos de loja SEM cadastro em store_info (loja órfã) ainda contam, mas
+  só na visão SEM escopo (admin/usuário sem equipe, sem filtro de equipe),
+  como linha "Sem cadastro" — preserva a receita órfã no total sem furar o
+  escopo de quem é restrito a equipes (órfão não tem equipe).
+- Escopo por equipe via user_scope(StoreInfo, user) + filtro `team`. Admin
+  vê tudo; usuário com sales_teams vê só lojas da(s) sua(s) equipe(s).
 - Período: default últimos 90 dias.
-
-Hoje nenhuma store_info tem sales_team preenchido — usuário não-admin
-com equipe verá o relatório vazio até o admin atribuir equipes às
-lojas. Isso é o comportamento correto, não bug.
 """
 from __future__ import annotations
 
@@ -52,9 +50,10 @@ async def list_faturamento(
 ) -> FaturamentoOut:
     """Resumo por loja, no período, dos pedidos entregues.
 
-    SQL espelhado em apps/api/app/routers/faturamento.py (CTE `ord`
-    deduplica por bling_id antes de agregar). user_scope(StoreInfo, user)
-    aplica o filtro de equipe — admin pula, equipe restringe.
+    Parte do roster de lojas (store_info) — toda loja do escopo aparece,
+    zerada se não vendeu — e faz LEFT JOIN nos pedidos agregados. Pedido de
+    loja sem cadastro entra como "Sem cadastro" só na visão sem escopo.
+    user_scope(StoreInfo, user) + `team` aplicam o filtro de equipe.
     """
     if end is None:
         end = datetime.now(UTC)
@@ -89,10 +88,9 @@ async def list_faturamento(
     if team is not None:
         scope_clauses.append(StoreInfo.sales_team == team)
 
-    # CTE com max(total) por bling_id pra deduplicar — bling_orders tem uma
-    # linha por item, total repete. Carrega `loja` (id da loja Bling) como
-    # chave do relatório; store_id FK é NULL em ~16k entregues e dropava
-    # esses pedidos num INNER join.
+    # ETAPA 1 — pedidos do período: dedup por bling_id (bling_orders tem uma
+    # linha por item, `total` repete) e agrega por loja Bling (pedidos +
+    # faturamento). `agg` fica com UMA linha por bling_store_id.
     ord_cte = (
         select(
             BlingOrder.bling_id.label("bling_id"),
@@ -107,60 +105,54 @@ async def list_faturamento(
         .group_by(BlingOrder.bling_id, BlingOrder.loja)
         .cte("ord")
     )
-
-    stmt = (
+    agg_cte = (
         select(
             ord_cte.c.bling_store_id.label("bling_store_id"),
-            StoreInfo.platform.label("tipo"),
-            StoreInfo.account_name.label("loja"),
-            StoreInfo.sales_team.label("sales_team"),
             func.count().label("pedidos"),
             func.coalesce(
                 func.round(func.sum(ord_cte.c.total), 2), 0,
             ).label("faturamento"),
         )
-        .select_from(ord_cte)
-        # LEFT JOIN em store_info pelo id da loja Bling — recupera nome/
-        # plataforma/equipe quando cadastrada; pedidos de loja sem cadastro
-        # entram com tipo/loja NULL e AINDA contam no total. bling_store_id é
-        # único em store_info, então não há fan-out. Pro escopo por equipe, o
-        # where(user_scope) remove linhas sem store_info quando o usuário tem
-        # sales_teams (LEFT vira INNER na prática), igual antes.
-        .outerjoin(
-            StoreInfo,
-            StoreInfo.bling_store_id == ord_cte.c.bling_store_id,
-        )
-        .where(*scope_clauses)
-        .group_by(
-            ord_cte.c.bling_store_id,
-            StoreInfo.platform,
-            StoreInfo.account_name,
-            StoreInfo.sales_team,
-        )
-        .order_by(func.sum(ord_cte.c.total).desc().nulls_last())
+        .group_by(ord_cte.c.bling_store_id)
+        .cte("agg")
     )
 
-    rows = (await session.execute(stmt)).all()
+    # ETAPA 2 — roster de lojas do escopo. PARTE de store_info (não dos
+    # pedidos) pra TODA loja aparecer, mesmo zerada. LEFT JOIN nos pedidos
+    # agregados; loja sem venda fica com pedidos/faturamento = 0. Chave =
+    # store_info.id (UUID), única até p/ as ~11 lojas sem bling_store_id.
+    # bling_store_id é único em store_info, então o join não faz fan-out.
+    roster_stmt = (
+        select(
+            StoreInfo.id.label("store_uuid"),
+            StoreInfo.bling_store_id.label("bling_store_id"),
+            StoreInfo.platform.label("tipo"),
+            StoreInfo.account_name.label("loja"),
+            func.coalesce(agg_cte.c.pedidos, 0).label("pedidos"),
+            func.coalesce(agg_cte.c.faturamento, 0).label("faturamento"),
+        )
+        .select_from(StoreInfo)
+        .outerjoin(
+            agg_cte, agg_cte.c.bling_store_id == StoreInfo.bling_store_id
+        )
+        .where(*scope_clauses)
+    )
 
     itens: list[FaturamentoLinha] = []
     total_pedidos = 0
     total_faturamento = 0.0
-    for r in rows:
+    for r in (await session.execute(roster_stmt)).all():
         ped = int(r.pedidos or 0)
         fat = float(r.faturamento or 0)
-        # COALESCE pra exibição: account_name → platform → id da loja Bling.
+        # Exibição: account_name → platform → id da loja Bling → "Sem nome".
         loja_label = (
             r.loja
             or r.tipo
             or (str(r.bling_store_id) if r.bling_store_id is not None else None)
-            or "Sem cadastro"
+            or "Sem nome"
         )
         itens.append(FaturamentoLinha(
-            # Chave única da linha = id da loja Bling (sentinel pros poucos
-            # pedidos sem `loja`). Não é mais o UUID de Store.
-            store_id=(
-                str(r.bling_store_id) if r.bling_store_id is not None else "sem-loja"
-            ),
+            store_id=str(r.store_uuid),
             loja=loja_label,
             tipo=r.tipo,
             pedidos=ped,
@@ -169,6 +161,52 @@ async def list_faturamento(
         ))
         total_pedidos += ped
         total_faturamento += fat
+
+    # ETAPA 3 — pedidos órfãos (loja sem cadastro em store_info). Só na visão
+    # SEM escopo (admin/usuário sem equipe) e SEM filtro de equipe: órfão não
+    # tem equipe, então some quando se restringe a uma. Mantém a receita órfã
+    # no total sem furar o escopo de quem é limitado a equipes.
+    teams = user.sales_teams or []
+    unscoped = user.role == UserRole.ADMIN or not teams
+    if team is None and unscoped:
+        orphan_stmt = (
+            select(
+                agg_cte.c.bling_store_id.label("bling_store_id"),
+                agg_cte.c.pedidos.label("pedidos"),
+                agg_cte.c.faturamento.label("faturamento"),
+            )
+            .select_from(agg_cte)
+            .outerjoin(
+                StoreInfo,
+                StoreInfo.bling_store_id == agg_cte.c.bling_store_id,
+            )
+            .where(StoreInfo.id.is_(None))
+        )
+        for r in (await session.execute(orphan_stmt)).all():
+            ped = int(r.pedidos or 0)
+            fat = float(r.faturamento or 0)
+            itens.append(FaturamentoLinha(
+                store_id=(
+                    str(r.bling_store_id)
+                    if r.bling_store_id is not None
+                    else "sem-loja"
+                ),
+                loja=(
+                    f"Sem cadastro ({r.bling_store_id})"
+                    if r.bling_store_id is not None
+                    else "Sem cadastro"
+                ),
+                tipo=None,
+                pedidos=ped,
+                faturamento=round(fat, 2),
+                ticket_medio=round(fat / ped, 2) if ped else 0.0,
+            ))
+            total_pedidos += ped
+            total_faturamento += fat
+
+    # Maior faturamento primeiro; lojas zeradas caem pro fim, ordenadas por
+    # nome pra a lista ficar estável.
+    itens.sort(key=lambda x: (-x.faturamento, (x.loja or "").lower()))
 
     return FaturamentoOut(
         itens=itens,
