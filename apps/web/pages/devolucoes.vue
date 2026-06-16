@@ -1220,7 +1220,7 @@ async function backfillAddresses() {
       </div>
       <label class="flex items-center gap-1.5 h-9 rounded-md border bg-background px-2.5 text-sm cursor-pointer select-none" title="Mostrar só pedidos que já passaram em manutenção">
         <input v-model="manutencaoFilter" type="checkbox" class="size-4 rounded border accent-primary" />
-        <span class="whitespace-nowrap">manutenção</span>
+        <span class="whitespace-nowrap">manutenções realizadas</span>
       </label>
       <Button size="sm" variant="outline" :disabled="exporting" @click="exportXlsx">
         <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exporting }" />
