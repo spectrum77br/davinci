@@ -8,7 +8,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
-from sqlalchemy import Text, cast, desc, func, or_, select, text
+from sqlalchemy import Text, cast, desc, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -80,6 +80,40 @@ async def _situacoes_by_pedido(
         .group_by(BlingOrder.numero)
     )
     return {str(numero): nome for numero, nome in rows.all() if numero and nome}
+
+
+async def _sync_reembolso_to_bling_orders(
+    session: AsyncSession, pedido_bling: str | None
+) -> None:
+    """Recalcula `bling_orders.reembolso` para o pedido inteiro com a soma (com
+    sinal) dos reembolsos dos refunds daquele pedido. Casa por `bling_id` (via
+    numero -> bling_id) e grava o MESMO total em todas as linhas (itens) do
+    pedido — a vw_bling_pedidos rateia por item_proportion, então o valor cheio
+    em cada linha não duplica. Recompute-from-scratch: idempotente; chamado após
+    create/patch/delete de refund (e nos dois números quando o patch troca o
+    pedido). NÃO faz commit — o caller controla a transação."""
+    pedido = (pedido_bling or "").strip()
+    if not pedido:
+        return
+    total = (
+        await session.execute(
+            select(func.coalesce(func.sum(Refund.reembolso), 0.0)).where(
+                Refund.pedido_bling == pedido
+            )
+        )
+    ).scalar_one()
+    await session.execute(
+        update(BlingOrder)
+        .where(
+            BlingOrder.bling_id.in_(
+                select(BlingOrder.bling_id).where(
+                    BlingOrder.numero == pedido,
+                    BlingOrder.bling_id.is_not(None),
+                )
+            )
+        )
+        .values(reembolso=float(total or 0.0))
+    )
 
 
 def _build_where(
@@ -426,6 +460,8 @@ async def create_refund(
         created_by=u.id,
     )
     session.add(row)
+    await session.flush()
+    await _sync_reembolso_to_bling_orders(session, row.pedido_bling)
     await session.commit()
     await session.refresh(row)
     logger.info(
@@ -448,6 +484,8 @@ async def patch_refund(
     if row is None:
         raise HTTPException(404, detail={"code": "refund_not_found"})
 
+    prev_pedido_bling = row.pedido_bling
+
     data = body.model_dump(exclude_unset=True)
     if data.get("conta") is None and "conta" in data:
         raise HTTPException(422, detail={"code": "conta_required"})
@@ -458,6 +496,13 @@ async def patch_refund(
     # Enforce Cliente -> reembolso <= 0 against the merged state (tipo or
     # reembolso may have come from either the patch or the existing row).
     row.reembolso = _clamp_cliente_reembolso(row.tipo, row.reembolso)
+
+    await session.flush()
+    # Ressincroniza o pedido atual; se o patch mudou o pedido, ressincroniza o
+    # antigo também (perdeu este refund) antes de gravar.
+    await _sync_reembolso_to_bling_orders(session, row.pedido_bling)
+    if prev_pedido_bling and prev_pedido_bling != row.pedido_bling:
+        await _sync_reembolso_to_bling_orders(session, prev_pedido_bling)
 
     await session.commit()
     await session.refresh(row)
@@ -473,7 +518,10 @@ async def delete_refund(
     row = (await session.execute(select(Refund).where(Refund.id == refund_id))).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "refund_not_found"})
+    pedido_bling = row.pedido_bling
     await session.delete(row)
+    await session.flush()
+    await _sync_reembolso_to_bling_orders(session, pedido_bling)
     await session.commit()
     logger.info("refund_deleted", id=str(refund_id))
     return None

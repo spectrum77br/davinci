@@ -54,6 +54,12 @@ class BlingOrder(Base, TimestampMixin):
     custofrete: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     taxacomissao: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     preco_custo: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Soma (com sinal) dos reembolsos (davinci.refunds) do pedido, replicada em
+    # todas as linhas do mesmo bling_id. Alimentada pela página de Reembolso
+    # (não vem do Bling), entra no lucro/margem da vw_bling_pedidos.
+    reembolso: Mapped[float | None] = mapped_column(
+        Float, nullable=True, server_default=text("0")
+    )
     item_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     item_index: Mapped[int | None] = mapped_column(Integer, nullable=True, server_default=text("0"))
     itemvalor: Mapped[float | None] = mapped_column(Numeric, nullable=True)
