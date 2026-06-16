@@ -228,23 +228,41 @@ async def patch_financials_for_item(
                 bling_lucro_calculado = CASE
                     WHEN CAST(:valorbase AS numeric) IS NOT NULL
                          AND COALESCE(bling_custo_produtos, 0::numeric) > 0::numeric
-                    THEN (
-                        CAST(:valorbase AS numeric)
-                        - COALESCE(CAST(:custofrete AS numeric), 0::numeric)
-                        - COALESCE(CAST(:taxacomissao AS numeric), 0::numeric)
-                    ) - bling_custo_produtos
+                    THEN CASE
+                        -- Perdimento (83956): saldo já É o prejuízo, não desconta custo de novo.
+                        -- Espelha vw_conciliacao_margens_marketplace (migration 0142).
+                        WHEN situacao::text = '83956'
+                        THEN (
+                            CAST(:valorbase AS numeric)
+                            - COALESCE(CAST(:custofrete AS numeric), 0::numeric)
+                            - COALESCE(CAST(:taxacomissao AS numeric), 0::numeric)
+                        )
+                        ELSE (
+                            CAST(:valorbase AS numeric)
+                            - COALESCE(CAST(:custofrete AS numeric), 0::numeric)
+                            - COALESCE(CAST(:taxacomissao AS numeric), 0::numeric)
+                        ) - bling_custo_produtos
+                    END
                     ELSE NULL::numeric
                 END,
                 bling_margem_calculado = CASE
                     WHEN CAST(:valorbase AS numeric) IS NOT NULL
                          AND COALESCE(bling_custo_produtos, 0::numeric) > 0::numeric
-                    THEN (
-                        (
+                    THEN CASE
+                        WHEN situacao::text = '83956'
+                        THEN (
                             CAST(:valorbase AS numeric)
                             - COALESCE(CAST(:custofrete AS numeric), 0::numeric)
                             - COALESCE(CAST(:taxacomissao AS numeric), 0::numeric)
-                        ) - bling_custo_produtos
-                    ) / bling_custo_produtos
+                        ) / bling_custo_produtos
+                        ELSE (
+                            (
+                                CAST(:valorbase AS numeric)
+                                - COALESCE(CAST(:custofrete AS numeric), 0::numeric)
+                                - COALESCE(CAST(:taxacomissao AS numeric), 0::numeric)
+                            ) - bling_custo_produtos
+                        ) / bling_custo_produtos
+                    END
                     ELSE NULL::numeric
                 END
             WHERE bling_order_item_id = CAST(:bling_order_item_id AS uuid)

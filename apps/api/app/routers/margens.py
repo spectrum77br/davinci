@@ -53,7 +53,6 @@ SITUACAO_ATENDIDO = 9
 SITUACAO_REPROVADO = 83955
 SITUACAO_ENVIADO_ETIQUETA = 83965
 SITUACAO_AGUARDANDO_DEVOLUCAO = 83957
-SITUACAO_PERDIMENTO = 83956
 
 # Situações em que uma divergência de saldo é triada (vira "saldo divergente").
 # 6 = "Em aberto" (pré-faturamento) e 83965 = "Enviado Etiqueta" (etiqueta
@@ -189,21 +188,10 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
                     - COALESCE(v.bling_taxacomissao_item, 0)
             )                                                    AS saldo_efetivo,
             v.marketplace_margem                                 AS margem,
-            -- Margem Bling. Para Perdimento (situação 83956) o produto foi
-            -- perdido: o saldo (valor_base − frete − taxa) já É o prejuízo
-            -- lançado, então o custo NÃO é descontado de novo — senão o valor
-            -- do produto entra duas vezes (ex.: saldo -660 + custo 660 = -200%
-            -- num prejuízo que deveria ser -100%). margem = saldo / custo.
-            -- Demais situações usam a margem padrão da view (lucro = saldo − custo).
-            CASE
-                WHEN v.situacao = '{SITUACAO_PERDIMENTO}'
-                     AND v.bling_valorbase_item IS NOT NULL
-                     AND COALESCE(v.bling_custo_produtos, 0) > 0
-                THEN (v.bling_valorbase_item
-                      - COALESCE(v.bling_custofrete_item, 0)
-                      - COALESCE(v.bling_taxacomissao_item, 0)) / v.bling_custo_produtos
-                ELSE v.bling_margem_calculado
-            END                                                  AS margem_bling,
+            -- margem_bling já vem perdimento-aware da view/snapshot
+            -- (migration 0142): Perdimento (83956) não desconta o custo de
+            -- novo, então a coluna armazenada já reflete a regra correta.
+            v.bling_margem_calculado                             AS margem_bling,
             v.margem_minima,
             v.situacao                                           AS situacao_id,
             v.situacao_nome                                      AS situacao,
