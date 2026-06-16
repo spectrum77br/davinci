@@ -86,19 +86,23 @@ async def _sync_reembolso_to_bling_orders(
     session: AsyncSession, pedido_bling: str | None
 ) -> None:
     """Recalcula `bling_orders.reembolso` para o pedido inteiro com a soma (com
-    sinal) dos reembolsos dos refunds daquele pedido. Casa por `bling_id` (via
-    numero -> bling_id) e grava o MESMO total em todas as linhas (itens) do
-    pedido — a vw_bling_pedidos rateia por item_proportion, então o valor cheio
-    em cada linha não duplica. Recompute-from-scratch: idempotente; chamado após
-    create/patch/delete de refund (e nos dois números quando o patch troca o
-    pedido). NÃO faz commit — o caller controla a transação."""
+    sinal) dos reembolsos dos refunds CONFERIDOS daquele pedido. Apenas refunds
+    com `conferido = true` entram no lucro/margem — um refund vira efetivo só
+    quando o usuário marca o check. Casa por `bling_id` (via numero -> bling_id)
+    e grava o MESMO total em todas as linhas (itens) do pedido — a
+    vw_bling_pedidos rateia por item_proportion, então o valor cheio em cada
+    linha não duplica. Recompute-from-scratch: idempotente; chamado após
+    create/patch/delete de refund (incluindo toggle do conferido) e nos dois
+    números quando o patch troca o pedido. NÃO faz commit — o caller controla a
+    transação."""
     pedido = (pedido_bling or "").strip()
     if not pedido:
         return
     total = (
         await session.execute(
             select(func.coalesce(func.sum(Refund.reembolso), 0.0)).where(
-                Refund.pedido_bling == pedido
+                Refund.pedido_bling == pedido,
+                Refund.conferido.is_(True),
             )
         )
     ).scalar_one()
