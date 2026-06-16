@@ -68,10 +68,11 @@ def _maybe_create_refund(session: AsyncSession, row: Devolution, condicao: str) 
 async def _sync_manutencao_to_refund(
     session: AsyncSession, row: Devolution, delta: float
 ) -> None:
-    """Soma `delta` (a variação do custo_manutencao da devolução) no `reembolso` do
-    refund de Manutenção correspondente — mesmo pedido + conta. Mantém o sinal do
-    custo (positivo ou negativo) e preserva o valor já existente na coluna, então
-    reedições do custo só movem o reembolso pela diferença (não contam duas vezes).
+    """Aplica a variação do custo_manutencao da devolução no `reembolso` do refund de
+    Manutenção correspondente — mesmo pedido + conta. O custo de manutenção é sempre
+    um DÉBITO: entra negativo no reembolso (custo 30 -> reembolso -= 30), somando ao
+    valor já existente (ex.: -10 + (-30) = -40). Trabalha por delta (`novo - anterior`),
+    então reedições do custo só movem o reembolso pela diferença (não contam duas vezes).
     """
     if not delta:
         return
@@ -92,7 +93,7 @@ async def _sync_manutencao_to_refund(
     )
     if refund is None:
         return
-    refund.reembolso = (refund.reembolso or 0) + delta
+    refund.reembolso = (refund.reembolso or 0) - delta
     logger.info(
         "refund_reembolso_synced",
         refund_id=str(refund.id),
@@ -713,7 +714,8 @@ async def create_devolution(
         _maybe_create_refund(session, row, body.condicao_produto)
     await session.commit()
     await session.refresh(row)
-    # Custo de manutenção informado no ADD entra no reembolso do refund recém-criado.
+    # Custo de manutenção informado no ADD entra como débito (negativo) no reembolso
+    # do refund recém-criado.
     if body.condicao_produto == "Manutenção" and (row.custo_manutencao or 0):
         await _sync_manutencao_to_refund(session, row, row.custo_manutencao or 0)
         await session.commit()
@@ -821,8 +823,8 @@ async def patch_devolution(
     await session.commit()
     await session.refresh(row)
 
-    # Variação do custo de manutenção é refletida no reembolso do refund de Manutenção
-    # (soma a diferença, preservando o que já estava lá e o sinal informado).
+    # Variação do custo de manutenção é refletida como débito no reembolso do refund
+    # de Manutenção (subtrai a diferença, preservando o que já estava lá).
     delta_custo = (row.custo_manutencao or 0) - (prev_custo_manutencao or 0)
     if delta_custo:
         await _sync_manutencao_to_refund(session, row, delta_custo)
