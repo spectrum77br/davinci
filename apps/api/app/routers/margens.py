@@ -172,7 +172,21 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             (v.bling_valorbase_item
                 - COALESCE(v.bling_custofrete_item, 0)
                 - COALESCE(v.bling_taxacomissao_item, 0))        AS saldo_bling,
-            v.marketplace_liquido_base_margem_item               AS saldo_efetivo,
+            -- Saldo Efetivo = saldo realizado do item. Por padrão é o líquido
+            -- do marketplace (igual a Saldo Plataforma), mas quando NÃO há
+            -- repasse de marketplace (ex.: situação "Perdimento", ou qualquer
+            -- pedido sem evento financeiro) cai pro valor gravado no Bling
+            -- (valor_base − frete − taxa). É lá que a edição inline de Saldo
+            -- Efetivo grava (POST /sync-saldo-final → bling_orders.valorbase,
+            -- zerando taxa/frete), então sem esse COALESCE o valor digitado
+            -- nunca aparecia na célula — ela lia o líquido do marketplace, que
+            -- fica NULL nesses casos.
+            COALESCE(
+                v.marketplace_liquido_base_margem_item,
+                v.bling_valorbase_item
+                    - COALESCE(v.bling_custofrete_item, 0)
+                    - COALESCE(v.bling_taxacomissao_item, 0)
+            )                                                    AS saldo_efetivo,
             v.marketplace_margem                                 AS margem,
             v.bling_margem_calculado                             AS margem_bling,
             v.margem_minima,
