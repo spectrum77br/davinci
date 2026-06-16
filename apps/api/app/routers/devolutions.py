@@ -650,6 +650,7 @@ async def stock_correction(
         quantidade=body.quantidade or 1,
         troca_sku=body.troca_sku,
         troca_condicao=body.troca_condicao,
+        estoque_suffix=body.estoque_suffix,
         estoque_destino_sku=body.estoque_destino_sku,
         estoque_nova_tag=body.estoque_nova_tag,
         manutencao_destino=body.manutencao_destino,

@@ -308,8 +308,9 @@ function onManutencaoCancel() {
   manutencaoModal.value = { open: false, sku: null, resolve: null }
 }
 
-// Modal de destino de estoque: bin existente OU tag p/ criar produto novo.
-type EstoqueResult = { destino_sku?: string; nova_tag?: string }
+// Modal de destino de estoque: bin existente, tag p/ criar produto novo
+// (z000N.<tag>) OU `suffix` p/ manter o SKU base.<sufixo> (ex.: .us).
+type EstoqueResult = { destino_sku?: string; nova_tag?: string; suffix?: string }
 const estoqueModal = ref<{ open: boolean; sku: string; condicao: string; resolve: ((v: EstoqueResult | null) => void) | null }>(
   { open: false, sku: '', condicao: '', resolve: null },
 )
@@ -376,6 +377,7 @@ async function resolveStockModals(
   if (!dest) return null
   out.estoque_destino_sku = dest.destino_sku ?? null
   out.estoque_nova_tag = dest.nova_tag ?? null
+  out.estoque_suffix = dest.suffix ?? null
   return out
 }
 
@@ -693,6 +695,7 @@ async function submitCorrecao() {
         observacao: correcaoObs.value.trim() || null,
         troca_sku: extra.troca_sku,
         troca_condicao: extra.troca_condicao,
+        estoque_suffix: extra.estoque_suffix,
         estoque_destino_sku: extra.estoque_destino_sku,
         estoque_nova_tag: extra.estoque_nova_tag,
         manutencao_destino: extra.manutencao_destino,

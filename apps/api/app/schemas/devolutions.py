@@ -181,6 +181,7 @@ class StockCorrectionIn(BaseModel):
     observacao: str | None = None
     troca_sku: str | None = None
     troca_condicao: str | None = None
+    estoque_suffix: str | None = None
     estoque_destino_sku: str | None = None
     estoque_nova_tag: str | None = None
     manutencao_destino: str | None = None
@@ -190,6 +191,7 @@ class StockCorrectionIn(BaseModel):
         "observacao",
         "troca_sku",
         "troca_condicao",
+        "estoque_suffix",
         "estoque_destino_sku",
         "estoque_nova_tag",
         "manutencao_destino",

@@ -13,8 +13,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  // Um dos dois é preenchido: bin existente escolhido, OU tag pra criar produto novo.
-  (e: 'confirm', payload: { destino_sku?: string; nova_tag?: string }): void
+  // Um dos três é preenchido: bin existente escolhido, tag pra criar produto
+  // novo (z000N.<tag>), OU `suffix` pra manter o SKU base.<sufixo> (ex.: .us).
+  (e: 'confirm', payload: { destino_sku?: string; nova_tag?: string; suffix?: string }): void
   (e: 'cancel'): void
 }>()
 
@@ -28,12 +29,14 @@ const errorMsg = ref<string | null>(null)
 const data = ref<SuffixesResponse | null>(null)
 const selectedExisting = ref<string | null>(null)
 const selectedTag = ref<string | null>(null)
+const selectedSuffix = ref<string | null>(null)
 
 watch(() => props.open, (open) => {
   if (open) {
     data.value = null
     selectedExisting.value = null
     selectedTag.value = null
+    selectedSuffix.value = null
     errorMsg.value = null
     fetchVariants()
   }
@@ -71,22 +74,35 @@ const tagChoices = computed(() => {
   ]
 })
 
-// Bin existente e "criar novo z" são mutuamente exclusivos.
-const canConfirm = computed(() => !!selectedExisting.value || !!selectedTag.value)
+// SKU usado a manter: base.us (ex.: dg020.us). Só pra Usado.
+const usadoSku = computed(() => (data.value ? `${data.value.base}.us` : ''))
+
+// Bin existente, "criar novo z" e "manter .us" são mutuamente exclusivos.
+const canConfirm = computed(
+  () => !!selectedExisting.value || !!selectedTag.value || !!selectedSuffix.value,
+)
 
 function pickExisting(sku: string) {
   selectedExisting.value = sku
   selectedTag.value = null
+  selectedSuffix.value = null
 }
 function pickTag(tag: string) {
   selectedTag.value = tag
   selectedExisting.value = null
+  selectedSuffix.value = null
+}
+function pickSuffix(suffix: string) {
+  selectedSuffix.value = suffix
+  selectedExisting.value = null
+  selectedTag.value = null
 }
 
 function confirm() {
   if (!canConfirm.value) return
   if (selectedExisting.value) emit('confirm', { destino_sku: selectedExisting.value })
-  else emit('confirm', { nova_tag: selectedTag.value! })
+  else if (selectedTag.value) emit('confirm', { nova_tag: selectedTag.value })
+  else emit('confirm', { suffix: selectedSuffix.value! })
 }
 </script>
 
@@ -130,6 +146,23 @@ function confirm() {
             >
               <span class="font-mono text-sm">{{ v.sku }}</span>
               <span class="mt-0.5 text-[11px] text-muted-foreground truncate w-full">{{ v.name || '—' }}</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Manter o SKU usado base.us (ex.: dg020.us) — só pra Usado. Entra no
+             bin se já existir, senão cria base.us (sem virar produto z). -->
+        <div v-if="isUsado" class="space-y-1.5">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Manter SKU usado</p>
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <button
+              type="button"
+              class="flex flex-col items-center rounded-md border px-3 py-2 text-center transition-colors"
+              :class="selectedSuffix === 'us' ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
+              @click="pickSuffix('us')"
+            >
+              <span class="font-mono text-sm">{{ usadoSku }}</span>
+              <span class="mt-0.5 text-[11px] text-muted-foreground">mantém .us</span>
             </button>
           </div>
         </div>
