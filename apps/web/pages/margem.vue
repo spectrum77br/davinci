@@ -81,6 +81,17 @@ const ATTENTION_OPTIONS: AttentionType[] = ['all', 'margem', 'frete', 'saldo']
 const { api } = useApi()
 const canEdit = useCan('margem', 'edit')
 
+// Coluna "Frete Resultado" restrita a estes usuários.
+const _auth = useAuthStore()
+const FRETE_RESULTADO_USERS = [
+  'spectrum77@tuta.com',
+  'maconer06@tuta.com',
+]
+const canSeeFreteResultado = computed(() => {
+  const email = _auth.user?.email?.toLowerCase()
+  return !!email && FRETE_RESULTADO_USERS.includes(email)
+})
+
 const items = ref<MarketplaceRow[]>([])
 const total = ref(0)
 const platforms = ref<string[]>([])
@@ -682,7 +693,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="3">Identificação</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="5">Anúncio</th>
             <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Item</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="5">Frete</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="canSeeFreteResultado ? 5 : 4">Frete</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="3">Saldo</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-blue-50 dark:bg-blue-900/20" colspan="3">Margem</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Situação</th>
@@ -703,7 +714,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Frete Anúncio</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Frete Projetado</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Frete Resultado</th>
+            <th v-if="canSeeFreteResultado" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Frete Resultado</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Saldo Plataforma</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-emerald-50 dark:bg-emerald-900/20">Saldo Bling</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-emerald-50 dark:bg-emerald-900/20">Saldo Efetivo</th>
@@ -717,12 +728,12 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="24" class="text-center py-8 text-muted-foreground">
+            <td :colspan="canSeeFreteResultado ? 24 : 23" class="text-center py-8 text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td colspan="24" class="text-center py-8 text-muted-foreground">
+            <td :colspan="canSeeFreteResultado ? 24 : 23" class="text-center py-8 text-muted-foreground">
               <template v-if="tab === 'lookup' && !lookupTerm">
                 digite o numero do pedido acima para buscar
               </template>
@@ -775,6 +786,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             </td>
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">{{ brl(r.reembolso) }}</td>
             <td
+              v-if="canSeeFreteResultado"
               class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10 font-medium"
               :class="r.resultado_frete != null ? (r.resultado_frete > 0 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400') : ''"
             >
