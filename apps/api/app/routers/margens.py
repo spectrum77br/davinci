@@ -193,6 +193,17 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             -- novo, então a coluna armazenada já reflete a regra correta.
             v.bling_margem_calculado                             AS margem_bling,
             v.margem_minima,
+            -- Margem Pós Reembolso = margem recalculada já com prejuízo/reembolso
+            -- da tabela refunds aplicados. saldo_final (migration 0076) já é
+            -- saldo_efetivo − prejuizo + reembolso (proporcionado por item), então
+            -- basta refazer a razão sobre o custo. Quando há reembolso de
+            -- manutenção/devolução, esta coluna fica negativa enquanto a "Margem"
+            -- (que ignora o reembolso) ainda mostra positivo.
+            CASE
+                WHEN COALESCE(v.bling_custo_produtos, 0) > 0 AND v.saldo_final IS NOT NULL
+                THEN (v.saldo_final - v.bling_custo_produtos) / v.bling_custo_produtos
+                ELSE NULL::numeric
+            END                                                  AS margem_pos_reembolso,
             v.situacao                                           AS situacao_id,
             v.situacao_nome                                      AS situacao,
             v.ajustes,

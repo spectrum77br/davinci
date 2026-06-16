@@ -28,6 +28,7 @@ type MarketplaceRow = {
   saldo_efetivo: number | null
   margem: number | null
   margem_bling: number | null
+  margem_pos_reembolso: number | null
   margem_minima: number | null
   situacao_id: number | null
   situacao: string | null
@@ -695,7 +696,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Item</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="canSeeFreteResultado ? 5 : 4">Frete</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="3">Saldo</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-blue-50 dark:bg-blue-900/20" colspan="3">Margem</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-blue-50 dark:bg-blue-900/20" colspan="4">Margem</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Situação</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Aprovação</th>
           </tr>
@@ -720,6 +721,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-emerald-50 dark:bg-emerald-900/20">Saldo Efetivo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Margem</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20">Margem Bling</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px] bg-blue-50 dark:bg-blue-900/20">Margem Pós Reembolso</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-blue-50 dark:bg-blue-900/20">Margem Mínima</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] border-l-[3px] border-gray-400 dark:border-gray-600">Situação</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] border-l-[3px] border-gray-400 dark:border-gray-600">Status</th>
@@ -858,6 +860,14 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                 : (r.margem_bling != null && r.margem_bling >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')"
             >
               {{ pct(r.margem_bling) }}
+            </td>
+            <td
+              class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 font-medium"
+              :class="r.margem_pos_reembolso != null && r.margem_minima != null
+                ? (r.margem_pos_reembolso >= r.margem_minima ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')
+                : (r.margem_pos_reembolso != null && r.margem_pos_reembolso >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')"
+            >
+              {{ pct(r.margem_pos_reembolso) }}
             </td>
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 text-muted-foreground">{{ pct(r.margem_minima) }}</td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground border-l-[3px] border-gray-400 dark:border-gray-600">{{ r.situacao || '—' }}</td>
