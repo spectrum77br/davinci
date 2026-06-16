@@ -63,6 +63,44 @@ def _maybe_create_refund(session: AsyncSession, row: Devolution, condicao: str) 
     )
     session.add(refund)
     logger.info("refund_auto_created", pedido_bling=row.pedido_bling, tipo=condicao)
+
+
+async def _sync_manutencao_to_refund(
+    session: AsyncSession, row: Devolution, delta: float
+) -> None:
+    """Soma `delta` (a variação do custo_manutencao da devolução) no `reembolso` do
+    refund de Manutenção correspondente — mesmo pedido + conta. Mantém o sinal do
+    custo (positivo ou negativo) e preserva o valor já existente na coluna, então
+    reedições do custo só movem o reembolso pela diferença (não contam duas vezes).
+    """
+    if not delta:
+        return
+    conds = [
+        Refund.tipo == "Manutenção",
+        func.btrim(Refund.conta) == (row.conta or "").strip(),
+    ]
+    if row.pedido_bling:
+        conds.append(Refund.pedido_bling == row.pedido_bling)
+    elif row.pedido_marketplace:
+        conds.append(Refund.pedido_marketplace == row.pedido_marketplace)
+    else:
+        return  # sem pedido não há como casar o refund
+    refund = (
+        (await session.execute(select(Refund).where(*conds).order_by(desc(Refund.created_at))))
+        .scalars()
+        .first()
+    )
+    if refund is None:
+        return
+    refund.reembolso = (refund.reembolso or 0) + delta
+    logger.info(
+        "refund_reembolso_synced",
+        refund_id=str(refund.id),
+        delta=delta,
+        reembolso=refund.reembolso,
+    )
+
+
 settings = get_settings()
 SCHEMA = settings.database_schema
 
@@ -675,6 +713,11 @@ async def create_devolution(
         _maybe_create_refund(session, row, body.condicao_produto)
     await session.commit()
     await session.refresh(row)
+    # Custo de manutenção informado no ADD entra no reembolso do refund recém-criado.
+    if body.condicao_produto == "Manutenção" and (row.custo_manutencao or 0):
+        await _sync_manutencao_to_refund(session, row, row.custo_manutencao or 0)
+        await session.commit()
+        await session.refresh(row)
     # Prazo (30 dias da inserção) só para Manutenção.
     if body.condicao_produto == "Manutenção" and row.prazo is None:
         row.prazo = row.created_at + timedelta(days=30)
@@ -741,6 +784,7 @@ async def patch_devolution(
 
     prev_condicao = row.condicao_produto
     prev_devolver_estoque = row.devolver_estoque
+    prev_custo_manutencao = row.custo_manutencao
     for key, value in data.items():
         setattr(row, key, value)
     if "sku" in data:
@@ -776,6 +820,14 @@ async def patch_devolution(
 
     await session.commit()
     await session.refresh(row)
+
+    # Variação do custo de manutenção é refletida no reembolso do refund de Manutenção
+    # (soma a diferença, preservando o que já estava lá e o sinal informado).
+    delta_custo = (row.custo_manutencao or 0) - (prev_custo_manutencao or 0)
+    if delta_custo:
+        await _sync_manutencao_to_refund(session, row, delta_custo)
+        await session.commit()
+        await session.refresh(row)
 
     condicao_changed = new_condicao != prev_condicao
     toggle_turned_on = row.devolver_estoque and not prev_devolver_estoque
