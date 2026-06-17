@@ -37,7 +37,6 @@ def qualified_table(name: str) -> str:
 
 SNAPSHOT_TABLE = qualified_table("verificar_margem")
 VIEW_TABLE = qualified_table("vw_conciliacao_margens_marketplace")
-VIEW_ALL_TABLE = qualified_table("vw_conciliacao_margens_marketplace_all")
 
 
 async def rebuild_all(session: AsyncSession) -> int:
@@ -83,12 +82,19 @@ async def rebuild_all(session: AsyncSession) -> int:
     return result.rowcount or 0
 
 
+FN_FOR_BLING_ID = f"{_ident(SCHEMA)}.conciliacao_margens_for_bling_id"
+BLING_ORDERS_TABLE = qualified_table("bling_orders")
+
+
 async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
     """Targeted refresh of one order by its Bling `numero`.
 
-    Le da view "_all" (sem janela de 20d) para que pedidos antigos
-    referenciados manualmente em refunds tambem apareçam em
-    verificar_margem e fiquem disponiveis na pagina de margens.
+    Caminho rápido: em vez de varrer a view `_all` (que recalcula a
+    `pricing_match` de todo o histórico — ~3 min, ver migration 0148), resolve
+    os `bling_id` do numero e chama a função `conciliacao_margens_for_bling_id`,
+    que injeta o filtro `bling_id` dentro da view e roda em ~2 s. Sem janela de
+    20d, então pedidos antigos (referenciados em refunds, fora da janela)
+    aparecem no snapshot e ficam disponiveis na pagina de margens.
     """
     await session.execute(
         text(f"DELETE FROM {SNAPSHOT_TABLE} WHERE pedido_bling = :p"),
@@ -97,8 +103,10 @@ async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
     result = await session.execute(
         text(
             f"INSERT INTO {SNAPSHOT_TABLE} "
-            f"SELECT * FROM {VIEW_ALL_TABLE} "
-            "WHERE pedido_bling = :p"
+            f"SELECT f.* FROM ("
+            f"  SELECT DISTINCT bling_id FROM {BLING_ORDERS_TABLE} "
+            f"  WHERE numero = :p AND bling_id IS NOT NULL"
+            f") b, LATERAL {FN_FOR_BLING_ID}(b.bling_id) f"
         ),
         {"p": pedido_bling},
     )
@@ -109,7 +117,8 @@ async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
 async def refresh_for_bling_id(session: AsyncSession, bling_id: int) -> int:
     """Targeted refresh of one order by its internal Bling id.
 
-    Le da view "_all" (sem janela de 20d), mesmo motivo de refresh_for_pedido.
+    Usa a função `conciliacao_margens_for_bling_id` (caminho rápido, ~2 s, sem
+    janela de 20d) — mesmo motivo de refresh_for_pedido (migration 0148).
     """
     await session.execute(
         text(f"DELETE FROM {SNAPSHOT_TABLE} WHERE bling_id = :b"),
@@ -118,8 +127,7 @@ async def refresh_for_bling_id(session: AsyncSession, bling_id: int) -> int:
     result = await session.execute(
         text(
             f"INSERT INTO {SNAPSHOT_TABLE} "
-            f"SELECT * FROM {VIEW_ALL_TABLE} "
-            "WHERE bling_id = :b"
+            f"SELECT * FROM {FN_FOR_BLING_ID}(:b)"
         ),
         {"b": bling_id},
     )
