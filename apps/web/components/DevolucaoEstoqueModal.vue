@@ -3,7 +3,7 @@ import { Loader2, Search, X } from 'lucide-vue-next'
 
 type Variant = { suffix: string; sku: string; name: string | null; exists: boolean }
 type SuffixesResponse = { base: string; allowed_suffixes: string[]; variants: Variant[] }
-type ProductHit = { sku: string; name: string; cost_price: number | null }
+type ProductHit = { sku: string; name: string; cost_price: number | null; saldo_virtual_total: number | null }
 
 const props = defineProps<{
   open: boolean
@@ -74,9 +74,8 @@ async function runSearch() {
   }
 }
 
-function brl(v: number | null) {
-  if (v == null) return '—'
-  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+function saldo(v: number | null) {
+  return v == null ? '—' : `${v} un.`
 }
 
 async function fetchVariants() {
@@ -202,7 +201,7 @@ function confirm() {
               <input type="radio" :checked="selectedExisting === r.sku" class="size-3.5 accent-primary shrink-0" />
               <span class="font-mono text-sm shrink-0">{{ r.sku }}</span>
               <span class="text-xs text-muted-foreground truncate flex-1">{{ r.name || '—' }}</span>
-              <span class="text-[11px] text-muted-foreground tabular-nums shrink-0">{{ brl(r.cost_price) }}</span>
+              <span class="text-[11px] text-muted-foreground tabular-nums shrink-0" title="saldo virtual">{{ saldo(r.saldo_virtual_total) }}</span>
             </button>
           </div>
         </div>

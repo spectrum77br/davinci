@@ -222,6 +222,7 @@ class DevolutionProductOut(BaseModel):
     sku: str
     name: str
     cost_price: float | None = None
+    saldo_virtual_total: int | None = None
 
 
 class SkuSuffixVariant(BaseModel):
