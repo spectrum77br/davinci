@@ -571,7 +571,10 @@ async def search_products(
     like = f"%{q}%"
     rows = (
         await session.execute(
-            select(Product.sku, Product.name, Product.cost_price, Product.saldo_virtual_total)
+            select(
+                Product.sku, Product.name, Product.cost_price,
+                Product.saldo_virtual_total, Product.stock,
+            )
             .where(or_(Product.sku.ilike(like), Product.name.ilike(like)))
             .where(or_(Product.situacao == "A", Product.situacao.is_(None)))
             .order_by(Product.sku)
@@ -583,7 +586,12 @@ async def search_products(
             sku=r.sku,
             name=r.name,
             cost_price=float(r.cost_price) if r.cost_price is not None else None,
-            saldo_virtual_total=r.saldo_virtual_total,
+            # `stock` (webhook) já é o saldoVirtualTotal; `saldo_virtual_total`
+            # (refresh explícito) é NULL nos avulsos z criados na devolução —
+            # cai no stock pra não exibir "—".
+            saldo_virtual_total=(
+                r.saldo_virtual_total if r.saldo_virtual_total is not None else r.stock
+            ),
         )
         for r in rows
     ]
