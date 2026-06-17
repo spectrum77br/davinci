@@ -12,7 +12,7 @@
 //   * Envios   → per-day shipment counts (the only tab that benefits
 //                from a wider window, so it auto-widens to last 7 days
 //                on first activation if the user hasn't picked a date).
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, FileUp, Upload, Download, Trash2,
@@ -165,6 +165,69 @@ async function syncFromBling() {
     setTimeout(() => { syncToast.value = null }, 4000)
   }
 }
+
+// ── Atualizar Bling (job assíncrono /api/jobs/refresh-bling-stock) ─────
+// Pagina o /produtos do Bling, regrava estoque e — no fim — marca como
+// excluído (situacao='E') os produtos que sumiram da listagem do Bling
+// (foram apagados lá). Diferente do "Recarregar" (sync-stocks), que só
+// atualiza o saldo dos produtos já cadastrados e NÃO remove os excluídos.
+// Roda no worker e leva alguns minutos; acompanhamos por polling do job.
+const blingJobRunning = ref(false)
+const blingJobToast = ref<string | null>(null)
+let blingPollHandle: number | null = null
+
+function stopBlingPoll() {
+  if (blingPollHandle) { clearInterval(blingPollHandle); blingPollHandle = null }
+}
+
+async function atualizarBling() {
+  if (blingJobRunning.value) return
+  blingJobRunning.value = true
+  blingJobToast.value = 'Iniciando atualização do Bling…'
+  try {
+    const r = await api<{ job_id: string }>('/api/jobs/refresh-bling-stock', {
+      method: 'POST',
+    })
+    pollBlingJob(r.job_id)
+  } catch (e: any) {
+    blingJobRunning.value = false
+    blingJobToast.value = `Falha: ${e?.data?.detail?.code || e?.message || 'erro'}`
+    setTimeout(() => { blingJobToast.value = null }, 6000)
+  }
+}
+
+function pollBlingJob(jobId: string) {
+  stopBlingPoll()
+  const tick = async () => {
+    try {
+      const j = await api<{
+        status: string; processed?: number; result?: Record<string, any>
+      }>(`/api/jobs/${jobId}`)
+      if (j.status === 'running' || j.status === 'pending') {
+        blingJobToast.value = `Atualizando do Bling… ${j.processed ?? 0} produtos`
+        return
+      }
+      stopBlingPoll()
+      blingJobRunning.value = false
+      if (j.status === 'succeeded') {
+        const excl = Number(j.result?.reconciled_excluido ?? 0)
+        blingJobToast.value = excl > 0
+          ? `Pronto — estoque atualizado e ${excl} produto(s) excluído(s) no Bling removido(s).`
+          : 'Pronto — estoque atualizado (nenhum excluído encontrado).'
+        void loadCurrentTab()
+      } else {
+        blingJobToast.value = 'Falha ao atualizar o estoque do Bling.'
+      }
+      setTimeout(() => { blingJobToast.value = null }, 10000)
+    } catch {
+      // erro transitório no polling — tenta de novo no próximo tick
+    }
+  }
+  void tick()
+  blingPollHandle = window.setInterval(tick, 2000)
+}
+
+onBeforeUnmount(stopBlingPoll)
 
 const statusFilter = ref<'all' | 'enviado' | 'nao_enviado'>('all')
 const conferidoFilter = ref<'all' | 'conferidos' | 'nao_conferidos'>('all')
@@ -800,6 +863,21 @@ async function conferirTodos() {
         v-if="syncToast"
         class="text-xs text-muted-foreground bg-muted/40 border rounded px-2 py-1"
       >{{ syncToast }}</span>
+      <button
+        v-if="isAdmin"
+        class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        :disabled="blingJobRunning"
+        :title="'Puxa os produtos do Bling, atualiza o estoque e remove os que foram excluídos no Bling'"
+        @click="atualizarBling"
+      >
+        <Loader2 v-if="blingJobRunning" class="size-3.5 animate-spin" />
+        <Download v-else class="size-3.5" />
+        {{ blingJobRunning ? 'Atualizando…' : 'Atualizar Bling' }}
+      </button>
+      <span
+        v-if="blingJobToast"
+        class="text-xs text-muted-foreground bg-muted/40 border rounded px-2 py-1"
+      >{{ blingJobToast }}</span>
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap">
         <button
           v-for="t in visibleTabs"
