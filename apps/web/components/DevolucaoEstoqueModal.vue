@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { Loader2, X } from 'lucide-vue-next'
+import { Loader2, Search, X } from 'lucide-vue-next'
 
 type Variant = { suffix: string; sku: string; name: string | null; exists: boolean }
 type SuffixesResponse = { base: string; allowed_suffixes: string[]; variants: Variant[] }
+type ProductHit = { sku: string; name: string; cost_price: number | null }
 
 const props = defineProps<{
   open: boolean
@@ -31,6 +32,14 @@ const selectedExisting = ref<string | null>(null)
 const selectedTag = ref<string | null>(null)
 const selectedSuffix = ref<string | null>(null)
 
+// Busca por nome/SKU: achar um produto ATIVO já existente (ex.: outro avulso
+// "Poco c65" = z0001) e somar a unidade nele em vez de criar um novo z.
+const q = ref('')
+const searching = ref(false)
+const searchResults = ref<ProductHit[]>([])
+const searchErr = ref<string | null>(null)
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+
 watch(() => props.open, (open) => {
   if (open) {
     data.value = null
@@ -38,9 +47,37 @@ watch(() => props.open, (open) => {
     selectedTag.value = null
     selectedSuffix.value = null
     errorMsg.value = null
+    q.value = ''
+    searchResults.value = []
+    searchErr.value = null
     fetchVariants()
   }
 })
+
+watch(q, () => {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(runSearch, 300)
+})
+
+async function runSearch() {
+  const term = q.value.trim()
+  if (!term) { searchResults.value = []; searchErr.value = null; return }
+  searching.value = true
+  searchErr.value = null
+  try {
+    searchResults.value = await api<ProductHit[]>(`/api/devolutions/product-search?q=${encodeURIComponent(term)}`)
+    if (!searchResults.value.length) searchErr.value = 'nenhum produto ativo encontrado'
+  } catch (e: any) {
+    searchErr.value = e?.data?.detail?.message || e?.message || 'erro na busca'
+  } finally {
+    searching.value = false
+  }
+}
+
+function brl(v: number | null) {
+  if (v == null) return '—'
+  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+}
 
 async function fetchVariants() {
   loading.value = true
@@ -130,6 +167,45 @@ function confirm() {
 
       <template v-else-if="data">
         <p class="text-xs text-muted-foreground">Base: <span class="font-mono">{{ data.base }}</span></p>
+
+        <!-- Buscar produto ativo já existente por nome/SKU e somar a unidade nele
+             (ex.: já existe um "Poco c65" = z0001 → volta no z0001, não cria z novo). -->
+        <div class="space-y-1.5">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Voltar num produto existente
+          </p>
+          <p class="text-xs text-muted-foreground">
+            Se já existe um produto com esse nome (ex.: outro avulso), busque e some a unidade nele.
+          </p>
+          <div class="relative">
+            <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+            <input
+              v-model="q"
+              class="h-9 w-full rounded-md border bg-background pl-8 pr-3 text-sm"
+              placeholder="buscar por nome ou SKU do produto"
+              @keydown.enter.prevent="runSearch"
+            />
+          </div>
+          <div v-if="searching" class="py-3 text-center text-sm text-muted-foreground">
+            <Loader2 class="size-4 inline animate-spin mr-1.5" /> buscando…
+          </div>
+          <div v-else-if="searchErr" class="py-2 text-center text-xs text-muted-foreground">{{ searchErr }}</div>
+          <div v-else-if="searchResults.length" class="rounded-md border max-h-[28vh] overflow-auto divide-y">
+            <button
+              v-for="r in searchResults"
+              :key="r.sku"
+              type="button"
+              class="flex w-full items-center gap-3 px-3 py-2 text-left transition-colors"
+              :class="selectedExisting === r.sku ? 'bg-primary/10' : 'hover:brightness-95 dark:hover:brightness-110'"
+              @click="pickExisting(r.sku)"
+            >
+              <input type="radio" :checked="selectedExisting === r.sku" class="size-3.5 accent-primary shrink-0" />
+              <span class="font-mono text-sm shrink-0">{{ r.sku }}</span>
+              <span class="text-xs text-muted-foreground truncate flex-1">{{ r.name || '—' }}</span>
+              <span class="text-[11px] text-muted-foreground tabular-nums shrink-0">{{ brl(r.cost_price) }}</span>
+            </button>
+          </div>
+        </div>
 
         <!-- Bins já existentes: entrada direta de N unidades. Oculto para Usado,
              que sempre vira produto z (não entra em bin regional existente). -->
