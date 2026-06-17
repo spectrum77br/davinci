@@ -624,6 +624,17 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       <span v-else class="text-xs text-muted-foreground">
         digite o numero do pedido e clique em buscar
       </span>
+      <Button
+        v-if="lookupTerm && items.length && historicoDisponivel"
+        size="sm"
+        variant="outline"
+        :disabled="loading || historicoLoading"
+        title="Recalcula da view completa (sem janela de 30 dias). Pode levar alguns minutos."
+        @click="lookupHistorico"
+      >
+        <RefreshCw class="size-4 mr-1.5" :class="{ 'animate-spin': historicoLoading }" />
+        atualizar este pedido
+      </Button>
     </div>
 
     <!-- Slow-path overlay: only when user opted-in via "buscar no historico" -->

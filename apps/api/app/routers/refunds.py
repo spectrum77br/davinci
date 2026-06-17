@@ -8,7 +8,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
-from sqlalchemy import Text, cast, desc, func, or_, select, text, update
+from sqlalchemy import Text, cast, desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -24,6 +24,10 @@ from app.schemas.refunds import (
     RefundPage,
     RefundPatch,
     _clamp_cliente_reembolso,
+)
+from app.services.reembolso_sync import sync_reembolso_for_pedido
+from app.services.verificar_margem import (
+    refresh_for_pedido as _refresh_verificar_margem_for_pedido,
 )
 
 logger = structlog.get_logger()
@@ -85,39 +89,30 @@ async def _situacoes_by_pedido(
 async def _sync_reembolso_to_bling_orders(
     session: AsyncSession, pedido_bling: str | None
 ) -> None:
-    """Recalcula `bling_orders.reembolso` para o pedido inteiro com a soma (com
-    sinal) dos reembolsos dos refunds CONFERIDOS daquele pedido. Apenas refunds
-    com `conferido = true` entram no lucro/margem — um refund vira efetivo só
-    quando o usuário marca o check. Casa por `bling_id` (via numero -> bling_id)
-    e grava o MESMO total em todas as linhas (itens) do pedido — a
-    vw_bling_pedidos rateia por item_proportion, então o valor cheio em cada
-    linha não duplica. Recompute-from-scratch: idempotente; chamado após
-    create/patch/delete de refund (incluindo toggle do conferido) e nos dois
-    números quando o patch troca o pedido. NÃO faz commit — o caller controla a
+    """Replica os refunds conferidos do pedido em `bling_orders.reembolso`.
+
+    Delega para o serviço compartilhado `sync_reembolso_for_pedido` (mesma
+    lógica usada pelo ingest de pedidos). NÃO faz commit — o caller controla a
     transação."""
+    await sync_reembolso_for_pedido(session, pedido_bling)
+
+
+async def _refresh_margem_snapshot(
+    session: AsyncSession, pedido_bling: str | None
+) -> None:
+    """Reconstrói a linha do pedido no snapshot `verificar_margem` (lê da view
+    `_all`, sem janela de 20d) para que a página de Margem reflita o reembolso
+    recém-gravado em `bling_orders`. Tolerante a falha: o reembolso já está
+    commitado; um erro/lentidão no refresh não pode derrubar o save — o cron de
+    30 min e o botão "atualizar" são fallbacks. Deve ser chamado APÓS o commit
+    que persiste `bling_orders.reembolso`."""
     pedido = (pedido_bling or "").strip()
     if not pedido:
         return
-    total = (
-        await session.execute(
-            select(func.coalesce(func.sum(Refund.reembolso), 0.0)).where(
-                Refund.pedido_bling == pedido,
-                Refund.conferido.is_(True),
-            )
-        )
-    ).scalar_one()
-    await session.execute(
-        update(BlingOrder)
-        .where(
-            BlingOrder.bling_id.in_(
-                select(BlingOrder.bling_id).where(
-                    BlingOrder.numero == pedido,
-                    BlingOrder.bling_id.is_not(None),
-                )
-            )
-        )
-        .values(reembolso=float(total or 0.0))
-    )
+    try:
+        await _refresh_verificar_margem_for_pedido(session, pedido)
+    except Exception:  # noqa: BLE001
+        logger.warning("refund_margem_snapshot_refresh_failed", pedido_bling=pedido)
 
 
 def _build_where(
@@ -467,6 +462,7 @@ async def create_refund(
     await session.flush()
     await _sync_reembolso_to_bling_orders(session, row.pedido_bling)
     await session.commit()
+    await _refresh_margem_snapshot(session, row.pedido_bling)
     await session.refresh(row)
     logger.info(
         "refund_created",
@@ -509,6 +505,9 @@ async def patch_refund(
         await _sync_reembolso_to_bling_orders(session, prev_pedido_bling)
 
     await session.commit()
+    await _refresh_margem_snapshot(session, row.pedido_bling)
+    if prev_pedido_bling and prev_pedido_bling != row.pedido_bling:
+        await _refresh_margem_snapshot(session, prev_pedido_bling)
     await session.refresh(row)
     return RefundOut.model_validate(row)
 
@@ -527,5 +526,6 @@ async def delete_refund(
     await session.flush()
     await _sync_reembolso_to_bling_orders(session, pedido_bling)
     await session.commit()
+    await _refresh_margem_snapshot(session, pedido_bling)
     logger.info("refund_deleted", id=str(refund_id))
     return None

@@ -39,6 +39,7 @@ from app.security.cipher import decrypt_json, encrypt_json
 # véspera — sem o cutoff, esses eventos caem no dia errado da planilha.
 from app.services.marketplace_shipment_check import _operational_ship_date
 from app.services.marketplaces.bling import BlingClient
+from app.services.reembolso_sync import sync_reembolso_for_pedido
 from app.services.verificar_margem import refresh_silent as _verificar_margem_refresh_silent
 from app.worker_pool import get_arq_pool
 
@@ -674,6 +675,16 @@ async def upsert_order(
             BlingOrder.item_index.notin_(kept_item_index),
         )
     )
+
+    # Re-aplica o reembolso dos refunds CONFERIDOS deste pedido. A coluna
+    # `reembolso` não vem do Bling (não está em _row_from_item), então o upsert
+    # acima não a toca na colisão e linhas novas nascem com 0 (server_default).
+    # Sem isto, o 1º ingest de um pedido que já tinha refund lançado — ou um
+    # re-ingest que cria item_index novo — perderia o reembolso até alguém
+    # reeditar o refund. Idempotente; o caller commita logo em seguida e então
+    # refaz o snapshot verificar_margem por bling_id.
+    await sync_reembolso_for_pedido(session, rows[0].get("numero"))
+
     return len(rows)
 
 

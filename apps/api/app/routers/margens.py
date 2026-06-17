@@ -390,9 +390,14 @@ async def lookup_marketplace(
         return list((await session.execute(items_sql, params)).mappings().all())
 
     rows = await _read_snapshot()
-    historico_disponivel = False
 
-    if not rows:
+    # `pedido_bling` alvo de um eventual refresh: derivado do snapshot quando já
+    # há linha (cobre busca por numero de marketplace, cujo pedido_bling vem na
+    # linha) ou resolvido em bling_orders quando o snapshot está vazio.
+    refresh_key: str | None = (
+        str(rows[0]["pedido_bling"]) if rows and rows[0].get("pedido_bling") else None
+    )
+    if refresh_key is None:
         bling_numero_row = (await session.execute(
             text(
                 "SELECT numero FROM davinci.bling_orders "
@@ -400,18 +405,22 @@ async def lookup_marketplace(
             ),
             {"p": pedido_clean},
         )).first()
-        bling_numero = (
+        refresh_key = (
             str(bling_numero_row[0]) if bling_numero_row and bling_numero_row[0] else None
         )
 
-        if force_refresh and bling_numero:
-            # Slow path — opt-in via CTA. Re-reads from the full view
-            # (no 20d window) into the snapshot, then queries again.
-            await _refresh_verificar_margem_for_pedido(session, bling_numero)
-            rows = await _read_snapshot()
-        elif bling_numero:
-            # Snapshot miss but order exists — surface CTA flag.
-            historico_disponivel = True
+    if force_refresh and refresh_key:
+        # Slow path — opt-in via CTA. Re-lê da view completa (sem janela de 20d)
+        # para o snapshot e re-consulta. Roda MESMO quando já existe linha no
+        # snapshot, para atualizar pedidos antigos cujo cache ficou velho (ex.:
+        # reembolso lançado depois, fora da janela de 30 dias).
+        await _refresh_verificar_margem_for_pedido(session, refresh_key)
+        rows = await _read_snapshot()
+
+    # "Dá pra forçar refresh deste pedido" — true sempre que o pedido existe no
+    # Bling, inclusive com linha presente, para o frontend oferecer o refresh
+    # mesmo de pedidos fora da janela (snapshot possivelmente defasado).
+    historico_disponivel = bool(refresh_key)
 
     items = [MargensMarketplaceOut.model_validate(dict(r)) for r in rows]
     return MargensMarketplacePage(
