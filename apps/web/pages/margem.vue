@@ -363,9 +363,10 @@ function lucroFinalCls(r: MarketplaceRow): string {
 }
 
 // Saldo Efetivo exibido = saldo pós-reembolso (saldo_final = efetivo − prejuízo
-// + reembolso). Quando não há repasse de marketplace o saldo_final fica null,
-// então cai no saldo_efetivo base para não esvaziar a célula. A edição inline
-// continua usando/gravando o saldo_efetivo base.
+// + reembolso). Ambos vêm ancorados no Bling (valor_base − frete − taxa), não no
+// líquido do marketplace — é o que a edição inline grava e o que o snapshot
+// patcheia, então o valor editado aparece na hora. saldo_efetivo é a base (sem
+// reembolso) e é o que a edição inline usa/grava; saldo_final é a base + reembolso.
 function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
   return r.saldo_final != null ? r.saldo_final : r.saldo_efetivo
 }
@@ -470,11 +471,6 @@ async function syncFromSaldoFinal(row: MarketplaceRow, valorBase?: number) {
     next.delete(id)
     syncingSaldoFinal.value = next
   }
-}
-
-async function syncSaldoEfetivoAsFinal(row: MarketplaceRow) {
-  if (row.saldo_efetivo == null) return
-  await syncFromSaldoFinal(row, row.saldo_efetivo)
 }
 
 // ---------- Edição inline de Saldo Efetivo (grava como final no Bling) ----------
@@ -867,17 +863,6 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                 >
                   <Loader2 v-if="isSyncing(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
                   <span v-else>→</span>
-                </button>
-                <button
-                  v-if="canEdit && r.saldo_efetivo != null && (r.saldo_bling == null || Math.abs(r.saldo_efetivo - r.saldo_bling) > 0.01)"
-                  type="button"
-                  :disabled="isSyncingSaldoFinal(r.bling_order_item_id)"
-                  class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-default"
-                  :title="`Grava o Saldo Efetivo como valor final no Bling (zera taxa e frete)`"
-                  @click="syncSaldoEfetivoAsFinal(r)"
-                >
-                  <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
-                  <Check v-else class="h-3 w-3" />
                 </button>
                 <button
                   type="button"

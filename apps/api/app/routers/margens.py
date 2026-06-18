@@ -139,6 +139,34 @@ _ATTENTION_TYPE_MAP = {
     "all":    NEEDS_ATTENTION_SQL,
 }
 
+# Saldo "Bling" = líquido gravado no Bling (valor_base − frete − taxa). É a base
+# do Saldo Efetivo. Como a edição inline grava valorbase/zera taxa/frete no
+# snapshot (patch_financials_for_item), esta expressão recalcula sozinha após
+# editar — por isso o Efetivo é ancorado no Bling e não no líquido do
+# marketplace (que o patch não toca, ficando stale).
+_SALDO_BLING_SQL = (
+    "(v.bling_valorbase_item"
+    " - COALESCE(v.bling_custofrete_item, 0)"
+    " - COALESCE(v.bling_taxacomissao_item, 0))"
+)
+
+# Ajuste de reembolso/prejuízo (refunds) por item, derivado do snapshot:
+#   v.saldo_final − saldo_plataforma = (−prejuizo + reembolso) * item_proportion
+# (a view define saldo_final = liquido_marketplace − prejuizo + reembolso, e
+# saldo_plataforma = marketplace_liquido_base_margem_item). Reaproveitamos esse
+# delta para somar o reembolso ao Saldo Efetivo do Bling, preservando a lógica
+# de reembolso sem reatrelar o Efetivo ao líquido do marketplace.
+_REEMBOLSO_DELTA_SQL = (
+    "(v.saldo_final - v.marketplace_liquido_base_margem_item)"
+)
+
+# Saldo Final ancorado no Bling = Saldo Efetivo (Bling) − prejuizo + reembolso.
+# Recalcula após edição (o snapshot mantém saldo_final/liquido_marketplace, então
+# o delta é estável, e _SALDO_BLING_SQL reflete o valor recém-gravado).
+_SALDO_FINAL_BLING_SQL = (
+    f"({_SALDO_BLING_SQL} + COALESCE({_REEMBOLSO_DELTA_SQL}, 0))"
+)
+
 
 def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate: bool) -> str:
     """Builds the per-item SELECT against either the snapshot table or the
@@ -169,24 +197,14 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             END                                                  AS reembolso,
             {_FRETE_RESULTADO_SQL}                               AS resultado_frete,
             v.marketplace_liquido_base_margem_item               AS saldo_plataforma,
-            (v.bling_valorbase_item
-                - COALESCE(v.bling_custofrete_item, 0)
-                - COALESCE(v.bling_taxacomissao_item, 0))        AS saldo_bling,
-            -- Saldo Efetivo = saldo realizado do item. Por padrão é o líquido
-            -- do marketplace (igual a Saldo Plataforma), mas quando NÃO há
-            -- repasse de marketplace (ex.: situação "Perdimento", ou qualquer
-            -- pedido sem evento financeiro) cai pro valor gravado no Bling
-            -- (valor_base − frete − taxa). É lá que a edição inline de Saldo
-            -- Efetivo grava (POST /sync-saldo-final → bling_orders.valorbase,
-            -- zerando taxa/frete), então sem esse COALESCE o valor digitado
-            -- nunca aparecia na célula — ela lia o líquido do marketplace, que
-            -- fica NULL nesses casos.
-            COALESCE(
-                v.marketplace_liquido_base_margem_item,
-                v.bling_valorbase_item
-                    - COALESCE(v.bling_custofrete_item, 0)
-                    - COALESCE(v.bling_taxacomissao_item, 0)
-            )                                                    AS saldo_efetivo,
+            {_SALDO_BLING_SQL}                                   AS saldo_bling,
+            -- Saldo Efetivo = saldo realizado do item, ancorado no Bling
+            -- (valor_base − frete − taxa), NÃO no líquido do marketplace. É lá
+            -- que a edição inline grava (POST /sync-saldo-final →
+            -- bling_orders.valorbase, zerando taxa/frete) e onde o snapshot é
+            -- patcheado, então o valor digitado aparece na hora. O líquido do
+            -- marketplace continua na coluna Saldo Plataforma.
+            {_SALDO_BLING_SQL}                                   AS saldo_efetivo,
             v.marketplace_margem                                 AS margem,
             -- margem_bling já vem perdimento-aware da view/snapshot
             -- (migration 0142): Perdimento (83956) não desconta o custo de
@@ -194,20 +212,22 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             v.bling_margem_calculado                             AS margem_bling,
             v.margem_minima,
             -- Margem Pós Reembolso = margem recalculada já com prejuízo/reembolso
-            -- da tabela refunds aplicados. saldo_final (migration 0076) já é
-            -- saldo_efetivo − prejuizo + reembolso (proporcionado por item), então
-            -- basta refazer a razão sobre o custo. Quando há reembolso de
-            -- manutenção/devolução, esta coluna fica negativa enquanto a "Margem"
+            -- da tabela refunds aplicados, sobre o Saldo Final ancorado no Bling
+            -- (_SALDO_FINAL_BLING_SQL = saldo Bling − prejuizo + reembolso). Como
+            -- usa o saldo do Bling, recalcula após a edição inline. Quando há
+            -- reembolso de manutenção/devolução fica negativa enquanto a "Margem"
             -- (que ignora o reembolso) ainda mostra positivo.
             CASE
-                WHEN COALESCE(v.bling_custo_produtos, 0) > 0 AND v.saldo_final IS NOT NULL
-                THEN (v.saldo_final - v.bling_custo_produtos) / v.bling_custo_produtos
+                WHEN COALESCE(v.bling_custo_produtos, 0) > 0
+                     AND {_SALDO_FINAL_BLING_SQL} IS NOT NULL
+                THEN ({_SALDO_FINAL_BLING_SQL} - v.bling_custo_produtos)
+                     / v.bling_custo_produtos
                 ELSE NULL::numeric
             END                                                  AS margem_pos_reembolso,
             v.situacao                                           AS situacao_id,
             v.situacao_nome                                      AS situacao,
             v.ajustes,
-            v.saldo_final,
+            {_SALDO_FINAL_BLING_SQL}                             AS saldo_final,
             CASE
                 WHEN v.bling_status_margem IN ('Aprovado', 'Reprovado')
                     THEN v.bling_status_margem
