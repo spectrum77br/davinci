@@ -70,14 +70,13 @@ const PAGE_SIZE = 100
 type StatusFilter = 'Pendente' | 'Aprovado' | 'Reprovado' | 'all'
 const STATUS_FILTER_OPTIONS: StatusFilter[] = ['Pendente', 'Aprovado', 'Reprovado', 'all']
 
-type AttentionType = 'all' | 'margem' | 'frete' | 'saldo'
+type AttentionType = 'all' | 'margem' | 'saldo'
 const ATTENTION_LABEL: Record<AttentionType, string> = {
   all:    'todos motivos',
   margem: 'margem baixa',
-  frete:  'frete negativo',
   saldo:  'saldo divergente',
 }
-const ATTENTION_OPTIONS: AttentionType[] = ['all', 'margem', 'frete', 'saldo']
+const ATTENTION_OPTIONS: AttentionType[] = ['all', 'margem', 'saldo']
 
 const { api } = useApi()
 const canEdit = useCan('margem', 'edit')
