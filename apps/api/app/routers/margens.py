@@ -274,7 +274,7 @@ async def list_margens_marketplace(
     rebuilt by the 'atualizar' UI button. User-facing PATCHes update the
     affected snapshot columns directly so edits appear immediately.
     """
-    where = ["v.situacao_nome != 'Cancelado'"]
+    where = ["v.situacao_nome != 'Cancelado'", f"NOT {_ATTENTION_FRETE_SQL}"]
     params: dict = {"limit": limit, "offset": offset}
     if platform:
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
