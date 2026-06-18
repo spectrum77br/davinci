@@ -747,7 +747,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="3">Saldo</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-orange-50 dark:bg-orange-900/20" colspan="1">Reembolsos</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-blue-50 dark:bg-blue-900/20" :colspan="isAdmin ? 3 : 2">Margem</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Situação</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Status Bling</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Aprovação</th>
           </tr>
           <tr class="border-b">
@@ -770,7 +770,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-emerald-50 dark:bg-emerald-900/20">Efetivo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-orange-50 dark:bg-orange-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Valor</th>
             <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] bg-blue-50 dark:bg-blue-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Lucro</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20" :class="!isAdmin && 'border-l-[3px] border-gray-400 dark:border-gray-600'">Margem</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20" :class="!isAdmin && 'border-l-[3px] border-gray-400 dark:border-gray-600'">Final</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-blue-50 dark:bg-blue-900/20">Mínima</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] border-l-[3px] border-gray-400 dark:border-gray-600">Situação</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] border-l-[3px] border-gray-400 dark:border-gray-600">Status</th>
