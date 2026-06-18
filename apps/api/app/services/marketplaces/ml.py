@@ -221,6 +221,19 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_order_discounts(self, order_id: str) -> dict:
+        """Per-discount funding breakdown for an order.
+
+        Returns `{details: [{type, items: [{amounts: {total, seller}}],
+        supplier: {funding_mode, campaign_id, ...}}]}`. `amounts.seller` is the
+        portion the SELLER funds; ML-funded promo coupons report `seller: 0`.
+        This is the only place ML exposes who paid each discount — the order's
+        `payment.coupon_amount` lumps both together. Only meaningful when the
+        order carries the `order_has_discount` tag."""
+        r = await self._request("GET", f"/orders/{order_id}/discounts")
+        r.raise_for_status()
+        return r.json() or {}
+
     async def get_shipment_costs(self, shipping_id: str) -> dict:
         r = await self._request("GET", f"/shipments/{shipping_id}/costs")
         r.raise_for_status()

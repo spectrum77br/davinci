@@ -668,11 +668,72 @@ def _ml_order_commission(order: Any) -> Decimal:
     return commission
 
 
-def _ml_order_discount(order: Any) -> Decimal | None:
-    payments = order.get("payments") if isinstance(order, dict) else None
-    if not isinstance(payments, list):
+def _ml_seller_funded_discount(discounts: Any) -> Decimal | None:
+    """Seller-funded discount from ML's `/orders/{id}/discounts` breakdown.
+
+    Sums `items[].amounts.seller` across details, EXCLUDING those whose
+    `supplier.funding_mode == "sale_fee"` (offer/catalog discounts already baked
+    into `unit_price`/commission — deducting them again double-counts). What
+    remains is the seller's real out-of-pocket on coupons; ML-funded promo
+    coupons contribute 0 (they report `seller: 0`). This is the authoritative
+    source — it nails the cents (e.g. pedido 282077 → R$2,00, giving 557,91).
+
+    Returns None when the breakdown is missing/empty so the caller can fall back.
+    """
+    if not isinstance(discounts, dict):
         return None
-    return _sum_money(p.get("coupon_amount") for p in payments if isinstance(p, dict))
+    details = discounts.get("details")
+    if not isinstance(details, list) or not details:
+        return None
+    total = Decimal("0")
+    for det in details:
+        if not isinstance(det, dict):
+            continue
+        supplier = det.get("supplier") or {}
+        if isinstance(supplier, dict) and supplier.get("funding_mode") == "sale_fee":
+            continue
+        for it in det.get("items") or []:
+            if not isinstance(it, dict):
+                continue
+            amounts = it.get("amounts") or {}
+            if isinstance(amounts, dict):
+                total += _money(amounts.get("seller")) or Decimal("0")
+    return total
+
+
+def _ml_billing_seller_discount(billing: Any) -> Decimal | None:
+    """Real *seller-funded* discount from the ML billing detail (repasse).
+
+    `payment.coupon_amount` is the buyer's checkout discount — but ML reimburses
+    promotional ("MELI") coupons, crediting them back to the seller as
+    "Recebimento pelo desconto da sua contraparte". So coupon_amount is NOT the
+    seller's cost: deducting it understated the net by the whole coupon (seen on
+    pedidos 282077/282055, R$57,76 / R$69,90 off). The authoritative amount the
+    seller actually loses lives in the billing detail's `sale_fee.discount` and
+    per-detail `discount_info.discount_amount` (both 0 for ML-funded coupons).
+
+    Returns None when billing isn't posted yet (`estimated`) — caller then
+    deducts nothing, i.e. assumes the coupon was ML-funded (the common case).
+    """
+    if not isinstance(billing, dict):
+        return None
+    results = billing.get("results")
+    if not isinstance(results, list) or not results:
+        return None
+    total = Decimal("0")
+    for res in results:
+        if not isinstance(res, dict):
+            continue
+        sale_fee = res.get("sale_fee")
+        if isinstance(sale_fee, dict):
+            total += _money(sale_fee.get("discount")) or Decimal("0")
+        for det in res.get("details") or []:
+            if not isinstance(det, dict):
+                continue
+            di = det.get("discount_info")
+            if isinstance(di, dict):
+                total += _money(di.get("discount_amount")) or Decimal("0")
+    return total
 
 
 async def _fetch_ml(
@@ -730,12 +791,29 @@ async def _fetch_ml(
     # --- Aggregate money across matched orders --------------------------
     gross = _sum_money(o.get("total_amount") for o in matched_orders)
     commission = sum((_ml_order_commission(o) for o in matched_orders), Decimal("0"))
-    discount = None
-    for o in matched_orders:
-        part = _ml_order_discount(o)
-        if part is None:
-            continue
-        discount = (discount or Decimal("0")) + part
+    # Seller-funded discount — NOT `payment.coupon_amount`. ML reimburses promo
+    # coupons (they show as coupon_amount but are credited back as "Recebimento
+    # pelo desconto da sua contraparte"), so deducting coupon_amount understated
+    # the net by the whole coupon (pedidos 282077/282055: R$57,76 / R$69,90 off).
+    # `/orders/{id}/discounts` splits each discount by who funded it; we deduct
+    # only the seller's share (excl. sale_fee-funded offers already in the
+    # price). Gated on the `order_has_discount` tag to avoid an extra ML call on
+    # the (common) no-discount orders. Falls back to the billing detail's
+    # seller charge if the breakdown call fails.
+    order_discounts: dict[str, Any] | None = None
+    discount: Decimal | None = None
+    has_discount = isinstance(order, dict) and "order_has_discount" in (
+        order.get("tags") or []
+    )
+    if has_discount:
+        try:
+            order_discounts = await client.get_order_discounts(order_id)
+            discount = _ml_seller_funded_discount(order_discounts)
+        except Exception as e:  # noqa: BLE001 — fall back to billing on any failure
+            logger.warning(
+                "ml_order_discounts_failed", order_id=order_id, error=str(e)[:300]
+            )
+            discount = _ml_billing_seller_discount(billing)
 
     payments = order.get("payments") if isinstance(order, dict) else []
     if not isinstance(payments, list):
@@ -744,10 +822,6 @@ async def _fetch_ml(
     payment_shipping_cost = (
         _money(payment.get("shipping_cost")) if isinstance(payment, dict) else None
     )
-    # `payment.coupon_amount` (deducted above per matched order) is a
-    # seller-financed discount applied at checkout (most commonly the R$2
-    # catalog/promo contribution). Once the billing detail posts ML reflects
-    # the actual deduction and any mismatch gets reconciled then.
     # Freight is shipment-level: every sub-order of a pack/carrinho shares
     # one shipping_id and /shipments/costs returns the WHOLE shipment cost.
     # `_fetch_ml_freight_reconciliations` prorates it by this order's share
@@ -800,7 +874,7 @@ async def _fetch_ml(
                 discount,
                 negative=True,
                 currency=currency,
-                raw={"source": "payments[].coupon_amount"},
+                raw={"source": "orders/{id}/discounts amounts.seller (excl. sale_fee)"},
             ),
             _event("net_estimated", net, currency=currency, status=status),
         ]
@@ -817,6 +891,7 @@ async def _fetch_ml(
             "order": order,
             "billing": billing,
             "billing_error": billing_error,
+            "order_discounts": order_discounts,
             "payment_shipping_cost": str(payment_shipping_cost)
             if payment_shipping_cost is not None
             else None,
