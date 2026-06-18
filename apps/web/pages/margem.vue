@@ -346,6 +346,14 @@ function margemFinalCls(r: MarketplaceRow): string {
   return m >= ref ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
 }
 
+// Saldo Efetivo exibido = saldo pós-reembolso (saldo_final = efetivo − prejuízo
+// + reembolso). Quando não há repasse de marketplace o saldo_final fica null,
+// então cai no saldo_efetivo base para não esvaziar a célula. A edição inline
+// continua usando/gravando o saldo_efetivo base.
+function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
+  return r.saldo_final != null ? r.saldo_final : r.saldo_efetivo
+}
+
 // ---------- Status: aprovar/reprovar/pendente (atualiza Bling) ----------
 
 async function setStatus(row: MarketplaceRow, value: MargensStatus) {
@@ -862,7 +870,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                   @click="startEditSaldoEfetivo(r)"
                 >
                   <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
-                  <span>{{ brl(r.saldo_efetivo) }}</span>
+                  <span>{{ brl(saldoEfetivoDisplay(r)) }}</span>
                   <Pencil v-if="canEdit" class="size-3 shrink-0 opacity-50" />
                 </button>
               </div>
