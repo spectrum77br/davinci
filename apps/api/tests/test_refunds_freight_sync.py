@@ -93,8 +93,8 @@ async def _select_refund(db: AsyncSession, pedido_bling: str) -> dict | None:
 
 
 async def test_creates_refund_for_non_shopee_when_charged_exceeds_anuncio(db: AsyncSession):
-    # ML order: frete anuncio R$10 mas marketplace cobrou R$15.
-    # Esperado prejuizo = 15 - 10 = 5.
+    # ML order: frete anuncio R$10 mas marketplace cobrou R$20.
+    # Esperado prejuizo = 20 - 10 = 10 (acima do piso de R$5).
     await _setup_view(
         db,
         [
@@ -106,7 +106,7 @@ async def test_creates_refund_for_non_shopee_when_charged_exceeds_anuncio(db: As
                 "loja_nome": "Loja ML",
                 "frete_projetado_item": 10,
                 "evento_frete_anuncio": 10,
-                "marketplace_frete_real_cobrado_item": 15,
+                "marketplace_frete_real_cobrado_item": 20,
             }
         ],
     )
@@ -121,7 +121,7 @@ async def test_creates_refund_for_non_shopee_when_charged_exceeds_anuncio(db: As
     assert refund["conta"] == "Loja ML"
     assert refund["plataforma"] == "ml"
     assert refund["conferido"] is False
-    assert float(refund["prejuizo"]) == pytest.approx(5.0)
+    assert float(refund["prejuizo"]) == pytest.approx(10.0)
 
 
 async def test_ml_frete_anuncio_is_not_prorated_per_item(db: AsyncSession):
@@ -162,6 +162,29 @@ async def test_ml_frete_anuncio_is_not_prorated_per_item(db: AsyncSession):
     refund = await _select_refund(db, "278867")
     assert refund is not None
     assert float(refund["prejuizo"]) == pytest.approx(51.83)
+
+
+async def test_skips_when_prejuizo_below_min_threshold(db: AsyncSession):
+    # Diferença de frete < R$5 nem compensa cobrar reembolso — não cria.
+    # Cobrado R$14, anuncio R$10 → prejuizo R$4 (abaixo do piso de R$5).
+    await _setup_view(
+        db,
+        [
+            {
+                "pedido_bling": "PED-007",
+                "plataforma_bling": "ml",
+                "loja_nome": "Loja ML",
+                "frete_projetado_item": 10,
+                "evento_frete_anuncio": 10,
+                "marketplace_frete_real_cobrado_item": 14,
+            }
+        ],
+    )
+
+    await upsert_freight_refund_for_bling_order(db, pedido_bling="PED-007")
+    await db.commit()
+
+    assert await _count_refunds(db, pedido_bling="PED-007") == 0
 
 
 async def test_skips_when_anuncio_exceeds_charged(db: AsyncSession):
@@ -219,7 +242,7 @@ async def test_does_not_create_duplicate_on_re_run(db: AsyncSession):
                 "loja_nome": "Loja ML",
                 "frete_projetado_item": 10,
                 "evento_frete_anuncio": 10,
-                "marketplace_frete_real_cobrado_item": 15,
+                "marketplace_frete_real_cobrado_item": 20,
             }
         ],
     )
@@ -278,7 +301,7 @@ async def test_never_overwrites_existing_logistica_refund(db: AsyncSession):
 
 async def test_shopee_uses_evento_freight_with_floor_at_zero(db: AsyncSession):
     # Shopee: frete plataforma = GREATEST(evento_freight * item_proportion, 0).
-    # evento_freight=8, item_proportion=1 → 8. Projetado 5 < 8 → prejuizo = 3.
+    # evento_freight=12, item_proportion=1 → 12. Projetado 5 < 12 → prejuizo = 7.
     await _setup_view(
         db,
         [
@@ -287,7 +310,7 @@ async def test_shopee_uses_evento_freight_with_floor_at_zero(db: AsyncSession):
                 "plataforma_bling": "shopee",
                 "loja_nome": "Loja Shopee",
                 "frete_projetado_item": 5,
-                "evento_freight": 8,
+                "evento_freight": 12,
                 "evento_frete_anuncio": 5,
                 "item_proportion": 1,
             }
@@ -300,21 +323,21 @@ async def test_shopee_uses_evento_freight_with_floor_at_zero(db: AsyncSession):
     refund = await _select_refund(db, "PED-006")
     assert refund is not None
     assert refund["plataforma"] == "shopee"
-    assert float(refund["prejuizo"]) == pytest.approx(3.0)
+    assert float(refund["prejuizo"]) == pytest.approx(7.0)
 
 
 async def test_backfill_processes_all_qualifying_pedidos(db: AsyncSession):
     await _setup_view(
         db,
         [
-            # Qualifica.
+            # Qualifica (prejuizo 12 - 5 = 7, acima do piso de R$5).
             {
                 "pedido_bling": "PED-100",
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja A",
                 "frete_projetado_item": 5,
                 "evento_frete_anuncio": 5,
-                "marketplace_frete_real_cobrado_item": 8,
+                "marketplace_frete_real_cobrado_item": 12,
             },
             # Qualifica.
             {

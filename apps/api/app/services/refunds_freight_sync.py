@@ -5,6 +5,9 @@ em app/routers/margens.py): linhas onde o frete real cobrado pelo marketplace
 é maior que o frete anúncio do item. Uma linha de refund por
 (pedido_bling, conta), tipo='Logistica'.
 
+Só cria quando o prejuizo agregado do pedido é de pelo menos `_MIN_PREJUIZO`
+(R$5): diferenças menores não compensam o esforço de cobrar o reembolso.
+
 Política: nunca atualiza, nunca sobrescreve. Se já existe um refund
 Logistica para o (pedido_bling, conta) — manual ou auto-gerado — o
 INSERT é skipado via WHERE NOT EXISTS. O usuário sempre tem o controle
@@ -55,6 +58,12 @@ _FRETE_ANUNCIO_SQL = "v.evento_frete_anuncio"
 # Espelha _FRETE_RESULTADO_SQL em app/routers/margens.py.
 _FRETE_RESULTADO_SQL = f"(({_FRETE_PLATAFORMA_SQL}) - ({_FRETE_ANUNCIO_SQL}))"
 
+# Piso de prejuizo (R$) por pedido pra criar o refund. Abaixo disso a
+# diferença de frete não compensa o esforço de cobrar reembolso, então
+# nem é lançada. R$5 exato cria (>=). Aplicado via HAVING sobre o SUM
+# agregado do pedido.
+_MIN_PREJUIZO = 5.0
+
 # Filtro espelha _ATTENTION_FRETE_SQL: vendedor pagou mais frete que o
 # frete anúncio. Ambas as expressões precisam ser não-nulas (sem dados
 # financeiros sincronizados ainda → skipa).
@@ -85,6 +94,7 @@ GROUP BY
     v.pedido_bling,
     COALESCE(v.plataforma_bling, v.plataforma_financeiro),
     btrim(v.loja_nome)
+HAVING SUM({_FRETE_RESULTADO_SQL}) >= {_MIN_PREJUIZO}
 """
 
 
