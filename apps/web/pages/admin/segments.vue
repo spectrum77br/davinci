@@ -15,11 +15,18 @@ type Segment = {
   sort_order: number
   active: boolean
   min_margin: string | null
+  altura: string | null
+  largura: string | null
+  comprimento: string | null
+  peso: string | null
   created_at: string
   updated_at: string
 }
 
 type TreeNode = Segment & { children: TreeNode[] }
+type DimField = 'altura' | 'largura' | 'comprimento' | 'peso'
+type EditField = 'name' | 'min_margin' | DimField
+const dimFields: DimField[] = ['altura', 'largura', 'comprimento', 'peso']
 
 const { api } = useApi()
 const canEdit = useCan('segmentos', 'edit')
@@ -55,7 +62,7 @@ function toggle(id: string) {
 
 // =========================================================== inline edit
 
-const editing = ref<{ id: string; field: 'name' | 'min_margin' } | null>(null)
+const editing = ref<{ id: string; field: EditField } | null>(null)
 const editValue = ref<string>('')
 const editOriginal = ref<string>('')
 const editInputRef = ref<HTMLInputElement | null>(null)
@@ -70,7 +77,7 @@ function flash(id: string, f: string) {
   setTimeout(() => flashed.value.delete(k), 1200)
 }
 
-async function startEdit(seg: Segment, field: 'name' | 'min_margin') {
+async function startEdit(seg: Segment, field: EditField) {
   if (!canEdit.value) return
   editing.value = { id: seg.id, field }
   const raw = (seg as any)[field]
@@ -108,6 +115,15 @@ async function commitEdit() {
       if (!Number.isFinite(n)) return cancelEdit()
       // UI accepts percent (15 → 0.15), DB stores fraction.
       payload.min_margin = (n / 100).toFixed(4)
+    }
+  } else if ((dimFields as string[]).includes(field)) {
+    // altura/largura/comprimento (cm) e peso (kg): número plano, nullable.
+    if (!raw) {
+      payload[field] = null
+    } else {
+      const n = Number(raw)
+      if (!Number.isFinite(n) || n < 0) return cancelEdit()
+      payload[field] = n.toString()
     }
   } else {
     if (!raw && field === 'name') return cancelEdit()
@@ -217,18 +233,22 @@ async function remove(seg: Segment, depth: number) {
           <tr>
             <th class="text-left px-3 py-2 font-medium border-b border-border min-w-[280px]">Nome</th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Margem Mín</th>
+            <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Altura <span class="text-muted-foreground font-normal">(cm)</span></th>
+            <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Largura <span class="text-muted-foreground font-normal">(cm)</span></th>
+            <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Comprim. <span class="text-muted-foreground font-normal">(cm)</span></th>
+            <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Peso <span class="text-muted-foreground font-normal">(kg)</span></th>
             <th class="text-center px-3 py-2 font-medium border-b border-border w-20">Ativo</th>
             <th class="text-center px-3 py-2 font-medium border-b border-border w-32">Ações</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !tree.length">
-            <td colspan="4" class="text-center py-6 text-muted-foreground">
+            <td colspan="8" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!tree.length && addingUnder === undefined">
-            <td colspan="4" class="text-center py-8 text-muted-foreground">Nenhum segmento.</td>
+            <td colspan="8" class="text-center py-8 text-muted-foreground">Nenhum segmento.</td>
           </tr>
 
           <template v-for="node in tree" :key="node.id">
@@ -273,6 +293,7 @@ async function remove(seg: Segment, depth: number) {
               />
             </td>
             <td class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
+            <td v-for="f in dimFields" :key="f" class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
             <td class="border border-border text-xs text-muted-foreground px-3 text-center">—</td>
             <td class="border border-border px-1 py-1 text-center">
               <div class="flex gap-0.5 justify-center">

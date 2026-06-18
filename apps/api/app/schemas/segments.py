@@ -28,6 +28,10 @@ class SegmentCreate(BaseModel):
     sort_order: int = 0
     active: bool = True
     min_margin: Decimal | None = None
+    altura: Decimal | None = None
+    largura: Decimal | None = None
+    comprimento: Decimal | None = None
+    peso: Decimal | None = None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -61,6 +65,10 @@ class SegmentPatch(BaseModel):
     sort_order: int | None = None
     active: bool | None = None
     min_margin: Decimal | None = None
+    altura: Decimal | None = None
+    largura: Decimal | None = None
+    comprimento: Decimal | None = None
+    peso: Decimal | None = None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -98,6 +106,10 @@ class SegmentOut(BaseModel):
     sort_order: int
     active: bool
     min_margin: Decimal | None = None
+    altura: Decimal | None = None
+    largura: Decimal | None = None
+    comprimento: Decimal | None = None
+    peso: Decimal | None = None
     created_at: datetime
     updated_at: datetime
 

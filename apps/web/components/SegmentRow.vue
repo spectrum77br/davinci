@@ -10,12 +10,19 @@ type Segment = {
   sort_order: number
   active: boolean
   min_margin: string | null
+  altura: string | null
+  largura: string | null
+  comprimento: string | null
+  peso: string | null
   created_at: string
   updated_at: string
 }
 type TreeNode = Segment & { children: TreeNode[] }
-type EditField = 'name' | 'min_margin'
+type DimField = 'altura' | 'largura' | 'comprimento' | 'peso'
+type EditField = 'name' | 'min_margin' | DimField
 type Editing = { id: string; field: EditField } | null
+
+const dimFields: DimField[] = ['altura', 'largura', 'comprimento', 'peso']
 
 const props = defineProps<{
   node: TreeNode
@@ -127,6 +134,35 @@ const open = computed(() => isOpen(props.node.id))
       </span>
     </td>
 
+    <!-- dimensions: altura, largura, comprimento, peso (subtypes only) -->
+    <td
+      v-for="f in dimFields"
+      :key="f"
+      class="border border-border px-3 py-1.5 text-xs text-right cursor-pointer"
+      :class="{
+        'ring-2 ring-blue-500 ring-inset bg-background': isEditing(node.id, f),
+        'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(node.id, f),
+      }"
+      @click="depth > 0 && !isEditing(node.id, f) && emit('start-edit', node, f)"
+    >
+      <input
+        v-if="isEditing(node.id, f)"
+        :ref="setEditInputRef"
+        :value="editValue"
+        type="number"
+        step="0.001"
+        min="0"
+        class="w-full text-xs bg-transparent outline-none text-right"
+        @input="(e: any) => emit('update:edit-value', e.target.value)"
+        @blur="emit('commit-edit')"
+        @keydown.enter.prevent="emit('commit-edit')"
+        @keydown.escape.prevent="emit('cancel-edit')"
+      />
+      <span v-else-if="depth === 0" class="text-muted-foreground">—</span>
+      <span v-else-if="node[f] === null" class="text-muted-foreground italic">—</span>
+      <span v-else>{{ Number(node[f]).toString() }}</span>
+    </td>
+
     <!-- active -->
     <td class="border border-border px-3 py-1.5 text-center">
       <button
@@ -183,6 +219,7 @@ const open = computed(() => isOpen(props.node.id))
       />
     </td>
     <td class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
+    <td v-for="f in dimFields" :key="f" class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
     <td class="border border-border text-xs text-muted-foreground px-3 text-center">—</td>
     <td class="border border-border px-1 py-1 text-center">
       <div class="flex gap-0.5 justify-center">

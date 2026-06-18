@@ -34,3 +34,8 @@ class Segment(Base, TimestampMixin):
         Boolean, nullable=False, default=True, server_default=text("true")
     )
     min_margin: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    # Physical defaults per subsegment: dimensions in cm, peso in kg. Nullable.
+    altura: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
+    largura: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
+    comprimento: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
+    peso: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
