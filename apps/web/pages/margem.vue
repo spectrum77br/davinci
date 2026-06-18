@@ -856,7 +856,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                 </button>
               </div>
             </td>
-            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-orange-50/40 dark:bg-orange-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">{{ brl(r.reembolso) }}</td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-orange-50/40 dark:bg-orange-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">{{ brl(r.ajustes) }}</td>
             <td
               class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 font-medium border-l-[3px] border-gray-400 dark:border-gray-600"
               :class="r.margem != null && r.margem_minima != null
