@@ -333,6 +333,19 @@ function freteProjMissingReason(r: MarketplaceRow): string | null {
   return `Pricing account "${r.pricing_account_name}" não tem shipping para o segmento "${r.pricing_leaf_segment_name}".`
 }
 
+// Margem exibida na coluna "Margem": usa a pós-reembolso; quando null ou zero
+// (pedido sem refund/ajuste), cai na margem do Bling.
+function margemFinal(r: MarketplaceRow): number | null {
+  const m = r.margem_pos_reembolso
+  return (m == null || m === 0) ? r.margem_bling : m
+}
+function margemFinalCls(r: MarketplaceRow): string {
+  const m = margemFinal(r)
+  if (m == null) return ''
+  const ref = r.margem_minima != null ? r.margem_minima : 0
+  return m >= ref ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+}
+
 // ---------- Status: aprovar/reprovar/pendente (atualiza Bling) ----------
 
 async function setStatus(row: MarketplaceRow, value: MargensStatus) {
@@ -708,7 +721,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="canSeeFreteResultado ? 4 : 3">Frete</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="3">Saldo</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-orange-50 dark:bg-orange-900/20" colspan="1">Reembolsos</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-blue-50 dark:bg-blue-900/20" colspan="4">Margem</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-blue-50 dark:bg-blue-900/20" colspan="2">Margem</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Situação</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Aprovação</th>
           </tr>
@@ -731,9 +744,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-emerald-50 dark:bg-emerald-900/20">Bling</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-emerald-50 dark:bg-emerald-900/20">Efetivo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-orange-50 dark:bg-orange-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Valor</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Marketplace</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20">Bling</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px] bg-blue-50 dark:bg-blue-900/20">Pós Reembolso</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Margem</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-blue-50 dark:bg-blue-900/20">Mínima</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] border-l-[3px] border-gray-400 dark:border-gray-600">Situação</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] border-l-[3px] border-gray-400 dark:border-gray-600">Status</th>
@@ -742,12 +753,12 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="canSeeFreteResultado ? 24 : 23" class="text-center py-8 text-muted-foreground">
+            <td :colspan="canSeeFreteResultado ? 22 : 21" class="text-center py-8 text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="canSeeFreteResultado ? 24 : 23" class="text-center py-8 text-muted-foreground">
+            <td :colspan="canSeeFreteResultado ? 22 : 21" class="text-center py-8 text-muted-foreground">
               <template v-if="tab === 'lookup' && !lookupTerm">
                 digite o numero do pedido acima para buscar
               </template>
@@ -859,27 +870,9 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-orange-50/40 dark:bg-orange-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">{{ brl(r.ajustes) }}</td>
             <td
               class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 font-medium border-l-[3px] border-gray-400 dark:border-gray-600"
-              :class="r.margem != null && r.margem_minima != null
-                ? (r.margem >= r.margem_minima ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')
-                : (r.margem != null && r.margem >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')"
+              :class="margemFinalCls(r)"
             >
-              {{ pct(r.margem) }}
-            </td>
-            <td
-              class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 font-medium"
-              :class="r.margem_bling != null && r.margem_minima != null
-                ? (r.margem_bling >= r.margem_minima ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')
-                : (r.margem_bling != null && r.margem_bling >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')"
-            >
-              {{ pct(r.margem_bling) }}
-            </td>
-            <td
-              class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 font-medium"
-              :class="r.margem_pos_reembolso != null && r.margem_minima != null
-                ? (r.margem_pos_reembolso >= r.margem_minima ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')
-                : (r.margem_pos_reembolso != null && r.margem_pos_reembolso >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')"
-            >
-              {{ pct(r.margem_pos_reembolso) }}
+              {{ pct(margemFinal(r)) }}
             </td>
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 text-muted-foreground">{{ pct(r.margem_minima) }}</td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground border-l-[3px] border-gray-400 dark:border-gray-600">{{ r.situacao || '—' }}</td>
