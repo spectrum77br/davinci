@@ -133,6 +133,14 @@ class Settings(BaseSettings):
     # explicitly applied. Locally we enable it via ENABLE_MARKETING=true.
     enable_marketing: bool = False
 
+    # Marketing AGENT NODE — the single dedicated machine allowed to talk
+    # to Shopee/ML Ads (works around the per-partner rate-limit). ONLY when
+    # this is true does the worker REGISTER the marketing command-consumer
+    # and schedule-reconciler crons. The central server keeps it absent/0 so
+    # it never executes ad actions (the registration itself is gated, not
+    # just the cron body). Flip to true via env on the dedicated node.
+    marketing_agent_node: bool = False
+
     # Safety-net cron que re-sincroniza pedidos suspeitos de stale com o
     # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.
     enable_bling_orders_safety_net: bool = True

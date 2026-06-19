@@ -27,6 +27,7 @@ from app.models import User
 from app.models.marketing import (
     MarketingAccount,
     MarketingCampaign,
+    MarketingCommand,
     MarketingDecision,
     MarketingMetric,
     MarketingPattern,
@@ -37,6 +38,7 @@ from app.services.marketing.agent import (
     calculate_intensity,
     collect_signals,
 )
+from app.services.marketing.scheduling import describe_state
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/marketing", tags=["marketing"])
@@ -129,6 +131,50 @@ class CreditAlertOut(BaseModel):
     daily_spend_avg: float
     days_remaining: float
     severity: str  # "ok" | "warning" | "critical"
+
+
+class CommandIn(BaseModel):
+    action: str  # "pause" | "resume" | "set_budget" | "adjust_budget_pct"
+    campaign_external_id: str | None = None  # None = all campaigns
+    payload: dict = Field(default_factory=dict)
+
+
+class CommandOut(BaseModel):
+    id: UUID
+    account_id: UUID
+    campaign_external_id: str | None
+    platform: str
+    action: str
+    payload: dict
+    status: str
+    result: str | None
+    attempts: int
+    source: str
+    created_at: str
+    completed_at: str | None
+
+
+class SchedulePatchIn(BaseModel):
+    schedule_enabled: bool | None = None
+    # 'pause' | 'resume' | None. Sentinel handling: the field being present
+    # (even as None) clears the override; absent leaves it untouched —
+    # disambiguated in the handler via `model_fields_set`.
+    override_action: str | None = None
+    override_until: datetime | None = None
+
+
+_VALID_COMMAND_ACTIONS = frozenset({"pause", "resume", "set_budget", "adjust_budget_pct"})
+
+
+def _command_out(c: MarketingCommand) -> CommandOut:
+    return CommandOut(
+        id=c.id, account_id=c.account_id,
+        campaign_external_id=c.campaign_external_id,
+        platform=c.platform, action=c.action, payload=c.payload or {},
+        status=c.status, result=c.result, attempts=c.attempts, source=c.source,
+        created_at=c.created_at.isoformat(),
+        completed_at=c.completed_at.isoformat() if c.completed_at else None,
+    )
 
 
 # ─── helpers ──────────────────────────────────────────────────────────
@@ -756,6 +802,127 @@ def _campaign_out(camp: MarketingCampaign, acc: MarketingAccount) -> dict:
         "acos": round(float(camp.acos), 1) if camp.acos is not None else None,
         "acos_target": acc.acos_target,
     }
+
+
+# ─── ACTIONS / COMMANDS + SCHEDULE ────────────────────────────────────
+
+
+@router.post("/accounts/{account_id}/commands")
+async def create_command(
+    account_id: UUID,
+    body: CommandIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_active_user)],
+) -> CommandOut:
+    """Enqueue a manual ad action (pause/resume/set_budget/adjust_budget_pct).
+    Inserts a `pending` command; the dedicated agent node executes it. Returns
+    the row so the UI can poll its status."""
+    acc = await session.get(MarketingAccount, account_id)
+    if acc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "account_not_found"})
+    if body.action not in _VALID_COMMAND_ACTIONS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "invalid_action", "action": body.action},
+        )
+    payload = dict(body.payload or {})
+    if body.action == "set_budget" and "budget" not in payload:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "budget_required"}
+        )
+    if body.action == "adjust_budget_pct" and "pct" not in payload:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "pct_required"}
+        )
+    cmd = MarketingCommand(
+        account_id=acc.id,
+        campaign_external_id=body.campaign_external_id,
+        platform=acc.platform,
+        action=body.action,
+        payload=payload,
+        status="pending",
+        source="manual",
+        created_by_user_id=user.id,
+    )
+    session.add(cmd)
+    await session.commit()
+    await session.refresh(cmd)
+    return _command_out(cmd)
+
+
+@router.get("/accounts/{account_id}/commands")
+async def list_commands(
+    account_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+    limit: int = Query(20, ge=1, le=100),
+) -> list[CommandOut]:
+    """Recent commands for an account (newest first) so the UI can show the
+    pending→executando→feito/erro badge."""
+    rows = (
+        await session.execute(
+            select(MarketingCommand)
+            .where(MarketingCommand.account_id == account_id)
+            .order_by(MarketingCommand.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return [_command_out(c) for c in rows]
+
+
+@router.get("/accounts/{account_id}/schedule")
+async def get_schedule_state(
+    account_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    """Current desired state (computed in BRT) + override info + next flip,
+    for the agenda panel's "Agora: LIGADO até 15:00" hint."""
+    acc = await session.get(MarketingAccount, account_id)
+    if acc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "account_not_found"})
+    schedules = (
+        await session.execute(
+            select(MarketingSchedule).where(MarketingSchedule.account_id == account_id)
+        )
+    ).scalars().all()
+    return describe_state(acc, list(schedules), datetime.now(UTC))
+
+
+@router.patch("/accounts/{account_id}/schedule")
+async def patch_schedule(
+    account_id: UUID,
+    body: SchedulePatchIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    """Toggle the automatic agenda and/or set a manual override. Only fields
+    present in the request are touched (so a pure override change doesn't
+    flip schedule_enabled, and vice-versa)."""
+    acc = await session.get(MarketingAccount, account_id)
+    if acc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail={"code": "account_not_found"})
+    fields = body.model_fields_set
+    if "schedule_enabled" in fields and body.schedule_enabled is not None:
+        acc.schedule_enabled = body.schedule_enabled
+    if "override_action" in fields:
+        if body.override_action not in (None, "pause", "resume"):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "invalid_override_action"},
+            )
+        acc.override_action = body.override_action
+        # Clearing the override clears its expiry too unless one is supplied.
+        acc.override_until = body.override_until if body.override_action else None
+    elif "override_until" in fields:
+        acc.override_until = body.override_until
+    await session.commit()
+    schedules = (
+        await session.execute(
+            select(MarketingSchedule).where(MarketingSchedule.account_id == account_id)
+        )
+    ).scalars().all()
+    return describe_state(acc, list(schedules), datetime.now(UTC))
 
 
 @router.post("/sync-shopee/{integration_id}")

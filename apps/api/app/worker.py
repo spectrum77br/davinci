@@ -464,6 +464,42 @@ async def marketing_shopee_tick(ctx: dict) -> None:
     )
 
 
+async def marketing_consume_commands(ctx: dict) -> None:
+    """Agent node only (~every 20s): drain the marketing_commands outbox —
+    pause/resume/budget actions, manual or schedule-driven — against the
+    live Shopee/ML Ads APIs. Registered ONLY when
+    `settings.marketing_agent_node` is set, so the central server never
+    executes ad actions. Body re-checks the flag defensively."""
+    if not _settings.marketing_agent_node:
+        return
+    from app.services.marketing.commands import consume_pending_commands
+
+    async with session_scope() as s:
+        try:
+            await consume_pending_commands(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("marketing_consume_commands_failed", err=str(e)[:300])
+
+
+async def marketing_reconcile_schedules(ctx: dict) -> None:
+    """Agent node only (~every 60s): compare each schedule-enabled account's
+    desired BRT state against its campaigns' actual state and enqueue a
+    correcting command on drift. Pure DB work — no marketplace calls — so
+    it's safe to run every minute and reconverges after any restart."""
+    if not _settings.marketing_agent_node:
+        return
+    from app.services.marketing.reconcile import reconcile_schedules
+
+    async with session_scope() as s:
+        try:
+            r = await reconcile_schedules(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("marketing_reconcile_failed", err=str(e)[:300])
+            return
+    if r.get("enqueued"):
+        logger.info("marketing_reconcile_tick", **r)
+
+
 async def daily_sync_scheduler(ctx: dict) -> None:
     """Every 5min: enqueue sync_all for users whose `daily_sync_time` falls
     inside the current 5-minute window in America/Sao_Paulo, only if no
@@ -1263,15 +1299,10 @@ class WorkerSettings:
         # Marketing: pull live ML + Amazon ad data every half-hour at :05
         # and :35 (Shopee is NOT included — see marketing_shopee_tick).
         cron(marketing_full_sync, minute={5, 35}, run_at_startup=False),
-        # Marketing: Shopee round-robin. One shop per tick, every 5 min.
-        # 13 shops × 5min = each refreshes ~once per 65 minutes. The
-        # per-partner Ads throttle can't sustain a full-batch sync; this
-        # spreads the load thin enough to stay under it.
-        cron(
-            marketing_shopee_tick,
-            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
-            run_at_startup=False,
-        ),
+        # Marketing: Shopee round-robin MOVED to the agent-node block below —
+        # only the dedicated machine (MARKETING_AGENT_NODE=1) talks to Shopee
+        # Ads, so the central server never competes on the same partner-id
+        # throttle (which would rate-limit both).
         # Cron de snapshot de margem REMOVIDO: a página /margem reconstrói o
         # snapshot (rebuild_all, superset deste insert incremental) ao carregar,
         # com throttle de 5 min. A função continua em `functions` para enqueue
@@ -1291,6 +1322,25 @@ class WorkerSettings:
         # que a safety-net não cobre (ex.: 15 → devolução).
         cron(bling_orders_period_sync_tick, minute={20}, run_at_startup=False),
     ]
+    # Marketing AGENT NODE crons — REGISTERED only on the dedicated machine
+    # (MARKETING_AGENT_NODE=1). The central server leaves the flag off so
+    # these never run there. This is what guarantees a SINGLE machine talks
+    # to Shopee Ads:
+    #   - marketing_shopee_tick: pulls Shopee ad data (still body-gated by
+    #     enable_shopee_ads, which the agent node turns on).
+    #   - marketing_consume_commands: drains the command outbox (executes
+    #     pause/resume/budget on Shopee+ML).
+    #   - marketing_reconcile_schedules: enforces the BRT schedule.
+    if _settings.marketing_agent_node:
+        cron_jobs += [
+            cron(
+                marketing_shopee_tick,
+                minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+                run_at_startup=False,
+            ),
+            cron(marketing_consume_commands, second={0, 20, 40}, run_at_startup=False),
+            cron(marketing_reconcile_schedules, run_at_startup=False),
+        ]
     max_jobs = 10
     job_timeout = 1800
     keep_result = 3600

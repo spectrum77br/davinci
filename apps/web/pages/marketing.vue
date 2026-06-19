@@ -2,10 +2,11 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Activity, AlertCircle, BarChart3, Bell, Bot, Clock, Cpu, LayoutGrid,
-  RefreshCw, Sparkles, TrendingUp, TrendingDown,
+  Pause, Play, RefreshCw, Sparkles, TrendingUp, TrendingDown,
 } from 'lucide-vue-next'
 
 const { api } = useApi()
+const { success: toastOk, error: toastErr } = useToasts()
 
 // ── Types ────────────────────────────────────────────────────────────
 type Account = {
@@ -122,6 +123,7 @@ type Campaign = {
   platform: string
   department: string
   name: string
+  external_id: string | null
   status: 'active' | 'reduced' | 'paused' | 'off' | string
   credit: number | null
   spend: number
@@ -129,6 +131,29 @@ type Campaign = {
   impressions: number
   acos: number | null
   acos_target: number
+}
+type Command = {
+  id: string
+  account_id: string
+  campaign_external_id: string | null
+  platform: string
+  action: string
+  payload: Record<string, unknown>
+  status: 'pending' | 'claimed' | 'done' | 'failed' | string
+  result: string | null
+  attempts: number
+  source: string
+  created_at: string
+  completed_at: string | null
+}
+type ScheduleState = {
+  state: 'on' | 'off'
+  schedule_enabled: boolean
+  override_action: 'pause' | 'resume' | null
+  override_until: string | null
+  override_active: boolean
+  next_transition: string | null
+  next_state: 'on' | 'off' | null
 }
 
 // ── State ────────────────────────────────────────────────────────────
@@ -144,6 +169,14 @@ const patterns = ref<Pattern[]>([])
 const agentStatus = ref<AgentStatus[]>([])
 const creditAlerts = ref<CreditAlert[]>([])
 const campaigns = ref<Campaign[]>([])
+
+// Recent commands keyed by account_id, for the Campanhas action badges.
+const commandsByAccount = ref<Record<string, Command[]>>({})
+const commandBusy = ref<Set<string>>(new Set())
+// Current desired-state of the schedule for the account selected in the
+// heatmap/agenda panel.
+const scheduleState = ref<ScheduleState | null>(null)
+const scheduleBusy = ref(false)
 
 const schedAccountId = ref<string | null>(null)
 const schedules = ref<Schedule[]>([])
@@ -186,6 +219,18 @@ const actionLabel: Record<string, string> = {
   no_action: 'Sem ação', enable_all: 'LIGAR ADS', disable_all: 'DESLIGAR ADS',
   increase_budget: 'AUMENTAR BUDGET', decrease_budget: 'REDUZIR BUDGET',
   pause_worst: 'PAUSAR PIORES',
+}
+
+// Command status → badge styling for the Campanhas action feedback.
+const cmdBadge: Record<string, { label: string; cls: string }> = {
+  pending: { label: 'Pendente', cls: 'bg-amber-500/15 text-amber-700 border-amber-500/30' },
+  claimed: { label: 'Executando', cls: 'bg-sky-500/15 text-sky-700 border-sky-500/30' },
+  done: { label: 'Feito', cls: 'bg-emerald-500/15 text-emerald-700 border-emerald-500/30' },
+  failed: { label: 'Erro', cls: 'bg-red-500/15 text-red-700 border-red-500/30' },
+}
+const cmdActionLabel: Record<string, string> = {
+  pause: 'Pausar', resume: 'Retomar',
+  set_budget: 'Budget', adjust_budget_pct: 'Ajustar budget',
 }
 
 // Marketplace filter for the 7d/30d period tables. 'all' = no filter.
@@ -522,6 +567,119 @@ async function loadTimeseries() {
   timeseries.value = await api<Timeseries>(`/api/marketing/timeseries?${params}`)
 }
 
+// ── Commands (manual ad actions) ─────────────────────────────────────
+function fmtHm(iso: string | null): string {
+  if (!iso) return ''
+  return new Date(iso).toLocaleTimeString('pt-BR', {
+    timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit',
+  })
+}
+
+const recentCommands = computed(() => {
+  const all = Object.values(commandsByAccount.value).flat()
+  return all.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 8)
+})
+
+function cmdIsBusy(c: Campaign, action: string): boolean {
+  return commandBusy.value.has(`${c.id}:${action}`)
+}
+
+async function loadCommands(accountId: string) {
+  const rows = await api<Command[]>(`/api/marketing/accounts/${accountId}/commands?limit=10`)
+  commandsByAccount.value = { ...commandsByAccount.value, [accountId]: rows }
+}
+
+function anyCommandActive(): boolean {
+  return Object.values(commandsByAccount.value)
+    .flat()
+    .some((c) => c.status === 'pending' || c.status === 'claimed')
+}
+
+let cmdTimer: ReturnType<typeof setInterval> | null = null
+function startCommandPolling() {
+  if (cmdTimer) return
+  cmdTimer = setInterval(async () => {
+    const ids = Object.keys(commandsByAccount.value)
+    await Promise.all(ids.map((id) => loadCommands(id))).catch(() => {})
+    if (!anyCommandActive() && cmdTimer) {
+      clearInterval(cmdTimer)
+      cmdTimer = null
+    }
+  }, 4000)
+}
+
+async function postCampaignCommand(c: Campaign, action: string, payload: Record<string, unknown> = {}) {
+  if (!c.external_id) {
+    toastErr('Campanha sem ID externo', 'Sincronize a campanha antes de agir nela.')
+    return
+  }
+  const key = `${c.id}:${action}`
+  commandBusy.value = new Set(commandBusy.value).add(key)
+  try {
+    await api(`/api/marketing/accounts/${c.account_id}/commands`, {
+      method: 'POST',
+      body: { action, campaign_external_id: c.external_id, payload },
+    })
+    toastOk('Comando enfileirado', `${cmdActionLabel[action] ?? action} — ${c.name}`)
+    await loadCommands(c.account_id)
+    startCommandPolling()
+  } catch (e: any) {
+    toastErr('Falha ao enfileirar', e?.data?.detail?.code ?? e?.message ?? 'erro')
+  } finally {
+    const next = new Set(commandBusy.value)
+    next.delete(key)
+    commandBusy.value = next
+  }
+}
+
+// ── Schedule (automatic agenda) ──────────────────────────────────────
+async function loadScheduleState() {
+  if (!schedAccountId.value) {
+    scheduleState.value = null
+    return
+  }
+  scheduleState.value = await api<ScheduleState>(`/api/marketing/accounts/${schedAccountId.value}/schedule`)
+}
+
+async function patchSchedule(body: Record<string, unknown>) {
+  if (!schedAccountId.value) return
+  scheduleBusy.value = true
+  try {
+    scheduleState.value = await api<ScheduleState>(
+      `/api/marketing/accounts/${schedAccountId.value}/schedule`,
+      { method: 'PATCH', body },
+    )
+  } catch (e: any) {
+    toastErr('Falha na agenda', e?.data?.detail?.code ?? e?.message ?? 'erro')
+  } finally {
+    scheduleBusy.value = false
+  }
+}
+
+async function toggleScheduleAuto() {
+  const next = !(scheduleState.value?.schedule_enabled)
+  await patchSchedule({ schedule_enabled: next })
+  toastOk(next ? 'Agenda automática ligada' : 'Agenda automática desligada')
+}
+async function overrideNow(action: 'pause' | 'resume') {
+  await patchSchedule({ override_action: action })
+  toastOk(action === 'pause' ? 'Pausado (override manual)' : 'Ligado (override manual)')
+}
+async function clearOverride() {
+  await patchSchedule({ override_action: null })
+  toastOk('Voltou ao automático')
+}
+
+// "Agora: LIGADO até 15:00" / "DESLIGADO — religa 19:00"
+const scheduleHint = computed(() => {
+  const s = scheduleState.value
+  if (!s) return ''
+  const on = s.state === 'on'
+  const when = s.next_transition ? fmtHm(s.next_transition) : null
+  if (on) return when ? `LIGADO até ${when}` : 'LIGADO'
+  return when ? `DESLIGADO — religa ${when}` : 'DESLIGADO'
+})
+
 async function refresh() {
   loading.value = true
   errorText.value = null
@@ -530,7 +688,7 @@ async function refresh() {
     await Promise.all([
       loadIntensity(), loadDecisions(), loadPatterns(),
       loadAgentStatus(), loadCreditAlerts(), loadSchedules(),
-      loadHeatmap(), loadCampaigns(), loadTimeseries(),
+      loadHeatmap(), loadCampaigns(), loadTimeseries(), loadScheduleState(),
     ])
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code ?? e?.message ?? 'load_failed'
@@ -577,6 +735,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   if (pollTimer) clearInterval(pollTimer)
+  if (cmdTimer) clearInterval(cmdTimer)
 })
 
 watch(department, async () => {
@@ -593,6 +752,7 @@ watch([chartDays, tablePlatform], () => {
 watch(schedAccountId, () => {
   loadSchedules().catch(() => {})
   loadHeatmap().catch(() => {})
+  loadScheduleState().catch(() => {})
 })
 
 definePageMeta({ middleware: [] })
@@ -887,6 +1047,59 @@ definePageMeta({ middleware: [] })
         </div>
       </div>
 
+      <!-- Agenda automática (BRT) -->
+      <div v-if="selectedSchedAccount" class="rounded-md border p-4">
+        <div class="flex items-center gap-2 mb-3 flex-wrap">
+          <Clock class="size-4 text-primary" />
+          <h2 class="text-lg font-semibold">Agenda automática</h2>
+          <span class="text-xs text-muted-foreground">
+            {{ selectedSchedAccount.name }} ({{ platformLabel[selectedSchedAccount.platform] }}) — horário de Brasília
+          </span>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <button
+            class="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm disabled:opacity-50 transition-colors"
+            :class="scheduleState?.schedule_enabled
+              ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700'
+              : 'hover:bg-muted'"
+            :disabled="scheduleBusy" @click="toggleScheduleAuto">
+            <span class="size-2 rounded-full" :class="scheduleState?.schedule_enabled ? 'bg-emerald-500' : 'bg-zinc-400'" />
+            {{ scheduleState?.schedule_enabled ? 'Agenda automática LIGADA' : 'Agenda automática desligada' }}
+          </button>
+
+          <div v-if="scheduleState" class="text-sm inline-flex items-center gap-2">
+            <span class="text-muted-foreground">Agora:</span>
+            <span class="font-semibold" :class="scheduleState.state === 'on' ? 'text-emerald-600' : 'text-zinc-500'">
+              {{ scheduleHint }}
+            </span>
+            <span v-if="scheduleState.override_active"
+              class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-700 border border-violet-500/30">
+              override manual
+            </span>
+          </div>
+
+          <div class="ml-auto flex items-center gap-2">
+            <button class="rounded-md border px-2.5 py-1.5 text-sm inline-flex items-center gap-1 hover:bg-red-500/10 hover:border-red-500/40 disabled:opacity-50"
+              :disabled="scheduleBusy" @click="overrideNow('pause')">
+              <Pause class="size-3.5" /> Pausar agora
+            </button>
+            <button class="rounded-md border px-2.5 py-1.5 text-sm inline-flex items-center gap-1 hover:bg-emerald-500/10 hover:border-emerald-500/40 disabled:opacity-50"
+              :disabled="scheduleBusy" @click="overrideNow('resume')">
+              <Play class="size-3.5" /> Ligar agora
+            </button>
+            <button v-if="scheduleState?.override_active"
+              class="rounded-md border px-2.5 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              :disabled="scheduleBusy" @click="clearOverride">
+              Voltar ao automático
+            </button>
+          </div>
+        </div>
+        <p class="mt-2 text-[11px] text-muted-foreground">
+          As janelas ON/OFF são editadas no heatmap acima (clique pra ligar/desligar). Com a agenda ligada, a máquina
+          dedicada pausa fora das janelas e religa dentro — sozinha, em horário de Brasília. O override manual vence a agenda até você voltar ao automático.
+        </p>
+      </div>
+
       <!-- Credit alerts -->
       <div class="rounded-md border p-4">
         <div class="flex items-center gap-2 mb-3">
@@ -1000,8 +1213,57 @@ definePageMeta({ middleware: [] })
                   </span>
                 </td>
               </tr>
+              <!-- Ações -->
+              <tr class="border-t bg-muted/5">
+                <td class="sticky left-0 z-10 bg-background px-3 py-2 text-muted-foreground border-r align-top">Ações</td>
+                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-2 border-r last:border-r-0 align-top">
+                  <div v-if="!c.external_id" class="text-[10px] text-muted-foreground">sem ID externo</div>
+                  <div v-else class="flex flex-wrap gap-1">
+                    <button class="rounded border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1 hover:bg-red-500/10 hover:border-red-500/40 disabled:opacity-50"
+                      :disabled="cmdIsBusy(c, 'pause')" @click="postCampaignCommand(c, 'pause')">
+                      <Pause class="size-3" /> Pausar
+                    </button>
+                    <button class="rounded border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1 hover:bg-emerald-500/10 hover:border-emerald-500/40 disabled:opacity-50"
+                      :disabled="cmdIsBusy(c, 'resume')" @click="postCampaignCommand(c, 'resume')">
+                      <Play class="size-3" /> Retomar
+                    </button>
+                    <button class="rounded border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1 hover:bg-muted disabled:opacity-50"
+                      :disabled="cmdIsBusy(c, 'adjust_budget_pct')" @click="postCampaignCommand(c, 'adjust_budget_pct', { pct: 20 })">
+                      <TrendingUp class="size-3" /> +20%
+                    </button>
+                    <button class="rounded border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1 hover:bg-muted disabled:opacity-50"
+                      :disabled="cmdIsBusy(c, 'adjust_budget_pct')" @click="postCampaignCommand(c, 'adjust_budget_pct', { pct: -20 })">
+                      <TrendingDown class="size-3" /> −20%
+                    </button>
+                  </div>
+                </td>
+              </tr>
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <!-- Ações recentes (status dos comandos enfileirados) -->
+      <div v-if="recentCommands.length" class="rounded-md border p-3">
+        <div class="text-sm font-medium mb-2 flex items-center gap-2">
+          <Activity class="size-4 text-primary" /> Ações recentes
+          <span class="text-[11px] text-muted-foreground font-normal">atualiza enquanto houver pendente</span>
+        </div>
+        <div class="space-y-1">
+          <div v-for="cmd in recentCommands" :key="cmd.id" class="flex items-center gap-2 text-xs">
+            <span class="px-1.5 py-0.5 rounded border whitespace-nowrap" :class="cmdBadge[cmd.status]?.cls ?? 'border-border'">
+              {{ cmdBadge[cmd.status]?.label ?? cmd.status }}
+            </span>
+            <span class="font-medium">{{ cmdActionLabel[cmd.action] ?? cmd.action }}</span>
+            <span class="text-muted-foreground">
+              {{ cmd.campaign_external_id ? `campanha ${cmd.campaign_external_id}` : 'conta inteira' }}
+            </span>
+            <span v-if="cmd.source === 'schedule'" class="text-[10px] uppercase tracking-wide text-violet-700">agenda</span>
+            <span v-if="cmd.status === 'failed' && cmd.result" class="text-red-600 truncate max-w-[260px]" :title="cmd.result">
+              {{ cmd.result }}
+            </span>
+            <span class="ml-auto text-muted-foreground whitespace-nowrap">{{ fmtHm(cmd.created_at) }}</span>
+          </div>
         </div>
       </div>
     </template>

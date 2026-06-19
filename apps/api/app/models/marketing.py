@@ -71,6 +71,65 @@ class MarketingAccount(Base, TimestampMixin):
     revenue_today: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default=text("0"))
     impressions_today: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
+    # ─── Automatic schedule (BRT windows) ────────────────────────────────
+    # When True, the reconciler (on the agent node) keeps this account's
+    # campaigns paused outside the MarketingSchedule windows and resumed
+    # inside them — in America/Sao_Paulo time, see services/marketing/scheduling.py.
+    schedule_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Manual override on top of the schedule. 'pause' forces OFF, 'resume'
+    # forces ON, NULL = follow the windows. `override_until` bounds it
+    # (NULL = until the operator clears it). The reconciler honours the
+    # override while it's active, then falls back to the windows.
+    override_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    override_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MarketingCommand(Base, TimestampMixin):
+    """Outbox queue for ad actions. Every action — manual (a button click)
+    or automatic (the schedule reconciler) — becomes one `pending` row here.
+    The dedicated agent node consumes it via SELECT … FOR UPDATE SKIP LOCKED,
+    runs it through `edit_campaign`, and stamps result/status. Durable across
+    restarts: an interrupted command stays `pending`/`claimed` and reconverges
+    on the next tick."""
+
+    __tablename__ = "marketing_commands"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketing_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # NULL = apply to ALL campaigns of the account (whole-account pause/resume).
+    campaign_external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    # "pause" | "resume" | "set_budget" | "adjust_budget_pct"
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # "pending" | "claimed" | "done" | "failed"
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # "manual" | "schedule"
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="manual", server_default=text("'manual'")
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 
 class MarketingSchedule(Base, TimestampMixin):
     __tablename__ = "marketing_schedules"
