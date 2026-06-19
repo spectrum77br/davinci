@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Loader2, Search, X } from 'lucide-vue-next'
 
-type ProductHit = { sku: string; name: string; cost_price: number | null }
+type ProductHit = { sku: string; name: string; cost_price: number | null; saldo_virtual_total: number | null }
 
 const props = defineProps<{
   open: boolean
@@ -64,9 +64,8 @@ function confirm() {
   emit('confirm', { sku: selectedSku.value!, condicao: condicao.value as 'Novo' | 'Usado' })
 }
 
-function brl(v: number | null) {
-  if (v == null) return '—'
-  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+function saldo(v: number | null) {
+  return v == null ? '—' : `${v} un.`
 }
 </script>
 
@@ -108,7 +107,7 @@ function brl(v: number | null) {
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground w-8"></th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground min-w-[130px]">SKU</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground min-w-[220px]">Produto</th>
-              <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground min-w-[100px]">Custo</th>
+              <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground min-w-[100px]">Saldo virtual</th>
             </tr>
           </thead>
           <tbody>
@@ -124,7 +123,7 @@ function brl(v: number | null) {
               </td>
               <td class="px-2 py-1 font-mono">{{ r.sku }}</td>
               <td class="px-2 py-1 text-muted-foreground">{{ r.name }}</td>
-              <td class="px-2 py-1 text-right tabular-nums">{{ brl(r.cost_price) }}</td>
+              <td class="px-2 py-1 text-right tabular-nums" title="saldo virtual">{{ saldo(r.saldo_virtual_total) }}</td>
             </tr>
           </tbody>
         </table>

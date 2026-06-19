@@ -564,7 +564,9 @@ async def search_products(
     limit: int = Query(20, ge=1, le=50),
 ) -> list[DevolutionProductOut]:
     """Busca produtos por SKU/nome para o modal de troca (Modal 1).
-    Só ativos (NULL=desconhecido passa); ordenado por SKU."""
+    Só ativos (NULL=desconhecido passa); ordenado por SKU. Apenas produtos
+    SIMPLES — kits/compostos (formato='E' ou SKU com '+') não voltam ao estoque
+    como unidade, então ficam de fora da busca."""
     q = q.strip()
     if not q:
         return []
@@ -577,6 +579,10 @@ async def search_products(
             )
             .where(or_(Product.sku.ilike(like), Product.name.ilike(like)))
             .where(or_(Product.situacao == "A", Product.situacao.is_(None)))
+            # Só simples: exclui composto explícito (formato='E') e SKUs '+'
+            # com flag de simples errada (NULL=desconhecido passa).
+            .where(or_(Product.formato.is_(None), Product.formato != "E"))
+            .where(Product.sku.notlike("%+%"))
             .order_by(Product.sku)
             .limit(limit)
         )

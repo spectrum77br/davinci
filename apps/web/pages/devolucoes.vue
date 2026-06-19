@@ -246,7 +246,7 @@ const savingRows = ref<Set<string>>(new Set())
 
 // ── Correção de estoque (entrada manual, sem criar devolução) ────────────
 // Reaproveita os modais de destino (resolveStockModals) e a lógica Novo/Usado.
-type ProductHit = { sku: string; name: string; cost_price: number | null }
+type ProductHit = { sku: string; name: string; cost_price: number | null; saldo_virtual_total: number | null }
 const CONDICOES_CORRECAO = ['Novo', 'Usado'] as const
 const correcaoOpen = ref(false)
 const correcaoSku = ref('')
@@ -441,6 +441,10 @@ function apiError(e: any) {
 function brl(v: number | null | undefined) {
   if (v == null) return '—'
   return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+}
+
+function saldoUn(v: number | null | undefined) {
+  return v == null ? '—' : `${v} un.`
 }
 
 function normalizeUrl(v: string | null | undefined) {
@@ -1561,7 +1565,7 @@ async function backfillAddresses() {
               >
                 <span class="shrink-0 font-mono">{{ r.sku }}</span>
                 <span class="flex-1 truncate text-muted-foreground">{{ r.name }}</span>
-                <span v-if="isAdmin" class="shrink-0 tabular-nums text-muted-foreground">{{ brl(r.cost_price) }}</span>
+                <span class="shrink-0 tabular-nums text-muted-foreground" title="saldo virtual">{{ saldoUn(r.saldo_virtual_total) }}</span>
               </button>
             </div>
           </div>
