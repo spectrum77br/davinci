@@ -92,6 +92,19 @@ const canSeeFreteResultado = computed(() => {
   return !!email && FRETE_RESULTADO_USERS.includes(email)
 })
 
+// Usuários para quem o snapshot é reconstruído automaticamente a cada
+// carregamento da página (com indicador visual de progresso).
+const SNAPSHOT_AUTO_REFRESH_USERS = [
+  'joffer4@tuta.com',
+  'maconer06@tuta.com',
+  'hans21@tuta.com',
+  'spectrum77@tuta.com',
+]
+const shouldAutoRefresh = computed(() => {
+  const email = _auth.user?.email?.toLowerCase()
+  return !!email && SNAPSHOT_AUTO_REFRESH_USERS.includes(email)
+})
+
 // Coluna "Lucro" (R$) restrita a administradores.
 const isAdmin = useIsAdmin()
 
@@ -116,6 +129,11 @@ const lookupTerm = ref('')
 const historicoDisponivel = ref(false)
 const historicoLoading = ref(false)
 const historicoElapsedMs = ref(0)
+
+// Auto-refresh do snapshot ao abrir a página (apenas para SNAPSHOT_AUTO_REFRESH_USERS).
+const autoRefreshing = ref(false)
+const autoRefreshDone = ref(false)
+const autoRefreshElapsedMs = ref(0)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
@@ -253,8 +271,60 @@ async function refreshAndLoad() {
     loading.value = false
     return
   }
+  // Refresh manual também renova a janela do throttle do auto-refresh.
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(AUTO_REFRESH_TS_KEY, String(Date.now()))
+  }
   await reloadCurrent()
 }
+
+// Throttle do auto-refresh: o rebuild completo (~17s) não deve rodar a cada
+// reload. Limita a no máximo 1x a cada 5 min por navegador (persistido em
+// localStorage, sobrevive ao reload). Só conta rebuilds que concluíram com
+// sucesso — uma falha tenta de novo no próximo carregamento.
+const AUTO_REFRESH_THROTTLE_MS = 5 * 60 * 1000
+const AUTO_REFRESH_TS_KEY = 'margem:lastAutoRefreshTs'
+function lastAutoRefreshTs(): number {
+  if (typeof localStorage === 'undefined') return 0
+  const v = Number(localStorage.getItem(AUTO_REFRESH_TS_KEY))
+  return Number.isFinite(v) ? v : 0
+}
+
+// Reconstrói o snapshot ao abrir a página e recarrega a lista, com banner
+// visual de progresso (timer). A lista já foi exibida com o snapshot atual
+// (await load() acima), então o usuário vê os dados na hora e o banner indica
+// que estão sendo atualizados em segundo plano.
+async function autoRefreshSnapshot() {
+  if (autoRefreshing.value) return
+  // Dentro da janela de throttle: pula o rebuild e mantém o snapshot atual.
+  if (Date.now() - lastAutoRefreshTs() < AUTO_REFRESH_THROTTLE_MS) return
+  autoRefreshing.value = true
+  autoRefreshDone.value = false
+  autoRefreshElapsedMs.value = 0
+  const started = Date.now()
+  const timer = setInterval(() => {
+    autoRefreshElapsedMs.value = Date.now() - started
+  }, 250)
+  try {
+    await api('/api/margens/marketplace/refresh', { method: 'POST' })
+    await reloadCurrent()
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(AUTO_REFRESH_TS_KEY, String(Date.now()))
+    }
+    autoRefreshDone.value = true
+    // some o "atualizado" depois de alguns segundos
+    setTimeout(() => { autoRefreshDone.value = false }, 4000)
+  } catch (e: any) {
+    error.value = apiError(e)
+  } finally {
+    clearInterval(timer)
+    autoRefreshing.value = false
+  }
+}
+
+onMounted(() => {
+  if (shouldAutoRefresh.value) autoRefreshSnapshot()
+})
 
 // reload on filter change (debounced search) — only in list mode
 let searchTimer: ReturnType<typeof setTimeout> | null = null
@@ -563,6 +633,23 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     <div v-if="error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
       <AlertCircle class="size-4" />
       {{ error }}
+    </div>
+
+    <!-- Auto-refresh do snapshot ao abrir a página -->
+    <div
+      v-if="autoRefreshing"
+      class="flex items-center gap-2.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm text-blue-700 dark:text-blue-300"
+    >
+      <Loader2 class="size-4 shrink-0 animate-spin" />
+      <span class="font-medium">Atualizando snapshot da margem…</span>
+      <span class="text-xs text-muted-foreground tabular-nums">{{ fmtElapsed(autoRefreshElapsedMs) }} decorrido</span>
+    </div>
+    <div
+      v-else-if="autoRefreshDone"
+      class="flex items-center gap-2.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300"
+    >
+      <Check class="size-4 shrink-0" />
+      <span class="font-medium">Snapshot atualizado.</span>
     </div>
 
     <div class="flex items-center gap-1 border-b">

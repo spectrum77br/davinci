@@ -1272,7 +1272,10 @@ class WorkerSettings:
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
             run_at_startup=False,
         ),
-        cron(verificar_margem_snapshot, minute={0, 30}, run_at_startup=False),
+        # Cron de snapshot de margem REMOVIDO: a página /margem reconstrói o
+        # snapshot (rebuild_all, superset deste insert incremental) ao carregar,
+        # com throttle de 5 min. A função continua em `functions` para enqueue
+        # manual via /admin/run-job se necessário.
         # Cron `check_marketplace_shipped_orders` MOVIDO pra
         # WorkerSettingsMarketplace (fila `davinci_marketplace`). Função
         # continua em `functions` deste worker como fallback (enqueue
