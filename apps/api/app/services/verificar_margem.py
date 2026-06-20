@@ -37,6 +37,31 @@ def qualified_table(name: str) -> str:
 
 SNAPSHOT_TABLE = qualified_table("verificar_margem")
 VIEW_TABLE = qualified_table("vw_conciliacao_margens_marketplace")
+BLING_ORDERS_TABLE = qualified_table("bling_orders")
+
+
+async def _delete_orphans(session: AsyncSession) -> int:
+    """Apaga linhas do snapshot cujo bling_order_item_id (PK) não existe mais
+    em bling_orders.
+
+    O id de um item churna a cada re-ingest (upsert gera uuid4 novo, ver
+    bling_orders.upsert_order), então um pedido re-sincronizado deixa para trás
+    a linha antiga. Os refresh direcionados só apagam por `pedido_bling`/
+    `bling_id`, e quando o próprio `bling_id` muda nenhum deles toca a linha
+    velha — ela vira órfã e o mesmo pedido/SKU passa a aparecer com custos
+    divergentes na página Margem. Anti-join pela PK (bling_order_item_id),
+    barato o suficiente para rodar em todo refresh. Devolve quantas removeu.
+    """
+    result = await session.execute(
+        text(
+            f"DELETE FROM {SNAPSHOT_TABLE} v "
+            f"WHERE NOT EXISTS ("
+            f"  SELECT 1 FROM {BLING_ORDERS_TABLE} bo "
+            f"  WHERE bo.id = v.bling_order_item_id"
+            f")"
+        )
+    )
+    return result.rowcount or 0
 
 
 async def rebuild_all(session: AsyncSession) -> int:
@@ -63,15 +88,7 @@ async def rebuild_all(session: AsyncSession) -> int:
     )
     # Remove orphan rows: snapshot entries whose UUID no longer exists in
     # bling_orders (e.g. order re-synced with a new UUID).
-    await session.execute(
-        text(
-            f"DELETE FROM {SNAPSHOT_TABLE} v "
-            f"WHERE NOT EXISTS ("
-            f"  SELECT 1 FROM {qualified_table('bling_orders')} bo"
-            f"  WHERE bo.id = v.bling_order_item_id"
-            f")"
-        )
-    )
+    await _delete_orphans(session)
     result = await session.execute(
         text(
             f"INSERT INTO {SNAPSHOT_TABLE} "
@@ -83,7 +100,6 @@ async def rebuild_all(session: AsyncSession) -> int:
 
 
 FN_FOR_BLING_ID = f"{_ident(SCHEMA)}.conciliacao_margens_for_bling_id"
-BLING_ORDERS_TABLE = qualified_table("bling_orders")
 
 
 async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
@@ -110,6 +126,7 @@ async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
         ),
         {"p": pedido_bling},
     )
+    await _delete_orphans(session)
     await session.commit()
     return result.rowcount or 0
 
@@ -131,6 +148,7 @@ async def refresh_for_bling_id(session: AsyncSession, bling_id: int) -> int:
         ),
         {"b": bling_id},
     )
+    await _delete_orphans(session)
     await session.commit()
     return result.rowcount or 0
 
