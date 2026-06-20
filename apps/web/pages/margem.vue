@@ -271,33 +271,20 @@ async function refreshAndLoad() {
     loading.value = false
     return
   }
-  // Refresh manual também renova a janela do throttle do auto-refresh.
-  if (typeof localStorage !== 'undefined') {
-    localStorage.setItem(AUTO_REFRESH_TS_KEY, String(Date.now()))
-  }
   await reloadCurrent()
 }
 
-// Throttle do auto-refresh: o rebuild completo (~17s) não deve rodar a cada
-// reload. Limita a no máximo 1x a cada 5 min por navegador (persistido em
-// localStorage, sobrevive ao reload). Só conta rebuilds que concluíram com
-// sucesso — uma falha tenta de novo no próximo carregamento.
-const AUTO_REFRESH_THROTTLE_MS = 5 * 60 * 1000
-const AUTO_REFRESH_TS_KEY = 'margem:lastAutoRefreshTs'
-function lastAutoRefreshTs(): number {
-  if (typeof localStorage === 'undefined') return 0
-  const v = Number(localStorage.getItem(AUTO_REFRESH_TS_KEY))
-  return Number.isFinite(v) ? v : 0
-}
-
-// Reconstrói o snapshot ao abrir a página e recarrega a lista, com banner
-// visual de progresso (timer). A lista já foi exibida com o snapshot atual
-// (await load() acima), então o usuário vê os dados na hora e o banner indica
-// que estão sendo atualizados em segundo plano.
+// Reconstrói o snapshot ao abrir a página e recarrega a lista. A tabela já foi
+// renderizada com o snapshot atual (await load() acima), então NÃO bloqueia: o
+// usuário usa os dados na hora e o banner só sinaliza a atualização em curso.
+//
+// O throttle é do servidor: passamos max_age_s=300 e o backend pula o rebuild
+// (resp.refreshed=false) se o snapshot já estiver fresco — autoritativo entre
+// todos os usuários — e garante single-flight (um rebuild por vez). Por isso a
+// maioria dos loads retorna na hora; só quando está realmente velho roda o
+// rebuild (alguns minutos), e aí a tabela já visível é trocada ao concluir.
 async function autoRefreshSnapshot() {
   if (autoRefreshing.value) return
-  // Dentro da janela de throttle: pula o rebuild e mantém o snapshot atual.
-  if (Date.now() - lastAutoRefreshTs() < AUTO_REFRESH_THROTTLE_MS) return
   autoRefreshing.value = true
   autoRefreshDone.value = false
   autoRefreshElapsedMs.value = 0
@@ -306,14 +293,16 @@ async function autoRefreshSnapshot() {
     autoRefreshElapsedMs.value = Date.now() - started
   }, 250)
   try {
-    await api('/api/margens/marketplace/refresh', { method: 'POST' })
-    await reloadCurrent()
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(AUTO_REFRESH_TS_KEY, String(Date.now()))
+    const res = await api<{ refreshed?: boolean }>(
+      '/api/margens/marketplace/refresh?max_age_s=300',
+      { method: 'POST' },
+    )
+    // Só recarrega/anuncia quando houve rebuild de fato (servidor não pulou).
+    if (res?.refreshed) {
+      await reloadCurrent()
+      autoRefreshDone.value = true
+      setTimeout(() => { autoRefreshDone.value = false }, 4000)
     }
-    autoRefreshDone.value = true
-    // some o "atualizado" depois de alguns segundos
-    setTimeout(() => { autoRefreshDone.value = false }, 4000)
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -635,14 +624,18 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       {{ error }}
     </div>
 
-    <!-- Auto-refresh do snapshot ao abrir a página -->
+    <!-- Auto-refresh do snapshot ao abrir a página (não bloqueia: a tabela
+         abaixo já mostra o snapshot atual). -->
     <div
       v-if="autoRefreshing"
       class="flex items-center gap-2.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm text-blue-700 dark:text-blue-300"
     >
       <Loader2 class="size-4 shrink-0 animate-spin" />
-      <span class="font-medium">Atualizando snapshot da margem…</span>
-      <span class="text-xs text-muted-foreground tabular-nums">{{ fmtElapsed(autoRefreshElapsedMs) }} decorrido</span>
+      <span class="font-medium">Atualizando snapshot em segundo plano…</span>
+      <span class="text-xs text-blue-700/70 dark:text-blue-300/70">
+        a tabela abaixo já tem o snapshot atual e troca ao concluir
+      </span>
+      <span class="ml-auto text-xs text-muted-foreground tabular-nums">{{ fmtElapsed(autoRefreshElapsedMs) }}</span>
     </div>
     <div
       v-else-if="autoRefreshDone"

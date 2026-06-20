@@ -719,13 +719,56 @@ async def sync_bling_from_saldo_final(
     }
 
 
+# Rebuild da view de conciliação é caro (~minutos em prod). Coordenamos via
+# Redis para (a) pular se o snapshot foi reconstruído há pouco (freshness) e
+# (b) garantir single-flight — um rebuild por vez, em vez de cada page-load
+# dos usuários empilhar um rebuild de minutos.
+_REFRESH_LOCK_KEY = "margem:snapshot:refresh:lock"
+_REFRESH_FRESH_KEY = "margem:snapshot:refresh:fresh"
+_REFRESH_LOCK_TTL_S = 600  # safety: libera o lock se o rebuild morrer no meio
+
+
 @router.post("/marketplace/refresh")
 async def refresh_marketplace_mv(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("margem", "view"))],
+    max_age_s: int = Query(
+        0,
+        ge=0,
+        le=3600,
+        description=(
+            "Pula o rebuild se o snapshot foi reconstruído há menos de N "
+            "segundos. 0 (default, botão manual) sempre reconstrói."
+        ),
+    ),
 ) -> dict:
-    """Rebuild davinci.verificar_margem on-demand (UI 'atualizar' button)."""
-    inserted = await _rebuild_verificar_margem(session)
+    """Rebuild davinci.verificar_margem on-demand.
+
+    Botão manual ('atualizar') chama sem `max_age_s` → sempre reconstrói.
+    O auto-refresh da página passa `max_age_s=300` → o servidor pula se já
+    estiver fresco (throttle autoritativo, cross-usuário) e nunca roda dois
+    rebuilds simultâneos (single-flight via lock Redis).
+    """
+    from app.redis_client import redis
+
+    # Freshness: alguém reconstruiu dentro da janela → não refaz.
+    if max_age_s > 0 and await redis.get(_REFRESH_FRESH_KEY):
+        return {"refreshed": False, "skipped": "fresh", "rows": 0}
+
+    # Single-flight: só um rebuild por vez. Demais retornam de imediato e o
+    # cliente segue com o snapshot atual (que o rebuild em curso vai atualizar).
+    got_lock = await redis.set(_REFRESH_LOCK_KEY, "1", nx=True, ex=_REFRESH_LOCK_TTL_S)
+    if not got_lock:
+        return {"refreshed": False, "skipped": "in_progress", "rows": 0}
+
+    try:
+        inserted = await _rebuild_verificar_margem(session)
+    finally:
+        await redis.delete(_REFRESH_LOCK_KEY)
+
+    # Marca o snapshot como fresco pela janela do chamador (default 5min para
+    # coalescer rajadas mesmo quando o gatilho foi o botão manual).
+    await redis.set(_REFRESH_FRESH_KEY, "1", ex=max_age_s if max_age_s > 0 else 300)
     return {"refreshed": True, "rows": inserted}
 
 
