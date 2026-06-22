@@ -56,6 +56,12 @@ class Product(Base, TimestampMixin):
     )
     cost_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     bling_cost_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
+    # Quando o `bling_cost_price` foi conferido vs. Bling pela última vez
+    # (cron diário ou refresh on-ingest). Usado para decidir se o custo do
+    # SKU está velho o bastante para re-buscar no Bling ao criar um pedido.
+    bling_cost_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     price: Mapped[Decimal | None] = mapped_column(Numeric(14, 4), nullable=True)
     stock: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     # Units held by ongoing sales — `saldoFisicoTotal - saldoVirtualTotal`

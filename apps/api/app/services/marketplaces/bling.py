@@ -627,6 +627,39 @@ class BlingClient:
         except Exception:  # noqa: BLE001
             return None
 
+    async def cost_by_skus(self, skus: set[str]) -> dict[str, float]:
+        """`precoCusto` atual no Bling para cada SKU, via listagem `/produtos`.
+
+        O `precoCusto` só vem na LISTA (`/produtos?codigo=`), não no detalhe
+        `/produtos/{id}`. Usado no refresh on-ingest: busca só os SKUs do
+        pedido cujo custo local está velho. Falha por SKU é silenciosa (o
+        chamador cai no `bling_cost_price` já gravado)."""
+        out: dict[str, float] = {}
+        for sku in skus:
+            if not sku:
+                continue
+            try:
+                r = await self._request(
+                    "GET",
+                    "/produtos",
+                    params={"codigo": sku, "pagina": 1, "limite": 5},
+                )
+                r.raise_for_status()
+                for item in r.json().get("data") or []:
+                    if (item.get("codigo") or "").strip() != sku:
+                        continue
+                    raw_cost = item.get("precoCusto")
+                    if raw_cost in (None, ""):
+                        continue
+                    try:
+                        out[sku] = float(raw_cost)
+                    except (TypeError, ValueError):
+                        pass
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
     async def product_exists_by_sku(self, sku: str) -> bool:
         """Return True if any product (active or inactive) exists with this SKU in Bling."""
         if not sku:

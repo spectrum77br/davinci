@@ -1252,9 +1252,17 @@ class WorkerSettings:
         # 06:00 UTC = 03:00 BRT — quiet window, also the daily-sync mass enqueue trigger.
         cron(daily_sync_scheduler, minute=_FIVE_MIN, run_at_startup=False),
         # Daily refresh de products.bling_cost_price (todos os produtos) via
-        # listagem /produtos. 06:50 UTC = 03:50 BRT — janela tranquila, antes
-        # do PDF de faturamento (05:00 BRT). Pedidos snapshotam esse custo.
-        cron(product_bling_cost_sync, hour={6}, minute=50, run_at_startup=False),
+        # listagem /produtos. Roda a cada 6h (00/06/12/18:50 UTC) + no startup
+        # do worker — antes era 1×/dia e run_at_startup=False, então um restart
+        # perto das 06:50 fazia o custo ficar preso no valor velho o dia todo, e
+        # pedidos novos nasciam com custo defasado. Pedidos snapshotam esse custo
+        # (o ingest ainda re-busca on-demand SKUs com custo > 3h via _cost_price_by_sku).
+        cron(
+            product_bling_cost_sync,
+            hour={0, 6, 12, 18},
+            minute=50,
+            run_at_startup=True,
+        ),
         # Semanal: cache da composição dos kits (bling_kit_components). Domingo
         # 04:30 UTC = 01:30 BRT — janela tranquila. Estrutura muda raramente.
         cron(kit_components_sync, weekday="sun", hour=4, minute=30, run_at_startup=False),

@@ -9,7 +9,7 @@ fetched via `GET /pedidos/vendas/{id}` and split into one row per item.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -320,21 +320,70 @@ def _next_em_andamento_data(
     return None
 
 
+# Idade máxima do `bling_cost_price` aceita ao criar um pedido. Acima disso,
+# a ingestão re-busca o `precoCusto` no Bling para os SKUs do pedido — assim o
+# pedido nasce com o custo correto mesmo se o cron diário tiver perdido a janela.
+_COST_INGEST_MAX_AGE = timedelta(hours=3)
+
+
 async def _cost_price_by_sku(
-    session: AsyncSession, skus: set[str]
+    session: AsyncSession,
+    skus: set[str],
+    *,
+    client: "BlingClient | None" = None,
+    max_age: timedelta = _COST_INGEST_MAX_AGE,
 ) -> dict[str, float]:
     """Custo unitário p/ snapshot do pedido = `products.bling_cost_price`
-    (custo sincronizado diariamente do Bling), não `cost_price`."""
+    (custo sincronizado do Bling), não `cost_price`.
+
+    Quando `client` é fornecido (caminho de ingestão), os SKUs cujo custo
+    local está velho (`bling_cost_synced_at` NULL ou além de `max_age`) são
+    re-buscados no Bling AGORA: atualiza `products.bling_cost_price` +
+    `bling_cost_synced_at` e usa o valor fresco no carimbo. Sem `client`
+    (ou se o Bling falhar), cai no valor já gravado — nunca quebra o ingest."""
     if not skus:
         return {}
     rows = (
         await session.execute(
-            select(Product.sku, Product.bling_cost_price).where(
-                Product.sku.in_(skus)
-            )
+            select(
+                Product.sku,
+                Product.bling_cost_price,
+                Product.bling_cost_synced_at,
+            ).where(Product.sku.in_(skus))
         )
     ).all()
-    return {sku: float(cost) for sku, cost in rows if cost is not None}
+    cost: dict[str, float] = {
+        sku: float(c) for sku, c, _ in rows if c is not None
+    }
+
+    if client is not None:
+        now = datetime.now(UTC)
+        fresh_enough: set[str] = set()
+        for sku, c, synced_at in rows:
+            if (
+                c is not None
+                and synced_at is not None
+                and (now - synced_at) <= max_age
+            ):
+                fresh_enough.add(sku)
+        stale = skus - fresh_enough
+        if stale:
+            try:
+                fresh = await client.cost_by_skus(stale)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("cost_ingest_refresh_failed", err=str(e))
+                fresh = {}
+            for sku, new_cost in fresh.items():
+                cost[sku] = new_cost
+                await session.execute(
+                    update(Product)
+                    .where(Product.sku == sku)
+                    .values(
+                        bling_cost_price=new_cost,
+                        bling_cost_synced_at=now,
+                    )
+                )
+    return cost
 
 
 async def _category_names_by_bling_id(
@@ -463,6 +512,8 @@ async def _existing_itens_signature(
 async def upsert_order(
     session: AsyncSession,
     raw_order: dict[str, Any],
+    *,
+    client: "BlingClient | None" = None,
 ) -> int:
     """Persist a Bling order. Strategy:
     - full replace (situacao=6, pedido novo, ou itens diferentes): snapshot
@@ -573,7 +624,7 @@ async def upsert_order(
             s = str(raw_sku).strip()
             if s:
                 skus.add(s)
-        cost_by_sku = await _cost_price_by_sku(session, skus)
+        cost_by_sku = await _cost_price_by_sku(session, skus, client=client)
     for it in itens:
         if not isinstance(it, dict):
             continue
@@ -837,7 +888,7 @@ async def run_ingest_bling_order(
         )
         return {"ok": False, "error": "empty_order"}
 
-    n = await upsert_order(session, raw)
+    n = await upsert_order(session, raw, client=client)
     jobs = await _enqueue_stock_refresh_for_order(
         session, raw_order=raw, user_id=user_id
     )

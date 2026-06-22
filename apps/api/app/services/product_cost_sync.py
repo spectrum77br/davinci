@@ -101,6 +101,10 @@ async def run_sync_product_bling_costs(session: AsyncSession) -> dict:
             summary["updated"] += 1
         else:
             summary["unchanged"] += 1
+        # Marca o custo como conferido AGORA mesmo quando não mudou — o
+        # refresh on-ingest usa essa data pra saber o que está velho.
+        if new_cost is not None:
+            prod.bling_cost_synced_at = datetime.now(UTC)
 
     await session.commit()
     logger.info("product_cost_sync_done", **summary)
