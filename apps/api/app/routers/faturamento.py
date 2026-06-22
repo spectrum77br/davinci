@@ -1,9 +1,9 @@
-"""Aba Faturamento — relatório por loja de pedidos ENTREGUES.
+"""Aba Faturamento — relatório por loja de pedidos faturáveis.
 
 Fonte LOCAL: davinci.bling_orders. Não chama API do Bling.
 
 Definições fixadas com o operador:
-- Só situacao = '83953' (Entregue).
+- Conta situacao em {'6' (Em aberto), '15' (Em andamento), '83953' (Entregue)}.
 - bling_orders tem UMA LINHA POR ITEM (item_index), e `total` se repete em
   cada linha do mesmo pedido. Pra somar o faturamento sem inflar é
   obrigatório DEDUPLICAR por pedido primeiro: max(total) GROUP BY bling_id.
@@ -35,9 +35,12 @@ from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut
 
 router = APIRouter(prefix="/api/faturamento", tags=["faturamento"])
 
-# Bling situação ID — pedido entregue ao cliente. Único status que conta
-# pra faturamento da empresa (ignora etiqueta gerada, em rota, devolução).
-_SITUACAO_ENTREGUE = "83953"
+# Bling situação IDs que contam pro faturamento da empresa:
+#   '6'     → Em aberto
+#   '15'    → Em andamento
+#   '83953' → Entregue
+# Demais status (etiqueta gerada, em rota, devolução, cancelado…) são ignorados.
+_SITUACOES_FATURAVEIS = ("6", "15", "83953")
 
 
 @router.get("", response_model=FaturamentoOut)
@@ -98,7 +101,7 @@ async def list_faturamento(
             func.max(BlingOrder.total).label("total"),
         )
         .where(
-            BlingOrder.situacao == _SITUACAO_ENTREGUE,
+            BlingOrder.situacao.in_(_SITUACOES_FATURAVEIS),
             BlingOrder.data >= start,
             BlingOrder.data < end,
         )

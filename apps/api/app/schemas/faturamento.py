@@ -1,5 +1,6 @@
-"""Schemas pra aba Faturamento — relatório por loja de pedidos
-ENTREGUES (situacao=83953) lido da tabela local bling_orders."""
+"""Schemas pra aba Faturamento — relatório por loja de pedidos faturáveis
+(situacao em 6 Em aberto, 15 Em andamento, 83953 Entregue) lido da tabela
+local bling_orders."""
 from __future__ import annotations
 
 from datetime import datetime

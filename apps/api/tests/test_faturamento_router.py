@@ -5,7 +5,8 @@ Cobre:
     StoreInfo.sales_team=X.
   * Dedup por bling_id: pedido com 2 itens conta como 1 pedido e usa
     max(total) (não a soma das linhas).
-  * situacao != '83953' é ignorado e o filtro de período funciona.
+  * situacao faturável ('6', '15', '83953') conta; demais são ignoradas; o
+    filtro de período funciona.
 """
 from __future__ import annotations
 
@@ -199,23 +200,27 @@ async def test_ignora_outras_situacoes_e_fora_do_periodo(
     auth_as: Callable[[User | None], None], owner: User,
 ):
     lojas = await _seed_lojas(db, owner)
-    # Entregue, dentro do período → conta.
+    # Status faturáveis, dentro do período → contam.
     await _seed_pedido(
         db, bling_id=9031, store_id=lojas["ml"]["store_id"],
-        total=Decimal("100.00"), data=_HOJE,
+        total=Decimal("100.00"), data=_HOJE, situacao="83953",
     )
-    # Outras situações no mesmo período → não contam.
     await _seed_pedido(
         db, bling_id=9032, store_id=lojas["ml"]["store_id"],
-        total=Decimal("999.99"), data=_HOJE, situacao="15",
+        total=Decimal("200.00"), data=_HOJE, situacao="6",
     )
     await _seed_pedido(
         db, bling_id=9033, store_id=lojas["ml"]["store_id"],
-        total=Decimal("777.00"), data=_HOJE, situacao="12",
+        total=Decimal("300.00"), data=_HOJE, situacao="15",
     )
-    # Entregue mas fora do período → não conta.
+    # Outra situação no mesmo período → não conta.
     await _seed_pedido(
         db, bling_id=9034, store_id=lojas["ml"]["store_id"],
+        total=Decimal("777.00"), data=_HOJE, situacao="12",
+    )
+    # Faturável mas fora do período → não conta.
+    await _seed_pedido(
+        db, bling_id=9035, store_id=lojas["ml"]["store_id"],
         total=Decimal("500.00"), data=_HOJE - timedelta(days=120),
     )
     admin = await _seed_user(db, role=UserRole.ADMIN, sales_teams=None)
@@ -227,5 +232,5 @@ async def test_ignora_outras_situacoes_e_fora_do_periodo(
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["total_pedidos"] == 1
-    assert Decimal(str(body["total_faturamento"])) == Decimal("100.00")
+    assert body["total_pedidos"] == 3
+    assert Decimal(str(body["total_faturamento"])) == Decimal("600.00")
