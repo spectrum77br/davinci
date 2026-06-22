@@ -1322,25 +1322,11 @@ class WorkerSettings:
         # que a safety-net não cobre (ex.: 15 → devolução).
         cron(bling_orders_period_sync_tick, minute={20}, run_at_startup=False),
     ]
-    # Marketing AGENT NODE crons — REGISTERED only on the dedicated machine
-    # (MARKETING_AGENT_NODE=1). The central server leaves the flag off so
-    # these never run there. This is what guarantees a SINGLE machine talks
-    # to Shopee Ads:
-    #   - marketing_shopee_tick: pulls Shopee ad data (still body-gated by
-    #     enable_shopee_ads, which the agent node turns on).
-    #   - marketing_consume_commands: drains the command outbox (executes
-    #     pause/resume/budget on Shopee+ML).
-    #   - marketing_reconcile_schedules: enforces the BRT schedule.
-    if _settings.marketing_agent_node:
-        cron_jobs += [
-            cron(
-                marketing_shopee_tick,
-                minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
-                run_at_startup=False,
-            ),
-            cron(marketing_consume_commands, second={0, 20, 40}, run_at_startup=False),
-            cron(marketing_reconcile_schedules, run_at_startup=False),
-        ]
+    # Marketing agent-node crons (Shopee sync + command consumer + schedule
+    # reconciler) are NOT registered here — they run ONLY on the dedicated
+    # machine via `WorkerSettingsMarketingAgent` below, which the central
+    # server never launches. That's what keeps a single machine on the
+    # Shopee partner-id throttle. (marketing_full_sync = ML/Amazon stays here.)
     max_jobs = 10
     job_timeout = 1800
     keep_result = 3600
@@ -1412,9 +1398,54 @@ class WorkerSettingsMarketplace:
     on_shutdown = shutdown
 
 
+class WorkerSettingsMarketingAgent:
+    """Worker da MÁQUINA DEDICADA (MARKETING_AGENT_NODE=1) — a ÚNICA que fala
+    com Shopee/ML Ads, contornando o rate-limit por partner-id.
+
+    Roda APENAS os 3 crons de marketing (não os ~25 do WorkerSettings), pra
+    NÃO duplicar refresh de token, daily_sync, safety-net etc. do servidor:
+      - marketing_shopee_tick:        puxa dados de Ads da Shopee (round-robin)
+      - marketing_consume_commands:   drena a fila marketing_commands
+      - marketing_reconcile_schedules: aplica a agenda BRT (pausa/religa)
+
+    Usa o `arq_redis_url` do ambiente — na máquina dedicada aponte-o pra um
+    Redis LOCAL próprio (ex.: redis://localhost:6380/1) pra isolar totalmente
+    a fila arq desta máquina da do servidor. O servidor NUNCA inicia esta
+    classe (o compose dele roda só WorkerSettings/UI/Marketplace)."""
+
+    redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
+    functions = [
+        marketing_shopee_tick,
+        marketing_consume_commands,
+        marketing_reconcile_schedules,
+    ]
+    cron_jobs = [
+        cron(
+            marketing_shopee_tick,
+            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+            run_at_startup=False,
+        ),
+        cron(marketing_consume_commands, second={0, 20, 40}, run_at_startup=False),
+        cron(marketing_reconcile_schedules, run_at_startup=False),
+    ]
+    queue_name = "davinci_marketing"
+    # Baixa concorrência: o consumidor processa lotes pequenos e o sync Shopee
+    # é serializado pelo throttle. 4 cobre folga.
+    max_jobs = 4
+    # Sync de uma loja Shopee pode levar minutos (delay de 30s entre chamadas
+    # × várias chamadas). 600s cobre com folga.
+    job_timeout = 600
+    keep_result = 3600
+    max_tries = 3
+    retry_jobs = True
+    on_startup = startup
+    on_shutdown = shutdown
+
+
 # Re-export for tests / introspection
 __all__ = [
     "WorkerSettings",
+    "WorkerSettingsMarketingAgent",
     "WorkerSettingsMarketplace",
     "WorkerSettingsUI",
     "audit_run",
