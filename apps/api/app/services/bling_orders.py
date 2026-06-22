@@ -230,6 +230,19 @@ def _row_from_item(
             or None
         )
 
+    total_val = _num(raw_order.get("total"))
+    valorbase_val = _num(
+        taxas.get("valorBase") if taxas.get("valorBase") is not None
+        else orig_taxas.get("valorBase")
+    )
+    # valorBase é a base de cálculo da comissão do marketplace. Alguns canais
+    # (ex.: TikTok) não populam `taxas.valorBase` no Bling — chega 0/NULL. Nesse
+    # caso usamos o `total` do pedido como base. Quando o valorBase real existe
+    # (>0), ele é preservado; o fallback só age quando vem 0/NULL. Espelha o
+    # COALESCE(NULLIF(valorbase,0), total) que a vw_bling_pedidos já fazia.
+    if not valorbase_val:
+        valorbase_val = total_val
+
     return {
         "bling_id": _int(raw_order.get("id")),
         "numero": str(raw_order["numero"]) if raw_order.get("numero") is not None else None,
@@ -240,16 +253,13 @@ def _row_from_item(
         ),
         "data": _to_dt(raw_order.get("data")),
         "totalprodutos": _num(raw_order.get("totalProdutos") or raw_order.get("totalprodutos")),
-        "total": _num(raw_order.get("total")),
+        "total": total_val,
         "situacao": situacao_id,
         "em_andamento_data": em_andamento_data,
         "loja": str(loja.get("id")) if loja.get("id") is not None else None,
         "store_id": store_id,
         "itens": raw_order.get("itens"),
-        "valorbase": _num(
-            taxas.get("valorBase") if taxas.get("valorBase") is not None
-            else orig_taxas.get("valorBase")
-        ),
+        "valorbase": valorbase_val,
         "custofrete": _num(
             taxas.get("custoFrete") if taxas.get("custoFrete") is not None
             else orig_taxas.get("custoFrete")
