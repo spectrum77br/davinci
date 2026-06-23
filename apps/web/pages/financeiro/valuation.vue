@@ -6,8 +6,8 @@
 //   2) Estoque Bling: último snapshot diário do estoque por local
 //      (PI/SA/SP/RA/CD/CI/US/Eletro/Mala/Outros). Gravado pelo cron arq
 //      `valuation_estoque_snapshot` (~08h BRT) em valuation_estoque_bling_diario.
-import { computed, ref } from 'vue'
-import { Loader2, RefreshCw } from 'lucide-vue-next'
+import { computed, onMounted, ref } from 'vue'
+import { Loader2, Lock, RefreshCw } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -68,6 +68,68 @@ type EstoqueSnapshot = {
 type Tab = 'resumo' | 'estoque'
 const tab = ref<Tab>('resumo')
 
+// ── Senha extra (camada acima do require_permission) ─────────────────────
+// Token vem do POST /unlock e é guardado em sessionStorage (some ao fechar
+// a aba). Backend valida HMAC + age <= 8h. Enviado em X-Valuation-Token
+// em todas as chamadas dos endpoints /api/financeiro/valuation*.
+const UNLOCK_KEY = 'davinci.valuation.token'
+const UNLOCK_EXP_KEY = 'davinci.valuation.token_exp'
+const unlockToken = ref<string | null>(null)
+const passwordInput = ref('')
+const unlockError = ref<string | null>(null)
+const unlocking = ref(false)
+const unlockInputRef = ref<HTMLInputElement | null>(null)
+
+function readStoredToken(): string | null {
+  if (import.meta.server) return null
+  const tok = sessionStorage.getItem(UNLOCK_KEY)
+  const exp = Number(sessionStorage.getItem(UNLOCK_EXP_KEY) || 0)
+  if (!tok || !exp || Date.now() / 1000 > exp) {
+    sessionStorage.removeItem(UNLOCK_KEY)
+    sessionStorage.removeItem(UNLOCK_EXP_KEY)
+    return null
+  }
+  return tok
+}
+
+function valHeaders(): Record<string, string> {
+  return unlockToken.value ? { 'X-Valuation-Token': unlockToken.value } : {}
+}
+
+async function submitUnlock() {
+  if (!passwordInput.value) return
+  unlocking.value = true
+  unlockError.value = null
+  try {
+    const r = await api<{ token: string; expires_in: number }>(
+      '/api/financeiro/valuation/unlock',
+      { method: 'POST', body: { password: passwordInput.value } },
+    )
+    unlockToken.value = r.token
+    sessionStorage.setItem(UNLOCK_KEY, r.token)
+    sessionStorage.setItem(
+      UNLOCK_EXP_KEY,
+      String(Math.floor(Date.now() / 1000) + r.expires_in - 30),
+    )
+    passwordInput.value = ''
+    void loadResumo() // já carrega a aba atual
+  } catch (e: any) {
+    unlockError.value = e?.data?.detail?.code === 'wrong_password'
+      ? 'Senha incorreta.'
+      : (e?.data?.detail?.code || e?.message || 'erro')
+  } finally {
+    unlocking.value = false
+  }
+}
+
+function lockOut() {
+  sessionStorage.removeItem(UNLOCK_KEY)
+  sessionStorage.removeItem(UNLOCK_EXP_KEY)
+  unlockToken.value = null
+  resumo.value = null
+  estoque.value = null
+}
+
 // Loading/erro por aba — cada uma carrega na primeira ativação (lazy).
 const loadingResumo = ref(false)
 const loadingEstoque = ref(false)
@@ -77,24 +139,41 @@ const resumo = ref<Report | null>(null)
 const estoque = ref<EstoqueSnapshot | null>(null)
 
 async function loadResumo() {
+  if (!unlockToken.value) return
   loadingResumo.value = true
   errorResumo.value = null
   try {
-    resumo.value = await api<Report>('/api/financeiro/valuation')
+    resumo.value = await api<Report>('/api/financeiro/valuation', {
+      headers: valHeaders(),
+    })
   } catch (e: any) {
-    errorResumo.value = e?.data?.detail?.code || e?.message || 'erro'
+    const code = e?.data?.detail?.code
+    if (code === 'valuation_locked') {
+      lockOut()
+    } else {
+      errorResumo.value = code || e?.message || 'erro'
+    }
   } finally {
     loadingResumo.value = false
   }
 }
 
 async function loadEstoque() {
+  if (!unlockToken.value) return
   loadingEstoque.value = true
   errorEstoque.value = null
   try {
-    estoque.value = await api<EstoqueSnapshot>('/api/financeiro/valuation/estoque-bling')
+    estoque.value = await api<EstoqueSnapshot>(
+      '/api/financeiro/valuation/estoque-bling',
+      { headers: valHeaders() },
+    )
   } catch (e: any) {
-    errorEstoque.value = e?.data?.detail?.code || e?.message || 'erro'
+    const code = e?.data?.detail?.code
+    if (code === 'valuation_locked') {
+      lockOut()
+    } else {
+      errorEstoque.value = code || e?.message || 'erro'
+    }
   } finally {
     loadingEstoque.value = false
   }
@@ -102,16 +181,27 @@ async function loadEstoque() {
 
 function setTab(t: Tab) {
   tab.value = t
+  if (!unlockToken.value) return
   if (t === 'resumo' && !resumo.value && !loadingResumo.value) void loadResumo()
   if (t === 'estoque' && !estoque.value && !loadingEstoque.value) void loadEstoque()
 }
 
 function reload() {
+  if (!unlockToken.value) return
   if (tab.value === 'resumo') void loadResumo()
   else void loadEstoque()
 }
 
-await loadResumo()
+// Carga inicial só roda client-side, após restaurar token (sessionStorage).
+onMounted(() => {
+  unlockToken.value = readStoredToken()
+  if (unlockToken.value) {
+    void loadResumo()
+  } else {
+    // Foca o campo de senha pra começar digitando direto.
+    setTimeout(() => unlockInputRef.value?.focus(), 60)
+  }
+})
 
 function fmtBRL(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return '—'
@@ -153,7 +243,48 @@ const loading = computed(() =>
 </script>
 
 <template>
-  <div class="space-y-4 p-4">
+  <!-- ─────────────────────────────────── Gate de senha ─────────────────── -->
+  <div
+    v-if="!unlockToken"
+    class="flex items-center justify-center min-h-[60vh] p-4"
+  >
+    <form
+      class="w-full max-w-sm space-y-4 border rounded-lg p-6 bg-card shadow-sm"
+      @submit.prevent="submitUnlock"
+    >
+      <div class="flex items-center gap-2">
+        <Lock class="size-5 text-muted-foreground" />
+        <h1 class="text-lg font-semibold">Valuation</h1>
+      </div>
+      <p class="text-xs text-muted-foreground">
+        Esta página exige uma senha adicional. O acesso fica liberado por 8h nesta aba.
+      </p>
+      <div class="space-y-1">
+        <label for="valuation-pwd" class="block text-xs font-medium">Senha</label>
+        <input
+          id="valuation-pwd"
+          ref="unlockInputRef"
+          v-model="passwordInput"
+          type="password"
+          autocomplete="off"
+          class="w-full h-9 border rounded px-2 bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+          :disabled="unlocking"
+        />
+      </div>
+      <p v-if="unlockError" class="text-xs text-destructive">{{ unlockError }}</p>
+      <button
+        type="submit"
+        class="w-full h-9 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+        :disabled="unlocking || !passwordInput"
+      >
+        <Loader2 v-if="unlocking" class="inline h-4 w-4 animate-spin mr-1" />
+        Desbloquear
+      </button>
+    </form>
+  </div>
+
+  <!-- ─────────────────────────────────── Conteúdo desbloqueado ─────────── -->
+  <div v-else class="space-y-4 p-4">
     <div class="flex flex-wrap items-center gap-2">
       <h1 class="text-xl font-semibold">Valuation</h1>
       <span class="text-xs text-muted-foreground ml-2">
@@ -162,7 +293,14 @@ const loading = computed(() =>
           : 'Estoque Bling por local — snapshot diário.' }}
       </span>
       <button
-        class="ml-auto inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        class="ml-auto inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs hover:bg-muted"
+        title="Bloquear novamente (esquece o token desta aba)"
+        @click="lockOut"
+      >
+        <Lock class="size-3.5" /> Bloquear
+      </button>
+      <button
+        class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
         :disabled="loading"
         @click="reload"
       >

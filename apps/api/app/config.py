@@ -32,6 +32,11 @@ class Settings(BaseSettings):
 
     jwt_secret: str = "dev-secret-change-me"
     jwt_ttl_seconds: int = 7 * 24 * 3600
+    # Senha extra que protege a página /financeiro/valuation, exigida
+    # depois do login independentemente do user. Em prod vem da env
+    # VALUATION_PASSWORD. TTL = uma jornada de trabalho.
+    valuation_password: str = "924005"
+    valuation_unlock_ttl_seconds: int = 8 * 3600
     credentials_key: str = "dev-credentials-key-change-me"
     cookie_name: str = "davinci_session"
     cookie_domain: str = ""

@@ -8,6 +8,10 @@ cacheado pras próximas. Isso evita inventar números.
 """
 
 import asyncio
+import hashlib
+import hmac
+import secrets
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -17,7 +21,7 @@ from uuid import UUID, uuid4
 import aiofiles
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +59,8 @@ from app.schemas.financeiro import (
     SuprimentosPatch,
     ValuationMesOut,
     ValuationReportOut,
+    ValuationUnlockIn,
+    ValuationUnlockOut,
 )
 
 logger = structlog.get_logger()
@@ -788,10 +794,53 @@ def _agg_to_secoes(rows: list[dict], months: list) -> list[FaturamentoMesSecaoOu
     return out
 
 
+# ── Senha extra da página Valuation ──────────────────────────────────────
+# Camada secundária acima do require_permission: mesmo admin precisa
+# digitar a senha. Token = HMAC(jwt_secret, "valuation:<ts>") com TTL.
+# Stateless, sem tabela; valida só HMAC + age. Front guarda em
+# sessionStorage e envia em X-Valuation-Token a cada GET.
+
+
+def _make_valuation_token() -> tuple[str, int]:
+    """Devolve (token, expires_in_seconds). Formato `<ts>.<sig_hex>`."""
+    s = get_settings()
+    ttl = s.valuation_unlock_ttl_seconds
+    ts = int(time.time())
+    msg = f"valuation:{ts}".encode()
+    sig = hmac.new(s.jwt_secret.encode(), msg, hashlib.sha256).hexdigest()
+    return f"{ts}.{sig}", ttl
+
+
+def _valid_valuation_token(token: str | None) -> bool:
+    if not token:
+        return False
+    try:
+        ts_str, sig = token.split(".", 1)
+        ts = int(ts_str)
+    except (ValueError, AttributeError):
+        return False
+    s = get_settings()
+    if time.time() - ts > s.valuation_unlock_ttl_seconds:
+        return False
+    expected = hmac.new(
+        s.jwt_secret.encode(), f"valuation:{ts}".encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(sig, expected)
+
+
+def require_valuation_unlock(
+    x_valuation_token: Annotated[str | None, Header(alias="X-Valuation-Token")] = None,
+) -> None:
+    """Trava em cima do require_permission: exige header com token válido."""
+    if not _valid_valuation_token(x_valuation_token):
+        raise HTTPException(401, detail={"code": "valuation_locked"})
+
+
 @router.get("/valuation", response_model=ValuationReportOut)
 async def valuation_report(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("financeiro_valuation", "view"))],
+    _unlocked: Annotated[None, Depends(require_valuation_unlock)] = None,
 ) -> ValuationReportOut:
     """Relatório de faturamento dos últimos 3 meses (porta web do PDF diário).
 
@@ -930,10 +979,27 @@ async def valuation_report(
 _ESTOQUE_LOCAIS_ORDEM = ["PI", "SA", "SP", "RA", "CD", "CI", "US", "Eletro", "Mala", "Outros"]
 
 
+@router.post("/valuation/unlock", response_model=ValuationUnlockOut)
+async def valuation_unlock(
+    body: ValuationUnlockIn,
+    _u: Annotated[User, Depends(require_permission("financeiro_valuation", "view"))],
+) -> ValuationUnlockOut:
+    """Valida a senha extra e devolve um token (HMAC + TTL). Senha errada =
+    401 com sleep curto (mitiga brute-force; sem rate-limit dedicado porque
+    o usuário já precisa estar logado e com permissão view)."""
+    s = get_settings()
+    if not hmac.compare_digest(body.password.strip(), s.valuation_password):
+        await asyncio.sleep(0.3)
+        raise HTTPException(401, detail={"code": "wrong_password"})
+    token, ttl = _make_valuation_token()
+    return ValuationUnlockOut(token=token, expires_in=ttl)
+
+
 @router.get("/valuation/estoque-bling", response_model=EstoqueBlingSnapshotOut)
 async def valuation_estoque_bling(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("financeiro_valuation", "view"))],
+    _unlocked: Annotated[None, Depends(require_valuation_unlock)] = None,
 ) -> EstoqueBlingSnapshotOut:
     """Último snapshot diário do estoque Bling por local.
 

@@ -305,6 +305,15 @@ class EstoqueBlingLocalOut(BaseModel):
     valor: float
 
 
+class ValuationUnlockIn(BaseModel):
+    password: str
+
+
+class ValuationUnlockOut(BaseModel):
+    token: str
+    expires_in: int  # segundos
+
+
 class EstoqueBlingSnapshotOut(BaseModel):
     """Último snapshot diário do estoque Bling, gravado pelo cron arq
     `valuation_estoque_snapshot` (~08h BRT). `data` é a data SP do crawl;
