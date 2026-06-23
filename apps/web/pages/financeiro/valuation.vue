@@ -69,7 +69,7 @@ const tab = ref<Tab>('resumo')
 
 // ── Senha extra (camada acima do require_permission) ─────────────────────
 // Token vem do POST /unlock e é guardado em sessionStorage (some ao fechar
-// a aba). Backend valida HMAC + age <= 8h. Enviado em X-Valuation-Token
+// a aba). Backend valida HMAC + age <= 15min. Enviado em X-Valuation-Token
 // em todas as chamadas dos endpoints /api/financeiro/valuation*.
 const UNLOCK_KEY = 'davinci.valuation.token'
 const UNLOCK_EXP_KEY = 'davinci.valuation.token_exp'
@@ -256,7 +256,7 @@ const loading = computed(() =>
         <h1 class="text-lg font-semibold">Valuation</h1>
       </div>
       <p class="text-xs text-muted-foreground">
-        Esta página exige uma senha adicional. O acesso fica liberado por 8h nesta aba.
+        Esta página exige uma senha adicional. O acesso fica liberado por 15 minutos nesta aba.
       </p>
       <div class="space-y-1">
         <label for="valuation-pwd" class="block text-xs font-medium">Senha</label>

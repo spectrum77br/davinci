@@ -34,9 +34,10 @@ class Settings(BaseSettings):
     jwt_ttl_seconds: int = 7 * 24 * 3600
     # Senha extra que protege a página /financeiro/valuation, exigida
     # depois do login independentemente do user. Em prod vem da env
-    # VALUATION_PASSWORD. TTL = uma jornada de trabalho.
+    # VALUATION_PASSWORD. TTL curto (15min) — janela apertada pra não
+    # deixar o navegador desbloqueado por horas sem atenção.
     valuation_password: str = "924005"
-    valuation_unlock_ttl_seconds: int = 8 * 3600
+    valuation_unlock_ttl_seconds: int = 15 * 60
     credentials_key: str = "dev-credentials-key-change-me"
     cookie_name: str = "davinci_session"
     cookie_domain: str = ""
