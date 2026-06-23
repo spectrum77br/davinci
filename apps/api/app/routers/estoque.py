@@ -76,19 +76,27 @@ _BASELINE_NUMERIC_SKUS = tuple(str(n) for n in range(1, 31))
 # Situação custom do shop para "Enviado Etiqueta" (etiqueta gerada,
 # esperando marketplace confirmar envio).
 _SITUACAO_ENVIADO_ETIQUETA = "83965"
-# Situação default Bling para "Atendido" (marketplace confirmou,
-# em_andamento_data deveria estar preenchida).
-_SITUACAO_ATENDIDO = "15"
-# Situação pós-15: pedido já entregue ao cliente. Ainda deve aparecer na aba
-# (mesmo dia, badge verde) — operacionalmente é "enviado/entregue", não some.
-_SITUACAO_ENTREGUE = "83953"
-# Cliente pediu devolução — pedido continua "do dia" em que foi enviado,
-# permanece visível na aba (badge verde). A devolução em si é tratada em
-# outro fluxo; a aba de Pedidos não esconde o histórico de envio.
-_SITUACAO_AGUARDANDO_DEVOLUCAO = "83957"
-# Caso de devolução já tratado pelo time — mesmo critério: pedido foi
-# enviado no dia, fica visível.
-_SITUACAO_RESOLVIDO = "545902"
+
+# Regra de "enviado" (decidida pelo dono): enviado = em_andamento_data
+# preenchida E situacao NOT IN (cancelamento/pré-envio). Em vez de uma
+# allowlist (que silenciosamente derruba pedidos quando avançam pra uma
+# situação pós-envio nova — Entregue, Resolvido, Manutenção, Problemas,
+# Perdimento…), usamos uma BLOCKLIST: tudo com data de envio conta, menos
+# o que claramente não saiu. À prova de novas situações pós-envio.
+_SITUACAO_NAO_ENVIADO = (
+    "6",      # Em aberto
+    "12",     # Cancelado
+    "21",     # Em digitação
+    "83955",  # Aguardando Cancelamento
+    "83962",  # Verificar Cancelamento
+    "83966",  # Erro no Envio
+    "84686",  # Golpe
+    "545901", # Sucata
+)
+# Badge VERDE (enviado confirmado) = enviado E não é a etiqueta provisória
+# 83965 (que segue vermelha até a agência confirmar).
+_SITUACAO_NAO_VERDE = _SITUACAO_NAO_ENVIADO + (_SITUACAO_ENVIADO_ETIQUETA,)
+
 # Pedidos pendentes mais antigos que isso = zumbis (webhook perdido) —
 # ficam escondidos da aba.
 _PENDENTE_MAX_AGE_DIAS = 14
@@ -371,15 +379,9 @@ async def list_estoque_pedidos(
         cast(BlingOrder.data, Date) >= today_brt - timedelta(days=_PENDENTE_MAX_AGE_DIAS),
     )
     enviado_clause = and_(
-        BlingOrder.situacao.in_(
-            (
-                _SITUACAO_ENVIADO_ETIQUETA,
-                _SITUACAO_ATENDIDO,
-                _SITUACAO_ENTREGUE,
-                _SITUACAO_AGUARDANDO_DEVOLUCAO,
-                _SITUACAO_RESOLVIDO,
-            )
-        ),
+        # Blocklist: visível se tem data de envio e não é cancelamento/
+        # pré-envio. 83965 (etiqueta) segue visível aqui, badge vermelho.
+        BlingOrder.situacao.notin_(_SITUACAO_NAO_ENVIADO),
         BlingOrder.em_andamento_data.isnot(None),
     )
     where: list = [or_(pendente_clause, enviado_clause)]
@@ -405,14 +407,9 @@ async def list_estoque_pedidos(
         where.append(BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA)
         order_by = effective_date.desc()
     elif status_filter == "enviado":
-        where.append(BlingOrder.situacao.in_(
-            (
-                _SITUACAO_ATENDIDO,
-                _SITUACAO_ENTREGUE,
-                _SITUACAO_AGUARDANDO_DEVOLUCAO,
-                _SITUACAO_RESOLVIDO,
-            )
-        ))
+        # Verde = enviado confirmado (exclui cancelamento/pré-envio E a
+        # etiqueta provisória 83965).
+        where.append(BlingOrder.situacao.notin_(_SITUACAO_NAO_VERDE))
         order_by = BlingOrder.em_andamento_data.desc()
     else:
         # status='todos' ou None → mostra ambos, sort por effective_date.
@@ -518,21 +515,15 @@ async def list_estoque_pedidos(
             "sku": o.item_codigo,
             "produto": o.item_descricao,
             "quantidade": o.item_quantidade or 1,
-            # Badge por situacao (não por em_andamento_data):
-            #   - 15 (Em andamento/Atendido), 83953 (Entregue), 83957
-            #     (Aguardando Devolução), 545902 (Resolvido) → verde
-            #     (pedido foi enviado, segue no histórico do dia mesmo se
-            #     entrou em fluxo de devolução).
-            #   - 83965 (Enviado Etiqueta) → vermelho (etiqueta gerada
-            #     mas agência ainda não confirmou).
-            "status": "enviado"
-            if o.situacao in (
-                _SITUACAO_ATENDIDO,
-                _SITUACAO_ENTREGUE,
-                _SITUACAO_AGUARDANDO_DEVOLUCAO,
-                _SITUACAO_RESOLVIDO,
-            )
-            else "nao_enviado",
+            # Badge por situacao (não por em_andamento_data), via blocklist:
+            #   - vermelho: 83965 (etiqueta gerada, agência não confirmou)
+            #     e situações de cancelamento/pré-envio (_SITUACAO_NAO_VERDE).
+            #   - verde: todo o resto que tem data de envio — inclui
+            #     Entregue, Resolvido, Aguardando Devolução, Manutenção,
+            #     Problemas, Perdimento (foram enviados no dia).
+            "status": "nao_enviado"
+            if o.situacao in _SITUACAO_NAO_VERDE
+            else "enviado",
             "conferido": check["conferido"],
             "observacao": check["observacao"],
             "bling_id": o.bling_id,
@@ -601,19 +592,12 @@ async def list_estoque_envios(
         data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
     where: list = [
-        # Espelha o enviado_clause da aba Pedidos (linha ~363): só
-        # pedidos efetivamente enviados (badge verde) contam como envios
-        # físicos. Antes filtrava só por `em_andamento_data not null`,
-        # incluindo 83965 (Etiqueta), 83955 (Aguardando Cancelamento),
-        # 12 (Cancelado) — abas Pedidos vs Envios divergiam. Agora batem.
-        BlingOrder.situacao.in_(
-            (
-                _SITUACAO_ATENDIDO,
-                _SITUACAO_ENTREGUE,
-                _SITUACAO_AGUARDANDO_DEVOLUCAO,
-                _SITUACAO_RESOLVIDO,
-            )
-        ),
+        # Espelha o badge verde da aba Pedidos: só pedidos efetivamente
+        # enviados (não 83965 etiqueta, não cancelamento/pré-envio) contam
+        # como envios físicos. Blocklist — à prova de novas situações
+        # pós-envio. Antes filtrava só por `em_andamento_data not null`,
+        # incluindo 83965/83955/12 — abas Pedidos vs Envios divergiam.
+        BlingOrder.situacao.notin_(_SITUACAO_NAO_VERDE),
         BlingOrder.em_andamento_data.isnot(None),
         BlingOrder.em_andamento_data >= data_inicio,
         BlingOrder.em_andamento_data <= data_fim,

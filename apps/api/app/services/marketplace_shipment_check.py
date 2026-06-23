@@ -113,8 +113,16 @@ def _operational_ship_date(ship_dt: datetime) -> date:
     gerava etiqueta cedo (ex: 6h-9h BRT). Reprodução em 03/06: 91
     pedidos com etiqueta gerada entre 6h-9h BRT do dia 03 cairam
     em 02/06 e foram corrigidos manualmente.
+
+    Domingo nunca é dia de expedição → a data operacional rola para a
+    segunda-feira (ex.: etiqueta no domingo 21/06 aparece em 22/06).
+    Sábado é caso-a-caso (feriado/plantão) e NÃO é rolado automaticamente
+    — decisão do dono, tratado manualmente quando aparece.
     """
-    return ship_dt.astimezone(_BRT).date()
+    d = ship_dt.astimezone(_BRT).date()
+    if d.weekday() == 6:  # domingo
+        d += timedelta(days=1)
+    return d
 
 
 def _shopee_ship_date(update_time: Any) -> date | None:
