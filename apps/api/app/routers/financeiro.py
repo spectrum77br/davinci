@@ -51,6 +51,9 @@ from app.schemas.financeiro import (
     FaturamentoMesSecaoOut,
     NCMOut,
     NCMPatch,
+    SaldoMarketplaceCelulaOut,
+    SaldoMarketplaceLojaOut,
+    SaldoMarketplaceSnapshotOut,
     SimulacaoOut,
     SimulacaoPatch,
     SituacaoLinhaOut,
@@ -1040,4 +1043,82 @@ async def valuation_estoque_bling(
         total_qtd=int(row["total_qtd"] or 0),
         total_valor=float(row["total_valor"] or 0),
         locais=locais,
+    )
+
+
+# Ordem preferida das colunas de marketplace; extras presentes no snapshot
+# entram depois, em ordem alfabética (suporta marketplaces futuros).
+_SALDO_MKT_ORDEM = ["ml", "shopee", "amazon"]
+
+
+def _f_or_none(v) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+@router.get("/valuation/saldo-marketplace", response_model=SaldoMarketplaceSnapshotOut)
+async def valuation_saldo_marketplace(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_admin)],
+    _unlocked: Annotated[None, Depends(require_valuation_unlock)] = None,
+) -> SaldoMarketplaceSnapshotOut:
+    """Último snapshot de saldos por loja × marketplace.
+
+    Gravado pela rotina externa AdsPower Contabilidade (desktop-only) em
+    `valuation_marketplace_saldo_diario`. Aqui só lemos a linha mais recente.
+    Devolve 404 se nunca rodou. Colunas (marketplaces) são dinâmicas."""
+    row = (
+        await session.execute(
+            text(f"""
+                SELECT data, updated_at, total_a_receber, total_disponivel, por_loja
+                FROM {_qt("valuation_marketplace_saldo_diario")}
+                ORDER BY data DESC
+                LIMIT 1
+            """),
+        )
+    ).mappings().first()
+    if row is None:
+        raise HTTPException(404, detail={"code": "saldo_marketplace_sem_snapshot"})
+
+    por_loja: list = row["por_loja"] or []
+
+    # Descobre o conjunto de marketplaces presentes → colunas dinâmicas.
+    presentes: set[str] = set()
+    for entry in por_loja:
+        for k in (entry or {}):
+            if k != "loja":
+                presentes.add(k)
+    marketplaces = [m for m in _SALDO_MKT_ORDEM if m in presentes]
+    marketplaces += sorted(presentes - set(marketplaces))
+
+    lojas: list[SaldoMarketplaceLojaOut] = []
+    for entry in por_loja:
+        entry = entry or {}
+        saldos: dict[str, SaldoMarketplaceCelulaOut] = {}
+        loja_receber = 0.0
+        for mkt in marketplaces:
+            cel = entry.get(mkt)
+            if not cel:
+                continue
+            disp = _f_or_none(cel.get("disponivel"))
+            arec = _f_or_none(cel.get("a_receber"))
+            saldos[mkt] = SaldoMarketplaceCelulaOut(disponivel=disp, a_receber=arec)
+            loja_receber += arec or 0.0
+        lojas.append(SaldoMarketplaceLojaOut(
+            loja=str(entry.get("loja") or "—"),
+            saldos=saldos,
+            total_a_receber=round(loja_receber, 2),
+        ))
+
+    return SaldoMarketplaceSnapshotOut(
+        data=row["data"],
+        updated_at=row["updated_at"],
+        marketplaces=marketplaces,
+        lojas=lojas,
+        total_a_receber=float(row["total_a_receber"] or 0),
+        total_disponivel=float(row["total_disponivel"] or 0),
     )

@@ -63,8 +63,22 @@ type EstoqueSnapshot = {
   total_valor: number
   locais: EstoqueLocal[]
 }
+type SaldoCelula = { disponivel: number | null; a_receber: number | null }
+type SaldoLoja = {
+  loja: string
+  saldos: Record<string, SaldoCelula>
+  total_a_receber: number
+}
+type SaldoSnapshot = {
+  data: string
+  updated_at: string
+  marketplaces: string[]
+  lojas: SaldoLoja[]
+  total_a_receber: number
+  total_disponivel: number
+}
 
-type Tab = 'resumo' | 'estoque'
+type Tab = 'resumo' | 'estoque' | 'saldo'
 const tab = ref<Tab>('resumo')
 
 // ── Senha extra (camada acima do require_permission) ─────────────────────
@@ -127,15 +141,19 @@ function lockOut() {
   unlockToken.value = null
   resumo.value = null
   estoque.value = null
+  saldo.value = null
 }
 
 // Loading/erro por aba — cada uma carrega na primeira ativação (lazy).
 const loadingResumo = ref(false)
 const loadingEstoque = ref(false)
+const loadingSaldo = ref(false)
 const errorResumo = ref<string | null>(null)
 const errorEstoque = ref<string | null>(null)
+const errorSaldo = ref<string | null>(null)
 const resumo = ref<Report | null>(null)
 const estoque = ref<EstoqueSnapshot | null>(null)
+const saldo = ref<SaldoSnapshot | null>(null)
 
 async function loadResumo() {
   if (!unlockToken.value) return
@@ -178,17 +196,40 @@ async function loadEstoque() {
   }
 }
 
+async function loadSaldo() {
+  if (!unlockToken.value) return
+  loadingSaldo.value = true
+  errorSaldo.value = null
+  try {
+    saldo.value = await api<SaldoSnapshot>(
+      '/api/financeiro/valuation/saldo-marketplace',
+      { headers: valHeaders() },
+    )
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    if (code === 'valuation_locked') {
+      lockOut()
+    } else {
+      errorSaldo.value = code || e?.message || 'erro'
+    }
+  } finally {
+    loadingSaldo.value = false
+  }
+}
+
 function setTab(t: Tab) {
   tab.value = t
   if (!unlockToken.value) return
   if (t === 'resumo' && !resumo.value && !loadingResumo.value) void loadResumo()
   if (t === 'estoque' && !estoque.value && !loadingEstoque.value) void loadEstoque()
+  if (t === 'saldo' && !saldo.value && !loadingSaldo.value) void loadSaldo()
 }
 
 function reload() {
   if (!unlockToken.value) return
   if (tab.value === 'resumo') void loadResumo()
-  else void loadEstoque()
+  else if (tab.value === 'estoque') void loadEstoque()
+  else void loadSaldo()
 }
 
 // Carga inicial só roda client-side, após restaurar token (sessionStorage).
@@ -236,8 +277,30 @@ const geradoEm = computed(() =>
 const estoqueUpdatedEm = computed(() =>
   estoque.value ? new Date(estoque.value.updated_at).toLocaleString('pt-BR') : '',
 )
+const saldoUpdatedEm = computed(() =>
+  saldo.value ? new Date(saldo.value.updated_at).toLocaleString('pt-BR') : '',
+)
+const mktLabel: Record<string, string> = {
+  ml: 'Mercado Livre',
+  shopee: 'Shopee',
+  amazon: 'Amazon',
+}
+function mktTitle(m: string): string {
+  return mktLabel[m] || m.charAt(0).toUpperCase() + m.slice(1)
+}
+// Totais por coluna de marketplace (rodapé da planilha).
+function colTotalReceber(m: string): number {
+  return (saldo.value?.lojas ?? []).reduce((s, l) => s + (l.saldos[m]?.a_receber ?? 0), 0)
+}
+function colTotalDisp(m: string): number {
+  return (saldo.value?.lojas ?? []).reduce((s, l) => s + (l.saldos[m]?.disponivel ?? 0), 0)
+}
 const loading = computed(() =>
-  tab.value === 'resumo' ? loadingResumo.value : loadingEstoque.value,
+  tab.value === 'resumo'
+    ? loadingResumo.value
+    : tab.value === 'estoque'
+      ? loadingEstoque.value
+      : loadingSaldo.value,
 )
 </script>
 
@@ -289,7 +352,9 @@ const loading = computed(() =>
       <span class="text-xs text-muted-foreground ml-2">
         {{ tab === 'resumo'
           ? 'Faturamento, custo, rentabilidade e margem dos últimos 3 meses.'
-          : 'Estoque Bling por local — snapshot diário.' }}
+          : tab === 'estoque'
+            ? 'Estoque Bling por local — snapshot diário.'
+            : 'Saldo das contas por marketplace — snapshot diário.' }}
       </span>
       <button
         class="ml-auto inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs hover:bg-muted"
@@ -322,6 +387,13 @@ const loading = computed(() =>
         @click="setTab('estoque')"
       >
         Estoque Bling
+      </button>
+      <button
+        class="px-4 py-1.5 hover:bg-muted border-l"
+        :class="tab === 'saldo' ? 'bg-primary text-primary-foreground' : ''"
+        @click="setTab('saldo')"
+      >
+        Saldo Marketplace
       </button>
     </div>
 
@@ -597,6 +669,90 @@ const loading = computed(() =>
             </tfoot>
           </table>
         </div>
+      </template>
+    </template>
+
+    <!-- ─────────────────────────────────────────  Aba SALDO MARKETPLACE  ──────── -->
+    <template v-if="tab === 'saldo'">
+      <p class="text-xs text-muted-foreground">
+        Saldo das contas por marketplace. Cada célula mostra
+        <span class="text-muted-foreground/70">disponível</span> /
+        <span class="font-medium">a receber</span>. Snapshot diário pela rotina AdsPower.
+        <template v-if="saldo">
+          · data {{ diaLabel(saldo.data) }} · gravado {{ saldoUpdatedEm }}.
+        </template>
+      </p>
+
+      <div v-if="errorSaldo === 'saldo_marketplace_sem_snapshot'" class="text-sm text-muted-foreground">
+        Nenhum snapshot ainda — aguarde a próxima execução da rotina AdsPower (≈08h BRT).
+      </div>
+      <div v-else-if="errorSaldo" class="text-sm text-destructive">{{ errorSaldo }}</div>
+      <div v-if="loadingSaldo && !saldo" class="text-sm text-muted-foreground">
+        <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
+      </div>
+
+      <template v-if="saldo">
+        <div class="border rounded-md overflow-auto">
+          <table class="w-full text-sm border-collapse">
+            <thead class="bg-muted/50 text-xs uppercase tracking-wide">
+              <tr>
+                <th class="text-left px-3 py-2 font-medium sticky left-0 bg-muted/50">Loja</th>
+                <th
+                  v-for="m in saldo.marketplaces"
+                  :key="m"
+                  class="text-right px-3 py-2 font-medium"
+                >
+                  {{ mktTitle(m) }}
+                </th>
+                <th class="text-right px-3 py-2 font-medium">Total a receber</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="!saldo.lojas.length">
+                <td :colspan="saldo.marketplaces.length + 2" class="text-center py-6 text-muted-foreground">
+                  Sem lojas no snapshot.
+                </td>
+              </tr>
+              <tr
+                v-for="l in saldo.lojas"
+                :key="l.loja"
+                class="border-t hover:bg-muted/20"
+              >
+                <td class="px-3 py-1.5 font-medium sticky left-0 bg-background">{{ l.loja }}</td>
+                <td
+                  v-for="m in saldo.marketplaces"
+                  :key="m"
+                  class="px-3 py-1.5 text-right tabular-nums"
+                >
+                  <template v-if="l.saldos[m]">
+                    <div class="text-[11px] text-muted-foreground">{{ fmtBRL(l.saldos[m].disponivel) }}</div>
+                    <div class="font-medium">{{ fmtBRL(l.saldos[m].a_receber) }}</div>
+                  </template>
+                  <span v-else class="text-muted-foreground">—</span>
+                </td>
+                <td class="px-3 py-1.5 text-right tabular-nums font-medium">{{ fmtBRL(l.total_a_receber) }}</td>
+              </tr>
+            </tbody>
+            <tfoot class="bg-muted/30 font-semibold">
+              <tr class="border-t">
+                <td class="px-3 py-2 sticky left-0 bg-muted/30">TOTAL</td>
+                <td
+                  v-for="m in saldo.marketplaces"
+                  :key="m"
+                  class="px-3 py-2 text-right tabular-nums"
+                >
+                  <div class="text-[11px] text-muted-foreground font-normal">{{ fmtBRL(colTotalDisp(m)) }}</div>
+                  <div>{{ fmtBRL(colTotalReceber(m)) }}</div>
+                </td>
+                <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(saldo.total_a_receber) }}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <p class="text-[11px] text-muted-foreground">
+          Total disponível (todas as contas): {{ fmtBRL(saldo.total_disponivel) }}.
+          O total a receber reconcilia com "A Receber" da aba Resumo.
+        </p>
       </template>
     </template>
   </div>

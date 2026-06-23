@@ -324,3 +324,34 @@ class EstoqueBlingSnapshotOut(BaseModel):
     total_qtd: int
     total_valor: float
     locais: list[EstoqueBlingLocalOut]
+
+
+# ── Saldo por marketplace (aba "Saldo Marketplace" da página Valuation) ──
+# Snapshot gravado pela rotina externa AdsPower Contabilidade (run_all.py),
+# desktop-only. Uma célula por loja × marketplace mostra disponível / a receber.
+
+
+class SaldoMarketplaceCelulaOut(BaseModel):
+    disponivel: float | None = None
+    a_receber: float | None = None
+
+
+class SaldoMarketplaceLojaOut(BaseModel):
+    loja: str
+    # chave = marketplace (ml, shopee, amazon, …). Só vêm os presentes.
+    saldos: dict[str, SaldoMarketplaceCelulaOut]
+    # Total a receber da loja (soma dos a_receber dos marketplaces presentes).
+    total_a_receber: float
+
+
+class SaldoMarketplaceSnapshotOut(BaseModel):
+    """Último snapshot diário de saldos por loja/marketplace. `total_a_receber`
+    coincide com valuation.receber do dia (aba Resumo → "A Receber")."""
+
+    data: date
+    updated_at: datetime
+    # Colunas da planilha, em ordem fixa preferida + extras no fim.
+    marketplaces: list[str]
+    lojas: list[SaldoMarketplaceLojaOut]
+    total_a_receber: float
+    total_disponivel: float
