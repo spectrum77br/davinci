@@ -48,13 +48,20 @@ def _normalize_company_payload(data: Any) -> Any:
     """Cross-field normalisation: validates uf first, then applies the
     appropriate cnpj rule based on whether uf is a BR state. Runs in
     `mode='before'` so the inner field validators see the cleaned
-    values."""
+    values.
+
+    Only touches keys that are actually present in the payload — a PATCH
+    with just `obs` must NOT inject `uf=None`/`cnpj=None`, otherwise those
+    keys become "set" and `model_dump(exclude_unset=True)` wipes the
+    stored CNPJ/UF."""
     if not isinstance(data, dict):
         return data
     uf = _normalize_uf(data.get("uf"))
-    data["uf"] = uf
-    strict = uf is None or uf in _BR_UFS
-    data["cnpj"] = _normalize_cnpj(data.get("cnpj"), strict=strict)
+    if "uf" in data:
+        data["uf"] = uf
+    if "cnpj" in data:
+        strict = uf is None or uf in _BR_UFS
+        data["cnpj"] = _normalize_cnpj(data.get("cnpj"), strict=strict)
     return data
 
 

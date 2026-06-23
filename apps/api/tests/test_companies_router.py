@@ -38,6 +38,31 @@ async def test_create_company_invalid_cnpj(client, make_user, auth_as):
 
 
 @pytest.mark.asyncio
+async def test_patch_obs_preserves_cnpj_and_uf(client, make_user, auth_as):
+    # Regression: a PATCH carrying only `obs` must not wipe the stored
+    # CNPJ/UF. The mode="before" validator used to inject cnpj=None/uf=None,
+    # which `exclude_unset` then persisted as None.
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    r = await client.post(
+        "/api/companies",
+        json={"razao_social": "A", "apelido": "a", "uf": "sp", "cnpj": VALID_CNPJ},
+    )
+    assert r.status_code == 201, r.text
+    company_id = r.json()["id"]
+
+    r2 = await client.patch(
+        f"/api/companies/{company_id}",
+        json={"obs": "observação qualquer"},
+    )
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["obs"] == "observação qualquer"
+    assert body["cnpj"] == VALID_CNPJ
+    assert body["uf"] == "SP"
+
+
+@pytest.mark.asyncio
 async def test_create_company_duplicate_cnpj_409(client, make_user, auth_as):
     admin = await make_user(role=UserRole.ADMIN)
     auth_as(admin)
