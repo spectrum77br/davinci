@@ -5,7 +5,7 @@ import {
   Package, Megaphone, DollarSign, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
   Store, Tags, ClipboardList, ChevronLeft, ChevronRight, Warehouse,
-  Coins, FileText, Calculator, FlaskConical, Ship,
+  Coins, FileText, Calculator, FlaskConical, Ship, Landmark,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -100,6 +100,7 @@ const sections: Section[] = [
   {
     label: 'Financeiro',
     items: [
+      { to: '/financeiro/valuation', label: 'Valuation', icon: Landmark, resource: 'financeiro_valuation' },
       { to: '/financeiro/consorcio', label: 'Consórcio', icon: Coins, resource: 'financeiro_consorcio' },
     ],
   },

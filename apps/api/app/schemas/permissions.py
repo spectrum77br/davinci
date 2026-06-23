@@ -26,6 +26,8 @@ Resource = Literal[
     "financeiro_suprimentos",
     "financeiro_simulacao",
     "financeiro_dnp",
+    # Valuation — relatório de faturamento 3 meses (porta web do PDF diário)
+    "financeiro_valuation",
     # Importação module — controle de pedidos de importação (malas/China)
     "importacao",
     "sincronizacoes",

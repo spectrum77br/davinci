@@ -229,3 +229,68 @@ class DNPProdutoPatch(BaseModel):
     comissao: Decimal | None = None
     inmetro: str | None = None
     obs: str | None = None
+
+
+# ── Valuation (relatório 3 meses) ────────────────────────────────────────
+# Porta web do antigo PDF faturamento_3meses_pdf.py (projeto ClaudeCode).
+# Mesmas regras de cálculo; lê davinci.bling_orders / valuation / stores /
+# situacao_bling ao vivo (atualizadas pela rotina diária das 5h).
+
+
+class ValuationMesOut(BaseModel):
+    """Saldos = snapshot do último dia disponível do mês; rentabilidade =
+    SUM do mês (fluxo). `data_snapshot` = data do saldo usado. Valores em
+    float (arredondados) p/ o front consumir como número direto no JSON."""
+
+    mes: date
+    caixa: float | None = None
+    receber: float | None = None
+    estoque: float | None = None
+    total: float | None = None
+    rentabilidade: float | None = None
+    data_snapshot: date | None = None
+
+
+class SituacaoLinhaOut(BaseModel):
+    situacao_nome: str
+    pedidos: int
+    faturamento: float
+
+
+class SituacaoSecaoOut(BaseModel):
+    """Resumo de ontem / Eficácia operacional — pedidos por situação."""
+
+    data: date | None = None
+    linhas: list[SituacaoLinhaOut]
+    total_pedidos: int
+    total_faturamento: float
+
+
+class FaturamentoGrpLinhaOut(BaseModel):
+    """Uma linha (marketplace ou categoria) de um mês. Faturamento considera
+    as situações aplicáveis; custo/rentabilidade/margem só Entregue."""
+
+    grp: str
+    faturamento: float
+    custo: float
+    rentabilidade: float
+    margem: float | None = None  # rentabilidade / custo (%)
+
+
+class FaturamentoMesSecaoOut(BaseModel):
+    mes: date
+    linhas: list[FaturamentoGrpLinhaOut]
+    total_faturamento: float
+    total_custo: float
+    total_rentabilidade: float
+    total_margem: float | None = None
+
+
+class ValuationReportOut(BaseModel):
+    gerado_em: datetime
+    situacoes_label: str
+    valuation_meses: list[ValuationMesOut]
+    resumo_ontem: SituacaoSecaoOut
+    eficacia: SituacaoSecaoOut
+    por_marketplace: list[FaturamentoMesSecaoOut]
+    por_categoria: list[FaturamentoMesSecaoOut]

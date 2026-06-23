@@ -8,7 +8,8 @@ cacheado pras próximas. Isso evita inventar números.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -18,7 +19,7 @@ import httpx
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -40,16 +41,24 @@ from app.schemas.financeiro import (
     DNPConfigPatch,
     DNPProdutoOut,
     DNPProdutoPatch,
+    FaturamentoGrpLinhaOut,
+    FaturamentoMesSecaoOut,
     NCMOut,
     NCMPatch,
     SimulacaoOut,
     SimulacaoPatch,
+    SituacaoLinhaOut,
+    SituacaoSecaoOut,
     SuprimentosOut,
     SuprimentosPatch,
+    ValuationMesOut,
+    ValuationReportOut,
 )
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/financeiro", tags=["financeiro"])
+
+_SCHEMA = get_settings().database_schema
 
 
 _BRASILAPI_NCM = "https://brasilapi.com.br/api/ncm/v1/{codigo}"
@@ -597,3 +606,319 @@ async def delete_dnp_foto(
         row.foto_url = None
         await session.commit()
     return None
+
+
+# ── Valuation (relatório 3 meses) ────────────────────────────────────────
+# Porta web do antigo PDF faturamento_3meses_pdf.py (projeto ClaudeCode).
+# As tabelas davinci.bling_orders e davinci.valuation são atualizadas pela
+# rotina diária das 5h; aqui só consultamos ao vivo — nada é agendado.
+
+# Bling situação IDs que entram no FATURAMENTO da janela de 3 meses.
+_VAL_SIT_APLICAVEIS = [
+    "6", "28",   # Em aberto
+    "15", "37",  # Em andamento
+    "83953",     # Entregue
+    "84674",     # Enviado Geral SP
+    "84675",     # Enviado Geral CI
+    "83959",     # Enviado Geral PI
+    "83958",     # Enviado Geral RA
+    "84678",     # Enviado Geral SA
+    "83965",     # Enviado Importado
+]
+_VAL_SIT_ENTREGUE = "83953"
+_VAL_SIT_LABEL = (
+    "Em aberto, Em andamento, Entregue, "
+    "Enviado Geral SP/CI/PI/RA/SA, Enviado Importado"
+)
+# Situações problemáticas — seção Eficácia Operacional (total do banco).
+_VAL_SIT_EFICACIA = [
+    "83955",  # Aguardando Cancelamento
+    "83957",  # Aguardando Devolução
+    "83960",  # Problemas
+    "83961",  # Aguardando Reembolso
+    "83964",  # Teste
+    "83966",  # Erro no Envio
+    "84676",  # Devolvido Estoque Usado
+    "84677",  # Manutenção
+]
+
+
+def _qt(name: str) -> str:
+    """Tabela qualificada pelo schema (mesma convenção de refunds.py)."""
+    return f'"{_SCHEMA}".{name}'
+
+
+def _r2(v) -> float | None:
+    """Arredonda p/ 2 casas em float (JSON number limpo). None → None."""
+    if v is None:
+        return None
+    return round(float(v), 2)
+
+
+def _agg_sql(group_col: str) -> str:
+    """SQL de faturamento/custo/rentabilidade por mês × {marketplace|categoria}.
+
+    Réplica fiel da QUERY_AGG do PDF. `group_col` é literal do nosso código
+    ('marketplace' ou 'categoria'), nunca entrada do usuário — interpolar é
+    seguro. Faturamento = SUM das situações aplicáveis; custo/rentabilidade =
+    só Entregue. Rateio proporcional ao itemvalor quando o pedido tem >1 item.
+    """
+    bo, stores = _qt("bling_orders"), _qt("stores")
+    return f"""
+WITH bo_base AS (
+    SELECT bo.*,
+           (bo.data AT TIME ZONE 'America/Sao_Paulo')::date AS data_sp,
+           COALESCE(NULLIF(bo.valorbase, 0), bo.total) AS valorbase_eff
+    FROM {bo} bo
+    WHERE (bo.data AT TIME ZONE 'America/Sao_Paulo')::date
+          >= date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - INTERVAL '2 months')::date
+      AND (bo.data AT TIME ZONE 'America/Sao_Paulo')::date
+          <  date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) + INTERVAL '1 month')::date
+),
+order_totals AS (
+    SELECT numero,
+           COUNT(*) AS total_items,
+           SUM(COALESCE(itemvalor, 0)) AS total_itemvalor_pedido
+    FROM bo_base
+    WHERE (item_index > 0 OR (item_index = 0 AND itemvalor IS NOT NULL))
+      AND valorbase_eff > 0
+    GROUP BY numero
+),
+prop AS (
+    SELECT
+        bo.numero, bo.data_sp, bo.loja, bo.situacao, bo.categoria_nome,
+        bo.item_quantidade, bo.preco_custo,
+        CASE
+            WHEN COALESCE(ot.total_items, 1) = 1 THEN bo.valorbase_eff
+            WHEN ot.total_itemvalor_pedido > 0 AND bo.itemvalor IS NOT NULL
+                THEN bo.valorbase_eff * (bo.itemvalor / ot.total_itemvalor_pedido)
+            ELSE bo.valorbase_eff / COALESCE(ot.total_items, 1)::numeric
+        END AS valorbase_prop,
+        CASE
+            WHEN COALESCE(ot.total_items, 1) = 1 THEN bo.custofrete
+            WHEN ot.total_itemvalor_pedido > 0 AND bo.itemvalor IS NOT NULL
+                THEN bo.custofrete * (bo.itemvalor / ot.total_itemvalor_pedido)
+            ELSE bo.custofrete / COALESCE(ot.total_items, 1)::numeric
+        END AS custofrete_prop,
+        CASE
+            WHEN COALESCE(ot.total_items, 1) = 1 THEN bo.taxacomissao
+            WHEN ot.total_itemvalor_pedido > 0 AND bo.itemvalor IS NOT NULL
+                THEN bo.taxacomissao * (bo.itemvalor / ot.total_itemvalor_pedido)
+            ELSE bo.taxacomissao / COALESCE(ot.total_items, 1)::numeric
+        END AS taxacomissao_prop
+    FROM bo_base bo
+    LEFT JOIN order_totals ot ON bo.numero = ot.numero
+    WHERE bo.valorbase_eff > 0
+),
+base AS (
+    SELECT
+        date_trunc('month', p.data_sp)::date AS mes,
+        l.marketplace::text AS marketplace,
+        COALESCE(NULLIF(TRIM(p.categoria_nome), ''), 'Sem categoria') AS categoria,
+        p.situacao AS situacao_id,
+        p.valorbase_prop AS valorbase,
+        (COALESCE(p.preco_custo, 0) * COALESCE(p.item_quantidade, 0)
+            + COALESCE(p.custofrete_prop, 0)
+            + COALESCE(p.taxacomissao_prop, 0)) AS custo_total
+    FROM prop p
+    LEFT JOIN {stores} l ON l.bling_store_id::text = p.loja
+)
+SELECT
+    mes,
+    {group_col} AS grp,
+    SUM(CASE WHEN situacao_id = ANY(:sit_aplic) THEN valorbase ELSE 0 END) AS faturamento,
+    SUM(CASE WHEN situacao_id = :entregue THEN valorbase   ELSE 0 END) AS faturamento_entregue,
+    SUM(CASE WHEN situacao_id = :entregue THEN custo_total ELSE 0 END) AS custo_entregue
+FROM base
+GROUP BY mes, {group_col}
+ORDER BY mes, grp
+"""
+
+
+def _val_window_months() -> list:
+    """3 primeiros-dias-do-mês (mês-2, mês-1, mês atual), tz São Paulo."""
+    from datetime import date as _date
+    from zoneinfo import ZoneInfo
+
+    today = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    first = today.replace(day=1)
+    months = []
+    for back in (2, 1, 0):
+        y, m = first.year, first.month - back
+        while m <= 0:
+            m += 12
+            y -= 1
+        months.append(_date(y, m, 1))
+    return months
+
+
+def _agg_to_secoes(rows: list[dict], months: list) -> list[FaturamentoMesSecaoOut]:
+    """Agrupa as linhas da _agg_sql em uma seção por mês (3 meses)."""
+    by_mes: dict = {m: [] for m in months}
+    for r in rows:
+        if r["mes"] in by_mes:
+            by_mes[r["mes"]].append(r)
+    out: list[FaturamentoMesSecaoOut] = []
+    for mes in months:
+        linhas: list[FaturamentoGrpLinhaOut] = []
+        tot_fat = tot_custo = tot_rent = Decimal("0")
+        for r in sorted(by_mes[mes], key=lambda x: (x["grp"] or "")):
+            if not r["grp"]:
+                continue
+            fat = Decimal(str(r["faturamento"] or 0))
+            fat_ent = Decimal(str(r["faturamento_entregue"] or 0))
+            custo = Decimal(str(r["custo_entregue"] or 0))
+            rent = fat_ent - custo
+            margem = (rent / custo * 100) if custo > 0 else None
+            linhas.append(FaturamentoGrpLinhaOut(
+                grp=r["grp"], faturamento=_r2(fat), custo=_r2(custo),
+                rentabilidade=_r2(rent), margem=_r2(margem),
+            ))
+            tot_fat += fat
+            tot_custo += custo
+            tot_rent += rent
+        tot_margem = (tot_rent / tot_custo * 100) if tot_custo > 0 else None
+        out.append(FaturamentoMesSecaoOut(
+            mes=mes, linhas=linhas,
+            total_faturamento=_r2(tot_fat), total_custo=_r2(tot_custo),
+            total_rentabilidade=_r2(tot_rent), total_margem=_r2(tot_margem),
+        ))
+    return out
+
+
+@router.get("/valuation", response_model=ValuationReportOut)
+async def valuation_report(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_valuation", "view"))],
+) -> ValuationReportOut:
+    """Relatório de faturamento dos últimos 3 meses (porta web do PDF diário).
+
+    Consulta ao vivo davinci.bling_orders / valuation / stores / situacao_bling
+    — sempre reflete o último estado das tabelas (a rotina das 5h as atualiza).
+    Seções: Valuation 3 meses, Resumo de ontem, Eficácia operacional,
+    Por Marketplace e Por Categoria.
+    """
+    months = _val_window_months()
+
+    # 1. Valuation por mês: saldos = snapshot do último dia do mês;
+    #    rentabilidade = SUM do mês.
+    val_saldos_sql = text(f"""
+        SELECT DISTINCT ON (date_trunc('month', data))
+               date_trunc('month', data)::date AS mes,
+               caixa, estoque, receber, data AS data_snapshot
+        FROM {_qt("valuation")}
+        WHERE data >= date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - INTERVAL '2 months')::date
+          AND data <  date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) + INTERVAL '1 month')::date
+        ORDER BY date_trunc('month', data), data DESC
+    """)
+    val_rent_sql = text(f"""
+        SELECT date_trunc('month', data)::date AS mes,
+               SUM(COALESCE(rentabilidade, 0)) AS rentabilidade
+        FROM {_qt("valuation")}
+        WHERE data >= date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - INTERVAL '2 months')::date
+          AND data <  date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) + INTERVAL '1 month')::date
+        GROUP BY date_trunc('month', data)
+    """)
+    val_by_mes: dict = {}
+    for r in (await session.execute(val_saldos_sql)).mappings().all():
+        val_by_mes[r["mes"]] = dict(r)
+    for r in (await session.execute(val_rent_sql)).mappings().all():
+        val_by_mes.setdefault(r["mes"], {})["rentabilidade"] = r["rentabilidade"]
+
+    valuation_meses: list[ValuationMesOut] = []
+    for mes in months:
+        md = val_by_mes.get(mes, {})
+        caixa = md.get("caixa")
+        estoque = md.get("estoque")
+        receber = md.get("receber")
+        total = None
+        if any(v is not None for v in (caixa, estoque, receber)):
+            total = (Decimal(str(caixa or 0)) + Decimal(str(estoque or 0))
+                     + Decimal(str(receber or 0)))
+        valuation_meses.append(ValuationMesOut(
+            mes=mes, caixa=_r2(caixa), estoque=_r2(estoque), receber=_r2(receber),
+            total=_r2(total), rentabilidade=_r2(md.get("rentabilidade")),
+            data_snapshot=md.get("data_snapshot"),
+        ))
+
+    # 2. Resumo de ontem — pedidos por situação (dedup por pedido).
+    daily_sql = text(f"""
+        WITH por_pedido AS (
+            SELECT bo.numero,
+                   MAX(bo.situacao) AS situacao,
+                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase_pedido
+            FROM {_qt("bling_orders")} bo
+            WHERE (bo.data AT TIME ZONE 'America/Sao_Paulo')::date
+                  = (((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - INTERVAL '1 day')::date
+            GROUP BY bo.numero
+        )
+        SELECT p.situacao AS situacao_id,
+               COALESCE(sb.nome, '(sem situacao)') AS situacao_nome,
+               COUNT(*) AS pedidos,
+               SUM(COALESCE(p.valorbase_pedido, 0)) AS faturamento
+        FROM por_pedido p
+        LEFT JOIN {_qt("situacao_bling")} sb ON p.situacao = sb.id::text
+        WHERE COALESCE(sb.nome, '') !~ '^-+$'
+        GROUP BY p.situacao, sb.nome
+        ORDER BY faturamento DESC NULLS LAST
+    """)
+    # 3. Eficácia operacional — situações problemáticas (total do banco).
+    efi_sql = text(f"""
+        WITH por_pedido AS (
+            SELECT bo.numero,
+                   MAX(bo.situacao) AS situacao,
+                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase_pedido
+            FROM {_qt("bling_orders")} bo
+            WHERE bo.situacao = ANY(:efi_ids)
+            GROUP BY bo.numero
+        )
+        SELECT p.situacao AS situacao_id,
+               COALESCE(sb.nome, '(sem situacao)') AS situacao_nome,
+               COUNT(*) AS pedidos,
+               SUM(COALESCE(p.valorbase_pedido, 0)) AS faturamento
+        FROM por_pedido p
+        LEFT JOIN {_qt("situacao_bling")} sb ON p.situacao = sb.id::text
+        GROUP BY p.situacao, sb.nome
+        ORDER BY faturamento DESC NULLS LAST
+    """)
+
+    def _build_secao(rows: list[dict], data=None) -> SituacaoSecaoOut:
+        linhas: list[SituacaoLinhaOut] = []
+        tot_ped = 0
+        tot_fat = Decimal("0")
+        for r in rows:
+            fat = Decimal(str(r["faturamento"] or 0))
+            linhas.append(SituacaoLinhaOut(
+                situacao_nome=r["situacao_nome"], pedidos=int(r["pedidos"]),
+                faturamento=_r2(fat),
+            ))
+            tot_ped += int(r["pedidos"])
+            tot_fat += fat
+        return SituacaoSecaoOut(
+            data=data, linhas=linhas,
+            total_pedidos=tot_ped, total_faturamento=_r2(tot_fat),
+        )
+
+    daily_rows = (await session.execute(daily_sql)).mappings().all()
+    efi_rows = (await session.execute(efi_sql, {"efi_ids": _VAL_SIT_EFICACIA})).mappings().all()
+
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    ontem = (datetime.now(ZoneInfo("America/Sao_Paulo")).date() - timedelta(days=1))
+    resumo_ontem = _build_secao([dict(r) for r in daily_rows], data=ontem)
+    eficacia = _build_secao([dict(r) for r in efi_rows])
+
+    # 4 + 5. Por Marketplace e Por Categoria (3 meses).
+    agg_params = {"sit_aplic": _VAL_SIT_APLICAVEIS, "entregue": _VAL_SIT_ENTREGUE}
+    mkt_rows = (await session.execute(text(_agg_sql("marketplace")), agg_params)).mappings().all()
+    cat_rows = (await session.execute(text(_agg_sql("categoria")), agg_params)).mappings().all()
+
+    return ValuationReportOut(
+        gerado_em=datetime.now(UTC),
+        situacoes_label=_VAL_SIT_LABEL,
+        valuation_meses=valuation_meses,
+        resumo_ontem=resumo_ontem,
+        eficacia=eficacia,
+        por_marketplace=_agg_to_secoes([dict(r) for r in mkt_rows], months),
+        por_categoria=_agg_to_secoes([dict(r) for r in cat_rows], months),
+    )

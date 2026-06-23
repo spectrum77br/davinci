@@ -14,6 +14,7 @@ export type Resource =
   | 'financeiro_suprimentos'
   | 'financeiro_simulacao'
   | 'financeiro_dnp'
+  | 'financeiro_valuation'
   | 'importacao'
   | 'devolucoes'
   | 'reembolso'
@@ -60,10 +61,10 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     resources: ['devolucoes', 'reembolso', 'notas_fiscais'],
   },
   {
-    // Financeiro = só Consórcio. Certificações, Importação, Simulação e DNP
-    // são do ciclo de compra/importação e foram pra Suprimentos (igual menu).
+    // Financeiro = Consórcio + Valuation. Certificações, Importação, Simulação
+    // e DNP são do ciclo de compra/importação e foram pra Suprimentos (menu).
     label: 'Financeiro',
-    resources: ['financeiro_consorcio'],
+    resources: ['financeiro_consorcio', 'financeiro_valuation'],
   },
   {
     // Suprimentos = ciclo de compra/importação. `financeiro_suprimentos` é a
@@ -105,6 +106,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   faturamento: 'Faturamento',
   controle_estoque: 'Controle de Estoque',
   financeiro_consorcio: 'Consórcio',
+  financeiro_valuation: 'Valuation',
   financeiro_suprimentos: 'Certificações',
   financeiro_simulacao: 'Simulação',
   financeiro_dnp: 'DNP',
