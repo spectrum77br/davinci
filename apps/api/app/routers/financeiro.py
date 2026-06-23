@@ -41,6 +41,8 @@ from app.schemas.financeiro import (
     DNPConfigPatch,
     DNPProdutoOut,
     DNPProdutoPatch,
+    EstoqueBlingLocalOut,
+    EstoqueBlingSnapshotOut,
     FaturamentoGrpLinhaOut,
     FaturamentoMesSecaoOut,
     NCMOut,
@@ -921,4 +923,55 @@ async def valuation_report(
         eficacia=eficacia,
         por_marketplace=_agg_to_secoes([dict(r) for r in mkt_rows], months),
         por_categoria=_agg_to_secoes([dict(r) for r in cat_rows], months),
+    )
+
+
+# Ordem fixa dos locais na resposta (mesma do snapshot e da rotina antiga).
+_ESTOQUE_LOCAIS_ORDEM = ["PI", "SA", "SP", "RA", "CD", "CI", "US", "Eletro", "Mala", "Outros"]
+
+
+@router.get("/valuation/estoque-bling", response_model=EstoqueBlingSnapshotOut)
+async def valuation_estoque_bling(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_valuation", "view"))],
+) -> EstoqueBlingSnapshotOut:
+    """Último snapshot diário do estoque Bling por local.
+
+    O cron `valuation_estoque_snapshot` (worker arq, ~08h BRT) crawl o Bling
+    e grava em `valuation_estoque_bling_diario`. Aqui só lemos a linha mais
+    recente. Devolve 404 se nunca rodou."""
+    row = (
+        await session.execute(
+            text(f"""
+                SELECT data, updated_at, total_qtd, total_valor, por_local
+                FROM {_qt("valuation_estoque_bling_diario")}
+                ORDER BY data DESC
+                LIMIT 1
+            """),
+        )
+    ).mappings().first()
+    if row is None:
+        raise HTTPException(
+            404, detail={"code": "estoque_bling_sem_snapshot"}
+        )
+
+    por_local: dict = row["por_local"] or {}
+    # Preserva a ordem fixa; só inclui locais com dado, somando "Outros" no fim.
+    locais: list[EstoqueBlingLocalOut] = []
+    for l in _ESTOQUE_LOCAIS_ORDEM:
+        entry = por_local.get(l)
+        if not entry:
+            continue
+        locais.append(EstoqueBlingLocalOut(
+            local=l,
+            qtd=int(entry.get("qtd") or 0),
+            valor=float(entry.get("valor") or 0),
+        ))
+
+    return EstoqueBlingSnapshotOut(
+        data=row["data"],
+        updated_at=row["updated_at"],
+        total_qtd=int(row["total_qtd"] or 0),
+        total_valor=float(row["total_valor"] or 0),
+        locais=locais,
     )

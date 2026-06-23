@@ -294,3 +294,24 @@ class ValuationReportOut(BaseModel):
     eficacia: SituacaoSecaoOut
     por_marketplace: list[FaturamentoMesSecaoOut]
     por_categoria: list[FaturamentoMesSecaoOut]
+
+
+# ── Estoque Bling (aba "Estoque Bling" da página Valuation) ──────────────
+
+
+class EstoqueBlingLocalOut(BaseModel):
+    local: str  # PI, SA, SP, RA, CD, CI, US, Eletro, Mala, Outros
+    qtd: int
+    valor: float
+
+
+class EstoqueBlingSnapshotOut(BaseModel):
+    """Último snapshot diário do estoque Bling, gravado pelo cron arq
+    `valuation_estoque_snapshot` (~08h BRT). `data` é a data SP do crawl;
+    `updated_at` é o momento exato em que o snapshot foi gravado."""
+
+    data: date
+    updated_at: datetime
+    total_qtd: int
+    total_valor: float
+    locais: list[EstoqueBlingLocalOut]

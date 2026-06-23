@@ -1,8 +1,11 @@
 <script setup lang="ts">
-// Valuation — relatório de faturamento dos últimos 3 meses. Porta web do
-// antigo PDF diário (faturamento_3meses_pdf.py). Somente leitura: consulta
-// ao vivo davinci.bling_orders / valuation / stores, que a rotina das 5h
-// mantém atualizadas — então a página reflete sempre o dado mais recente.
+// Valuation — duas abas:
+//   1) Resumo: relatório de faturamento dos últimos 3 meses (porta web do
+//      antigo PDF diário). Consulta ao vivo davinci.bling_orders / valuation
+//      / stores (atualizadas pela rotina das 5h).
+//   2) Estoque Bling: último snapshot diário do estoque por local
+//      (PI/SA/SP/RA/CD/CI/US/Eletro/Mala/Outros). Gravado pelo cron arq
+//      `valuation_estoque_snapshot` (~08h BRT) em valuation_estoque_bling_diario.
 import { computed, ref } from 'vue'
 import { Loader2, RefreshCw } from 'lucide-vue-next'
 
@@ -53,23 +56,62 @@ type Report = {
   por_marketplace: FatMesSecao[]
   por_categoria: FatMesSecao[]
 }
+type EstoqueLocal = { local: string; qtd: number; valor: number }
+type EstoqueSnapshot = {
+  data: string
+  updated_at: string
+  total_qtd: number
+  total_valor: number
+  locais: EstoqueLocal[]
+}
 
-const loading = ref(false)
-const error = ref<string | null>(null)
-const data = ref<Report | null>(null)
+type Tab = 'resumo' | 'estoque'
+const tab = ref<Tab>('resumo')
 
-async function load() {
-  loading.value = true
-  error.value = null
+// Loading/erro por aba — cada uma carrega na primeira ativação (lazy).
+const loadingResumo = ref(false)
+const loadingEstoque = ref(false)
+const errorResumo = ref<string | null>(null)
+const errorEstoque = ref<string | null>(null)
+const resumo = ref<Report | null>(null)
+const estoque = ref<EstoqueSnapshot | null>(null)
+
+async function loadResumo() {
+  loadingResumo.value = true
+  errorResumo.value = null
   try {
-    data.value = await api<Report>('/api/financeiro/valuation')
+    resumo.value = await api<Report>('/api/financeiro/valuation')
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    errorResumo.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
-    loading.value = false
+    loadingResumo.value = false
   }
 }
-await load()
+
+async function loadEstoque() {
+  loadingEstoque.value = true
+  errorEstoque.value = null
+  try {
+    estoque.value = await api<EstoqueSnapshot>('/api/financeiro/valuation/estoque-bling')
+  } catch (e: any) {
+    errorEstoque.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    loadingEstoque.value = false
+  }
+}
+
+function setTab(t: Tab) {
+  tab.value = t
+  if (t === 'resumo' && !resumo.value && !loadingResumo.value) void loadResumo()
+  if (t === 'estoque' && !estoque.value && !loadingEstoque.value) void loadEstoque()
+}
+
+function reload() {
+  if (tab.value === 'resumo') void loadResumo()
+  else void loadEstoque()
+}
+
+await loadResumo()
 
 function fmtBRL(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return '—'
@@ -98,244 +140,327 @@ function diaLabel(iso: string | null): string {
   return new Date(y, m - 1, d).toLocaleDateString('pt-BR')
 }
 
-const valMeses = computed(() => data.value?.valuation_meses ?? [])
+const valMeses = computed(() => resumo.value?.valuation_meses ?? [])
 const geradoEm = computed(() =>
-  data.value ? new Date(data.value.gerado_em).toLocaleString('pt-BR') : '',
+  resumo.value ? new Date(resumo.value.gerado_em).toLocaleString('pt-BR') : '',
+)
+const estoqueUpdatedEm = computed(() =>
+  estoque.value ? new Date(estoque.value.updated_at).toLocaleString('pt-BR') : '',
+)
+const loading = computed(() =>
+  tab.value === 'resumo' ? loadingResumo.value : loadingEstoque.value,
 )
 </script>
 
 <template>
-  <div class="space-y-6 p-4">
+  <div class="space-y-4 p-4">
     <div class="flex flex-wrap items-center gap-2">
       <h1 class="text-xl font-semibold">Valuation</h1>
       <span class="text-xs text-muted-foreground ml-2">
-        Faturamento, custo, rentabilidade e margem dos últimos 3 meses.
+        {{ tab === 'resumo'
+          ? 'Faturamento, custo, rentabilidade e margem dos últimos 3 meses.'
+          : 'Estoque Bling por local — snapshot diário.' }}
       </span>
       <button
         class="ml-auto inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
         :disabled="loading"
-        @click="load"
+        @click="reload"
       >
         <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" /> Recarregar
       </button>
     </div>
 
-    <p v-if="data" class="text-xs text-muted-foreground">
-      Atualizado às 5h diariamente · gerado {{ geradoEm }}.
-      Faturamento considera: {{ data.situacoes_label }}.
-      Custo / Rentabilidade / Margem apenas <b>Entregue</b>. Margem = Rentabilidade ÷ Custo.
-    </p>
-
-    <div v-if="error" class="text-sm text-destructive">{{ error }}</div>
-    <div v-if="loading && !data" class="text-sm text-muted-foreground">
-      <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
+    <!-- Tabs -->
+    <div class="inline-flex rounded-md border overflow-hidden text-sm">
+      <button
+        class="px-4 py-1.5 hover:bg-muted"
+        :class="tab === 'resumo' ? 'bg-primary text-primary-foreground' : ''"
+        @click="setTab('resumo')"
+      >
+        Resumo
+      </button>
+      <button
+        class="px-4 py-1.5 hover:bg-muted border-l"
+        :class="tab === 'estoque' ? 'bg-primary text-primary-foreground' : ''"
+        @click="setTab('estoque')"
+      >
+        Estoque Bling
+      </button>
     </div>
 
-    <template v-if="data">
-      <!-- 1. Valuation 3 meses -->
-      <section class="space-y-2">
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-          Valuation — 3 meses
-        </h2>
-        <div class="border rounded-md overflow-auto">
-          <table class="w-full text-sm border-collapse">
-            <thead class="bg-muted/50 text-xs uppercase tracking-wide">
-              <tr>
-                <th class="text-left px-3 py-2 font-medium">Componente</th>
-                <th
-                  v-for="m in valMeses"
-                  :key="m.mes"
-                  class="text-right px-3 py-2 font-medium capitalize"
-                >
-                  {{ mesLabel(m.mes) }}
-                  <span v-if="m.data_snapshot" class="block text-[10px] normal-case text-muted-foreground">
-                    (até {{ diaCurto(m.data_snapshot) }})
-                  </span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr class="border-t">
-                <td class="px-3 py-1.5">Caixa</td>
-                <td v-for="m in valMeses" :key="m.mes" class="px-3 py-1.5 text-right tabular-nums">
-                  {{ fmtBRL(m.caixa) }}
-                </td>
-              </tr>
-              <tr class="border-t bg-muted/20">
-                <td class="px-3 py-1.5">A Receber</td>
-                <td v-for="m in valMeses" :key="m.mes" class="px-3 py-1.5 text-right tabular-nums">
-                  {{ fmtBRL(m.receber) }}
-                </td>
-              </tr>
-              <tr class="border-t">
-                <td class="px-3 py-1.5">Estoque</td>
-                <td v-for="m in valMeses" :key="m.mes" class="px-3 py-1.5 text-right tabular-nums">
-                  {{ fmtBRL(m.estoque) }}
-                </td>
-              </tr>
-              <tr class="border-t bg-muted/40 font-semibold">
-                <td class="px-3 py-2">TOTAL VALUATION</td>
-                <td v-for="m in valMeses" :key="m.mes" class="px-3 py-2 text-right tabular-nums">
-                  {{ fmtBRL(m.total) }}
-                </td>
-              </tr>
-              <tr class="border-t bg-amber-50 dark:bg-amber-950/30 font-semibold">
-                <td class="px-3 py-2">Rentabilidade (mês)</td>
-                <td v-for="m in valMeses" :key="m.mes" class="px-3 py-2 text-right tabular-nums">
-                  {{ fmtBRL(m.rentabilidade) }}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
+    <!-- ─────────────────────────────────────────  Aba RESUMO  ───────────────────── -->
+    <template v-if="tab === 'resumo'">
+      <p v-if="resumo" class="text-xs text-muted-foreground">
+        Atualizado às 5h diariamente · gerado {{ geradoEm }}.
+        Faturamento considera: {{ resumo.situacoes_label }}.
+        Custo / Rentabilidade / Margem apenas <b>Entregue</b>. Margem = Rentabilidade ÷ Custo.
+      </p>
 
-      <!-- 2. Resumo de ontem -->
-      <section class="space-y-2">
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-          Resumo de ontem
-          <span v-if="data.resumo_ontem.data" class="normal-case text-xs">
-            ({{ diaLabel(data.resumo_ontem.data) }})
-          </span>
-        </h2>
-        <div class="border rounded-md overflow-auto">
-          <table class="w-full text-sm border-collapse">
-            <thead class="bg-muted/50 text-xs uppercase tracking-wide">
-              <tr>
-                <th class="text-left px-3 py-2 font-medium">Situação</th>
-                <th class="text-right px-3 py-2 font-medium">Pedidos</th>
-                <th class="text-right px-3 py-2 font-medium">Faturamento</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-if="!data.resumo_ontem.linhas.length">
-                <td colspan="3" class="text-center py-6 text-muted-foreground">Sem pedidos ontem.</td>
-              </tr>
-              <tr
-                v-for="(r, i) in data.resumo_ontem.linhas"
-                :key="r.situacao_nome + i"
-                class="border-t hover:bg-muted/20"
-              >
-                <td class="px-3 py-1.5">{{ r.situacao_nome }}</td>
-                <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtInt(r.pedidos) }}</td>
-                <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.faturamento) }}</td>
-              </tr>
-            </tbody>
-            <tfoot v-if="data.resumo_ontem.linhas.length" class="bg-muted/30 font-semibold">
-              <tr class="border-t">
-                <td class="px-3 py-2">Total</td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ fmtInt(data.resumo_ontem.total_pedidos) }}</td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(data.resumo_ontem.total_faturamento) }}</td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      </section>
+      <div v-if="errorResumo" class="text-sm text-destructive">{{ errorResumo }}</div>
+      <div v-if="loadingResumo && !resumo" class="text-sm text-muted-foreground">
+        <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
+      </div>
 
-      <!-- 3. Eficácia operacional -->
-      <section class="space-y-2">
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-destructive">
-          Eficácia operacional
-          <span class="normal-case text-xs text-muted-foreground">(situações problemáticas — total do banco)</span>
-        </h2>
-        <div class="border rounded-md overflow-auto">
-          <table class="w-full text-sm border-collapse">
-            <thead class="bg-destructive/10 text-xs uppercase tracking-wide">
-              <tr>
-                <th class="text-left px-3 py-2 font-medium">Situação</th>
-                <th class="text-right px-3 py-2 font-medium">Pedidos</th>
-                <th class="text-right px-3 py-2 font-medium">Faturamento</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-if="!data.eficacia.linhas.length">
-                <td colspan="3" class="text-center py-6 text-muted-foreground">Sem ocorrências.</td>
-              </tr>
-              <tr
-                v-for="(r, i) in data.eficacia.linhas"
-                :key="r.situacao_nome + i"
-                class="border-t hover:bg-muted/20"
-              >
-                <td class="px-3 py-1.5">{{ r.situacao_nome }}</td>
-                <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtInt(r.pedidos) }}</td>
-                <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.faturamento) }}</td>
-              </tr>
-            </tbody>
-            <tfoot v-if="data.eficacia.linhas.length" class="bg-muted/30 font-semibold">
-              <tr class="border-t">
-                <td class="px-3 py-2">Total</td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ fmtInt(data.eficacia.total_pedidos) }}</td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(data.eficacia.total_faturamento) }}</td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      </section>
-
-      <!-- 4 + 5. Por Marketplace / Por Categoria -->
-      <section
-        v-for="grupo in [
-          { titulo: 'Por Marketplace', col: 'Marketplace', meses: data.por_marketplace },
-          { titulo: 'Por Categoria', col: 'Categoria', meses: data.por_categoria },
-        ]"
-        :key="grupo.titulo"
-        class="space-y-3"
-      >
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-          {{ grupo.titulo }}
-        </h2>
-        <div v-for="sec in grupo.meses" :key="grupo.titulo + sec.mes" class="space-y-1">
-          <h3 class="text-xs font-semibold capitalize">{{ mesLabel(sec.mes) }}</h3>
+      <template v-if="resumo">
+        <!-- 1. Valuation 3 meses -->
+        <section class="space-y-2">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Valuation — 3 meses
+          </h2>
           <div class="border rounded-md overflow-auto">
             <table class="w-full text-sm border-collapse">
               <thead class="bg-muted/50 text-xs uppercase tracking-wide">
                 <tr>
-                  <th class="text-left px-3 py-2 font-medium">{{ grupo.col }}</th>
-                  <th class="text-right px-3 py-2 font-medium">Faturamento</th>
-                  <th class="text-right px-3 py-2 font-medium">Custo (Entregue)</th>
-                  <th class="text-right px-3 py-2 font-medium">Rentabilidade</th>
-                  <th class="text-right px-3 py-2 font-medium">Margem</th>
+                  <th class="text-left px-3 py-2 font-medium">Componente</th>
+                  <th
+                    v-for="m in valMeses"
+                    :key="m.mes"
+                    class="text-right px-3 py-2 font-medium capitalize"
+                  >
+                    {{ mesLabel(m.mes) }}
+                    <span v-if="m.data_snapshot" class="block text-[10px] normal-case text-muted-foreground">
+                      (até {{ diaCurto(m.data_snapshot) }})
+                    </span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-if="!sec.linhas.length">
-                  <td colspan="5" class="text-center py-4 text-muted-foreground">Sem dados no mês.</td>
-                </tr>
-                <tr
-                  v-for="(r, i) in sec.linhas"
-                  :key="r.grp + i"
-                  class="border-t hover:bg-muted/20"
-                >
-                  <td class="px-3 py-1.5">{{ r.grp }}</td>
-                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.faturamento) }}</td>
-                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.custo) }}</td>
-                  <td
-                    class="px-3 py-1.5 text-right tabular-nums"
-                    :class="r.rentabilidade < 0 ? 'text-destructive' : ''"
-                  >
-                    {{ fmtBRL(r.rentabilidade) }}
+                <tr class="border-t">
+                  <td class="px-3 py-1.5">Caixa</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-1.5 text-right tabular-nums">
+                    {{ fmtBRL(m.caixa) }}
                   </td>
-                  <td
-                    class="px-3 py-1.5 text-right tabular-nums"
-                    :class="r.margem != null && r.margem < 0 ? 'text-destructive' : ''"
-                  >
-                    {{ fmtPct(r.margem) }}
+                </tr>
+                <tr class="border-t bg-muted/20">
+                  <td class="px-3 py-1.5">A Receber</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-1.5 text-right tabular-nums">
+                    {{ fmtBRL(m.receber) }}
+                  </td>
+                </tr>
+                <tr class="border-t">
+                  <td class="px-3 py-1.5">Estoque</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-1.5 text-right tabular-nums">
+                    {{ fmtBRL(m.estoque) }}
+                  </td>
+                </tr>
+                <tr class="border-t bg-muted/40 font-semibold">
+                  <td class="px-3 py-2">TOTAL VALUATION</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-2 text-right tabular-nums">
+                    {{ fmtBRL(m.total) }}
+                  </td>
+                </tr>
+                <tr class="border-t bg-amber-50 dark:bg-amber-950/30 font-semibold">
+                  <td class="px-3 py-2">Rentabilidade (mês)</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-2 text-right tabular-nums">
+                    {{ fmtBRL(m.rentabilidade) }}
                   </td>
                 </tr>
               </tbody>
-              <tfoot v-if="sec.linhas.length" class="bg-muted/30 font-semibold">
+            </table>
+          </div>
+        </section>
+
+        <!-- 2. Resumo de ontem -->
+        <section class="space-y-2">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Resumo de ontem
+            <span v-if="resumo.resumo_ontem.data" class="normal-case text-xs">
+              ({{ diaLabel(resumo.resumo_ontem.data) }})
+            </span>
+          </h2>
+          <div class="border rounded-md overflow-auto">
+            <table class="w-full text-sm border-collapse">
+              <thead class="bg-muted/50 text-xs uppercase tracking-wide">
+                <tr>
+                  <th class="text-left px-3 py-2 font-medium">Situação</th>
+                  <th class="text-right px-3 py-2 font-medium">Pedidos</th>
+                  <th class="text-right px-3 py-2 font-medium">Faturamento</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!resumo.resumo_ontem.linhas.length">
+                  <td colspan="3" class="text-center py-6 text-muted-foreground">Sem pedidos ontem.</td>
+                </tr>
+                <tr
+                  v-for="(r, i) in resumo.resumo_ontem.linhas"
+                  :key="r.situacao_nome + i"
+                  class="border-t hover:bg-muted/20"
+                >
+                  <td class="px-3 py-1.5">{{ r.situacao_nome }}</td>
+                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtInt(r.pedidos) }}</td>
+                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.faturamento) }}</td>
+                </tr>
+              </tbody>
+              <tfoot v-if="resumo.resumo_ontem.linhas.length" class="bg-muted/30 font-semibold">
                 <tr class="border-t">
                   <td class="px-3 py-2">Total</td>
-                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(sec.total_faturamento) }}</td>
-                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(sec.total_custo) }}</td>
-                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(sec.total_rentabilidade) }}</td>
-                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtPct(sec.total_margem) }}</td>
+                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtInt(resumo.resumo_ontem.total_pedidos) }}</td>
+                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(resumo.resumo_ontem.total_faturamento) }}</td>
                 </tr>
               </tfoot>
             </table>
           </div>
+        </section>
+
+        <!-- 3. Eficácia operacional -->
+        <section class="space-y-2">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-destructive">
+            Eficácia operacional
+            <span class="normal-case text-xs text-muted-foreground">(situações problemáticas — total do banco)</span>
+          </h2>
+          <div class="border rounded-md overflow-auto">
+            <table class="w-full text-sm border-collapse">
+              <thead class="bg-destructive/10 text-xs uppercase tracking-wide">
+                <tr>
+                  <th class="text-left px-3 py-2 font-medium">Situação</th>
+                  <th class="text-right px-3 py-2 font-medium">Pedidos</th>
+                  <th class="text-right px-3 py-2 font-medium">Faturamento</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!resumo.eficacia.linhas.length">
+                  <td colspan="3" class="text-center py-6 text-muted-foreground">Sem ocorrências.</td>
+                </tr>
+                <tr
+                  v-for="(r, i) in resumo.eficacia.linhas"
+                  :key="r.situacao_nome + i"
+                  class="border-t hover:bg-muted/20"
+                >
+                  <td class="px-3 py-1.5">{{ r.situacao_nome }}</td>
+                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtInt(r.pedidos) }}</td>
+                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.faturamento) }}</td>
+                </tr>
+              </tbody>
+              <tfoot v-if="resumo.eficacia.linhas.length" class="bg-muted/30 font-semibold">
+                <tr class="border-t">
+                  <td class="px-3 py-2">Total</td>
+                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtInt(resumo.eficacia.total_pedidos) }}</td>
+                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(resumo.eficacia.total_faturamento) }}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </section>
+
+        <!-- 4 + 5. Por Marketplace / Por Categoria -->
+        <section
+          v-for="grupo in [
+            { titulo: 'Por Marketplace', col: 'Marketplace', meses: resumo.por_marketplace },
+            { titulo: 'Por Categoria', col: 'Categoria', meses: resumo.por_categoria },
+          ]"
+          :key="grupo.titulo"
+          class="space-y-3"
+        >
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            {{ grupo.titulo }}
+          </h2>
+          <div v-for="sec in grupo.meses" :key="grupo.titulo + sec.mes" class="space-y-1">
+            <h3 class="text-xs font-semibold capitalize">{{ mesLabel(sec.mes) }}</h3>
+            <div class="border rounded-md overflow-auto">
+              <table class="w-full text-sm border-collapse">
+                <thead class="bg-muted/50 text-xs uppercase tracking-wide">
+                  <tr>
+                    <th class="text-left px-3 py-2 font-medium">{{ grupo.col }}</th>
+                    <th class="text-right px-3 py-2 font-medium">Faturamento</th>
+                    <th class="text-right px-3 py-2 font-medium">Custo (Entregue)</th>
+                    <th class="text-right px-3 py-2 font-medium">Rentabilidade</th>
+                    <th class="text-right px-3 py-2 font-medium">Margem</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-if="!sec.linhas.length">
+                    <td colspan="5" class="text-center py-4 text-muted-foreground">Sem dados no mês.</td>
+                  </tr>
+                  <tr
+                    v-for="(r, i) in sec.linhas"
+                    :key="r.grp + i"
+                    class="border-t hover:bg-muted/20"
+                  >
+                    <td class="px-3 py-1.5">{{ r.grp }}</td>
+                    <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.faturamento) }}</td>
+                    <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.custo) }}</td>
+                    <td
+                      class="px-3 py-1.5 text-right tabular-nums"
+                      :class="r.rentabilidade < 0 ? 'text-destructive' : ''"
+                    >
+                      {{ fmtBRL(r.rentabilidade) }}
+                    </td>
+                    <td
+                      class="px-3 py-1.5 text-right tabular-nums"
+                      :class="r.margem != null && r.margem < 0 ? 'text-destructive' : ''"
+                    >
+                      {{ fmtPct(r.margem) }}
+                    </td>
+                  </tr>
+                </tbody>
+                <tfoot v-if="sec.linhas.length" class="bg-muted/30 font-semibold">
+                  <tr class="border-t">
+                    <td class="px-3 py-2">Total</td>
+                    <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(sec.total_faturamento) }}</td>
+                    <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(sec.total_custo) }}</td>
+                    <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(sec.total_rentabilidade) }}</td>
+                    <td class="px-3 py-2 text-right tabular-nums">{{ fmtPct(sec.total_margem) }}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </section>
+      </template>
+    </template>
+
+    <!-- ─────────────────────────────────────────  Aba ESTOQUE BLING  ──────────── -->
+    <template v-if="tab === 'estoque'">
+      <p class="text-xs text-muted-foreground">
+        Snapshot diário do estoque por local (PI/SA/SP/RA/CD/CI/US/Eletro/Mala/Outros),
+        valor = saldo físico × preço de custo. Roda às 8h BRT.
+        <template v-if="estoque">
+          · data {{ diaLabel(estoque.data) }} · gravado {{ estoqueUpdatedEm }}.
+        </template>
+      </p>
+
+      <div v-if="errorEstoque === 'estoque_bling_sem_snapshot'" class="text-sm text-muted-foreground">
+        Nenhum snapshot ainda — aguarde a primeira execução do cron diário (≈08h BRT).
+      </div>
+      <div v-else-if="errorEstoque" class="text-sm text-destructive">{{ errorEstoque }}</div>
+      <div v-if="loadingEstoque && !estoque" class="text-sm text-muted-foreground">
+        <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
+      </div>
+
+      <template v-if="estoque">
+        <div class="border rounded-md overflow-auto">
+          <table class="w-full text-sm border-collapse">
+            <thead class="bg-muted/50 text-xs uppercase tracking-wide">
+              <tr>
+                <th class="text-left px-3 py-2 font-medium">Local</th>
+                <th class="text-right px-3 py-2 font-medium">Quantidade</th>
+                <th class="text-right px-3 py-2 font-medium">Valor</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="!estoque.locais.length">
+                <td colspan="3" class="text-center py-6 text-muted-foreground">Sem itens em estoque.</td>
+              </tr>
+              <tr
+                v-for="r in estoque.locais"
+                :key="r.local"
+                class="border-t hover:bg-muted/20"
+              >
+                <td class="px-3 py-1.5 font-medium">{{ r.local }}</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtInt(r.qtd) }}</td>
+                <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.valor) }}</td>
+              </tr>
+            </tbody>
+            <tfoot class="bg-muted/30 font-semibold">
+              <tr class="border-t">
+                <td class="px-3 py-2">TOTAL</td>
+                <td class="px-3 py-2 text-right tabular-nums">{{ fmtInt(estoque.total_qtd) }}</td>
+                <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(estoque.total_valor) }}</td>
+              </tr>
+            </tfoot>
+          </table>
         </div>
-      </section>
+      </template>
     </template>
   </div>
 </template>

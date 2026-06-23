@@ -58,6 +58,7 @@ from app.services.product_cost_sync import (
     run_sync_import_bling_costs,
     run_sync_product_bling_costs,
 )
+from app.services.valuation_estoque_snapshot import run_valuation_estoque_snapshot
 from app.services.notas_fiscais_export import run_export_notas
 from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.refunds_freight_sync import backfill_freight_refunds
@@ -584,6 +585,18 @@ async def kit_components_sync(ctx: dict) -> None:
     async with session_scope() as s:
         summary = await run_sync_kit_components(s)
     logger.info("kit_components_sync_done", **summary)
+
+
+async def valuation_estoque_snapshot(ctx: dict) -> None:
+    """Diário (~08h BRT): crawl do Bling pra gravar o snapshot de estoque por
+    local (PI/SA/SP/RA/CD/CI/US/Eletro/Mala/Outros) em
+    `valuation_estoque_bling_diario`. Também atualiza `valuation.estoque`
+    (total) — substitui a rotina externa estoque-bling-diario que mandava o
+    breakdown no Threema. A aba "Estoque Bling" da página
+    /financeiro/valuation lê esta tabela."""
+    async with session_scope() as s:
+        summary = await run_valuation_estoque_snapshot(s)
+    logger.info("valuation_estoque_snapshot_done", **summary)
 
 
 async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_s: int) -> None:
@@ -1246,6 +1259,7 @@ class WorkerSettings:
         bling_orders_period_sync_tick,
         bling_notas_token_refresh,
         kit_components_sync,
+        valuation_estoque_snapshot,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -1266,6 +1280,12 @@ class WorkerSettings:
         # Semanal: cache da composição dos kits (bling_kit_components). Domingo
         # 04:30 UTC = 01:30 BRT — janela tranquila. Estrutura muda raramente.
         cron(kit_components_sync, weekday="sun", hour=4, minute=30, run_at_startup=False),
+        # Diário 11:00 UTC = 08:00 BRT (mesmo horário da rotina externa
+        # estoque-bling-diario antes da migração): crawl Bling, grava
+        # snapshot do estoque por local em valuation_estoque_bling_diario
+        # e atualiza valuation.estoque (total). A aba "Estoque Bling" da
+        # página /financeiro/valuation lê dessa tabela.
+        cron(valuation_estoque_snapshot, hour=11, minute=0, run_at_startup=False),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps
         # 5/5/5/5/4h — sempre abaixo da expiração. minute=45 evita colidir
