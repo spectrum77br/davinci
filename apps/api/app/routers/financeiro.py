@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import require_admin, require_permission
 from app.models import (
     DNPConfig,
     DNPProduto,
@@ -839,7 +839,7 @@ def require_valuation_unlock(
 @router.get("/valuation", response_model=ValuationReportOut)
 async def valuation_report(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro_valuation", "view"))],
+    _u: Annotated[User, Depends(require_admin)],
     _unlocked: Annotated[None, Depends(require_valuation_unlock)] = None,
 ) -> ValuationReportOut:
     """Relatório de faturamento dos últimos 3 meses (porta web do PDF diário).
@@ -982,7 +982,7 @@ _ESTOQUE_LOCAIS_ORDEM = ["PI", "SA", "SP", "RA", "CD", "CI", "US", "Eletro", "Ma
 @router.post("/valuation/unlock", response_model=ValuationUnlockOut)
 async def valuation_unlock(
     body: ValuationUnlockIn,
-    _u: Annotated[User, Depends(require_permission("financeiro_valuation", "view"))],
+    _u: Annotated[User, Depends(require_admin)],
 ) -> ValuationUnlockOut:
     """Valida a senha extra e devolve um token (HMAC + TTL). Senha errada =
     401 com sleep curto (mitiga brute-force; sem rate-limit dedicado porque
@@ -998,7 +998,7 @@ async def valuation_unlock(
 @router.get("/valuation/estoque-bling", response_model=EstoqueBlingSnapshotOut)
 async def valuation_estoque_bling(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro_valuation", "view"))],
+    _u: Annotated[User, Depends(require_admin)],
     _unlocked: Annotated[None, Depends(require_valuation_unlock)] = None,
 ) -> EstoqueBlingSnapshotOut:
     """Último snapshot diário do estoque Bling por local.

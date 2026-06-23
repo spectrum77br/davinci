@@ -100,7 +100,7 @@ const sections: Section[] = [
   {
     label: 'Financeiro',
     items: [
-      { to: '/financeiro/valuation', label: 'Valuation', icon: Landmark, resource: 'financeiro_valuation' },
+      { to: '/financeiro/valuation', label: 'Valuation', icon: Landmark, adminOnly: true },
       { to: '/financeiro/consorcio', label: 'Consórcio', icon: Coins, resource: 'financeiro_consorcio' },
     ],
   },

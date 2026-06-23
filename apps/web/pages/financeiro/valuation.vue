@@ -10,8 +10,7 @@ import { computed, onMounted, ref } from 'vue'
 import { Loader2, Lock, RefreshCw } from 'lucide-vue-next'
 
 definePageMeta({
-  middleware: ['permission'],
-  permission: { resource: 'financeiro_valuation', action: 'view' },
+  middleware: ['admin'],
 })
 
 const { api } = useApi()

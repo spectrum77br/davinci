@@ -26,7 +26,10 @@ Resource = Literal[
     "financeiro_suprimentos",
     "financeiro_simulacao",
     "financeiro_dnp",
-    # Valuation — relatório de faturamento 3 meses (porta web do PDF diário)
+    # Legacy — Valuation virou admin-only (require_admin no router), o
+    # resource não é mais usado em runtime. Mantido aqui pra JSONB salvo
+    # antes da mudança não falhar na validação (mesmo precedente do
+    # "financeiro" legacy acima).
     "financeiro_valuation",
     # Importação module — controle de pedidos de importação (malas/China)
     "importacao",
