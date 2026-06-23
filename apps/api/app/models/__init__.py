@@ -2,6 +2,7 @@ from app.models.alert import Alert
 from app.models.audit import AuditFinding, AuditRun, AuditUpload
 from app.models.auth_code import AuthCode
 from app.models.base import Base
+from app.models.bling_envio_evento import BlingEnvioEvento
 from app.models.bling_kit_component import BlingKitComponent
 from app.models.bling_nota import BlingNota
 from app.models.bling_order import BlingOrder
@@ -105,6 +106,7 @@ __all__ = [
     "BackgroundJobStatus",
     "BackgroundJobType",
     "Base",
+    "BlingEnvioEvento",
     "BlingNota",
     "BlingOrder",
     "Cadastro",

@@ -39,7 +39,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import BlingOrder, EstoqueDiaFinalizado, Product, User, UserRole
+from app.models import (
+    BlingEnvioEvento,
+    BlingOrder,
+    EstoqueDiaFinalizado,
+    Product,
+    User,
+    UserRole,
+)
 from app.models.company import Store
 from app.models.integration import Integration
 from app.models.stock_check import StockCheck
@@ -616,6 +623,33 @@ async def list_estoque_envios(
             .order_by(BlingOrder.em_andamento_data.desc())
         )
     ).all()
+    old_by_day = {r.dia.isoformat(): int(r.envios or 0) for r in rows if r.dia}
+
+    # Contagem PARALELA pelo ledger de eventos (migration 0156): conta o
+    # EVENTO de entrada na situação 15, bucketizado por `shipping_day` (corte
+    # 08:00 BRT) — imune ao recarimbo de `em_andamento_data` e estável a
+    # cancelamentos posteriores. Roda lado a lado com `envios` (acima) pra
+    # validação antes da troca definitiva. Mesma classificação de tag
+    # (`sql_clause_for_tag`) → atribuição por estoque idêntica à de hoje.
+    ledger_where: list = [
+        BlingEnvioEvento.shipping_day >= data_inicio,
+        BlingEnvioEvento.shipping_day <= data_fim,
+    ]
+    if tags is not None:
+        ledger_where.append(
+            or_(*[_sql_clause_for_tag(BlingEnvioEvento.item_codigo, t) for t in tags])
+        )
+    ledger_rows = (
+        await session.execute(
+            select(
+                BlingEnvioEvento.shipping_day.label("dia"),
+                func.count(func.distinct(BlingEnvioEvento.bling_id)).label("envios"),
+            )
+            .where(and_(*ledger_where))
+            .group_by(BlingEnvioEvento.shipping_day)
+        )
+    ).all()
+    ledger_by_day = {r.dia.isoformat(): int(r.envios or 0) for r in ledger_rows if r.dia}
 
     check_where = [
         StockCheck.section == "envio",
@@ -658,12 +692,19 @@ async def list_estoque_envios(
         )
     )).all()}
 
+    # União dos dias das duas fontes (em_andamento_data × ledger): assim um
+    # dia que diverge — só tem envio numa das contagens — aparece mesmo assim,
+    # que é o ponto da validação em paralelo. Ordena desc (ISO ordena como data).
+    locks_str = {d.isoformat() for d in locks}
+    all_days = sorted(set(old_by_day) | set(ledger_by_day), reverse=True)
+
     items: list[dict[str, Any]] = []
     total_envios = 0
+    total_envios_evento = 0
     total_conferido = 0
-    for r in rows:
-        dia_str = r.dia.isoformat() if r.dia else ""
-        envios_n = int(r.envios or 0)
+    for dia_str in all_days:
+        envios_n = old_by_day.get(dia_str, 0)
+        envios_evento_n = ledger_by_day.get(dia_str, 0)
         conf = checks.get(dia_str, False)
         # `conferido_filter` is applied client-of-the-loop so totals
         # reflect the visible set only. `all` (or None) shows everything;
@@ -673,7 +714,7 @@ async def list_estoque_envios(
         if conferido_filter == "nao_conferidos" and conf:
             continue
         estoque_conferidos = estoque_checks_by_day.get(dia_str, 0)
-        if r.dia in locks:
+        if dia_str in locks_str:
             # Dia travado: ignora o count atual de produtos.
             conferencia_estoque = "total"
         elif total_produtos == 0:
@@ -687,10 +728,14 @@ async def list_estoque_envios(
         items.append({
             "data": dia_str,
             "envios": envios_n,
+            # Contagem nova (ledger por evento, corte 08:00). Em paralelo até
+            # validar; depois `envios` passa a vir daqui (ver migration 0156).
+            "envios_evento": envios_evento_n,
             "conferido": conf,
             "conferencia_estoque": conferencia_estoque,
         })
         total_envios += envios_n
+        total_envios_evento += envios_evento_n
         if conf:
             total_conferido += envios_n
 
@@ -700,6 +745,7 @@ async def list_estoque_envios(
         # mantido pra "Total geral" se a UI quiser exibir.
         "total": total_conferido,
         "total_envios": total_envios,
+        "total_envios_evento": total_envios_evento,
         "total_conferido": total_conferido,
         "periodo": {"inicio": str(data_inicio), "fim": str(data_fim)},
     }

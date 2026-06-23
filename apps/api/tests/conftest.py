@@ -169,6 +169,47 @@ async def _setup_schema():
                 """
             )
         )
+        # Ledger de envios por evento: a TABELA vem do create_all (é model),
+        # mas a FUNÇÃO + TRIGGER não — recriadas aqui à mão, em sincronia com
+        # alembic/versions/0156_bling_envio_evento.py, pra que inserts/updates
+        # de situação em bling_orders disparem a captura também nos testes.
+        # Nomes NÃO-qualificados de propósito: o search_path do engine de teste
+        # (davinci_test,public) resolve tudo pro schema de teste — e evita o
+        # S608 que f-strings com INSERT disparam.
+        await conn.execute(text(
+            """
+            CREATE OR REPLACE FUNCTION bling_envio_evento_capture_fn()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.situacao = '15'
+                   AND NEW.bling_id IS NOT NULL
+                   AND NEW.item_index IS NOT NULL
+                   AND (TG_OP = 'INSERT' OR OLD.situacao IS DISTINCT FROM '15') THEN
+                    INSERT INTO bling_envio_evento
+                        (bling_id, item_index, item_codigo, numero,
+                         occurred_at, shipping_day)
+                    VALUES (
+                        NEW.bling_id, NEW.item_index, NEW.item_codigo, NEW.numero,
+                        now(),
+                        ((now() AT TIME ZONE 'America/Sao_Paulo')
+                         - interval '8 hours')::date
+                    )
+                    ON CONFLICT (bling_id, item_index) DO NOTHING;
+                END IF;
+                RETURN NULL;
+            END;
+            $$
+            """
+        ))
+        await conn.execute(text(
+            """
+            CREATE TRIGGER bling_orders_envio_evento_capture
+            AFTER INSERT OR UPDATE OF situacao
+            ON bling_orders
+            FOR EACH ROW
+            EXECUTE FUNCTION bling_envio_evento_capture_fn()
+            """
+        ))
     yield
     async with _test_engine.begin() as conn:
         await conn.execute(text(f'DROP SCHEMA IF EXISTS "{TEST_SCHEMA}" CASCADE'))
@@ -211,6 +252,7 @@ _CLEANUP_TABLES = (
     "products",
     "margens",
     "refunds",
+    "bling_envio_evento",
     "bling_orders",
     "situacao_bling",
     "background_jobs",
