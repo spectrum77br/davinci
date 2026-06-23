@@ -463,18 +463,15 @@ async function setStatus(row: MarketplaceRow, value: MargensStatus) {
     removeFromView()
   } catch (e: any) {
     if (pushBling && isBlingPatchError(e)) {
-      const ok = window.confirm(
-        `O pedido nao foi alterado no Bling.\n\nDeseja continuar e marcar como ${value} apenas no DaVinci?`,
-      )
-      if (ok) {
-        try {
-          await call(true)
-          error.value = null
-          removeFromView()
-          return
-        } catch (fallback: any) {
-          error.value = apiError(fallback)
-        }
+      // Bling não aceitou o patch de situação: marca como aprovado/reprovado
+      // apenas no DaVinci automaticamente, sem pedir confirmação ao usuário.
+      try {
+        await call(true)
+        error.value = null
+        removeFromView()
+        return
+      } catch (fallback: any) {
+        error.value = apiError(fallback)
       }
     } else {
       error.value = apiError(e)
@@ -631,9 +628,9 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       class="flex items-center gap-2.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm text-blue-700 dark:text-blue-300"
     >
       <Loader2 class="size-4 shrink-0 animate-spin" />
-      <span class="font-medium">Atualizando snapshot em segundo plano…</span>
+      <span class="font-medium">Atualizando a margem em segundo plano…</span>
       <span class="text-xs text-blue-700/70 dark:text-blue-300/70">
-        a tabela abaixo já tem o snapshot atual e troca ao concluir
+        pode continuar usando — a tabela troca sozinha quando os novos dados chegarem
       </span>
       <span class="ml-auto text-xs text-muted-foreground tabular-nums">{{ fmtElapsed(autoRefreshElapsedMs) }}</span>
     </div>
@@ -642,7 +639,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       class="flex items-center gap-2.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300"
     >
       <Check class="size-4 shrink-0" />
-      <span class="font-medium">Snapshot atualizado.</span>
+      <span class="font-medium">Margem atualizada.</span>
     </div>
 
     <div class="flex items-center gap-1 border-b">
