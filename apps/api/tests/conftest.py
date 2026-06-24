@@ -169,10 +169,11 @@ async def _setup_schema():
                 """
             )
         )
-        # Ledger de envios por evento: a TABELA vem do create_all (é model),
-        # mas a FUNÇÃO + TRIGGER não — recriadas aqui à mão, em sincronia com
-        # alembic/versions/0156_bling_envio_evento.py, pra que inserts/updates
-        # de situação em bling_orders disparem a captura também nos testes.
+        # Ledger de envios por evento: as TABELAS vêm do create_all (são
+        # models), mas a FUNÇÃO + TRIGGER não — recriadas aqui à mão, em
+        # sincronia com alembic/versions/0157_bling_envio_correcao.py (corpo
+        # atual da função; 0156 criou o trigger), pra que inserts/updates de
+        # situação em bling_orders disparem a captura também nos testes.
         # Nomes NÃO-qualificados de propósito: o search_path do engine de teste
         # (davinci_test,public) resolve tudo pro schema de teste — e evita o
         # S608 que f-strings com INSERT disparam.
@@ -180,21 +181,47 @@ async def _setup_schema():
             """
             CREATE OR REPLACE FUNCTION bling_envio_evento_capture_fn()
             RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE
+                v_today date := ((now() AT TIME ZONE 'America/Sao_Paulo')
+                                 - interval '8 hours')::date;
+                v_old_day date;
+                v_found boolean;
             BEGIN
-                IF NEW.situacao = '15'
-                   AND NEW.bling_id IS NOT NULL
-                   AND NEW.item_index IS NOT NULL
-                   AND (TG_OP = 'INSERT' OR OLD.situacao IS DISTINCT FROM '15') THEN
+                IF NEW.situacao IS DISTINCT FROM '15'
+                   OR NEW.bling_id IS NULL OR NEW.item_index IS NULL THEN
+                    RETURN NULL;
+                END IF;
+
+                SELECT shipping_day INTO v_old_day
+                FROM bling_envio_evento
+                WHERE bling_id = NEW.bling_id AND item_index = NEW.item_index;
+                v_found := FOUND;
+
+                IF NOT v_found THEN
                     INSERT INTO bling_envio_evento
                         (bling_id, item_index, item_codigo, numero,
                          occurred_at, shipping_day)
-                    VALUES (
-                        NEW.bling_id, NEW.item_index, NEW.item_codigo, NEW.numero,
-                        now(),
-                        ((now() AT TIME ZONE 'America/Sao_Paulo')
-                         - interval '8 hours')::date
-                    )
+                    VALUES (NEW.bling_id, NEW.item_index, NEW.item_codigo,
+                            NEW.numero, now(), v_today)
                     ON CONFLICT (bling_id, item_index) DO NOTHING;
+                    RETURN NULL;
+                END IF;
+
+                IF TG_OP = 'UPDATE'
+                   AND OLD.situacao IS DISTINCT FROM '15'
+                   AND (OLD.situacao IS NULL OR OLD.situacao IN
+                        ('6','12','21','83955','83962','83966','84686','545901','83965'))
+                   AND v_old_day IS DISTINCT FROM v_today THEN
+                    UPDATE bling_envio_evento
+                    SET shipping_day = v_today, occurred_at = now(),
+                        item_codigo = NEW.item_codigo, numero = NEW.numero
+                    WHERE bling_id = NEW.bling_id AND item_index = NEW.item_index;
+
+                    INSERT INTO bling_envio_correcao
+                        (bling_id, numero, item_codigo, dia_anterior, dia_novo)
+                    VALUES (NEW.bling_id, NEW.numero, NEW.item_codigo,
+                            v_old_day, v_today)
+                    ON CONFLICT (bling_id, dia_anterior, dia_novo) DO NOTHING;
                 END IF;
                 RETURN NULL;
             END;
@@ -252,6 +279,7 @@ _CLEANUP_TABLES = (
     "products",
     "margens",
     "refunds",
+    "bling_envio_correcao",
     "bling_envio_evento",
     "bling_orders",
     "situacao_bling",

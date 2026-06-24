@@ -25,12 +25,16 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    BlingEnvioCorrecao,
     BlingEnvioEvento,
     BlingOrder,
     User,
     UserRole,
     UserStatus,
 )
+
+# Dia claramente no passado: garante v_old_day != hoje no re-carimbo.
+_DIA_ERRADO = date(2020, 1, 1)
 
 PERM_VIEW = {"controle_estoque": {"view": True, "edit": False, "delete": False}}
 _DIA = date(2026, 6, 2)
@@ -281,3 +285,96 @@ async def test_endpoint_filtra_por_tag_do_operador(
     body_admin = await _get_envios(client)
     dia_admin = next(i for i in body_admin["data"] if i["data"] == _DIA.isoformat())
     assert dia_admin["envios_evento"] == 2  # .ra + .ci
+
+
+# ─── Correção de dia (erro→volta→relança noutro dia) + fila Threema ───────
+
+
+async def _ledger_dia(db: AsyncSession, bling_id: int, item_index: int = 0) -> date:
+    return (await db.execute(
+        select(BlingEnvioEvento.shipping_day)
+        .where(BlingEnvioEvento.bling_id == bling_id,
+               BlingEnvioEvento.item_index == item_index)
+    )).scalar_one()
+
+
+async def _correcoes(db: AsyncSession, bling_id: int) -> list[BlingEnvioCorrecao]:
+    return list((await db.execute(
+        select(BlingEnvioCorrecao).where(BlingEnvioCorrecao.bling_id == bling_id)
+    )).scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_bounce_mesmo_dia_nao_gera_correcao(db: AsyncSession):
+    """6→15→6→15 no MESMO dia: re-stamp não move (mesmo dia), sem correção."""
+    o = await _add_order(db, bling_id=950001, situacao="6")
+    o.situacao = "15"
+    await db.commit()
+    o.situacao = "6"
+    await db.commit()
+    o.situacao = "15"
+    await db.commit()
+    assert await _ledger_count(db, 950001) == 1
+    assert len(await _correcoes(db, 950001)) == 0
+
+
+@pytest.mark.asyncio
+async def test_correcao_cross_day_recarimba_e_enfileira(db: AsyncSession):
+    """Pedido carimbado num dia ERRADO (passado); operador volta pra em aberto
+    e relança em 15 → re-carimba pro dia de hoje E enfileira a correção. Não
+    duplica (1 linha no ledger)."""
+    o = await _add_order(db, bling_id=950002, situacao="6")
+    # ledger já tem o dia errado (envio equivocado de um dia passado)
+    await _seed_evento(db, bling_id=950002, shipping_day=_DIA_ERRADO,
+                       item_codigo="sku-950002")
+    o.situacao = "15"   # correção: 6 → 15 hoje
+    await db.commit()
+    novo = await _ledger_dia(db, 950002)
+    assert novo != _DIA_ERRADO            # moveu pro dia de hoje
+    assert await _ledger_count(db, 950002) == 1  # não duplicou
+    cs = await _correcoes(db, 950002)
+    assert len(cs) == 1
+    assert cs[0].dia_anterior == _DIA_ERRADO
+    assert cs[0].dia_novo == novo
+    assert cs[0].threema_sent_at is None  # pendente p/ a rotina drenar
+
+
+@pytest.mark.asyncio
+async def test_correcao_multi_item_um_aviso_so(db: AsyncSession):
+    """Pedido com 2 itens corrigido → 1 linha só na fila (dedup por
+    bling_id+dia_anterior+dia_novo), mas os 2 itens movem no ledger."""
+    await _add_order(db, bling_id=950003, situacao="6", item_index=0, item_codigo="a.ra")
+    await _add_order(db, bling_id=950003, situacao="6", item_index=1, item_codigo="b.ra")
+    await _seed_evento(db, bling_id=950003, shipping_day=_DIA_ERRADO,
+                       item_codigo="a.ra", item_index=0)
+    await _seed_evento(db, bling_id=950003, shipping_day=_DIA_ERRADO,
+                       item_codigo="b.ra", item_index=1)
+    await db.execute(text("UPDATE bling_orders SET situacao='15' WHERE bling_id=950003"))
+    await db.commit()
+    assert len(await _correcoes(db, 950003)) == 1            # 1 aviso só
+    assert await _ledger_dia(db, 950003, 0) != _DIA_ERRADO   # item 0 moveu
+    assert await _ledger_dia(db, 950003, 1) != _DIA_ERRADO   # item 1 moveu
+
+
+@pytest.mark.asyncio
+async def test_oscilacao_entregue_para_15_nao_recarimba(db: AsyncSession):
+    """Entregue(83953)→15 (oscilação do Bling, vem de estado JÁ-enviado): NÃO
+    move o dia nem enfileira — o pedido já tinha saído."""
+    o = await _add_order(db, bling_id=950004, situacao="83953")
+    await _seed_evento(db, bling_id=950004, shipping_day=_DIA_ERRADO,
+                       item_codigo="sku-950004")
+    o.situacao = "15"
+    await db.commit()
+    assert await _ledger_dia(db, 950004) == _DIA_ERRADO   # preservado
+    assert len(await _correcoes(db, 950004)) == 0
+
+
+@pytest.mark.asyncio
+async def test_reinsert_sync_nao_recarimba(db: AsyncSession):
+    """Reinsert do sync (DELETE+INSERT → TG_OP=INSERT) com ledger já existente:
+    preserva o dia, não enfileira. É a defesa contra o re-carimbo do sync."""
+    await _seed_evento(db, bling_id=950005, shipping_day=_DIA_ERRADO,
+                       item_codigo="sku-950005")
+    await _add_order(db, bling_id=950005, situacao="15", item_codigo="sku-950005")
+    assert await _ledger_dia(db, 950005) == _DIA_ERRADO   # preservado
+    assert len(await _correcoes(db, 950005)) == 0
