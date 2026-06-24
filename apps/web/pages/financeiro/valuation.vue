@@ -393,7 +393,7 @@ const loading = computed(() =>
         :class="tab === 'saldo' ? 'bg-primary text-primary-foreground' : ''"
         @click="setTab('saldo')"
       >
-        Saldo Marketplace
+        A Receber
       </button>
     </div>
 
