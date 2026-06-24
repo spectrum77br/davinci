@@ -61,8 +61,8 @@ function cooldownLeft(id: string): number {
 const showNew = ref(false)
 const filter = ref('')
 
-const canEdit = useCan('empresa', 'edit')
-const canDelete = useCan('empresa', 'delete')
+const canEdit = useCan('integracoes', 'edit')
+const canDelete = useCan('integracoes', 'delete')
 
 async function refresh() {
   loading.value = true

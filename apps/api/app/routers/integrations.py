@@ -129,7 +129,7 @@ async def get_integration(
 async def create_integration(
     body: IntegrationCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_permission("empresa", "edit"))],
+    user: Annotated[User, Depends(require_permission("integracoes", "edit"))],
 ) -> IntegrationOut:
     store = (await session.execute(select(Store).where(Store.id == body.store_id))).scalar_one_or_none()
     if store is None:
@@ -164,7 +164,7 @@ async def patch_integration(
     integration_id: UUID,
     body: IntegrationPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("empresa", "edit"))],
+    _u: Annotated[User, Depends(require_permission("integracoes", "edit"))],
 ) -> IntegrationOut:
     i = (await session.execute(select(Integration).where(Integration.id == integration_id))).scalar_one_or_none()
     if i is None:
@@ -189,7 +189,7 @@ async def patch_integration(
 async def delete_integration(
     integration_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("empresa", "delete"))],
+    _u: Annotated[User, Depends(require_permission("integracoes", "delete"))],
 ) -> None:
     i = (await session.execute(select(Integration).where(Integration.id == integration_id))).scalar_one_or_none()
     if i is None:
@@ -262,7 +262,7 @@ TIKTOK_STATE_TTL_MIN = 10
 @router.get("/tiktok/start", response_model=OAuthStartOut)
 async def tiktok_oauth_start(
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_permission("empresa", "edit"))],
+    user: Annotated[User, Depends(require_permission("integracoes", "edit"))],
     integration_id: Annotated[UUID, Query(alias="integrationId")],
     origin: Annotated[str | None, Query()] = None,
 ) -> OAuthStartOut:
@@ -381,7 +381,7 @@ async def tiktok_oauth_callback(
 async def list_bling_stores(
     integration_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("empresa", "view"))],
+    _u: Annotated[User, Depends(require_permission("integracoes", "view"))],
 ) -> BlingStoresOut:
     i = (await session.execute(select(Integration).where(Integration.id == integration_id))).scalar_one_or_none()
     if i is None:
