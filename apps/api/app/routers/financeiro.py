@@ -10,6 +10,7 @@ cacheado pras próximas. Isso evita inventar números.
 import asyncio
 import hashlib
 import hmac
+import re
 import secrets
 import time
 from datetime import UTC, datetime
@@ -1060,6 +1061,12 @@ def _f_or_none(v) -> float | None:
         return None
 
 
+def _norm_loja(s: str | None) -> str:
+    """Normaliza nome de loja p/ casar o perfil AdsPower com
+    `store_info.account_name` (minúsculas, só alfanumérico)."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
 @router.get("/valuation/saldo-marketplace", response_model=SaldoMarketplaceSnapshotOut)
 async def valuation_saldo_marketplace(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1086,6 +1093,35 @@ async def valuation_saldo_marketplace(
 
     por_loja: list = row["por_loja"] or []
 
+    # O snapshot guarda o NOME DO PERFIL AdsPower (ex.: "Luminin - ml sho").
+    # Na tela queremos o nome da loja como aparece na página "Lojas"
+    # (store_info.account_name). Casamos pelo prefixo antes de " - ",
+    # normalizado; se não houver match exato, tentamos um account_name que
+    # comece com o prefixo (ex.: "Victor" → "victor mei").
+    acct_names = (
+        await session.execute(
+            text(
+                f"SELECT DISTINCT account_name FROM {_qt('store_info')} "
+                f"WHERE account_name IS NOT NULL AND account_name <> ''"
+            )
+        )
+    ).scalars().all()
+    acct_por_norm: dict[str, str] = {}
+    for a in acct_names:
+        acct_por_norm.setdefault(_norm_loja(a), a)
+
+    def _resolve_loja(raw: str) -> str:
+        prefixo = (raw or "").split(" - ")[0].strip()
+        n = _norm_loja(prefixo)
+        if not n:
+            return raw or "—"
+        if n in acct_por_norm:
+            return acct_por_norm[n]
+        for norm, orig in acct_por_norm.items():
+            if norm.startswith(n):
+                return orig
+        return prefixo or raw or "—"
+
     # Descobre o conjunto de marketplaces presentes → colunas dinâmicas.
     presentes: set[str] = set()
     for entry in por_loja:
@@ -1109,7 +1145,7 @@ async def valuation_saldo_marketplace(
             saldos[mkt] = SaldoMarketplaceCelulaOut(disponivel=disp, a_receber=arec)
             loja_receber += arec or 0.0
         lojas.append(SaldoMarketplaceLojaOut(
-            loja=str(entry.get("loja") or "—"),
+            loja=_resolve_loja(str(entry.get("loja") or "")),
             saldos=saldos,
             total_a_receber=round(loja_receber, 2),
         ))
