@@ -579,6 +579,38 @@ async def _next_z_sku_for_tag(
     raise RuntimeError("Espaço de z-SKU esgotado")
 
 
+async def _ensure_local_product(
+    session: AsyncSession, bling_product_id: int, ctx: dict
+) -> None:
+    """Garante a linha local em `products` pro avulso recém-criado, na hora.
+
+    Idempotente e best-effort: nunca derruba o retorno de estoque. Resolve o
+    dono pelo ProductLink Bling (mesma atribuição single-tenant do webhook)."""
+    from app.models.product import ProductLink
+    from app.services.bling_product_create import run_auto_create_product_from_bling
+
+    try:
+        link = (
+            await session.execute(
+                select(ProductLink)
+                .where(ProductLink.platform == IntegrationPlatform.BLING)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if link is None:
+            logger.warning("devolution_local_product_no_link", **ctx)
+            return
+        await run_auto_create_product_from_bling(
+            session, bling_product_id=bling_product_id, user_id=link.user_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Webhook/job ainda é o fallback; só logamos.
+        logger.warning(
+            "devolution_local_product_failed",
+            bling_product_id=bling_product_id, error=str(exc), **ctx,
+        )
+
+
 async def _create_z_product(
     client: BlingClient, session: AsyncSession, tag: str | None,
     eff_sku: str, eff_condicao: str, row: Devolution, qty: int, obs: str, ctx: dict,
@@ -624,6 +656,12 @@ async def _create_z_product(
     pid = int(product_id)
     await _persist_cost(client, pid, cost, ctx)
     await client.update_stock_by_id(pid, qty=qty, operation="E", observacao=obs, custo=cost)
+    # Cria a linha local em `products` JÁ — sem isso o avulso só apareceria na
+    # busca da devolução depois que o webhook `product.created` do Bling
+    # dispara o job arq `auto_create_product_from_bling`, que é frágil (o Bling
+    # V3 perde webhooks). Quando o job não rodava, o z ficava invisível pra
+    # seleção. Reaproveita o mesmo serviço (idempotente) de forma síncrona.
+    await _ensure_local_product(session, pid, ctx)
     logger.info(
         "devolution_stock_created_avulso",
         target_sku=target_sku, bling_product_id=pid, name=name, **ctx,
