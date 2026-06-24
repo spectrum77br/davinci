@@ -700,11 +700,16 @@ async def list_estoque_envios(
 
     items: list[dict[str, Any]] = []
     total_envios = 0
-    total_envios_evento = 0
+    total_em_andamento = 0
     total_conferido = 0
     for dia_str in all_days:
-        envios_n = old_by_day.get(dia_str, 0)
-        envios_evento_n = ledger_by_day.get(dia_str, 0)
+        # Cutover 2026-06-24: a contagem OFICIAL de "Envios" passa a vir do
+        # ledger de evento (shipping_day, corte 08:00 — migration 0156),
+        # imune ao recarimbo de em_andamento_data. A contagem antiga
+        # (`envios_em_andamento`) continua exposta como coluna de
+        # comparação admin enquanto o corte 08:00 é validado dia a dia.
+        envios_n = ledger_by_day.get(dia_str, 0)
+        envios_em_andamento_n = old_by_day.get(dia_str, 0)
         conf = checks.get(dia_str, False)
         # `conferido_filter` is applied client-of-the-loop so totals
         # reflect the visible set only. `all` (or None) shows everything;
@@ -727,15 +732,15 @@ async def list_estoque_envios(
             conferencia_estoque = "nenhuma"
         items.append({
             "data": dia_str,
+            # `envios` = contagem oficial (ledger de evento, pós-cutover).
             "envios": envios_n,
-            # Contagem nova (ledger por evento, corte 08:00). Em paralelo até
-            # validar; depois `envios` passa a vir daqui (ver migration 0156).
-            "envios_evento": envios_evento_n,
+            # Contagem antiga (em_andamento_data) — só comparação admin.
+            "envios_em_andamento": envios_em_andamento_n,
             "conferido": conf,
             "conferencia_estoque": conferencia_estoque,
         })
         total_envios += envios_n
-        total_envios_evento += envios_evento_n
+        total_em_andamento += envios_em_andamento_n
         if conf:
             total_conferido += envios_n
 
@@ -745,7 +750,7 @@ async def list_estoque_envios(
         # mantido pra "Total geral" se a UI quiser exibir.
         "total": total_conferido,
         "total_envios": total_envios,
-        "total_envios_evento": total_envios_evento,
+        "total_em_andamento": total_em_andamento,
         "total_conferido": total_conferido,
         "periodo": {"inicio": str(data_inicio), "fim": str(data_fim)},
     }

@@ -6,9 +6,9 @@ Cobre dois níveis:
     15, é idempotente (1ª entrada vence, nunca move) e mantém o registro mesmo
     se o pedido depois for cancelado. O trigger é recriado no conftest
     (`_setup_schema`) porque o `create_all` só faz a tabela, não a função.
-  * Endpoint `GET /api/estoque/envios` — expõe `envios_evento` por dia ao lado
-    de `envios`, com a mesma classificação de tag e união dos dias das duas
-    fontes.
+  * Endpoint `GET /api/estoque/envios` — pós-cutover 2026-06-24, `envios` é a
+    contagem OFICIAL (ledger por evento); `envios_em_andamento` segue ao lado
+    como comparação admin. Mesma classificação de tag e união dos dias.
 
 Mais o corte das 08:00 BRT (`shipping_day`) validado direto no SQL.
 """
@@ -231,8 +231,9 @@ async def test_endpoint_expoe_envios_evento(
     await _seed_evento(db, bling_id=940001, shipping_day=_DIA, item_codigo="x.ra")
     body = await _get_envios(client)
     dia = next(i for i in body["data"] if i["data"] == _DIA.isoformat())
-    assert dia["envios_evento"] == 1
-    assert body["total_envios_evento"] == 1
+    # Pós-cutover 2026-06-24: `envios` é a contagem oficial (ledger).
+    assert dia["envios"] == 1
+    assert body["total_envios"] == 1
 
 
 @pytest.mark.asyncio
@@ -248,7 +249,7 @@ async def test_endpoint_distinct_bling_id(
                        item_codigo="b.ra", item_index=1)
     body = await _get_envios(client)
     dia = next(i for i in body["data"] if i["data"] == _DIA.isoformat())
-    assert dia["envios_evento"] == 1
+    assert dia["envios"] == 1
 
 
 @pytest.mark.asyncio
@@ -257,13 +258,13 @@ async def test_endpoint_dia_so_no_ledger_aparece(
     auth_as: Callable[[User | None], None], admin_view: User,
 ):
     """Dia que só existe no ledger (nenhum BlingOrder verde) aparece com
-    envios=0 e envios_evento>0 — a divergência fica visível."""
+    envios_em_andamento=0 e envios>0 — a divergência fica visível."""
     auth_as(admin_view)
     await _seed_evento(db, bling_id=940003, shipping_day=_DIA, item_codigo="y.ci")
     body = await _get_envios(client)
     dia = next(i for i in body["data"] if i["data"] == _DIA.isoformat())
-    assert dia["envios"] == 0
-    assert dia["envios_evento"] == 1
+    assert dia["envios_em_andamento"] == 0
+    assert dia["envios"] == 1
 
 
 @pytest.mark.asyncio
@@ -279,12 +280,12 @@ async def test_endpoint_filtra_por_tag_do_operador(
     auth_as(operador_ra)
     body_ra = await _get_envios(client)
     dia_ra = next(i for i in body_ra["data"] if i["data"] == _DIA.isoformat())
-    assert dia_ra["envios_evento"] == 1  # só o .ra
+    assert dia_ra["envios"] == 1  # só o .ra
 
     auth_as(admin_view)
     body_admin = await _get_envios(client)
     dia_admin = next(i for i in body_admin["data"] if i["data"] == _DIA.isoformat())
-    assert dia_admin["envios_evento"] == 2  # .ra + .ci
+    assert dia_admin["envios"] == 2  # .ra + .ci
 
 
 # ─── Correção de dia (erro→volta→relança noutro dia) + fila Threema ───────
