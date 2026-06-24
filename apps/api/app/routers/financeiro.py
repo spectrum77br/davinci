@@ -1142,7 +1142,10 @@ async def valuation_saldo_marketplace(
                 continue
             disp = _f_or_none(cel.get("disponivel"))
             arec = _f_or_none(cel.get("a_receber"))
-            saldos[mkt] = SaldoMarketplaceCelulaOut(disponivel=disp, a_receber=arec)
+            nota = cel.get("nota") or None
+            saldos[mkt] = SaldoMarketplaceCelulaOut(
+                disponivel=disp, a_receber=arec, nota=nota,
+            )
             loja_receber += arec or 0.0
         lojas.append(SaldoMarketplaceLojaOut(
             loja=_resolve_loja(str(entry.get("loja") or "")),

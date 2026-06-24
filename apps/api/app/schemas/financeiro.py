@@ -334,6 +334,10 @@ class EstoqueBlingSnapshotOut(BaseModel):
 class SaldoMarketplaceCelulaOut(BaseModel):
     disponivel: float | None = None
     a_receber: float | None = None
+    # Nota operacional quando não há valor real (ex.: "Deslogado",
+    # "Verificação pendente"). Quando presente, a página mostra a nota
+    # em vez de "—" / "R$ 0,00". Célula com nota não entra nos totais.
+    nota: str | None = None
 
 
 class SaldoMarketplaceLojaOut(BaseModel):

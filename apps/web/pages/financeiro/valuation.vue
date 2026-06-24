@@ -63,7 +63,7 @@ type EstoqueSnapshot = {
   total_valor: number
   locais: EstoqueLocal[]
 }
-type SaldoCelula = { disponivel: number | null; a_receber: number | null }
+type SaldoCelula = { disponivel: number | null; a_receber: number | null; nota?: string | null }
 type SaldoLoja = {
   loja: string
   saldos: Record<string, SaldoCelula>
@@ -724,7 +724,13 @@ const loading = computed(() =>
                   :key="m"
                   class="px-3 py-1.5 text-right tabular-nums"
                 >
-                  <template v-if="l.saldos[m]">
+                  <template v-if="l.saldos[m]?.nota">
+                    <span
+                      class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium text-amber-600 bg-amber-500/10"
+                      :title="l.saldos[m].nota || ''"
+                    >{{ l.saldos[m].nota }}</span>
+                  </template>
+                  <template v-else-if="l.saldos[m]">
                     <div class="text-[11px] text-muted-foreground">{{ fmtBRL(l.saldos[m].disponivel) }}</div>
                     <div class="font-medium">{{ fmtBRL(l.saldos[m].a_receber) }}</div>
                   </template>
