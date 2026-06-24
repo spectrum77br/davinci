@@ -421,11 +421,12 @@ function lucroFinalCls(r: MarketplaceRow): string {
   return l >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
 }
 
-// Saldo Efetivo exibido = saldo pós-reembolso (saldo_final = efetivo − prejuízo
-// + reembolso). Ambos vêm ancorados no Bling (valor_base − frete − taxa), não no
-// líquido do marketplace — é o que a edição inline grava e o que o snapshot
-// patcheia, então o valor editado aparece na hora. saldo_efetivo é a base (sem
-// reembolso) e é o que a edição inline usa/grava; saldo_final é a base + reembolso.
+// Saldo Efetivo exibido = saldo pós-reembolso (saldo_final = efetivo +
+// reembolso; o prejuízo é só visual e NÃO desconta). Ambos vêm ancorados no
+// Bling (valor_base − frete − taxa), não no líquido do marketplace — é o que a
+// edição inline grava e o que o snapshot patcheia, então o valor editado aparece
+// na hora. saldo_efetivo é a base (sem reembolso) e é o que a edição inline
+// usa/grava; saldo_final é a base + reembolso.
 function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
   return r.saldo_final != null ? r.saldo_final : r.saldo_efetivo
 }

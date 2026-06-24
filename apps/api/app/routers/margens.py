@@ -150,19 +150,18 @@ _SALDO_BLING_SQL = (
     " - COALESCE(v.bling_taxacomissao_item, 0))"
 )
 
-# Ajuste de reembolso/prejuízo (refunds) por item, derivado do snapshot:
-#   v.saldo_final − saldo_plataforma = (−prejuizo + reembolso) * item_proportion
-# (a view define saldo_final = liquido_marketplace − prejuizo + reembolso, e
-# saldo_plataforma = marketplace_liquido_base_margem_item). Reaproveitamos esse
-# delta para somar o reembolso ao Saldo Efetivo do Bling, preservando a lógica
-# de reembolso sem reatrelar o Efetivo ao líquido do marketplace.
-_REEMBOLSO_DELTA_SQL = (
-    "(v.saldo_final - v.marketplace_liquido_base_margem_item)"
-)
+# Ajuste por item: SÓ o reembolso entra no Saldo Efetivo. O `prejuizo` da tabela
+# refunds é referência visual (base pra abrir o chamado de reembolso) e NUNCA
+# desconta do saldo/margem — inclusive porque o frete que o prejuizo de Logística
+# representa já está embutido no líquido do Bling (valor_base − frete − taxa), e
+# descontá-lo de novo contaria duas vezes. `v.ajustes` já é
+# SUM(refunds.reembolso) * item_proportion (migration 0079) e pode ser + ou −.
+# (NÃO usar v.saldo_final − saldo_plataforma: esse delta embute −prejuizo.)
+_REEMBOLSO_DELTA_SQL = "v.ajustes"
 
-# Saldo Final ancorado no Bling = Saldo Efetivo (Bling) − prejuizo + reembolso.
-# Recalcula após edição (o snapshot mantém saldo_final/liquido_marketplace, então
-# o delta é estável, e _SALDO_BLING_SQL reflete o valor recém-gravado).
+# Saldo Final ancorado no Bling = Saldo Efetivo (Bling) + reembolso.
+# Recalcula após edição (o snapshot mantém ajustes, então o delta é estável, e
+# _SALDO_BLING_SQL reflete o valor recém-gravado).
 _SALDO_FINAL_BLING_SQL = (
     f"({_SALDO_BLING_SQL} + COALESCE({_REEMBOLSO_DELTA_SQL}, 0))"
 )
@@ -211,12 +210,12 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             -- novo, então a coluna armazenada já reflete a regra correta.
             v.bling_margem_calculado                             AS margem_bling,
             v.margem_minima,
-            -- Margem Pós Reembolso = margem recalculada já com prejuízo/reembolso
-            -- da tabela refunds aplicados, sobre o Saldo Final ancorado no Bling
-            -- (_SALDO_FINAL_BLING_SQL = saldo Bling − prejuizo + reembolso). Como
-            -- usa o saldo do Bling, recalcula após a edição inline. Quando há
-            -- reembolso de manutenção/devolução fica negativa enquanto a "Margem"
-            -- (que ignora o reembolso) ainda mostra positivo.
+            -- Margem Pós Reembolso = margem recalculada já com o reembolso da
+            -- tabela refunds aplicado, sobre o Saldo Final ancorado no Bling
+            -- (_SALDO_FINAL_BLING_SQL = saldo Bling + reembolso; o prejuizo NÃO
+            -- desconta). Como usa o saldo do Bling, recalcula após a edição
+            -- inline. Quando há reembolso negativo (manutenção/devolução) fica
+            -- abaixo da "Margem" (que ignora o reembolso).
             CASE
                 WHEN COALESCE(v.bling_custo_produtos, 0) > 0
                      AND {_SALDO_FINAL_BLING_SQL} IS NOT NULL
