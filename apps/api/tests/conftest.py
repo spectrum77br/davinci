@@ -183,7 +183,7 @@ async def _setup_schema():
             RETURNS trigger LANGUAGE plpgsql AS $$
             DECLARE
                 v_today date := ((now() AT TIME ZONE 'America/Sao_Paulo')
-                                 - interval '8 hours')::date;
+                                 - interval '10 hours')::date;
                 v_old_day date;
                 v_found boolean;
             BEGIN

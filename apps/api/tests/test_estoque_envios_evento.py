@@ -201,19 +201,20 @@ async def test_trigger_cancelado_depois_mantem(db: AsyncSession):
     assert await _ledger_count(db, 930007) == 1
 
 
-# ─── Corte das 08:00 (shipping_day) ──────────────────────────────────────
+# ─── Corte das 10:00 (shipping_day) ──────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_shipping_day_corte_08h(db: AsyncSession):
-    """07:59 BRT pertence ao dia anterior; 08:01 ao dia corrente."""
+async def test_shipping_day_corte_10h(db: AsyncSession):
+    """Corte às 10:00 (migration 0158, absorve o lag de processamento da
+    manhã): 09:59 BRT pertence ao dia anterior; 10:01 ao dia corrente."""
     antes = (await db.execute(text(
-        "SELECT (((TIMESTAMPTZ '2026-06-03 07:59:00-03:00')"
-        " AT TIME ZONE 'America/Sao_Paulo') - interval '8 hours')::date"
+        "SELECT (((TIMESTAMPTZ '2026-06-03 09:59:00-03:00')"
+        " AT TIME ZONE 'America/Sao_Paulo') - interval '10 hours')::date"
     ))).scalar_one()
     depois = (await db.execute(text(
-        "SELECT (((TIMESTAMPTZ '2026-06-03 08:01:00-03:00')"
-        " AT TIME ZONE 'America/Sao_Paulo') - interval '8 hours')::date"
+        "SELECT (((TIMESTAMPTZ '2026-06-03 10:01:00-03:00')"
+        " AT TIME ZONE 'America/Sao_Paulo') - interval '10 hours')::date"
     ))).scalar_one()
     assert antes == date(2026, 6, 2)
     assert depois == date(2026, 6, 3)
