@@ -290,7 +290,6 @@ class ValuationReportOut(BaseModel):
     gerado_em: datetime
     situacoes_label: str
     valuation_meses: list[ValuationMesOut]
-    resumo_ontem: SituacaoSecaoOut
     eficacia: SituacaoSecaoOut
     por_marketplace: list[FaturamentoMesSecaoOut]
     por_categoria: list[FaturamentoMesSecaoOut]

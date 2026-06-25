@@ -50,7 +50,6 @@ type Report = {
   gerado_em: string
   situacoes_label: string
   valuation_meses: ValuationMes[]
-  resumo_ontem: SituacaoSecao
   eficacia: SituacaoSecao
   por_marketplace: FatMesSecao[]
   por_categoria: FatMesSecao[]
@@ -465,48 +464,6 @@ const loading = computed(() =>
                   </td>
                 </tr>
               </tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- 2. Resumo de ontem -->
-        <section class="space-y-2">
-          <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-            Resumo de ontem
-            <span v-if="resumo.resumo_ontem.data" class="normal-case text-xs">
-              ({{ diaLabel(resumo.resumo_ontem.data) }})
-            </span>
-          </h2>
-          <div class="border rounded-md overflow-auto">
-            <table class="w-full text-sm border-collapse">
-              <thead class="bg-muted/50 text-xs uppercase tracking-wide">
-                <tr>
-                  <th class="text-left px-3 py-2 font-medium">Situação</th>
-                  <th class="text-right px-3 py-2 font-medium">Pedidos</th>
-                  <th class="text-right px-3 py-2 font-medium">Faturamento</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-if="!resumo.resumo_ontem.linhas.length">
-                  <td colspan="3" class="text-center py-6 text-muted-foreground">Sem pedidos ontem.</td>
-                </tr>
-                <tr
-                  v-for="(r, i) in resumo.resumo_ontem.linhas"
-                  :key="r.situacao_nome + i"
-                  class="border-t hover:bg-muted/20"
-                >
-                  <td class="px-3 py-1.5">{{ r.situacao_nome }}</td>
-                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtInt(r.pedidos) }}</td>
-                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.faturamento) }}</td>
-                </tr>
-              </tbody>
-              <tfoot v-if="resumo.resumo_ontem.linhas.length" class="bg-muted/30 font-semibold">
-                <tr class="border-t">
-                  <td class="px-3 py-2">Total</td>
-                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtInt(resumo.resumo_ontem.total_pedidos) }}</td>
-                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(resumo.resumo_ontem.total_faturamento) }}</td>
-                </tr>
-              </tfoot>
             </table>
           </div>
         </section>

@@ -855,7 +855,7 @@ async def valuation_report(
 
     Consulta ao vivo davinci.bling_orders / valuation / stores / situacao_bling
     — sempre reflete o último estado das tabelas (a rotina das 5h as atualiza).
-    Seções: Valuation 3 meses, Resumo de ontem, Eficácia operacional,
+    Seções: Valuation 3 meses, Eficácia operacional,
     Por Marketplace e Por Categoria.
     """
     months = _val_window_months()
@@ -916,28 +916,7 @@ async def valuation_report(
             data_snapshot=md.get("data_snapshot"),
         ))
 
-    # 2. Resumo de ontem — pedidos por situação (dedup por pedido).
-    daily_sql = text(f"""
-        WITH por_pedido AS (
-            SELECT bo.numero,
-                   MAX(bo.situacao) AS situacao,
-                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase_pedido
-            FROM {_qt("bling_orders")} bo
-            WHERE (bo.data AT TIME ZONE 'America/Sao_Paulo')::date
-                  = (((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - INTERVAL '1 day')::date
-            GROUP BY bo.numero
-        )
-        SELECT p.situacao AS situacao_id,
-               COALESCE(sb.nome, '(sem situacao)') AS situacao_nome,
-               COUNT(*) AS pedidos,
-               SUM(COALESCE(p.valorbase_pedido, 0)) AS faturamento
-        FROM por_pedido p
-        LEFT JOIN {_qt("situacao_bling")} sb ON p.situacao = sb.id::text
-        WHERE COALESCE(sb.nome, '') !~ '^-+$'
-        GROUP BY p.situacao, sb.nome
-        ORDER BY faturamento DESC NULLS LAST
-    """)
-    # 3. Eficácia operacional — situações problemáticas (total do banco).
+    # 2. Eficácia operacional — situações problemáticas (total do banco).
     efi_sql = text(f"""
         WITH por_pedido AS (
             SELECT bo.numero,
@@ -974,13 +953,7 @@ async def valuation_report(
             total_pedidos=tot_ped, total_faturamento=_r2(tot_fat),
         )
 
-    daily_rows = (await session.execute(daily_sql)).mappings().all()
     efi_rows = (await session.execute(efi_sql, {"efi_ids": _VAL_SIT_EFICACIA})).mappings().all()
-
-    from datetime import timedelta
-    from zoneinfo import ZoneInfo
-    ontem = (datetime.now(ZoneInfo("America/Sao_Paulo")).date() - timedelta(days=1))
-    resumo_ontem = _build_secao([dict(r) for r in daily_rows], data=ontem)
     eficacia = _build_secao([dict(r) for r in efi_rows])
 
     # 4 + 5. Por Marketplace e Por Categoria (3 meses) — mkt_rows/cat_rows já
@@ -989,7 +962,6 @@ async def valuation_report(
         gerado_em=datetime.now(UTC),
         situacoes_label=_VAL_SIT_LABEL,
         valuation_meses=valuation_meses,
-        resumo_ontem=resumo_ontem,
         eficacia=eficacia,
         por_marketplace=_agg_to_secoes([dict(r) for r in mkt_rows], months),
         por_categoria=_agg_to_secoes([dict(r) for r in cat_rows], months),
