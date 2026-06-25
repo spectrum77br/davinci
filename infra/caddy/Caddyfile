@@ -38,6 +38,13 @@
 	}
 }
 
+# ── Outros projetos que dividem este proxy de borda ──────────────────────
+# Blocos de sites de OUTROS projetos (ex.: 67why/invoicer) moram no host em
+# /opt/edge/caddy-sites (montado read-only em /etc/caddy/sites-enabled), FORA
+# deste repo — `git reset`/clone do DaVinci nunca os toca. Cada projeto larga
+# seu próprio <nome>.caddy lá. Glob sem match = no-op.
+import /etc/caddy/sites-enabled/*.caddy
+
 gestaoestoque.com, www.gestaoestoque.com {
 	encode zstd gzip
 

@@ -10,6 +10,11 @@ networks:
   davinci_net:
     external: true
     name: davinci_net
+  # Rede de borda compartilhada com OUTROS projetos (invoicer/67why). Externa:
+  # criada fora deste compose; o caddy entra nela p/ alcançar invoicer-app.
+  web_edge:
+    external: true
+    name: web_edge
 
 services:
   caddy:
@@ -23,6 +28,8 @@ services:
       - "443:443"
     volumes:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Sites de outros projetos (no host, fora do repo). Ver `import` no Caddyfile.
+      - /opt/edge/caddy-sites:/etc/caddy/sites-enabled:ro
       - ./data/caddy/data:/data
       - ./data/caddy/config:/config
-    networks: [davinci_net]
+    networks: [davinci_net, web_edge]
