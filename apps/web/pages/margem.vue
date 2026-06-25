@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, Check, ChevronLeft, ChevronRight, Loader2, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
+import { AlertCircle, Check, ChevronLeft, ChevronRight, Download, Loader2, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -114,6 +114,44 @@ const platforms = ref<string[]>([])
 const contas = ref<string[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+
+// --- Download da planilha de rentabilidade por período (admin) ---
+function isoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+const _today = new Date()
+const rentInicio = ref(isoDate(new Date(_today.getFullYear(), _today.getMonth(), 1)))
+const rentFim = ref(isoDate(_today))
+const rentExporting = ref(false)
+
+async function exportRentabilidade() {
+  if (rentExporting.value || !rentInicio.value || !rentFim.value) return
+  if (rentFim.value < rentInicio.value) {
+    error.value = 'A data final não pode ser anterior à inicial.'
+    return
+  }
+  rentExporting.value = true
+  error.value = null
+  try {
+    const params = new URLSearchParams({ inicio: rentInicio.value, fim: rentFim.value })
+    const blob = await api<Blob>(
+      `/api/margens/rentabilidade/export.xlsx?${params.toString()}`,
+      { responseType: 'blob' as any },
+    )
+    const href = URL.createObjectURL(blob as any)
+    const a = document.createElement('a')
+    a.href = href
+    a.download = `rentabilidade_${rentInicio.value}_${rentFim.value}.xlsx`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(href)
+  } catch (e: any) {
+    error.value = apiError(e)
+  } finally {
+    rentExporting.value = false
+  }
+}
 
 const search = ref('')
 const platform = ref<'all' | string>('all')
@@ -610,10 +648,37 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
   <div class="space-y-5">
     <PageHeader title="Margem" description="Margem por pedido — conciliação marketplace (últimos 30 dias).">
       <template #actions>
-        <Button size="sm" variant="outline" :disabled="loading" @click="refreshAndLoad">
-          <RefreshCw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
-          atualizar
-        </Button>
+        <div class="flex flex-wrap items-center gap-2">
+          <div v-if="isAdmin" class="flex items-center gap-1.5">
+            <input
+              v-model="rentInicio"
+              type="date"
+              class="text-sm rounded-md border bg-background px-2 py-1.5"
+              title="data inicial"
+            />
+            <span class="text-muted-foreground text-sm">→</span>
+            <input
+              v-model="rentFim"
+              type="date"
+              class="text-sm rounded-md border bg-background px-2 py-1.5"
+              title="data final"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              :disabled="rentExporting || !rentInicio || !rentFim"
+              title="Baixar planilha de rentabilidade por pedido no período"
+              @click="exportRentabilidade"
+            >
+              <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': rentExporting }" />
+              planilha
+            </Button>
+          </div>
+          <Button size="sm" variant="outline" :disabled="loading" @click="refreshAndLoad">
+            <RefreshCw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
+            atualizar
+          </Button>
+        </div>
       </template>
     </PageHeader>
 

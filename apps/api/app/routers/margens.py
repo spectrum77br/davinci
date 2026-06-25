@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import date
+from io import BytesIO
 from typing import Annotated
 from uuid import UUID
 
 import httpx
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission
+from app.deps.auth import require_admin, require_permission
 from app.models import BlingOrder, Integration, IntegrationPlatform, Margens, User
 from app.schemas.margens import (
     ALLOWED_STATUS,
@@ -24,6 +27,7 @@ from app.schemas.margens import (
 )
 from app.security.cipher import decrypt_json
 from app.services.margem_audit import record_margem_audit
+from app.services.rentabilidade_xlsx import build_rentabilidade_xlsx
 from app.services.marketplaces.bling import BlingClient
 from app.services.verificar_margem import (
     SNAPSHOT_TABLE as _VERIFICAR_MARGEM_TABLE,
@@ -47,6 +51,12 @@ from app.services.verificar_margem import (
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/margens", tags=["margens"])
 _BLING_ORDERS_TABLE = _qualified_table("bling_orders")
+_STORES_TABLE = _qualified_table("stores")
+_SITUACAO_BLING_TABLE = _qualified_table("situacao_bling")
+
+# Situações que compõem a rentabilidade (Em aberto / Em andamento / Entregue),
+# mesmas da rotina diária `rentabilidade_valuation.py`.
+_RENT_SITUACOES_SQL = "('6', '15', '83953')"
 
 SITUACAO_APROVADO = 6
 SITUACAO_ATENDIDO = 9
@@ -368,6 +378,78 @@ async def list_margens_marketplace(
         offset=offset,
         platforms=platforms,
         contas=contas,
+    )
+
+
+@router.get("/rentabilidade/export.xlsx")
+async def export_rentabilidade(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_admin)],
+    inicio: date = Query(..., description="data inicial (YYYY-MM-DD, fuso SP)"),
+    fim: date = Query(..., description="data final (YYYY-MM-DD, fuso SP)"),
+) -> StreamingResponse:
+    """Planilha de rentabilidade por pedido no período (abas Pedidos + Resumo).
+
+    Agrega `bling_orders` (situações 6/15/83953) por pedido com a fórmula da
+    rentabilidade diária — base/comissão/frete = MAX, custo = SUM(preco_custo×
+    quantidade) — recortada pela data de realização (fuso SP). Sem coluna de
+    categoria. Admin-only porque expõe custo e lucro por pedido (a coluna
+    "Lucro" da própria página também é restrita a admin).
+    """
+    if fim < inicio:
+        raise HTTPException(status_code=400, detail="data final anterior à inicial")
+    if (fim - inicio).days > 366:
+        raise HTTPException(status_code=400, detail="período máximo de 1 ano")
+
+    rows_sql = text(  # noqa: S608 — tabelas vêm de _qualified_table, sem input do usuário
+        f"""
+        WITH ped AS (
+            SELECT numero,
+                   MIN((data AT TIME ZONE 'America/Sao_Paulo')::date) AS data_sp,
+                   MAX(COALESCE(numeroloja, '')) AS numeroloja,
+                   MAX(COALESCE(loja, ''))       AS loja,
+                   MAX(situacao::text)           AS situacao,
+                   MAX(COALESCE(valorbase, 0))    AS base,
+                   MAX(COALESCE(taxacomissao, 0)) AS com,
+                   MAX(COALESCE(custofrete, 0))   AS frete,
+                   SUM(COALESCE(preco_custo, 0) * COALESCE(item_quantidade, 0)) AS custo
+            FROM {_BLING_ORDERS_TABLE}
+            WHERE situacao IN {_RENT_SITUACOES_SQL}
+              AND (data AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN :inicio AND :fim
+            GROUP BY numero
+        )
+        SELECT p.data_sp, p.numero, p.numeroloja, p.loja, p.situacao,
+               COALESCE(s.nome, p.situacao) AS situacao_nome,
+               p.base, p.com, p.frete, p.custo
+        FROM ped p
+        LEFT JOIN {_SITUACAO_BLING_TABLE} s ON s.id::text = p.situacao
+        ORDER BY p.data_sp, p.numero
+        """
+    )
+    rows = (
+        await session.execute(rows_sql, {"inicio": inicio, "fim": fim})
+    ).mappings().all()
+
+    stores_sql = text(  # noqa: S608
+        f"SELECT bling_store_id, marketplace, apelido_override "
+        f"FROM {_STORES_TABLE} WHERE bling_store_id IS NOT NULL"
+    )
+    store_map: dict[str, str] = {}
+    for bid, mk, ap in (await session.execute(stores_sql)).all():
+        ap = (ap or "").strip()
+        mk = (mk or "").strip()
+        if mk and ap and mk.lower() not in ap.lower():
+            label = f"{mk} · {ap}"
+        else:
+            label = ap or mk or str(bid)
+        store_map[str(bid)] = label
+
+    buf = build_rentabilidade_xlsx(rows, store_map, inicio, fim)
+    fname = f"rentabilidade_{inicio.isoformat()}_{fim.isoformat()}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
 
