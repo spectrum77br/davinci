@@ -1,4 +1,4 @@
-"""Ledger de envios por evento (migration 0155).
+"""Ledger de envios por evento (migrations 0156-0158).
 
 Cobre dois níveis:
 
@@ -6,11 +6,10 @@ Cobre dois níveis:
     15, é idempotente (1ª entrada vence, nunca move) e mantém o registro mesmo
     se o pedido depois for cancelado. O trigger é recriado no conftest
     (`_setup_schema`) porque o `create_all` só faz a tabela, não a função.
-  * Endpoint `GET /api/estoque/envios` — pós-cutover 2026-06-24, `envios` é a
-    contagem OFICIAL (ledger por evento); `envios_em_andamento` segue ao lado
-    como comparação admin. Mesma classificação de tag e união dos dias.
+  * Endpoint `GET /api/estoque/envios` — `envios` é a contagem OFICIAL (ledger
+    por evento), por dia, com a mesma classificação de tag.
 
-Mais o corte das 08:00 BRT (`shipping_day`) validado direto no SQL.
+Mais o corte das 10:00 BRT (`shipping_day`) validado direto no SQL.
 """
 from __future__ import annotations
 
@@ -224,7 +223,7 @@ async def test_shipping_day_corte_10h(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_endpoint_expoe_envios_evento(
+async def test_endpoint_expoe_envios(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None], admin_view: User,
 ):
@@ -258,13 +257,12 @@ async def test_endpoint_dia_so_no_ledger_aparece(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None], admin_view: User,
 ):
-    """Dia que só existe no ledger (nenhum BlingOrder verde) aparece com
-    envios_em_andamento=0 e envios>0 — a divergência fica visível."""
+    """Um dia com evento no ledger aparece com envios>0 (sem depender de um
+    BlingOrder verde correspondente)."""
     auth_as(admin_view)
     await _seed_evento(db, bling_id=940003, shipping_day=_DIA, item_codigo="y.ci")
     body = await _get_envios(client)
     dia = next(i for i in body["data"] if i["data"] == _DIA.isoformat())
-    assert dia["envios_em_andamento"] == 0
     assert dia["envios"] == 1
 
 

@@ -69,12 +69,9 @@ type PedidoRow = {
 }
 type EnvioRow = {
   data: string
-  // Contagem OFICIAL (ledger por evento, corte 08:00 — migration 0156),
-  // imune ao recarimbo de em_andamento_data (cutover 2026-06-24).
+  // Contagem oficial: ledger por evento (shipping_day, corte 10:00 —
+  // migrations 0156/0158), imune ao recarimbo de em_andamento_data.
   envios: number
-  // Contagem antiga (em_andamento_data) — só comparação admin enquanto o
-  // corte 08:00 é validado dia a dia.
-  envios_em_andamento: number
   conferido: boolean
   // Status da conferência da aba Estoque para aquele dia. Vem do
   // backend — comparação count(StockCheck conferido) vs count(produtos).
@@ -249,8 +246,7 @@ const envios = ref<{
   items: EnvioRow[]
   total: number                 // sum of conferido envios (footer "Total")
   total_envios: number          // sum across the window (footer "Total geral")
-  total_em_andamento: number    // idem, pela contagem antiga (em_andamento_data)
-}>({ items: [], total: 0, total_envios: 0, total_em_andamento: 0 })
+}>({ items: [], total: 0, total_envios: 0 })
 
 // Foto da conferência do estoque HOJE — independente do filtro de dia.
 // Alimenta o bloqueio da aba Envios pro operador (admin nunca bloqueia).
@@ -341,18 +337,16 @@ async function loadEnvios() {
       data: EnvioRow[]
       total: number
       total_envios: number
-      total_em_andamento: number
       total_conferido: number
     }>(`/api/estoque/envios?${qs.join('&')}`)
     envios.value = {
       items: r.data || [],
       total: r.total ?? 0,
       total_envios: r.total_envios ?? 0,
-      total_em_andamento: r.total_em_andamento ?? 0,
     }
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || e?.message || 'load_failed'
-    envios.value = { items: [], total: 0, total_envios: 0, total_em_andamento: 0 }
+    envios.value = { items: [], total: 0, total_envios: 0 }
   } finally {
     loading.value = false
   }
@@ -1206,18 +1200,13 @@ async function conferirTodos() {
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
             <th class="text-left">Data</th>
             <th class="text-right">Envios</th>
-            <!-- Coluna de comparação: contagem ANTIGA por em_andamento_data.
-                 Admin-only, pra validar o corte 08:00 do ledger dia a dia. -->
-            <th v-if="isAdmin" class="text-right" title="Contagem antiga (em_andamento_data), sem corte 08:00 — só comparação">
-              Envios (em and.)
-            </th>
             <th class="text-center">Conf. Estoque</th>
             <th class="text-center bg-gray-100/40">Conferido</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="envios.items.length === 0">
-            <td :colspan="isAdmin ? 5 : 4" class="py-6 text-center text-muted-foreground">
+            <td colspan="4" class="py-6 text-center text-muted-foreground">
               Nenhum envio no período.
             </td>
           </tr>
@@ -1228,17 +1217,6 @@ async function conferirTodos() {
           >
             <td>{{ row.data }}</td>
             <td class="text-right font-semibold">{{ row.envios }}</td>
-            <td
-              v-if="isAdmin"
-              class="text-right font-semibold tabular-nums"
-              :class="row.envios_em_andamento === row.envios ? 'text-muted-foreground' : 'text-amber-600 dark:text-amber-400'"
-              :title="row.envios_em_andamento === row.envios ? 'Bate com a contagem oficial (ledger)' : 'Diverge da contagem oficial (ledger)'"
-            >
-              {{ row.envios_em_andamento }}
-              <span v-if="row.envios_em_andamento !== row.envios" class="text-[10px] font-normal">
-                ({{ row.envios_em_andamento - row.envios > 0 ? '+' : '' }}{{ row.envios_em_andamento - row.envios }})
-              </span>
-            </td>
             <td class="text-center">
               <span
                 class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium"
@@ -1278,9 +1256,6 @@ async function conferirTodos() {
           <tr>
             <td class="text-right">Total (conferidos)</td>
             <td class="text-right">{{ envios.total }}</td>
-            <td v-if="isAdmin" class="text-right text-muted-foreground text-[10px]">
-              em and.: {{ envios.total_em_andamento }}
-            </td>
             <td></td>
             <td class="text-center text-muted-foreground text-[10px]">
               geral: {{ envios.total_envios }}

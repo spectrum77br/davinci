@@ -598,39 +598,10 @@ async def list_estoque_envios(
     else:
         data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
-    where: list = [
-        # Espelha o badge verde da aba Pedidos: só pedidos efetivamente
-        # enviados (não 83965 etiqueta, não cancelamento/pré-envio) contam
-        # como envios físicos. Blocklist — à prova de novas situações
-        # pós-envio. Antes filtrava só por `em_andamento_data not null`,
-        # incluindo 83965/83955/12 — abas Pedidos vs Envios divergiam.
-        BlingOrder.situacao.notin_(_SITUACAO_NAO_VERDE),
-        BlingOrder.em_andamento_data.isnot(None),
-        BlingOrder.em_andamento_data >= data_inicio,
-        BlingOrder.em_andamento_data <= data_fim,
-    ]
-    if tags is not None:
-        where.append(or_(*[_sql_clause_for_tag(BlingOrder.item_codigo, t) for t in tags]))
-
-    rows = (
-        await session.execute(
-            select(
-                BlingOrder.em_andamento_data.label("dia"),
-                func.count(func.distinct(BlingOrder.bling_id)).label("envios"),
-            )
-            .where(and_(*where))
-            .group_by(BlingOrder.em_andamento_data)
-            .order_by(BlingOrder.em_andamento_data.desc())
-        )
-    ).all()
-    old_by_day = {r.dia.isoformat(): int(r.envios or 0) for r in rows if r.dia}
-
-    # Contagem PARALELA pelo ledger de eventos (migration 0156): conta o
-    # EVENTO de entrada na situação 15, bucketizado por `shipping_day` (corte
-    # 08:00 BRT) — imune ao recarimbo de `em_andamento_data` e estável a
-    # cancelamentos posteriores. Roda lado a lado com `envios` (acima) pra
-    # validação antes da troca definitiva. Mesma classificação de tag
-    # (`sql_clause_for_tag`) → atribuição por estoque idêntica à de hoje.
+    # Contagem de envios pelo ledger de eventos (oficial desde o cutover):
+    # conta o EVENTO de entrada na situação 15, bucketizado por `shipping_day`
+    # (corte 10:00 BRT — migrations 0156/0158), imune ao recarimbo de
+    # `em_andamento_data`. Tag resolvida via `sql_clause_for_tag`.
     ledger_where: list = [
         BlingEnvioEvento.shipping_day >= data_inicio,
         BlingEnvioEvento.shipping_day <= data_fim,
@@ -692,24 +663,16 @@ async def list_estoque_envios(
         )
     )).all()}
 
-    # União dos dias das duas fontes (em_andamento_data × ledger): assim um
-    # dia que diverge — só tem envio numa das contagens — aparece mesmo assim,
-    # que é o ponto da validação em paralelo. Ordena desc (ISO ordena como data).
     locks_str = {d.isoformat() for d in locks}
-    all_days = sorted(set(old_by_day) | set(ledger_by_day), reverse=True)
+    all_days = sorted(ledger_by_day, reverse=True)
 
     items: list[dict[str, Any]] = []
     total_envios = 0
-    total_em_andamento = 0
     total_conferido = 0
     for dia_str in all_days:
-        # Cutover 2026-06-24: a contagem OFICIAL de "Envios" passa a vir do
-        # ledger de evento (shipping_day, corte 08:00 — migration 0156),
-        # imune ao recarimbo de em_andamento_data. A contagem antiga
-        # (`envios_em_andamento`) continua exposta como coluna de
-        # comparação admin enquanto o corte 08:00 é validado dia a dia.
+        # `envios` = contagem oficial pelo ledger de evento (shipping_day,
+        # corte 10:00 — migrations 0156/0158).
         envios_n = ledger_by_day.get(dia_str, 0)
-        envios_em_andamento_n = old_by_day.get(dia_str, 0)
         conf = checks.get(dia_str, False)
         # `conferido_filter` is applied client-of-the-loop so totals
         # reflect the visible set only. `all` (or None) shows everything;
@@ -732,15 +695,11 @@ async def list_estoque_envios(
             conferencia_estoque = "nenhuma"
         items.append({
             "data": dia_str,
-            # `envios` = contagem oficial (ledger de evento, pós-cutover).
             "envios": envios_n,
-            # Contagem antiga (em_andamento_data) — só comparação admin.
-            "envios_em_andamento": envios_em_andamento_n,
             "conferido": conf,
             "conferencia_estoque": conferencia_estoque,
         })
         total_envios += envios_n
-        total_em_andamento += envios_em_andamento_n
         if conf:
             total_conferido += envios_n
 
@@ -750,7 +709,6 @@ async def list_estoque_envios(
         # mantido pra "Total geral" se a UI quiser exibir.
         "total": total_conferido,
         "total_envios": total_envios,
-        "total_em_andamento": total_em_andamento,
         "total_conferido": total_conferido,
         "periodo": {"inicio": str(data_inicio), "fim": str(data_fim)},
     }
