@@ -637,7 +637,11 @@ _VAL_SIT_APLICAVEIS = [
     "84678",     # Enviado Geral SA
     "83965",     # Enviado Importado
 ]
-_VAL_SIT_ENTREGUE = "83953"
+# Situações que entram em RENTABILIDADE / Custo / Margem: Em aberto (6,28) +
+# Em andamento (15,37) + Entregue (83953). Mais amplo que só-Entregue — inclui
+# pedidos em trânsito cuja margem ainda não foi realizada. Mesmo conjunto do
+# export de rentabilidade (margens.py / rentabilidade_xlsx).
+_VAL_SIT_RENTABILIDADE = ["6", "28", "15", "37", "83953"]
 _VAL_SIT_LABEL = (
     "Em aberto, Em andamento, Entregue, "
     "Enviado Geral SP/CI/PI/RA/SA, Enviado Importado"
@@ -673,7 +677,8 @@ def _agg_sql(group_col: str) -> str:
     Réplica fiel da QUERY_AGG do PDF. `group_col` é literal do nosso código
     ('marketplace' ou 'categoria'), nunca entrada do usuário — interpolar é
     seguro. Faturamento = SUM das situações aplicáveis; custo/rentabilidade =
-    só Entregue. Rateio proporcional ao itemvalor quando o pedido tem >1 item.
+    Em aberto+Em andamento+Entregue (:sit_rent). Rateio proporcional ao
+    itemvalor quando o pedido tem >1 item.
     """
     bo, stores = _qt("bling_orders"), _qt("stores")
     return f"""
@@ -725,7 +730,7 @@ prop AS (
 base AS (
     SELECT
         date_trunc('month', p.data_sp)::date AS mes,
-        l.marketplace::text AS marketplace,
+        COALESCE(NULLIF(TRIM(l.marketplace::text), ''), 'Sem marketplace') AS marketplace,
         COALESCE(NULLIF(TRIM(p.categoria_nome), ''), 'Sem categoria') AS categoria,
         p.situacao AS situacao_id,
         p.valorbase_prop AS valorbase,
@@ -739,8 +744,8 @@ SELECT
     mes,
     {group_col} AS grp,
     SUM(CASE WHEN situacao_id = ANY(:sit_aplic) THEN valorbase ELSE 0 END) AS faturamento,
-    SUM(CASE WHEN situacao_id = :entregue THEN valorbase   ELSE 0 END) AS faturamento_entregue,
-    SUM(CASE WHEN situacao_id = :entregue THEN custo_total ELSE 0 END) AS custo_entregue
+    SUM(CASE WHEN situacao_id = ANY(:sit_rent) THEN valorbase   ELSE 0 END) AS faturamento_rent,
+    SUM(CASE WHEN situacao_id = ANY(:sit_rent) THEN custo_total ELSE 0 END) AS custo_rent
 FROM base
 GROUP BY mes, {group_col}
 ORDER BY mes, grp
@@ -778,9 +783,9 @@ def _agg_to_secoes(rows: list[dict], months: list) -> list[FaturamentoMesSecaoOu
             if not r["grp"]:
                 continue
             fat = Decimal(str(r["faturamento"] or 0))
-            fat_ent = Decimal(str(r["faturamento_entregue"] or 0))
-            custo = Decimal(str(r["custo_entregue"] or 0))
-            rent = fat_ent - custo
+            fat_rent = Decimal(str(r["faturamento_rent"] or 0))
+            custo = Decimal(str(r["custo_rent"] or 0))
+            rent = fat_rent - custo
             margem = (rent / custo * 100) if custo > 0 else None
             linhas.append(FaturamentoGrpLinhaOut(
                 grp=r["grp"], faturamento=_r2(fat), custo=_r2(custo),
@@ -855,8 +860,16 @@ async def valuation_report(
     """
     months = _val_window_months()
 
-    # 1. Valuation por mês: saldos = snapshot do último dia do mês;
-    #    rentabilidade = SUM do mês.
+    # 1. Valuation por mês:
+    #    • SALDOS (caixa/estoque/receber) = snapshot do último dia do mês,
+    #      lidos da tabela `valuation` — posições de um instante, não dá p/
+    #      recomputar do bling_orders.
+    #    • RENTABILIDADE = ao vivo: somada do mesmo _agg_sql que alimenta as
+    #      seções "Por Marketplace"/"Por Categoria" abaixo (Em aberto + Em
+    #      andamento + Entregue; base − custo − frete − comissão, rateada por
+    #      item). Antes vinha da coluna
+    #      `valuation.rentabilidade` carimbada pela rotina diária, que ficava
+    #      congelada e já sofreu corrupção por embaralhamento de datas.
     val_saldos_sql = text(f"""
         SELECT DISTINCT ON (date_trunc('month', data))
                date_trunc('month', data)::date AS mes,
@@ -866,19 +879,26 @@ async def valuation_report(
           AND data <  date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) + INTERVAL '1 month')::date
         ORDER BY date_trunc('month', data), data DESC
     """)
-    val_rent_sql = text(f"""
-        SELECT date_trunc('month', data)::date AS mes,
-               SUM(COALESCE(rentabilidade, 0)) AS rentabilidade
-        FROM {_qt("valuation")}
-        WHERE data >= date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - INTERVAL '2 months')::date
-          AND data <  date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) + INTERVAL '1 month')::date
-        GROUP BY date_trunc('month', data)
-    """)
     val_by_mes: dict = {}
     for r in (await session.execute(val_saldos_sql)).mappings().all():
         val_by_mes[r["mes"]] = dict(r)
-    for r in (await session.execute(val_rent_sql)).mappings().all():
-        val_by_mes.setdefault(r["mes"], {})["rentabilidade"] = r["rentabilidade"]
+
+    # Agregação ao vivo por mês × marketplace/categoria (também usada nas
+    # seções 4 e 5 — por isso executada aqui em cima): a rentabilidade do card
+    # mensal é a soma dela.
+    agg_params = {"sit_aplic": _VAL_SIT_APLICAVEIS, "sit_rent": _VAL_SIT_RENTABILIDADE}
+    mkt_rows = (await session.execute(text(_agg_sql("marketplace")), agg_params)).mappings().all()
+    cat_rows = (await session.execute(text(_agg_sql("categoria")), agg_params)).mappings().all()
+
+    # Rentabilidade mensal ao vivo = SUM(faturamento_rent − custo_rent) sobre
+    # TODAS as linhas do mês (Em aberto+Em andamento+Entregue). Loja sem
+    # marketplace cai no grupo 'Sem marketplace' (não é descartada), então o
+    # card é o total real e bate com a soma da tabela Por Marketplace.
+    rent_by_mes: dict = {}
+    for r in mkt_rows:
+        delta = (Decimal(str(r["faturamento_rent"] or 0))
+                 - Decimal(str(r["custo_rent"] or 0)))
+        rent_by_mes[r["mes"]] = rent_by_mes.get(r["mes"], Decimal("0")) + delta
 
     valuation_meses: list[ValuationMesOut] = []
     for mes in months:
@@ -892,7 +912,7 @@ async def valuation_report(
                      + Decimal(str(receber or 0)))
         valuation_meses.append(ValuationMesOut(
             mes=mes, caixa=_r2(caixa), estoque=_r2(estoque), receber=_r2(receber),
-            total=_r2(total), rentabilidade=_r2(md.get("rentabilidade")),
+            total=_r2(total), rentabilidade=_r2(rent_by_mes.get(mes)),
             data_snapshot=md.get("data_snapshot"),
         ))
 
@@ -963,11 +983,8 @@ async def valuation_report(
     resumo_ontem = _build_secao([dict(r) for r in daily_rows], data=ontem)
     eficacia = _build_secao([dict(r) for r in efi_rows])
 
-    # 4 + 5. Por Marketplace e Por Categoria (3 meses).
-    agg_params = {"sit_aplic": _VAL_SIT_APLICAVEIS, "entregue": _VAL_SIT_ENTREGUE}
-    mkt_rows = (await session.execute(text(_agg_sql("marketplace")), agg_params)).mappings().all()
-    cat_rows = (await session.execute(text(_agg_sql("categoria")), agg_params)).mappings().all()
-
+    # 4 + 5. Por Marketplace e Por Categoria (3 meses) — mkt_rows/cat_rows já
+    # executados acima (a rentabilidade do card mensal é a soma de mkt_rows).
     return ValuationReportOut(
         gerado_em=datetime.now(UTC),
         situacoes_label=_VAL_SIT_LABEL,

@@ -402,7 +402,7 @@ const loading = computed(() =>
       <p v-if="resumo" class="text-xs text-muted-foreground">
         Atualizado às 5h diariamente · gerado {{ geradoEm }}.
         Faturamento considera: {{ resumo.situacoes_label }}.
-        Custo / Rentabilidade / Margem apenas <b>Entregue</b>. Margem = Rentabilidade ÷ Custo.
+        Custo / Rentabilidade / Margem: <b>Em aberto, Em andamento e Entregue</b>. Margem = Rentabilidade ÷ Custo.
       </p>
 
       <div v-if="errorResumo" class="text-sm text-destructive">{{ errorResumo }}</div>
@@ -571,7 +571,7 @@ const loading = computed(() =>
                   <tr>
                     <th class="text-left px-3 py-2 font-medium">{{ grupo.col }}</th>
                     <th class="text-right px-3 py-2 font-medium">Faturamento</th>
-                    <th class="text-right px-3 py-2 font-medium">Custo (Entregue)</th>
+                    <th class="text-right px-3 py-2 font-medium">Custo</th>
                     <th class="text-right px-3 py-2 font-medium">Rentabilidade</th>
                     <th class="text-right px-3 py-2 font-medium">Margem</th>
                   </tr>
