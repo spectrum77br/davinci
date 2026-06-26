@@ -23,7 +23,7 @@ class IntegrationOut(BaseModel):
 
 
 class IntegrationCreate(BaseModel):
-    store_id: UUID
+    store_id: UUID | None = None
     platform: str
     name: str
     credentials: dict

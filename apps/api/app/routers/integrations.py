@@ -131,15 +131,21 @@ async def create_integration(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("integracoes", "edit"))],
 ) -> IntegrationOut:
-    store = (await session.execute(select(Store).where(Store.id == body.store_id))).scalar_one_or_none()
-    if store is None:
-        raise HTTPException(404, detail={"code": "store_not_found"})
-    if store.integration_id is not None:
-        raise HTTPException(409, detail={"code": "store_already_linked"})
+    # Loja é opcional. Quando informada, validamos e vinculamos; quando
+    # ausente, criamos a integração "solta" (store_id=None).
+    store = None
+    if body.store_id is not None:
+        store = (
+            await session.execute(select(Store).where(Store.id == body.store_id))
+        ).scalar_one_or_none()
+        if store is None:
+            raise HTTPException(404, detail={"code": "store_not_found"})
+        if store.integration_id is not None:
+            raise HTTPException(409, detail={"code": "store_already_linked"})
 
     integ = Integration(
         user_id=user.id,
-        store_id=store.id,
+        store_id=store.id if store else None,
         platform=_to_platform(body.platform),
         name=body.name,
         credentials=encrypt_json(body.credentials or {}),
@@ -153,10 +159,11 @@ async def create_integration(
             raise HTTPException(409, detail={"code": "store_already_linked"}) from e
         raise
 
-    store.integration_id = integ.id
+    if store is not None:
+        store.integration_id = integ.id
     await session.commit()
     await session.refresh(integ)
-    return _to_out(integ, store.company_id)
+    return _to_out(integ, store.company_id if store else None)
 
 
 @router.patch("/{integration_id}", response_model=IntegrationOut)

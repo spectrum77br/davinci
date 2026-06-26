@@ -215,7 +215,6 @@ watch(() => props.open, async (open) => {
 
 const requiredOk = computed(() => {
   if (isEdit.value) return draft.value.name.trim().length > 0
-  if (!draft.value.store_id) return false
   return currentSpec.value.fields.every(f => !f.required || (draft.value.creds[f.key] || '').trim() !== '')
 })
 
@@ -240,7 +239,7 @@ async function submitForm() {
       const r = await api<{ id: string }>('/api/integrations', {
         method: 'POST',
         body: {
-          store_id: draft.value.store_id,
+          store_id: draft.value.store_id || null,
           platform: draft.value.platform,
           name: draft.value.name || defaultName.value || `${draft.value.platform}-manual`,
           credentials: creds,
@@ -291,9 +290,9 @@ function close() {
         </div>
 
         <div v-if="!lockStore && !isEdit">
-          <Label>Loja <span class="text-red-500">*</span></Label>
+          <Label>Loja <span class="text-xs text-muted-foreground">(opcional)</span></Label>
           <select v-model="draft.store_id" class="w-full border rounded px-2 py-1 bg-background">
-            <option value="">— selecione —</option>
+            <option value="">— nenhuma —</option>
             <option v-for="s in eligibleStores" :key="s.id" :value="s.id">
               {{ companyById[s.company_id]?.apelido || '?' }} / {{ s.marketplace }}
             </option>
