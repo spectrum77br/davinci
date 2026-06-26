@@ -251,19 +251,24 @@ class ValuationMesOut(BaseModel):
     data_snapshot: date | None = None
 
 
-class SituacaoLinhaOut(BaseModel):
-    situacao_nome: str
-    pedidos: int
-    faturamento: float
+class OperacionalLinhaOut(BaseModel):
+    """Uma métrica do quadro "Operacional — 3 meses". `valores` tem um item por
+    mês, alinhado a `OperacionalSecaoOut.meses`. `formato` diz como o front
+    renderiza: 'brl' (moeda; Reembolso pode vir com sinal) ou 'pct' (Taxa de
+    Perdimento). Valor None = sem dado no mês (Taxa quando faturamento = 0)."""
+
+    chave: str
+    label: str
+    formato: str  # 'brl' | 'pct'
+    valores: list[float | None]
 
 
-class SituacaoSecaoOut(BaseModel):
-    """Resumo de ontem / Eficácia operacional — pedidos por situação."""
+class OperacionalSecaoOut(BaseModel):
+    """Quadro operacional dos últimos 3 meses (substitui a antiga Eficácia).
+    `meses` = 1º-dia-do-mês de cada coluna; `linhas` = as métricas, em ordem."""
 
-    data: date | None = None
-    linhas: list[SituacaoLinhaOut]
-    total_pedidos: int
-    total_faturamento: float
+    meses: list[date]
+    linhas: list[OperacionalLinhaOut]
 
 
 class FaturamentoGrpLinhaOut(BaseModel):
@@ -290,7 +295,7 @@ class ValuationReportOut(BaseModel):
     gerado_em: datetime
     situacoes_label: str
     valuation_meses: list[ValuationMesOut]
-    eficacia: SituacaoSecaoOut
+    operacional: OperacionalSecaoOut
     por_marketplace: list[FaturamentoMesSecaoOut]
     por_categoria: list[FaturamentoMesSecaoOut]
 

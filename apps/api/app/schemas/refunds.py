@@ -49,6 +49,7 @@ class RefundOut(BaseModel):
     chamado_resolvido: bool = False
     operacao: str | None = None
     conferido: bool
+    conferido_at: datetime | None = None
     observacao: str | None = None
     created_at: datetime
     updated_at: datetime

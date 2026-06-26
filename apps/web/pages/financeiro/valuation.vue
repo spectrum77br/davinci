@@ -24,12 +24,15 @@ type ValuationMes = {
   rentabilidade: number | null
   data_snapshot: string | null
 }
-type SituacaoLinha = { situacao_nome: string; pedidos: number; faturamento: number }
-type SituacaoSecao = {
-  data: string | null
-  linhas: SituacaoLinha[]
-  total_pedidos: number
-  total_faturamento: number
+type OperacionalLinha = {
+  chave: string
+  label: string
+  formato: 'brl' | 'pct'
+  valores: (number | null)[]
+}
+type OperacionalSecao = {
+  meses: string[]
+  linhas: OperacionalLinha[]
 }
 type FatLinha = {
   grp: string
@@ -50,7 +53,7 @@ type Report = {
   gerado_em: string
   situacoes_label: string
   valuation_meses: ValuationMes[]
-  eficacia: SituacaoSecao
+  operacional: OperacionalSecao
   por_marketplace: FatMesSecao[]
   por_categoria: FatMesSecao[]
 }
@@ -468,42 +471,45 @@ const loading = computed(() =>
           </div>
         </section>
 
-        <!-- 3. Eficácia operacional -->
+        <!-- 3. Operacional — 3 meses (situações / reembolso / devoluções por mês) -->
         <section class="space-y-2">
-          <h2 class="text-sm font-semibold uppercase tracking-wide text-destructive">
-            Eficácia operacional
-            <span class="normal-case text-xs text-muted-foreground">(situações problemáticas — total do banco)</span>
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Operacional — 3 meses
+            <span class="normal-case text-xs text-muted-foreground">(situações, reembolso e devoluções por mês)</span>
           </h2>
           <div class="border rounded-md overflow-auto">
             <table class="w-full text-sm border-collapse">
-              <thead class="bg-destructive/10 text-xs uppercase tracking-wide">
+              <thead class="bg-muted/50 text-xs uppercase tracking-wide">
                 <tr>
-                  <th class="text-left px-3 py-2 font-medium">Situação</th>
-                  <th class="text-right px-3 py-2 font-medium">Pedidos</th>
-                  <th class="text-right px-3 py-2 font-medium">Faturamento</th>
+                  <th class="text-left px-3 py-2 font-medium">Métrica</th>
+                  <th
+                    v-for="m in resumo.operacional.meses"
+                    :key="m"
+                    class="text-right px-3 py-2 font-medium capitalize"
+                  >
+                    {{ mesLabel(m) }}
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-if="!resumo.eficacia.linhas.length">
-                  <td colspan="3" class="text-center py-6 text-muted-foreground">Sem ocorrências.</td>
-                </tr>
                 <tr
-                  v-for="(r, i) in resumo.eficacia.linhas"
-                  :key="r.situacao_nome + i"
-                  class="border-t hover:bg-muted/20"
+                  v-for="linha in resumo.operacional.linhas"
+                  :key="linha.chave"
+                  class="border-t"
+                  :class="linha.chave === 'taxa_perdimento'
+                    ? 'bg-amber-50 dark:bg-amber-950/30 font-semibold'
+                    : 'hover:bg-muted/20'"
                 >
-                  <td class="px-3 py-1.5">{{ r.situacao_nome }}</td>
-                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtInt(r.pedidos) }}</td>
-                  <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.faturamento) }}</td>
+                  <td class="px-3 py-1.5">{{ linha.label }}</td>
+                  <td
+                    v-for="(v, i) in linha.valores"
+                    :key="resumo.operacional.meses[i]"
+                    class="px-3 py-1.5 text-right tabular-nums"
+                  >
+                    {{ linha.formato === 'pct' ? fmtPct(v) : fmtBRL(v) }}
+                  </td>
                 </tr>
               </tbody>
-              <tfoot v-if="resumo.eficacia.linhas.length" class="bg-muted/30 font-semibold">
-                <tr class="border-t">
-                  <td class="px-3 py-2">Total</td>
-                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtInt(resumo.eficacia.total_pedidos) }}</td>
-                  <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(resumo.eficacia.total_faturamento) }}</td>
-                </tr>
-              </tfoot>
             </table>
           </div>
         </section>

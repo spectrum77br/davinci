@@ -52,13 +52,13 @@ from app.schemas.financeiro import (
     FaturamentoMesSecaoOut,
     NCMOut,
     NCMPatch,
+    OperacionalLinhaOut,
+    OperacionalSecaoOut,
     SaldoMarketplaceCelulaOut,
     SaldoMarketplaceLojaOut,
     SaldoMarketplaceSnapshotOut,
     SimulacaoOut,
     SimulacaoPatch,
-    SituacaoLinhaOut,
-    SituacaoSecaoOut,
     SuprimentosOut,
     SuprimentosPatch,
     ValuationMesOut,
@@ -646,17 +646,15 @@ _VAL_SIT_LABEL = (
     "Em aberto, Em andamento, Entregue, "
     "Enviado Geral SP/CI/PI/RA/SA, Enviado Importado"
 )
-# Situações problemáticas — seção Eficácia Operacional (total do banco).
-_VAL_SIT_EFICACIA = [
-    "83955",  # Aguardando Cancelamento
-    "83957",  # Aguardando Devolução
-    "83960",  # Problemas
-    "83961",  # Aguardando Reembolso
-    "83964",  # Teste
-    "83966",  # Erro no Envio
-    "84676",  # Devolvido Estoque Usado
-    "84677",  # Manutenção
-]
+# Quadro "Operacional — 3 meses" (substitui a antiga Eficácia). Linhas diretas
+# de situação (faturamento por mês da data do pedido) + o conjunto que serve de
+# denominador (faturamento) da Taxa de Perdimento.
+_VAL_SIT_ERRO_ENVIO = "83966"   # Erro no Envio
+_VAL_SIT_PROBLEMAS = "83960"    # Problemas
+_VAL_SIT_PERDIMENTO = "83956"   # Perdimento
+# Denominador da Taxa de Perdimento: Em andamento (15,37) + Entregue (83953) +
+# Perdimento (83956) + Resolvido (545902) + Enviado Fake (83958).
+_VAL_SIT_FAT_PERDIMENTO = ["15", "37", "83953", "83956", "545902", "83958"]
 
 
 def _qt(name: str) -> str:
@@ -855,8 +853,8 @@ async def valuation_report(
 
     Consulta ao vivo davinci.bling_orders / valuation / stores / situacao_bling
     — sempre reflete o último estado das tabelas (a rotina das 5h as atualiza).
-    Seções: Valuation 3 meses, Eficácia operacional,
-    Por Marketplace e Por Categoria.
+    Seções: Valuation 3 meses, Operacional 3 meses (situações/reembolso/
+    devoluções por mês), Por Marketplace e Por Categoria.
     """
     months = _val_window_months()
 
@@ -916,45 +914,106 @@ async def valuation_report(
             data_snapshot=md.get("data_snapshot"),
         ))
 
-    # 2. Eficácia operacional — situações problemáticas (total do banco).
-    efi_sql = text(f"""
+    # 2. Quadro "Operacional — 3 meses" (substitui a Eficácia). Tudo ao vivo,
+    #    cada métrica agrupada por mês a partir da SUA data:
+    #      • situações (Erro no Envio / Problemas / Perdimento) pela data do pedido;
+    #      • Reembolso por refunds.conferido_at (carimbado no patch);
+    #      • Usado/Manutenção/Custo Manutenção pelo devolutions.created_at.
+    #    Mesma janela 3 meses (mês-2..mês atual, tz SP) das demais seções.
+    # Helpers SQL (tz São Paulo): bucket de mês e filtro da janela de 3 meses
+    # (mês-2..mês atual) por coluna de data — evita repetir a expressão longa.
+    def _mes(col: str) -> str:
+        return f"date_trunc('month', ({col} AT TIME ZONE 'America/Sao_Paulo')::date)::date"
+
+    def _janela(col: str) -> str:
+        d = f"({col} AT TIME ZONE 'America/Sao_Paulo')::date"
+        hoje = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date"
+        return (
+            f"{d} >= date_trunc('month', {hoje} - INTERVAL '2 months')::date "
+            f"AND {d} < date_trunc('month', {hoje} + INTERVAL '1 month')::date"
+        )
+
+    oper_bo_sql = text(f"""
         WITH por_pedido AS (
             SELECT bo.numero,
+                   {_mes('bo.data')} AS mes,
                    MAX(bo.situacao) AS situacao,
-                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase_pedido
+                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase
             FROM {_qt("bling_orders")} bo
-            WHERE bo.situacao = ANY(:efi_ids)
-            GROUP BY bo.numero
+            WHERE {_janela('bo.data')}
+            GROUP BY bo.numero, mes
         )
-        SELECT p.situacao AS situacao_id,
-               COALESCE(sb.nome, '(sem situacao)') AS situacao_nome,
-               COUNT(*) AS pedidos,
-               SUM(COALESCE(p.valorbase_pedido, 0)) AS faturamento
-        FROM por_pedido p
-        LEFT JOIN {_qt("situacao_bling")} sb ON p.situacao = sb.id::text
-        GROUP BY p.situacao, sb.nome
-        ORDER BY faturamento DESC NULLS LAST
+        SELECT mes,
+               SUM(valorbase) FILTER (WHERE situacao = :s_erro)     AS erro_envio,
+               SUM(valorbase) FILTER (WHERE situacao = :s_prob)     AS problemas,
+               SUM(valorbase) FILTER (WHERE situacao = :s_perd)     AS perdimento_num,
+               SUM(valorbase) FILTER (WHERE situacao = ANY(:s_fat)) AS faturamento_den
+        FROM por_pedido
+        GROUP BY mes
+    """)
+    oper_ref_sql = text(f"""
+        SELECT {_mes('conferido_at')} AS mes,
+               SUM(COALESCE(reembolso, 0)) AS reembolso
+        FROM {_qt("refunds")}
+        WHERE conferido = true AND conferido_at IS NOT NULL
+          AND {_janela('conferido_at')}
+        GROUP BY mes
+    """)
+    oper_dev_sql = text(f"""
+        SELECT {_mes('created_at')} AS mes,
+               SUM(COALESCE(custo_produto, 0))
+                   FILTER (WHERE condicao_produto = 'Usado') AS usado,
+               SUM(COALESCE(custo_produto, 0))
+                   FILTER (WHERE condicao_produto = 'Manutenção') AS manutencao,
+               SUM(COALESCE(custo_manutencao, 0)) AS custo_manutencao
+        FROM {_qt("devolutions")}
+        WHERE {_janela('created_at')}
+        GROUP BY mes
     """)
 
-    def _build_secao(rows: list[dict], data=None) -> SituacaoSecaoOut:
-        linhas: list[SituacaoLinhaOut] = []
-        tot_ped = 0
-        tot_fat = Decimal("0")
-        for r in rows:
-            fat = Decimal(str(r["faturamento"] or 0))
-            linhas.append(SituacaoLinhaOut(
-                situacao_nome=r["situacao_nome"], pedidos=int(r["pedidos"]),
-                faturamento=_r2(fat),
-            ))
-            tot_ped += int(r["pedidos"])
-            tot_fat += fat
-        return SituacaoSecaoOut(
-            data=data, linhas=linhas,
-            total_pedidos=tot_ped, total_faturamento=_r2(tot_fat),
-        )
+    bo_by_mes = {
+        r["mes"]: r for r in (await session.execute(oper_bo_sql, {
+            "s_erro": _VAL_SIT_ERRO_ENVIO, "s_prob": _VAL_SIT_PROBLEMAS,
+            "s_perd": _VAL_SIT_PERDIMENTO, "s_fat": _VAL_SIT_FAT_PERDIMENTO,
+        })).mappings().all()
+    }
+    ref_by_mes = {r["mes"]: r for r in (await session.execute(oper_ref_sql)).mappings().all()}
+    dev_by_mes = {r["mes"]: r for r in (await session.execute(oper_dev_sql)).mappings().all()}
 
-    efi_rows = (await session.execute(efi_sql, {"efi_ids": _VAL_SIT_EFICACIA})).mappings().all()
-    eficacia = _build_secao([dict(r) for r in efi_rows])
+    def _brl_row(by_mes: dict, col: str) -> list[float | None]:
+        # Mês sem linhas → R$ 0,00 (não "—") nas métricas de moeda.
+        return [_r2(by_mes.get(m, {}).get(col) or 0) for m in months]
+
+    def _taxa_perdimento() -> list[float | None]:
+        out: list[float | None] = []
+        for m in months:
+            r = bo_by_mes.get(m, {})
+            den = r.get("faturamento_den") or 0
+            num = r.get("perdimento_num") or 0
+            out.append(
+                _r2(Decimal(str(num)) / Decimal(str(den)) * 100) if den else None
+            )
+        return out
+
+    operacional = OperacionalSecaoOut(
+        meses=months,
+        linhas=[
+            OperacionalLinhaOut(chave="erro_envio", label="Erro no Envio",
+                                formato="brl", valores=_brl_row(bo_by_mes, "erro_envio")),
+            OperacionalLinhaOut(chave="problemas", label="Problemas",
+                                formato="brl", valores=_brl_row(bo_by_mes, "problemas")),
+            OperacionalLinhaOut(chave="taxa_perdimento", label="Taxa de Perdimento",
+                                formato="pct", valores=_taxa_perdimento()),
+            OperacionalLinhaOut(chave="reembolso", label="Reembolso",
+                                formato="brl", valores=_brl_row(ref_by_mes, "reembolso")),
+            OperacionalLinhaOut(chave="usado", label="Usado",
+                                formato="brl", valores=_brl_row(dev_by_mes, "usado")),
+            OperacionalLinhaOut(chave="manutencao", label="Manutenção",
+                                formato="brl", valores=_brl_row(dev_by_mes, "manutencao")),
+            OperacionalLinhaOut(chave="custo_manutencao", label="Custo Manutenção",
+                                formato="brl", valores=_brl_row(dev_by_mes, "custo_manutencao")),
+        ],
+    )
 
     # 4 + 5. Por Marketplace e Por Categoria (3 meses) — mkt_rows/cat_rows já
     # executados acima (a rentabilidade do card mensal é a soma de mkt_rows).
@@ -962,7 +1021,7 @@ async def valuation_report(
         gerado_em=datetime.now(UTC),
         situacoes_label=_VAL_SIT_LABEL,
         valuation_meses=valuation_meses,
-        eficacia=eficacia,
+        operacional=operacional,
         por_marketplace=_agg_to_secoes([dict(r) for r in mkt_rows], months),
         por_categoria=_agg_to_secoes([dict(r) for r in cat_rows], months),
     )
