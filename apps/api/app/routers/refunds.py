@@ -485,6 +485,7 @@ async def patch_refund(
         raise HTTPException(404, detail={"code": "refund_not_found"})
 
     prev_pedido_bling = row.pedido_bling
+    was_conferido = row.conferido
 
     data = body.model_dump(exclude_unset=True)
     if data.get("conta") is None and "conta" in data:
@@ -492,6 +493,11 @@ async def patch_refund(
 
     for key, value in data.items():
         setattr(row, key, value)
+
+    # Carimba quando `conferido` transiciona (false->true grava agora; true->false
+    # limpa). Única fonte da data usada no quadro "Operacional — 3 meses".
+    if "conferido" in data and row.conferido != was_conferido:
+        row.conferido_at = datetime.now(UTC) if row.conferido else None
 
     # Enforce Cliente -> reembolso <= 0 against the merged state (tipo or
     # reembolso may have come from either the patch or the existing row).

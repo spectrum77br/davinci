@@ -32,6 +32,9 @@ class Refund(Base, TimestampMixin):
     )
     operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     conferido: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # Carimbado por patch_refund quando `conferido` vira true (limpo em true->false).
+    # Usado pelo quadro "Operacional — 3 meses" (Valuation) p/ agrupar reembolsos por mês.
+    conferido_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Rastreio interno de autoria (DB-only): preenchido no POST /api/refunds a
     # partir do usuário autenticado. NÃO é exposto em RefundOut nem na UI.
