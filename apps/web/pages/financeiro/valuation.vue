@@ -495,10 +495,7 @@ const loading = computed(() =>
                 <tr
                   v-for="linha in resumo.operacional.linhas"
                   :key="linha.chave"
-                  class="border-t"
-                  :class="linha.chave === 'taxa_perdimento'
-                    ? 'bg-amber-50 dark:bg-amber-950/30 font-semibold'
-                    : 'hover:bg-muted/20'"
+                  class="border-t hover:bg-muted/20"
                 >
                   <td class="px-3 py-1.5">{{ linha.label }}</td>
                   <td
