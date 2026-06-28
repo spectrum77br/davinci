@@ -1097,7 +1097,7 @@ async def valuation_estoque_bling(
 
 # Ordem preferida das colunas de marketplace; extras presentes no snapshot
 # entram depois, em ordem alfabética (suporta marketplaces futuros).
-_SALDO_MKT_ORDEM = ["ml", "shopee", "amazon"]
+_SALDO_MKT_ORDEM = ["ml", "shopee", "amazon", "magalu", "tiktok", "shein", "temu", "aliexpress"]
 
 
 def _f_or_none(v) -> float | None:

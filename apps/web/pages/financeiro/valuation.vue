@@ -286,6 +286,11 @@ const mktLabel: Record<string, string> = {
   ml: 'Mercado Livre',
   shopee: 'Shopee',
   amazon: 'Amazon',
+  magalu: 'Magalu',
+  tiktok: 'TikTok',
+  shein: 'Shein',
+  temu: 'Temu',
+  aliexpress: 'AliExpress',
 }
 function mktTitle(m: string): string {
   return mktLabel[m] || m.charAt(0).toUpperCase() + m.slice(1)
