@@ -306,7 +306,7 @@ async def list_margens_marketplace(
     rebuilt by the 'atualizar' UI button. User-facing PATCHes update the
     affected snapshot columns directly so edits appear immediately.
     """
-    where = ["v.situacao_nome != 'Cancelado'", f"NOT {_ATTENTION_FRETE_SQL}"]
+    where = ["v.situacao_nome != 'Cancelado'"]
     params: dict = {"limit": limit, "offset": offset}
     if platform:
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
@@ -321,6 +321,15 @@ async def list_margens_marketplace(
     # attention_type='all' (default), status alone drives the filter.
     attention_sql = _ATTENTION_TYPE_MAP.get(attention_type or "all", NEEDS_ATTENTION_SQL)
     attention_active = attention_type and attention_type != "all"
+    # Frete-difference rows (Frete Resultado > 0) are hidden from the listing by
+    # default: they no longer require margin approval and are consumed by the
+    # backend logistics-refund flow, not triaged here (commit 77302a7, which
+    # also removed 'frete' from the UI attention dropdown). The exclusion is
+    # lifted only when the caller explicitly asks for them via
+    # attention_type=frete — otherwise that filter (appended just below) would
+    # contradict the exclusion and the query could never match a row.
+    if attention_type != "frete":
+        where.append(f"NOT {_ATTENTION_FRETE_SQL}")
     if attention_active:
         where.append(attention_sql)
     if status:
