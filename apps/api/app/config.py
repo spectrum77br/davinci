@@ -156,6 +156,12 @@ class Settings(BaseSettings):
     # perdido, situação-agnóstica. Desligável via ENABLE_BLING_ORDERS_PERIOD_SYNC=false.
     enable_bling_orders_period_sync: bool = True
 
+    # Varredura DIÁRIA por data de emissão: lista todos os pedidos do dia no
+    # Bling e ingere os AUSENTES do banco (insert) ou com situação divergente
+    # (update) — única rede que recupera pedido nunca-ingerido. Pula os já
+    # presentes e inalterados. Desligável via ENABLE_BLING_ORDERS_DAILY_BACKFILL=false.
+    enable_bling_orders_daily_backfill: bool = True
+
     @property
     def is_prod(self) -> bool:
         return self.env == "production"

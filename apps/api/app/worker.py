@@ -1209,6 +1209,50 @@ async def bling_orders_period_sync_tick(ctx: dict) -> None:
     )
 
 
+async def bling_orders_daily_backfill_tick(ctx: dict) -> None:
+    """1×/dia: lista todos os pedidos do Bling por data de emissão (janela
+    curta) e re-ingere via ingest_bling_order_run só os que estão AUSENTES
+    do banco (insert) ou com situação divergente (update). Pula os já
+    presentes e inalterados — nada de re-insert/re-stamp. É a única rede que
+    recupera um pedido cujo ingest falhou e nunca entrou.
+    Desligável via ENABLE_BLING_ORDERS_DAILY_BACKFILL=false."""
+    if not get_settings().enable_bling_orders_daily_backfill:
+        return
+
+    from app.services.bling_orders_daily_backfill import (
+        find_daily_backfill_candidates,
+    )
+
+    async with session_scope() as session:
+        bling_ids, user_id = await find_daily_backfill_candidates(session)
+
+    if not bling_ids or user_id is None:
+        logger.info("bling_orders_daily_backfill_no_candidates")
+        return
+
+    pool = await get_arq_pool()
+    enqueued = 0
+    for bling_id in bling_ids:
+        try:
+            await pool.enqueue_job(
+                "ingest_bling_order_run",
+                bling_id,
+                str(user_id),
+                "daily_backfill",
+            )
+            enqueued += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "bling_daily_backfill_enqueue_failed",
+                bling_id=bling_id, err=str(e)[:200],
+            )
+
+    logger.info(
+        "bling_orders_daily_backfill_tick_done",
+        candidates=len(bling_ids), enqueued=enqueued,
+    )
+
+
 # ---------------------------------------------------------------- lifecycle
 
 
@@ -1257,6 +1301,7 @@ class WorkerSettings:
         check_marketplace_shipped_orders,
         bling_orders_safety_net_tick,
         bling_orders_period_sync_tick,
+        bling_orders_daily_backfill_tick,
         bling_notas_token_refresh,
         kit_components_sync,
         valuation_estoque_snapshot,
@@ -1349,6 +1394,12 @@ class WorkerSettings:
         # perdidos de QUALQUER transição (situação-agnóstica), inclusive as
         # que a safety-net não cobre (ex.: 15 → devolução).
         cron(bling_orders_period_sync_tick, minute={20}, run_at_startup=False),
+        # Varredura DIÁRIA por data de emissão (09:30 UTC = 06:30 BRT): lista
+        # todos os pedidos do dia no Bling e ingere os AUSENTES do banco
+        # (insert) ou com situação divergente (update). Pula presentes e
+        # inalterados. Única rede que recupera pedido cujo ingest falhou e
+        # nunca entrou (Bling 500 / transação envenenada).
+        cron(bling_orders_daily_backfill_tick, hour=9, minute=30, run_at_startup=False),
     ]
     # Marketing agent-node crons (Shopee sync + command consumer + schedule
     # reconciler) are NOT registered here — they run ONLY on the dedicated
