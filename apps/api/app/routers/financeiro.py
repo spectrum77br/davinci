@@ -656,6 +656,11 @@ _VAL_SIT_PERDIMENTO = "83956"   # Perdimento
 # Perdimento (83956) + Resolvido (545902) + Enviado Fake (83958).
 _VAL_SIT_FAT_PERDIMENTO = ["15", "37", "83953", "83956", "545902", "83958"]
 
+# Lojas internas/ignoradas — mesmas que bling_sync.IGNORED_STORES descarta no
+# ingest. Não entram em faturamento/custo/rentabilidade da página Valuation.
+# loja 0 = sem loja; 205632678 / 205660518 = lojas internas.
+_VAL_IGNORED_STORES = ["0", "205632678", "205660518"]
+
 
 def _qt(name: str) -> str:
     """Tabela qualificada pelo schema (mesma convenção de refunds.py)."""
@@ -689,6 +694,7 @@ WITH bo_base AS (
           >= date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - INTERVAL '2 months')::date
       AND (bo.data AT TIME ZONE 'America/Sao_Paulo')::date
           <  date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) + INTERVAL '1 month')::date
+      AND COALESCE(bo.loja, '') <> ALL(:ignored_stores)
 ),
 order_totals AS (
     SELECT numero,
@@ -884,7 +890,11 @@ async def valuation_report(
     # Agregação ao vivo por mês × marketplace/categoria (também usada nas
     # seções 4 e 5 — por isso executada aqui em cima): a rentabilidade do card
     # mensal é a soma dela.
-    agg_params = {"sit_aplic": _VAL_SIT_APLICAVEIS, "sit_rent": _VAL_SIT_RENTABILIDADE}
+    agg_params = {
+        "sit_aplic": _VAL_SIT_APLICAVEIS,
+        "sit_rent": _VAL_SIT_RENTABILIDADE,
+        "ignored_stores": _VAL_IGNORED_STORES,
+    }
     mkt_rows = (await session.execute(text(_agg_sql("marketplace")), agg_params)).mappings().all()
     cat_rows = (await session.execute(text(_agg_sql("categoria")), agg_params)).mappings().all()
 
