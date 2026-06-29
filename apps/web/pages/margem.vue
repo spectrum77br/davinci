@@ -114,6 +114,9 @@ const platforms = ref<string[]>([])
 const contas = ref<string[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+// Aviso informativo (não-erro): ex. saldo gravado mas margem abaixo da mínima,
+// pedido mantido como Pendente. Persiste através do reload que segue a ação.
+const notice = ref<string | null>(null)
 
 // --- Download da planilha de rentabilidade por período (admin) ---
 function isoDate(d: Date): string {
@@ -375,6 +378,7 @@ watch(conta, () => {
 })
 watch(statusFilter, () => {
   if (tab.value !== 'list') return
+  notice.value = null
   page.value = 1
   load()
 })
@@ -473,6 +477,7 @@ function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
 
 async function setStatus(row: MarketplaceRow, value: MargensStatus) {
   if (!canEdit.value || value === row.status || !row.pedido_bling) return
+  notice.value = null
   const prev = row.status
   const pedido = row.pedido_bling
   // Push to Bling apenas quando o problema é de margem. Frete/saldo divergente
@@ -552,12 +557,21 @@ async function syncFromSaldoFinal(row: MarketplaceRow, valorBase?: number) {
   const id = row.bling_order_item_id
   if (syncingSaldoFinal.value.has(id)) return
   syncingSaldoFinal.value.add(id)
+  notice.value = null
   try {
-    await api(`/api/margens/marketplace/${encodeURIComponent(id)}/sync-saldo-final`, {
-      method: 'POST',
-      body: valorBase != null ? { valor_base: valorBase } : undefined,
-    })
+    const res = await api<{ status?: string; margem?: number | null; margem_minima?: number | null }>(
+      `/api/margens/marketplace/${encodeURIComponent(id)}/sync-saldo-final`,
+      {
+        method: 'POST',
+        body: valorBase != null ? { valor_base: valorBase } : undefined,
+      },
+    )
     error.value = null
+    // Saldo gravado, mas a margem recalculada não atingiu a mínima: não aprova
+    // automaticamente, o pedido fica como Pendente para decisão manual.
+    notice.value = res?.status === 'Pendente'
+      ? `Saldo gravado. Margem recalculada ${pct(res.margem)} ficou abaixo da mínima ${pct(res.margem_minima)} — pedido mantido como Pendente (sem aprovação automática).`
+      : null
     await reloadCurrent()
   } catch (e: any) {
     error.value = apiError(e)
@@ -685,6 +699,11 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     <div v-if="error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
       <AlertCircle class="size-4" />
       {{ error }}
+    </div>
+
+    <div v-if="notice" class="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
+      <AlertCircle class="size-4 shrink-0" />
+      {{ notice }}
     </div>
 
     <!-- Auto-refresh do snapshot ao abrir a página (não bloqueia: a tabela

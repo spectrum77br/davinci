@@ -238,7 +238,10 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             v.ajustes,
             {_SALDO_FINAL_BLING_SQL}                             AS saldo_final,
             CASE
-                WHEN v.bling_status_margem IN ('Aprovado', 'Reprovado')
+                -- 'Pendente' gravado = hold manual (edição de Saldo Efetivo com
+                -- margem recalculada abaixo da mínima); fixa o pedido como
+                -- Pendente mesmo sem gatilho de atenção ativo.
+                WHEN v.bling_status_margem IN ('Aprovado', 'Reprovado', 'Pendente')
                     THEN v.bling_status_margem
                 WHEN {NEEDS_ATTENTION_SQL} THEN 'Pendente'
                 ELSE 'Aprovado'
@@ -322,19 +325,22 @@ async def list_margens_marketplace(
         where.append(attention_sql)
     if status:
         # Effective status:
-        #   Aprovado/Reprovado in DB → respected as-is
-        #   NULL/Pendente in DB     → derived from NEEDS_ATTENTION_SQL
-        #                               (true → Pendente, false → Aprovado)
+        #   Aprovado/Reprovado/Pendente in DB → respected as-is
+        #   NULL in DB                        → derived from NEEDS_ATTENTION_SQL
+        #                                        (true → Pendente, false → Aprovado)
+        # 'Pendente' gravado = hold manual (edição de Saldo Efetivo com margem
+        # recalculada abaixo da mínima): fixa o pedido na aba Pendente mesmo que
+        # ele não dispare mais nenhum gatilho de atenção (ex.: divergência de
+        # saldo resolvida pela própria edição).
         if status == "Pendente":
             where.append(
-                f"(v.bling_status_margem IS NULL OR v.bling_status_margem = 'Pendente') "
-                f"AND {NEEDS_ATTENTION_SQL}"
+                f"(v.bling_status_margem = 'Pendente' "
+                f" OR (v.bling_status_margem IS NULL AND {NEEDS_ATTENTION_SQL}))"
             )
         elif status == "Aprovado":
             where.append(
-                f"(v.bling_status_margem = 'Aprovado' "
-                f" OR ((v.bling_status_margem IS NULL OR v.bling_status_margem = 'Pendente') "
-                f"     AND NOT {NEEDS_ATTENTION_SQL}))"
+                "(v.bling_status_margem = 'Aprovado' "
+                f" OR (v.bling_status_margem IS NULL AND NOT {NEEDS_ATTENTION_SQL}))"
             )
         elif status == "Reprovado":
             where.append("v.bling_status_margem = 'Reprovado'")
@@ -771,17 +777,67 @@ async def sync_bling_from_saldo_final(
         origem="margens",
         mudado_por=user.id,
     )
-    # Gravar o Saldo Efetivo como final tambem aprova o pedido no DaVinci
-    # (status='Aprovado', verificado=True). update_bling=False: o pedido ja foi
-    # patcheado financeiramente acima, nao mexemos na situacao do Bling aqui.
-    await _apply_bling_decision_by_pedido(
-        session,
-        user.id,
-        pedido_bling=row.pedido_bling,
-        sku=row.sku,
-        new_status="Aprovado",
-        update_bling=False,
+    # A edição do Saldo Efetivo só aprova automaticamente quando a margem
+    # recalculada (a partir do novo saldo, já patcheado acima) atinge a mínima.
+    # `margem_final` espelha a coluna "Margem" da UI (margemFinal): pós-reembolso
+    # quando há ajuste, senão a margem do Bling. Lê do snapshot DEPOIS do patch
+    # financeiro, então reflete exatamente o valor recém-gravado.
+    margin_row = (await session.execute(
+        text(
+            f"""
+            SELECT
+                v.margem_minima AS margem_minima,
+                COALESCE(
+                    NULLIF(
+                        CASE
+                            WHEN COALESCE(v.bling_custo_produtos, 0) > 0
+                                 AND {_SALDO_FINAL_BLING_SQL} IS NOT NULL
+                            THEN ({_SALDO_FINAL_BLING_SQL} - v.bling_custo_produtos)
+                                 / v.bling_custo_produtos
+                            ELSE NULL::numeric
+                        END, 0),
+                    v.bling_margem_calculado
+                ) AS margem_final
+            FROM {_VERIFICAR_MARGEM_TABLE} v
+            WHERE v.bling_order_item_id = :id
+            LIMIT 1
+            """  # noqa: S608
+        ),
+        {"id": str(bling_order_item_id)},
+    )).first()
+    margem_final = margin_row.margem_final if margin_row is not None else None
+    margem_minima = margin_row.margem_minima if margin_row is not None else None
+    # Sem mínima cadastrada ou margem incalculável (sem custo) → não há critério
+    # para barrar: mantém o comportamento antigo (aprova). Espelha a triagem, que
+    # só marca "margem baixa" quando margem E mínima existem.
+    clears_minimum = (
+        margem_minima is None
+        or margem_final is None
+        or margem_final >= margem_minima
     )
+
+    if clears_minimum:
+        # Margem ok → aprova o pedido no DaVinci (status='Aprovado',
+        # verificado=True). update_bling=False: o pedido já foi patcheado
+        # financeiramente acima, não mexemos na situação do Bling aqui.
+        await _apply_bling_decision_by_pedido(
+            session,
+            user.id,
+            pedido_bling=row.pedido_bling,
+            sku=row.sku,
+            new_status="Aprovado",
+            update_bling=False,
+        )
+        result_status = "Aprovado"
+    else:
+        # Margem abaixo da mínima → NÃO aprova automaticamente; o pedido
+        # fica/permanece Pendente para decisão manual (sem tocar no Bling).
+        await _mark_pedido_pendente_by_pedido(
+            session,
+            pedido_bling=row.pedido_bling,
+            sku=row.sku,
+        )
+        result_status = "Pendente"
     await session.commit()
 
     logger.info(
@@ -790,13 +846,18 @@ async def sync_bling_from_saldo_final(
         pedido_bling=row.pedido_bling,
         valorbase=str(valorbase),
         manual=override is not None,
+        status=result_status,
+        margem=None if margem_final is None else float(margem_final),
+        margem_minima=None if margem_minima is None else float(margem_minima),
     )
     return {
         "ok": True,
         "valorbase": float(valorbase),
         "taxacomissao": 0.0,
         "custofrete": 0.0,
-        "status": "Aprovado",
+        "status": result_status,
+        "margem": None if margem_final is None else float(margem_final),
+        "margem_minima": None if margem_minima is None else float(margem_minima),
     }
 
 
@@ -1063,6 +1124,61 @@ async def _apply_bling_decision_by_pedido(
         aprovado_por=str(actor_id),
         verificado=True,
     )
+
+
+async def _mark_pedido_pendente_by_pedido(
+    session: AsyncSession,
+    *,
+    pedido_bling: int | str | None,
+    sku: str | None,
+) -> None:
+    """Marca o pedido como Pendente no DaVinci, sem tocar na situação do Bling.
+
+    Usado quando a edição do Saldo Efetivo NÃO aprova automaticamente porque a
+    margem recalculada ficou abaixo da mínima: o pedido fica/permanece na aba
+    Pendente para decisão manual. Ao contrário de `_apply_bling_decision_by_pedido`
+    (que força Aprovado/Reprovado, atualiza a situação no Bling e marca
+    verificado=True), aqui só gravamos status='Pendente', verificado=False e
+    limpamos aprovado_por — em bling_orders e no snapshot.
+
+    `bling_status_margem='Pendente'` é respeitado pela derivação de status e pelo
+    filtro do endpoint de listagem, fixando o pedido na aba Pendente mesmo que
+    ele não dispare mais nenhum gatilho de atenção (ex.: divergência de saldo
+    resolvida pela própria edição).
+    """
+    if pedido_bling is None:
+        raise HTTPException(400, detail={"code": "pedido_bling_missing"})
+
+    order = await _find_bling_order_by_pedido(session, str(pedido_bling), sku)
+    if order is None or order.bling_id is None:
+        raise HTTPException(404, detail={"code": "bling_order_not_found"})
+
+    await session.execute(
+        update(BlingOrder)
+        .where(BlingOrder.bling_id == order.bling_id)
+        .values(status="Pendente", verificado=False, aprovado_por=None)
+    )
+    # Snapshot é best-effort (igual ao patch de status na aprovação): bling_orders
+    # é a fonte que sobrevive ao rebuild do snapshot.
+    try:
+        await session.execute(
+            text(
+                f"""
+                UPDATE {_VERIFICAR_MARGEM_TABLE}
+                SET bling_status_margem = 'Pendente',
+                    verificado = false,
+                    aprovado_por = NULL
+                WHERE pedido_bling = :pedido_bling
+                """  # noqa: S608
+            ),
+            {"pedido_bling": str(pedido_bling)},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "verificar_margem_pendente_patch_failed",
+            pedido_bling=str(pedido_bling),
+            error=str(e)[:200],
+        )
 
 
 async def _find_bling_order_by_pedido(

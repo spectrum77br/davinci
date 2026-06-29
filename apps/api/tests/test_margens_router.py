@@ -750,3 +750,145 @@ async def test_sync_from_marketplace_updates_snapshot_financials_without_view_re
     assert float(snapshot["bling_custofrete_item"]) == 5.0
     assert float(snapshot["bling_lucro_calculado"]) == 55.0
     assert float(snapshot["bling_margem_calculado"]) == 1.1
+
+
+async def test_sync_saldo_final_approves_when_margin_clears_minimum(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Editar o Saldo Efetivo aprova automaticamente SÓ quando a margem
+    recalculada (a partir do novo saldo) atinge a mínima."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    order = BlingOrder(
+        bling_id=987660,
+        numero="500001",
+        item_codigo="sku-ok",
+        item_index=0,
+        situacao="6",
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                situacao, situacao_nome, plataforma_bling, item_proportion,
+                bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
+                bling_custo_produtos, margem_minima, ajustes, bling_status_margem
+            )
+            VALUES (
+                :id, '500001', 987660, 'sku-ok',
+                '6', 'Em aberto', 'ml', 1,
+                100, 0, 0,
+                100, 0.20, 0, NULL
+            )
+            """
+        ),
+        {"id": str(order.id)},
+    )
+    await db.commit()
+
+    # valor_base=130 → margem (130-100)/100 = 30% ≥ 20% mínima → aprova.
+    response = await client.post(
+        f"/api/margens/marketplace/{order.id}/sync-saldo-final",
+        json={"valor_base": 130},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "Aprovado"
+
+    snapshot = (
+        await db.execute(
+            text(
+                """
+                SELECT bling_status_margem, verificado
+                FROM verificar_margem
+                WHERE bling_order_item_id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": str(order.id)},
+        )
+    ).mappings().one()
+    assert snapshot["bling_status_margem"] == "Aprovado"
+    assert snapshot["verificado"] is True
+
+
+async def test_sync_saldo_final_keeps_pending_when_margin_below_minimum(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Quando a margem recalculada fica ABAIXO da mínima, a edição do Saldo
+    Efetivo NÃO aprova: o pedido é fixado como Pendente (bling_status_margem=
+    'Pendente'), mesmo sem nenhum gatilho de atenção ativo — fecha o back-door
+    em que, resolvida a divergência de saldo, o pedido cairia em Aprovado."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    order = BlingOrder(
+        bling_id=987661,
+        numero="500002",
+        item_codigo="sku-low",
+        item_index=0,
+        situacao="6",
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+    # marketplace_margem e marketplace_liquido NULL → nenhum gatilho de atenção
+    # (margem/frete/saldo) dispara após a edição.
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                situacao, situacao_nome, plataforma_bling, item_proportion,
+                bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
+                bling_custo_produtos, margem_minima, ajustes, bling_status_margem
+            )
+            VALUES (
+                :id, '500002', 987661, 'sku-low',
+                '6', 'Em aberto', 'ml', 1,
+                100, 0, 0,
+                100, 0.20, 0, NULL
+            )
+            """
+        ),
+        {"id": str(order.id)},
+    )
+    await db.commit()
+
+    # valor_base=110 → margem (110-100)/100 = 10% < 20% mínima → NÃO aprova.
+    response = await client.post(
+        f"/api/margens/marketplace/{order.id}/sync-saldo-final",
+        json={"valor_base": 110},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "Pendente"
+
+    snapshot = (
+        await db.execute(
+            text(
+                """
+                SELECT bling_status_margem, verificado
+                FROM verificar_margem
+                WHERE bling_order_item_id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": str(order.id)},
+        )
+    ).mappings().one()
+    assert snapshot["bling_status_margem"] == "Pendente"
+    assert snapshot["verificado"] is False
+
+    # Fixado: aparece na aba Pendente mesmo sem gatilho de atenção ativo...
+    pending = await client.get("/api/margens/marketplace?status=Pendente")
+    assert pending.status_code == 200
+    assert "500002" in [it["pedido_bling"] for it in pending.json()["items"]]
+    # ...e NÃO cai em Aprovado (regressão do back-door).
+    approved = await client.get("/api/margens/marketplace?status=Aprovado")
+    assert "500002" not in [it["pedido_bling"] for it in approved.json()["items"]]
