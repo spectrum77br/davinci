@@ -1211,6 +1211,8 @@ async def valuation_saldo_marketplace(
             total_a_receber=round(loja_receber, 2),
         ))
 
+    lojas.sort(key=lambda l: l.loja.casefold())
+
     return SaldoMarketplaceSnapshotOut(
         data=row["data"],
         updated_at=row["updated_at"],
