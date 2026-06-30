@@ -1358,31 +1358,137 @@ async def _fetch_amazon(client: AmazonClient, order_id: str) -> FinancialSnapsho
     )
 
 
+# TikTok finance responses that mean "we can't get this via API (yet)" rather
+# than a transient failure. Treated as `unsupported` (NOT in RETRYABLE_STATUSES)
+# so the order isn't re-queued forever:
+#   - 401 / 105005: the app lacks the Finance access scope (needs Partner Center
+#     grant + re-OAuth so the new token carries the scope).
+#   - 410 / 36009034: the legacy V1 endpoint was retired (defensive — we already
+#     call V2, but keep it in case TikTok deprecates more).
+# The day the Finance scope is granted, the very same code path starts returning
+# real settlement data with no further changes here.
+_TIKTOK_BLOCKED_CODES = {401, 403, 410, 105005, 36009034}
+
+
+def _tiktok_finance_blocked(code: Any, message: str | None) -> bool:
+    try:
+        if int(code) in _TIKTOK_BLOCKED_CODES:
+            return True
+    except (TypeError, ValueError):
+        pass
+    msg = (message or "").lower()
+    return any(
+        kw in msg
+        for kw in ("access denied", "not authorized", "access scope", "deprecat")
+    )
+
+
 async def _fetch_tiktok(client: TikTokClient, order_id: str) -> FinancialSnapshot:
     body = await client.get_order_settlements(order_id)
     code = body.get("code") if isinstance(body, dict) else None
+    message = body.get("message") if isinstance(body, dict) else None
+
+    if _tiktok_finance_blocked(code, message):
+        return FinancialSnapshot(
+            status="unsupported",
+            raw={"settlements": body},
+            error=f"TikTok finance unavailable (scope/endpoint): {message or code}",
+        )
+
     if code not in (None, 0, "0"):
-        raise RuntimeError(f"TikTok finance error: {body.get('message') or code}")
+        raise RuntimeError(f"TikTok finance error: {message or code}")
+
     data = body.get("data") if isinstance(body, dict) else None
-    net = _find_first_money(
-        data,
-        {
-            "settlement_amount",
-            "settlementAmount",
-            "actual_settlement_amount",
-            "total_settlement_amount",
-            "settled_amount",
-        },
-    )
+    # v202309 nests one entry per (sub-)transaction under
+    # data.statement_transactions[]; a refunded order yields more than one, so
+    # every money field is SUMMED across them (refunds net out). Verified
+    # against live SETTLED orders: settlement_amount = revenue_amount +
+    # fee_amount + shipping_cost_amount (all signed — fees/shipping/refunds are
+    # negative, revenue/subsidies positive). E.g. 2561 + (-207.66) + (-6.1) =
+    # 2347.24 on a R$2560.80 sale; a fully-refunded order settles negative.
+    txs = data.get("statement_transactions") if isinstance(data, dict) else None
+    txs = [t for t in txs if isinstance(t, dict)] if isinstance(txs, list) else []
     currency = _currency_from(data) or "BRL"
-    has_data = bool(data)
+
+    def _agg(*keys: str) -> Decimal | None:
+        """Sum one or more signed money fields across all transactions."""
+        total = Decimal("0")
+        seen = False
+        for t in txs:
+            for k in keys:
+                amt = _money(t.get(k))
+                if amt is not None:
+                    total += amt
+                    seen = True
+        return total if seen else None
+
+    net = _agg("settlement_amount")
+    if net is None:
+        # Defensive: unexpected shape / single top-level object.
+        net = _find_first_money(
+            data,
+            {
+                "settlement_amount",
+                "settlementAmount",
+                "actual_settlement_amount",
+                "total_settlement_amount",
+                "settled_amount",
+            },
+        )
+
+    # All TikTok amounts are pre-signed, so events are emitted as-is (no
+    # `negative=`). These feed the display-only evento_* columns of
+    # vw_conciliacao_margens; they are NOT summed into the margem.
+    revenue = _agg("revenue_amount")
+    gross = _agg("gross_sales_amount") or revenue or _agg("customer_payment_amount")
+    fee_total = _agg("fee_amount")  # aggregate platform fees (negative)
+    commission = _agg("platform_commission_amount")
+    transaction_fee = _agg("transaction_fee_amount", "referral_fee_amount")
+    shipping = _agg("shipping_cost_amount")  # net shipping borne by seller (neg)
+    subsidy = _agg(
+        "platform_shipping_fee_discount_amount", "shipping_cost_discount_amount"
+    )  # shipping subsidy (positive)
+    discount = _agg("platform_discount_amount", "seller_discount_amount")
+    refund = _agg("customer_refund_amount")
+    tax = _agg(
+        "iva_vat_amount", "sales_tax_amount", "isr_income_tax_amount", "pit_amount"
+    )
+
+    events = _compact_events(
+        [
+            _event("sale", revenue, currency=currency),
+            _event("commission_fee", commission, currency=currency),
+            _event("transaction_fee", transaction_fee, currency=currency),
+            _event("freight", shipping, currency=currency),
+            _event("shipping_rebate", subsidy, currency=currency),
+            _event("discount", discount, currency=currency),
+            _event("refund", refund, currency=currency),
+            _event("tax", tax, currency=currency),
+            _event("net_payout", net, currency=currency),
+        ]
+    )
+
+    # Settled => net amount present => final ("posted"). Order not yet settled
+    # => pending => retried later until TikTok posts the statement. The margem
+    # uses net_amount with priority (vw_conciliacao_margens); the structured
+    # magnitudes below are positive, display-only, and chosen to reconcile as
+    # gross_amount - fee_amount - freight_amount - refund_amount ≈ net_amount.
+    # rebate / discount / tax are surfaced via EVENTS only: the shipping subsidy
+    # is already baked into the net shipping_cost_amount and platform_discount is
+    # platform-funded (it does not reduce the seller payout), so populating them
+    # here would double-count in that fallback.
+    has_settlement = net is not None
     return FinancialSnapshot(
-        status="posted" if has_data else "pending",
+        status="posted" if has_settlement else "pending",
         currency=currency,
+        gross_amount=gross,
+        fee_amount=abs(fee_total) if fee_total is not None else None,
+        freight_amount=abs(shipping) if shipping is not None else None,
+        refund_amount=abs(refund) if refund is not None else None,
         net_amount=net,
         raw={"settlements": body},
-        events=_compact_events([_event("net_payout", net, currency=currency)]),
-        error=None if has_data else "TikTok settlement not available yet",
+        events=events,
+        error=None if has_settlement else "TikTok settlement not available yet",
     )
 
 
