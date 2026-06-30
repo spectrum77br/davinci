@@ -32,7 +32,7 @@ const PLATFORM_SPECS: Record<Platform, PlatformSpec> = {
     fields: [
       { key: 'client_id', label: 'Client ID (App ID)', placeholder: 'ID do seu aplicativo ML', required: true },
       { key: 'client_secret', label: 'Client Secret', type: 'password', required: true },
-      { key: 'refresh_token', label: 'Refresh Token', type: 'password', placeholder: 'Token de atualização OAuth', required: true },
+      { key: 'refresh_token', label: 'Refresh Token (opcional)', type: 'password', placeholder: 'Token de atualização OAuth' },
       { key: 'access_token', label: 'Access Token', type: 'password', placeholder: 'Token de acesso atual' },
       { key: 'user_id', label: 'User ID (opcional)', placeholder: 'Seu ID de usuário ML' },
     ],
