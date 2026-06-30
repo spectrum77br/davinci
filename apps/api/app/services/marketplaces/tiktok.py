@@ -388,9 +388,18 @@ class TikTokClient:
             return TestResult(ok=False, detail=f"error: {e}")
 
     async def get_order_settlements(self, order_id: str) -> dict:
+        """Settlement / statement transactions for one order.
+
+        TikTok v202309 Finance API:
+            GET /finance/202309/orders/{order_id}/statement_transactions
+
+        The old V1 path (/api/finance/order/settlements) was retired and now
+        answers HTTP 410. This endpoint also requires the app to hold the
+        Finance access scope; without it TikTok returns 401 code 105005.
+        `_get` adds shop_cipher + signing + access_token automatically.
+        """
         return await self._get(
-            "/api/finance/order/settlements",
-            {"order_id": order_id},
+            f"/finance/202309/orders/{order_id}/statement_transactions"
         )
 
     async def update_stock(
