@@ -44,7 +44,10 @@ _EM_ANDAMENTO_MIN_DAYS = 7
 _EM_ANDAMENTO_MAX_DAYS = 60
 
 # Limite por ciclo pra não estourar rate limit do Bling (~3 req/s).
-_MAX_PER_CYCLE = 30
+# 30 → 20 (incidente 30/06): cada refetch dispara um refresh do snapshot
+# verificar_margem (gargalo serializado). A cada 10 min, 30/ciclo = 180/h só
+# desta rede consumiam ~30% da vazão de refresh; 20 alivia o regime contínuo.
+_MAX_PER_CYCLE = 20
 
 # Idade mínima da última sync local pra considerar candidato — evita
 # disputa com webhooks recém-chegados.

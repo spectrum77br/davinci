@@ -37,7 +37,12 @@ WINDOW_HOURS = 2
 
 # Teto de segurança por ciclo. Volume real em 2h é dezenas de pedidos; se
 # estourar, loga (NÃO silencia) — sinal de backlog/reprocesso em massa.
-MAX_PER_CYCLE = 500
+# 500 → 150 (incidente 30/06): cada re-ingest dispara um refresh do snapshot
+# verificar_margem (gargalo serializado, ~10/min). Uma rajada de 500 num único
+# tick horário, durante um surto de mudança de status à tarde, afogava o worker
+# e empilhava o backlog. 150 ainda cobre o volume normal + surtos moderados;
+# excedente é capturado nos ticks seguintes (overlap de WINDOW_HOURS) e logado.
+MAX_PER_CYCLE = 150
 
 # Bling exige timestamp completo no filtro de data de alteração.
 _BLING_DT_FMT = "%Y-%m-%d %H:%M:%S"
