@@ -112,24 +112,34 @@ _ATTENTION_MARGEM_SQL = (
 _ATTENTION_FRETE_SQL = (
     f"(({_FRETE_ANUNCIO_SQL}) IS NOT NULL AND {_FRETE_RESULTADO_SQL} > 0)"
 )
-# Divergence = |saldo_bling − saldo_plataforma| > R$0,01, restricted to orders
-# in situação 6 ou 83965 (only those count as saldo-divergent for triage). This
-# MUST match the per-row "corrigir" trigger in the UI (margem.vue:
-# [6, 83965].includes(situacao_id) && Math.abs(saldo_plataforma - saldo_bling) >
-# 0.01), otherwise rows show the divergence marker in the detail but get filtered
-# out of the "saldo divergente" list. A relative 1% threshold was used before and
-# hid real divergences on high-value items (e.g. a R$60 gap on a R$7.000 Macbook
-# = 0.85%, below 1%, but still a divergence to fix).
+# "Saldo divergente" — restrito a pedidos em situação 6 ou 83965 (só esses
+# contam para triagem), com saldo_base do Bling presente, e que satisfaçam UMA
+# das condições:
+#   a) Plataforma AINDA NULA (financeiro não reconciliado) → não auto-aprovar
+#      antes de bater o repasse real do marketplace. Marketplaces como TikTok
+#      liquidam ~1-2 semanas após a entrega, então o pedido fica "divergente"
+#      (não resolvido) até o settlement chegar — aí vira mismatch (b) ou some.
+#   b) Divergência real: |saldo_bling − saldo_plataforma| > R$0,01.
+# O gatilho do botão "→" (copia marketplace→Bling) na UI continua exigindo
+# Plataforma != null (não há o que copiar quando nula): margem.vue
+# [6, 83965].includes(situacao_id) && saldo_plataforma != null &&
+# Math.abs(saldo_plataforma - saldo_bling) > 0.01. Ou seja, linhas (a) entram na
+# lista "saldo divergente" mas sem o botão de cópia (a ação é aguardar o
+# settlement ou editar o Saldo Efetivo manualmente). Limiar absoluto de R$0,01
+# (um relativo de 1% escondia gaps em itens caros, ex.: R$60 num Macbook de
+# R$7.000 = 0,85%, mas ainda é divergência a corrigir).
 _ATTENTION_SALDO_SQL = (
     f"(v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN}) "
-    " AND v.marketplace_liquido_base_margem_item IS NOT NULL "
     " AND v.bling_valorbase_item IS NOT NULL "
-    " AND ABS("
-    "       (v.bling_valorbase_item"
-    "        - COALESCE(v.bling_custofrete_item, 0)"
-    "        - COALESCE(v.bling_taxacomissao_item, 0))"
-    "       - v.marketplace_liquido_base_margem_item"
-    "    ) > 0.01)"
+    " AND ("
+    "       v.marketplace_liquido_base_margem_item IS NULL "
+    "       OR ABS("
+    "            (v.bling_valorbase_item"
+    "             - COALESCE(v.bling_custofrete_item, 0)"
+    "             - COALESCE(v.bling_taxacomissao_item, 0))"
+    "            - v.marketplace_liquido_base_margem_item"
+    "         ) > 0.01"
+    " ))"
 )
 
 # "Needs attention" flag — rows the user must triage. Three independent triggers:
