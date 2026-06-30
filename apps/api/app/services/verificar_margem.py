@@ -39,6 +39,18 @@ SNAPSHOT_TABLE = qualified_table("verificar_margem")
 VIEW_TABLE = qualified_table("vw_conciliacao_margens_marketplace")
 BLING_ORDERS_TABLE = qualified_table("bling_orders")
 
+# Serializa TODO refresh do snapshot (rebuild_all + targeted) num único lock
+# de transação. Cada refresh roda `INSERT ... SELECT * FROM
+# conciliacao_margens_for_bling_id(...)`/da view — computação cara que, rodando
+# em N jobs concorrentes, satura o Postgres e cada uma passa de ~2s pra 40s+
+# (thundering herd). Em pico isso CONGELAVA a fila do worker (incidente 30/06).
+# O advisory xact lock garante 1 refresh por vez no banco: cada um volta a ~2s,
+# o DB não satura, e o resto do job (API Bling etc.) segue concorrente. Auto-
+# liberado no commit/rollback de cada função.
+_REFRESH_LOCK_KEY = 0x7665726D  # "verm"
+
+_ACQUIRE_REFRESH_LOCK = "SELECT pg_advisory_xact_lock(:k)"
+
 
 async def _delete_orphans(session: AsyncSession) -> int:
     """Apaga linhas do snapshot cujo bling_order_item_id (PK) não existe mais
@@ -76,6 +88,7 @@ async def rebuild_all(session: AsyncSession) -> int:
     MVCC keeps concurrent SELECT readers on the pre-commit snapshot,
     so the ~17s rebuild does not block the margens page.
     """
+    await session.execute(text(_ACQUIRE_REFRESH_LOCK), {"k": _REFRESH_LOCK_KEY})
     # Remove rows whose bling_order_item_id is about to be refreshed from the view.
     await session.execute(
         text(
@@ -112,6 +125,7 @@ async def refresh_for_pedido(session: AsyncSession, pedido_bling: str) -> int:
     20d, então pedidos antigos (referenciados em refunds, fora da janela)
     aparecem no snapshot e ficam disponiveis na pagina de margens.
     """
+    await session.execute(text(_ACQUIRE_REFRESH_LOCK), {"k": _REFRESH_LOCK_KEY})
     await session.execute(
         text(f"DELETE FROM {SNAPSHOT_TABLE} WHERE pedido_bling = :p"),
         {"p": pedido_bling},
@@ -137,6 +151,7 @@ async def refresh_for_bling_id(session: AsyncSession, bling_id: int) -> int:
     Usa a função `conciliacao_margens_for_bling_id` (caminho rápido, ~2 s, sem
     janela de 20d) — mesmo motivo de refresh_for_pedido (migration 0148).
     """
+    await session.execute(text(_ACQUIRE_REFRESH_LOCK), {"k": _REFRESH_LOCK_KEY})
     await session.execute(
         text(f"DELETE FROM {SNAPSHOT_TABLE} WHERE bling_id = :b"),
         {"b": bling_id},

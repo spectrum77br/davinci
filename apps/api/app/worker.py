@@ -1411,12 +1411,13 @@ class WorkerSettings:
     # machine via `WorkerSettingsMarketingAgent` below, which the central
     # server never launches. That's what keeps a single machine on the
     # Shopee partner-id throttle. (marketing_full_sync = ML/Amazon stays here.)
-    # 10 → 15: com o financeiro real movido pra fila/worker dedicados
-    # (WorkerSettingsFinancials), a fila default só carrega ingest + crons +
-    # sync_product_run. 15 paralelos drenam o backlog mais rápido sem
-    # estourar o rate limit do Bling (ingest = 1 get_order/pedido). Cabe no
-    # pool de 30 conexões (db.py: pool_size=10 + max_overflow=20).
-    max_jobs = 15
+    # Mantido em 10 (conservador). O gargalo real do ingest não é a
+    # concorrência e sim o refresh do snapshot verificar_margem, agora
+    # SERIALIZADO por advisory lock (verificar_margem._REFRESH_LOCK_KEY) — subir
+    # max_jobs só empilharia conexões esperando o lock. O financeiro real saiu
+    # pra fila/worker dedicados (WorkerSettingsFinancials), então estes 10 slots
+    # ficam só com ingest + crons + sync_product_run.
+    max_jobs = 10
     job_timeout = 1800
     keep_result = 3600
     max_tries = 3
@@ -1507,10 +1508,11 @@ class WorkerSettingsFinancials:
         sync_marketplace_financials_for_order_run,
     ]
     queue_name = ARQ_FINANCIALS_QUEUE
-    # Concorrência moderada — os marketplaces (Shopee/ML) limitam por partner-id
-    # e respondem 429 sob rajada. 8 paralelos drenam o backlog sem disparar
-    # rate limit. Cabe folgado no pool de 30 conexões.
-    max_jobs = 8
+    # Concorrência baixa: 3. Além do rate limit de Shopee/ML, cada job refaz o
+    # snapshot verificar_margem — refresh agora serializado por advisory lock
+    # (verificar_margem._REFRESH_LOCK_KEY), então passar de poucos slots só
+    # empilha conexões esperando o lock sem ganhar vazão.
+    max_jobs = 3
     job_timeout = 1800
     keep_result = 3600
     max_tries = 3
