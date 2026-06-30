@@ -782,18 +782,24 @@ async def alerts_cleanup(ctx: dict) -> None:
 
 
 async def verificar_margem_snapshot(ctx: dict) -> None:
-    """Snapshot novos itens de vw_conciliacao_margens_marketplace em
-    davinci.verificar_margem. Skip rows already inserted via PK conflict on
-    bling_order_item_id."""
+    """Rebuild COMPLETO do snapshot davinci.verificar_margem (janela 20d) como
+    backstop periódico (cron 30min).
+
+    Antes era INSERT incremental (ON CONFLICT DO NOTHING) e nem rodava como
+    cron. Virou rebuild_all porque o refresh per-ingest agora PULA os re-syncs
+    (order.updated/safety_net/period_sync — ver bling_orders.
+    _DEFER_MARGEM_REFRESH_EVENTS): as mudanças de status deles passam a chegar
+    ao snapshot só via rebuild_all. O load da página /margem já reconstrói
+    (throttle 5min), e este cron cobre os períodos sem ninguém olhando.
+    Serializado pelo advisory lock do rebuild_all (sem herd)."""
+    from app.services.verificar_margem import rebuild_all
+
     async with session_scope() as s:
-        result = await s.execute(
-            text(
-                "INSERT INTO davinci.verificar_margem "
-                "SELECT * FROM davinci.vw_conciliacao_margens_marketplace "
-                "ON CONFLICT (bling_order_item_id) DO NOTHING"
-            )
-        )
-        logger.info("verificar_margem_snapshot_done", inserted=result.rowcount or 0)
+        try:
+            n = await rebuild_all(s)
+            logger.info("verificar_margem_snapshot_done", rebuilt=n)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("verificar_margem_snapshot_failed", error=str(e)[:200])
 
 
 async def sync_lock_safety_release(ctx: dict) -> None:
@@ -1381,10 +1387,14 @@ class WorkerSettings:
         # only the dedicated machine (MARKETING_AGENT_NODE=1) talks to Shopee
         # Ads, so the central server never competes on the same partner-id
         # throttle (which would rate-limit both).
-        # Cron de snapshot de margem REMOVIDO: a página /margem reconstrói o
-        # snapshot (rebuild_all, superset deste insert incremental) ao carregar,
-        # com throttle de 5 min. A função continua em `functions` para enqueue
-        # manual via /admin/run-job se necessário.
+        # Snapshot de margem: backstop de rebuild_all a cada 30 min (:15/:45,
+        # fora do pico de crons em :00). RE-ADICIONADO porque o refresh
+        # per-ingest agora pula re-syncs (bling_orders._DEFER_MARGEM_REFRESH_
+        # EVENTS) — sem este cron, a mudança de status de um pedido re-sincado
+        # só chegaria ao snapshot quando alguém abrisse a página /margem
+        # (que também reconstrói, throttle 5min). Este cron garante a
+        # propagação em períodos ociosos. Serializado pelo advisory lock.
+        cron(verificar_margem_snapshot, minute={15, 45}, run_at_startup=False),
         # Cron `check_marketplace_shipped_orders` MOVIDO pra
         # WorkerSettingsMarketplace (fila `davinci_marketplace`). Função
         # continua em `functions` deste worker como fallback (enqueue

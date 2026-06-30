@@ -863,6 +863,19 @@ async def _enqueue_stock_refresh_for_order(
     return jobs
 
 
+# Eventos de RE-SYNC de pedido já existente: pulam o refresh per-ingest do
+# snapshot verificar_margem. Eram o grosso do backlog do worker e cada um
+# custava ~6s no refresh (serializado por advisory lock → teto de ~10/min).
+# Sem o refresh processam a ~30/min e a fila não acumula. As mudanças de status
+# deles chegam ao snapshot via rebuild_all — no load da página /margem (throttle
+# 5min) e pelo cron verificar_margem_snapshot (30min, cobre período ocioso).
+# Pedidos NOVOS (order.created/daily_backfill/manual_resync/None) seguem com
+# refresh imediato → aparecem na Margem na hora.
+_DEFER_MARGEM_REFRESH_EVENTS = frozenset(
+    {"order.updated", "safety_net", "period_sync"}
+)
+
+
 async def run_ingest_bling_order(
     session: AsyncSession,
     *,
@@ -903,7 +916,10 @@ async def run_ingest_bling_order(
         session, raw_order=raw, user_id=user_id
     )
     await session.commit()
-    await _verificar_margem_refresh_silent(session, bling_id=bling_order_id)
+    # Re-syncs pulam o refresh (propagado por rebuild_all da página/cron);
+    # pedidos novos refrescam na hora. Ver _DEFER_MARGEM_REFRESH_EVENTS.
+    if event not in _DEFER_MARGEM_REFRESH_EVENTS:
+        await _verificar_margem_refresh_silent(session, bling_id=bling_order_id)
 
     try:
         # Fila dedicada (davinci_financials): isola o financeiro real — lento e
