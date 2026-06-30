@@ -473,6 +473,21 @@ function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
   return r.saldo_final != null ? r.saldo_final : r.saldo_efetivo
 }
 
+// Divergência de saldo: Bling e Plataforma ambos presentes e diferindo por mais
+// de R$0,01 (qualquer situação). Mesmo limiar absoluto usado pelo botão "→".
+function saldoDivergente(r: MarketplaceRow): boolean {
+  return r.saldo_bling != null
+    && r.saldo_plataforma != null
+    && Math.abs(r.saldo_bling - r.saldo_plataforma) > 0.01
+}
+
+// Valor exibido na coluna "Efetivo". Quando Bling × Plataforma divergem, mostra
+// 0 APENAS visualmente — não altera o banco nem o valor que a edição inline
+// usa/grava (startEditSaldoEfetivo continua partindo de r.saldo_efetivo real).
+function saldoEfetivoVisual(r: MarketplaceRow): number | null {
+  return saldoDivergente(r) ? 0 : saldoEfetivoDisplay(r)
+}
+
 // ---------- Status: aprovar/reprovar/pendente (atualiza Bling) ----------
 
 async function setStatus(row: MarketplaceRow, value: MargensStatus) {
@@ -524,30 +539,7 @@ async function setStatus(row: MarketplaceRow, value: MargensStatus) {
   }
 }
 
-// ---------- Sync Bling ← Marketplace (one-shot) ----------
-
-const syncing = ref<Set<string>>(new Set())
-function isSyncing(id: string): boolean { return syncing.value.has(id) }
-
-async function syncFromMarketplace(row: MarketplaceRow) {
-  if (!canEdit.value) return
-  const id = row.bling_order_item_id
-  if (syncing.value.has(id)) return
-  syncing.value.add(id)
-  try {
-    await api(`/api/margens/marketplace/${encodeURIComponent(id)}/sync-from-marketplace`, {
-      method: 'POST',
-    })
-    error.value = null
-    await reloadCurrent()
-  } catch (e: any) {
-    error.value = apiError(e)
-  } finally {
-    const next = new Set(syncing.value)
-    next.delete(id)
-    syncing.value = next
-  }
-}
+// ---------- Sync Saldo Final (grava como final no Bling) ----------
 
 const syncingSaldoFinal = ref<Set<string>>(new Set())
 function isSyncingSaldoFinal(id: string): boolean { return syncingSaldoFinal.value.has(id) }
@@ -1016,25 +1008,16 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
               </div>
               <div v-else class="flex items-center justify-end gap-2">
                 <button
-                  v-if="canEdit && [6, 83965].includes(r.situacao_id) && r.saldo_plataforma != null && r.saldo_bling != null && Math.abs(r.saldo_plataforma - r.saldo_bling) > 0.01"
-                  type="button"
-                  :disabled="isSyncing(r.bling_order_item_id)"
-                  class="text-[10px] font-medium px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-default"
-                  :title="`Copia bruto/taxa/frete do Marketplace para Bling neste item`"
-                  @click="syncFromMarketplace(r)"
-                >
-                  <Loader2 v-if="isSyncing(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
-                  <span v-else>→</span>
-                </button>
-                <button
                   type="button"
                   class="flex items-center justify-end gap-1 text-right tabular-nums hover:text-foreground disabled:cursor-default"
                   :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id)"
-                  :title="canEdit && r.pedido_bling ? `Editar Saldo Efetivo → grava o valor como final no Bling (zera taxa e frete)` : ''"
+                  :title="saldoDivergente(r)
+                    ? `Saldo Bling × Plataforma divergente — Efetivo exibido como 0 (apenas visual). Valor real: ${brl(saldoEfetivoDisplay(r))}.${canEdit && r.pedido_bling ? ' Clique para editar → grava como final no Bling (zera taxa e frete).' : ''}`
+                    : (canEdit && r.pedido_bling ? `Editar Saldo Efetivo → grava o valor como final no Bling (zera taxa e frete)` : '')"
                   @click="startEditSaldoEfetivo(r)"
                 >
                   <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
-                  <span>{{ brl(saldoEfetivoDisplay(r)) }}</span>
+                  <span :class="saldoDivergente(r) ? 'text-amber-600 dark:text-amber-400' : ''">{{ brl(saldoEfetivoVisual(r)) }}</span>
                   <Pencil v-if="canEdit" class="size-3 shrink-0 opacity-50" />
                 </button>
               </div>
