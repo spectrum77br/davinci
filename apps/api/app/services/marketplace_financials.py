@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+import httpx
 import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -749,7 +750,25 @@ async def _fetch_ml(
     *,
     bling_skus: set[str] | None = None,
 ) -> FinancialSnapshot:
-    order = await client.get_order(order_id)
+    try:
+        order = await client.get_order(order_id)
+    except httpx.HTTPStatusError as e:
+        # Bling guarda o *pack_id* do ML em `numeroloja` para alguns pedidos, e
+        # `/orders/{pack_id}` responde 404 (um pack não é um pedido). Resolve o
+        # pack e re-ancora no primeiro pedido membro; a expansão de pack abaixo
+        # agrega os irmãos restantes. Repropaga qualquer outro status (ex.: 403).
+        if e.response.status_code != 404:
+            raise
+        pack = await client.get_pack(order_id)
+        member_ids = [
+            oid
+            for o in (pack.get("orders") or [])
+            if isinstance(o, dict) and (oid := _text_value(o.get("id")))
+        ]
+        if not member_ids:
+            raise
+        order_id = member_ids[0]
+        order = await client.get_order(order_id)
     billing: dict[str, Any] | None = None
     billing_error: str | None = None
     try:
