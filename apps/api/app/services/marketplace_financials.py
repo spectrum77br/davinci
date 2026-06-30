@@ -179,7 +179,14 @@ async def run_sync_marketplace_financials_for_bling_order(
                 error=str(e)[:500],
             )
 
-    await _verificar_margem_refresh_silent(session, bling_id=bling_order_id)
+    # Bulk (webhook/retry) PULA o refresh pesado serializado pelo advisory lock —
+    # a taxa real propaga via rebuild_all (load da página /margem 5min + cron
+    # 30min), igual ao desacoplamento dos re-syncs (bling_orders.
+    # _DEFER_MARGEM_REFRESH_EVENTS). Só o fetch MANUAL de 1 pedido refresca na
+    # hora. Destrava a vazão da fila davinci_financials (estava presa no lock,
+    # ~6/min; agora limitada só pela latência da API do marketplace).
+    if trigger == "manual":
+        await _verificar_margem_refresh_silent(session, bling_id=bling_order_id)
 
     return {
         "ok": snapshot.status not in {"error", "unsupported"},

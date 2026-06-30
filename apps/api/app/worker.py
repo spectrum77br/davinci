@@ -1518,11 +1518,13 @@ class WorkerSettingsFinancials:
         sync_marketplace_financials_for_order_run,
     ]
     queue_name = ARQ_FINANCIALS_QUEUE
-    # Concorrência baixa: 3. Além do rate limit de Shopee/ML, cada job refaz o
-    # snapshot verificar_margem — refresh agora serializado por advisory lock
-    # (verificar_margem._REFRESH_LOCK_KEY), então passar de poucos slots só
-    # empilha conexões esperando o lock sem ganhar vazão.
-    max_jobs = 3
+    # 3 → 8: o refresh pesado saiu do caminho do bulk (marketplace_financials
+    # pula o _verificar_margem_refresh_silent quando trigger != 'manual'), então
+    # o lock não é mais o teto — a vazão passa a ser limitada pela latência da
+    # API do marketplace. 8 paralelos drenam a fila ~3× mais rápido sem estourar
+    # o rate limit (lookup por pedido, não Ads). Cabe folgado no pool de 30 e na
+    # CPU (core liberado do build órfão do Nuxt).
+    max_jobs = 8
     job_timeout = 1800
     keep_result = 3600
     max_tries = 3
