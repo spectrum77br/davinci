@@ -51,8 +51,9 @@ CREATE TABLE IF NOT EXISTS "{SCHEMA}".pricing_product_variant (
 );
 """
 
+_TRUNCATE = f'TRUNCATE "{SCHEMA}".pricing_product_variant;'
+
 _POPULATE = f"""
-TRUNCATE "{SCHEMA}".pricing_product_variant;
 INSERT INTO "{SCHEMA}".pricing_product_variant (pricing_product_id, segment_id, variant_norm, vlen)
 SELECT pp.id, pp.segment_id, lower(trim(vr)), length(trim(vr))
 FROM "{SCHEMA}".pricing_products pp, LATERAL regexp_split_to_table(pp.sku::text, ',') vr
@@ -79,8 +80,9 @@ END;
 $fn$;
 """
 
+_DROP_TRIGGER = f'DROP TRIGGER IF EXISTS trg_pricing_product_variant_sync ON "{SCHEMA}".pricing_products;'
+
 _TRIGGER = f"""
-DROP TRIGGER IF EXISTS trg_pricing_product_variant_sync ON "{SCHEMA}".pricing_products;
 CREATE TRIGGER trg_pricing_product_variant_sync
 AFTER INSERT OR DELETE OR UPDATE OF sku, segment_id ON "{SCHEMA}".pricing_products
 FOR EACH ROW EXECUTE FUNCTION "{SCHEMA}".pricing_product_variant_sync();
@@ -131,8 +133,10 @@ def _rewrite_view() -> None:
 def upgrade() -> None:
     op.execute(_TABLE)
     op.execute(_INDEX)
+    op.execute(_TRUNCATE)
     op.execute(_POPULATE)
     op.execute(_TRIGGER_FN)
+    op.execute(_DROP_TRIGGER)
     op.execute(_TRIGGER)
     _rewrite_view()
 
