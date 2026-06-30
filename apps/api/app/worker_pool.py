@@ -7,6 +7,7 @@ _settings = get_settings()
 _pool: ArqRedis | None = None
 _ui_pool: ArqRedis | None = None
 _marketplace_pool: ArqRedis | None = None
+_financials_pool: ArqRedis | None = None
 
 # Fila default ARQ — concentra ~48 jobs (webhooks marketplace, syncs,
 # crons gerais). Alto volume, latência ok.
@@ -23,6 +24,16 @@ ARQ_UI_QUEUE = "davinci_ui"
 # quando marketplace confirma envio). Antes competia com webhooks na
 # default e atrasava 15-20 min em pico. Worker dedicado garante o tick.
 ARQ_MARKETPLACE_QUEUE = "davinci_marketplace"
+
+# Fila de busca de financeiro real por pedido — `sync_marketplace_financials_
+# for_order_run`. Cada job bate em Shopee/ML/Bling (~25s, sujeito a 429) e é
+# enfileirado 1× por pedido ingerido. Na fila default disputava 1:1 com o
+# `ingest_bling_order_run` no mesmo worker (max_jobs=10): em pico o financeiro
+# (mais lento) afogava o ingest e o backlog do default explodia (~15k jobs /
+# 17h de atraso em 29/06), travando a entrada de pedidos novos na Margem.
+# Worker dedicado isola o ingest do financeiro — a Margem só precisa do ingest
+# (taxa estimada do Bling é fallback até o financeiro real chegar).
+ARQ_FINANCIALS_QUEUE = "davinci_financials"
 
 
 async def get_arq_pool() -> ArqRedis:
@@ -63,8 +74,22 @@ async def get_arq_marketplace_pool() -> ArqRedis:
     return _marketplace_pool
 
 
+async def get_arq_financials_pool() -> ArqRedis:
+    """Pool da fila de financeiro por pedido. Use pra enfileirar
+    `sync_marketplace_financials_for_order_run`. Worker dedicado
+    (`WorkerSettingsFinancials`) drena em paralelo ao default — o financeiro
+    real (lento, rate-limited) nunca mais bloqueia o ingest de pedido."""
+    global _financials_pool
+    if _financials_pool is None:
+        _financials_pool = await create_pool(
+            RedisSettings.from_dsn(_settings.arq_redis_url),
+            default_queue_name=ARQ_FINANCIALS_QUEUE,
+        )
+    return _financials_pool
+
+
 async def close_arq_pool() -> None:
-    global _pool, _ui_pool, _marketplace_pool
+    global _pool, _ui_pool, _marketplace_pool, _financials_pool
     if _pool is not None:
         await _pool.aclose()
         _pool = None
@@ -74,3 +99,6 @@ async def close_arq_pool() -> None:
     if _marketplace_pool is not None:
         await _marketplace_pool.aclose()
         _marketplace_pool = None
+    if _financials_pool is not None:
+        await _financials_pool.aclose()
+        _financials_pool = None

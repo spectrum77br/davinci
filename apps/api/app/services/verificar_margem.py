@@ -173,6 +173,21 @@ async def refresh_silent(
         else:
             await rebuild_all(session)
     except Exception as e:  # noqa: BLE001
+        # Um statement que falha no meio do refresh (deadlock, função da view
+        # que estoura etc.) deixa a transação ABORTADA. Como este wrapper
+        # engole a exceção e devolve o controle ao chamador (ex.: o ingest de
+        # pedido em bling_orders.run_ingest_bling_order, que segue usando a
+        # MESMA session), o próximo statement do chamador morria com
+        # InFailedSQLTransactionError ("current transaction is aborted") e o
+        # job inteiro falhava → retry 3× → vazão do worker despencava. O
+        # rollback aqui descontamina a session antes de retornar. O pedido em
+        # si já foi commitado ANTES deste refresh, então nada de útil se perde.
+        try:
+            await session.rollback()
+        except Exception as rb_err:  # noqa: BLE001
+            logger.debug(
+                "verificar_margem_rollback_failed", error=str(rb_err)[:200]
+            )
         logger.warning(
             "verificar_margem_refresh_failed",
             pedido_bling=pedido_bling,

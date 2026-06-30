@@ -41,7 +41,7 @@ from app.services.marketplace_shipment_check import _operational_ship_date
 from app.services.marketplaces.bling import BlingClient
 from app.services.reembolso_sync import sync_reembolso_for_pedido
 from app.services.verificar_margem import refresh_silent as _verificar_margem_refresh_silent
-from app.worker_pool import get_arq_pool
+from app.worker_pool import get_arq_financials_pool, get_arq_pool
 
 # em_andamento_data is the operator-facing ship-date column on the
 # planilha. Stamp it in Brasília-local date — without this conversion,
@@ -905,10 +905,13 @@ async def run_ingest_bling_order(
     await session.commit()
     await _verificar_margem_refresh_silent(session, bling_id=bling_order_id)
 
-    pool = None
     try:
-        pool = await get_arq_pool()
-        arq = await pool.enqueue_job(
+        # Fila dedicada (davinci_financials): isola o financeiro real — lento e
+        # rate-limited — do ingest de pedido, que mora na fila default. Sem
+        # isso o financeiro afogava o ingest no mesmo worker e o backlog
+        # explodia (ver worker_pool.ARQ_FINANCIALS_QUEUE).
+        fin_pool = await get_arq_financials_pool()
+        arq = await fin_pool.enqueue_job(
             "sync_marketplace_financials_for_order_run",
             int(bling_order_id),
             "webhook",
@@ -926,8 +929,7 @@ async def run_ingest_bling_order(
         )
 
     if jobs:
-        if pool is None:
-            pool = await get_arq_pool()
+        pool = await get_arq_pool()
         for job_id, product_id, link_ids in jobs:
             arq = await pool.enqueue_job(
                 "sync_product_run",

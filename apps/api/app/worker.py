@@ -35,6 +35,7 @@ from app.services.bling_product_create import run_auto_create_product_from_bling
 from app.services.email import get_email_sender, render_otp_html
 from app.services.import_lote_bling_stock import push_lote_stock_to_bling_job
 from app.services.import_product_bling_create import sync_import_product_to_bling_job
+from app.services.kit_components_sync import run_sync_kit_components
 from app.services.listings_import import (
     _create_product_links_for_matched,
     _link_by_sku,
@@ -49,8 +50,8 @@ from app.services.marketplace_shipment_check import run_check_marketplace_shippe
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
-from app.services.kit_components_sync import run_sync_kit_components
 from app.services.ml_backfill import run_backfill_ml_stock
+from app.services.notas_fiscais_export import run_export_notas
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.product_cost_sync import (
@@ -58,12 +59,16 @@ from app.services.product_cost_sync import (
     run_sync_import_bling_costs,
     run_sync_product_bling_costs,
 )
-from app.services.valuation_estoque_snapshot import run_valuation_estoque_snapshot
-from app.services.notas_fiscais_export import run_export_notas
 from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.sync_orchestrator import SyncOrchestrator
-from app.worker_pool import ARQ_MARKETPLACE_QUEUE, ARQ_UI_QUEUE, get_arq_pool
+from app.services.valuation_estoque_snapshot import run_valuation_estoque_snapshot
+from app.worker_pool import (
+    ARQ_FINANCIALS_QUEUE,
+    ARQ_MARKETPLACE_QUEUE,
+    ARQ_UI_QUEUE,
+    get_arq_pool,
+)
 
 logger = structlog.get_logger()
 _settings = get_settings()
@@ -1406,7 +1411,12 @@ class WorkerSettings:
     # machine via `WorkerSettingsMarketingAgent` below, which the central
     # server never launches. That's what keeps a single machine on the
     # Shopee partner-id throttle. (marketing_full_sync = ML/Amazon stays here.)
-    max_jobs = 10
+    # 10 → 15: com o financeiro real movido pra fila/worker dedicados
+    # (WorkerSettingsFinancials), a fila default só carrega ingest + crons +
+    # sync_product_run. 15 paralelos drenam o backlog mais rápido sem
+    # estourar o rate limit do Bling (ingest = 1 get_order/pedido). Cabe no
+    # pool de 30 conexões (db.py: pool_size=10 + max_overflow=20).
+    max_jobs = 15
     job_timeout = 1800
     keep_result = 3600
     max_tries = 3
@@ -1470,6 +1480,38 @@ class WorkerSettingsMarketplace:
     # 2 min cobre consulta a N marketplaces; mais que isso indica
     # marketplace fora do ar, melhor abortar e re-tentar no próximo tick.
     job_timeout = 120
+    keep_result = 3600
+    max_tries = 3
+    retry_jobs = True
+    on_startup = startup
+    on_shutdown = shutdown
+
+
+class WorkerSettingsFinancials:
+    """Worker dedicado pro financeiro real por pedido
+    (`sync_marketplace_financials_for_order_run`).
+
+    Antes esse job morava na fila default junto com `ingest_bling_order_run`,
+    no mesmo worker (max_jobs=10). Cada busca de financeiro bate em Shopee/ML
+    (~25s, sujeita a 429) e é enfileirada 1× por pedido; em pico ela afogava o
+    ingest e o backlog da default explodia — 29/06 a fila chegou a ~15k jobs /
+    17h de atraso e pedidos novos sumiram da Margem. Fila própria
+    (`davinci_financials`) isola os dois: o ingest (que a Margem precisa) drena
+    livre na default; o financeiro real chega quando chegar (a taxa estimada
+    do Bling é o fallback até lá).
+
+    Sem cron_jobs (todos os crons rodam no worker default)."""
+
+    redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
+    functions = [
+        sync_marketplace_financials_for_order_run,
+    ]
+    queue_name = ARQ_FINANCIALS_QUEUE
+    # Concorrência moderada — os marketplaces (Shopee/ML) limitam por partner-id
+    # e respondem 429 sob rajada. 8 paralelos drenam o backlog sem disparar
+    # rate limit. Cabe folgado no pool de 30 conexões.
+    max_jobs = 8
+    job_timeout = 1800
     keep_result = 3600
     max_tries = 3
     retry_jobs = True

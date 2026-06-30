@@ -119,6 +119,28 @@ services:
         aliases:
           - worker_marketplace
 
+  # Worker dedicado pro financeiro real por pedido
+  # (`sync_marketplace_financials_for_order_run`, fila `davinci_financials`).
+  # Isola o financeiro (lento, rate-limited por Shopee/ML) do `ingest_bling_
+  # order_run` da fila default — antes dividiam o mesmo worker e em pico o
+  # financeiro afogava o ingest, estourando o backlog (29/06: ~15k jobs / 17h).
+  # Mesma imagem, comando diferente: WorkerSettingsFinancials, max_jobs=8.
+  worker_financials:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["uv", "run", "arq", "app.worker.WorkerSettingsFinancials"]
+    env_file: .env
+    environment:
+      APP_NAME: davinci-worker-financials
+    volumes:
+      - ./data/uploads:/data/uploads
+    networks:
+      davinci_net:
+        aliases:
+          - worker_financials
+
   web:
     build:
       context: ./apps/web
