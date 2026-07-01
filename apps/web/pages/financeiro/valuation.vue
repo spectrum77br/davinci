@@ -7,7 +7,7 @@
 //      (PI/SA/SP/RA/CD/CI/US/Eletro/Mala/Outros). Gravado pelo cron arq
 //      `valuation_estoque_snapshot` (~08h BRT) em valuation_estoque_bling_diario.
 import { computed, onMounted, ref } from 'vue'
-import { Loader2, Lock, RefreshCw } from 'lucide-vue-next'
+import { Info, Loader2, Lock, RefreshCw } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['admin'],
@@ -28,6 +28,7 @@ type OperacionalLinha = {
   chave: string
   label: string
   formato: 'brl' | 'pct'
+  descricao: string
   valores: (number | null)[]
 }
 type OperacionalSecao = {
@@ -502,7 +503,15 @@ const loading = computed(() =>
                   :key="linha.chave"
                   class="border-t hover:bg-muted/20"
                 >
-                  <td class="px-3 py-1.5">{{ linha.label }}</td>
+                  <td class="px-3 py-1.5">
+                    <span
+                      class="inline-flex items-center gap-1.5 cursor-help"
+                      :title="linha.descricao"
+                    >
+                      {{ linha.label }}
+                      <Info class="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
+                    </span>
+                  </td>
                   <td
                     v-for="(v, i) in linha.valores"
                     :key="resumo.operacional.meses[i]"

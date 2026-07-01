@@ -656,6 +656,38 @@ _VAL_SIT_PERDIMENTO = "83956"   # Perdimento
 # Perdimento (83956) + Resolvido (545902) + Enviado Fake (83958).
 _VAL_SIT_FAT_PERDIMENTO = ["15", "37", "83953", "83956", "545902", "83958"]
 
+# Explicação da fórmula de cada linha — tooltip "informativo" no hover (front).
+_OPER_DESCRICOES = {
+    "erro_envio": (
+        "Soma do valor base dos pedidos na situação 'Erro no Envio', "
+        "agrupada pelo mês da data do pedido."
+    ),
+    "problemas": (
+        "Soma do valor base dos pedidos na situação 'Problemas', "
+        "agrupada pelo mês da data do pedido."
+    ),
+    "taxa_perdimento": (
+        "Valor base dos pedidos em 'Perdimento' ÷ faturamento do mês (Em andamento, "
+        "Entregue, Perdimento, Resolvido e Enviado Fake). Agrupado pela data do pedido."
+    ),
+    "reembolso": (
+        "Soma dos reembolsos conferidos (positivos somam, negativos subtraem), "
+        "agrupada pelo mês em que o reembolso foi marcado como conferido."
+    ),
+    "usado": (
+        "Soma do preço de custo dos produtos devolvidos na condição 'Usado', "
+        "agrupada pelo mês de criação da devolução."
+    ),
+    "manutencao": (
+        "Soma do preço de custo dos produtos devolvidos na condição 'Manutenção', "
+        "agrupada pelo mês de criação da devolução."
+    ),
+    "custo_manutencao": (
+        "Soma dos custos de manutenção lançados nas devoluções, "
+        "agrupada pelo mês de criação da devolução."
+    ),
+}
+
 # Lojas internas/ignoradas — mesmas que bling_sync.IGNORED_STORES descarta no
 # ingest. Não entram em faturamento/custo/rentabilidade da página Valuation.
 # loja 0 = sem loja; 205632678 / 205660518 = lojas internas.
@@ -1008,20 +1040,27 @@ async def valuation_report(
     operacional = OperacionalSecaoOut(
         meses=months,
         linhas=[
-            OperacionalLinhaOut(chave="erro_envio", label="Erro no Envio",
-                                formato="brl", valores=_brl_row(bo_by_mes, "erro_envio")),
-            OperacionalLinhaOut(chave="problemas", label="Problemas",
-                                formato="brl", valores=_brl_row(bo_by_mes, "problemas")),
-            OperacionalLinhaOut(chave="taxa_perdimento", label="Taxa de Perdimento",
-                                formato="pct", valores=_taxa_perdimento()),
-            OperacionalLinhaOut(chave="reembolso", label="Reembolso",
-                                formato="brl", valores=_brl_row(ref_by_mes, "reembolso")),
-            OperacionalLinhaOut(chave="usado", label="Usado",
-                                formato="brl", valores=_brl_row(dev_by_mes, "usado")),
-            OperacionalLinhaOut(chave="manutencao", label="Manutenção",
-                                formato="brl", valores=_brl_row(dev_by_mes, "manutencao")),
-            OperacionalLinhaOut(chave="custo_manutencao", label="Custo Manutenção",
-                                formato="brl", valores=_brl_row(dev_by_mes, "custo_manutencao")),
+            OperacionalLinhaOut(chave="erro_envio", label="Erro no Envio", formato="brl",
+                                descricao=_OPER_DESCRICOES["erro_envio"],
+                                valores=_brl_row(bo_by_mes, "erro_envio")),
+            OperacionalLinhaOut(chave="problemas", label="Problemas", formato="brl",
+                                descricao=_OPER_DESCRICOES["problemas"],
+                                valores=_brl_row(bo_by_mes, "problemas")),
+            OperacionalLinhaOut(chave="taxa_perdimento", label="Taxa de Perdimento", formato="pct",
+                                descricao=_OPER_DESCRICOES["taxa_perdimento"],
+                                valores=_taxa_perdimento()),
+            OperacionalLinhaOut(chave="reembolso", label="Reembolso", formato="brl",
+                                descricao=_OPER_DESCRICOES["reembolso"],
+                                valores=_brl_row(ref_by_mes, "reembolso")),
+            OperacionalLinhaOut(chave="usado", label="Usado", formato="brl",
+                                descricao=_OPER_DESCRICOES["usado"],
+                                valores=_brl_row(dev_by_mes, "usado")),
+            OperacionalLinhaOut(chave="manutencao", label="Manutenção", formato="brl",
+                                descricao=_OPER_DESCRICOES["manutencao"],
+                                valores=_brl_row(dev_by_mes, "manutencao")),
+            OperacionalLinhaOut(chave="custo_manutencao", label="Custo Manutenção", formato="brl",
+                                descricao=_OPER_DESCRICOES["custo_manutencao"],
+                                valores=_brl_row(dev_by_mes, "custo_manutencao")),
         ],
     )
 

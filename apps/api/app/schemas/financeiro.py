@@ -260,6 +260,7 @@ class OperacionalLinhaOut(BaseModel):
     chave: str
     label: str
     formato: str  # 'brl' | 'pct'
+    descricao: str  # explicação da fórmula (tooltip "informativo" no hover)
     valores: list[float | None]
 
 
