@@ -29,11 +29,19 @@ const PLATFORM_SPECS: Record<Platform, PlatformSpec> = {
   ml: {
     label: 'Mercado Livre',
     marketplace: 'ml',
+    hint: {
+      tone: 'oauth-ml',
+      lines: [
+        '**Mercado Livre:** preencha Client ID e Client Secret (do seu app no DevCenter do Mercado Livre).',
+        'Depois de salvar, clique em **Autorizar no Mercado Livre** na página de Integrações para gerar Access/Refresh Token via login OAuth.',
+        'Os campos de token abaixo são opcionais — só preencha se quiser colar as credenciais manualmente.',
+      ],
+    },
     fields: [
       { key: 'client_id', label: 'Client ID (App ID)', placeholder: 'ID do seu aplicativo ML', required: true },
       { key: 'client_secret', label: 'Client Secret', type: 'password', required: true },
-      { key: 'refresh_token', label: 'Refresh Token (opcional)', type: 'password', placeholder: 'Token de atualização OAuth' },
-      { key: 'access_token', label: 'Access Token', type: 'password', placeholder: 'Token de acesso atual' },
+      { key: 'refresh_token', label: 'Refresh Token (opcional)', type: 'password', placeholder: 'Gerado via OAuth — ou cole manualmente' },
+      { key: 'access_token', label: 'Access Token (opcional)', type: 'password', placeholder: 'Gerado via OAuth' },
       { key: 'user_id', label: 'User ID (opcional)', placeholder: 'Seu ID de usuário ML' },
     ],
   },

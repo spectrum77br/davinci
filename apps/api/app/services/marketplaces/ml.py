@@ -72,35 +72,61 @@ class MercadoLivreClient:
         return self.expires_at - skew <= int(time.time())
 
     @staticmethod
-    def authorize_url(state: str) -> str:
+    def authorize_url(
+        state: str,
+        *,
+        client_id: str | None = None,
+        redirect_uri: str | None = None,
+    ) -> str:
+        """Build the ML authorize URL.
+
+        `client_id`/`redirect_uri` default to the global env app when omitted
+        (generic `/api/oauth/ml/*` flow). The integration-bound flow passes the
+        integration's own credentials so each seller uses their own ML app.
+        """
         s = get_settings()
         params = {
             "response_type": "code",
-            "client_id": s.ml_client_id,
-            "redirect_uri": s.ml_redirect_uri,
+            "client_id": client_id or s.ml_client_id,
+            "redirect_uri": redirect_uri or s.ml_redirect_uri,
             "state": state,
         }
         return f"{ML_AUTH_URL}?{urlencode(params)}"
 
     @staticmethod
-    async def exchange_code(code: str) -> dict:
+    async def exchange_code(
+        code: str,
+        *,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        redirect_uri: str | None = None,
+    ) -> dict:
+        """Exchange an auth code for tokens.
+
+        `client_id`/`client_secret`/`redirect_uri` default to the env app when
+        omitted. The one actually used is written back into the returned creds
+        so `refresh()` can reuse it.
+        """
         s = get_settings()
+        cid = client_id or s.ml_client_id
+        csec = client_secret or s.ml_client_secret
+        ruri = redirect_uri or s.ml_redirect_uri
         async with httpx.AsyncClient(timeout=20.0) as c:
             r = await c.post(
                 ML_TOKEN_URL,
                 headers={"Accept": "application/json"},
                 data={
                     "grant_type": "authorization_code",
-                    "client_id": s.ml_client_id,
-                    "client_secret": s.ml_client_secret,
+                    "client_id": cid,
+                    "client_secret": csec,
                     "code": code,
-                    "redirect_uri": s.ml_redirect_uri,
+                    "redirect_uri": ruri,
                 },
             )
             r.raise_for_status()
             creds = _normalize_token(r.json())
-            creds["client_id"] = s.ml_client_id
-            creds["client_secret"] = s.ml_client_secret
+            creds["client_id"] = cid
+            creds["client_secret"] = csec
             return creds
 
     def _client_creds(self) -> tuple[str, str]:

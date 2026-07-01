@@ -179,18 +179,21 @@ function onModalClose(open: boolean) {
   if (!open) editing.value = null
 }
 
-const tiktokAuthorizingId = ref<string | null>(null)
-async function authorizeTikTok(i: Integration) {
-  tiktokAuthorizingId.value = i.id
+// Platforms that connect via integration-bound OAuth "login" (the seller logs
+// into their own app). Same start/callback shape — endpoint keyed by platform.
+const OAUTH_LOGIN_PLATFORMS: Platform[] = ['tiktok', 'ml']
+const authorizingId = ref<string | null>(null)
+async function authorizeOAuth(i: Integration) {
+  authorizingId.value = i.id
   try {
     const r = await api<{ url: string; state: string }>(
-      `/api/integrations/tiktok/start?integrationId=${i.id}&origin=${encodeURIComponent(window.location.origin)}`,
+      `/api/integrations/${i.platform}/start?integrationId=${i.id}&origin=${encodeURIComponent(window.location.origin)}`,
     )
     if (r?.url) window.location.href = r.url
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'tiktok_authorize_failed'
+    error.value = e?.data?.detail?.code || e?.message || 'authorize_failed'
   } finally {
-    tiktokAuthorizingId.value = null
+    authorizingId.value = null
   }
 }
 
@@ -281,15 +284,17 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
                 : (testingId === i.id ? 'testando…' : 'testar') }}
             </Button>
             <Button
-              v-if="canEdit && i.platform === 'tiktok'"
+              v-if="canEdit && OAUTH_LOGIN_PLATFORMS.includes(i.platform)"
               size="sm"
               variant="outline"
-              :disabled="tiktokAuthorizingId === i.id"
-              title="Iniciar OAuth no TikTok Partner Center"
-              @click="authorizeTikTok(i)"
+              :disabled="authorizingId === i.id"
+              :title="i.platform === 'ml' ? 'Iniciar OAuth no Mercado Livre' : 'Iniciar OAuth no TikTok Partner Center'"
+              @click="authorizeOAuth(i)"
             >
               <KeyRound class="size-3 mr-1" />
-              {{ tiktokAuthorizingId === i.id ? 'redirecionando…' : 'Autorizar no TikTok' }}
+              {{ authorizingId === i.id
+                ? 'redirecionando…'
+                : (i.platform === 'ml' ? 'Autorizar no Mercado Livre' : 'Autorizar no TikTok') }}
             </Button>
             <Button v-if="canEdit" size="sm" variant="ghost" title="editar" @click="openEdit(i)">
               <SquarePen class="size-4" />

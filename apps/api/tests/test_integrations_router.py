@@ -248,3 +248,137 @@ async def test_create_integration_requires_empresa_edit(client, make_user, auth_
         },
     )
     assert r.status_code == 403
+
+
+# =============================================================================
+# Mercado Livre integration-bound OAuth (mirrors the TikTok "login" flow).
+# =============================================================================
+
+
+async def _make_ml_integration(client, credentials: dict) -> tuple[str, str]:
+    """Create a company + ML store + ML integration; returns (store_id, integration_id)."""
+    _cid, sid = await _make_company_and_store(client)
+    r = await client.post(
+        "/api/integrations",
+        json={"store_id": sid, "platform": "ml", "name": "ml-oauth", "credentials": credentials},
+    )
+    assert r.status_code == 201, r.text
+    return sid, r.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_ml_oauth_start_creates_state(client, make_user, auth_as, db, monkeypatch):
+    """`/api/integrations/ml/start` builds an ML authorize URL using the
+    integration's own client_id and persists an integration-bound state row."""
+    from sqlalchemy import select
+
+    from app.config import get_settings
+    from app.models import OAuthState
+
+    settings = get_settings()
+    monkeypatch.setattr(
+        settings, "ml_redirect_uri", "https://test/api/integrations/ml/callback", raising=False
+    )
+
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    _sid, iid = await _make_ml_integration(
+        client, {"client_id": "CID-123", "client_secret": "CSEC-abc"}
+    )
+
+    r = await client.get(f"/api/integrations/ml/start?integrationId={iid}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "state" in body and len(body["state"]) >= 16
+    assert "auth.mercadolivre.com.br/authorization" in body["url"]
+    assert "client_id=CID-123" in body["url"]
+    assert "state=" + body["state"] in body["url"]
+
+    row = (
+        await db.execute(select(OAuthState).where(OAuthState.state == body["state"]))
+    ).scalar_one()
+    assert row.platform == IntegrationPlatform.ML
+    assert row.code_verifier == iid  # threads the integration id to the callback
+
+
+@pytest.mark.asyncio
+async def test_ml_oauth_start_missing_client_id(client, make_user, auth_as):
+    """Start must refuse an ML integration that has no client_id yet."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    _sid, iid = await _make_ml_integration(client, {"client_secret": "only-secret"})
+    r = await client.get(f"/api/integrations/ml/start?integrationId={iid}")
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "missing_client_id"
+
+
+@pytest.mark.asyncio
+async def test_ml_oauth_callback_exchanges_and_saves(client, make_user, auth_as, db, monkeypatch):
+    """Callback exchanges the code with the integration's creds, merges the
+    tokens back, and consumes the state (replay-proof)."""
+    import time
+
+    from sqlalchemy import select
+
+    from app.models import Integration, OAuthState
+    from app.security.cipher import decrypt_json
+
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    sid, iid = await _make_ml_integration(
+        client, {"client_id": "CID-123", "client_secret": "CSEC-abc"}
+    )
+
+    state_token = "ml-state-12345678"
+    db.add(OAuthState(
+        state=state_token,
+        platform=IntegrationPlatform.ML,
+        store_id=sid,
+        user_id=admin.id,
+        code_verifier=iid,
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    ))
+    await db.commit()
+
+    async def fake_exchange(code, *, client_id=None, client_secret=None, redirect_uri=None):
+        assert client_id == "CID-123" and client_secret == "CSEC-abc"
+        return {
+            "access_token": "AT-ml",
+            "refresh_token": "RT-ml",
+            "user_id": 123456,
+            "scope": "read write offline_access",
+            "expires_at": int(time.time()) + 21600,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+
+    from app.services.marketplaces import ml
+    monkeypatch.setattr(ml.MercadoLivreClient, "exchange_code", staticmethod(fake_exchange))
+
+    r = await client.get(f"/api/integrations/ml/callback?code=THE-CODE&state={state_token}")
+    assert r.status_code in (302, 307), r.text
+    assert "/companies/" in r.headers["location"]
+    assert "platform=ml" in r.headers["location"]
+
+    # State consumed.
+    row = (
+        await db.execute(select(OAuthState).where(OAuthState.state == state_token))
+    ).scalar_one()
+    assert row.consumed_at is not None
+
+    # Tokens merged into the integration, client creds preserved, expiry set.
+    integ = (
+        await db.execute(select(Integration).where(Integration.id == iid))
+    ).scalar_one()
+    creds = decrypt_json(integ.credentials)
+    assert creds["access_token"] == "AT-ml"
+    assert creds["refresh_token"] == "RT-ml"
+    assert creds["user_id"] == 123456
+    assert creds["client_id"] == "CID-123"
+    assert integ.status == "active"
+    assert integ.token_expires_at is not None
+
+    # Replay should fail (state already consumed).
+    r2 = await client.get(f"/api/integrations/ml/callback?code=AGAIN&state={state_token}")
+    assert r2.status_code == 400
+    assert r2.json()["detail"]["code"] == "state_consumed"
