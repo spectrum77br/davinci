@@ -108,7 +108,7 @@ const search = ref('')
 const platform = ref<'all' | string>('all')
 const tipoFilter = ref<'all' | RefundTipo>('all')
 const conferidoFilter = ref<ConferidoFilter>('false')
-// Filtro por data do reembolso (coluna "Data" = Refund.data), só para admins.
+// Filtro por data do conferido (Refund.conferido_at), só para admins.
 const isAdmin = useIsAdmin()
 const dataInicio = ref('')
 const dataFim = ref('')
@@ -692,19 +692,19 @@ async function saveRow(row: RefundRow): Promise<void> {
         <option value="all">todos</option>
       </select>
       <div v-if="isAdmin" class="flex items-center gap-1.5">
-        <span class="text-xs text-muted-foreground">data</span>
+        <span class="text-xs text-muted-foreground">conferido em</span>
         <input
           v-model="dataInicio"
           type="date"
           class="h-9 rounded-md border bg-background px-2 text-sm"
-          title="Data do reembolso — início"
+          title="Data do conferido — início"
         />
         <span class="text-xs text-muted-foreground">até</span>
         <input
           v-model="dataFim"
           type="date"
           class="h-9 rounded-md border bg-background px-2 text-sm"
-          title="Data do reembolso — fim"
+          title="Data do conferido — fim"
         />
         <Button
           v-if="dataInicio || dataFim"

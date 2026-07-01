@@ -388,35 +388,39 @@ async def test_list_refunds_filters_by_data_range(
     user = await make_user(permissions=_refund_permissions())
     auth_as(user)
 
-    # O filtro vive no GET/_build_where; insere direto pra não passar pelo
-    # refresh de margem do POST. "R-B" cai às 23:30 do último dia de maio (SP) e
-    # deve entrar com data_fim inclusivo; "R-D" (data NULL) fica de fora do filtro.
+    # O filtro vive no GET/_build_where e agora chaveia por conferido_at; insere
+    # direto pra não passar pelo refresh de margem do POST. `data` é setada FORA
+    # do intervalo de propósito, pra provar que o filtro ignora a coluna Data.
+    # "R-B" foi conferido às 23:30 do último dia de maio (SP) e deve entrar com
+    # data_fim inclusivo; "R-D" (não conferido, conferido_at NULL) fica de fora.
     sp = ZoneInfo("America/Sao_Paulo")
+    fora = datetime(2020, 1, 1, 0, 0, tzinfo=sp)
     db.add_all([
-        Refund(pedido_bling="R-A", conta="Loja Teste",
-               data=datetime(2026, 5, 10, 9, 0, tzinfo=sp)),
-        Refund(pedido_bling="R-B", conta="Loja Teste",
-               data=datetime(2026, 5, 31, 23, 30, tzinfo=sp)),
-        Refund(pedido_bling="R-C", conta="Loja Teste",
-               data=datetime(2026, 6, 2, 9, 0, tzinfo=sp)),
-        Refund(pedido_bling="R-D", conta="Loja Teste", data=None),
+        Refund(pedido_bling="R-A", conta="Loja Teste", data=fora, conferido=True,
+               conferido_at=datetime(2026, 5, 10, 9, 0, tzinfo=sp)),
+        Refund(pedido_bling="R-B", conta="Loja Teste", data=fora, conferido=True,
+               conferido_at=datetime(2026, 5, 31, 23, 30, tzinfo=sp)),
+        Refund(pedido_bling="R-C", conta="Loja Teste", data=fora, conferido=True,
+               conferido_at=datetime(2026, 6, 2, 9, 0, tzinfo=sp)),
+        Refund(pedido_bling="R-D", conta="Loja Teste", data=fora, conferido=False,
+               conferido_at=None),
     ])
     await db.commit()
 
     def _pedidos(resp):
         return {item["pedido_bling"] for item in resp.json()["items"]}
 
-    # Intervalo fechado de maio: pega A e B, exclui C (junho) e D (sem data).
+    # Intervalo fechado de maio: pega A e B, exclui C (junho) e D (não conferido).
     resp = await client.get("/api/refunds?data_inicio=2026-05-01&data_fim=2026-05-31")
     assert resp.status_code == 200
     assert _pedidos(resp) == {"R-A", "R-B"}
 
-    # Só limite inferior: A, B e C; exclui apenas o sem data.
+    # Só limite inferior: A, B e C; exclui apenas o não conferido.
     resp = await client.get("/api/refunds?data_inicio=2026-05-01")
     assert resp.status_code == 200
     assert _pedidos(resp) == {"R-A", "R-B", "R-C"}
 
-    # Só limite superior: exclui C (junho) e o sem data.
+    # Só limite superior: exclui C (junho) e o não conferido.
     resp = await client.get("/api/refunds?data_fim=2026-05-31")
     assert resp.status_code == 200
     assert _pedidos(resp) == {"R-A", "R-B"}
