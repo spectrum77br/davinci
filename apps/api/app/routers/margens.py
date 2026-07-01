@@ -316,7 +316,17 @@ async def list_margens_marketplace(
     rebuilt by the 'atualizar' UI button. User-facing PATCHes update the
     affected snapshot columns directly so edits appear immediately.
     """
-    where = ["v.situacao_nome != 'Cancelado'", f"NOT {_ATTENTION_FRETE_SQL}"]
+    # "Cancelado" (12) e "Aguardando Cancelamento" (83955) ficam fora do fluxo de
+    # triagem da margem: são pedidos cancelados / em processo de cancelamento e
+    # não devem ser aprovados/reprovados. 83955 é justamente o destino de um
+    # pedido reprovado no Bling (SITUACAO_REPROVADO) — o estado é transitório até
+    # virar "Cancelado". Filtrado por código (situacao) porque situacao_nome vem
+    # de um JOIN e pode ser NULL; IS DISTINCT FROM preserva linhas com situacao NULL.
+    where = [
+        "v.situacao_nome != 'Cancelado'",
+        f"v.situacao IS DISTINCT FROM '{SITUACAO_REPROVADO}'",
+        f"NOT {_ATTENTION_FRETE_SQL}",
+    ]
     params: dict = {"limit": limit, "offset": offset}
     if platform:
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
