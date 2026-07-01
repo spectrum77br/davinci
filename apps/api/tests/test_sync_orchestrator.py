@@ -293,7 +293,11 @@ async def test_advisory_lock_blocks_second_acquirer(
             assert got1 is True
             async with try_user_sync_lock(s2, user.id) as got2:
                 assert got2 is False
-        # After s1 exits, s2 must succeed.
+        # `pg_try_advisory_xact_lock` is TRANSACTION-scoped: exiting the
+        # context manager releases nothing — the lock only drops when s1's
+        # transaction ends. (This test predates the session→xact lock
+        # migration; without the rollback, s1 still holds the lock here.)
+        await s1.rollback()
         async with try_user_sync_lock(s2, user.id) as got3:
             assert got3 is True
 

@@ -571,6 +571,20 @@ class BlingClient:
                 ) from e
             raise
 
+        # 200 with an empty `data` payload (get_product coalesces to {}):
+        # nothing to parse. Without this guard `parse_bling_product({})`
+        # KeyErrors on the missing `id`, which the orchestrator's blanket
+        # except turned into RETRYABLE — the pre-smart path in _refresh_bling
+        # (`parse_bling_product(raw) if raw else {}`) treated it as
+        # stock-missing → SKIPPED. Keep that semantic.
+        if not raw:
+            return {
+                "stock": None,
+                "bling_product_id": bling_product_id,
+                "found_via": "direct",
+                "raw": raw,
+            }
+
         parsed = parse_bling_product(raw)
         situacao = (raw.get("situacao") or "").upper()
 
