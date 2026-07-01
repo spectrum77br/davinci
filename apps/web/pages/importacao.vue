@@ -836,6 +836,10 @@ async function saveNewProduct() {
     })
     products.value = [...products.value, row]
     showCreateModal.value = false
+    // Celular: o backend também criou a linha correspondente na aba Kit.
+    // Refetch pra ela aparecer na matriz sem recarregar a página. Best-
+    // effort e no-op p/ eletro (sem aba Kit) — reloadKitOnly já ignora erro.
+    if (availableSubtabs.value.includes('kit')) void reloadKitOnly()
   } catch (e: any) {
     errorText.value = `Falha ao adicionar: ${e?.data?.detail?.code || 'erro'}`
   } finally {
