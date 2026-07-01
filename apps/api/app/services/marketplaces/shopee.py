@@ -33,6 +33,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
 import httpx
 import structlog
@@ -113,6 +114,87 @@ class ShopeeClient:
         msg = f"{partner_id}{path}{timestamp}{self.access_token}{self.shop_id}".encode()
         sig = hmac.new(partner_key, msg, hashlib.sha256).hexdigest()
         return sig, partner_id
+
+    # ------------------------------------------------------------------ OAuth
+    # Shopee's "auth_partner" login flow — the integration-bound OAuth mirrored
+    # by the integrations router (same shape as TikTok/ML). Both endpoints below
+    # are *public* (pre-token) APIs, so the signature base string is only
+    # partner_id + path + timestamp — no access_token, no shop_id — the same
+    # shape `refresh()` uses.
+
+    @staticmethod
+    def _public_sign(partner_id: int, partner_key: str, path: str, timestamp: int) -> str:
+        msg = f"{partner_id}{path}{timestamp}".encode()
+        return hmac.new(str(partner_key).encode(), msg, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def authorize_url(
+        *,
+        partner_id: str | int,
+        partner_key: str,
+        redirect: str,
+        use_sandbox: bool = False,
+    ) -> str:
+        """Build the Shopee `auth_partner` authorize URL.
+
+        The seller logs into Shopee, authorizes the app, and is redirected to
+        `redirect` with `?code=...&shop_id=...` appended. The link is only valid
+        for 5 minutes on Shopee's side. `redirect` must already carry the CSRF
+        `state` as a path segment (see the router) — Shopee has no native
+        `state` param and may clobber a pre-existing query string.
+        """
+        base = SHOPEE_TEST_BASE if use_sandbox else SHOPEE_LIVE_BASE
+        path = "/api/v2/shop/auth_partner"
+        ts = int(time.time())
+        pid = int(partner_id)
+        sign = ShopeeClient._public_sign(pid, partner_key, path, ts)
+        params = {"partner_id": pid, "timestamp": ts, "sign": sign, "redirect": redirect}
+        return f"{base}{path}?{urlencode(params)}"
+
+    @staticmethod
+    async def exchange_code(
+        code: str,
+        shop_id: str | int,
+        *,
+        partner_id: str | int,
+        partner_key: str,
+        use_sandbox: bool = False,
+    ) -> dict:
+        """Exchange the `code` + `shop_id` from the redirect for tokens.
+
+        Returns a creds fragment ready to merge into `integrations.credentials`:
+        `{access_token, refresh_token, expires_at, shop_id}`. The shop-scoped
+        access_token lasts 4h; the refresh_token lasts 30d (rotated on refresh).
+        """
+        base = SHOPEE_TEST_BASE if use_sandbox else SHOPEE_LIVE_BASE
+        path = "/api/v2/auth/token/get"
+        ts = int(time.time())
+        pid = int(partner_id)
+        sid = int(shop_id)
+        sign = ShopeeClient._public_sign(pid, partner_key, path, ts)
+        params = {"partner_id": pid, "timestamp": ts, "sign": sign}
+        async with httpx.AsyncClient(timeout=20.0) as c:
+            r = await c.post(
+                f"{base}{path}",
+                params=params,
+                json={"code": code, "shop_id": sid, "partner_id": pid},
+            )
+            r.raise_for_status()
+            payload = r.json() or {}
+        if payload.get("error"):
+            raise RuntimeError(
+                f"shopee_token_get_error {payload.get('error')}: {payload.get('message')}"
+            )
+        access_token = str(payload.get("access_token") or "").strip()
+        if not access_token:
+            raise RuntimeError(f"shopee_token_get_no_access_token: {payload}")
+        expire_in = int(payload.get("expire_in") or 14400)
+        return {
+            "access_token": access_token,
+            "refresh_token": payload.get("refresh_token"),
+            "expires_at": int(time.time()) + expire_in,
+            "shop_id": sid,
+        }
 
     async def refresh(self) -> None:
         rt = self.creds.get("refresh_token")

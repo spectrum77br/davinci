@@ -181,7 +181,17 @@ function onModalClose(open: boolean) {
 
 // Platforms that connect via integration-bound OAuth "login" (the seller logs
 // into their own app). Same start/callback shape — endpoint keyed by platform.
-const OAUTH_LOGIN_PLATFORMS: Platform[] = ['tiktok', 'ml']
+const OAUTH_LOGIN_PLATFORMS: Platform[] = ['tiktok', 'ml', 'shopee']
+const OAUTH_START_TITLES: Partial<Record<Platform, string>> = {
+  ml: 'Iniciar OAuth no Mercado Livre',
+  tiktok: 'Iniciar OAuth no TikTok Partner Center',
+  shopee: 'Iniciar OAuth na Shopee (auth_partner)',
+}
+const OAUTH_AUTHORIZE_LABELS: Partial<Record<Platform, string>> = {
+  ml: 'Autorizar no Mercado Livre',
+  tiktok: 'Autorizar no TikTok',
+  shopee: 'Autorizar na Shopee',
+}
 const authorizingId = ref<string | null>(null)
 async function authorizeOAuth(i: Integration) {
   authorizingId.value = i.id
@@ -288,13 +298,13 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
               size="sm"
               variant="outline"
               :disabled="authorizingId === i.id"
-              :title="i.platform === 'ml' ? 'Iniciar OAuth no Mercado Livre' : 'Iniciar OAuth no TikTok Partner Center'"
+              :title="OAUTH_START_TITLES[i.platform]"
               @click="authorizeOAuth(i)"
             >
               <KeyRound class="size-3 mr-1" />
               {{ authorizingId === i.id
                 ? 'redirecionando…'
-                : (i.platform === 'ml' ? 'Autorizar no Mercado Livre' : 'Autorizar no TikTok') }}
+                : OAUTH_AUTHORIZE_LABELS[i.platform] }}
             </Button>
             <Button v-if="canEdit" size="sm" variant="ghost" title="editar" @click="openEdit(i)">
               <SquarePen class="size-4" />

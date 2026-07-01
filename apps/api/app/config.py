@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     shopee_partner_id: str = ""
     shopee_partner_key: str = ""
     shopee_use_sandbox: bool = False
+    # Public callback URL registered for the Shopee OAuth "login" flow. The
+    # per-request `state` is appended as a PATH segment (not a query param) —
+    # Shopee appends `?code=&shop_id=` to the redirect and does not reliably
+    # preserve pre-existing query strings, so the state must live in the path.
+    shopee_redirect_uri: str = ""
 
     ml_client_id: str = ""
     ml_client_secret: str = ""
