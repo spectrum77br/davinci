@@ -34,6 +34,7 @@ from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces import client_for
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
+from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
@@ -497,6 +498,146 @@ async def ml_oauth_callback(
     suffix = f"/companies/{company_id}" if company_id else "/integrations"
     return RedirectResponse(
         f"{settings.app_url}{suffix}?oauth=ok&platform=ml",
+        status_code=302,
+    )
+
+
+# =============================================================================
+# Shopee OAuth — integration-bound "auth_partner" login (each integration
+# carries its own partner_id/partner_key; the seller authorizes their shop).
+# Mirrors the TikTok/ML flow above, with two Shopee-specific twists:
+#   * the CSRF `state` rides in the callback PATH, not a query param — Shopee
+#     appends `?code=&shop_id=` to the redirect and won't reliably preserve a
+#     pre-existing query string;
+#   * the redirect returns `shop_id`, stored alongside the tokens.
+# =============================================================================
+
+SHOPEE_STATE_TTL_MIN = 10
+
+
+def _shopee_redirect_base() -> str:
+    """Public callback base URL (no trailing slash). An explicit setting is
+    required — in dev the API and web run on different ports, so it can't be
+    derived from app_url the way the final success redirect can."""
+    return get_settings().shopee_redirect_uri.rstrip("/")
+
+
+@router.get("/shopee/start", response_model=OAuthStartOut)
+async def shopee_oauth_start(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("integracoes", "edit"))],
+    integration_id: Annotated[UUID, Query(alias="integrationId")],
+    origin: Annotated[str | None, Query()] = None,
+) -> OAuthStartOut:
+    del origin  # accepted for FE compatibility; redirect uses shopee_redirect_uri
+    integ = (
+        await session.execute(select(Integration).where(Integration.id == integration_id))
+    ).scalar_one_or_none()
+    if integ is None:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+    if integ.platform != IntegrationPlatform.SHOPEE:
+        raise HTTPException(400, detail={"code": "not_shopee"})
+
+    settings = get_settings()
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+    partner_id = str(creds.get("partner_id") or settings.shopee_partner_id or "").strip()
+    partner_key = str(creds.get("partner_key") or settings.shopee_partner_key or "").strip()
+    if not partner_id or not partner_key:
+        raise HTTPException(400, detail={"code": "missing_partner_credentials"})
+    redirect_base = _shopee_redirect_base()
+    if not redirect_base:
+        raise HTTPException(400, detail={"code": "missing_shopee_redirect_uri"})
+
+    state = token_urlsafe(32)
+    session.add(
+        OAuthState(
+            state=state,
+            platform=IntegrationPlatform.SHOPEE,
+            store_id=integ.store_id,
+            user_id=user.id,
+            code_verifier=str(integ.id),  # threads integration_id to callback
+            expires_at=datetime.now(UTC) + timedelta(minutes=SHOPEE_STATE_TTL_MIN),
+        )
+    )
+    await session.commit()
+    url = ShopeeClient.authorize_url(
+        partner_id=partner_id,
+        partner_key=partner_key,
+        redirect=f"{redirect_base}/{state}",
+        use_sandbox=settings.shopee_use_sandbox,
+    )
+    return OAuthStartOut(url=url, state=state)
+
+
+@router.get("/shopee/callback/{state}")
+async def shopee_oauth_callback(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    state: str,
+    code: Annotated[str, Query(...)],
+    shop_id: Annotated[str | None, Query()] = None,
+):
+    settings = get_settings()
+    row = (
+        await session.execute(select(OAuthState).where(OAuthState.state == state))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(400, detail={"code": "state_not_found"})
+    if row.consumed_at is not None:
+        raise HTTPException(400, detail={"code": "state_consumed"})
+    if row.expires_at < datetime.now(UTC):
+        raise HTTPException(400, detail={"code": "state_expired"})
+    if row.platform != IntegrationPlatform.SHOPEE:
+        raise HTTPException(400, detail={"code": "state_platform_mismatch"})
+    if not shop_id:
+        raise HTTPException(400, detail={"code": "missing_shop_id"})
+
+    integ: Integration | None = None
+    if row.code_verifier:
+        try:
+            integ_id = UUID(row.code_verifier)
+        except ValueError:
+            integ_id = None
+        if integ_id is not None:
+            integ = (
+                await session.execute(select(Integration).where(Integration.id == integ_id))
+            ).scalar_one_or_none()
+    if integ is None:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+    partner_id = str(creds.get("partner_id") or settings.shopee_partner_id or "").strip()
+    partner_key = str(creds.get("partner_key") or settings.shopee_partner_key or "").strip()
+    if not partner_id or not partner_key:
+        raise HTTPException(400, detail={"code": "missing_partner_credentials"})
+
+    try:
+        new_creds = await ShopeeClient.exchange_code(
+            code,
+            shop_id,
+            partner_id=partner_id,
+            partner_key=partner_key,
+            use_sandbox=settings.shopee_use_sandbox,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("shopee_exchange_failed", err=str(e), integration_id=str(integ.id))
+        raise HTTPException(400, detail={"code": "exchange_failed", "err": str(e)[:200]}) from e
+
+    # Merge exchanged tokens over the existing creds (keeps partner_id/key and
+    # any manually-entered fields), then stamp expiry so both the refresh cron
+    # and on-demand refresh pick it up.
+    creds.update(new_creds)
+    integ.credentials = encrypt_json(creds)
+    exp = creds.get("expires_at")
+    integ.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC) if exp else None
+    integ.status = "active"
+    integ.last_error = None
+    row.consumed_at = datetime.now(UTC)
+    await session.commit()
+
+    company_id = await _company_id_for(session, integ.store_id)
+    suffix = f"/companies/{company_id}" if company_id else "/integrations"
+    return RedirectResponse(
+        f"{settings.app_url}{suffix}?oauth=ok&platform=shopee",
         status_code=302,
     )
 

@@ -48,11 +48,20 @@ const PLATFORM_SPECS: Record<Platform, PlatformSpec> = {
   shopee: {
     label: 'Shopee',
     marketplace: 'shopee',
+    hint: {
+      tone: 'oauth-shopee',
+      lines: [
+        '**Shopee:** preencha Partner ID e Partner Key (do seu app na Shopee Open Platform).',
+        'Depois de salvar, clique em **Autorizar na Shopee** na página de Integrações para gerar Access/Refresh Token e capturar o Shop ID via login OAuth.',
+        'Os campos de token abaixo são opcionais — só preencha se quiser colar as credenciais manualmente.',
+      ],
+    },
     fields: [
       { key: 'partner_id', label: 'Partner ID', placeholder: 'Ex: 2012455', required: true },
       { key: 'partner_key', label: 'Partner Key', type: 'password', required: true },
-      { key: 'shop_id', label: 'Shop ID', placeholder: 'ID da sua loja Shopee', required: true },
-      { key: 'access_token', label: 'Access Token', type: 'password', placeholder: 'Token de acesso Shopee' },
+      { key: 'shop_id', label: 'Shop ID (opcional)', placeholder: 'Capturado via OAuth — ou cole manualmente' },
+      { key: 'refresh_token', label: 'Refresh Token (opcional)', type: 'password', placeholder: 'Gerado via OAuth' },
+      { key: 'access_token', label: 'Access Token (opcional)', type: 'password', placeholder: 'Gerado via OAuth' },
     ],
   },
   amazon: {

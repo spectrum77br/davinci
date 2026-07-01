@@ -382,3 +382,153 @@ async def test_ml_oauth_callback_exchanges_and_saves(client, make_user, auth_as,
     r2 = await client.get(f"/api/integrations/ml/callback?code=AGAIN&state={state_token}")
     assert r2.status_code == 400
     assert r2.json()["detail"]["code"] == "state_consumed"
+
+
+async def _make_shopee_integration(client, credentials: dict) -> tuple[str, str]:
+    """Create a company + store + Shopee integration; returns (store_id, integration_id)."""
+    _cid, sid = await _make_company_and_store(client)
+    r = await client.post(
+        "/api/integrations",
+        json={
+            "store_id": sid,
+            "platform": "shopee",
+            "name": "shopee-oauth",
+            "credentials": credentials,
+        },
+    )
+    assert r.status_code == 201, r.text
+    return sid, r.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_shopee_oauth_start_creates_state(client, make_user, auth_as, db, monkeypatch):
+    """`/api/integrations/shopee/start` builds an auth_partner URL from the
+    integration's own partner_id and threads the state through the redirect path."""
+    from sqlalchemy import select
+
+    from app.config import get_settings
+    from app.models import OAuthState
+
+    settings = get_settings()
+    monkeypatch.setattr(
+        settings, "shopee_redirect_uri",
+        "https://test/api/integrations/shopee/callback", raising=False,
+    )
+    monkeypatch.setattr(settings, "shopee_use_sandbox", False, raising=False)
+
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    _sid, iid = await _make_shopee_integration(
+        client, {"partner_id": "2012455", "partner_key": "KEY-abc"}
+    )
+
+    r = await client.get(f"/api/integrations/shopee/start?integrationId={iid}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "state" in body and len(body["state"]) >= 16
+    assert "partner.shopeemobile.com/api/v2/shop/auth_partner" in body["url"]
+    assert "partner_id=2012455" in body["url"]
+    # state is url-safe, so it survives verbatim inside the (encoded) redirect param.
+    assert body["state"] in body["url"]
+
+    row = (
+        await db.execute(select(OAuthState).where(OAuthState.state == body["state"]))
+    ).scalar_one()
+    assert row.platform == IntegrationPlatform.SHOPEE
+    assert row.code_verifier == iid  # threads the integration id to the callback
+
+
+@pytest.mark.asyncio
+async def test_shopee_oauth_start_missing_partner_key(client, make_user, auth_as, monkeypatch):
+    """Start must refuse a Shopee integration with no partner_key (and no env fallback)."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "shopee_partner_key", "", raising=False)
+    monkeypatch.setattr(
+        settings, "shopee_redirect_uri",
+        "https://test/api/integrations/shopee/callback", raising=False,
+    )
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    _sid, iid = await _make_shopee_integration(client, {"partner_id": "2012455"})
+    r = await client.get(f"/api/integrations/shopee/start?integrationId={iid}")
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "missing_partner_credentials"
+
+
+@pytest.mark.asyncio
+async def test_shopee_oauth_callback_exchanges_and_saves(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """Callback exchanges code+shop_id with the integration's creds, merges the
+    tokens back (incl. shop_id), and consumes the state (replay-proof)."""
+    import time
+
+    from sqlalchemy import select
+
+    from app.models import Integration, OAuthState
+    from app.security.cipher import decrypt_json
+
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    sid, iid = await _make_shopee_integration(
+        client, {"partner_id": "2012455", "partner_key": "KEY-abc"}
+    )
+
+    state_token = "shopee-state-12345678"
+    db.add(OAuthState(
+        state=state_token,
+        platform=IntegrationPlatform.SHOPEE,
+        store_id=sid,
+        user_id=admin.id,
+        code_verifier=iid,
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    ))
+    await db.commit()
+
+    async def fake_exchange(code, shop_id, *, partner_id=None, partner_key=None, use_sandbox=False):
+        assert code == "THE-CODE"
+        assert str(shop_id) == "778899"
+        assert partner_id == "2012455" and partner_key == "KEY-abc"
+        return {
+            "access_token": "AT-shopee",
+            "refresh_token": "RT-shopee",
+            "expires_at": int(time.time()) + 14400,
+            "shop_id": 778899,
+        }
+
+    from app.services.marketplaces import shopee
+    monkeypatch.setattr(shopee.ShopeeClient, "exchange_code", staticmethod(fake_exchange))
+
+    r = await client.get(
+        f"/api/integrations/shopee/callback/{state_token}?code=THE-CODE&shop_id=778899"
+    )
+    assert r.status_code in (302, 307), r.text
+    assert "/companies/" in r.headers["location"]
+    assert "platform=shopee" in r.headers["location"]
+
+    # State consumed.
+    row = (
+        await db.execute(select(OAuthState).where(OAuthState.state == state_token))
+    ).scalar_one()
+    assert row.consumed_at is not None
+
+    # Tokens merged into the integration, partner creds preserved, expiry set.
+    integ = (
+        await db.execute(select(Integration).where(Integration.id == iid))
+    ).scalar_one()
+    creds = decrypt_json(integ.credentials)
+    assert creds["access_token"] == "AT-shopee"
+    assert creds["refresh_token"] == "RT-shopee"
+    assert creds["shop_id"] == 778899
+    assert creds["partner_id"] == "2012455"  # kept alongside the new tokens
+    assert integ.status == "active"
+    assert integ.token_expires_at is not None
+
+    # Replay should fail (state already consumed).
+    r2 = await client.get(
+        f"/api/integrations/shopee/callback/{state_token}?code=AGAIN&shop_id=778899"
+    )
+    assert r2.status_code == 400
+    assert r2.json()["detail"]["code"] == "state_consumed"
