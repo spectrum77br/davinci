@@ -39,6 +39,7 @@ from app.schemas.sync import (
     SyncProductBody,
 )
 from app.services.advisory_lock import SYNC_NAMESPACE, _user_lock_key, try_user_sync_lock
+from app.services.job_details import load_job_details_tail
 from app.services.sync_orchestrator import SyncOrchestrator
 from app.worker_pool import get_arq_pool
 
@@ -254,7 +255,12 @@ async def sync_product(
     await orch.run([product], only_link_ids=only_link_ids)
 
     await session.refresh(job)
-    return JobOut.model_validate(job, from_attributes=True)
+    out = JobOut.model_validate(job, from_attributes=True)
+    # Per-link detail now lives in `background_job_details` (off the hot job
+    # row). Hydrate the response from there so the front's per-link toast keeps
+    # working — a single product's log is a handful of entries.
+    out.details = await load_job_details_tail(session, job.id)
+    return out
 
 
 @router.get("/sync-logs", response_model=SyncLogPage)

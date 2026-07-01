@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -194,3 +195,32 @@ class BackgroundJob(Base, TimestampMixin):
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class BackgroundJobDetail(Base):
+    """One progress entry for a `BackgroundJob`, kept off the hot
+    `background_jobs` row.
+
+    `background_jobs.details` (a JSONB array on the job row) turned quadratic
+    under `sync_all`: every append rewrote the whole array under a row lock and
+    the 8 parallel sub-orchestrators all hammered the same row. Each progress
+    entry is now one cheap INSERT here — O(1) append, no row-lock contention —
+    and the read API pages the tail by `id`. See `app.services.job_details`
+    and migration 0165.
+    """
+
+    __tablename__ = "background_job_details"
+    __table_args__ = (
+        Index("ix_background_job_details_job_id_id", "job_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("background_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    entry: Mapped[dict] = mapped_column(JSONB, nullable=False)

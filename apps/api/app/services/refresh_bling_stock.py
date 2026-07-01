@@ -39,6 +39,7 @@ from app.models import (
     ProductLink,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.job_details import append_job_detail
 from app.services.marketplaces.bling import (
     BLING_PRODUCTS_PAGE_SIZE,
     BlingClient,
@@ -46,8 +47,6 @@ from app.services.marketplaces.bling import (
 )
 
 logger = structlog.get_logger()
-
-DETAILS_MAX = 500
 
 # Máximo de produtos verificados 1-a-1 por execução na reconciliação de
 # excluídos. Como os rebaixados saem do conjunto de candidatos, em poucas
@@ -62,12 +61,10 @@ def _now() -> datetime:
 
 
 async def _append_detail(session: AsyncSession, job: BackgroundJob, entry: dict[str, Any]) -> None:
-    entry = {"at": _now().isoformat(), **entry}
-    current = list(job.details or [])
-    current.append(entry)
-    if len(current) > DETAILS_MAX:
-        current = current[-DETAILS_MAX:]
-    job.details = current
+    # Off the hot job row: append one row to background_job_details (per Bling
+    # page, low volume) rather than rewriting the JSONB array. Bump the
+    # heartbeat so the orphan GC doesn't reap a long paginated sweep.
+    await append_job_detail(session, job.id, entry)
     job.last_heartbeat_at = _now()
     await session.commit()
 

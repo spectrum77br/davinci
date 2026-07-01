@@ -32,6 +32,7 @@ from app.models import (
     ProductLink,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.job_details import append_job_detail
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
@@ -54,8 +55,10 @@ async def _heartbeat(session: AsyncSession, job: BackgroundJob) -> None:
 
 
 async def _append_detail(session: AsyncSession, job: BackgroundJob, entry: dict[str, Any]) -> None:
-    entry = {"at": _now().isoformat(), **entry}
-    job.details = [*(job.details or []), entry]
+    # Off the hot job row: one INSERT into background_job_details instead of
+    # rewriting the JSONB array. Called once per integration (low volume), so
+    # the commit here is cheap and keeps the per-integration progress visible.
+    await append_job_detail(session, job.id, entry)
     await session.commit()
 
 

@@ -193,3 +193,35 @@ class JobStats(BaseModel):
     succeeded: int
     failed: int
     cancelled: int
+
+
+class JobStatusOut(BaseModel):
+    """Lightweight job snapshot for polling — everything JobOut carries EXCEPT
+    the (now offloaded) `details` array, plus `details_count` so the client
+    knows when to fetch the next detail delta from /jobs/{id}/details."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    type: str
+    status: str
+    total: int
+    processed: int
+    payload: dict
+    result: dict
+    error: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    details_count: int = 0
+
+
+class JobDetailsOut(BaseModel):
+    """A slice of a job's progress log, paged by child-row id. `items` are the
+    raw entry objects (insertion order); `max_id` is the cursor to pass back as
+    `after` on the next request."""
+
+    items: list[dict]
+    max_id: int
