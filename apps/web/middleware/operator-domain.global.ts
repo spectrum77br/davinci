@@ -17,7 +17,7 @@ export default defineNuxtRouteMiddleware((to) => {
   const host = url.hostname.toLowerCase()
   if (!host.endsWith('gestaoestoque.com')) return
 
-  const allowedPrefixes = ['/controle-estoque', '/login', '/pending-approval']
+  const allowedPrefixes = ['/controle-estoque', '/login', '/pending-approval', '/privacidade']
   if (allowedPrefixes.some((p) => to.path === p || to.path.startsWith(p + '/'))) return
 
   return navigateTo('/controle-estoque')
