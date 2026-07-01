@@ -599,6 +599,79 @@ async def list_products(
     return out
 
 
+# ── Auto-criação da linha na aba Kit (só Celular) ────────────────────
+# Ao criar um produto de Celular na aba Importação, ele deve aparecer
+# automaticamente como LINHA (base) na aba Kit — espelhando o seed 0117,
+# onde cada produto celular virou 1 base pelo SKU completo.
+#
+# Por que SÓ celular:
+#   * Mala usa 1 base por MODELO (b001). O SKU do produto carrega o
+#     tamanho (b001.12, b001.20) e o tamanho é COLUNA/variação, não
+#     linha — então produto novo não mapeia 1:1 pra uma base nova.
+#   * Eletro não tem aba Kit.
+#
+# Por que acessórios ficam de fora:
+#   Fone/carregador/aspirador/roteador são COMPONENTES de kit (as próprias
+#   variações a001/a003/a004…), não produtos-base. Heurística robusta e
+#   alinhada à estrutura "aparelho × cor" do Kit: é aparelho ⇔ modelo_bling
+#   tem ' - <Cor>'. Todas as 115 bases celular existentes seguem esse
+#   padrão; os únicos produtos sem ' - ' são justamente os acessórios.
+def _celular_base_cor(modelo_bling: str | None) -> str | None:
+    """Cor da base = trecho após o último ' - ' do modelo, 1ª letra
+    maiúscula (igual ao seed 0117). 'Apple Ipad 11 128 GB - Azul' → 'Azul'.
+    None quando não há ' - ' (acessório)."""
+    if not modelo_bling or " - " not in modelo_bling:
+        return None
+    tail = modelo_bling.rsplit(" - ", 1)[-1].strip()
+    if not tail:
+        return None
+    return tail[:1].upper() + tail[1:]
+
+
+async def _maybe_create_kit_base_for_product(
+    session: AsyncSession, product: ImportProduct,
+) -> ImportKitBase | None:
+    """Cria a linha da aba Kit correspondente a um produto de Celular
+    recém-criado. Retorna a base criada, ou None quando não se aplica.
+
+    Idempotente e defensivo:
+      * Só celular; acessório (sem ' - <Cor>') não vira base.
+      * `sku_base` é UNIQUE global — se já existe base com esse SKU (seed,
+        produto recriado), não faz nada.
+      * `ordem` = MAX+1 na categoria. O grid ordena por modelo/sku, então
+        o valor só precisa ser NOT NULL — não afeta a exibição.
+    """
+    if (product.categoria or "").lower().strip() != "celular":
+        return None
+    if not product.modelo_bling or " - " not in product.modelo_bling:
+        return None
+    exists = (await session.execute(
+        select(ImportKitBase.id)
+        .where(ImportKitBase.sku_base == product.sku)
+        .limit(1)
+    )).scalar_one_or_none()
+    if exists is not None:
+        return None
+    next_ordem = (await session.execute(
+        select(func.coalesce(func.max(ImportKitBase.ordem), 0) + 1)
+        .where(ImportKitBase.categoria == "celular")
+    )).scalar() or 1
+    base = ImportKitBase(
+        categoria="celular",
+        modelo_bling=product.modelo_bling,
+        sku_base=product.sku,
+        cor=_celular_base_cor(product.modelo_bling),
+        ordem=int(next_ordem),
+    )
+    session.add(base)
+    logger.info(
+        "kit_base_auto_created",
+        sku_base=base.sku_base, categoria="celular",
+        product_id=str(product.id),
+    )
+    return base
+
+
 @router.post("/products", response_model=ImportProductOut, status_code=status.HTTP_201_CREATED)
 async def create_product(
     body: ImportProductCreate,
@@ -607,6 +680,11 @@ async def create_product(
 ) -> ImportProductOut:
     row = ImportProduct(**body.model_dump())
     session.add(row)
+    # Celular: cria a linha correspondente na aba Kit (import_kit_bases) na
+    # MESMA transação, pro produto aparecer automaticamente na matriz. flush
+    # antes garante row.id (default uuid4 é aplicado no flush) pro log.
+    await session.flush()
+    await _maybe_create_kit_base_for_product(session, row)
     await session.commit()
     await session.refresh(row)
     return ImportProductOut(
