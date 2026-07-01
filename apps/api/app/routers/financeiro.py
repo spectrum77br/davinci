@@ -652,9 +652,6 @@ _VAL_SIT_LABEL = (
 _VAL_SIT_ERRO_ENVIO = "83966"   # Erro no Envio
 _VAL_SIT_PROBLEMAS = "83960"    # Problemas
 _VAL_SIT_PERDIMENTO = "83956"   # Perdimento
-# Denominador da Taxa de Perdimento: Em andamento (15,37) + Entregue (83953) +
-# Perdimento (83956) + Resolvido (545902) + Enviado Fake (83958).
-_VAL_SIT_FAT_PERDIMENTO = ["15", "37", "83953", "83956", "545902", "83958"]
 
 # Explicação da fórmula de cada linha — tooltip "informativo" no hover (front).
 _OPER_DESCRICOES = {
@@ -666,9 +663,9 @@ _OPER_DESCRICOES = {
         "Soma do valor base dos pedidos na situação 'Problemas', "
         "agrupada pelo mês da data do pedido."
     ),
-    "taxa_perdimento": (
-        "Valor base dos pedidos em 'Perdimento' ÷ faturamento do mês (Em andamento, "
-        "Entregue, Perdimento, Resolvido e Enviado Fake). Agrupado pela data do pedido."
+    "perdimento": (
+        "Soma do preço de custo (preço de custo × quantidade) dos pedidos na situação "
+        "'Perdimento', agrupada pelo mês da data do pedido."
     ),
     "reembolso": (
         "Soma dos reembolsos conferidos (positivos somam, negativos subtraem), "
@@ -980,16 +977,17 @@ async def valuation_report(
             SELECT bo.numero,
                    {_mes('bo.data')} AS mes,
                    MAX(bo.situacao) AS situacao,
-                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase
+                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase,
+                   SUM(COALESCE(bo.preco_custo, 0)
+                       * COALESCE(bo.item_quantidade, 0)) AS custo_produto
             FROM {_qt("bling_orders")} bo
             WHERE {_janela('bo.data')}
             GROUP BY bo.numero, mes
         )
         SELECT mes,
-               SUM(valorbase) FILTER (WHERE situacao = :s_erro)     AS erro_envio,
-               SUM(valorbase) FILTER (WHERE situacao = :s_prob)     AS problemas,
-               SUM(valorbase) FILTER (WHERE situacao = :s_perd)     AS perdimento_num,
-               SUM(valorbase) FILTER (WHERE situacao = ANY(:s_fat)) AS faturamento_den
+               SUM(valorbase) FILTER (WHERE situacao = :s_erro) AS erro_envio,
+               SUM(valorbase) FILTER (WHERE situacao = :s_prob) AS problemas,
+               SUM(custo_produto) FILTER (WHERE situacao = :s_perd) AS perdimento
         FROM por_pedido
         GROUP BY mes
     """)
@@ -1016,7 +1014,7 @@ async def valuation_report(
     bo_by_mes = {
         r["mes"]: r for r in (await session.execute(oper_bo_sql, {
             "s_erro": _VAL_SIT_ERRO_ENVIO, "s_prob": _VAL_SIT_PROBLEMAS,
-            "s_perd": _VAL_SIT_PERDIMENTO, "s_fat": _VAL_SIT_FAT_PERDIMENTO,
+            "s_perd": _VAL_SIT_PERDIMENTO,
         })).mappings().all()
     }
     ref_by_mes = {r["mes"]: r for r in (await session.execute(oper_ref_sql)).mappings().all()}
@@ -1025,17 +1023,6 @@ async def valuation_report(
     def _brl_row(by_mes: dict, col: str) -> list[float | None]:
         # Mês sem linhas → R$ 0,00 (não "—") nas métricas de moeda.
         return [_r2(by_mes.get(m, {}).get(col) or 0) for m in months]
-
-    def _taxa_perdimento() -> list[float | None]:
-        out: list[float | None] = []
-        for m in months:
-            r = bo_by_mes.get(m, {})
-            den = r.get("faturamento_den") or 0
-            num = r.get("perdimento_num") or 0
-            out.append(
-                _r2(Decimal(str(num)) / Decimal(str(den)) * 100) if den else None
-            )
-        return out
 
     operacional = OperacionalSecaoOut(
         meses=months,
@@ -1046,9 +1033,9 @@ async def valuation_report(
             OperacionalLinhaOut(chave="problemas", label="Problemas", formato="brl",
                                 descricao=_OPER_DESCRICOES["problemas"],
                                 valores=_brl_row(bo_by_mes, "problemas")),
-            OperacionalLinhaOut(chave="taxa_perdimento", label="Taxa de Perdimento", formato="pct",
-                                descricao=_OPER_DESCRICOES["taxa_perdimento"],
-                                valores=_taxa_perdimento()),
+            OperacionalLinhaOut(chave="perdimento", label="Perdimento", formato="brl",
+                                descricao=_OPER_DESCRICOES["perdimento"],
+                                valores=_brl_row(bo_by_mes, "perdimento")),
             OperacionalLinhaOut(chave="reembolso", label="Reembolso", formato="brl",
                                 descricao=_OPER_DESCRICOES["reembolso"],
                                 valores=_brl_row(ref_by_mes, "reembolso")),
