@@ -5,7 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import BlingOrder, SituacaoBling
+from app.models import BlingOrder, Refund, SituacaoBling
 
 pytestmark = pytest.mark.asyncio
 
@@ -374,6 +374,52 @@ async def test_list_refunds_includes_current_bling_situacao(
     assert by_pedido["555002"]["situacao_bling"] == "83965"
     # Pedido sem linha em bling_orders -> sem situacao.
     assert by_pedido["555003"]["situacao_bling"] is None
+
+
+async def test_list_refunds_filters_by_data_range(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    user = await make_user(permissions=_refund_permissions())
+    auth_as(user)
+
+    # O filtro vive no GET/_build_where; insere direto pra não passar pelo
+    # refresh de margem do POST. "R-B" cai às 23:30 do último dia de maio (SP) e
+    # deve entrar com data_fim inclusivo; "R-D" (data NULL) fica de fora do filtro.
+    sp = ZoneInfo("America/Sao_Paulo")
+    db.add_all([
+        Refund(pedido_bling="R-A", conta="Loja Teste",
+               data=datetime(2026, 5, 10, 9, 0, tzinfo=sp)),
+        Refund(pedido_bling="R-B", conta="Loja Teste",
+               data=datetime(2026, 5, 31, 23, 30, tzinfo=sp)),
+        Refund(pedido_bling="R-C", conta="Loja Teste",
+               data=datetime(2026, 6, 2, 9, 0, tzinfo=sp)),
+        Refund(pedido_bling="R-D", conta="Loja Teste", data=None),
+    ])
+    await db.commit()
+
+    def _pedidos(resp):
+        return {item["pedido_bling"] for item in resp.json()["items"]}
+
+    # Intervalo fechado de maio: pega A e B, exclui C (junho) e D (sem data).
+    resp = await client.get("/api/refunds?data_inicio=2026-05-01&data_fim=2026-05-31")
+    assert resp.status_code == 200
+    assert _pedidos(resp) == {"R-A", "R-B"}
+
+    # Só limite inferior: A, B e C; exclui apenas o sem data.
+    resp = await client.get("/api/refunds?data_inicio=2026-05-01")
+    assert resp.status_code == 200
+    assert _pedidos(resp) == {"R-A", "R-B", "R-C"}
+
+    # Só limite superior: exclui C (junho) e o sem data.
+    resp = await client.get("/api/refunds?data_fim=2026-05-31")
+    assert resp.status_code == 200
+    assert _pedidos(resp) == {"R-A", "R-B"}
 
 
 async def test_export_refunds_xlsx_respects_filters(

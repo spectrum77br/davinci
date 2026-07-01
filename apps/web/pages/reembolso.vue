@@ -108,6 +108,10 @@ const search = ref('')
 const platform = ref<'all' | string>('all')
 const tipoFilter = ref<'all' | RefundTipo>('all')
 const conferidoFilter = ref<ConferidoFilter>('false')
+// Filtro por data do reembolso (coluna "Data" = Refund.data), só para admins.
+const isAdmin = useIsAdmin()
+const dataInicio = ref('')
+const dataFim = ref('')
 
 const addOpen = ref(false)
 const lookupPedido = ref('')
@@ -246,6 +250,8 @@ async function load() {
     if (platform.value !== 'all') params.set('platform', platform.value)
     if (tipoFilter.value !== 'all') params.set('tipo', tipoFilter.value)
     if (conferidoFilter.value !== 'all') params.set('conferido', conferidoFilter.value)
+    if (dataInicio.value) params.set('data_inicio', dataInicio.value)
+    if (dataFim.value) params.set('data_fim', dataFim.value)
     const res = await api<RefundPage>(`/api/refunds?${params.toString()}`)
     items.value = res.items
     total.value = res.total
@@ -269,6 +275,8 @@ async function exportXlsx() {
     if (platform.value !== 'all') params.set('platform', platform.value)
     if (tipoFilter.value !== 'all') params.set('tipo', tipoFilter.value)
     if (conferidoFilter.value !== 'all') params.set('conferido', conferidoFilter.value)
+    if (dataInicio.value) params.set('data_inicio', dataInicio.value)
+    if (dataFim.value) params.set('data_fim', dataFim.value)
     const blob = await api<Blob>(`/api/refunds/export.xlsx?${params.toString()}`, { responseType: 'blob' as any })
     const href = URL.createObjectURL(blob as any)
     const a = document.createElement('a')
@@ -295,7 +303,7 @@ watch(search, () => {
     load()
   }, 300)
 })
-watch([platform, tipoFilter, conferidoFilter], () => {
+watch([platform, tipoFilter, conferidoFilter, dataInicio, dataFim], () => {
   page.value = 1
   load()
 })
@@ -683,6 +691,31 @@ async function saveRow(row: RefundRow): Promise<void> {
         <option value="true">conferidos</option>
         <option value="all">todos</option>
       </select>
+      <div v-if="isAdmin" class="flex items-center gap-1.5">
+        <span class="text-xs text-muted-foreground">data</span>
+        <input
+          v-model="dataInicio"
+          type="date"
+          class="h-9 rounded-md border bg-background px-2 text-sm"
+          title="Data do reembolso — início"
+        />
+        <span class="text-xs text-muted-foreground">até</span>
+        <input
+          v-model="dataFim"
+          type="date"
+          class="h-9 rounded-md border bg-background px-2 text-sm"
+          title="Data do reembolso — fim"
+        />
+        <Button
+          v-if="dataInicio || dataFim"
+          size="sm"
+          variant="ghost"
+          title="limpar datas"
+          @click="dataInicio = ''; dataFim = ''"
+        >
+          <X class="size-4" />
+        </Button>
+      </div>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · a conferir {{ totalAConferir }} · prejuízo {{ brl(totalPrejuizo) }} · reembolso {{ brl(totalReembolso) }}
       </span>

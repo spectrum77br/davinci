@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from io import BytesIO
 from typing import Annotated
 from uuid import UUID
@@ -120,6 +120,8 @@ def _build_where(
     platform: str | None,
     tipo: str | None,
     conferido: bool | None,
+    data_inicio: date | None = None,
+    data_fim: date | None = None,
 ) -> list:
     where = []
     if search and search.strip():
@@ -131,6 +133,15 @@ def _build_where(
         where.append(Refund.tipo == tipo)
     if conferido is not None:
         where.append(Refund.conferido.is_(conferido))
+    # Filtro por "data do reembolso" = coluna Data (Refund.data), exposto só a
+    # admins na UI. Período inclusivo [data_inicio 00:00, data_fim 23:59:59] no
+    # fuso de SP. Refunds sem data (NULL) ficam de fora quando há filtro.
+    if data_inicio is not None:
+        start = datetime.combine(data_inicio, time.min, tzinfo=SAO_PAULO)
+        where.append(Refund.data >= start.astimezone(UTC))
+    if data_fim is not None:
+        end = datetime.combine(data_fim, time.min, tzinfo=SAO_PAULO) + timedelta(days=1)
+        where.append(Refund.data < end.astimezone(UTC))
     return where
 
 
@@ -144,8 +155,10 @@ async def list_refunds(
     platform: str | None = Query(None),
     tipo: str | None = Query(None),
     conferido: bool | None = Query(None),
+    data_inicio: date | None = Query(None),
+    data_fim: date | None = Query(None),
 ) -> RefundPage:
-    where = _build_where(search, platform, tipo, conferido)
+    where = _build_where(search, platform, tipo, conferido, data_inicio, data_fim)
 
     stmt = (
         select(Refund)
@@ -222,9 +235,11 @@ async def export_refunds(
     platform: str | None = Query(None),
     tipo: str | None = Query(None),
     conferido: bool | None = Query(None),
+    data_inicio: date | None = Query(None),
+    data_fim: date | None = Query(None),
 ) -> StreamingResponse:
     """Exporta os reembolsos (com os mesmos filtros da lista) em XLSX."""
-    where = _build_where(search, platform, tipo, conferido)
+    where = _build_where(search, platform, tipo, conferido, data_inicio, data_fim)
     rows = (
         await session.execute(
             select(Refund)
