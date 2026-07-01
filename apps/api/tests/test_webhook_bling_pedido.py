@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -27,6 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import (
+    BackgroundJob,
+    BackgroundJobStatus,
+    BackgroundJobType,
     BlingOrder,
     Integration,
     IntegrationPlatform,
@@ -303,6 +307,168 @@ async def test_upsert_order_replaces_existing_rows(db: AsyncSession, user: User)
         )
     ).scalars().all()
     assert [r.item_codigo for r in rows] == ["NEW-A", "NEW-B"]
+
+
+@pytest.mark.asyncio
+async def test_pedido_webhook_creates_durable_job(
+    db: AsyncSession, client: AsyncClient, user: User
+) -> None:
+    """Cada webhook de pedido grava um BackgroundJob(ingest_bling_order) durável
+    e passa o job_id como 5º arg do enqueue — a base do re-drive/alerta."""
+    await _attach_bling_integration(db, user)
+    body = _pedido_event_body(bling_order_id=424242)
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock(return_value=type("J", (), {"job_id": "arq-dj"}))
+    with patch("app.routers.webhooks.get_arq_pool", return_value=fake_pool):
+        r = await client.post(
+            "/api/webhooks/bling",
+            content=body,
+            headers={
+                "X-Bling-Signature": _sign(body),
+                "X-Bling-Event": "pedido.alteracao",
+                "X-Bling-Delivery": uuid.uuid4().hex,
+                "Content-Type": "application/json",
+            },
+        )
+
+    assert r.status_code == 200, r.text
+    out = r.json()
+    job_id = out["job_id"]
+
+    # 5º arg do enqueue = job_id do registro durável
+    args = fake_pool.enqueue_job.await_args.args
+    assert args[0] == "ingest_bling_order_run"
+    assert args[1] == 424242
+    assert args[4] == job_id
+
+    db.expire_all()
+    job = (
+        await db.execute(
+            select(BackgroundJob).where(BackgroundJob.id == uuid.UUID(job_id))
+        )
+    ).scalar_one()
+    assert job.type == BackgroundJobType.INGEST_BLING_ORDER
+    assert job.status == BackgroundJobStatus.PENDING
+    assert job.payload["bling_order_id"] == 424242
+    assert job.payload["user_id"] == str(user.id)
+    assert job.arq_job_id == "arq-dj"
+
+
+@pytest.mark.asyncio
+async def test_ingest_orders_retry_sweep_reenqueues_failed(
+    db: AsyncSession, user: User
+) -> None:
+    """Um ingest FAILED e maduro é re-enfileirado pelo sweep: status volta a
+    PENDING, sweep_attempts incrementa e o enqueue recebe o mesmo job_id."""
+    from app.worker import ingest_orders_retry_sweep
+
+    job = BackgroundJob(
+        type=BackgroundJobType.INGEST_BLING_ORDER,
+        status=BackgroundJobStatus.FAILED,
+        created_by=user.id,
+        total=1,
+        finished_at=datetime.now(UTC) - timedelta(minutes=10),
+        error="RuntimeError: bling_order_empty:99001",
+        payload={
+            "trigger": "webhook_bling",
+            "event": "pedido.alteracao",
+            "bling_order_id": 99001,
+            "user_id": str(user.id),
+        },
+    )
+    db.add(job)
+    await db.commit()
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock(return_value=type("J", (), {"job_id": "arq-sw"}))
+    with patch("app.worker.get_arq_pool", return_value=fake_pool):
+        await ingest_orders_retry_sweep({})
+
+    # Job-specific (robusto a estado cross-test): nosso pedido foi re-enfileirado.
+    calls = [c.args for c in fake_pool.enqueue_job.await_args_list]
+    ours = [a for a in calls if len(a) >= 5 and a[1] == 99001]
+    assert len(ours) == 1, ours
+    a = ours[0]
+    assert a[0] == "ingest_bling_order_run"
+    assert a[2] == str(user.id)
+    assert a[3] == "pedido.alteracao"
+    assert a[4] == str(job.id)
+
+    db.expire_all()
+    refreshed = await db.get(BackgroundJob, job.id)
+    assert refreshed.status == BackgroundJobStatus.PENDING
+    assert refreshed.error is None
+    assert refreshed.payload["sweep_attempts"] == 1
+    assert refreshed.arq_job_id == "arq-sw"
+
+
+@pytest.mark.asyncio
+async def test_ingest_orders_retry_sweep_respects_cap(
+    db: AsyncSession, user: User
+) -> None:
+    """Passado o teto de tentativas o sweep NÃO re-enfileira — fica FAILED
+    (visível) e o backfill diário é a última rede."""
+    from app.worker import INGEST_SWEEP_MAX_ATTEMPTS, ingest_orders_retry_sweep
+
+    job = BackgroundJob(
+        type=BackgroundJobType.INGEST_BLING_ORDER,
+        status=BackgroundJobStatus.FAILED,
+        created_by=user.id,
+        total=1,
+        finished_at=datetime.now(UTC) - timedelta(minutes=10),
+        payload={
+            "event": "pedido.alteracao",
+            "bling_order_id": 99002,
+            "user_id": str(user.id),
+            "sweep_attempts": INGEST_SWEEP_MAX_ATTEMPTS,
+        },
+    )
+    db.add(job)
+    await db.commit()
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock()
+    with patch("app.worker.get_arq_pool", return_value=fake_pool):
+        await ingest_orders_retry_sweep({})
+
+    calls = [c.args for c in fake_pool.enqueue_job.await_args_list]
+    assert not [a for a in calls if len(a) >= 2 and a[1] == 99002]
+    db.expire_all()
+    refreshed = await db.get(BackgroundJob, job.id)
+    assert refreshed.status == BackgroundJobStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_ingest_orders_retry_sweep_skips_fresh_failure(
+    db: AsyncSession, user: User
+) -> None:
+    """Falha recém-ocorrida (dentro da janela de maturação) NÃO é varrida —
+    deixa os retries do próprio arq assentarem antes."""
+    from app.worker import ingest_orders_retry_sweep
+
+    job = BackgroundJob(
+        type=BackgroundJobType.INGEST_BLING_ORDER,
+        status=BackgroundJobStatus.FAILED,
+        created_by=user.id,
+        total=1,
+        finished_at=datetime.now(UTC),  # agora — jovem demais
+        payload={
+            "event": "pedido.alteracao",
+            "bling_order_id": 99003,
+            "user_id": str(user.id),
+        },
+    )
+    db.add(job)
+    await db.commit()
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock()
+    with patch("app.worker.get_arq_pool", return_value=fake_pool):
+        await ingest_orders_retry_sweep({})
+
+    calls = [c.args for c in fake_pool.enqueue_job.await_args_list]
+    assert not [a for a in calls if len(a) >= 2 and a[1] == 99003]
 
 
 @pytest.mark.asyncio
