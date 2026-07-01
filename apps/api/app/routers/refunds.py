@@ -133,15 +133,15 @@ def _build_where(
         where.append(Refund.tipo == tipo)
     if conferido is not None:
         where.append(Refund.conferido.is_(conferido))
-    # Filtro por "data do reembolso" = coluna Data (Refund.data), exposto só a
-    # admins na UI. Período inclusivo [data_inicio 00:00, data_fim 23:59:59] no
-    # fuso de SP. Refunds sem data (NULL) ficam de fora quando há filtro.
+    # Filtro por "data do conferido" (Refund.conferido_at), exposto só a admins
+    # na UI. Período inclusivo [data_inicio 00:00, data_fim 23:59:59] no fuso de
+    # SP. Refunds não conferidos (conferido_at NULL) ficam de fora quando há filtro.
     if data_inicio is not None:
         start = datetime.combine(data_inicio, time.min, tzinfo=SAO_PAULO)
-        where.append(Refund.data >= start.astimezone(UTC))
+        where.append(Refund.conferido_at >= start.astimezone(UTC))
     if data_fim is not None:
         end = datetime.combine(data_fim, time.min, tzinfo=SAO_PAULO) + timedelta(days=1)
-        where.append(Refund.data < end.astimezone(UTC))
+        where.append(Refund.conferido_at < end.astimezone(UTC))
     return where
 
 
