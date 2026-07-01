@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -328,28 +329,103 @@ async def auto_create_product_from_bling_run(
         )
 
 
+# Deve casar com WorkerSettings.max_tries (fila default). Usado só para decidir
+# quando marcar o BackgroundJob durável como FAILED (na última tentativa arq),
+# sem depender de ctx["max_tries"] (não garantido em toda versão do arq).
+INGEST_ORDER_MAX_TRIES = 3
+
+
+async def _mark_ingest_job(job_id: UUID, **values: Any) -> None:
+    """Grava status no BackgroundJob durável do ingest de pedido, em transação
+    PRÓPRIA — sobrevive ao rollback da transação do ingest quando ele falha.
+    Best-effort: nunca deixa a falha do UPDATE derrubar o job de ingest."""
+    try:
+        async with session_scope() as s:
+            await s.execute(
+                update(BackgroundJob)
+                .where(BackgroundJob.id == job_id)
+                .values(**values)
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "ingest_job_mark_failed", job_id=str(job_id), err=str(e)[:200]
+        )
+
+
 async def ingest_bling_order_run(
     ctx: dict,
     bling_order_id: int,
     user_id: str,
     event: str | None = None,
+    job_id: str | None = None,
 ) -> None:
     """Fase 5b: ingest a Bling pedido de venda triggered by webhook.
 
     Per-order advisory lock keeps concurrent webhook deliveries serialized
     for the same order while still allowing parallelism across orders.
+
+    Quando `job_id` é passado (caminho do webhook e do sweep), atualiza o
+    BackgroundJob durável: RUNNING no início, SUCCEEDED no fim, e FAILED só na
+    ÚLTIMA tentativa do arq — as intermediárias re-levantam pro arq re-tentar
+    com backoff sem marcar FAILED (evita alerta falso). Esgotadas as tentativas,
+    o registro fica FAILED (visível ao failed_jobs_alert_scan) e o
+    ingest_orders_retry_sweep re-dirige. Chamadas sem `job_id` (redes de
+    recuperação) mantêm o comportamento antigo: 3 tentativas e o próprio cron
+    re-enfileira no próximo tick.
     """
     uid = UUID(user_id)
-    lock_key = f"ingest_bling_order:{bling_order_id}"
-    async with session_scope() as s:
-        await s.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key}
+    jid = UUID(job_id) if job_id else None
+    job_try = int(ctx.get("job_try", 1) or 1)
+    if jid is not None:
+        now = datetime.now(UTC)
+        await _mark_ingest_job(
+            jid,
+            status=BackgroundJobStatus.RUNNING,
+            started_at=now,
+            last_heartbeat_at=now,
         )
-        await run_ingest_bling_order(
-            s,
-            bling_order_id=int(bling_order_id),
-            user_id=uid,
-            event=event,
+    lock_key = f"ingest_bling_order:{bling_order_id}"
+    try:
+        async with session_scope() as s:
+            await s.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key}
+            )
+            await run_ingest_bling_order(
+                s,
+                bling_order_id=int(bling_order_id),
+                user_id=uid,
+                event=event,
+            )
+    except Exception as e:  # noqa: BLE001
+        terminal = job_try >= INGEST_ORDER_MAX_TRIES
+        logger.error(
+            "ingest_bling_order_failed",
+            bling_order_id=bling_order_id,
+            bling_event=event,
+            attempt=job_try,
+            terminal=terminal,
+            err=f"{type(e).__name__}: {str(e)[:500]}",
+        )
+        if not terminal:
+            raise  # deixa o arq re-tentar (Bling 5xx / contenção de lock)
+        if jid is not None:
+            await _mark_ingest_job(
+                jid,
+                status=BackgroundJobStatus.FAILED,
+                finished_at=datetime.now(UTC),
+                error=f"{type(e).__name__}: {str(e)[:1000]}",
+            )
+        # Registro durável (se houver) já gravou a falha; o sweep re-dirige.
+        # Engole pra não empilhar log de falha permanente do arq pro mesmo job.
+        return
+    if jid is not None:
+        done = datetime.now(UTC)
+        await _mark_ingest_job(
+            jid,
+            status=BackgroundJobStatus.SUCCEEDED,
+            processed=1,
+            finished_at=done,
+            last_heartbeat_at=done,
         )
 
 
@@ -727,8 +803,17 @@ async def ml_discrepancy_check(ctx: dict) -> None:
 
 
 async def background_jobs_gc(ctx: dict) -> None:
-    """Mark `running` jobs with no heartbeat in 5min as failed."""
-    cutoff = datetime.now(UTC) - timedelta(minutes=5)
+    """Mark `running` jobs with no heartbeat in 5min as failed, e poda os
+    registros duráveis de ingest de pedido já resolvidos.
+
+    Retenção do type=ingest_bling_order (introduzido p/ não perder webhook):
+    todo webhook de pedido grava uma linha, então sem poda a tabela cresceria
+    como o sync_product já cresce (~400k+ linhas, sem retenção própria). Só
+    este tipo é podado aqui — SUCCEEDED/CANCELLED após 3 dias (já cumpriram o
+    papel) e FAILED após 7 dias (mantém visibilidade + além disso o backfill
+    diário é a rede). PENDING/RUNNING (finished_at NULL) nunca são podados."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(minutes=5)
     async with session_scope() as s:
         result = await s.execute(
             update(BackgroundJob)
@@ -742,10 +827,35 @@ async def background_jobs_gc(ctx: dict) -> None:
             .values(
                 status=BackgroundJobStatus.FAILED,
                 error="orphan_no_heartbeat",
-                finished_at=datetime.now(UTC),
+                finished_at=now,
             )
         )
-        logger.info("background_jobs_gc_done", marked_failed=result.rowcount or 0)
+        pruned = await s.execute(
+            delete(BackgroundJob).where(
+                BackgroundJob.type == BackgroundJobType.INGEST_BLING_ORDER,
+                BackgroundJob.finished_at.is_not(None),
+                or_(
+                    and_(
+                        BackgroundJob.status.in_(
+                            [
+                                BackgroundJobStatus.SUCCEEDED,
+                                BackgroundJobStatus.CANCELLED,
+                            ]
+                        ),
+                        BackgroundJob.finished_at < now - timedelta(days=3),
+                    ),
+                    and_(
+                        BackgroundJob.status == BackgroundJobStatus.FAILED,
+                        BackgroundJob.finished_at < now - timedelta(days=7),
+                    ),
+                ),
+            )
+        )
+        logger.info(
+            "background_jobs_gc_done",
+            marked_failed=result.rowcount or 0,
+            ingest_pruned=pruned.rowcount or 0,
+        )
 
 
 def _next_month_partition_bounds(now: datetime) -> tuple[str, str, str]:
@@ -1264,6 +1374,100 @@ async def bling_orders_daily_backfill_tick(ctx: dict) -> None:
     )
 
 
+# Sweep de re-drive dos ingests de pedido que falharam em definitivo.
+INGEST_SWEEP_MAX_ATTEMPTS = 8
+# Espera curta pós-falha: dá tempo dos 3 retries do arq assentarem antes de o
+# sweep entrar. Menor que isso re-enfileiraria por cima do próprio retry.
+INGEST_SWEEP_MIN_AGE = timedelta(minutes=3)
+# Não ressuscita registro antigo — passou disso, é caso pro backfill diário
+# (que casa contra a listagem do Bling e não re-dirige pedido inexistente).
+INGEST_SWEEP_MAX_AGE = timedelta(days=3)
+INGEST_SWEEP_BATCH = 200
+
+
+async def ingest_orders_retry_sweep(ctx: dict) -> None:
+    """Re-dirige pedidos cujo ingest esgotou os retries do arq.
+
+    Cada webhook de pedido grava um BackgroundJob(type=ingest_bling_order); ao
+    falhar em definitivo ele fica FAILED (visível ao failed_jobs_alert_scan).
+    Este cron (5 min) re-enfileira esses FAILED — já tem o `bling_id` no payload,
+    então NÃO re-lista o Bling — com teto de tentativas (`sweep_attempts`) e uma
+    idade mínima que evita competir com o retry do arq. Recuperação em minutos,
+    não no backfill diário. Passado o teto, o registro fica FAILED e o backfill
+    diário é a última rede. Desligável via ENABLE_INGEST_ORDERS_RETRY_SWEEP=false.
+    """
+    if not get_settings().enable_ingest_orders_retry_sweep:
+        return
+
+    now = datetime.now(UTC)
+    ready_before = now - INGEST_SWEEP_MIN_AGE
+    floor = now - INGEST_SWEEP_MAX_AGE
+    re_enqueued = 0
+    exhausted = 0
+    async with session_scope() as s:
+        rows = (
+            await s.execute(
+                select(BackgroundJob)
+                .where(
+                    BackgroundJob.type == BackgroundJobType.INGEST_BLING_ORDER,
+                    BackgroundJob.status == BackgroundJobStatus.FAILED,
+                    BackgroundJob.finished_at.is_not(None),
+                    BackgroundJob.finished_at < ready_before,
+                    BackgroundJob.created_at >= floor,
+                )
+                .order_by(BackgroundJob.finished_at)
+                .limit(INGEST_SWEEP_BATCH)
+            )
+        ).scalars().all()
+
+        pool = await get_arq_pool()
+        for job in rows:
+            payload = dict(job.payload or {})
+            attempts = int(payload.get("sweep_attempts", 0) or 0)
+            if attempts >= INGEST_SWEEP_MAX_ATTEMPTS:
+                exhausted += 1
+                continue
+            bling_order_id = payload.get("bling_order_id")
+            user_id = payload.get("user_id")
+            if bling_order_id is None or user_id is None:
+                continue
+            event = payload.get("event")
+            try:
+                arq = await pool.enqueue_job(
+                    "ingest_bling_order_run",
+                    int(bling_order_id),
+                    str(user_id),
+                    event,
+                    str(job.id),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "ingest_orders_retry_sweep_enqueue_failed",
+                    job_id=str(job.id), err=str(e)[:200],
+                )
+                continue
+            # Só muta o job depois do enqueue OK — senão um PENDING órfão (sem
+            # arq job) ficaria preso (o background_jobs_gc só recicla RUNNING).
+            payload["sweep_attempts"] = attempts + 1
+            job.payload = payload
+            job.status = BackgroundJobStatus.PENDING
+            job.error = None
+            if arq is not None:
+                job.arq_job_id = arq.job_id
+            re_enqueued += 1
+        # session_scope commita as mutações de payload/status.
+
+    if exhausted:
+        logger.warning(
+            "ingest_orders_retry_sweep_exhausted",
+            count=exhausted, cap=INGEST_SWEEP_MAX_ATTEMPTS,
+        )
+    logger.info(
+        "ingest_orders_retry_sweep_done",
+        candidates=len(rows), re_enqueued=re_enqueued, exhausted=exhausted,
+    )
+
+
 # ---------------------------------------------------------------- lifecycle
 
 
@@ -1313,6 +1517,7 @@ class WorkerSettings:
         bling_orders_safety_net_tick,
         bling_orders_period_sync_tick,
         bling_orders_daily_backfill_tick,
+        ingest_orders_retry_sweep,
         bling_notas_token_refresh,
         kit_components_sync,
         valuation_estoque_snapshot,
@@ -1415,6 +1620,11 @@ class WorkerSettings:
         # inalterados. Única rede que recupera pedido cujo ingest falhou e
         # nunca entrou (Bling 500 / transação envenenada).
         cron(bling_orders_daily_backfill_tick, hour=9, minute=30, run_at_startup=False),
+        # Re-drive (5 min) dos ingests de pedido que esgotaram os retries do
+        # arq: re-enfileira os BackgroundJob(ingest_bling_order) FAILED pelo
+        # bling_id do payload (sem re-listar o Bling), com teto de tentativas.
+        # Recuperação em minutos em vez de esperar o backfill diário.
+        cron(ingest_orders_retry_sweep, minute=_FIVE_MIN, run_at_startup=False),
     ]
     # Marketing agent-node crons (Shopee sync + command consumer + schedule
     # reconciler) are NOT registered here — they run ONLY on the dedicated
@@ -1597,6 +1807,7 @@ __all__ = [
     "failed_jobs_alert_scan",
     "import_listings_run",
     "ingest_bling_order_run",
+    "ingest_orders_retry_sweep",
     "kit_components_sync",
     "low_stock_polling",
     "product_bling_cost_sync",

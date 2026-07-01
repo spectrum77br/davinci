@@ -162,6 +162,13 @@ class Settings(BaseSettings):
     # presentes e inalterados. Desligável via ENABLE_BLING_ORDERS_DAILY_BACKFILL=false.
     enable_bling_orders_daily_backfill: bool = True
 
+    # Sweep que re-dirige o ingest de pedidos que esgotou os retries do arq.
+    # Cada webhook de pedido grava um BackgroundJob durável (type=ingest_bling_order);
+    # ao falhar em definitivo ele fica FAILED e este cron re-enfileira (já tem o
+    # bling_id, sem re-listar o Bling) com teto de tentativas — recuperação em
+    # minutos, não no backfill diário. Desligável via ENABLE_INGEST_ORDERS_RETRY_SWEEP=false.
+    enable_ingest_orders_retry_sweep: bool = True
+
     @property
     def is_prod(self) -> bool:
         return self.env == "production"

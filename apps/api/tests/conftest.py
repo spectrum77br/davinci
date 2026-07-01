@@ -84,7 +84,7 @@ async def _setup_schema():
             "sync_all", "sync_product", "auto_link", "audit",
             "sync_bling_costs", "import_listings",
             "import_bling_products", "push_prices_batch",
-            "backfill_ml_stock",
+            "backfill_ml_stock", "ingest_bling_order",
         ),
         "background_job_status": (
             "pending", "running", "succeeded", "failed", "cancelled",

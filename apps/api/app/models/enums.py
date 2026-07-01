@@ -94,6 +94,12 @@ class BackgroundJobType(StrEnum):
     REFRESH_BLING_STOCK = "refresh_bling_stock"
     AUTO_IMPORT_LINK = "auto_import_link"
     EXPORT_NOTAS_FISCAIS = "export_notas_fiscais"
+    # Registro durável de um ingest de pedido disparado por webhook. Antes o
+    # webhook de pedido só enfileirava o arq (sem BackgroundJob), então uma
+    # falha terminal do ingest sumia em silêncio — invisível ao
+    # failed_jobs_alert_scan e sem re-drive. Com este tipo o pedido ganha o
+    # mesmo tratamento durável do webhook de produto (ver ingest_orders_retry_sweep).
+    INGEST_BLING_ORDER = "ingest_bling_order"
 
 
 class BackgroundJobStatus(StrEnum):

@@ -302,17 +302,47 @@ async def _handle_pedido_event(
             "delivery_id": delivery_key,
         }
 
+    # Registro DURÁVEL do ingest antes de enfileirar. Sem ele o webhook de
+    # pedido só empurrava um job arq — se o ingest falhasse em definitivo
+    # (Bling 5xx, transação Postgres envenenada) o arq descartava em silêncio,
+    # invisível ao failed_jobs_alert_scan, e só o backfill diário recuperava (no
+    # dia seguinte). Com o BackgroundJob o ingest_bling_order_run atualiza o
+    # status (RUNNING→SUCCEEDED/FAILED) e o cron ingest_orders_retry_sweep
+    # re-dirige os FAILED em minutos. `bling_order_id`/`user_id`/`event` no
+    # payload são o que o sweep precisa pra re-enfileirar sem re-listar o Bling.
+    job = BackgroundJob(
+        type=BackgroundJobType.INGEST_BLING_ORDER,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user_id,
+        total=1,
+        payload={
+            "trigger": "webhook_bling",
+            "event": event,
+            "delivery_id": delivery_key,
+            "bling_order_id": bling_order_id,
+            "user_id": str(user_id),
+        },
+    )
+    session.add(job)
+    await session.flush()
+
     pool = await get_arq_pool()
     arq = await pool.enqueue_job(
         "ingest_bling_order_run",
         bling_order_id,
         str(user_id),
         event,
+        str(job.id),
     )
+    if arq is not None:
+        job.arq_job_id = arq.job_id
+    await session.commit()
+
     logger.info(
         "bling_pedido_webhook_accepted",
         bling_event=event,
         bling_order_id=bling_order_id,
+        job_id=str(job.id),
         arq_job_id=arq.job_id if arq is not None else None,
         delivery_id=delivery_key,
     )
@@ -320,6 +350,7 @@ async def _handle_pedido_event(
         "ack": True,
         "kind": "pedido",
         "bling_order_id": bling_order_id,
+        "job_id": str(job.id),
         "delivery_id": delivery_key,
     }
 

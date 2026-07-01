@@ -906,10 +906,19 @@ async def run_ingest_bling_order(
 
     raw = await client.get_order(bling_order_id)
     if not raw:
+        # Fetch vazio num evento de pedido REAL (criação/alteração — exclusão
+        # já foi tratada acima) é quase sempre um soluço transitório do Bling.
+        # Antes retornávamos ok:False: o job "terminava com sucesso" e o pedido
+        # NUNCA entrava — perda silenciosa recuperada só pelo backfill diário.
+        # Levantar erro deixa o arq re-tentar e, esgotados os retries, o
+        # BackgroundJob durável fica FAILED e o ingest_orders_retry_sweep
+        # re-dirige (com teto de tentativas). Se o pedido de fato não existe no
+        # Bling, o sweep para no teto e o backfill diário — que casa contra a
+        # listagem do Bling — nunca o ressuscita.
         logger.warning(
             "bling_order_ingest_empty", bling_order_id=bling_order_id
         )
-        return {"ok": False, "error": "empty_order"}
+        raise RuntimeError(f"bling_order_empty:{bling_order_id}")
 
     n = await upsert_order(session, raw, client=client)
     jobs = await _enqueue_stock_refresh_for_order(
