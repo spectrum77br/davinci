@@ -474,18 +474,28 @@ function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
 }
 
 // Divergência de saldo: Bling e Plataforma ambos presentes e diferindo por mais
-// de R$0,01 (qualquer situação). Mesmo limiar absoluto usado pelo botão "→".
+// de R$0,01 (qualquer situação).
 function saldoDivergente(r: MarketplaceRow): boolean {
   return r.saldo_bling != null
     && r.saldo_plataforma != null
     && Math.abs(r.saldo_bling - r.saldo_plataforma) > 0.01
 }
 
-// Valor exibido na coluna "Efetivo". Quando Bling × Plataforma divergem, mostra
-// 0 APENAS visualmente — não altera o banco nem o valor que a edição inline
+// Exibe o Saldo Efetivo como 0 (apenas visual) SOMENTE enquanto o pedido não foi
+// aprovado E Bling × Plataforma divergem — é o alerta de "ainda falta conciliar".
+// Uma vez aprovado, a conciliação está fechada e a coluna volta a mostrar o valor
+// real (não zera mais). Sem esse gate, um pedido aprovado-e-divergente ficava em
+// R$0,00 para sempre e, como a edição grava valorbase mas NÃO mexe no saldo da
+// plataforma, a divergência persistia após salvar — parecendo que "não salvou".
+function saldoZeradoVisual(r: MarketplaceRow): boolean {
+  return r.status !== 'Aprovado' && saldoDivergente(r)
+}
+
+// Valor exibido na coluna "Efetivo". Mostra 0 APENAS visualmente quando
+// `saldoZeradoVisual` — não altera o banco nem o valor que a edição inline
 // usa/grava (startEditSaldoEfetivo continua partindo de r.saldo_efetivo real).
 function saldoEfetivoVisual(r: MarketplaceRow): number | null {
-  return saldoDivergente(r) ? 0 : saldoEfetivoDisplay(r)
+  return saldoZeradoVisual(r) ? 0 : saldoEfetivoDisplay(r)
 }
 
 // ---------- Status: aprovar/reprovar/pendente (atualiza Bling) ----------
@@ -1011,13 +1021,13 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                   type="button"
                   class="flex items-center justify-end gap-1 text-right tabular-nums hover:text-foreground disabled:cursor-default"
                   :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id)"
-                  :title="saldoDivergente(r)
+                  :title="saldoZeradoVisual(r)
                     ? `Saldo Bling × Plataforma divergente — Efetivo exibido como 0 (apenas visual). Valor real: ${brl(saldoEfetivoDisplay(r))}.${canEdit && r.pedido_bling ? ' Clique para editar → grava como final no Bling (zera taxa e frete).' : ''}`
                     : (canEdit && r.pedido_bling ? `Editar Saldo Efetivo → grava o valor como final no Bling (zera taxa e frete)` : '')"
                   @click="startEditSaldoEfetivo(r)"
                 >
                   <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
-                  <span :class="saldoDivergente(r) ? 'text-amber-600 dark:text-amber-400' : ''">{{ brl(saldoEfetivoVisual(r)) }}</span>
+                  <span :class="saldoZeradoVisual(r) ? 'text-amber-600 dark:text-amber-400' : ''">{{ brl(saldoEfetivoVisual(r)) }}</span>
                   <Pencil v-if="canEdit" class="size-3 shrink-0 opacity-50" />
                 </button>
               </div>
