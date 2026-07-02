@@ -59,6 +59,11 @@ logger = structlog.get_logger()
 
 
 def _to_dt(raw: Any) -> datetime | None:
+    """Datas do Bling (ex.: `data` do pedido) vêm sem timezone e são locais
+    de São Paulo. Carimbar como _BRT — não UTC: '2026-07-01' como 00:00 UTC
+    vira 30/06 21h em SP e o pedido cai UM DIA ANTES em todo relatório que
+    agrupa por dia/mês SP (Valuation, margem, envios). Corrigido em 2026-07-02;
+    o histórico gravado errado foi normalizado pela migration 0166."""
     if raw is None:
         return None
     if isinstance(raw, datetime):
@@ -68,11 +73,13 @@ def _to_dt(raw: Any) -> datetime | None:
         return None
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(s, fmt).replace(tzinfo=UTC)
+            return datetime.strptime(s, fmt).replace(tzinfo=_BRT)
         except ValueError:
             continue
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        # ISO sem offset explícito também é hora local de SP.
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=_BRT)
     except ValueError:
         return None
 
