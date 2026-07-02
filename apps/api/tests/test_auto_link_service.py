@@ -216,3 +216,64 @@ async def test_auto_link_shopee_nao_duplica_link_com_encoding_legado(
         )
     ).scalars().all()
     assert len(links) == 1
+
+
+# ---------------------------------------------------- TikTok page timeout (Item 1)
+
+
+@pytest.mark.asyncio
+async def test_link_tiktok_page_timeout_is_bounded(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """A wedged `search_products` must not hang the auto-link job: the per-page
+    asyncio.wait_for wall trips, the account is marked failed with a timeout
+    error, and control returns fast (the old code only checked the 2-min wall
+    *between* pages, so a single hung call blocked TikTok linking forever)."""
+    import asyncio
+    import time
+
+    from app.services import auto_link as al
+    from app.services.marketplaces import tiktok as tt_mod
+
+    job = await _make_job(db, user)
+    # In-memory TikTok integration: the test schema's integration_platform enum
+    # has no 'tiktok' value, but the timeout path creates no links, so nothing
+    # is ever inserted that references it. Give it an explicit id (the model's
+    # uuid default only fires on flush, which never happens here).
+    integ = Integration(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        store_id=None,
+        platform=IntegrationPlatform.TIKTOK,
+        name="tt",
+        credentials=encrypt_json(
+            {"app_key": "k", "app_secret": "s", "access_token": "t", "shop_cipher": "c"}
+        ),
+    )
+
+    async def _hang(self, **kwargs):  # noqa: ANN001
+        await asyncio.sleep(30)  # would hang the job without the wait_for wall
+        return [], None
+
+    monkeypatch.setattr(tt_mod.TikTokClient, "search_products", _hang)
+    monkeypatch.setattr(al, "TIKTOK_PAGE_TIMEOUT_SECONDS", 0.2)
+
+    t0 = time.monotonic()
+    stats = await al._link_tiktok_integration(db, job, integ)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 5.0, f"took {elapsed:.1f}s — wait_for wall didn't trip"
+    assert stats["created"] == 0
+    assert stats["error"] and "timeout" in stats["error"]
+
+
+def test_tiktok_client_has_explicit_timeout():
+    """TikTokClient carries an explicit httpx connect+read timeout (not the bare
+    15s float) so a slow endpoint can't stall a request indefinitely."""
+    import httpx
+
+    from app.services.marketplaces.tiktok import TIKTOK_DEFAULT_TIMEOUT, TikTokClient
+
+    c = TikTokClient({"app_key": "k", "app_secret": "s"})
+    assert isinstance(c._timeout, httpx.Timeout)
+    assert isinstance(TIKTOK_DEFAULT_TIMEOUT, httpx.Timeout)

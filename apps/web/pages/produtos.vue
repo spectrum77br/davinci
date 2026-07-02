@@ -112,6 +112,9 @@ const filtroSegment = ref<string>('')
 const stockFilter = ref<'' | 'low' | 'ok' | 'zero'>('')
 const expanded = ref<Set<string>>(new Set())
 const selected = ref<Set<string>>(new Set())
+// Checked product_links in the expanded rows (Item 4 — batch link delete).
+// Keyed by link id (globally unique), so one Set covers every open row.
+const selectedLinks = ref<Set<string>>(new Set())
 const loading = ref(false)
 const error = ref<string | null>(null)
 
@@ -458,12 +461,15 @@ async function bulkDelete() {
   const count = selected.value.size
   if (!confirm(`Excluir ${count} produto(s)?`)) return
   try {
+    const ids = new Set(selected.value)
     await api('/api/products/bulk-delete', {
       method: 'POST',
-      body: { ids: [...selected.value] },
+      body: { ids: [...ids] },
     })
+    // Drop deleted products locally instead of refetching the whole grid.
+    items.value = items.value.filter((p) => !ids.has(p.id))
+    total.value = Math.max(0, total.value - ids.size)
     selected.value = new Set()
-    await refreshAll()
   } catch (e: any) {
     const msg = e?.data?.detail?.code || e?.message || 'erro desconhecido'
     pushToast({ kind: 'error', title: `Falha ao excluir ${count} produto(s)`, lines: [msg] }, 15000)
@@ -474,17 +480,77 @@ async function deleteOne(id: string) {
   if (!confirm('Excluir produto?')) return
   try {
     await api(`/api/products/${id}`, { method: 'DELETE' })
-    await refreshAll()
+    items.value = items.value.filter((p) => p.id !== id)
+    total.value = Math.max(0, total.value - 1)
   } catch (e: any) {
     const msg = e?.data?.detail?.code || e?.message || 'erro desconhecido'
     pushToast({ kind: 'error', title: 'Falha ao excluir produto', lines: [msg] }, 15000)
   }
 }
 
+// Drop links from the in-memory grid without refetching all ~4000 products
+// (Item 5: the old `await refreshAll()` after every delete made the button
+// feel slow/stuck). Rebuild only the touched products so Vue re-renders them.
+function removeLinksLocal(ids: Set<string> | string[]) {
+  const idSet = ids instanceof Set ? ids : new Set(ids)
+  if (idSet.size === 0) return
+  items.value = items.value.map((p) =>
+    p.links.some((l) => idSet.has(l.id))
+      ? { ...p, links: p.links.filter((l) => !idSet.has(l.id)) }
+      : p,
+  )
+  for (const id of idSet) selectedLinks.value.delete(id)
+  selectedLinks.value = new Set(selectedLinks.value)
+}
+
 async function deleteLink(id: string) {
   if (!confirm('Remover link?')) return
-  await api(`/api/product-links/${id}`, { method: 'DELETE' })
-  await refreshAll()
+  try {
+    await api(`/api/product-links/${id}`, { method: 'DELETE' })
+    removeLinksLocal([id])
+  } catch (e: any) {
+    const msg = e?.data?.detail?.code || e?.message || 'erro desconhecido'
+    pushToast({ kind: 'error', title: 'Falha ao remover link', lines: [msg] }, 15000)
+  }
+}
+
+function toggleSelectLink(id: string) {
+  if (selectedLinks.value.has(id)) selectedLinks.value.delete(id)
+  else selectedLinks.value.add(id)
+  selectedLinks.value = new Set(selectedLinks.value)
+}
+
+function selectedLinkCountFor(p: Product): number {
+  return p.links.reduce((n, l) => (selectedLinks.value.has(l.id) ? n + 1 : n), 0)
+}
+
+function allLinksSelected(p: Product): boolean {
+  return p.links.length > 0 && p.links.every((l) => selectedLinks.value.has(l.id))
+}
+
+function toggleSelectAllLinks(p: Product) {
+  const all = allLinksSelected(p)
+  for (const l of p.links) {
+    if (all) selectedLinks.value.delete(l.id)
+    else selectedLinks.value.add(l.id)
+  }
+  selectedLinks.value = new Set(selectedLinks.value)
+}
+
+async function bulkDeleteLinks(p: Product) {
+  const ids = p.links.filter((l) => selectedLinks.value.has(l.id)).map((l) => l.id)
+  if (ids.length === 0) return
+  if (!confirm(`Remover ${ids.length} vínculo(s)?`)) return
+  try {
+    const r = await api<{ deleted: number; deleted_ids: string[] }>(
+      '/api/product-links/bulk-delete',
+      { method: 'POST', body: { link_ids: ids } },
+    )
+    removeLinksLocal(r.deleted_ids?.length ? r.deleted_ids : ids)
+  } catch (e: any) {
+    const msg = e?.data?.detail?.code || e?.message || 'erro desconhecido'
+    pushToast({ kind: 'error', title: `Falha ao remover ${ids.length} vínculo(s)`, lines: [msg] }, 15000)
+  }
 }
 
 // ---------------------------- CSV import (Feature 1) ------------------------
@@ -584,11 +650,32 @@ async function syncProduct(id: string, integrationIds?: string[]) {
     } else {
       const okLines: string[] = []
       const errLines: string[] = []
+      // Reconcile entries (kind=reconcile_*) come from the on-demand SKU
+      // reconcile that runs before the push: they carry `kind`, not `status`,
+      // so pull them out first and surface where each link moved.
+      const moveLines: string[] = []
       for (const d of details) {
         const acc = d.integration_id
           ? integrationById.value[d.integration_id]?.name || d.platform
           : d.platform
         const plat = String(d.platform || '').toUpperCase()
+        if (d.kind === 'reconcile_move') {
+          moveLines.push(`🔀 ${plat} ${acc}: ${d.from_sku} → ${d.to_sku}`)
+          continue
+        }
+        if (d.kind === 'reconcile_warning') {
+          if (d.code === 'produto_novo_ausente') {
+            moveLines.push(`⚠ SKU novo sem produto cadastrado: ${d.sku}`)
+          } else if (d.code === 'sku_ambiguo') {
+            moveLines.push(`⚠ SKU novo ambíguo (2+ produtos): ${d.sku}`)
+          } else {
+            moveLines.push(`⚠ ${d.code}: ${d.sku || ''}`)
+          }
+          continue
+        }
+        if (d.kind === 'reconcile_excedent_deleted') {
+          continue // internal cleanup, not worth a toast line
+        }
         if (d.status === 'ok') {
           okLines.push(
             `${plat} ${acc}: ${d.qty_before ?? '—'} → ${d.qty_after ?? '—'} ✓`,
@@ -625,15 +712,20 @@ async function syncProduct(id: string, integrationIds?: string[]) {
           errLines.push(`${plat} ${acc}: ${err}`)
         }
       }
+      const movedNote = moveLines.length ? ` · ${moveLines.length} link(s) movido(s)` : ''
       if (errLines.length === 0) {
-        pushToast({ kind: 'success', title: `✓ ${sku} sincronizado`, lines: okLines })
+        pushToast({
+          kind: 'success',
+          title: `✓ ${sku} sincronizado${movedNote}`,
+          lines: [...moveLines, ...okLines],
+        })
       } else if (okLines.length === 0) {
-        pushToast({ kind: 'error', title: `✗ ${sku}`, lines: errLines })
+        pushToast({ kind: 'error', title: `✗ ${sku}`, lines: [...moveLines, ...errLines] })
       } else {
         pushToast({
           kind: 'warning',
-          title: `${sku} sincronizado parcialmente`,
-          lines: [...okLines, ...errLines],
+          title: `${sku} sincronizado parcialmente${movedNote}`,
+          lines: [...moveLines, ...okLines, ...errLines],
         })
       }
     }
@@ -1419,42 +1511,71 @@ onUnmounted(() => stopPolling())
                 <div v-if="p.links.length === 0" class="text-xs text-muted-foreground">
                   Sem links. Rode o auto-link para vincular este SKU aos canais.
                 </div>
-                <table v-else class="w-full text-xs">
-                  <thead>
-                    <tr class="text-left text-muted-foreground">
-                      <th>Plataforma</th>
-                      <th>Tipo</th>
-                      <th>Integração</th>
-                      <th>External ID</th>
-                      <th>Variação</th>
-                      <th>Título</th>
-                      <th class="text-right">Estoque</th>
-                      <th>Status</th>
-                      <th class="w-8"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="l in p.links" :key="l.id">
-                      <td>{{ l.platform }}</td>
-                      <td>{{ l.listing_type || '—' }}</td>
-                      <td>{{ integrationById[l.integration_id]?.name || l.integration_id }}</td>
-                      <td class="font-mono">{{ l.external_id }}</td>
-                      <td>{{ l.variation_id || '—' }}</td>
-                      <td>{{ l.listing_title || '—' }}</td>
-                      <td class="text-right tabular-nums">{{ l.stock ?? '—' }}</td>
-                      <td>
-                        <span class="pill" :class="l.last_sync_status === 'ok' ? 'pill-success' : l.last_sync_status === 'fatal' ? 'pill-danger' : 'pill-muted'">
-                          {{ l.last_sync_status }}
-                        </span>
-                      </td>
-                      <td>
-                        <Button v-if="canDelete" size="icon" variant="ghost" @click="deleteLink(l.id)">
-                          <X class="size-3" />
-                        </Button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+                <div v-else>
+                  <div v-if="canDelete" class="flex items-center gap-2 mb-2">
+                    <button
+                      class="text-xs text-muted-foreground hover:text-foreground hover:underline"
+                      @click="toggleSelectAllLinks(p)"
+                    >
+                      {{ allLinksSelected(p) ? 'Desmarcar todos' : 'Marcar todos' }}
+                    </button>
+                    <Button
+                      v-if="selectedLinkCountFor(p) > 0"
+                      size="sm"
+                      variant="ghost"
+                      class="h-7 text-red-600 hover:text-red-700 hover:bg-red-50"
+                      @click="bulkDeleteLinks(p)"
+                    >
+                      <Trash2 class="size-3.5 mr-1" />
+                      Excluir selecionados ({{ selectedLinkCountFor(p) }})
+                    </Button>
+                  </div>
+                  <table class="w-full text-xs">
+                    <thead>
+                      <tr class="text-left text-muted-foreground">
+                        <th v-if="canDelete" class="w-6"></th>
+                        <th>Plataforma</th>
+                        <th>Tipo</th>
+                        <th>Integração</th>
+                        <th>External ID</th>
+                        <th>Variação</th>
+                        <th>Título</th>
+                        <th class="text-right">Estoque</th>
+                        <th>Status</th>
+                        <th class="w-8"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="l in p.links" :key="l.id" :class="selectedLinks.has(l.id) ? 'bg-red-50' : ''">
+                        <td v-if="canDelete" class="w-6">
+                          <input
+                            type="checkbox"
+                            :checked="selectedLinks.has(l.id)"
+                            :aria-label="`Selecionar vínculo ${l.external_id}`"
+                            @change="toggleSelectLink(l.id)"
+                          />
+                        </td>
+                        <td>{{ l.platform }}</td>
+                        <td>{{ l.listing_type || '—' }}</td>
+                        <td>{{ integrationById[l.integration_id]?.name || l.integration_id }}</td>
+                        <td class="font-mono">{{ l.external_id }}</td>
+                        <td>{{ l.variation_id || '—' }}</td>
+                        <td>{{ l.listing_title || '—' }}</td>
+                        <td class="text-right tabular-nums">{{ l.stock ?? '—' }}</td>
+                        <td>
+                          <span class="pill" :class="l.last_sync_status === 'ok' ? 'pill-success' : l.last_sync_status === 'fatal' ? 'pill-danger' : 'pill-muted'">
+                            {{ l.last_sync_status }}
+                          </span>
+                        </td>
+                        <td>
+                          <Button v-if="canDelete" size="icon" variant="ghost" @click="deleteLink(l.id)">
+                            <X class="size-3" />
+                          </Button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </td>
             </tr>
           </template>

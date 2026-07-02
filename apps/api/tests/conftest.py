@@ -76,7 +76,12 @@ async def _setup_schema():
         ),
         "cadastro_tipo": ("fone", "email", "dominio", "servidor"),
         "cadastro_status": ("active", "inactive", "excluded"),
-        "integration_platform": ("bling", "ml", "shopee", "amazon"),
+        # Match the model's IntegrationPlatform enum (models/enums.py). Without
+        # tiktok/temu/shein even a `platform == 'tiktok'` filter fails casting
+        # the literal to the enum type in the test schema.
+        "integration_platform": (
+            "bling", "ml", "shopee", "amazon", "tiktok", "temu", "shein",
+        ),
         "link_sync_status": (
             "ok", "skipped", "retryable", "fatal", "pending", "requires_review",
         ),

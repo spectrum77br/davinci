@@ -46,11 +46,27 @@ TIKTOK_AUTH_BASE = "https://auth.tiktok-shops.com"
 TIKTOK_AUTHORIZE_BASE = "https://services.tiktokshop.com/open/authorize"
 TOKEN_REFRESH_BUFFER_SEC = 300  # refresh if expiring within 5 min
 
+# Explicit connect+read timeout for every product/search/inventory call. The
+# bare `timeout=15.0` used before is a single number httpx spreads across all
+# phases, but its read timeout is *per socket read* (it resets on each byte),
+# so a TikTok endpoint dribbling bytes could keep a request alive far past 15s
+# and wedge the auto-link job — which was the "TikTok trava e não vincula"
+# symptom. A tighter, explicit connect + a bounded read is the floor; the
+# auto-link loop stacks an asyncio.wait_for wall on top as belt-and-suspenders.
+TIKTOK_DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
+
 
 class TikTokClient:
-    def __init__(self, creds: dict, on_token_refresh=None):
+    def __init__(
+        self,
+        creds: dict,
+        on_token_refresh=None,
+        *,
+        timeout: httpx.Timeout | float | None = None,
+    ):
         self.creds = dict(creds)
         self._on_refresh = on_token_refresh
+        self._timeout = timeout if timeout is not None else TIKTOK_DEFAULT_TIMEOUT
 
     @property
     def app_key(self) -> str:
@@ -300,7 +316,7 @@ class TikTokClient:
     ) -> dict:
         await self._ensure_fresh_token()
         params = self._build_get_params(path, extra_params)
-        async with httpx.AsyncClient(timeout=15.0) as c:
+        async with httpx.AsyncClient(timeout=self._timeout) as c:
             r = await c.get(
                 f"{TIKTOK_BASE_URL}{path}",
                 params=params,
@@ -322,7 +338,7 @@ class TikTokClient:
         await self._ensure_fresh_token()
         body_str = json.dumps(body or {}, separators=(",", ":"), ensure_ascii=False)
         params = self._build_post_params(path, body_str, extra_params)
-        async with httpx.AsyncClient(timeout=15.0) as c:
+        async with httpx.AsyncClient(timeout=self._timeout) as c:
             r = await c.post(
                 f"{TIKTOK_BASE_URL}{path}",
                 content=body_str,
@@ -623,6 +639,41 @@ class TikTokClient:
         if v > 100000 and v == int(v):
             return v / 100.0
         return v
+
+    async def get_listing_snapshot(self, link: "ProductLink") -> dict | None:
+        """Current seller_sku + title for the SKU this link points to
+        (product_id=external_id, sku_id=variation_id). Returns
+        ``{"sku", "title"}`` or None when the listing/SKU can't be read.
+
+        Used by the on-demand reconcile (link_reconcile) to detect that the
+        operator changed the seller_sku ON the TikTok listing — TikTok keeps
+        the internal sku_id stable across a seller_sku edit, so we match by
+        sku_id and read the (possibly new) seller_sku off it. No fall back to
+        the first SKU: if the stored sku_id is gone we can't safely reconcile."""
+        product_id = (link.external_id or "").strip()
+        sku_id = (link.variation_id or "").strip()
+        if not product_id:
+            return None
+        try:
+            resp = await self._get(f"/product/202309/products/{product_id}")
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(resp, dict) or resp.get("code") != 0:
+            return None
+        data = resp.get("data") or {}
+        title = data.get("title")
+        skus = data.get("skus") or []
+        chosen = None
+        if sku_id:
+            for s in skus:
+                if str(s.get("id") or "") == sku_id:
+                    chosen = s
+                    break
+        elif len(skus) == 1:
+            chosen = skus[0]
+        if chosen is None:
+            return None
+        return {"sku": (chosen.get("seller_sku") or "").strip() or None, "title": title}
 
     async def activate_product(self, product_id: str) -> bool:
         """Activate a deactivated product.

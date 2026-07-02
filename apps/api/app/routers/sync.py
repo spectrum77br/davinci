@@ -24,6 +24,7 @@ from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobType,
+    IntegrationPlatform,
     LinkSyncStatus,
     Product,
     ProductLink,
@@ -39,7 +40,8 @@ from app.schemas.sync import (
     SyncProductBody,
 )
 from app.services.advisory_lock import SYNC_NAMESPACE, _user_lock_key, try_user_sync_lock
-from app.services.job_details import load_job_details_tail
+from app.services.job_details import append_job_detail, load_job_details_tail
+from app.services.link_reconcile import reconcile_product_links
 from app.services.sync_orchestrator import SyncOrchestrator
 from app.worker_pool import get_arq_pool
 
@@ -202,25 +204,20 @@ async def sync_product(
     if product is None:
         raise HTTPException(404, detail={"code": "product_not_found"})
 
-    only_link_ids: list[UUID] | None = None
     requested_integration_ids = body.integration_ids if body else None
+    do_reconcile = body.reconcile if body else True
+
+    # Snapshot the clicked product's link ids (respecting the integration
+    # filter) BEFORE reconcile — these are the links the operator asked to
+    # reload, wherever they end up living after a re-point.
+    link_q = select(ProductLink.id).where(ProductLink.product_id == product.id)
     if requested_integration_ids:
-        link_rows = (
-            await session.execute(
-                select(ProductLink.id).where(
-                    and_(
-                        ProductLink.product_id == product.id,
-                        ProductLink.integration_id.in_(requested_integration_ids),
-                    )
-                )
-            )
-        ).scalars().all()
-        only_link_ids = list(link_rows)
-        if not only_link_ids:
-            raise HTTPException(
-                400,
-                detail={"code": "no_links_for_integrations"},
-            )
+        link_q = link_q.where(
+            ProductLink.integration_id.in_(requested_integration_ids)
+        )
+    original_link_ids = list((await session.execute(link_q)).scalars().all())
+    if requested_integration_ids and not original_link_ids:
+        raise HTTPException(400, detail={"code": "no_links_for_integrations"})
 
     job = BackgroundJob(
         type=BackgroundJobType.SYNC_PRODUCT,
@@ -233,6 +230,82 @@ async def sync_product(
     )
     session.add(job)
     await session.flush()
+
+    # --- On-demand SKU reconcile (ONLY here, never in sync-all/auto-link) ---
+    # Re-read each in-scope listing's current seller_sku and move any link
+    # whose SKU now belongs to a different product. Report every move/warning
+    # into the job's detail log so the toast shows what happened.
+    only_link_ids: list[UUID] | None = (
+        list(original_link_ids) if requested_integration_ids else None
+    )
+    products_to_sync: list[Product] = [product]
+    reconcile_summary: dict | None = None
+    if do_reconcile:
+        report = await reconcile_product_links(
+            session,
+            user=user,
+            product=product,
+            only_integration_ids=requested_integration_ids,
+        )
+        for m in report.moves:
+            await append_job_detail(
+                session,
+                job.id,
+                {
+                    "kind": "reconcile_move",
+                    "link_id": str(m.link_id),
+                    "integration_id": str(m.integration_id),
+                    "platform": m.platform,
+                    "external_id": m.external_id,
+                    "from_sku": m.from_sku,
+                    "to_sku": m.to_sku,
+                },
+            )
+        for w in report.warnings:
+            await append_job_detail(session, job.id, {"kind": "reconcile_warning", **w})
+        for dup_id in report.excedent_deleted:
+            await append_job_detail(
+                session,
+                job.id,
+                {"kind": "reconcile_excedent_deleted", "link_id": str(dup_id)},
+            )
+        reconcile_summary = {
+            "checked": report.checked,
+            "moved": len(report.moves),
+            "excedent_deleted": len(report.excedent_deleted),
+            "warnings": len(report.warnings),
+            "unreadable": report.unreadable,
+        }
+        if report.moves:
+            # Links moved to other products — sync those too, scoped to the
+            # moved links plus each target's Bling link so its stock refreshes
+            # BEFORE the marketplace push (so the moved listing gets the right
+            # product's fresh stock, not a stale value).
+            sync_ids = set(original_link_ids) - set(report.excedent_deleted)
+            target_ids = report.moved_product_ids
+            bling_ids = (
+                await session.execute(
+                    select(ProductLink.id).where(
+                        and_(
+                            ProductLink.product_id.in_(target_ids),
+                            ProductLink.platform == IntegrationPlatform.BLING,
+                        )
+                    )
+                )
+            ).scalars().all()
+            sync_ids.update(bling_ids)
+            only_link_ids = list(sync_ids)
+            extra = (
+                await session.execute(
+                    select(Product).where(
+                        and_(
+                            Product.id.in_(target_ids),
+                            user_scope(Product, user),
+                        )
+                    )
+                )
+            ).scalars().all()
+            products_to_sync = [product, *extra]
 
     # Individual sync intentionally bypasses the per-user advisory lock that
     # `sync_all` uses: this endpoint runs synchronously, is scoped to one
@@ -252,7 +325,13 @@ async def sync_product(
         force=True,
         force_bling_refresh=True,
     )
-    await orch.run([product], only_link_ids=only_link_ids)
+    await orch.run(products_to_sync, only_link_ids=only_link_ids)
+
+    # orch.run() overwrites job.result with the push summary — merge the
+    # reconcile summary back in AFTERWARD so the response carries both.
+    if reconcile_summary is not None:
+        job.result = {**(job.result or {}), "reconcile": reconcile_summary}
+        await session.commit()
 
     await session.refresh(job)
     out = JobOut.model_validate(job, from_attributes=True)

@@ -12,6 +12,7 @@ job log is honest about what was skipped. Fase 4 fills those adapters.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -39,6 +40,16 @@ from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
+
+# Hard wall-clock cap on a single TikTok search page. The TikTokClient already
+# carries an httpx connect+read timeout, but httpx's read timeout resets on each
+# byte received, so a trickling/wedged response can outlive it. asyncio.wait_for
+# is a true elapsed-time bound: if one page doesn't come back in time we log,
+# stop this account, and let the other integrations keep linking (the old code
+# only checked the 2-min TIMEOUT_SECONDS *between* pages, so a single hung
+# search_products call blocked TikTok linking indefinitely). Module-level so
+# tests can shrink it.
+TIKTOK_PAGE_TIMEOUT_SECONDS = 45.0
 
 
 def _now() -> datetime:
@@ -255,9 +266,19 @@ async def _link_tiktok_integration(
             break
         page_idx += 1
         try:
-            tk_products, page_token = await client.search_products(
-                page_size=100, page_token=page_token
+            tk_products, page_token = await asyncio.wait_for(
+                client.search_products(page_size=100, page_token=page_token),
+                timeout=TIKTOK_PAGE_TIMEOUT_SECONDS,
             )
+        except TimeoutError:  # asyncio.wait_for raises TimeoutError on timeout
+            logger.warning(
+                "auto_link_tiktok_page_timeout",
+                integration_id=str(integ.id),
+                page=page_idx,
+                timeout=TIKTOK_PAGE_TIMEOUT_SECONDS,
+            )
+            error = f"search_timeout: page {page_idx} exceeded {TIKTOK_PAGE_TIMEOUT_SECONDS:.0f}s"
+            break
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "auto_link_tiktok_search_failed",

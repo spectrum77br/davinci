@@ -106,6 +106,10 @@ class BulkDeleteIn(BaseModel):
     ids: list[UUID] = Field(min_length=1)
 
 
+class BulkLinkDeleteIn(BaseModel):
+    link_ids: list[UUID] = Field(min_length=1, max_length=2000)
+
+
 class BulkSegmentAssignIn(BaseModel):
     product_ids: list[UUID] = Field(min_length=1)
     segment_id: UUID | None = None

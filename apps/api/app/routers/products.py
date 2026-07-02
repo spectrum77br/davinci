@@ -26,6 +26,7 @@ from app.schemas.products import (
     BlingPreviewItem,
     BlingPreviewOut,
     BulkDeleteIn,
+    BulkLinkDeleteIn,
     BulkSegmentAssignIn,
     CsvImportSummary,
     ProductCreate,
@@ -507,6 +508,50 @@ async def delete_product_link(
         **_audit_request_ctx(request),
     )
     return None
+
+
+@router.post("/product-links/bulk-delete")
+async def bulk_delete_product_links(
+    body: BulkLinkDeleteIn,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "delete"))],
+) -> dict:
+    """Delete many product_links in ONE statement, scoped to the caller (same
+    user-scoping as the single-link delete). The front sends the checked link
+    ids from a product's expanded row and removes them from local state on
+    success — no full-grid refetch. `sync_logs.product_link_id` is ON DELETE
+    SET NULL and now indexed (migration 0168), so the cascade is cheap."""
+    # Snapshot for the audit trail (which links, scoped to this user).
+    snapshot = (
+        await session.execute(
+            select(
+                ProductLink.id, ProductLink.product_id, ProductLink.platform,
+                ProductLink.external_id, ProductLink.integration_id,
+            ).where(
+                and_(ProductLink.id.in_(body.link_ids), user_scope(ProductLink, user))
+            )
+        )
+    ).all()
+
+    res = await session.execute(
+        delete(ProductLink).where(
+            and_(ProductLink.id.in_(body.link_ids), user_scope(ProductLink, user))
+        )
+    )
+    await session.commit()
+
+    deleted_ids = [str(r.id) for r in snapshot]
+    logger.info(
+        "product_links_bulk_deleted",
+        actor_user_id=str(user.id),
+        actor_email=user.email,
+        requested=len(body.link_ids),
+        deleted=res.rowcount or 0,
+        deleted_link_ids=deleted_ids[:50],
+        **_audit_request_ctx(request),
+    )
+    return {"deleted": res.rowcount or 0, "deleted_ids": deleted_ids}
 
 
 # ----------------------------------------------------------- Bling preview/import

@@ -10,6 +10,11 @@ class SyncProductIn(BaseModel):
 
 class SyncProductBody(BaseModel):
     integration_ids: list[UUID] | None = None
+    # On the per-product "recarregar" click we first re-read each listing's
+    # current seller_sku and re-point links whose SKU moved to another product
+    # (see services.link_reconcile). Defaults on; callers can disable to get a
+    # pure stock push with no re-pointing.
+    reconcile: bool = True
 
 
 class SyncAllIn(BaseModel):

@@ -730,6 +730,53 @@ class ShopeeClient:
                 page_idx += 1
                 await asyncio.sleep(1.0)
 
+    async def get_listing_snapshot(self, link: "ProductLink") -> dict | None:
+        """Current SKU + title for the item/model this link points to
+        (item_id=external_id, model_id=variation_id). Returns ``{"sku",
+        "title"}`` or None when it can't be read. For a variation link we read
+        model_sku off the matching model; if the model is gone we return None
+        rather than guess. Used by the on-demand reconcile."""
+        try:
+            item_id = int(link.external_id)
+        except (TypeError, ValueError):
+            return None
+        model_id = 0
+        if link.variation_id:
+            try:
+                model_id = int(link.variation_id)
+            except (TypeError, ValueError):
+                model_id = 0
+        try:
+            r = await self._request(
+                "GET",
+                "/api/v2/product/get_item_base_info",
+                params={"item_id_list": str(item_id)},
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if r.status_code != 200:
+            return None
+        body = r.json() or {}
+        if body.get("error"):
+            return None
+        items = (body.get("response") or {}).get("item_list") or []
+        if not items:
+            return None
+        it = items[0]
+        title = it.get("item_name")
+        if model_id and it.get("has_model"):
+            try:
+                models = await self._get_model_list(item_id)
+            except Exception:  # noqa: BLE001
+                return None
+            for m in models:
+                if int(m.get("model_id") or 0) == model_id:
+                    model_name = (m.get("model_name") or "").strip()
+                    t = f"{title} - {model_name}" if (title and model_name) else title
+                    return {"sku": (m.get("model_sku") or "").strip() or None, "title": t}
+            return None
+        return {"sku": (it.get("item_sku") or "").strip() or None, "title": title}
+
     async def get_listing_price(self, link: "ProductLink") -> float | None:
         """Read the current price from /api/v2/product/get_item_base_info.
 

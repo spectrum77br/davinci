@@ -316,6 +316,28 @@ class MercadoLivreClient:
         except (TypeError, ValueError):
             return None
 
+    async def get_listing_snapshot(self, link: "ProductLink") -> dict | None:
+        """Current seller_sku + title for the item/variation this link points
+        to. Returns ``{"sku", "title"}`` or None when it can't be read.
+
+        For a variation link we read the SELLER_SKU off the matching variation
+        (by stored variation_id); if that variation is gone we return None
+        rather than guess. Used by the on-demand reconcile."""
+        try:
+            item = await self.get_item(link.external_id)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(item, dict) or not item:
+            return None
+        title = item.get("title")
+        variations = item.get("variations") or []
+        if link.variation_id:
+            for v in variations:
+                if str(v.get("id")) == str(link.variation_id):
+                    return {"sku": _ml_sku_of(v), "title": title}
+            return None
+        return {"sku": _ml_sku_of(item), "title": title}
+
     async def update_stock(
         self,
         link: ProductLink,
@@ -814,6 +836,18 @@ def _iter_ml_variants(body: dict):
             "listing_type": listing_type,
             "raw": body,
         }
+
+
+def _ml_sku_of(obj: dict) -> str | None:
+    """Seller SKU of an ML item OR variation: SELLER_SKU attribute
+    (value_name → value) → seller_custom_field. Same priority the auto-link
+    ingestion uses, so reconcile compares like with like."""
+    for attr in obj.get("attributes") or []:
+        if (attr.get("id") or "").upper() == "SELLER_SKU":
+            v = (attr.get("value_name") or attr.get("value") or "").strip()
+            if v:
+                return v
+    return (obj.get("seller_custom_field") or "").strip() or None
 
 
 def _resolve_variation(
