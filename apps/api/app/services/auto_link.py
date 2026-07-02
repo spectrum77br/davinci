@@ -62,6 +62,73 @@ async def _append_detail(session: AsyncSession, job: BackgroundJob, entry: dict[
     await session.commit()
 
 
+def _norm_sku(raw: str | None) -> str:
+    """Canonical SKU for matching: trim + lower + colapsa espaços internos.
+    Usada nos DOIS lados do match (products.sku e seller_sku do marketplace);
+    sufixos/acentos ficam intactos de propósito — remoção silenciosa criaria
+    matches falsos."""
+    return " ".join((raw or "").split()).lower()
+
+
+class _SkuIndex:
+    """products.sku → Product, com colisão explícita em vez de sobrescrita.
+
+    O dict[str, Product] antigo deixava o ÚLTIMO produto do loop vencer quando
+    dois produtos compartilham SKU (cadastro duplicado no Bling) — o listing
+    linkava num dos gêmeos ao acaso e o outro ficava 'sem anúncio' na tela.
+    Aqui SKU ambíguo não linka: conta em `sku_ambiguo` e aparece no detail.
+    """
+
+    def __init__(self, products: list[Product]):
+        self._by_sku: dict[str, list[Product]] = {}
+        for p in products:
+            key = _norm_sku(p.sku)
+            if key:
+                self._by_sku.setdefault(key, []).append(p)
+        self.ambiguous_hits: dict[str, int] = {}
+
+    def resolve(self, sku: str | None) -> tuple[Product | None, str]:
+        """→ (product, motivo) com motivo ∈ {'match', 'not_found', 'ambiguo'}."""
+        key = _norm_sku(sku)
+        candidates = self._by_sku.get(key)
+        if not candidates:
+            return None, "not_found"
+        if len(candidates) > 1:
+            self.ambiguous_hits[key] = self.ambiguous_hits.get(key, 0) + 1
+            return None, "ambiguo"
+        return candidates[0], "match"
+
+    @property
+    def ambiguous_count(self) -> int:
+        return sum(self.ambiguous_hits.values())
+
+    def ambiguous_sample(self, limit: int = 5) -> list[str]:
+        return sorted(self.ambiguous_hits)[:limit]
+
+
+def _stats(
+    *,
+    created: int = 0,
+    already: int = 0,
+    not_found: int = 0,
+    sku_vazio: int = 0,
+    sku_index: _SkuIndex | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "created": created,
+        "already_present": already,
+        "not_found": not_found,
+        "sku_vazio": sku_vazio,
+        "sku_ambiguo": 0,
+        "error": error,
+    }
+    if sku_index is not None and sku_index.ambiguous_count:
+        out["sku_ambiguo"] = sku_index.ambiguous_count
+        out["sku_ambiguo_sample"] = sku_index.ambiguous_sample()
+    return out
+
+
 async def _link_bling_integration(
     session: AsyncSession,
     job: BackgroundJob,
@@ -121,8 +188,8 @@ async def _link_tiktok_integration(
     session: AsyncSession,
     job: BackgroundJob,
     integ: Integration,
-) -> tuple[int, int, int, str | None]:
-    """Returns (created, already_present, not_found, error).
+) -> dict[str, Any]:
+    """Returns o dict de stats consumido por `_record`.
 
     Iterates `client.search_products` in pages of 100, matching each TikTok
     SKU's `seller_sku` against the user's `products.sku` (case-insensitive).
@@ -130,13 +197,8 @@ async def _link_tiktok_integration(
     with `platform=tiktok` and the TikTok product/sku ids in
     `external_id` / `variation_id`.
     """
-    # Build case-insensitive sku → product index for fast match.
     products = (await session.execute(select(Product))).scalars().all()
-    by_sku: dict[str, Product] = {}
-    for p in products:
-        sk = (p.sku or "").strip().lower()
-        if sk:
-            by_sku[sk] = p
+    sku_index = _SkuIndex(products)
 
     existing_keys: set[tuple[UUID, str, str]] = set()
     for link in (
@@ -171,6 +233,7 @@ async def _link_tiktok_integration(
     created = 0
     already = 0
     not_found = 0
+    sku_vazio = 0
     error: str | None = None
     page_token: str | None = None
     page_idx = 0
@@ -212,11 +275,15 @@ async def _link_tiktok_integration(
             for sku in tp.get("skus") or []:
                 seller_sku = (sku.get("seller_sku") or "").strip()
                 sku_id = (sku.get("id") or "").strip()
-                if not seller_sku or not sku_id:
+                if not sku_id:
                     continue
-                local = by_sku.get(seller_sku.lower())
+                if not seller_sku:
+                    sku_vazio += 1
+                    continue
+                local, motivo = sku_index.resolve(seller_sku)
                 if local is None:
-                    not_found += 1
+                    if motivo == "not_found":
+                        not_found += 1
                     continue
                 key = (local.id, product_id, sku_id)
                 if key in existing_keys:
@@ -247,7 +314,10 @@ async def _link_tiktok_integration(
             break
 
     await session.commit()
-    return created, already, not_found, error
+    return _stats(
+        created=created, already=already, not_found=not_found,
+        sku_vazio=sku_vazio, sku_index=sku_index, error=error,
+    )
 
 
 async def _safe_flush_batch(
@@ -297,18 +367,14 @@ async def _link_via_listings(
     integ: Integration,
     client,
     platform: IntegrationPlatform,
-) -> tuple[int, int, int, str | None]:
+) -> dict[str, Any]:
     """Generic adapter: walk `client.list_listings()` (which already yields
     normalized {external_id, sku, title, listing_type, …} dicts for ML and
     Shopee) and create `product_links` for every listing whose SKU matches
-    a row in `products`. Returns (created, already_present, not_found, error).
+    a row in `products`. Returns o dict de stats consumido por `_record`.
     """
     products = (await session.execute(select(Product))).scalars().all()
-    by_sku: dict[str, Product] = {}
-    for p in products:
-        sk = (p.sku or "").strip().lower()
-        if sk:
-            by_sku[sk] = p
+    sku_index = _SkuIndex(products)
 
     # Dedup key matches the DB unique constraint (uq_product_links_identity):
     # (user_id, platform, integration_id, external_id, COALESCE(variation_id, '')).
@@ -327,15 +393,24 @@ async def _link_via_listings(
             )
         )
     ).scalars().all():
-        existing_keys.add(
-            (link.external_id or "", link.variation_id or "")
-        )
+        ext = link.external_id or ""
+        var = link.variation_id or ""
+        existing_keys.add((ext, var))
+        # Encoding legado da Shopee (promoção via listings): o model_id vinha
+        # embutido no external_id ("item_model") com variation_id vazio. Sem
+        # decompor aqui, o mesmo anúncio ganharia um segundo link no formato
+        # canônico (item, model) — era a causa do estoque 2x na tela.
+        if platform == IntegrationPlatform.SHOPEE and not var and "_" in ext:
+            base, _, model = ext.partition("_")
+            if base.isdigit() and model.isdigit():
+                existing_keys.add((base, model))
 
     pending: list[ProductLink] = []
     created = 0
     skipped = 0
     already = 0
     not_found = 0
+    sku_vazio = 0
     error: str | None = None
 
     async def _flush() -> None:
@@ -356,11 +431,12 @@ async def _link_via_listings(
             if not external_id:
                 continue
             if not sku:
-                not_found += 1
+                sku_vazio += 1
                 continue
-            local = by_sku.get(sku.lower())
+            local, motivo = sku_index.resolve(sku)
             if local is None:
-                not_found += 1
+                if motivo == "not_found":
+                    not_found += 1
                 continue
             key = (external_id, variation_id or "")
             if key in existing_keys:
@@ -405,7 +481,10 @@ async def _link_via_listings(
             platform=platform.value,
             skipped=skipped,
         )
-    return created, already, not_found, error
+    return _stats(
+        created=created, already=already, not_found=not_found,
+        sku_vazio=sku_vazio, sku_index=sku_index, error=error,
+    )
 
 
 def _ml_client_for(integ: Integration, session: AsyncSession) -> MercadoLivreClient:
@@ -442,7 +521,7 @@ async def _link_amazon_integration(
     session: AsyncSession,
     job: BackgroundJob,
     integ: Integration,
-) -> tuple[int, int, int, str | None]:
+) -> dict[str, Any]:
     """Amazon-specific adapter: pulls the GET_MERCHANT_LISTINGS_ALL_DATA
     report (TSV via Reports API), matches by seller-SKU, and bulk-inserts
     product_links in chunks of 100 (mirroring SSH's createProductLinksBulk).
@@ -450,16 +529,12 @@ async def _link_amazon_integration(
     Dedup key INCLUDES `integration_id` because the same SKU can exist in
     multiple Amazon seller accounts (e.g., MFN + FBA, or two regions).
 
-    Returns (created, already_present, not_found, error).
+    Returns o dict de stats consumido por `_record`.
     """
     client = _amazon_client_for(integ, session)
 
     products = (await session.execute(select(Product))).scalars().all()
-    by_sku: dict[str, Product] = {}
-    for p in products:
-        sk = (p.sku or "").strip().lower()
-        if sk:
-            by_sku[sk] = p
+    sku_index = _SkuIndex(products)
 
     # Same rule as _link_via_listings: dedup on (external_id, variation_id)
     # since the DB unique constraint excludes product_id. existing_keys is
@@ -484,6 +559,7 @@ async def _link_amazon_integration(
     skipped = 0
     already = 0
     not_found = 0
+    sku_vazio = 0
     error: str | None = None
 
     async def _flush() -> None:
@@ -501,12 +577,15 @@ async def _link_amazon_integration(
             sku = (listing.get("sku") or "").strip()
             external_id = (listing.get("external_id") or "").strip()
             variation_id = (listing.get("variation_id") or "").strip() or None
-            if not external_id or not sku:
-                not_found += 1
+            if not external_id:
                 continue
-            local = by_sku.get(sku.lower())
+            if not sku:
+                sku_vazio += 1
+                continue
+            local, motivo = sku_index.resolve(sku)
             if local is None:
-                not_found += 1
+                if motivo == "not_found":
+                    not_found += 1
                 continue
             key = (external_id, variation_id or "")
             if key in existing_keys:
@@ -549,7 +628,10 @@ async def _link_amazon_integration(
             platform="amazon",
             skipped=skipped,
         )
-    return created, already, not_found, error
+    return _stats(
+        created=created, already=already, not_found=not_found,
+        sku_vazio=sku_vazio, sku_index=sku_index, error=error,
+    )
 
 
 async def run_auto_link(
@@ -582,15 +664,19 @@ async def run_auto_link(
         "already_present": 0,
         "skipped": 0,
         "not_found": 0,
+        "sku_vazio": 0,
+        "sku_ambiguo": 0,
         "failed_integrations": 0,
         "ok_integrations": 0,
     }
 
-    async def _record(integ: Integration, *, created: int, already: int,
-                      not_found: int, error: str | None) -> None:
-        summary["created"] += created
-        summary["already_present"] += already
-        summary["not_found"] += not_found
+    async def _record(integ: Integration, stats: dict[str, Any]) -> None:
+        summary["created"] += stats.get("created", 0)
+        summary["already_present"] += stats.get("already_present", 0)
+        summary["not_found"] += stats.get("not_found", 0)
+        summary["sku_vazio"] += stats.get("sku_vazio", 0)
+        summary["sku_ambiguo"] += stats.get("sku_ambiguo", 0)
+        error = stats.get("error")
         if error:
             summary["failed_integrations"] += 1
         else:
@@ -603,10 +689,7 @@ async def run_auto_link(
                 "integration_name": integ.name,
                 "platform": integ.platform.value,
                 "result": "failed" if error else "ok",
-                "created": created,
-                "already_present": already,
-                "not_found": not_found,
-                "error": error,
+                **stats,
             },
         )
 
@@ -618,41 +701,31 @@ async def run_auto_link(
                     session, job, integ
                 )
                 await _record(
-                    integ, created=created, already=already, not_found=0, error=error
+                    integ, _stats(created=created, already=already, error=error)
                 )
             elif integ.platform == IntegrationPlatform.TIKTOK:
-                created, already, not_found, error = await _link_tiktok_integration(
-                    session, job, integ
-                )
                 await _record(
-                    integ, created=created, already=already,
-                    not_found=not_found, error=error,
+                    integ, await _link_tiktok_integration(session, job, integ)
                 )
             elif integ.platform == IntegrationPlatform.ML:
                 client = _ml_client_for(integ, session)
-                created, already, not_found, error = await _link_via_listings(
-                    session, job, integ, client, IntegrationPlatform.ML
-                )
                 await _record(
-                    integ, created=created, already=already,
-                    not_found=not_found, error=error,
+                    integ,
+                    await _link_via_listings(
+                        session, job, integ, client, IntegrationPlatform.ML
+                    ),
                 )
             elif integ.platform == IntegrationPlatform.SHOPEE:
                 client = _shopee_client_for(integ, session)
-                created, already, not_found, error = await _link_via_listings(
-                    session, job, integ, client, IntegrationPlatform.SHOPEE
-                )
                 await _record(
-                    integ, created=created, already=already,
-                    not_found=not_found, error=error,
+                    integ,
+                    await _link_via_listings(
+                        session, job, integ, client, IntegrationPlatform.SHOPEE
+                    ),
                 )
             elif integ.platform == IntegrationPlatform.AMAZON:
-                created, already, not_found, error = await _link_amazon_integration(
-                    session, job, integ
-                )
                 await _record(
-                    integ, created=created, already=already,
-                    not_found=not_found, error=error,
+                    integ, await _link_amazon_integration(session, job, integ)
                 )
             else:
                 # TEMU still goes through the listings-table path (no

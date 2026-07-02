@@ -128,6 +128,56 @@ async def test_auto_link_attaches_listing_by_sku(db: AsyncSession, user: User):
 
 
 @pytest.mark.asyncio
+async def test_promocao_decompoe_external_id_composto_shopee(
+    db: AsyncSession, user: User
+):
+    """Listing Shopee com model embutido ("item_model") promove como
+    (external_id=item, variation_id=model) — o formato canônico do auto_link.
+    Promover cru duplicava o anúncio no product_links (estoque 2x)."""
+    from app.models import ProductLink
+
+    integ = await _make_integration(db, user)
+    p = Product(user_id=user.id, sku="SKU-C", name="Comp", stock=0, min_stock=0)
+    db.add(p)
+    await db.flush()
+    db.add(
+        Listing(
+            user_id=user.id,
+            integration_id=integ.id,
+            platform=IntegrationPlatform.SHOPEE,
+            external_id="123_456",
+            sku="SKU-C",
+            title="Composto",
+            status=ListingStatus.ACTIVE,
+        )
+    )
+    await db.commit()
+
+    await run_auto_import_link(db)
+    await db.commit()
+
+    links = (
+        await db.execute(
+            select(ProductLink).where(ProductLink.integration_id == integ.id)
+        )
+    ).scalars().all()
+    assert len(links) == 1
+    assert links[0].external_id == "123"
+    assert links[0].variation_id == "456"
+    assert links[0].product_id == p.id
+
+    # idempotente: re-rodar não duplica (nem no formato cru nem no canônico)
+    await run_auto_import_link(db)
+    await db.commit()
+    links = (
+        await db.execute(
+            select(ProductLink).where(ProductLink.integration_id == integ.id)
+        )
+    ).scalars().all()
+    assert len(links) == 1
+
+
+@pytest.mark.asyncio
 async def test_auto_link_links_across_users_in_crm_mode(db: AsyncSession, user: User):
     """CRM mode: integrations/products/listings are shared. Auto-link matches
     on SKU globally — a listing owned by user A links to a product owned by

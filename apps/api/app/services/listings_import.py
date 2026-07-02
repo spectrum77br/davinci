@@ -1,3 +1,5 @@
+# ruff: noqa: S608 — schema interpolado vem de DATABASE_SCHEMA (config
+# confiável, nunca input de usuário); mesmo padrão do job_details.
 """Listings import + auto-link by SKU (Fase 8).
 
 Two entry points:
@@ -24,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import text as sa_text
 
+from app.config import get_settings
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
@@ -150,26 +153,62 @@ async def _create_product_links_for_matched(session: AsyncSession) -> int:
     a listing matched via `_link_by_sku` is invisible to sync_all until a
     corresponding row exists in `product_links`. Skip rows that already
     exist for (integration_id, platform, external_id).
+
+    Shopee: `listings` não tem coluna de variação, então o model_id vem
+    embutido no external_id ("item_model"). O link canônico — o formato que
+    o auto_link grava direto da API — é (external_id=item, variation_id=
+    model). Promover o id composto cru criava um SEGUNDO link pro mesmo
+    anúncio (estoque 2x na tela de produtos); decompomos aqui e checamos
+    existência nos dois formatos.
+
+    Schema vem de DATABASE_SCHEMA (config confiável, nunca input de usuário):
+    o "davinci." hardcoded ignorava o search_path do engine de teste e fazia
+    os TESTES gravarem product_links em PRODUÇÃO.
     """
+    schema = get_settings().database_schema
     sql = sa_text(
-        """
-        INSERT INTO davinci.product_links (
+        f"""
+        WITH src AS (
+            SELECT
+                l.user_id, l.product_id, l.integration_id, i.store_id,
+                l.platform, l.external_id AS raw_external_id, l.sku, l.title,
+                l.listing_type, l.stock,
+                CASE WHEN l.platform = 'shopee' AND l.external_id ~ '^[0-9]+_[0-9]+$'
+                     THEN split_part(l.external_id, '_', 1)
+                     ELSE l.external_id END AS link_external_id,
+                CASE WHEN l.platform = 'shopee' AND l.external_id ~ '^[0-9]+_[0-9]+$'
+                     THEN split_part(l.external_id, '_', 2)
+                     ELSE NULL END AS link_variation_id
+            FROM "{schema}".listings l
+            JOIN "{schema}".integrations i ON i.id = l.integration_id
+            WHERE l.product_id IS NOT NULL
+        )
+        INSERT INTO "{schema}".product_links (
             id, user_id, product_id, integration_id, store_id, platform,
-            external_id, external_sku, listing_title, listing_type, stock, price,
+            external_id, variation_id, external_sku, listing_title,
+            listing_type, stock, price,
             last_sync_status, last_sync_at, created_at, updated_at
         )
         SELECT
-            gen_random_uuid(), l.user_id, l.product_id, l.integration_id,
-            i.store_id, l.platform, l.external_id, l.sku, l.title,
-            l.listing_type, l.stock, NULL, 'pending', NULL, NOW(), NOW()
-        FROM davinci.listings l
-        JOIN davinci.integrations i ON i.id = l.integration_id
-        WHERE l.product_id IS NOT NULL
+            gen_random_uuid(), src.user_id, src.product_id, src.integration_id,
+            src.store_id, src.platform, src.link_external_id,
+            src.link_variation_id, src.sku, src.title,
+            src.listing_type, src.stock, NULL, 'pending', NULL, NOW(), NOW()
+        FROM src
+        WHERE NOT EXISTS (
+              -- formato cru do listing já linkado (qualquer variação)
+              SELECT 1 FROM "{schema}".product_links pl
+              WHERE pl.integration_id = src.integration_id
+                AND pl.platform = src.platform
+                AND pl.external_id = src.raw_external_id
+          )
           AND NOT EXISTS (
-              SELECT 1 FROM davinci.product_links pl
-              WHERE pl.integration_id = l.integration_id
-                AND pl.platform = l.platform
-                AND pl.external_id = l.external_id
+              -- formato canônico (item, model) já linkado
+              SELECT 1 FROM "{schema}".product_links pl
+              WHERE pl.integration_id = src.integration_id
+                AND pl.platform = src.platform
+                AND pl.external_id = src.link_external_id
+                AND COALESCE(pl.variation_id, '') = COALESCE(src.link_variation_id, '')
           )
         """
     )
