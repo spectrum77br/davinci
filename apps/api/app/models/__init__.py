@@ -8,6 +8,7 @@ from app.models.bling_kit_component import BlingKitComponent
 from app.models.bling_nota import BlingNota
 from app.models.bling_order import BlingOrder
 from app.models.company import Cadastro, CadastroStore, Company, Store
+from app.models.company_certificate import CompanyCertificate
 from app.models.devolution import Devolution
 from app.models.enums import (
     MARKETPLACES,
@@ -124,6 +125,7 @@ __all__ = [
     "CadastroTipo",
     "CellStatus",
     "Company",
+    "CompanyCertificate",
     "CotacaoFabricante",
     "CotacaoProduto",
     "CotacaoValor",

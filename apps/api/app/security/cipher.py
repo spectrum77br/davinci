@@ -52,3 +52,19 @@ def decrypt_json(blob: bytes) -> dict:
     aes = AESGCM(_KEY)
     nonce, ct = blob[:12], blob[12:]
     return json.loads(aes.decrypt(nonce, ct, None).decode())
+
+
+def encrypt_bytes(data: bytes) -> bytes:
+    """Encrypt raw bytes to `nonce || ct` (for BYTEA columns — e.g. arquivos
+    de certificado digital .p12/.pfx e a senha do certificado)."""
+    aes = AESGCM(_KEY)
+    nonce = os.urandom(12)
+    return nonce + aes.encrypt(nonce, data, None)
+
+
+def decrypt_bytes(blob: bytes) -> bytes:
+    if len(blob) <= 12:
+        raise ValueError("ciphertext_too_short")
+    aes = AESGCM(_KEY)
+    nonce, ct = blob[:12], blob[12:]
+    return aes.decrypt(nonce, ct, None)

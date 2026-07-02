@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { ArrowLeft, Save, Trash2, Plus, Unlink } from 'lucide-vue-next'
 import {
   MARKETPLACES,
@@ -38,6 +38,22 @@ type CompanyDetail = {
   created_at: string
   updated_at: string
   stores: StoreOut[]
+}
+
+type CompanyCertificate = {
+  id: string
+  company_id: string
+  filename: string
+  content_type: string | null
+  size_bytes: number
+  label: string | null
+  expires_at: string | null
+  notes: string | null
+  has_password: boolean
+  uploaded_by: string | null
+  uploaded_by_name: string | null
+  created_at: string
+  updated_at: string
 }
 
 const route = useRoute()
@@ -106,6 +122,120 @@ async function load() {
   }
 }
 await load()
+
+// ---------- certificados digitais (admin only) ----------
+const isAdmin = useIsAdmin()
+const certificates = ref<CompanyCertificate[]>([])
+const certLoading = ref(false)
+const certError = ref<string | null>(null)
+const certForm = reactive({ password: '', label: '', expires_at: '', notes: '' })
+const certFileEl = ref<HTMLInputElement | null>(null)
+const certUploading = ref(false)
+const revealedPw = ref<Record<string, string>>({})
+
+async function loadCertificates() {
+  if (!isAdmin.value || !company.value) return
+  certLoading.value = true
+  certError.value = null
+  try {
+    certificates.value = await api<CompanyCertificate[]>(
+      `/api/companies/${company.value.id}/certificates`,
+    )
+  } catch (e: any) {
+    certError.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    certLoading.value = false
+  }
+}
+
+async function uploadCertificate() {
+  if (!company.value) return
+  const input = certFileEl.value
+  const f = input?.files?.[0]
+  if (!f) { certError.value = 'Selecione um arquivo .p12 ou .pfx'; return }
+  const lower = f.name.toLowerCase()
+  if (!lower.endsWith('.p12') && !lower.endsWith('.pfx')) {
+    certError.value = 'O arquivo precisa ser .p12 ou .pfx'; return
+  }
+  certUploading.value = true
+  certError.value = null
+  try {
+    const fd = new FormData()
+    fd.append('file', f)
+    if (certForm.password) fd.append('password', certForm.password)
+    if (certForm.label) fd.append('label', certForm.label)
+    if (certForm.expires_at) fd.append('expires_at', certForm.expires_at)
+    if (certForm.notes) fd.append('notes', certForm.notes)
+    await api(`/api/companies/${company.value.id}/certificates`, { method: 'POST', body: fd })
+    certForm.password = ''; certForm.label = ''; certForm.expires_at = ''; certForm.notes = ''
+    if (input) input.value = ''
+    await loadCertificates()
+  } catch (e: any) {
+    certError.value = e?.data?.detail?.code || e?.message || 'erro ao enviar'
+  } finally {
+    certUploading.value = false
+  }
+}
+
+async function downloadCertificate(cert: CompanyCertificate) {
+  if (!company.value) return
+  try {
+    const blob = await api<Blob>(
+      `/api/companies/${company.value.id}/certificates/${cert.id}/download`,
+      { responseType: 'blob' as any },
+    )
+    const href = URL.createObjectURL(blob as any)
+    const a = document.createElement('a')
+    a.href = href
+    a.download = cert.filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(href)
+  } catch (e: any) {
+    certError.value = e?.data?.detail?.code || e?.message || 'erro ao baixar'
+  }
+}
+
+async function revealPassword(cert: CompanyCertificate) {
+  if (!company.value) return
+  if (revealedPw.value[cert.id] != null) {
+    const cp = { ...revealedPw.value }; delete cp[cert.id]; revealedPw.value = cp
+    return
+  }
+  try {
+    const r = await api<{ password: string | null }>(
+      `/api/companies/${company.value.id}/certificates/${cert.id}/password`,
+    )
+    revealedPw.value = { ...revealedPw.value, [cert.id]: r.password || '(sem senha)' }
+  } catch (e: any) {
+    certError.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
+
+async function deleteCertificate(cert: CompanyCertificate) {
+  if (!company.value) return
+  if (!confirm(`Excluir o certificado "${cert.label || cert.filename}"? Não dá pra desfazer.`)) return
+  try {
+    await api(`/api/companies/${company.value.id}/certificates/${cert.id}`, { method: 'DELETE' })
+    await loadCertificates()
+  } catch (e: any) {
+    certError.value = e?.data?.detail?.code || e?.message || 'erro ao excluir'
+  }
+}
+
+function fmtBytes(n: number) {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function isExpired(cert: CompanyCertificate) {
+  if (!cert.expires_at) return false
+  return new Date(cert.expires_at) < new Date(new Date().toDateString())
+}
+
+await loadCertificates()
 
 const showNewIntegration = ref(false)
 const newIntegrationStoreId = ref<string | null>(null)
@@ -436,6 +566,96 @@ async function deleteCompany() {
       <p v-if="!blingIntegrationForCompany" class="text-xs text-muted-foreground">
         Conecte uma integração Bling em qualquer loja desta empresa para habilitar o select "Loja no Bling".
       </p>
+    </section>
+
+    <section v-if="isAdmin" class="border rounded-md p-4 space-y-4">
+      <div class="flex items-center gap-2 flex-wrap">
+        <h2 class="font-semibold">Certificados digitais</h2>
+        <span class="text-xs text-muted-foreground">.p12 / .pfx — guardado criptografado, visível só para admin</span>
+      </div>
+
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 items-end border-b border-border pb-4">
+        <div class="sm:col-span-2 lg:col-span-1">
+          <Label>Arquivo (.p12/.pfx)</Label>
+          <input
+            ref="certFileEl"
+            type="file"
+            accept=".p12,.pfx,application/x-pkcs12"
+            class="block w-full text-sm text-muted-foreground file:mr-3 file:rounded file:border file:border-input file:bg-background file:px-3 file:py-1 file:text-sm hover:file:bg-accent"
+          />
+        </div>
+        <div>
+          <Label>Senha do certificado</Label>
+          <Input v-model="certForm.password" type="password" placeholder="opcional" autocomplete="off" />
+        </div>
+        <div>
+          <Label>Rótulo</Label>
+          <Input v-model="certForm.label" placeholder="ex.: A1 2026" />
+        </div>
+        <div>
+          <Label>Validade</Label>
+          <Input v-model="certForm.expires_at" type="date" />
+        </div>
+        <div>
+          <Label>Notas</Label>
+          <Input v-model="certForm.notes" />
+        </div>
+        <div>
+          <Button :disabled="certUploading" @click="uploadCertificate">
+            {{ certUploading ? 'enviando…' : 'Enviar certificado' }}
+          </Button>
+        </div>
+      </div>
+
+      <div v-if="certError" class="text-sm text-red-500">erro: {{ certError }}</div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-muted/40 text-left">
+            <tr>
+              <th class="px-3 py-2">Arquivo</th>
+              <th class="px-3 py-2">Rótulo</th>
+              <th class="px-3 py-2">Validade</th>
+              <th class="px-3 py-2">Senha</th>
+              <th class="px-3 py-2">Tamanho</th>
+              <th class="px-3 py-2">Enviado por</th>
+              <th class="px-3 py-2 text-right">Ações</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="cert in certificates" :key="cert.id" class="border-t align-top">
+              <td class="px-3 py-2 font-mono text-xs" :title="cert.notes || ''">{{ cert.filename }}</td>
+              <td class="px-3 py-2">{{ cert.label || '—' }}</td>
+              <td class="px-3 py-2">
+                <span v-if="cert.expires_at" :class="isExpired(cert) ? 'text-red-500 font-semibold' : ''">
+                  {{ cert.expires_at }}{{ isExpired(cert) ? ' (vencido)' : '' }}
+                </span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-3 py-2 text-xs">
+                <template v-if="cert.has_password">
+                  <button class="text-blue-500 hover:underline" @click="revealPassword(cert)">
+                    {{ revealedPw[cert.id] != null ? 'ocultar' : 'ver' }}
+                  </button>
+                  <span v-if="revealedPw[cert.id] != null" class="ml-2 font-mono break-all">{{ revealedPw[cert.id] }}</span>
+                </template>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-3 py-2 text-xs whitespace-nowrap">{{ fmtBytes(cert.size_bytes) }}</td>
+              <td class="px-3 py-2 text-xs">{{ cert.uploaded_by_name || '—' }}</td>
+              <td class="px-3 py-2 text-right whitespace-nowrap">
+                <Button size="sm" variant="ghost" @click="downloadCertificate(cert)">baixar</Button>
+                <Button size="sm" variant="ghost" class="text-destructive" title="excluir" @click="deleteCertificate(cert)">
+                  <Trash2 class="size-4" />
+                </Button>
+              </td>
+            </tr>
+            <tr v-if="!certLoading && certificates.length === 0">
+              <td colspan="7" class="px-3 py-4 text-center text-muted-foreground">nenhum certificado</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <IntegrationFormModal

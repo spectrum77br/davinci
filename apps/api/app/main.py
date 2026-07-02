@@ -13,6 +13,7 @@ from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import cadastros as cadastros_router
 from app.routers import companies as companies_router
+from app.routers import company_certificates as company_certificates_router
 from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
 from app.routers import devolutions as devolutions_router
@@ -136,6 +137,7 @@ app.add_middleware(
 app.include_router(auth_router.router)
 app.include_router(users_router.router)
 app.include_router(companies_router.router)
+app.include_router(company_certificates_router.router)
 app.include_router(stores_router.router)
 app.include_router(cadastros_router.router)
 app.include_router(integrations_router.router)
