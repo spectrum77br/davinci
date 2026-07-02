@@ -679,12 +679,19 @@ def _ml_order_commission(order: Any) -> Decimal:
 def _ml_seller_funded_discount(discounts: Any) -> Decimal | None:
     """Seller-funded discount from ML's `/orders/{id}/discounts` breakdown.
 
-    Sums `items[].amounts.seller` across details, EXCLUDING those whose
-    `supplier.funding_mode == "sale_fee"` (offer/catalog discounts already baked
-    into `unit_price`/commission — deducting them again double-counts). What
-    remains is the seller's real out-of-pocket on coupons; ML-funded promo
-    coupons contribute 0 (they report `seller: 0`). This is the authoritative
-    source — it nails the cents (e.g. pedido 282077 → R$2,00, giving 557,91).
+    Sums `items[].amounts.seller` across details, EXCLUDING every *offer* — a
+    detail whose `supplier` carries an `offer_id` (regardless of funding_mode),
+    or `funding_mode == "sale_fee"`. An offer/campaign price cut is already baked
+    into `unit_price`/`total_amount` (and the commission base), so subtracting it
+    again double-counts. ML's own repasse agrees: for offers the billing detail
+    reports `sale_fee.discount == 0`. What remains is the seller's real
+    out-of-pocket on *coupons* (no `offer_id`); ML-funded promo coupons
+    contribute 0 (they report `seller: 0`).
+
+    Examples: pedido 282077 → R$2,00 coupon share is kept (net 557,91); pedido
+    285633 → R$30,00 seller-funded OFFER is skipped (net 155,47). Keying the
+    exclusion only on `funding_mode == "sale_fee"` let an offer with
+    `funding_mode == "seller"` slip through and double-counted it (155,47 → 125,47).
 
     Returns None when the breakdown is missing/empty so the caller can fall back.
     """
@@ -698,7 +705,12 @@ def _ml_seller_funded_discount(discounts: Any) -> Decimal | None:
         if not isinstance(det, dict):
             continue
         supplier = det.get("supplier") or {}
-        if isinstance(supplier, dict) and supplier.get("funding_mode") == "sale_fee":
+        # Offers (an `offer_id`, any funding_mode incl. sale_fee) are a campaign
+        # price cut already reflected in unit_price — skip. Only non-offer
+        # coupons reduce the repasse by the seller's funded share.
+        if isinstance(supplier, dict) and (
+            supplier.get("offer_id") or supplier.get("funding_mode") == "sale_fee"
+        ):
             continue
         for it in det.get("items") or []:
             if not isinstance(it, dict):
@@ -900,7 +912,7 @@ async def _fetch_ml(
                 discount,
                 negative=True,
                 currency=currency,
-                raw={"source": "orders/{id}/discounts amounts.seller (excl. sale_fee)"},
+                raw={"source": "orders/{id}/discounts amounts.seller (excl. offers)"},
             ),
             _event("net_estimated", net, currency=currency, status=status),
         ]
