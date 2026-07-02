@@ -81,7 +81,13 @@ from app.models.pricing import (
     PricingPushIdempotency,
     StoreInfo,
 )
-from app.models.product import BackgroundJob, Product, ProductCategory, ProductLink
+from app.models.product import (
+    BackgroundJob,
+    BackgroundJobDetail,
+    Product,
+    ProductCategory,
+    ProductLink,
+)
 from app.models.refund import Refund
 from app.models.segment import Segment
 from app.models.situacao_bling import SituacaoBling
@@ -104,6 +110,7 @@ __all__ = [
     "AuditUpload",
     "AuthCode",
     "BackgroundJob",
+    "BackgroundJobDetail",
     "BackgroundJobStatus",
     "BackgroundJobType",
     "Base",

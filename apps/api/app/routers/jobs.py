@@ -18,10 +18,13 @@ from app.models import (
 from app.schemas.products import (
     AutoLinkIn,
     JobCreatedOut,
+    JobDetailsOut,
     JobOut,
     JobPage,
     JobStats,
+    JobStatusOut,
 )
+from app.services.job_details import count_job_details, load_job_details
 from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
@@ -123,6 +126,70 @@ async def get_job(
     if j is None:
         raise HTTPException(404, detail={"code": "job_not_found"})
     return JobOut.model_validate(j, from_attributes=True)
+
+
+@router.get("/jobs/{job_id}/status", response_model=JobStatusOut)
+async def get_job_status(
+    job_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_active_user)],
+) -> JobStatusOut:
+    """Lightweight poll: everything JobOut has except the `details` array, plus
+    `details_count`. The array moved to `background_job_details`; clients fetch
+    only the delta via /jobs/{id}/details, so this stays tiny even when the log
+    is thousands of entries long."""
+    j = (
+        await session.execute(
+            select(BackgroundJob).where(
+                and_(BackgroundJob.id == job_id, _scope_jobs(user))
+            )
+        )
+    ).scalar_one_or_none()
+    if j is None:
+        raise HTTPException(404, detail={"code": "job_not_found"})
+    details_count = await count_job_details(session, job_id)
+    return JobStatusOut(
+        id=j.id,
+        type=j.type.value,
+        status=j.status.value,
+        total=j.total,
+        processed=j.processed,
+        payload=j.payload,
+        result=j.result,
+        error=j.error,
+        started_at=j.started_at,
+        finished_at=j.finished_at,
+        last_heartbeat_at=j.last_heartbeat_at,
+        created_at=j.created_at,
+        updated_at=j.updated_at,
+        details_count=details_count,
+    )
+
+
+@router.get("/jobs/{job_id}/details", response_model=JobDetailsOut)
+async def get_job_details(
+    job_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_active_user)],
+    after: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=2000),
+) -> JobDetailsOut:
+    """Incremental slice of a job's progress log: entries with child-id >
+    `after`, oldest first. Returns the raw entry objects plus `max_id` (the
+    cursor to pass back as `after` next time)."""
+    scoped = (
+        await session.execute(
+            select(BackgroundJob.id).where(
+                and_(BackgroundJob.id == job_id, _scope_jobs(user))
+            )
+        )
+    ).scalar_one_or_none()
+    if scoped is None:
+        raise HTTPException(404, detail={"code": "job_not_found"})
+    items, max_id = await load_job_details(
+        session, job_id, after_id=after, limit=limit
+    )
+    return JobDetailsOut(items=items, max_id=max_id)
 
 
 @router.post("/jobs/auto-link", response_model=JobCreatedOut, status_code=status.HTTP_201_CREATED)

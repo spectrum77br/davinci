@@ -283,6 +283,7 @@ _CLEANUP_TABLES = (
     "bling_envio_evento",
     "bling_orders",
     "situacao_bling",
+    "background_job_details",
     "background_jobs",
     "integrations",
     "stores",

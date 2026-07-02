@@ -85,7 +85,12 @@ type Job = {
   processed: number
   payload: Record<string, unknown>
   result: Record<string, unknown>
-  details: Array<Record<string, unknown>>
+  // `details` now comes from GET /api/jobs/{id}/details (paged), not the job
+  // row. The light /status poll carries only `details_count`; the single-sync
+  // POST still returns `details` inline. Both optional so `activeJob` (status)
+  // and the single-sync response share this type.
+  details?: Array<Record<string, unknown>>
+  details_count?: number
   error: string | null
   started_at: string | null
   finished_at: string | null
@@ -841,8 +846,8 @@ function tailDetails(details: Array<Record<string, any>> | undefined, n: number)
 
 // Auto-link helpers: surface the marketplace currently being scanned and a
 // running tally aggregated per platform from the per-integration entries.
-function autoLinkCurrent(job: any): string {
-  const last = (job?.details || []).at?.(-1)
+function autoLinkCurrent(details: Array<Record<string, any>> | undefined): string {
+  const last = details?.at?.(-1)
   if (!last) return ''
   const plat = last.platform ? String(last.platform).toUpperCase() : ''
   const name = last.integration_name || ''
@@ -862,7 +867,7 @@ function autoLinkTotals(job: any): {
     failed: r.failed_integrations ?? 0,
   }
 }
-function autoLinkBreakdown(job: any): Array<{
+function autoLinkBreakdown(details: Array<Record<string, any>> | undefined): Array<{
   integration: string
   platform: string
   created: number
@@ -871,7 +876,7 @@ function autoLinkBreakdown(job: any): Array<{
   result: string
   error: string | null
 }> {
-  return (job?.details || []).map((d: any) => ({
+  return (details || []).map((d: any) => ({
     integration: d.integration_name || (d.integration_id || '').slice(0, 8),
     platform: d.platform || '',
     created: d.created ?? 0,
@@ -985,7 +990,22 @@ const importStats = computed(() => {
 // ---------------------------- Auto-link ------------------------------------
 
 const activeJob = ref<Job | null>(null)
+// Detail log lives outside `activeJob` in a shallowRef: we reassign the array
+// to trigger a (shallow) update and never deep-track its entries — that deep
+// reactivity over a growing array is what used to freeze the page. Fed
+// incrementally by fetchDetailDelta via the `after` cursor.
+const jobDetails = shallowRef<Array<Record<string, any>>>([])
+let lastDetailId = 0
 let pollHandle: number | null = null
+
+// While a sync-all / auto-link job is running, disable the buttons that would
+// launch another one (the dialogs already hide their run button once a job is
+// active; this covers the header buttons).
+const jobActive = computed(
+  () =>
+    activeJob.value != null &&
+    (activeJob.value.status === 'running' || activeJob.value.status === 'pending'),
+)
 
 function openAutoLinkDialog() {
   selectedAutoLinkIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
@@ -1027,27 +1047,61 @@ async function runAutoImportLink() {
   }
 }
 
+function stopPolling() {
+  if (pollHandle) {
+    clearTimeout(pollHandle)
+    pollHandle = null
+  }
+}
+
+// Pull new detail entries since our cursor. Pages forward until caught up
+// (usually one request). shallowRef → reassign to trigger the update.
+async function fetchDetailDelta(jobId: string) {
+  for (let guard = 0; guard < 50; guard++) {
+    const r = await api<{ items: Array<Record<string, any>>; max_id: number }>(
+      `/api/jobs/${jobId}/details?after=${lastDetailId}&limit=500`,
+    ).catch(() => null)
+    if (!r || !r.items?.length) break
+    jobDetails.value = jobDetails.value.concat(r.items)
+    lastDetailId = r.max_id
+    if (r.items.length < 500) break
+  }
+}
+
+// Poll the lightweight /status endpoint and fetch only the detail delta when
+// the count grows. setTimeout (not setInterval) so we can back off from 1.5s
+// up to 5s while nothing changes, and stop cleanly on a terminal status.
 function startPolling(jobId: string) {
-  if (pollHandle) clearInterval(pollHandle)
+  stopPolling()
+  jobDetails.value = []
+  lastDetailId = 0
+  activeJob.value = null
+  let delay = 1500
+  let lastCount = -1
   const tick = async () => {
     try {
-      const j = await api<Job>(`/api/jobs/${jobId}`)
-      activeJob.value = j
-      if (j.status === 'succeeded' || j.status === 'failed' || j.status === 'cancelled') {
-        if (pollHandle) { clearInterval(pollHandle); pollHandle = null }
+      const s = await api<Job>(`/api/jobs/${jobId}/status`)
+      activeJob.value = s
+      const count = s.details_count ?? 0
+      if (count > jobDetails.value.length) await fetchDetailDelta(jobId)
+      if (s.status === 'succeeded' || s.status === 'failed' || s.status === 'cancelled') {
+        await fetchDetailDelta(jobId) // catch the tail before we stop
+        stopPolling()
         await refreshAll()
+        return
       }
+      // Snap back to fast polling on activity; back off when idle.
+      delay = count === lastCount ? Math.min(5000, Math.round(delay * 1.4)) : 1500
+      lastCount = count
+      pollHandle = window.setTimeout(tick, delay)
     } catch {
-      /* swallow */
+      pollHandle = window.setTimeout(tick, delay)
     }
   }
   void tick()
-  pollHandle = window.setInterval(tick, 1500)
 }
 
-onUnmounted(() => {
-  if (pollHandle) clearInterval(pollHandle)
-})
+onUnmounted(() => stopPolling())
 
 </script>
 
@@ -1075,6 +1129,7 @@ onUnmounted(() => {
           v-if="canEdit"
           size="sm"
           variant="outline"
+          :disabled="jobActive"
           class="border-emerald-300 text-emerald-700 hover:bg-emerald-50"
           @click="openAutoLinkDialog"
         >
@@ -1090,7 +1145,7 @@ onUnmounted(() => {
         >
           <Link2 class="size-4 mr-1.5" /> Vincular Anúncios
         </Button>
-        <Button v-if="canEdit" size="sm" variant="outline" @click="openSyncAllDialog">
+        <Button v-if="canEdit" size="sm" variant="outline" :disabled="jobActive" @click="openSyncAllDialog">
           <RefreshCw class="size-4 mr-1.5" /> Sincronizar Todos
         </Button>
         <Button
@@ -1730,23 +1785,23 @@ onUnmounted(() => {
           <div v-if="activeJob.status === 'running' || activeJob.status === 'pending'" class="text-sm flex items-center gap-2">
             <Loader2 class="size-4 animate-spin text-emerald-600" />
             <span class="text-muted-foreground">Processando:</span>
-            <span class="font-medium">{{ autoLinkCurrent(activeJob) || '…' }}</span>
+            <span class="font-medium">{{ autoLinkCurrent(jobDetails) || '…' }}</span>
           </div>
 
           <!-- Progress bar (integrations done / total) -->
           <div>
             <div class="flex justify-between text-xs mb-1">
               <span class="text-muted-foreground tabular-nums">
-                {{ activeJob.details?.length ?? 0 }} / {{ activeJob.total }} integraçõe(s)
+                {{ activeJob.details_count ?? 0 }} / {{ activeJob.total }} integraçõe(s)
               </span>
               <span class="tabular-nums font-semibold text-emerald-600">
-                {{ activeJob.total > 0 ? Math.round(((activeJob.details?.length ?? 0) / activeJob.total) * 100) : 0 }}%
+                {{ activeJob.total > 0 ? Math.round(((activeJob.details_count ?? 0) / activeJob.total) * 100) : 0 }}%
               </span>
             </div>
             <div class="h-2 bg-muted rounded overflow-hidden">
               <div
                 class="h-full bg-emerald-500 transition-all"
-                :style="`width: ${activeJob.total > 0 ? ((activeJob.details?.length ?? 0) / activeJob.total) * 100 : 0}%`"
+                :style="`width: ${activeJob.total > 0 ? ((activeJob.details_count ?? 0) / activeJob.total) * 100 : 0}%`"
               />
             </div>
           </div>
@@ -1778,7 +1833,7 @@ onUnmounted(() => {
             </div>
             <!-- Per-integration breakdown -->
             <ul class="mt-2 space-y-0.5 text-xs">
-              <li v-for="(b, idx) in autoLinkBreakdown(activeJob)" :key="idx" class="flex items-center gap-1">
+              <li v-for="(b, idx) in autoLinkBreakdown(jobDetails)" :key="idx" class="flex items-center gap-1">
                 <span class="font-bold">{{ b.result === 'failed' ? '✗' : '✓' }}</span>
                 <span class="uppercase font-semibold">{{ b.platform }}</span>
                 <span>({{ b.integration }}):</span>
@@ -1795,7 +1850,7 @@ onUnmounted(() => {
           <!-- Live log -->
           <ul class="max-h-48 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
             <li
-              v-for="(d, idx) in tailDetails(activeJob.details, 100)"
+              v-for="(d, idx) in tailDetails(jobDetails, 100)"
               :key="idx"
               class="whitespace-pre-wrap"
               :class="d.result === 'failed' ? 'text-red-600' : 'text-emerald-600'"
@@ -1805,7 +1860,7 @@ onUnmounted(() => {
               <template v-if="d.result === 'failed'">{{ d.error }}</template>
               <template v-else>{{ d.created ?? 0 }} vinculados · {{ d.already_present ?? 0 }} já existentes · {{ d.not_found ?? 0 }} não encontrados</template>
             </li>
-            <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
+            <li v-if="!jobDetails.length" class="text-muted-foreground italic">
               processando…
             </li>
           </ul>
@@ -1905,7 +1960,7 @@ onUnmounted(() => {
           <!-- Current SKU -->
           <div v-if="activeJob.status === 'running' || activeJob.status === 'pending'" class="text-sm">
             <span class="text-muted-foreground">Sincronizando:</span>
-            <span class="ml-1 font-mono font-medium">{{ lastProcessedSku(activeJob.details) || '…' }}</span>
+            <span class="ml-1 font-mono font-medium">{{ lastProcessedSku(jobDetails) || '…' }}</span>
           </div>
 
           <!-- Progress bar + % -->
@@ -1968,14 +2023,14 @@ onUnmounted(() => {
           <!-- Log: last 100 entries with colored status -->
           <ul class="max-h-60 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
             <li
-              v-for="(d, idx) in tailDetails(activeJob.details, 100)"
+              v-for="(d, idx) in tailDetails(jobDetails, 100)"
               :key="idx"
               class="whitespace-pre-wrap"
               :class="detailColorClass(d)"
             >
               <span class="font-bold">{{ detailIcon(d) }}</span> {{ formatDetail(d) }}
             </li>
-            <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
+            <li v-if="!jobDetails.length" class="text-muted-foreground italic">
               processando…
             </li>
           </ul>
@@ -2034,10 +2089,10 @@ onUnmounted(() => {
               {{ activeJob.error }}
             </div>
             <ul class="max-h-72 overflow-auto text-xs space-y-0.5 font-mono bg-muted/30 p-2 rounded">
-              <li v-for="(d, idx) in activeJob.details" :key="idx" class="text-muted-foreground whitespace-pre-wrap">
+              <li v-for="(d, idx) in jobDetails" :key="idx" class="text-muted-foreground whitespace-pre-wrap">
                 {{ formatDetail(d) }}
               </li>
-              <li v-if="!activeJob.details?.length" class="text-muted-foreground italic">
+              <li v-if="!jobDetails.length" class="text-muted-foreground italic">
                 buscando primeira página…
               </li>
             </ul>

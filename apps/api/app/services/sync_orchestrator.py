@@ -20,7 +20,6 @@ unimplemented platforms — orchestrator catches that and writes `skipped`.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -29,7 +28,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import and_, func, select, text, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
@@ -51,6 +50,7 @@ from app.models import (
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.alerts import emit_alert
+from app.services.job_details import append_job_detail
 from app.services.marketplaces.base import SyncResult, SyncStatus
 from app.services.marketplaces.bling import BlingClient, parse_bling_product
 from app.services.marketplaces.factory import client_for
@@ -450,26 +450,32 @@ class SyncOrchestrator:
     async def _append_detail(self, entry: dict) -> None:
         if self.job is None:
             return
-        entry = {"at": datetime.now(UTC).isoformat(), **entry}
-        # Atomic JSONB append + counter bump so concurrent sub-orchestrators
-        # (run_parallel) never lose detail entries to read-modify-write
-        # races. Trim is intentionally not done here (asyncpg rejects the
-        # CASE/subquery form with repeated placeholders) — a single sync_all
-        # run produces <4k entries, ~800KB JSONB, which Postgres handles
-        # fine. A periodic GC could trim historical jobs if it ever matters.
+        # One cheap INSERT into background_job_details instead of rewriting the
+        # job row's JSONB array. No row-lock on the hot job row → the 8 parallel
+        # sub-orchestrators (run_parallel) no longer serialize. No commit here:
+        # the caller batches the commit with its progress flush (per product in
+        # run_parallel, per heartbeat in run) so we never pay a round-trip per
+        # link. The `processed` counter is bumped separately (_bump_processed /
+        # _heartbeat), not inline with each detail.
+        await append_job_detail(self.session, self.job.id, entry)
+
+    async def _bump_processed(self, n: int) -> None:
+        """Advance the job's `processed` counter by `n` with a *relative*
+        UPDATE so the parallel sub-orchestrators (each in its own session)
+        accumulate without clobbering each other. A cheap integer bump — no
+        JSONB, the row lock is held for microseconds — replacing the per-link
+        JSONB rewrite that used to serialize the fan-out. Does not commit; the
+        caller's commit flushes it along with the batched detail rows."""
+        if self.job is None or n <= 0:
+            return
         await self.session.execute(
-            text(
-                """
-                UPDATE davinci.background_jobs
-                SET details = COALESCE(details, '[]'::jsonb) || CAST(:entry AS jsonb),
-                    processed = COALESCE(processed, 0) + 1,
-                    last_heartbeat_at = NOW()
-                WHERE id = :jid
-                """
-            ),
-            {"jid": str(self.job.id), "entry": json.dumps(entry)},
+            update(BackgroundJob)
+            .where(BackgroundJob.id == self.job.id)
+            .values(
+                processed=BackgroundJob.processed + n,
+                last_heartbeat_at=func.now(),
+            )
         )
-        await self.session.commit()
 
     async def _heartbeat(self, processed: int) -> None:
         if self.job is None:
@@ -618,6 +624,13 @@ class SyncOrchestrator:
                             await sub_orch._process_link(
                                 p, link, skip_non_bling=bling_failed
                             )
+                        # Advance the shared job's processed counter once per
+                        # product (relative bump, atomic across tasks) and let
+                        # this commit flush it together with the product's
+                        # batched detail rows + link/SyncLog writes.
+                        await sub_orch._bump_processed(
+                            len(bling_links) + len(other_links)
+                        )
                         await sub_s.commit()
                         return sub_orch.report
                 except Exception as e:  # noqa: BLE001
