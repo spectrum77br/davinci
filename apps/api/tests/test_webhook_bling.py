@@ -126,7 +126,15 @@ def _stock_event_body(*, sku: str, bling_id: int, stock: int) -> bytes:
 
 
 @pytest.mark.asyncio
-async def test_webhook_rejects_invalid_signature(client: AsyncClient) -> None:
+async def test_webhook_accepts_invalid_signature_soft_check(client: AsyncClient) -> None:
+    """Signature verification is a soft observability signal, NOT a gate.
+
+    Bling V3 doesn't expose a configurable webhook secret and the auto-signed
+    header mismatches on ~75% of legitimate deliveries (upstream body
+    normalization), so rejecting would drop real stock/order webhooks — see
+    `_verify_bling_signature`. A bad signature is logged + counted, and the
+    delivery is still processed (here: unmatched payload → ack'd, no product).
+    """
     body = _stock_event_body(sku="x", bling_id=1, stock=0)
     r = await client.post(
         "/api/webhooks/bling",
@@ -138,15 +146,20 @@ async def test_webhook_rejects_invalid_signature(client: AsyncClient) -> None:
             "Content-Type": "application/json",
         },
     )
-    assert r.status_code == 401
-    assert r.json()["detail"]["code"] == "bad_signature"
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ack"] is True
+    assert data["matched"] is False
 
 
 @pytest.mark.asyncio
-async def test_webhook_rejects_missing_signature(client: AsyncClient) -> None:
+async def test_webhook_accepts_missing_signature_soft_check(client: AsyncClient) -> None:
+    """No signature header → still accepted (never 401), same soft-check
+    rationale as above. The empty payload resolves no product, so the handler
+    acks it as unmatched."""
     r = await client.post("/api/webhooks/bling", content=b"{}")
-    assert r.status_code == 401
-    assert r.json()["detail"]["code"] == "missing_signature"
+    assert r.status_code == 200
+    assert r.json()["ack"] is True
 
 
 @pytest.mark.asyncio
