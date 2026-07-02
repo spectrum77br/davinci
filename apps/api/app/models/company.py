@@ -40,6 +40,8 @@ class Company(Base, TimestampMixin):
     cnpj: Mapped[str | None] = mapped_column(String(14), unique=True, nullable=True)
     inscricao_estadual: Mapped[str | None] = mapped_column(Text, nullable=True)
     site_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contabilidade: Mapped[str | None] = mapped_column(Text, nullable=True)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled_marketplaces: Mapped[list[str]] = mapped_column(
         ARRAY(Text),

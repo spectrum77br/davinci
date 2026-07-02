@@ -73,6 +73,8 @@ class CompanyBase(BaseModel):
     cnpj: str | None = None
     inscricao_estadual: str | None = None
     site_url: str | None = None
+    operacao: str | None = None
+    contabilidade: str | None = None
     obs: str | None = None
 
     @model_validator(mode="before")
@@ -93,6 +95,8 @@ class CompanyPatch(BaseModel):
     cnpj: str | None = None
     inscricao_estadual: str | None = None
     site_url: str | None = None
+    operacao: str | None = None
+    contabilidade: str | None = None
     obs: str | None = None
     enabled_marketplaces: list[str] | None = None
 

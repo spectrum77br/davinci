@@ -30,6 +30,8 @@ type CompanyOut = {
   cnpj: string | null
   inscricao_estadual: string | null
   site_url: string | null
+  operacao: string | null
+  contabilidade: string | null
   obs: string | null
   enabled_marketplaces: string[]
   created_at: string
@@ -149,7 +151,7 @@ const filteredRows = computed(() => {
   return rows
 })
 
-const draft = ref({ razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', obs: '' })
+const draft = ref({ razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', obs: '' })
 const creating = ref(false)
 const createErr = ref<string | null>(null)
 
@@ -161,12 +163,12 @@ async function createCompany() {
       razao_social: draft.value.razao_social,
       apelido: draft.value.apelido,
     }
-    for (const k of ['cnpj', 'uf', 'inscricao_estadual', 'site_url', 'obs'] as const) {
+    for (const k of ['cnpj', 'uf', 'inscricao_estadual', 'site_url', 'operacao', 'contabilidade', 'obs'] as const) {
       if (draft.value[k]) body[k] = draft.value[k]
     }
     await api('/api/companies', { method: 'POST', body })
     showNew.value = false
-    draft.value = { razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', obs: '' }
+    draft.value = { razao_social: '', apelido: '', cnpj: '', uf: '', inscricao_estadual: '', site_url: '', operacao: '', contabilidade: '', obs: '' }
     await refresh()
   } catch (e: any) {
     // Two shapes: our HTTPException ({code: ...}) and Pydantic 422
@@ -243,7 +245,7 @@ async function commitEditResp(apelido: string) {
 }
 
 // ---------- generic inline edit for company text fields ----------
-type EditableField = 'razao_social' | 'apelido' | 'uf' | 'cnpj' | 'inscricao_estadual' | 'site_url'
+type EditableField = 'razao_social' | 'apelido' | 'uf' | 'cnpj' | 'inscricao_estadual' | 'site_url' | 'operacao' | 'contabilidade'
 
 const editingCell = ref<{ id: string; field: EditableField } | null>(null)
 const editCellValue = ref('')
@@ -541,6 +543,8 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <th class="px-3 py-2">I.E.</th>
             <th class="px-3 py-2">conta</th>
             <th class="px-3 py-2">Responsável</th>
+            <th class="px-3 py-2">operação</th>
+            <th class="px-3 py-2">contabilidade</th>
             <th v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center">
               {{ MARKETPLACE_SHORT[mk] }}
             </th>
@@ -694,6 +698,48 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 {{ respByApelido.get(row.company.apelido.trim().toLowerCase())?.cpf || '—' }}
               </span>
             </td>
+            <td
+              class="px-3 py-2 text-xs max-w-40"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'operacao') }"
+              :title="row.company.operacao || ''"
+              @click="canEdit && !isEditingCell(row, 'operacao') && startEditCell(row, 'operacao')"
+            >
+              <input
+                v-if="isEditingCell(row, 'operacao')"
+                v-model="editCellValue"
+                type="text"
+                class="w-full text-xs bg-transparent outline-none border-b border-blue-500"
+                :disabled="editCellSaving"
+                autofocus
+                @blur="commitEditCell(row, 'operacao')"
+                @keydown.enter.prevent="commitEditCell(row, 'operacao')"
+                @keydown.escape.prevent="cancelEditCell"
+              />
+              <span v-else :class="{ 'text-muted-foreground': !row.company.operacao }" class="block truncate">
+                {{ row.company.operacao || '—' }}
+              </span>
+            </td>
+            <td
+              class="px-3 py-2 text-xs max-w-40"
+              :class="{ 'cursor-pointer hover:bg-accent/30': canEdit && !isEditingCell(row, 'contabilidade') }"
+              :title="row.company.contabilidade || ''"
+              @click="canEdit && !isEditingCell(row, 'contabilidade') && startEditCell(row, 'contabilidade')"
+            >
+              <input
+                v-if="isEditingCell(row, 'contabilidade')"
+                v-model="editCellValue"
+                type="text"
+                class="w-full text-xs bg-transparent outline-none border-b border-blue-500"
+                :disabled="editCellSaving"
+                autofocus
+                @blur="commitEditCell(row, 'contabilidade')"
+                @keydown.enter.prevent="commitEditCell(row, 'contabilidade')"
+                @keydown.escape.prevent="cancelEditCell"
+              />
+              <span v-else :class="{ 'text-muted-foreground': !row.company.contabilidade }" class="block truncate">
+                {{ row.company.contabilidade || '—' }}
+              </span>
+            </td>
             <td v-for="mk in MARKETPLACES" :key="mk" class="px-2 py-2 text-center relative">
               <template v-if="row.stores[mk]">
                 <button
@@ -772,7 +818,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
-            <td :colspan="16" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
+            <td :colspan="18" class="px-3 py-6 text-center text-muted-foreground">nenhuma empresa</td>
           </tr>
         </tbody>
       </table>
@@ -900,6 +946,16 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
           <div>
             <Label>Site</Label>
             <Input v-model="draft.site_url" />
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <Label>Operação</Label>
+              <Input v-model="draft.operacao" />
+            </div>
+            <div>
+              <Label>Contabilidade</Label>
+              <Input v-model="draft.contabilidade" />
+            </div>
           </div>
           <div>
             <Label>Observação</Label>

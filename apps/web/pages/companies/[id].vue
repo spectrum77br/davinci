@@ -32,6 +32,8 @@ type CompanyDetail = {
   cnpj: string | null
   inscricao_estadual: string | null
   site_url: string | null
+  operacao: string | null
+  contabilidade: string | null
   obs: string | null
   created_at: string
   updated_at: string
@@ -171,6 +173,8 @@ async function saveCompany() {
         cnpj: c.cnpj,
         inscricao_estadual: c.inscricao_estadual,
         site_url: c.site_url,
+        operacao: c.operacao,
+        contabilidade: c.contabilidade,
         obs: c.obs,
       },
     })
@@ -267,6 +271,14 @@ async function deleteCompany() {
         <div>
           <Label>Site</Label>
           <Input v-model="company.site_url" :disabled="!canEdit" />
+        </div>
+        <div>
+          <Label>Operação</Label>
+          <Input v-model="company.operacao" :disabled="!canEdit" />
+        </div>
+        <div>
+          <Label>Contabilidade</Label>
+          <Input v-model="company.contabilidade" :disabled="!canEdit" />
         </div>
       </div>
       <div>
