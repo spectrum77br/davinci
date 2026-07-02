@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from arq import cron
 from arq.connections import RedisSettings
+from arq.worker import func
 from sqlalchemy import and_, delete, or_, select, text, update
 
 from app.config import get_settings
@@ -1492,7 +1493,11 @@ class WorkerSettings:
         send_otp_email,
         auth_codes_cleanup,
         auto_link_run,
-        sync_all_run,
+        # O "Sincronizar Todos" completo (include_all_stock, ~30k links) leva
+        # ~25-30 min só de chamadas externas — o job_timeout global de 1800s
+        # matava a barra a ~98% (TimeoutError em 2/jul, job 7c1b0d83). 3h de
+        # teto: o advisory lock por usuário já impede rodar dois em paralelo.
+        func(sync_all_run, timeout=10800),
         sync_product_run,
         ml_backfill_run,
         refresh_bling_stock_run,
