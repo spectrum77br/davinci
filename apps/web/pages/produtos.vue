@@ -857,6 +857,8 @@ function autoLinkTotals(job: any): {
   created: number
   already: number
   not_found: number
+  sku_vazio: number
+  sku_ambiguo: number
   failed: number
 } {
   const r = (job?.result || {}) as Record<string, any>
@@ -864,6 +866,8 @@ function autoLinkTotals(job: any): {
     created: r.created ?? 0,
     already: r.already_present ?? 0,
     not_found: r.not_found ?? 0,
+    sku_vazio: r.sku_vazio ?? 0,
+    sku_ambiguo: r.sku_ambiguo ?? 0,
     failed: r.failed_integrations ?? 0,
   }
 }
@@ -873,6 +877,9 @@ function autoLinkBreakdown(details: Array<Record<string, any>> | undefined): Arr
   created: number
   already: number
   not_found: number
+  sku_vazio: number
+  sku_ambiguo: number
+  sku_ambiguo_sample: string[]
   result: string
   error: string | null
 }> {
@@ -882,6 +889,9 @@ function autoLinkBreakdown(details: Array<Record<string, any>> | undefined): Arr
     created: d.created ?? 0,
     already: d.already_present ?? 0,
     not_found: d.not_found ?? 0,
+    sku_vazio: d.sku_vazio ?? 0,
+    sku_ambiguo: d.sku_ambiguo ?? 0,
+    sku_ambiguo_sample: d.sku_ambiguo_sample ?? [],
     result: d.result || 'ok',
     error: d.error || null,
   }))
@@ -1827,7 +1837,9 @@ onUnmounted(() => stopPolling())
               </div>
               <div class="text-xs mt-0.5 opacity-90">
                 {{ autoLinkTotals(activeJob).already }} já existentes ·
-                {{ autoLinkTotals(activeJob).not_found }} não encontrados
+                {{ autoLinkTotals(activeJob).not_found }} não encontrados<template v-if="autoLinkTotals(activeJob).sku_vazio"> ·
+                {{ autoLinkTotals(activeJob).sku_vazio }} sem SKU no anúncio</template><template v-if="autoLinkTotals(activeJob).sku_ambiguo"> ·
+                {{ autoLinkTotals(activeJob).sku_ambiguo }} com SKU duplicado no cadastro</template>
               </div>
               <div v-if="activeJob.error" class="text-xs mt-1 font-mono opacity-90">{{ activeJob.error }}</div>
             </div>
@@ -1841,7 +1853,7 @@ onUnmounted(() => stopPolling())
                   <span class="text-red-700 font-mono text-[11px]">{{ b.error }}</span>
                 </template>
                 <template v-else>
-                  <span>{{ b.created }} vinculados, {{ b.already }} já existentes, {{ b.not_found }} não encontrados</span>
+                  <span>{{ b.created }} vinculados, {{ b.already }} já existentes, {{ b.not_found }} não encontrados<template v-if="b.sku_vazio">, {{ b.sku_vazio }} sem SKU</template><template v-if="b.sku_ambiguo">, {{ b.sku_ambiguo }} SKU duplicado ({{ b.sku_ambiguo_sample.join(', ') }})</template></span>
                 </template>
               </li>
             </ul>
@@ -1858,7 +1870,7 @@ onUnmounted(() => stopPolling())
               <span class="font-bold">{{ d.result === 'failed' ? '✗' : '✓' }}</span>
               [{{ (d.platform || '').toUpperCase() }}] {{ d.integration_name || (d.integration_id || '').slice(0, 8) }}:
               <template v-if="d.result === 'failed'">{{ d.error }}</template>
-              <template v-else>{{ d.created ?? 0 }} vinculados · {{ d.already_present ?? 0 }} já existentes · {{ d.not_found ?? 0 }} não encontrados</template>
+              <template v-else>{{ d.created ?? 0 }} vinculados · {{ d.already_present ?? 0 }} já existentes · {{ d.not_found ?? 0 }} não encontrados<template v-if="d.sku_vazio"> · {{ d.sku_vazio }} sem SKU</template><template v-if="d.sku_ambiguo"> · {{ d.sku_ambiguo }} SKU duplicado</template></template>
             </li>
             <li v-if="!jobDetails.length" class="text-muted-foreground italic">
               processando…
