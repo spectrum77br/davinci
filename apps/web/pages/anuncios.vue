@@ -12,7 +12,6 @@ import {
   Trash2,
   X,
 } from 'lucide-vue-next'
-import { parseBRNumber } from '~/lib/number'
 
 definePageMeta({
   middleware: ['permission'],
@@ -326,8 +325,8 @@ watch(tab, async v => {
 
 async function createRequest() {
   if (!newReq.value.product_name) return
-  const priceNum = parseBRNumber(newReq.value.requested_price.replace(/[^0-9.,]/g, ''))
-  const priceCents = priceNum == null ? null : Math.round(priceNum * 100)
+  const priceStr = newReq.value.requested_price.replace(/[^0-9.,]/g, '').replace(',', '.')
+  const priceCents = priceStr ? Math.round(parseFloat(priceStr) * 100) : null
   await api('/api/listing-requests', {
     method: 'POST',
     body: {
