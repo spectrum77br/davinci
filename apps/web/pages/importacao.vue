@@ -398,9 +398,9 @@ async function toggleFretePago(r: FreteRow) {
 }
 
 async function salvarFreteAjuste() {
-  const saldoNum = Number(String(freteAjusteForm.saldo).replace(',', '.'))
+  const saldoNum = parseBRNumber(freteAjusteForm.saldo)
   if (!freteAjusteForm.transportadora.trim() || !freteAjusteForm.abertura
-      || !Number.isFinite(saldoNum)) {
+      || saldoNum == null) {
     errorText.value = 'transportadora, abertura e saldo são obrigatórios'
     return
   }
@@ -611,9 +611,8 @@ const _cotacaoSaveTimers: Record<string, ReturnType<typeof setTimeout>> = {}
 
 function scheduleSaveCotacaoParam<K extends keyof CotacaoParams>(field: K, value: string) {
   // Aceita inputs em formato BR (vírgula) ou decimal puro.
-  const normalized = String(value).replace(',', '.').trim()
-  const n = normalized === '' ? null : Number(normalized)
-  if (n == null || !Number.isFinite(n)) return
+  const n = parseBRNumber(value)
+  if (n == null) return
   ;(cotacaoParams.value as any)[field] = n
   const key = `param_${String(field)}`
   if (_cotacaoSaveTimers[key]) clearTimeout(_cotacaoSaveTimers[key])
@@ -637,9 +636,10 @@ function scheduleSaveCotacaoProduto(
 ) {
   let normalized: any = value
   if (field !== 'frete_type') {
-    const s = String(value).replace(',', '.').trim()
-    normalized = s === '' ? null : Number(s)
-    if (normalized != null && !Number.isFinite(normalized)) return
+    // Vazio limpa o valor (null); entrada não-parseável aborta sem salvar.
+    const s = String(value).trim()
+    normalized = s === '' ? null : parseBRNumber(s)
+    if (s !== '' && normalized == null) return
   }
   ;(prod as any)[field] = normalized
   const key = `prod_${prod.id}_${field}`
@@ -985,9 +985,10 @@ async function persistLoteItem(prod: Product, loteId: string, qty: number) {
 // endpoint PUT /lotes/{id}/items mantendo `quantidade` atual e
 // adicionando `valor_usd`. Body vazia → null no DB (limpa o valor).
 function scheduleLoteItemValor(prod: Product, loteId: string, raw: string) {
-  const s = String(raw).replace(',', '.').trim()
-  const novo = s === '' ? null : Number(s)
-  if (novo != null && !Number.isFinite(novo)) return
+  // Vazio limpa o valor (null); entrada não-parseável aborta sem salvar.
+  const s = raw.trim()
+  const novo = s === '' ? null : parseBRNumber(s)
+  if (s !== '' && novo == null) return
   // Optimistic update.
   prod.lote_valores_usd = { ...(prod.lote_valores_usd || {}), [loteId]: novo }
   const key = `item_valor_${prod.id}_${loteId}`

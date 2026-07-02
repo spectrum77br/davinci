@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { AlertCircle, Check, ChevronLeft, ChevronRight, Download, Loader2, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
+import { parseBRNumber } from '~/lib/number'
 
 definePageMeta({
   middleware: ['permission'],
@@ -402,20 +403,6 @@ function pct(v: number | null | undefined) {
   return `${(v * 100).toFixed(1)}%`
 }
 
-// Interpreta um número digitado em pt-BR. Quando há vírgula, ela é o separador
-// decimal: removem-se os pontos (separador de milhar) e a vírgula vira ponto —
-// então "3.919,92" → 3919.92. Sem vírgula, o ponto é tratado como decimal, o que
-// cobre tanto o valor pré-preenchido cru ("4133.04") quanto inteiros ("3919").
-// Retorna NaN para entrada vazia/inválida. Sem isto, "3.919,92" virava "3.919.92"
-// (só a vírgula era trocada) → NaN → a edição do Saldo Efetivo era descartada em
-// silêncio para qualquer valor ≥ R$ 1.000.
-function parseBrNumber(s: string): number {
-  const t = s.trim()
-  if (t === '') return NaN
-  const normalized = t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : t
-  return Number(normalized)
-}
-
 function fmtDate(v: string | null) {
   if (!v) return '—'
   // Bling envia 'data' como YYYY-MM-DDT00:00:00Z — usar a parte YYYY-MM-DD
@@ -615,8 +602,8 @@ function cancelEditSaldoEfetivo() {
 }
 
 async function saveSaldoEfetivo(row: MarketplaceRow) {
-  const next = parseBrNumber(saldoEfetivoDraft.value)
-  if (Number.isNaN(next)) {
+  const next = parseBRNumber(saldoEfetivoDraft.value)
+  if (next == null) {
     cancelEditSaldoEfetivo()
     return
   }
