@@ -168,6 +168,13 @@ async def list_refunds(
         .offset(offset)
     )
     count_stmt = select(func.count()).select_from(Refund).where(*where)
+    # Totais do conjunto filtrado INTEIRO (todas as páginas), não só os `items`
+    # carregados — assim o rodapé bate com a linha Reembolso do quadro Operacional.
+    summary_stmt = select(
+        func.coalesce(func.sum(Refund.prejuizo), 0.0),
+        func.coalesce(func.sum(Refund.reembolso), 0.0),
+        func.count().filter(Refund.conferido.is_(False)),
+    ).where(*where)
     platforms_stmt = (
         select(Refund.plataforma)
         .where(Refund.plataforma.is_not(None))
@@ -177,6 +184,7 @@ async def list_refunds(
 
     items = (await session.execute(stmt)).scalars().all()
     total = (await session.execute(count_stmt)).scalar_one()
+    sum_prejuizo, sum_reembolso, n_a_conferir = (await session.execute(summary_stmt)).one()
     platforms = [p for p in (await session.execute(platforms_stmt)).scalars().all() if p]
 
     situacoes = await _situacoes_by_pedido(
@@ -195,6 +203,9 @@ async def list_refunds(
         limit=limit,
         offset=offset,
         platforms=platforms,
+        total_prejuizo=round(float(sum_prejuizo or 0), 2),
+        total_reembolso=round(float(sum_reembolso or 0), 2),
+        total_a_conferir=int(n_a_conferir or 0),
     )
 
 

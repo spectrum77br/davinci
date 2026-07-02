@@ -42,6 +42,9 @@ type RefundPage = {
   limit: number
   offset: number
   platforms: string[]
+  total_prejuizo: number
+  total_reembolso: number
+  total_a_conferir: number
 }
 
 type LookupRow = {
@@ -129,9 +132,11 @@ const rowSaveQueue = new Map<string, Promise<void>>()
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 const rangeStart = computed(() => total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1)
 const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
-const totalPrejuizo = computed(() => items.value.reduce((acc, row) => acc + (row.prejuizo ?? 0), 0))
-const totalReembolso = computed(() => items.value.reduce((acc, row) => acc + (row.reembolso ?? 0), 0))
-const totalAConferir = computed(() => items.value.filter((row) => !row.conferido).length)
+// Totais do conjunto filtrado INTEIRO, vindos do servidor (não só a página
+// carregada) — batem com a linha Reembolso do quadro Operacional.
+const totalPrejuizo = ref(0)
+const totalReembolso = ref(0)
+const totalAConferir = ref(0)
 
 const sheetInputClass = 'h-7 w-full rounded-none border-0 bg-transparent px-1 text-xs focus:bg-background focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-70'
 const sheetSelectClass = `${sheetInputClass} cursor-pointer`
@@ -256,6 +261,9 @@ async function load() {
     items.value = res.items
     total.value = res.total
     platforms.value = res.platforms
+    totalPrejuizo.value = res.total_prejuizo
+    totalReembolso.value = res.total_reembolso
+    totalAConferir.value = res.total_a_conferir
   } catch (e: any) {
     error.value = apiError(e)
   } finally {

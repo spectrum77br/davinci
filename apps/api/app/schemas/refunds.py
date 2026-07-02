@@ -151,6 +151,11 @@ class RefundPage(BaseModel):
     limit: int
     offset: int
     platforms: list[str]
+    # Totais do CONJUNTO FILTRADO INTEIRO (não só a página carregada) — batem
+    # com a linha Reembolso do quadro Operacional quando o filtro é conferido_at.
+    total_prejuizo: float
+    total_reembolso: float
+    total_a_conferir: int
 
 
 class RefundLookupOut(BaseModel):
