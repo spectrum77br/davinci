@@ -653,6 +653,12 @@ _VAL_SIT_ERRO_ENVIO = "83966"   # Erro no Envio
 _VAL_SIT_PROBLEMAS = "83960"    # Problemas
 _VAL_SIT_PERDIMENTO = "83956"   # Perdimento
 
+# Quadro "Comercial — 3 meses" (irmão do Operacional). Situações de saldo por
+# mês da data do pedido + Taxa de Devolução (devoluções ÷ entregues).
+_VAL_SIT_AGUARD_DEVOLUCAO = "83957"      # Aguardando Devolução
+_VAL_SIT_AGUARD_CANCELAMENTO = "83955"   # Aguardando Cancelamento
+_VAL_SIT_ENTREGUE = "83953"              # Entregue
+
 # Explicação da fórmula de cada linha — tooltip "informativo" no hover (front).
 _OPER_DESCRICOES = {
     "erro_envio": (
@@ -682,6 +688,23 @@ _OPER_DESCRICOES = {
     "custo_manutencao": (
         "Soma dos custos de manutenção lançados nas devoluções, "
         "agrupada pelo mês de criação da devolução."
+    ),
+}
+
+# Explicação da fórmula de cada linha do quadro "Comercial" (tooltip no hover).
+_COM_DESCRICOES = {
+    "aguardando_devolucao": (
+        "Soma do valor base dos pedidos na situação 'Aguardando Devolução', "
+        "agrupada pelo mês da data do pedido."
+    ),
+    "aguardando_cancelamento": (
+        "Soma do valor base dos pedidos na situação 'Aguardando Cancelamento', "
+        "agrupada pelo mês da data do pedido."
+    ),
+    "taxa_devolucao": (
+        "Quantidade de produtos devolvidos (condição Novo ou Usado, pelo mês de "
+        "criação da devolução) dividida pela quantidade de pedidos entregues "
+        "(situação 'Entregue', pelo mês da data do pedido), em %."
     ),
 }
 
@@ -889,7 +912,8 @@ async def valuation_report(
     Consulta ao vivo davinci.bling_orders / valuation / stores / situacao_bling
     — sempre reflete o último estado das tabelas (a rotina das 5h as atualiza).
     Seções: Valuation 3 meses, Operacional 3 meses (situações/reembolso/
-    devoluções por mês), Por Marketplace e Por Categoria.
+    devoluções por mês), Comercial 3 meses (aguardando devolução/cancelamento
+    e taxa de devolução por mês), Por Marketplace e Por Categoria.
     """
     months = _val_window_months()
 
@@ -1051,6 +1075,71 @@ async def valuation_report(
         ],
     )
 
+    # 3b. Quadro "Comercial — 3 meses" (irmão do Operacional). Mesma janela e
+    #     mesmos helpers (_mes/_janela/_brl_row):
+    #       • Aguardando Devolução / Aguardando Cancelamento = SUM(valor base)
+    #         por situação, pela data do pedido (1 valor por pedido, MAX);
+    #       • Taxa de Devolução = qtd de devoluções (Novo+Usado, por created_at)
+    #         ÷ qtd de pedidos Entregues (por data do pedido), em %.
+    com_bo_sql = text(f"""
+        WITH por_pedido AS (
+            SELECT bo.numero,
+                   {_mes('bo.data')} AS mes,
+                   MAX(bo.situacao) AS situacao,
+                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase
+            FROM {_qt("bling_orders")} bo
+            WHERE {_janela('bo.data')}
+            GROUP BY bo.numero, mes
+        )
+        SELECT mes,
+               SUM(valorbase) FILTER (WHERE situacao = :s_dev) AS aguardando_devolucao,
+               SUM(valorbase) FILTER (WHERE situacao = :s_can) AS aguardando_cancelamento,
+               COUNT(*)       FILTER (WHERE situacao = :s_ent) AS entregues
+        FROM por_pedido
+        GROUP BY mes
+    """)
+    com_dev_sql = text(f"""
+        SELECT {_mes('created_at')} AS mes,
+               COUNT(*) FILTER (WHERE condicao_produto IN ('Novo', 'Usado')) AS devolucoes
+        FROM {_qt("devolutions")}
+        WHERE {_janela('created_at')}
+        GROUP BY mes
+    """)
+
+    com_bo_by_mes = {
+        r["mes"]: r for r in (await session.execute(com_bo_sql, {
+            "s_dev": _VAL_SIT_AGUARD_DEVOLUCAO,
+            "s_can": _VAL_SIT_AGUARD_CANCELAMENTO,
+            "s_ent": _VAL_SIT_ENTREGUE,
+        })).mappings().all()
+    }
+    com_dev_by_mes = {r["mes"]: r for r in (await session.execute(com_dev_sql)).mappings().all()}
+
+    def _taxa_dev_row() -> list[float | None]:
+        # Devoluções (Novo+Usado) ÷ pedidos entregues, em %. Sem entregues no
+        # mês → None (célula "—"), evita divisão por zero.
+        out: list[float | None] = []
+        for m in months:
+            entregues = com_bo_by_mes.get(m, {}).get("entregues") or 0
+            devs = com_dev_by_mes.get(m, {}).get("devolucoes") or 0
+            out.append(_r2(devs / entregues * 100) if entregues else None)
+        return out
+
+    comercial = OperacionalSecaoOut(
+        meses=months,
+        linhas=[
+            OperacionalLinhaOut(chave="aguardando_devolucao", label="Aguardando Devolução",
+                                formato="brl", descricao=_COM_DESCRICOES["aguardando_devolucao"],
+                                valores=_brl_row(com_bo_by_mes, "aguardando_devolucao")),
+            OperacionalLinhaOut(chave="aguardando_cancelamento", label="Aguardando Cancelamento",
+                                formato="brl", descricao=_COM_DESCRICOES["aguardando_cancelamento"],
+                                valores=_brl_row(com_bo_by_mes, "aguardando_cancelamento")),
+            OperacionalLinhaOut(chave="taxa_devolucao", label="Taxa de Devolução",
+                                formato="pct", descricao=_COM_DESCRICOES["taxa_devolucao"],
+                                valores=_taxa_dev_row()),
+        ],
+    )
+
     # 4 + 5. Por Marketplace e Por Categoria (3 meses) — mkt_rows/cat_rows já
     # executados acima (a rentabilidade do card mensal é a soma de mkt_rows).
     return ValuationReportOut(
@@ -1058,6 +1147,7 @@ async def valuation_report(
         situacoes_label=_VAL_SIT_LABEL,
         valuation_meses=valuation_meses,
         operacional=operacional,
+        comercial=comercial,
         por_marketplace=_agg_to_secoes([dict(r) for r in mkt_rows], months),
         por_categoria=_agg_to_secoes([dict(r) for r in cat_rows], months),
     )

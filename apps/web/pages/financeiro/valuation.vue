@@ -40,6 +40,7 @@ type Report = {
   situacoes_label: string
   valuation_meses: ValuationMes[]
   operacional: OperacionalSecao
+  comercial: OperacionalSecao
 }
 type EstoqueLocal = { local: string; qtd: number; valor: number }
 type EstoqueSnapshot = {
@@ -498,6 +499,54 @@ const loading = computed(() =>
                   <td
                     v-for="(v, i) in linha.valores"
                     :key="resumo.operacional.meses[i]"
+                    class="px-2 py-1 text-right tabular-nums border"
+                  >
+                    {{ linha.formato === 'pct' ? fmtPct(v) : fmtBRL(v) }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 4. Comercial — 3 meses (situações de saldo / taxa de devolução por mês) -->
+        <section class="space-y-2">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Comercial — 3 meses
+            <span class="normal-case text-xs text-muted-foreground">(aguardando devolução/cancelamento e taxa de devolução por mês)</span>
+          </h2>
+          <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
+            <table class="w-full text-xs border-collapse">
+              <thead class="bg-background sticky top-0 z-20">
+                <tr>
+                  <th class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Métrica</th>
+                  <th
+                    v-for="m in resumo.comercial.meses"
+                    :key="m"
+                    class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
+                  >
+                    {{ mesLabel(m) }}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="linha in resumo.comercial.linhas"
+                  :key="linha.chave"
+                  class="hover:brightness-95 dark:hover:brightness-110"
+                >
+                  <td class="px-2 py-1 border">
+                    <span
+                      class="inline-flex items-center gap-1.5 cursor-help"
+                      :title="linha.descricao"
+                    >
+                      {{ linha.label }}
+                      <Info class="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
+                    </span>
+                  </td>
+                  <td
+                    v-for="(v, i) in linha.valores"
+                    :key="resumo.comercial.meses[i]"
                     class="px-2 py-1 text-right tabular-nums border"
                   >
                     {{ linha.formato === 'pct' ? fmtPct(v) : fmtBRL(v) }}

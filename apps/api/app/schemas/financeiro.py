@@ -297,6 +297,7 @@ class ValuationReportOut(BaseModel):
     situacoes_label: str
     valuation_meses: list[ValuationMesOut]
     operacional: OperacionalSecaoOut
+    comercial: OperacionalSecaoOut
     por_marketplace: list[FaturamentoMesSecaoOut]
     por_categoria: list[FaturamentoMesSecaoOut]
 
