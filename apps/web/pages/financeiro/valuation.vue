@@ -407,51 +407,51 @@ const loading = computed(() =>
           <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             Valuation — 3 meses
           </h2>
-          <div class="border rounded-md overflow-auto">
-            <table class="w-full text-sm border-collapse">
-              <thead class="bg-muted/50 text-xs uppercase tracking-wide">
+          <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
+            <table class="w-full text-xs border-collapse">
+              <thead class="bg-background sticky top-0 z-20">
                 <tr>
-                  <th class="text-left px-3 py-2 font-medium">Componente</th>
+                  <th class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Componente</th>
                   <th
                     v-for="m in valMeses"
                     :key="m.mes"
-                    class="text-right px-3 py-2 font-medium capitalize"
+                    class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
                   >
                     {{ mesLabel(m.mes) }}
-                    <span v-if="m.data_snapshot" class="block text-[10px] normal-case text-muted-foreground">
+                    <span v-if="m.data_snapshot" class="block text-[10px] normal-case font-normal text-muted-foreground/70">
                       (até {{ diaCurto(m.data_snapshot) }})
                     </span>
                   </th>
                 </tr>
               </thead>
               <tbody>
-                <tr class="border-t">
-                  <td class="px-3 py-1.5">Caixa</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-1.5 text-right tabular-nums">
+                <tr class="hover:brightness-95 dark:hover:brightness-110">
+                  <td class="px-2 py-1 border">Caixa</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border">
                     {{ fmtBRL(m.caixa) }}
                   </td>
                 </tr>
-                <tr class="border-t bg-muted/20">
-                  <td class="px-3 py-1.5">A Receber</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-1.5 text-right tabular-nums">
+                <tr class="bg-muted/20 hover:brightness-95 dark:hover:brightness-110">
+                  <td class="px-2 py-1 border">A Receber</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border">
                     {{ fmtBRL(m.receber) }}
                   </td>
                 </tr>
-                <tr class="border-t">
-                  <td class="px-3 py-1.5">Estoque</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-1.5 text-right tabular-nums">
+                <tr class="hover:brightness-95 dark:hover:brightness-110">
+                  <td class="px-2 py-1 border">Estoque</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border">
                     {{ fmtBRL(m.estoque) }}
                   </td>
                 </tr>
-                <tr class="border-t bg-muted/40 font-semibold">
-                  <td class="px-3 py-2">TOTAL VALUATION</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-2 text-right tabular-nums">
+                <tr class="bg-muted/40 font-semibold">
+                  <td class="px-2 py-1.5 border">TOTAL VALUATION</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1.5 text-right tabular-nums border">
                     {{ fmtBRL(m.total) }}
                   </td>
                 </tr>
-                <tr class="border-t bg-amber-50 dark:bg-amber-950/30 font-semibold">
-                  <td class="px-3 py-2">Rentabilidade (mês)</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-3 py-2 text-right tabular-nums">
+                <tr class="bg-amber-50 dark:bg-amber-950/30 font-semibold">
+                  <td class="px-2 py-1.5 border">Rentabilidade (mês)</td>
+                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1.5 text-right tabular-nums border">
                     {{ fmtBRL(m.rentabilidade) }}
                   </td>
                 </tr>
@@ -466,15 +466,15 @@ const loading = computed(() =>
             Operacional — 3 meses
             <span class="normal-case text-xs text-muted-foreground">(situações, reembolso e devoluções por mês)</span>
           </h2>
-          <div class="border rounded-md overflow-auto">
-            <table class="w-full text-sm border-collapse">
-              <thead class="bg-muted/50 text-xs uppercase tracking-wide">
+          <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
+            <table class="w-full text-xs border-collapse">
+              <thead class="bg-background sticky top-0 z-20">
                 <tr>
-                  <th class="text-left px-3 py-2 font-medium">Métrica</th>
+                  <th class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Métrica</th>
                   <th
                     v-for="m in resumo.operacional.meses"
                     :key="m"
-                    class="text-right px-3 py-2 font-medium capitalize"
+                    class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
                   >
                     {{ mesLabel(m) }}
                   </th>
@@ -484,9 +484,9 @@ const loading = computed(() =>
                 <tr
                   v-for="linha in resumo.operacional.linhas"
                   :key="linha.chave"
-                  class="border-t hover:bg-muted/20"
+                  class="hover:brightness-95 dark:hover:brightness-110"
                 >
-                  <td class="px-3 py-1.5">
+                  <td class="px-2 py-1 border">
                     <span
                       class="inline-flex items-center gap-1.5 cursor-help"
                       :title="linha.descricao"
@@ -498,7 +498,7 @@ const loading = computed(() =>
                   <td
                     v-for="(v, i) in linha.valores"
                     :key="resumo.operacional.meses[i]"
-                    class="px-3 py-1.5 text-right tabular-nums"
+                    class="px-2 py-1 text-right tabular-nums border"
                   >
                     {{ linha.formato === 'pct' ? fmtPct(v) : fmtBRL(v) }}
                   </td>
@@ -529,13 +529,13 @@ const loading = computed(() =>
       </div>
 
       <template v-if="estoque">
-        <div class="border rounded-md overflow-auto">
-          <table class="w-full text-sm border-collapse">
-            <thead class="bg-muted/50 text-xs uppercase tracking-wide">
+        <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
+          <table class="w-full text-xs border-collapse">
+            <thead class="bg-background sticky top-0 z-20">
               <tr>
-                <th class="text-left px-3 py-2 font-medium">Local</th>
-                <th class="text-right px-3 py-2 font-medium">Quantidade</th>
-                <th class="text-right px-3 py-2 font-medium">Valor</th>
+                <th class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Local</th>
+                <th class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Quantidade</th>
+                <th class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Valor</th>
               </tr>
             </thead>
             <tbody>
@@ -545,18 +545,18 @@ const loading = computed(() =>
               <tr
                 v-for="r in estoque.locais"
                 :key="r.local"
-                class="border-t hover:bg-muted/20"
+                class="hover:brightness-95 dark:hover:brightness-110"
               >
-                <td class="px-3 py-1.5 font-medium">{{ r.local }}</td>
-                <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtInt(r.qtd) }}</td>
-                <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.valor) }}</td>
+                <td class="px-2 py-1 font-medium border">{{ r.local }}</td>
+                <td class="px-2 py-1 text-right tabular-nums border">{{ fmtInt(r.qtd) }}</td>
+                <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(r.valor) }}</td>
               </tr>
             </tbody>
             <tfoot class="bg-muted/30 font-semibold">
-              <tr class="border-t">
-                <td class="px-3 py-2">TOTAL</td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ fmtInt(estoque.total_qtd) }}</td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(estoque.total_valor) }}</td>
+              <tr>
+                <td class="px-2 py-1.5 border">TOTAL</td>
+                <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtInt(estoque.total_qtd) }}</td>
+                <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(estoque.total_valor) }}</td>
               </tr>
             </tfoot>
           </table>
@@ -584,19 +584,19 @@ const loading = computed(() =>
       </div>
 
       <template v-if="saldo">
-        <div class="border rounded-md overflow-auto">
-          <table class="w-full text-sm border-collapse">
-            <thead class="bg-muted/50 text-xs uppercase tracking-wide">
+        <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
+          <table class="w-full text-xs border-collapse">
+            <thead class="bg-background sticky top-0 z-20">
               <tr>
-                <th class="text-left px-3 py-2 font-medium sticky left-0 bg-muted/50">Loja</th>
+                <th class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border sticky left-0 z-30 bg-background">Loja</th>
                 <th
                   v-for="m in saldo.marketplaces"
                   :key="m"
-                  class="text-right px-3 py-2 font-medium"
+                  class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border"
                 >
                   {{ mktTitle(m) }}
                 </th>
-                <th class="text-right px-3 py-2 font-medium">Total a receber</th>
+                <th class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Total a receber</th>
               </tr>
             </thead>
             <tbody>
@@ -608,13 +608,13 @@ const loading = computed(() =>
               <tr
                 v-for="l in saldo.lojas"
                 :key="l.loja"
-                class="border-t hover:bg-muted/20"
+                class="hover:brightness-95 dark:hover:brightness-110"
               >
-                <td class="px-3 py-1.5 font-medium sticky left-0 bg-background">{{ l.loja }}</td>
+                <td class="px-2 py-1 font-medium border sticky left-0 z-10 bg-background">{{ l.loja }}</td>
                 <td
                   v-for="m in saldo.marketplaces"
                   :key="m"
-                  class="px-3 py-1.5 text-right tabular-nums"
+                  class="px-2 py-1 text-right tabular-nums border"
                 >
                   <template v-if="l.saldos[m]?.nota">
                     <span
@@ -628,21 +628,21 @@ const loading = computed(() =>
                   </template>
                   <span v-else class="text-muted-foreground">—</span>
                 </td>
-                <td class="px-3 py-1.5 text-right tabular-nums font-medium">{{ fmtBRL(l.total_a_receber) }}</td>
+                <td class="px-2 py-1 text-right tabular-nums font-medium border">{{ fmtBRL(l.total_a_receber) }}</td>
               </tr>
             </tbody>
             <tfoot class="bg-muted/30 font-semibold">
-              <tr class="border-t">
-                <td class="px-3 py-2 sticky left-0 bg-muted/30">TOTAL</td>
+              <tr>
+                <td class="px-2 py-1.5 border sticky left-0 z-10 bg-muted/30">TOTAL</td>
                 <td
                   v-for="m in saldo.marketplaces"
                   :key="m"
-                  class="px-3 py-2 text-right tabular-nums"
+                  class="px-2 py-1.5 text-right tabular-nums border"
                 >
                   <div class="text-[11px] text-muted-foreground font-normal">{{ fmtBRL(colTotalDisp(m)) }}</div>
                   <div>{{ fmtBRL(colTotalReceber(m)) }}</div>
                 </td>
-                <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(saldo.total_a_receber) }}</td>
+                <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(saldo.total_a_receber) }}</td>
               </tr>
             </tfoot>
           </table>
