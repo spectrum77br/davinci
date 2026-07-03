@@ -272,6 +272,26 @@ class OperacionalSecaoOut(BaseModel):
     linhas: list[OperacionalLinhaOut]
 
 
+class ComercialQuadroOut(BaseModel):
+    """Um quadro do bloco "Comercial — 3 meses". Mesma forma de
+    OperacionalSecaoOut (meses + linhas), com um `titulo` que identifica o
+    grupo: "Total (todas as lojas)", "Equipe N" ou "Sem equipe". `equipe` = o
+    número da equipe (None no Total e no Sem equipe)."""
+
+    titulo: str
+    equipe: int | None = None
+    meses: list[date]
+    linhas: list[OperacionalLinhaOut]
+
+
+class ComercialSecaoOut(BaseModel):
+    """Bloco Comercial dos últimos 3 meses, quebrado por equipe de vendas:
+    um quadro Total, um por equipe (store_info.sales_team) e um "Sem equipe"
+    quando houver dados não atribuídos a nenhuma equipe."""
+
+    quadros: list[ComercialQuadroOut]
+
+
 class FaturamentoGrpLinhaOut(BaseModel):
     """Uma linha (marketplace ou categoria) de um mês. Faturamento considera
     as situações aplicáveis; custo/rentabilidade/margem só Entregue."""
@@ -297,7 +317,7 @@ class ValuationReportOut(BaseModel):
     situacoes_label: str
     valuation_meses: list[ValuationMesOut]
     operacional: OperacionalSecaoOut
-    comercial: OperacionalSecaoOut
+    comercial: ComercialSecaoOut
     por_marketplace: list[FaturamentoMesSecaoOut]
     por_categoria: list[FaturamentoMesSecaoOut]
 

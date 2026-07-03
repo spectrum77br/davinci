@@ -40,6 +40,8 @@ from app.models import (
     User,
 )
 from app.schemas.financeiro import (
+    ComercialQuadroOut,
+    ComercialSecaoOut,
     ConsorcioOut,
     ConsorcioPatch,
     DNPConfigOut,
@@ -695,16 +697,19 @@ _OPER_DESCRICOES = {
 _COM_DESCRICOES = {
     "aguardando_devolucao": (
         "Soma do valor base dos pedidos na situação 'Aguardando Devolução', "
-        "agrupada pelo mês da data do pedido."
+        "pelo mês da data do pedido. Nos quadros por equipe, apenas as lojas da "
+        "equipe (loja do Bling → equipe de vendas em store_info.sales_team)."
     ),
     "aguardando_cancelamento": (
         "Soma do valor base dos pedidos na situação 'Aguardando Cancelamento', "
-        "agrupada pelo mês da data do pedido."
+        "pelo mês da data do pedido. Nos quadros por equipe, apenas as lojas da "
+        "equipe (loja do Bling → equipe de vendas em store_info.sales_team)."
     ),
     "taxa_devolucao": (
         "Quantidade de produtos devolvidos (condição Novo ou Usado, pelo mês de "
         "criação da devolução) dividida pela quantidade de pedidos entregues "
-        "(situação 'Entregue', pelo mês da data do pedido), em %."
+        "(situação 'Entregue', pelo mês da data do pedido), em %. A equipe da "
+        "devolução vem do pedido de origem (pedido → loja do Bling → equipe)."
     ),
 }
 
@@ -913,7 +918,8 @@ async def valuation_report(
     — sempre reflete o último estado das tabelas (a rotina das 5h as atualiza).
     Seções: Valuation 3 meses, Operacional 3 meses (situações/reembolso/
     devoluções por mês), Comercial 3 meses (aguardando devolução/cancelamento
-    e taxa de devolução por mês), Por Marketplace e Por Categoria.
+    e taxa de devolução por mês, quebrado por equipe de vendas), Por
+    Marketplace e Por Categoria.
     """
     months = _val_window_months()
 
@@ -1075,70 +1081,118 @@ async def valuation_report(
         ],
     )
 
-    # 3b. Quadro "Comercial — 3 meses" (irmão do Operacional). Mesma janela e
-    #     mesmos helpers (_mes/_janela/_brl_row):
-    #       • Aguardando Devolução / Aguardando Cancelamento = SUM(valor base)
-    #         por situação, pela data do pedido (1 valor por pedido, MAX);
+    # 3b. Bloco "Comercial — 3 meses", quebrado por EQUIPE de vendas. Mesma
+    #     janela/helpers (_mes/_janela). Equipe da loja = store_info.sales_team
+    #     (mapeada por bling_store_id = bling_orders.loja). Métricas por
+    #     (mês × equipe); os quadros (Total / Equipe N / Sem equipe) são
+    #     montados somando os baldes de equipe em Python.
+    #       • Aguardando Devolução/Cancelamento = SUM(valor base) por situação,
+    #         pela data do pedido (1 valor por pedido, MAX);
     #       • Taxa de Devolução = qtd de devoluções (Novo+Usado, por created_at)
-    #         ÷ qtd de pedidos Entregues (por data do pedido), em %.
+    #         ÷ qtd de pedidos Entregues (por data do pedido), em %. A equipe da
+    #         devolução vem do pedido de origem (pedido_bling → loja → equipe).
     com_bo_sql = text(f"""
         WITH por_pedido AS (
             SELECT bo.numero,
                    {_mes('bo.data')} AS mes,
                    MAX(bo.situacao) AS situacao,
-                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase
+                   MAX(COALESCE(NULLIF(bo.valorbase, 0), bo.total)) AS valorbase,
+                   MAX(bo.loja) AS loja
             FROM {_qt("bling_orders")} bo
             WHERE {_janela('bo.data')}
             GROUP BY bo.numero, mes
         )
-        SELECT mes,
-               SUM(valorbase) FILTER (WHERE situacao = :s_dev) AS aguardando_devolucao,
-               SUM(valorbase) FILTER (WHERE situacao = :s_can) AS aguardando_cancelamento,
-               COUNT(*)       FILTER (WHERE situacao = :s_ent) AS entregues
-        FROM por_pedido
-        GROUP BY mes
+        SELECT pp.mes, si.sales_team AS equipe,
+               SUM(pp.valorbase) FILTER (WHERE pp.situacao = :s_dev) AS aguardando_devolucao,
+               SUM(pp.valorbase) FILTER (WHERE pp.situacao = :s_can) AS aguardando_cancelamento,
+               COUNT(*)          FILTER (WHERE pp.situacao = :s_ent) AS entregues
+        FROM por_pedido pp
+        LEFT JOIN {_qt("store_info")} si ON si.bling_store_id = pp.loja
+        GROUP BY pp.mes, si.sales_team
     """)
     com_dev_sql = text(f"""
-        SELECT {_mes('created_at')} AS mes,
-               COUNT(*) FILTER (WHERE condicao_produto IN ('Novo', 'Usado')) AS devolucoes
-        FROM {_qt("devolutions")}
-        WHERE {_janela('created_at')}
-        GROUP BY mes
+        WITH dev AS (
+            SELECT d.id, {_mes('d.created_at')} AS mes, d.pedido_bling
+            FROM {_qt("devolutions")} d
+            WHERE {_janela('d.created_at')}
+              AND d.condicao_produto IN ('Novo', 'Usado')
+        )
+        SELECT dev.mes, si.sales_team AS equipe, COUNT(*) AS devolucoes
+        FROM dev
+        LEFT JOIN LATERAL (
+            SELECT bo.loja FROM {_qt("bling_orders")} bo
+            WHERE bo.numero = dev.pedido_bling LIMIT 1
+        ) bo ON true
+        LEFT JOIN {_qt("store_info")} si ON si.bling_store_id = bo.loja
+        GROUP BY dev.mes, si.sales_team
     """)
 
-    com_bo_by_mes = {
-        r["mes"]: r for r in (await session.execute(com_bo_sql, {
-            "s_dev": _VAL_SIT_AGUARD_DEVOLUCAO,
-            "s_can": _VAL_SIT_AGUARD_CANCELAMENTO,
-            "s_ent": _VAL_SIT_ENTREGUE,
-        })).mappings().all()
-    }
-    com_dev_by_mes = {r["mes"]: r for r in (await session.execute(com_dev_sql)).mappings().all()}
+    com_bo_rows = (await session.execute(com_bo_sql, {
+        "s_dev": _VAL_SIT_AGUARD_DEVOLUCAO,
+        "s_can": _VAL_SIT_AGUARD_CANCELAMENTO,
+        "s_ent": _VAL_SIT_ENTREGUE,
+    })).mappings().all()
+    com_dev_rows = (await session.execute(com_dev_sql)).mappings().all()
+    teams = list((await session.execute(text(
+        f"SELECT DISTINCT sales_team FROM {_qt('store_info')} "
+        "WHERE sales_team IS NOT NULL ORDER BY sales_team"
+    ))).scalars().all())
 
-    def _taxa_dev_row() -> list[float | None]:
-        # Devoluções (Novo+Usado) ÷ pedidos entregues, em %. Sem entregues no
-        # mês → None (célula "—"), evita divisão por zero.
-        out: list[float | None] = []
-        for m in months:
-            entregues = com_bo_by_mes.get(m, {}).get("entregues") or 0
-            devs = com_dev_by_mes.get(m, {}).get("devolucoes") or 0
-            out.append(_r2(devs / entregues * 100) if entregues else None)
-        return out
+    # Índices (mês, equipe) → métricas. equipe = None quando a loja não tem
+    # equipe (lojas internas / não mapeadas) — vira o quadro "Sem equipe".
+    bo_idx = {(r["mes"], r["equipe"]): r for r in com_bo_rows}
+    dev_idx = {(r["mes"], r["equipe"]): (r["devolucoes"] or 0) for r in com_dev_rows}
 
-    comercial = OperacionalSecaoOut(
-        meses=months,
-        linhas=[
-            OperacionalLinhaOut(chave="aguardando_devolucao", label="Aguardando Devolução",
-                                formato="brl", descricao=_COM_DESCRICOES["aguardando_devolucao"],
-                                valores=_brl_row(com_bo_by_mes, "aguardando_devolucao")),
-            OperacionalLinhaOut(chave="aguardando_cancelamento", label="Aguardando Cancelamento",
-                                formato="brl", descricao=_COM_DESCRICOES["aguardando_cancelamento"],
-                                valores=_brl_row(com_bo_by_mes, "aguardando_cancelamento")),
-            OperacionalLinhaOut(chave="taxa_devolucao", label="Taxa de Devolução",
-                                formato="pct", descricao=_COM_DESCRICOES["taxa_devolucao"],
-                                valores=_taxa_dev_row()),
-        ],
-    )
+    def _com_quadro(titulo: str, equipe: int | None, pred) -> ComercialQuadroOut:
+        # `pred(team)` seleciona os baldes de equipe deste quadro (Total = todos,
+        # Equipe N = team == N, Sem equipe = team is None).
+        ag_dev = {m: 0.0 for m in months}
+        ag_can = {m: 0.0 for m in months}
+        ent = {m: 0 for m in months}
+        dev = {m: 0 for m in months}
+        for (mes, team), r in bo_idx.items():
+            if mes in ag_dev and pred(team):
+                ag_dev[mes] += float(r["aguardando_devolucao"] or 0)
+                ag_can[mes] += float(r["aguardando_cancelamento"] or 0)
+                ent[mes] += int(r["entregues"] or 0)
+        for (mes, team), c in dev_idx.items():
+            if mes in dev and pred(team):
+                dev[mes] += int(c)
+        # Taxa: devoluções ÷ entregues, em %. Sem entregues no mês → None ("—").
+        taxa = [_r2(dev[m] / ent[m] * 100) if ent[m] else None for m in months]
+        return ComercialQuadroOut(
+            titulo=titulo, equipe=equipe, meses=months,
+            linhas=[
+                OperacionalLinhaOut(chave="aguardando_devolucao", label="Aguardando Devolução",
+                                    formato="brl", descricao=_COM_DESCRICOES["aguardando_devolucao"],
+                                    valores=[_r2(ag_dev[m]) for m in months]),
+                OperacionalLinhaOut(chave="aguardando_cancelamento", label="Aguardando Cancelamento",
+                                    formato="brl", descricao=_COM_DESCRICOES["aguardando_cancelamento"],
+                                    valores=[_r2(ag_can[m]) for m in months]),
+                OperacionalLinhaOut(chave="taxa_devolucao", label="Taxa de Devolução",
+                                    formato="pct", descricao=_COM_DESCRICOES["taxa_devolucao"],
+                                    valores=taxa),
+            ],
+        )
+
+    def _grupo_tem_dados(pred) -> bool:
+        for (mes, team), r in bo_idx.items():
+            if mes in months and pred(team) and (
+                (r["aguardando_devolucao"] or 0) or (r["aguardando_cancelamento"] or 0)
+                or (r["entregues"] or 0)
+            ):
+                return True
+        return any(mes in months and pred(team) and c
+                   for (mes, team), c in dev_idx.items())
+
+    quadros = [_com_quadro("Total (todas as lojas)", None, lambda t: True)]
+    for n in teams:
+        quadros.append(_com_quadro(f"Equipe {n}", int(n), (lambda t, n=n: t == n)))
+    # "Sem equipe" só aparece quando houver dados não atribuídos a equipe.
+    if _grupo_tem_dados(lambda t: t is None):
+        quadros.append(_com_quadro("Sem equipe", None, lambda t: t is None))
+
+    comercial = ComercialSecaoOut(quadros=quadros)
 
     # 4 + 5. Por Marketplace e Por Categoria (3 meses) — mkt_rows/cat_rows já
     # executados acima (a rentabilidade do card mensal é a soma de mkt_rows).
