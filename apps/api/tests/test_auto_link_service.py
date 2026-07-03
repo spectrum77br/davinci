@@ -86,6 +86,28 @@ async def _make_ml_integration(db: AsyncSession, user: User) -> Integration:
     return integ
 
 
+async def _make_tiktok_integration(db: AsyncSession, user: User) -> Integration:
+    company = Company(razao_social="TTCO", apelido=f"tt-{uuid.uuid4().hex[:6]}")
+    db.add(company)
+    await db.flush()
+    store = Store(company_id=company.id, marketplace=Marketplace.TIKTOK, status=StoreStatus.ACTIVE)
+    db.add(store)
+    await db.flush()
+    integ = Integration(
+        user_id=user.id,
+        store_id=store.id,
+        platform=IntegrationPlatform.TIKTOK,
+        name="tt",
+        credentials=encrypt_json(
+            {"app_key": "k", "app_secret": "s", "access_token": "t", "shop_cipher": "c"}
+        ),
+    )
+    db.add(integ)
+    await db.commit()
+    await db.refresh(integ)
+    return integ
+
+
 async def _make_job(db: AsyncSession, user: User) -> BackgroundJob:
     job = BackgroundJob(
         type=BackgroundJobType.AUTO_LINK,
@@ -359,6 +381,123 @@ async def test_auto_link_ml_keeps_link_already_present_when_sku_unchanged(
     assert job.result["created"] == 0
     assert job.result["repointed"] == 0
     assert job.result["already_present"] == 1
+
+
+# ------------------------------------------------- Shopee/TikTok repoint
+
+
+@pytest.mark.asyncio
+async def test_auto_link_shopee_repoints_link_when_marketplace_sku_changes(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Repoint agora vale p/ Shopee também: SKU do anúncio editado no painel
+    (dg053.sp → dg053.ci) move o link pro produto novo em vez de pular."""
+    integ = await _make_shopee_integration(db, user)
+    job = await _make_job(db, user)
+
+    old = Product(user_id=user.id, sku="dg053.sp", name="A", stock=0, min_stock=0)
+    new = Product(user_id=user.id, sku="dg053.ci", name="B", stock=5, min_stock=0)
+    db.add_all([old, new])
+    await db.flush()
+    stale = ProductLink(
+        user_id=user.id,
+        product_id=old.id,
+        integration_id=integ.id,
+        store_id=integ.store_id,
+        platform=IntegrationPlatform.SHOPEE,
+        external_id="900",
+        variation_id="7",
+        external_sku="dg053.sp",
+        listing_title="A",
+        stock=0,
+        last_sync_status=LinkSyncStatus.SKIPPED,
+    )
+    db.add(stale)
+    await db.commit()
+    stale_id = stale.id
+
+    from app.services.marketplaces import shopee as shopee_mod
+
+    monkeypatch.setattr(
+        shopee_mod.ShopeeClient,
+        "list_listings",
+        _fake_listings_factory([
+            {"external_id": "900", "variation_id": "7", "sku": "dg053.ci",
+             "title": "B", "stock": 5},
+        ]),
+    )
+
+    await run_auto_link(db, job_id=job.id, integration_ids=[integ.id])
+    await db.refresh(job)
+
+    assert job.result["created"] == 0
+    assert job.result["repointed"] == 1
+    links = (
+        await db.execute(
+            select(ProductLink).where(ProductLink.integration_id == integ.id)
+        )
+    ).scalars().all()
+    assert len(links) == 1
+    assert links[0].id == stale_id
+    assert links[0].product_id == new.id
+    assert links[0].external_sku == "dg053.ci"
+
+
+@pytest.mark.asyncio
+async def test_auto_link_tiktok_repoints_link_when_seller_sku_changes(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """TikTok: sku_id interno estável, seller_sku editado (a003.sa → a003.ci)
+    → re-aponta o link. Também cobre o dedup por (external_id, variation_id):
+    antes a chave incluía product_id e o repoint viria como INSERT duplicado."""
+    from app.services import auto_link as al
+    from app.services.marketplaces import tiktok as tt_mod
+
+    integ = await _make_tiktok_integration(db, user)
+    job = await _make_job(db, user)
+
+    old = Product(user_id=user.id, sku="a003.sa", name="Fone", stock=0, min_stock=0)
+    new = Product(user_id=user.id, sku="a003.ci", name="Fone", stock=9, min_stock=0)
+    db.add_all([old, new])
+    await db.flush()
+    stale = ProductLink(
+        user_id=user.id,
+        product_id=old.id,
+        integration_id=integ.id,
+        store_id=integ.store_id,
+        platform=IntegrationPlatform.TIKTOK,
+        external_id="TT1",
+        variation_id="SK1",
+        external_sku="a003.sa",
+        listing_title="Fone",
+        stock=0,
+        last_sync_status=LinkSyncStatus.SKIPPED,
+    )
+    db.add(stale)
+    await db.commit()
+
+    async def _fake_search(self, **kw):  # noqa: ANN001
+        return (
+            [{"product_id": "TT1", "title": "Fone",
+              "skus": [{"id": "SK1", "seller_sku": "a003.ci", "stock": 9}]}],
+            None,
+        )
+
+    monkeypatch.setattr(tt_mod.TikTokClient, "search_products", _fake_search)
+
+    stats = await al._link_tiktok_integration(db, job, integ)
+
+    assert stats["created"] == 0
+    assert stats["repointed"] == 1
+    await db.refresh(stale)
+    assert stale.product_id == new.id
+    assert stale.external_sku == "a003.ci"
+    links = (
+        await db.execute(
+            select(ProductLink).where(ProductLink.integration_id == integ.id)
+        )
+    ).scalars().all()
+    assert len(links) == 1
 
 
 # ---------------------------------------------------- TikTok page timeout (Item 1)

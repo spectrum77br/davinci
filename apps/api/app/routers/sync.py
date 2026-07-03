@@ -33,6 +33,8 @@ from app.models import (
 )
 from app.schemas.products import JobCreatedOut, JobOut
 from app.schemas.sync import (
+    ReloadLinkMove,
+    ReloadLinksOut,
     SyncAllIn,
     SyncLogOut,
     SyncLogPage,
@@ -340,6 +342,138 @@ async def sync_product(
     # working — a single product's log is a handful of entries.
     out.details = await load_job_details_tail(session, job.id)
     return out
+
+
+@router.post("/sync/product/{product_id}/reload-links", response_model=ReloadLinksOut)
+async def reload_product_links(
+    product_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+) -> ReloadLinksOut:
+    """Botão "Recarregar Vínculo" da linha do produto.
+
+    Relê o seller_sku ATUAL de todos os anúncios do produto em todas as
+    plataformas reconciliáveis (ML/Shopee/TikTok — na Amazon o seller-sku é a
+    chave imutável do anúncio, nada a mover) e re-aponta os links cujo SKU
+    passou pra outro produto. Depois roda o SyncOrchestrator nos produtos
+    afetados pra o estoque fluir pro anúncio já no produto certo. Devolve
+    quantos vínculos foram movidos e pra onde.
+    """
+    product = (
+        await session.execute(
+            select(Product).where(
+                and_(Product.id == product_id, user_scope(Product, user))
+            )
+        )
+    ).scalar_one_or_none()
+    if product is None:
+        raise HTTPException(404, detail={"code": "product_not_found"})
+
+    job = BackgroundJob(
+        type=BackgroundJobType.SYNC_PRODUCT,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={"product_id": str(product_id), "action": "reload_links"},
+    )
+    session.add(job)
+    await session.flush()
+
+    original_link_ids = list(
+        (
+            await session.execute(
+                select(ProductLink.id).where(ProductLink.product_id == product.id)
+            )
+        ).scalars().all()
+    )
+
+    report = await reconcile_product_links(session, user=user, product=product)
+
+    # Enrich each move with the target product's sku/name for the toast.
+    target_ids = list(report.moved_product_ids)
+    prod_by_id: dict[UUID, Product] = {}
+    if target_ids:
+        for p in (
+            await session.execute(
+                select(Product).where(Product.id.in_(target_ids))
+            )
+        ).scalars().all():
+            prod_by_id[p.id] = p
+
+    moves: list[ReloadLinkMove] = []
+    for m in report.moves:
+        tp = prod_by_id.get(m.to_product_id)
+        moves.append(
+            ReloadLinkMove(
+                link_id=m.link_id,
+                platform=m.platform,
+                external_id=m.external_id,
+                variation_id=m.variation_id,
+                from_sku=m.from_sku,
+                to_sku=m.to_sku,
+                to_product_id=m.to_product_id,
+                to_product_sku=tp.sku if tp else None,
+                to_product_name=tp.name if tp else None,
+            )
+        )
+        await append_job_detail(
+            session,
+            job.id,
+            {
+                "kind": "reconcile_move",
+                "link_id": str(m.link_id),
+                "integration_id": str(m.integration_id),
+                "platform": m.platform,
+                "external_id": m.external_id,
+                "from_sku": m.from_sku,
+                "to_sku": m.to_sku,
+            },
+        )
+    for w in report.warnings:
+        await append_job_detail(session, job.id, {"kind": "reconcile_warning", **w})
+
+    # Push stock from the (now correct) products so the anúncios that moved get
+    # the right stock — scoped to the clicked product's links (minus excedents)
+    # plus each target's Bling link, mirroring sync_product's post-move sync.
+    products_to_sync: list[Product] = [product]
+    only_link_ids: list[UUID] | None = None
+    if report.moves:
+        sync_ids = set(original_link_ids) - set(report.excedent_deleted)
+        bling_ids = (
+            await session.execute(
+                select(ProductLink.id).where(
+                    and_(
+                        ProductLink.product_id.in_(target_ids),
+                        ProductLink.platform == IntegrationPlatform.BLING,
+                    )
+                )
+            )
+        ).scalars().all()
+        sync_ids.update(bling_ids)
+        only_link_ids = list(sync_ids)
+        extra = (
+            await session.execute(
+                select(Product).where(
+                    and_(Product.id.in_(target_ids), user_scope(Product, user))
+                )
+            )
+        ).scalars().all()
+        products_to_sync = [product, *extra]
+
+    orch = SyncOrchestrator(
+        session, user_id=user.id, job=job, force=True, force_bling_refresh=True
+    )
+    await orch.run(products_to_sync, only_link_ids=only_link_ids)
+    await session.commit()
+
+    return ReloadLinksOut(
+        job_id=job.id,
+        checked=report.checked,
+        moved=len(report.moves),
+        unreadable=report.unreadable,
+        warnings=len(report.warnings),
+        moves=moves,
+        warnings_detail=report.warnings,
+    )
 
 
 @router.get("/sync-logs", response_model=SyncLogPage)

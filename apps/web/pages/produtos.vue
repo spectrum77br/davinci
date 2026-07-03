@@ -739,6 +739,79 @@ async function syncProduct(id: string, integrationIds?: string[]) {
   }
 }
 
+// "Recarregar Vínculo": relê o SKU atual de todos os anúncios do produto em
+// todas as plataformas e re-aponta os links cujo SKU mudou pra outro produto
+// (repoint on-demand). Diferente do "Sincronizar" (que empurra estoque por
+// conta escolhida), este corre em todas as contas do produto e foca em MOVER
+// vínculos que ficaram presos no produto errado.
+const reloadingLinks = ref<Set<string>>(new Set())
+
+type ReloadMove = {
+  platform: string
+  external_id: string
+  from_sku: string
+  to_sku: string
+  to_product_sku?: string | null
+  to_product_name?: string | null
+}
+type ReloadLinksResult = {
+  moved: number
+  checked: number
+  unreadable: number
+  warnings: number
+  moves: ReloadMove[]
+  warnings_detail: Array<Record<string, any>>
+}
+
+async function reloadLinks(id: string) {
+  reloadingLinks.value.add(id)
+  reloadingLinks.value = new Set(reloadingLinks.value)
+  try {
+    const res = await api<ReloadLinksResult>(
+      `/api/sync/product/${id}/reload-links`,
+      { method: 'POST', body: {} },
+    )
+    // Re-fetch pra tabela refletir os links movidos + estoque novo.
+    await refreshAll()
+    const product = items.value.find((p) => p.id === id)
+    const sku = product?.sku || id.slice(0, 8)
+
+    const warnLines = (res.warnings_detail || []).map((w) => {
+      if (w.code === 'produto_novo_ausente') return `⚠ SKU novo sem produto cadastrado: ${w.sku}`
+      if (w.code === 'sku_ambiguo') return `⚠ SKU novo ambíguo (2+ produtos): ${w.sku}`
+      return `⚠ ${w.code}: ${w.sku || ''}`
+    })
+
+    if (res.moved === 0) {
+      pushToast({
+        kind: warnLines.length ? 'warning' : 'success',
+        title: `${sku}: nenhum vínculo movido`,
+        lines: warnLines.length
+          ? warnLines
+          : [`${res.checked} anúncio(s) conferido(s) — todos já no produto certo`],
+      })
+    } else {
+      const moveLines = res.moves.map((m) => {
+        const dest = m.to_product_sku
+          ? ` (${m.to_product_name || m.to_product_sku})`
+          : ''
+        return `🔀 ${String(m.platform).toUpperCase()} ${m.external_id}: ${m.from_sku} → ${m.to_sku}${dest}`
+      })
+      pushToast({
+        kind: warnLines.length ? 'warning' : 'success',
+        title: `✓ ${sku}: ${res.moved} vínculo(s) movido(s)`,
+        lines: [...moveLines, ...warnLines],
+      }, 12000)
+    }
+  } catch (e: any) {
+    const msg = e?.data?.detail?.code || e?.message || 'erro'
+    pushToast({ kind: 'error', title: '✗ Erro ao recarregar vínculo', lines: [msg] })
+  } finally {
+    reloadingLinks.value.delete(id)
+    reloadingLinks.value = new Set(reloadingLinks.value)
+  }
+}
+
 function openSyncPopover(p: Product, ev: MouseEvent) {
   // Pre-selecionar todas as integrações que têm link com este produto.
   syncPopoverSelectedIds.value = new Set(
@@ -1437,6 +1510,17 @@ onUnmounted(() => stopPolling())
                     @click="(ev: MouseEvent) => syncPopoverProductId === p.id ? closeSyncPopover() : openSyncPopover(p, ev)"
                   >
                     <RefreshCw class="size-4" :class="syncingProduct.has(p.id) ? 'animate-spin' : ''" />
+                  </Button>
+                  <Button
+                    v-if="canEdit"
+                    size="icon"
+                    variant="ghost"
+                    class="text-violet-600 hover:text-violet-700 hover:bg-violet-50"
+                    :disabled="reloadingLinks.has(p.id)"
+                    :title="reloadingLinks.has(p.id) ? 'recarregando vínculo…' : 'Recarregar Vínculo — relê o SKU dos anúncios e re-aponta os que mudaram'"
+                    @click="reloadLinks(p.id)"
+                  >
+                    <Link2 class="size-4" :class="reloadingLinks.has(p.id) ? 'animate-pulse' : ''" />
                   </Button>
                   <Button
                     v-if="canDelete"

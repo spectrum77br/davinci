@@ -17,6 +17,33 @@ class SyncProductBody(BaseModel):
     reconcile: bool = True
 
 
+class ReloadLinkMove(BaseModel):
+    """One re-pointed link: the anúncio's SKU changed on the marketplace and
+    the link moved to the product that now owns that SKU."""
+
+    link_id: UUID
+    platform: str
+    external_id: str
+    variation_id: str | None = None
+    from_sku: str
+    to_sku: str
+    to_product_id: UUID
+    to_product_sku: str | None = None
+    to_product_name: str | None = None
+
+
+class ReloadLinksOut(BaseModel):
+    """Result of the per-product "Recarregar Vínculo" action."""
+
+    job_id: UUID | None = None
+    checked: int
+    moved: int
+    unreadable: int
+    warnings: int
+    moves: list[ReloadLinkMove]
+    warnings_detail: list[dict] = []
+
+
 class SyncAllIn(BaseModel):
     integration_ids: list[UUID] | None = None
     product_ids: list[UUID] | None = None

@@ -213,7 +213,12 @@ async def _link_tiktok_integration(
     products = (await session.execute(select(Product))).scalars().all()
     sku_index = _SkuIndex(products)
 
-    existing_keys: set[tuple[UUID, str, str]] = set()
+    # Key on (external_id, variation_id) to match the DB unique index
+    # (product_id is NOT part of it). Keying on product_id — as before — meant a
+    # seller_sku edited to another product produced a *new* key, so auto-link
+    # tried to INSERT a duplicate identity and the whole commit 23505'd; now it
+    # re-points instead.
+    existing_by_key: dict[tuple[str, str], ProductLink] = {}
     for link in (
         await session.execute(
             select(ProductLink).where(
@@ -224,9 +229,7 @@ async def _link_tiktok_integration(
             )
         )
     ).scalars().all():
-        existing_keys.add(
-            (link.product_id, link.external_id or "", link.variation_id or "")
-        )
+        existing_by_key[(link.external_id or "", link.variation_id or "")] = link
 
     creds = decrypt_json(integ.credentials) if integ.credentials else {}
 
@@ -247,6 +250,7 @@ async def _link_tiktok_integration(
     already = 0
     not_found = 0
     sku_vazio = 0
+    repointed = 0
     error: str | None = None
     page_token: str | None = None
     page_idx = 0
@@ -308,27 +312,41 @@ async def _link_tiktok_integration(
                     if motivo == "not_found":
                         not_found += 1
                     continue
-                key = (local.id, product_id, sku_id)
-                if key in existing_keys:
-                    already += 1
-                    continue
-                session.add(
-                    ProductLink(
-                        user_id=integ.user_id,
+                key = (product_id, sku_id)
+                existing_link = existing_by_key.get(key)
+                if existing_link is not None:
+                    if existing_link.product_id == local.id:
+                        already += 1
+                        continue
+                    # seller_sku editado no anúncio TikTok → re-aponta o link
+                    # pro produto que o SKU passou a resolver (o sku_id interno
+                    # é estável na edição do seller_sku).
+                    _repoint_link(
+                        existing_link,
                         product_id=local.id,
-                        integration_id=integ.id,
-                        store_id=integ.store_id,
-                        platform=IntegrationPlatform.TIKTOK,
-                        external_id=product_id,
-                        variation_id=sku_id,
                         external_sku=seller_sku,
-                        listing_title=title,
+                        title=title,
                         stock=sku.get("stock"),
-                        last_sync_status=LinkSyncStatus.OK,
-                        last_sync_at=_now(),
                     )
+                    repointed += 1
+                    job.processed = (job.processed or 0) + 1
+                    continue
+                new_link = ProductLink(
+                    user_id=integ.user_id,
+                    product_id=local.id,
+                    integration_id=integ.id,
+                    store_id=integ.store_id,
+                    platform=IntegrationPlatform.TIKTOK,
+                    external_id=product_id,
+                    variation_id=sku_id,
+                    external_sku=seller_sku,
+                    listing_title=title,
+                    stock=sku.get("stock"),
+                    last_sync_status=LinkSyncStatus.OK,
+                    last_sync_at=_now(),
                 )
-                existing_keys.add(key)
+                session.add(new_link)
+                existing_by_key[key] = new_link
                 created += 1
                 job.processed = (job.processed or 0) + 1
                 if created % 25 == 0:
@@ -339,7 +357,7 @@ async def _link_tiktok_integration(
     await session.commit()
     return _stats(
         created=created, already=already, not_found=not_found,
-        sku_vazio=sku_vazio, sku_index=sku_index, error=error,
+        sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
     )
 
 
@@ -382,6 +400,27 @@ async def _safe_flush_batch(
                 variation_id=link.variation_id,
             )
     return committed, skipped
+
+
+def _repoint_link(
+    link: ProductLink,
+    *,
+    product_id: Any,
+    external_sku: str,
+    title: str | None,
+    stock: int | None,
+) -> None:
+    """Move an existing link onto `product_id` because the marketplace's
+    current SELLER_SKU now belongs to a different product. The identity tuple
+    (user, platform, integration, external_id, variation_id) is unchanged, so
+    the re-point never collides with the unique index. Callers set
+    `listing_type` themselves when the platform carries one."""
+    link.product_id = product_id
+    link.external_sku = external_sku
+    link.listing_title = title
+    link.stock = stock
+    link.last_sync_status = LinkSyncStatus.OK
+    link.last_sync_at = _now()
 
 
 async def _link_via_listings(
@@ -484,13 +523,14 @@ async def _link_via_listings(
                     continue
                 # Marketplace SKU changed → re-point the stored row to the
                 # product it now belongs to (see docstring).
-                existing_link.product_id = local.id
-                existing_link.external_sku = sku
-                existing_link.listing_title = listing.get("title")
+                _repoint_link(
+                    existing_link,
+                    product_id=local.id,
+                    external_sku=sku,
+                    title=listing.get("title"),
+                    stock=listing.get("stock"),
+                )
                 existing_link.listing_type = listing.get("listing_type")
-                existing_link.stock = listing.get("stock")
-                existing_link.last_sync_status = LinkSyncStatus.OK
-                existing_link.last_sync_at = _now()
                 repointed += 1
                 job.processed = (job.processed or 0) + 1
                 continue
@@ -592,9 +632,9 @@ async def _link_amazon_integration(
     sku_index = _SkuIndex(products)
 
     # Same rule as _link_via_listings: dedup on (external_id, variation_id)
-    # since the DB unique constraint excludes product_id. existing_keys is
+    # since the DB unique constraint excludes product_id. existing_by_key is
     # already scoped to this integration via the WHERE clause below.
-    existing_keys: set[tuple[str, str]] = set()
+    existing_by_key: dict[tuple[str, str], ProductLink] = {}
     for link in (
         await session.execute(
             select(ProductLink).where(
@@ -605,9 +645,7 @@ async def _link_amazon_integration(
             )
         )
     ).scalars().all():
-        existing_keys.add(
-            (link.external_id or "", link.variation_id or "")
-        )
+        existing_by_key[(link.external_id or "", link.variation_id or "")] = link
 
     pending: list[ProductLink] = []
     created = 0
@@ -615,6 +653,7 @@ async def _link_amazon_integration(
     already = 0
     not_found = 0
     sku_vazio = 0
+    repointed = 0
     error: str | None = None
 
     async def _flush() -> None:
@@ -643,27 +682,42 @@ async def _link_amazon_integration(
                     not_found += 1
                 continue
             key = (external_id, variation_id or "")
-            if key in existing_keys:
-                already += 1
-                continue
-            pending.append(
-                ProductLink(
-                    user_id=integ.user_id,
+            existing_link = existing_by_key.get(key)
+            if existing_link is not None:
+                if existing_link.product_id == local.id:
+                    already += 1
+                    continue
+                # Raramente dispara na Amazon: o external_id É o seller-sku
+                # (chave imutável do anúncio), então editar o SKU cria um
+                # anúncio novo em vez de re-mapear este. Mantido por
+                # uniformidade com ML/Shopee/TikTok.
+                _repoint_link(
+                    existing_link,
                     product_id=local.id,
-                    integration_id=integ.id,
-                    store_id=integ.store_id,
-                    platform=IntegrationPlatform.AMAZON,
-                    external_id=external_id,
-                    variation_id=variation_id,
                     external_sku=listing.get("external_sku") or sku,
-                    listing_title=listing.get("title"),
-                    listing_type=listing.get("listing_type"),
+                    title=listing.get("title"),
                     stock=listing.get("stock"),
-                    last_sync_status=LinkSyncStatus.OK,
-                    last_sync_at=_now(),
                 )
+                existing_link.listing_type = listing.get("listing_type")
+                repointed += 1
+                continue
+            new_link = ProductLink(
+                user_id=integ.user_id,
+                product_id=local.id,
+                integration_id=integ.id,
+                store_id=integ.store_id,
+                platform=IntegrationPlatform.AMAZON,
+                external_id=external_id,
+                variation_id=variation_id,
+                external_sku=listing.get("external_sku") or sku,
+                listing_title=listing.get("title"),
+                listing_type=listing.get("listing_type"),
+                stock=listing.get("stock"),
+                last_sync_status=LinkSyncStatus.OK,
+                last_sync_at=_now(),
             )
-            existing_keys.add(key)
+            pending.append(new_link)
+            existing_by_key[key] = new_link
             if len(pending) >= 100:
                 await _flush()
         await _flush()
@@ -685,7 +739,7 @@ async def _link_amazon_integration(
         )
     return _stats(
         created=created, already=already, not_found=not_found,
-        sku_vazio=sku_vazio, sku_index=sku_index, error=error,
+        sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
     )
 
 
@@ -778,7 +832,8 @@ async def run_auto_link(
                 await _record(
                     integ,
                     await _link_via_listings(
-                        session, job, integ, client, IntegrationPlatform.SHOPEE
+                        session, job, integ, client, IntegrationPlatform.SHOPEE,
+                        repoint=True,
                     ),
                 )
             elif integ.platform == IntegrationPlatform.AMAZON:
