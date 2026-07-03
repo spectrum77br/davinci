@@ -310,3 +310,173 @@ async def test_uses_variation_id_as_model_id(db: AsyncSession, user: User) -> No
     assert result.status == SyncStatus.OK
     body = route.calls.last.request.content
     assert b'"model_id": 777' in body or b'"model_id":777' in body
+
+
+# --------------------------------------------- batch failure_list / success_list
+# Shopee's update_stock is a batch endpoint: it returns HTTP 200 with an EMPTY
+# top-level `error` even when the pushed model was rejected — the rejection is
+# hidden in response.failure_list. Reading only the top-level `error` reported
+# OK for a push that never landed, so the panel showed "enviado N" while Shopee
+# kept the old stock (the dup-listing bug on conta mega, i215.sa). These tests
+# pin the confirm-before-OK behavior.
+
+
+@pytest.mark.asyncio
+async def test_update_stock_model_in_failure_list_is_not_ok(
+    db: AsyncSession, user: User
+) -> None:
+    """error='' but the pushed model is in failure_list → NOT OK, and the real
+    failed_reason is surfaced. qty_after stays None so the orchestrator has
+    nothing to mirror into link.stock."""
+    _, _, link = await _setup(db, user)
+    link.variation_id = "159554631961"
+    db.add(link)
+    await db.commit()
+
+    client = ShopeeClient(_shopee_creds())
+    with respx.mock(base_url=client._base) as router:
+        router.post("/api/v2/product/update_stock").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "error": "",
+                    "message": "",
+                    "response": {
+                        "failure_list": [
+                            {
+                                "model_id": 159554631961,
+                                "failed_reason": "stock is locked by an ongoing promotion",
+                            }
+                        ],
+                        "success_list": [],
+                    },
+                },
+            )
+        )
+        result = await client.update_stock(link, 1)
+
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.error_code == "shopee_stock_failed"
+    assert "promotion" in (result.error_detail or "")
+    assert result.qty_after is None
+
+
+@pytest.mark.asyncio
+async def test_update_stock_success_list_confirms_ok(
+    db: AsyncSession, user: User
+) -> None:
+    """error='' and the pushed model is in success_list → OK with qty_after."""
+    _, _, link = await _setup(db, user)
+    link.variation_id = "239432288068"
+    db.add(link)
+    await db.commit()
+
+    client = ShopeeClient(_shopee_creds())
+    with respx.mock(base_url=client._base) as router:
+        router.post("/api/v2/product/update_stock").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "error": "",
+                    "response": {
+                        "failure_list": [],
+                        "success_list": [
+                            {"model_id": 239432288068, "location_id": "", "stock": 7}
+                        ],
+                    },
+                },
+            )
+        )
+        result = await client.update_stock(link, 7)
+
+    assert result.status == SyncStatus.OK
+    assert result.qty_after == 7
+
+
+@pytest.mark.asyncio
+async def test_update_stock_model_absent_from_both_lists_not_confirmed(
+    db: AsyncSession, user: User
+) -> None:
+    """error='' but our model is in neither list (Shopee silently dropped it) →
+    RETRYABLE, never a mirrored OK."""
+    _, _, link = await _setup(db, user)
+    link.variation_id = "111111111111"
+    db.add(link)
+    await db.commit()
+
+    client = ShopeeClient(_shopee_creds())
+    with respx.mock(base_url=client._base) as router:
+        router.post("/api/v2/product/update_stock").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "error": "",
+                    "response": {
+                        "failure_list": [],
+                        "success_list": [
+                            {"model_id": 999999999999, "location_id": "", "stock": 3}
+                        ],
+                    },
+                },
+            )
+        )
+        result = await client.update_stock(link, 3)
+
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.error_code == "shopee_stock_not_confirmed"
+    assert result.qty_after is None
+
+
+@pytest.mark.asyncio
+async def test_update_stock_failure_list_abnormal_goes_to_review(
+    db: AsyncSession, user: User
+) -> None:
+    """A dead-listing reason (deleted/abnormal) routes to REQUIRES_REVIEW so a
+    human unlinks the anúncio instead of retrying it forever (a055.sa /
+    SELLER_DELETE case, but reported via failure_list without a top error)."""
+    _, _, link = await _setup(db, user)
+    link.variation_id = "179410478625"
+    db.add(link)
+    await db.commit()
+
+    client = ShopeeClient(_shopee_creds())
+    with respx.mock(base_url=client._base) as router:
+        router.post("/api/v2/product/update_stock").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "error": "",
+                    "response": {
+                        "failure_list": [
+                            {
+                                "model_id": 179410478625,
+                                "failed_reason": "All the fields cannot be updated because the product status is abnormal",
+                            }
+                        ],
+                        "success_list": [],
+                    },
+                },
+            )
+        )
+        result = await client.update_stock(link, 67)
+
+    assert result.status == SyncStatus.REQUIRES_REVIEW
+    assert result.error_code == "shopee_stock_rejected"
+    assert result.payload.get("shopee_classification") == "banned"
+
+
+@pytest.mark.asyncio
+async def test_update_stock_no_response_body_stays_ok(
+    db: AsyncSession, user: User
+) -> None:
+    """Regression guard: a bare `{"error": ""}` (no batch lists — the shape the
+    older mocks and some Shopee responses use) must still be OK."""
+    _, _, link = await _setup(db, user)
+    client = ShopeeClient(_shopee_creds())
+    with respx.mock(base_url=client._base) as router:
+        router.post("/api/v2/product/update_stock").mock(
+            return_value=httpx.Response(200, json={"error": "", "request_id": "r"})
+        )
+        result = await client.update_stock(link, 5)
+    assert result.status == SyncStatus.OK
+    assert result.qty_after == 5

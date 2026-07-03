@@ -376,7 +376,7 @@ class ShopeeClient:
         except httpx.HTTPError as e:
             return _http_error_to_result(e, qty_before)
 
-        return _classify_response(r, qty_before, qty_after=qty)
+        return _classify_response(r, qty_before, qty_after=qty, model_id=model_id)
 
     async def update_price(
         self,
@@ -970,8 +970,67 @@ def _normalize_shopee_model(it: dict, model: dict, fallback_status: str) -> dict
 # ---------------------------------------------------------------- helpers
 
 
+# Substrings in a per-model `failed_reason` that mean the listing is in an
+# operational dead state (deleted/banned/abnormal) — route those to
+# REQUIRES_REVIEW so a human unlinks/fixes the anúncio instead of the sync
+# retrying it forever. Anything else that failed is treated as transient.
+_STOCK_REVIEW_KEYWORDS: tuple[str, ...] = (
+    "ban",
+    "delist",
+    "removed",
+    "off-shelf",
+    "off_shelf",
+    "abnormal",
+    "delete",
+    "not exist",
+    "does not exist",
+    "prohibit",
+)
+
+
+def _find_pushed_model(entries: list[dict], model_id: int | None) -> dict | None:
+    """Locate the success/failure entry for the model we pushed. update_stock
+    sends exactly one model per call, so when model_id is unknown we take the
+    sole entry."""
+    if not entries:
+        return None
+    if model_id is None:
+        return entries[0]
+    for e in entries:
+        try:
+            if int(e.get("model_id") or 0) == int(model_id):
+                return e
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _stock_failure_result(reason: str, qty_before: int | None) -> SyncResult:
+    """Turn a per-model `failed_reason` into a non-OK result. Deliberately never
+    OK — the point is that link.stock must NOT be mirrored for a push Shopee
+    rejected."""
+    if any(kw in reason.lower() for kw in _STOCK_REVIEW_KEYWORDS):
+        return SyncResult(
+            status=SyncStatus.REQUIRES_REVIEW,
+            qty_before=qty_before,
+            error_code="shopee_stock_rejected",
+            error_detail=reason[:500] or None,
+            payload={"shopee_classification": "banned"},
+        )
+    return SyncResult(
+        status=SyncStatus.RETRYABLE,
+        qty_before=qty_before,
+        error_code="shopee_stock_failed",
+        error_detail=reason[:500] or None,
+    )
+
+
 def _classify_response(
-    r: httpx.Response, qty_before: int | None, *, qty_after: int
+    r: httpx.Response,
+    qty_before: int | None,
+    *,
+    qty_after: int,
+    model_id: int | None = None,
 ) -> SyncResult:
     """Shopee returns 200 even when the request was rejected; the JSON body
     carries `error` + `message`. B5 hinges on reading the body, not the HTTP
@@ -998,6 +1057,35 @@ def _classify_response(
     msg = (payload.get("message") or payload.get("msg") or "").strip()
 
     if not err:
+        # update_stock is a *batch* endpoint (stock_list is a list of models):
+        # it returns HTTP 200 with an empty top-level `error` even when the
+        # model we pushed was rejected. The rejected model lands in
+        # `response.failure_list` (with `failed_reason`) while accepted models
+        # land in `response.success_list`. Reading only the top-level `error`
+        # reported OK for a push that never applied — the orchestrator then
+        # mirrored the new qty into link.stock and the panel showed "enviado N"
+        # while Shopee kept the old stock (the dup-listing bug on conta mega:
+        # i215.sa showed enviado=1 while Shopee held 0). Confirm the model we
+        # pushed actually succeeded before declaring OK.
+        resp = payload.get("response")
+        if isinstance(resp, dict) and ("failure_list" in resp or "success_list" in resp):
+            failed = _find_pushed_model(resp.get("failure_list") or [], model_id)
+            if failed is not None:
+                return _stock_failure_result(
+                    (failed.get("failed_reason") or "").strip(), qty_before
+                )
+            if _find_pushed_model(resp.get("success_list") or [], model_id) is None:
+                # Not explicitly failed, but also not confirmed applied — retry
+                # instead of mirroring an unconfirmed quantity into link.stock.
+                return SyncResult(
+                    status=SyncStatus.RETRYABLE,
+                    qty_before=qty_before,
+                    error_code="shopee_stock_not_confirmed",
+                    error_detail=(
+                        f"model_id {model_id} absent from success_list "
+                        "and failure_list"
+                    ),
+                )
         return SyncResult(
             status=SyncStatus.OK,
             qty_before=qty_before,
