@@ -35,28 +35,11 @@ type OperacionalSecao = {
   meses: string[]
   linhas: OperacionalLinha[]
 }
-type FatLinha = {
-  grp: string
-  faturamento: number
-  custo: number
-  rentabilidade: number
-  margem: number | null
-}
-type FatMesSecao = {
-  mes: string
-  linhas: FatLinha[]
-  total_faturamento: number
-  total_custo: number
-  total_rentabilidade: number
-  total_margem: number | null
-}
 type Report = {
   gerado_em: string
   situacoes_label: string
   valuation_meses: ValuationMes[]
   operacional: OperacionalSecao
-  por_marketplace: FatMesSecao[]
-  por_categoria: FatMesSecao[]
 }
 type EstoqueLocal = { local: string; qtd: number; valor: number }
 type EstoqueSnapshot = {
@@ -522,71 +505,6 @@ const loading = computed(() =>
                 </tr>
               </tbody>
             </table>
-          </div>
-        </section>
-
-        <!-- 4 + 5. Por Marketplace / Por Categoria -->
-        <section
-          v-for="grupo in [
-            { titulo: 'Por Marketplace', col: 'Marketplace', meses: resumo.por_marketplace },
-            { titulo: 'Por Categoria', col: 'Categoria', meses: resumo.por_categoria },
-          ]"
-          :key="grupo.titulo"
-          class="space-y-3"
-        >
-          <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-            {{ grupo.titulo }}
-          </h2>
-          <div v-for="sec in grupo.meses" :key="grupo.titulo + sec.mes" class="space-y-1">
-            <h3 class="text-xs font-semibold capitalize">{{ mesLabel(sec.mes) }}</h3>
-            <div class="border rounded-md overflow-auto">
-              <table class="w-full text-sm border-collapse">
-                <thead class="bg-muted/50 text-xs uppercase tracking-wide">
-                  <tr>
-                    <th class="text-left px-3 py-2 font-medium">{{ grupo.col }}</th>
-                    <th class="text-right px-3 py-2 font-medium">Faturamento</th>
-                    <th class="text-right px-3 py-2 font-medium">Custo</th>
-                    <th class="text-right px-3 py-2 font-medium">Rentabilidade</th>
-                    <th class="text-right px-3 py-2 font-medium">Margem</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-if="!sec.linhas.length">
-                    <td colspan="5" class="text-center py-4 text-muted-foreground">Sem dados no mês.</td>
-                  </tr>
-                  <tr
-                    v-for="(r, i) in sec.linhas"
-                    :key="r.grp + i"
-                    class="border-t hover:bg-muted/20"
-                  >
-                    <td class="px-3 py-1.5">{{ r.grp }}</td>
-                    <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.faturamento) }}</td>
-                    <td class="px-3 py-1.5 text-right tabular-nums">{{ fmtBRL(r.custo) }}</td>
-                    <td
-                      class="px-3 py-1.5 text-right tabular-nums"
-                      :class="r.rentabilidade < 0 ? 'text-destructive' : ''"
-                    >
-                      {{ fmtBRL(r.rentabilidade) }}
-                    </td>
-                    <td
-                      class="px-3 py-1.5 text-right tabular-nums"
-                      :class="r.margem != null && r.margem < 0 ? 'text-destructive' : ''"
-                    >
-                      {{ fmtPct(r.margem) }}
-                    </td>
-                  </tr>
-                </tbody>
-                <tfoot v-if="sec.linhas.length" class="bg-muted/30 font-semibold">
-                  <tr class="border-t">
-                    <td class="px-3 py-2">Total</td>
-                    <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(sec.total_faturamento) }}</td>
-                    <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(sec.total_custo) }}</td>
-                    <td class="px-3 py-2 text-right tabular-nums">{{ fmtBRL(sec.total_rentabilidade) }}</td>
-                    <td class="px-3 py-2 text-right tabular-nums">{{ fmtPct(sec.total_margem) }}</td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
           </div>
         </section>
       </template>
