@@ -123,6 +123,7 @@ def _stats(
     already: int = 0,
     not_found: int = 0,
     sku_vazio: int = 0,
+    repointed: int = 0,
     sku_index: _SkuIndex | None = None,
     error: str | None = None,
 ) -> dict[str, Any]:
@@ -132,6 +133,7 @@ def _stats(
         "not_found": not_found,
         "sku_vazio": sku_vazio,
         "sku_ambiguo": 0,
+        "repointed": repointed,
         "error": error,
     }
     if sku_index is not None and sku_index.ambiguous_count:
@@ -388,11 +390,21 @@ async def _link_via_listings(
     integ: Integration,
     client,
     platform: IntegrationPlatform,
+    *,
+    repoint: bool = False,
 ) -> dict[str, Any]:
     """Generic adapter: walk `client.list_listings()` (which already yields
     normalized {external_id, sku, title, listing_type, …} dicts for ML and
     Shopee) and create `product_links` for every listing whose SKU matches
     a row in `products`. Returns o dict de stats consumido por `_record`.
+
+    `repoint=True` (ML only) re-points an existing link when the marketplace
+    changed the listing's SELLER_SKU so it now resolves to a *different*
+    DaVinci product. Without it the old behavior treated the row as
+    "already_present" and skipped it — leaving the anúncio frozen on the
+    product that USED to carry that SKU and its stock stranded (the z0215
+    catalog-anúncio bug: 5 MLBs pinned to dg025.ra after the seller edited the
+    SKU on ML). Left off for Shopee to keep that path's behavior unchanged.
     """
     products = (await session.execute(select(Product))).scalars().all()
     sku_index = _SkuIndex(products)
@@ -404,6 +416,9 @@ async def _link_via_listings(
     # would allow two DaVinci products that share a SKU to both queue a link
     # for the same marketplace listing — and the DB then 23505s out.
     existing_keys: set[tuple[str, str]] = set()
+    # Same key → the actual ProductLink row, so we can re-point it in place when
+    # the marketplace SKU moved it to another product (repoint path).
+    existing_by_key: dict[tuple[str, str], ProductLink] = {}
     for link in (
         await session.execute(
             select(ProductLink).where(
@@ -417,6 +432,7 @@ async def _link_via_listings(
         ext = link.external_id or ""
         var = link.variation_id or ""
         existing_keys.add((ext, var))
+        existing_by_key[(ext, var)] = link
         # Encoding legado da Shopee (promoção via listings): o model_id vinha
         # embutido no external_id ("item_model") com variation_id vazio. Sem
         # decompor aqui, o mesmo anúncio ganharia um segundo link no formato
@@ -432,6 +448,7 @@ async def _link_via_listings(
     already = 0
     not_found = 0
     sku_vazio = 0
+    repointed = 0
     error: str | None = None
 
     async def _flush() -> None:
@@ -460,6 +477,23 @@ async def _link_via_listings(
                     not_found += 1
                 continue
             key = (external_id, variation_id or "")
+            existing_link = existing_by_key.get(key)
+            if existing_link is not None:
+                if not repoint or existing_link.product_id == local.id:
+                    already += 1
+                    continue
+                # Marketplace SKU changed → re-point the stored row to the
+                # product it now belongs to (see docstring).
+                existing_link.product_id = local.id
+                existing_link.external_sku = sku
+                existing_link.listing_title = listing.get("title")
+                existing_link.listing_type = listing.get("listing_type")
+                existing_link.stock = listing.get("stock")
+                existing_link.last_sync_status = LinkSyncStatus.OK
+                existing_link.last_sync_at = _now()
+                repointed += 1
+                job.processed = (job.processed or 0) + 1
+                continue
             if key in existing_keys:
                 already += 1
                 continue
@@ -504,7 +538,7 @@ async def _link_via_listings(
         )
     return _stats(
         created=created, already=already, not_found=not_found,
-        sku_vazio=sku_vazio, sku_index=sku_index, error=error,
+        sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
     )
 
 
@@ -687,6 +721,7 @@ async def run_auto_link(
         "not_found": 0,
         "sku_vazio": 0,
         "sku_ambiguo": 0,
+        "repointed": 0,
         "failed_integrations": 0,
         "ok_integrations": 0,
     }
@@ -697,6 +732,7 @@ async def run_auto_link(
         summary["not_found"] += stats.get("not_found", 0)
         summary["sku_vazio"] += stats.get("sku_vazio", 0)
         summary["sku_ambiguo"] += stats.get("sku_ambiguo", 0)
+        summary["repointed"] += stats.get("repointed", 0)
         error = stats.get("error")
         if error:
             summary["failed_integrations"] += 1
@@ -733,7 +769,8 @@ async def run_auto_link(
                 await _record(
                     integ,
                     await _link_via_listings(
-                        session, job, integ, client, IntegrationPlatform.ML
+                        session, job, integ, client, IntegrationPlatform.ML,
+                        repoint=True,
                     ),
                 )
             elif integ.platform == IntegrationPlatform.SHOPEE:

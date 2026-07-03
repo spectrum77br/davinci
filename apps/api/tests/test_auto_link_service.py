@@ -64,6 +64,28 @@ async def _make_shopee_integration(db: AsyncSession, user: User) -> Integration:
     return integ
 
 
+async def _make_ml_integration(db: AsyncSession, user: User) -> Integration:
+    company = Company(razao_social="MLCO", apelido=f"mlco-{uuid.uuid4().hex[:6]}")
+    db.add(company)
+    await db.flush()
+    store = Store(company_id=company.id, marketplace=Marketplace.ML, status=StoreStatus.ACTIVE)
+    db.add(store)
+    await db.flush()
+    integ = Integration(
+        user_id=user.id,
+        store_id=store.id,
+        platform=IntegrationPlatform.ML,
+        name="dream",
+        credentials=encrypt_json(
+            {"access_token": "x", "user_id": 1, "expires_at": 9999999999}
+        ),
+    )
+    db.add(integ)
+    await db.commit()
+    await db.refresh(integ)
+    return integ
+
+
 async def _make_job(db: AsyncSession, user: User) -> BackgroundJob:
     job = BackgroundJob(
         type=BackgroundJobType.AUTO_LINK,
@@ -216,6 +238,127 @@ async def test_auto_link_shopee_nao_duplica_link_com_encoding_legado(
         )
     ).scalars().all()
     assert len(links) == 1
+
+
+# ------------------------------------------------- ML repoint on SKU change
+
+
+@pytest.mark.asyncio
+async def test_auto_link_ml_repoints_link_when_marketplace_sku_changes(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Regressão do bug dos anúncios de catálogo (z0215): quando o vendedor
+    troca o SELLER_SKU no ML, o anúncio (mesmo external_id) passa a resolver
+    para OUTRO produto. O comportamento antigo via a chave (external_id,
+    variation_id) já existente e pulava como 'already_present', deixando o
+    link preso no produto velho (dg025.ra) com o estoque congelado. Agora o
+    link é RE-APONTADO para o produto novo (z0215)."""
+    integ = await _make_ml_integration(db, user)
+    job = await _make_job(db, user)
+
+    old = Product(user_id=user.id, sku="dg025.ra", name="Preto", stock=0, min_stock=0)
+    new = Product(user_id=user.id, sku="z0215", name="Preto AVULSO", stock=6, min_stock=0)
+    db.add_all([old, new])
+    await db.flush()
+
+    # Link legado: anúncio de catálogo apontando pro produto ERRADO (dg025.ra).
+    stale = ProductLink(
+        user_id=user.id,
+        product_id=old.id,
+        integration_id=integ.id,
+        store_id=integ.store_id,
+        platform=IntegrationPlatform.ML,
+        external_id="MLB4638933507",
+        variation_id=None,
+        external_sku="dg025.ra",
+        listing_title="Preto",
+        stock=0,
+        last_sync_status=LinkSyncStatus.SKIPPED,
+    )
+    db.add(stale)
+    await db.commit()
+    stale_id = stale.id
+
+    from app.services.marketplaces import ml as ml_mod
+
+    monkeypatch.setattr(
+        ml_mod.MercadoLivreClient,
+        "list_listings",
+        _fake_listings_factory([
+            # O anúncio agora carrega o SKU z0215 (o vendedor trocou no ML).
+            {"external_id": "MLB4638933507", "variation_id": None, "sku": "z0215",
+             "title": "Preto AVULSO", "listing_type": "gold_pro", "stock": 4},
+        ]),
+    )
+
+    await run_auto_link(db, job_id=job.id, integration_ids=[integ.id])
+    await db.refresh(job)
+
+    assert job.status == BackgroundJobStatus.SUCCEEDED
+    assert job.result["created"] == 0
+    assert job.result["already_present"] == 0
+    assert job.result["repointed"] == 1
+
+    # A MESMA linha foi re-apontada (não duplicou): agora pro produto novo.
+    links = (
+        await db.execute(
+            select(ProductLink).where(ProductLink.integration_id == integ.id)
+        )
+    ).scalars().all()
+    assert len(links) == 1
+    link = links[0]
+    assert link.id == stale_id
+    assert link.product_id == new.id
+    assert link.external_sku == "z0215"
+    assert link.stock == 4
+    assert link.last_sync_status == LinkSyncStatus.OK
+
+
+@pytest.mark.asyncio
+async def test_auto_link_ml_keeps_link_already_present_when_sku_unchanged(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Guard: se o SKU do anúncio NÃO mudou (resolve pro mesmo produto), o
+    link continua contando como 'already_present' e não é reescrito nem
+    contado como repoint."""
+    integ = await _make_ml_integration(db, user)
+    job = await _make_job(db, user)
+
+    p = Product(user_id=user.id, sku="z0215", name="AVULSO", stock=6, min_stock=0)
+    db.add(p)
+    await db.flush()
+    db.add(
+        ProductLink(
+            user_id=user.id,
+            product_id=p.id,
+            integration_id=integ.id,
+            store_id=integ.store_id,
+            platform=IntegrationPlatform.ML,
+            external_id="MLB4638933507",
+            variation_id=None,
+            external_sku="z0215",
+            last_sync_status=LinkSyncStatus.OK,
+        )
+    )
+    await db.commit()
+
+    from app.services.marketplaces import ml as ml_mod
+
+    monkeypatch.setattr(
+        ml_mod.MercadoLivreClient,
+        "list_listings",
+        _fake_listings_factory([
+            {"external_id": "MLB4638933507", "variation_id": None, "sku": "z0215",
+             "title": "AVULSO", "stock": 4},
+        ]),
+    )
+
+    await run_auto_link(db, job_id=job.id, integration_ids=[integ.id])
+    await db.refresh(job)
+
+    assert job.result["created"] == 0
+    assert job.result["repointed"] == 0
+    assert job.result["already_present"] == 1
 
 
 # ---------------------------------------------------- TikTok page timeout (Item 1)
