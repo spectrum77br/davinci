@@ -131,6 +131,7 @@ def _build_where(
     condicao: str | None,
     manutencao: bool | None = None,
     prazo_dias: int | None = None,
+    prazo_vencido: bool | None = None,
 ) -> list:
     where = []
     if search and search.strip():
@@ -143,10 +144,13 @@ def _build_where(
         where.append(Devolution.tag == tag.strip().lower().lstrip("."))
     if condicao and condicao.strip() and condicao.strip().lower() != "all":
         where.append(Devolution.condicao_produto == condicao.strip())
-    # Prazo de manutenção vencendo em até N dias (7/15/30). Só linhas com prazo
-    # setado (condição Manutenção); inclui vencidos (prazo já no passado), que
-    # são os mais urgentes.
-    if prazo_dias is not None and prazo_dias > 0:
+    # Prazo de manutenção (só linhas com prazo setado = condição Manutenção):
+    #   prazo_vencido → só as JÁ vencidas (prazo no passado);
+    #   prazo_dias    → vencendo em até N dias (7/15/30), incluindo as vencidas.
+    if prazo_vencido:
+        where.append(Devolution.prazo.is_not(None))
+        where.append(Devolution.prazo < datetime.now(UTC))
+    elif prazo_dias is not None and prazo_dias > 0:
         limite = datetime.now(UTC) + timedelta(days=prazo_dias)
         where.append(Devolution.prazo.is_not(None))
         where.append(Devolution.prazo <= limite)
@@ -175,9 +179,11 @@ async def list_devolutions(
     condicao: str | None = Query(None),
     manutencao: bool | None = Query(None),
     prazo_dias: int | None = Query(None, ge=1, le=365),
+    prazo_vencido: bool | None = Query(None),
 ) -> DevolutionPage:
     where = _build_where(
-        search, reembolso, tag, data_inicio, data_fim, condicao, manutencao, prazo_dias
+        search, reembolso, tag, data_inicio, data_fim, condicao, manutencao,
+        prazo_dias, prazo_vencido,
     )
 
     stmt = (
@@ -247,10 +253,12 @@ async def export_devolutions(
     condicao: str | None = Query(None),
     manutencao: bool | None = Query(None),
     prazo_dias: int | None = Query(None, ge=1, le=365),
+    prazo_vencido: bool | None = Query(None),
 ) -> StreamingResponse:
     """Exporta as devoluções (com os mesmos filtros da lista) em XLSX."""
     where = _build_where(
-        search, reembolso, tag, data_inicio, data_fim, condicao, manutencao, prazo_dias
+        search, reembolso, tag, data_inicio, data_fim, condicao, manutencao,
+        prazo_dias, prazo_vencido,
     )
     rows = (
         await session.execute(

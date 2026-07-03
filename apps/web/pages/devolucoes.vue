@@ -230,9 +230,10 @@ const dataInicioFilter = ref('')
 const dataFimFilter = ref('')
 // Mostrar só pedidos que já passaram em manutenção (manutencao = true).
 const manutencaoFilter = ref(false)
-// Filtro de prazo de manutenção (admin): mostra só devoluções cujo prazo
-// (created_at + 30d, condição Manutenção) vence em até N dias. Inclui vencidos.
-const prazoDiasFilter = ref<'all' | '7' | '15' | '30'>('all')
+// Filtro de prazo de manutenção (admin): 'vencidas' = só as já vencidas;
+// 7/15/30 = prazo (created_at + 30d, condição Manutenção) vencendo em até N
+// dias (inclui as vencidas).
+const prazoDiasFilter = ref<'all' | 'vencidas' | '7' | '15' | '30'>('all')
 const exporting = ref(false)
 
 const addOpen = ref(false)
@@ -561,7 +562,8 @@ async function load() {
     if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
     if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
     if (manutencaoFilter.value) params.set('manutencao', 'true')
-    if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
+    if (isAdmin.value && prazoDiasFilter.value === 'vencidas') params.set('prazo_vencido', 'true')
+    else if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
     const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
     items.value = res.items
     total.value = res.total
@@ -585,7 +587,8 @@ async function exportXlsx() {
     if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
     if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
     if (manutencaoFilter.value) params.set('manutencao', 'true')
-    if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
+    if (isAdmin.value && prazoDiasFilter.value === 'vencidas') params.set('prazo_vencido', 'true')
+    else if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
     const blob = await api<Blob>(`/api/devolutions/export.xlsx?${params.toString()}`, { responseType: 'blob' as any })
     const href = URL.createObjectURL(blob as any)
     const a = document.createElement('a')
@@ -1241,6 +1244,7 @@ async function backfillAddresses() {
         title="Prazo de manutenção vencendo em até N dias (inclui vencidos)"
       >
         <option value="all">todos prazos</option>
+        <option value="vencidas">vencidas</option>
         <option value="7">prazo em 7 dias</option>
         <option value="15">prazo em 15 dias</option>
         <option value="30">prazo em 30 dias</option>
