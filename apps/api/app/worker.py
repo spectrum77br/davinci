@@ -68,8 +68,10 @@ from app.services.valuation_estoque_snapshot import run_valuation_estoque_snapsh
 from app.worker_pool import (
     ARQ_FINANCIALS_QUEUE,
     ARQ_MARKETPLACE_QUEUE,
+    ARQ_SYNC_QUEUE,
     ARQ_UI_QUEUE,
     get_arq_pool,
+    get_arq_sync_pool,
 )
 
 logger = structlog.get_logger()
@@ -113,12 +115,30 @@ async def auto_link_run(
     job_id: str,
     integration_ids: list[str] | None,
 ) -> None:
+    """Vincular Automático (massa). Adquire o mesmo advisory lock por usuário do
+    `sync_all_run` pra que Sincronizar-Todos e Vincular sejam mutuamente
+    exclusivos (exclusividade "só outro massa"). Não conseguiu o lock → marca o
+    job FAILED com `sync_already_running`. O gate determinístico
+    (`mass_sync_active`) no endpoint já recusa a maioria com 409; este lock é o
+    backstop de runtime pra dois jobs que iniciem quase ao mesmo tempo."""
+    jid = UUID(job_id)
     async with session_scope() as s:
-        await run_auto_link(
-            s,
-            job_id=UUID(job_id),
-            integration_ids=[UUID(i) for i in (integration_ids or [])] or None,
-        )
+        job = await s.get(BackgroundJob, jid)
+        if job is None:
+            logger.error("auto_link_run_job_missing", job_id=job_id)
+            return
+        async with try_user_sync_lock(s, job.created_by) as acquired:
+            if not acquired:
+                job.status = BackgroundJobStatus.FAILED
+                job.error = "sync_already_running"
+                job.finished_at = datetime.now(UTC)
+                logger.warning("auto_link_run_locked", job_id=job_id)
+                return
+            await run_auto_link(
+                s,
+                job_id=jid,
+                integration_ids=[UUID(i) for i in (integration_ids or [])] or None,
+            )
 
 
 async def sync_all_run(
@@ -622,7 +642,7 @@ async def daily_sync_scheduler(ctx: dict) -> None:
             )
             s.add(job)
             await s.flush()
-            pool = await get_arq_pool()
+            pool = await get_arq_sync_pool()
             arq = await pool.enqueue_job(
                 "sync_all_run", str(job.id), str(us.user_id), None
             )
@@ -1748,6 +1768,49 @@ class WorkerSettingsFinancials:
     on_shutdown = shutdown
 
 
+class WorkerSettingsSync:
+    """Worker dedicado pro SYNC EM MASSA — `sync_all_run` (Sincronizar Todos),
+    `auto_link_run` (Vincular Automático), `sync_product_run` (webhook de
+    produto) e `refresh_bling_stock_run`.
+
+    Antes esses 4 jobs moravam na fila default junto do `ingest_bling_order_run`
+    (webhook de pedido) e ~25 crons (`WorkerSettings`, max_jobs=10). Um
+    Sincronizar Todos completo (~30 min) segurava um slot da default e competia
+    com o ingest, e o auto_link processava as ~17 integrações em série — uma
+    conta lenta travava a barra. Fila própria (`davinci_sync`) isola o massa: o
+    ingest/crons drenam livres na default; o massa roda em paralelo aqui.
+
+    Sem cron_jobs (o `daily_sync_scheduler` mora no default e enfileira o
+    `sync_all_run` NESTA fila via get_arq_sync_pool)."""
+
+    redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
+    functions = [
+        # Mantém o teto de 3h do sync_all (Sincronizar Todos completo ~30 min;
+        # ver nota em WorkerSettings). O advisory lock por usuário já impede
+        # dois em paralelo.
+        func(sync_all_run, timeout=10800),
+        sync_product_run,
+        auto_link_run,
+        refresh_bling_stock_run,
+    ]
+    queue_name = ARQ_SYNC_QUEUE
+    # Pool do processo = 30 (pool_size 10 + overflow 20). Pior caso realista:
+    # 1 massa segurando um slot (sync_all = 1 + SYNC_ALL_CONCURRENCY(8) sub-
+    # sessões = 9 conexões; auto_link = 1 + AUTOLINK_CONCURRENCY(4) = 5, e é
+    # mutuamente exclusivo com o sync_all pelo lock) + 7 sync_product/refresh
+    # (1 conexão cada) = ~16 < 30. max_jobs=8 cobre rajada de sync_product com
+    # folga sem estourar o pool.
+    max_jobs = 8
+    # Teto por job da classe. O sync_all sobrescreve p/ 10800 via func(); os
+    # demais (auto_link/sync_product/refresh) terminam bem abaixo de 1800.
+    job_timeout = 1800
+    keep_result = 3600
+    max_tries = 3
+    retry_jobs = True
+    on_startup = startup
+    on_shutdown = shutdown
+
+
 class WorkerSettingsMarketingAgent:
     """Worker da MÁQUINA DEDICADA (MARKETING_AGENT_NODE=1) — a ÚNICA que fala
     com Shopee/ML Ads, contornando o rate-limit por partner-id.
@@ -1797,6 +1860,7 @@ __all__ = [
     "WorkerSettings",
     "WorkerSettingsMarketingAgent",
     "WorkerSettingsMarketplace",
+    "WorkerSettingsSync",
     "WorkerSettingsUI",
     "audit_run",
     "auth_codes_cleanup",

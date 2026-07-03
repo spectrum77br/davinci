@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { Plus, Trash2, Download, RefreshCw, ChevronDown, ChevronRight, X, Loader2, Zap, Upload, Search, Tags, Link2 } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'produtos', action: 'view' } })
@@ -898,7 +898,7 @@ async function runSyncAll() {
     startPolling(r.job_id)
     syncAllProductIds.value = null
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    if (!handleMassBusy(e)) error.value = e?.data?.detail?.code || e?.message || 'erro'
   }
 }
 
@@ -1024,7 +1024,7 @@ function autoLinkTotals(job: any): {
   not_found: number
   sku_vazio: number
   sku_ambiguo: number
-  failed: number
+  pending: number
 } {
   const r = (job?.result || {}) as Record<string, any>
   return {
@@ -1033,7 +1033,9 @@ function autoLinkTotals(job: any): {
     not_found: r.not_found ?? 0,
     sku_vazio: r.sku_vazio ?? 0,
     sku_ambiguo: r.sku_ambiguo ?? 0,
-    failed: r.failed_integrations ?? 0,
+    // Contas que esgotaram os retries (ITEM 1). `failed_integrations` é mantido
+    // no backend como sinônimo; preferimos `pending_integrations` quando existe.
+    pending: r.pending_integrations ?? r.failed_integrations ?? 0,
   }
 }
 function autoLinkBreakdown(details: Array<Record<string, any>> | undefined): Array<{
@@ -1046,6 +1048,7 @@ function autoLinkBreakdown(details: Array<Record<string, any>> | undefined): Arr
   sku_ambiguo: number
   sku_ambiguo_sample: string[]
   result: string
+  bad: boolean
   error: string | null
 }> {
   return (details || []).map((d: any) => ({
@@ -1058,13 +1061,15 @@ function autoLinkBreakdown(details: Array<Record<string, any>> | undefined): Arr
     sku_ambiguo: d.sku_ambiguo ?? 0,
     sku_ambiguo_sample: d.sku_ambiguo_sample ?? [],
     result: d.result || 'ok',
+    // `pending` (retries esgotados) e o legado `failed` renderizam como aviso.
+    bad: d.result === 'pending' || d.result === 'failed',
     error: d.error || null,
   }))
 }
 function autoLinkSummaryClass(job: any): string {
   if (job?.status === 'failed') return 'border-red-300 bg-red-50 text-red-800'
   const t = autoLinkTotals(job)
-  if (t.failed > 0) return 'border-amber-300 bg-amber-50 text-amber-800'
+  if (t.pending > 0) return 'border-amber-300 bg-amber-50 text-amber-800'
   return 'border-emerald-300 bg-emerald-50 text-emerald-800'
 }
 
@@ -1173,14 +1178,43 @@ const jobDetails = shallowRef<Array<Record<string, any>>>([])
 let lastDetailId = 0
 let pollHandle: number | null = null
 
+// Cross-tab/reload: além do `activeJob` local (job iniciado NESTA aba), pergunta
+// ao backend se HÁ um massa em andamento (outra aba/cliente ou o daily_sync).
+// Assim os botões de massa ficam desabilitados p/ todos enquanto um massa roda,
+// não só na aba que o disparou. O gate real (409) mora no backend; isto é UX.
+const massSyncActiveRemote = ref(false)
+let massActiveHandle: number | null = null
+
+async function refreshMassActive() {
+  try {
+    const r = await api<{ active: boolean }>('/api/sync/active')
+    massSyncActiveRemote.value = !!r.active
+  } catch {
+    /* silencioso — quem garante a exclusividade é o 409 do backend */
+  }
+}
+
 // While a sync-all / auto-link job is running, disable the buttons that would
 // launch another one (the dialogs already hide their run button once a job is
-// active; this covers the header buttons).
+// active; this covers the header buttons). Individual per-SKU sync NÃO é
+// bloqueado (exclusividade "só outro massa").
 const jobActive = computed(
   () =>
-    activeJob.value != null &&
-    (activeJob.value.status === 'running' || activeJob.value.status === 'pending'),
+    massSyncActiveRemote.value ||
+    (activeJob.value != null &&
+      (activeJob.value.status === 'running' || activeJob.value.status === 'pending')),
 )
+
+// Trata o 409 "sync_already_running": marca massa ativo (desabilita botões) e
+// mostra aviso amigável. Devolve true se era 409 (o caller não sobrescreve).
+function handleMassBusy(e: any): boolean {
+  if (e?.data?.detail?.code === 'sync_already_running' || e?.status === 409) {
+    massSyncActiveRemote.value = true
+    error.value = 'Já existe uma sincronização em massa rodando; aguarde ela terminar.'
+    return true
+  }
+  return false
+}
 
 function openAutoLinkDialog() {
   selectedAutoLinkIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
@@ -1206,7 +1240,7 @@ async function runAutoLink() {
     })
     startPolling(r.job_id)
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    if (!handleMassBusy(e)) error.value = e?.data?.detail?.code || e?.message || 'erro'
   }
 }
 
@@ -1263,6 +1297,7 @@ function startPolling(jobId: string) {
         await fetchDetailDelta(jobId) // catch the tail before we stop
         stopPolling()
         await refreshAll()
+        await refreshMassActive() // re-enable os botões de massa assim que fecha
         return
       }
       // Snap back to fast polling on activity; back off when idle.
@@ -1276,7 +1311,16 @@ function startPolling(jobId: string) {
   void tick()
 }
 
-onUnmounted(() => stopPolling())
+onMounted(() => {
+  void refreshMassActive()
+  // Poll leve (10s) p/ refletir massa iniciado em outra aba/cliente ou pelo
+  // daily_sync — mantém os botões de massa desabilitados p/ todos.
+  massActiveHandle = window.setInterval(() => void refreshMassActive(), 10000)
+})
+onUnmounted(() => {
+  stopPolling()
+  if (massActiveHandle) window.clearInterval(massActiveHandle)
+})
 
 </script>
 
@@ -2025,8 +2069,8 @@ onUnmounted(() => stopPolling())
           <div class="text-sm">
             <span class="font-semibold tabular-nums text-emerald-700">{{ autoLinkTotals(activeJob).created }}</span>
             <span class="text-muted-foreground"> vinculados até agora</span>
-            <span v-if="autoLinkTotals(activeJob).failed > 0" class="ml-2 text-amber-700">
-              · {{ autoLinkTotals(activeJob).failed }} integração(ões) com erro
+            <span v-if="autoLinkTotals(activeJob).pending > 0" class="ml-2 text-amber-700">
+              · {{ autoLinkTotals(activeJob).pending }} conta(s) pendente(s)
             </span>
           </div>
 
@@ -2051,11 +2095,11 @@ onUnmounted(() => stopPolling())
             <!-- Per-integration breakdown -->
             <ul class="mt-2 space-y-0.5 text-xs">
               <li v-for="(b, idx) in autoLinkBreakdown(jobDetails)" :key="idx" class="flex items-center gap-1">
-                <span class="font-bold">{{ b.result === 'failed' ? '✗' : '✓' }}</span>
+                <span class="font-bold">{{ b.bad ? '⚠' : '✓' }}</span>
                 <span class="uppercase font-semibold">{{ b.platform }}</span>
                 <span>({{ b.integration }}):</span>
-                <template v-if="b.result === 'failed'">
-                  <span class="text-red-700 font-mono text-[11px]">{{ b.error }}</span>
+                <template v-if="b.bad">
+                  <span class="text-amber-700 font-mono text-[11px]">pendente após retries<template v-if="b.error"> · {{ b.error }}</template></span>
                 </template>
                 <template v-else>
                   <span>{{ b.created }} vinculados, {{ b.already }} já existentes, {{ b.not_found }} não encontrados<template v-if="b.sku_vazio">, {{ b.sku_vazio }} sem SKU</template><template v-if="b.sku_ambiguo">, {{ b.sku_ambiguo }} SKU duplicado ({{ b.sku_ambiguo_sample.join(', ') }})</template></span>
@@ -2070,11 +2114,11 @@ onUnmounted(() => stopPolling())
               v-for="(d, idx) in tailDetails(jobDetails, 100)"
               :key="idx"
               class="whitespace-pre-wrap"
-              :class="d.result === 'failed' ? 'text-red-600' : 'text-emerald-600'"
+              :class="(d.result === 'failed' || d.result === 'pending') ? 'text-amber-600' : 'text-emerald-600'"
             >
-              <span class="font-bold">{{ d.result === 'failed' ? '✗' : '✓' }}</span>
+              <span class="font-bold">{{ (d.result === 'failed' || d.result === 'pending') ? '⚠' : '✓' }}</span>
               [{{ (d.platform || '').toUpperCase() }}] {{ d.integration_name || (d.integration_id || '').slice(0, 8) }}:
-              <template v-if="d.result === 'failed'">{{ d.error }}</template>
+              <template v-if="d.result === 'failed' || d.result === 'pending'">pendente após retries<template v-if="d.error"> · {{ d.error }}</template></template>
               <template v-else>{{ d.created ?? 0 }} vinculados · {{ d.already_present ?? 0 }} já existentes · {{ d.not_found ?? 0 }} não encontrados<template v-if="d.sku_vazio"> · {{ d.sku_vazio }} sem SKU</template><template v-if="d.sku_ambiguo"> · {{ d.sku_ambiguo }} SKU duplicado</template></template>
             </li>
             <li v-if="!jobDetails.length" class="text-muted-foreground italic">

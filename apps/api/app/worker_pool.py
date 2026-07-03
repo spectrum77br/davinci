@@ -8,6 +8,7 @@ _pool: ArqRedis | None = None
 _ui_pool: ArqRedis | None = None
 _marketplace_pool: ArqRedis | None = None
 _financials_pool: ArqRedis | None = None
+_sync_pool: ArqRedis | None = None
 
 # Fila default ARQ — concentra ~48 jobs (webhooks marketplace, syncs,
 # crons gerais). Alto volume, latência ok.
@@ -34,6 +35,16 @@ ARQ_MARKETPLACE_QUEUE = "davinci_marketplace"
 # Worker dedicado isola o ingest do financeiro — a Margem só precisa do ingest
 # (taxa estimada do Bling é fallback até o financeiro real chegar).
 ARQ_FINANCIALS_QUEUE = "davinci_financials"
+
+# Fila do sync em massa — `sync_all_run` (Sincronizar Todos, ~25-30 min),
+# `auto_link_run` (Vincular Automático), `sync_product_run` (webhook de produto)
+# e `refresh_bling_stock_run`. Antes moravam na fila default junto do
+# `ingest_bling_order_run` (webhook de pedido) e ~25 crons: um Sincronizar Todos
+# segurava um slot da default por meia hora e o auto_link processava as ~17
+# integrações em série, então uma conta lenta travava a barra e competia com o
+# ingest. Worker dedicado (`WorkerSettingsSync`) drena o sync em paralelo ao
+# default — webhooks de pedido e crons não desaceleram o massa e vice-versa.
+ARQ_SYNC_QUEUE = "davinci_sync"
 
 
 async def get_arq_pool() -> ArqRedis:
@@ -88,8 +99,23 @@ async def get_arq_financials_pool() -> ArqRedis:
     return _financials_pool
 
 
+async def get_arq_sync_pool() -> ArqRedis:
+    """Pool da fila de sync em massa (`davinci_sync`). Use pra enfileirar
+    `sync_all_run`, `auto_link_run`, `sync_product_run` e
+    `refresh_bling_stock_run`. Worker dedicado (`WorkerSettingsSync`) drena em
+    paralelo ao default — o massa nunca mais compete com o ingest de pedido nem
+    com os crons."""
+    global _sync_pool
+    if _sync_pool is None:
+        _sync_pool = await create_pool(
+            RedisSettings.from_dsn(_settings.arq_redis_url),
+            default_queue_name=ARQ_SYNC_QUEUE,
+        )
+    return _sync_pool
+
+
 async def close_arq_pool() -> None:
-    global _pool, _ui_pool, _marketplace_pool, _financials_pool
+    global _pool, _ui_pool, _marketplace_pool, _financials_pool, _sync_pool
     if _pool is not None:
         await _pool.aclose()
         _pool = None
@@ -102,3 +128,6 @@ async def close_arq_pool() -> None:
     if _financials_pool is not None:
         await _financials_pool.aclose()
         _financials_pool = None
+    if _sync_pool is not None:
+        await _sync_pool.aclose()
+        _sync_pool = None

@@ -321,6 +321,11 @@ async def test_auto_link_ml_repoints_link_when_marketplace_sku_changes(
     assert job.result["already_present"] == 0
     assert job.result["repointed"] == 1
 
+    # O repoint agora roda numa sub-sessão (run_auto_link é concorrente), então a
+    # `db` desta fixture ainda tem a cópia velha do link no identity map
+    # (expire_on_commit=False). Recarrega SÓ esse objeto do banco (refresh é
+    # async-safe; expire_all dispararia lazy-load em new/old fora do greenlet).
+    await db.refresh(stale)
     # A MESMA linha foi re-apontada (não duplicou): agora pro produto novo.
     links = (
         await db.execute(
@@ -432,6 +437,10 @@ async def test_auto_link_shopee_repoints_link_when_marketplace_sku_changes(
 
     assert job.result["created"] == 0
     assert job.result["repointed"] == 1
+    # Repoint numa sub-sessão (run_auto_link concorrente) → recarrega SÓ o link
+    # do banco (refresh async-safe; expire_all dispararia lazy-load fora do
+    # greenlet), senão a `db` devolve a cópia velha do identity map.
+    await db.refresh(stale)
     links = (
         await db.execute(
             select(ProductLink).where(ProductLink.integration_id == integ.id)
@@ -485,7 +494,7 @@ async def test_auto_link_tiktok_repoints_link_when_seller_sku_changes(
 
     monkeypatch.setattr(tt_mod.TikTokClient, "search_products", _fake_search)
 
-    stats = await al._link_tiktok_integration(db, job, integ)
+    stats = await al._link_tiktok_integration(db, job.id, integ)
 
     assert stats["created"] == 0
     assert stats["repointed"] == 1
@@ -541,7 +550,7 @@ async def test_link_tiktok_page_timeout_is_bounded(
     monkeypatch.setattr(al, "TIKTOK_PAGE_TIMEOUT_SECONDS", 0.2)
 
     t0 = time.monotonic()
-    stats = await al._link_tiktok_integration(db, job, integ)
+    stats = await al._link_tiktok_integration(db, job.id, integ)
     elapsed = time.monotonic() - t0
 
     assert elapsed < 5.0, f"took {elapsed:.1f}s — wait_for wall didn't trip"
@@ -559,3 +568,137 @@ def test_tiktok_client_has_explicit_timeout():
     c = TikTokClient({"app_key": "k", "app_secret": "s"})
     assert isinstance(c._timeout, httpx.Timeout)
     assert isinstance(TIKTOK_DEFAULT_TIMEOUT, httpx.Timeout)
+
+
+# ------------------------------------------------- ITEM 1: concorrência/retry
+
+
+def _always_fail_listings_factory(counter: dict):
+    """async generator que conta a chamada e falha — simula conta instável.
+    `_link_via_listings` captura a exceção internamente e devolve stats.error,
+    então o `_link_with_retry` re-tenta."""
+    async def _fail(self, **kw):  # noqa: ANN001
+        counter["n"] += 1
+        raise RuntimeError("marketplace down")
+        yield  # inalcançável — torna isto um async generator
+    return _fail
+
+
+@pytest.mark.asyncio
+async def test_auto_link_conta_pendurada_fica_pending_sem_derrubar_as_outras(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """ITEM 1: uma conta que falha em TODAS as tentativas fica PENDENTE (visível
+    no summary), retentada AUTOLINK_MAX_TRIES vezes, enquanto a conta boa conclui
+    normalmente. O job termina SUCCEEDED (parcial), nunca FAILED, e nenhuma conta
+    some."""
+    from app.services import auto_link as al
+    from app.services.marketplaces import ml as ml_mod
+    from app.services.marketplaces import shopee as shopee_mod
+
+    # backoff zero — teste rápido, sem esperar os 2s/5s reais.
+    monkeypatch.setattr(al, "AUTOLINK_BACKOFF_SECONDS", [0.0, 0.0])
+
+    ok_integ = await _make_ml_integration(db, user)
+    bad_integ = await _make_shopee_integration(db, user)
+    job = await _make_job(db, user)
+
+    p = Product(user_id=user.id, sku="sku-ok", name="ok", stock=0, min_stock=0)
+    db.add(p)
+    await db.commit()
+
+    monkeypatch.setattr(
+        ml_mod.MercadoLivreClient, "list_listings",
+        _fake_listings_factory([
+            {"external_id": "1", "variation_id": None, "sku": "sku-ok",
+             "title": "t", "stock": 2},
+        ]),
+    )
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        shopee_mod.ShopeeClient, "list_listings",
+        _always_fail_listings_factory(calls),
+    )
+
+    await run_auto_link(
+        db, job_id=job.id, integration_ids=[ok_integ.id, bad_integ.id]
+    )
+    await db.refresh(job)
+
+    assert job.status == BackgroundJobStatus.SUCCEEDED  # parcial, não FAILED
+    assert job.result["ok_integrations"] == 1
+    assert job.result["pending_integrations"] == 1
+    # `failed_integrations` mantido como sinônimo (o front lê essa chave).
+    assert job.result["failed_integrations"] == 1
+    assert job.result["created"] == 1  # link da conta boa criado
+    # a conta ruim tentou exatamente AUTOLINK_MAX_TRIES vezes (nunca abandonada)
+    assert calls["n"] == al.AUTOLINK_MAX_TRIES
+
+    links = (
+        await db.execute(select(ProductLink).where(ProductLink.product_id == p.id))
+    ).scalars().all()
+    assert len(links) == 1  # só a conta boa gerou link
+
+
+@pytest.mark.asyncio
+async def test_auto_link_todas_pendentes_marca_job_failed(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Se NENHUMA conta conclui (todas pendentes), o job vira FAILED."""
+    from app.services import auto_link as al
+    from app.services.marketplaces import shopee as shopee_mod
+
+    monkeypatch.setattr(al, "AUTOLINK_BACKOFF_SECONDS", [0.0, 0.0])
+    bad_integ = await _make_shopee_integration(db, user)
+    job = await _make_job(db, user)
+
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        shopee_mod.ShopeeClient, "list_listings",
+        _always_fail_listings_factory(calls),
+    )
+
+    await run_auto_link(db, job_id=job.id, integration_ids=[bad_integ.id])
+    await db.refresh(job)
+
+    assert job.status == BackgroundJobStatus.FAILED
+    assert job.result["pending_integrations"] == 1
+    assert job.result["ok_integrations"] == 0
+
+
+# ------------------------------------------------- ITEM 1: exclusividade massa
+
+
+@pytest.mark.asyncio
+async def test_mass_sync_active_detecta_massa_em_andamento(
+    db: AsyncSession, user: User
+):
+    from datetime import UTC, datetime
+
+    from app.services.advisory_lock import mass_sync_active
+
+    assert await mass_sync_active(db, user.id) is None
+
+    job = BackgroundJob(
+        type=BackgroundJobType.SYNC_ALL,
+        status=BackgroundJobStatus.RUNNING,
+        created_by=user.id,
+    )
+    db.add(job)
+    await db.commit()
+
+    active = await mass_sync_active(db, user.id)
+    assert active is not None
+    assert active["type"] == "sync_all"
+    assert active["job_id"] == str(job.id)
+
+    # AUTO_LINK também conta como massa.
+    job.type = BackgroundJobType.AUTO_LINK
+    await db.commit()
+    assert (await mass_sync_active(db, user.id))["type"] == "auto_link"
+
+    # Terminado (finished_at setado) → não conta mais.
+    job.status = BackgroundJobStatus.SUCCEEDED
+    job.finished_at = datetime.now(UTC)
+    await db.commit()
+    assert await mass_sync_active(db, user.id) is None

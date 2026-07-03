@@ -24,8 +24,9 @@ from app.schemas.products import (
     JobStats,
     JobStatusOut,
 )
+from app.services.advisory_lock import mass_sync_active
 from app.services.job_details import count_job_details, load_job_details
-from app.worker_pool import get_arq_pool
+from app.worker_pool import get_arq_pool, get_arq_sync_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api", tags=["jobs"])
@@ -34,6 +35,7 @@ router = APIRouter(prefix="/api", tags=["jobs"])
 def _scope_jobs(user: User):
     """Admins see every user's jobs; non-admins only their own."""
     from sqlalchemy import true
+
     from app.models.enums import UserRole
 
     if user.role == UserRole.ADMIN:
@@ -198,6 +200,14 @@ async def enqueue_auto_link(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "edit"))],
 ) -> JobCreatedOut:
+    # Exclusividade "só outro massa": recusa se já há um Sincronizar Todos ou
+    # Vincular Automático em andamento. Individual por SKU não passa por aqui.
+    active = await mass_sync_active(session, user.id)
+    if active is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "sync_already_running", **active},
+        )
     job = BackgroundJob(
         type=BackgroundJobType.AUTO_LINK,
         status=BackgroundJobStatus.PENDING,
@@ -207,7 +217,7 @@ async def enqueue_auto_link(
     session.add(job)
     await session.flush()
 
-    pool = await get_arq_pool()
+    pool = await get_arq_sync_pool()
     arq = await pool.enqueue_job(
         "auto_link_run",
         str(job.id),

@@ -13,6 +13,7 @@ from app.worker import (
     WorkerSettingsUI,
     check_marketplace_shipped_orders,
     create_bling_kit_for_mark_job,
+    push_lote_stock_to_bling_job,
     sync_import_product_to_bling_job,
 )
 from app.worker_pool import (
@@ -32,12 +33,15 @@ def test_filas_separadas():
 
 
 def test_worker_ui_so_tem_jobs_ui():
-    """WorkerSettingsUI registra APENAS os 2 jobs UI-triggered.
-    Webhooks/syncs/crons NÃO devem rodar nele pra não bloquear."""
+    """WorkerSettingsUI registra APENAS os jobs UI-triggered (curtos, disparados
+    por click do operador). Webhooks/syncs/crons NÃO devem rodar nele pra não
+    bloquear. Hoje são 3: criar produto no Bling, criar kit e push de lote de
+    estoque."""
     fns = WorkerSettingsUI.functions
-    assert len(fns) == 2
+    assert len(fns) == 3
     assert sync_import_product_to_bling_job in fns
     assert create_bling_kit_for_mark_job in fns
+    assert push_lote_stock_to_bling_job in fns
 
 
 def test_worker_ui_consome_da_fila_correta():

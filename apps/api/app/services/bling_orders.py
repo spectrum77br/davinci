@@ -41,7 +41,10 @@ from app.services.marketplace_shipment_check import _operational_ship_date
 from app.services.marketplaces.bling import BlingClient
 from app.services.reembolso_sync import sync_reembolso_for_pedido
 from app.services.verificar_margem import refresh_silent as _verificar_margem_refresh_silent
-from app.worker_pool import get_arq_financials_pool, get_arq_pool
+from app.worker_pool import (
+    get_arq_financials_pool,
+    get_arq_sync_pool,
+)
 
 # em_andamento_data is the operator-facing ship-date column on the
 # planilha. Stamp it in Brasília-local date — without this conversion,
@@ -961,7 +964,9 @@ async def run_ingest_bling_order(
         )
 
     if jobs:
-        pool = await get_arq_pool()
+        # Fila dedicada de sync (davinci_sync): o push de estoque por produto
+        # sai do refresh de estoque do pedido, isolado do ingest na default.
+        pool = await get_arq_sync_pool()
         for job_id, product_id, link_ids in jobs:
             arq = await pool.enqueue_job(
                 "sync_product_run",

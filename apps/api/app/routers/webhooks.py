@@ -39,7 +39,7 @@ from app.models import (
     SyncLogAction,
 )
 from app.redis_client import redis
-from app.worker_pool import get_arq_pool
+from app.worker_pool import get_arq_pool, get_arq_sync_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
@@ -565,7 +565,10 @@ async def receive_bling_webhook(
     session.add(job)
     await session.flush()
 
-    pool = await get_arq_pool()
+    # Fila dedicada de sync (davinci_sync): o webhook de PRODUTO empurra estoque
+    # pro marketplace e mora com o resto do sync, isolado do ingest de PEDIDO
+    # (que fica na default). Ver worker_pool.ARQ_SYNC_QUEUE.
+    pool = await get_arq_sync_pool()
     arq = await pool.enqueue_job(
         "sync_product_run",
         str(job.id),

@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import and_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Namespace constant: first int passed to `pg_try_advisory_lock(int4, int4)`.
@@ -61,6 +62,53 @@ async def try_user_sync_lock(session: AsyncSession, user_id: UUID):
     )
     acquired: bool = bool(row.scalar())
     yield acquired
+
+
+# Janela p/ considerar um massa "ativo". O sync_all completo roda até ~3h
+# (WorkerSettings sync_all timeout=10800). Um RUNNING órfão é coberto pelo
+# background_jobs_gc (5min sem heartbeat → FAILED); esta janela só limita um
+# PENDING que nunca foi pego pelo worker (raro) pra não travar o gate p/ sempre.
+_MASS_SYNC_ACTIVE_WINDOW = timedelta(hours=4)
+
+
+async def mass_sync_active(session: AsyncSession, user_id: UUID) -> dict | None:
+    """Retorna o massa em andamento do usuário, ou None.
+
+    "Massa" = Sincronizar Todos (SYNC_ALL) ou Vincular Automático (AUTO_LINK).
+    Gate determinístico de exclusividade "só outro massa": os endpoints de
+    enqueue recusam (409) se já existe um; o sync individual por SKU NÃO usa
+    este gate (continua livre). Preferido ao advisory lock porque o lock é
+    transacional e só é adquirido DENTRO do worker (há uma janela entre o
+    enqueue e o pickup em que ninguém o segura) — uma linha PENDING/RUNNING é
+    visível imediatamente após o enqueue.
+    """
+    # Import local: app.models importa cedo demais p/ topo deste módulo.
+    from app.models import BackgroundJob, BackgroundJobStatus, BackgroundJobType
+
+    cutoff = datetime.now(UTC) - _MASS_SYNC_ACTIVE_WINDOW
+    row = (
+        await session.execute(
+            select(BackgroundJob)
+            .where(
+                and_(
+                    BackgroundJob.created_by == user_id,
+                    BackgroundJob.type.in_(
+                        [BackgroundJobType.SYNC_ALL, BackgroundJobType.AUTO_LINK]
+                    ),
+                    BackgroundJob.status.in_(
+                        [BackgroundJobStatus.PENDING, BackgroundJobStatus.RUNNING]
+                    ),
+                    BackgroundJob.finished_at.is_(None),
+                    BackgroundJob.created_at >= cutoff,
+                )
+            )
+            .order_by(BackgroundJob.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return {"job_id": str(row.id), "type": row.type.value, "status": row.status.value}
 
 
 async def release_stale_sync_locks(

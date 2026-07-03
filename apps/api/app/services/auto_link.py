@@ -19,10 +19,11 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import session_scope
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
@@ -51,6 +52,29 @@ logger = structlog.get_logger()
 # tests can shrink it.
 TIKTOK_PAGE_TIMEOUT_SECONDS = 45.0
 
+# Fan-out das integrações: em vez de processar as ~17 contas em série (uma conta
+# lenta segurava as outras 16), roda até AUTOLINK_CONCURRENCY em paralelo, cada
+# uma na sua própria AsyncSession. Cabe folgado no pool de 30 do processo
+# (1 sessão principal + AUTOLINK_CONCURRENCY sub-sessões).
+AUTOLINK_CONCURRENCY = 4
+
+# "Nunca abandona a conta": cada integração é retentada até AUTOLINK_MAX_TRIES
+# vezes dentro do run, com backoff entre as tentativas. Esgotou e ainda falha →
+# marcada PENDENTE (visível no summary/log do job), sem derrubar as outras.
+AUTOLINK_MAX_TRIES = 3
+# Espera (s) ANTES da 2ª e 3ª tentativas. Módulo-level p/ os testes zerarem.
+AUTOLINK_BACKOFF_SECONDS = [2.0, 5.0]
+
+# Plataformas com adapter direto de auto-link. As demais (ex.: TEMU) caem no
+# cron de listings e são contadas como `skipped`.
+_ADAPTED_PLATFORMS = {
+    IntegrationPlatform.BLING,
+    IntegrationPlatform.TIKTOK,
+    IntegrationPlatform.ML,
+    IntegrationPlatform.SHOPEE,
+    IntegrationPlatform.AMAZON,
+}
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -60,16 +84,43 @@ def _loop_now() -> float:
     return time.monotonic()
 
 
-async def _heartbeat(session: AsyncSession, job: BackgroundJob) -> None:
-    job.last_heartbeat_at = _now()
+async def _heartbeat(session: AsyncSession, job_id: UUID) -> None:
+    """Liveness only: bumps `last_heartbeat_at` via atomic SQL so
+    background_jobs_gc não marca o job como órfão durante um scan longo. Não
+    toca em `processed` (contabilizado por integração em `_bump_processed`),
+    então é seguro chamar de sub-sessões concorrentes."""
+    await session.execute(
+        update(BackgroundJob)
+        .where(BackgroundJob.id == job_id)
+        .values(last_heartbeat_at=_now())
+    )
     await session.commit()
 
 
-async def _append_detail(session: AsyncSession, job: BackgroundJob, entry: dict[str, Any]) -> None:
+async def _bump_processed(session: AsyncSession, job_id: UUID, n: int) -> None:
+    """Incremento RELATIVO e atômico de `processed` (+ heartbeat). Relativo
+    porque N integrações commitam em paralelo em sessões distintas — um
+    `SET processed = :abs` perderia updates (padrão do SyncOrchestrator)."""
+    if n <= 0:
+        return
+    await session.execute(
+        update(BackgroundJob)
+        .where(BackgroundJob.id == job_id)
+        .values(
+            processed=func.coalesce(BackgroundJob.processed, 0) + n,
+            last_heartbeat_at=_now(),
+        )
+    )
+    await session.commit()
+
+
+async def _append_detail(
+    session: AsyncSession, job_id: UUID, entry: dict[str, Any]
+) -> None:
     # Off the hot job row: one INSERT into background_job_details instead of
     # rewriting the JSONB array. Called once per integration (low volume), so
     # the commit here is cheap and keeps the per-integration progress visible.
-    await append_job_detail(session, job.id, entry)
+    await append_job_detail(session, job_id, entry)
     await session.commit()
 
 
@@ -144,10 +195,10 @@ def _stats(
 
 async def _link_bling_integration(
     session: AsyncSession,
-    job: BackgroundJob,
+    job_id: UUID,
     integ: Integration,
-) -> tuple[int, int, str | None]:
-    """Returns (created, already_present, error)."""
+) -> dict[str, Any]:
+    """Returns o dict de stats consumido por `_run_one`."""
     products = (
         await session.execute(
             select(Product).where(Product.bling_product_id.is_not(None))
@@ -191,18 +242,18 @@ async def _link_bling_integration(
         )
         session.add(link)
         created += 1
-        job.processed = (job.processed or 0) + 1
         if created % 25 == 0:
-            await _heartbeat(session, job)
-    return created, already, None
+            await _heartbeat(session, job_id)
+    await session.commit()
+    return _stats(created=created, already=already)
 
 
 async def _link_tiktok_integration(
     session: AsyncSession,
-    job: BackgroundJob,
+    job_id: UUID,
     integ: Integration,
 ) -> dict[str, Any]:
-    """Returns o dict de stats consumido por `_record`.
+    """Returns o dict de stats consumido por `_run_one`.
 
     Iterates `client.search_products` in pages of 100, matching each TikTok
     SKU's `seller_sku` against the user's `products.sku` (case-insensitive).
@@ -329,7 +380,6 @@ async def _link_tiktok_integration(
                         stock=sku.get("stock"),
                     )
                     repointed += 1
-                    job.processed = (job.processed or 0) + 1
                     continue
                 new_link = ProductLink(
                     user_id=integ.user_id,
@@ -348,9 +398,8 @@ async def _link_tiktok_integration(
                 session.add(new_link)
                 existing_by_key[key] = new_link
                 created += 1
-                job.processed = (job.processed or 0) + 1
                 if created % 25 == 0:
-                    await _heartbeat(session, job)
+                    await _heartbeat(session, job_id)
         if not page_token:
             break
 
@@ -425,7 +474,7 @@ def _repoint_link(
 
 async def _link_via_listings(
     session: AsyncSession,
-    job: BackgroundJob,
+    job_id: UUID,
     integ: Integration,
     client,
     platform: IntegrationPlatform,
@@ -435,7 +484,7 @@ async def _link_via_listings(
     """Generic adapter: walk `client.list_listings()` (which already yields
     normalized {external_id, sku, title, listing_type, …} dicts for ML and
     Shopee) and create `product_links` for every listing whose SKU matches
-    a row in `products`. Returns o dict de stats consumido por `_record`.
+    a row in `products`. Returns o dict de stats consumido por `_run_one`.
 
     `repoint=True` (ML only) re-points an existing link when the marketplace
     changed the listing's SELLER_SKU so it now resolves to a *different*
@@ -498,7 +547,7 @@ async def _link_via_listings(
         created += c
         skipped += s
         pending = []
-        await _heartbeat(session, job)
+        await _heartbeat(session, job_id)
 
     try:
         async for listing in client.list_listings():
@@ -532,7 +581,6 @@ async def _link_via_listings(
                 )
                 existing_link.listing_type = listing.get("listing_type")
                 repointed += 1
-                job.processed = (job.processed or 0) + 1
                 continue
             if key in existing_keys:
                 already += 1
@@ -555,7 +603,6 @@ async def _link_via_listings(
                 )
             )
             existing_keys.add(key)
-            job.processed = (job.processed or 0) + 1
             if len(pending) >= 100:
                 await _flush()
         await _flush()
@@ -614,7 +661,7 @@ def _amazon_client_for(integ: Integration, session: AsyncSession) -> AmazonClien
 
 async def _link_amazon_integration(
     session: AsyncSession,
-    job: BackgroundJob,
+    job_id: UUID,
     integ: Integration,
 ) -> dict[str, Any]:
     """Amazon-specific adapter: pulls the GET_MERCHANT_LISTINGS_ALL_DATA
@@ -624,7 +671,7 @@ async def _link_amazon_integration(
     Dedup key INCLUDES `integration_id` because the same SKU can exist in
     multiple Amazon seller accounts (e.g., MFN + FBA, or two regions).
 
-    Returns o dict de stats consumido por `_record`.
+    Returns o dict de stats consumido por `_run_one`.
     """
     client = _amazon_client_for(integ, session)
 
@@ -664,7 +711,7 @@ async def _link_amazon_integration(
         created += c
         skipped += s
         pending = []
-        await _heartbeat(session, job)
+        await _heartbeat(session, job_id)
 
     try:
         async for listing in client.list_listings():
@@ -743,6 +790,76 @@ async def _link_amazon_integration(
     )
 
 
+async def _link_dispatch(
+    session: AsyncSession, job_id: UUID, integ: Integration
+) -> dict[str, Any]:
+    """Roteia p/ o adapter da plataforma. Só é chamado p/ plataformas em
+    `_ADAPTED_PLATFORMS`. Retorna o dict de stats (com `error` setado em falha
+    tratada); pode levantar em falha não-tratada — o `_link_with_retry` captura."""
+    platform = integ.platform
+    if platform == IntegrationPlatform.BLING:
+        return await _link_bling_integration(session, job_id, integ)
+    if platform == IntegrationPlatform.TIKTOK:
+        return await _link_tiktok_integration(session, job_id, integ)
+    if platform == IntegrationPlatform.ML:
+        return await _link_via_listings(
+            session, job_id, integ, _ml_client_for(integ, session),
+            IntegrationPlatform.ML, repoint=True,
+        )
+    if platform == IntegrationPlatform.SHOPEE:
+        return await _link_via_listings(
+            session, job_id, integ, _shopee_client_for(integ, session),
+            IntegrationPlatform.SHOPEE, repoint=True,
+        )
+    if platform == IntegrationPlatform.AMAZON:
+        return await _link_amazon_integration(session, job_id, integ)
+    return _stats(error=f"no_adapter:{platform.value}")
+
+
+async def _link_with_retry(
+    session: AsyncSession, job_id: UUID, integ: Integration
+) -> tuple[dict[str, Any], bool]:
+    """Roda o adapter da plataforma, retentando até `AUTOLINK_MAX_TRIES` vezes
+    em caso de falha (exceção OU `stats['error']`), com backoff entre as
+    tentativas. Os adapters são idempotentes (already_present/repoint), então
+    re-rodar é seguro. Retorna `(stats, pending)` — `pending=True` quando esgotou
+    as tentativas e a conta ainda falha: ela é marcada PENDENTE em vez de sumir.
+    """
+    stats: dict[str, Any] = {}
+    for attempt in range(1, AUTOLINK_MAX_TRIES + 1):
+        try:
+            stats = await _link_dispatch(session, job_id, integ)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "auto_link_integration_attempt_failed",
+                integration_id=str(integ.id),
+                platform=integ.platform.value,
+                attempt=attempt,
+                err=str(e)[:300],
+            )
+            stats = _stats(error=f"{type(e).__name__}: {str(e)[:300]}")
+            # A exceção pode ter abortado a transação — limpa antes de seguir,
+            # senão o _bump_processed/_append_detail seguintes falhariam.
+            try:
+                await session.rollback()
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "auto_link_retry_rollback_failed", integration_id=str(integ.id)
+                )
+        if not stats.get("error"):
+            return stats, False
+        if attempt < AUTOLINK_MAX_TRIES:
+            idx = attempt - 1
+            delay = (
+                AUTOLINK_BACKOFF_SECONDS[idx]
+                if idx < len(AUTOLINK_BACKOFF_SECONDS)
+                else AUTOLINK_BACKOFF_SECONDS[-1]
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+    return stats, True
+
+
 async def run_auto_link(
     session: AsyncSession,
     *,
@@ -765,8 +882,12 @@ async def run_auto_link(
         stmt = stmt.where(Integration.id.in_(integration_ids))
     integrations = (await session.execute(stmt)).scalars().all()
 
-    job.total = sum(1 for _ in integrations) or 1
+    job.total = len(integrations) or 1
     await session.commit()
+
+    # Snapshot só os ids — cada task re-busca sua Integration na SUA sessão
+    # (sessions SQLAlchemy não são compartilháveis entre tasks concorrentes).
+    integ_ids = [i.id for i in integrations]
 
     summary = {
         "created": 0,
@@ -776,105 +897,98 @@ async def run_auto_link(
         "sku_vazio": 0,
         "sku_ambiguo": 0,
         "repointed": 0,
+        # `failed_integrations` mantido (o front lê essa chave) e agora é
+        # sinônimo de `pending_integrations`: contas que esgotaram os retries.
         "failed_integrations": 0,
+        "pending_integrations": 0,
         "ok_integrations": 0,
     }
+    sem = asyncio.Semaphore(AUTOLINK_CONCURRENCY)
 
-    async def _record(integ: Integration, stats: dict[str, Any]) -> None:
+    def _accumulate(stats: dict[str, Any]) -> None:
+        # Bloco 100% síncrono (sem await): seguro entre tasks cooperativas do
+        # asyncio — nenhuma outra corrotina roda no meio de um += sem await.
         summary["created"] += stats.get("created", 0)
         summary["already_present"] += stats.get("already_present", 0)
         summary["not_found"] += stats.get("not_found", 0)
         summary["sku_vazio"] += stats.get("sku_vazio", 0)
         summary["sku_ambiguo"] += stats.get("sku_ambiguo", 0)
         summary["repointed"] += stats.get("repointed", 0)
-        error = stats.get("error")
-        if error:
-            summary["failed_integrations"] += 1
-        else:
-            summary["ok_integrations"] += 1
-        await _append_detail(
-            session,
-            job,
-            {
-                "integration_id": str(integ.id),
-                "integration_name": integ.name,
-                "platform": integ.platform.value,
-                "result": "failed" if error else "ok",
-                **stats,
-            },
-        )
 
-    try:
-        for integ in integrations:
-            await _heartbeat(session, job)
-            if integ.platform == IntegrationPlatform.BLING:
-                created, already, error = await _link_bling_integration(
-                    session, job, integ
+    async def _run_one(integ_id: UUID) -> None:
+        async with sem:
+            async with session_scope() as sub_s:
+                integ = await sub_s.get(Integration, integ_id)
+                if integ is None:
+                    return
+                if integ.platform not in _ADAPTED_PLATFORMS:
+                    # TEMU etc: sem adapter direto → cai no cron de listings.
+                    summary["skipped"] += 1
+                    await _append_detail(
+                        sub_s,
+                        job_id,
+                        {
+                            "integration_id": str(integ.id),
+                            "integration_name": integ.name,
+                            "platform": integ.platform.value,
+                            "result": "deferred_to_listings_cron",
+                            "note": "Temu auto-link uses listings_import cron",
+                        },
+                    )
+                    return
+                stats, pending = await _link_with_retry(sub_s, job_id, integ)
+                await _bump_processed(
+                    sub_s,
+                    job_id,
+                    stats.get("created", 0) + stats.get("repointed", 0),
                 )
-                await _record(
-                    integ, _stats(created=created, already=already, error=error)
-                )
-            elif integ.platform == IntegrationPlatform.TIKTOK:
-                await _record(
-                    integ, await _link_tiktok_integration(session, job, integ)
-                )
-            elif integ.platform == IntegrationPlatform.ML:
-                client = _ml_client_for(integ, session)
-                await _record(
-                    integ,
-                    await _link_via_listings(
-                        session, job, integ, client, IntegrationPlatform.ML,
-                        repoint=True,
-                    ),
-                )
-            elif integ.platform == IntegrationPlatform.SHOPEE:
-                client = _shopee_client_for(integ, session)
-                await _record(
-                    integ,
-                    await _link_via_listings(
-                        session, job, integ, client, IntegrationPlatform.SHOPEE,
-                        repoint=True,
-                    ),
-                )
-            elif integ.platform == IntegrationPlatform.AMAZON:
-                await _record(
-                    integ, await _link_amazon_integration(session, job, integ)
-                )
-            else:
-                # TEMU still goes through the listings-table path (no
-                # direct API adapter implemented yet).
-                summary["skipped"] += 1
+                if pending:
+                    summary["pending_integrations"] += 1
+                    summary["failed_integrations"] += 1
+                    result = "pending"
+                else:
+                    summary["ok_integrations"] += 1
+                    result = "ok"
+                _accumulate(stats)
                 await _append_detail(
-                    session,
-                    job,
+                    sub_s,
+                    job_id,
                     {
                         "integration_id": str(integ.id),
                         "integration_name": integ.name,
                         "platform": integ.platform.value,
-                        "result": "deferred_to_listings_cron",
-                        "note": "Temu auto-link uses listings_import cron",
+                        "result": result,
+                        "pending": pending,
+                        **stats,
                     },
                 )
+
+    try:
+        # Fan-out: uma conta lenta/instável não segura as outras. Cada task tem
+        # seu retry+backoff; uma que estoure de vez fica PENDENTE, nunca some.
+        await asyncio.gather(*[_run_one(i) for i in integ_ids])
         job.result = summary
-        # Job is FAILED only when *every* integration failed (no successes).
-        # Otherwise SUCCEEDED — the UI can flag partial failures via
-        # `result.failed_integrations` and the per-integration details.
+        # FAILED só quando NENHUMA integração concluiu (nem ok, nem skipped) e há
+        # pendentes. Senão SUCCEEDED — o parcial fica visível em
+        # result.pending_integrations + nos detalhes por integração.
         if (
-            summary["failed_integrations"] > 0
+            summary["pending_integrations"] > 0
             and summary["ok_integrations"] == 0
             and summary["skipped"] == 0
         ):
             job.status = BackgroundJobStatus.FAILED
             job.error = (
-                f"all {summary['failed_integrations']} integration(s) failed"
+                f"all {summary['pending_integrations']} integration(s) pending"
             )
         else:
             job.status = BackgroundJobStatus.SUCCEEDED
-            if summary["failed_integrations"] > 0:
+            if summary["pending_integrations"] > 0:
+                total_adapted = (
+                    summary["pending_integrations"] + summary["ok_integrations"]
+                )
                 job.error = (
-                    f"{summary['failed_integrations']}/"
-                    f"{summary['failed_integrations'] + summary['ok_integrations']}"
-                    " integration(s) failed"
+                    f"{summary['pending_integrations']}/{total_adapted}"
+                    " integration(s) pending"
                 )
     except Exception as e:  # noqa: BLE001
         logger.exception("auto_link_failed", job_id=str(job_id))

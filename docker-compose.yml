@@ -141,6 +141,28 @@ services:
         aliases:
           - worker_financials
 
+  # Worker dedicado pro SYNC EM MASSA (fila `davinci_sync`): sync_all_run
+  # (Sincronizar Todos, ~30 min), auto_link_run (Vincular Automático),
+  # sync_product_run (webhook de produto) e refresh_bling_stock_run. Antes
+  # disputavam a fila default com o ingest de pedido e ~25 crons; um massa
+  # segurava o slot e uma conta lenta travava a barra. Mesma imagem, comando
+  # diferente: WorkerSettingsSync, max_jobs=8.
+  worker_sync:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["uv", "run", "arq", "app.worker.WorkerSettingsSync"]
+    env_file: .env
+    environment:
+      APP_NAME: davinci-worker-sync
+    volumes:
+      - ./data/uploads:/data/uploads
+    networks:
+      davinci_net:
+        aliases:
+          - worker_sync
+
   web:
     build:
       context: ./apps/web

@@ -41,11 +41,15 @@ from app.schemas.sync import (
     SyncLogStats,
     SyncProductBody,
 )
-from app.services.advisory_lock import SYNC_NAMESPACE, _user_lock_key, try_user_sync_lock
+from app.services.advisory_lock import (
+    SYNC_NAMESPACE,
+    _user_lock_key,
+    mass_sync_active,
+)
 from app.services.job_details import append_job_detail, load_job_details_tail
 from app.services.link_reconcile import reconcile_product_links
 from app.services.sync_orchestrator import SyncOrchestrator
-from app.worker_pool import get_arq_pool
+from app.worker_pool import get_arq_pool, get_arq_sync_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api", tags=["sync"])
@@ -61,6 +65,15 @@ async def enqueue_sync_all(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "edit"))],
 ) -> JobCreatedOut:
+    # Exclusividade "só outro massa": recusa se já há um Sincronizar Todos ou
+    # Vincular Automático em andamento p/ este usuário. O sync individual por
+    # SKU NÃO passa por aqui (continua livre).
+    active = await mass_sync_active(session, user.id)
+    if active is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "sync_already_running", **active},
+        )
     job = BackgroundJob(
         type=BackgroundJobType.SYNC_ALL,
         status=BackgroundJobStatus.PENDING,
@@ -74,7 +87,7 @@ async def enqueue_sync_all(
     session.add(job)
     await session.flush()
 
-    pool = await get_arq_pool()
+    pool = await get_arq_sync_pool()
     arq = await pool.enqueue_job(
         "sync_all_run",
         str(job.id),
@@ -181,12 +194,24 @@ async def enqueue_refresh_bling_stock(
     session.add(job)
     await session.flush()
 
-    pool = await get_arq_pool()
+    pool = await get_arq_sync_pool()
     arq = await pool.enqueue_job("refresh_bling_stock_run", str(job.id))
     if arq is not None:
         job.arq_job_id = arq.job_id
     await session.commit()
     return JobCreatedOut(job_id=job.id)
+
+
+@router.get("/sync/active")
+async def sync_active(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    """Existe um sync em massa (Sincronizar Todos / Vincular Automático) em
+    andamento p/ este usuário? O front consulta no load + a cada ~10s pra
+    desabilitar os botões de massa mesmo quando outro cliente/aba iniciou."""
+    active = await mass_sync_active(session, user.id)
+    return {"active": active is not None, **(active or {})}
 
 
 @router.post("/sync/product/{product_id}", response_model=JobOut)
