@@ -1091,6 +1091,10 @@ async def valuation_report(
     #       • Taxa de Devolução = qtd de devoluções (Novo+Usado, por created_at)
     #         ÷ qtd de pedidos Entregues (por data do pedido), em %. A equipe da
     #         devolução vem do pedido de origem (pedido_bling → loja → equipe).
+    #     Lojas internas (_VAL_IGNORED_STORES: 0/205632678/205660518) ficam de
+    #     fora — mesmas que a rentabilidade do Valuation já ignora. Pedidos/
+    #     devoluções sem loja (loja NULL / pedido não casado) CONTINUAM entrando
+    #     no "Sem equipe" (COALESCE('') não bate com a lista de ignoradas).
     com_bo_sql = text(f"""
         WITH por_pedido AS (
             SELECT bo.numero,
@@ -1100,6 +1104,7 @@ async def valuation_report(
                    MAX(bo.loja) AS loja
             FROM {_qt("bling_orders")} bo
             WHERE {_janela('bo.data')}
+              AND COALESCE(bo.loja, '') <> ALL(:ignored_stores)
             GROUP BY bo.numero, mes
         )
         SELECT pp.mes, si.sales_team AS equipe,
@@ -1124,6 +1129,7 @@ async def valuation_report(
             WHERE bo.numero = dev.pedido_bling LIMIT 1
         ) bo ON true
         LEFT JOIN {_qt("store_info")} si ON si.bling_store_id = bo.loja
+        WHERE COALESCE(bo.loja, '') <> ALL(:ignored_stores)
         GROUP BY dev.mes, si.sales_team
     """)
 
@@ -1131,8 +1137,11 @@ async def valuation_report(
         "s_dev": _VAL_SIT_AGUARD_DEVOLUCAO,
         "s_can": _VAL_SIT_AGUARD_CANCELAMENTO,
         "s_ent": _VAL_SIT_ENTREGUE,
+        "ignored_stores": _VAL_IGNORED_STORES,
     })).mappings().all()
-    com_dev_rows = (await session.execute(com_dev_sql)).mappings().all()
+    com_dev_rows = (await session.execute(com_dev_sql, {
+        "ignored_stores": _VAL_IGNORED_STORES,
+    })).mappings().all()
     teams = list((await session.execute(text(
         f"SELECT DISTINCT sales_team FROM {_qt('store_info')} "
         "WHERE sales_team IS NOT NULL ORDER BY sales_team"
