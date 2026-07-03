@@ -130,6 +130,7 @@ def _build_where(
     data_fim: date | None,
     condicao: str | None,
     manutencao: bool | None = None,
+    prazo_dias: int | None = None,
 ) -> list:
     where = []
     if search and search.strip():
@@ -142,6 +143,13 @@ def _build_where(
         where.append(Devolution.tag == tag.strip().lower().lstrip("."))
     if condicao and condicao.strip() and condicao.strip().lower() != "all":
         where.append(Devolution.condicao_produto == condicao.strip())
+    # Prazo de manutenção vencendo em até N dias (7/15/30). Só linhas com prazo
+    # setado (condição Manutenção); inclui vencidos (prazo já no passado), que
+    # são os mais urgentes.
+    if prazo_dias is not None and prazo_dias > 0:
+        limite = datetime.now(UTC) + timedelta(days=prazo_dias)
+        where.append(Devolution.prazo.is_not(None))
+        where.append(Devolution.prazo <= limite)
     # "Data de devolução" = quando o registro entrou no sistema (created_at).
     # Período inclusivo: [data_inicio 00:00, data_fim 23:59:59] no fuso de SP.
     if data_inicio is not None:
@@ -166,8 +174,11 @@ async def list_devolutions(
     data_fim: date | None = Query(None),
     condicao: str | None = Query(None),
     manutencao: bool | None = Query(None),
+    prazo_dias: int | None = Query(None, ge=1, le=365),
 ) -> DevolutionPage:
-    where = _build_where(search, reembolso, tag, data_inicio, data_fim, condicao, manutencao)
+    where = _build_where(
+        search, reembolso, tag, data_inicio, data_fim, condicao, manutencao, prazo_dias
+    )
 
     stmt = (
         select(Devolution)
@@ -235,9 +246,12 @@ async def export_devolutions(
     data_fim: date | None = Query(None),
     condicao: str | None = Query(None),
     manutencao: bool | None = Query(None),
+    prazo_dias: int | None = Query(None, ge=1, le=365),
 ) -> StreamingResponse:
     """Exporta as devoluções (com os mesmos filtros da lista) em XLSX."""
-    where = _build_where(search, reembolso, tag, data_inicio, data_fim, condicao, manutencao)
+    where = _build_where(
+        search, reembolso, tag, data_inicio, data_fim, condicao, manutencao, prazo_dias
+    )
     rows = (
         await session.execute(
             select(Devolution)

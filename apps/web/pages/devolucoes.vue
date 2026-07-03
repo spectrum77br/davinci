@@ -230,6 +230,9 @@ const dataInicioFilter = ref('')
 const dataFimFilter = ref('')
 // Mostrar só pedidos que já passaram em manutenção (manutencao = true).
 const manutencaoFilter = ref(false)
+// Filtro de prazo de manutenção (admin): mostra só devoluções cujo prazo
+// (created_at + 30d, condição Manutenção) vence em até N dias. Inclui vencidos.
+const prazoDiasFilter = ref<'all' | '7' | '15' | '30'>('all')
 const exporting = ref(false)
 
 const addOpen = ref(false)
@@ -558,6 +561,7 @@ async function load() {
     if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
     if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
     if (manutencaoFilter.value) params.set('manutencao', 'true')
+    if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
     const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
     items.value = res.items
     total.value = res.total
@@ -581,6 +585,7 @@ async function exportXlsx() {
     if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
     if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
     if (manutencaoFilter.value) params.set('manutencao', 'true')
+    if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
     const blob = await api<Blob>(`/api/devolutions/export.xlsx?${params.toString()}`, { responseType: 'blob' as any })
     const href = URL.createObjectURL(blob as any)
     const a = document.createElement('a')
@@ -607,7 +612,7 @@ watch(search, () => {
     load()
   }, 300)
 })
-watch([reembolsoFilter, tagFilter, condicaoFilter, dataInicioFilter, dataFimFilter, manutencaoFilter], () => { page.value = 1; load() })
+watch([reembolsoFilter, tagFilter, condicaoFilter, dataInicioFilter, dataFimFilter, manutencaoFilter, prazoDiasFilter], () => { page.value = 1; load() })
 watch(page, () => load())
 
 function openAdd() {
@@ -1229,6 +1234,17 @@ async function backfillAddresses() {
         <input v-model="manutencaoFilter" type="checkbox" class="size-4 rounded border accent-primary" />
         <span class="whitespace-nowrap">manutenções realizadas</span>
       </label>
+      <select
+        v-if="isAdmin"
+        v-model="prazoDiasFilter"
+        class="h-9 rounded-md border bg-background px-2 text-sm"
+        title="Prazo de manutenção vencendo em até N dias (inclui vencidos)"
+      >
+        <option value="all">todos prazos</option>
+        <option value="7">prazo em 7 dias</option>
+        <option value="15">prazo em 15 dias</option>
+        <option value="30">prazo em 30 dias</option>
+      </select>
       <Button size="sm" variant="outline" :disabled="exporting" @click="exportXlsx">
         <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exporting }" />
         exportar xlsx
@@ -1245,6 +1261,7 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="8">Identificação</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 10 : 9">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
+            <th v-if="isAdmin" class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-slate-50 dark:bg-slate-800/40" colspan="1">Atualização</th>
           </tr>
           <tr class="border-b">
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data</th>
@@ -1266,17 +1283,18 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Data devolvido estoque</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prazo</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
+            <th v-if="isAdmin" class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-slate-50 dark:bg-slate-800/40 border-l-[3px] border-gray-400 dark:border-gray-600">Atualizado</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="isAdmin ? 19 : 18" class="py-8 text-center text-muted-foreground">
+            <td :colspan="isAdmin ? 20 : 18" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="isAdmin ? 19 : 18" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="isAdmin ? 20 : 18" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -1445,6 +1463,7 @@ async function backfillAddresses() {
                 @blur="saveRow(row)"
               />
             </td>
+            <td v-if="isAdmin" class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-slate-50/40 dark:bg-slate-800/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Última alteração feita neste registro">{{ fmtDateTime(row.updated_at) }}</td>
           </tr>
         </tbody>
       </table>
