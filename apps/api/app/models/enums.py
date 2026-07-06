@@ -57,6 +57,7 @@ class IntegrationPlatform(StrEnum):
     TIKTOK = "tiktok"
     TEMU = "temu"
     SHEIN = "shein"
+    MAGALU = "magalu"
 
 
 PLATFORMS: tuple[str, ...] = tuple(p.value for p in IntegrationPlatform)

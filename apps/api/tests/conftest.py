@@ -80,7 +80,7 @@ async def _setup_schema():
         # tiktok/temu/shein even a `platform == 'tiktok'` filter fails casting
         # the literal to the enum type in the test schema.
         "integration_platform": (
-            "bling", "ml", "shopee", "amazon", "tiktok", "temu", "shein",
+            "bling", "ml", "shopee", "amazon", "tiktok", "temu", "shein", "magalu",
         ),
         "link_sync_status": (
             "ok", "skipped", "retryable", "fatal", "pending", "requires_review",

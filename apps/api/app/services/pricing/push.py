@@ -719,6 +719,15 @@ async def _dispatch_price_update_link(
                 price=price,
                 variation_id=link.variation_id,
             )
+        elif platform == IntegrationPlatform.MAGALU:
+            # Magalu endereça o anúncio pelo SKU (versão com hífen), que é
+            # exatamente o external_id gravado no link. update_price converte
+            # o preço em reais p/ centavos (normalizer=100) internamente.
+            return await client.update_price(
+                item_id=link.external_id,
+                price=price,
+                variation_id=link.variation_id,
+            )
         elif platform == IntegrationPlatform.AMAZON:
             # SSH spec: Amazon addresses listings by seller SKU. Prefer the
             # actual product SKU; fall back to external_sku then external_id

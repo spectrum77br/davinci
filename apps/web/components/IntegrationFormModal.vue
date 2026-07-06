@@ -2,7 +2,7 @@
 import { ref, computed, watch } from 'vue'
 import { X } from 'lucide-vue-next'
 
-type Platform = 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu'
+type Platform = 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu'
 
 type Field = {
   key: string
@@ -108,6 +108,18 @@ const PLATFORM_SPECS: Record<Platform, PlatformSpec> = {
       { key: 'access_token', label: 'Access Token', placeholder: 'Token de acesso da API', required: true },
       { key: 'region', label: 'Região', placeholder: 'global, us ou eu (padrão: global)' },
     ],
+  },
+  magalu: {
+    label: 'Magalu',
+    marketplace: 'magalu',
+    hint: {
+      tone: 'info',
+      lines: [
+        '**Magalu:** não precisa colar credenciais — o app OAuth é compartilhado.',
+        'Salve a integração (nome + loja) e clique em **Autorizar no Magalu** na página de Integrações para logar no ID Magalu e conceder acesso à sua loja.',
+      ],
+    },
+    fields: [],
   },
 }
 
