@@ -726,23 +726,13 @@ async def _dispatch_price_update_link(
             sku = product_sku or link.external_sku or link.external_id
             return await client.update_price(sku=sku, price=price)
         elif platform == IntegrationPlatform.TIKTOK:
-            sku_id = link.variation_id or ""
-            try:
-                await client.update_price_with_activation(
-                    product_id=link.external_id,
-                    sku_ids=sku_id,
-                    price=price,
-                )
-                return SyncResult(
-                    status=SyncStatus.OK,
-                    payload={"product_id": link.external_id, "sku_id": sku_id, "price": price},
-                )
-            except RuntimeError as e:
-                return SyncResult(
-                    status=SyncStatus.FATAL,
-                    error_code="tiktok_price_error",
-                    error_detail=str(e)[:500],
-                )
+            # Parity with Shopee: never write the base price. Push the deal
+            # price into the active Fixed-Price promotion (activity) instead.
+            return await client.update_discount_price(
+                product_id=link.external_id,
+                sku_id=link.variation_id or "",
+                price=price,
+            )
         elif platform == IntegrationPlatform.TEMU:
             product_sku_id = link.variation_id or link.external_id
             try:

@@ -67,6 +67,11 @@ class TikTokClient:
         self.creds = dict(creds)
         self._on_refresh = on_token_refresh
         self._timeout = timeout if timeout is not None else TIKTOK_DEFAULT_TIMEOUT
+        # Per-instance memo for promotion lookups so a product with several
+        # variations doesn't re-search + re-fetch the shop's activities on
+        # every variation during one price push.
+        self._promo_search_cache: list[dict] | None = None
+        self._promo_activity_cache: dict[str, dict | None] = {}
 
     @property
     def app_key(self) -> str:
@@ -340,6 +345,29 @@ class TikTokClient:
         params = self._build_post_params(path, body_str, extra_params)
         async with httpx.AsyncClient(timeout=self._timeout) as c:
             r = await c.post(
+                f"{TIKTOK_BASE_URL}{path}",
+                content=body_str,
+                params=params,
+                headers={
+                    "x-tts-access-token": self.access_token,
+                    "content-type": "application/json",
+                },
+            )
+        if r.status_code == 200:
+            return r.json()
+        return {"code": r.status_code, "message": r.text[:500]}
+
+    async def _put(
+        self,
+        path: str,
+        body: dict | None = None,
+        extra_params: dict[str, str] | None = None,
+    ) -> dict:
+        await self._ensure_fresh_token()
+        body_str = json.dumps(body or {}, separators=(",", ":"), ensure_ascii=False)
+        params = self._build_post_params(path, body_str, extra_params)
+        async with httpx.AsyncClient(timeout=self._timeout) as c:
+            r = await c.put(
                 f"{TIKTOK_BASE_URL}{path}",
                 content=body_str,
                 params=params,
@@ -731,6 +759,284 @@ class TikTokClient:
                     f"Produto {product_id} desativado no TikTok e não foi possível reativá-lo."
                 )
             raise
+
+    # ------------------------------------------------------- discount (promotion) price
+
+    async def update_discount_price(
+        self,
+        product_id: str,
+        sku_id: str,
+        price: float,
+    ) -> SyncResult:
+        """Push price to a TikTok listing via its ACTIVE PROMOTION, mirroring
+        Shopee.update_price.
+
+        Like Shopee (which never touches the base price and edits the active
+        "Desconto de Loja" instead), TikTok's displayed deal price comes from
+        an ONGOING Fixed-Price promotion activity. We locate the ongoing
+        FIXED_PRICE activity that already carries this product/SKU and update
+        its `activity_price_amount`. If the product isn't enrolled yet but a
+        single ongoing FIXED_PRICE activity exists, we add it (parity with
+        Shopee's add_discount_item fallback). No active fixed-price promotion
+        -> FATAL so the user knows to create one. A FLASHSALE promotion is
+        surfaced as SKIPPED (its price can't be edited mid-run), matching the
+        Shopee flash-sale behaviour. The base price is never written.
+        """
+        if price <= 0:
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                error_code="invalid_price",
+                error_detail=f"price={price}",
+            )
+        product_id = (product_id or "").strip()
+        sku_id = (sku_id or "").strip()
+        if not product_id:
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="tiktok_missing_ids",
+                error_detail=f"product_id={product_id!r}",
+            )
+
+        try:
+            activity, entry, kind = await self._find_product_activity(
+                product_id, sku_id
+            )
+        except Exception as e:  # noqa: BLE001
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="tiktok_activity_lookup_failed",
+                error_detail=str(e)[:500],
+            )
+
+        if kind == "flash":
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                error_code="tiktok_flashsale_active",
+                error_detail=(
+                    f"Produto {product_id} está em Promoção Relâmpago (Flash "
+                    "Deal); o preço só pode ser alterado após o fim da flash sale."
+                ),
+            )
+        if kind == "ambiguous":
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="tiktok_multiple_activities",
+                error_detail=(
+                    f"Produto {product_id} não está em nenhuma Promoção de "
+                    "Preço Fixo e há mais de uma ativa — adicione o produto à "
+                    "promoção certa no painel do TikTok antes de empurrar preço."
+                ),
+            )
+        if kind == "none" or activity is None:
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="tiktok_no_active_activity",
+                error_detail=(
+                    f"Produto {product_id} sem Promoção de Preço Fixo ativa. "
+                    "Crie uma Promoção (Fixed Price / Preço Fixo) no painel do "
+                    "TikTok antes de tentar empurrar preço."
+                ),
+            )
+
+        try:
+            ok = await self._update_activity_product_price(
+                activity, entry, product_id, sku_id, price
+            )
+        except Exception as e:  # noqa: BLE001
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="tiktok_discount_push_failed",
+                error_detail=str(e)[:500],
+            )
+        if not ok:
+            return SyncResult(
+                status=SyncStatus.FATAL,
+                error_code="tiktok_discount_push_failed",
+                error_detail="update-activity-product returned non-zero",
+            )
+        return SyncResult(
+            status=SyncStatus.OK,
+            payload={
+                "product_id": product_id,
+                "sku_id": sku_id,
+                "price": price,
+                "via": "update_activity_product"
+                if kind == "update"
+                else "add_activity_product",
+                "activity_id": activity.get("activity_id") or activity.get("id"),
+            },
+        )
+
+    async def _search_ongoing_activities(self) -> list[dict]:
+        """Return the shop's ONGOING promotion activities (metadata only).
+
+        POST /promotion/202309/activities/search with status=ONGOING, paged.
+        Cached on the instance for the lifetime of this client so a multi-
+        variation price push doesn't re-search per variation.
+        """
+        if self._promo_search_cache is not None:
+            return self._promo_search_cache
+        activities: list[dict] = []
+        page_token = ""
+        for _ in range(10):  # hard page cap
+            body: dict[str, Any] = {"status": "ONGOING", "page_size": 100}
+            if page_token:
+                body["page_token"] = page_token
+            resp = await self._post(
+                "/promotion/202309/activities/search", body
+            )
+            if resp.get("code") != 0:
+                raise RuntimeError(
+                    f"TikTok search-activities error: {resp.get('message', 'Unknown')}"
+                )
+            data = resp.get("data") or {}
+            activities.extend(data.get("activities") or [])
+            page_token = data.get("next_page_token") or ""
+            if not page_token:
+                break
+        self._promo_search_cache = activities
+        return activities
+
+    async def _get_activity(self, activity_id: str) -> dict | None:
+        """GET /promotion/202309/activities/{id} -> the activity `data`
+        (with products[]), or None. Cached per instance."""
+        if activity_id in self._promo_activity_cache:
+            return self._promo_activity_cache[activity_id]
+        resp = await self._get(f"/promotion/202309/activities/{activity_id}")
+        full = resp.get("data") if isinstance(resp, dict) and resp.get("code") == 0 else None
+        self._promo_activity_cache[activity_id] = full
+        return full
+
+    @staticmethod
+    def _match_product_entry(
+        full: dict, product_id: str, sku_id: str
+    ) -> dict | None:
+        """Return the product entry from a get-activity payload that carries
+        `product_id` (and, for VARIATION-level activities, `sku_id`), else
+        None."""
+        level = (full.get("product_level") or "").upper()
+        for p in full.get("products") or []:
+            if str(p.get("id") or "") != str(product_id):
+                continue
+            if level == "VARIATION":
+                if not sku_id:
+                    continue
+                for s in p.get("skus") or []:
+                    if str(s.get("id") or "") == str(sku_id):
+                        return p
+                continue
+            return p
+        return None
+
+    async def _find_product_activity(
+        self, product_id: str, sku_id: str
+    ) -> tuple[dict | None, dict | None, str]:
+        """Locate the ongoing promotion that governs `product_id`/`sku_id`.
+
+        Returns (activity_full, product_entry, kind) where kind is:
+          - "update": product already in an ongoing FIXED_PRICE activity;
+          - "add":    product not enrolled, but exactly one ongoing FIXED_PRICE
+                      activity exists -> safe to add it there;
+          - "flash":  product is in an ongoing FLASHSALE activity (skip);
+          - "ambiguous": product not enrolled and >1 ongoing FIXED_PRICE;
+          - "none":   no ongoing FIXED_PRICE activity at all.
+        """
+        activities = await self._search_ongoing_activities()
+        fixed = [a for a in activities if (a.get("activity_type") or "") == "FIXED_PRICE"]
+        flash = [a for a in activities if (a.get("activity_type") or "") == "FLASHSALE"]
+
+        # 1) already enrolled in a FIXED_PRICE activity -> update
+        for a in fixed:
+            full = await self._get_activity(str(a.get("id") or ""))
+            if not full:
+                continue
+            entry = self._match_product_entry(full, product_id, sku_id)
+            if entry is not None:
+                return full, entry, "update"
+
+        # 2) enrolled in a FLASHSALE activity -> skip (can't edit)
+        for a in flash:
+            full = await self._get_activity(str(a.get("id") or ""))
+            if not full:
+                continue
+            if self._match_product_entry(full, product_id, sku_id) is not None:
+                return full, None, "flash"
+
+        # 3) not enrolled anywhere: add only if a single FIXED_PRICE exists
+        if len(fixed) == 1:
+            full = await self._get_activity(str(fixed[0].get("id") or ""))
+            if full:
+                return full, None, "add"
+            return None, None, "none"
+        if len(fixed) > 1:
+            return None, None, "ambiguous"
+        return None, None, "none"
+
+    async def _update_activity_product_price(
+        self,
+        activity: dict,
+        entry: dict | None,
+        product_id: str,
+        sku_id: str,
+        price: float,
+    ) -> bool:
+        """PUT /promotion/202309/activities/{id}/products — set the deal price
+        (`activity_price_amount`) for the product/SKU. Handles both adding and
+        editing (TikTok's update endpoint does both). Raises on API error."""
+        activity_id = str(activity.get("activity_id") or activity.get("id") or "")
+        level = (activity.get("product_level") or "").upper()
+        price_str = f"{price:.2f}"
+
+        product_obj: dict[str, Any] = {"id": str(product_id)}
+        if level == "VARIATION":
+            # Spec: at VARIATION level product-level and sku-level quantity
+            # fields must be -1; the deal price lives on the SKU.
+            product_obj["quantity_limit"] = -1
+            product_obj["quantity_per_user"] = -1
+            product_obj["skus"] = [
+                {
+                    "id": str(sku_id),
+                    "activity_price_amount": price_str,
+                    "quantity_limit": -1,
+                    "quantity_per_user": -1,
+                }
+            ]
+        else:
+            # PRODUCT level: deal price on the product, skus must be [].
+            # Preserve existing quantity limits (they can't be decreased);
+            # default to -1 (unlimited) when adding a fresh product.
+            ql = (entry or {}).get("quantity_limit")
+            qpu = (entry or {}).get("quantity_per_user")
+            product_obj["activity_price_amount"] = price_str
+            product_obj["quantity_limit"] = ql if isinstance(ql, int) and ql != 0 else -1
+            product_obj["quantity_per_user"] = (
+                qpu if isinstance(qpu, int) and qpu != 0 else -1
+            )
+            product_obj["skus"] = []
+
+        body = {"products": [product_obj], "activity_id": activity_id}
+        resp = await self._put(
+            f"/promotion/202309/activities/{activity_id}/products", body
+        )
+        if resp.get("code") != 0:
+            msg = resp.get("message", "Unknown error")
+            logger.error(
+                "tiktok_update_activity_product_failed",
+                product_id=product_id,
+                sku_id=sku_id,
+                activity_id=activity_id,
+                code=resp.get("code"),
+                message=msg,
+            )
+            raise RuntimeError(f"TikTok API error: {msg}")
+        logger.info(
+            "tiktok_discount_price_updated",
+            product_id=product_id,
+            sku_id=sku_id,
+            activity_id=activity_id,
+            price=price,
+        )
+        return True
 
     # ---------------------------------------------------------------- product search
 
