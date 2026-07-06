@@ -54,6 +54,14 @@ class Integration(Base, TimestampMixin):
     ads_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # "Modo férias": quando True, o SyncOrchestrator NÃO empurra estoque pra
+    # esta conta do marketplace (freeze — o anúncio mantém o último estoque
+    # enviado). Só afeta o push de estoque; preços, pedidos, ads e OAuth
+    # seguem normais. Default false = comportamento inalterado das integrações
+    # existentes.
+    vacation_mode: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     # Counter incremented on each marketing-sync failure, reset on
     # success. Used by alerts.notify_consecutive_failures to fire
     # Telegram on exactly the 3rd consecutive miss so flaky APIs don't

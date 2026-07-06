@@ -18,6 +18,7 @@ type Integration = {
   last_test_at: string | null
   last_test_ok: boolean | null
   last_error: string | null
+  vacation_mode: boolean
   created_at: string
   updated_at: string
 }
@@ -217,6 +218,28 @@ async function deleteIntegration(i: Integration) {
   }
 }
 
+const vacationId = ref<string | null>(null)
+async function toggleVacation(i: Integration) {
+  const turningOn = !i.vacation_mode
+  if (turningOn && !confirm(
+    `Ativar modo férias em "${i.name}"?\n\n`
+    + 'O DaVinci vai PARAR de enviar estoque para esta conta '
+    + '(o anúncio mantém o estoque atual). Preço, pedidos e anúncios continuam normais.'
+  )) return
+  vacationId.value = i.id
+  try {
+    await api(`/api/integrations/${i.id}`, {
+      method: 'PATCH',
+      body: { vacation_mode: turningOn },
+    })
+    await refresh()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || 'erro'
+  } finally {
+    vacationId.value = null
+  }
+}
+
 function fmtDate(s: string | null) {
   if (!s) return '—'
   return new Date(s).toLocaleString('pt-BR')
@@ -269,6 +292,13 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
         <div v-for="i in group.items" :key="i.id" class="border rounded-md p-3 space-y-2">
           <div class="flex items-center gap-2">
             <span class="text-xs uppercase font-mono">{{ PLATFORM_LABELS[i.platform] }}</span>
+            <span
+              v-if="i.vacation_mode"
+              class="text-xs px-2 py-0.5 rounded border border-amber-500 text-amber-400 bg-amber-500/10"
+              title="Modo férias ativo — estoque não é enviado para esta conta"
+            >
+              FÉRIAS
+            </span>
             <span class="text-xs px-2 py-0.5 rounded border ml-auto" :class="statusClass(i)">
               {{ i.last_test_ok === null ? 'não testado'
                  : i.last_test_ok ? 'ok' : 'falhou' }}
@@ -305,6 +335,18 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
               {{ authorizingId === i.id
                 ? 'redirecionando…'
                 : OAUTH_AUTHORIZE_LABELS[i.platform] }}
+            </Button>
+            <Button
+              v-if="canEdit && i.platform !== 'bling'"
+              size="sm"
+              :variant="i.vacation_mode ? 'default' : 'outline'"
+              :disabled="vacationId === i.id"
+              :title="i.vacation_mode
+                ? 'Modo férias ativo — clique para retomar o envio de estoque'
+                : 'Ativar modo férias — para de enviar estoque para esta conta'"
+              @click="toggleVacation(i)"
+            >
+              {{ vacationId === i.id ? '…' : (i.vacation_mode ? 'Férias ON' : 'Modo férias') }}
             </Button>
             <Button v-if="canEdit" size="sm" variant="ghost" title="editar" @click="openEdit(i)">
               <SquarePen class="size-4" />

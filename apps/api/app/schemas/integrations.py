@@ -18,6 +18,7 @@ class IntegrationOut(BaseModel):
     last_test_at: datetime | None = None
     last_test_ok: bool | None = None
     last_error: str | None = None
+    vacation_mode: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -33,6 +34,7 @@ class IntegrationPatch(BaseModel):
     name: str | None = None
     status: str | None = None
     credentials: dict | None = None
+    vacation_mode: bool | None = None
 
 
 class TestConnectionOut(BaseModel):

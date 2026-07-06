@@ -86,6 +86,7 @@ def _to_out(i: Integration, company_id: UUID | None, store_id: UUID | None = Non
         last_test_at=i.last_test_at,
         last_test_ok=i.last_test_ok,
         last_error=i.last_error,
+        vacation_mode=i.vacation_mode,
         created_at=i.created_at,
         updated_at=i.updated_at,
     )
@@ -183,6 +184,8 @@ async def patch_integration(
         i.name = data["name"]
     if "status" in data and data["status"] is not None:
         i.status = data["status"]
+    if "vacation_mode" in data and data["vacation_mode"] is not None:
+        i.vacation_mode = data["vacation_mode"]
     if "credentials" in data and data["credentials"] is not None:
         # Merge with existing — never blow away refresh_token by accident.
         existing = decrypt_json(i.credentials) if i.credentials else {}

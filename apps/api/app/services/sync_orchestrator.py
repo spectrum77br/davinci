@@ -288,21 +288,34 @@ class SyncOrchestrator:
                 action = SyncLogAction.UPDATE_STOCK
                 try:
                     integration = await self._get_integration(link.integration_id)
-                    client = await self._client(integration)
-                    # Negative product.stock can leak in from direct DB writes
-                    # or older imports — guard at the push site too so the
-                    # clamp is enforced even if `_refresh_bling` didn't run
-                    # this pass (e.g. webhook-fed stock).
-                    qty = max(0, product.stock)
-                    # Always push to the marketplace — SSH parity. The earlier
-                    # "verify-before-send" optimization (skip when link.stock
-                    # equals qty + last_sync_status=OK) was removed because
-                    # external edits to the marketplace can drift link.stock
-                    # without us noticing, and operators expect "sincronizar"
-                    # to actually call the API every time.
-                    result = await client.update_stock(  # type: ignore[union-attr]
-                        link, qty, bling_store_id=bling_store_id, force=self.force
-                    )
+                    if integration.vacation_mode:
+                        # "Modo férias" ligado: não empurra estoque pra esta
+                        # conta. Freeze — o marketplace mantém o último estoque
+                        # enviado. SKIPPED (não é falha) pra não disparar alerta
+                        # nem contar como erro no relatório do job.
+                        result = SyncResult(
+                            status=SyncStatus.SKIPPED,
+                            qty_before=product.stock,
+                            qty_after=product.stock,
+                            error_code="vacation_mode",
+                            error_detail="modo férias ativo — push de estoque pausado",
+                        )
+                    else:
+                        client = await self._client(integration)
+                        # Negative product.stock can leak in from direct DB writes
+                        # or older imports — guard at the push site too so the
+                        # clamp is enforced even if `_refresh_bling` didn't run
+                        # this pass (e.g. webhook-fed stock).
+                        qty = max(0, product.stock)
+                        # Always push to the marketplace — SSH parity. The earlier
+                        # "verify-before-send" optimization (skip when link.stock
+                        # equals qty + last_sync_status=OK) was removed because
+                        # external edits to the marketplace can drift link.stock
+                        # without us noticing, and operators expect "sincronizar"
+                        # to actually call the API every time.
+                        result = await client.update_stock(  # type: ignore[union-attr]
+                            link, qty, bling_store_id=bling_store_id, force=self.force
+                        )
                 except HTTPException as e:
                     code = "platform_not_implemented" if e.status_code == 501 else "http_error"
                     result = SyncResult(

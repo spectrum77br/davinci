@@ -93,6 +93,12 @@ async def _check_integration(
     """Check all links for a single Shopee integration."""
     stats = {"checked": 0, "fixed": 0, "errors": 0, "skipped": 0}
 
+    # "Modo férias": não corrige/empurra estoque pra contas pausadas — senão o
+    # discrepancy-check reverteria o freeze empurrando o estoque local de volta.
+    if integration.vacation_mode:
+        stats["skipped_vacation"] = 1
+        return stats
+
     creds = decrypt_json(integration.credentials)
 
     async def _persist_refresh(new_creds: dict) -> None:

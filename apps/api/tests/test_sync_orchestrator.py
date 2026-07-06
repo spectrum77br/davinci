@@ -321,3 +321,42 @@ async def test_orchestrator_handles_missing_bling_stock(
     await db.refresh(link)
     assert report.skipped == 1
     assert link.last_sync_status == LinkSyncStatus.SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_vacation_mode_skips_stock_push(
+    db: AsyncSession, user: User
+) -> None:
+    """Modo férias: uma integração de marketplace com `vacation_mode=True` não
+    tem estoque empurrado — o link fica SKIPPED(vacation_mode) e o client do
+    marketplace nunca chega a ser instanciado (`client_for` não é chamado)."""
+    _, store = await _make_company_store(db, user)
+    integ = await _make_integration(db, user, store, IntegrationPlatform.ML)
+    integ.vacation_mode = True
+    await db.commit()
+
+    p, link = await _make_product_with_link(
+        db, user, integ, store, bling_product_id=88, initial_stock=7
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("client_for não deveria ser chamado em modo férias")
+
+    with patch("app.services.sync_orchestrator.client_for", side_effect=_boom):
+        orch = SyncOrchestrator(db, user_id=user.id)
+        report = await orch.run([p])
+
+    await db.refresh(link)
+    assert report.skipped == 1
+    assert report.ok == 0
+    assert link.last_sync_status == LinkSyncStatus.SKIPPED
+    assert link.last_error is not None and "vacation_mode" in link.last_error
+    # Freeze: o estoque local do link não é alterado pelo push pausado.
+    assert link.stock == 7
+
+    logs = (
+        await db.execute(select(SyncLog).where(SyncLog.product_link_id == link.id))
+    ).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].status == LinkSyncStatus.SKIPPED
+    assert logs[0].error_code == "vacation_mode"
