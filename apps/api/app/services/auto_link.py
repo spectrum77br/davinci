@@ -36,6 +36,7 @@ from app.models import (
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.job_details import append_job_detail
 from app.services.marketplaces.amazon import AmazonClient
+from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
@@ -73,6 +74,7 @@ _ADAPTED_PLATFORMS = {
     IntegrationPlatform.ML,
     IntegrationPlatform.SHOPEE,
     IntegrationPlatform.AMAZON,
+    IntegrationPlatform.MAGALU,
 }
 
 
@@ -659,6 +661,19 @@ def _amazon_client_for(integ: Integration, session: AsyncSession) -> AmazonClien
     return AmazonClient(creds, on_token_refresh=_persist_refresh)
 
 
+def _magalu_client_for(integ: Integration, session: AsyncSession) -> MagaluClient:
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+
+    async def _persist_refresh(new_creds: dict) -> None:
+        integ.credentials = encrypt_json(new_creds)
+        exp = new_creds.get("expires_at")
+        if exp:
+            integ.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
+        await session.commit()
+
+    return MagaluClient(creds, on_token_refresh=_persist_refresh)
+
+
 async def _link_amazon_integration(
     session: AsyncSession,
     job_id: UUID,
@@ -810,6 +825,16 @@ async def _link_dispatch(
         return await _link_via_listings(
             session, job_id, integ, _shopee_client_for(integ, session),
             IntegrationPlatform.SHOPEE, repoint=True,
+        )
+    if platform == IntegrationPlatform.MAGALU:
+        # Magalu's listing SKU (com hífen) e o external_id andam juntos — o
+        # `list_listings` já devolve external_id=SKU-com-hífen e sku=SKU-com-ponto
+        # (canônico do Bling/produtos), então o match usa o ponto e o link
+        # guarda o hífen p/ o PATCH de estoque. repoint=True por uniformidade
+        # (na prática nunca dispara: mudar o SKU na Magalu troca o external_id).
+        return await _link_via_listings(
+            session, job_id, integ, _magalu_client_for(integ, session),
+            IntegrationPlatform.MAGALU, repoint=True,
         )
     if platform == IntegrationPlatform.AMAZON:
         return await _link_amazon_integration(session, job_id, integ)

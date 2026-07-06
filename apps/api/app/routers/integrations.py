@@ -33,6 +33,7 @@ from app.schemas.integrations import (
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.marketplaces import client_for
 from app.services.marketplaces.bling import BlingClient
+from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
@@ -501,6 +502,122 @@ async def ml_oauth_callback(
     suffix = f"/companies/{company_id}" if company_id else "/integrations"
     return RedirectResponse(
         f"{settings.app_url}{suffix}?oauth=ok&platform=ml",
+        status_code=302,
+    )
+
+
+# =============================================================================
+# Magalu OAuth (ID Magalu) — app ÚNICO/compartilhado. Diferente do ML, todas as
+# integrações usam o MESMO client_id/secret/redirect (nível env, settings.magalu_*),
+# e cada seller escolhe o próprio tenant no login (choose_tenants=true). Por isso
+# o /magalu/start NÃO exige client_id nas creds da integração.
+# =============================================================================
+
+MAGALU_STATE_TTL_MIN = 10
+
+
+@router.get("/magalu/start", response_model=OAuthStartOut)
+async def magalu_oauth_start(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("integracoes", "edit"))],
+    integration_id: Annotated[UUID, Query(alias="integrationId")],
+    origin: Annotated[str | None, Query()] = None,
+) -> OAuthStartOut:
+    del origin  # accepted for FE compatibility; final redirect uses settings.app_url
+    integ = (
+        await session.execute(select(Integration).where(Integration.id == integration_id))
+    ).scalar_one_or_none()
+    if integ is None:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+    if integ.platform != IntegrationPlatform.MAGALU:
+        raise HTTPException(400, detail={"code": "not_magalu"})
+
+    settings = get_settings()
+    if not settings.magalu_client_id:
+        raise HTTPException(400, detail={"code": "missing_magalu_app"})
+
+    state = token_urlsafe(32)
+    session.add(
+        OAuthState(
+            state=state,
+            platform=IntegrationPlatform.MAGALU,
+            store_id=integ.store_id,
+            user_id=user.id,
+            code_verifier=str(integ.id),  # threads integration_id to callback
+            expires_at=datetime.now(UTC) + timedelta(minutes=MAGALU_STATE_TTL_MIN),
+        )
+    )
+    await session.commit()
+    url = MagaluClient.authorize_url(
+        state,
+        client_id=settings.magalu_client_id,
+        redirect_uri=settings.magalu_redirect_uri,
+    )
+    return OAuthStartOut(url=url, state=state)
+
+
+@router.get("/magalu/callback")
+async def magalu_oauth_callback(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    code: Annotated[str, Query(...)],
+    state: Annotated[str, Query(...)],
+):
+    settings = get_settings()
+    row = (
+        await session.execute(select(OAuthState).where(OAuthState.state == state))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(400, detail={"code": "state_not_found"})
+    if row.consumed_at is not None:
+        raise HTTPException(400, detail={"code": "state_consumed"})
+    if row.expires_at < datetime.now(UTC):
+        raise HTTPException(400, detail={"code": "state_expired"})
+    if row.platform != IntegrationPlatform.MAGALU:
+        raise HTTPException(400, detail={"code": "state_platform_mismatch"})
+
+    integ: Integration | None = None
+    if row.code_verifier:
+        try:
+            integ_id = UUID(row.code_verifier)
+        except ValueError:
+            integ_id = None
+        if integ_id is not None:
+            integ = (
+                await session.execute(select(Integration).where(Integration.id == integ_id))
+            ).scalar_one_or_none()
+    if integ is None:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+
+    if not settings.magalu_client_id or not settings.magalu_client_secret:
+        raise HTTPException(400, detail={"code": "missing_magalu_app"})
+
+    try:
+        new_creds = await MagaluClient.exchange_code(
+            code,
+            client_id=settings.magalu_client_id,
+            client_secret=settings.magalu_client_secret,
+            redirect_uri=settings.magalu_redirect_uri,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("magalu_exchange_failed", err=str(e), integration_id=str(integ.id))
+        raise HTTPException(400, detail={"code": "exchange_failed", "err": str(e)[:200]}) from e
+
+    # Merge the exchanged tokens over the existing creds (keeps any manually-set
+    # fields; the app client_id/secret stay at env-level, never in creds).
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+    creds.update(new_creds)
+    integ.credentials = encrypt_json(creds)
+    exp = creds.get("expires_at")
+    integ.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC) if exp else None
+    integ.status = "active"
+    integ.last_error = None
+    row.consumed_at = datetime.now(UTC)
+    await session.commit()
+
+    company_id = await _company_id_for(session, integ.store_id)
+    suffix = f"/companies/{company_id}" if company_id else "/integrations"
+    return RedirectResponse(
+        f"{settings.app_url}{suffix}?oauth=ok&platform=magalu",
         status_code=302,
     )
 

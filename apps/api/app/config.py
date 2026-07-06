@@ -91,6 +91,16 @@ class Settings(BaseSettings):
     ml_client_secret: str = ""
     ml_redirect_uri: str = ""
 
+    # Magalu (Magazine Luiza) — app OAuth único/compartilhado no ID Magalu
+    # ("DavinciERP"). Diferente do ML, TODAS as integrações usam o MESMO
+    # client_id/secret (nível env), e cada seller autoriza o próprio tenant no
+    # login (choose_tenants=true). O client_secret vem SÓ da env em prod
+    # (MAGALU_CLIENT_SECRET) — nunca commitado. redirect_uri tem que bater
+    # exatamente com o registrado no app.
+    magalu_client_id: str = ""
+    magalu_client_secret: str = ""
+    magalu_redirect_uri: str = ""
+
     amazon_client_id: str = ""
     amazon_client_secret: str = ""
     amazon_refresh_token: str = ""

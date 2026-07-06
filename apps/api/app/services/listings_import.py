@@ -37,6 +37,7 @@ from app.models import (
     Product,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 
@@ -80,6 +81,8 @@ def _client_for_listings(session: AsyncSession, integ: Integration):
         return ShopeeClient(creds, on_token_refresh=on_refresh)
     if integ.platform == IntegrationPlatform.ML:
         return MercadoLivreClient(creds, on_token_refresh=on_refresh)
+    if integ.platform == IntegrationPlatform.MAGALU:
+        return MagaluClient(creds, on_token_refresh=on_refresh)
     return None
 
 

@@ -4,7 +4,7 @@ import { SquarePen, Plus, RefreshCw, Trash2, Zap, Search, KeyRound } from 'lucid
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'integracoes', action: 'view' } })
 
-type Platform = 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu'
+type Platform = 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'temu' | 'magalu'
 
 type Integration = {
   id: string
@@ -36,6 +36,7 @@ const PLATFORM_LABELS: Record<string, string> = {
   amazon: 'Amazon',
   tiktok: 'TikTok Shop',
   temu: 'Temu',
+  magalu: 'Magalu',
 }
 
 const { api } = useApi()
@@ -182,16 +183,18 @@ function onModalClose(open: boolean) {
 
 // Platforms that connect via integration-bound OAuth "login" (the seller logs
 // into their own app). Same start/callback shape — endpoint keyed by platform.
-const OAUTH_LOGIN_PLATFORMS: Platform[] = ['tiktok', 'ml', 'shopee']
+const OAUTH_LOGIN_PLATFORMS: Platform[] = ['tiktok', 'ml', 'shopee', 'magalu']
 const OAUTH_START_TITLES: Partial<Record<Platform, string>> = {
   ml: 'Iniciar OAuth no Mercado Livre',
   tiktok: 'Iniciar OAuth no TikTok Partner Center',
   shopee: 'Iniciar OAuth na Shopee (auth_partner)',
+  magalu: 'Iniciar OAuth no ID Magalu',
 }
 const OAUTH_AUTHORIZE_LABELS: Partial<Record<Platform, string>> = {
   ml: 'Autorizar no Mercado Livre',
   tiktok: 'Autorizar no TikTok',
   shopee: 'Autorizar na Shopee',
+  magalu: 'Autorizar no Magalu',
 }
 const authorizingId = ref<string | null>(null)
 async function authorizeOAuth(i: Integration) {
