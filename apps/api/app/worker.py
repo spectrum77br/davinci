@@ -22,6 +22,7 @@ from app.models import (
     Integration,
     IntegrationPlatform,
     Product,
+    ProductLink,
     UserSettings,
 )
 from app.redis_client import redis
@@ -147,6 +148,7 @@ async def sync_all_run(
     user_id: str,
     product_ids: list[str] | None,
     include_all_stock: bool = False,
+    integration_ids: list[str] | None = None,
 ) -> None:
     """Fase 4a: full sync run. Acquires per-user advisory lock; if busy, marks
     job as `failed` with `error='sync_already_running'`.
@@ -189,10 +191,57 @@ async def sync_all_run(
                 stmt = stmt.where(and_(*where))
             products = (await s.execute(stmt)).scalars().all()
             pids = [p.id for p in products]
+            # `integration_ids` scopes the push to the selected marketplace
+            # accounts (mirrors the single-product sync's integration filter).
+            # Narrow the product set to those that actually link to one of the
+            # selected accounts, then include each such product's BLING link so
+            # its stock refreshes BEFORE the marketplace push — otherwise a
+            # scoped run would push whatever stale value sits in product.stock.
+            only_link_ids: list[UUID] | None = None
+            if integration_ids:
+                iids = [UUID(i) for i in integration_ids]
+                scoped_pids = (
+                    (
+                        await s.execute(
+                            select(ProductLink.product_id)
+                            .where(
+                                and_(
+                                    ProductLink.product_id.in_(pids),
+                                    ProductLink.integration_id.in_(iids),
+                                )
+                            )
+                            .distinct()
+                        )
+                    ).scalars().all()
+                    if pids
+                    else []
+                )
+                pids = list(scoped_pids)
+                link_rows = (
+                    (
+                        await s.execute(
+                            select(ProductLink.id).where(
+                                and_(
+                                    ProductLink.product_id.in_(pids),
+                                    or_(
+                                        ProductLink.integration_id.in_(iids),
+                                        ProductLink.platform
+                                        == IntegrationPlatform.BLING,
+                                    ),
+                                )
+                            )
+                        )
+                    ).scalars().all()
+                    if pids
+                    else []
+                )
+                only_link_ids = list(link_rows)
             # Count links upfront so processed/total stays a real ratio
             # (the orchestrator bumps `processed` once per link). The
             # product count goes into payload so the UI can show both.
-            if pids:
+            if only_link_ids is not None:
+                link_total = len(only_link_ids)
+            elif pids:
                 link_total = (
                     await s.execute(
                         text(
@@ -205,7 +254,7 @@ async def sync_all_run(
             else:
                 link_total = 0
             job.total = int(link_total)
-            job.payload = {**(job.payload or {}), "total_products": len(products)}
+            job.payload = {**(job.payload or {}), "total_products": len(pids)}
             await s.commit()
 
             # `force_bling_refresh=True`: daily sync_all also bypasses the
@@ -220,7 +269,7 @@ async def sync_all_run(
             # MAX_RESYNC_ROUNDS-1 retry passes for products whose links
             # came back RETRYABLE. The verify-before-send shortcut (delta
             # #2) and skipped_verified accounting are inside _process_link.
-            report = await orch.run_with_retry(pids)
+            report = await orch.run_with_retry(pids, only_link_ids=only_link_ids)
 
             if (job.payload or {}).get("trigger") == "daily_sync":
                 await _notify_daily_sync_completed(s, uid, job, report)

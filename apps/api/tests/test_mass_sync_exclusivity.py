@@ -7,6 +7,7 @@ Também cobre o repoint da fila: o enqueue do auto_link vai pra fila de sync
 """
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from unittest.mock import AsyncMock, patch
 
@@ -86,6 +87,53 @@ async def test_auto_link_sem_massa_enfileira_na_fila_de_sync(
     assert r.status_code == 201
     fake_pool.enqueue_job.assert_awaited_once()
     assert fake_pool.enqueue_job.await_args.args[0] == "auto_link_run"
+
+
+@pytest.mark.asyncio
+async def test_sync_all_encaminha_integration_ids_pro_worker(
+    client: AsyncClient,
+    make_user: Callable,
+    auth_as: Callable[[User | None], None],
+):
+    """Selecionar contas no dialog "Sincronizar Todos" tem que ESCOPAR o job:
+    `integration_ids` é encaminhado como 6º arg pro worker `sync_all_run`.
+    Antes ele ficava só no payload e era ignorado — o job sincronizava TODAS
+    as contas (bug "aparece 30 mil links mesmo escolhendo uma conta")."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    iid = str(uuid.uuid4())
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock(return_value=type("J", (), {"job_id": "x"}))
+    with patch("app.routers.sync.get_arq_sync_pool", return_value=fake_pool):
+        r = await client.post("/api/jobs/sync-all", json={"integration_ids": [iid]})
+
+    assert r.status_code == 201
+    args = fake_pool.enqueue_job.await_args.args
+    assert args[0] == "sync_all_run"
+    # (fn, job_id, user_id, product_ids, include_all_stock, integration_ids)
+    assert args[5] == [iid]
+
+
+@pytest.mark.asyncio
+async def test_sync_all_sem_selecao_nao_escopa(
+    client: AsyncClient,
+    make_user: Callable,
+    auth_as: Callable[[User | None], None],
+):
+    """Sem `integration_ids` (sync global), o 6º arg é None — o worker cai no
+    caminho não-escopado e conta/sincroniza todos os links."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock(return_value=type("J", (), {"job_id": "x"}))
+    with patch("app.routers.sync.get_arq_sync_pool", return_value=fake_pool):
+        r = await client.post("/api/jobs/sync-all", json={})
+
+    assert r.status_code == 201
+    args = fake_pool.enqueue_job.await_args.args
+    assert args[5] is None
 
 
 @pytest.mark.asyncio
