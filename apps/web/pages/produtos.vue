@@ -258,6 +258,23 @@ const integrationById = computed(() => Object.fromEntries(integrations.value.map
 const blingIntegrations = computed(() => integrations.value.filter(i => i.platform === 'bling'))
 const marketplaceIntegrations = computed(() => integrations.value.filter(i => i.platform !== 'bling'))
 
+// Contas do filtro superior agrupadas por plataforma (ordem alfabética) e, dentro
+// de cada grupo, por nome (alfabético, case-insensitive pt-BR).
+const integrationGroups = computed(() => {
+  const groups: Record<string, Integration[]> = {}
+  for (const i of integrations.value) {
+    ;(groups[i.platform as string] ??= []).push(i)
+  }
+  return Object.keys(groups)
+    .sort((a, b) => a.localeCompare(b))
+    .map((platform) => ({
+      platform,
+      items: [...groups[platform]].sort((a, b) =>
+        (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }),
+      ),
+    }))
+})
+
 type MarketCol = 'shopee' | 'amazon' | 'ml_classico' | 'ml_premium' | 'tiktok' | 'magalu'
 
 function linkCol(l: ProductLink): MarketCol | null {
@@ -277,7 +294,14 @@ function linkCol(l: ProductLink): MarketCol | null {
 }
 
 function linksFor(p: Product, col: MarketCol): ProductLink[] {
-  return p.links.filter(l => linkCol(l) === col)
+  return p.links.filter(l => {
+    if (linkCol(l) !== col) return false
+    // Filtro de conta ativo: mostra só os links da conta escolhida (o backend
+    // já restringe QUAIS produtos aparecem; aqui restringimos os links da
+    // linha pra não pintar as outras colunas/contas).
+    if (filtroIntegration.value && l.integration_id !== filtroIntegration.value) return false
+    return true
+  })
 }
 
 function hasIntegrationsForCol(col: MarketCol): boolean {
@@ -1413,7 +1437,9 @@ onUnmounted(() => {
       </select>
       <select v-model="filtroIntegration" class="h-9 w-[220px] rounded-md border bg-background px-2 text-sm" @change="refreshAll">
         <option value="">Todas as contas</option>
-        <option v-for="i in integrations" :key="i.id" :value="i.id">[{{ i.platform }}] {{ i.name }}</option>
+        <optgroup v-for="g in integrationGroups" :key="g.platform" :label="g.platform">
+          <option v-for="i in g.items" :key="i.id" :value="i.id">[{{ i.platform }}] {{ i.name }}</option>
+        </optgroup>
       </select>
       <select v-model="filtroSegment" class="h-9 w-[200px] rounded-md border bg-background px-2 text-sm">
         <option value="">Todos segmentos</option>
