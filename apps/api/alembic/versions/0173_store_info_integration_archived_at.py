@@ -10,8 +10,8 @@ loja pra integração vinculada.
 
 Idempotente (checa information_schema antes do add_column).
 
-Revision ID: 0170_store_info_integration_archived_at
-Revises: 0169_companies_operacao_contabilidade
+Revision ID: 0173_store_info_integration_archived_at
+Revises: 0172_integration_platform_magalu
 Create Date: 2026-07-07
 """
 
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0170_store_info_integration_archived_at"
-down_revision: str | None = "0169_companies_operacao_contabilidade"
+revision: str = "0173_store_info_integration_archived_at"
+down_revision: str | None = "0172_integration_platform_magalu"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
