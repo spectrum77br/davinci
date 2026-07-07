@@ -465,6 +465,7 @@ async def push_one(
         IntegrationPlatform.AMAZON,
         IntegrationPlatform.TIKTOK,
         IntegrationPlatform.TEMU,
+        IntegrationPlatform.MAGALU,
     }
     if integration.platform not in _SUPPORTED_PLATFORMS:
         return PushOutcome(
