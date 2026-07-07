@@ -202,3 +202,39 @@ async def test_produto_criado_depois_nao_regride_dia_ja_conferido(
     # Dia continua 'total' — o produto novo só conta do dia da criação
     # pra frente, não regride _DIA pra 'parcial'.
     assert (await _get_envios_dia(client))["conferencia_estoque"] == "total"
+
+
+@pytest.mark.asyncio
+async def test_sku_duplicado_nao_impede_dia_fechar_total(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None], admin: User,
+):
+    """Bug: dia com TODOS os SKUs conferidos ('total' na aba Estoque)
+    aparecia 'parcial' na aba Envios quando havia SKU DUPLICADO (2 linhas
+    de Product com o mesmo SKU). A conferência é keyed por SKU
+    (StockCheck.reference_id = SKU), mas o denominador contava LINHAS de
+    Product → SKU duplicado inflava o total e o dia nunca fechava. Com o
+    denominador dedupando por SKU, 1 check basta pro dia ficar 'total'."""
+    auth_as(admin)
+    # 1 SKU único (aa9.sa) mas em DUAS linhas de Product, ambas criadas
+    # antes de _DIA. O denominador tem que contar esse SKU 1 vez.
+    for _ in range(2):
+        db.add(Product(
+            user_id=admin.id, sku="aa9.sa", name="prod dup",
+            stock=10, min_stock=0, situacao="A", formato="S",
+            created_at=_ANTES,
+        ))
+    db.add(BlingEnvioEvento(
+        bling_id=910009, item_index=0, item_codigo="aa9.sa",
+        numero="910009", shipping_day=_DIA,
+    ))
+    # 1 check no SKU → cobre a conferência inteira do dia.
+    db.add(StockCheck(
+        user_id=admin.id, section="estoque",
+        reference_id="aa9.sa", reference_date=_DIA, conferido=True,
+    ))
+    await db.commit()
+
+    # Sem o dedupe: denom=2 (2 linhas), conf=1 → 'parcial'.
+    # Com o dedupe: denom=1 (1 SKU), conf=1 → 'total'.
+    assert (await _get_envios_dia(client))["conferencia_estoque"] == "total"

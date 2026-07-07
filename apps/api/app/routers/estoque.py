@@ -740,9 +740,15 @@ async def _count_active_products(
     stock_clause = _stock_filter_clause(estoque_filter)
     if stock_clause is not None:
         where.append(stock_clause)
+    # DISTINCT sku: a conferência é keyed por SKU (StockCheck.reference_id =
+    # SKU), então o denominador tem que contar SKUs, não linhas de Product.
+    # SKUs duplicados (2 produtos com o mesmo SKU) inflavam o total e o dia
+    # nunca fechava 100% mesmo com todos os checks ticados.
     n = (
         await session.execute(
-            select(func.count()).select_from(Product).where(and_(*where))
+            select(func.count(func.distinct(Product.sku)))
+            .select_from(Product)
+            .where(and_(*where))
         )
     ).scalar_one()
     return int(n or 0)
@@ -781,21 +787,36 @@ async def _active_products_denominator_by_day(
     # data, igual o resto do app (AT TIME ZONE 'America/Sao_Paulo').
     created_brt = func.date(func.timezone("America/Sao_Paulo", Product.created_at))
 
-    # Criados ANTES do início do período: contam em todos os dias.
+    # Dedupe por SKU: a conferência é keyed por SKU (StockCheck.reference_id),
+    # então o denominador conta cada SKU UMA vez — no dia de criação do seu
+    # PRIMEIRO produto (min). Sem isso, SKUs duplicados (2 linhas de Product
+    # com o mesmo SKU) inflavam o total e o dia ficava "parcial" pra sempre,
+    # mesmo com todos os checks ticados na aba Estoque.
+    first_seen = (
+        select(
+            Product.sku.label("sku"),
+            func.min(created_brt).label("d"),
+        )
+        .where(and_(*where))
+        .group_by(Product.sku)
+        .subquery()
+    )
+
+    # SKUs vistos ANTES do início do período: contam em todos os dias.
     baseline = (
         await session.execute(
             select(func.count())
-            .select_from(Product)
-            .where(and_(*where, created_brt < data_inicio))
+            .select_from(first_seen)
+            .where(first_seen.c.d < data_inicio)
         )
     ).scalar_one()
 
-    # Criados DENTRO do período, agrupados pelo dia de criação (BRT).
+    # SKUs vistos pela 1ª vez DENTRO do período, agrupados pelo dia (BRT).
     rows = (
         await session.execute(
-            select(created_brt.label("d"), func.count().label("n"))
-            .where(and_(*where, created_brt >= data_inicio, created_brt <= data_fim))
-            .group_by(created_brt)
+            select(first_seen.c.d.label("d"), func.count().label("n"))
+            .where(first_seen.c.d >= data_inicio, first_seen.c.d <= data_fim)
+            .group_by(first_seen.c.d)
         )
     ).all()
     per_create: dict[str, int] = {
@@ -851,11 +872,12 @@ async def _count_estoque_checks_by_day(
             or_(*[_sql_clause_for_tag(StockCheck.reference_id, t) for t in tags])
         )
 
-    # Admin agrega todos os usuários — conta SKUs DISTINTOS por dia pra
-    # não duplicar quando 2 operadores conferem o mesmo SKU no mesmo dia.
-    n_expr = (
-        func.count(func.distinct(StockCheck.reference_id)) if is_admin else func.count()
-    )
+    # Conta SKUs DISTINTOS por dia (reference_id = SKU) — 1:1 com o
+    # denominador, que também dedupa por SKU. Admin agrega vários usuários
+    # (evita duplicar quando 2 operadores conferem o mesmo SKU no mesmo dia);
+    # non-admin normalmente já tem 1 check por SKU, mas o distinct blinda
+    # contra qualquer linha duplicada.
+    n_expr = func.count(func.distinct(StockCheck.reference_id))
     stmt = (
         select(StockCheck.reference_date, n_expr.label("n"))
         .group_by(StockCheck.reference_date)
