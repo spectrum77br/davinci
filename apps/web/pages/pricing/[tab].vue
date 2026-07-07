@@ -217,8 +217,10 @@ type Account = {
   email: string | null
   phone: string | null
   observation: string | null
-  observation2: string | null
-  observation3: string | null
+  discount: string | null
+  affiliate: string | null
+  ads: string | null
+  coupon: string | null
   has_password: boolean
   integration_id: string | null
   segment_id: string | null
@@ -589,6 +591,17 @@ async function focusEditInput() {
 
 // =========================================================== account inline edit
 
+// 5 campos livres exibidos embaixo do nome da loja (grade de preço + aba
+// Contas). Substituem os antigos obs1/obs2/obs3. `observation` é reusado como
+// "obs"; desconto/afiliado/ads/cupom são colunas próprias (migration 0173).
+const STORE_NOTE_FIELDS: { key: string; label: string }[] = [
+  { key: 'discount', label: 'desconto' },
+  { key: 'affiliate', label: 'afiliado' },
+  { key: 'ads', label: 'ads' },
+  { key: 'coupon', label: 'cupom' },
+  { key: 'observation', label: 'obs' },
+]
+
 function startEditAccount(acc: Account, field: string) {
   if (!canEditContas.value) return
   // Flush any pending edit BEFORE overwriting editing.value. commitEditAccount
@@ -671,7 +684,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
       if (Number.isNaN(n)) return
       payload[field] = n
     }
-  } else if (field.startsWith('observation') || field === 'email' || field === 'phone' || field === 'listing_type') {
+  } else if (field.startsWith('observation') || field === 'discount' || field === 'affiliate' || field === 'ads' || field === 'coupon' || field === 'email' || field === 'phone' || field === 'listing_type') {
     payload[field] = raw || null
   } else {
     return
@@ -2159,9 +2172,11 @@ watch(department, async () => {
                   <span>marg</span><span>frete</span>
                 </div>
               </th>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Obs 1</th>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Obs 2</th>
-              <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Obs 3</th>
+              <th
+                v-for="f in STORE_NOTE_FIELDS"
+                :key="`h-${f.key}`"
+                class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px] capitalize"
+              >{{ f.label }}</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-16"></th>
             </tr>
           </thead>
@@ -2411,18 +2426,18 @@ watch(department, async () => {
                   <span v-else>{{ fmtShipping((acc as any)[`shipping${t}`]) }}</span>
                 </td>
               </template>
-              <!-- obs 1/2/3 -->
-              <template v-for="i in 3" :key="`obs${i}`">
+              <!-- desconto / afiliado / ads / cupom / obs -->
+              <template v-for="f in STORE_NOTE_FIELDS" :key="`c-${f.key}`">
                 <td
                   class="border border-border px-2 py-1.5 text-xs cursor-pointer text-left max-w-[260px]"
                   :class="{
-                    'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, i === 1 ? 'observation' : `observation${i}`),
-                    'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, i === 1 ? 'observation' : `observation${i}`),
+                    'ring-2 ring-blue-500 ring-inset bg-background': isEditing(acc.id, f.key),
+                    'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(acc.id, f.key),
                   }"
-                  @click="!isEditing(acc.id, i === 1 ? 'observation' : `observation${i}`) && startEditAccount(acc, i === 1 ? 'observation' : `observation${i}`)"
+                  @click="!isEditing(acc.id, f.key) && startEditAccount(acc, f.key)"
                 >
                   <input
-                    v-if="isEditing(acc.id, i === 1 ? 'observation' : `observation${i}`)"
+                    v-if="isEditing(acc.id, f.key)"
                     :ref="setEditInputRef"
                     v-model="editValue"
                     type="text"
@@ -2431,8 +2446,8 @@ watch(department, async () => {
                     @keydown.enter.prevent="commitEditAccount"
                     @keydown.escape.prevent="cancelEdit"
                   />
-                  <span v-else :class="{ 'text-muted-foreground': !((acc as any)[i === 1 ? 'observation' : `observation${i}`]) }">
-                    {{ (acc as any)[i === 1 ? 'observation' : `observation${i}`] || '—' }}
+                  <span v-else :class="{ 'text-muted-foreground': !((acc as any)[f.key]) }">
+                    {{ (acc as any)[f.key] || '—' }}
                   </span>
                 </td>
               </template>
@@ -3060,24 +3075,24 @@ watch(department, async () => {
                     <Send class="h-3 w-3" />
                   </button>
                 </div>
-                <template v-for="field in ['observation', 'observation2', 'observation3']" :key="field">
-                  <div v-if="editingObsId === `${acc.id}-${field}`">
+                <template v-for="f in STORE_NOTE_FIELDS" :key="f.key">
+                  <div v-if="editingObsId === `${acc.id}-${f.key}`">
                     <input
                       v-model="obsValue"
                       class="w-full text-[9px] border rounded px-1 py-0.5 bg-background"
-                      @blur="commitObs(acc.id, field)"
-                      @keydown.enter="commitObs(acc.id, field)"
+                      @blur="commitObs(acc.id, f.key)"
+                      @keydown.enter="commitObs(acc.id, f.key)"
                       @keydown.escape="editingObsId = null"
                     />
                   </div>
                   <div
                     v-else
                     class="text-[9px] cursor-pointer truncate leading-tight"
-                    :class="(acc as any)[field] ? 'text-amber-700 font-medium' : 'text-muted-foreground/60 italic'"
-                    :title="(acc as any)[field] || field"
-                    @click="startEditObs(acc.id, field, (acc as any)[field])"
+                    :class="(acc as any)[f.key] ? 'text-amber-700 font-medium' : 'text-muted-foreground/60 italic'"
+                    :title="(acc as any)[f.key] ? `${f.label}: ${(acc as any)[f.key]}` : f.label"
+                    @click="startEditObs(acc.id, f.key, (acc as any)[f.key])"
                   >
-                    {{ (acc as any)[field] || (field === 'observation' ? 'obs1' : field === 'observation2' ? 'obs2' : 'obs3') }}
+                    {{ (acc as any)[f.key] ? `${f.label}: ${(acc as any)[f.key]}` : f.label }}
                   </div>
                 </template>
               </th>

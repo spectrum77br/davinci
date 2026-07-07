@@ -34,6 +34,10 @@ class PricingAccountBase(BaseModel):
     observation: str | None = None
     observation2: str | None = None
     observation3: str | None = None
+    discount: str | None = None
+    affiliate: str | None = None
+    ads: str | None = None
+    coupon: str | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int = 0
@@ -79,6 +83,10 @@ class PricingAccountPatch(BaseModel):
     observation: str | None = None
     observation2: str | None = None
     observation3: str | None = None
+    discount: str | None = None
+    affiliate: str | None = None
+    ads: str | None = None
+    coupon: str | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int | None = None

@@ -74,6 +74,13 @@ class PricingAccount(Base, TimestampMixin):
     observation: Mapped[str | None] = mapped_column(Text, nullable=True)
     observation2: Mapped[str | None] = mapped_column(Text, nullable=True)
     observation3: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Campos livres exibidos embaixo do nome da loja na tabela de preço.
+    # Substituem os antigos obs2/obs3 na UI (obs1 vira "obs" = `observation`);
+    # os 4 abaixo são colunas próprias, rotuladas. Migration 0173.
+    discount: Mapped[str | None] = mapped_column(Text, nullable=True)
+    affiliate: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ads: Mapped[str | None] = mapped_column(Text, nullable=True)
+    coupon: Mapped[str | None] = mapped_column(Text, nullable=True)
     store_info_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("store_info.id", ondelete="SET NULL"),
