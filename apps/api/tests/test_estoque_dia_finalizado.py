@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 import pytest_asyncio
@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
-    BlingOrder,
+    BlingEnvioEvento,
     EstoqueDiaFinalizado,
     Product,
     StockCheck,
@@ -48,16 +48,26 @@ async def admin(db: AsyncSession) -> User:
     return u
 
 
+# Produtos existiam antes de _DIA (denominador do dia = 2).
+_ANTES = datetime(2026, 6, 1, tzinfo=UTC)
+
+
 async def _seed_products_and_order(db: AsyncSession, admin: User) -> None:
-    """2 produtos ativos + 1 pedido enviado em _DIA (envios=1, total_produtos=2)."""
+    """2 produtos ativos (criados antes de _DIA) + 1 evento de envio no
+    ledger em _DIA (envios=1, denominador do dia=2).
+
+    Insere o BlingEnvioEvento direto (shipping_day=_DIA) em vez de
+    depender do trigger de bling_orders, que carimbaria 'hoje' e deixaria
+    o teste frágil à data corrente."""
     for sku in ("aa1.sa", "aa2.sa"):
         db.add(Product(
             user_id=admin.id, sku=sku, name=f"prod {sku}",
             stock=10, min_stock=0, situacao="A", formato="S",
+            created_at=_ANTES,
         ))
-    db.add(BlingOrder(
-        bling_id=910001, numero="910001", item_codigo="aa1.sa", item_index=0,
-        situacao="15", em_andamento_data=_DIA,
+    db.add(BlingEnvioEvento(
+        bling_id=910001, item_index=0, item_codigo="aa1.sa",
+        numero="910001", shipping_day=_DIA,
     ))
     await db.commit()
 
@@ -158,3 +168,37 @@ async def test_lock_nao_e_removido_no_destique(
         select(EstoqueDiaFinalizado).where(EstoqueDiaFinalizado.data == _DIA)
     )).scalars().all()
     assert len(rows) == 1  # ainda lá
+
+
+@pytest.mark.asyncio
+async def test_produto_criado_depois_nao_regride_dia_ja_conferido(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None], admin: User,
+):
+    """Bug: dia com TODOS os produtos conferidos ('total') regredia pra
+    'parcial' ao entrar produto novo no Bling, porque o novo inflava o
+    denominador de TODOS os dias anteriores. Com o denominador POR DIA
+    (só conta produtos criados até o dia), um produto criado DEPOIS de
+    _DIA não entra no denominador de _DIA — o dia continua 'total' sem
+    precisar de lock."""
+    auth_as(admin)
+    await _seed_products_and_order(db, admin)  # 2 produtos criados antes de _DIA
+    # Conferiu os 2 produtos existentes em _DIA → dia = 'total'.
+    for sku in ("aa1.sa", "aa2.sa"):
+        db.add(StockCheck(
+            user_id=admin.id, section="estoque",
+            reference_id=sku, reference_date=_DIA, conferido=True,
+        ))
+    await db.commit()
+    assert (await _get_envios_dia(client))["conferencia_estoque"] == "total"
+
+    # Entra produto novo no Bling DEPOIS de _DIA (created_at = hoje).
+    db.add(Product(
+        user_id=admin.id, sku="aa3.sa", name="prod novo",
+        stock=10, min_stock=0, situacao="A", formato="S",
+    ))
+    await db.commit()
+
+    # Dia continua 'total' — o produto novo só conta do dia da criação
+    # pra frente, não regride _DIA pra 'parcial'.
+    assert (await _get_envios_dia(client))["conferencia_estoque"] == "total"

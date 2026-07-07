@@ -645,11 +645,14 @@ async def list_estoque_envios(
         )).all()
         checks = {r.reference_id: bool(r.conferido) for r in checks_rows}
 
-    # Per-day stock conferência aggregate. Total de produtos é fixo
-    # (não varia por dia); conferidos vem por reference_date a partir
-    # da seção 'estoque'. O front exibe Total/Parcial/Não conferido
-    # numa coluna nova ao lado de "Envios".
-    total_produtos = await _count_active_products(session, tags)
+    # Per-day stock conferência aggregate. O denominador (total de
+    # produtos) é calculado POR DIA — um produto só conta a partir do
+    # seu dia de criação (BRT), senão produto novo no Bling regride dias
+    # já conferidos pra 'parcial'. Conferidos vem por reference_date a
+    # partir da seção 'estoque'. O front exibe Total/Parcial/Não conferido.
+    denom_by_day = await _active_products_denominator_by_day(
+        session, tags, data_inicio, data_fim,
+    )
     estoque_checks_by_day = await _count_estoque_checks_by_day(
         session, user_id=user.id, data_inicio=data_inicio, data_fim=data_fim,
         tags=tags, is_admin=_user_sees_all_checks(user),
@@ -682,12 +685,14 @@ async def list_estoque_envios(
         if conferido_filter == "nao_conferidos" and conf:
             continue
         estoque_conferidos = estoque_checks_by_day.get(dia_str, 0)
+        # Denominador do DIA: só produtos criados até esse dia.
+        denom_dia = denom_by_day.get(dia_str, 0)
         if dia_str in locks_str:
-            # Dia travado: ignora o count atual de produtos.
+            # Dia travado: ignora o count de produtos.
             conferencia_estoque = "total"
-        elif total_produtos == 0:
+        elif denom_dia == 0:
             conferencia_estoque = "nenhuma"
-        elif estoque_conferidos >= total_produtos:
+        elif estoque_conferidos >= denom_dia:
             conferencia_estoque = "total"
         elif estoque_conferidos > 0:
             conferencia_estoque = "parcial"
@@ -741,6 +746,73 @@ async def _count_active_products(
         )
     ).scalar_one()
     return int(n or 0)
+
+
+async def _active_products_denominator_by_day(
+    session: AsyncSession,
+    tags: list[str] | None,
+    data_inicio: date,
+    data_fim: date,
+    estoque_filter: str | None = None,
+) -> dict[str, int]:
+    """Denominador de conferência POR DIA. Um produto só entra no
+    denominador a partir do seu dia de CRIAÇÃO (BRT). Sem isso, um
+    produto novo no Bling inflava o total de TODOS os dias anteriores
+    (o denominador era o count atual, fixo), fazendo dias já conferidos
+    regredirem de 'total' pra 'parcial'. Produtos criados depois de um
+    dia não contam naquele dia — só do dia da criação pra frente.
+
+    Retorna {iso_day: denominador_acumulado} pra cada dia do período.
+    Mesmo filtro de situacao/formato/SKU+/baseline/tag do
+    _count_active_products, pra ficar 1:1 com o numerador."""
+    where: list = [
+        Product.situacao == "A",
+        Product.formato == "S",
+        Product.sku.notlike("%+%"),
+        *_baseline_sku_exclusions(Product.sku),
+    ]
+    if tags is not None:
+        where.append(or_(*[_sql_clause_for_tag(Product.sku, t) for t in tags]))
+    stock_clause = _stock_filter_clause(estoque_filter)
+    if stock_clause is not None:
+        where.append(stock_clause)
+
+    # created_at é timestamptz (UTC); converte pra BRT antes de extrair a
+    # data, igual o resto do app (AT TIME ZONE 'America/Sao_Paulo').
+    created_brt = func.date(func.timezone("America/Sao_Paulo", Product.created_at))
+
+    # Criados ANTES do início do período: contam em todos os dias.
+    baseline = (
+        await session.execute(
+            select(func.count())
+            .select_from(Product)
+            .where(and_(*where, created_brt < data_inicio))
+        )
+    ).scalar_one()
+
+    # Criados DENTRO do período, agrupados pelo dia de criação (BRT).
+    rows = (
+        await session.execute(
+            select(created_brt.label("d"), func.count().label("n"))
+            .where(and_(*where, created_brt >= data_inicio, created_brt <= data_fim))
+            .group_by(created_brt)
+        )
+    ).all()
+    per_create: dict[str, int] = {
+        r.d.isoformat(): int(r.n or 0) for r in rows if r.d is not None
+    }
+
+    # Denominador acumulado dia a dia. Criados DEPOIS de data_fim ficam de
+    # fora (não entram em nenhum dia visível), o que é o comportamento certo.
+    result: dict[str, int] = {}
+    running = int(baseline or 0)
+    d = data_inicio
+    while d <= data_fim:
+        iso = d.isoformat()
+        running += per_create.get(iso, 0)
+        result[iso] = running
+        d += timedelta(days=1)
+    return result
 
 
 async def _count_estoque_checks_by_day(

@@ -16,7 +16,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
-    BlingOrder,
+    BlingEnvioEvento,
     Product,
     StockCheck,
     User,
@@ -69,15 +69,17 @@ async def other_admin(db: AsyncSession) -> User:
 
 
 async def _seed_minimal_envio(db: AsyncSession, gerente: User) -> None:
-    """1 produto sa + 1 pedido enviado no dia. Suficiente pra ter
-    1 envio na /envios."""
+    """1 produto sa + 1 evento de envio no ledger em _DIA. Suficiente pra
+    ter 1 envio na /envios. Insere o BlingEnvioEvento direto (em vez de
+    depender do trigger, que carimbaria 'hoje' e deixaria o teste frágil
+    à data corrente)."""
     db.add(Product(
         user_id=gerente.id, sku="aa1.sa", name="prod",
         stock=10, min_stock=0, situacao="A", formato="S",
     ))
-    db.add(BlingOrder(
-        bling_id=920001, numero="920001", item_codigo="aa1.sa", item_index=0,
-        situacao="15", em_andamento_data=_DIA,
+    db.add(BlingEnvioEvento(
+        bling_id=920001, item_index=0, item_codigo="aa1.sa",
+        numero="920001", shipping_day=_DIA,
     ))
     await db.commit()
 
