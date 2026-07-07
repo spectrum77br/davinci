@@ -198,6 +198,7 @@ function platformBadgeClass(platform: string): string {
     case 'amazon': return `${baseClass} bg-yellow-100 text-yellow-700`
     case 'ml': return `${baseClass} bg-blue-100 text-blue-700`
     case 'tiktok': return `${baseClass} bg-pink-100 text-pink-700`
+    case 'magalu': return `${baseClass} bg-indigo-100 text-indigo-700`
     case 'temu': return `${baseClass} bg-purple-100 text-purple-700`
     case 'aliexpress': return `${baseClass} bg-red-100 text-red-700`
     default: return `${baseClass} bg-gray-100 text-gray-700`
@@ -257,12 +258,13 @@ const integrationById = computed(() => Object.fromEntries(integrations.value.map
 const blingIntegrations = computed(() => integrations.value.filter(i => i.platform === 'bling'))
 const marketplaceIntegrations = computed(() => integrations.value.filter(i => i.platform !== 'bling'))
 
-type MarketCol = 'shopee' | 'amazon' | 'ml_classico' | 'ml_premium' | 'tiktok'
+type MarketCol = 'shopee' | 'amazon' | 'ml_classico' | 'ml_premium' | 'tiktok' | 'magalu'
 
 function linkCol(l: ProductLink): MarketCol | null {
   if (l.platform === 'shopee') return 'shopee'
   if (l.platform === 'amazon') return 'amazon'
   if (l.platform === 'tiktok') return 'tiktok'
+  if (l.platform === 'magalu') return 'magalu'
   if (l.platform === 'ml') {
     const t = (l.listing_type || '').toLowerCase()
     // ML API values (preserved at ingestion):
@@ -1435,6 +1437,7 @@ onUnmounted(() => {
             <th class="text-center">ML Clássico</th>
             <th class="text-center">ML Premium</th>
             <th class="text-center">TikTok</th>
+            <th class="text-center">Magalu</th>
             <th class="text-center">Status</th>
             <th class="text-right w-24">Ações</th>
           </tr>
@@ -1501,7 +1504,7 @@ onUnmounted(() => {
                   {{ p.stock }}
                 </span>
               </td>
-              <td v-for="col in (['shopee','amazon','ml_classico','ml_premium','tiktok'] as const)" :key="col" class="text-center">
+              <td v-for="col in (['shopee','amazon','ml_classico','ml_premium','tiktok','magalu'] as const)" :key="col" class="text-center">
                 <template v-if="linksFor(p, col).length === 0">
                   <button
                     v-if="(col === 'amazon' || col === 'tiktok') && hasIntegrationsForCol(col)"
@@ -1635,7 +1638,7 @@ onUnmounted(() => {
               </td>
             </tr>
             <tr v-if="expanded.has(p.id)" class="bg-muted/30">
-              <td colspan="13" class="p-3">
+              <td colspan="14" class="p-3">
                 <div v-if="p.links.length === 0" class="text-xs text-muted-foreground">
                   Sem links. Rode o auto-link para vincular este SKU aos canais.
                 </div>
@@ -1708,7 +1711,7 @@ onUnmounted(() => {
             </tr>
           </template>
           <tr v-if="items.length === 0">
-            <td colspan="13" class="py-8 text-center text-sm text-muted-foreground">
+            <td colspan="14" class="py-8 text-center text-sm text-muted-foreground">
               Nenhum produto. Use "importar Bling" para começar.
             </td>
           </tr>
