@@ -6,6 +6,8 @@ Cobre:
   * refresh — persiste o refresh_token rotacionado (single-use) via callback
   * update_stock — 202 = OK, guard B1 (nunca zera origem positiva), force libera
   * update_price — PATCH em centavos (normalizer=100), reais→cents
+  * channel.id — descoberto do sub-recurso stocks/prices e injetado nos PATCH
+    (obrigatório; sem ele a Magalu devolve 422 "channel: Field required")
   * regra de SKU — external_id fica com hífen (id do recurso na Magalu) e
     sku vira a forma canônica com ponto (casa com products.sku)
 
@@ -50,6 +52,21 @@ def _creds(**over: Any) -> dict[str, Any]:
 def _link(external_id: str = "b001-20", stock: int | None = 10) -> SimpleNamespace:
     """update_stock só lê link.external_id e link.stock — um namespace basta."""
     return SimpleNamespace(external_id=external_id, stock=stock)
+
+
+# channel.id do seller (obrigatório nos PATCH). Nos testes de corpo do PATCH
+# semeamos direto em client._channel_id pra não acoplar cada teste ao GET de
+# descoberta — a descoberta tem teste próprio (test_discover_channel_id_*).
+_CHANNEL = "9fe0d853-732b-4e4a-a0b0-cff988ed043d"
+
+
+def _stock_sub(channel_id: str = _CHANNEL, quantity: int = 0) -> dict[str, Any]:
+    """Resposta do GET sub-recurso de estoque, de onde sai o channel.id."""
+    return {
+        "results": [
+            {"type": "AVAILABLE", "quantity": quantity, "channel": {"id": channel_id}}
+        ]
+    }
 
 
 # --------------------------------------------------------------- authorize_url
@@ -148,6 +165,7 @@ async def test_refresh_persists_rotated_refresh_token() -> None:
 @pytest.mark.asyncio
 async def test_update_stock_202_is_ok() -> None:
     client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL  # canal já descoberto (testado à parte)
     link = _link(external_id="b001-20", stock=3)
     with respx.mock(base_url=MAGALU_API_BASE) as router:
         route = router.patch("/seller/v1/portfolios/stocks/b001-20").mock(
@@ -157,10 +175,60 @@ async def test_update_stock_202_is_ok() -> None:
 
     assert route.called
     body = json.loads(route.calls.last.request.content)
-    # type="AVAILABLE" é obrigatório no PATCH de estoque da Magalu.
-    assert body == {"quantity": 42, "type": "AVAILABLE"}
+    # type="AVAILABLE" e channel.id são obrigatórios no PATCH de estoque da Magalu.
+    assert body == {
+        "quantity": 42,
+        "type": "AVAILABLE",
+        "channel": {"id": _CHANNEL},
+    }
     assert result.status == SyncStatus.OK
     assert result.qty_after == 42
+
+
+@pytest.mark.asyncio
+async def test_update_stock_discovers_channel_when_unset() -> None:
+    """Sem canal em cache, faz o GET de descoberta e injeta o channel.id no PATCH."""
+    client = MagaluClient(_creds())
+    assert client._channel_id is None
+    link = _link(external_id="b001-20", stock=3)
+    with respx.mock(base_url=MAGALU_API_BASE) as router:
+        get_route = router.get("/seller/v1/portfolios/stocks/b001-20").mock(
+            return_value=httpx.Response(200, json=_stock_sub())
+        )
+        patch_route = router.patch("/seller/v1/portfolios/stocks/b001-20").mock(
+            return_value=httpx.Response(202, json={})
+        )
+        result = await client.update_stock(link, 42)
+
+    assert get_route.called and patch_route.called
+    body = json.loads(patch_route.calls.last.request.content)
+    assert body["channel"] == {"id": _CHANNEL}
+    # canal fica cacheado no cliente pro resto do run.
+    assert client._channel_id == _CHANNEL
+    assert result.status == SyncStatus.OK
+
+
+@pytest.mark.asyncio
+async def test_update_stock_channel_unknown_is_retryable() -> None:
+    """GET de descoberta sem channel → não faz PATCH e devolve RETRYABLE."""
+    client = MagaluClient(_creds())
+    link = _link(external_id="b001-20", stock=3)
+    with respx.mock(base_url=MAGALU_API_BASE, assert_all_called=False) as router:
+        # nem estoque nem preço trazem channel → descoberta falha.
+        router.get("/seller/v1/portfolios/stocks/b001-20").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        router.get("/seller/v1/portfolios/prices/b001-20").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        patch_route = router.patch("/seller/v1/portfolios/stocks/b001-20").mock(
+            return_value=httpx.Response(202, json={})
+        )
+        result = await client.update_stock(link, 42)
+
+    assert not patch_route.called  # sem canal, não arrisca o PATCH
+    assert result.status == SyncStatus.RETRYABLE
+    assert result.error_code == "magalu_channel_unknown"
 
 
 @pytest.mark.asyncio
@@ -178,6 +246,7 @@ async def test_update_stock_b1_guard_blocks_zero() -> None:
 @pytest.mark.asyncio
 async def test_update_stock_force_allows_zero() -> None:
     client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL
     link = _link(external_id="b001-20", stock=8)
     with respx.mock(base_url=MAGALU_API_BASE) as router:
         router.patch("/seller/v1/portfolios/stocks/b001-20").mock(
@@ -189,12 +258,47 @@ async def test_update_stock_force_allows_zero() -> None:
     assert result.qty_after == 0
 
 
+# ------------------------------------------------------- descoberta do channel
+
+
+@pytest.mark.asyncio
+async def test_discover_channel_id_falls_back_to_prices() -> None:
+    """Se o sub-recurso de estoque não traz channel, cai no de preço."""
+    client = MagaluClient(_creds())
+    with respx.mock(base_url=MAGALU_API_BASE) as router:
+        router.get("/seller/v1/portfolios/stocks/b001-20").mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        router.get("/seller/v1/portfolios/prices/b001-20").mock(
+            return_value=httpx.Response(
+                200, json={"results": [{"price": 9980, "channel": {"id": _CHANNEL}}]}
+            )
+        )
+        channel_id = await client._discover_channel_id("b001-20")
+
+    assert channel_id == _CHANNEL
+    assert client._channel_id == _CHANNEL
+
+
+@pytest.mark.asyncio
+async def test_discover_channel_id_cached_skips_http() -> None:
+    """Canal já em cache → nenhuma chamada HTTP."""
+    client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL
+    with respx.mock(base_url=MAGALU_API_BASE, assert_all_called=False) as router:
+        channel_id = await client._discover_channel_id("b001-20")
+        assert len(router.calls) == 0
+
+    assert channel_id == _CHANNEL
+
+
 # ---------------------------------------------------------------- update_price
 
 
 @pytest.mark.asyncio
 async def test_update_price_converts_reais_to_cents() -> None:
     client = MagaluClient(_creds())
+    client._channel_id = _CHANNEL  # canal já descoberto (testado à parte)
     with respx.mock(base_url=MAGALU_API_BASE) as router:
         route = router.patch("/seller/v1/portfolios/prices/b001-20").mock(
             return_value=httpx.Response(202, json={})
@@ -208,6 +312,8 @@ async def test_update_price_converts_reais_to_cents() -> None:
     assert body["list_price"] == 9980
     assert body["currency"] == "BRL"
     assert body["normalizer"] == 100
+    # channel.id é obrigatório também no PATCH de preço.
+    assert body["channel"] == {"id": _CHANNEL}
     assert result.status == SyncStatus.OK
 
 

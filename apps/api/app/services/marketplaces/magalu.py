@@ -34,11 +34,18 @@ Semântica confirmada na doc oficial (developers.magalu.com, API "Produtos"):
                 → {"results": [ {sku,title,status,...} ], "meta":..., "links":...}
                 (o portfólio NÃO traz stock/price inline — são sub-recursos.)
   * PATCH stock: PATCH /seller/v1/portfolios/stocks/{sku}
-                body {"quantity": <int>, "type": "AVAILABLE"} → 202 (async = OK)
+                body {"quantity": <int>, "type": "AVAILABLE",
+                "channel": {"id": <uuid>}} → 202 (async = OK)
   * PATCH price: PATCH /seller/v1/portfolios/prices/{sku}
                 body {"price": <cent>, "list_price": <cent>, "currency": "BRL",
-                "normalizer": 100} → 202. Preços são INTEIROS em centavos
-                (normalizer=100 é o divisor: 9980 == R$ 99,80).
+                "normalizer": 100, "channel": {"id": <uuid>}} → 202. Preços são
+                INTEIROS em centavos (normalizer=100 é o divisor: 9980 == R$ 99,80).
+  ⚠️ `channel.id` é o canal de venda do seller (nível conta) e é OBRIGATÓRIO nos
+     PATCH de estoque/preço (sem ele a Magalu devolve 422 "channel: Field
+     required"). Não há endpoint de listagem de canais — descobrimos o id lendo o
+     sub-recurso `stocks`/`prices` de qualquer SKU do portfólio
+     (`results[0].channel.id`) e cacheamos no cliente (mesmo canal p/ todos os
+     SKUs da integração).
 O token já é escopado ao tenant escolhido no login (choose_tenants=true), então
 as chamadas em api.magalu.com NÃO exigem header de tenant.
 """
@@ -107,6 +114,10 @@ class MagaluClient:
     def __init__(self, creds: dict, on_token_refresh=None):
         self.creds = dict(creds)
         self._on_refresh = on_token_refresh
+        # channel.id do seller (obrigatório nos PATCH de estoque/preço). Fica
+        # None até a 1ª descoberta e é cacheado aqui pelo resto do ciclo de vida
+        # do cliente (o orchestrator reusa 1 cliente por integração no run).
+        self._channel_id: str | None = None
 
     @property
     def access_token(self) -> str | None:
@@ -275,6 +286,43 @@ class MagaluClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def _discover_channel_id(self, sku: str) -> str | None:
+        """Descobre (e cacheia) o `channel.id` do seller a partir de um SKU.
+
+        Os PATCH de estoque/preço exigem `channel: {"id": <uuid>}` — o canal de
+        venda do seller, nível conta. Como não há endpoint de listagem de canais,
+        lemos o sub-recurso de estoque (e, em fallback, o de preço) de um SKU
+        qualquer do portfólio e extraímos `results[0].channel.id`. É o mesmo canal
+        pra todos os SKUs da integração, então cacheamos no cliente e as chamadas
+        seguintes saem de graça.
+        """
+        if self._channel_id:
+            return self._channel_id
+        for sub in ("stocks", "prices"):
+            try:
+                r = await self._request(
+                    "GET", f"/seller/v1/portfolios/{sub}/{quote(sku, safe='')}"
+                )
+            except httpx.HTTPError:
+                continue
+            if r.status_code != 200:
+                continue
+            results = (r.json() or {}).get("results") or []
+            for row in results:
+                if not isinstance(row, dict):
+                    continue
+                ch = row.get("channel")
+                cid = ch.get("id") if isinstance(ch, dict) else None
+                if cid:
+                    self._channel_id = str(cid)
+                    logger.info(
+                        "magalu_channel_discovered",
+                        channel_id=self._channel_id,
+                        via=sub,
+                    )
+                    return self._channel_id
+        return None
+
     async def update_stock(
         self,
         link: ProductLink,
@@ -313,11 +361,26 @@ class MagaluClient:
                 error_detail="link.external_id vazio",
             )
 
+        # channel.id é obrigatório no corpo (sem ele → 422). Descoberto 1x por
+        # integração e cacheado no cliente.
+        channel_id = await self._discover_channel_id(sku)
+        if not channel_id:
+            return SyncResult(
+                status=SyncStatus.RETRYABLE,
+                qty_before=qty_before,
+                error_code="magalu_channel_unknown",
+                error_detail=f"não descobriu channel.id (sku={sku})",
+            )
+
         try:
             r = await self._request(
                 "PATCH",
                 f"/seller/v1/portfolios/stocks/{quote(sku, safe='')}",
-                json={"quantity": int(qty), "type": "AVAILABLE"},
+                json={
+                    "quantity": int(qty),
+                    "type": "AVAILABLE",
+                    "channel": {"id": channel_id},
+                },
             )
         except httpx.HTTPError as e:
             return _map_http_error(e, qty_before, "magalu_patch_stock_failed")
@@ -366,6 +429,14 @@ class MagaluClient:
                 error_code="magalu_missing_sku",
                 error_detail="item_id vazio",
             )
+        # channel.id é obrigatório no corpo do PATCH de preço, igual ao estoque.
+        channel_id = await self._discover_channel_id(sku)
+        if not channel_id:
+            return SyncResult(
+                status=SyncStatus.RETRYABLE,
+                error_code="magalu_channel_unknown",
+                error_detail=f"não descobriu channel.id (sku={sku})",
+            )
         try:
             r = await self._request(
                 "PATCH",
@@ -375,6 +446,7 @@ class MagaluClient:
                     "list_price": cents,
                     "currency": "BRL",
                     "normalizer": 100,
+                    "channel": {"id": channel_id},
                 },
             )
         except httpx.HTTPError as e:
