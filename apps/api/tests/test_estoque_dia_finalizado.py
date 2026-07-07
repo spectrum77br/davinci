@@ -238,3 +238,29 @@ async def test_sku_duplicado_nao_impede_dia_fechar_total(
     # Sem o dedupe: denom=2 (2 linhas), conf=1 → 'parcial'.
     # Com o dedupe: denom=1 (1 SKU), conf=1 → 'total'.
     assert (await _get_envios_dia(client))["conferencia_estoque"] == "total"
+
+
+@pytest.mark.asyncio
+async def test_produto_situacao_formato_null_aparece_no_estoque(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None], admin: User,
+):
+    """Bug: produto importado do Bling com situacao/formato NULL (o
+    importer nem sempre popula) sumia da aba Estoque, porque o filtro
+    exigia situacao='A' AND formato='S' estrito. O resto do app trata
+    NULL como ativo/simples. Agora a aba Estoque também: NULL aparece."""
+    auth_as(admin)
+    db.add(Product(
+        user_id=admin.id, sku="z0215", name="Tecno Spark go 1 - AVULSO",
+        stock=5, min_stock=0, situacao=None, formato=None,
+        created_at=_ANTES,
+    ))
+    await db.commit()
+
+    r = await client.get(
+        f"/api/estoque/produtos?data_inicio={_DIA.isoformat()}"
+        f"&data_fim={_DIA.isoformat()}"
+    )
+    assert r.status_code == 200, r.text
+    skus = [row["sku"] for row in r.json()["data"]]
+    assert "z0215" in skus

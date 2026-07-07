@@ -121,6 +121,20 @@ def _baseline_sku_exclusions(column):
     ]
 
 
+def _active_simple_product_clauses() -> list:
+    """situacao/formato NULL contam como ativo/simples — mesma convenção
+    do resto do app (devoluções, importação, estoque negativo já usam
+    `or_(== , is_(None))`). Produtos recém-importados do Bling entram com
+    esses campos NULL (o importer nem sempre popula) e não podem sumir do
+    Controle de Estoque só por isso — o próximo refresh do Bling backfilla
+    situacao/formato. Kits ainda são barrados: formato='E' não casa e o
+    filtro de SKU com '+' pega os compostos."""
+    return [
+        or_(Product.situacao == "A", Product.situacao.is_(None)),
+        or_(Product.formato == "S", Product.formato.is_(None)),
+    ]
+
+
 def _user_sees_all_checks(user: User) -> bool:
     """True se o user pode ver conferências (StockCheck) agregadas de
     TODOS os usuários — admins por padrão, e qualquer user com a flag
@@ -216,8 +230,7 @@ async def list_estoque_produtos(
     # simples flag set incorrectly. Belt-and-suspenders: drop anything
     # whose SKU contains a '+' character regardless of `formato`.
     where: list = [
-        Product.situacao == "A",
-        Product.formato == "S",
+        *_active_simple_product_clauses(),
         Product.sku.notlike("%+%"),
         *_baseline_sku_exclusions(Product.sku),
     ]
@@ -730,8 +743,7 @@ async def _count_active_products(
     forwardado pra manter o denominador alinhado com o que o operador
     vê na tela quando filtra por com/sem estoque."""
     where: list = [
-        Product.situacao == "A",
-        Product.formato == "S",
+        *_active_simple_product_clauses(),
         Product.sku.notlike("%+%"),
         *_baseline_sku_exclusions(Product.sku),
     ]
@@ -772,8 +784,7 @@ async def _active_products_denominator_by_day(
     Mesmo filtro de situacao/formato/SKU+/baseline/tag do
     _count_active_products, pra ficar 1:1 com o numerador."""
     where: list = [
-        Product.situacao == "A",
-        Product.formato == "S",
+        *_active_simple_product_clauses(),
         Product.sku.notlike("%+%"),
         *_baseline_sku_exclusions(Product.sku),
     ]
@@ -1014,8 +1025,7 @@ async def sync_stocks(
     tags = _resolve_tags(user, tag)
 
     where: list = [
-        Product.situacao == "A",
-        Product.formato == "S",
+        *_active_simple_product_clauses(),
         Product.sku.notlike("%+%"),
         Product.bling_product_id.isnot(None),
         *_baseline_sku_exclusions(Product.sku),
