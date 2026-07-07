@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     magalu_client_id: str = ""
     magalu_client_secret: str = ""
     magalu_redirect_uri: str = ""
+    # Proxy de saída EXCLUSIVO da Magalu (formato "http://user:senha@host:porta").
+    # A Azion (edge da Magalu) bloqueia IPs de datacenter/fora do BR: o servidor
+    # de produção (Hetzner/DE) leva 403 em TODO id.magalu.com e api.magalu.com.
+    # Setando isto, o tráfego da Magalu (OAuth + API) — e SÓ ele — sai por um
+    # proxy BR; as demais integrações continuam saindo direto. Vazia = conexão
+    # direta (sem proxy), o comportamento padrão.
+    magalu_proxy_url: str = ""
 
     amazon_client_id: str = ""
     amazon_client_secret: str = ""

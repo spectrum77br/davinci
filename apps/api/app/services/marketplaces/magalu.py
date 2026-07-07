@@ -90,6 +90,19 @@ MAGALU_SCOPES = " ".join(
 _MAX_PAGE_SIZE = 100
 
 
+def _http_client(timeout: float) -> httpx.AsyncClient:
+    """AsyncClient com proxy opcional — usado por TODA saída HTTP da Magalu.
+
+    A Azion (edge da Magalu) bloqueia IPs de datacenter/fora do BR: o servidor
+    de produção (Hetzner/DE) leva 403 em todo id.magalu.com e api.magalu.com. Se
+    `MAGALU_PROXY_URL` estiver setada, o tráfego da Magalu (exchange, refresh e
+    chamadas de API) — e SÓ ele — sai por esse proxy BR; vazia = conexão direta
+    (comportamento padrão). As demais integrações não passam por aqui.
+    """
+    proxy = get_settings().magalu_proxy_url or None
+    return httpx.AsyncClient(timeout=timeout, proxy=proxy)
+
+
 class MagaluClient:
     def __init__(self, creds: dict, on_token_refresh=None):
         self.creds = dict(creds)
@@ -148,7 +161,7 @@ class MagaluClient:
         cid = client_id or s.magalu_client_id
         csec = client_secret or s.magalu_client_secret
         ruri = redirect_uri or s.magalu_redirect_uri
-        async with httpx.AsyncClient(timeout=20.0) as c:
+        async with _http_client(20.0) as c:
             r = await c.post(
                 MAGALU_TOKEN_URL,
                 headers={"Accept": "application/json"},
@@ -176,7 +189,7 @@ class MagaluClient:
         csec = str(self.creds.get("client_secret") or s.magalu_client_secret or "")
         if not cid or not csec:
             raise RuntimeError("missing client_id or client_secret")
-        async with httpx.AsyncClient(timeout=20.0) as c:
+        async with _http_client(20.0) as c:
             r = await c.post(
                 MAGALU_TOKEN_URL,
                 headers={"Accept": "application/json"},
@@ -213,7 +226,7 @@ class MagaluClient:
         delay = 1.0
         r: httpx.Response | None = None
         for attempt in range(3):
-            async with httpx.AsyncClient(timeout=30.0) as c:
+            async with _http_client(30.0) as c:
                 r = await c.request(
                     method, url, headers=headers, params=params, json=json
                 )
