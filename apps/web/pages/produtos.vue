@@ -258,8 +258,13 @@ const integrationById = computed(() => Object.fromEntries(integrations.value.map
 const blingIntegrations = computed(() => integrations.value.filter(i => i.platform === 'bling'))
 const marketplaceIntegrations = computed(() => integrations.value.filter(i => i.platform !== 'bling'))
 
+// Ordena contas por nome (alfabético, case-insensitive pt-BR, ignora espaços).
+function cmpIntegrationName(a: Integration, b: Integration): number {
+  return (a.name || '').trim().localeCompare((b.name || '').trim(), 'pt-BR', { sensitivity: 'base' })
+}
+
 // Contas do filtro superior agrupadas por plataforma (ordem alfabética) e, dentro
-// de cada grupo, por nome (alfabético, case-insensitive pt-BR).
+// de cada grupo, por nome (alfabético).
 const integrationGroups = computed(() => {
   const groups: Record<string, Integration[]> = {}
   for (const i of integrations.value) {
@@ -269,11 +274,18 @@ const integrationGroups = computed(() => {
     .sort((a, b) => a.localeCompare(b))
     .map((platform) => ({
       platform,
-      items: [...groups[platform]].sort((a, b) =>
-        (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' }),
-      ),
+      items: [...groups[platform]].sort(cmpIntegrationName),
     }))
 })
+
+// Contas de marketplace ordenadas por plataforma e, dentro dela, por nome —
+// usada nos diálogos "Vincular Automático" e "Sincronizar Todos".
+const marketplaceIntegrationsSorted = computed(() =>
+  [...marketplaceIntegrations.value].sort((a, b) => {
+    const p = (a.platform as string).localeCompare(b.platform as string)
+    return p !== 0 ? p : cmpIntegrationName(a, b)
+  }),
+)
 
 type MarketCol = 'shopee' | 'amazon' | 'ml_classico' | 'ml_premium' | 'tiktok' | 'magalu'
 
@@ -2050,10 +2062,10 @@ onUnmounted(() => {
                 Nenhuma integração de marketplace conectada.
               </p>
               <label
-                v-for="(integ, idx) in marketplaceIntegrations"
+                v-for="(integ, idx) in marketplaceIntegrationsSorted"
                 :key="integ.id"
                 class="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 cursor-pointer transition-colors"
-                :class="idx !== marketplaceIntegrations.length - 1 ? 'border-b' : ''"
+                :class="idx !== marketplaceIntegrationsSorted.length - 1 ? 'border-b' : ''"
               >
                 <input
                   type="checkbox"
@@ -2228,10 +2240,10 @@ onUnmounted(() => {
                 Nenhuma integração de marketplace conectada.
               </p>
               <label
-                v-for="(integ, idx) in marketplaceIntegrations"
+                v-for="(integ, idx) in marketplaceIntegrationsSorted"
                 :key="integ.id"
                 class="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 cursor-pointer transition-colors"
-                :class="idx !== marketplaceIntegrations.length - 1 ? 'border-b' : ''"
+                :class="idx !== marketplaceIntegrationsSorted.length - 1 ? 'border-b' : ''"
               >
                 <input
                   type="checkbox"
