@@ -827,7 +827,7 @@ function openSyncPopover(p: Product, ev: MouseEvent) {
   // `capture: true` pega scroll em qualquer container (ex: o overflow-auto
   // do `.table-card` quando voltar a ser scrollável). Adiamos o
   // click-outside um tick pra não capturar o próprio clique que abriu.
-  window.addEventListener('scroll', closeSyncPopover, true)
+  window.addEventListener('scroll', onSyncPopoverScroll, true)
   setTimeout(() => document.addEventListener('mousedown', onSyncPopoverDocClick), 0)
 }
 
@@ -835,8 +835,17 @@ function closeSyncPopover() {
   syncPopoverProductId.value = null
   syncPopoverSelectedIds.value = new Set()
   syncPopoverAnchor.value = null
-  window.removeEventListener('scroll', closeSyncPopover, true)
+  window.removeEventListener('scroll', onSyncPopoverScroll, true)
   document.removeEventListener('mousedown', onSyncPopoverDocClick)
+}
+
+// Fecha ao rolar a PÁGINA (âncora invalida), mas NÃO quando o scroll é da
+// própria lista de contas do popover (max-h-48 overflow-y-auto) — senão
+// arrastar pra ver mais contas fechava o popover.
+function onSyncPopoverScroll(ev: Event) {
+  const el = document.getElementById('sync-popover-floating')
+  if (el && el.contains(ev.target as Node)) return
+  closeSyncPopover()
 }
 
 function onSyncPopoverDocClick(ev: MouseEvent) {
@@ -845,7 +854,7 @@ function onSyncPopoverDocClick(ev: MouseEvent) {
 }
 
 onUnmounted(() => {
-  window.removeEventListener('scroll', closeSyncPopover, true)
+  window.removeEventListener('scroll', onSyncPopoverScroll, true)
   document.removeEventListener('mousedown', onSyncPopoverDocClick)
 })
 
