@@ -288,7 +288,18 @@ class SyncOrchestrator:
                 action = SyncLogAction.UPDATE_STOCK
                 try:
                     integration = await self._get_integration(link.integration_id)
-                    if integration.vacation_mode:
+                    if integration.archived_at is not None:
+                        # Conta arquivada (loja suspensa tirada de circulação em
+                        # Lojas): o sync para de mirá-la. SKIPPED — não é falha,
+                        # não dispara alerta nem conta como erro no job.
+                        result = SyncResult(
+                            status=SyncStatus.SKIPPED,
+                            qty_before=product.stock,
+                            qty_after=product.stock,
+                            error_code="archived",
+                            error_detail="conta arquivada — sync pausado",
+                        )
+                    elif integration.vacation_mode:
                         # "Modo férias" ligado: não empurra estoque pra esta
                         # conta. Freeze — o marketplace mantém o último estoque
                         # enviado. SKIPPED (não é falha) pra não disparar alerta

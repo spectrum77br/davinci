@@ -108,7 +108,15 @@ async def list_integrations(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_active_user)],
 ) -> list[IntegrationOut]:
-    rows = (await session.execute(select(Integration).order_by(Integration.created_at.desc()))).scalars().all()
+    # Integrações arquivadas (loja suspensa tirada de circulação em Lojas) somem
+    # do filtro de contas e de Produtos. archived_at NULL = ativa.
+    rows = (
+        await session.execute(
+            select(Integration)
+            .where(Integration.archived_at.is_(None))
+            .order_by(Integration.created_at.desc())
+        )
+    ).scalars().all()
     out: list[IntegrationOut] = []
     for i in rows:
         s = await _resolve_store(session, i)

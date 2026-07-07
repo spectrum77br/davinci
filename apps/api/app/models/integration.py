@@ -42,6 +42,11 @@ class Integration(Base, TimestampMixin):
     credentials: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'active'"))
+    # "Arquivada": conta suspensa que o operador tira de circulação pela tela
+    # Lojas. Quando != NULL, a integração some de Produtos e do filtro de contas,
+    # e o sync (push de estoque/preço) para de mirá-la. NULL = ativa. Reversível
+    # pelo botão "Ativar". Migration 0170.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -274,6 +274,12 @@ class StoreInfo(Base, TimestampMixin):
     uf_restrictions: Mapped[list[str] | None] = mapped_column(
         ARRAY(Text), nullable=True
     )
+    # "Arquivada": loja suspensa tirada de circulação. Quando != NULL, some da
+    # tela Lojas (e a integração vinculada é arquivada junto). NULL = ativa.
+    # Migration 0170.
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class PricingPushIdempotency(Base):

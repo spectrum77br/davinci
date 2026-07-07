@@ -174,11 +174,23 @@ async def list_products(
         )
     ).scalars().all()
 
-    # Batch-load links to avoid N+1.
+    # Batch-load links to avoid N+1. Links de integrações arquivadas (loja
+    # suspensa) são omitidos — a conta some das colunas/badges de Produtos.
     if rows:
         ids = [p.id for p in rows]
+        archived_integs = select(Integration.id).where(
+            Integration.archived_at.is_not(None)
+        )
         links = (
-            await session.execute(select(ProductLink).where(ProductLink.product_id.in_(ids)))
+            await session.execute(
+                select(ProductLink).where(
+                    ProductLink.product_id.in_(ids),
+                    or_(
+                        ProductLink.integration_id.is_(None),
+                        ProductLink.integration_id.not_in(archived_integs),
+                    ),
+                )
+            )
         ).scalars().all()
     else:
         links = []

@@ -392,6 +392,7 @@ class StoreInfoOut(StoreInfoBase):
     departments: list[str] = []
     has_pricing: bool = False
     has_integration: bool = False
+    archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

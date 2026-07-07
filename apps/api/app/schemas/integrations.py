@@ -19,6 +19,7 @@ class IntegrationOut(BaseModel):
     last_test_ok: bool | None = None
     last_error: str | None = None
     vacation_mode: bool = False
+    archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

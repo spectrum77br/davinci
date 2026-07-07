@@ -221,6 +221,21 @@ async def list_accounts(
         stmt = stmt.where(PricingAccount.segment_id == rid)
     if platform:
         stmt = stmt.where(PricingAccount.platform == _coerce_platform(platform))
+    # Contas cuja loja (store_info) OU integração vinculada está arquivada saem
+    # da Tabela de Preço. FK-based: linhas legadas sem FK permanecem visíveis
+    # (o `or_ is_(None)` evita a armadilha `NULL NOT IN (...)` = NULL = exclui).
+    archived_stores = select(StoreInfo.id).where(StoreInfo.archived_at.is_not(None))
+    archived_integs = select(Integration.id).where(Integration.archived_at.is_not(None))
+    stmt = stmt.where(
+        or_(
+            PricingAccount.store_info_id.is_(None),
+            PricingAccount.store_info_id.not_in(archived_stores),
+        ),
+        or_(
+            PricingAccount.integration_id.is_(None),
+            PricingAccount.integration_id.not_in(archived_integs),
+        ),
+    )
     stmt = stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
     rows = (await session.execute(stmt)).scalars().all()
     names_by_id = await _segment_names_by_id(session)
@@ -2010,11 +2025,19 @@ async def list_store_info(
     user: Annotated[
         User, Depends(require_permission("tabela_precos", "view"))
     ],
+    archived: bool = Query(False),
 ) -> list[StoreInfoOut]:
+    # Default view hides archived stores; `?archived=true` shows only the
+    # archived ones (the "Arquivadas" tab). archived_at NULL = ativa.
+    archived_filter = (
+        StoreInfo.archived_at.is_not(None)
+        if archived
+        else StoreInfo.archived_at.is_(None)
+    )
     rows = (
         await session.execute(
             select(StoreInfo)
-            .where(user_scope(StoreInfo, user))
+            .where(user_scope(StoreInfo, user), archived_filter)
             .order_by(StoreInfo.sort_order, StoreInfo.platform)
         )
     ).scalars().all()
@@ -2158,6 +2181,120 @@ async def patch_store_info(
         departments=depts,
         has_pricing=has_pricing,
         has_integration=has_integ,
+    )
+
+
+async def _resolve_linked_integration(
+    session: AsyncSession, user: User, row: StoreInfo
+) -> Integration | None:
+    """Encontra a integração vinculada à loja: prefere o FK store_info.
+    integration_id; se ausente, casa por (lower(name)==lower(account_name),
+    platform) — mesmo pareamento estrito do badge "Integração"."""
+    if row.integration_id is not None:
+        return (
+            await session.execute(
+                select(Integration).where(
+                    and_(
+                        Integration.id == row.integration_id,
+                        user_scope(Integration, user),
+                    )
+                )
+            )
+        ).scalar_one_or_none()
+    sname = (row.account_name or "").strip().lower()
+    splat = (row.platform or "").strip().lower()
+    if not sname:
+        return None
+    integs = (
+        await session.execute(
+            select(Integration).where(user_scope(Integration, user))
+        )
+    ).scalars().all()
+    for integ in integs:
+        iplat = integ.platform.value if hasattr(integ.platform, "value") else str(integ.platform)
+        if (integ.name or "").strip().lower() == sname and iplat.lower() == splat:
+            return integ
+    return None
+
+
+@router.post("/store-info/{store_info_id}/archive", response_model=StoreInfoOut)
+async def archive_store_info(
+    store_info_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> StoreInfoOut:
+    """Arquiva uma loja suspensa: some de Lojas, da Tabela de Preço e de
+    Produtos, e o sync para de empurrar estoque/preço. Propaga o
+    `archived_at` pra integração vinculada. Reversível pelo /unarchive."""
+    from datetime import UTC, datetime
+
+    row = (
+        await session.execute(
+            select(StoreInfo).where(
+                and_(StoreInfo.id == store_info_id, user_scope(StoreInfo, user))
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "store_info_not_found"})
+    now = datetime.now(UTC)
+    row.archived_at = now
+    integ = await _resolve_linked_integration(session, user, row)
+    if integ is not None:
+        integ.archived_at = now
+        # Backfill do FK pra desarquivar depois sem depender do name-match.
+        if row.integration_id is None:
+            row.integration_id = integ.id
+    await session.commit()
+    await session.refresh(row)
+    logger.info(
+        "store_info.archived",
+        user_id=str(user.id),
+        store_info_id=str(store_info_id),
+        integration_id=str(integ.id) if integ else None,
+    )
+    return _store_info_out(row)
+
+
+@router.post("/store-info/{store_info_id}/unarchive", response_model=StoreInfoOut)
+async def unarchive_store_info(
+    store_info_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos", "edit"))
+    ],
+) -> StoreInfoOut:
+    """Reativa uma loja arquivada (botão "Ativar"): volta pra Lojas, Tabela de
+    Preço e Produtos, e o sync volta a mirá-la. Limpa o `archived_at` da loja
+    e da integração vinculada."""
+    row = (
+        await session.execute(
+            select(StoreInfo).where(
+                and_(StoreInfo.id == store_info_id, user_scope(StoreInfo, user))
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "store_info_not_found"})
+    row.archived_at = None
+    integ = await _resolve_linked_integration(session, user, row)
+    if integ is not None:
+        integ.archived_at = None
+    await session.commit()
+    await session.refresh(row)
+    depts, has_pricing, has_integ = await _compute_store_info_badges(
+        session, user, row
+    )
+    logger.info(
+        "store_info.unarchived",
+        user_id=str(user.id),
+        store_info_id=str(store_info_id),
+        integration_id=str(integ.id) if integ else None,
+    )
+    return _store_info_out(
+        row, departments=depts, has_pricing=has_pricing, has_integration=has_integ
     )
 
 

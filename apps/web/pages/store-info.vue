@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle, Unlink, Link2 } from 'lucide-vue-next'
+import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle, Unlink, Link2, Archive, ArchiveRestore } from 'lucide-vue-next'
 
 definePageMeta({
   // `/store-info.` (trailing period) shows up consistently in prod logs —
@@ -38,6 +38,7 @@ type StoreInfo = {
   duoker: boolean | null
   uf_restrictions: string[] | null
   sales_team: number | null
+  archived_at: string | null
   created_at: string
   updated_at: string
 }
@@ -118,13 +119,17 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const filterPlatform = ref<string>('all')
 const search = ref('')
+// false = Lojas ativas (default); true = aba "Arquivadas" (contas suspensas
+// tiradas de circulação, com botão "Ativar" pra reverter).
+const archivedView = ref(false)
 
 async function load() {
   loading.value = true
   error.value = null
   try {
+    const q = archivedView.value ? '?archived=true' : ''
     const [storeInfo, integs] = await Promise.all([
-      api<StoreInfo[]>('/api/pricing/store-info'),
+      api<StoreInfo[]>(`/api/pricing/store-info${q}`),
       api<IntegrationRef[]>('/api/integrations').catch(() => [] as IntegrationRef[]),
     ])
     items.value = storeInfo
@@ -426,6 +431,43 @@ async function remove(row: StoreInfo) {
   }
 }
 
+// =========================================================== archive
+
+// Arquivar uma conta suspensa: some de Lojas, Tabela de Preço e Produtos, e o
+// sync para de mirá-la. A integração vinculada é arquivada junto. Reversível
+// pelo botão "Ativar" na aba Arquivadas.
+const archiveBusy = ref<Set<string>>(new Set())
+
+async function archiveRow(row: StoreInfo) {
+  if (!confirm(`Arquivar "${row.account_name || row.platform}"? Ela sai de Lojas, Tabela de Preço e Produtos, e o sync para de empurrar estoque/preço. Reversível em "Arquivadas".`)) return
+  archiveBusy.value.add(row.id)
+  try {
+    await api(`/api/pricing/store-info/${row.id}/archive`, { method: 'POST' })
+    items.value = items.value.filter((x) => x.id !== row.id)
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    archiveBusy.value.delete(row.id)
+  }
+}
+
+async function unarchiveRow(row: StoreInfo) {
+  archiveBusy.value.add(row.id)
+  try {
+    await api(`/api/pricing/store-info/${row.id}/unarchive`, { method: 'POST' })
+    items.value = items.value.filter((x) => x.id !== row.id)
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    archiveBusy.value.delete(row.id)
+  }
+}
+
+function toggleArchivedView() {
+  archivedView.value = !archivedView.value
+  load()
+}
+
 // =========================================================== bind dept
 
 const TIPO_OPTIONS = [
@@ -516,7 +558,15 @@ async function copyText(text: string) {
         <Button size="sm" variant="ghost" :disabled="loading" @click="load">
           <RefreshCw class="size-4 mr-1" :class="{ 'animate-spin': loading }" /> recarregar
         </Button>
-        <Button v-if="canEdit" size="sm" :disabled="showAdd" @click="openAdd">
+        <Button
+          size="sm"
+          :variant="archivedView ? 'default' : 'ghost'"
+          :disabled="loading"
+          @click="toggleArchivedView"
+        >
+          <Archive class="size-4 mr-1" /> {{ archivedView ? 'Ativas' : 'Arquivadas' }}
+        </Button>
+        <Button v-if="canEdit && !archivedView" size="sm" :disabled="showAdd" @click="openAdd">
           <Plus class="size-4 mr-1" /> Nova loja
         </Button>
       </template>
@@ -966,8 +1016,26 @@ async function copyText(text: string) {
                   : '—' }}
               </button>
             </td>
-            <!-- delete -->
-            <td class="border border-border px-1 py-1 text-center">
+            <!-- actions: arquivar/ativar + delete -->
+            <td class="border border-border px-1 py-1 text-center whitespace-nowrap">
+              <button
+                v-if="canEdit && archivedView"
+                class="p-1 text-emerald-500 hover:bg-emerald-500/10 rounded disabled:opacity-40"
+                :title="`Ativar ${row.account_name || row.platform}`"
+                :disabled="archiveBusy.has(row.id)"
+                @click="unarchiveRow(row)"
+              >
+                <ArchiveRestore class="h-3 w-3" />
+              </button>
+              <button
+                v-else-if="canEdit"
+                class="p-1 text-amber-500 hover:bg-amber-500/10 rounded disabled:opacity-40"
+                :title="`Arquivar ${row.account_name || row.platform}`"
+                :disabled="archiveBusy.has(row.id)"
+                @click="archiveRow(row)"
+              >
+                <Archive class="h-3 w-3" />
+              </button>
               <button
                 v-if="canDelete"
                 class="p-1 text-destructive hover:bg-destructive/10 rounded"

@@ -458,6 +458,15 @@ async def push_one(
             code="integration_not_found",
             price=outcome.price,
         )
+    if integration.archived_at is not None:
+        # Conta arquivada (loja suspensa): push de preço pausado, igual ao
+        # push de estoque no sync orchestrator.
+        return PushOutcome(
+            ok=False,
+            code="integration_archived",
+            detail="conta arquivada — push de preço pausado",
+            price=outcome.price,
+        )
     # All platforms are now supported
     _SUPPORTED_PLATFORMS = {
         IntegrationPlatform.ML,
