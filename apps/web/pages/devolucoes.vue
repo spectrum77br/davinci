@@ -11,6 +11,7 @@ import {
   Plus,
   RotateCcw,
   Search,
+  Trash2,
   Undo2,
   X,
 } from 'lucide-vue-next'
@@ -164,6 +165,7 @@ const TECNICOS = [
 
 const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
+const canDelete = useCan('devolucoes', 'delete')
 const isAdmin = useIsAdmin()
 
 // Devolução de estoque é AUTOMÁTICA no insert para todas as condições que
@@ -946,6 +948,34 @@ async function saveRow(row: DevolutionRow) {
   }
 }
 
+const deleting = ref<Set<string>>(new Set())
+function isDeleting(id: string): boolean {
+  return deleting.value.has(id)
+}
+async function removeRow(row: DevolutionRow) {
+  if (!canDelete.value || isDeleting(row.id)) return
+  const label = row.sku || row.pedido_bling || 'esta devolução'
+  const stockNote = row.estoque_mov_sku && !row.estoque_mov_revertido_at
+    ? ' O estoque já devolvido no Bling NÃO é estornado — ajuste-o direto no Bling.'
+    : ''
+  if (!confirm(`Remover o lançamento de "${label}"? Esta ação não pode ser desfeita.${stockNote}`)) return
+  const next = new Set(deleting.value)
+  next.add(row.id)
+  deleting.value = next
+  error.value = null
+  try {
+    await api(`/api/devolutions/${encodeURIComponent(row.id)}`, { method: 'DELETE' })
+    items.value = items.value.filter((i) => i.id !== row.id)
+    total.value = Math.max(0, total.value - 1)
+  } catch (e: any) {
+    error.value = apiError(e)
+  } finally {
+    const done = new Set(deleting.value)
+    done.delete(row.id)
+    deleting.value = done
+  }
+}
+
 const backfilling = ref(false)
 async function backfillAddresses() {
   if (!canEdit.value || backfilling.value) return
@@ -1288,17 +1318,18 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prazo</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
             <th v-if="isAdmin" class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-slate-50 dark:bg-slate-800/40 border-l-[3px] border-gray-400 dark:border-gray-600">Atualizado</th>
+            <th v-if="canDelete" class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[50px]"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="isAdmin ? 20 : 18" class="py-8 text-center text-muted-foreground">
+            <td :colspan="(isAdmin ? 20 : 18) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="isAdmin ? 20 : 18" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="(isAdmin ? 20 : 18) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -1468,6 +1499,18 @@ async function backfillAddresses() {
               />
             </td>
             <td v-if="isAdmin" class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-slate-50/40 dark:bg-slate-800/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Última alteração feita neste registro">{{ fmtDateTime(row.updated_at) }}</td>
+            <td v-if="canDelete" class="px-2 py-1 text-center">
+              <button
+                type="button"
+                :disabled="isDeleting(row.id)"
+                title="Remover lançamento (não estorna o estoque no Bling)"
+                class="inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-red-100 hover:text-red-600 disabled:cursor-default disabled:opacity-50 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+                @click="removeRow(row)"
+              >
+                <Loader2 v-if="isDeleting(row.id)" class="size-3.5 animate-spin" />
+                <Trash2 v-else class="size-3.5" />
+              </button>
+            </td>
           </tr>
         </tbody>
       </table>
