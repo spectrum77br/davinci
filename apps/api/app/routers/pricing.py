@@ -1810,6 +1810,7 @@ PRICING_TO_INTEG_PLATFORM = {
     "amazon": IntegrationPlatform.AMAZON,
     "tiktok": IntegrationPlatform.TIKTOK,
     "temu": IntegrationPlatform.TEMU,
+    "magalu": IntegrationPlatform.MAGALU,
 }
 
 # `store_info.platform` uses short codes (ml, …); `pricing_accounts.platform`

@@ -280,6 +280,7 @@ const PRICING_TO_INTEG_PLATFORM: Record<string, string> = {
   amazon: 'amazon',
   tiktok: 'tiktok',
   temu: 'temu',
+  magalu: 'magalu',
 }
 
 function integrationsForPricingPlatform(p: string): Integration[] {
