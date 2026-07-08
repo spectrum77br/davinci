@@ -116,6 +116,25 @@ async def _reconcile_excluidos(
         logger.warning("reconcile_excluidos_skipped", reason="no_sweep_data")
         return
 
+    # Ressuscita 'E' stale: produto local marcado 'E' cujo bling_product_id
+    # VOLTOU a aparecer no sweep do /produtos. Como o /produtos não lista
+    # apagados/excluídos, reaparecer = vivo de novo no catálogo Bling → o 'E'
+    # local está congelado (a reconciliação de exclusão é mão única e nunca
+    # volta 'E'→'A', e o backfill de situacao só toca NULL). Sem isso, um
+    # produto reativado no Bling some pra sempre do Controle de Estoque e da
+    # busca de Correção de Estoque (devoluções). Restaura pra 'A'.
+    resurrected = [
+        p
+        for bpid, p in product_by_bpid.items()
+        if p.situacao == "E" and bpid in seen_bpids
+    ]
+    for p in resurrected:
+        p.situacao = "A"
+    summary["reconciled_resurrected"] = len(resurrected)
+    if resurrected:
+        summary["resurrected_skus"] = [p.sku for p in resurrected[:200]]
+        await session.commit()
+
     candidates = [
         p
         for bpid, p in product_by_bpid.items()
@@ -236,6 +255,7 @@ async def run_refresh_bling_stock(
         "reconcile_candidates": 0,
         "reconciled_excluido": 0,
         "reconciled_healed": 0,
+        "reconciled_resurrected": 0,
     }
 
     # Match Bling products to local products by Product.bling_product_id
