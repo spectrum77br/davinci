@@ -314,6 +314,16 @@ async function startEdit(row: StoreInfo, field: string) {
   editing.value = { id: row.id, field }
   let initial: string
   if (field === 'password') {
+    // Revela a senha real ANTES de editar. Sem isso, o campo abria vazio
+    // (a máscara não é a senha) e parecia que a senha tinha sumido ao
+    // clicar nos pontos — e um blur poderia salvar em branco.
+    if (row.has_password && !revealedPasswords.value.has(row.id)) {
+      try {
+        const r = await api<{ password: string }>(`/api/pricing/store-info/${row.id}/password`)
+        revealedPasswords.value.set(row.id, r.password)
+        revealed.value.add(row.id)
+      } catch { /* mantém vazio se falhar */ }
+    }
     initial = revealedPasswords.value.get(row.id) ?? ''
   } else {
     const raw = (row as any)[field]
@@ -532,6 +542,26 @@ async function toggleReveal(id: string) {
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   }
+}
+
+const copiedId = ref<string | null>(null)
+async function copyPassword(id: string) {
+  let pw = revealedPasswords.value.get(id)
+  if (pw == null) {
+    try {
+      const r = await api<{ password: string }>(`/api/pricing/store-info/${id}/password`)
+      pw = r.password
+      revealedPasswords.value.set(id, pw)
+    } catch (e: any) {
+      error.value = e?.data?.detail?.code || e?.message || 'erro'
+      return
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(pw ?? '')
+    copiedId.value = id
+    setTimeout(() => { if (copiedId.value === id) copiedId.value = null }, 1200)
+  } catch { /* clipboard indisponível */ }
 }
 
 async function copyText(text: string) {
@@ -813,6 +843,15 @@ async function copyText(text: string) {
                 >
                   <EyeOff v-if="revealed.has(row.id)" class="h-3 w-3" />
                   <Eye v-else class="h-3 w-3" />
+                </button>
+                <button
+                  v-if="row.has_password && !isEditing(row.id, 'password')"
+                  class="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 hover:bg-muted rounded"
+                  :title="copiedId === row.id ? 'Copiado!' : 'Copiar senha'"
+                  @click="copyPassword(row.id)"
+                >
+                  <Check v-if="copiedId === row.id" class="h-3 w-3 text-emerald-600" />
+                  <Copy v-else class="h-3 w-3" />
                 </button>
               </div>
             </td>
