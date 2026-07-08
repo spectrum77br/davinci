@@ -172,6 +172,36 @@ async def test_unarchive_reverts_store_and_integration(
 
 
 @pytest.mark.asyncio
+async def test_archive_hides_account_from_grid(
+    db: AsyncSession,
+    client: AsyncClient,
+    user_arch: User,
+    auth_as: Callable[[User | None], None],
+    archive_setup: dict[str, object],
+):
+    """Regressão: a conta arquivada saía de /accounts (a lista) mas continuava
+    como COLUNA no /grid (a matriz de preços), porque o grid não aplicava o
+    filtro de arquivadas. Agora os dois usam a mesma exclusão."""
+    auth_as(user_arch)
+    info_id = archive_setup["info_id"]
+    acc_id = str(archive_setup["acc_id"])
+
+    # Antes: a conta é coluna no grid.
+    r = await client.get("/api/pricing/grid")
+    assert r.status_code == 200, r.text
+    assert any(a["id"] == acc_id for a in r.json()["accounts"])
+
+    # Arquiva a loja.
+    r = await client.post(f"/api/pricing/store-info/{info_id}/archive")
+    assert r.status_code == 200
+
+    # Depois: some do grid também.
+    r = await client.get("/api/pricing/grid")
+    assert r.status_code == 200, r.text
+    assert not any(a["id"] == acc_id for a in r.json()["accounts"])
+
+
+@pytest.mark.asyncio
 async def test_archive_not_found(
     client: AsyncClient,
     user_arch: User,

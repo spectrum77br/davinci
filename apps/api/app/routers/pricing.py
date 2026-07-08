@@ -203,6 +203,27 @@ def _product_out(
 # Accounts
 # =============================================================================
 
+def _exclude_archived_accounts(stmt):
+    """Tira da Tabela de Preço as contas cuja loja (store_info) OU integração
+    vinculada está arquivada. FK-based: linhas legadas sem FK permanecem
+    visíveis (o `or_ is_(None)` evita a armadilha `NULL NOT IN (...)` = NULL =
+    exclui). Usado no `/accounts` E no `/grid` — os dois têm que esconder as
+    mesmas contas, senão a arquivada some da lista mas continua como coluna no
+    grid de preços."""
+    archived_stores = select(StoreInfo.id).where(StoreInfo.archived_at.is_not(None))
+    archived_integs = select(Integration.id).where(Integration.archived_at.is_not(None))
+    return stmt.where(
+        or_(
+            PricingAccount.store_info_id.is_(None),
+            PricingAccount.store_info_id.not_in(archived_stores),
+        ),
+        or_(
+            PricingAccount.integration_id.is_(None),
+            PricingAccount.integration_id.not_in(archived_integs),
+        ),
+    )
+
+
 @router.get("/accounts", response_model=list[PricingAccountOut])
 async def list_accounts(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -221,21 +242,7 @@ async def list_accounts(
         stmt = stmt.where(PricingAccount.segment_id == rid)
     if platform:
         stmt = stmt.where(PricingAccount.platform == _coerce_platform(platform))
-    # Contas cuja loja (store_info) OU integração vinculada está arquivada saem
-    # da Tabela de Preço. FK-based: linhas legadas sem FK permanecem visíveis
-    # (o `or_ is_(None)` evita a armadilha `NULL NOT IN (...)` = NULL = exclui).
-    archived_stores = select(StoreInfo.id).where(StoreInfo.archived_at.is_not(None))
-    archived_integs = select(Integration.id).where(Integration.archived_at.is_not(None))
-    stmt = stmt.where(
-        or_(
-            PricingAccount.store_info_id.is_(None),
-            PricingAccount.store_info_id.not_in(archived_stores),
-        ),
-        or_(
-            PricingAccount.integration_id.is_(None),
-            PricingAccount.integration_id.not_in(archived_integs),
-        ),
-    )
+    stmt = _exclude_archived_accounts(stmt)
     stmt = stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
     rows = (await session.execute(stmt)).scalars().all()
     names_by_id = await _segment_names_by_id(session)
@@ -985,6 +992,9 @@ async def get_grid(
         leaf_ids = [lid for lid, (rs, _pt) in leaves_by_id.items() if rs == department]
         accounts_stmt = accounts_stmt.where(PricingAccount.segment_id == rid)
         products_stmt = products_stmt.where(PricingProduct.segment_id.in_(leaf_ids))
+    # Mesma exclusão do `/accounts`: conta de loja/integração arquivada não
+    # pode virar coluna no grid de preços.
+    accounts_stmt = _exclude_archived_accounts(accounts_stmt)
     accounts = (
         await session.execute(
             accounts_stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
