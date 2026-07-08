@@ -634,11 +634,16 @@ async def marketing_consume_commands(ctx: dict) -> None:
 
 
 async def marketing_reconcile_schedules(ctx: dict) -> None:
-    """Agent node only (~every 60s): compare each schedule-enabled account's
-    desired BRT state against its campaigns' actual state and enqueue a
-    correcting command on drift. Pure DB work — no marketplace calls — so
-    it's safe to run every minute and reconverges after any restart."""
-    if not _settings.marketing_agent_node:
+    """CENTRAL server (~every 60s): compare each schedule-enabled account's
+    desired BRT state against its actual state and enqueue a correcting command
+    on drift. Pure DB work — it only writes to the marketing_commands outbox,
+    never calls a marketplace API — so unlike the consumer (pinned to the agent
+    node for the partner throttle) it's safe to run on the always-on central
+    node. The enqueued commands are executed elsewhere: Shopee ('browser') by
+    the LOCAL marionete via /agent/lease, ML/Amazon ('api') by the agent-node
+    consumer. Gated by `enable_marketing` (no-op in prod until the module is
+    switched on); reconverges after any restart."""
+    if not _settings.enable_marketing:
         return
     from app.services.marketing.reconcile import reconcile_schedules
 
@@ -1662,6 +1667,13 @@ class WorkerSettings:
         # Marketing: pull live ML + Amazon ad data every half-hour at :05
         # and :35 (Shopee is NOT included — see marketing_shopee_tick).
         cron(marketing_full_sync, minute={5, 35}, run_at_startup=False),
+        # Marketing: schedule reconciler (BRT windows → outbox) every minute.
+        # Runs HERE on the always-on central server because it only WRITES to
+        # the marketing_commands outbox — no marketplace API call — so it isn't
+        # bound by the Shopee/ML partner throttle that pins the consumer to the
+        # agent node. It enqueues 'browser' commands (Shopee → local marionete
+        # via /agent/lease) and 'api' commands (ML/Amazon → agent-node consumer).
+        cron(marketing_reconcile_schedules, run_at_startup=False),
         # Marketing: Shopee round-robin MOVED to the agent-node block below —
         # only the dedicated machine (MARKETING_AGENT_NODE=1) talks to Shopee
         # Ads, so the central server never competes on the same partner-id
@@ -1864,11 +1876,16 @@ class WorkerSettingsMarketingAgent:
     """Worker da MÁQUINA DEDICADA (MARKETING_AGENT_NODE=1) — a ÚNICA que fala
     com Shopee/ML Ads, contornando o rate-limit por partner-id.
 
-    Roda APENAS os 3 crons de marketing (não os ~25 do WorkerSettings), pra
-    NÃO duplicar refresh de token, daily_sync, safety-net etc. do servidor:
+    Roda os crons de marketing que EXIGEM a máquina dedicada (não os ~25 do
+    WorkerSettings), pra NÃO duplicar refresh de token, daily_sync, safety-net
+    etc. do servidor:
       - marketing_shopee_tick:        puxa dados de Ads da Shopee (round-robin)
-      - marketing_consume_commands:   drena a fila marketing_commands
-      - marketing_reconcile_schedules: aplica a agenda BRT (pausa/religa)
+      - marketing_consume_commands:   drena a fila (comandos executor='api')
+
+    O `marketing_reconcile_schedules` NÃO roda aqui: ele só escreve na outbox
+    (sem chamar API), então mora no WorkerSettings central (sempre ligado, é
+    quem serve o /agent/lease pro marionete). Deixá-lo aqui também duplicaria o
+    trabalho a cada minuto.
 
     Usa o `arq_redis_url` do ambiente — na máquina dedicada aponte-o pra um
     Redis LOCAL próprio (ex.: redis://localhost:6380/1) pra isolar totalmente
@@ -1879,7 +1896,6 @@ class WorkerSettingsMarketingAgent:
     functions = [
         marketing_shopee_tick,
         marketing_consume_commands,
-        marketing_reconcile_schedules,
     ]
     cron_jobs = [
         cron(
@@ -1888,7 +1904,6 @@ class WorkerSettingsMarketingAgent:
             run_at_startup=False,
         ),
         cron(marketing_consume_commands, second={0, 20, 40}, run_at_startup=False),
-        cron(marketing_reconcile_schedules, run_at_startup=False),
     ]
     queue_name = "davinci_marketing"
     # Baixa concorrência: o consumidor processa lotes pequenos e o sync Shopee

@@ -87,6 +87,17 @@ class MarketingAccount(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
 
+    # ─── External executor (AdsPower / marionete) ────────────────────────
+    # AdsPower profile the local executor opens to drive this shop in a
+    # browser. NULL on ML/Amazon accounts (those use the official API).
+    adspower_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Last state ('on'|'off') applied by the external executor. 'browser'
+    # accounts (Shopee via AdsPower) have NO synced campaigns — the sync uses
+    # the blocked API — so the reconciler compares desired against THIS field
+    # instead of MarketingCampaign rows. Updated when the executor reports a
+    # pause/resume as done (see routers/marketing.py agent result endpoint).
+    applied_state: Mapped[str | None] = mapped_column(String(8), nullable=True)
+
 
 class MarketingCommand(Base, TimestampMixin):
     """Outbox queue for ad actions. Every action — manual (a button click)
@@ -121,6 +132,13 @@ class MarketingCommand(Base, TimestampMixin):
     # "manual" | "schedule"
     source: Mapped[str] = mapped_column(
         String(16), nullable=False, default="manual", server_default=text("'manual'")
+    )
+    # Execution channel: 'api' = internal consumer (ML/Amazon via official
+    # API); 'browser' = external local executor (Shopee via AdsPower). 'browser'
+    # commands are handed out via /marketing/agent/lease and NEVER pass through
+    # `consume_pending_commands` (which would hit the blocked Shopee API).
+    executor: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="api", server_default=text("'api'")
     )
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -235,3 +253,20 @@ class MarketingPattern(Base, TimestampMixin):
         Boolean, nullable=False, default=True, server_default=text("true")
     )
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MarketingAgentHeartbeat(Base, TimestampMixin):
+    """Presence of the external local executor (marionete). One row per
+    `agent_name` (singleton in practice). The dashboard renders online/offline
+    from `last_seen_at` (online if seen within the last ~120s)."""
+
+    __tablename__ = "marketing_agent_heartbeat"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    agent_name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    adspower_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    accounts_online: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    info: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))

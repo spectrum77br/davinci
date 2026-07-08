@@ -143,6 +143,7 @@ type Command = {
   result: string | null
   attempts: number
   source: string
+  executor: 'api' | 'browser' | string
   created_at: string
   completed_at: string | null
 }
@@ -155,10 +156,23 @@ type ScheduleState = {
   next_transition: string | null
   next_state: 'on' | 'off' | null
 }
+// Presence of the LOCAL browser executor (marionete) that drives Shopee via
+// AdsPower. `online` = a heartbeat within the last ~120s (server-computed).
+type AgentPresence = {
+  online: boolean
+  agent_name: string | null
+  last_seen_at: string | null
+  age_seconds?: number
+  adspower_ok: boolean | null
+  accounts_online: number | null
+  info: Record<string, unknown>
+}
 
 // ── State ────────────────────────────────────────────────────────────
 type Tab = 'metricas' | 'campanhas' | 'agentes'
-type Dept = 'celular' | 'mala' | 'eletro'
+// 'geral' = whole-shop accounts with no per-vertical split — the Shopee shops
+// driven by the local browser executor (marionete) live here.
+type Dept = 'celular' | 'mala' | 'eletro' | 'geral'
 const tab = ref<Tab>('metricas')
 const department = ref<Dept>('celular')
 
@@ -167,6 +181,7 @@ const intensity = ref<Intensity[]>([])
 const decisions = ref<Decision[]>([])
 const patterns = ref<Pattern[]>([])
 const agentStatus = ref<AgentStatus[]>([])
+const agentPresence = ref<AgentPresence | null>(null)
 const creditAlerts = ref<CreditAlert[]>([])
 const campaigns = ref<Campaign[]>([])
 
@@ -541,6 +556,9 @@ async function loadPatterns() {
 async function loadAgentStatus() {
   agentStatus.value = await api<AgentStatus[]>('/api/marketing/agents/status')
 }
+async function loadAgentPresence() {
+  agentPresence.value = await api<AgentPresence>('/api/marketing/agent/status')
+}
 async function loadCreditAlerts() {
   creditAlerts.value = await api<CreditAlert[]>('/api/marketing/credit-alerts')
 }
@@ -680,6 +698,30 @@ const scheduleHint = computed(() => {
   return when ? `DESLIGADO — religa ${when}` : 'DESLIGADO'
 })
 
+// Badge for the LOCAL browser executor (marionete). ONLINE means it sent a
+// heartbeat in the last ~120s and is polling the outbox — i.e. scheduled
+// Shopee pause/resume will actually run on the Mac.
+const executorBadge = computed(() => {
+  const p = agentPresence.value
+  const seen = p?.last_seen_at ? fmtHm(p.last_seen_at) : null
+  if (!p || !p.online) {
+    return {
+      online: false,
+      label: 'Executor local: OFFLINE',
+      title: seen ? `Última vez visto às ${seen}` : 'Nunca reportou',
+    }
+  }
+  const bits: string[] = []
+  if (p.adspower_ok != null) bits.push(`AdsPower ${p.adspower_ok ? 'ok' : 'falha'}`)
+  if (p.accounts_online != null) bits.push(`${p.accounts_online} contas`)
+  if (seen) bits.push(`visto ${seen}`)
+  return {
+    online: true,
+    label: 'Executor local: ONLINE',
+    title: bits.join(' · ') || 'Online',
+  }
+})
+
 async function refresh() {
   loading.value = true
   errorText.value = null
@@ -687,7 +729,7 @@ async function refresh() {
     await loadSummary()
     await Promise.all([
       loadIntensity(), loadDecisions(), loadPatterns(),
-      loadAgentStatus(), loadCreditAlerts(), loadSchedules(),
+      loadAgentStatus(), loadAgentPresence(), loadCreditAlerts(), loadSchedules(),
       loadHeatmap(), loadCampaigns(), loadTimeseries(), loadScheduleState(),
     ])
   } catch (e: any) {
@@ -730,7 +772,9 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 onMounted(async () => {
   await refresh()
   pollTimer = setInterval(() => {
-    Promise.all([loadIntensity(), loadDecisions(), loadAgentStatus()]).catch(() => {})
+    Promise.all([
+      loadIntensity(), loadDecisions(), loadAgentStatus(), loadAgentPresence(),
+    ]).catch(() => {})
   }, 30000)
 })
 onBeforeUnmount(() => {
@@ -771,6 +815,17 @@ definePageMeta({ middleware: [] })
         <RefreshCw class="size-4" :class="{ 'animate-spin': loading }" /> recarregar
       </button>
       <div class="ml-auto flex items-center gap-2">
+        <span
+          class="rounded-md border px-2 py-1 text-xs inline-flex items-center gap-1.5"
+          :class="executorBadge.online
+            ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+            : 'border-muted-foreground/30 bg-muted/40 text-muted-foreground'"
+          :title="executorBadge.title">
+          <Bot class="size-3.5" />
+          <span class="inline-block size-1.5 rounded-full"
+            :class="executorBadge.online ? 'bg-emerald-500' : 'bg-muted-foreground/50'" />
+          {{ executorBadge.label }}
+        </span>
         <button v-if="(summary?.accounts.length ?? 0) > 0"
           class="rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm inline-flex items-center gap-1 disabled:opacity-50"
           :disabled="triggering" @click="triggerAll">
@@ -802,11 +857,11 @@ definePageMeta({ middleware: [] })
         </button>
       </div>
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
-        <button v-for="d in (['celular', 'mala', 'eletro'] as const)" :key="d"
+        <button v-for="d in (['celular', 'mala', 'eletro', 'geral'] as const)" :key="d"
           class="px-3 py-1 rounded text-sm transition-colors"
           :class="department === d ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
           @click="department = d">
-          {{ d === 'celular' ? 'Celular' : d === 'mala' ? 'Mala' : 'Eletro' }}
+          {{ d === 'celular' ? 'Celular' : d === 'mala' ? 'Mala' : d === 'eletro' ? 'Eletro' : 'Shopee (geral)' }}
         </button>
       </div>
     </div>

@@ -1,0 +1,26 @@
+{
+  "name": "davinci-executor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Braço local do DaVinci Marketing: dirige a Shopee via AdsPower puxando comandos do control plane (/api/marketing/agent). Roda no Mac com o AdsPower aberto; substitui o antigo projeto ~/marionete.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "puppeteer-core": "^23.11.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

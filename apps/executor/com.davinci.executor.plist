@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent do DaVinci Executor.
+  TEM que ser LaunchAgent (sessão gráfica do usuário) para enxergar o AdsPower.
+
+  Antes de usar, troque os placeholders:
+    __DIR__  -> caminho absoluto do app  (ex.: /Users/admmarketing/davinci-marketing/apps/executor)
+    __USER__ -> seu usuário do Mac        (ex.: admmarketing)
+
+  Depois:
+    cp com.davinci.executor.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.davinci.executor.plist
+  Logs em /tmp/davinci-executor.{out,err}.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.davinci.executor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__DIR__/node_modules/.bin/tsx</string>
+        <string>__DIR__/src/index.ts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__DIR__</string>
+
+    <key>UserName</key>
+    <string>__USER__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/davinci-executor.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/davinci-executor.err.log</string>
+</dict>
+</plist>

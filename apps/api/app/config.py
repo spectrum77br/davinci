@@ -169,6 +169,16 @@ class Settings(BaseSettings):
     # just the cron body). Flip to true via env on the dedicated node.
     marketing_agent_node: bool = False
 
+    # Machine-to-machine token the LOCAL external executor (marionete) sends on
+    # the /marketing/agent/* endpoints (lease/result/heartbeat). Empty = those
+    # endpoints stay CLOSED (401). This is how Shopee ad actions actually run:
+    # the official Shopee Ads API is blocked by the partner quota, so DaVinci is
+    # only the control plane (UI + BRT schedule + outbox) and the local Mac
+    # drives Shopee via AdsPower, polling this token-gated queue over NAT. Set
+    # via env MARKETING_AGENT_TOKEN on the server AND the same value in the
+    # marionete .env to turn the integration on.
+    marketing_agent_token: str = ""
+
     # Safety-net cron que re-sincroniza pedidos suspeitos de stale com o
     # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.
     enable_bling_orders_safety_net: bool = True
