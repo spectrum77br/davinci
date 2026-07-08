@@ -54,7 +54,13 @@ async def consume_pending_commands(
     claimed = (
         await session.execute(
             select(MarketingCommand)
-            .where(MarketingCommand.status == "pending")
+            .where(
+                MarketingCommand.status == "pending",
+                # 'browser' commands run on the external local executor
+                # (marionete) via /marketing/agent/lease — NEVER here (that would
+                # hit the blocked Shopee Ads API). Only 'api' (ML/Amazon).
+                MarketingCommand.executor == "api",
+            )
             .order_by(MarketingCommand.created_at.asc())
             .limit(max_batch)
             .with_for_update(skip_locked=True)

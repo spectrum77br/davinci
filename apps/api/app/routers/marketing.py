@@ -10,22 +10,25 @@ single-tenant ops dashboard for the whole shop).
 from __future__ import annotations
 
 import random
+import secrets
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 import sqlalchemy as sa
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user
 from app.models import User
 from app.models.marketing import (
     MarketingAccount,
+    MarketingAgentHeartbeat,
     MarketingCampaign,
     MarketingCommand,
     MarketingDecision,
@@ -150,6 +153,7 @@ class CommandOut(BaseModel):
     result: str | None
     attempts: int
     source: str
+    executor: str
     created_at: str
     completed_at: str | None
 
@@ -172,6 +176,7 @@ def _command_out(c: MarketingCommand) -> CommandOut:
         campaign_external_id=c.campaign_external_id,
         platform=c.platform, action=c.action, payload=c.payload or {},
         status=c.status, result=c.result, attempts=c.attempts, source=c.source,
+        executor=c.executor,
         created_at=c.created_at.isoformat(),
         completed_at=c.completed_at.isoformat() if c.completed_at else None,
     )
@@ -842,6 +847,10 @@ async def create_command(
         payload=payload,
         status="pending",
         source="manual",
+        # Channel routing: Shopee has no working Ads API (partner quota), so its
+        # commands run on the LOCAL browser executor (marionete/AdsPower) via
+        # /agent/lease. Everything else goes to the internal 'api' consumer.
+        executor="browser" if acc.platform == "shopee" else "api",
         created_by_user_id=user.id,
     )
     session.add(cmd)
@@ -923,6 +932,216 @@ async def patch_schedule(
         )
     ).scalars().all()
     return describe_state(acc, list(schedules), datetime.now(UTC))
+
+
+# ─── AGENT (external browser executor / marionete) ────────────────────
+#
+# Machine-to-machine surface for the LOCAL executor that drives Shopee via
+# AdsPower — the official Shopee Ads API is blocked by the partner quota, so
+# DaVinci is only the control plane (UI + BRT schedule + outbox) and the Mac
+# behind NAT does the actual clicking. The executor POLLS /agent/lease, applies
+# the pause/resume in the browser, then reports via /agent/commands/{id}/result
+# and /agent/heartbeat. Those three are gated by the shared X-Agent-Token;
+# /agent/status uses normal user auth so the dashboard can show ONLINE/OFFLINE.
+
+
+async def _require_agent_token(
+    x_agent_token: Annotated[str | None, Header(alias="X-Agent-Token")] = None,
+) -> None:
+    """Guard the /agent/* M2M endpoints. An empty token in settings means the
+    integration is disabled → the endpoints stay CLOSED (401)."""
+    expected = get_settings().marketing_agent_token
+    if (
+        not expected
+        or not x_agent_token
+        or not secrets.compare_digest(x_agent_token, expected)
+    ):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail={"code": "agent_unauthorized"}
+        )
+
+
+class AgentLeaseIn(BaseModel):
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class AgentCommandOut(BaseModel):
+    id: UUID
+    account_id: UUID
+    account_name: str
+    adspower_user_id: str | None
+    platform: str
+    action: str
+    payload: dict
+    campaign_external_id: str | None
+
+
+class AgentResultIn(BaseModel):
+    status: str  # "done" | "failed"
+    result: str | None = None
+
+
+class AgentHeartbeatIn(BaseModel):
+    agent_name: str = "marionete"
+    version: str | None = None
+    adspower_ok: bool | None = None
+    accounts_online: int | None = None
+    info: dict = Field(default_factory=dict)
+
+
+@router.post("/agent/lease", dependencies=[Depends(_require_agent_token)])
+async def agent_lease(
+    body: AgentLeaseIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Claim up to `limit` pending 'browser' commands (FOR UPDATE SKIP LOCKED),
+    flip them to 'claimed', and return each enriched with the AdsPower profile
+    the executor must open. Safe under concurrency: two pollers never get the
+    same row."""
+    claimed = (
+        await session.execute(
+            select(MarketingCommand)
+            .where(
+                MarketingCommand.status == "pending",
+                MarketingCommand.executor == "browser",
+            )
+            .order_by(MarketingCommand.created_at.asc())
+            .limit(body.limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+
+    out: list[AgentCommandOut] = []
+    if claimed:
+        now = datetime.now(UTC)
+        acc_ids = {c.account_id for c in claimed}
+        accounts = {
+            a.id: a
+            for a in (
+                await session.execute(
+                    select(MarketingAccount).where(MarketingAccount.id.in_(acc_ids))
+                )
+            ).scalars().all()
+        }
+        for cmd in claimed:
+            cmd.status = "claimed"
+            cmd.claimed_at = now
+            cmd.attempts += 1
+            acc = accounts.get(cmd.account_id)
+            out.append(
+                AgentCommandOut(
+                    id=cmd.id,
+                    account_id=cmd.account_id,
+                    account_name=acc.name if acc else "",
+                    adspower_user_id=acc.adspower_user_id if acc else None,
+                    platform=cmd.platform,
+                    action=cmd.action,
+                    payload=cmd.payload or {},
+                    campaign_external_id=cmd.campaign_external_id,
+                )
+            )
+        await session.commit()
+
+    logger.info("marketing_agent_lease", leased=len(out))
+    return {"commands": [o.model_dump(mode="json") for o in out]}
+
+
+@router.post(
+    "/agent/commands/{command_id}/result",
+    dependencies=[Depends(_require_agent_token)],
+)
+async def agent_command_result(
+    command_id: UUID,
+    body: AgentResultIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Report a leased command's outcome. On 'done' for a whole-account
+    pause/resume we mirror the resulting on/off onto the account's
+    `applied_state` — the ACTUAL state the schedule reconciler compares against
+    (Shopee has no synced campaigns to read)."""
+    cmd = await session.get(MarketingCommand, command_id)
+    if cmd is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail={"code": "command_not_found"}
+        )
+    new_status = "done" if body.status == "done" else "failed"
+    cmd.status = new_status
+    cmd.result = (body.result or "")[:2000] or None
+    cmd.completed_at = datetime.now(UTC)
+
+    if (
+        new_status == "done"
+        and cmd.campaign_external_id is None
+        and cmd.action in ("pause", "resume")
+    ):
+        acc = await session.get(MarketingAccount, cmd.account_id)
+        if acc is not None:
+            acc.applied_state = "on" if cmd.action == "resume" else "off"
+
+    await session.commit()
+    logger.info(
+        "marketing_agent_result", command_id=str(command_id), status=new_status
+    )
+    return {"ok": True, "status": new_status}
+
+
+@router.post("/agent/heartbeat", dependencies=[Depends(_require_agent_token)])
+async def agent_heartbeat(
+    body: AgentHeartbeatIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Upsert the executor's presence row (keyed by agent_name). The dashboard
+    reads it via /agent/status to show ONLINE/OFFLINE + AdsPower health."""
+    hb = (
+        await session.execute(
+            select(MarketingAgentHeartbeat).where(
+                MarketingAgentHeartbeat.agent_name == body.agent_name
+            )
+        )
+    ).scalar_one_or_none()
+    info = dict(body.info or {})
+    if body.version:
+        info.setdefault("version", body.version)
+    if hb is None:
+        hb = MarketingAgentHeartbeat(agent_name=body.agent_name)
+        session.add(hb)
+    hb.last_seen_at = datetime.now(UTC)
+    hb.adspower_ok = body.adspower_ok
+    hb.accounts_online = body.accounts_online
+    hb.info = info
+    await session.commit()
+    return {"ok": True}
+
+
+@router.get("/agent/status")
+async def agent_status(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_active_user)],
+) -> dict:
+    """Executor presence for the dashboard. `online` = a heartbeat within the
+    last 120s. Returns the most-recently-seen agent row (singleton in practice)."""
+    hb = (
+        await session.execute(
+            select(MarketingAgentHeartbeat)
+            .order_by(MarketingAgentHeartbeat.last_seen_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if hb is None or hb.last_seen_at is None:
+        return {
+            "online": False, "agent_name": None, "last_seen_at": None,
+            "adspower_ok": None, "accounts_online": None, "info": {},
+        }
+    age = (datetime.now(UTC) - hb.last_seen_at).total_seconds()
+    return {
+        "online": age <= 120,
+        "agent_name": hb.agent_name,
+        "last_seen_at": hb.last_seen_at.isoformat(),
+        "age_seconds": int(age),
+        "adspower_ok": hb.adspower_ok,
+        "accounts_online": hb.accounts_online,
+        "info": hb.info or {},
+    }
 
 
 @router.post("/sync-shopee/{integration_id}")

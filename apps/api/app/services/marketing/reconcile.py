@@ -74,26 +74,45 @@ async def reconcile_schedules(session: AsyncSession) -> dict[str, Any]:
         ).scalars().all()
         desired = desired_state(acc, list(schedules), now)
 
-        # Actual state from campaigns we can actually toggle (external_id set).
-        camps = (
-            await session.execute(
-                select(MarketingCampaign).where(MarketingCampaign.account_id == acc.id)
-            )
-        ).scalars().all()
-        toggleable = [c for c in camps if c.external_id]
-        if not toggleable:
-            continue
-        has_active = any(c.status == "active" for c in toggleable)
-        has_off = any(c.status in ("paused", "off") for c in toggleable)
-
-        # desired 'on'  → drift if any campaign is paused/off  → resume
-        # desired 'off' → drift if any campaign is active      → pause
-        if desired == "on" and has_off:
-            action = "resume"
-        elif desired == "off" and has_active:
-            action = "pause"
+        # Two execution channels, two ways to read the ACTUAL state:
+        #
+        # - Shopee → EXTERNAL executor (AdsPower/marionete). No campaigns are
+        #   synced (the sync uses the blocked API), so "actual" is the last
+        #   state the executor reported applying (`applied_state`). The command
+        #   is tagged executor='browser' and handed out via /agent/lease.
+        # - ML → internal API consumer. "actual" is read off the synced,
+        #   toggleable campaigns; command stays executor='api'.
+        if acc.platform == "shopee":
+            executor = "browser"
+            actual = acc.applied_state  # 'on' | 'off' | None (unknown → apply)
+            if desired == "on" and actual != "on":
+                action = "resume"
+            elif desired == "off" and actual != "off":
+                action = "pause"
+            else:
+                continue  # already converged
         else:
-            continue  # already converged
+            executor = "api"
+            camps = (
+                await session.execute(
+                    select(MarketingCampaign).where(
+                        MarketingCampaign.account_id == acc.id
+                    )
+                )
+            ).scalars().all()
+            toggleable = [c for c in camps if c.external_id]
+            if not toggleable:
+                continue
+            has_active = any(c.status == "active" for c in toggleable)
+            has_off = any(c.status in ("paused", "off") for c in toggleable)
+            # desired 'on'  → drift if any campaign is paused/off → resume
+            # desired 'off' → drift if any campaign is active     → pause
+            if desired == "on" and has_off:
+                action = "resume"
+            elif desired == "off" and has_active:
+                action = "pause"
+            else:
+                continue  # already converged
 
         if await _has_open_command(session, acc.id):
             continue  # in-flight command will move actual toward desired
@@ -107,12 +126,13 @@ async def reconcile_schedules(session: AsyncSession) -> dict[str, Any]:
                 payload={},
                 status="pending",
                 source="schedule",
+                executor=executor,
             )
         )
         enqueued += 1
         logger.info(
             "marketing_reconcile_enqueue",
-            account_id=str(acc.id), desired=desired, action=action,
+            account_id=str(acc.id), desired=desired, action=action, executor=executor,
         )
 
     await session.commit()
