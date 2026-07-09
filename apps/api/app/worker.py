@@ -19,10 +19,13 @@ from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobType,
+    Fatura,
     Integration,
     IntegrationPlatform,
     Product,
     ProductLink,
+    User,
+    UserRole,
     UserSettings,
 )
 from app.redis_client import redis
@@ -1203,6 +1206,62 @@ async def low_stock_polling(ctx: dict) -> None:
         logger.info("low_stock_polling_done", scanned=len(rows), emitted=emitted)
 
 
+async def faturas_vencimento_scan(ctx: dict) -> None:
+    """Avisa 1 dia antes do vencimento de cada fatura (assinatura recorrente).
+    Também pega o próprio dia do vencimento como rede de segurança, caso o
+    aviso da véspera tenha sido perdido. Alerta só na tela (sem Telegram).
+
+    O dedupe_key inclui a `data_vencimento` (não a data de hoje): garante um
+    único aviso por ciclo. Ao renovar, o admin move a data → a chave muda e o
+    próximo aviso dispara no ciclo seguinte. Notifica todos os admins."""
+    today = datetime.now(UTC).date()
+    tomorrow = today + timedelta(days=1)
+    async with session_scope() as s:
+        faturas = (
+            await s.execute(
+                select(Fatura).where(
+                    Fatura.data_vencimento >= today,
+                    Fatura.data_vencimento <= tomorrow,
+                )
+            )
+        ).scalars().all()
+        if not faturas:
+            logger.debug("faturas_vencimento_scan_noop")
+            return
+        admin_ids = (
+            await s.execute(select(User.id).where(User.role == UserRole.ADMIN))
+        ).scalars().all()
+        emitted = 0
+        for f in faturas:
+            venc = f.data_vencimento
+            quando = "vence amanhã" if venc == tomorrow else "vence hoje"
+            plano = f" ({f.plano})" if f.plano else ""
+            for uid in admin_ids:
+                a = await emit_alert(
+                    s,
+                    user_id=uid,
+                    type=AlertType.GENERIC,
+                    severity=AlertSeverity.WARNING,
+                    title=f"Fatura {quando}: {f.servico}",
+                    message=f"{f.servico}{plano} {quando} ({venc.isoformat()}).",
+                    payload={
+                        "fatura_id": str(f.id),
+                        "servico": f.servico,
+                        "data_vencimento": venc.isoformat(),
+                    },
+                    dedupe_key=f"fatura_venc:{f.id}:{venc.isoformat()}",
+                    notify_telegram=False,
+                )
+                if a is not None:
+                    emitted += 1
+        logger.info(
+            "faturas_vencimento_scan_done",
+            faturas=len(faturas),
+            admins=len(admin_ids),
+            emitted=emitted,
+        )
+
+
 async def auto_import_link(ctx: dict) -> None:
     """Fase 8: scan listings whose product_id is null and a non-blank SKU
     matches a product; attach product_id and promote into product_links.
@@ -1654,6 +1713,8 @@ class WorkerSettings:
         cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),
         cron(webhook_signature_alert_scan, minute={5, 35}, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),
+        cron(faturas_vencimento_scan, hour=11, minute=5, run_at_startup=False),  # 08:05 BRT
+
         # SSH parity: 30-min safety timeout for stuck sync advisory locks.
         # Runs every 5 minutes so the worst-case stuck duration is 35min.
 

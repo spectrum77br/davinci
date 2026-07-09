@@ -22,6 +22,9 @@ const enableMarketing = computed(() => Boolean(runtimeConfig.public.enableMarket
 // dot stays even after the modal is dismissed.
 const { api } = useApi()
 const pendingTarefasCount = ref(0)
+// Red dot on "Faturas" (admin only) when there are faturas vencidas/vencendo
+// (data_vencimento <= hoje+1). Polls /api/faturas/vencendo-count.
+const pendingFaturasCount = ref(0)
 
 async function fetchPendingTarefas() {
   if (!auth.user) return
@@ -30,6 +33,16 @@ async function fetchPendingTarefas() {
     pendingTarefasCount.value = r.count ?? 0
   } catch {
     // Silent — the modal's polling will surface real outages.
+  }
+}
+
+async function fetchPendingFaturas() {
+  if (!auth.user || !auth.isAdmin) return
+  try {
+    const r = await api<{ count: number }>('/api/faturas/vencendo-count')
+    pendingFaturasCount.value = r.count ?? 0
+  } catch {
+    // Silent.
   }
 }
 
@@ -42,10 +55,13 @@ watch(
       pendingPoll = null
     }
     pendingTarefasCount.value = 0
+    pendingFaturasCount.value = 0
     if (uid && import.meta.client) {
       void fetchPendingTarefas()
+      void fetchPendingFaturas()
       pendingPoll = setInterval(() => {
         void fetchPendingTarefas()
+        void fetchPendingFaturas()
       }, 15_000)
     }
   },
@@ -140,6 +156,7 @@ const sections: Section[] = [
       // Regular users see their own tarefas (router-level filter), so this
       // is NOT marked adminOnly — the page itself hides admin-only controls.
       { to: '/tarefas', label: 'Tarefas', icon: ClipboardList },
+      { to: '/faturas', label: 'Faturas', icon: Receipt, adminOnly: true },
     ],
   },
 ]
@@ -238,6 +255,13 @@ function isActive(to: string) {
                   ? 'absolute top-1 right-1 inline-block size-2.5 rounded-full bg-red-500'
                   : 'ml-auto inline-block size-2.5 rounded-full bg-red-500'"
                 :title="`${pendingTarefasCount} tarefa${pendingTarefasCount === 1 ? '' : 's'} pendente${pendingTarefasCount === 1 ? '' : 's'}`"
+              />
+              <span
+                v-if="it.to === '/faturas' && pendingFaturasCount > 0"
+                :class="props.collapsed
+                  ? 'absolute top-1 right-1 inline-block size-2.5 rounded-full bg-red-500'
+                  : 'ml-auto inline-block size-2.5 rounded-full bg-red-500'"
+                :title="`${pendingFaturasCount} fatura${pendingFaturasCount === 1 ? '' : 's'} vencendo`"
               />
             </NuxtLink>
           </li>

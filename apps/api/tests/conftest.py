@@ -293,6 +293,7 @@ _CLEANUP_TABLES = (
     "integrations",
     "stores",
     "companies",
+    "faturas",
     "user_settings",
     "users",
 )

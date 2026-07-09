@@ -95,6 +95,7 @@ from app.models.situacao_bling import SituacaoBling
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
 from app.models.sync_log import SyncLog
+from app.models.fatura import Fatura
 from app.models.tarefa import Tarefa
 from app.models.user import User
 from app.models.user_settings import UserSettings
@@ -183,6 +184,7 @@ __all__ = [
     "StoreStatus",
     "SyncLog",
     "SyncLogAction",
+    "Fatura",
     "Tarefa",
     "User",
     "UserRole",
