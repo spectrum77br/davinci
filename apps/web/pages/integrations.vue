@@ -256,12 +256,42 @@ function statusClass(i: Integration) {
 
 const route = useRoute()
 const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluído (${route.query.platform})` : null)
+
+// Abas: "Integrações" (contas de marketplace) e "Automações" (catálogo das
+// rotinas/crons do sistema — registro manual pra visibilidade). Começa em
+// Automações se a URL vier com ?tab=automacoes.
+const tab = ref<'integracoes' | 'automacoes'>(
+  route.query.tab === 'automacoes' ? 'automacoes' : 'integracoes',
+)
 </script>
 
 <template>
   <div class="space-y-4">
+    <h1 class="text-2xl font-semibold">Integrações</h1>
+
+    <div class="flex items-center gap-1 border-b border-border">
+      <button
+        class="px-3 h-9 text-sm font-medium border-b-2 -mb-px transition-colors"
+        :class="tab === 'integracoes'
+          ? 'border-primary text-foreground'
+          : 'border-transparent text-muted-foreground hover:text-foreground'"
+        @click="tab = 'integracoes'"
+      >
+        Integrações
+      </button>
+      <button
+        class="px-3 h-9 text-sm font-medium border-b-2 -mb-px transition-colors"
+        :class="tab === 'automacoes'
+          ? 'border-primary text-foreground'
+          : 'border-transparent text-muted-foreground hover:text-foreground'"
+        @click="tab = 'automacoes'"
+      >
+        Automações
+      </button>
+    </div>
+
+    <template v-if="tab === 'integracoes'">
     <div class="flex items-center gap-3 flex-wrap">
-      <h1 class="text-2xl font-semibold">Integrações</h1>
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">
         <RefreshCw class="size-4 mr-1" /> recarregar
       </Button>
@@ -378,5 +408,8 @@ const oauthBanner = computed(() => route.query.oauth === 'ok' ? `OAuth concluíd
       @created="refresh"
       @updated="refresh"
     />
+    </template>
+
+    <AutomacoesPanel v-else />
   </div>
 </template>

@@ -11,6 +11,7 @@ from app.redis_client import redis
 from app.routers import alerts as alerts_router
 from app.routers import audit as audit_router
 from app.routers import auth as auth_router
+from app.routers import automacoes as automacoes_router
 from app.routers import cadastros as cadastros_router
 from app.routers import companies as companies_router
 from app.routers import company_certificates as company_certificates_router
@@ -94,6 +95,10 @@ _OPENAPI_TAGS = [
         "name": "faturas",
         "description": "Assinaturas/planos recorrentes (admin) — aviso de vencimento.",
     },
+    {
+        "name": "automacoes",
+        "description": "Catálogo manual das rotinas/crons do sistema (aba Integrações).",
+    },
     {"name": "refunds", "description": "Reembolsos vinculados aos pedidos da conciliação."},
     {"name": "devolutions", "description": "Devoluções por pedido — controle manual de retorno de produto."},
     {"name": "financeiro", "description": "Consórcio, suprimentos (certificações) e simulação de cotações de importação."},
@@ -164,6 +169,7 @@ app.include_router(margens_router.router)
 app.include_router(margem_audit_router.router)
 app.include_router(tarefas_router.router)
 app.include_router(faturas_router.router)
+app.include_router(automacoes_router.router)
 app.include_router(refunds_router.router)
 app.include_router(devolutions_router.router)
 app.include_router(estoque_router.router)

@@ -1,5 +1,6 @@
 from app.models.alert import Alert
 from app.models.audit import AuditFinding, AuditRun, AuditUpload
+from app.models.automacao import Automacao
 from app.models.auth_code import AuthCode
 from app.models.base import Base
 from app.models.bling_envio_correcao import BlingEnvioCorrecao
@@ -110,6 +111,7 @@ __all__ = [
     "AuditRun",
     "AuditRunStatus",
     "AuditUpload",
+    "Automacao",
     "AuthCode",
     "BackgroundJob",
     "BackgroundJobDetail",
