@@ -916,8 +916,8 @@ definePageMeta({ middleware: [] })
         </div>
       </div>
 
-      <!-- Schedule heatmap (ACOS por hora × dia) — Shopee only -->
-      <div v-if="platform === 'shopee'" class="rounded-md border p-4">
+      <!-- Schedule heatmap (ACOS por hora × dia) — ML + Shopee -->
+      <div class="rounded-md border p-4">
         <div class="flex items-center gap-2 mb-3 flex-wrap">
           <Clock class="size-4 text-primary" />
           <h2 class="text-lg font-semibold">Heatmap ACOS — Horários</h2>
@@ -957,8 +957,8 @@ definePageMeta({ middleware: [] })
         </div>
       </div>
 
-      <!-- Agenda automática (BRT) — Shopee only -->
-      <div v-if="platform === 'shopee' && selectedSchedAccount" class="rounded-md border p-4">
+      <!-- Agenda automática (BRT) — ML + Shopee -->
+      <div v-if="selectedSchedAccount" class="rounded-md border p-4">
         <div class="flex items-center gap-2 mb-3 flex-wrap">
           <Clock class="size-4 text-primary" />
           <h2 class="text-lg font-semibold">Agenda automática</h2>
