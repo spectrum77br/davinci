@@ -18,6 +18,9 @@ class Fatura(Base, TimestampMixin):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     servico: Mapped[str] = mapped_column(Text, nullable=False)
+    # Domínios associados ao serviço (ex.: hostinguer) — coluna separada pra
+    # não misturar o provedor com a lista de domínios.
+    dominios: Mapped[str | None] = mapped_column(Text, nullable=True)
     plano: Mapped[str | None] = mapped_column(Text, nullable=True)
     valor: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     data_vencimento: Mapped[date] = mapped_column(Date, nullable=False, index=True)

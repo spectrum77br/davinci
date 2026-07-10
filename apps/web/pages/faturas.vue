@@ -11,6 +11,7 @@ const { api } = useApi()
 type Fatura = {
   id: string
   servico: string
+  dominios: string | null
   plano: string | null
   valor: string | number | null
   data_vencimento: string
@@ -39,8 +40,9 @@ await refresh()
 
 // ---- Create modal ----
 const showNew = ref(false)
-const draft = ref<{ servico: string; plano: string; valor: string; data_vencimento: string }>({
+const draft = ref<{ servico: string; dominios: string; plano: string; valor: string; data_vencimento: string }>({
   servico: '',
+  dominios: '',
   plano: '',
   valor: '',
   data_vencimento: '',
@@ -49,7 +51,7 @@ const creating = ref(false)
 const createErr = ref<string | null>(null)
 
 function openNew() {
-  draft.value = { servico: '', plano: '', valor: '', data_vencimento: '' }
+  draft.value = { servico: '', dominios: '', plano: '', valor: '', data_vencimento: '' }
   createErr.value = null
   showNew.value = true
 }
@@ -66,6 +68,7 @@ async function createFatura() {
       method: 'POST',
       body: {
         servico: draft.value.servico.trim(),
+        dominios: draft.value.dominios.trim() || null,
         plano: draft.value.plano.trim() || null,
         valor: draft.value.valor.trim() ? Number(draft.value.valor.replace(',', '.')) : null,
         data_vencimento: draft.value.data_vencimento,
@@ -82,8 +85,9 @@ async function createFatura() {
 
 // ---- Edit modal ----
 const editing = ref<Fatura | null>(null)
-const editDraft = ref<{ servico: string; plano: string; valor: string; data_vencimento: string }>({
+const editDraft = ref<{ servico: string; dominios: string; plano: string; valor: string; data_vencimento: string }>({
   servico: '',
+  dominios: '',
   plano: '',
   valor: '',
   data_vencimento: '',
@@ -95,6 +99,7 @@ function openEdit(f: Fatura) {
   editing.value = f
   editDraft.value = {
     servico: f.servico,
+    dominios: f.dominios || '',
     plano: f.plano || '',
     valor: f.valor != null ? String(f.valor) : '',
     data_vencimento: f.data_vencimento,
@@ -111,6 +116,7 @@ async function saveEdit() {
       method: 'PATCH',
       body: {
         servico: editDraft.value.servico.trim(),
+        dominios: editDraft.value.dominios.trim() || null,
         plano: editDraft.value.plano.trim() || null,
         valor: editDraft.value.valor.trim() ? Number(editDraft.value.valor.replace(',', '.')) : null,
         data_vencimento: editDraft.value.data_vencimento,
@@ -168,9 +174,11 @@ function daysUntil(s: string): number {
 // Ordem alfabética por serviço (case-insensitive, pt-BR, numérica) —
 // mantém a lista organizada independente da ordem que o backend devolve.
 const sortedRows = computed(() =>
-  [...rows.value].sort((a, b) =>
-    (a.servico || '').localeCompare(b.servico || '', 'pt-BR', { sensitivity: 'base', numeric: true }),
-  ),
+  [...rows.value].sort((a, b) => {
+    const s = (a.servico || '').localeCompare(b.servico || '', 'pt-BR', { sensitivity: 'base', numeric: true })
+    if (s !== 0) return s
+    return (a.dominios || '').localeCompare(b.dominios || '', 'pt-BR', { sensitivity: 'base', numeric: true })
+  }),
 )
 
 type Status = { label: string; cls: string }
@@ -209,6 +217,7 @@ function statusOf(f: Fatura): Status {
         <thead class="bg-muted/40 text-left">
           <tr class="whitespace-nowrap">
             <th class="px-3 py-2">Serviço</th>
+            <th class="px-3 py-2">Domínios</th>
             <th class="px-3 py-2">Plano</th>
             <th class="px-3 py-2 text-right">Valor</th>
             <th class="px-3 py-2">Vencimento</th>
@@ -223,6 +232,7 @@ function statusOf(f: Fatura): Status {
             @click="openEdit(f)"
           >
             <td class="px-3 py-2 whitespace-nowrap font-medium">{{ f.servico }}</td>
+            <td class="px-3 py-2 text-muted-foreground max-w-[280px] whitespace-normal break-words">{{ f.dominios || '—' }}</td>
             <td class="px-3 py-2 text-muted-foreground">{{ f.plano || '—' }}</td>
             <td class="px-3 py-2 whitespace-nowrap text-right font-mono">{{ fmtValor(f.valor) }}</td>
             <td class="px-3 py-2 whitespace-nowrap">{{ fmtDate(f.data_vencimento) }}</td>
@@ -231,7 +241,7 @@ function statusOf(f: Fatura): Status {
             </td>
           </tr>
           <tr v-if="!loading && rows.length === 0">
-            <td colspan="5" class="px-3 py-6 text-center text-muted-foreground">nenhuma fatura</td>
+            <td colspan="6" class="px-3 py-6 text-center text-muted-foreground">nenhuma fatura</td>
           </tr>
         </tbody>
       </table>
@@ -251,6 +261,9 @@ function statusOf(f: Fatura): Status {
             <div class="text-xs text-muted-foreground truncate">{{ f.plano || '—' }}</div>
           </div>
           <span class="text-[10px] px-1.5 py-0.5 rounded border shrink-0" :class="statusOf(f).cls">{{ statusOf(f).label }}</span>
+        </div>
+        <div v-if="f.dominios" class="text-xs break-words">
+          <span class="text-muted-foreground">Domínios:</span> {{ f.dominios }}
         </div>
         <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
           <div><span class="text-muted-foreground">Vencimento:</span> {{ fmtDate(f.data_vencimento) }}</div>
@@ -274,7 +287,11 @@ function statusOf(f: Fatura): Status {
         <div class="space-y-3">
           <div>
             <Label>Serviço *</Label>
-            <Input v-model="draft.servico" placeholder="ex: Higgsfield" />
+            <Input v-model="draft.servico" placeholder="ex: Hostinguer" />
+          </div>
+          <div>
+            <Label>Domínios</Label>
+            <Input v-model="draft.dominios" placeholder="ex: hadken.com / gestaoestoque.com" />
           </div>
           <div>
             <Label>Plano</Label>
@@ -312,6 +329,10 @@ function statusOf(f: Fatura): Status {
           <div>
             <Label>Serviço</Label>
             <Input v-model="editDraft.servico" />
+          </div>
+          <div>
+            <Label>Domínios</Label>
+            <Input v-model="editDraft.dominios" placeholder="ex: hadken.com / gestaoestoque.com" />
           </div>
           <div>
             <Label>Plano</Label>

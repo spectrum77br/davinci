@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class FaturaOut(BaseModel):
     id: UUID
     servico: str
+    dominios: str | None = None
     plano: str | None = None
     valor: Decimal | None = None
     data_vencimento: date
@@ -18,6 +19,7 @@ class FaturaOut(BaseModel):
 
 class FaturaCreate(BaseModel):
     servico: str = Field(min_length=1)
+    dominios: str | None = None
     plano: str | None = None
     valor: Decimal | None = None
     data_vencimento: date
@@ -25,6 +27,7 @@ class FaturaCreate(BaseModel):
 
 class FaturaPatch(BaseModel):
     servico: str | None = Field(default=None, min_length=1)
+    dominios: str | None = None
     plano: str | None = None
     valor: Decimal | None = None
     data_vencimento: date | None = None

@@ -27,6 +27,7 @@ def _to_out(f: Fatura) -> FaturaOut:
     return FaturaOut(
         id=f.id,
         servico=f.servico,
+        dominios=f.dominios,
         plano=f.plano,
         valor=f.valor,
         data_vencimento=f.data_vencimento,
@@ -74,6 +75,7 @@ async def create_fatura(
 ) -> FaturaOut:
     f = Fatura(
         servico=body.servico.strip(),
+        dominios=body.dominios.strip() if body.dominios and body.dominios.strip() else None,
         plano=body.plano.strip() if body.plano else None,
         valor=body.valor,
         data_vencimento=body.data_vencimento,
@@ -102,6 +104,8 @@ async def patch_fatura(
     data = body.model_dump(exclude_unset=True)
     if "servico" in data and data["servico"] is not None:
         f.servico = data["servico"].strip()
+    if "dominios" in data:
+        f.dominios = data["dominios"].strip() if data["dominios"] and data["dominios"].strip() else None
     if "plano" in data:
         f.plano = data["plano"].strip() if data["plano"] else None
     if "valor" in data:
