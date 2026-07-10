@@ -292,17 +292,38 @@ function acosClass(acos: number | null | undefined, target: number): string {
 // a separate legend; the per-name hash gives each account inside a
 // platform a slightly different shade so they don't all look the same.
 // Spread is kept tight (±25°) so platforms stay visually distinct.
-const _PLATFORM_HUE_BASE: Record<string, number> = {
-  amazon: 35,    // orange ↔ yellow
-  ml: 200,       // cyan ↔ blue ↔ green-blue
-  shopee: 350,   // red ↔ pink
+// Distinct categorical color per account. Golden-angle hue rotation (137.5°)
+// spaces consecutive accounts far apart on the color wheel; 3 alternating
+// sat/lightness tiers break ties once the hue wraps — so even 20+ accounts on
+// one chart stay visually distinct (the old scheme tied hue to the platform
+// with only a ±25° spread, making every ML line a near-identical blue).
+function _distinctColor(i: number): string {
+  const hue = (i * 137.508) % 360
+  const tier = i % 3
+  const sat = [72, 85, 62][tier]
+  const light = [50, 40, 56][tier]
+  return `hsl(${hue.toFixed(1)} ${sat}% ${light}%)`
 }
+// account_id → color, assigned per platform in a stable name order so the same
+// account always gets the same color in both the chart line and the legend.
+const accountColorMap = computed<Map<string, string>>(() => {
+  const map = new Map<string, string>()
+  const byPlat = new Map<string, Account[]>()
+  for (const a of summary.value?.accounts ?? []) {
+    const list = byPlat.get(a.platform) ?? []
+    list.push(a)
+    byPlat.set(a.platform, list)
+  }
+  for (const list of byPlat.values()) {
+    list
+      .slice()
+      .sort((x, y) => x.name.localeCompare(y.name, 'pt-BR'))
+      .forEach((a, i) => map.set(a.id, _distinctColor(i)))
+  }
+  return map
+})
 function accountColor(account: Account): string {
-  const base = _PLATFORM_HUE_BASE[account.platform] ?? 200
-  let h = 0
-  for (let i = 0; i < account.name.length; i++) h = (h * 31 + account.name.charCodeAt(i)) & 0xffff
-  const hue = (base + (h % 50) - 25 + 360) % 360
-  return `hsl(${hue} 70% 48%)`
+  return accountColorMap.value.get(account.id) ?? _distinctColor(0)
 }
 
 // Chart geometry — derived from chartDays + timeseries data + chartMetric.
