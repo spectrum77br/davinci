@@ -163,6 +163,29 @@ services:
         aliases:
           - worker_sync
 
+  # Executor cloud dos comandos de Ads 'api' (ML/Amazon): roda só
+  # `marketing_consume_commands` (classe WorkerSettingsMarketingApi), drenando a
+  # outbox marketing_commands e aplicando pause/resume/orçamento na API do ML —
+  # que funciona da nuvem (a de Ads da Shopee é bloqueada → usa a marionete
+  # externa via /agent/lease). MARKETING_AGENT_NODE=true liga o consumidor e
+  # DEVE existir em UM único nó, senão dois processos disputam a mesma outbox.
+  worker_marketing_agent:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["uv", "run", "arq", "app.worker.WorkerSettingsMarketingApi"]
+    env_file: .env
+    environment:
+      APP_NAME: davinci-worker-marketing-agent
+      MARKETING_AGENT_NODE: "true"
+    volumes:
+      - ./data/uploads:/data/uploads
+    networks:
+      davinci_net:
+        aliases:
+          - worker_marketing_agent
+
   web:
     build:
       context: ./apps/web

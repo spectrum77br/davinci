@@ -1980,10 +1980,41 @@ class WorkerSettingsMarketingAgent:
     on_shutdown = shutdown
 
 
+class WorkerSettingsMarketingApi:
+    """Cloud-side executor for ML/Amazon ('api') ad commands.
+
+    Runs ONLY `marketing_consume_commands`: drains the marketing_commands outbox
+    for executor='api' rows and applies pause/resume/budget against the ML Ads
+    API — reachable from the cloud, unlike Shopee whose Ads API is blocked (that
+    path uses the external marionete via /agent/lease). Deliberately split from
+    WorkerSettingsMarketingAgent so this cloud node does NOT also run
+    `marketing_shopee_tick` (which pulls Shopee Ads data and only works from the
+    dedicated machine).
+
+    Runtime-gated by MARKETING_AGENT_NODE=1 (re-checked inside
+    marketing_consume_commands); set that flag on THIS service only, so exactly
+    one node consumes the 'api' outbox."""
+
+    redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
+    functions = [marketing_consume_commands]
+    cron_jobs = [
+        cron(marketing_consume_commands, second={0, 20, 40}, run_at_startup=False),
+    ]
+    queue_name = "davinci_marketing_api"
+    max_jobs = 4
+    job_timeout = 120
+    keep_result = 3600
+    max_tries = 3
+    retry_jobs = True
+    on_startup = startup
+    on_shutdown = shutdown
+
+
 # Re-export for tests / introspection
 __all__ = [
     "WorkerSettings",
     "WorkerSettingsMarketingAgent",
+    "WorkerSettingsMarketingApi",
     "WorkerSettingsMarketplace",
     "WorkerSettingsSync",
     "WorkerSettingsUI",
