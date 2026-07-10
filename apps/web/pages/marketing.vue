@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  Activity, AlertCircle, BarChart3, Bell, Bot, Clock, Cpu, LayoutGrid,
-  Pause, Play, RefreshCw, Sparkles, TrendingUp, TrendingDown,
+  AlertCircle, BarChart3, Bell, Bot, Clock,
+  Pause, Play, RefreshCw, Sparkles,
 } from 'lucide-vue-next'
 
 const { api } = useApi()
@@ -169,27 +169,16 @@ type AgentPresence = {
 }
 
 // ── State ────────────────────────────────────────────────────────────
-type Tab = 'metricas' | 'campanhas' | 'agentes'
-// 'geral' = whole-shop accounts with no per-vertical split — the Shopee shops
-// driven by the local browser executor (marionete) live here.
-type Dept = 'celular' | 'mala' | 'eletro' | 'geral'
-const tab = ref<Tab>('metricas')
-const department = ref<Dept>('celular')
+// The page is organised by marketplace — only Mercado Livre + Shopee are
+// surfaced. The platform tab replaces the old mode + department tabs.
+type Platform = 'ml' | 'shopee'
+const platform = ref<Platform>('ml')
 
 const summary = ref<Summary | null>(null)
-const intensity = ref<Intensity[]>([])
-const decisions = ref<Decision[]>([])
-const patterns = ref<Pattern[]>([])
-const agentStatus = ref<AgentStatus[]>([])
 const agentPresence = ref<AgentPresence | null>(null)
 const creditAlerts = ref<CreditAlert[]>([])
-const campaigns = ref<Campaign[]>([])
-
-// Recent commands keyed by account_id, for the Campanhas action badges.
-const commandsByAccount = ref<Record<string, Command[]>>({})
-const commandBusy = ref<Set<string>>(new Set())
 // Current desired-state of the schedule for the account selected in the
-// heatmap/agenda panel.
+// heatmap/agenda panel (Shopee only).
 const scheduleState = ref<ScheduleState | null>(null)
 const scheduleBusy = ref(false)
 
@@ -197,16 +186,12 @@ const schedAccountId = ref<string | null>(null)
 const schedules = ref<Schedule[]>([])
 const heatmap = ref<Heatmap | null>(null)
 
-const campaignAccountId = ref<string>('all')
-
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 const triggering = ref(false)
 
 const period1Days = ref(7)
 const period2Days = ref(30)
-
-const decFilterPlatform = ref<string>('all')
 
 const days = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
 const platformColor: Record<string, string> = {
@@ -248,9 +233,6 @@ const cmdActionLabel: Record<string, string> = {
   set_budget: 'Budget', adjust_budget_pct: 'Ajustar budget',
 }
 
-// Marketplace filter for the 7d/30d period tables. 'all' = no filter.
-const tablePlatform = ref<'all' | 'shopee' | 'ml' | 'amazon'>('all')
-
 // Chart state
 type ChartMetric = 'spend' | 'revenue' | 'impressions' | 'clicks' | 'acos'
 const chartMetric = ref<ChartMetric>('spend')
@@ -264,15 +246,7 @@ const chartHover = ref<{ x: number; y: number; day: string; rows: { id: string; 
 // ── Computeds ────────────────────────────────────────────────────────
 const filteredAccounts = computed(() => {
   if (!summary.value) return []
-  return summary.value.accounts.filter((a) =>
-    a.department === department.value
-    && (tablePlatform.value === 'all' || a.platform === tablePlatform.value),
-  )
-})
-
-const filteredDecisions = computed(() => {
-  if (decFilterPlatform.value === 'all') return decisions.value
-  return decisions.value.filter((d) => d.platform === decFilterPlatform.value)
+  return summary.value.accounts.filter((a) => a.platform === platform.value)
 })
 
 const selectedSchedAccount = computed(
@@ -292,24 +266,6 @@ function scheduleCells(): Set<string> {
   return s
 }
 const scheduleSet = computed(() => scheduleCells())
-
-const filteredCampaigns = computed(() => {
-  let out = campaigns.value.filter((c) => c.department === department.value)
-  if (campaignAccountId.value !== 'all') {
-    out = out.filter((c) => c.account_id === campaignAccountId.value)
-  }
-  return out
-})
-
-const campaignAccountOptions = computed(() => {
-  const accs = filteredAccounts.value
-  const byId = new Set(
-    campaigns.value
-      .filter((c) => c.department === department.value)
-      .map((c) => c.account_id),
-  )
-  return accs.filter((a) => byId.has(a.id))
-})
 
 // ── Helpers ──────────────────────────────────────────────────────────
 function fmtMoney(v: number | null | undefined): string {
@@ -365,9 +321,7 @@ const chartLines = computed<ChartLine[]>(() => {
   // marketplace filter still apply so the chart respects the page's
   // current view scope.
   const accs = (timeseries.value.accounts || []).filter(
-    (a) => chartSelected.value.has(a.id)
-        && a.department === department.value
-        && (tablePlatform.value === 'all' || a.platform === tablePlatform.value),
+    (a) => chartSelected.value.has(a.id) && a.platform === platform.value,
   )
   // x/y are placeholders here — chartGeom resolves them once it knows
   // the union-of-days and yMax. We drop null/NaN values per day so
@@ -466,8 +420,7 @@ function toggleChartLine(id: string) {
 const chartSidebarGroups = computed(() => {
   const out: { platform: string; label: string; accounts: Account[] }[] = []
   const accs = (timeseries.value?.accounts || []).filter(
-    (a) => a.department === department.value
-        && (tablePlatform.value === 'all' || a.platform === tablePlatform.value),
+    (a) => a.platform === platform.value,
   )
   const groups: Record<string, Account[]> = { amazon: [], ml: [], shopee: [] }
   for (const a of accs) {
@@ -537,24 +490,12 @@ function heatmapTooltip(dow: number, hour: number): string {
 
 // ── Fetchers ─────────────────────────────────────────────────────────
 async function loadSummary() {
-  const qs = `?period1_days=${period1Days.value}&period2_days=${period2Days.value}&department=${department.value}`
+  const qs = `?period1_days=${period1Days.value}&period2_days=${period2Days.value}&platform=${platform.value}`
   summary.value = await api<Summary>(`/api/marketing/metrics/summary${qs}`)
   const accs = summary.value.accounts
   if (accs.length > 0 && (!schedAccountId.value || !accs.find((a) => a.id === schedAccountId.value))) {
     schedAccountId.value = accs[0].id
   }
-}
-async function loadIntensity() {
-  intensity.value = await api<Intensity[]>(`/api/marketing/intensity?department=${department.value}`)
-}
-async function loadDecisions() {
-  decisions.value = await api<Decision[]>(`/api/marketing/decisions?limit=20&department=${department.value}`)
-}
-async function loadPatterns() {
-  patterns.value = await api<Pattern[]>('/api/marketing/patterns?active=true')
-}
-async function loadAgentStatus() {
-  agentStatus.value = await api<AgentStatus[]>('/api/marketing/agents/status')
 }
 async function loadAgentPresence() {
   agentPresence.value = await api<AgentPresence>('/api/marketing/agent/status')
@@ -573,81 +514,20 @@ async function loadHeatmap() {
   }
   heatmap.value = await api<Heatmap>(`/api/marketing/schedules/${schedAccountId.value}/heatmap`)
 }
-async function loadCampaigns() {
-  campaigns.value = await api<Campaign[]>(`/api/marketing/campaigns?department=${department.value}`)
-}
 async function loadTimeseries() {
   const params = new URLSearchParams({
     days: String(chartDays.value),
-    department: department.value,
+    platform: platform.value,
   })
-  if (tablePlatform.value !== 'all') params.set('platform', tablePlatform.value)
   timeseries.value = await api<Timeseries>(`/api/marketing/timeseries?${params}`)
 }
 
-// ── Commands (manual ad actions) ─────────────────────────────────────
+// ── Time formatter (BRT) — used by the executor badge + agenda hint ──
 function fmtHm(iso: string | null): string {
   if (!iso) return ''
   return new Date(iso).toLocaleTimeString('pt-BR', {
     timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit',
   })
-}
-
-const recentCommands = computed(() => {
-  const all = Object.values(commandsByAccount.value).flat()
-  return all.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 8)
-})
-
-function cmdIsBusy(c: Campaign, action: string): boolean {
-  return commandBusy.value.has(`${c.id}:${action}`)
-}
-
-async function loadCommands(accountId: string) {
-  const rows = await api<Command[]>(`/api/marketing/accounts/${accountId}/commands?limit=10`)
-  commandsByAccount.value = { ...commandsByAccount.value, [accountId]: rows }
-}
-
-function anyCommandActive(): boolean {
-  return Object.values(commandsByAccount.value)
-    .flat()
-    .some((c) => c.status === 'pending' || c.status === 'claimed')
-}
-
-let cmdTimer: ReturnType<typeof setInterval> | null = null
-function startCommandPolling() {
-  if (cmdTimer) return
-  cmdTimer = setInterval(async () => {
-    const ids = Object.keys(commandsByAccount.value)
-    await Promise.all(ids.map((id) => loadCommands(id))).catch(() => {})
-    if (!anyCommandActive() && cmdTimer) {
-      clearInterval(cmdTimer)
-      cmdTimer = null
-    }
-  }, 4000)
-}
-
-async function postCampaignCommand(c: Campaign, action: string, payload: Record<string, unknown> = {}) {
-  if (!c.external_id) {
-    toastErr('Campanha sem ID externo', 'Sincronize a campanha antes de agir nela.')
-    return
-  }
-  const key = `${c.id}:${action}`
-  commandBusy.value = new Set(commandBusy.value).add(key)
-  try {
-    await api(`/api/marketing/accounts/${c.account_id}/commands`, {
-      method: 'POST',
-      body: { action, campaign_external_id: c.external_id, payload },
-    })
-    toastOk('Comando enfileirado', `${cmdActionLabel[action] ?? action} — ${c.name}`)
-    await loadCommands(c.account_id)
-    startCommandPolling()
-  } catch (e: any) {
-    toastErr('Falha ao enfileirar', e?.data?.detail?.code ?? e?.message ?? 'erro')
-  } finally {
-    const next = new Set(commandBusy.value)
-    next.delete(key)
-    commandBusy.value = next
-  }
 }
 
 // ── Schedule (automatic agenda) ──────────────────────────────────────
@@ -728,9 +608,8 @@ async function refresh() {
   try {
     await loadSummary()
     await Promise.all([
-      loadIntensity(), loadDecisions(), loadPatterns(),
-      loadAgentStatus(), loadAgentPresence(), loadCreditAlerts(), loadSchedules(),
-      loadHeatmap(), loadCampaigns(), loadTimeseries(), loadScheduleState(),
+      loadAgentPresence(), loadCreditAlerts(), loadSchedules(),
+      loadHeatmap(), loadTimeseries(), loadScheduleState(),
     ])
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code ?? e?.message ?? 'load_failed'
@@ -773,23 +652,20 @@ onMounted(async () => {
   await refresh()
   pollTimer = setInterval(() => {
     Promise.all([
-      loadIntensity(), loadDecisions(), loadAgentStatus(), loadAgentPresence(),
+      loadAgentPresence(), loadCreditAlerts(),
     ]).catch(() => {})
   }, 30000)
 })
 onBeforeUnmount(() => {
   if (pollTimer) clearInterval(pollTimer)
-  if (cmdTimer) clearInterval(cmdTimer)
 })
 
-watch(department, async () => {
-  campaignAccountId.value = 'all'
+watch(platform, async () => {
   await Promise.all([
-    loadSummary(), loadIntensity(), loadDecisions(),
-    loadCampaigns(), loadTimeseries(),
+    loadSummary(), loadCreditAlerts(), loadTimeseries(),
   ])
 })
-watch([chartDays, tablePlatform], () => {
+watch(chartDays, () => {
   loadTimeseries().catch(() => {})
 })
 
@@ -843,46 +719,27 @@ definePageMeta({ middleware: [] })
       Nenhuma conta sincronizada ainda. As integrações Shopee/ML/Amazon com <code>ads_enabled</code> são populadas automaticamente pelo cron.
     </div>
 
-    <!-- Tabs + department -->
+    <!-- Abas por plataforma (Mercado Livre | Shopee) -->
     <div v-if="(summary?.accounts.length ?? 0) > 0" class="flex flex-wrap items-center gap-3">
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
-        <button v-for="t in (['metricas', 'campanhas', 'agentes'] as const)" :key="t"
-          class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
-          :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
-          @click="tab = t">
-          <BarChart3 v-if="t === 'metricas'" class="size-4" />
-          <LayoutGrid v-else-if="t === 'campanhas'" class="size-4" />
-          <Cpu v-else class="size-4" />
-          {{ t === 'metricas' ? 'Métricas' : t === 'campanhas' ? 'Campanhas' : 'Agentes' }}
-        </button>
-      </div>
-      <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
-        <button v-for="d in (['celular', 'mala', 'eletro', 'geral'] as const)" :key="d"
-          class="px-3 py-1 rounded text-sm transition-colors"
-          :class="department === d ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
-          @click="department = d">
-          {{ d === 'celular' ? 'Celular' : d === 'mala' ? 'Mala' : d === 'eletro' ? 'Eletro' : 'Shopee (geral)' }}
+        <button v-for="p in (['ml', 'shopee'] as const)" :key="p"
+          class="px-4 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
+          :class="platform === p ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+          @click="platform = p">
+          <span class="inline-block size-2 rounded-full" :style="{ background: platformColor[p] }" />
+          {{ platformLabel[p] ?? p }}
         </button>
       </div>
     </div>
 
     <!-- ═══════════════════════════════ MÉTRICAS ═══════════════════════ -->
-    <template v-if="tab === 'metricas' && summary">
+    <template v-if="summary">
       <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <template v-for="(period, idx) in [{ key: 'period_1', days: period1Days }, { key: 'period_2', days: period2Days }] as const" :key="period.key">
           <div class="rounded-md border overflow-hidden">
             <div class="bg-muted/40 px-3 py-2 text-sm font-medium border-b flex items-center justify-between gap-2 flex-wrap">
               <span>Últimos {{ idx === 0 ? period1Days : period2Days }} dias</span>
               <div class="flex items-center gap-3">
-                <label v-if="idx === 0" class="text-xs font-normal text-muted-foreground inline-flex items-center gap-1">
-                  Plataforma:
-                  <select v-model="tablePlatform" class="border rounded-md px-2 py-0.5 text-xs bg-background text-foreground">
-                    <option value="all">Todas</option>
-                    <option value="amazon">Amazon</option>
-                    <option value="ml">Mercado Livre</option>
-                    <option value="shopee">Shopee</option>
-                  </select>
-                </label>
                 <label class="text-xs font-normal text-muted-foreground inline-flex items-center gap-1">
                   Dias:
                   <input
@@ -900,16 +757,14 @@ definePageMeta({ middleware: [] })
                   <tr>
                     <th class="px-2 py-2"></th>
                     <th v-for="a in filteredAccounts" :key="a.id" class="px-2 py-2 whitespace-nowrap min-w-[110px] align-top">
-                      <div class="text-[11px] font-semibold" :style="{ color: platformColor[a.platform] }">{{ platformLabel[a.platform] ?? a.platform }}</div>
-                      <div class="text-[11px] text-muted-foreground">{{ a.name }}</div>
-                      <div class="text-[9px] uppercase tracking-wide text-muted-foreground">{{ a.department }}</div>
+                      <div class="text-[12px] font-semibold text-foreground">{{ a.name }}</div>
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr class="border-t"><td class="px-2 py-1 text-muted-foreground">Crédito</td>
+                  <tr v-if="platform === 'shopee'" class="border-t"><td class="px-2 py-1 text-muted-foreground">Crédito</td>
                     <td v-for="a in filteredAccounts" :key="a.id" class="px-2 py-1 whitespace-nowrap">
-                      {{ a.platform === 'shopee' ? fmtMoney((summary as any)[period.key].data[a.id]?.credit) : '—' }}
+                      {{ fmtMoney((summary as any)[period.key].data[a.id]?.credit) }}
                     </td>
                   </tr>
                   <tr class="border-t"><td class="px-2 py-1 text-muted-foreground">Gasto</td>
@@ -983,7 +838,7 @@ definePageMeta({ middleware: [] })
             </div>
             <div v-else-if="!timeseries || chartGeom.lines.length === 0"
                  class="text-sm text-muted-foreground py-12 text-center">
-              Sem dados pra essa combinação de departamento × plataforma × janela.
+              Sem dados pra essa combinação de contas × janela.
             </div>
             <div v-else class="relative">
               <svg :viewBox="`0 0 ${chartGeom.W} ${chartGeom.H}`" class="w-full h-[320px]"
@@ -1061,15 +916,15 @@ definePageMeta({ middleware: [] })
         </div>
       </div>
 
-      <!-- Schedule heatmap (ACOS por hora × dia) -->
-      <div class="rounded-md border p-4">
+      <!-- Schedule heatmap (ACOS por hora × dia) — Shopee only -->
+      <div v-if="platform === 'shopee'" class="rounded-md border p-4">
         <div class="flex items-center gap-2 mb-3 flex-wrap">
           <Clock class="size-4 text-primary" />
           <h2 class="text-lg font-semibold">Heatmap ACOS — Horários</h2>
           <span class="text-xs text-muted-foreground">— clique para ligar/desligar</span>
           <select v-if="filteredAccounts.length > 0" v-model="schedAccountId" class="ml-auto border rounded-md px-2 py-1 text-sm bg-background">
             <option v-for="a in filteredAccounts" :key="a.id" :value="a.id">
-              {{ a.name }} ({{ platformLabel[a.platform] }} — {{ a.department }})
+              {{ a.name }}
             </option>
           </select>
         </div>
@@ -1102,13 +957,13 @@ definePageMeta({ middleware: [] })
         </div>
       </div>
 
-      <!-- Agenda automática (BRT) -->
-      <div v-if="selectedSchedAccount" class="rounded-md border p-4">
+      <!-- Agenda automática (BRT) — Shopee only -->
+      <div v-if="platform === 'shopee' && selectedSchedAccount" class="rounded-md border p-4">
         <div class="flex items-center gap-2 mb-3 flex-wrap">
           <Clock class="size-4 text-primary" />
           <h2 class="text-lg font-semibold">Agenda automática</h2>
           <span class="text-xs text-muted-foreground">
-            {{ selectedSchedAccount.name }} ({{ platformLabel[selectedSchedAccount.platform] }}) — horário de Brasília
+            {{ selectedSchedAccount.name }} — horário de Brasília
           </span>
         </div>
         <div class="flex flex-wrap items-center gap-3">
@@ -1155,8 +1010,8 @@ definePageMeta({ middleware: [] })
         </p>
       </div>
 
-      <!-- Credit alerts -->
-      <div class="rounded-md border p-4">
+      <!-- Credit alerts — Shopee only -->
+      <div v-if="platform === 'shopee'" class="rounded-md border p-4">
         <div class="flex items-center gap-2 mb-3">
           <Bell class="size-4 text-primary" />
           <h2 class="text-lg font-semibold">Alertas de crédito (Shopee)</h2>
@@ -1173,7 +1028,7 @@ definePageMeta({ middleware: [] })
               : 'border-emerald-500/30 bg-emerald-500/5'">
             <span class="text-xl">{{ a.severity === 'critical' ? '🚨' : a.severity === 'warning' ? '⚠️' : '✅' }}</span>
             <div class="flex-1">
-              <div class="font-medium">{{ a.name }} <span class="text-[10px] text-muted-foreground uppercase">{{ a.department }}</span></div>
+              <div class="font-medium">{{ a.name }}</div>
               <div class="text-xs text-muted-foreground">
                 Crédito {{ fmtMoney(a.credit_balance) }} · gasto médio/dia {{ fmtMoney(a.daily_spend_avg) }}
               </div>
@@ -1181,248 +1036,6 @@ definePageMeta({ middleware: [] })
             <div class="text-sm font-medium text-right" :class="a.severity === 'critical' ? 'text-red-700' : a.severity === 'warning' ? 'text-amber-700' : 'text-emerald-700'">
               {{ a.days_remaining }} dias
             </div>
-          </div>
-        </div>
-      </div>
-    </template>
-
-    <!-- ═══════════════════════════════ CAMPANHAS ══════════════════════ -->
-    <template v-if="tab === 'campanhas' && summary">
-      <div class="flex flex-wrap items-center gap-3">
-        <span class="text-sm text-muted-foreground">Conta:</span>
-        <select v-model="campaignAccountId" class="border rounded-md px-2 py-1 text-sm bg-background">
-          <option value="all">Todas</option>
-          <option v-for="a in campaignAccountOptions" :key="a.id" :value="a.id">
-            {{ a.name }} ({{ platformLabel[a.platform] }} — {{ a.department }})
-          </option>
-        </select>
-        <span class="text-xs text-muted-foreground">
-          {{ filteredCampaigns.length }} campanha{{ filteredCampaigns.length === 1 ? '' : 's' }}
-        </span>
-      </div>
-
-      <div v-if="filteredCampaigns.length === 0" class="rounded-md border bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-        Nenhuma campanha pra esse filtro.
-      </div>
-      <div v-else class="rounded-md border overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="text-sm border-collapse min-w-full">
-            <thead>
-              <tr class="bg-muted/40">
-                <th class="sticky left-0 z-10 bg-muted/40 px-3 py-2 text-left text-xs uppercase tracking-wide text-muted-foreground border-r min-w-[140px] align-bottom">Métrica</th>
-                <th v-for="c in filteredCampaigns" :key="c.id"
-                  class="px-3 py-2 text-left whitespace-nowrap border-r last:border-r-0 min-w-[180px] align-top">
-                  <div class="text-[11px] font-semibold" :style="{ color: platformColor[c.platform] }">
-                    {{ platformLabel[c.platform] ?? c.platform }}
-                  </div>
-                  <div class="text-[11px] text-muted-foreground">{{ c.account_name }}</div>
-                  <div class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ c.department }}</div>
-                  <div class="font-semibold mt-1">{{ c.name }}</div>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              <!-- Crédito (Shopee only; ML/Amazon = "—") -->
-              <tr class="border-t hover:bg-muted/10">
-                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Crédito</td>
-                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0">
-                  {{ c.platform === 'shopee' ? fmtMoney(c.credit) : '—' }}
-                </td>
-              </tr>
-              <!-- Gasto -->
-              <tr class="border-t hover:bg-muted/10">
-                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Gasto</td>
-                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0">
-                  {{ fmtMoney(c.spend) }}
-                </td>
-              </tr>
-              <!-- Faturamento -->
-              <tr class="border-t hover:bg-muted/10">
-                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Faturamento</td>
-                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0">
-                  {{ fmtMoney(c.revenue) }}
-                </td>
-              </tr>
-              <!-- Impressões -->
-              <tr class="border-t hover:bg-muted/10">
-                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Impressões</td>
-                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap text-muted-foreground border-r last:border-r-0">
-                  {{ c.impressions.toLocaleString('pt-BR') }}
-                </td>
-              </tr>
-              <!-- ACOS -->
-              <tr class="border-t hover:bg-muted/10">
-                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">ACOS</td>
-                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0"
-                  :class="acosClass(c.acos, c.acos_target)">
-                  {{ fmtPct(c.acos) }}
-                </td>
-              </tr>
-              <!-- Status -->
-              <tr class="border-t hover:bg-muted/10">
-                <td class="sticky left-0 z-10 bg-background px-3 py-1.5 text-muted-foreground border-r">Status</td>
-                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-1.5 whitespace-nowrap border-r last:border-r-0">
-                  <span class="inline-flex items-center gap-1.5">
-                    <span class="size-2 rounded-full" :class="statusDot[c.status] ?? 'bg-zinc-400'" />
-                    <span class="text-xs">{{ statusLabel[c.status] ?? c.status }}</span>
-                  </span>
-                </td>
-              </tr>
-              <!-- Ações -->
-              <tr class="border-t bg-muted/5">
-                <td class="sticky left-0 z-10 bg-background px-3 py-2 text-muted-foreground border-r align-top">Ações</td>
-                <td v-for="c in filteredCampaigns" :key="c.id" class="px-3 py-2 border-r last:border-r-0 align-top">
-                  <div v-if="!c.external_id" class="text-[10px] text-muted-foreground">sem ID externo</div>
-                  <div v-else class="flex flex-wrap gap-1">
-                    <button class="rounded border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1 hover:bg-red-500/10 hover:border-red-500/40 disabled:opacity-50"
-                      :disabled="cmdIsBusy(c, 'pause')" @click="postCampaignCommand(c, 'pause')">
-                      <Pause class="size-3" /> Pausar
-                    </button>
-                    <button class="rounded border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1 hover:bg-emerald-500/10 hover:border-emerald-500/40 disabled:opacity-50"
-                      :disabled="cmdIsBusy(c, 'resume')" @click="postCampaignCommand(c, 'resume')">
-                      <Play class="size-3" /> Retomar
-                    </button>
-                    <button class="rounded border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1 hover:bg-muted disabled:opacity-50"
-                      :disabled="cmdIsBusy(c, 'adjust_budget_pct')" @click="postCampaignCommand(c, 'adjust_budget_pct', { pct: 20 })">
-                      <TrendingUp class="size-3" /> +20%
-                    </button>
-                    <button class="rounded border px-1.5 py-0.5 text-[11px] inline-flex items-center gap-1 hover:bg-muted disabled:opacity-50"
-                      :disabled="cmdIsBusy(c, 'adjust_budget_pct')" @click="postCampaignCommand(c, 'adjust_budget_pct', { pct: -20 })">
-                      <TrendingDown class="size-3" /> −20%
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Ações recentes (status dos comandos enfileirados) -->
-      <div v-if="recentCommands.length" class="rounded-md border p-3">
-        <div class="text-sm font-medium mb-2 flex items-center gap-2">
-          <Activity class="size-4 text-primary" /> Ações recentes
-          <span class="text-[11px] text-muted-foreground font-normal">atualiza enquanto houver pendente</span>
-        </div>
-        <div class="space-y-1">
-          <div v-for="cmd in recentCommands" :key="cmd.id" class="flex items-center gap-2 text-xs">
-            <span class="px-1.5 py-0.5 rounded border whitespace-nowrap" :class="cmdBadge[cmd.status]?.cls ?? 'border-border'">
-              {{ cmdBadge[cmd.status]?.label ?? cmd.status }}
-            </span>
-            <span class="font-medium">{{ cmdActionLabel[cmd.action] ?? cmd.action }}</span>
-            <span class="text-muted-foreground">
-              {{ cmd.campaign_external_id ? `campanha ${cmd.campaign_external_id}` : 'conta inteira' }}
-            </span>
-            <span v-if="cmd.source === 'schedule'" class="text-[10px] uppercase tracking-wide text-violet-700">agenda</span>
-            <span v-if="cmd.status === 'failed' && cmd.result" class="text-red-600 truncate max-w-[260px]" :title="cmd.result">
-              {{ cmd.result }}
-            </span>
-            <span class="ml-auto text-muted-foreground whitespace-nowrap">{{ fmtHm(cmd.created_at) }}</span>
-          </div>
-        </div>
-      </div>
-    </template>
-
-    <!-- ═══════════════════════════════ AGENTES ════════════════════════ -->
-    <template v-if="tab === 'agentes'">
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <div v-for="ag in agentStatus" :key="ag.platform"
-          class="rounded-md border p-3 flex items-center gap-3">
-          <div class="size-10 rounded-full grid place-items-center"
-            :style="{ backgroundColor: platformColor[ag.platform] + '20' }">
-            <Bot class="size-5" :style="{ color: platformColor[ag.platform] }" />
-          </div>
-          <div class="flex-1">
-            <div class="font-medium">Agente {{ platformLabel[ag.platform] ?? ag.platform }}</div>
-            <div class="text-xs text-muted-foreground">
-              {{ ag.last_decision_minutes_ago != null ? `última decisão ${ag.last_decision_minutes_ago}min atrás` : 'sem decisões ainda' }}
-            </div>
-          </div>
-          <div class="text-right">
-            <div class="inline-flex items-center gap-1 text-xs">
-              <span class="size-2 rounded-full" :class="ag.running ? 'bg-emerald-500' : 'bg-zinc-400'" />
-              {{ ag.running ? 'Rodando' : 'Parado' }}
-            </div>
-            <div class="text-[10px] text-muted-foreground mt-0.5">{{ ag.decisions_today }} hoje</div>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="intensity.length > 0" class="rounded-md border p-4">
-        <div class="flex items-center gap-2 mb-3">
-          <Activity class="size-4 text-primary" />
-          <h2 class="text-lg font-semibold">Intensidade do mercado agora</h2>
-          <span class="text-[10px] text-muted-foreground">atualiza a cada 30s</span>
-        </div>
-        <div class="space-y-1.5">
-          <div v-for="i in intensity" :key="i.account_id" class="flex items-center gap-3">
-            <div class="w-44 text-sm">
-              <div class="font-medium">{{ i.name }}</div>
-              <div class="text-[10px]" :style="{ color: platformColor[i.platform] }">{{ platformLabel[i.platform] }} — <span class="text-muted-foreground">{{ i.department }}</span></div>
-            </div>
-            <div class="flex-1 h-5 rounded-full bg-muted overflow-hidden relative">
-              <div class="h-full transition-all duration-500" :class="assessmentBg[i.assessment]"
-                :style="{ width: `${i.intensity}%` }" />
-              <span class="absolute inset-0 flex items-center justify-center text-[11px] font-medium text-foreground/80">{{ i.intensity }}%</span>
-            </div>
-            <div class="w-24 text-sm font-medium uppercase tracking-wide" :class="assessmentTxt[i.assessment]">{{ i.assessment }}</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="rounded-md border p-4">
-        <div class="flex items-center gap-2 mb-3 flex-wrap">
-          <Cpu class="size-4 text-primary" />
-          <h2 class="text-lg font-semibold">Decisões recentes</h2>
-          <select v-model="decFilterPlatform" class="ml-auto border rounded-md px-2 py-1 text-xs bg-background">
-            <option value="all">Todas plataformas</option>
-            <option value="shopee">Shopee</option>
-            <option value="ml">Mercado Livre</option>
-            <option value="amazon">Amazon</option>
-          </select>
-        </div>
-        <div v-if="filteredDecisions.length === 0" class="text-sm text-muted-foreground py-2">
-          Sem decisões. Clique "rodar ciclo agora" no topo.
-        </div>
-        <div v-else class="space-y-1.5 max-h-[480px] overflow-y-auto pr-2">
-          <div v-for="d in filteredDecisions" :key="d.id" class="border rounded-md p-2.5 text-sm"
-            :class="d.action === 'enable_all' || d.action === 'increase_budget' ? 'border-emerald-500/30 bg-emerald-500/5'
-              : d.action === 'disable_all' || d.action === 'decrease_budget' || d.action === 'pause_worst' ? 'border-red-500/30 bg-red-500/5'
-              : 'border-border'">
-            <div class="flex items-center gap-2 flex-wrap text-xs">
-              <span class="text-muted-foreground">{{ fmtTime(d.timestamp) }}</span>
-              <span class="size-2 rounded-full" :style="{ backgroundColor: platformColor[d.platform] }" />
-              <span class="font-medium">{{ d.account_name }}</span>
-              <span class="text-muted-foreground uppercase">{{ d.department }}</span>
-              <span v-if="d.in_base_window" class="px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700 border border-sky-500/30 text-[10px]">horário base</span>
-              <span class="ml-auto font-medium inline-flex items-center gap-1">
-                <TrendingUp v-if="d.action === 'enable_all' || d.action === 'increase_budget'" class="size-3 text-emerald-600" />
-                <TrendingDown v-else-if="d.action === 'disable_all' || d.action === 'decrease_budget' || d.action === 'pause_worst'" class="size-3 text-red-600" />
-                {{ actionLabel[d.action] ?? d.action }}
-              </span>
-            </div>
-            <div class="mt-1">{{ d.reasoning }}</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="rounded-md border p-4">
-        <div class="flex items-center gap-2 mb-3">
-          <Sparkles class="size-4 text-primary" />
-          <h2 class="text-lg font-semibold">Padrões aprendidos</h2>
-        </div>
-        <div v-if="patterns.length === 0" class="text-sm text-muted-foreground py-2">
-          Nenhum padrão detectado ainda.
-        </div>
-        <div v-else class="space-y-1.5">
-          <div v-for="p in patterns" :key="p.id" class="border rounded-md p-2.5 text-sm">
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ p.pattern_type }}</span>
-              <span class="text-xs font-medium" :class="p.confidence > 0.8 ? 'text-emerald-600' : 'text-sky-600'">
-                {{ Math.round(p.confidence * 100) }}% confiança
-              </span>
-            </div>
-            <div class="mt-1">{{ p.description }}</div>
           </div>
         </div>
       </div>
