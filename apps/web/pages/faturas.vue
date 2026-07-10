@@ -224,7 +224,7 @@ function statusOf(f: Fatura): Status {
 
     <!-- Desktop table -->
     <div class="hidden md:block border rounded-md overflow-x-auto">
-      <table class="w-full text-sm min-w-[700px]">
+      <table class="w-full text-sm min-w-[700px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
         <thead class="bg-muted/40 text-left">
           <tr class="whitespace-nowrap">
             <th class="px-3 py-2">Serviço</th>
