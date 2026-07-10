@@ -165,6 +165,14 @@ function daysUntil(s: string): number {
   return Math.round((venc.getTime() - today.getTime()) / 86_400_000)
 }
 
+// Ordem alfabética por serviço (case-insensitive, pt-BR, numérica) —
+// mantém a lista organizada independente da ordem que o backend devolve.
+const sortedRows = computed(() =>
+  [...rows.value].sort((a, b) =>
+    (a.servico || '').localeCompare(b.servico || '', 'pt-BR', { sensitivity: 'base', numeric: true }),
+  ),
+)
+
 type Status = { label: string; cls: string }
 function statusOf(f: Fatura): Status {
   const dd = daysUntil(f.data_vencimento)
@@ -209,7 +217,7 @@ function statusOf(f: Fatura): Status {
         </thead>
         <tbody>
           <tr
-            v-for="f in rows"
+            v-for="f in sortedRows"
             :key="f.id"
             class="border-t hover:bg-muted/20 cursor-pointer"
             @click="openEdit(f)"
@@ -232,7 +240,7 @@ function statusOf(f: Fatura): Status {
     <!-- Mobile cards -->
     <div class="md:hidden space-y-2">
       <div
-        v-for="f in rows"
+        v-for="f in sortedRows"
         :key="f.id"
         class="border rounded-md p-3 space-y-2 hover:bg-muted/20 cursor-pointer"
         @click="openEdit(f)"
