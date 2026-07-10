@@ -11,7 +11,7 @@ const { api } = useApi()
 type Fatura = {
   id: string
   servico: string
-  dominios: string | null
+  detalhes: string | null
   plano: string | null
   valor: string | number | null
   data_vencimento: string
@@ -40,9 +40,9 @@ await refresh()
 
 // ---- Create modal ----
 const showNew = ref(false)
-const draft = ref<{ servico: string; dominios: string; plano: string; valor: string; data_vencimento: string }>({
+const draft = ref<{ servico: string; detalhes: string; plano: string; valor: string; data_vencimento: string }>({
   servico: '',
-  dominios: '',
+  detalhes: '',
   plano: '',
   valor: '',
   data_vencimento: '',
@@ -51,7 +51,7 @@ const creating = ref(false)
 const createErr = ref<string | null>(null)
 
 function openNew() {
-  draft.value = { servico: '', dominios: '', plano: '', valor: '', data_vencimento: '' }
+  draft.value = { servico: '', detalhes: '', plano: '', valor: '', data_vencimento: '' }
   createErr.value = null
   showNew.value = true
 }
@@ -68,7 +68,7 @@ async function createFatura() {
       method: 'POST',
       body: {
         servico: draft.value.servico.trim(),
-        dominios: draft.value.dominios.trim() || null,
+        detalhes: draft.value.detalhes.trim() || null,
         plano: draft.value.plano.trim() || null,
         valor: draft.value.valor.trim() ? Number(draft.value.valor.replace(',', '.')) : null,
         data_vencimento: draft.value.data_vencimento,
@@ -85,9 +85,9 @@ async function createFatura() {
 
 // ---- Edit modal ----
 const editing = ref<Fatura | null>(null)
-const editDraft = ref<{ servico: string; dominios: string; plano: string; valor: string; data_vencimento: string }>({
+const editDraft = ref<{ servico: string; detalhes: string; plano: string; valor: string; data_vencimento: string }>({
   servico: '',
-  dominios: '',
+  detalhes: '',
   plano: '',
   valor: '',
   data_vencimento: '',
@@ -99,7 +99,8 @@ function openEdit(f: Fatura) {
   editing.value = f
   editDraft.value = {
     servico: f.servico,
-    dominios: f.dominios || '',
+    // Mostra um item por linha no textarea (converte dados legados " / ").
+    detalhes: splitDetalhes(f.detalhes).join('\n'),
     plano: f.plano || '',
     valor: f.valor != null ? String(f.valor) : '',
     data_vencimento: f.data_vencimento,
@@ -116,7 +117,7 @@ async function saveEdit() {
       method: 'PATCH',
       body: {
         servico: editDraft.value.servico.trim(),
-        dominios: editDraft.value.dominios.trim() || null,
+        detalhes: editDraft.value.detalhes.trim() || null,
         plano: editDraft.value.plano.trim() || null,
         valor: editDraft.value.valor.trim() ? Number(editDraft.value.valor.replace(',', '.')) : null,
         data_vencimento: editDraft.value.data_vencimento,
@@ -161,6 +162,16 @@ function fmtValor(v: string | number | null) {
   return n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+// Quebra os detalhes em itens (um por linha) — aceita quebra de linha ou " / "
+// pra ficar com cara de planilha, cada item na sua linha.
+function splitDetalhes(s: string | null): string[] {
+  if (!s) return []
+  return s
+    .split(/\r?\n|\s*\/\s*/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+}
+
 // Dias até o vencimento (negativo = já venceu). Compara datas locais.
 function daysUntil(s: string): number {
   const [y, m, d] = s.split('-').map((n) => Number(n))
@@ -177,7 +188,7 @@ const sortedRows = computed(() =>
   [...rows.value].sort((a, b) => {
     const s = (a.servico || '').localeCompare(b.servico || '', 'pt-BR', { sensitivity: 'base', numeric: true })
     if (s !== 0) return s
-    return (a.dominios || '').localeCompare(b.dominios || '', 'pt-BR', { sensitivity: 'base', numeric: true })
+    return (a.detalhes || '').localeCompare(b.detalhes || '', 'pt-BR', { sensitivity: 'base', numeric: true })
   }),
 )
 
@@ -217,7 +228,7 @@ function statusOf(f: Fatura): Status {
         <thead class="bg-muted/40 text-left">
           <tr class="whitespace-nowrap">
             <th class="px-3 py-2">Serviço</th>
-            <th class="px-3 py-2">Domínios</th>
+            <th class="px-3 py-2">Detalhes</th>
             <th class="px-3 py-2">Plano</th>
             <th class="px-3 py-2 text-right">Valor</th>
             <th class="px-3 py-2">Vencimento</th>
@@ -232,7 +243,12 @@ function statusOf(f: Fatura): Status {
             @click="openEdit(f)"
           >
             <td class="px-3 py-2 whitespace-nowrap font-medium">{{ f.servico }}</td>
-            <td class="px-3 py-2 text-muted-foreground max-w-[280px] whitespace-normal break-words">{{ f.dominios || '—' }}</td>
+            <td class="px-3 py-2 text-muted-foreground align-top">
+              <template v-if="splitDetalhes(f.detalhes).length">
+                <div v-for="(d, i) in splitDetalhes(f.detalhes)" :key="i" class="whitespace-nowrap leading-relaxed">{{ d }}</div>
+              </template>
+              <template v-else>—</template>
+            </td>
             <td class="px-3 py-2 text-muted-foreground">{{ f.plano || '—' }}</td>
             <td class="px-3 py-2 whitespace-nowrap text-right font-mono">{{ fmtValor(f.valor) }}</td>
             <td class="px-3 py-2 whitespace-nowrap">{{ fmtDate(f.data_vencimento) }}</td>
@@ -262,8 +278,9 @@ function statusOf(f: Fatura): Status {
           </div>
           <span class="text-[10px] px-1.5 py-0.5 rounded border shrink-0" :class="statusOf(f).cls">{{ statusOf(f).label }}</span>
         </div>
-        <div v-if="f.dominios" class="text-xs break-words">
-          <span class="text-muted-foreground">Domínios:</span> {{ f.dominios }}
+        <div v-if="splitDetalhes(f.detalhes).length" class="text-xs">
+          <div class="text-muted-foreground">Detalhes:</div>
+          <div v-for="(d, i) in splitDetalhes(f.detalhes)" :key="i" class="break-words">{{ d }}</div>
         </div>
         <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
           <div><span class="text-muted-foreground">Vencimento:</span> {{ fmtDate(f.data_vencimento) }}</div>
@@ -290,8 +307,13 @@ function statusOf(f: Fatura): Status {
             <Input v-model="draft.servico" placeholder="ex: Hostinguer" />
           </div>
           <div>
-            <Label>Domínios</Label>
-            <Input v-model="draft.dominios" placeholder="ex: hadken.com / gestaoestoque.com" />
+            <Label>Detalhes</Label>
+            <textarea
+              v-model="draft.detalhes"
+              rows="3"
+              placeholder="um por linha, ex:&#10;hadken.com&#10;gestaoestoque.com"
+              class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
+            />
           </div>
           <div>
             <Label>Plano</Label>
@@ -331,8 +353,13 @@ function statusOf(f: Fatura): Status {
             <Input v-model="editDraft.servico" />
           </div>
           <div>
-            <Label>Domínios</Label>
-            <Input v-model="editDraft.dominios" placeholder="ex: hadken.com / gestaoestoque.com" />
+            <Label>Detalhes</Label>
+            <textarea
+              v-model="editDraft.detalhes"
+              rows="3"
+              placeholder="um por linha, ex:&#10;hadken.com&#10;gestaoestoque.com"
+              class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
+            />
           </div>
           <div>
             <Label>Plano</Label>

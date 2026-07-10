@@ -91,12 +91,12 @@ async def test_crud_lifecycle(
 
 
 @pytest.mark.asyncio
-async def test_dominios_round_trip(
+async def test_detalhes_round_trip(
     client: AsyncClient,
     admin: User,
     auth_as: Callable[[User | None], None],
 ):
-    """`dominios` é coluna separada do provedor (servico). Persiste no create,
+    """`detalhes` é coluna separada do provedor (servico). Persiste no create,
     volta na lista e no patch; string vazia vira NULL."""
     auth_as(admin)
     venc = (date.today() + timedelta(days=30)).isoformat()
@@ -105,28 +105,28 @@ async def test_dominios_round_trip(
         "/api/faturas",
         json={
             "servico": "Hostinguer",
-            "dominios": "hadken.com / gestaoestoque.com",
+            "detalhes": "hadken.com\ngestaoestoque.com",
             "data_vencimento": venc,
         },
     )
     assert r.status_code == 201, r.text
     fid = r.json()["id"]
     assert r.json()["servico"] == "Hostinguer"
-    assert r.json()["dominios"] == "hadken.com / gestaoestoque.com"
+    assert r.json()["detalhes"] == "hadken.com\ngestaoestoque.com"
 
     r = await client.get("/api/faturas")
     row = next(f for f in r.json() if f["id"] == fid)
-    assert row["dominios"] == "hadken.com / gestaoestoque.com"
+    assert row["detalhes"] == "hadken.com\ngestaoestoque.com"
 
-    # Patch atualiza os domínios.
-    r = await client.patch(f"/api/faturas/{fid}", json={"dominios": "novo.com"})
+    # Patch atualiza os detalhes.
+    r = await client.patch(f"/api/faturas/{fid}", json={"detalhes": "novo.com"})
     assert r.status_code == 200
-    assert r.json()["dominios"] == "novo.com"
+    assert r.json()["detalhes"] == "novo.com"
 
     # String vazia/espacos → NULL.
-    r = await client.patch(f"/api/faturas/{fid}", json={"dominios": "   "})
+    r = await client.patch(f"/api/faturas/{fid}", json={"detalhes": "   "})
     assert r.status_code == 200
-    assert r.json()["dominios"] is None
+    assert r.json()["detalhes"] is None
 
 
 @pytest.mark.asyncio
