@@ -1,103 +1,67 @@
 """Bling-as-revenue-source for the Marketing module.
 
-Why: the platforms' GMV (Shopee `direct_gmv` + `broad_gmv`, ML's spend
-metrics, Amazon `sales14d`) is "attributed sales" — orders the ad click
-*may* have driven, with a 14-day attribution window. The authoritative
-"faturamento" number for accounting is what actually shipped with NF
-emitida, which lives in Bling under `pedidos/vendas` with `situacao=9`
-("Atendido"). This module fetches the real number and provides per-day
-aggregates the orchestrator can join against ad spend to compute the
-"true" ACOS.
+Faturamento = a receita "faturável" da empresa, exatamente como a aba
+Faturamento do DaVinci (routers/faturamento.py) define: pedidos em
+`davinci.bling_orders` cuja situação está em {6 Em aberto, 15 Em andamento,
+83953 Entregue}. Fonte LOCAL (a MESMA tabela que a aba Faturamento usa) —
+NÃO chama a API do Bling. Assim os números do painel de Marketing batem
+1:1 com a aba Faturamento.
 
-Loja routing:
-  1. If `Integration.bling_loja_id` is set, use it (explicit override).
-  2. Else if the Integration has a Store, use `Store.bling_store_id`.
-  3. Else return None — caller treats absence as "skip Bling for this
-     integration" and falls back to platform GMV.
+bling_orders tem UMA LINHA POR ITEM (`total` se repete em cada linha do
+mesmo pedido); pra somar sem inflar é obrigatório deduplicar por pedido:
+MAX(total) GROUP BY bling_id — idêntico ao que faturamento.py faz.
 
-There is exactly one Bling Integration per company (the existing
-bling_orders.py pattern hard-codes `.limit(1)`); we follow that — every
-marketing integration shares the same Bling client and filters by
-idLoja for routing.
+Agregamos por DIA (data do pedido em BRT) pra o orquestrador casar contra o
+gasto diário de anúncios e calcular o ACOS "real" (gasto / faturamento).
+
+Loja routing (inalterado):
+  1. Integration.bling_loja_id (override explícito), senão
+  2. Store.bling_store_id (via Integration.store_id), senão
+  3. None → caller trata como "sem faturamento p/ essa integração".
 """
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import Date, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import BlingOrder
 from app.models.company import Store
-from app.models.enums import IntegrationPlatform
 from app.models.integration import Integration
-from app.security.cipher import decrypt_json, encrypt_json
-from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
 
-# Optional Bling situação filter. The default-9 ("Atendido / NF emitida")
-# turned out to be wrong for prod's Bling — that account uses custom
-# situação IDs (15, 83953-83965) and never set anything to 9 in 30 days.
-# Leaving this None means: don't filter server-side; o filtro client-side
-# `_INCLUDED_SITUACOES` (whitelist) só conta 15 (Em andamento) e 83953
-# (Entregue). Set a specific int here pra re-habilitar filtro server-side.
-BLING_SITUACAO_FATURADO: int | None = None
+# Situações Bling que contam como faturamento — MESMA definição da aba
+# Faturamento (routers/faturamento.py):
+#   '6'     → Em aberto
+#   '15'    → Em andamento
+#   '83953' → Entregue
+# Etiqueta gerada, em rota, devolução, cancelado… NÃO contam.
+_SITUACOES_FATURAVEIS: tuple[str, ...] = ("6", "15", "83953")
 
-# Situações que contam como faturamento real (whitelist).
-# Inversão da lista anterior (_EXCLUDED_SITUACOES) — mais seguro: qualquer
-# situação custom nova no Bling NÃO infla o faturamento acidentalmente.
-#   15    = Em andamento (pedido enviado, em rota)
-#   83953 = Entregue (cliente recebeu)
-# Outras situações (83965 Enviado Etiqueta, 83957 Aguardando Devolução,
-# 83963 Devolvido Estoque, 12 Cancelado, 6 Em digitação, etc.) NÃO contam.
-_INCLUDED_SITUACOES: frozenset[int] = frozenset({15, 83953})
+# Fuso do negócio — o "dia" do faturamento é o dia BRT do pedido.
+_BRT = "America/Sao_Paulo"
 
 
 @dataclass(slots=True)
 class BlingRevenue:
-    """Per-day revenue in BRL, keyed by emission date. `total` is the
-    sum; convenient when the caller only needs the window total."""
+    """Faturamento por dia (BRL), keyed pela data BRT do pedido. `total` é a
+    soma da janela; `order_count`, o nº de pedidos distintos."""
 
     total: float
     by_day: dict[date, float]
     order_count: int
 
 
-async def _resolve_bling_client(session: AsyncSession) -> BlingClient | None:
-    """Singleton Bling integration → BlingClient. Returns None if Bling
-    isn't connected (so the marketing sync silently falls back to
-    platform GMV instead of erroring)."""
-    integ = (
-        await session.execute(
-            select(Integration)
-            .where(Integration.platform == IntegrationPlatform.BLING)
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if integ is None:
-        return None
-    creds = decrypt_json(integ.credentials)
-
-    async def _persist(new_creds: dict) -> None:
-        integ.credentials = encrypt_json(new_creds)
-        exp = new_creds.get("expires_at")
-        if exp:
-            integ.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
-        await session.flush()
-
-    return BlingClient(creds, on_token_refresh=_persist, integration_id=integ.id)
-
-
 async def resolve_bling_loja_id(
     session: AsyncSession, integration: Integration
 ) -> int | None:
-    """Returns the Bling idLoja for this integration, or None if no
-    mapping exists. Caller decides whether absence is an error or just
-    means "skip Bling for this integration"."""
+    """Retorna o idLoja Bling desta integração, ou None se não há mapeamento
+    (nem override, nem Store.bling_store_id)."""
     if integration.bling_loja_id is not None:
         return int(integration.bling_loja_id)
     if integration.store_id is None:
@@ -108,35 +72,6 @@ async def resolve_bling_loja_id(
     return int(store.bling_store_id)
 
 
-def _parse_bling_date(s: str | None) -> date | None:
-    """Bling returns dataEmissao as YYYY-MM-DD (sometimes with timestamp
-    suffix). We tolerate both shapes — datetime.fromisoformat handles
-    the truncation cleanly when we only need the date part."""
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
-    except ValueError:
-        try:
-            return date.fromisoformat(s[:10])
-        except ValueError:
-            return None
-
-
-def _pedido_total(pedido: dict) -> float:
-    """`totalVenda` is the canonical revenue field; `total` and
-    `totalProdutos` are also returned by Bling but exclude (or include)
-    fees inconsistently across versions. Prefer totalVenda; fall back
-    to total when missing for safety."""
-    v = pedido.get("totalVenda")
-    if v is None:
-        v = pedido.get("total") or 0
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 async def get_bling_revenue(
     session: AsyncSession,
     integration: Integration,
@@ -144,64 +79,63 @@ async def get_bling_revenue(
     start: date,
     end: date,
 ) -> BlingRevenue | None:
-    """Pull all `situacao=9` (NF emitida) pedidos for this integration's
-    Bling loja in [start, end]. Aggregates by `dataEmissao` so the
-    orchestrator can join against per-day ad spend.
+    """Faturamento faturável (situação ∈ {6,15,83953}) da loja desta
+    integração, agregado por dia BRT em [start, end]. Fonte: tabela local
+    davinci.bling_orders (a mesma da aba Faturamento). Dedup por pedido
+    (MAX(total) GROUP BY bling_id) pra não inflar com as linhas-por-item.
 
-    Returns None when:
-      - Bling isn't connected, or
-      - the integration has no Bling loja mapping (no override, no
-        Store.bling_store_id).
-    The caller treats None as "use platform GMV" — that keeps the sync
-    working in dev/test where Bling isn't wired up yet."""
+    Retorna None quando a integração não tem loja Bling mapeada — o caller
+    trata como "sem faturamento" (revenue 0 / ACOS None)."""
     loja_id = await resolve_bling_loja_id(session, integration)
     if loja_id is None:
         return None
-    client = await _resolve_bling_client(session)
-    if client is None:
-        return None
 
-    by_day: dict[date, float] = defaultdict(float)
+    # Pré-filtro INDEXÁVEL na coluna crua `data` (timestamptz). BRT = UTC-3
+    # (sem horário de verão desde 2019); a margem de ±1 dia cobre o offset
+    # com folga. O bucketing exato por dia BRT é feito abaixo.
+    start_dt = datetime.combine(start - timedelta(days=1), time.min, tzinfo=UTC)
+    end_dt = datetime.combine(end + timedelta(days=2), time.min, tzinfo=UTC)
+
+    # Dia BRT do pedido (bling_orders.data é timestamptz em UTC).
+    brt_day = cast(func.timezone(_BRT, BlingOrder.data), Date)
+
+    # ETAPA 1 — dedup por pedido: UMA linha por bling_id, com seu dia e total.
+    per_order = (
+        select(
+            BlingOrder.bling_id.label("bling_id"),
+            func.min(brt_day).label("day"),
+            func.max(BlingOrder.total).label("total"),
+        )
+        .where(
+            BlingOrder.loja == str(loja_id),
+            BlingOrder.situacao.in_(_SITUACOES_FATURAVEIS),
+            BlingOrder.data >= start_dt,
+            BlingOrder.data < end_dt,
+        )
+        .group_by(BlingOrder.bling_id)
+        .subquery()
+    )
+
+    # ETAPA 2 — soma o faturamento por dia.
+    stmt = select(
+        per_order.c.day.label("day"),
+        func.coalesce(func.sum(per_order.c.total), 0).label("revenue"),
+        func.count().label("orders"),
+    ).group_by(per_order.c.day)
+
+    by_day: dict[date, float] = {}
     total = 0.0
     count = 0
-    try:
-        async for pedido in client.iter_pedidos_vendas(
-            data_inicial=start.isoformat(),
-            data_final=end.isoformat(),
-            id_situacao=BLING_SITUACAO_FATURADO,  # None → no server-side filter
-            id_loja=loja_id,
-        ):
-            # Só conta se a situação está na whitelist (Em andamento ou
-            # Entregue). Antes era blacklist (excluía Cancelado/Em digitação)
-            # — qualquer situação custom nova inflava o faturamento.
-            sit_id = (pedido.get("situacao") or {}).get("id")
-            try:
-                sit_int = int(sit_id) if sit_id is not None else None
-            except (TypeError, ValueError):
-                sit_int = None
-            if sit_int not in _INCLUDED_SITUACOES:
-                continue
-            d = _parse_bling_date(pedido.get("dataEmissao") or pedido.get("data"))
-            v = _pedido_total(pedido)
-            if d is not None:
-                by_day[d] += v
-            total += v
-            count += 1
-    except Exception as e:  # noqa: BLE001
-        # Soft-fail: log and return None so the sync keeps going with
-        # platform GMV. The orchestrator surfaces this via the response
-        # payload so the operator notices.
-        logger.warning(
-            "bling_revenue_fetch_failed",
-            integration_id=str(integration.id),
-            loja_id=loja_id,
-            err=str(e)[:200],
-        )
-        return None
-    finally:
-        await session.commit()
+    for row in (await session.execute(stmt)).all():
+        # Descarta os dias-borda que o pré-filtro cru deixou passar.
+        if row.day is None or row.day < start or row.day > end:
+            continue
+        rev = float(row.revenue or 0)
+        by_day[row.day] = rev
+        total += rev
+        count += int(row.orders or 0)
 
-    return BlingRevenue(total=round(total, 2), by_day=dict(by_day), order_count=count)
+    return BlingRevenue(total=round(total, 2), by_day=by_day, order_count=count)
 
 
 async def get_bling_revenue_by_integration_id(
@@ -211,9 +145,8 @@ async def get_bling_revenue_by_integration_id(
     start: date,
     end: date,
 ) -> BlingRevenue | None:
-    """Convenience for callers that only have the integration id (the
-    manual-trigger router endpoint, the worker cron). Loads the
-    Integration row then delegates."""
+    """Conveniência para callers que só têm o id da integração (endpoint de
+    trigger manual, cron do worker). Carrega a Integration e delega."""
     integ = await session.get(Integration, integration_id)
     if integ is None:
         return None

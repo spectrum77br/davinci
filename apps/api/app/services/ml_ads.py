@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import httpx
@@ -353,6 +353,33 @@ class MLAdsClient(MercadoLivreClient):
             day=end, spend=spend, impressions=impressions,
             clicks=clicks, revenue=revenue, acos=acos,
         )
+
+    async def get_daily_spend_series(
+        self, start: date, end: date
+    ) -> dict[date, float]:
+        """Gasto (cost) POR DIA em [start, end], keyed pela data.
+
+        O endpoint de métricas do ML só devolve o TOTAL da janela (não uma
+        série), então iteramos dia a dia (uma chamada por dia). É a única
+        forma de obter o gasto diário real — necessário porque:
+
+          • o ML finaliza o `cost` com ~3-4 dias de atraso: os dias mais
+            recentes voltam 0 e "amadurecem" nas runs seguintes;
+          • gravar o total da janela na linha de um único dia inflava o
+            gasto (e o ACOS) — era o bug dos números irreais.
+
+        `fetch_campaign_metrics` engole erros e devolve {} (gasto 0 nesse
+        dia); como a janela é reprocessada a cada run, um 0 transitório se
+        auto-corrige na run seguinte."""
+        out: dict[date, float] = {}
+        day = start
+        while day <= end:
+            metrics = await self.fetch_campaign_metrics(date_from=day, date_to=day)
+            out[day] = round(
+                sum(_safe_float(m.get("spend")) for m in metrics.values()), 2
+            )
+            day += timedelta(days=1)
+        return out
 
     # ─── credit (derived: remaining daily budget) ─────────────────────────
 

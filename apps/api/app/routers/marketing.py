@@ -261,7 +261,6 @@ async def metrics_summary(
                         func.coalesce(func.sum(MarketingMetric.impressions), 0).label("impressions"),
                         func.coalesce(func.sum(MarketingMetric.clicks), 0).label("clicks"),
                         func.coalesce(func.sum(MarketingMetric.orders), 0).label("orders"),
-                        func.avg(MarketingMetric.acos).label("acos"),
                     ).where(
                         and_(
                             MarketingMetric.account_id == acc.id,
@@ -272,6 +271,9 @@ async def metrics_summary(
             ).first()
             spend = float(row.spend or 0)
             revenue = float(row.revenue or 0)
+            # ACOS = GASTO ÷ Faturamento × 100 (definição do operador). Usa os
+            # SOMATÓRIOS da janela (Σgasto/Σfaturamento), NÃO a média dos ACOS
+            # diários — média de razões ≠ razão das somas e distorce o número.
             out[str(acc.id)] = {
                 "credit": acc.credit_balance if acc.platform == "shopee" else None,
                 "spend": round(spend, 2),
@@ -279,7 +281,7 @@ async def metrics_summary(
                 "impressions": int(row.impressions or 0),
                 "clicks": int(row.clicks or 0),
                 "orders": int(row.orders or 0),
-                "acos": round(float(row.acos), 1) if row.acos is not None else None,
+                "acos": round(spend / revenue * 100, 1) if revenue > 0 else None,
                 "status": acc.status,
             }
         return out
@@ -636,10 +638,13 @@ async def get_intensity(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_active_user)],
     department: str | None = Query(None),
+    platform: str | None = Query(None),
 ) -> list[IntensityOut]:
     stmt = select(MarketingAccount)
     if department:
         stmt = stmt.where(MarketingAccount.department == department)
+    if platform:
+        stmt = stmt.where(MarketingAccount.platform == platform)
     rows = (
         await session.execute(stmt.order_by(MarketingAccount.platform, MarketingAccount.name))
     ).scalars().all()

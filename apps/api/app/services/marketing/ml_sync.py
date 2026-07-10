@@ -68,11 +68,24 @@ async def sync_ml_integration(
     client = MLAdsClient(creds, on_token_refresh=_persist_refreshed_creds)
 
     today = datetime.now(UTC).date()
+    # Janela de "amadurecimento" do faturamento: a receita de um dia sobe nos
+    # dias seguintes conforme os pedidos avançam de situação. Reprocessamos só
+    # o faturamento (não o gasto) dessa janela a cada run — é barato, é query
+    # local. NÃO é backfill histórico: linhas inexistentes não são criadas.
     start_day = today - timedelta(days=_DAILY_LOOKBACK_DAYS - 1)
 
     try:
-        campaigns, daily = await client.get_daily_performance(start_day, today)
+        # Gasto/impressões de HOJE (dia único). O antigo (start_day, today)
+        # devolvia o SOMATÓRIO de 7 dias e gravava isso na linha de hoje —
+        # inflava o gasto e quebrava o ACOS. Agora a linha do dia é do dia.
+        campaigns, today_metric = await client.get_daily_performance(today, today)
         remaining_budget = await client.get_remaining_daily_budget(campaigns=campaigns)
+        # Gasto POR DIA da janela. O ML finaliza o `cost` com ~3-4 dias de
+        # atraso (dias recentes voltam 0 e amadurecem run a run), e o endpoint
+        # só devolve o TOTAL da janela — por isso puxamos dia a dia. Usado
+        # abaixo pra corrigir o gasto das linhas já gravadas; sem isso o gasto
+        # ficava congelado no 1º valor (que era o somatório inflado da janela).
+        spend_series = await client.get_daily_spend_series(start_day, today)
     except MLAdsScopeError as e:
         # Scope not granted = operator action needed = NOT a flapping bug.
         # Don't increment consecutive_errors (would spam Telegram every cron).
@@ -99,40 +112,59 @@ async def sync_ml_integration(
         await session.commit()
         raise
 
-    # ─── Bling authoritative revenue ────────────────────────────────────
+    # ─── Faturamento (fonte: aba Faturamento = bling_orders local) ───────
+    # revenue = faturamento faturável {6,15,83953} da loja, por dia BRT.
     bling = await get_bling_revenue(session, integration, start=start_day, end=today)
-    # Pega APENAS o faturamento de HOJE (não o somatório da janela). Gravar
-    # o total da janela no row de hoje inflava agregados 7d/30d ~2x
-    # (totais sobrepostos somavam de novo). shopee_sync já fazia certo.
-    bling_today = bling.by_day.get(today, 0.0) if bling else 0.0
-    account_revenue = bling_today if bling else daily.revenue
+    by_day = bling.by_day if bling is not None else {}
+    # Loja mapeada → usa o faturamento (0 se ainda não houve venda hoje).
+    # Sem mapeamento de loja → cai no atribuído do próprio ML (só hoje).
+    revenue_today = (
+        by_day.get(today, 0.0) if bling is not None else today_metric.revenue
+    )
+    # ACOS = Gasto ÷ Faturamento × 100 (definição do operador).
     account_acos = (
-        round(daily.spend / account_revenue * 100, 2)
-        if account_revenue > 0
+        round(today_metric.spend / revenue_today * 100, 2)
+        if revenue_today > 0
         else None
     )
 
-    # ─── upsert MarketingAccount ─────────────────────────────────────────
+    # ─── upsert MarketingAccount (tudo de HOJE) ──────────────────────────
     account = await _upsert_account(
         session,
         integration=integration,
         credit=remaining_budget,
-        spend=daily.spend,
-        revenue=account_revenue,
-        impressions=daily.impressions,
+        spend=today_metric.spend,
+        revenue=revenue_today,
+        impressions=today_metric.impressions,
     )
 
-    # ─── one daily metric row at window end (sentinel intensity=0) ───────
+    # ─── linha diária de HOJE (sentinel intensity=0), tudo do mesmo dia ──
     await _upsert_daily_metric(
         session,
         account_id=account.id,
         day=today,
-        spend=daily.spend,
-        revenue=account_revenue,
-        impressions=daily.impressions,
-        clicks=daily.clicks,
+        spend=today_metric.spend,
+        revenue=revenue_today,
+        impressions=today_metric.impressions,
+        clicks=today_metric.clicks,
         acos=account_acos,
     )
+
+    # ─── amadurecimento: corrige GASTO (ML finaliza ~4d depois) e
+    #     FATURAMENTO (pedidos amadurecem de situação {6,15,83953}) das
+    #     linhas JÁ EXISTENTES da janela, recalculando o ACOS. NÃO cria
+    #     linhas novas (nada de backfill histórico) — o dia que não existe
+    #     é ignorado; a linha de hoje se auto-corrige nas runs seguintes. ─
+    day = start_day
+    while day < today:
+        await _refresh_metric_day(
+            session,
+            account_id=account.id,
+            day=day,
+            spend=spend_series.get(day),
+            revenue=by_day.get(day) if bling is not None else None,
+        )
+        day += timedelta(days=1)
 
     # ─── campaigns upsert ────────────────────────────────────────────────
     await _upsert_campaigns(
@@ -156,8 +188,8 @@ async def sync_ml_integration(
         "status": "ok",
         "account_id": str(account.id),
         "credit": remaining_budget,
-        "spend": daily.spend,
-        "revenue": account_revenue,
+        "spend": today_metric.spend,
+        "revenue": revenue_today,
         "campaigns": len(campaigns),
         "bling_revenue": bling.total if bling else None,
     }
@@ -272,6 +304,47 @@ async def _upsert_daily_metric(
         existing.impressions = impressions
         existing.clicks = clicks
         existing.acos = acos
+
+
+async def _refresh_metric_day(
+    session: AsyncSession,
+    *,
+    account_id: UUID,
+    day: date,
+    spend: float | None = None,
+    revenue: float | None = None,
+) -> None:
+    """Atualiza uma linha diária JÁ EXISTENTE: gasto (se `spend` != None)
+    e/ou faturamento (se `revenue` != None), recalculando o ACOS =
+    gasto/faturamento×100. NÃO cria linha nova — se o dia não existe, não
+    faz nada (sem backfill histórico).
+
+    ACOS fica None enquanto o gasto do dia ainda não foi finalizado pelo ML
+    (gasto 0) — evita mostrar "0% de ACOS" num dia que teve venda mas cujo
+    custo de anúncio ainda não amadureceu."""
+    ts = datetime.combine(day, time(12, 0), tzinfo=UTC)
+    row = (
+        await session.execute(
+            select(MarketingMetric).where(
+                and_(
+                    MarketingMetric.account_id == account_id,
+                    MarketingMetric.timestamp == ts,
+                    MarketingMetric.intensity == 0,
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return
+    if spend is not None:
+        row.spend = spend
+    if revenue is not None:
+        row.revenue = revenue
+    row.acos = (
+        round(row.spend / row.revenue * 100, 2)
+        if row.revenue and row.revenue > 0 and row.spend
+        else None
+    )
 
 
 def _map_ml_status(status: str) -> str:
