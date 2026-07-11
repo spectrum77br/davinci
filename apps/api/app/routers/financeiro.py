@@ -686,6 +686,12 @@ _OPER_DESCRICOES = {
         "Soma dos custos de manutenção lançados nas devoluções, "
         "agrupada pelo mês de criação da devolução."
     ),
+    "giro_venda": (
+        "Custo de venda dos produtos faturados no mês (preço de custo × "
+        "quantidade, situações que contam como faturamento) dividido pelo valor "
+        "do estoque do mês (snapshot do último dia, da tabela valuation), em %. "
+        "Indica quanto do estoque girou em vendas no mês."
+    ),
 }
 
 # Explicação da fórmula de cada linha do quadro "Comercial" (tooltip no hover).
@@ -1034,6 +1040,28 @@ async def valuation_report(
         WHERE {_janela('created_at')}
         GROUP BY mes
     """)
+    # Numerador do Giro de Venda: custo de venda (preço de custo × quantidade)
+    # dos pedidos que contam como faturamento (situações aplicáveis), por mês.
+    # Mesma definição de "faturamento" das demais seções (exclui lojas internas).
+    # O denominador (valor de estoque) vem do snapshot `valuation` já carregado.
+    oper_giro_sql = text(f"""
+        WITH por_pedido AS (
+            SELECT bo.numero,
+                   {_mes('bo.data')} AS mes,
+                   MAX(bo.situacao) AS situacao,
+                   SUM(COALESCE(bo.preco_custo, 0)
+                       * COALESCE(bo.item_quantidade, 0)) AS custo_produto
+            FROM {_qt("bling_orders")} bo
+            WHERE {_janela('bo.data')}
+              AND COALESCE(bo.loja, '') <> ALL(:ignored_stores)
+            GROUP BY bo.numero, mes
+        )
+        SELECT mes,
+               SUM(custo_produto) FILTER (WHERE situacao = ANY(:sit_aplic))
+                   AS custo_faturamento
+        FROM por_pedido
+        GROUP BY mes
+    """)
 
     bo_by_mes = {
         r["mes"]: r for r in (await session.execute(oper_bo_sql, {
@@ -1043,10 +1071,29 @@ async def valuation_report(
     }
     ref_by_mes = {r["mes"]: r for r in (await session.execute(oper_ref_sql)).mappings().all()}
     dev_by_mes = {r["mes"]: r for r in (await session.execute(oper_dev_sql)).mappings().all()}
+    giro_by_mes = {
+        r["mes"]: r for r in (await session.execute(oper_giro_sql, {
+            "ignored_stores": _VAL_IGNORED_STORES,
+            "sit_aplic": _VAL_SIT_APLICAVEIS,
+        })).mappings().all()
+    }
 
     def _brl_row(by_mes: dict, col: str) -> list[float | None]:
         # Mês sem linhas → R$ 0,00 (não "—") nas métricas de moeda.
         return [_r2(by_mes.get(m, {}).get(col) or 0) for m in months]
+
+    def _giro_row() -> list[float | None]:
+        # (custo de venda do faturamento ÷ valor de estoque) × 100. Sem estoque
+        # no snapshot do mês (None ou 0) → None ("—"), não dá pra dividir.
+        out: list[float | None] = []
+        for m in months:
+            custo = giro_by_mes.get(m, {}).get("custo_faturamento")
+            estoque = val_by_mes.get(m, {}).get("estoque")
+            if custo is None or not estoque or float(estoque) == 0:
+                out.append(None)
+            else:
+                out.append(_r2(float(custo) / float(estoque) * 100))
+        return out
 
     operacional = OperacionalSecaoOut(
         meses=months,
@@ -1069,6 +1116,9 @@ async def valuation_report(
             OperacionalLinhaOut(chave="custo_manutencao", label="Custo Manutenção", formato="brl",
                                 descricao=_OPER_DESCRICOES["custo_manutencao"],
                                 valores=_brl_row(dev_by_mes, "custo_manutencao")),
+            OperacionalLinhaOut(chave="giro_venda", label="Giro de Venda", formato="pct",
+                                descricao=_OPER_DESCRICOES["giro_venda"],
+                                valores=_giro_row()),
         ],
     )
 
