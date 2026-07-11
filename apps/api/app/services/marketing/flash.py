@@ -55,6 +55,10 @@ async def enqueue_flash_duplicates(session: AsyncSession) -> dict[str, Any]:
             select(MarketingAccount).where(
                 MarketingAccount.platform == "shopee",
                 MarketingAccount.flash_duplicate_enabled.is_(True),
+                # Só lojas dirigidas pelo browser: sem perfil AdsPower o executor
+                # não abre a conta. Blinda contra uma linha por vertical
+                # (celular/mala/eletro) que por acaso fique com o flag ligado.
+                MarketingAccount.adspower_user_id.isnot(None),
             )
         )
     ).scalars().all()

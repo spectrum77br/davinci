@@ -31,12 +31,15 @@ def upgrade() -> None:
         """
     )
     # Liga nas contas de malas já existentes (idempotente: só sobe pra true).
+    # Escopo department='geral': é a linha "loja inteira" dirigida pelo browser
+    # (tem adspower_user_id). As linhas por vertical (celular/mala/eletro) NÃO
+    # têm perfil AdsPower e o executor não consegue abrí-las — ficam de fora.
     names = ", ".join("'" + n.replace("'", "''") + "'" for n in _MALAS)
     op.execute(
         f"""
         UPDATE {SCHEMA}.marketing_accounts
            SET flash_duplicate_enabled = true
-         WHERE platform = 'shopee' AND name IN ({names})
+         WHERE platform = 'shopee' AND department = 'geral' AND name IN ({names})
         """
     )
 
