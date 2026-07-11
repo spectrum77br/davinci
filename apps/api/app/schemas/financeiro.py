@@ -272,24 +272,42 @@ class OperacionalSecaoOut(BaseModel):
     linhas: list[OperacionalLinhaOut]
 
 
-class ComercialQuadroOut(BaseModel):
-    """Um quadro do bloco "Comercial — 3 meses". Mesma forma de
-    OperacionalSecaoOut (meses + linhas), com um `titulo` que identifica o
-    grupo: "Total (todas as lojas)", "Equipe N" ou "Sem equipe". `equipe` = o
-    número da equipe (None no Total e no Sem equipe)."""
+class ComercialMembroOut(BaseModel):
+    """Um membro (ex. "1.1") dentro de uma empresa, com duas séries por mês
+    (alinhadas a `ComercialSecaoOut.meses`): `cancelamento` (R$ aguardando
+    cancelamento) e `taxa_devolucao` (%)."""
 
-    titulo: str
-    equipe: int | None = None
-    meses: list[date]
-    linhas: list[OperacionalLinhaOut]
+    label: str
+    cancelamento: list[float | None]
+    taxa_devolucao: list[float | None]
+
+
+class ComercialEmpresaOut(BaseModel):
+    """Uma empresa = uma aba do bloco Comercial. `label` = "Empresa 1" /
+    "Sem equipe". As séries são o subtotal da empresa (o que aparece na aba
+    "Geral"); `membros` são as linhas mostradas ao abrir a aba da empresa
+    ("Sem equipe" não tem membros)."""
+
+    empresa: int | None = None
+    label: str
+    cancelamento: list[float | None]
+    taxa_devolucao: list[float | None]
+    membros: list[ComercialMembroOut]
 
 
 class ComercialSecaoOut(BaseModel):
-    """Bloco Comercial dos últimos 3 meses, quebrado por equipe de vendas:
-    um quadro Total, um por equipe (store_info.sales_team) e um "Sem equipe"
-    quando houver dados não atribuídos a nenhuma equipe."""
+    """Bloco Comercial em abas: uma aba "Geral" (Total geral + subtotal por
+    empresa) e uma aba por empresa (com os membros). Duas métricas por mês:
+    Cancelamento (R$) e Taxa de Devolução (%). Hoje há 1 empresa — os
+    `store_info.sales_team` viram membros 1.1/1.2/… dela; a ramificação real
+    (loja → empresa) virá depois."""
 
-    quadros: list[ComercialQuadroOut]
+    meses: list[date]
+    total_cancelamento: list[float | None]
+    total_taxa_devolucao: list[float | None]
+    desc_cancelamento: str
+    desc_taxa_devolucao: str
+    empresas: list[ComercialEmpresaOut]
 
 
 class FaturamentoGrpLinhaOut(BaseModel):

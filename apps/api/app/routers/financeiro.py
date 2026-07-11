@@ -40,7 +40,8 @@ from app.models import (
     User,
 )
 from app.schemas.financeiro import (
-    ComercialQuadroOut,
+    ComercialEmpresaOut,
+    ComercialMembroOut,
     ComercialSecaoOut,
     ConsorcioOut,
     ConsorcioPatch,
@@ -1151,7 +1152,6 @@ async def valuation_report(
             GROUP BY bo.numero, mes
         )
         SELECT pp.mes, si.sales_team AS equipe,
-               SUM(pp.valorbase) FILTER (WHERE pp.situacao = :s_dev) AS aguardando_devolucao,
                SUM(pp.valorbase) FILTER (WHERE pp.situacao = :s_can) AS aguardando_cancelamento,
                COUNT(*)          FILTER (WHERE pp.situacao = ANY(:sit_fat)) AS faturamento_qtd
         FROM por_pedido pp
@@ -1179,7 +1179,6 @@ async def valuation_report(
     """)
 
     com_bo_rows = (await session.execute(com_bo_sql, {
-        "s_dev": _VAL_SIT_AGUARD_DEVOLUCAO,
         "s_can": _VAL_SIT_AGUARD_CANCELAMENTO,
         "sit_fat": _VAL_SIT_APLICAVEIS,
         "ignored_stores": _VAL_IGNORED_STORES,
@@ -1197,57 +1196,75 @@ async def valuation_report(
     bo_idx = {(r["mes"], r["equipe"]): r for r in com_bo_rows}
     dev_idx = {(r["mes"], r["equipe"]): (r["devolucoes"] or 0) for r in com_dev_rows}
 
-    def _com_quadro(titulo: str, equipe: int | None, pred) -> ComercialQuadroOut:
-        # `pred(team)` seleciona os baldes de equipe deste quadro (Total = todos,
-        # Equipe N = team == N, Sem equipe = team is None).
-        ag_dev = {m: 0.0 for m in months}
-        ag_can = {m: 0.0 for m in months}
+    # `_com_series(pred)` devolve as duas séries por mês (Cancelamento em R$ e
+    # Taxa de Devolução em %) somando os baldes de equipe que casam com `pred`.
+    def _com_series(pred) -> tuple[list[float | None], list[float | None]]:
+        cancel = {m: 0.0 for m in months}
         fat = {m: 0 for m in months}
         dev = {m: 0 for m in months}
         for (mes, team), r in bo_idx.items():
-            if mes in ag_dev and pred(team):
-                ag_dev[mes] += float(r["aguardando_devolucao"] or 0)
-                ag_can[mes] += float(r["aguardando_cancelamento"] or 0)
+            if mes in cancel and pred(team):
+                cancel[mes] += float(r["aguardando_cancelamento"] or 0)
                 fat[mes] += int(r["faturamento_qtd"] or 0)
         for (mes, team), c in dev_idx.items():
             if mes in dev and pred(team):
                 dev[mes] += int(c)
+        cancel_s = [_r2(cancel[m]) for m in months]
         # Taxa: produtos devolvidos (Novo+Usado) ÷ pedidos do faturamento, em %.
         # Sem pedidos de faturamento no mês → None ("—").
-        taxa = [_r2(dev[m] / fat[m] * 100) if fat[m] else None for m in months]
-        return ComercialQuadroOut(
-            titulo=titulo, equipe=equipe, meses=months,
-            linhas=[
-                OperacionalLinhaOut(chave="aguardando_devolucao", label="Aguardando Devolução",
-                                    formato="brl", descricao=_COM_DESCRICOES["aguardando_devolucao"],
-                                    valores=[_r2(ag_dev[m]) for m in months]),
-                OperacionalLinhaOut(chave="aguardando_cancelamento", label="Aguardando Cancelamento",
-                                    formato="brl", descricao=_COM_DESCRICOES["aguardando_cancelamento"],
-                                    valores=[_r2(ag_can[m]) for m in months]),
-                OperacionalLinhaOut(chave="taxa_devolucao", label="Taxa de Devolução",
-                                    formato="pct", descricao=_COM_DESCRICOES["taxa_devolucao"],
-                                    valores=taxa),
-            ],
-        )
+        taxa_s = [_r2(dev[m] / fat[m] * 100) if fat[m] else None for m in months]
+        return cancel_s, taxa_s
 
-    def _grupo_tem_dados(pred) -> bool:
+    def _tem_dados(pred) -> bool:
         for (mes, team), r in bo_idx.items():
             if mes in months and pred(team) and (
-                (r["aguardando_devolucao"] or 0) or (r["aguardando_cancelamento"] or 0)
-                or (r["faturamento_qtd"] or 0)
+                (r["aguardando_cancelamento"] or 0) or (r["faturamento_qtd"] or 0)
             ):
                 return True
         return any(mes in months and pred(team) and c
                    for (mes, team), c in dev_idx.items())
 
-    quadros = [_com_quadro("Total (todas as lojas)", None, lambda t: True)]
-    for n in teams:
-        quadros.append(_com_quadro(f"Equipe {n}", int(n), (lambda t, n=n: t == n)))
-    # "Sem equipe" só aparece quando houver dados não atribuídos a equipe.
-    if _grupo_tem_dados(lambda t: t is None):
-        quadros.append(_com_quadro("Sem equipe", None, lambda t: t is None))
+    # Hoje há UMA empresa: todo `sales_team` é membro dela, rotulado
+    # "1.<rank>" pela ordem do sales_team. Quando ramificar, este bloco troca
+    # pelo mapeamento real (loja → empresa).
+    _teams = sorted(
+        set(teams)
+        | {t for (_m, t) in bo_idx if t is not None}
+        | {t for (_m, t) in dev_idx if t is not None}
+    )
+    _rank = {t: i + 1 for i, t in enumerate(_teams)}
 
-    comercial = ComercialSecaoOut(quadros=quadros)
+    total_cancel, total_taxa = _com_series(lambda t: True)
+
+    empresas: list[ComercialEmpresaOut] = []
+    if _teams:
+        membros = []
+        for team in _teams:
+            c, t = _com_series(lambda x, team=team: x == team)
+            membros.append(ComercialMembroOut(
+                label=f"1.{_rank[team]}", cancelamento=c, taxa_devolucao=t,
+            ))
+        c, t = _com_series(lambda x: x is not None)
+        empresas.append(ComercialEmpresaOut(
+            empresa=1, label="Empresa 1",
+            cancelamento=c, taxa_devolucao=t, membros=membros,
+        ))
+    # "Sem equipe" só aparece quando houver dados não atribuídos a equipe.
+    if _tem_dados(lambda t: t is None):
+        c, t = _com_series(lambda x: x is None)
+        empresas.append(ComercialEmpresaOut(
+            empresa=None, label="Sem equipe",
+            cancelamento=c, taxa_devolucao=t, membros=[],
+        ))
+
+    comercial = ComercialSecaoOut(
+        meses=months,
+        total_cancelamento=total_cancel,
+        total_taxa_devolucao=total_taxa,
+        desc_cancelamento=_COM_DESCRICOES["aguardando_cancelamento"],
+        desc_taxa_devolucao=_COM_DESCRICOES["taxa_devolucao"],
+        empresas=empresas,
+    )
 
     # 4 + 5. Por Marketplace e Por Categoria (3 meses) — mkt_rows/cat_rows já
     # executados acima (a rentabilidade do card mensal é a soma de mkt_rows).

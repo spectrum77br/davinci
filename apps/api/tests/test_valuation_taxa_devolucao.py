@@ -57,17 +57,12 @@ async def _devolucao(db: AsyncSession, *, condicao: str, quantidade: int) -> Non
 
 
 def _taxa_total(body: dict) -> list:
-    for q in body["comercial"]["quadros"]:
-        if q["titulo"].startswith("Total"):
-            for linha in q["linhas"]:
-                if linha["chave"] == "taxa_devolucao":
-                    return linha["valores"]
-    raise AssertionError("quadro Total / linha taxa_devolucao ausente")
+    return body["comercial"]["total_taxa_devolucao"]
 
 
 def _idx_mes_atual(body: dict) -> int:
     hoje = datetime.now(UTC).date().replace(day=1).isoformat()
-    return body["comercial"]["quadros"][0]["meses"].index(hoje)
+    return body["comercial"]["meses"].index(hoje)
 
 
 @pytest.mark.asyncio

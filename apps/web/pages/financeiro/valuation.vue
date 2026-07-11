@@ -35,14 +35,25 @@ type OperacionalSecao = {
   meses: string[]
   linhas: OperacionalLinha[]
 }
-type ComercialQuadro = {
-  titulo: string
-  equipe: number | null
-  meses: string[]
-  linhas: OperacionalLinha[]
+type ComercialMembro = {
+  label: string
+  cancelamento: (number | null)[]
+  taxa_devolucao: (number | null)[]
+}
+type ComercialEmpresa = {
+  empresa: number | null
+  label: string
+  cancelamento: (number | null)[]
+  taxa_devolucao: (number | null)[]
+  membros: ComercialMembro[]
 }
 type ComercialSecao = {
-  quadros: ComercialQuadro[]
+  meses: string[]
+  total_cancelamento: (number | null)[]
+  total_taxa_devolucao: (number | null)[]
+  desc_cancelamento: string
+  desc_taxa_devolucao: string
+  empresas: ComercialEmpresa[]
 }
 type Report = {
   gerado_em: string
@@ -150,6 +161,62 @@ const errorSaldo = ref<string | null>(null)
 const resumo = ref<Report | null>(null)
 const estoque = ref<EstoqueSnapshot | null>(null)
 const saldo = ref<SaldoSnapshot | null>(null)
+
+// Bloco Comercial em abas: 'geral' (Total + subtotal por empresa) ou o label
+// de uma empresa (mostra os membros dela).
+const comTab = ref<string>('geral')
+const comEmpresa = computed<ComercialEmpresa | null>(() =>
+  resumo.value?.comercial.empresas.find((e) => e.label === comTab.value) ?? null,
+)
+// Abas clicáveis = só as empresas que têm membros (ex.: "Sem equipe" fica só
+// como linha no Geral, sem aba própria).
+const comTabs = computed<ComercialEmpresa[]>(() =>
+  resumo.value?.comercial.empresas.filter((e) => e.membros.length) ?? [],
+)
+// Linhas da tabela conforme a aba ativa. No Geral: Total + subtotal por
+// empresa (empresa com membros vira link p/ a aba). Numa empresa: subtotal
+// dela + os membros.
+type ComRow = {
+  label: string
+  cancelamento: (number | null)[]
+  taxa_devolucao: (number | null)[]
+  isTotal?: boolean
+  tabTo?: string
+}
+const comRows = computed<ComRow[]>(() => {
+  const c = resumo.value?.comercial
+  if (!c) return []
+  if (comTab.value === 'geral') {
+    const rows: ComRow[] = [{
+      label: 'Total', cancelamento: c.total_cancelamento,
+      taxa_devolucao: c.total_taxa_devolucao, isTotal: true,
+    }]
+    for (const e of c.empresas) {
+      rows.push({
+        label: e.label, cancelamento: e.cancelamento,
+        taxa_devolucao: e.taxa_devolucao,
+        tabTo: e.membros.length ? e.label : undefined,
+      })
+    }
+    return rows
+  }
+  const e = comEmpresa.value
+  if (!e) return []
+  const rows: ComRow[] = [{
+    label: `${e.label} — total`, cancelamento: e.cancelamento,
+    taxa_devolucao: e.taxa_devolucao, isTotal: true,
+  }]
+  for (const m of e.membros) {
+    rows.push({ label: m.label, cancelamento: m.cancelamento, taxa_devolucao: m.taxa_devolucao })
+  }
+  return rows
+})
+// Se a empresa da aba ativa sumir (reload de dados), volta pro Geral.
+watch(comTabs, (tabs) => {
+  if (comTab.value !== 'geral' && !tabs.some((e) => e.label === comTab.value)) {
+    comTab.value = 'geral'
+  }
+})
 
 async function loadResumo() {
   if (!unlockToken.value) return
@@ -518,54 +585,90 @@ const loading = computed(() =>
           </div>
         </section>
 
-        <!-- 4. Comercial — 3 meses, por equipe (Total + Equipe N + Sem equipe) -->
-        <section class="space-y-3">
+        <!-- 4. Comercial — 3 meses, em abas: Geral (Total + empresas) + por empresa (membros) -->
+        <section class="space-y-2">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             Comercial — 3 meses
-            <span class="normal-case text-xs text-muted-foreground">(aguardando devolução/cancelamento e taxa de devolução, por equipe)</span>
+            <span class="normal-case text-xs text-muted-foreground">(cancelamento e taxa de devolução, por empresa/membro)</span>
           </h2>
-          <div v-for="q in resumo.comercial.quadros" :key="q.titulo" class="space-y-1.5">
-            <h3 class="text-xs font-semibold text-foreground/80">{{ q.titulo }}</h3>
-            <div class="overflow-x-auto rounded border">
-              <table class="w-full text-xs border-collapse">
-                <thead class="bg-background">
-                  <tr>
-                    <th class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Métrica</th>
-                    <th
-                      v-for="m in q.meses"
-                      :key="m"
-                      class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
-                    >
-                      {{ mesLabel(m) }}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="linha in q.linhas"
-                    :key="linha.chave"
-                    class="hover:brightness-95 dark:hover:brightness-110"
+
+          <div class="flex flex-wrap gap-1 border-b">
+            <button
+              type="button"
+              class="px-3 py-1 text-xs font-medium border-b-2 -mb-px transition-colors"
+              :class="comTab === 'geral' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+              @click="comTab = 'geral'"
+            >
+              Geral
+            </button>
+            <button
+              v-for="e in comTabs"
+              :key="e.label"
+              type="button"
+              class="px-3 py-1 text-xs font-medium border-b-2 -mb-px transition-colors"
+              :class="comTab === e.label ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+              @click="comTab = e.label"
+            >
+              {{ e.label }}
+            </button>
+          </div>
+
+          <div class="overflow-x-auto rounded border">
+            <table class="w-full text-xs border-collapse">
+              <thead class="bg-background">
+                <tr>
+                  <th rowspan="2" class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border align-bottom">
+                    {{ comTab === 'geral' ? 'Empresa' : 'Membro' }}
+                  </th>
+                  <th
+                    v-for="m in resumo.comercial.meses"
+                    :key="m"
+                    colspan="2"
+                    class="text-center px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
                   >
-                    <td class="px-2 py-1 border">
-                      <span
-                        class="inline-flex items-center gap-1.5 cursor-help"
-                        :title="linha.descricao"
-                      >
-                        {{ linha.label }}
-                        <Info class="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
+                    {{ mesLabel(m) }}
+                  </th>
+                </tr>
+                <tr>
+                  <template v-for="m in resumo.comercial.meses" :key="`h-${m}`">
+                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                      <span class="inline-flex items-center gap-1 cursor-help" :title="resumo.comercial.desc_cancelamento">
+                        Cancel. <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                       </span>
-                    </td>
-                    <td
-                      v-for="(v, i) in linha.valores"
-                      :key="q.meses[i]"
-                      class="px-2 py-1 text-right tabular-nums border"
+                    </th>
+                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                      <span class="inline-flex items-center gap-1 cursor-help" :title="resumo.comercial.desc_taxa_devolucao">
+                        Taxa <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                      </span>
+                    </th>
+                  </template>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="row in comRows"
+                  :key="row.label"
+                  class="hover:brightness-95 dark:hover:brightness-110"
+                  :class="{ 'font-semibold': row.isTotal }"
+                >
+                  <td class="px-2 py-1 border">
+                    <button
+                      v-if="row.tabTo"
+                      type="button"
+                      class="text-left text-foreground hover:underline"
+                      @click="comTab = row.tabTo"
                     >
-                      {{ linha.formato === 'pct' ? fmtPct(v) : fmtBRL(v) }}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+                      {{ row.label }}
+                    </button>
+                    <span v-else>{{ row.label }}</span>
+                  </td>
+                  <template v-for="(m, i) in resumo.comercial.meses" :key="`${row.label}-${m}`">
+                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.cancelamento[i]) }}</td>
+                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.taxa_devolucao[i]) }}</td>
+                  </template>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </section>
       </template>
