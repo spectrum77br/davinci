@@ -688,8 +688,8 @@ _OPER_DESCRICOES = {
         "agrupada pelo mês de criação da devolução."
     ),
     "giro_venda": (
-        "Custo de venda dos produtos faturados no mês (preço de custo × "
-        "quantidade, situações que contam como faturamento) dividido pelo valor "
+        "Custo de venda dos produtos do mês (preço de custo × quantidade, "
+        "pedidos em Em aberto, Em andamento ou Entregue) dividido pelo valor "
         "do estoque do mês (snapshot do último dia, da tabela valuation), em %. "
         "Indica quanto do estoque girou em vendas no mês."
     ),
@@ -1058,7 +1058,7 @@ async def valuation_report(
             GROUP BY bo.numero, mes
         )
         SELECT mes,
-               SUM(custo_produto) FILTER (WHERE situacao = ANY(:sit_aplic))
+               SUM(custo_produto) FILTER (WHERE situacao = ANY(:sit_giro))
                    AS custo_faturamento
         FROM por_pedido
         GROUP BY mes
@@ -1075,7 +1075,7 @@ async def valuation_report(
     giro_by_mes = {
         r["mes"]: r for r in (await session.execute(oper_giro_sql, {
             "ignored_stores": _VAL_IGNORED_STORES,
-            "sit_aplic": _VAL_SIT_APLICAVEIS,
+            "sit_giro": _VAL_SIT_RENTABILIDADE,
         })).mappings().all()
     }
 

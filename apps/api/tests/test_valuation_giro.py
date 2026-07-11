@@ -147,3 +147,31 @@ async def test_giro_none_sem_snapshot_estoque(
     linha = _giro_linha(r.json())
     i = _idx_mes_atual(r.json())
     assert linha["valores"][i] is None
+
+
+@pytest.mark.asyncio
+async def test_giro_so_em_aberto_andamento_entregue(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+):
+    # Giro só considera Em aberto (6/28) + Em andamento (15/37) + Entregue
+    # (83953). Situações de Enviado (Geral/Importado) estão no faturamento amplo
+    # mas NÃO entram no giro.
+    await _snapshot_estoque(db, 1000.0)
+    # Conta: Entregue = 200 de custo.
+    await _pedido(db, bling_id=7301, loja="5001", situacao="83953",
+                  preco_custo=100.0, qtd=2)
+    # NÃO conta: Enviado Importado (83965) e Enviado Geral SP (84674).
+    await _pedido(db, bling_id=7302, loja="5001", situacao="83965",
+                  preco_custo=100.0, qtd=9)
+    await _pedido(db, bling_id=7303, loja="5001", situacao="84674",
+                  preco_custo=100.0, qtd=9)
+    admin = await _admin(db)
+    auth_as(admin)
+
+    r = await client.get("/api/financeiro/valuation", headers=_headers())
+    assert r.status_code == 200, r.text
+    linha = _giro_linha(r.json())
+    i = _idx_mes_atual(r.json())
+    # Só os 200 do Entregue → 200 / 1000 * 100 = 20.0.
+    assert linha["valores"][i] == 20.0
