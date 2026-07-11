@@ -660,6 +660,28 @@ async def marketing_reconcile_schedules(ctx: dict) -> None:
         logger.info("marketing_reconcile_tick", **r)
 
 
+async def marketing_flash_duplicate(ctx: dict) -> None:
+    """CENTRAL server (01:00 BRT = 04:00 UTC): enqueue the daily Oferta Relâmpago
+    (Shopee flash-sale) duplication for every `flash_duplicate_enabled` account.
+    Pure DB work — writes one 'flash_duplicate' command (executor='browser',
+    payload {commit:true}) to the outbox per account; the LOCAL marionete leases
+    and duplicates the running offer into the next day with openings. The
+    commit=true only creates for real when the executor has SELECTORS_CALIBRATED
+    =true, so this stays a safe no-op end-to-end until the operator validates.
+    Gated by `enable_marketing` (no-op in prod until the module is switched on)."""
+    if not _settings.enable_marketing:
+        return
+    from app.services.marketing.flash import enqueue_flash_duplicates
+
+    async with session_scope() as s:
+        try:
+            r = await enqueue_flash_duplicates(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("marketing_flash_duplicate_failed", err=str(e)[:300])
+            return
+    logger.info("marketing_flash_duplicate_tick", **r)
+
+
 async def daily_sync_scheduler(ctx: dict) -> None:
     """Every 5min: enqueue sync_all for users whose `daily_sync_time` falls
     inside the current 5-minute window in America/Sao_Paulo, only if no
@@ -1735,6 +1757,11 @@ class WorkerSettings:
         # agent node. It enqueues 'browser' commands (Shopee → local marionete
         # via /agent/lease) and 'api' commands (ML/Amazon → agent-node consumer).
         cron(marketing_reconcile_schedules, run_at_startup=False),
+        # Marketing: Oferta Relâmpago (Shopee flash-sale) — enfileira a
+        # duplicação diária às 01:00 BRT = 04:00 UTC (o worker roda em UTC).
+        # Igual ao reconciler, só ESCREVE no outbox (comandos 'browser' pra
+        # marionete local via /agent/lease), então roda aqui no central.
+        cron(marketing_flash_duplicate, hour=4, minute=0, run_at_startup=False),
         # Marketing: Shopee round-robin MOVED to the agent-node block below —
         # only the dedicated machine (MARKETING_AGENT_NODE=1) talks to Shopee
         # Ads, so the central server never competes on the same partner-id

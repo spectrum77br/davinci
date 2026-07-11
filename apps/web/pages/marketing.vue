@@ -17,6 +17,7 @@ type Account = {
   acos_target: number
   daily_budget: number | null
   agent_enabled: boolean
+  flash_duplicate_enabled: boolean
   status: 'active' | 'reduced' | 'paused' | 'off' | string
   current_intensity: number
   credit_balance: number | null
@@ -181,6 +182,8 @@ const creditAlerts = ref<CreditAlert[]>([])
 // heatmap/agenda panel (Shopee only).
 const scheduleState = ref<ScheduleState | null>(null)
 const scheduleBusy = ref(false)
+// Oferta Relâmpago (Shopee flash-sale): botão "Duplicar agora".
+const flashBusy = ref(false)
 
 const schedAccountId = ref<string | null>(null)
 const schedules = ref<Schedule[]>([])
@@ -231,6 +234,7 @@ const cmdBadge: Record<string, { label: string; cls: string }> = {
 const cmdActionLabel: Record<string, string> = {
   pause: 'Pausar', resume: 'Retomar',
   set_budget: 'Budget', adjust_budget_pct: 'Ajustar budget',
+  flash_duplicate: 'Duplicar Oferta',
 }
 
 // Chart state
@@ -587,6 +591,38 @@ async function overrideNow(action: 'pause' | 'resume') {
 async function clearOverride() {
   await patchSchedule({ override_action: null })
   toastOk('Voltou ao automático')
+}
+
+// ── Oferta Relâmpago (Shopee flash-sale) ─────────────────────────────
+// Liga/desliga a duplicação diária (01:00 BRT). O estado mora no account
+// (flash_duplicate_enabled), então recarrego o summary depois do PATCH.
+async function toggleFlashDuplicate() {
+  const next = !(selectedSchedAccount.value?.flash_duplicate_enabled)
+  await patchSchedule({ flash_duplicate_enabled: next })
+  await loadSummary().catch(() => {})
+  toastOk(next
+    ? 'Duplicação da Oferta Relâmpago ligada (01:00)'
+    : 'Duplicação da Oferta Relâmpago desligada')
+}
+
+// "Duplicar agora": enfileira um comando flash_duplicate de conta inteira
+// (commit=true). O executor local só CRIA de verdade se SELECTORS_CALIBRATED
+// =true no .env dele — senão recusa o Confirmar final (nada criado).
+async function duplicateFlashNow() {
+  const acc = selectedSchedAccount.value
+  if (!acc) return
+  flashBusy.value = true
+  try {
+    await api(`/api/marketing/accounts/${acc.id}/commands`, {
+      method: 'POST',
+      body: { action: 'flash_duplicate', payload: { commit: true } },
+    })
+    toastOk('Duplicação enfileirada', `Oferta Relâmpago — ${acc.name}`)
+  } catch (e: any) {
+    toastErr('Falha ao enfileirar', e?.data?.detail?.code ?? e?.message ?? 'erro')
+  } finally {
+    flashBusy.value = false
+  }
 }
 
 // "Agora: LIGADO até 15:00" / "DESLIGADO — religa 19:00"
@@ -1029,6 +1065,35 @@ definePageMeta({ middleware: [] })
           As janelas ON/OFF são editadas no heatmap acima (clique pra ligar/desligar). Com a agenda ligada, a máquina
           dedicada pausa fora das janelas e religa dentro — sozinha, em horário de Brasília. O override manual vence a agenda até você voltar ao automático.
         </p>
+
+        <!-- Oferta Relâmpago (Shopee flash-sale) — só Shopee -->
+        <div v-if="selectedSchedAccount.platform === 'shopee'" class="mt-3 pt-3 border-t">
+          <div class="flex items-center gap-2 mb-2 flex-wrap">
+            <Sparkles class="size-4 text-primary" />
+            <h3 class="text-sm font-semibold">Oferta Relâmpago</h3>
+            <span class="text-xs text-muted-foreground">duplica a oferta 'Em andamento' pro próximo dia — 01:00 BRT</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-3">
+            <button
+              class="inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm disabled:opacity-50 transition-colors"
+              :class="selectedSchedAccount.flash_duplicate_enabled
+                ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700'
+                : 'hover:bg-muted'"
+              :disabled="scheduleBusy" @click="toggleFlashDuplicate">
+              <span class="size-2 rounded-full" :class="selectedSchedAccount.flash_duplicate_enabled ? 'bg-emerald-500' : 'bg-zinc-400'" />
+              {{ selectedSchedAccount.flash_duplicate_enabled ? 'Duplicação diária LIGADA (01:00)' : 'Duplicação diária desligada' }}
+            </button>
+            <button
+              class="ml-auto rounded-md border px-2.5 py-1.5 text-sm inline-flex items-center gap-1 hover:bg-primary/10 hover:border-primary/40 disabled:opacity-50"
+              :disabled="flashBusy" @click="duplicateFlashNow">
+              <Sparkles class="size-3.5" /> Duplicar agora
+            </button>
+          </div>
+          <p class="mt-2 text-[11px] text-muted-foreground">
+            A duplicação roda no executor local (AdsPower) e só CRIA de verdade quando ele está calibrado
+            (SELECTORS_CALIBRATED=true); antes disso o comando percorre o fluxo mas para antes do Confirmar final (nada é criado).
+          </p>
+        </div>
       </div>
 
       <!-- Credit alerts — Shopee only -->
