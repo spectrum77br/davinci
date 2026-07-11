@@ -5,7 +5,8 @@ Hoje há UMA empresa: cada `store_info.sales_team` vira um membro dela, rotulado
 da empresa + `membros[]`. Duas métricas por mês: `cancelamento` (R$ aguardando
 cancelamento) e `taxa_devolucao` (%). Cobre:
   * agrupamento empresa → membros com rótulo "1.1"/"1.2";
-  * taxa por membro (devoluções Novo+Usado ÷ pedidos do faturamento do membro);
+  * taxa por membro (PEDIDOS devolvidos Novo+Usado, distinct pedido_bling ÷
+    pedidos do faturamento do membro — um kit ramificado conta 1);
   * Total geral somando todos os membros;
   * cancelamento (R$) por membro.
 """
@@ -81,18 +82,20 @@ async def test_comercial_agrupa_empresa_membros(
     admin = await _admin(db)
     await _loja(db, admin, loja="9001", team=1)
     await _loja(db, admin, loja="9002", team=2)
-    # Membro 1.1 (equipe 1): 2 pedidos faturamento; 1 produto devolvido → 50%.
+    # Membro 1.1 (equipe 1): 2 pedidos faturamento; 1 pedido devolvido → 50%.
     await _pedido(db, bling_id=9101, loja="9001", situacao="83953")
     await _pedido(db, bling_id=9102, loja="9001", situacao="6")
     await _devolucao(db, pedido=9101, condicao="Novo", quantidade=1)
     # + 1 pedido aguardando cancelamento (83955) → cancelamento R$ 500 (não é faturamento).
     await _pedido(db, bling_id=9103, loja="9001", situacao="83955", total=500.0)
-    # Membro 1.2 (equipe 2): 4 pedidos faturamento; 3 produtos devolvidos → 75%.
+    # Membro 1.2 (equipe 2): 4 pedidos faturamento; kit do pedido 9201 ramificou
+    # em 2 linhas (mesmo pedido) → conta 1 pedido devolvido → 25%.
     await _pedido(db, bling_id=9201, loja="9002", situacao="83953")
     await _pedido(db, bling_id=9202, loja="9002", situacao="83953")
     await _pedido(db, bling_id=9203, loja="9002", situacao="6")
     await _pedido(db, bling_id=9204, loja="9002", situacao="15")
-    await _devolucao(db, pedido=9201, condicao="Usado", quantidade=3)
+    await _devolucao(db, pedido=9201, condicao="Usado", quantidade=1)
+    await _devolucao(db, pedido=9201, condicao="Novo", quantidade=1)
     auth_as(admin)
 
     r = await client.get("/api/financeiro/valuation", headers=_headers())
@@ -107,16 +110,17 @@ async def test_comercial_agrupa_empresa_membros(
     membros = {m["label"]: m for m in emp["membros"]}
     assert set(membros) == {"1.1", "1.2"}
 
-    # Taxa por membro.
-    assert membros["1.1"]["taxa_devolucao"][i] == 50.0   # 1 ÷ 2 × 100
-    assert membros["1.2"]["taxa_devolucao"][i] == 75.0   # 3 ÷ 4 × 100
+    # Taxa por membro (pedidos distintos devolvidos ÷ pedidos faturamento).
+    assert membros["1.1"]["taxa_devolucao"][i] == 50.0   # 1 pedido ÷ 2 × 100
+    assert membros["1.2"]["taxa_devolucao"][i] == 25.0   # 1 pedido ÷ 4 × 100
     # Cancelamento (R$) no membro 1.1.
     assert membros["1.1"]["cancelamento"][i] == 500.0
     assert membros["1.2"]["cancelamento"][i] == 0.0
 
-    # Total geral = 4 produtos ÷ 6 pedidos × 100 = 66.67; subtotal da empresa idem.
-    assert com["total_taxa_devolucao"][i] == 66.67
-    assert emp["taxa_devolucao"][i] == 66.67
+    # Total geral = 2 pedidos devolvidos ({9101, 9201}) ÷ 6 pedidos × 100 =
+    # 33.33; subtotal da empresa idem.
+    assert com["total_taxa_devolucao"][i] == 33.33
+    assert emp["taxa_devolucao"][i] == 33.33
 
 
 @pytest.mark.asyncio

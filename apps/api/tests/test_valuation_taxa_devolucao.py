@@ -1,10 +1,12 @@
 """Página Valuation — bloco Comercial, linha "Taxa de Devolução".
 
-Taxa = (qtd de PRODUTOS devolvidos condição Novo+Usado, SUM(quantidade), por
-mês de criação) ÷ (qtd de pedidos do faturamento, situações aplicáveis, por mês
-da data do pedido) × 100. Cobre:
+Taxa = (qtd de PEDIDOS devolvidos condição Novo+Usado, contados uma vez por
+número de pedido do Bling — DISTINCT pedido_bling —, por mês de criação) ÷
+(qtd de pedidos do faturamento, situações aplicáveis, por mês da data do
+pedido) × 100. Cobre:
   * o denominador = pedidos do faturamento (NÃO só entregues);
-  * o numerador soma `quantidade` (produtos), não conta registros; só Novo+Usado.
+  * o numerador conta PEDIDOS distintos, não linhas: um kit devolvido vira
+    várias linhas com o mesmo pedido, mas conta 1 (só Novo+Usado).
 """
 from __future__ import annotations
 
@@ -48,10 +50,11 @@ async def _pedido(db: AsyncSession, *, bling_id: int, situacao: str,
     await db.commit()
 
 
-async def _devolucao(db: AsyncSession, *, condicao: str, quantidade: int) -> None:
+async def _devolucao(db: AsyncSession, *, pedido: int, condicao: str,
+                     quantidade: int = 1) -> None:
     db.add(Devolution(
-        conta="teste", condicao_produto=condicao, quantidade=quantidade,
-        data=datetime.now(UTC),
+        conta="teste", pedido_bling=str(pedido), condicao_produto=condicao,
+        quantidade=quantidade, data=datetime.now(UTC),
     ))
     await db.commit()
 
@@ -66,7 +69,7 @@ def _idx_mes_atual(body: dict) -> int:
 
 
 @pytest.mark.asyncio
-async def test_taxa_denominador_faturamento_numerador_produtos(
+async def test_taxa_denominador_faturamento_numerador_pedidos(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None],
 ):
@@ -77,11 +80,11 @@ async def test_taxa_denominador_faturamento_numerador_produtos(
     await _pedido(db, bling_id=8004, situacao="83965")   # Enviado Importado
     # Não faturamento → fora do denominador.
     await _pedido(db, bling_id=8005, situacao="12")      # Cancelado
-    # Numerador = produtos Novo+Usado (SUM quantidade): 2 + 1 = 3.
-    await _devolucao(db, condicao="Novo", quantidade=2)
-    await _devolucao(db, condicao="Usado", quantidade=1)
+    # Numerador = PEDIDOS distintos com devolução Novo+Usado: {8001, 8002} = 2.
+    await _devolucao(db, pedido=8001, condicao="Novo", quantidade=2)
+    await _devolucao(db, pedido=8002, condicao="Usado", quantidade=1)
     # Não conta: outra condição.
-    await _devolucao(db, condicao="Extraviado", quantidade=5)
+    await _devolucao(db, pedido=8003, condicao="Extraviado", quantidade=5)
     admin = await _admin(db)
     auth_as(admin)
 
@@ -89,19 +92,24 @@ async def test_taxa_denominador_faturamento_numerador_produtos(
     assert r.status_code == 200, r.text
     body = r.json()
     i = _idx_mes_atual(body)
-    # 3 produtos ÷ 4 pedidos de faturamento × 100 = 75.0.
-    assert _taxa_total(body)[i] == 75.0
+    # 2 pedidos devolvidos ÷ 4 pedidos de faturamento × 100 = 50.0.
+    assert _taxa_total(body)[i] == 50.0
 
 
 @pytest.mark.asyncio
-async def test_taxa_conta_quantidade_nao_registros(
+async def test_taxa_kit_ramificado_conta_um_pedido(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None],
 ):
-    # 2 pedidos de faturamento; 1 única devolução com quantidade=4.
+    # 2 pedidos de faturamento. Um kit devolvido do pedido 8101 ramificou em
+    # 5 linhas com o MESMO pedido_bling (uma extraviada, o resto Novo/Usado).
     await _pedido(db, bling_id=8101, situacao="83953")
     await _pedido(db, bling_id=8102, situacao="83953")
-    await _devolucao(db, condicao="Usado", quantidade=4)
+    await _devolucao(db, pedido=8101, condicao="Novo")
+    await _devolucao(db, pedido=8101, condicao="Novo")
+    await _devolucao(db, pedido=8101, condicao="Novo")
+    await _devolucao(db, pedido=8101, condicao="Usado")
+    await _devolucao(db, pedido=8101, condicao="Extraviado")  # ignorado
     admin = await _admin(db)
     auth_as(admin)
 
@@ -109,5 +117,6 @@ async def test_taxa_conta_quantidade_nao_registros(
     assert r.status_code == 200, r.text
     body = r.json()
     i = _idx_mes_atual(body)
-    # 4 produtos ÷ 2 pedidos × 100 = 200.0 (COUNT(*) daria 1 registro → 50.0).
-    assert _taxa_total(body)[i] == 200.0
+    # 1 pedido devolvido (as 4 linhas Novo/Usado do 8101 contam 1) ÷ 2 = 50.0.
+    # (SUM(quantidade) daria 4 ÷ 2 = 200.0 — a regra antiga.)
+    assert _taxa_total(body)[i] == 50.0

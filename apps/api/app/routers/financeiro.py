@@ -708,10 +708,12 @@ _COM_DESCRICOES = {
         "equipe (loja do Bling → equipe de vendas em store_info.sales_team)."
     ),
     "taxa_devolucao": (
-        "Quantidade de produtos devolvidos (condição Novo ou Usado, pelo mês de "
-        "criação da devolução) dividida pela quantidade de pedidos do faturamento "
-        "(situações aplicáveis, pelo mês da data do pedido), em %. A equipe da "
-        "devolução vem do pedido de origem (pedido → loja do Bling → equipe)."
+        "Quantidade de PEDIDOS devolvidos (com devolução condição Novo ou Usado, "
+        "contados uma vez por número de pedido do Bling, pelo mês de criação da "
+        "devolução) dividida pela quantidade de pedidos do faturamento (situações "
+        "aplicáveis, pelo mês da data do pedido), em %. Um kit devolvido vira "
+        "várias linhas com o mesmo pedido, mas conta 1. A equipe da devolução vem "
+        "do pedido de origem (pedido → loja do Bling → equipe)."
     ),
 }
 
@@ -1160,14 +1162,13 @@ async def valuation_report(
     """)
     com_dev_sql = text(f"""
         WITH dev AS (
-            SELECT d.id, {_mes('d.created_at')} AS mes, d.pedido_bling,
-                   COALESCE(d.quantidade, 1) AS quantidade
+            SELECT d.id, {_mes('d.created_at')} AS mes, d.pedido_bling
             FROM {_qt("devolutions")} d
             WHERE {_janela('d.created_at')}
               AND d.condicao_produto IN ('Novo', 'Usado')
         )
         SELECT dev.mes, si.sales_team AS equipe,
-               SUM(dev.quantidade) AS devolucoes
+               COUNT(DISTINCT dev.pedido_bling) AS devolucoes
         FROM dev
         LEFT JOIN LATERAL (
             SELECT bo.loja FROM {_qt("bling_orders")} bo
@@ -1210,8 +1211,8 @@ async def valuation_report(
             if mes in dev and pred(team):
                 dev[mes] += int(c)
         cancel_s = [_r2(cancel[m]) for m in months]
-        # Taxa: produtos devolvidos (Novo+Usado) ÷ pedidos do faturamento, em %.
-        # Sem pedidos de faturamento no mês → None ("—").
+        # Taxa: pedidos devolvidos (Novo+Usado, distinct pedido) ÷ pedidos do
+        # faturamento, em %. Sem pedidos de faturamento no mês → None ("—").
         taxa_s = [_r2(dev[m] / fat[m] * 100) if fat[m] else None for m in months]
         return cancel_s, taxa_s
 
