@@ -22,6 +22,7 @@ import { cfg } from "./config";
 import { log } from "./log";
 import * as adspower from "./adspower";
 import * as shopee from "./shopee";
+import * as flashsale from "./flashsale";
 import * as davinci from "./davinci";
 import type { LeasedCommand } from "./davinci";
 
@@ -38,7 +39,13 @@ async function processCommand(cmd: LeasedCommand): Promise<void> {
     await davinci.reportResult(cmd.id, "failed", "sem adspower_user_id");
     return;
   }
-  if (cmd.action !== "pause" && cmd.action !== "resume") {
+  // Ações suportadas pelo executor: pause/resume (liga/desliga anúncios) e
+  // flash_duplicate (duplica a Oferta Relâmpago 'Em andamento' pro próximo dia).
+  if (
+    cmd.action !== "pause" &&
+    cmd.action !== "resume" &&
+    cmd.action !== "flash_duplicate"
+  ) {
     await davinci.reportResult(
       cmd.id,
       "failed",
@@ -47,30 +54,53 @@ async function processCommand(cmd: LeasedCommand): Promise<void> {
     return;
   }
 
-  const on = cmd.action === "resume";
-  // O comando pode carregar mode/filter no payload; senão usa o default do .env.
-  const payload = (cmd.payload || {}) as {
-    mode?: shopee.ControlMode;
-    filter?: shopee.ManualFilter;
-  };
-  const mode: shopee.ControlMode =
-    payload.mode === "gmvmax" || payload.mode === "manual"
-      ? payload.mode
-      : cfg.defaultMode;
-  const filter: shopee.ManualFilter =
-    payload.filter && payload.filter.scope
-      ? payload.filter
-      : { scope: cfg.defaultScope };
-
   let session: shopee.Session | null = null;
   try {
     const ws = await adspower.start(userId);
     session = await shopee.connect(ws);
-    const result = await shopee.applyState(session.page, cmd.account_name, mode, on, filter);
-    await davinci.reportResult(cmd.id, "done", JSON.stringify(result));
-    log.info(
-      `${cmd.account_name} ${cmd.action} [${mode}] → matched=${result.matched} changed=${result.changed}`
-    );
+
+    if (cmd.action === "flash_duplicate") {
+      // Oferta Relâmpago: payload.commit=true cria de verdade (gated por
+      // SELECTORS_CALIBRATED no flashsale.ts); sem commit é DRY (não cria).
+      const payload = (cmd.payload || {}) as {
+        commit?: boolean;
+        target_day?: number | null;
+      };
+      const result = await flashsale.duplicateFlashSale(session.page, cmd.account_name, {
+        commit: payload.commit === true,
+        targetDay: payload.target_day ?? null,
+      });
+      await davinci.reportResult(
+        cmd.id,
+        result.ok ? "done" : "failed",
+        JSON.stringify(result)
+      );
+      log.info(
+        `${cmd.account_name} flash_duplicate → ok=${result.ok} created=${result.created} ` +
+          `dry=${result.dry}${result.chosenDay ? ` dia=${result.chosenDay}` : ""}` +
+          `${result.enabledOn != null ? ` on=${result.enabledOn}` : ""}`
+      );
+    } else {
+      const on = cmd.action === "resume";
+      // O comando pode carregar mode/filter no payload; senão usa o default do .env.
+      const payload = (cmd.payload || {}) as {
+        mode?: shopee.ControlMode;
+        filter?: shopee.ManualFilter;
+      };
+      const mode: shopee.ControlMode =
+        payload.mode === "gmvmax" || payload.mode === "manual"
+          ? payload.mode
+          : cfg.defaultMode;
+      const filter: shopee.ManualFilter =
+        payload.filter && payload.filter.scope
+          ? payload.filter
+          : { scope: cfg.defaultScope };
+      const result = await shopee.applyState(session.page, cmd.account_name, mode, on, filter);
+      await davinci.reportResult(cmd.id, "done", JSON.stringify(result));
+      log.info(
+        `${cmd.account_name} ${cmd.action} [${mode}] → matched=${result.matched} changed=${result.changed}`
+      );
+    }
   } catch (err: any) {
     if (err instanceof shopee.NeedsManualLogin || err?.name === "NeedsManualLogin") {
       log.warn(`${cmd.account_name}: precisa de login/verificação manual (needs_manual_login)`);

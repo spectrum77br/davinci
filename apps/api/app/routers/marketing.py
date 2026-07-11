@@ -58,6 +58,7 @@ class AccountOut(BaseModel):
     acos_target: float
     daily_budget: float | None
     agent_enabled: bool
+    flash_duplicate_enabled: bool
     status: str
     current_intensity: int
     credit_balance: float | None
@@ -160,6 +161,8 @@ class CommandOut(BaseModel):
 
 class SchedulePatchIn(BaseModel):
     schedule_enabled: bool | None = None
+    # Liga/desliga a duplicação diária da Oferta Relâmpago (01:00 BRT) pra conta.
+    flash_duplicate_enabled: bool | None = None
     # 'pause' | 'resume' | None. Sentinel handling: the field being present
     # (even as None) clears the override; absent leaves it untouched —
     # disambiguated in the handler via `model_fields_set`.
@@ -167,7 +170,11 @@ class SchedulePatchIn(BaseModel):
     override_until: datetime | None = None
 
 
-_VALID_COMMAND_ACTIONS = frozenset({"pause", "resume", "set_budget", "adjust_budget_pct"})
+# flash_duplicate: só Shopee (executor 'browser') — duplica a Oferta Relâmpago
+# 'Em andamento' pro próximo dia; payload {commit: bool, target_day?: int}.
+_VALID_COMMAND_ACTIONS = frozenset(
+    {"pause", "resume", "set_budget", "adjust_budget_pct", "flash_duplicate"}
+)
 
 
 def _command_out(c: MarketingCommand) -> CommandOut:
@@ -189,7 +196,8 @@ def _account_out(a: MarketingAccount) -> AccountOut:
     return AccountOut(
         id=a.id, name=a.name, platform=a.platform, department=a.department,
         acos_target=a.acos_target, daily_budget=a.daily_budget,
-        agent_enabled=a.agent_enabled, status=a.status,
+        agent_enabled=a.agent_enabled,
+        flash_duplicate_enabled=a.flash_duplicate_enabled, status=a.status,
         current_intensity=a.current_intensity, credit_balance=a.credit_balance,
         spend_today=a.spend_today, revenue_today=a.revenue_today,
         impressions_today=a.impressions_today,
@@ -839,6 +847,13 @@ async def create_command(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "pct_required"}
         )
+    # flash_duplicate só roda no executor de navegador (Shopee); numa conta 'api'
+    # o comando ficaria preso (o consumidor interno não sabe duplicar oferta).
+    if body.action == "flash_duplicate" and acc.platform != "shopee":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "flash_duplicate_shopee_only"},
+        )
     cmd = MarketingCommand(
         account_id=acc.id,
         campaign_external_id=body.campaign_external_id,
@@ -914,6 +929,11 @@ async def patch_schedule(
     fields = body.model_fields_set
     if "schedule_enabled" in fields and body.schedule_enabled is not None:
         acc.schedule_enabled = body.schedule_enabled
+    if (
+        "flash_duplicate_enabled" in fields
+        and body.flash_duplicate_enabled is not None
+    ):
+        acc.flash_duplicate_enabled = body.flash_duplicate_enabled
     if "override_action" in fields:
         if body.override_action not in (None, "pause", "resume"):
             raise HTTPException(

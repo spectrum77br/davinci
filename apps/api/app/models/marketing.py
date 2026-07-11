@@ -98,6 +98,15 @@ class MarketingAccount(Base, TimestampMixin):
     # pause/resume as done (see routers/marketing.py agent result endpoint).
     applied_state: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
+    # ─── Oferta Relâmpago (Shopee flash-sale) ────────────────────────────
+    # When True, the daily 01:00 BRT cron (worker.marketing_flash_duplicate)
+    # enqueues a whole-account 'flash_duplicate' browser command for this shop —
+    # the local executor duplicates the 'Em andamento' offer into the next day
+    # with openings. Only the "malas" shops start True (see the seed script).
+    flash_duplicate_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
 
 class MarketingCommand(Base, TimestampMixin):
     """Outbox queue for ad actions. Every action — manual (a button click)

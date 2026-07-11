@@ -60,6 +60,11 @@ _SHOPEE_ACCOUNTS: list[tuple[str, str, bool]] = [
     ("Oliveira", "k16yrimx", False),
 ]
 
+# As contas "de malas" que rodam a duplicação diária da Oferta Relâmpago
+# (Shopee flash-sale) às 01:00 BRT. Sobem já com flash_duplicate_enabled=True;
+# as demais começam desligadas e podem ser ligadas no dashboard.
+_FLASH_ACCOUNTS: set[str] = {"Poofy", "KFA", "Minas", "Inova"}
+
 # Default agenda: ON 18:00–22:00 BRT (start inclusive, end exclusive → the
 # reconciler keeps the shop resumed 18:00–21:59 and pauses it at 22:00) every
 # day of the week. day_of_week: 0=Mon … 6=Sun.
@@ -95,12 +100,14 @@ async def main(*, apply: bool) -> None:
                     agent_enabled=False,
                     schedule_enabled=schedule_enabled,
                     adspower_user_id=adspower_user_id,
+                    flash_duplicate_enabled=name in _FLASH_ACCOUNTS,
                 )
                 s.add(acc)
                 await s.flush()  # need acc.id for the windows below
                 created += 1
                 print(f"CREATE {name:12s} adspower={adspower_user_id} "
-                      f"schedule_enabled={schedule_enabled}")
+                      f"schedule_enabled={schedule_enabled} "
+                      f"flash_duplicate_enabled={name in _FLASH_ACCOUNTS}")
             else:
                 if acc.adspower_user_id != adspower_user_id:
                     print(f"UPDATE {name:12s} adspower "
