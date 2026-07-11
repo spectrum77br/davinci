@@ -304,6 +304,7 @@ _CLEANUP_TABLES = (
     "products",
     "margens",
     "refunds",
+    "devolutions",
     "bling_envio_correcao",
     "bling_envio_evento",
     "bling_orders",

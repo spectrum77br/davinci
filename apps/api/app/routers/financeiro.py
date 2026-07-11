@@ -708,8 +708,8 @@ _COM_DESCRICOES = {
     ),
     "taxa_devolucao": (
         "Quantidade de produtos devolvidos (condição Novo ou Usado, pelo mês de "
-        "criação da devolução) dividida pela quantidade de pedidos entregues "
-        "(situação 'Entregue', pelo mês da data do pedido), em %. A equipe da "
+        "criação da devolução) dividida pela quantidade de pedidos do faturamento "
+        "(situações aplicáveis, pelo mês da data do pedido), em %. A equipe da "
         "devolução vem do pedido de origem (pedido → loja do Bling → equipe)."
     ),
 }
@@ -1129,9 +1129,11 @@ async def valuation_report(
     #     montados somando os baldes de equipe em Python.
     #       • Aguardando Devolução/Cancelamento = SUM(valor base) por situação,
     #         pela data do pedido (1 valor por pedido, MAX);
-    #       • Taxa de Devolução = qtd de devoluções (Novo+Usado, por created_at)
-    #         ÷ qtd de pedidos Entregues (por data do pedido), em %. A equipe da
-    #         devolução vem do pedido de origem (pedido_bling → loja → equipe).
+    #       • Taxa de Devolução = qtd de PRODUTOS devolvidos (SUM(quantidade),
+    #         condição Novo+Usado, por created_at) ÷ qtd de pedidos do
+    #         faturamento (situações aplicáveis, por data do pedido), em %. A
+    #         equipe da devolução vem do pedido de origem (pedido_bling → loja →
+    #         equipe).
     #     Lojas internas (_VAL_IGNORED_STORES: 0/205632678/205660518) ficam de
     #     fora — mesmas que a rentabilidade do Valuation já ignora. Pedidos/
     #     devoluções sem loja (loja NULL / pedido não casado) CONTINUAM entrando
@@ -1151,19 +1153,21 @@ async def valuation_report(
         SELECT pp.mes, si.sales_team AS equipe,
                SUM(pp.valorbase) FILTER (WHERE pp.situacao = :s_dev) AS aguardando_devolucao,
                SUM(pp.valorbase) FILTER (WHERE pp.situacao = :s_can) AS aguardando_cancelamento,
-               COUNT(*)          FILTER (WHERE pp.situacao = :s_ent) AS entregues
+               COUNT(*)          FILTER (WHERE pp.situacao = ANY(:sit_fat)) AS faturamento_qtd
         FROM por_pedido pp
         LEFT JOIN {_qt("store_info")} si ON si.bling_store_id = pp.loja
         GROUP BY pp.mes, si.sales_team
     """)
     com_dev_sql = text(f"""
         WITH dev AS (
-            SELECT d.id, {_mes('d.created_at')} AS mes, d.pedido_bling
+            SELECT d.id, {_mes('d.created_at')} AS mes, d.pedido_bling,
+                   COALESCE(d.quantidade, 1) AS quantidade
             FROM {_qt("devolutions")} d
             WHERE {_janela('d.created_at')}
               AND d.condicao_produto IN ('Novo', 'Usado')
         )
-        SELECT dev.mes, si.sales_team AS equipe, COUNT(*) AS devolucoes
+        SELECT dev.mes, si.sales_team AS equipe,
+               SUM(dev.quantidade) AS devolucoes
         FROM dev
         LEFT JOIN LATERAL (
             SELECT bo.loja FROM {_qt("bling_orders")} bo
@@ -1177,7 +1181,7 @@ async def valuation_report(
     com_bo_rows = (await session.execute(com_bo_sql, {
         "s_dev": _VAL_SIT_AGUARD_DEVOLUCAO,
         "s_can": _VAL_SIT_AGUARD_CANCELAMENTO,
-        "s_ent": _VAL_SIT_ENTREGUE,
+        "sit_fat": _VAL_SIT_APLICAVEIS,
         "ignored_stores": _VAL_IGNORED_STORES,
     })).mappings().all()
     com_dev_rows = (await session.execute(com_dev_sql, {
@@ -1198,18 +1202,19 @@ async def valuation_report(
         # Equipe N = team == N, Sem equipe = team is None).
         ag_dev = {m: 0.0 for m in months}
         ag_can = {m: 0.0 for m in months}
-        ent = {m: 0 for m in months}
+        fat = {m: 0 for m in months}
         dev = {m: 0 for m in months}
         for (mes, team), r in bo_idx.items():
             if mes in ag_dev and pred(team):
                 ag_dev[mes] += float(r["aguardando_devolucao"] or 0)
                 ag_can[mes] += float(r["aguardando_cancelamento"] or 0)
-                ent[mes] += int(r["entregues"] or 0)
+                fat[mes] += int(r["faturamento_qtd"] or 0)
         for (mes, team), c in dev_idx.items():
             if mes in dev and pred(team):
                 dev[mes] += int(c)
-        # Taxa: devoluções ÷ entregues, em %. Sem entregues no mês → None ("—").
-        taxa = [_r2(dev[m] / ent[m] * 100) if ent[m] else None for m in months]
+        # Taxa: produtos devolvidos (Novo+Usado) ÷ pedidos do faturamento, em %.
+        # Sem pedidos de faturamento no mês → None ("—").
+        taxa = [_r2(dev[m] / fat[m] * 100) if fat[m] else None for m in months]
         return ComercialQuadroOut(
             titulo=titulo, equipe=equipe, meses=months,
             linhas=[
@@ -1229,7 +1234,7 @@ async def valuation_report(
         for (mes, team), r in bo_idx.items():
             if mes in months and pred(team) and (
                 (r["aguardando_devolucao"] or 0) or (r["aguardando_cancelamento"] or 0)
-                or (r["entregues"] or 0)
+                or (r["faturamento_qtd"] or 0)
             ):
                 return True
         return any(mes in months and pred(team) and c
