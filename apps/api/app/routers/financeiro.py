@@ -651,7 +651,6 @@ _VAL_SIT_LABEL = (
 # Quadro "Operacional — 3 meses" (substitui a antiga Eficácia). Linhas diretas
 # de situação (faturamento por mês da data do pedido) + o conjunto que serve de
 # denominador (faturamento) da Taxa de Perdimento.
-_VAL_SIT_ERRO_ENVIO = "83966"   # Erro no Envio
 _VAL_SIT_PROBLEMAS = "83960"    # Problemas
 _VAL_SIT_PERDIMENTO = "83956"   # Perdimento
 
@@ -663,10 +662,6 @@ _VAL_SIT_ENTREGUE = "83953"              # Entregue
 
 # Explicação da fórmula de cada linha — tooltip "informativo" no hover (front).
 _OPER_DESCRICOES = {
-    "erro_envio": (
-        "Soma do valor base dos pedidos na situação 'Erro no Envio', "
-        "agrupada pelo mês da data do pedido."
-    ),
     "problemas": (
         "Soma do valor base dos pedidos na situação 'Problemas', "
         "agrupada pelo mês da data do pedido."
@@ -985,7 +980,7 @@ async def valuation_report(
 
     # 2. Quadro "Operacional — 3 meses" (substitui a Eficácia). Tudo ao vivo,
     #    cada métrica agrupada por mês a partir da SUA data:
-    #      • situações (Erro no Envio / Problemas / Perdimento) pela data do pedido;
+    #      • situações (Problemas / Perdimento) pela data do pedido;
     #      • Reembolso por refunds.conferido_at (carimbado no patch);
     #      • Usado/Manutenção/Custo Manutenção pelo devolutions.created_at.
     #    Mesma janela 3 meses (mês-2..mês atual, tz SP) das demais seções.
@@ -1015,7 +1010,6 @@ async def valuation_report(
             GROUP BY bo.numero, mes
         )
         SELECT mes,
-               SUM(valorbase) FILTER (WHERE situacao = :s_erro) AS erro_envio,
                SUM(valorbase) FILTER (WHERE situacao = :s_prob) AS problemas,
                SUM(custo_produto) FILTER (WHERE situacao = :s_perd) AS perdimento
         FROM por_pedido
@@ -1043,7 +1037,7 @@ async def valuation_report(
 
     bo_by_mes = {
         r["mes"]: r for r in (await session.execute(oper_bo_sql, {
-            "s_erro": _VAL_SIT_ERRO_ENVIO, "s_prob": _VAL_SIT_PROBLEMAS,
+            "s_prob": _VAL_SIT_PROBLEMAS,
             "s_perd": _VAL_SIT_PERDIMENTO,
         })).mappings().all()
     }
@@ -1057,9 +1051,6 @@ async def valuation_report(
     operacional = OperacionalSecaoOut(
         meses=months,
         linhas=[
-            OperacionalLinhaOut(chave="erro_envio", label="Erro no Envio", formato="brl",
-                                descricao=_OPER_DESCRICOES["erro_envio"],
-                                valores=_brl_row(bo_by_mes, "erro_envio")),
             OperacionalLinhaOut(chave="problemas", label="Problemas", formato="brl",
                                 descricao=_OPER_DESCRICOES["problemas"],
                                 valores=_brl_row(bo_by_mes, "problemas")),
