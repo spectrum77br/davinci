@@ -2,13 +2,13 @@
 
 Hoje há UMA empresa: cada `store_info.sales_team` vira um membro dela, rotulado
 "1.<rank>". A saída tem: `total_*` (Total geral), e `empresas[]` com o subtotal
-da empresa + `membros[]`. Duas métricas por mês: `cancelamento` (R$ aguardando
-cancelamento) e `taxa_devolucao` (%). Cobre:
+da empresa + `membros[]`. Duas métricas por mês: `aguardando_devolucao` (R$ dos
+pedidos em Aguardando Devolução) e `taxa_devolucao` (%). Cobre:
   * agrupamento empresa → membros com rótulo "1.1"/"1.2";
   * taxa por membro (PEDIDOS devolvidos Novo+Usado, distinct pedido_bling ÷
     pedidos do faturamento do membro — um kit ramificado conta 1);
   * Total geral somando todos os membros;
-  * cancelamento (R$) por membro.
+  * aguardando devolução (R$) por membro.
 """
 from __future__ import annotations
 
@@ -86,8 +86,8 @@ async def test_comercial_agrupa_empresa_membros(
     await _pedido(db, bling_id=9101, loja="9001", situacao="83953")
     await _pedido(db, bling_id=9102, loja="9001", situacao="6")
     await _devolucao(db, pedido=9101, condicao="Novo", quantidade=1)
-    # + 1 pedido aguardando cancelamento (83955) → cancelamento R$ 500 (não é faturamento).
-    await _pedido(db, bling_id=9103, loja="9001", situacao="83955", total=500.0)
+    # + 1 pedido aguardando devolução (83957) → aguardando_devolucao R$ 500 (não é faturamento).
+    await _pedido(db, bling_id=9103, loja="9001", situacao="83957", total=500.0)
     # Membro 1.2 (equipe 2): 4 pedidos faturamento; kit do pedido 9201 ramificou
     # em 2 linhas (mesmo pedido) → conta 1 pedido devolvido → 25%.
     await _pedido(db, bling_id=9201, loja="9002", situacao="83953")
@@ -113,9 +113,9 @@ async def test_comercial_agrupa_empresa_membros(
     # Taxa por membro (pedidos distintos devolvidos ÷ pedidos faturamento).
     assert membros["1.1"]["taxa_devolucao"][i] == 50.0   # 1 pedido ÷ 2 × 100
     assert membros["1.2"]["taxa_devolucao"][i] == 25.0   # 1 pedido ÷ 4 × 100
-    # Cancelamento (R$) no membro 1.1.
-    assert membros["1.1"]["cancelamento"][i] == 500.0
-    assert membros["1.2"]["cancelamento"][i] == 0.0
+    # Aguardando Devolução (R$) no membro 1.1.
+    assert membros["1.1"]["aguardando_devolucao"][i] == 500.0
+    assert membros["1.2"]["aguardando_devolucao"][i] == 0.0
 
     # Total geral = 2 pedidos devolvidos ({9101, 9201}) ÷ 6 pedidos × 100 =
     # 33.33; subtotal da empresa idem.

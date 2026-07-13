@@ -663,7 +663,6 @@ _VAL_SIT_PERDIMENTO = "83956"   # Perdimento
 # Quadro "Comercial — 3 meses" (irmão do Operacional). Situações de saldo por
 # mês da data do pedido + Taxa de Devolução (devoluções ÷ entregues).
 _VAL_SIT_AGUARD_DEVOLUCAO = "83957"      # Aguardando Devolução
-_VAL_SIT_AGUARD_CANCELAMENTO = "83955"   # Aguardando Cancelamento
 _VAL_SIT_ENTREGUE = "83953"              # Entregue
 
 # Explicação da fórmula de cada linha — tooltip "informativo" no hover (front).
@@ -704,11 +703,6 @@ _OPER_DESCRICOES = {
 _COM_DESCRICOES = {
     "aguardando_devolucao": (
         "Soma do valor base dos pedidos na situação 'Aguardando Devolução', "
-        "pelo mês da data do pedido. Nos quadros por equipe, apenas as lojas da "
-        "equipe (loja do Bling → equipe de vendas em store_info.sales_team)."
-    ),
-    "aguardando_cancelamento": (
-        "Soma do valor base dos pedidos na situação 'Aguardando Cancelamento', "
         "pelo mês da data do pedido. Nos quadros por equipe, apenas as lojas da "
         "equipe (loja do Bling → equipe de vendas em store_info.sales_team)."
     ),
@@ -1168,7 +1162,7 @@ async def valuation_report(
             GROUP BY bo.numero, mes
         )
         SELECT pp.mes, si.sales_team AS equipe,
-               SUM(pp.valorbase) FILTER (WHERE pp.situacao = :s_can) AS aguardando_cancelamento,
+               SUM(pp.valorbase) FILTER (WHERE pp.situacao = :s_dev) AS aguardando_devolucao,
                COUNT(*)          FILTER (WHERE pp.situacao = ANY(:sit_fat)) AS faturamento_qtd
         FROM por_pedido pp
         LEFT JOIN {_qt("store_info")} si ON si.bling_store_id = pp.loja
@@ -1194,7 +1188,7 @@ async def valuation_report(
     """)
 
     com_bo_rows = (await session.execute(com_bo_sql, {
-        "s_can": _VAL_SIT_AGUARD_CANCELAMENTO,
+        "s_dev": _VAL_SIT_AGUARD_DEVOLUCAO,
         "sit_fat": _VAL_SIT_APLICAVEIS,
         "ignored_stores": _VAL_IGNORED_STORES,
     })).mappings().all()
@@ -1211,29 +1205,29 @@ async def valuation_report(
     bo_idx = {(r["mes"], r["equipe"]): r for r in com_bo_rows}
     dev_idx = {(r["mes"], r["equipe"]): (r["devolucoes"] or 0) for r in com_dev_rows}
 
-    # `_com_series(pred)` devolve as duas séries por mês (Cancelamento em R$ e
-    # Taxa de Devolução em %) somando os baldes de equipe que casam com `pred`.
+    # `_com_series(pred)` devolve as duas séries por mês (Aguardando Devolução em
+    # R$ e Taxa de Devolução em %) somando os baldes de equipe que casam com `pred`.
     def _com_series(pred) -> tuple[list[float | None], list[float | None]]:
-        cancel = {m: 0.0 for m in months}
+        aguard = {m: 0.0 for m in months}
         fat = {m: 0 for m in months}
         dev = {m: 0 for m in months}
         for (mes, team), r in bo_idx.items():
-            if mes in cancel and pred(team):
-                cancel[mes] += float(r["aguardando_cancelamento"] or 0)
+            if mes in aguard and pred(team):
+                aguard[mes] += float(r["aguardando_devolucao"] or 0)
                 fat[mes] += int(r["faturamento_qtd"] or 0)
         for (mes, team), c in dev_idx.items():
             if mes in dev and pred(team):
                 dev[mes] += int(c)
-        cancel_s = [_r2(cancel[m]) for m in months]
+        aguard_s = [_r2(aguard[m]) for m in months]
         # Taxa: pedidos devolvidos (Novo+Usado, distinct pedido) ÷ pedidos do
         # faturamento, em %. Sem pedidos de faturamento no mês → None ("—").
         taxa_s = [_r2(dev[m] / fat[m] * 100) if fat[m] else None for m in months]
-        return cancel_s, taxa_s
+        return aguard_s, taxa_s
 
     def _tem_dados(pred) -> bool:
         for (mes, team), r in bo_idx.items():
             if mes in months and pred(team) and (
-                (r["aguardando_cancelamento"] or 0) or (r["faturamento_qtd"] or 0)
+                (r["aguardando_devolucao"] or 0) or (r["faturamento_qtd"] or 0)
             ):
                 return True
         return any(mes in months and pred(team) and c
@@ -1249,34 +1243,34 @@ async def valuation_report(
     )
     _rank = {t: i + 1 for i, t in enumerate(_teams)}
 
-    total_cancel, total_taxa = _com_series(lambda t: True)
+    total_aguard, total_taxa = _com_series(lambda t: True)
 
     empresas: list[ComercialEmpresaOut] = []
     if _teams:
         membros = []
         for team in _teams:
-            c, t = _com_series(lambda x, team=team: x == team)
+            a, t = _com_series(lambda x, team=team: x == team)
             membros.append(ComercialMembroOut(
-                label=f"1.{_rank[team]}", cancelamento=c, taxa_devolucao=t,
+                label=f"1.{_rank[team]}", aguardando_devolucao=a, taxa_devolucao=t,
             ))
-        c, t = _com_series(lambda x: x is not None)
+        a, t = _com_series(lambda x: x is not None)
         empresas.append(ComercialEmpresaOut(
             empresa=1, label="Empresa 1",
-            cancelamento=c, taxa_devolucao=t, membros=membros,
+            aguardando_devolucao=a, taxa_devolucao=t, membros=membros,
         ))
     # "Sem equipe" só aparece quando houver dados não atribuídos a equipe.
     if _tem_dados(lambda t: t is None):
-        c, t = _com_series(lambda x: x is None)
+        a, t = _com_series(lambda x: x is None)
         empresas.append(ComercialEmpresaOut(
             empresa=None, label="Sem equipe",
-            cancelamento=c, taxa_devolucao=t, membros=[],
+            aguardando_devolucao=a, taxa_devolucao=t, membros=[],
         ))
 
     comercial = ComercialSecaoOut(
         meses=months,
-        total_cancelamento=total_cancel,
+        total_aguardando_devolucao=total_aguard,
         total_taxa_devolucao=total_taxa,
-        desc_cancelamento=_COM_DESCRICOES["aguardando_cancelamento"],
+        desc_aguardando_devolucao=_COM_DESCRICOES["aguardando_devolucao"],
         desc_taxa_devolucao=_COM_DESCRICOES["taxa_devolucao"],
         empresas=empresas,
     )

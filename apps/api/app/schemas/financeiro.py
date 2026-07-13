@@ -274,11 +274,11 @@ class OperacionalSecaoOut(BaseModel):
 
 class ComercialMembroOut(BaseModel):
     """Um membro (ex. "1.1") dentro de uma empresa, com duas séries por mês
-    (alinhadas a `ComercialSecaoOut.meses`): `cancelamento` (R$ aguardando
-    cancelamento) e `taxa_devolucao` (%)."""
+    (alinhadas a `ComercialSecaoOut.meses`): `aguardando_devolucao` (R$ dos
+    pedidos em Aguardando Devolução) e `taxa_devolucao` (%)."""
 
     label: str
-    cancelamento: list[float | None]
+    aguardando_devolucao: list[float | None]
     taxa_devolucao: list[float | None]
 
 
@@ -290,7 +290,7 @@ class ComercialEmpresaOut(BaseModel):
 
     empresa: int | None = None
     label: str
-    cancelamento: list[float | None]
+    aguardando_devolucao: list[float | None]
     taxa_devolucao: list[float | None]
     membros: list[ComercialMembroOut]
 
@@ -298,14 +298,14 @@ class ComercialEmpresaOut(BaseModel):
 class ComercialSecaoOut(BaseModel):
     """Bloco Comercial em abas: uma aba "Geral" (Total geral + subtotal por
     empresa) e uma aba por empresa (com os membros). Duas métricas por mês:
-    Cancelamento (R$) e Taxa de Devolução (%). Hoje há 1 empresa — os
+    Aguardando Devolução (R$) e Taxa de Devolução (%). Hoje há 1 empresa — os
     `store_info.sales_team` viram membros 1.1/1.2/… dela; a ramificação real
     (loja → empresa) virá depois."""
 
     meses: list[date]
-    total_cancelamento: list[float | None]
+    total_aguardando_devolucao: list[float | None]
     total_taxa_devolucao: list[float | None]
-    desc_cancelamento: str
+    desc_aguardando_devolucao: str
     desc_taxa_devolucao: str
     empresas: list[ComercialEmpresaOut]
 

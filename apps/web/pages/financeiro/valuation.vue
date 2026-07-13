@@ -37,21 +37,21 @@ type OperacionalSecao = {
 }
 type ComercialMembro = {
   label: string
-  cancelamento: (number | null)[]
+  aguardando_devolucao: (number | null)[]
   taxa_devolucao: (number | null)[]
 }
 type ComercialEmpresa = {
   empresa: number | null
   label: string
-  cancelamento: (number | null)[]
+  aguardando_devolucao: (number | null)[]
   taxa_devolucao: (number | null)[]
   membros: ComercialMembro[]
 }
 type ComercialSecao = {
   meses: string[]
-  total_cancelamento: (number | null)[]
+  total_aguardando_devolucao: (number | null)[]
   total_taxa_devolucao: (number | null)[]
-  desc_cancelamento: string
+  desc_aguardando_devolucao: string
   desc_taxa_devolucao: string
   empresas: ComercialEmpresa[]
 }
@@ -195,7 +195,7 @@ const comTabs = computed<ComercialEmpresa[]>(() =>
 // dela + os membros.
 type ComRow = {
   label: string
-  cancelamento: (number | null)[]
+  aguardando_devolucao: (number | null)[]
   taxa_devolucao: (number | null)[]
   isTotal?: boolean
   tabTo?: string
@@ -205,12 +205,12 @@ const comRows = computed<ComRow[]>(() => {
   if (!c) return []
   if (comTab.value === 'geral') {
     const rows: ComRow[] = [{
-      label: 'Total', cancelamento: c.total_cancelamento,
+      label: 'Total', aguardando_devolucao: c.total_aguardando_devolucao,
       taxa_devolucao: c.total_taxa_devolucao, isTotal: true,
     }]
     for (const e of c.empresas) {
       rows.push({
-        label: e.label, cancelamento: e.cancelamento,
+        label: e.label, aguardando_devolucao: e.aguardando_devolucao,
         taxa_devolucao: e.taxa_devolucao,
         tabTo: e.membros.length ? e.label : undefined,
       })
@@ -220,11 +220,11 @@ const comRows = computed<ComRow[]>(() => {
   const e = comEmpresa.value
   if (!e) return []
   const rows: ComRow[] = [{
-    label: `${e.label} — total`, cancelamento: e.cancelamento,
+    label: `${e.label} — total`, aguardando_devolucao: e.aguardando_devolucao,
     taxa_devolucao: e.taxa_devolucao, isTotal: true,
   }]
   for (const m of e.membros) {
-    rows.push({ label: m.label, cancelamento: m.cancelamento, taxa_devolucao: m.taxa_devolucao })
+    rows.push({ label: m.label, aguardando_devolucao: m.aguardando_devolucao, taxa_devolucao: m.taxa_devolucao })
   }
   return rows
 })
@@ -652,7 +652,7 @@ const loading = computed(() =>
         <section class="space-y-2">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             Comercial — 3 meses
-            <span class="normal-case text-xs text-muted-foreground">(cancelamento e taxa de devolução, por empresa/membro)</span>
+            <span class="normal-case text-xs text-muted-foreground">(aguardando devolução e taxa de devolução, por empresa/membro)</span>
           </h2>
 
           <div class="flex flex-wrap gap-1 border-b">
@@ -695,8 +695,8 @@ const loading = computed(() =>
                 <tr>
                   <template v-for="m in resumo.comercial.meses" :key="`h-${m}`">
                     <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
-                      <span class="inline-flex items-center gap-1 cursor-help" :title="resumo.comercial.desc_cancelamento">
-                        Cancel. <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                      <span class="inline-flex items-center gap-1 cursor-help" :title="resumo.comercial.desc_aguardando_devolucao">
+                        Aguard. Devol. <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                       </span>
                     </th>
                     <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
@@ -726,7 +726,7 @@ const loading = computed(() =>
                     <span v-else>{{ row.label }}</span>
                   </td>
                   <template v-for="(m, i) in resumo.comercial.meses" :key="`${row.label}-${m}`">
-                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.cancelamento[i]) }}</td>
+                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.aguardando_devolucao[i]) }}</td>
                     <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.taxa_devolucao[i]) }}</td>
                   </template>
                 </tr>
