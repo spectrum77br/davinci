@@ -636,7 +636,7 @@ _VAL_SIT_APLICAVEIS = [
     "84674",     # Enviado Geral SP
     "84675",     # Enviado Geral CI
     "83959",     # Enviado Geral PI
-    "83958",     # Enviado Geral RA
+    "83958",     # Enviado Fake (nome real na situacao_bling)
     "84678",     # Enviado Geral SA
     "83965",     # Enviado Importado
 ]
@@ -645,6 +645,11 @@ _VAL_SIT_APLICAVEIS = [
 # pedidos em trânsito cuja margem ainda não foi realizada. Mesmo conjunto do
 # export de rentabilidade (margens.py / rentabilidade_xlsx).
 _VAL_SIT_RENTABILIDADE = ["6", "28", "15", "37", "83953"]
+# Situações da MARGEM OPERACIONAL por categoria/plataforma (blueprint "status a
+# considerar"): Em andamento (15,37) + Entregue (83953) + Perdimento (83956) +
+# Resolvido (545902) + Enviado Fake (83958). % = (lucro ÷ faturamento) × 100,
+# faturamento e custo somados sobre ESTE mesmo conjunto.
+_VAL_SIT_MARGEM = ["15", "37", "83953", "83956", "545902", "83958"]
 _VAL_SIT_LABEL = (
     "Em aberto, Em andamento, Entregue, "
     "Enviado Geral SP/CI/PI/RA/SA, Enviado Importado"
@@ -740,9 +745,13 @@ def _agg_sql(group_col: str) -> str:
 
     Réplica fiel da QUERY_AGG do PDF. `group_col` é literal do nosso código
     ('marketplace' ou 'categoria'), nunca entrada do usuário — interpolar é
-    seguro. Faturamento = SUM das situações aplicáveis; custo/rentabilidade =
-    Em aberto+Em andamento+Entregue (:sit_rent). Rateio proporcional ao
-    itemvalor quando o pedido tem >1 item.
+    seguro. `faturamento` = SUM das situações aplicáveis; `faturamento_rent`/
+    `custo_rent` = Em aberto+Em andamento+Entregue (:sit_rent, alimenta o card
+    mensal de rentabilidade); `fat_margem`/`custo_margem` = conjunto da MARGEM
+    operacional (:sit_margem = Em andamento+Entregue+Perdimento+Resolvido+
+    Enviado Fake), que alimenta as seções por categoria/plataforma com
+    lucro = faturamento − custo e % = (lucro ÷ faturamento) × 100. Rateio
+    proporcional ao itemvalor quando o pedido tem >1 item.
     """
     bo, stores = _qt("bling_orders"), _qt("stores")
     return f"""
@@ -810,7 +819,9 @@ SELECT
     {group_col} AS grp,
     SUM(CASE WHEN situacao_id = ANY(:sit_aplic) THEN valorbase ELSE 0 END) AS faturamento,
     SUM(CASE WHEN situacao_id = ANY(:sit_rent) THEN valorbase   ELSE 0 END) AS faturamento_rent,
-    SUM(CASE WHEN situacao_id = ANY(:sit_rent) THEN custo_total ELSE 0 END) AS custo_rent
+    SUM(CASE WHEN situacao_id = ANY(:sit_rent) THEN custo_total ELSE 0 END) AS custo_rent,
+    SUM(CASE WHEN situacao_id = ANY(:sit_margem) THEN valorbase   ELSE 0 END) AS fat_margem,
+    SUM(CASE WHEN situacao_id = ANY(:sit_margem) THEN custo_total ELSE 0 END) AS custo_margem
 FROM base
 GROUP BY mes, {group_col}
 ORDER BY mes, grp
@@ -847,11 +858,13 @@ def _agg_to_secoes(rows: list[dict], months: list) -> list[FaturamentoMesSecaoOu
         for r in sorted(by_mes[mes], key=lambda x: (x["grp"] or "")):
             if not r["grp"]:
                 continue
-            fat = Decimal(str(r["faturamento"] or 0))
-            fat_rent = Decimal(str(r["faturamento_rent"] or 0))
-            custo = Decimal(str(r["custo_rent"] or 0))
-            rent = fat_rent - custo
-            margem = (rent / custo * 100) if custo > 0 else None
+            # Margem operacional (blueprint): faturamento e custo somados sobre
+            # o conjunto _VAL_SIT_MARGEM; lucro = faturamento − custo;
+            # % = (lucro ÷ faturamento) × 100.
+            fat = Decimal(str(r["fat_margem"] or 0))
+            custo = Decimal(str(r["custo_margem"] or 0))
+            rent = fat - custo
+            margem = (rent / fat * 100) if fat != 0 else None
             linhas.append(FaturamentoGrpLinhaOut(
                 grp=r["grp"], faturamento=_r2(fat), custo=_r2(custo),
                 rentabilidade=_r2(rent), margem=_r2(margem),
@@ -859,7 +872,7 @@ def _agg_to_secoes(rows: list[dict], months: list) -> list[FaturamentoMesSecaoOu
             tot_fat += fat
             tot_custo += custo
             tot_rent += rent
-        tot_margem = (tot_rent / tot_custo * 100) if tot_custo > 0 else None
+        tot_margem = (tot_rent / tot_fat * 100) if tot_fat != 0 else None
         out.append(FaturamentoMesSecaoOut(
             mes=mes, linhas=linhas,
             total_faturamento=_r2(tot_fat), total_custo=_r2(tot_custo),
@@ -956,6 +969,7 @@ async def valuation_report(
     agg_params = {
         "sit_aplic": _VAL_SIT_APLICAVEIS,
         "sit_rent": _VAL_SIT_RENTABILIDADE,
+        "sit_margem": _VAL_SIT_MARGEM,
         "ignored_stores": _VAL_IGNORED_STORES,
     }
     mkt_rows = (await session.execute(text(_agg_sql("marketplace")), agg_params)).mappings().all()

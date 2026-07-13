@@ -237,7 +237,7 @@ watch(comTabs, (tabs) => {
 
 // Margem operacional (categoria / plataforma). O backend manda uma seção por
 // mês (com linhas por grupo); aqui pivotamos p/ linhas = grupo, colunas = mês
-// × (valor, %). valor = rentabilidade (lucro); % = margem (rent ÷ custo).
+// × (valor, %). valor = lucro (faturamento − custo); % = lucro ÷ faturamento.
 type MargemRow = { grp: string; valor: (number | null)[]; pct: (number | null)[] }
 type MargemTabela = {
   meses: string[]
@@ -736,11 +736,12 @@ const loading = computed(() =>
         </section>
 
         <!-- 5. Margem operacional — categoria e plataforma (3 meses).
-             valor = lucro (rentabilidade); % = margem (rent ÷ custo). -->
+             valor = lucro (faturamento − custo); % = lucro ÷ faturamento × 100.
+             Status: Em andamento, Entregue, Perdimento, Resolvido, Enviado Fake. -->
         <section v-for="bloco in margemBlocos" :key="bloco.key" class="space-y-2">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             {{ bloco.titulo }}
-            <span class="normal-case text-xs text-muted-foreground">(valor = lucro do pedido · % = margem)</span>
+            <span class="normal-case text-xs text-muted-foreground">(valor = lucro do pedido · % = lucro ÷ faturamento)</span>
           </h2>
           <div class="overflow-x-auto rounded border">
             <table class="w-full text-xs border-collapse">
@@ -761,12 +762,12 @@ const loading = computed(() =>
                 <tr>
                   <template v-for="m in bloco.tabela.meses" :key="`h-${bloco.key}-${m}`">
                     <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
-                      <span class="inline-flex items-center gap-1 cursor-help" title="Lucro do mês — faturamento (Em aberto/andamento/entregue) menos custo.">
+                      <span class="inline-flex items-center gap-1 cursor-help" title="Lucro do mês = faturamento − custo (status: Em andamento, Entregue, Perdimento, Resolvido, Enviado Fake).">
                         Valor <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                       </span>
                     </th>
                     <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
-                      <span class="inline-flex items-center gap-1 cursor-help" title="Margem = Rentabilidade ÷ Custo × 100.">
+                      <span class="inline-flex items-center gap-1 cursor-help" title="Margem = (Lucro ÷ Faturamento) × 100.">
                         % <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                       </span>
                     </th>
