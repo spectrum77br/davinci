@@ -55,12 +55,29 @@ type ComercialSecao = {
   desc_taxa_devolucao: string
   empresas: ComercialEmpresa[]
 }
+type FaturamentoGrpLinha = {
+  grp: string
+  faturamento: number
+  custo: number
+  rentabilidade: number
+  margem: number | null
+}
+type FaturamentoMesSecao = {
+  mes: string
+  linhas: FaturamentoGrpLinha[]
+  total_faturamento: number
+  total_custo: number
+  total_rentabilidade: number
+  total_margem: number | null
+}
 type Report = {
   gerado_em: string
   situacoes_label: string
   valuation_meses: ValuationMes[]
   operacional: OperacionalSecao
   comercial: ComercialSecao
+  por_marketplace: FaturamentoMesSecao[]
+  por_categoria: FaturamentoMesSecao[]
 }
 type EstoqueLocal = { local: string; qtd: number; valor: number }
 type EstoqueSnapshot = {
@@ -217,6 +234,52 @@ watch(comTabs, (tabs) => {
     comTab.value = 'geral'
   }
 })
+
+// Margem operacional (categoria / plataforma). O backend manda uma seção por
+// mês (com linhas por grupo); aqui pivotamos p/ linhas = grupo, colunas = mês
+// × (valor, %). valor = rentabilidade (lucro); % = margem (rent ÷ custo).
+type MargemRow = { grp: string; valor: (number | null)[]; pct: (number | null)[] }
+type MargemTabela = {
+  meses: string[]
+  rows: MargemRow[]
+  totalValor: (number | null)[]
+  totalPct: (number | null)[]
+}
+function pivotMargem(secoes: FaturamentoMesSecao[] | undefined): MargemTabela {
+  const secs = secoes ?? []
+  const meses = secs.map((s) => s.mes)
+  const grps = new Set<string>()
+  for (const s of secs) for (const l of s.linhas) grps.add(l.grp)
+  const rows: MargemRow[] = [...grps]
+    .sort((a, b) => a.localeCompare(b, 'pt-BR'))
+    .map((grp) => ({
+      grp,
+      valor: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.rentabilidade ?? null),
+      pct: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.margem ?? null),
+    }))
+  return {
+    meses,
+    rows,
+    totalValor: secs.map((s) => s.total_rentabilidade ?? null),
+    totalPct: secs.map((s) => s.total_margem ?? null),
+  }
+}
+const catTabela = computed(() => pivotMargem(resumo.value?.por_categoria))
+const mktTabela = computed(() => pivotMargem(resumo.value?.por_marketplace))
+const margemBlocos = computed(() => [
+  {
+    key: 'categoria',
+    titulo: 'Margem operacional — categoria',
+    tabela: catTabela.value,
+    label: (g: string) => g,
+  },
+  {
+    key: 'plataforma',
+    titulo: 'Margem operacional — plataforma',
+    tabela: mktTabela.value,
+    label: (g: string) => mktTitle(g),
+  },
+])
 
 async function loadResumo() {
   if (!unlockToken.value) return
@@ -668,6 +731,75 @@ const loading = computed(() =>
                   </template>
                 </tr>
               </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 5. Margem operacional — categoria e plataforma (3 meses).
+             valor = lucro (rentabilidade); % = margem (rent ÷ custo). -->
+        <section v-for="bloco in margemBlocos" :key="bloco.key" class="space-y-2">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            {{ bloco.titulo }}
+            <span class="normal-case text-xs text-muted-foreground">(valor = lucro do pedido · % = margem)</span>
+          </h2>
+          <div class="overflow-x-auto rounded border">
+            <table class="w-full text-xs border-collapse">
+              <thead class="bg-background">
+                <tr>
+                  <th rowspan="2" class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border align-bottom">
+                    {{ bloco.key === 'categoria' ? 'Categoria' : 'Plataforma' }}
+                  </th>
+                  <th
+                    v-for="m in bloco.tabela.meses"
+                    :key="m"
+                    colspan="2"
+                    class="text-center px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
+                  >
+                    {{ mesLabel(m) }}
+                  </th>
+                </tr>
+                <tr>
+                  <template v-for="m in bloco.tabela.meses" :key="`h-${bloco.key}-${m}`">
+                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                      <span class="inline-flex items-center gap-1 cursor-help" title="Lucro do mês — faturamento (Em aberto/andamento/entregue) menos custo.">
+                        Valor <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                      </span>
+                    </th>
+                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                      <span class="inline-flex items-center gap-1 cursor-help" title="Margem = Rentabilidade ÷ Custo × 100.">
+                        % <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                      </span>
+                    </th>
+                  </template>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="!bloco.tabela.rows.length">
+                  <td :colspan="bloco.tabela.meses.length * 2 + 1" class="text-center py-6 text-muted-foreground">
+                    Sem dados no período.
+                  </td>
+                </tr>
+                <tr
+                  v-for="row in bloco.tabela.rows"
+                  :key="row.grp"
+                  class="hover:brightness-95 dark:hover:brightness-110"
+                >
+                  <td class="px-2 py-1 border">{{ bloco.label(row.grp) }}</td>
+                  <template v-for="(m, i) in bloco.tabela.meses" :key="`${bloco.key}-${row.grp}-${m}`">
+                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.valor[i]) }}</td>
+                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.pct[i]) }}</td>
+                  </template>
+                </tr>
+              </tbody>
+              <tfoot v-if="bloco.tabela.rows.length" class="bg-muted/40 font-semibold">
+                <tr>
+                  <td class="px-2 py-1.5 border">Total</td>
+                  <template v-for="(m, i) in bloco.tabela.meses" :key="`tot-${bloco.key}-${m}`">
+                    <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalValor[i]) }}</td>
+                    <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalPct[i]) }}</td>
+                  </template>
+                </tr>
+              </tfoot>
             </table>
           </div>
         </section>
