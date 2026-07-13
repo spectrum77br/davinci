@@ -109,3 +109,37 @@ async def test_margem_categoria_exclui_status_fora_do_conjunto(
     linha = _cat_linha(r.json(), "Celular")
     assert linha["rentabilidade"] == 400.0
     assert linha["margem"] == 40.0
+
+
+@pytest.mark.asyncio
+async def test_margem_categoria_funde_usado_no_normal(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+):
+    # Planta não tem "Usado": Celular Usado → Celular e Mala Usada → Mala.
+    # Celular: 1000-600=400 ; Celular Usado: 500-100=400 → funde em Celular
+    # fat=1500 custo=700 lucro=800 margem=800/1500*100=53.33.
+    await _pedido(db, bling_id=6201, situacao="83953", categoria="Celular",
+                  total=1000, preco_custo=100, qtd=6)
+    await _pedido(db, bling_id=6202, situacao="83953", categoria="Celular Usado",
+                  total=500, preco_custo=100, qtd=1)
+    # Mala: 1000-600=400 ; Mala Usada: 200-100=100 → funde em Mala
+    # fat=1200 custo=700 lucro=500 margem=500/1200*100=41.67.
+    await _pedido(db, bling_id=6203, situacao="83953", categoria="Mala",
+                  total=1000, preco_custo=100, qtd=6)
+    await _pedido(db, bling_id=6204, situacao="83953", categoria="Mala Usada",
+                  total=200, preco_custo=100, qtd=1)
+    admin = await _admin(db)
+    auth_as(admin)
+    r = await client.get("/api/financeiro/valuation", headers=_headers())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    hoje = datetime.now(UTC).date().replace(day=1).isoformat()
+    secao = next(s for s in body["por_categoria"] if s["mes"] == hoje)
+    grupos = {l["grp"] for l in secao["linhas"]}
+    assert "Celular Usado" not in grupos
+    assert "Mala Usada" not in grupos
+    assert _cat_linha(body, "Celular")["rentabilidade"] == 800.0
+    assert _cat_linha(body, "Celular")["margem"] == 53.33
+    assert _cat_linha(body, "Mala")["rentabilidade"] == 500.0
+    assert _cat_linha(body, "Mala")["margem"] == 41.67

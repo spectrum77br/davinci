@@ -799,7 +799,13 @@ base AS (
     SELECT
         date_trunc('month', p.data_sp)::date AS mes,
         COALESCE(NULLIF(TRIM(l.marketplace::text), ''), 'Sem marketplace') AS marketplace,
-        COALESCE(NULLIF(TRIM(p.categoria_nome), ''), 'Sem categoria') AS categoria,
+        -- Buckets da planta não têm "Usado": Celular Usado → Celular e
+        -- Mala Usada → Mala (kits já caem em Celular Kit / Mala Kit).
+        CASE lower(COALESCE(NULLIF(TRIM(p.categoria_nome), ''), 'sem categoria'))
+            WHEN 'celular usado' THEN 'Celular'
+            WHEN 'mala usada'    THEN 'Mala'
+            ELSE COALESCE(NULLIF(TRIM(p.categoria_nome), ''), 'Sem categoria')
+        END AS categoria,
         p.situacao AS situacao_id,
         p.valorbase_prop AS valorbase,
         (COALESCE(p.preco_custo, 0) * COALESCE(p.item_quantidade, 0)
