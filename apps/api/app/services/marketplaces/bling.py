@@ -991,7 +991,13 @@ def parse_bling_product(raw: dict) -> dict:
     image = raw.get("imagemURL") or raw.get("midia", {}).get("imagem", {}).get("url")
     categoria = raw.get("categoria") or {}
     if isinstance(categoria, dict):
+        # Bling v3 GET /produtos/{id} devolve categoria só com `id` (sem
+        # descricao/nome). Guardamos o id (mesmo formato dos produtos legados);
+        # o resolvedor de categoria (bling_orders / product_categories) casa
+        # tanto por id quanto por nome. Sem o id (fallback), usa o nome.
         category = categoria.get("descricao") or categoria.get("nome")
+        if not category and categoria.get("id") is not None:
+            category = str(categoria["id"])
     else:
         category = None
     observation = raw.get("observacoes")
