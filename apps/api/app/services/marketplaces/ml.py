@@ -254,11 +254,12 @@ class MercadoLivreClient:
 
     async def get_claim_returns(self, claim_id: str | int) -> dict | list:
         """Fetch the return(s) tied to a claim. The return carries its own
-        shipment status (`shipping.status` ∈ ready_to_ship/shipped/delivered/
-        cancelled) which is what the planilha calls `return_status`. Shape
-        varies (single object vs list); the caller normalizes. Raises on
-        non-2xx (soft-failed by caller when a claim has no return)."""
-        r = await self._request("GET", f"/post-purchase/v1/claims/{claim_id}/returns")
+        shipment status (`shipments[].status` ∈ ready_to_ship/shipped/delivered/
+        cancelled) which is what the planilha calls `return_status`. Uses the
+        v2 endpoint (v1 responds 400 for this resource); shape is
+        `{id, shipments: [{shipment_id, status, ...}]}`. The caller normalizes.
+        Raises on non-2xx (soft-failed by caller when a claim has no return)."""
+        r = await self._request("GET", f"/post-purchase/v2/claims/{claim_id}/returns")
         r.raise_for_status()
         return r.json() or {}
 

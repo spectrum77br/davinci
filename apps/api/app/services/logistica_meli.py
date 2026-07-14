@@ -41,13 +41,18 @@ _ML_PLATAFORMAS = {"mercado livre", "mercadolivre", "ml"}
 
 def _extract_return_status(rets: Any) -> str:
     """Status do envio da devolução (`return_status`) do payload de returns do
-    claim. Aceita objeto único OU lista; procura `shipping.status` e cai em
-    `status`."""
+    claim (v2). Aceita objeto único OU lista; prioriza `shipments[0].status`
+    (formato v2) e cai em `shipping.status` / `status` (resiliência)."""
     if not rets:
         return ""
     obj = rets[0] if isinstance(rets, list) and rets else rets
     if not isinstance(obj, dict):
         return ""
+    shipments = obj.get("shipments")
+    if isinstance(shipments, list) and shipments and isinstance(shipments[0], dict):
+        s = (shipments[0].get("status") or "").strip()
+        if s:
+            return s
     shp = obj.get("shipping") or {}
     s = (shp.get("status") or "").strip()
     if s:

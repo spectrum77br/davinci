@@ -82,6 +82,20 @@ async def test_build_meli_status_sem_reclamacao():
 
 
 @pytest.mark.asyncio
+async def test_build_meli_status_returns_v2_shipments():
+    # Formato real do endpoint v2: {id, shipments:[{status}]}.
+    client = FakeML(
+        order={"status": "paid", "shipping": {"id": 7}, "mediations": [{"id": 2}]},
+        shipment={"status": "delivered", "substatus": "delivered"},
+        claim={"stage": "claim", "status": "opened"},
+        returns={"id": 148419512, "shipments": [{"shipment_id": 47511095985, "status": "ready_to_ship"}]},
+    )
+    out = await logistica_meli.build_meli_status(client, "1")
+    assert out["return_status"] == "ready_to_ship"
+    assert out["claim_stage"] == "claim"
+
+
+@pytest.mark.asyncio
 async def test_build_meli_status_returns_lista():
     # returns pode vir como lista — pega o [0].shipping.status.
     client = FakeML(
