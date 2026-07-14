@@ -99,6 +99,33 @@ async def test_build_meli_status_resolve_pack_id():
 
 
 @pytest.mark.asyncio
+async def test_build_enrichment_rastreio_do_shipment():
+    # rastreio = tracking_number do shipment; meli_status monta normal.
+    client = FakeML(
+        order={"status": "paid", "shipping": {"id": 5}, "mediations": []},
+        shipment={"status": "shipped", "substatus": "dropped_off", "tracking_number": "AP085672954BR"},
+    )
+    enr = await logistica_meli.build_enrichment(client, "1")
+    assert enr["rastreio"] == "AP085672954BR"
+    assert enr["meli_status"] == {
+        "order_status": "paid",
+        "ship_status": "shipped",
+        "ship_substatus": "dropped_off",
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_enrichment_sem_tracking_number():
+    # shipment sem tracking_number => rastreio None (não inventa).
+    client = FakeML(
+        order={"status": "paid", "shipping": {"id": 5}, "mediations": []},
+        shipment={"status": "ready_to_ship", "substatus": "printed"},
+    )
+    enr = await logistica_meli.build_enrichment(client, "1")
+    assert enr["rastreio"] is None
+
+
+@pytest.mark.asyncio
 async def test_build_meli_status_sem_reclamacao():
     # Pedido pago/enviado sem mediação: só pedido + envio; claim/returns fora.
     client = FakeML(

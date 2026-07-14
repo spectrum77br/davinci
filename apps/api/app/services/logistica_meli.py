@@ -13,6 +13,10 @@ resto. Aqui montamos os 8 campos (`order_status`, `ship_status`,
     (id vem de order.mediations[].id)
   - return_status -> GET /post-purchase/v1/claims/{id}/returns (shipping.status)
 
+Além da assinatura, `build_enrichment` também devolve o `rastreio`
+(`shipment.tracking_number`), gravado em `Logistica.rastreio`. O "último local
+físico" (localização) o ML NÃO expõe — precisa vir direto do Correios/Amazon.
+
 Só se aplica a pedidos de Mercado Livre — as outras plataformas têm status
 próprios e a planilha de referência é do Meli. Tudo best-effort: uma chamada de
 claim que falhe (pedido sem reclamação → 404) só deixa aqueles campos vazios,
@@ -78,13 +82,15 @@ async def _fetch_order(client: MercadoLivreClient, order_id: str) -> dict:
     return await client.get_order(str(real_ids[0]))
 
 
-async def build_meli_status(client: MercadoLivreClient, order_id: str) -> dict[str, str]:
-    """Monta o dict dos 8 campos (só os não-vazios) pra um pedido do ML.
+async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[str, Any]:
+    """Puxa do ML tudo que a Logística consome de um pedido: a assinatura de 8
+    campos (`meli_status`) + o número de rastreio (`rastreio`, vem do shipment).
 
-    Best-effort: falha em shipment/claim/returns deixa aqueles campos de fora,
-    mas mantém os que já resolveram. Levanta só se nem order nem pack existirem
-    (aí o caller decide o que fazer com o pedido inteiro)."""
+    Retorna `{"meli_status": {...}, "rastreio": str|None}`. Best-effort: falha
+    em shipment/claim/returns deixa aqueles campos de fora, mas mantém os que já
+    resolveram. Levanta só se nem order nem pack existirem."""
     out: dict[str, str] = {}
+    rastreio: str | None = None
     order = await _fetch_order(client, str(order_id))
 
     st = (order.get("status") or "").strip()
@@ -110,6 +116,9 @@ async def build_meli_status(client: MercadoLivreClient, order_id: str) -> dict[s
         sub = (sh.get("substatus") or "").strip()
         if sub:
             out["ship_substatus"] = sub
+        tn = (sh.get("tracking_number") or "").strip()
+        if tn:
+            rastreio = tn
     else:
         ship_status = (shipping.get("status") or "").strip()
         if ship_status:
@@ -150,7 +159,14 @@ async def build_meli_status(client: MercadoLivreClient, order_id: str) -> dict[s
             out["return_status"] = rstatus
 
     # Mantém só campos conhecidos (defesa contra tokens estranhos entrando).
-    return {f: out[f] for f in logistica_rules.FIELD_ORDER if out.get(f)}
+    meli = {f: out[f] for f in logistica_rules.FIELD_ORDER if out.get(f)}
+    return {"meli_status": meli, "rastreio": rastreio}
+
+
+async def build_meli_status(client: MercadoLivreClient, order_id: str) -> dict[str, str]:
+    """Só a assinatura de 8 campos (compat). Ver `build_enrichment`."""
+    enr = await build_enrichment(client, order_id)
+    return enr["meli_status"]
 
 
 async def _ml_integration_for_conta(session: AsyncSession, conta: str | None) -> Integration | None:
@@ -218,8 +234,10 @@ async def enrich_row(
         if client_cache is not None:
             client_cache[conta] = client
 
-    meli = await build_meli_status(client, order_id)
-    row.meli_status = meli
+    enr = await build_enrichment(client, order_id)
+    row.meli_status = enr["meli_status"]
+    if enr.get("rastreio"):
+        row.rastreio = enr["rastreio"]
     return True
 
 
