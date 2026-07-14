@@ -8,7 +8,6 @@ from app.models.bling_envio_evento import BlingEnvioEvento
 from app.models.bling_kit_component import BlingKitComponent
 from app.models.bling_nota import BlingNota
 from app.models.bling_order import BlingOrder
-from app.models.chamado import Chamado
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
 from app.models.devolution import Devolution
@@ -61,6 +60,7 @@ from app.models.importacao import (
 )
 from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
+from app.models.logistica import Logistica, LogisticaStatus
 from app.models.margem_audit import MargemAudit
 from app.models.margens import Margens
 from app.models.marketing import (
@@ -128,7 +128,6 @@ __all__ = [
     "CadastroStore",
     "CadastroTipo",
     "CellStatus",
-    "Chamado",
     "Company",
     "CompanyCertificate",
     "CotacaoFabricante",
@@ -153,6 +152,8 @@ __all__ = [
     "ListingRequest",
     "ListingRequestStatus",
     "ListingStatus",
+    "Logistica",
+    "LogisticaStatus",
     "MARKETPLACES",
     "MargemAudit",
     "Margens",

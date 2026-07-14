@@ -14,8 +14,9 @@ Resource = Literal[
     "controle_estoque",
     "devolucoes",
     "reembolso",
-    # Chamados — casos de pós-venda (Planilha2), com sugestão de status Bling.
-    "chamados",
+    # Logística — casos de pós-venda a acompanhar + aba Status. Sugestão de
+    # status Bling a partir da assinatura de status do Meli.
+    "logistica",
     # Notas Fiscais — consulta/export de NF-e das contas bling_notas.
     "notas_fiscais",
     # Legacy single-bucket — no longer used by any route after the
