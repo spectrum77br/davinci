@@ -14,6 +14,8 @@ Resource = Literal[
     "controle_estoque",
     "devolucoes",
     "reembolso",
+    # Chamados — casos de pós-venda (Planilha2), com sugestão de status Bling.
+    "chamados",
     # Notas Fiscais — consulta/export de NF-e das contas bling_notas.
     "notas_fiscais",
     # Legacy single-bucket — no longer used by any route after the

@@ -5,7 +5,7 @@ import {
   Package, Megaphone, DollarSign, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
   Store, Tags, ClipboardList, ChevronLeft, ChevronRight, Warehouse,
-  Coins, FileText, Calculator, FlaskConical, Ship, Landmark,
+  Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -110,6 +110,7 @@ const sections: Section[] = [
     items: [
       { to: '/devolucoes', label: 'Devoluções', icon: Undo2, resource: 'devolucoes' },
       { to: '/reembolso', label: 'Reembolso', icon: Receipt, resource: 'reembolso' },
+      { to: '/chamados', label: 'Chamados', icon: Headset, resource: 'chamados' },
       { to: '/notas-fiscais', label: 'Notas Fiscais', icon: FileText, resource: 'notas_fiscais' },
     ],
   },

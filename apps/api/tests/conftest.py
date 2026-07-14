@@ -316,6 +316,7 @@ _CLEANUP_TABLES = (
     "companies",
     "faturas",
     "automacoes",
+    "chamados",
     "user_settings",
     "users",
 )
