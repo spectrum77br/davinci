@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Date, ForeignKey, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -43,3 +43,13 @@ class StockCheck(Base, TimestampMixin):
         Boolean, nullable=False, server_default=text("false")
     )
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Saldo CONGELADO no ato da conferência (só section='estoque').
+    # products.stock/reserved_stock são AO VIVO (saldoVirtualTotal do
+    # Bling), então abrir um dia passado mostrava o saldo de hoje. Quando o
+    # operador tica conferido, gravamos aqui o saldo virtual + reserva
+    # daquele instante — assim a aba Estoque, num dia passado, mostra o que
+    # existia NAQUELE dia (um item conferido com 0 continua 0 mesmo depois
+    # que chega estoque). NULL em conferências de pedido/envio, antigas, ou
+    # destickadas.
+    saldo_virtual: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reserved: Mapped[int | None] = mapped_column(Integer, nullable=True)

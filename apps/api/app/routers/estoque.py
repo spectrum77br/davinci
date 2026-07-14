@@ -224,6 +224,12 @@ async def list_estoque_produtos(
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
     window_start = datetime.combine(data_inicio, time.min, tzinfo=UTC)
     window_end = datetime.combine(data_fim, time.max, tzinfo=UTC)
+    # Dia PASSADO (data_fim < hoje SP): a coluna Saldo vem do valor
+    # CONGELADO na conferência (stock_checks.saldo_virtual/reserved), não do
+    # products.stock ao vivo. Hoje/futuro segue ao vivo. A aba manda
+    # data_inicio == data_fim (dia único), então data_fim é o "dia" olhado.
+    today = datetime.now(_BRT).date()
+    is_historical = data_fim < today
 
     # `formato='S'` should already exclude kits, but prod data has some
     # compound SKUs ("x009.ci+a001.ci") sneaking through with the
@@ -238,8 +244,11 @@ async def list_estoque_produtos(
         # OR across each tag's pattern — operator with [ci, ra] sees
         # products ending in .ci OR .ra.
         where.append(or_(*[_sql_clause_for_tag(Product.sku, t) for t in tags]))
+    # Em dia passado o saldo efetivo vem do congelado, então o filtro
+    # com/sem-estoque roda em Python (abaixo), sobre o saldo congelado — não
+    # no SQL sobre products.stock (ao vivo). Hoje: filtra no SQL, ao vivo.
     stock_clause = _stock_filter_clause(estoque_filter)
-    if stock_clause is not None:
+    if stock_clause is not None and not is_historical:
         where.append(stock_clause)
 
     products = (
@@ -259,6 +268,39 @@ async def list_estoque_produtos(
         }
 
     skus = [p.sku for p in products if p.sku]
+
+    # Dia passado: puxa o saldo CONGELADO na conferência daquele dia. Só
+    # existe pros SKUs que foram ticados conferido (a rotina confere tudo
+    # todo dia → cobertura total). `updated_at` asc: a conferência mais
+    # recente sobrescreve no dict (relevante quando o admin/gerente vê as
+    # conferências de vários operadores agregadas). Não-admin: só as suas.
+    frozen: dict[str, tuple[int, int]] = {}
+    if is_historical and skus:
+        frozen_where = [
+            StockCheck.section == "estoque",
+            StockCheck.reference_date == data_fim,
+            StockCheck.conferido.is_(True),
+            StockCheck.saldo_virtual.isnot(None),
+            StockCheck.reference_id.in_(skus),
+        ]
+        if not _user_sees_all_checks(user):
+            frozen_where.append(StockCheck.user_id == user.id)
+        frozen_rows = (
+            await session.execute(
+                select(
+                    StockCheck.reference_id,
+                    StockCheck.saldo_virtual,
+                    StockCheck.reserved,
+                )
+                .where(and_(*frozen_where))
+                .order_by(StockCheck.updated_at.asc())
+            )
+        ).all()
+        frozen = {
+            r.reference_id: (int(r.saldo_virtual or 0), int(r.reserved or 0))
+            for r in frozen_rows
+        }
+
     movements = (
         await session.execute(
             select(
@@ -335,11 +377,23 @@ async def list_estoque_produtos(
     result: list[dict[str, Any]] = []
     for p in products:
         slot = by_sku.get(p.sku, {})
-        virtual = int(p.stock or 0)
-        reserved = int(p.reserved_stock or 0)
+        # Dia passado + SKU conferido → saldo CONGELADO daquele dia.
+        # Senão (hoje, ou dia passado sem conferência) → saldo ao vivo.
+        congelado = p.sku in frozen  # `frozen` só é populado em dia passado
+        if congelado:
+            virtual, reserved = frozen[p.sku]
+        else:
+            virtual = int(p.stock or 0)
+            reserved = int(p.reserved_stock or 0)
+        # Dia passado: com/sem-estoque filtra pelo saldo EFETIVO (o clause
+        # SQL sobre products.stock foi pulado lá em cima justamente por isto).
+        if is_historical and estoque_filter == "com" and virtual <= 0:
+            continue
+        if is_historical and estoque_filter == "sem" and virtual > 0:
+            continue
         # `Product.stock` is the VIRTUAL balance (Bling saldoVirtualTotal).
         # The operator's "saldo atual" column wants the FÍSICO total —
-        # virtual + reserved reconstructs that. No new column needed.
+        # virtual + reserved reconstructs that.
         saldo_fisico = virtual + reserved
         result.append({
             "sku": p.sku,
@@ -352,6 +406,7 @@ async def list_estoque_produtos(
             "saldo_virtual": virtual,
             "reserva": reserved,
             "conferido": checks.get(p.sku, False),
+            "saldo_congelado": congelado,
         })
 
     return {
@@ -950,6 +1005,26 @@ async def toggle_estoque_check(
     # ✓/✗ but can't toggle. The other two sections are operator-editable.
     if section == "envio" and user.role != UserRole.ADMIN:
         raise HTTPException(403, detail={"code": "admin_only"})
+
+    # Congela o saldo no ato da conferência da aba Estoque: products.stock /
+    # reserved_stock são AO VIVO, então sem isto um dia passado mostraria o
+    # saldo de hoje. Gravamos o saldo do instante do ✓ (reference_id = SKU).
+    # Ao destickar (conferido=False), limpamos → volta ao comportamento ao
+    # vivo. Só section='estoque' (pedido/envio não têm coluna de saldo).
+    frozen_virtual: int | None = None
+    frozen_reserved: int | None = None
+    if section == "estoque" and conferido:
+        prod = (
+            await session.execute(
+                select(Product.stock, Product.reserved_stock).where(
+                    Product.sku == reference_id
+                )
+            )
+        ).first()
+        if prod is not None:
+            frozen_virtual = int(prod.stock or 0)
+            frozen_reserved = int(prod.reserved_stock or 0)
+
     existing = (
         await session.execute(
             select(StockCheck).where(
@@ -970,12 +1045,18 @@ async def toggle_estoque_check(
                 reference_date=reference_date,
                 conferido=conferido,
                 observacao=observacao,
+                saldo_virtual=frozen_virtual,
+                reserved=frozen_reserved,
             )
         )
     else:
         existing.conferido = conferido
         if observacao is not None:
             existing.observacao = observacao or None
+        if section == "estoque":
+            # Recongela ao (re)confirmar; limpa (None) ao destickar.
+            existing.saldo_virtual = frozen_virtual
+            existing.reserved = frozen_reserved
 
     # Trava permanente do badge `conferencia_estoque` quando admin
     # finaliza o dia (✓ em section='envio'). Migration 0134. Lock NÃO
