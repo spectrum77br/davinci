@@ -19,7 +19,12 @@ import pytest
 import respx
 
 from app.services.marketplaces.base import SyncStatus
-from app.services.marketplaces.tiktok import TIKTOK_BASE_URL, TikTokClient
+from app.services.marketplaces.tiktok import (
+    TIKTOK_AUTH_BASE,
+    TIKTOK_BASE_URL,
+    TikTokClient,
+    _norm_expiry,
+)
 
 
 def _creds() -> dict[str, Any]:
@@ -255,3 +260,86 @@ async def test_invalid_price_is_skipped_no_http() -> None:
         assert len(router.calls) == 0
     assert result.status == SyncStatus.SKIPPED
     assert result.error_code == "invalid_price"
+
+
+# ---------------------------------------------------------------- token expiry
+
+
+def test_norm_expiry_absolute_vs_duration() -> None:
+    now = 1_000_000
+    # TikTok returns the field as an ABSOLUTE epoch -> kept as-is (not doubled).
+    assert _norm_expiry(now + 604800, now) == now + 604800
+    # A small value that reads as a duration is added to now.
+    assert _norm_expiry(3600, now) == now + 3600
+    assert _norm_expiry(0, now) == 0
+    assert _norm_expiry(None, now) == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_treats_expire_in_as_absolute_epoch() -> None:
+    """Regression: `access_token_expire_in` is an absolute epoch, so the
+    stored expiry must equal it — not `now + it` (which pushed it to ~2083 and
+    disabled every refresh path)."""
+    now = int(time.time())
+    abs_exp = now + 604800  # +7 days, as TikTok actually sends it
+    with respx.mock(base_url=TIKTOK_AUTH_BASE) as router:
+        router.get("/api/v2/token/refresh").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "message": "success",
+                    "data": {
+                        "access_token": "new",
+                        "refresh_token": "newref",
+                        "access_token_expire_in": abs_exp,
+                        "refresh_token_expire_in": now + 5_000_000,
+                    },
+                },
+            )
+        )
+        data = await TikTokClient.refresh_access_token("ref", "ak", "as")
+    assert data["token_expires_at"] == abs_exp
+    assert abs(data["token_expires_at"] - now - 604800) < 5
+
+
+@pytest.mark.asyncio
+async def test_expired_creds_forces_refresh_and_retries() -> None:
+    """A 200-OK body carrying code 105002 (expired token) must force a refresh
+    and retry the call once, transparently — the self-heal for the silent
+    token death."""
+    now = int(time.time())
+    persisted: dict = {}
+
+    async def _on_refresh(c: dict) -> None:
+        persisted.update(c)
+
+    client = TikTokClient(_creds(), on_token_refresh=_on_refresh)
+    with respx.mock(assert_all_called=False) as router:
+        router.post(f"{TIKTOK_BASE_URL}/promotion/202309/activities/search").mock(
+            side_effect=[
+                httpx.Response(200, json={"code": 105002, "message": "Expired credentials"}),
+                httpx.Response(200, json=_search_body([])),
+            ]
+        )
+        router.get(f"{TIKTOK_AUTH_BASE}/api/v2/token/refresh").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "access_token": "fresh",
+                        "refresh_token": "r2",
+                        "access_token_expire_in": now + 604800,
+                        "refresh_token_expire_in": now + 5_000_000,
+                    },
+                },
+            )
+        )
+        resp = await client._post(
+            "/promotion/202309/activities/search",
+            {"status": "ONGOING", "page_size": 100},
+        )
+    assert resp["code"] == 0
+    assert client.access_token == "fresh"
+    assert persisted.get("access_token") == "fresh"

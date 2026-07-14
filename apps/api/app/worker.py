@@ -798,7 +798,10 @@ async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_
 
                 async def _persist(new_creds: dict, _it=it, _s=s) -> None:
                     _it.credentials = encrypt_json(new_creds)
-                    exp = new_creds.get("expires_at")
+                    # TikTok stores `token_expires_at`; Shopee/ML use
+                    # `expires_at`. Read whichever is present so the column
+                    # mirrors the real expiry across platforms.
+                    exp = new_creds.get("token_expires_at") or new_creds.get("expires_at")
                     if exp:
                         _it.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
                     await _s.commit()

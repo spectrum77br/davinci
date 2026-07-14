@@ -516,7 +516,8 @@ async def push_one(
 
     async def _persist_refresh(new_creds: dict) -> None:
         integration.credentials = encrypt_json(new_creds)
-        exp = new_creds.get("expires_at")
+        # TikTok stores `token_expires_at`; Shopee/ML use `expires_at`.
+        exp = new_creds.get("token_expires_at") or new_creds.get("expires_at")
         if exp:
             integration.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
         await session.commit()

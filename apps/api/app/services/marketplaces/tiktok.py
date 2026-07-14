@@ -46,6 +46,24 @@ TIKTOK_AUTH_BASE = "https://auth.tiktok-shops.com"
 TIKTOK_AUTHORIZE_BASE = "https://services.tiktokshop.com/open/authorize"
 TOKEN_REFRESH_BUFFER_SEC = 300  # refresh if expiring within 5 min
 
+# TikTok returns `access_token_expire_in` / `refresh_token_expire_in` as an
+# ABSOLUTE epoch timestamp (the instant of expiry), not a relative duration —
+# e.g. an access token issued now comes back as `now + 604800` (7 days). The
+# old code did `now + expire_in`, doubling it to ~year 2083, which made every
+# refresh path (lazy, cron, column) believe the token was valid for decades
+# and never refresh it — so tokens silently died at their real 7-day expiry
+# and all pushes failed with 105002 "Expired credentials". Normalise both
+# conventions defensively: a value already in the future is treated as an
+# absolute expiry; a small value is treated as a duration from `now`.
+_EXPIRED_CREDS_CODES = {105002, 36009005}
+
+
+def _norm_expiry(value: Any, now: int) -> int:
+    v = int(value or 0)
+    if v <= 0:
+        return 0
+    return v if v > now else now + v
+
 # Explicit connect+read timeout for every product/search/inventory call. The
 # bare `timeout=15.0` used before is a single number httpx spreads across all
 # phases, but its read timeout is *per socket read* (it resets on each byte),
@@ -135,9 +153,11 @@ class TikTokClient:
             raise RuntimeError(f"TikTok token/get failed: {body.get('message')}")
         data = body.get("data") or {}
         now = int(time.time())
-        data["token_expires_at"] = now + int(data.get("access_token_expire_in") or 0)
-        data["refresh_token_expires_at"] = now + int(
-            data.get("refresh_token_expire_in") or 0
+        data["token_expires_at"] = _norm_expiry(
+            data.get("access_token_expire_in"), now
+        )
+        data["refresh_token_expires_at"] = _norm_expiry(
+            data.get("refresh_token_expire_in"), now
         )
         return data
 
@@ -162,9 +182,11 @@ class TikTokClient:
             raise RuntimeError(f"TikTok token/refresh failed: {body.get('message')}")
         data = body.get("data") or {}
         now = int(time.time())
-        data["token_expires_at"] = now + int(data.get("access_token_expire_in") or 0)
-        data["refresh_token_expires_at"] = now + int(
-            data.get("refresh_token_expire_in") or 0
+        data["token_expires_at"] = _norm_expiry(
+            data.get("access_token_expire_in"), now
+        )
+        data["refresh_token_expires_at"] = _norm_expiry(
+            data.get("refresh_token_expire_in"), now
         )
         return data
 
@@ -202,27 +224,17 @@ class TikTokClient:
 
     # ---------------------------------------------------------------- token freshness
 
-    async def _ensure_fresh_token(self) -> None:
-        """Refresh access_token before requests if it's near expiry.
-
-        Skipped when refresh_token or token_expires_at is missing (e.g. legacy
-        creds populated by the cutover migration without an absolute expiry).
-        """
-        exp = self.token_expires_at
+    async def refresh(self) -> None:
+        """Force a token refresh via the refresh_token and persist the new
+        tokens through the `on_token_refresh` callback. Used by the periodic
+        token-refresh cron and as the self-heal on an expired-credentials
+        response. No-op when the refresh_token / app creds are missing."""
         rt = self.refresh_token_value
-        if not exp or not rt or not self.app_key or not self.app_secret:
+        if not rt or not self.app_key or not self.app_secret:
             return
-        if exp - int(time.time()) > TOKEN_REFRESH_BUFFER_SEC:
-            return
-        try:
-            data = await TikTokClient.refresh_access_token(
-                rt, self.app_key, self.app_secret
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("tiktok_refresh_failed", err=str(e))
-            return
-        # Merge the new tokens into our creds + notify the caller so it can
-        # persist them to the integration row.
+        data = await TikTokClient.refresh_access_token(
+            rt, self.app_key, self.app_secret
+        )
         self.creds.update(
             {
                 "access_token": data.get("access_token") or self.creds.get("access_token"),
@@ -236,6 +248,27 @@ class TikTokClient:
                 await self._on_refresh(self.creds)
             except Exception as e:  # noqa: BLE001
                 logger.warning("tiktok_refresh_callback_failed", err=str(e))
+
+    async def _ensure_fresh_token(self, *, force: bool = False) -> None:
+        """Refresh access_token before requests if it's near expiry (or when
+        `force` is set, e.g. after an expired-credentials response).
+
+        Skipped when refresh_token is missing (e.g. legacy creds). When not
+        forcing, also skipped if the stored expiry is still comfortably ahead.
+        """
+        rt = self.refresh_token_value
+        if not rt or not self.app_key or not self.app_secret:
+            return
+        if not force:
+            exp = self.token_expires_at
+            if not exp:
+                return
+            if exp - int(time.time()) > TOKEN_REFRESH_BUFFER_SEC:
+                return
+        try:
+            await self.refresh()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("tiktok_refresh_failed", err=str(e))
 
     # ---------------------------------------------------------------- signing
 
@@ -316,8 +349,18 @@ class TikTokClient:
 
     # ---------------------------------------------------------------- HTTP helpers
 
+    @staticmethod
+    def _expired_creds(resp: dict) -> bool:
+        """True when a 200-OK TikTok body signals an expired access token
+        (code 105002 / 36009005) — the trigger to force-refresh and retry."""
+        return resp.get("code") in _EXPIRED_CREDS_CODES
+
     async def _get(
-        self, path: str, extra_params: dict[str, str] | None = None
+        self,
+        path: str,
+        extra_params: dict[str, str] | None = None,
+        *,
+        _retried: bool = False,
     ) -> dict:
         await self._ensure_fresh_token()
         params = self._build_get_params(path, extra_params)
@@ -331,7 +374,11 @@ class TikTokClient:
                 },
             )
         if r.status_code == 200:
-            return r.json()
+            body = r.json()
+            if self._expired_creds(body) and not _retried:
+                await self._ensure_fresh_token(force=True)
+                return await self._get(path, extra_params, _retried=True)
+            return body
         return {"code": r.status_code, "message": r.text[:500]}
 
     async def _post(
@@ -339,6 +386,8 @@ class TikTokClient:
         path: str,
         body: dict | None = None,
         extra_params: dict[str, str] | None = None,
+        *,
+        _retried: bool = False,
     ) -> dict:
         await self._ensure_fresh_token()
         body_str = json.dumps(body or {}, separators=(",", ":"), ensure_ascii=False)
@@ -354,7 +403,11 @@ class TikTokClient:
                 },
             )
         if r.status_code == 200:
-            return r.json()
+            resp = r.json()
+            if self._expired_creds(resp) and not _retried:
+                await self._ensure_fresh_token(force=True)
+                return await self._post(path, body, extra_params, _retried=True)
+            return resp
         return {"code": r.status_code, "message": r.text[:500]}
 
     async def _put(
@@ -362,6 +415,8 @@ class TikTokClient:
         path: str,
         body: dict | None = None,
         extra_params: dict[str, str] | None = None,
+        *,
+        _retried: bool = False,
     ) -> dict:
         await self._ensure_fresh_token()
         body_str = json.dumps(body or {}, separators=(",", ":"), ensure_ascii=False)
@@ -377,7 +432,11 @@ class TikTokClient:
                 },
             )
         if r.status_code == 200:
-            return r.json()
+            resp = r.json()
+            if self._expired_creds(resp) and not _retried:
+                await self._ensure_fresh_token(force=True)
+                return await self._put(path, body, extra_params, _retried=True)
+            return resp
         return {"code": r.status_code, "message": r.text[:500]}
 
     # ---------------------------------------------------------------- MarketplaceClient interface
