@@ -49,9 +49,13 @@ _SKU_TAG_OVERRIDES: dict[str, str] = {
     "dg023.us": "sa",
     "dg061.us": "sa",
     "zr010.us": "sa",
-    # 2 malas que ficaram com sufixo .us
+    # 3 malas que ficaram com sufixo .us
     "b000.us": "mala",
     "z0097.us": "mala",
+    # z0207.mala.us = "Mala Losangulo M4 ... Avariada AVULSO SALVADO": o
+    # sufixo .us venceria o infixo .mala e jogava a mala pro estoque de
+    # usados. Override manda pra tag mala.
+    "z0207.mala.us": "mala",
 }
 
 _MALA_RE = re.compile(r"^b[0-9]")
