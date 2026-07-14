@@ -193,6 +193,67 @@ async def test_patch_not_found(
 
 
 @pytest.mark.asyncio
+async def test_atualizar_meli_404(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    r = await client.post(f"/api/logistica/{uuid.uuid4()}/atualizar-meli")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "logistica_not_found"
+
+
+@pytest.mark.asyncio
+async def test_atualizar_meli_nao_ml(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    # Linha de outra plataforma: enriquecer não se aplica → 422 logistica_nao_ml.
+    auth_as(admin)
+    r = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Shopee", "conta": "loja", "pedido_marketplace": "SP123"},
+    )
+    cid = r.json()["id"]
+    r = await client.post(f"/api/logistica/{cid}/atualizar-meli")
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "logistica_nao_ml"
+
+
+@pytest.mark.asyncio
+async def test_atualizar_meli_sem_pedido(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    # ML sem pedido de marketplace → 422 logistica_sem_pedido.
+    auth_as(admin)
+    r = await client.post(
+        "/api/logistica", json={"plataforma": "Mercado Livre", "conta": "inova"}
+    )
+    cid = r.json()["id"]
+    r = await client.post(f"/api/logistica/{cid}/atualizar-meli")
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "logistica_sem_pedido"
+
+
+@pytest.mark.asyncio
+async def test_atualizar_meli_sem_integracao(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    # ML com pedido mas conta sem integração ML cadastrada → 422 logistica_sem_integracao.
+    auth_as(admin)
+    r = await client.post(
+        "/api/logistica",
+        json={
+            "plataforma": "Mercado Livre",
+            "conta": "conta-inexistente-xyz",
+            "pedido_marketplace": "2000012345",
+        },
+    )
+    cid = r.json()["id"]
+    r = await client.post(f"/api/logistica/{cid}/atualizar-meli")
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "logistica_sem_integracao"
+
+
+@pytest.mark.asyncio
 async def test_sugestao_candidatos_ordenados(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
 ):

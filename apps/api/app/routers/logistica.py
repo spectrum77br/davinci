@@ -37,7 +37,7 @@ from app.schemas.logistica import (
     SugestaoIn,
     SugestaoOut,
 )
-from app.services import logistica_rules
+from app.services import logistica_meli, logistica_rules
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/logistica", tags=["logistica"])
@@ -52,6 +52,7 @@ def _to_out(c: Logistica) -> LogisticaOut:
         plataforma=c.plataforma,
         conta=c.conta,
         meli_status=c.meli_status or {},
+        status_plataforma=logistica_rules.assinatura_pt(c.meli_status or {}),
         rastreio=c.rastreio,
         localizacao=c.localizacao,
         status_bling=c.status_bling,
@@ -233,6 +234,32 @@ async def create_logistica(
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_created", id=str(c.id), pedido_bling=c.pedido_bling)
+    return _to_out(c)
+
+
+@router.post("/{logistica_id}/atualizar-meli", response_model=LogisticaOut)
+async def atualizar_meli(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> LogisticaOut:
+    """Puxa a assinatura de status do Meli (8 campos) da API do ML e grava em
+    `meli_status`. Só vale pra pedidos de Mercado Livre com pedido de
+    marketplace e conta com integração ML."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        await logistica_meli.enrich_row(session, c)
+    except logistica_meli.MeliEnrichError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_meli_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
+        raise HTTPException(502, detail={"code": "logistica_meli_erro"}) from e
+    await session.commit()
+    await session.refresh(c)
     return _to_out(c)
 
 

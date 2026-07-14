@@ -125,6 +125,125 @@ FIELD_OPTIONS: dict[str, list[str]] = {
     ],
 }
 
+# Tradução PT dos valores crus que a API do Meli devolve (tokens em inglês).
+# Chaveado por campo → {token: rótulo}. `traduzir_valor` cai no token cru
+# quando não há tradução (ex.: substatus novo que o Meli passe a emitir).
+VALUE_LABELS_PT: dict[str, dict[str, str]] = {
+    "order_status": {
+        "paid": "Pago",
+        "cancelled": "Cancelado",
+        "confirmed": "Confirmado",
+        "payment_required": "Aguardando pagamento",
+        "payment_in_process": "Pagamento em processo",
+        "partially_paid": "Parcialmente pago",
+        "partially_refunded": "Reembolso parcial",
+        "invalid": "Inválido",
+    },
+    "ship_status": {
+        "pending": "Pendente",
+        "handling": "Em preparação",
+        "ready_to_ship": "Pronto p/ envio",
+        "shipped": "Enviado",
+        "delivered": "Entregue",
+        "not_delivered": "Não entregue",
+        "cancelled": "Cancelado",
+        "to_be_agreed": "A combinar",
+        "active": "Ativo",
+    },
+    "ship_substatus": {
+        "ready_to_print": "Etiqueta pronta p/ imprimir",
+        "printed": "Etiqueta impressa",
+        "in_packing_list": "Na lista de coleta",
+        "invoice_pending": "Aguardando NF",
+        "picked_up": "Coletado",
+        "in_hub": "No centro de distribuição",
+        "dropped_off": "Entregue à agência",
+        "first_mile": "Primeira milha",
+        "buffered": "Programado",
+        "out_for_delivery": "Saiu p/ entrega",
+        "at_the_door": "Na porta / rota de entrega",
+        "delivered": "Entregue",
+        "receiver_absent": "Destinatário ausente",
+        "not_visited": "Não visitado",
+        "delayed": "Atrasado",
+        "stale": "Parado",
+        "lost": "Perdido",
+        "bad_address": "Endereço incorreto",
+        "not_localized": "Endereço não localizado",
+        "refused_delivery": "Entrega recusada",
+        "confiscated": "Confiscado",
+        "fraudulent": "Fraude",
+        "retained": "Retido",
+        "waiting_authority": "Retido na alfândega",
+        "waiting_for_withdrawal": "Aguardando retirada",
+        "no_action_taken": "Sem ação",
+        "not_picked_up_at_hub": "Não coletado no hub",
+        "claimed_me": "Reclamação aberta",
+        "returned": "Devolvido",
+        "returned_to_hub": "Devolvido ao hub",
+        "returning_to_hub": "Retornando ao hub",
+        "returning_to_sender": "Retornando ao remetente",
+        "soon_to_be_returned": "Em devolução",
+        "soon_deliver": "A caminho",
+    },
+    "cancel_group": {
+        "buyer": "Comprador",
+        "seller": "Vendedor",
+        "mediations": "Mediação",
+        "delivery": "Entrega",
+        "fraud": "Fraude",
+        "internal": "Interno",
+        "item": "Item",
+        "shipment": "Envio",
+        "respondent": "Vendedor",
+        "complainant": "Comprador",
+    },
+    "return_status": {
+        "pending": "Pendente",
+        "ready_to_ship": "Pronto p/ envio",
+        "shipped": "Enviado",
+        "delivered": "Entregue",
+        "cancelled": "Cancelado",
+    },
+    "claim_stage": {
+        "claim": "Reclamação",
+        "dispute": "Mediação",
+        "recontact": "Recontato",
+        "none": "Nenhum",
+    },
+    "claim_status": {
+        "opened": "Aberta",
+        "closed": "Fechada",
+    },
+    "benefited": {
+        "complainant": "Comprador",
+        "respondent": "Vendedor",
+    },
+}
+
+
+def traduzir_valor(field: str, value: str | None) -> str:
+    """Rótulo PT de um valor cru do Meli; cai no próprio token quando não há
+    tradução cadastrada."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    return VALUE_LABELS_PT.get(field, {}).get(v, v)
+
+
+def assinatura_pt(meli_status: dict[str, str] | None) -> str:
+    """Assinatura em PT p/ exibir na coluna "Status Plataforma": os valores
+    não-vazios dos 8 campos (na ORDEM fixa), traduzidos, juntados por " | "."""
+    if not meli_status:
+        return ""
+    partes = [
+        traduzir_valor(f, meli_status.get(f))
+        for f in FIELD_ORDER
+        if (meli_status.get(f) or "").strip()
+    ]
+    return " | ".join(p for p in partes if p)
+
+
 # 223 linhas curadas (campos + status_bling resultante).
 RULES: list[dict[str, str]] = [
     {"order_status": "cancelled", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "internal", "return_status": "delivered", "claim_stage": "dispute", "claim_status": "closed", "benefited": "complainant", "status_bling": "Aguardando Devolução"},

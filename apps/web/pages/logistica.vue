@@ -22,6 +22,7 @@ type Logistica = {
   plataforma: string | null
   conta: string | null
   meli_status: MeliStatus
+  status_plataforma: string
   rastreio: string | null
   localizacao: string | null
   status_bling: string | null
@@ -230,13 +231,41 @@ function fmtDate(s: string | null) {
   return new Date(y, m - 1, d).toLocaleDateString('pt-BR')
 }
 
-// "STATUS PLATAFORMA" = assinatura dos status do Meli preenchidos, join " | ".
+// "STATUS PLATAFORMA" = assinatura em PT vinda do backend (traduz os status do
+// Meli). Fallback pro join local dos tokens crus se o backend não mandar.
 function assinatura(c: Logistica): string {
+  if (c.status_plataforma) return c.status_plataforma
   const order = opcoes.value.field_order.length
     ? opcoes.value.field_order
     : Object.keys(c.meli_status || {})
   const parts = order.map((f) => c.meli_status?.[f]).filter(Boolean)
   return parts.join(' | ')
+}
+
+function isMl(c: Logistica): boolean {
+  return ['mercado livre', 'mercadolivre', 'ml'].includes(
+    (c.plataforma || '').trim().toLowerCase(),
+  )
+}
+
+// Puxa a assinatura do Meli (8 campos) da API do ML pra uma linha.
+const refreshingMeli = ref<Set<string>>(new Set())
+async function atualizarMeli(c: Logistica) {
+  refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
+  try {
+    const updated = await api<Logistica>(`/api/logistica/${c.id}/atualizar-meli`, {
+      method: 'POST',
+    })
+    const i = rows.value.findIndex((r) => r.id === c.id)
+    if (i >= 0) rows.value[i] = updated
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = code
+  } finally {
+    const s = new Set(refreshingMeli.value)
+    s.delete(c.id)
+    refreshingMeli.value = s
+  }
 }
 
 // ================= Aba Status =================
@@ -428,7 +457,20 @@ async function removeStatus() {
               <td class="px-3 py-2 whitespace-nowrap">{{ c.pedido_marketplace || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.plataforma || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.conta || '—' }}</td>
-              <td class="px-3 py-2 text-muted-foreground text-xs max-w-[280px] break-words">{{ assinatura(c) || '—' }}</td>
+              <td class="px-3 py-2 text-muted-foreground text-xs max-w-[280px] break-words">
+                <div class="flex items-start gap-1.5">
+                  <span class="flex-1 break-words">{{ assinatura(c) || '—' }}</span>
+                  <button
+                    v-if="canEdit && isMl(c) && c.pedido_marketplace"
+                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    title="Atualizar status do Meli"
+                    :disabled="refreshingMeli.has(c.id)"
+                    @click.stop="atualizarMeli(c)"
+                  >
+                    <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
+                  </button>
+                </div>
+              </td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.rastreio || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.localizacao || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">

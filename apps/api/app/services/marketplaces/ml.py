@@ -238,6 +238,30 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_claim(self, claim_id: str | int) -> dict:
+        """Fetch a post-purchase claim/mediation detail.
+
+        Returns `{id, type, stage, status, resolution: {benefited, reason, ...},
+        players: [{role, type}], ...}`. `stage` ∈ claim/dispute/recontact/none;
+        `status` ∈ opened/closed; `resolution.benefited` names the winning side
+        (complainant/respondent). Claim ids come off the order's `mediations`
+        array (`order.mediations[].id`) — ML only lists them there when a
+        post-sale claim/mediation actually opened. Raises on non-2xx (caller
+        soft-fails)."""
+        r = await self._request("GET", f"/post-purchase/v1/claims/{claim_id}")
+        r.raise_for_status()
+        return r.json() or {}
+
+    async def get_claim_returns(self, claim_id: str | int) -> dict | list:
+        """Fetch the return(s) tied to a claim. The return carries its own
+        shipment status (`shipping.status` ∈ ready_to_ship/shipped/delivered/
+        cancelled) which is what the planilha calls `return_status`. Shape
+        varies (single object vs list); the caller normalizes. Raises on
+        non-2xx (soft-failed by caller when a claim has no return)."""
+        r = await self._request("GET", f"/post-purchase/v1/claims/{claim_id}/returns")
+        r.raise_for_status()
+        return r.json() or {}
+
     async def get_billing_order_details(self, order_id: str) -> dict:
         r = await self._request(
             "GET",

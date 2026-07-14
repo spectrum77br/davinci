@@ -12,6 +12,9 @@ class LogisticaOut(BaseModel):
     plataforma: str | None = None
     conta: str | None = None
     meli_status: dict[str, str] = Field(default_factory=dict)
+    # Assinatura em PT p/ exibir na coluna "Status Plataforma" (derivada de
+    # meli_status; vazia quando não há assinatura). O front só renderiza.
+    status_plataforma: str = ""
     rastreio: str | None = None
     localizacao: str | None = None
     status_bling: str | None = None
