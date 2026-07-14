@@ -126,6 +126,32 @@ async def test_build_enrichment_sem_tracking_number():
 
 
 @pytest.mark.asyncio
+async def test_build_enrichment_localizacao_do_substatus():
+    # localizacao = substatus traduzido (proxy do último local); cai no status.
+    client = FakeML(
+        order={"status": "paid", "shipping": {"id": 5}, "mediations": []},
+        shipment={"status": "shipped", "substatus": "out_for_delivery"},
+    )
+    enr = await logistica_meli.build_enrichment(client, "1")
+    assert enr["localizacao"] == "Saiu p/ entrega"
+
+    client2 = FakeML(
+        order={"status": "paid", "shipping": {"id": 5}, "mediations": []},
+        shipment={"status": "shipped", "substatus": ""},
+    )
+    enr2 = await logistica_meli.build_enrichment(client2, "1")
+    assert enr2["localizacao"] == "Enviado"
+
+
+def test_localizacao_pt_prioriza_substatus():
+    assert logistica_rules.localizacao_pt(
+        {"ship_status": "shipped", "ship_substatus": "dropped_off"}
+    ) == "Entregue à agência"
+    assert logistica_rules.localizacao_pt({"ship_status": "delivered"}) == "Entregue"
+    assert logistica_rules.localizacao_pt({}) == ""
+
+
+@pytest.mark.asyncio
 async def test_build_meli_status_sem_reclamacao():
     # Pedido pago/enviado sem mediação: só pedido + envio; claim/returns fora.
     client = FakeML(

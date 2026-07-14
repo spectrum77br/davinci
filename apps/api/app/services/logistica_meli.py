@@ -14,8 +14,9 @@ resto. Aqui montamos os 8 campos (`order_status`, `ship_status`,
   - return_status -> GET /post-purchase/v1/claims/{id}/returns (shipping.status)
 
 Além da assinatura, `build_enrichment` também devolve o `rastreio`
-(`shipment.tracking_number`), gravado em `Logistica.rastreio`. O "último local
-físico" (localização) o ML NÃO expõe — precisa vir direto do Correios/Amazon.
+(`shipment.tracking_number`) e a `localizacao` (proxy do "último local" = o
+substatus/status do envio traduzido pra PT — o ML NÃO expõe o local físico, que
+só existiria no rastreamento direto do Correios/Amazon). Ambos gravados na linha.
 
 Só se aplica a pedidos de Mercado Livre — as outras plataformas têm status
 próprios e a planilha de referência é do Meli. Tudo best-effort: uma chamada de
@@ -160,7 +161,10 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
 
     # Mantém só campos conhecidos (defesa contra tokens estranhos entrando).
     meli = {f: out[f] for f in logistica_rules.FIELD_ORDER if out.get(f)}
-    return {"meli_status": meli, "rastreio": rastreio}
+    # Localização = proxy do "último local" (substatus/status do envio em PT); o
+    # ML não dá o local físico.
+    localizacao = logistica_rules.localizacao_pt(meli) or None
+    return {"meli_status": meli, "rastreio": rastreio, "localizacao": localizacao}
 
 
 async def build_meli_status(client: MercadoLivreClient, order_id: str) -> dict[str, str]:
@@ -238,6 +242,8 @@ async def enrich_row(
     row.meli_status = enr["meli_status"]
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]
+    if enr.get("localizacao"):
+        row.localizacao = enr["localizacao"]
     return True
 
 

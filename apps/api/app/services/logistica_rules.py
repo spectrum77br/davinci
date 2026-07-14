@@ -244,6 +244,17 @@ def assinatura_pt(meli_status: dict[str, str] | None) -> str:
     return " | ".join(p for p in partes if p)
 
 
+def localizacao_pt(meli_status: dict[str, str] | None) -> str:
+    """Proxy do "último local" a partir do envio do Meli: substatus do envio
+    traduzido (mais específico) ou, na falta, o status do envio. O ML NÃO expõe
+    o local físico — isto é a situação do envio na plataforma (opção 3)."""
+    m = meli_status or {}
+    sub = traduzir_valor("ship_substatus", m.get("ship_substatus"))
+    if sub:
+        return sub
+    return traduzir_valor("ship_status", m.get("ship_status"))
+
+
 # 223 linhas curadas (campos + status_bling resultante).
 RULES: list[dict[str, str]] = [
     {"order_status": "cancelled", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "internal", "return_status": "delivered", "claim_stage": "dispute", "claim_status": "closed", "benefited": "complainant", "status_bling": "Aguardando Devolução"},
