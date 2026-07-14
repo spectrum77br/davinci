@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2 } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -51,13 +51,79 @@ async function refresh() {
   loading.value = true
   error.value = null
   try {
-    rows.value = await api<Logistica[]>('/api/logistica')
+    // Por enquanto a aba mostra só Mercado Livre; futuras abas Shopee/Amazon
+    // vão trocar a plataforma. O backend filtra server-side.
+    rows.value = await api<Logistica[]>('/api/logistica?plataforma=ml')
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     loading.value = false
   }
 }
+
+// ---- Busca + filtros (client-side sobre as linhas já carregadas) ----
+const search = ref('')
+const contaFilter = ref('all')
+const statusBlingFilter = ref('all')
+const dataInicioFilter = ref('')
+const dataFimFilter = ref('')
+
+const contas = computed(() =>
+  [...new Set(rows.value.map((c) => c.conta).filter((v): v is string => !!v))].sort((a, b) =>
+    a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }),
+  ),
+)
+const statusBlings = computed(() =>
+  [...new Set(rows.value.map((c) => c.status_bling).filter((v): v is string => !!v))].sort((a, b) =>
+    a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }),
+  ),
+)
+
+const filteredRows = computed(() => {
+  const q = search.value.trim().toLowerCase()
+  const di = dataInicioFilter.value
+  const df = dataFimFilter.value
+  return rows.value.filter((c) => {
+    if (contaFilter.value !== 'all' && (c.conta || '') !== contaFilter.value) return false
+    if (statusBlingFilter.value !== 'all' && (c.status_bling || '') !== statusBlingFilter.value) return false
+    if (di && (!c.data || c.data < di)) return false
+    if (df && (!c.data || c.data > df)) return false
+    if (q) {
+      const hay = [
+        c.pedido_bling,
+        c.pedido_marketplace,
+        c.conta,
+        c.rastreio,
+        c.chamado,
+        c.localizacao,
+        c.status_bling,
+        c.status_plataforma,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+    return true
+  })
+})
+
+function limparFiltros() {
+  search.value = ''
+  contaFilter.value = 'all'
+  statusBlingFilter.value = 'all'
+  dataInicioFilter.value = ''
+  dataFimFilter.value = ''
+}
+
+const filtrosAtivos = computed(
+  () =>
+    !!search.value.trim() ||
+    contaFilter.value !== 'all' ||
+    statusBlingFilter.value !== 'all' ||
+    !!dataInicioFilter.value ||
+    !!dataFimFilter.value,
+)
 
 async function loadOpcoes() {
   try {
@@ -398,7 +464,7 @@ async function removeStatus() {
         :class="tab === 'logistica' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
         @click="tab = 'logistica'"
       >
-        Logística
+        Mercado Livre
       </button>
       <button
         type="button"
@@ -426,6 +492,50 @@ async function removeStatus() {
         sugere os Status Bling que a planilha já viu pra aquela combinação — a decisão final é sua.
       </p>
 
+      <!-- Busca + filtros -->
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="relative">
+          <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+          <input
+            v-model="search"
+            class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
+            placeholder="buscar pedido, conta, rastreio, chamado…"
+          />
+        </div>
+        <select v-model="contaFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
+          <option value="all">todas contas</option>
+          <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
+        </select>
+        <select v-model="statusBlingFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
+          <option value="all">todos status bling</option>
+          <option v-for="s in statusBlings" :key="s" :value="s">{{ s }}</option>
+        </select>
+        <div class="flex items-center gap-1.5 h-9 rounded-md border bg-background px-2" title="Período da data">
+          <span class="text-xs text-muted-foreground">de</span>
+          <input
+            v-model="dataInicioFilter"
+            type="date"
+            :max="dataFimFilter || undefined"
+            title="Data inicial"
+            class="bg-transparent text-sm focus:outline-none"
+          />
+          <span class="text-xs text-muted-foreground">até</span>
+          <input
+            v-model="dataFimFilter"
+            type="date"
+            :min="dataInicioFilter || undefined"
+            title="Data final"
+            class="bg-transparent text-sm focus:outline-none"
+          />
+        </div>
+        <Button v-if="filtrosAtivos" size="sm" variant="ghost" @click="limparFiltros">
+          <X class="size-4 mr-1" /> limpar
+        </Button>
+        <span class="text-xs text-muted-foreground ml-auto">
+          {{ filteredRows.length }} de {{ rows.length }}
+        </span>
+      </div>
+
       <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
 
       <!-- Desktop table -->
@@ -447,7 +557,7 @@ async function removeStatus() {
           </thead>
           <tbody>
             <tr
-              v-for="c in rows"
+              v-for="c in filteredRows"
               :key="c.id"
               class="border-t hover:bg-muted/20 cursor-pointer"
               @click="openEdit(c)"
@@ -479,8 +589,10 @@ async function removeStatus() {
               </td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.chamado || '—' }}</td>
             </tr>
-            <tr v-if="!loading && rows.length === 0">
-              <td colspan="10" class="px-3 py-6 text-center text-muted-foreground">nenhum caso</td>
+            <tr v-if="!loading && filteredRows.length === 0">
+              <td colspan="10" class="px-3 py-6 text-center text-muted-foreground">
+                {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
+              </td>
             </tr>
           </tbody>
         </table>
@@ -489,7 +601,7 @@ async function removeStatus() {
       <!-- Mobile cards -->
       <div class="md:hidden space-y-2">
         <div
-          v-for="c in rows"
+          v-for="c in filteredRows"
           :key="c.id"
           class="border rounded-md p-3 space-y-2 hover:bg-muted/20 cursor-pointer"
           @click="openEdit(c)"
@@ -509,8 +621,8 @@ async function removeStatus() {
             <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || '—' }}</div>
           </div>
         </div>
-        <div v-if="!loading && rows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
-          nenhum caso
+        <div v-if="!loading && filteredRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
+          {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
         </div>
       </div>
     </template>

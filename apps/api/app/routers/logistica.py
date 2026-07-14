@@ -18,7 +18,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,16 @@ from app.services import logistica_meli, logistica_rules
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/logistica", tags=["logistica"])
+
+# Chave canônica -> rótulo gravado em `logistica.plataforma` (o filtro da aba por
+# marketplace manda a chave; futuras abas Shopee/Amazon só trocam o valor).
+_PLATAFORMA_LABELS = {
+    "ml": "Mercado Livre",
+    "shopee": "Shopee",
+    "amazon": "Amazon",
+    "tiktok": "TikTok",
+    "magalu": "Magalu",
+}
 
 
 def _to_out(c: Logistica) -> LogisticaOut:
@@ -201,11 +211,15 @@ async def delete_status(
 async def list_logistica(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("logistica", "view"))],
+    plataforma: Annotated[str | None, Query()] = None,
 ) -> list[LogisticaOut]:
     # Mais recentes primeiro (data desc, depois criação desc).
     stmt = select(Logistica).order_by(
         desc(Logistica.data.is_(None)), desc(Logistica.data), desc(Logistica.created_at)
     )
+    if plataforma:
+        label = _PLATAFORMA_LABELS.get(plataforma.strip().lower(), plataforma)
+        stmt = stmt.where(Logistica.plataforma == label)
     rows = (await session.execute(stmt)).scalars().all()
     return [_to_out(c) for c in rows]
 

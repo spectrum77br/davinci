@@ -114,6 +114,32 @@ async def test_crud_lifecycle(
 
 
 @pytest.mark.asyncio
+async def test_list_filtra_por_plataforma(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    r = await client.post(
+        "/api/logistica", json={"pedido_bling": "ML1", "plataforma": "Mercado Livre"}
+    )
+    assert r.status_code == 201
+    ml_id = r.json()["id"]
+    r = await client.post("/api/logistica", json={"pedido_bling": "SP1", "plataforma": "Shopee"})
+    assert r.status_code == 201
+    sp_id = r.json()["id"]
+
+    # ?plataforma=ml → só Mercado Livre (chave canônica → rótulo).
+    r = await client.get("/api/logistica?plataforma=ml")
+    assert r.status_code == 200
+    ids = {c["id"] for c in r.json()}
+    assert ml_id in ids
+    assert sp_id not in ids
+
+    # sem filtro → traz as duas.
+    ids = {c["id"] for c in (await client.get("/api/logistica")).json()}
+    assert {ml_id, sp_id} <= ids
+
+
+@pytest.mark.asyncio
 async def test_status_crud(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
 ):
