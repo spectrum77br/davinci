@@ -256,3 +256,5 @@ class DevolutionLookupOut(BaseModel):
     bairro_destino: str | None = None
     cidade_destino: str | None = None
     uf_destino: str | None = None
+    # True quando já existe devolução lançada para este pedido+sku (front esmaece).
+    ja_devolvido: bool = False

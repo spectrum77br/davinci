@@ -93,6 +93,7 @@ type LookupRow = {
   custo_produto: number | null
   nome_destinatario: string | null
   cep_destino: string | null
+  ja_devolvido?: boolean
 }
 
 type DevolutionDraft = LookupRow & {
@@ -417,7 +418,10 @@ const alreadyAddedKeys = computed(() => {
 })
 
 function isAlreadyAdded(row: LookupRow) {
-  return alreadyAddedKeys.value.has(`${row.pedido_bling}|${row.sku}`)
+  // O backend já marca itens com devolução lançada (não depende da página
+  // carregada da tabela); mantemos os keys locais p/ o que foi criado agora.
+  return row.ja_devolvido === true
+    || alreadyAddedKeys.value.has(`${row.pedido_bling}|${row.sku}`)
 }
 // Produtos do pedido ainda não adicionados — todos entram de uma vez no rascunho.
 const selectableLookupCount = computed(

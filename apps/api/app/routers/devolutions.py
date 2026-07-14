@@ -434,6 +434,34 @@ async def lookup_devolution_order(
         elif fallback := base_products.get(_sku_base(sku_key).strip().lower()):
             r["produtos"] = fallback["name"]
 
+    # Marca itens que JÁ têm devolução lançada (por pedido+sku) para o front
+    # esmaecer. Antes o "já feito" olhava só a página carregada da tabela, então
+    # um item devolvido cedo (empurrado pra fora da página) reaparecia como
+    # disponível — ex.: acessórios de um kit lançados antes do item principal.
+    pedidos = sorted({p for r in expanded if (p := (r.get("pedido_bling") or "").strip())})
+    devolvidos: set[tuple[str, str]] = set()
+    if pedidos:
+        dev_rows = (
+            await session.execute(
+                text(
+                    f"""
+                    SELECT DISTINCT pedido_bling::text AS pedido_bling,
+                           lower(btrim(sku)) AS sku
+                    FROM "{SCHEMA}".devolutions
+                    WHERE pedido_bling::text = ANY(:pedidos)
+                      AND sku IS NOT NULL
+                    """  # noqa: S608
+                ),
+                {"pedidos": pedidos},
+            )
+        ).mappings().all()
+        devolvidos = {(d["pedido_bling"], d["sku"]) for d in dev_rows}
+    for r in expanded:
+        r["ja_devolvido"] = (
+            (r.get("pedido_bling") or "").strip(),
+            (r.get("sku") or "").strip().lower(),
+        ) in devolvidos
+
     return [DevolutionLookupOut.model_validate({k: v for k, v in r.items() if not k.startswith("_")}) for r in expanded]
 
 

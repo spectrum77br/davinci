@@ -396,3 +396,76 @@ async def test_order_lookup_returns_all_units_of_large_order(
     skus = [r["sku"] for r in rows]
     assert skus.count("a900.pi") == 60
     assert skus.count("a901.pi") == 39
+
+
+async def test_order_lookup_marks_already_devolved_items(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Itens do pedido que JÁ têm devolução lançada voltam com ja_devolvido=True,
+    independente da página carregada da tabela — regressão do bug em que acessórios
+    devolvidos cedo (empurrados pra fora da página) reapareciam como disponíveis."""
+    user = await make_user(permissions=_devolution_permissions(edit=False, delete=False))
+    auth_as(user)
+    schema = get_settings().database_schema
+
+    # Já existe devolução (Extraviado) lançada para 2 dos 3 SKUs do pedido.
+    await db.execute(
+        text(
+            """
+            INSERT INTO devolutions (pedido_bling, conta, sku, condicao_produto, quantidade)
+            VALUES
+                ('283041', 'Shopee Jlas', 'a003.sp', 'Extraviado', 1),
+                ('283041', 'Shopee Jlas', 'a004.sp', 'Extraviado', 1)
+            """
+        )
+    )
+    await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_devolucoes AS
+            SELECT * FROM (VALUES
+                (
+                    '2026-07-13T03:00:00+00:00'::timestamptz,
+                    '283041'::text, NULL::text, 'Shopee Jlas'::text, NULL::bigint,
+                    'dg053.sp'::text, 'Celular'::text, 1::integer, NULL::uuid,
+                    NULL::text, NULL::text,
+                    NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+                ),
+                (
+                    '2026-07-13T03:00:00+00:00'::timestamptz,
+                    '283041'::text, NULL::text, 'Shopee Jlas'::text, NULL::bigint,
+                    'a003.sp'::text, 'Fone'::text, 1::integer, NULL::uuid,
+                    NULL::text, NULL::text,
+                    NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+                ),
+                (
+                    '2026-07-13T03:00:00+00:00'::timestamptz,
+                    '283041'::text, NULL::text, 'Shopee Jlas'::text, NULL::bigint,
+                    'a004.sp'::text, 'Relogio'::text, 1::integer, NULL::uuid,
+                    NULL::text, NULL::text,
+                    NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+                )
+            ) AS t(
+                data, pedido_bling, pedido_marketplace, loja_nome, bling_loja_id,
+                sku, produto, quantidade, bling_order_item_id, nome_destinatario,
+                cep_destino, endereco_destino, numero_destino, complemento_destino,
+                bairro_destino, cidade_destino, uf_destino
+            )
+            """  # noqa: S608
+        )
+    )
+    await db.commit()
+
+    try:
+        response = await client.get("/api/devolutions/order-lookup?pedido=283041")
+    finally:
+        await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+        await db.commit()
+
+    assert response.status_code == 200
+    ja = {r["sku"]: r["ja_devolvido"] for r in response.json()}
+    assert ja == {"dg053.sp": False, "a003.sp": True, "a004.sp": True}
