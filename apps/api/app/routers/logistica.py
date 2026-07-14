@@ -77,10 +77,13 @@ def _to_out(c: Logistica) -> LogisticaOut:
 def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
     return LogisticaStatusOut(
         id=s.id,
+        plataforma=s.plataforma,
         status_plataforma=s.status_plataforma,
         alterar_status_bling=s.alterar_status_bling,
+        monitoramento=s.monitoramento,
         abrir_chamado=s.abrir_chamado,
         mensagem_chamado=s.mensagem_chamado,
+        anexar_envio=s.anexar_envio,
         created_by=s.created_by,
         created_at=s.created_at,
         updated_at=s.updated_at,
@@ -148,10 +151,13 @@ async def create_status(
     user: Annotated[User, Depends(require_permission("logistica", "edit"))],
 ) -> LogisticaStatusOut:
     s = LogisticaStatus(
+        plataforma=_clean(body.plataforma),
         status_plataforma=(body.status_plataforma or "").strip(),
         alterar_status_bling=_clean(body.alterar_status_bling),
+        monitoramento=bool(body.monitoramento),
         abrir_chamado=bool(body.abrir_chamado),
         mensagem_chamado=_clean(body.mensagem_chamado),
+        anexar_envio=_clean(body.anexar_envio),
         created_by=user.id,
     )
     session.add(s)
@@ -174,14 +180,20 @@ async def patch_status(
         raise HTTPException(404, detail={"code": "logistica_status_not_found"})
 
     data = body.model_dump(exclude_unset=True)
+    if "plataforma" in data:
+        s.plataforma = _clean(data["plataforma"])
     if "status_plataforma" in data:
         s.status_plataforma = (data["status_plataforma"] or "").strip()
     if "alterar_status_bling" in data:
         s.alterar_status_bling = _clean(data["alterar_status_bling"])
+    if "monitoramento" in data:
+        s.monitoramento = bool(data["monitoramento"])
     if "abrir_chamado" in data:
         s.abrir_chamado = bool(data["abrir_chamado"])
     if "mensagem_chamado" in data:
         s.mensagem_chamado = _clean(data["mensagem_chamado"])
+    if "anexar_envio" in data:
+        s.anexar_envio = _clean(data["anexar_envio"])
 
     await session.commit()
     await session.refresh(s)

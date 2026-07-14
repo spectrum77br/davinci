@@ -59,13 +59,20 @@ class LogisticaStatus(Base, TimestampMixin):
     __tablename__ = "logistica_status"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # Marketplace a que a regra se aplica (ex. "Mercado Livre"); vazio = geral.
+    plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
     status_plataforma: Mapped[str] = mapped_column(Text, nullable=False)
     # Novo status do Bling; se vazio "não faz nada" (obs "alterado logística").
     alterar_status_bling: Mapped[str | None] = mapped_column(Text, nullable=True)
+    monitoramento: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     abrir_chamado: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
     mensagem_chamado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Instrução do que anexar no envio (ex. comprovante/tutorial).
+    anexar_envio: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

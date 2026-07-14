@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-RefundTipo = Literal["Logistica", "Cliente", "Manutenção", "Extraviado"]
+RefundTipo = Literal["Logistica", "Cliente", "Manutenção", "Extraviado", "Frete"]
 
 
 def _clean_optional_text(value: str | None) -> str | None:

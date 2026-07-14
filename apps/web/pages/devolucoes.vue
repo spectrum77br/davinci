@@ -153,7 +153,7 @@ const CONDICOES_PRODUTO = [
   'Manutenção',
   'Extraviado',
   'Trocado',
-  'Entregue',
+  'Não devolvido',
 ] as const
 
 const TECNICOS = [

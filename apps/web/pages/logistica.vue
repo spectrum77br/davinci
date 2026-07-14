@@ -337,10 +337,13 @@ async function atualizarMeli(c: Logistica) {
 // ================= Aba Status =================
 type LogisticaStatus = {
   id: string
+  plataforma: string | null
   status_plataforma: string
   alterar_status_bling: string | null
+  monitoramento: boolean
   abrir_chamado: boolean
   mensagem_chamado: string | null
+  anexar_envio: string | null
   created_by: string | null
   created_at: string
   updated_at: string
@@ -374,17 +377,23 @@ const statusSaving = ref(false)
 const statusFormErr = ref<string | null>(null)
 
 const statusForm = reactive({
+  plataforma: '',
   status_plataforma: '',
   alterar_status_bling: '',
+  monitoramento: false,
   abrir_chamado: false,
   mensagem_chamado: '',
+  anexar_envio: '',
 })
 
 function resetStatusForm(src?: LogisticaStatus) {
+  statusForm.plataforma = src?.plataforma || ''
   statusForm.status_plataforma = src?.status_plataforma || ''
   statusForm.alterar_status_bling = src?.alterar_status_bling || ''
+  statusForm.monitoramento = src?.monitoramento || false
   statusForm.abrir_chamado = src?.abrir_chamado || false
   statusForm.mensagem_chamado = src?.mensagem_chamado || ''
+  statusForm.anexar_envio = src?.anexar_envio || ''
 }
 
 function openNewStatus() {
@@ -408,10 +417,13 @@ function closeStatusModal() {
 
 function statusPayload() {
   return {
+    plataforma: statusForm.plataforma.trim() || null,
     status_plataforma: statusForm.status_plataforma.trim(),
     alterar_status_bling: statusForm.alterar_status_bling.trim() || null,
+    monitoramento: statusForm.monitoramento,
     abrir_chamado: statusForm.abrir_chamado,
     mensagem_chamado: statusForm.mensagem_chamado.trim() || null,
+    anexar_envio: statusForm.anexar_envio.trim() || null,
   }
 }
 
@@ -649,10 +661,13 @@ async function removeStatus() {
         <table class="w-full text-sm min-w-[700px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
           <thead class="bg-muted/40 text-left">
             <tr class="whitespace-nowrap">
+              <th class="px-3 py-2">Plataforma</th>
               <th class="px-3 py-2">Status Plataforma</th>
               <th class="px-3 py-2">Alterar Status Bling</th>
+              <th class="px-3 py-2">Monitoramento</th>
               <th class="px-3 py-2">Abrir Chamado</th>
               <th class="px-3 py-2">Mensagem do Chamado</th>
+              <th class="px-3 py-2">Anexar Envio</th>
             </tr>
           </thead>
           <tbody>
@@ -662,10 +677,16 @@ async function removeStatus() {
               class="border-t hover:bg-muted/20 cursor-pointer"
               @click="openEditStatus(s)"
             >
+              <td class="px-3 py-2 whitespace-nowrap">{{ s.plataforma || '—' }}</td>
               <td class="px-3 py-2 font-medium">{{ s.status_plataforma }}</td>
               <td class="px-3 py-2">
                 <span v-if="s.alterar_status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50">{{ s.alterar_status_bling }}</span>
                 <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-3 py-2 whitespace-nowrap">
+                <span :class="s.monitoramento ? 'text-emerald-500' : 'text-muted-foreground'">
+                  {{ s.monitoramento ? 'Sim' : 'Não' }}
+                </span>
               </td>
               <td class="px-3 py-2 whitespace-nowrap">
                 <span :class="s.abrir_chamado ? 'text-emerald-500' : 'text-muted-foreground'">
@@ -673,9 +694,10 @@ async function removeStatus() {
                 </span>
               </td>
               <td class="px-3 py-2 text-muted-foreground text-xs max-w-[320px] break-words">{{ s.mensagem_chamado || '—' }}</td>
+              <td class="px-3 py-2 text-muted-foreground text-xs max-w-[320px] break-words">{{ s.anexar_envio || '—' }}</td>
             </tr>
             <tr v-if="!statusLoading && statusRows.length === 0">
-              <td colspan="4" class="px-3 py-6 text-center text-muted-foreground">nenhum status</td>
+              <td colspan="7" class="px-3 py-6 text-center text-muted-foreground">nenhum status</td>
             </tr>
           </tbody>
         </table>
@@ -695,10 +717,19 @@ async function removeStatus() {
               {{ s.abrir_chamado ? 'Chamado' : 'Sem chamado' }}
             </span>
           </div>
+          <div v-if="s.plataforma" class="text-xs">
+            <span class="text-muted-foreground">Plataforma:</span> {{ s.plataforma }}
+          </div>
           <div class="text-xs">
             <span class="text-muted-foreground">Alterar Bling:</span> {{ s.alterar_status_bling || '—' }}
           </div>
+          <div class="text-xs">
+            <span class="text-muted-foreground">Monitoramento:</span> {{ s.monitoramento ? 'Sim' : 'Não' }}
+          </div>
           <div v-if="s.mensagem_chamado" class="text-xs text-muted-foreground break-words">{{ s.mensagem_chamado }}</div>
+          <div v-if="s.anexar_envio" class="text-xs">
+            <span class="text-muted-foreground">Anexar envio:</span> {{ s.anexar_envio }}
+          </div>
         </div>
         <div v-if="!statusLoading && statusRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
           nenhum status
@@ -829,6 +860,10 @@ async function removeStatus() {
 
         <div class="space-y-3">
           <div>
+            <Label>Plataforma</Label>
+            <Input v-model="statusForm.plataforma" placeholder="ex. Mercado Livre (vazio = geral)" :disabled="!canEdit" />
+          </div>
+          <div>
             <Label>Status Plataforma</Label>
             <Input v-model="statusForm.status_plataforma" :disabled="!canEdit" />
           </div>
@@ -836,6 +871,10 @@ async function removeStatus() {
             <Label>Alterar Status Bling</Label>
             <Input v-model="statusForm.alterar_status_bling" placeholder="deixe vazio pra não alterar" :disabled="!canEdit" />
           </div>
+          <label class="flex items-center gap-2 text-sm">
+            <input v-model="statusForm.monitoramento" type="checkbox" :disabled="!canEdit" class="size-4" />
+            Monitoramento
+          </label>
           <label class="flex items-center gap-2 text-sm">
             <input v-model="statusForm.abrir_chamado" type="checkbox" :disabled="!canEdit" class="size-4" />
             Abrir chamado
@@ -845,6 +884,16 @@ async function removeStatus() {
             <textarea
               v-model="statusForm.mensagem_chamado"
               rows="2"
+              :disabled="!canEdit"
+              class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
+            />
+          </div>
+          <div>
+            <Label>Anexar Envio</Label>
+            <textarea
+              v-model="statusForm.anexar_envio"
+              rows="2"
+              placeholder="o que anexar no envio (ex. comprovante/tutorial)"
               :disabled="!canEdit"
               class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
             />

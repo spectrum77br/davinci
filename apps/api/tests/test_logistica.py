@@ -147,25 +147,33 @@ async def test_status_crud(
     r = await client.post(
         "/api/logistica/status",
         json={
+            "plataforma": "Mercado Livre",
             "status_plataforma": "Devolução em trânsito",
             "alterar_status_bling": "Aguardando Devolução",
+            "monitoramento": True,
             "abrir_chamado": True,
             "mensagem_chamado": "acompanhar devolução",
+            "anexar_envio": "comprovante de postagem",
         },
     )
     assert r.status_code == 201, r.text
     sid = r.json()["id"]
     assert r.json()["status_plataforma"] == "Devolução em trânsito"
+    assert r.json()["plataforma"] == "Mercado Livre"
+    assert r.json()["monitoramento"] is True
     assert r.json()["abrir_chamado"] is True
+    assert r.json()["anexar_envio"] == "comprovante de postagem"
 
     r = await client.get("/api/logistica/status")
     assert any(s["id"] == sid for s in r.json())
 
     r = await client.patch(
-        f"/api/logistica/status/{sid}", json={"abrir_chamado": False, "alterar_status_bling": ""}
+        f"/api/logistica/status/{sid}",
+        json={"abrir_chamado": False, "alterar_status_bling": "", "monitoramento": False},
     )
     assert r.status_code == 200
     assert r.json()["abrir_chamado"] is False
+    assert r.json()["monitoramento"] is False
     assert r.json()["alterar_status_bling"] is None
 
     r = await client.delete(f"/api/logistica/status/{sid}")
