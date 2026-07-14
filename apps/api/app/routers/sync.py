@@ -182,10 +182,13 @@ async def enqueue_backfill_ml_stock(
 )
 async def enqueue_refresh_bling_stock(
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "edit"))],
 ) -> JobCreatedOut:
     """Manual quick path: pull stock from Bling /produtos page-by-page (100)
-    and write to local products + product_links. No marketplace push."""
+    and write to local products + product_links. No marketplace push.
+
+    Gated on controle_estoque:edit (same as the "Recarregar"/sync-stocks
+    button) so the stock-conferência operators can trigger it — não só admin."""
     job = BackgroundJob(
         type=BackgroundJobType.REFRESH_BLING_STOCK,
         status=BackgroundJobStatus.PENDING,

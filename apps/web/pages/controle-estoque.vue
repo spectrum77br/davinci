@@ -92,6 +92,14 @@ const enviosFim = ref(isoToday())
 // Admin-only tag override.
 const isAdmin = computed(() => auth.user?.role === 'admin')
 
+// "Atualizar Bling" (job refresh-bling-stock) libera pra quem pode editar o
+// Controle de Estoque — mesma permissão do botão "Recarregar" (sync-stocks).
+// Antes era admin-only; operadores de conferência precisam puxar o Bling.
+// Backend valida o mesmo controle_estoque:edit, então segurança não muda.
+const canAtualizarBling = computed(
+  () => isAdmin.value || auth.user?.permissions?.controle_estoque?.edit === true,
+)
+
 // Operador específico (churchill) tem acesso ao filtro de tag, mesmo não
 // sendo admin (stock_tags dele cobre todas as 9 tags). Hardcoded por nome
 // — se aparecer outro caso, vira permissão. Backend continua validando a
@@ -866,7 +874,7 @@ async function conferirTodos() {
         class="text-xs text-muted-foreground bg-muted/40 border rounded px-2 py-1"
       >{{ syncToast }}</span>
       <button
-        v-if="isAdmin"
+        v-if="canAtualizarBling"
         class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
         :disabled="blingJobRunning"
         :title="'Puxa os produtos do Bling, atualiza o estoque e remove os que foram excluídos no Bling'"
