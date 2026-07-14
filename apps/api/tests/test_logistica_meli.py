@@ -13,14 +13,27 @@ class FakeML:
     """Client ML mínimo: métodos que build_meli_status chama. `None` num
     recurso => a chamada levanta (simula 404 sem shipment/claim/returns)."""
 
-    def __init__(self, order, shipment=None, claim=None, returns=None):
+    def __init__(self, order, shipment=None, claim=None, returns=None, orders_by_id=None, pack=None):
         self._order = order
         self._shipment = shipment
         self._claim = claim
         self._returns = returns
+        # Quando setado, get_order resolve por id (id ausente => 404); habilita
+        # o teste de fallback pack → order.
+        self._orders_by_id = orders_by_id
+        self._pack = pack
 
     async def get_order(self, order_id):
+        if self._orders_by_id is not None:
+            if str(order_id) not in self._orders_by_id:
+                raise RuntimeError("Order do not exists")
+            return self._orders_by_id[str(order_id)]
         return self._order
+
+    async def get_pack(self, pack_id):
+        if self._pack is None:
+            raise RuntimeError("no pack")
+        return self._pack
 
     async def get_shipment(self, shipment_id):
         if self._shipment is None:
@@ -64,6 +77,25 @@ async def test_build_meli_status_completo():
     }
     # Ordem fixa dos campos preservada (chave -> FIELD_ORDER).
     assert list(out.keys()) == [f for f in logistica_rules.FIELD_ORDER if f in out]
+
+
+@pytest.mark.asyncio
+async def test_build_meli_status_resolve_pack_id():
+    # O número guardado é um PACK id: /orders/{pack} 404 → resolve via /packs.
+    client = FakeML(
+        order=None,
+        orders_by_id={
+            "2000017409067996": {"status": "paid", "shipping": {"id": 5}, "mediations": []},
+        },
+        pack={"id": "2000014011101337", "orders": [{"id": 2000017409067996}]},
+        shipment={"status": "shipped", "substatus": "dropped_off"},
+    )
+    out = await logistica_meli.build_meli_status(client, "2000014011101337")
+    assert out == {
+        "order_status": "paid",
+        "ship_status": "shipped",
+        "ship_substatus": "dropped_off",
+    }
 
 
 @pytest.mark.asyncio

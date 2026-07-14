@@ -60,14 +60,32 @@ def _extract_return_status(rets: Any) -> str:
     return (obj.get("status") or "").strip()
 
 
+async def _fetch_order(client: MercadoLivreClient, order_id: str) -> dict:
+    """GET /orders/{id}; se falhar (o número guardado costuma ser um PACK id,
+    não um order id → `/orders/{pack}` dá 404 "Order do not exists"), resolve
+    via GET /packs/{id} e busca o primeiro order real do pack
+    (`pack.orders[0].id`). Sem pack válido, deixa o erro original subir."""
+    try:
+        return await client.get_order(order_id)
+    except Exception:  # noqa: BLE001
+        pass
+    pack = await client.get_pack(order_id)  # levanta se nem pack existir
+    real_ids = [
+        o.get("id") for o in (pack.get("orders") or []) if isinstance(o, dict) and o.get("id")
+    ]
+    if not real_ids:
+        return await client.get_order(order_id)  # re-levanta o erro original limpo
+    return await client.get_order(str(real_ids[0]))
+
+
 async def build_meli_status(client: MercadoLivreClient, order_id: str) -> dict[str, str]:
     """Monta o dict dos 8 campos (só os não-vazios) pra um pedido do ML.
 
     Best-effort: falha em shipment/claim/returns deixa aqueles campos de fora,
-    mas mantém os que já resolveram. Levanta só se o GET /orders/{id} falhar
+    mas mantém os que já resolveram. Levanta só se nem order nem pack existirem
     (aí o caller decide o que fazer com o pedido inteiro)."""
     out: dict[str, str] = {}
-    order = await client.get_order(str(order_id))
+    order = await _fetch_order(client, str(order_id))
 
     st = (order.get("status") or "").strip()
     if st:
