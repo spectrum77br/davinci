@@ -255,6 +255,24 @@ def localizacao_pt(meli_status: dict[str, str] | None) -> str:
     return traduzir_valor("ship_status", m.get("ship_status"))
 
 
+def localizacao_completa(
+    status_pt: str, *, destino: str | None = None, previsao: str | None = None
+) -> str:
+    """Compõe a localização proxy da rede própria do ML (Flex/Coletas/Full, que
+    não tem local ao vivo): o status do envio em PT + destino (cidade/UF) +
+    previsão de entrega, quando houver — `Saiu p/ entrega → São Paulo/SP ·
+    previsão 16/07`. Partes ausentes são omitidas."""
+    out = (status_pt or "").strip()
+    d = (destino or "").strip()
+    if d:
+        out = f"{out} → {d}" if out else d
+    p = (previsao or "").strip()
+    if p:
+        pv = f"previsão {p}"
+        out = f"{out} · {pv}" if out else pv
+    return out
+
+
 # 223 linhas curadas (campos + status_bling resultante).
 RULES: list[dict[str, str]] = [
     {"order_status": "cancelled", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "internal", "return_status": "delivered", "claim_stage": "dispute", "claim_status": "closed", "benefited": "complainant", "status_bling": "Aguardando Devolução"},

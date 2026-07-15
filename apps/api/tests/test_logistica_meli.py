@@ -143,6 +143,34 @@ async def test_build_enrichment_localizacao_do_substatus():
     assert enr2["localizacao"] == "Enviado"
 
 
+@pytest.mark.asyncio
+async def test_build_enrichment_localizacao_com_destino_e_previsao():
+    # Rede própria: status + destino (receiver_address) + previsão (lead_time).
+    client = FakeML(
+        order={"status": "paid", "shipping": {"id": 5}, "mediations": []},
+        shipment={
+            "status": "shipped",
+            "substatus": "out_for_delivery",
+            "receiver_address": {"city": {"name": "São Paulo"}, "state": {"id": "BR-SP"}},
+            "lead_time": {"estimated_delivery_final": {"date": "2026-07-16T00:00:00.000-03:00"}},
+        },
+    )
+    enr = await logistica_meli.build_enrichment(client, "1")
+    assert enr["localizacao"] == "Saiu p/ entrega → São Paulo/SP · previsão 16/07"
+
+
+def test_localizacao_completa_omite_partes_ausentes():
+    assert logistica_rules.localizacao_completa("Enviado") == "Enviado"
+    assert (
+        logistica_rules.localizacao_completa("Enviado", destino="Recife/PE") == "Enviado → Recife/PE"
+    )
+    assert (
+        logistica_rules.localizacao_completa("Enviado", previsao="20/07")
+        == "Enviado · previsão 20/07"
+    )
+    assert logistica_rules.localizacao_completa("", destino="Recife/PE") == "Recife/PE"
+
+
 def test_localizacao_pt_prioriza_substatus():
     assert logistica_rules.localizacao_pt(
         {"ship_status": "shipped", "ship_substatus": "dropped_off"}

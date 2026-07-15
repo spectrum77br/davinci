@@ -65,6 +65,42 @@ def _extract_return_status(rets: Any) -> str:
     return (obj.get("status") or "").strip()
 
 
+def _ship_destino(sh: dict) -> str | None:
+    """Cidade/UF de destino do shipment (`receiver_address`). `city`/`state`
+    podem vir como string ou objeto `{id, name}`; `state.id` costuma ser
+    `BR-SP` → extrai o `SP`."""
+    addr = sh.get("receiver_address") or {}
+    city = addr.get("city")
+    if isinstance(city, dict):
+        city = city.get("name")
+    city = str(city or "").strip()
+    state = addr.get("state")
+    if isinstance(state, dict):
+        state = state.get("id") or state.get("name")
+    uf = str(state or "").strip()
+    if "-" in uf:
+        uf = uf.rsplit("-", 1)[-1]
+    where = "/".join(p for p in (city, uf) if p)
+    return where or None
+
+
+def _ship_previsao(sh: dict) -> str | None:
+    """Data prevista de entrega (dd/mm) a partir do `lead_time` do shipment;
+    prefere o limite final, cai no limite/estimado."""
+    lt = sh.get("lead_time") or {}
+    for k in ("estimated_delivery_final", "estimated_delivery_limit", "estimated_delivery_time"):
+        node = lt.get(k)
+        date = node.get("date") if isinstance(node, dict) else None
+        if not date:
+            continue
+        try:
+            d = datetime.fromisoformat(str(date).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return d.strftime("%d/%m")
+    return None
+
+
 async def _fetch_order(client: MercadoLivreClient, order_id: str) -> dict:
     """GET /orders/{id}; se falhar (o número guardado costuma ser um PACK id,
     não um order id → `/orders/{pack}` dá 404 "Order do not exists"), resolve
@@ -92,6 +128,8 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     resolveram. Levanta só se nem order nem pack existirem."""
     out: dict[str, str] = {}
     rastreio: str | None = None
+    destino: str | None = None
+    previsao: str | None = None
     order = await _fetch_order(client, str(order_id))
 
     st = (order.get("status") or "").strip()
@@ -120,6 +158,8 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
         tn = (sh.get("tracking_number") or "").strip()
         if tn:
             rastreio = tn
+        destino = _ship_destino(sh)
+        previsao = _ship_previsao(sh)
     else:
         ship_status = (shipping.get("status") or "").strip()
         if ship_status:
@@ -161,9 +201,13 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
 
     # Mantém só campos conhecidos (defesa contra tokens estranhos entrando).
     meli = {f: out[f] for f in logistica_rules.FIELD_ORDER if out.get(f)}
-    # Localização = proxy do "último local" (substatus/status do envio em PT); o
-    # ML não dá o local físico.
-    localizacao = logistica_rules.localizacao_pt(meli) or None
+    # Localização = proxy do "último local" (substatus/status do envio em PT) +
+    # destino (cidade/UF) + previsão de entrega; o ML não dá o local físico da
+    # rede própria.
+    status_pt = logistica_rules.localizacao_pt(meli)
+    localizacao = (
+        logistica_rules.localizacao_completa(status_pt, destino=destino, previsao=previsao) or None
+    )
     return {"meli_status": meli, "rastreio": rastreio, "localizacao": localizacao}
 
 
