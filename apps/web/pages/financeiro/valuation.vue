@@ -61,6 +61,9 @@ type FaturamentoGrpLinha = {
   custo: number
   rentabilidade: number
   margem: number | null
+  giro_valor: number | null
+  giro: number | null
+  rentabilidade_final: number | null
 }
 type FaturamentoMesSecao = {
   mes: string
@@ -69,6 +72,9 @@ type FaturamentoMesSecao = {
   total_custo: number
   total_rentabilidade: number
   total_margem: number | null
+  total_giro_valor: number | null
+  total_giro: number | null
+  total_rentabilidade_final: number | null
 }
 type Report = {
   gerado_em: string
@@ -238,12 +244,24 @@ watch(comTabs, (tabs) => {
 // Margem operacional (categoria / plataforma). O backend manda uma seção por
 // mês (com linhas por grupo); aqui pivotamos p/ linhas = grupo, colunas = mês
 // × (valor, %). valor = lucro (faturamento − custo); % = lucro ÷ faturamento.
-type MargemRow = { grp: string; valor: (number | null)[]; pct: (number | null)[] }
+type MargemRow = {
+  grp: string
+  faturamento: (number | null)[]
+  valor: (number | null)[]
+  pct: (number | null)[]
+  giroValor: (number | null)[]
+  giroPct: (number | null)[]
+  rentFinal: (number | null)[]
+}
 type MargemTabela = {
   meses: string[]
   rows: MargemRow[]
+  totalFaturamento: (number | null)[]
   totalValor: (number | null)[]
   totalPct: (number | null)[]
+  totalGiroValor: (number | null)[]
+  totalGiroPct: (number | null)[]
+  totalRentFinal: (number | null)[]
 }
 function pivotMargem(secoes: FaturamentoMesSecao[] | undefined): MargemTabela {
   const secs = secoes ?? []
@@ -254,30 +272,42 @@ function pivotMargem(secoes: FaturamentoMesSecao[] | undefined): MargemTabela {
     .sort((a, b) => a.localeCompare(b, 'pt-BR'))
     .map((grp) => ({
       grp,
+      faturamento: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.faturamento ?? null),
       valor: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.rentabilidade ?? null),
       pct: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.margem ?? null),
+      giroValor: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.giro_valor ?? null),
+      giroPct: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.giro ?? null),
+      rentFinal: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.rentabilidade_final ?? null),
     }))
   return {
     meses,
     rows,
+    totalFaturamento: secs.map((s) => s.total_faturamento ?? null),
     totalValor: secs.map((s) => s.total_rentabilidade ?? null),
     totalPct: secs.map((s) => s.total_margem ?? null),
+    totalGiroValor: secs.map((s) => s.total_giro_valor ?? null),
+    totalGiroPct: secs.map((s) => s.total_giro ?? null),
+    totalRentFinal: secs.map((s) => s.total_rentabilidade_final ?? null),
   }
 }
 const catTabela = computed(() => pivotMargem(resumo.value?.por_categoria))
 const mktTabela = computed(() => pivotMargem(resumo.value?.por_marketplace))
+// `rich` = bloco por categoria (colunas Faturamento + Giro + % Rent. final).
+// Plataforma segue enxuto (só Valor + %).
 const margemBlocos = computed(() => [
   {
     key: 'categoria',
     titulo: 'Margem operacional — categoria',
     tabela: catTabela.value,
     label: (g: string) => g,
+    rich: true,
   },
   {
     key: 'plataforma',
     titulo: 'Margem operacional — plataforma',
     tabela: mktTabela.value,
     label: (g: string) => mktTitle(g),
+    rich: false,
   },
 ])
 
@@ -736,12 +766,19 @@ const loading = computed(() =>
         </section>
 
         <!-- 5. Margem operacional — categoria e plataforma (3 meses).
-             valor = lucro (faturamento − custo); % = lucro ÷ faturamento × 100.
-             Status: Em andamento, Entregue, Perdimento, Resolvido, Enviado Fake. -->
+             Rentabilidade: valor = lucro (faturamento − custo); % = lucro ÷
+             faturamento × 100. Status: Em andamento, Entregue, Perdimento,
+             Resolvido, Enviado Fake.
+             No bloco por CATEGORIA (rich): Faturamento primeiro, depois
+             Rentabilidade (valor + %), depois Giro (valor = custo dos produtos
+             vendidos; % = custo vendido ÷ estoque atual da categoria × 100) e
+             % Rent. final = % Rentabilidade × % Giro ÷ 100. Kit usa o estoque
+             da base (Celular Kit → Celular, Mala Kit → Mala). -->
         <section v-for="bloco in margemBlocos" :key="bloco.key" class="space-y-2">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             {{ bloco.titulo }}
-            <span class="normal-case text-xs text-muted-foreground">(valor = lucro do pedido · % = lucro ÷ faturamento)</span>
+            <span v-if="bloco.rich" class="normal-case text-xs text-muted-foreground">(Rent.: lucro ÷ faturamento · Giro: custo vendido ÷ estoque da categoria · Rent. final = Rent. × Giro ÷ 100)</span>
+            <span v-else class="normal-case text-xs text-muted-foreground">(valor = lucro do pedido · % = lucro ÷ faturamento)</span>
           </h2>
           <div class="overflow-x-auto rounded border">
             <table class="w-full text-xs border-collapse">
@@ -753,7 +790,7 @@ const loading = computed(() =>
                   <th
                     v-for="m in bloco.tabela.meses"
                     :key="m"
-                    colspan="2"
+                    :colspan="bloco.rich ? 6 : 2"
                     class="text-center px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
                   >
                     {{ mesLabel(m) }}
@@ -761,22 +798,56 @@ const loading = computed(() =>
                 </tr>
                 <tr>
                   <template v-for="m in bloco.tabela.meses" :key="`h-${bloco.key}-${m}`">
-                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
-                      <span class="inline-flex items-center gap-1 cursor-help" title="Lucro do mês = faturamento − custo (status: Em andamento, Entregue, Perdimento, Resolvido, Enviado Fake).">
-                        Valor <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
-                      </span>
-                    </th>
-                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
-                      <span class="inline-flex items-center gap-1 cursor-help" title="Margem = (Lucro ÷ Faturamento) × 100.">
-                        % <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
-                      </span>
-                    </th>
+                    <template v-if="bloco.rich">
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                        <span class="inline-flex items-center gap-1 cursor-help" title="Faturamento do mês (status: Em andamento, Entregue, Perdimento, Resolvido, Enviado Fake).">
+                          Fat. <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                        </span>
+                      </th>
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                        <span class="inline-flex items-center gap-1 cursor-help" title="Rentabilidade (lucro) = faturamento − custo.">
+                          Rent. <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                        </span>
+                      </th>
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                        <span class="inline-flex items-center gap-1 cursor-help" title="% Rentabilidade = (Lucro ÷ Faturamento) × 100.">
+                          Rent.% <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                        </span>
+                      </th>
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                        <span class="inline-flex items-center gap-1 cursor-help" title="Giro (valor) = custo dos produtos vendidos da categoria no mês (numerador).">
+                          Giro <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                        </span>
+                      </th>
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                        <span class="inline-flex items-center gap-1 cursor-help" title="% Giro = (custo vendido ÷ estoque atual da categoria) × 100. Kit usa o estoque da base (Celular Kit → Celular, Mala Kit → Mala). Estoque é o valor atual (sem histórico por categoria).">
+                          Giro% <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                        </span>
+                      </th>
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                        <span class="inline-flex items-center gap-1 cursor-help" title="% Rentabilidade final = % Rentabilidade × % Giro ÷ 100.">
+                          Rent.f% <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                        </span>
+                      </th>
+                    </template>
+                    <template v-else>
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                        <span class="inline-flex items-center gap-1 cursor-help" title="Lucro do mês = faturamento − custo (status: Em andamento, Entregue, Perdimento, Resolvido, Enviado Fake).">
+                          Valor <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                        </span>
+                      </th>
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                        <span class="inline-flex items-center gap-1 cursor-help" title="Margem = (Lucro ÷ Faturamento) × 100.">
+                          % <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                        </span>
+                      </th>
+                    </template>
                   </template>
                 </tr>
               </thead>
               <tbody>
                 <tr v-if="!bloco.tabela.rows.length">
-                  <td :colspan="bloco.tabela.meses.length * 2 + 1" class="text-center py-6 text-muted-foreground">
+                  <td :colspan="bloco.tabela.meses.length * (bloco.rich ? 6 : 2) + 1" class="text-center py-6 text-muted-foreground">
                     Sem dados no período.
                   </td>
                 </tr>
@@ -787,8 +858,18 @@ const loading = computed(() =>
                 >
                   <td class="px-2 py-1 border">{{ bloco.label(row.grp) }}</td>
                   <template v-for="(m, i) in bloco.tabela.meses" :key="`${bloco.key}-${row.grp}-${m}`">
-                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.valor[i]) }}</td>
-                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.pct[i]) }}</td>
+                    <template v-if="bloco.rich">
+                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.faturamento[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.valor[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.pct[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.giroValor[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.giroPct[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.rentFinal[i]) }}</td>
+                    </template>
+                    <template v-else>
+                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.valor[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.pct[i]) }}</td>
+                    </template>
                   </template>
                 </tr>
               </tbody>
@@ -796,8 +877,18 @@ const loading = computed(() =>
                 <tr>
                   <td class="px-2 py-1.5 border">Total</td>
                   <template v-for="(m, i) in bloco.tabela.meses" :key="`tot-${bloco.key}-${m}`">
-                    <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalValor[i]) }}</td>
-                    <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalPct[i]) }}</td>
+                    <template v-if="bloco.rich">
+                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalFaturamento[i]) }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalValor[i]) }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalPct[i]) }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalGiroValor[i]) }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalGiroPct[i]) }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalRentFinal[i]) }}</td>
+                    </template>
+                    <template v-else>
+                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalValor[i]) }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalPct[i]) }}</td>
+                    </template>
                   </template>
                 </tr>
               </tfoot>

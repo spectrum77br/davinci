@@ -20,7 +20,14 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder, User, UserRole, UserStatus
+from app.models import (
+    BlingOrder,
+    Product,
+    ProductCategory,
+    User,
+    UserRole,
+    UserStatus,
+)
 from app.routers.financeiro import _make_valuation_token
 
 
@@ -53,6 +60,25 @@ async def _pedido(
         categoria_nome=categoria,
         preco_custo=preco_custo, item_quantidade=qtd,
         total=Decimal(str(total)),
+    ))
+    await db.commit()
+
+
+async def _categoria(
+    db: AsyncSession, *, bling_category_id: int, name: str,
+) -> None:
+    db.add(ProductCategory(bling_category_id=bling_category_id, name=name))
+    await db.commit()
+
+
+async def _produto(
+    db: AsyncSession, *, user_id, sku: str, category: str,
+    cost_price: float, stock: int,
+) -> None:
+    db.add(Product(
+        user_id=user_id, sku=sku, name=sku, category=category,
+        cost_price=Decimal(str(cost_price)), stock=stock,
+        situacao="A", formato="S",
     ))
     await db.commit()
 
@@ -143,3 +169,43 @@ async def test_margem_categoria_funde_usado_no_normal(
     assert _cat_linha(body, "Celular")["margem"] == 53.33
     assert _cat_linha(body, "Mala")["rentabilidade"] == 500.0
     assert _cat_linha(body, "Mala")["margem"] == 41.67
+
+
+@pytest.mark.asyncio
+async def test_margem_categoria_giro(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+):
+    # Giro por categoria: giro_valor = custo dos produtos vendidos (custo_giro),
+    # giro % = custo_vendido ÷ estoque atual da categoria × 100 e
+    # rentabilidade_final = margem × giro ÷ 100. Kit compartilha o estoque da
+    # categoria-base (Celular Kit → estoque de Celular).
+    admin = await _admin(db)
+    await _categoria(db, bling_category_id=1000, name="Celular")
+    # estoque Celular = 100 (custo) × 20 (stock) = 2000.
+    await _produto(db, user_id=admin.id, sku="cel-1", category="1000",
+                   cost_price=100, stock=20)
+    # Venda Celular (83953=Entregue, está no giro E na margem):
+    #   fat=1000, custo=600, lucro=400, margem=40; giro_valor=600
+    #   giro=600/2000*100=30; rent_final=40*30/100=12.
+    await _pedido(db, bling_id=6301, situacao="83953", categoria="Celular",
+                  total=1000, preco_custo=100, qtd=6)
+    # Venda Celular Kit (usa o estoque de Celular=2000):
+    #   fat=500, custo=100, lucro=400, margem=80; giro_valor=100
+    #   giro=100/2000*100=5; rent_final=80*5/100=4.
+    await _pedido(db, bling_id=6302, situacao="83953", categoria="Celular Kit",
+                  total=500, preco_custo=50, qtd=2)
+    auth_as(admin)
+    r = await client.get("/api/financeiro/valuation", headers=_headers())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    cel = _cat_linha(body, "Celular")
+    assert cel["giro_valor"] == 600.0
+    assert cel["giro"] == 30.0
+    assert cel["margem"] == 40.0
+    assert cel["rentabilidade_final"] == 12.0
+    kit = _cat_linha(body, "Celular Kit")
+    assert kit["giro_valor"] == 100.0
+    assert kit["giro"] == 5.0          # estoque-base = Celular (2000)
+    assert kit["margem"] == 80.0
+    assert kit["rentabilidade_final"] == 4.0

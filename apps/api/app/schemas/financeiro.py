@@ -319,6 +319,15 @@ class FaturamentoGrpLinhaOut(BaseModel):
     custo: float
     rentabilidade: float
     margem: float | None = None  # rentabilidade / custo (%)
+    # Giro (só preenchido no bloco por CATEGORIA; None por plataforma):
+    #   giro_valor = custo dos produtos vendidos da categoria (numerador, R$);
+    #   giro       = (giro_valor ÷ estoque atual da categoria) × 100;
+    #   rentabilidade_final = margem × giro ÷ 100.
+    # Kit compartilha o estoque da categoria-base (Celular Kit → Celular,
+    # Mala Kit → Mala).
+    giro_valor: float | None = None
+    giro: float | None = None
+    rentabilidade_final: float | None = None
 
 
 class FaturamentoMesSecaoOut(BaseModel):
@@ -328,6 +337,9 @@ class FaturamentoMesSecaoOut(BaseModel):
     total_custo: float
     total_rentabilidade: float
     total_margem: float | None = None
+    total_giro_valor: float | None = None
+    total_giro: float | None = None
+    total_rentabilidade_final: float | None = None
 
 
 class ValuationReportOut(BaseModel):

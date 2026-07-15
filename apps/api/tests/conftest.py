@@ -302,6 +302,7 @@ _CLEANUP_TABLES = (
     "cadastros",
     "product_links",
     "products",
+    "product_categories",
     "margens",
     "refunds",
     "devolutions",

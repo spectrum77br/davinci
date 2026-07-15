@@ -808,6 +808,10 @@ base AS (
         END AS categoria,
         p.situacao AS situacao_id,
         p.valorbase_prop AS valorbase,
+        -- Custo só de PRODUTO (preço custo × qtd), sem frete/comissão —
+        -- numerador do Giro por categoria (mesma definição do Giro do
+        -- Operacional).
+        (COALESCE(p.preco_custo, 0) * COALESCE(p.item_quantidade, 0)) AS custo_produto,
         (COALESCE(p.preco_custo, 0) * COALESCE(p.item_quantidade, 0)
             + COALESCE(p.custofrete_prop, 0)
             + COALESCE(p.taxacomissao_prop, 0)) AS custo_total
@@ -821,7 +825,8 @@ SELECT
     SUM(CASE WHEN situacao_id = ANY(:sit_rent) THEN valorbase   ELSE 0 END) AS faturamento_rent,
     SUM(CASE WHEN situacao_id = ANY(:sit_rent) THEN custo_total ELSE 0 END) AS custo_rent,
     SUM(CASE WHEN situacao_id = ANY(:sit_margem) THEN valorbase   ELSE 0 END) AS fat_margem,
-    SUM(CASE WHEN situacao_id = ANY(:sit_margem) THEN custo_total ELSE 0 END) AS custo_margem
+    SUM(CASE WHEN situacao_id = ANY(:sit_margem) THEN custo_total ELSE 0 END) AS custo_margem,
+    SUM(CASE WHEN situacao_id = ANY(:sit_giro) THEN custo_produto ELSE 0 END) AS custo_giro
 FROM base
 GROUP BY mes, {group_col}
 ORDER BY mes, grp
@@ -845,16 +850,38 @@ def _val_window_months() -> list:
     return months
 
 
-def _agg_to_secoes(rows: list[dict], months: list) -> list[FaturamentoMesSecaoOut]:
-    """Agrupa as linhas da _agg_sql em uma seção por mês (3 meses)."""
+def _estoque_base_categoria(grp: str) -> str:
+    """Categoria-base do estoque do Giro: kit compartilha o estoque da base
+    (Celular Kit → Celular, Mala Kit → Mala)."""
+    return grp[:-4] if grp.endswith(" Kit") else grp
+
+
+def _agg_to_secoes(
+    rows: list[dict],
+    months: list,
+    estoque_by_cat: dict[str, Decimal] | None = None,
+) -> list[FaturamentoMesSecaoOut]:
+    """Agrupa as linhas da _agg_sql em uma seção por mês (3 meses).
+
+    Quando `estoque_by_cat` é passado (bloco por CATEGORIA), calcula o Giro:
+    giro_valor = custo dos produtos vendidos (custo_giro); giro = (giro_valor ÷
+    estoque atual da categoria) × 100; rentabilidade_final = margem × giro ÷ 100.
+    O estoque não tem histórico por categoria — é o valor atual, o mesmo nos 3
+    meses (o giro varia pelo custo vendido de cada mês)."""
     by_mes: dict = {m: [] for m in months}
     for r in rows:
         if r["mes"] in by_mes:
             by_mes[r["mes"]].append(r)
+    # Estoque total da seção (denominador do Giro total) = soma dos estoques
+    # DISTINTOS por categoria (cada base uma vez; kit não duplica).
+    total_estoque = (
+        sum(estoque_by_cat.values(), Decimal("0"))
+        if estoque_by_cat else Decimal("0")
+    )
     out: list[FaturamentoMesSecaoOut] = []
     for mes in months:
         linhas: list[FaturamentoGrpLinhaOut] = []
-        tot_fat = tot_custo = tot_rent = Decimal("0")
+        tot_fat = tot_custo = tot_rent = tot_giro_valor = Decimal("0")
         for r in sorted(by_mes[mes], key=lambda x: (x["grp"] or "")):
             if not r["grp"]:
                 continue
@@ -865,18 +892,39 @@ def _agg_to_secoes(rows: list[dict], months: list) -> list[FaturamentoMesSecaoOu
             custo = Decimal(str(r["custo_margem"] or 0))
             rent = fat - custo
             margem = (rent / fat * 100) if fat != 0 else None
+            giro_valor = giro = rent_final = None
+            if estoque_by_cat is not None:
+                giro_valor = Decimal(str(r.get("custo_giro") or 0))
+                est = estoque_by_cat.get(_estoque_base_categoria(r["grp"]))
+                if est and Decimal(str(est)) != 0:
+                    giro = giro_valor / Decimal(str(est)) * 100
+                    if margem is not None:
+                        rent_final = margem * giro / 100
+                tot_giro_valor += giro_valor
             linhas.append(FaturamentoGrpLinhaOut(
                 grp=r["grp"], faturamento=_r2(fat), custo=_r2(custo),
                 rentabilidade=_r2(rent), margem=_r2(margem),
+                giro_valor=_r2(giro_valor), giro=_r2(giro),
+                rentabilidade_final=_r2(rent_final),
             ))
             tot_fat += fat
             tot_custo += custo
             tot_rent += rent
         tot_margem = (tot_rent / tot_fat * 100) if tot_fat != 0 else None
+        tot_giro = tot_rent_final = None
+        tgv = None
+        if estoque_by_cat is not None:
+            tgv = tot_giro_valor
+            if total_estoque != 0:
+                tot_giro = tot_giro_valor / total_estoque * 100
+                if tot_margem is not None:
+                    tot_rent_final = tot_margem * tot_giro / 100
         out.append(FaturamentoMesSecaoOut(
             mes=mes, linhas=linhas,
             total_faturamento=_r2(tot_fat), total_custo=_r2(tot_custo),
             total_rentabilidade=_r2(tot_rent), total_margem=_r2(tot_margem),
+            total_giro_valor=_r2(tgv), total_giro=_r2(tot_giro),
+            total_rentabilidade_final=_r2(tot_rent_final),
         ))
     return out
 
@@ -970,10 +1018,42 @@ async def valuation_report(
         "sit_aplic": _VAL_SIT_APLICAVEIS,
         "sit_rent": _VAL_SIT_RENTABILIDADE,
         "sit_margem": _VAL_SIT_MARGEM,
+        "sit_giro": _VAL_SIT_RENTABILIDADE,
         "ignored_stores": _VAL_IGNORED_STORES,
     }
     mkt_rows = (await session.execute(text(_agg_sql("marketplace")), agg_params)).mappings().all()
     cat_rows = (await session.execute(text(_agg_sql("categoria")), agg_params)).mappings().all()
+
+    # Denominador do Giro por categoria: valor de estoque ATUAL por categoria
+    # (saldo × preço de custo), produtos simples ativos. Não há snapshot
+    # histórico por categoria, então é o valor atual aplicado aos 3 meses.
+    # Celular Usado → Celular e Mala Usada → Mala (kits compartilham a base).
+    estoque_cat_sql = text(f"""
+        SELECT
+            CASE lower(COALESCE(pc.name, ''))
+                WHEN 'celular usado' THEN 'Celular'
+                WHEN 'mala usada'    THEN 'Mala'
+                ELSE pc.name
+            END AS categoria,
+            SUM(COALESCE(p.stock, 0) * COALESCE(p.cost_price, 0)) AS valor
+        FROM {_qt("products")} p
+        JOIN {_qt("product_categories")} pc
+            ON pc.bling_category_id::text = p.category
+        WHERE (p.situacao = 'A' OR p.situacao IS NULL)
+          AND (p.formato = 'S' OR p.formato IS NULL)
+          AND p.sku NOT LIKE '%+%'
+          AND COALESCE(p.stock, 0) > 0
+          AND pc.name IS NOT NULL
+        GROUP BY 1
+    """)
+    estoque_by_cat: dict[str, Decimal] = {}
+    for r in (await session.execute(estoque_cat_sql)).mappings().all():
+        cat = r["categoria"]
+        if not cat:
+            continue
+        estoque_by_cat[cat] = estoque_by_cat.get(cat, Decimal("0")) + Decimal(
+            str(r["valor"] or 0)
+        )
 
     # Rentabilidade mensal ao vivo = SUM(faturamento_rent − custo_rent) sobre
     # TODAS as linhas do mês (Em aberto+Em andamento+Entregue). Loja sem
@@ -1290,7 +1370,9 @@ async def valuation_report(
         operacional=operacional,
         comercial=comercial,
         por_marketplace=_agg_to_secoes([dict(r) for r in mkt_rows], months),
-        por_categoria=_agg_to_secoes([dict(r) for r in cat_rows], months),
+        por_categoria=_agg_to_secoes(
+            [dict(r) for r in cat_rows], months, estoque_by_cat
+        ),
     )
 
 
