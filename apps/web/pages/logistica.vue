@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -9,6 +9,7 @@ definePageMeta({
 
 const { api } = useApi()
 const canEdit = useCan('logistica', 'edit')
+const toasts = useToasts()
 
 const tab = ref<'logistica' | 'status'>('logistica')
 
@@ -352,6 +353,18 @@ function isMl(c: Logistica): boolean {
   return ['mercado livre', 'mercadolivre', 'ml'].includes(
     (c.plataforma || '').trim().toLowerCase(),
   )
+}
+
+// Copia a "chave" (assinatura do Status Plataforma, ex. "Pago | Pendente | Programado").
+async function copiarChave(c: Logistica) {
+  const chave = assinatura(c)
+  if (!chave) return
+  try {
+    await navigator.clipboard.writeText(chave)
+    toasts.success('Chave copiada', chave)
+  } catch {
+    toasts.error('Não foi possível copiar')
+  }
 }
 
 // Puxa a assinatura do Meli (8 campos) da API do ML pra uma linha.
@@ -767,6 +780,14 @@ async function enviarChamado(c: Logistica) {
                     :title="statusTooltip(c)"
                   >{{ assinatura(c) || '—' }}</span>
                   <button
+                    v-if="assinatura(c)"
+                    class="shrink-0 text-muted-foreground hover:text-foreground"
+                    title="Copiar chave"
+                    @click.stop="copiarChave(c)"
+                  >
+                    <Copy class="size-3.5" />
+                  </button>
+                  <button
                     v-if="canEdit && isMl(c) && c.pedido_marketplace"
                     class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
                     title="Atualizar status do Meli"
@@ -823,7 +844,12 @@ async function enviarChamado(c: Logistica) {
             </div>
             <span v-if="c.status_bling" class="text-[10px] px-1.5 py-0.5 rounded border border-primary/50 shrink-0">{{ c.status_bling }}</span>
           </div>
-          <div v-if="assinatura(c)" class="text-xs text-muted-foreground break-words" :title="statusTooltip(c)">{{ assinatura(c) }}</div>
+          <div v-if="assinatura(c)" class="flex items-start gap-1.5 text-xs text-muted-foreground break-words">
+            <span class="flex-1 break-words" :title="statusTooltip(c)">{{ assinatura(c) }}</span>
+            <button class="shrink-0 hover:text-foreground" title="Copiar chave" @click.stop="copiarChave(c)">
+              <Copy class="size-3.5" />
+            </button>
+          </div>
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
             <div><span class="text-muted-foreground">Data:</span> {{ fmtDate(c.data) }}</div>
             <div><span class="text-muted-foreground">Rastreio:</span> {{ c.rastreio || '—' }}</div>
