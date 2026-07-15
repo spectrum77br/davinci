@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     # ao contato com esse nome (resolvido via /contatos?pesquisa=).
     bling_default_supplier_name: str = "000000111111111ll"
 
+    # 17track — rastreamento físico real dos Correios (`...BR`) na Logística.
+    # `logi_17track_token`: API token da conta 17track (register/gettrackinfo).
+    # `logi_17track_webhook_secret`: segmento secreto no path do webhook público
+    # (o 17track não assina o push, então o segredo no URL é o guard).
+    logi_17track_token: str = ""
+    logi_17track_webhook_secret: str = ""
+
     shopee_partner_id: str = ""
     shopee_partner_key: str = ""
     shopee_use_sandbox: bool = False

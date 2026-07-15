@@ -28,6 +28,7 @@ from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
 from app.routers import logistica as logistica_router
+from app.routers import logistica_track as logistica_track_router
 from app.routers import margem_audit as margem_audit_router
 from app.routers import margens as margens_router
 from app.routers import metrics as metrics_router
@@ -172,6 +173,7 @@ app.include_router(tarefas_router.router)
 app.include_router(faturas_router.router)
 app.include_router(automacoes_router.router)
 app.include_router(logistica_router.router)
+app.include_router(logistica_track_router.router)
 app.include_router(refunds_router.router)
 app.include_router(devolutions_router.router)
 app.include_router(estoque_router.router)
