@@ -37,6 +37,7 @@ type Opcoes = {
   field_order: string[]
   field_labels: Record<string, string>
   field_options: Record<string, string[]>
+  status_bling_options: string[]
 }
 
 type Candidato = { status_bling: string; matches: number }
@@ -45,7 +46,7 @@ const rows = ref<Logistica[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 
-const opcoes = ref<Opcoes>({ field_order: [], field_labels: {}, field_options: {} })
+const opcoes = ref<Opcoes>({ field_order: [], field_labels: {}, field_options: {}, status_bling_options: [] })
 
 async function refresh() {
   loading.value = true
@@ -342,6 +343,7 @@ type LogisticaStatus = {
   alterar_status_bling: string | null
   monitoramento: boolean
   abrir_chamado: boolean
+  abrir_reembolso: boolean
   mensagem_chamado: string | null
   created_by: string | null
   created_at: string
@@ -430,21 +432,63 @@ async function commitEdit(s: LogisticaStatus) {
   await patchStatusField(s.id, { [field]: val || null })
 }
 
-async function toggleStatusBool(s: LogisticaStatus, field: 'monitoramento' | 'abrir_chamado') {
+async function toggleStatusBool(
+  s: LogisticaStatus,
+  field: 'monitoramento' | 'abrir_chamado' | 'abrir_reembolso',
+) {
   if (!canEdit.value) return
   await patchStatusField(s.id, { [field]: !s[field] })
 }
 
-async function addStatusRow() {
+// ---- Modal "Novo status" ----
+const showStatusForm = ref(false)
+const statusSaving = ref(false)
+const statusForm = ref({
+  plataforma: '',
+  status_plataforma: '',
+  alterar_status_bling: '',
+  monitoramento: false,
+  abrir_chamado: false,
+  abrir_reembolso: false,
+  mensagem_chamado: '',
+})
+
+function openStatusForm() {
+  statusForm.value = {
+    plataforma: '',
+    status_plataforma: '',
+    alterar_status_bling: '',
+    monitoramento: false,
+    abrir_chamado: false,
+    abrir_reembolso: false,
+    mensagem_chamado: '',
+  }
+  showStatusForm.value = true
+}
+
+async function saveStatusForm() {
+  statusSaving.value = true
   statusError.value = null
   try {
+    const f = statusForm.value
     const created = await api<LogisticaStatus>('/api/logistica/status', {
       method: 'POST',
-      body: {},
+      body: {
+        plataforma: f.plataforma.trim() || null,
+        status_plataforma: f.status_plataforma.trim() || null,
+        alterar_status_bling: f.alterar_status_bling.trim() || null,
+        monitoramento: f.monitoramento,
+        abrir_chamado: f.abrir_chamado,
+        abrir_reembolso: f.abrir_reembolso,
+        mensagem_chamado: f.mensagem_chamado.trim() || null,
+      },
     })
     statusRows.value.unshift(created)
+    showStatusForm.value = false
   } catch (e: any) {
     statusError.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    statusSaving.value = false
   }
 }
 
@@ -713,7 +757,7 @@ async function enviarChamado(c: Logistica) {
         <Button size="sm" variant="ghost" :disabled="statusLoading" @click="refreshStatus">
           <RefreshCw class="size-4 mr-1" /> recarregar
         </Button>
-        <Button v-if="canEdit" size="sm" class="ml-auto" @click="addStatusRow">
+        <Button v-if="canEdit" size="sm" class="ml-auto" @click="openStatusForm">
           <Plus class="size-4 mr-1" /> Novo status
         </Button>
       </div>
@@ -735,6 +779,7 @@ async function enviarChamado(c: Logistica) {
               <th class="px-3 py-2">Alterar Status Bling</th>
               <th class="px-3 py-2">Monitoramento</th>
               <th class="px-3 py-2">Abrir Chamado</th>
+              <th class="px-3 py-2">Abrir Reembolso</th>
               <th class="px-3 py-2">Mensagem do Chamado</th>
               <th v-if="canEdit" class="px-3 py-2 w-10"></th>
             </tr>
@@ -768,21 +813,23 @@ async function enviarChamado(c: Logistica) {
                 />
                 <span v-else :class="[canEdit ? 'cursor-text' : '', s.status_plataforma ? 'font-medium' : 'text-muted-foreground']">{{ s.status_plataforma || '—' }}</span>
               </td>
-              <!-- Alterar Status Bling -->
+              <!-- Alterar Status Bling (dropdown com os status conhecidos do Bling) -->
               <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'alterar_status_bling')">
-                <input
+                <select
                   v-if="isEditing(s, 'alterar_status_bling')"
                   v-model="editValue"
                   autofocus
-                  placeholder="vazio = não altera"
                   class="w-44 rounded border bg-background px-1.5 py-1 text-sm"
+                  @change="commitEdit(s)"
                   @blur="commitEdit(s)"
-                  @keydown.enter.prevent="commitEdit(s)"
                   @keydown.esc="cancelEdit"
-                />
+                >
+                  <option value="">— não altera —</option>
+                  <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
+                </select>
                 <template v-else>
-                  <span v-if="s.alterar_status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50" :class="canEdit ? 'cursor-text' : ''">{{ s.alterar_status_bling }}</span>
-                  <span v-else class="text-muted-foreground" :class="canEdit ? 'cursor-text' : ''">—</span>
+                  <span v-if="s.alterar_status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50" :class="canEdit ? 'cursor-pointer' : ''">{{ s.alterar_status_bling }}</span>
+                  <span v-else class="text-muted-foreground" :class="canEdit ? 'cursor-pointer' : ''">—</span>
                 </template>
               </td>
               <!-- Monitoramento (toggle direto) -->
@@ -809,6 +856,19 @@ async function enviarChamado(c: Logistica) {
                     @change="toggleStatusBool(s, 'abrir_chamado')"
                   />
                   <span :class="s.abrir_chamado ? 'text-emerald-500' : 'text-muted-foreground'">{{ s.abrir_chamado ? 'Sim' : 'Não' }}</span>
+                </label>
+              </td>
+              <!-- Abrir Reembolso (toggle direto) -->
+              <td class="px-3 py-1 whitespace-nowrap align-top">
+                <label class="inline-flex items-center gap-1.5" :class="canEdit ? 'cursor-pointer' : ''">
+                  <input
+                    type="checkbox"
+                    :checked="s.abrir_reembolso"
+                    :disabled="!canEdit || statusBusy.has(s.id)"
+                    class="size-4"
+                    @change="toggleStatusBool(s, 'abrir_reembolso')"
+                  />
+                  <span :class="s.abrir_reembolso ? 'text-emerald-500' : 'text-muted-foreground'">{{ s.abrir_reembolso ? 'Sim' : 'Não' }}</span>
                 </label>
               </td>
               <!-- Mensagem do Chamado (textarea inline) -->
@@ -838,7 +898,7 @@ async function enviarChamado(c: Logistica) {
               </td>
             </tr>
             <tr v-if="!statusLoading && statusRows.length === 0">
-              <td :colspan="canEdit ? 7 : 6" class="px-3 py-6 text-center text-muted-foreground">nenhum status</td>
+              <td :colspan="canEdit ? 8 : 7" class="px-3 py-6 text-center text-muted-foreground">nenhum status</td>
             </tr>
           </tbody>
         </table>
@@ -879,15 +939,17 @@ async function enviarChamado(c: Logistica) {
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Alterar Status Bling</label>
-            <input
+            <select
               :value="s.alterar_status_bling || ''"
               :disabled="!canEdit || statusBusy.has(s.id)"
-              placeholder="vazio = não altera"
               class="w-full rounded border bg-background px-2 py-1 text-sm"
-              @change="patchStatusField(s.id, { alterar_status_bling: ($event.target as HTMLInputElement).value.trim() || null })"
-            />
+              @change="patchStatusField(s.id, { alterar_status_bling: ($event.target as HTMLSelectElement).value || null })"
+            >
+              <option value="">— não altera —</option>
+              <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
+            </select>
           </div>
-          <div class="flex items-center gap-4">
+          <div class="flex flex-wrap items-center gap-4">
             <label class="flex items-center gap-2 text-sm">
               <input type="checkbox" :checked="s.monitoramento" :disabled="!canEdit || statusBusy.has(s.id)" class="size-4" @change="toggleStatusBool(s, 'monitoramento')" />
               Monitoramento
@@ -895,6 +957,10 @@ async function enviarChamado(c: Logistica) {
             <label class="flex items-center gap-2 text-sm">
               <input type="checkbox" :checked="s.abrir_chamado" :disabled="!canEdit || statusBusy.has(s.id)" class="size-4" @change="toggleStatusBool(s, 'abrir_chamado')" />
               Abrir chamado
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input type="checkbox" :checked="s.abrir_reembolso" :disabled="!canEdit || statusBusy.has(s.id)" class="size-4" @change="toggleStatusBool(s, 'abrir_reembolso')" />
+              Abrir reembolso
             </label>
           </div>
           <div>
@@ -914,6 +980,67 @@ async function enviarChamado(c: Logistica) {
         </div>
       </div>
     </template>
+
+    <!-- Modal "Novo status" (aba Status) -->
+    <div v-if="showStatusForm" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="showStatusForm = false">
+      <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold">Novo status</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" @click="showStatusForm = false">
+            <X class="size-4" />
+          </Button>
+        </div>
+
+        <div>
+          <Label>Plataforma</Label>
+          <Input v-model="statusForm.plataforma" placeholder="vazio = geral" />
+        </div>
+        <div>
+          <Label>Status Plataforma</Label>
+          <Input v-model="statusForm.status_plataforma" />
+        </div>
+        <div>
+          <Label>Alterar Status Bling</Label>
+          <select
+            v-model="statusForm.alterar_status_bling"
+            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+          >
+            <option value="">— não altera —</option>
+            <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
+          </select>
+        </div>
+        <div class="flex flex-wrap items-center gap-4">
+          <label class="flex items-center gap-2 text-sm">
+            <input v-model="statusForm.monitoramento" type="checkbox" class="size-4" />
+            Monitoramento
+          </label>
+          <label class="flex items-center gap-2 text-sm">
+            <input v-model="statusForm.abrir_chamado" type="checkbox" class="size-4" />
+            Abrir chamado
+          </label>
+          <label class="flex items-center gap-2 text-sm">
+            <input v-model="statusForm.abrir_reembolso" type="checkbox" class="size-4" />
+            Abrir reembolso
+          </label>
+        </div>
+        <div>
+          <Label>Mensagem do Chamado</Label>
+          <textarea
+            v-model="statusForm.mensagem_chamado"
+            rows="3"
+            placeholder="texto, link ou foto (cole a URL)"
+            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
+          />
+        </div>
+
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" @click="showStatusForm = false">Cancelar</Button>
+          <Button :disabled="statusSaving" @click="saveStatusForm">
+            {{ statusSaving ? 'Salvando…' : 'Salvar' }}
+          </Button>
+        </div>
+      </div>
+    </div>
 
     <!-- Modal create/edit caso -->
     <div v-if="modalOpen" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="closeModal">

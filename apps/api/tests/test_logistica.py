@@ -152,6 +152,7 @@ async def test_status_crud(
             "alterar_status_bling": "Aguardando Devolução",
             "monitoramento": True,
             "abrir_chamado": True,
+            "abrir_reembolso": True,
             "mensagem_chamado": "acompanhar devolução",
         },
     )
@@ -161,6 +162,7 @@ async def test_status_crud(
     assert r.json()["plataforma"] == "Mercado Livre"
     assert r.json()["monitoramento"] is True
     assert r.json()["abrir_chamado"] is True
+    assert r.json()["abrir_reembolso"] is True
     assert "anexar_envio" not in r.json()
 
     r = await client.get("/api/logistica/status")
@@ -168,10 +170,16 @@ async def test_status_crud(
 
     r = await client.patch(
         f"/api/logistica/status/{sid}",
-        json={"abrir_chamado": False, "alterar_status_bling": "", "monitoramento": False},
+        json={
+            "abrir_chamado": False,
+            "abrir_reembolso": False,
+            "alterar_status_bling": "",
+            "monitoramento": False,
+        },
     )
     assert r.status_code == 200
     assert r.json()["abrir_chamado"] is False
+    assert r.json()["abrir_reembolso"] is False
     assert r.json()["monitoramento"] is False
     assert r.json()["alterar_status_bling"] is None
 
@@ -194,6 +202,7 @@ async def test_status_cria_vazio(
     assert body["plataforma"] is None
     assert body["monitoramento"] is False
     assert body["abrir_chamado"] is False
+    assert body["abrir_reembolso"] is False
 
 
 @pytest.mark.asyncio
@@ -357,6 +366,29 @@ async def test_opcoes_expostas(
     body = r.json()
     assert body["field_order"] == logistica_rules.FIELD_ORDER
     assert "cancelled" in body["field_options"]["order_status"]
+    assert "status_bling_options" in body
+
+
+@pytest.mark.asyncio
+async def test_opcoes_status_bling_options(
+    client: AsyncClient,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+    db: AsyncSession,
+):
+    # Os nomes das situações do Bling alimentam o dropdown "Alterar Status Bling".
+    from app.models import SituacaoBling
+
+    db.add(SituacaoBling(id=999001, nome="Aguardando Devolução"))
+    db.add(SituacaoBling(id=999002, nome="Entregue"))
+    await db.commit()
+
+    auth_as(admin)
+    r = await client.get("/api/logistica/opcoes")
+    assert r.status_code == 200
+    opts = r.json()["status_bling_options"]
+    assert "Aguardando Devolução" in opts
+    assert "Entregue" in opts
 
 
 def test_sugerir_selecao_vazia_retorna_lista_vazia():

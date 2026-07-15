@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Logistica, LogisticaStatus, User
+from app.models import Logistica, LogisticaStatus, SituacaoBling, User
 from app.schemas.logistica import (
     CandidatoOut,
     LogisticaCreate,
@@ -82,6 +82,7 @@ def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
         alterar_status_bling=s.alterar_status_bling,
         monitoramento=s.monitoramento,
         abrir_chamado=s.abrir_chamado,
+        abrir_reembolso=s.abrir_reembolso,
         mensagem_chamado=s.mensagem_chamado,
         created_by=s.created_by,
         created_at=s.created_at,
@@ -112,12 +113,19 @@ def _clean_meli(m: dict[str, str] | None) -> dict[str, str]:
 
 @router.get("/opcoes", response_model=OpcoesOut)
 async def opcoes(
+    session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("logistica", "view"))],
 ) -> OpcoesOut:
+    nomes = (
+        await session.execute(
+            select(SituacaoBling.nome).distinct().order_by(SituacaoBling.nome)
+        )
+    ).scalars().all()
     return OpcoesOut(
         field_order=logistica_rules.FIELD_ORDER,
         field_labels=logistica_rules.FIELD_LABELS,
         field_options=logistica_rules.FIELD_OPTIONS,
+        status_bling_options=[n for n in nomes if n],
     )
 
 
@@ -155,6 +163,7 @@ async def create_status(
         alterar_status_bling=_clean(body.alterar_status_bling),
         monitoramento=bool(body.monitoramento),
         abrir_chamado=bool(body.abrir_chamado),
+        abrir_reembolso=bool(body.abrir_reembolso),
         mensagem_chamado=_clean(body.mensagem_chamado),
         created_by=user.id,
     )
@@ -188,6 +197,8 @@ async def patch_status(
         s.monitoramento = bool(data["monitoramento"])
     if "abrir_chamado" in data:
         s.abrir_chamado = bool(data["abrir_chamado"])
+    if "abrir_reembolso" in data:
+        s.abrir_reembolso = bool(data["abrir_reembolso"])
     if "mensagem_chamado" in data:
         s.mensagem_chamado = _clean(data["mensagem_chamado"])
 

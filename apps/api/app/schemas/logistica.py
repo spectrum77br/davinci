@@ -63,6 +63,7 @@ class LogisticaStatusOut(BaseModel):
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
+    abrir_reembolso: bool = False
     mensagem_chamado: str | None = None
     created_by: UUID | None = None
     created_at: datetime
@@ -75,6 +76,7 @@ class LogisticaStatusCreate(BaseModel):
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
+    abrir_reembolso: bool = False
     mensagem_chamado: str | None = None
 
 
@@ -84,6 +86,7 @@ class LogisticaStatusPatch(BaseModel):
     alterar_status_bling: str | None = None
     monitoramento: bool | None = None
     abrir_chamado: bool | None = None
+    abrir_reembolso: bool | None = None
     mensagem_chamado: str | None = None
 
 
@@ -111,3 +114,6 @@ class OpcoesOut(BaseModel):
     field_order: list[str]
     field_labels: dict[str, str]
     field_options: dict[str, list[str]]
+    # Nomes das situações do Bling (davinci.situacao_bling), pra o dropdown de
+    # "Alterar Status Bling" na aba Status.
+    status_bling_options: list[str] = Field(default_factory=list)

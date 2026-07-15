@@ -72,6 +72,9 @@ class LogisticaStatus(Base, TimestampMixin):
     abrir_chamado: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    abrir_reembolso: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     # Mensagem do chamado + o que anexar (foto/link/o que for) no envio.
     mensagem_chamado: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
