@@ -224,7 +224,14 @@ function pollBlingJob(jobId: string) {
         blingJobToast.value = excl > 0
           ? `Pronto — estoque atualizado e ${excl} produto(s) excluído(s) no Bling removido(s).`
           : 'Pronto — estoque atualizado (nenhum excluído encontrado).'
-        void loadCurrentTab()
+        // O sweep do /produtos refresca só o saldo VIRTUAL (stock). O
+        // reserved_stock fica com o último valor do webhook e pode estar
+        // preso (reserva de um pedido que já saiu no Bling), inflando o
+        // "saldo atual" da grade. Encadeia o reconcile de reserva
+        // (/sync-stocks: puxa saldoFisico/Virtual do Bling e recalcula
+        // reserved_stock = max(0, físico - virtual)); ele recarrega a
+        // grade já corrigida ao terminar.
+        void syncFromBling()
       } else {
         blingJobToast.value = 'Falha ao atualizar o estoque do Bling.'
       }
