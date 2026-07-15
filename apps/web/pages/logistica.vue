@@ -309,6 +309,22 @@ function assinatura(c: Logistica): string {
   return parts.join(' | ')
 }
 
+// Tooltip da coluna "Status Plataforma": mostra qual campo do Meli é cada
+// pedaço da assinatura (order_status, ship_status, ...) pra dar pra identificar.
+// Pareia os campos NÃO-vazios (na ordem fixa) com os valores PT já traduzidos
+// (a assinatura junta esses mesmos valores por " | ").
+function statusTooltip(c: Logistica): string {
+  const fo = opcoes.value.field_order
+  const labels = opcoes.value.field_labels
+  const ms = c.meli_status || {}
+  const naoVazios = fo.filter((f) => String(ms[f] ?? '').trim())
+  if (!naoVazios.length) return ''
+  const partesPt = (c.status_plataforma || '').split(' | ')
+  return naoVazios
+    .map((f, i) => `${labels[f] || f}: ${partesPt[i] ?? String(ms[f] ?? '')}`)
+    .join('\n')
+}
+
 function isMl(c: Logistica): boolean {
   return ['mercado livre', 'mercadolivre', 'ml'].includes(
     (c.plataforma || '').trim().toLowerCase(),
@@ -670,7 +686,11 @@ async function enviarChamado(c: Logistica) {
               <td class="px-3 py-2 whitespace-nowrap">{{ c.conta || '—' }}</td>
               <td class="px-3 py-2 text-muted-foreground text-xs max-w-[280px] break-words">
                 <div class="flex items-start gap-1.5">
-                  <span class="flex-1 break-words">{{ assinatura(c) || '—' }}</span>
+                  <span
+                    class="flex-1 break-words"
+                    :class="statusTooltip(c) ? 'cursor-help' : ''"
+                    :title="statusTooltip(c)"
+                  >{{ assinatura(c) || '—' }}</span>
                   <button
                     v-if="canEdit && isMl(c) && c.pedido_marketplace"
                     class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
@@ -728,7 +748,7 @@ async function enviarChamado(c: Logistica) {
             </div>
             <span v-if="c.status_bling" class="text-[10px] px-1.5 py-0.5 rounded border border-primary/50 shrink-0">{{ c.status_bling }}</span>
           </div>
-          <div v-if="assinatura(c)" class="text-xs text-muted-foreground break-words">{{ assinatura(c) }}</div>
+          <div v-if="assinatura(c)" class="text-xs text-muted-foreground break-words" :title="statusTooltip(c)">{{ assinatura(c) }}</div>
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
             <div><span class="text-muted-foreground">Data:</span> {{ fmtDate(c.data) }}</div>
             <div><span class="text-muted-foreground">Rastreio:</span> {{ c.rastreio || '—' }}</div>
