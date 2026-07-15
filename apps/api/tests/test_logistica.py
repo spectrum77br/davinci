@@ -153,7 +153,6 @@ async def test_status_crud(
             "monitoramento": True,
             "abrir_chamado": True,
             "mensagem_chamado": "acompanhar devolução",
-            "anexar_envio": "comprovante de postagem",
         },
     )
     assert r.status_code == 201, r.text
@@ -162,7 +161,7 @@ async def test_status_crud(
     assert r.json()["plataforma"] == "Mercado Livre"
     assert r.json()["monitoramento"] is True
     assert r.json()["abrir_chamado"] is True
-    assert r.json()["anexar_envio"] == "comprovante de postagem"
+    assert "anexar_envio" not in r.json()
 
     r = await client.get("/api/logistica/status")
     assert any(s["id"] == sid for s in r.json())
@@ -180,6 +179,48 @@ async def test_status_crud(
     assert r.status_code == 204
     r = await client.get("/api/logistica/status")
     assert not any(s["id"] == sid for s in r.json())
+
+
+@pytest.mark.asyncio
+async def test_status_cria_vazio(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    # Campos opcionais: dá pra criar uma linha vazia pra preencher à mão depois.
+    auth_as(admin)
+    r = await client.post("/api/logistica/status", json={})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["status_plataforma"] is None
+    assert body["plataforma"] is None
+    assert body["monitoramento"] is False
+    assert body["abrir_chamado"] is False
+
+
+@pytest.mark.asyncio
+async def test_enviar_chamado_404(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    r = await client.post(f"/api/logistica/{uuid.uuid4()}/enviar-chamado")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "logistica_not_found"
+
+
+@pytest.mark.asyncio
+async def test_enviar_chamado_sem_mensagem(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    # Sem meli_status → sem assinatura → nenhuma regra da aba Status casa →
+    # 422 logistica_sem_mensagem_chamado (nem tenta chamar o ML).
+    auth_as(admin)
+    r = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "conta": "loja", "pedido_marketplace": "ML1"},
+    )
+    cid = r.json()["id"]
+    r = await client.post(f"/api/logistica/{cid}/enviar-chamado")
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "logistica_sem_mensagem_chamado"
 
 
 @pytest.mark.asyncio

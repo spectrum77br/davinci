@@ -83,7 +83,6 @@ def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
         monitoramento=s.monitoramento,
         abrir_chamado=s.abrir_chamado,
         mensagem_chamado=s.mensagem_chamado,
-        anexar_envio=s.anexar_envio,
         created_by=s.created_by,
         created_at=s.created_at,
         updated_at=s.updated_at,
@@ -152,12 +151,11 @@ async def create_status(
 ) -> LogisticaStatusOut:
     s = LogisticaStatus(
         plataforma=_clean(body.plataforma),
-        status_plataforma=(body.status_plataforma or "").strip(),
+        status_plataforma=_clean(body.status_plataforma),
         alterar_status_bling=_clean(body.alterar_status_bling),
         monitoramento=bool(body.monitoramento),
         abrir_chamado=bool(body.abrir_chamado),
         mensagem_chamado=_clean(body.mensagem_chamado),
-        anexar_envio=_clean(body.anexar_envio),
         created_by=user.id,
     )
     session.add(s)
@@ -183,7 +181,7 @@ async def patch_status(
     if "plataforma" in data:
         s.plataforma = _clean(data["plataforma"])
     if "status_plataforma" in data:
-        s.status_plataforma = (data["status_plataforma"] or "").strip()
+        s.status_plataforma = _clean(data["status_plataforma"])
     if "alterar_status_bling" in data:
         s.alterar_status_bling = _clean(data["alterar_status_bling"])
     if "monitoramento" in data:
@@ -192,8 +190,6 @@ async def patch_status(
         s.abrir_chamado = bool(data["abrir_chamado"])
     if "mensagem_chamado" in data:
         s.mensagem_chamado = _clean(data["mensagem_chamado"])
-    if "anexar_envio" in data:
-        s.anexar_envio = _clean(data["anexar_envio"])
 
     await session.commit()
     await session.refresh(s)
@@ -286,6 +282,64 @@ async def atualizar_meli(
         raise HTTPException(502, detail={"code": "logistica_meli_erro"}) from e
     await session.commit()
     await session.refresh(c)
+    return _to_out(c)
+
+
+async def _mensagem_chamado_para(session: AsyncSession, c: Logistica) -> str | None:
+    """Mensagem do chamado da regra da aba Status que casa com o Status
+    Plataforma (assinatura PT) da linha. Prefere a regra específica da
+    plataforma; cai na regra geral (plataforma vazia). None se nenhuma casar
+    ou a que casou não tiver mensagem."""
+    assinatura = logistica_rules.assinatura_pt(c.meli_status or {}).strip().lower()
+    if not assinatura:
+        return None
+    plat = (c.plataforma or "").strip().lower()
+    rows = (await session.execute(select(LogisticaStatus))).scalars().all()
+    especifica: str | None = None
+    geral: str | None = None
+    for s in rows:
+        if (s.status_plataforma or "").strip().lower() != assinatura:
+            continue
+        msg = (s.mensagem_chamado or "").strip()
+        if not msg:
+            continue
+        sp = (s.plataforma or "").strip().lower()
+        if sp and sp == plat:
+            especifica = msg
+        elif not sp:
+            geral = msg
+    return especifica or geral
+
+
+@router.post("/{logistica_id}/enviar-chamado", response_model=LogisticaOut)
+async def enviar_chamado(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> LogisticaOut:
+    """Abre o chamado (mediação) direto no Mercado Livre pro pedido da linha e
+    manda a mensagem da regra da aba Status (que casa com o Status Plataforma)
+    pro mediador do ML. Grava o claim_id em `chamado`. Só vale pra pedidos de ML
+    que já tenham uma reclamação aberta pelo comprador (a API do ML não deixa o
+    vendedor abrir reclamação do zero)."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    mensagem = await _mensagem_chamado_para(session, c)
+    if not mensagem:
+        raise HTTPException(422, detail={"code": "logistica_sem_mensagem_chamado"})
+    try:
+        await logistica_meli.enviar_chamado_for_row(session, c, mensagem)
+    except logistica_meli.MeliEnrichError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_enviar_chamado_falhou", id=str(logistica_id), err=str(e)[:300])
+        raise HTTPException(502, detail={"code": "logistica_chamado_erro", "erro": str(e)[:300]}) from e
+    await session.commit()
+    await session.refresh(c)
+    logger.info("logistica_chamado_enviado", id=str(logistica_id), chamado=c.chamado)
     return _to_out(c)
 
 

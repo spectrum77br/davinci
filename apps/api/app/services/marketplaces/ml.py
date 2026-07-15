@@ -263,6 +263,50 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def open_claim_dispute(self, claim_id: str | int) -> dict:
+        """Escala a reclamação pra mediação do Mercado Livre (o "chamado"): o ML
+        passa a atuar como mediador e o canal de mensagem com o mediador é
+        liberado. Só funciona sobre uma reclamação já ABERTA pelo comprador (o
+        vendedor NÃO abre reclamação/mediação do zero por API — a doc do ML é
+        explícita). Ação irreversível. Levanta com o corpo do erro do ML em 4xx
+        (pra ser mostrado ao operador)."""
+        r = await self._request(
+            "POST", f"/post-purchase/v1/claims/{claim_id}/actions/open-dispute"
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"ml_open_dispute status={r.status_code} body={r.text[:500]}"
+            )
+        return r.json() or {}
+
+    async def send_claim_message(
+        self,
+        claim_id: str | int,
+        message: str,
+        *,
+        receiver_role: str = "mediator",
+        attachments: list[str] | None = None,
+    ) -> dict:
+        """Manda uma mensagem numa reclamação existente. `receiver_role`:
+        `mediator` (o Mercado Livre, disponível só após open-dispute),
+        `complainant` (o comprador) ou `respondent`. `attachments` são os
+        `filename` retornados pelo upload em /claims/{id}/attachments. Levanta
+        com o corpo do erro do ML em 4xx."""
+        r = await self._request(
+            "POST",
+            f"/post-purchase/v1/claims/{claim_id}/actions/send-message",
+            json={
+                "receiver_role": receiver_role,
+                "message": message,
+                "attachments": attachments or [],
+            },
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"ml_send_claim_message status={r.status_code} body={r.text[:500]}"
+            )
+        return r.json() or {}
+
     async def get_billing_order_details(self, order_id: str) -> dict:
         r = await self._request(
             "GET",

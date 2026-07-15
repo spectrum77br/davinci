@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -338,16 +338,22 @@ async function atualizarMeli(c: Logistica) {
 type LogisticaStatus = {
   id: string
   plataforma: string | null
-  status_plataforma: string
+  status_plataforma: string | null
   alterar_status_bling: string | null
   monitoramento: boolean
   abrir_chamado: boolean
   mensagem_chamado: string | null
-  anexar_envio: string | null
   created_by: string | null
   created_at: string
   updated_at: string
 }
+
+// Campos de texto editáveis inline (mensagem_chamado usa textarea).
+type StatusTextField =
+  | 'plataforma'
+  | 'status_plataforma'
+  | 'alterar_status_bling'
+  | 'mensagem_chamado'
 
 const statusRows = ref<LogisticaStatus[]>([])
 const statusLoading = ref(false)
@@ -371,93 +377,132 @@ watch(tab, (t) => {
   if (t === 'status' && !statusLoaded) refreshStatus()
 })
 
-const statusModalOpen = ref(false)
-const statusEditingId = ref<string | null>(null)
-const statusSaving = ref(false)
-const statusFormErr = ref<string | null>(null)
+// ---- Edição inline (uma célula por vez) ----
+const editing = ref<{ id: string; field: StatusTextField } | null>(null)
+const editValue = ref('')
+const statusBusy = ref<Set<string>>(new Set())
 
-const statusForm = reactive({
-  plataforma: '',
-  status_plataforma: '',
-  alterar_status_bling: '',
-  monitoramento: false,
-  abrir_chamado: false,
-  mensagem_chamado: '',
-  anexar_envio: '',
-})
-
-function resetStatusForm(src?: LogisticaStatus) {
-  statusForm.plataforma = src?.plataforma || ''
-  statusForm.status_plataforma = src?.status_plataforma || ''
-  statusForm.alterar_status_bling = src?.alterar_status_bling || ''
-  statusForm.monitoramento = src?.monitoramento || false
-  statusForm.abrir_chamado = src?.abrir_chamado || false
-  statusForm.mensagem_chamado = src?.mensagem_chamado || ''
-  statusForm.anexar_envio = src?.anexar_envio || ''
+function isEditing(s: LogisticaStatus, field: StatusTextField) {
+  return editing.value?.id === s.id && editing.value?.field === field
 }
 
-function openNewStatus() {
-  statusEditingId.value = null
-  resetStatusForm()
-  statusFormErr.value = null
-  statusModalOpen.value = true
+function startEdit(s: LogisticaStatus, field: StatusTextField) {
+  if (!canEdit.value) return
+  editing.value = { id: s.id, field }
+  editValue.value = (s[field] as string | null) || ''
 }
 
-function openEditStatus(s: LogisticaStatus) {
-  statusEditingId.value = s.id
-  resetStatusForm(s)
-  statusFormErr.value = null
-  statusModalOpen.value = true
+function cancelEdit() {
+  editing.value = null
 }
 
-function closeStatusModal() {
-  statusModalOpen.value = false
-  statusEditingId.value = null
+function setStatusBusy(id: string, on: boolean) {
+  const next = new Set(statusBusy.value)
+  if (on) next.add(id)
+  else next.delete(id)
+  statusBusy.value = next
 }
 
-function statusPayload() {
-  return {
-    plataforma: statusForm.plataforma.trim() || null,
-    status_plataforma: statusForm.status_plataforma.trim(),
-    alterar_status_bling: statusForm.alterar_status_bling.trim() || null,
-    monitoramento: statusForm.monitoramento,
-    abrir_chamado: statusForm.abrir_chamado,
-    mensagem_chamado: statusForm.mensagem_chamado.trim() || null,
-    anexar_envio: statusForm.anexar_envio.trim() || null,
-  }
-}
-
-async function saveStatus() {
-  statusSaving.value = true
-  statusFormErr.value = null
+async function patchStatusField(id: string, body: Record<string, unknown>) {
+  setStatusBusy(id, true)
+  statusError.value = null
   try {
-    if (statusEditingId.value) {
-      await api(`/api/logistica/status/${statusEditingId.value}`, { method: 'PATCH', body: statusPayload() })
-    } else {
-      await api('/api/logistica/status', { method: 'POST', body: statusPayload() })
-    }
-    closeStatusModal()
-    await refreshStatus()
+    const updated = await api<LogisticaStatus>(`/api/logistica/status/${id}`, {
+      method: 'PATCH',
+      body,
+    })
+    const i = statusRows.value.findIndex((r) => r.id === id)
+    if (i >= 0) statusRows.value[i] = updated
   } catch (e: any) {
-    statusFormErr.value = e?.data?.detail?.code || e?.message || 'erro'
+    statusError.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
-    statusSaving.value = false
+    setStatusBusy(id, false)
   }
 }
 
-async function removeStatus() {
-  if (!statusEditingId.value) return
+async function commitEdit(s: LogisticaStatus) {
+  if (!editing.value) return
+  const field = editing.value.field
+  const val = editValue.value.trim()
+  editing.value = null
+  const cur = (s[field] as string | null) || ''
+  if (val === cur) return
+  await patchStatusField(s.id, { [field]: val || null })
+}
+
+async function toggleStatusBool(s: LogisticaStatus, field: 'monitoramento' | 'abrir_chamado') {
+  if (!canEdit.value) return
+  await patchStatusField(s.id, { [field]: !s[field] })
+}
+
+async function addStatusRow() {
+  statusError.value = null
+  try {
+    const created = await api<LogisticaStatus>('/api/logistica/status', {
+      method: 'POST',
+      body: {},
+    })
+    statusRows.value.unshift(created)
+  } catch (e: any) {
+    statusError.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
+
+async function removeStatusRow(s: LogisticaStatus) {
   if (!confirm('Remover este status?')) return
-  statusSaving.value = true
-  statusFormErr.value = null
+  setStatusBusy(s.id, true)
+  statusError.value = null
   try {
-    await api(`/api/logistica/status/${statusEditingId.value}`, { method: 'DELETE' })
-    closeStatusModal()
-    await refreshStatus()
+    await api(`/api/logistica/status/${s.id}`, { method: 'DELETE' })
+    statusRows.value = statusRows.value.filter((r) => r.id !== s.id)
   } catch (e: any) {
-    statusFormErr.value = e?.data?.detail?.code || e?.message || 'erro'
+    statusError.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
-    statusSaving.value = false
+    setStatusBusy(s.id, false)
+  }
+}
+
+// ---- Enviar chamado direto pro ML (aba Mercado Livre) ----
+const CHAMADO_ERROS: Record<string, string> = {
+  logistica_sem_mensagem_chamado:
+    'Sem regra na aba Status que case com o Status Plataforma deste pedido — cadastre a mensagem do chamado.',
+  logistica_nao_ml: 'Só pedidos do Mercado Livre.',
+  logistica_sem_pedido: 'Pedido sem número de marketplace.',
+  logistica_sem_integracao: 'Conta sem integração ML configurada.',
+  logistica_sem_reclamacao:
+    'Pedido sem reclamação aberta pelo comprador — só dá pra abrir chamado no painel do Mercado Livre.',
+  logistica_reclamacao_encerrada: 'Reclamação já encerrada no Mercado Livre.',
+  logistica_reclamacao_sem_acao:
+    'O Mercado Livre não liberou falar com o mediador neste chamado.',
+}
+const sendingChamado = ref<Set<string>>(new Set())
+async function enviarChamado(c: Logistica) {
+  if (
+    !confirm(
+      'Isto abre a mediação do Mercado Livre nesta reclamação (o ML entra como mediador — ação irreversível) e manda a mensagem da regra pro ML. Continuar?',
+    )
+  )
+    return
+  sendingChamado.value = new Set(sendingChamado.value).add(c.id)
+  error.value = null
+  try {
+    const updated = await api<Logistica>(`/api/logistica/${c.id}/enviar-chamado`, {
+      method: 'POST',
+    })
+    const i = rows.value.findIndex((r) => r.id === c.id)
+    if (i >= 0) rows.value[i] = updated
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    error.value =
+      (code && CHAMADO_ERROS[code]) ||
+      e?.data?.detail?.erro ||
+      code ||
+      e?.message ||
+      'erro'
+  } finally {
+    const s = new Set(sendingChamado.value)
+    s.delete(c.id)
+    sendingChamado.value = s
   }
 }
 </script>
@@ -599,7 +644,21 @@ async function removeStatus() {
                 <span v-if="c.status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50">{{ c.status_bling }}</span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
-              <td class="px-3 py-2 whitespace-nowrap">{{ c.chamado || '—' }}</td>
+              <td class="px-3 py-2 whitespace-nowrap">
+                <div class="flex items-center gap-1.5">
+                  <span class="flex-1">{{ c.chamado || '—' }}</span>
+                  <button
+                    v-if="canEdit && isMl(c) && c.pedido_marketplace"
+                    class="shrink-0 inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded border hover:bg-muted/40 disabled:opacity-50"
+                    title="Enviar chamado direto pro Mercado Livre"
+                    :disabled="sendingChamado.has(c.id)"
+                    @click.stop="enviarChamado(c)"
+                  >
+                    <Send class="size-3" :class="sendingChamado.has(c.id) ? 'animate-pulse' : ''" />
+                    enviar
+                  </button>
+                </div>
+              </td>
             </tr>
             <tr v-if="!loading && filteredRows.length === 0">
               <td colspan="10" class="px-3 py-6 text-center text-muted-foreground">
@@ -632,6 +691,15 @@ async function removeStatus() {
             <div><span class="text-muted-foreground">Localização:</span> {{ c.localizacao || '—' }}</div>
             <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || '—' }}</div>
           </div>
+          <button
+            v-if="canEdit && isMl(c) && c.pedido_marketplace"
+            class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border hover:bg-muted/40 disabled:opacity-50"
+            :disabled="sendingChamado.has(c.id)"
+            @click.stop="enviarChamado(c)"
+          >
+            <Send class="size-3" :class="sendingChamado.has(c.id) ? 'animate-pulse' : ''" />
+            enviar chamado
+          </button>
         </div>
         <div v-if="!loading && filteredRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
           {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
@@ -645,20 +713,21 @@ async function removeStatus() {
         <Button size="sm" variant="ghost" :disabled="statusLoading" @click="refreshStatus">
           <RefreshCw class="size-4 mr-1" /> recarregar
         </Button>
-        <Button v-if="canEdit" size="sm" class="ml-auto" @click="openNewStatus">
+        <Button v-if="canEdit" size="sm" class="ml-auto" @click="addStatusRow">
           <Plus class="size-4 mr-1" /> Novo status
         </Button>
       </div>
 
       <p class="text-sm text-muted-foreground">
-        Cadastro do que fazer pra cada Status Plataforma: se altera o status no Bling e se abre chamado.
+        Clique numa célula pra editar só aquele campo. Os campos ficam vazios pra o operador
+        preencher à mão. A "Mensagem do Chamado" pode conter texto, link ou foto (cole a URL).
       </p>
 
       <div v-if="statusError" class="text-sm text-red-500">erro: {{ statusError }}</div>
 
-      <!-- Desktop table -->
+      <!-- Desktop table (edição inline por célula) -->
       <div class="hidden md:block border rounded-md overflow-x-auto">
-        <table class="w-full text-sm min-w-[700px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
+        <table class="w-full text-sm min-w-[760px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
           <thead class="bg-muted/40 text-left">
             <tr class="whitespace-nowrap">
               <th class="px-3 py-2">Plataforma</th>
@@ -667,68 +736,177 @@ async function removeStatus() {
               <th class="px-3 py-2">Monitoramento</th>
               <th class="px-3 py-2">Abrir Chamado</th>
               <th class="px-3 py-2">Mensagem do Chamado</th>
-              <th class="px-3 py-2">Anexar Envio</th>
+              <th v-if="canEdit" class="px-3 py-2 w-10"></th>
             </tr>
           </thead>
           <tbody>
-            <tr
-              v-for="s in statusRows"
-              :key="s.id"
-              class="border-t hover:bg-muted/20 cursor-pointer"
-              @click="openEditStatus(s)"
-            >
-              <td class="px-3 py-2 whitespace-nowrap">{{ s.plataforma || '—' }}</td>
-              <td class="px-3 py-2 font-medium">{{ s.status_plataforma }}</td>
-              <td class="px-3 py-2">
-                <span v-if="s.alterar_status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50">{{ s.alterar_status_bling }}</span>
-                <span v-else class="text-muted-foreground">—</span>
+            <tr v-for="s in statusRows" :key="s.id" class="border-t hover:bg-muted/20">
+              <!-- Plataforma -->
+              <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'plataforma')">
+                <input
+                  v-if="isEditing(s, 'plataforma')"
+                  v-model="editValue"
+                  autofocus
+                  placeholder="vazio = geral"
+                  class="w-40 rounded border bg-background px-1.5 py-1 text-sm"
+                  @blur="commitEdit(s)"
+                  @keydown.enter.prevent="commitEdit(s)"
+                  @keydown.esc="cancelEdit"
+                />
+                <span v-else :class="[canEdit ? 'cursor-text' : '', s.plataforma ? '' : 'text-muted-foreground']">{{ s.plataforma || '—' }}</span>
               </td>
-              <td class="px-3 py-2 whitespace-nowrap">
-                <span :class="s.monitoramento ? 'text-emerald-500' : 'text-muted-foreground'">
-                  {{ s.monitoramento ? 'Sim' : 'Não' }}
-                </span>
+              <!-- Status Plataforma -->
+              <td class="px-2 py-1 align-top" @click="startEdit(s, 'status_plataforma')">
+                <input
+                  v-if="isEditing(s, 'status_plataforma')"
+                  v-model="editValue"
+                  autofocus
+                  class="w-64 rounded border bg-background px-1.5 py-1 text-sm"
+                  @blur="commitEdit(s)"
+                  @keydown.enter.prevent="commitEdit(s)"
+                  @keydown.esc="cancelEdit"
+                />
+                <span v-else :class="[canEdit ? 'cursor-text' : '', s.status_plataforma ? 'font-medium' : 'text-muted-foreground']">{{ s.status_plataforma || '—' }}</span>
               </td>
-              <td class="px-3 py-2 whitespace-nowrap">
-                <span :class="s.abrir_chamado ? 'text-emerald-500' : 'text-muted-foreground'">
-                  {{ s.abrir_chamado ? 'Sim' : 'Não' }}
-                </span>
+              <!-- Alterar Status Bling -->
+              <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'alterar_status_bling')">
+                <input
+                  v-if="isEditing(s, 'alterar_status_bling')"
+                  v-model="editValue"
+                  autofocus
+                  placeholder="vazio = não altera"
+                  class="w-44 rounded border bg-background px-1.5 py-1 text-sm"
+                  @blur="commitEdit(s)"
+                  @keydown.enter.prevent="commitEdit(s)"
+                  @keydown.esc="cancelEdit"
+                />
+                <template v-else>
+                  <span v-if="s.alterar_status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50" :class="canEdit ? 'cursor-text' : ''">{{ s.alterar_status_bling }}</span>
+                  <span v-else class="text-muted-foreground" :class="canEdit ? 'cursor-text' : ''">—</span>
+                </template>
               </td>
-              <td class="px-3 py-2 text-muted-foreground text-xs max-w-[320px] break-words">{{ s.mensagem_chamado || '—' }}</td>
-              <td class="px-3 py-2 text-muted-foreground text-xs max-w-[320px] break-words">{{ s.anexar_envio || '—' }}</td>
+              <!-- Monitoramento (toggle direto) -->
+              <td class="px-3 py-1 whitespace-nowrap align-top">
+                <label class="inline-flex items-center gap-1.5" :class="canEdit ? 'cursor-pointer' : ''">
+                  <input
+                    type="checkbox"
+                    :checked="s.monitoramento"
+                    :disabled="!canEdit || statusBusy.has(s.id)"
+                    class="size-4"
+                    @change="toggleStatusBool(s, 'monitoramento')"
+                  />
+                  <span :class="s.monitoramento ? 'text-emerald-500' : 'text-muted-foreground'">{{ s.monitoramento ? 'Sim' : 'Não' }}</span>
+                </label>
+              </td>
+              <!-- Abrir Chamado (toggle direto) -->
+              <td class="px-3 py-1 whitespace-nowrap align-top">
+                <label class="inline-flex items-center gap-1.5" :class="canEdit ? 'cursor-pointer' : ''">
+                  <input
+                    type="checkbox"
+                    :checked="s.abrir_chamado"
+                    :disabled="!canEdit || statusBusy.has(s.id)"
+                    class="size-4"
+                    @change="toggleStatusBool(s, 'abrir_chamado')"
+                  />
+                  <span :class="s.abrir_chamado ? 'text-emerald-500' : 'text-muted-foreground'">{{ s.abrir_chamado ? 'Sim' : 'Não' }}</span>
+                </label>
+              </td>
+              <!-- Mensagem do Chamado (textarea inline) -->
+              <td class="px-2 py-1 text-xs max-w-[340px] align-top" @click="startEdit(s, 'mensagem_chamado')">
+                <textarea
+                  v-if="isEditing(s, 'mensagem_chamado')"
+                  v-model="editValue"
+                  autofocus
+                  rows="3"
+                  placeholder="texto, link ou foto (cole a URL)"
+                  class="w-80 rounded border bg-background px-1.5 py-1 text-sm resize-y"
+                  @blur="commitEdit(s)"
+                  @keydown.esc="cancelEdit"
+                />
+                <span v-else class="break-words whitespace-pre-line" :class="[canEdit ? 'cursor-text' : '', s.mensagem_chamado ? 'text-muted-foreground' : 'text-muted-foreground/60']">{{ s.mensagem_chamado || '—' }}</span>
+              </td>
+              <!-- Ação -->
+              <td v-if="canEdit" class="px-2 py-1 align-top text-center">
+                <button
+                  class="text-muted-foreground hover:text-red-500 disabled:opacity-50"
+                  title="Remover"
+                  :disabled="statusBusy.has(s.id)"
+                  @click="removeStatusRow(s)"
+                >
+                  <Trash2 class="size-4" />
+                </button>
+              </td>
             </tr>
             <tr v-if="!statusLoading && statusRows.length === 0">
-              <td colspan="7" class="px-3 py-6 text-center text-muted-foreground">nenhum status</td>
+              <td :colspan="canEdit ? 7 : 6" class="px-3 py-6 text-center text-muted-foreground">nenhum status</td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <!-- Mobile cards -->
+      <!-- Mobile cards (campos editáveis diretos) -->
       <div class="md:hidden space-y-2">
-        <div
-          v-for="s in statusRows"
-          :key="s.id"
-          class="border rounded-md p-3 space-y-2 hover:bg-muted/20 cursor-pointer"
-          @click="openEditStatus(s)"
-        >
+        <div v-for="s in statusRows" :key="s.id" class="border rounded-md p-3 space-y-2">
           <div class="flex items-start gap-2">
-            <div class="flex-1 min-w-0 font-medium truncate">{{ s.status_plataforma }}</div>
-            <span :class="s.abrir_chamado ? 'text-emerald-500' : 'text-muted-foreground'" class="text-xs shrink-0">
-              {{ s.abrir_chamado ? 'Chamado' : 'Sem chamado' }}
-            </span>
+            <div class="flex-1 min-w-0 text-xs text-muted-foreground">Status</div>
+            <button
+              v-if="canEdit"
+              class="text-muted-foreground hover:text-red-500 disabled:opacity-50 shrink-0"
+              :disabled="statusBusy.has(s.id)"
+              @click="removeStatusRow(s)"
+            >
+              <Trash2 class="size-4" />
+            </button>
           </div>
-          <div v-if="s.plataforma" class="text-xs">
-            <span class="text-muted-foreground">Plataforma:</span> {{ s.plataforma }}
+          <div>
+            <label class="text-xs text-muted-foreground">Plataforma</label>
+            <input
+              :value="s.plataforma || ''"
+              :disabled="!canEdit || statusBusy.has(s.id)"
+              placeholder="vazio = geral"
+              class="w-full rounded border bg-background px-2 py-1 text-sm"
+              @change="patchStatusField(s.id, { plataforma: ($event.target as HTMLInputElement).value.trim() || null })"
+            />
           </div>
-          <div class="text-xs">
-            <span class="text-muted-foreground">Alterar Bling:</span> {{ s.alterar_status_bling || '—' }}
+          <div>
+            <label class="text-xs text-muted-foreground">Status Plataforma</label>
+            <input
+              :value="s.status_plataforma || ''"
+              :disabled="!canEdit || statusBusy.has(s.id)"
+              class="w-full rounded border bg-background px-2 py-1 text-sm"
+              @change="patchStatusField(s.id, { status_plataforma: ($event.target as HTMLInputElement).value.trim() || null })"
+            />
           </div>
-          <div class="text-xs">
-            <span class="text-muted-foreground">Monitoramento:</span> {{ s.monitoramento ? 'Sim' : 'Não' }}
+          <div>
+            <label class="text-xs text-muted-foreground">Alterar Status Bling</label>
+            <input
+              :value="s.alterar_status_bling || ''"
+              :disabled="!canEdit || statusBusy.has(s.id)"
+              placeholder="vazio = não altera"
+              class="w-full rounded border bg-background px-2 py-1 text-sm"
+              @change="patchStatusField(s.id, { alterar_status_bling: ($event.target as HTMLInputElement).value.trim() || null })"
+            />
           </div>
-          <div v-if="s.mensagem_chamado" class="text-xs text-muted-foreground break-words">{{ s.mensagem_chamado }}</div>
-          <div v-if="s.anexar_envio" class="text-xs">
-            <span class="text-muted-foreground">Anexar envio:</span> {{ s.anexar_envio }}
+          <div class="flex items-center gap-4">
+            <label class="flex items-center gap-2 text-sm">
+              <input type="checkbox" :checked="s.monitoramento" :disabled="!canEdit || statusBusy.has(s.id)" class="size-4" @change="toggleStatusBool(s, 'monitoramento')" />
+              Monitoramento
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input type="checkbox" :checked="s.abrir_chamado" :disabled="!canEdit || statusBusy.has(s.id)" class="size-4" @change="toggleStatusBool(s, 'abrir_chamado')" />
+              Abrir chamado
+            </label>
+          </div>
+          <div>
+            <label class="text-xs text-muted-foreground">Mensagem do Chamado</label>
+            <textarea
+              :value="s.mensagem_chamado || ''"
+              :disabled="!canEdit || statusBusy.has(s.id)"
+              rows="2"
+              placeholder="texto, link ou foto (cole a URL)"
+              class="w-full rounded border bg-background px-2 py-1 text-sm resize-y"
+              @change="patchStatusField(s.id, { mensagem_chamado: ($event.target as HTMLTextAreaElement).value.trim() || null })"
+            />
           </div>
         </div>
         <div v-if="!statusLoading && statusRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
@@ -848,69 +1026,5 @@ async function removeStatus() {
       </div>
     </div>
 
-    <!-- Modal create/edit status -->
-    <div v-if="statusModalOpen" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="closeStatusModal">
-      <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-4 max-h-[90vh] overflow-y-auto">
-        <div class="flex items-center">
-          <h2 class="text-lg font-semibold">{{ statusEditingId ? 'Editar status' : 'Novo status' }}</h2>
-          <Button class="ml-auto" size="sm" variant="ghost" @click="closeStatusModal">
-            <X class="size-4" />
-          </Button>
-        </div>
-
-        <div class="space-y-3">
-          <div>
-            <Label>Plataforma</Label>
-            <Input v-model="statusForm.plataforma" placeholder="ex. Mercado Livre (vazio = geral)" :disabled="!canEdit" />
-          </div>
-          <div>
-            <Label>Status Plataforma</Label>
-            <Input v-model="statusForm.status_plataforma" :disabled="!canEdit" />
-          </div>
-          <div>
-            <Label>Alterar Status Bling</Label>
-            <Input v-model="statusForm.alterar_status_bling" placeholder="deixe vazio pra não alterar" :disabled="!canEdit" />
-          </div>
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="statusForm.monitoramento" type="checkbox" :disabled="!canEdit" class="size-4" />
-            Monitoramento
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="statusForm.abrir_chamado" type="checkbox" :disabled="!canEdit" class="size-4" />
-            Abrir chamado
-          </label>
-          <div>
-            <Label>Mensagem do Chamado</Label>
-            <textarea
-              v-model="statusForm.mensagem_chamado"
-              rows="2"
-              :disabled="!canEdit"
-              class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
-            />
-          </div>
-          <div>
-            <Label>Anexar Envio</Label>
-            <textarea
-              v-model="statusForm.anexar_envio"
-              rows="2"
-              placeholder="o que anexar no envio (ex. comprovante/tutorial)"
-              :disabled="!canEdit"
-              class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
-            />
-          </div>
-        </div>
-
-        <div v-if="statusFormErr" class="text-sm text-red-500">erro: {{ statusFormErr }}</div>
-        <div v-if="canEdit" class="flex justify-end gap-2">
-          <Button v-if="statusEditingId" variant="ghost" :disabled="statusSaving" class="text-red-500 mr-auto" @click="removeStatus">
-            <Trash2 class="size-4 mr-1" /> remover
-          </Button>
-          <Button variant="ghost" :disabled="statusSaving" @click="closeStatusModal">cancelar</Button>
-          <Button :disabled="statusSaving" @click="saveStatus">
-            {{ statusSaving ? 'salvando…' : 'Salvar' }}
-          </Button>
-        </div>
-      </div>
-    </div>
   </div>
 </template>

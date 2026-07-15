@@ -59,12 +59,11 @@ class LogisticaPatch(BaseModel):
 class LogisticaStatusOut(BaseModel):
     id: UUID
     plataforma: str | None = None
-    status_plataforma: str
+    status_plataforma: str | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
     mensagem_chamado: str | None = None
-    anexar_envio: str | None = None
     created_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
@@ -72,12 +71,11 @@ class LogisticaStatusOut(BaseModel):
 
 class LogisticaStatusCreate(BaseModel):
     plataforma: str | None = None
-    status_plataforma: str
+    status_plataforma: str | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
     mensagem_chamado: str | None = None
-    anexar_envio: str | None = None
 
 
 class LogisticaStatusPatch(BaseModel):
@@ -87,7 +85,6 @@ class LogisticaStatusPatch(BaseModel):
     monitoramento: bool | None = None
     abrir_chamado: bool | None = None
     mensagem_chamado: str | None = None
-    anexar_envio: str | None = None
 
 
 # ---- Sugestão de Status Bling (a partir dos status do Meli) ----

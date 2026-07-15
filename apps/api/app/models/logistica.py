@@ -52,8 +52,9 @@ class LogisticaStatus(Base, TimestampMixin):
     """Aba "Status": cadastro/referência do que fazer pra cada STATUS PLATAFORMA.
 
     Formato da aba `status pla.`: STATUS PLATAFORMA | alterar status bling |
-    abrir chamado | mensagem chamado. Por enquanto é só cadastro manual (não
-    escreve no Bling automaticamente).
+    abrir chamado | mensagem chamado. É cadastro manual — o operador preenche as
+    células à mão (todos os campos são opcionais). A `mensagem_chamado` também
+    guarda o que anexar (foto/link/o que for) do envio.
     """
 
     __tablename__ = "logistica_status"
@@ -61,7 +62,8 @@ class LogisticaStatus(Base, TimestampMixin):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     # Marketplace a que a regra se aplica (ex. "Mercado Livre"); vazio = geral.
     plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status_plataforma: Mapped[str] = mapped_column(Text, nullable=False)
+    # Opcional: linha pode nascer vazia pra ser completada pelo operador.
+    status_plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Novo status do Bling; se vazio "não faz nada" (obs "alterado logística").
     alterar_status_bling: Mapped[str | None] = mapped_column(Text, nullable=True)
     monitoramento: Mapped[bool] = mapped_column(
@@ -70,9 +72,8 @@ class LogisticaStatus(Base, TimestampMixin):
     abrir_chamado: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # Mensagem do chamado + o que anexar (foto/link/o que for) no envio.
     mensagem_chamado: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Instrução do que anexar no envio (ex. comprovante/tutorial).
-    anexar_envio: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

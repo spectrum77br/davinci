@@ -299,3 +299,148 @@ def test_assinatura_pt_pula_vazios_e_mantem_ordem():
 def test_traduzir_valor_fallback_token_cru():
     assert logistica_rules.traduzir_valor("ship_substatus", "token_novo_do_ml") == "token_novo_do_ml"
     assert logistica_rules.traduzir_valor("order_status", "") == ""
+
+
+# ---- enviar chamado (open-dispute + send-message ao mediador) -------------
+
+from app.models import Logistica  # noqa: E402
+
+
+def test_respondent_actions_extrai_do_player():
+    claim = {
+        "players": [
+            {"role": "complainant", "available_actions": []},
+            {
+                "role": "respondent",
+                "available_actions": [
+                    {"action": "send_message_to_complainant"},
+                    {"action": "open_dispute"},
+                ],
+            },
+        ]
+    }
+    assert logistica_meli._respondent_actions(claim) == {
+        "send_message_to_complainant",
+        "open_dispute",
+    }
+    assert logistica_meli._respondent_actions({"players": []}) == set()
+
+
+class FakeChamadoML:
+    """Client que registra as chamadas de chamado (open-dispute/send-message)."""
+
+    def __init__(self, order, claim):
+        self._order = order
+        self._claim = claim
+        self.disputed: list = []
+        self.messages: list = []
+
+    async def get_order(self, order_id):
+        return self._order
+
+    async def get_pack(self, pack_id):
+        raise RuntimeError("no pack")
+
+    async def get_claim(self, claim_id):
+        return self._claim
+
+    async def open_claim_dispute(self, claim_id):
+        self.disputed.append(claim_id)
+        return {"id": claim_id}
+
+    async def send_claim_message(self, claim_id, message, *, receiver_role="mediator", attachments=None):
+        self.messages.append((claim_id, message, receiver_role))
+        return {"ok": True}
+
+
+def _patch_ml(monkeypatch, fake):
+    monkeypatch.setattr(logistica_meli, "_ml_integration_for_conta", _fake_integ)
+    monkeypatch.setattr(logistica_meli, "_build_ml_client", lambda session, integ: fake)
+
+
+async def _fake_integ(session, conta):
+    return object()  # integração não-nula; o client é injetado à parte
+
+
+def _ml_row():
+    return Logistica(plataforma="Mercado Livre", conta="loja", pedido_marketplace="ML1")
+
+
+@pytest.mark.asyncio
+async def test_enviar_chamado_abre_dispute_e_manda_ao_mediador(monkeypatch):
+    fake = FakeChamadoML(
+        order={"mediations": [{"id": 999}]},
+        claim={
+            "status": "opened",
+            "players": [
+                {"role": "respondent", "available_actions": [{"action": "open_dispute"}]}
+            ],
+        },
+    )
+    _patch_ml(monkeypatch, fake)
+    row = _ml_row()
+    cid = await logistica_meli.enviar_chamado_for_row(None, row, "oi ML")
+    assert cid == "999"
+    assert row.chamado == "999"
+    assert fake.disputed == [999]  # escalou (não tinha send_message_to_mediator)
+    assert fake.messages == [(999, "oi ML", "mediator")]
+
+
+@pytest.mark.asyncio
+async def test_enviar_chamado_ja_em_mediacao_nao_reabre(monkeypatch):
+    fake = FakeChamadoML(
+        order={"mediations": [{"id": 5}]},
+        claim={
+            "status": "opened",
+            "players": [
+                {"role": "respondent", "available_actions": [{"action": "send_message_to_mediator"}]}
+            ],
+        },
+    )
+    _patch_ml(monkeypatch, fake)
+    cid = await logistica_meli.enviar_chamado_for_row(None, _ml_row(), "msg")
+    assert cid == "5"
+    assert fake.disputed == []  # já podia falar com o mediador → não reabre
+    assert fake.messages == [(5, "msg", "mediator")]
+
+
+@pytest.mark.asyncio
+async def test_enviar_chamado_sem_reclamacao(monkeypatch):
+    fake = FakeChamadoML(order={"mediations": []}, claim={})
+    _patch_ml(monkeypatch, fake)
+    with pytest.raises(logistica_meli.MeliEnrichError) as ei:
+        await logistica_meli.enviar_chamado_for_row(None, _ml_row(), "msg")
+    assert ei.value.code == "logistica_sem_reclamacao"
+
+
+@pytest.mark.asyncio
+async def test_enviar_chamado_reclamacao_encerrada(monkeypatch):
+    fake = FakeChamadoML(
+        order={"mediations": [{"id": 7}]},
+        claim={"status": "closed", "players": [{"role": "respondent", "available_actions": []}]},
+    )
+    _patch_ml(monkeypatch, fake)
+    with pytest.raises(logistica_meli.MeliEnrichError) as ei:
+        await logistica_meli.enviar_chamado_for_row(None, _ml_row(), "msg")
+    assert ei.value.code == "logistica_reclamacao_encerrada"
+    assert fake.messages == []
+
+
+@pytest.mark.asyncio
+async def test_enviar_chamado_sem_acao_de_mediador(monkeypatch):
+    # Aberta, mas o vendedor só pode falar com o comprador (nem mediador nem escalar).
+    fake = FakeChamadoML(
+        order={"mediations": [{"id": 8}]},
+        claim={
+            "status": "opened",
+            "players": [
+                {"role": "respondent", "available_actions": [{"action": "send_message_to_complainant"}]}
+            ],
+        },
+    )
+    _patch_ml(monkeypatch, fake)
+    with pytest.raises(logistica_meli.MeliEnrichError) as ei:
+        await logistica_meli.enviar_chamado_for_row(None, _ml_row(), "msg")
+    assert ei.value.code == "logistica_reclamacao_sem_acao"
+    assert fake.disputed == []
+    assert fake.messages == []

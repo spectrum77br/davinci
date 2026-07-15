@@ -315,6 +315,72 @@ async def enrich_row(
     return True
 
 
+def _respondent_actions(claim: dict) -> set[str]:
+    """Ações liberadas pro VENDEDOR (player role=respondent) num claim."""
+    for p in claim.get("players") or []:
+        if (p or {}).get("role") == "respondent":
+            return {
+                a.get("action")
+                for a in (p.get("available_actions") or [])
+                if isinstance(a, dict) and a.get("action")
+            }
+    return set()
+
+
+async def enviar_chamado_for_row(session: AsyncSession, row: Logistica, message: str) -> str:
+    """Abre o chamado no ML e manda a `message` PRO MERCADO LIVRE (mediador),
+    sobre a reclamação já existente do pedido. Grava o claim_id em `row.chamado`
+    e o retorna.
+
+    Fluxo (a API do ML NÃO deixa o vendedor abrir reclamação do zero — só o
+    comprador; ver doc post-purchase): pega o claim_id de `order.mediations[]`;
+    se a mediação ainda não está aberta e o vendedor tem a ação `open_dispute`,
+    escala (`open-dispute`) e o ML entra como mediador; então manda a mensagem
+    com `receiver_role=mediator`.
+
+    Levanta `MeliEnrichError` com código: linha não-ML / sem pedido / sem
+    integração (como o enrich) + `logistica_sem_reclamacao` (pedido sem claim do
+    comprador) / `logistica_reclamacao_encerrada` (claim fechado, sem ações) /
+    `logistica_reclamacao_sem_acao` (vendedor não pode falar com o mediador nem
+    escalar). Erros crus da API do ML sobem como exceção (o endpoint devolve o
+    corpo do ML)."""
+    if (row.plataforma or "").strip().lower() not in _ML_PLATAFORMAS:
+        raise MeliEnrichError("logistica_nao_ml")
+    order_id = (row.pedido_marketplace or "").strip()
+    if not order_id:
+        raise MeliEnrichError("logistica_sem_pedido")
+    integ = await _ml_integration_for_conta(session, row.conta)
+    if integ is None:
+        raise MeliEnrichError("logistica_sem_integracao")
+    client = _build_ml_client(session, integ)
+
+    order = await _fetch_order(client, order_id)
+    claim_id = next(
+        (
+            m["id"]
+            for m in (order.get("mediations") or [])
+            if isinstance(m, dict) and m.get("id")
+        ),
+        None,
+    )
+    if not claim_id:
+        raise MeliEnrichError("logistica_sem_reclamacao")
+
+    claim = await client.get_claim(claim_id)
+    actions = _respondent_actions(claim)
+    if (claim.get("status") or "").lower() == "closed" or not actions:
+        raise MeliEnrichError("logistica_reclamacao_encerrada")
+
+    if "send_message_to_mediator" not in actions:
+        if "open_dispute" not in actions:
+            raise MeliEnrichError("logistica_reclamacao_sem_acao")
+        await client.open_claim_dispute(claim_id)  # abre a mediação (entra o ML)
+
+    await client.send_claim_message(claim_id, message, receiver_role="mediator")
+    row.chamado = str(claim_id)
+    return str(claim_id)
+
+
 async def enrich_recent(
     session: AsyncSession,
     *,
