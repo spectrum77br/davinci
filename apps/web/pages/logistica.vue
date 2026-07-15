@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy } from 'lucide-vue-next'
 
 definePageMeta({
@@ -440,6 +440,30 @@ watch(tab, (t) => {
   if (t === 'status' && !statusLoaded) refreshStatus()
 })
 
+// Carrega as chaves cadastradas na aba Status já no início, pra a aba
+// Mercado Livre poder pintar de vermelho os pedidos cuja chave ainda não
+// foi cadastrada (= status que a gente ainda não decidiu o que fazer).
+onMounted(() => {
+  if (!statusLoaded) refreshStatus()
+})
+
+function normKey(s: string | null | undefined): string {
+  return (s || '').trim().toLowerCase()
+}
+const registeredKeys = computed(() => {
+  const set = new Set<string>()
+  for (const s of statusRows.value) {
+    const k = normKey(s.status_plataforma)
+    if (k) set.add(k)
+  }
+  return set
+})
+// Vermelho: tem chave (Status Plataforma) e ela NÃO está na aba Status.
+function precisaAtencao(c: Logistica): boolean {
+  const k = normKey(assinatura(c))
+  return !!k && !registeredKeys.value.has(k)
+}
+
 // ---- Edição inline (uma célula por vez) ----
 const editing = ref<{ id: string; field: StatusTextField } | null>(null)
 const editValue = ref('')
@@ -764,7 +788,8 @@ async function enviarChamado(c: Logistica) {
             <tr
               v-for="c in pagedRows"
               :key="c.id"
-              class="border-t hover:bg-muted/20 cursor-pointer"
+              class="border-t cursor-pointer"
+              :class="precisaAtencao(c) ? 'bg-red-50 hover:bg-red-100 dark:bg-red-950/40' : 'hover:bg-muted/20'"
               @click="openEdit(c)"
             >
               <td class="px-3 py-2 whitespace-nowrap">{{ fmtDate(c.data) }}</td>
@@ -834,7 +859,8 @@ async function enviarChamado(c: Logistica) {
         <div
           v-for="c in pagedRows"
           :key="c.id"
-          class="border rounded-md p-3 space-y-2 hover:bg-muted/20 cursor-pointer"
+          class="border rounded-md p-3 space-y-2 cursor-pointer"
+          :class="precisaAtencao(c) ? 'border-red-300 bg-red-50 hover:bg-red-100 dark:bg-red-950/40' : 'hover:bg-muted/20'"
           @click="openEdit(c)"
         >
           <div class="flex items-start gap-2">
