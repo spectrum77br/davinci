@@ -22,8 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     BlingOrder,
-    Product,
-    ProductCategory,
     User,
     UserRole,
     UserStatus,
@@ -64,22 +62,23 @@ async def _pedido(
     await db.commit()
 
 
-async def _categoria(
-    db: AsyncSession, *, bling_category_id: int, name: str,
-) -> None:
-    db.add(ProductCategory(bling_category_id=bling_category_id, name=name))
-    await db.commit()
+async def _estoque_snapshot(db: AsyncSession, *, por_local: dict) -> None:
+    """Snapshot de Estoque Bling de HOJE (denominador do Giro). por_local no
+    formato {"SP": {"qtd": .., "valor": ..}, ...}."""
+    import json
 
+    from sqlalchemy import text
 
-async def _produto(
-    db: AsyncSession, *, user_id, sku: str, category: str,
-    cost_price: float, stock: int,
-) -> None:
-    db.add(Product(
-        user_id=user_id, sku=sku, name=sku, category=category,
-        cost_price=Decimal(str(cost_price)), stock=stock,
-        situacao="A", formato="S",
-    ))
+    total_valor = sum(float(v.get("valor") or 0) for v in por_local.values())
+    await db.execute(
+        text(
+            "INSERT INTO valuation_estoque_bling_diario"
+            " (data, total_qtd, total_valor, por_local)"
+            " VALUES (:d, 0, :tv, CAST(:pl AS jsonb))"
+        ),
+        {"d": datetime.now(UTC).date(), "tv": total_valor,
+         "pl": json.dumps(por_local)},
+    )
     await db.commit()
 
 
@@ -176,23 +175,25 @@ async def test_margem_categoria_giro(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None],
 ):
-    # Giro por categoria: giro_valor = custo dos produtos vendidos (custo_giro),
-    # giro % = custo_vendido ÷ estoque atual da categoria × 100 e
-    # rentabilidade_final = margem × giro ÷ 100. Kit compartilha o estoque da
-    # categoria-base (Celular Kit → estoque de Celular).
+    # Giro por categoria: giro % = (custo dos produtos vendidos da categoria ÷
+    # estoque Bling do bucket no fim do mês) × 100. O denominador vem do
+    # snapshot valuation_estoque_bling_diario: bucket Celular = soma dos 7
+    # armazéns (PI/SA/SP/RA/CD/CI/US). Kit compartilha o estoque da base
+    # (Celular Kit → Celular).
     admin = await _admin(db)
-    await _categoria(db, bling_category_id=1000, name="Celular")
-    # estoque Celular = 100 (custo) × 20 (stock) = 2000.
-    await _produto(db, user_id=admin.id, sku="cel-1", category="1000",
-                   cost_price=100, stock=20)
+    # Estoque Bling: Celular = SP 1200 + CI 800 = 2000 (soma dos armazéns).
+    await _estoque_snapshot(db, por_local={
+        "SP": {"qtd": 12, "valor": 1200},
+        "CI": {"qtd": 8, "valor": 800},
+    })
     # Venda Celular (83953=Entregue, está no giro E na margem):
-    #   fat=1000, custo=600, lucro=400, margem=40; giro_valor=600
-    #   giro=600/2000*100=30; rent_final=40*30/100=12.
+    #   fat=1000, custo=600, lucro=400, margem=40; custo vendido=600
+    #   giro=600/2000*100=30.
     await _pedido(db, bling_id=6301, situacao="83953", categoria="Celular",
                   total=1000, preco_custo=100, qtd=6)
     # Venda Celular Kit (usa o estoque de Celular=2000):
-    #   fat=500, custo=100, lucro=400, margem=80; giro_valor=100
-    #   giro=100/2000*100=5; rent_final=80*5/100=4.
+    #   fat=500, custo=100, lucro=400, margem=80; custo vendido=100
+    #   giro=100/2000*100=5.
     await _pedido(db, bling_id=6302, situacao="83953", categoria="Celular Kit",
                   total=500, preco_custo=50, qtd=2)
     auth_as(admin)
@@ -200,12 +201,10 @@ async def test_margem_categoria_giro(
     assert r.status_code == 200, r.text
     body = r.json()
     cel = _cat_linha(body, "Celular")
-    assert cel["giro_valor"] == 600.0
     assert cel["giro"] == 30.0
     assert cel["margem"] == 40.0
-    assert cel["rentabilidade_final"] == 12.0
+    assert "giro_valor" not in cel
+    assert "rentabilidade_final" not in cel
     kit = _cat_linha(body, "Celular Kit")
-    assert kit["giro_valor"] == 100.0
     assert kit["giro"] == 5.0          # estoque-base = Celular (2000)
     assert kit["margem"] == 80.0
-    assert kit["rentabilidade_final"] == 4.0

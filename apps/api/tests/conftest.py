@@ -193,6 +193,24 @@ async def _setup_schema():
                 """
             )
         )
+        # Snapshot diário do estoque Bling por local (migration 0153, sem ORM
+        # model → não vem do create_all). Denominador do Giro por categoria:
+        # bucket Celular = soma de PI/SA/SP/RA/CD/CI/US; Mala/Eletro têm chave
+        # própria em por_local.
+        await conn.execute(
+            text(
+                f"""
+                CREATE TABLE "{TEST_SCHEMA}".valuation_estoque_bling_diario (
+                    data date PRIMARY KEY,
+                    total_qtd bigint NOT NULL DEFAULT 0,
+                    total_valor numeric(16,2) NOT NULL DEFAULT 0,
+                    por_local jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                    created_at timestamptz NOT NULL DEFAULT now(),
+                    updated_at timestamptz NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
         # Ledger de envios por evento: as TABELAS vêm do create_all (são
         # models), mas a FUNÇÃO + TRIGGER não — recriadas aqui à mão, em
         # sincronia com alembic/versions/0157_bling_envio_correcao.py (corpo
@@ -290,6 +308,7 @@ _CLEANUP_TABLES = (
     "pricing_overrides",
     "verificar_margem",
     "valuation",
+    "valuation_estoque_bling_diario",
     "pricing_products",
     "pricing_accounts",
     "segments",

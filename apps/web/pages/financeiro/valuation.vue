@@ -61,9 +61,7 @@ type FaturamentoGrpLinha = {
   custo: number
   rentabilidade: number
   margem: number | null
-  giro_valor: number | null
   giro: number | null
-  rentabilidade_final: number | null
 }
 type FaturamentoMesSecao = {
   mes: string
@@ -72,9 +70,7 @@ type FaturamentoMesSecao = {
   total_custo: number
   total_rentabilidade: number
   total_margem: number | null
-  total_giro_valor: number | null
   total_giro: number | null
-  total_rentabilidade_final: number | null
 }
 type Report = {
   gerado_em: string
@@ -249,9 +245,7 @@ type MargemRow = {
   faturamento: (number | null)[]
   valor: (number | null)[]
   pct: (number | null)[]
-  giroValor: (number | null)[]
   giroPct: (number | null)[]
-  rentFinal: (number | null)[]
 }
 type MargemTabela = {
   meses: string[]
@@ -259,9 +253,7 @@ type MargemTabela = {
   totalFaturamento: (number | null)[]
   totalValor: (number | null)[]
   totalPct: (number | null)[]
-  totalGiroValor: (number | null)[]
   totalGiroPct: (number | null)[]
-  totalRentFinal: (number | null)[]
 }
 function pivotMargem(secoes: FaturamentoMesSecao[] | undefined): MargemTabela {
   const secs = secoes ?? []
@@ -275,9 +267,7 @@ function pivotMargem(secoes: FaturamentoMesSecao[] | undefined): MargemTabela {
       faturamento: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.faturamento ?? null),
       valor: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.rentabilidade ?? null),
       pct: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.margem ?? null),
-      giroValor: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.giro_valor ?? null),
       giroPct: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.giro ?? null),
-      rentFinal: secs.map((s) => s.linhas.find((l) => l.grp === grp)?.rentabilidade_final ?? null),
     }))
   return {
     meses,
@@ -285,14 +275,36 @@ function pivotMargem(secoes: FaturamentoMesSecao[] | undefined): MargemTabela {
     totalFaturamento: secs.map((s) => s.total_faturamento ?? null),
     totalValor: secs.map((s) => s.total_rentabilidade ?? null),
     totalPct: secs.map((s) => s.total_margem ?? null),
-    totalGiroValor: secs.map((s) => s.total_giro_valor ?? null),
     totalGiroPct: secs.map((s) => s.total_giro ?? null),
-    totalRentFinal: secs.map((s) => s.total_rentabilidade_final ?? null),
   }
 }
+// Bandas de cor por mês (estilo Excel): cada mês (grupo de colunas) recebe uma
+// cor rotativa — cabeçalho mais forte, células mais suaves e uma borda grossa
+// à esquerda separando os grupos. Reusado por todas as tabelas com meses.
+const MES_BANDS = [
+  {
+    head: 'bg-sky-100 dark:bg-sky-900/40',
+    cell: 'bg-sky-50/60 dark:bg-sky-900/10',
+    sep: 'border-l-[3px] border-sky-400 dark:border-sky-600',
+  },
+  {
+    head: 'bg-amber-100 dark:bg-amber-900/40',
+    cell: 'bg-amber-50/60 dark:bg-amber-900/10',
+    sep: 'border-l-[3px] border-amber-400 dark:border-amber-600',
+  },
+  {
+    head: 'bg-emerald-100 dark:bg-emerald-900/40',
+    cell: 'bg-emerald-50/60 dark:bg-emerald-900/10',
+    sep: 'border-l-[3px] border-emerald-400 dark:border-emerald-600',
+  },
+]
+function mesBand(i: number) {
+  return MES_BANDS[((i % MES_BANDS.length) + MES_BANDS.length) % MES_BANDS.length]
+}
+
 const catTabela = computed(() => pivotMargem(resumo.value?.por_categoria))
 const mktTabela = computed(() => pivotMargem(resumo.value?.por_marketplace))
-// `rich` = bloco por categoria (colunas Faturamento + Giro + % Rent. final).
+// `rich` = bloco por categoria (colunas Faturamento + Rent. + Rent.% + Giro%).
 // Plataforma segue enxuto (só Valor + %).
 const margemBlocos = computed(() => [
   {
@@ -583,9 +595,10 @@ const loading = computed(() =>
                 <tr>
                   <th class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Componente</th>
                   <th
-                    v-for="m in valMeses"
+                    v-for="(m, mi) in valMeses"
                     :key="m.mes"
-                    class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
+                    class="text-right px-2 py-1 font-semibold text-[11px] border capitalize"
+                    :class="[mesBand(mi).head, mesBand(mi).sep]"
                   >
                     {{ mesLabel(m.mes) }}
                     <span v-if="m.data_snapshot" class="block text-[10px] normal-case font-normal text-muted-foreground/70">
@@ -595,33 +608,33 @@ const loading = computed(() =>
                 </tr>
               </thead>
               <tbody>
-                <tr class="hover:brightness-95 dark:hover:brightness-110">
-                  <td class="px-2 py-1 border">Caixa</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border">
+                <tr class="border-t hover:brightness-95 dark:hover:brightness-110">
+                  <td class="px-2 py-1 border font-medium">Caixa</td>
+                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border" :class="mesBand(mi).sep">
                     {{ fmtBRL(m.caixa) }}
                   </td>
                 </tr>
-                <tr class="bg-muted/20 hover:brightness-95 dark:hover:brightness-110">
-                  <td class="px-2 py-1 border">A Receber</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border">
+                <tr class="border-t bg-muted/20 hover:brightness-95 dark:hover:brightness-110">
+                  <td class="px-2 py-1 border font-medium">A Receber</td>
+                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border" :class="mesBand(mi).sep">
                     {{ fmtBRL(m.receber) }}
                   </td>
                 </tr>
-                <tr class="hover:brightness-95 dark:hover:brightness-110">
-                  <td class="px-2 py-1 border">Estoque</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border">
+                <tr class="border-t hover:brightness-95 dark:hover:brightness-110">
+                  <td class="px-2 py-1 border font-medium">Estoque</td>
+                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border" :class="mesBand(mi).sep">
                     {{ fmtBRL(m.estoque) }}
                   </td>
                 </tr>
                 <tr class="bg-muted/40 font-semibold">
                   <td class="px-2 py-1.5 border">TOTAL VALUATION</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1.5 text-right tabular-nums border">
+                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1.5 text-right tabular-nums border" :class="mesBand(mi).sep">
                     {{ fmtBRL(m.total) }}
                   </td>
                 </tr>
                 <tr class="bg-amber-50 dark:bg-amber-950/30 font-semibold">
                   <td class="px-2 py-1.5 border">Rentabilidade (mês)</td>
-                  <td v-for="m in valMeses" :key="m.mes" class="px-2 py-1.5 text-right tabular-nums border">
+                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1.5 text-right tabular-nums border" :class="mesBand(mi).sep">
                     {{ fmtBRL(m.rentabilidade) }}
                   </td>
                 </tr>
@@ -642,9 +655,10 @@ const loading = computed(() =>
                 <tr>
                   <th class="text-left px-2 py-1 font-semibold text-[11px] text-muted-foreground border">Métrica</th>
                   <th
-                    v-for="m in resumo.operacional.meses"
+                    v-for="(m, mi) in resumo.operacional.meses"
                     :key="m"
-                    class="text-right px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
+                    class="text-right px-2 py-1 font-semibold text-[11px] border capitalize"
+                    :class="[mesBand(mi).head, mesBand(mi).sep]"
                   >
                     {{ mesLabel(m) }}
                   </th>
@@ -654,9 +668,9 @@ const loading = computed(() =>
                 <tr
                   v-for="linha in resumo.operacional.linhas"
                   :key="linha.chave"
-                  class="hover:brightness-95 dark:hover:brightness-110"
+                  class="border-t hover:brightness-95 dark:hover:brightness-110"
                 >
-                  <td class="px-2 py-1 border">
+                  <td class="px-2 py-1 border font-medium">
                     <span
                       class="inline-flex items-center gap-1.5 cursor-help"
                       :title="linha.descricao"
@@ -669,6 +683,7 @@ const loading = computed(() =>
                     v-for="(v, i) in linha.valores"
                     :key="resumo.operacional.meses[i]"
                     class="px-2 py-1 text-right tabular-nums border"
+                    :class="[mesBand(i).cell, mesBand(i).sep]"
                   >
                     {{ linha.formato === 'pct' ? fmtPct(v) : fmtBRL(v) }}
                   </td>
@@ -714,22 +729,23 @@ const loading = computed(() =>
                     {{ comTab === 'geral' ? 'Empresa' : 'Membro' }}
                   </th>
                   <th
-                    v-for="m in resumo.comercial.meses"
+                    v-for="(m, mi) in resumo.comercial.meses"
                     :key="m"
                     colspan="2"
-                    class="text-center px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
+                    class="text-center px-2 py-1 font-semibold text-[11px] border capitalize"
+                    :class="[mesBand(mi).head, mesBand(mi).sep]"
                   >
                     {{ mesLabel(m) }}
                   </th>
                 </tr>
                 <tr>
-                  <template v-for="m in resumo.comercial.meses" :key="`h-${m}`">
-                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                  <template v-for="(m, mi) in resumo.comercial.meses" :key="`h-${m}`">
+                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border" :class="[mesBand(mi).head, mesBand(mi).sep]">
                       <span class="inline-flex items-center gap-1 cursor-help" :title="resumo.comercial.desc_aguardando_devolucao">
                         Aguard. Devol. <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                       </span>
                     </th>
-                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                    <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border" :class="mesBand(mi).head">
                       <span class="inline-flex items-center gap-1 cursor-help" :title="resumo.comercial.desc_taxa_devolucao">
                         Taxa <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                       </span>
@@ -741,7 +757,7 @@ const loading = computed(() =>
                 <tr
                   v-for="row in comRows"
                   :key="row.label"
-                  class="hover:brightness-95 dark:hover:brightness-110"
+                  class="border-t hover:brightness-95 dark:hover:brightness-110"
                   :class="{ 'font-semibold': row.isTotal }"
                 >
                   <td class="px-2 py-1 border">
@@ -756,8 +772,8 @@ const loading = computed(() =>
                     <span v-else>{{ row.label }}</span>
                   </td>
                   <template v-for="(m, i) in resumo.comercial.meses" :key="`${row.label}-${m}`">
-                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.aguardando_devolucao[i]) }}</td>
-                    <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.taxa_devolucao[i]) }}</td>
+                    <td class="px-2 py-1 text-right tabular-nums border" :class="[mesBand(i).cell, mesBand(i).sep]">{{ fmtBRL(row.aguardando_devolucao[i]) }}</td>
+                    <td class="px-2 py-1 text-right tabular-nums border" :class="mesBand(i).cell">{{ fmtPct(row.taxa_devolucao[i]) }}</td>
                   </template>
                 </tr>
               </tbody>
@@ -769,15 +785,14 @@ const loading = computed(() =>
              Rentabilidade: valor = lucro (faturamento − custo); % = lucro ÷
              faturamento × 100. Status: Em andamento, Entregue, Perdimento,
              Resolvido, Enviado Fake.
-             No bloco por CATEGORIA (rich): Faturamento primeiro, depois
-             Rentabilidade (valor + %), depois Giro (valor = custo dos produtos
-             vendidos; % = custo vendido ÷ estoque atual da categoria × 100) e
-             % Rent. final = % Rentabilidade × % Giro ÷ 100. Kit usa o estoque
-             da base (Celular Kit → Celular, Mala Kit → Mala). -->
+             No bloco por CATEGORIA (rich): Faturamento, Rentabilidade (valor +
+             %) e Giro% (custo dos produtos vendidos ÷ estoque Bling do bucket no
+             fim do mês). Kit, Acessórios e Insumos usam o estoque de Celular
+             (soma dos 7 armazéns); Mala e Eletro têm bucket próprio. -->
         <section v-for="bloco in margemBlocos" :key="bloco.key" class="space-y-2">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             {{ bloco.titulo }}
-            <span v-if="bloco.rich" class="normal-case text-xs text-muted-foreground">(Rent.: lucro ÷ faturamento · Giro: custo vendido ÷ estoque da categoria · Rent. final = Rent. × Giro ÷ 100)</span>
+            <span v-if="bloco.rich" class="normal-case text-xs text-muted-foreground">(Rent.: lucro ÷ faturamento · Giro: custo vendido ÷ estoque Bling da categoria)</span>
             <span v-else class="normal-case text-xs text-muted-foreground">(valor = lucro do pedido · % = lucro ÷ faturamento)</span>
           </h2>
           <div class="overflow-x-auto rounded border">
@@ -788,55 +803,46 @@ const loading = computed(() =>
                     {{ bloco.key === 'categoria' ? 'Categoria' : 'Plataforma' }}
                   </th>
                   <th
-                    v-for="m in bloco.tabela.meses"
+                    v-for="(m, mi) in bloco.tabela.meses"
                     :key="m"
-                    :colspan="bloco.rich ? 6 : 2"
-                    class="text-center px-2 py-1 font-semibold text-[11px] text-muted-foreground border capitalize"
+                    :colspan="bloco.rich ? 4 : 2"
+                    class="text-center px-2 py-1 font-semibold text-[11px] border capitalize"
+                    :class="[mesBand(mi).head, mesBand(mi).sep]"
                   >
                     {{ mesLabel(m) }}
                   </th>
                 </tr>
                 <tr>
-                  <template v-for="m in bloco.tabela.meses" :key="`h-${bloco.key}-${m}`">
+                  <template v-for="(m, mi) in bloco.tabela.meses" :key="`h-${bloco.key}-${m}`">
                     <template v-if="bloco.rich">
-                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border" :class="[mesBand(mi).head, mesBand(mi).sep]">
                         <span class="inline-flex items-center gap-1 cursor-help" title="Faturamento do mês (status: Em andamento, Entregue, Perdimento, Resolvido, Enviado Fake).">
                           Fat. <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                         </span>
                       </th>
-                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border" :class="mesBand(mi).head">
                         <span class="inline-flex items-center gap-1 cursor-help" title="Rentabilidade (lucro) = faturamento − custo.">
                           Rent. <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                         </span>
                       </th>
-                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border" :class="mesBand(mi).head">
                         <span class="inline-flex items-center gap-1 cursor-help" title="% Rentabilidade = (Lucro ÷ Faturamento) × 100.">
                           Rent.% <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                         </span>
                       </th>
-                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
-                        <span class="inline-flex items-center gap-1 cursor-help" title="Giro (valor) = custo dos produtos vendidos da categoria no mês (numerador).">
-                          Giro <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
-                        </span>
-                      </th>
-                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
-                        <span class="inline-flex items-center gap-1 cursor-help" title="% Giro = (custo vendido ÷ estoque atual da categoria) × 100. Kit usa o estoque da base (Celular Kit → Celular, Mala Kit → Mala). Estoque é o valor atual (sem histórico por categoria).">
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border" :class="mesBand(mi).head">
+                        <span class="inline-flex items-center gap-1 cursor-help" title="% Giro = (custo dos produtos vendidos da categoria no mês ÷ estoque Bling do bucket no fim do mês) × 100. Bucket Celular = soma dos 7 armazéns (PI/SA/SP/RA/CD/CI/US); Mala e Eletro têm bucket próprio; Kit, Acessórios e Insumos usam o estoque de Celular. Meses sem snapshot (antes de 23/06) ficam em branco.">
                           Giro% <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
-                        </span>
-                      </th>
-                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
-                        <span class="inline-flex items-center gap-1 cursor-help" title="% Rentabilidade final = % Rentabilidade × % Giro ÷ 100.">
-                          Rent.f% <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                         </span>
                       </th>
                     </template>
                     <template v-else>
-                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border" :class="[mesBand(mi).head, mesBand(mi).sep]">
                         <span class="inline-flex items-center gap-1 cursor-help" title="Lucro do mês = faturamento − custo (status: Em andamento, Entregue, Perdimento, Resolvido, Enviado Fake).">
                           Valor <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                         </span>
                       </th>
-                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border">
+                      <th class="text-right px-2 py-1 font-medium text-[10px] text-muted-foreground border" :class="mesBand(mi).head">
                         <span class="inline-flex items-center gap-1 cursor-help" title="Margem = (Lucro ÷ Faturamento) × 100.">
                           % <Info class="h-3 w-3 text-muted-foreground/60 shrink-0" />
                         </span>
@@ -847,28 +853,26 @@ const loading = computed(() =>
               </thead>
               <tbody>
                 <tr v-if="!bloco.tabela.rows.length">
-                  <td :colspan="bloco.tabela.meses.length * (bloco.rich ? 6 : 2) + 1" class="text-center py-6 text-muted-foreground">
+                  <td :colspan="bloco.tabela.meses.length * (bloco.rich ? 4 : 2) + 1" class="text-center py-6 text-muted-foreground">
                     Sem dados no período.
                   </td>
                 </tr>
                 <tr
                   v-for="row in bloco.tabela.rows"
                   :key="row.grp"
-                  class="hover:brightness-95 dark:hover:brightness-110"
+                  class="border-t hover:brightness-95 dark:hover:brightness-110"
                 >
-                  <td class="px-2 py-1 border">{{ bloco.label(row.grp) }}</td>
+                  <td class="px-2 py-1 border font-medium">{{ bloco.label(row.grp) }}</td>
                   <template v-for="(m, i) in bloco.tabela.meses" :key="`${bloco.key}-${row.grp}-${m}`">
                     <template v-if="bloco.rich">
-                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.faturamento[i]) }}</td>
-                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.valor[i]) }}</td>
-                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.pct[i]) }}</td>
-                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.giroValor[i]) }}</td>
-                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.giroPct[i]) }}</td>
-                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.rentFinal[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border" :class="[mesBand(i).cell, mesBand(i).sep]">{{ fmtBRL(row.faturamento[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border" :class="mesBand(i).cell">{{ fmtBRL(row.valor[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border" :class="mesBand(i).cell">{{ fmtPct(row.pct[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border" :class="mesBand(i).cell">{{ fmtPct(row.giroPct[i]) }}</td>
                     </template>
                     <template v-else>
-                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtBRL(row.valor[i]) }}</td>
-                      <td class="px-2 py-1 text-right tabular-nums border">{{ fmtPct(row.pct[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border" :class="[mesBand(i).cell, mesBand(i).sep]">{{ fmtBRL(row.valor[i]) }}</td>
+                      <td class="px-2 py-1 text-right tabular-nums border" :class="mesBand(i).cell">{{ fmtPct(row.pct[i]) }}</td>
                     </template>
                   </template>
                 </tr>
@@ -878,15 +882,13 @@ const loading = computed(() =>
                   <td class="px-2 py-1.5 border">Total</td>
                   <template v-for="(m, i) in bloco.tabela.meses" :key="`tot-${bloco.key}-${m}`">
                     <template v-if="bloco.rich">
-                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalFaturamento[i]) }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums border" :class="mesBand(i).sep">{{ fmtBRL(bloco.tabela.totalFaturamento[i]) }}</td>
                       <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalValor[i]) }}</td>
                       <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalPct[i]) }}</td>
-                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalGiroValor[i]) }}</td>
                       <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalGiroPct[i]) }}</td>
-                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalRentFinal[i]) }}</td>
                     </template>
                     <template v-else>
-                      <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtBRL(bloco.tabela.totalValor[i]) }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums border" :class="mesBand(i).sep">{{ fmtBRL(bloco.tabela.totalValor[i]) }}</td>
                       <td class="px-2 py-1.5 text-right tabular-nums border">{{ fmtPct(bloco.tabela.totalPct[i]) }}</td>
                     </template>
                   </template>

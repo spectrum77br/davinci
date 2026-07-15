@@ -850,36 +850,53 @@ def _val_window_months() -> list:
     return months
 
 
-def _estoque_base_categoria(grp: str) -> str:
-    """Categoria-base do estoque do Giro: kit compartilha o estoque da base
-    (Celular Kit → Celular, Mala Kit → Mala)."""
-    return grp[:-4] if grp.endswith(" Kit") else grp
+# Locais físicos do Estoque Bling que compõem o bucket "Celular" (o estoque de
+# Celular é a SOMA dos 7 armazéns). Mala e Eletro têm bucket próprio no snapshot.
+_GIRO_CELULAR_LOCAIS = ("PI", "SA", "SP", "RA", "CD", "CI", "US")
+
+
+def _estoque_bucket_categoria(grp: str) -> str | None:
+    """Bucket de Estoque Bling do Giro por categoria.
+
+    Celular / Celular Kit / Acessórios Celular / Insumos → "Celular" (não têm
+    bucket próprio, ficam dentro de Celular); Mala / Mala Kit → "Mala";
+    Eletro / Eletro Kit → "Eletro"; qualquer outra → None (sem giro)."""
+    base = grp[:-4] if grp.endswith(" Kit") else grp
+    b = base.strip().lower()
+    if b in ("celular", "acessórios celular", "acessorios celular", "insumos"):
+        return "Celular"
+    if b == "mala":
+        return "Mala"
+    if b == "eletro":
+        return "Eletro"
+    return None
 
 
 def _agg_to_secoes(
     rows: list[dict],
     months: list,
-    estoque_by_cat: dict[str, Decimal] | None = None,
+    estoque_by_mes: dict | None = None,
 ) -> list[FaturamentoMesSecaoOut]:
     """Agrupa as linhas da _agg_sql em uma seção por mês (3 meses).
 
-    Quando `estoque_by_cat` é passado (bloco por CATEGORIA), calcula o Giro:
-    giro_valor = custo dos produtos vendidos (custo_giro); giro = (giro_valor ÷
-    estoque atual da categoria) × 100; rentabilidade_final = margem × giro ÷ 100.
-    O estoque não tem histórico por categoria — é o valor atual, o mesmo nos 3
-    meses (o giro varia pelo custo vendido de cada mês)."""
+    Quando `estoque_by_mes` é passado (bloco por CATEGORIA), calcula o Giro:
+    giro = (custo dos produtos vendidos da categoria ÷ estoque Bling do bucket
+    da categoria no fim daquele mês) × 100. O estoque vem do snapshot
+    `valuation_estoque_bling_diario` (último dia com dado do mês). Celular =
+    soma dos 7 armazéns; Mala/Eletro bucket próprio; kit e Acessórios/Insumos
+    caem em Celular. Meses sem snapshot (ex. antes de 23/06) ficam sem giro."""
     by_mes: dict = {m: [] for m in months}
     for r in rows:
         if r["mes"] in by_mes:
             by_mes[r["mes"]].append(r)
-    # Estoque total da seção (denominador do Giro total) = soma dos estoques
-    # DISTINTOS por categoria (cada base uma vez; kit não duplica).
-    total_estoque = (
-        sum(estoque_by_cat.values(), Decimal("0"))
-        if estoque_by_cat else Decimal("0")
-    )
     out: list[FaturamentoMesSecaoOut] = []
     for mes in months:
+        est_mes = estoque_by_mes.get(mes) if estoque_by_mes else None
+        # Estoque total da seção (denominador do Giro total) = soma dos buckets
+        # distintos com dado neste mês.
+        total_estoque = (
+            sum(est_mes.values(), Decimal("0")) if est_mes else Decimal("0")
+        )
         linhas: list[FaturamentoGrpLinhaOut] = []
         tot_fat = tot_custo = tot_rent = tot_giro_valor = Decimal("0")
         for r in sorted(by_mes[mes], key=lambda x: (x["grp"] or "")):
@@ -892,39 +909,30 @@ def _agg_to_secoes(
             custo = Decimal(str(r["custo_margem"] or 0))
             rent = fat - custo
             margem = (rent / fat * 100) if fat != 0 else None
-            giro_valor = giro = rent_final = None
-            if estoque_by_cat is not None:
+            giro = None
+            if estoque_by_mes is not None:
                 giro_valor = Decimal(str(r.get("custo_giro") or 0))
-                est = estoque_by_cat.get(_estoque_base_categoria(r["grp"]))
+                bucket = _estoque_bucket_categoria(r["grp"])
+                est = est_mes.get(bucket) if est_mes and bucket else None
                 if est and Decimal(str(est)) != 0:
                     giro = giro_valor / Decimal(str(est)) * 100
-                    if margem is not None:
-                        rent_final = margem * giro / 100
                 tot_giro_valor += giro_valor
             linhas.append(FaturamentoGrpLinhaOut(
                 grp=r["grp"], faturamento=_r2(fat), custo=_r2(custo),
-                rentabilidade=_r2(rent), margem=_r2(margem),
-                giro_valor=_r2(giro_valor), giro=_r2(giro),
-                rentabilidade_final=_r2(rent_final),
+                rentabilidade=_r2(rent), margem=_r2(margem), giro=_r2(giro),
             ))
             tot_fat += fat
             tot_custo += custo
             tot_rent += rent
         tot_margem = (tot_rent / tot_fat * 100) if tot_fat != 0 else None
-        tot_giro = tot_rent_final = None
-        tgv = None
-        if estoque_by_cat is not None:
-            tgv = tot_giro_valor
-            if total_estoque != 0:
-                tot_giro = tot_giro_valor / total_estoque * 100
-                if tot_margem is not None:
-                    tot_rent_final = tot_margem * tot_giro / 100
+        tot_giro = None
+        if estoque_by_mes is not None and total_estoque != 0:
+            tot_giro = tot_giro_valor / total_estoque * 100
         out.append(FaturamentoMesSecaoOut(
             mes=mes, linhas=linhas,
             total_faturamento=_r2(tot_fat), total_custo=_r2(tot_custo),
             total_rentabilidade=_r2(tot_rent), total_margem=_r2(tot_margem),
-            total_giro_valor=_r2(tgv), total_giro=_r2(tot_giro),
-            total_rentabilidade_final=_r2(tot_rent_final),
+            total_giro=_r2(tot_giro),
         ))
     return out
 
@@ -1024,36 +1032,41 @@ async def valuation_report(
     mkt_rows = (await session.execute(text(_agg_sql("marketplace")), agg_params)).mappings().all()
     cat_rows = (await session.execute(text(_agg_sql("categoria")), agg_params)).mappings().all()
 
-    # Denominador do Giro por categoria: valor de estoque ATUAL por categoria
-    # (saldo × preço de custo), produtos simples ativos. Não há snapshot
-    # histórico por categoria, então é o valor atual aplicado aos 3 meses.
-    # Celular Usado → Celular e Mala Usada → Mala (kits compartilham a base).
-    estoque_cat_sql = text(f"""
-        SELECT
-            CASE lower(COALESCE(pc.name, ''))
-                WHEN 'celular usado' THEN 'Celular'
-                WHEN 'mala usada'    THEN 'Mala'
-                ELSE pc.name
-            END AS categoria,
-            SUM(COALESCE(p.stock, 0) * COALESCE(p.cost_price, 0)) AS valor
-        FROM {_qt("products")} p
-        JOIN {_qt("product_categories")} pc
-            ON pc.bling_category_id::text = p.category
-        WHERE (p.situacao = 'A' OR p.situacao IS NULL)
-          AND (p.formato = 'S' OR p.formato IS NULL)
-          AND p.sku NOT LIKE '%+%'
-          AND COALESCE(p.stock, 0) > 0
-          AND pc.name IS NOT NULL
-        GROUP BY 1
+    # Denominador do Giro por categoria: snapshot de Estoque Bling do último dia
+    # com dado de cada mês (tabela valuation_estoque_bling_diario, por_local
+    # jsonb: PI/SA/SP/RA/CD/CI/US/Eletro/Mala/Outros). Bucket Celular = soma dos
+    # 7 armazéns; Mala/Eletro têm bucket próprio. Meses sem snapshot (antes de
+    # 23/06) não entram → giro em branco naquele mês.
+    estoque_snap_sql = text(f"""
+        SELECT DISTINCT ON (date_trunc('month', data))
+               date_trunc('month', data)::date AS mes,
+               por_local
+        FROM {_qt("valuation_estoque_bling_diario")}
+        WHERE data >= :ini
+        ORDER BY date_trunc('month', data), data DESC
     """)
-    estoque_by_cat: dict[str, Decimal] = {}
-    for r in (await session.execute(estoque_cat_sql)).mappings().all():
-        cat = r["categoria"]
-        if not cat:
-            continue
-        estoque_by_cat[cat] = estoque_by_cat.get(cat, Decimal("0")) + Decimal(
-            str(r["valor"] or 0)
-        )
+    estoque_by_mes: dict = {}
+    snap_rows = (await session.execute(
+        estoque_snap_sql, {"ini": months[0]}
+    )).mappings().all()
+    for r in snap_rows:
+        por_local = r["por_local"] or {}
+
+        def _loc_valor(key: str) -> Decimal:
+            v = por_local.get(key) or {}
+            return Decimal(str(v.get("valor") or 0))
+
+        celular = sum((_loc_valor(k) for k in _GIRO_CELULAR_LOCAIS), Decimal("0"))
+        buckets: dict[str, Decimal] = {}
+        if celular != 0:
+            buckets["Celular"] = celular
+        mala = _loc_valor("Mala")
+        if mala != 0:
+            buckets["Mala"] = mala
+        eletro = _loc_valor("Eletro")
+        if eletro != 0:
+            buckets["Eletro"] = eletro
+        estoque_by_mes[r["mes"]] = buckets
 
     # Rentabilidade mensal ao vivo = SUM(faturamento_rent − custo_rent) sobre
     # TODAS as linhas do mês (Em aberto+Em andamento+Entregue). Loja sem
@@ -1371,7 +1384,7 @@ async def valuation_report(
         comercial=comercial,
         por_marketplace=_agg_to_secoes([dict(r) for r in mkt_rows], months),
         por_categoria=_agg_to_secoes(
-            [dict(r) for r in cat_rows], months, estoque_by_cat
+            [dict(r) for r in cat_rows], months, estoque_by_mes
         ),
     )
 
