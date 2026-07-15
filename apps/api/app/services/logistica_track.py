@@ -46,20 +46,45 @@ def is_correios(rastreio: str | None) -> bool:
     return len(r) >= 4 and r.endswith("BR")
 
 
+# O /register do 17track aceita no MÁXIMO 40 números por requisição (acima
+# disso devolve -18010014 "Request limit exceeded"). Quebramos em lotes.
+_REGISTER_BATCH = 40
+
+
 async def register(numbers: list[str]) -> dict[str, Any]:
     """Registra números Correios no 17track (idempotente do lado deles — repetir
-    o mesmo número não gasta quota extra). Retorna o corpo cru da resposta."""
-    payload = [{"number": n, "carrier": CORREIOS_CARRIER} for n in numbers if n]
-    if not payload:
+    o mesmo número não gasta quota extra). Quebra em lotes de 40 (limite do
+    endpoint). Retorna o consolidado accepted/rejected/errors."""
+    nums = [n for n in numbers if n]
+    if not nums:
         return {"registered": 0}
+
+    accepted: list[Any] = []
+    rejected: list[Any] = []
+    errors: list[Any] = []
     async with httpx.AsyncClient(timeout=40.0) as c:
-        r = await c.post(f"{_BASE}/register", headers=_headers(), json=payload)
-    try:
-        body = r.json()
-    except ValueError:
-        body = {"status_code": r.status_code, "text": r.text[:300]}
-    logger.info("logistica_17track_register", n=len(payload), status=r.status_code)
-    return body
+        for i in range(0, len(nums), _REGISTER_BATCH):
+            chunk = nums[i : i + _REGISTER_BATCH]
+            payload = [{"number": n, "carrier": CORREIOS_CARRIER} for n in chunk]
+            r = await c.post(f"{_BASE}/register", headers=_headers(), json=payload)
+            try:
+                body = r.json()
+            except ValueError:
+                body = {"status_code": r.status_code, "text": r.text[:300]}
+            data = body.get("data") if isinstance(body, dict) else None
+            if isinstance(data, dict):
+                accepted += data.get("accepted") or []
+                rejected += data.get("rejected") or []
+                errors += data.get("errors") or []
+            logger.info(
+                "logistica_17track_register", n=len(chunk), status=r.status_code
+            )
+    return {
+        "registered": len(accepted),
+        "accepted": len(accepted),
+        "rejected": len(rejected),
+        "errors": errors,
+    }
 
 
 def _fmt_from_track_info(track_info: dict) -> str | None:
