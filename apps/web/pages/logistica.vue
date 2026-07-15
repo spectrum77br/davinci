@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -116,6 +116,29 @@ function limparFiltros() {
   dataInicioFilter.value = ''
   dataFimFilter.value = ''
 }
+
+// ---- Paginação (client-side, 50 por página; muitas linhas travam o DOM) ----
+const PAGE_SIZE = 50
+const page = ref(1)
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / PAGE_SIZE)))
+const pagedRows = computed(() =>
+  filteredRows.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE),
+)
+const pageStart = computed(() =>
+  filteredRows.value.length ? (page.value - 1) * PAGE_SIZE + 1 : 0,
+)
+const pageEnd = computed(() => Math.min(page.value * PAGE_SIZE, filteredRows.value.length))
+function goToPage(p: number) {
+  page.value = Math.min(Math.max(1, p), totalPages.value)
+}
+// Filtros mudaram → volta pra 1ª página.
+watch([search, contaFilter, statusBlingFilter, dataInicioFilter, dataFimFilter], () => {
+  page.value = 1
+})
+// Recarregou dados / página ficou fora do intervalo → corrige.
+watch(totalPages, (tp) => {
+  if (page.value > tp) page.value = tp
+})
 
 const filtrosAtivos = computed(
   () =>
@@ -726,7 +749,7 @@ async function enviarChamado(c: Logistica) {
           </thead>
           <tbody>
             <tr
-              v-for="c in filteredRows"
+              v-for="c in pagedRows"
               :key="c.id"
               class="border-t hover:bg-muted/20 cursor-pointer"
               @click="openEdit(c)"
@@ -788,7 +811,7 @@ async function enviarChamado(c: Logistica) {
       <!-- Mobile cards -->
       <div class="md:hidden space-y-2">
         <div
-          v-for="c in filteredRows"
+          v-for="c in pagedRows"
           :key="c.id"
           class="border rounded-md p-3 space-y-2 hover:bg-muted/20 cursor-pointer"
           @click="openEdit(c)"
@@ -819,6 +842,24 @@ async function enviarChamado(c: Logistica) {
         </div>
         <div v-if="!loading && filteredRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
           {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
+        </div>
+      </div>
+
+      <!-- Paginação -->
+      <div v-if="filteredRows.length > PAGE_SIZE" class="flex items-center justify-between gap-3 pt-1">
+        <span class="text-xs text-muted-foreground">
+          {{ pageStart }}–{{ pageEnd }} de {{ filteredRows.length }}
+        </span>
+        <div class="flex items-center gap-1">
+          <Button size="sm" variant="outline" :disabled="page <= 1" @click="goToPage(page - 1)">
+            <ChevronLeft class="size-4" />
+          </Button>
+          <span class="text-xs text-muted-foreground px-2 whitespace-nowrap">
+            página {{ page }} de {{ totalPages }}
+          </span>
+          <Button size="sm" variant="outline" :disabled="page >= totalPages" @click="goToPage(page + 1)">
+            <ChevronRight class="size-4" />
+          </Button>
         </div>
       </div>
     </template>
