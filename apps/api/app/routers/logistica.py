@@ -18,14 +18,16 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Logistica, LogisticaStatus, SituacaoBling, User
+from app.models import Logistica, LogisticaStatus, LogisticaStatusAnexo, SituacaoBling, User
 from app.schemas.logistica import (
+    AnexoOut,
     CandidatoOut,
     LogisticaCreate,
     LogisticaOut,
@@ -84,6 +86,16 @@ def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
         abrir_chamado=s.abrir_chamado,
         abrir_reembolso=s.abrir_reembolso,
         mensagem_chamado=s.mensagem_chamado,
+        anexos=[
+            AnexoOut(
+                id=a.id,
+                filename=a.filename,
+                content_type=a.content_type,
+                size_bytes=a.size_bytes,
+                created_at=a.created_at,
+            )
+            for a in s.anexos
+        ],
         created_by=s.created_by,
         created_at=s.created_at,
         updated_at=s.updated_at,
@@ -141,12 +153,26 @@ async def sugestao(
 # ---- Aba Status (cadastro) ----
 
 
+async def _load_status(session: AsyncSession, status_id: UUID) -> LogisticaStatus | None:
+    return (
+        await session.execute(
+            select(LogisticaStatus)
+            .options(selectinload(LogisticaStatus.anexos))
+            .where(LogisticaStatus.id == status_id)
+        )
+    ).scalar_one_or_none()
+
+
 @router.get("/status", response_model=list[LogisticaStatusOut])
 async def list_status(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("logistica", "view"))],
 ) -> list[LogisticaStatusOut]:
-    stmt = select(LogisticaStatus).order_by(LogisticaStatus.status_plataforma)
+    stmt = (
+        select(LogisticaStatus)
+        .options(selectinload(LogisticaStatus.anexos))
+        .order_by(LogisticaStatus.status_plataforma)
+    )
     rows = (await session.execute(stmt)).scalars().all()
     return [_to_status_out(s) for s in rows]
 
@@ -169,7 +195,7 @@ async def create_status(
     )
     session.add(s)
     await session.commit()
-    await session.refresh(s)
+    s = await _load_status(session, s.id)
     return _to_status_out(s)
 
 
@@ -180,9 +206,7 @@ async def patch_status(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
 ) -> LogisticaStatusOut:
-    s = (
-        await session.execute(select(LogisticaStatus).where(LogisticaStatus.id == status_id))
-    ).scalar_one_or_none()
+    s = await _load_status(session, status_id)
     if s is None:
         raise HTTPException(404, detail={"code": "logistica_status_not_found"})
 
@@ -203,7 +227,7 @@ async def patch_status(
         s.mensagem_chamado = _clean(data["mensagem_chamado"])
 
     await session.commit()
-    await session.refresh(s)
+    s = await _load_status(session, s.id)
     return _to_status_out(s)
 
 
@@ -219,6 +243,96 @@ async def delete_status(
     if s is None:
         raise HTTPException(404, detail={"code": "logistica_status_not_found"})
     await session.delete(s)
+    await session.commit()
+    return None
+
+
+# ---- Anexos (imagens) da aba Status ----
+
+_ANEXO_TIPOS = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+_ANEXO_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
+
+
+@router.post(
+    "/status/{status_id}/anexos",
+    response_model=AnexoOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_status_anexo(
+    status_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+    file: Annotated[UploadFile, File(...)],
+) -> AnexoOut:
+    s = (
+        await session.execute(select(LogisticaStatus).where(LogisticaStatus.id == status_id))
+    ).scalar_one_or_none()
+    if s is None:
+        raise HTTPException(404, detail={"code": "logistica_status_not_found"})
+
+    ctype = (file.content_type or "").lower()
+    if ctype not in _ANEXO_TIPOS:
+        raise HTTPException(400, detail={"code": "logistica_anexo_tipo_invalido"})
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, detail={"code": "logistica_anexo_vazio"})
+    if len(raw) > _ANEXO_MAX_BYTES:
+        raise HTTPException(413, detail={"code": "logistica_anexo_muito_grande"})
+
+    a = LogisticaStatusAnexo(
+        status_id=status_id,
+        filename=(file.filename or "imagem").strip() or "imagem",
+        content_type=ctype,
+        size_bytes=len(raw),
+        blob=raw,
+        created_by=user.id,
+    )
+    session.add(a)
+    await session.commit()
+    await session.refresh(a)
+    return AnexoOut(
+        id=a.id,
+        filename=a.filename,
+        content_type=a.content_type,
+        size_bytes=a.size_bytes,
+        created_at=a.created_at,
+    )
+
+
+@router.get("/anexos/{anexo_id}")
+async def get_status_anexo(
+    anexo_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> Response:
+    a = (
+        await session.execute(
+            select(LogisticaStatusAnexo).where(LogisticaStatusAnexo.id == anexo_id)
+        )
+    ).scalar_one_or_none()
+    if a is None:
+        raise HTTPException(404, detail={"code": "logistica_anexo_not_found"})
+    return Response(
+        content=a.blob,
+        media_type=a.content_type,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@router.delete("/anexos/{anexo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_status_anexo(
+    anexo_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> None:
+    a = (
+        await session.execute(
+            select(LogisticaStatusAnexo).where(LogisticaStatusAnexo.id == anexo_id)
+        )
+    ).scalar_one_or_none()
+    if a is None:
+        raise HTTPException(404, detail={"code": "logistica_anexo_not_found"})
+    await session.delete(a)
     await session.commit()
     return None
 

@@ -394,3 +394,112 @@ async def test_opcoes_status_bling_options(
 def test_sugerir_selecao_vazia_retorna_lista_vazia():
     assert logistica_rules.sugerir({}) == []
     assert logistica_rules.sugerir({"order_status": ""}) == []
+
+
+# PNG 1x1 válido (assinatura + IHDR + IDAT + IEND).
+_PNG_1X1 = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000d4944415478da6360000002000154a24f60000000004945"
+    "4e44ae426082"
+)
+
+
+async def _criar_status(client: AsyncClient) -> str:
+    r = await client.post(
+        "/api/logistica/status", json={"status_plataforma": "com anexo"}
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_anexo_upload_serve_delete(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    sid = await _criar_status(client)
+
+    # upload
+    r = await client.post(
+        f"/api/logistica/status/{sid}/anexos",
+        files={"file": ("foto.png", _PNG_1X1, "image/png")},
+    )
+    assert r.status_code == 201, r.text
+    aid = r.json()["id"]
+    assert r.json()["filename"] == "foto.png"
+    assert r.json()["content_type"] == "image/png"
+    assert r.json()["size_bytes"] == len(_PNG_1X1)
+
+    # aparece na listagem do status
+    r = await client.get("/api/logistica/status")
+    row = next(s for s in r.json() if s["id"] == sid)
+    assert any(a["id"] == aid for a in row["anexos"])
+
+    # serve os bytes com o content-type certo
+    r = await client.get(f"/api/logistica/anexos/{aid}")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content == _PNG_1X1
+
+    # delete
+    r = await client.delete(f"/api/logistica/anexos/{aid}")
+    assert r.status_code == 204
+    r = await client.get(f"/api/logistica/anexos/{aid}")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "logistica_anexo_not_found"
+
+
+@pytest.mark.asyncio
+async def test_anexo_tipo_invalido(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    sid = await _criar_status(client)
+    r = await client.post(
+        f"/api/logistica/status/{sid}/anexos",
+        files={"file": ("doc.txt", b"nao sou imagem", "text/plain")},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "logistica_anexo_tipo_invalido"
+
+
+@pytest.mark.asyncio
+async def test_anexo_status_not_found(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    r = await client.post(
+        f"/api/logistica/status/{uuid.uuid4()}/anexos",
+        files={"file": ("foto.png", _PNG_1X1, "image/png")},
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "logistica_status_not_found"
+
+
+@pytest.mark.asyncio
+async def test_anexo_viewer_serve_mas_nao_edita(
+    client: AsyncClient,
+    admin: User,
+    viewer: User,
+    auth_as: Callable[[User | None], None],
+):
+    auth_as(admin)
+    sid = await _criar_status(client)
+    r = await client.post(
+        f"/api/logistica/status/{sid}/anexos",
+        files={"file": ("foto.png", _PNG_1X1, "image/png")},
+    )
+    aid = r.json()["id"]
+
+    auth_as(viewer)
+    # view pode ver a imagem
+    r = await client.get(f"/api/logistica/anexos/{aid}")
+    assert r.status_code == 200
+    # mas não pode subir nem apagar
+    r = await client.post(
+        f"/api/logistica/status/{sid}/anexos",
+        files={"file": ("foto.png", _PNG_1X1, "image/png")},
+    )
+    assert r.status_code == 403
+    r = await client.delete(f"/api/logistica/anexos/{aid}")
+    assert r.status_code == 403

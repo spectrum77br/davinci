@@ -60,7 +60,7 @@ from app.models.importacao import (
 )
 from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
-from app.models.logistica import Logistica, LogisticaStatus
+from app.models.logistica import Logistica, LogisticaStatus, LogisticaStatusAnexo
 from app.models.margem_audit import MargemAudit
 from app.models.margens import Margens
 from app.models.marketing import (
@@ -154,6 +154,7 @@ __all__ = [
     "ListingStatus",
     "Logistica",
     "LogisticaStatus",
+    "LogisticaStatusAnexo",
     "MARKETPLACES",
     "MargemAudit",
     "Margens",

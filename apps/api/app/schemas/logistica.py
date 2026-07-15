@@ -56,6 +56,14 @@ class LogisticaPatch(BaseModel):
 # ---- Aba "Status" (logistica_status) ----
 
 
+class AnexoOut(BaseModel):
+    id: UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime
+
+
 class LogisticaStatusOut(BaseModel):
     id: UUID
     plataforma: str | None = None
@@ -65,6 +73,7 @@ class LogisticaStatusOut(BaseModel):
     abrir_chamado: bool = False
     abrir_reembolso: bool = False
     mensagem_chamado: str | None = None
+    anexos: list[AnexoOut] = Field(default_factory=list)
     created_by: UUID | None = None
     created_at: datetime
     updated_at: datetime

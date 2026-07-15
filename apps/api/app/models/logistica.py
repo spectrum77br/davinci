@@ -1,10 +1,10 @@
 from datetime import date
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Date, ForeignKey, Text
+from sqlalchemy import BigInteger, Boolean, Date, ForeignKey, LargeBinary, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
 
@@ -82,3 +82,38 @@ class LogisticaStatus(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+
+    anexos: Mapped[list["LogisticaStatusAnexo"]] = relationship(
+        back_populates="status",
+        cascade="all, delete-orphan",
+        order_by="LogisticaStatusAnexo.created_at",
+    )
+
+
+class LogisticaStatusAnexo(Base, TimestampMixin):
+    """Imagem anexada à `mensagem_chamado` de uma linha da aba Status.
+
+    Guarda o arquivo como blob (bytea) no próprio banco — o app não tem storage
+    externo. Servido de volta pelo endpoint autenticado (cookie) pra o <img>.
+    """
+
+    __tablename__ = "logistica_status_anexo"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    status_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("logistica_status.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    status: Mapped["LogisticaStatus"] = relationship(back_populates="anexos")

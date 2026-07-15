@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -361,9 +361,18 @@ type LogisticaStatus = {
   abrir_chamado: boolean
   abrir_reembolso: boolean
   mensagem_chamado: string | null
+  anexos: Anexo[]
   created_by: string | null
   created_at: string
   updated_at: string
+}
+
+type Anexo = {
+  id: string
+  filename: string
+  content_type: string
+  size_bytes: number
+  created_at: string
 }
 
 // Campos de texto editáveis inline (mensagem_chamado usa textarea).
@@ -515,6 +524,49 @@ async function removeStatusRow(s: LogisticaStatus) {
   try {
     await api(`/api/logistica/status/${s.id}`, { method: 'DELETE' })
     statusRows.value = statusRows.value.filter((r) => r.id !== s.id)
+  } catch (e: any) {
+    statusError.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    setStatusBusy(s.id, false)
+  }
+}
+
+// ---- Anexos de imagem na "Mensagem do Chamado" ----
+function anexoUrl(id: string) {
+  // Relativo → o cookie de sessão vai junto no <img src>/<a href>.
+  return `/api/logistica/anexos/${id}`
+}
+
+async function uploadAnexo(s: LogisticaStatus, ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = '' // permite re-selecionar o mesmo arquivo
+  if (!file) return
+  setStatusBusy(s.id, true)
+  statusError.value = null
+  try {
+    const fd = new FormData()
+    fd.append('file', file)
+    const anexo = await api<Anexo>(`/api/logistica/status/${s.id}/anexos`, {
+      method: 'POST',
+      body: fd,
+    })
+    if (!Array.isArray(s.anexos)) s.anexos = []
+    s.anexos.push(anexo)
+  } catch (e: any) {
+    statusError.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    setStatusBusy(s.id, false)
+  }
+}
+
+async function removeAnexo(s: LogisticaStatus, anexoId: string) {
+  if (!confirm('Remover esta imagem?')) return
+  setStatusBusy(s.id, true)
+  statusError.value = null
+  try {
+    await api(`/api/logistica/anexos/${anexoId}`, { method: 'DELETE' })
+    s.anexos = (s.anexos || []).filter((a) => a.id !== anexoId)
   } catch (e: any) {
     statusError.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -784,7 +836,7 @@ async function enviarChamado(c: Logistica) {
 
       <p class="text-sm text-muted-foreground">
         Clique numa célula pra editar só aquele campo. Os campos ficam vazios pra o operador
-        preencher à mão. A "Mensagem do Chamado" pode conter texto, link ou foto (cole a URL).
+        preencher à mão. Na "Mensagem do Chamado" dá pra anexar imagens no botão de foto (ou colar uma URL no texto).
       </p>
 
       <div v-if="statusError" class="text-sm text-red-500">erro: {{ statusError }}</div>
@@ -904,6 +956,32 @@ async function enviarChamado(c: Logistica) {
                   @keydown.esc="cancelEdit"
                 />
                 <span v-else class="break-words whitespace-pre-line" :class="[canEdit ? 'cursor-text' : '', s.mensagem_chamado ? 'text-muted-foreground' : 'text-muted-foreground/60']">{{ s.mensagem_chamado || '—' }}</span>
+                <!-- Anexos de imagem -->
+                <div class="mt-1.5 flex flex-wrap items-center gap-1.5" @click.stop>
+                  <div v-for="a in s.anexos || []" :key="a.id" class="relative group">
+                    <a :href="anexoUrl(a.id)" target="_blank" rel="noopener" :title="a.filename">
+                      <img :src="anexoUrl(a.id)" :alt="a.filename" class="size-10 rounded border object-cover" />
+                    </a>
+                    <button
+                      v-if="canEdit"
+                      class="absolute -right-1 -top-1 hidden rounded-full bg-red-500 p-0.5 text-white group-hover:block disabled:opacity-50"
+                      title="Remover imagem"
+                      :disabled="statusBusy.has(s.id)"
+                      @click="removeAnexo(s, a.id)"
+                    >
+                      <X class="size-3" />
+                    </button>
+                  </div>
+                  <label
+                    v-if="canEdit"
+                    class="inline-flex size-10 cursor-pointer items-center justify-center rounded border border-dashed text-muted-foreground hover:text-foreground"
+                    :class="statusBusy.has(s.id) ? 'pointer-events-none opacity-50' : ''"
+                    title="Anexar imagem"
+                  >
+                    <ImagePlus class="size-4" />
+                    <input type="file" accept="image/*" class="hidden" :disabled="statusBusy.has(s.id)" @change="uploadAnexo(s, $event)" />
+                  </label>
+                </div>
               </td>
               <!-- Ação -->
               <td v-if="canEdit" class="px-2 py-1 align-top text-center">
@@ -993,6 +1071,31 @@ async function enviarChamado(c: Logistica) {
               class="w-full rounded border bg-background px-2 py-1 text-sm resize-y"
               @change="patchStatusField(s.id, { mensagem_chamado: ($event.target as HTMLTextAreaElement).value.trim() || null })"
             />
+            <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <div v-for="a in s.anexos || []" :key="a.id" class="relative">
+                <a :href="anexoUrl(a.id)" target="_blank" rel="noopener" :title="a.filename">
+                  <img :src="anexoUrl(a.id)" :alt="a.filename" class="size-12 rounded border object-cover" />
+                </a>
+                <button
+                  v-if="canEdit"
+                  class="absolute -right-1 -top-1 rounded-full bg-red-500 p-0.5 text-white disabled:opacity-50"
+                  title="Remover imagem"
+                  :disabled="statusBusy.has(s.id)"
+                  @click="removeAnexo(s, a.id)"
+                >
+                  <X class="size-3" />
+                </button>
+              </div>
+              <label
+                v-if="canEdit"
+                class="inline-flex size-12 cursor-pointer items-center justify-center rounded border border-dashed text-muted-foreground"
+                :class="statusBusy.has(s.id) ? 'pointer-events-none opacity-50' : ''"
+                title="Anexar imagem"
+              >
+                <ImagePlus class="size-5" />
+                <input type="file" accept="image/*" class="hidden" :disabled="statusBusy.has(s.id)" @change="uploadAnexo(s, $event)" />
+              </label>
+            </div>
           </div>
         </div>
         <div v-if="!statusLoading && statusRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
@@ -1048,9 +1151,10 @@ async function enviarChamado(c: Logistica) {
           <textarea
             v-model="statusForm.mensagem_chamado"
             rows="3"
-            placeholder="texto, link ou foto (cole a URL)"
+            placeholder="texto ou link"
             class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
           />
+          <p class="mt-1 text-xs text-muted-foreground">Depois de salvar, dá pra anexar imagens direto na linha.</p>
         </div>
 
         <div class="flex justify-end gap-2">
