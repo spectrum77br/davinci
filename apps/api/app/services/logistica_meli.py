@@ -84,10 +84,14 @@ def _ship_destino(sh: dict) -> str | None:
     return where or None
 
 
-def _ship_previsao(sh: dict) -> str | None:
-    """Data prevista de entrega (dd/mm) a partir do `lead_time` do shipment;
-    prefere o limite final, cai no limite/estimado."""
-    lt = sh.get("lead_time") or {}
+# Status de envio já finalizados — não têm previsão de entrega futura.
+_SHIP_TERMINAL = {"delivered", "cancelled", "not_delivered"}
+
+
+def _previsao_from_lead_time(lt: dict) -> str | None:
+    """Data prevista de entrega (dd/mm) de um payload de `lead_time`; prefere o
+    limite final, cai no limite/estimado."""
+    lt = lt or {}
     for k in ("estimated_delivery_final", "estimated_delivery_limit", "estimated_delivery_time"):
         node = lt.get(k)
         date = node.get("date") if isinstance(node, dict) else None
@@ -99,6 +103,26 @@ def _ship_previsao(sh: dict) -> str | None:
             continue
         return d.strftime("%d/%m")
     return None
+
+
+async def _ship_previsao(client: MercadoLivreClient, sh: dict, ship_id: str) -> str | None:
+    """Previsão de entrega do shipment. O `get_shipment` normalmente NÃO embute
+    `lead_time`, então busca o endpoint dedicado — mas só pra envios em curso
+    (finalizados não têm ETA e não valem a chamada extra)."""
+    prev = _previsao_from_lead_time(sh.get("lead_time") or {})
+    if prev:
+        return prev
+    if (sh.get("status") or "").strip() in _SHIP_TERMINAL:
+        return None
+    try:
+        r = await client._request("GET", f"/shipments/{ship_id}/lead_time")
+        if r.status_code != 200:
+            return None
+        lt = r.json() or {}
+    except Exception as e:  # noqa: BLE001
+        logger.info("logistica_meli_lead_time_none", ship_id=ship_id, err=str(e)[:120])
+        return None
+    return _previsao_from_lead_time(lt)
 
 
 async def _fetch_order(client: MercadoLivreClient, order_id: str) -> dict:
@@ -159,7 +183,7 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
         if tn:
             rastreio = tn
         destino = _ship_destino(sh)
-        previsao = _ship_previsao(sh)
+        previsao = await _ship_previsao(client, sh, str(ship_id))
     else:
         ship_status = (shipping.get("status") or "").strip()
         if ship_status:

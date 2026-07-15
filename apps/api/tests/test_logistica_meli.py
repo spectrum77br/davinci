@@ -13,7 +13,7 @@ class FakeML:
     """Client ML mínimo: métodos que build_meli_status chama. `None` num
     recurso => a chamada levanta (simula 404 sem shipment/claim/returns)."""
 
-    def __init__(self, order, shipment=None, claim=None, returns=None, orders_by_id=None, pack=None):
+    def __init__(self, order, shipment=None, claim=None, returns=None, orders_by_id=None, pack=None, lead_time=None):
         self._order = order
         self._shipment = shipment
         self._claim = claim
@@ -22,6 +22,8 @@ class FakeML:
         # o teste de fallback pack → order.
         self._orders_by_id = orders_by_id
         self._pack = pack
+        # Payload do endpoint dedicado /shipments/{id}/lead_time (previsão).
+        self._lead_time = lead_time
 
     async def get_order(self, order_id):
         if self._orders_by_id is not None:
@@ -49,6 +51,21 @@ class FakeML:
         if self._returns is None:
             raise RuntimeError("no returns")
         return self._returns
+
+    async def _request(self, method, path, **kwargs):
+        # Só o endpoint de lead_time é usado pelo enriquecimento. Sem payload
+        # setado => 404 (simula shipment sem previsão dedicada).
+        class _Resp:
+            def __init__(self, status, body):
+                self.status_code = status
+                self._body = body
+
+            def json(self):
+                return self._body
+
+        if path.endswith("/lead_time") and self._lead_time is not None:
+            return _Resp(200, self._lead_time)
+        return _Resp(404, {})
 
 
 @pytest.mark.asyncio
@@ -157,6 +174,38 @@ async def test_build_enrichment_localizacao_com_destino_e_previsao():
     )
     enr = await logistica_meli.build_enrichment(client, "1")
     assert enr["localizacao"] == "Saiu p/ entrega → São Paulo/SP · previsão 16/07"
+
+
+@pytest.mark.asyncio
+async def test_build_enrichment_previsao_do_endpoint_dedicado():
+    # get_shipment sem lead_time embutido + envio em curso => busca /lead_time.
+    client = FakeML(
+        order={"status": "paid", "shipping": {"id": 5}, "mediations": []},
+        shipment={
+            "status": "shipped",
+            "substatus": "out_for_delivery",
+            "receiver_address": {"city": {"name": "Recife"}, "state": {"id": "BR-PE"}},
+        },
+        lead_time={"estimated_delivery_limit": {"date": "2026-07-20T00:00:00.000-03:00"}},
+    )
+    enr = await logistica_meli.build_enrichment(client, "1")
+    assert enr["localizacao"] == "Saiu p/ entrega → Recife/PE · previsão 20/07"
+
+
+@pytest.mark.asyncio
+async def test_build_enrichment_terminal_nao_busca_previsao():
+    # Envio entregue (terminal) NÃO chama /lead_time mesmo que exista payload.
+    client = FakeML(
+        order={"status": "paid", "shipping": {"id": 5}, "mediations": []},
+        shipment={
+            "status": "delivered",
+            "substatus": "delivered",
+            "receiver_address": {"city": {"name": "Recife"}, "state": {"id": "BR-PE"}},
+        },
+        lead_time={"estimated_delivery_limit": {"date": "2026-07-20T00:00:00.000-03:00"}},
+    )
+    enr = await logistica_meli.build_enrichment(client, "1")
+    assert enr["localizacao"] == "Entregue → Recife/PE"
 
 
 def test_localizacao_completa_omite_partes_ausentes():
