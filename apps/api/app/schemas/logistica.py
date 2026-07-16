@@ -70,11 +70,14 @@ class LogisticaStatusOut(BaseModel):
     id: UUID
     plataforma: str | None = None
     status_plataforma: str | None = None
+    status_atual: str | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
     abrir_reembolso: bool = False
     mensagem_chamado: str | None = None
+    mensagem_bling: str | None = None
+    mensagem_threema: str | None = None
     anexos: list[AnexoOut] = Field(default_factory=list)
     created_by: UUID | None = None
     created_at: datetime
@@ -84,21 +87,27 @@ class LogisticaStatusOut(BaseModel):
 class LogisticaStatusCreate(BaseModel):
     plataforma: str | None = None
     status_plataforma: str | None = None
+    status_atual: str | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool = False
     abrir_chamado: bool = False
     abrir_reembolso: bool = False
     mensagem_chamado: str | None = None
+    mensagem_bling: str | None = None
+    mensagem_threema: str | None = None
 
 
 class LogisticaStatusPatch(BaseModel):
     plataforma: str | None = None
     status_plataforma: str | None = None
+    status_atual: str | None = None
     alterar_status_bling: str | None = None
     monitoramento: bool | None = None
     abrir_chamado: bool | None = None
     abrir_reembolso: bool | None = None
     mensagem_chamado: str | None = None
+    mensagem_bling: str | None = None
+    mensagem_threema: str | None = None
 
 
 # ---- Sugestão de Status Bling (a partir dos status do Meli) ----

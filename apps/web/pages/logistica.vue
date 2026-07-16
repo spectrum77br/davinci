@@ -394,11 +394,14 @@ type LogisticaStatus = {
   id: string
   plataforma: string | null
   status_plataforma: string | null
+  status_atual: string | null
   alterar_status_bling: string | null
   monitoramento: boolean
   abrir_chamado: boolean
   abrir_reembolso: boolean
   mensagem_chamado: string | null
+  mensagem_bling: string | null
+  mensagem_threema: string | null
   anexos: Anexo[]
   created_by: string | null
   created_at: string
@@ -417,8 +420,11 @@ type Anexo = {
 type StatusTextField =
   | 'plataforma'
   | 'status_plataforma'
+  | 'status_atual'
   | 'alterar_status_bling'
   | 'mensagem_chamado'
+  | 'mensagem_bling'
+  | 'mensagem_threema'
 
 const statusRows = ref<LogisticaStatus[]>([])
 const statusLoading = ref(false)
@@ -533,22 +539,28 @@ const statusSaving = ref(false)
 const statusForm = ref({
   plataforma: '',
   status_plataforma: '',
+  status_atual: '',
   alterar_status_bling: '',
   monitoramento: false,
   abrir_chamado: false,
   abrir_reembolso: false,
   mensagem_chamado: '',
+  mensagem_bling: '',
+  mensagem_threema: '',
 })
 
 function openStatusForm() {
   statusForm.value = {
     plataforma: '',
     status_plataforma: '',
+    status_atual: '',
     alterar_status_bling: '',
     monitoramento: false,
     abrir_chamado: false,
     abrir_reembolso: false,
     mensagem_chamado: '',
+    mensagem_bling: '',
+    mensagem_threema: '',
   }
   showStatusForm.value = true
 }
@@ -563,11 +575,14 @@ async function saveStatusForm() {
       body: {
         plataforma: f.plataforma.trim() || null,
         status_plataforma: f.status_plataforma.trim() || null,
+        status_atual: f.status_atual.trim() || null,
         alterar_status_bling: f.alterar_status_bling.trim() || null,
         monitoramento: f.monitoramento,
         abrir_chamado: f.abrir_chamado,
         abrir_reembolso: f.abrir_reembolso,
         mensagem_chamado: f.mensagem_chamado.trim() || null,
+        mensagem_bling: f.mensagem_bling.trim() || null,
+        mensagem_threema: f.mensagem_threema.trim() || null,
       },
     })
     statusRows.value.unshift(created)
@@ -954,11 +969,14 @@ async function enviarChamado(c: Logistica) {
             <tr class="whitespace-nowrap">
               <th class="px-3 py-2">Plataforma</th>
               <th class="px-3 py-2">Status Plataforma</th>
+              <th class="px-3 py-2">Status Atual</th>
               <th class="px-3 py-2">Alterar Status Bling</th>
               <th class="px-3 py-2">Monitoramento</th>
               <th class="px-3 py-2">Abrir Chamado</th>
               <th class="px-3 py-2">Abrir Reembolso</th>
               <th class="px-3 py-2">Mensagem do Chamado</th>
+              <th class="px-3 py-2">Mensagem Bling</th>
+              <th class="px-3 py-2">Mensagem Threema</th>
               <th v-if="canEdit" class="px-3 py-2 w-10"></th>
             </tr>
           </thead>
@@ -990,6 +1008,25 @@ async function enviarChamado(c: Logistica) {
                   @keydown.esc="cancelEdit"
                 />
                 <span v-else :class="[canEdit ? 'cursor-text' : '', s.status_plataforma ? 'font-medium' : 'text-muted-foreground']">{{ s.status_plataforma || '—' }}</span>
+              </td>
+              <!-- Status Atual (dropdown com os status conhecidos do Bling) -->
+              <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'status_atual')">
+                <select
+                  v-if="isEditing(s, 'status_atual')"
+                  v-model="editValue"
+                  autofocus
+                  class="w-44 rounded border bg-background px-1.5 py-1 text-sm"
+                  @change="commitEdit(s)"
+                  @blur="commitEdit(s)"
+                  @keydown.esc="cancelEdit"
+                >
+                  <option value="">— vazio —</option>
+                  <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
+                </select>
+                <template v-else>
+                  <span v-if="s.status_atual" class="text-xs px-2 py-0.5 rounded border border-border" :class="canEdit ? 'cursor-pointer' : ''">{{ s.status_atual }}</span>
+                  <span v-else class="text-muted-foreground" :class="canEdit ? 'cursor-pointer' : ''">—</span>
+                </template>
               </td>
               <!-- Alterar Status Bling (dropdown com os status conhecidos do Bling) -->
               <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'alterar_status_bling')">
@@ -1089,6 +1126,34 @@ async function enviarChamado(c: Logistica) {
                   </label>
                 </div>
               </td>
+              <!-- Mensagem Bling (textarea inline) -->
+              <td class="px-2 py-1 text-xs max-w-[300px] align-top" @click="startEdit(s, 'mensagem_bling')">
+                <textarea
+                  v-if="isEditing(s, 'mensagem_bling')"
+                  v-model="editValue"
+                  autofocus
+                  rows="3"
+                  placeholder="texto a colar no Bling"
+                  class="w-72 rounded border bg-background px-1.5 py-1 text-sm resize-y"
+                  @blur="commitEdit(s)"
+                  @keydown.esc="cancelEdit"
+                />
+                <span v-else class="break-words whitespace-pre-line" :class="[canEdit ? 'cursor-text' : '', s.mensagem_bling ? 'text-muted-foreground' : 'text-muted-foreground/60']">{{ s.mensagem_bling || '—' }}</span>
+              </td>
+              <!-- Mensagem Threema (textarea inline) -->
+              <td class="px-2 py-1 text-xs max-w-[300px] align-top" @click="startEdit(s, 'mensagem_threema')">
+                <textarea
+                  v-if="isEditing(s, 'mensagem_threema')"
+                  v-model="editValue"
+                  autofocus
+                  rows="3"
+                  placeholder="mensagem p/ notificar as pessoas"
+                  class="w-72 rounded border bg-background px-1.5 py-1 text-sm resize-y"
+                  @blur="commitEdit(s)"
+                  @keydown.esc="cancelEdit"
+                />
+                <span v-else class="break-words whitespace-pre-line" :class="[canEdit ? 'cursor-text' : '', s.mensagem_threema ? 'text-muted-foreground' : 'text-muted-foreground/60']">{{ s.mensagem_threema || '—' }}</span>
+              </td>
               <!-- Ação -->
               <td v-if="canEdit" class="px-2 py-1 align-top text-center">
                 <button
@@ -1102,7 +1167,7 @@ async function enviarChamado(c: Logistica) {
               </td>
             </tr>
             <tr v-if="!statusLoading && statusRows.length === 0">
-              <td :colspan="canEdit ? 8 : 7" class="px-3 py-6 text-center text-muted-foreground">nenhum status</td>
+              <td :colspan="canEdit ? 11 : 10" class="px-3 py-6 text-center text-muted-foreground">nenhum status</td>
             </tr>
           </tbody>
         </table>
@@ -1140,6 +1205,18 @@ async function enviarChamado(c: Logistica) {
               class="w-full rounded border bg-background px-2 py-1 text-sm"
               @change="patchStatusField(s.id, { status_plataforma: ($event.target as HTMLInputElement).value.trim() || null })"
             />
+          </div>
+          <div>
+            <label class="text-xs text-muted-foreground">Status Atual</label>
+            <select
+              :value="s.status_atual || ''"
+              :disabled="!canEdit || statusBusy.has(s.id)"
+              class="w-full rounded border bg-background px-2 py-1 text-sm"
+              @change="patchStatusField(s.id, { status_atual: ($event.target as HTMLSelectElement).value || null })"
+            >
+              <option value="">— vazio —</option>
+              <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
+            </select>
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Alterar Status Bling</label>
@@ -1203,6 +1280,28 @@ async function enviarChamado(c: Logistica) {
               </label>
             </div>
           </div>
+          <div>
+            <label class="text-xs text-muted-foreground">Mensagem Bling</label>
+            <textarea
+              :value="s.mensagem_bling || ''"
+              :disabled="!canEdit || statusBusy.has(s.id)"
+              rows="2"
+              placeholder="texto a colar no Bling"
+              class="w-full rounded border bg-background px-2 py-1 text-sm resize-y"
+              @change="patchStatusField(s.id, { mensagem_bling: ($event.target as HTMLTextAreaElement).value.trim() || null })"
+            />
+          </div>
+          <div>
+            <label class="text-xs text-muted-foreground">Mensagem Threema</label>
+            <textarea
+              :value="s.mensagem_threema || ''"
+              :disabled="!canEdit || statusBusy.has(s.id)"
+              rows="2"
+              placeholder="mensagem p/ notificar as pessoas"
+              class="w-full rounded border bg-background px-2 py-1 text-sm resize-y"
+              @change="patchStatusField(s.id, { mensagem_threema: ($event.target as HTMLTextAreaElement).value.trim() || null })"
+            />
+          </div>
         </div>
         <div v-if="!statusLoading && statusRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
           nenhum status
@@ -1227,6 +1326,16 @@ async function enviarChamado(c: Logistica) {
         <div>
           <Label>Status Plataforma</Label>
           <Input v-model="statusForm.status_plataforma" />
+        </div>
+        <div>
+          <Label>Status Atual</Label>
+          <select
+            v-model="statusForm.status_atual"
+            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+          >
+            <option value="">— vazio —</option>
+            <option v-for="opt in opcoes.status_bling_options" :key="opt" :value="opt">{{ opt }}</option>
+          </select>
         </div>
         <div>
           <Label>Alterar Status Bling</Label>
@@ -1261,6 +1370,24 @@ async function enviarChamado(c: Logistica) {
             class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
           />
           <p class="mt-1 text-xs text-muted-foreground">Depois de salvar, dá pra anexar imagens direto na linha.</p>
+        </div>
+        <div>
+          <Label>Mensagem Bling</Label>
+          <textarea
+            v-model="statusForm.mensagem_bling"
+            rows="3"
+            placeholder="texto a colar no Bling"
+            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
+          />
+        </div>
+        <div>
+          <Label>Mensagem Threema</Label>
+          <textarea
+            v-model="statusForm.mensagem_threema"
+            rows="3"
+            placeholder="mensagem p/ notificar as pessoas"
+            class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y"
+          />
         </div>
 
         <div class="flex justify-end gap-2">

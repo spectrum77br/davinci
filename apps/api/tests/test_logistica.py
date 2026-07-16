@@ -149,20 +149,26 @@ async def test_status_crud(
         json={
             "plataforma": "Mercado Livre",
             "status_plataforma": "Devolução em trânsito",
+            "status_atual": "Em andamento",
             "alterar_status_bling": "Aguardando Devolução",
             "monitoramento": True,
             "abrir_chamado": True,
             "abrir_reembolso": True,
             "mensagem_chamado": "acompanhar devolução",
+            "mensagem_bling": "cliente devolveu",
+            "mensagem_threema": "avisar equipe",
         },
     )
     assert r.status_code == 201, r.text
     sid = r.json()["id"]
     assert r.json()["status_plataforma"] == "Devolução em trânsito"
     assert r.json()["plataforma"] == "Mercado Livre"
+    assert r.json()["status_atual"] == "Em andamento"
     assert r.json()["monitoramento"] is True
     assert r.json()["abrir_chamado"] is True
     assert r.json()["abrir_reembolso"] is True
+    assert r.json()["mensagem_bling"] == "cliente devolveu"
+    assert r.json()["mensagem_threema"] == "avisar equipe"
     assert "anexar_envio" not in r.json()
 
     r = await client.get("/api/logistica/status")
@@ -174,6 +180,8 @@ async def test_status_crud(
             "abrir_chamado": False,
             "abrir_reembolso": False,
             "alterar_status_bling": "",
+            "status_atual": "",
+            "mensagem_bling": "",
             "monitoramento": False,
         },
     )
@@ -182,6 +190,8 @@ async def test_status_crud(
     assert r.json()["abrir_reembolso"] is False
     assert r.json()["monitoramento"] is False
     assert r.json()["alterar_status_bling"] is None
+    assert r.json()["status_atual"] is None
+    assert r.json()["mensagem_bling"] is None
 
     r = await client.delete(f"/api/logistica/status/{sid}")
     assert r.status_code == 204

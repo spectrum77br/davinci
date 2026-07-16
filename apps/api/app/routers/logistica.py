@@ -82,11 +82,14 @@ def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
         id=s.id,
         plataforma=s.plataforma,
         status_plataforma=s.status_plataforma,
+        status_atual=s.status_atual,
         alterar_status_bling=s.alterar_status_bling,
         monitoramento=s.monitoramento,
         abrir_chamado=s.abrir_chamado,
         abrir_reembolso=s.abrir_reembolso,
         mensagem_chamado=s.mensagem_chamado,
+        mensagem_bling=s.mensagem_bling,
+        mensagem_threema=s.mensagem_threema,
         anexos=[
             AnexoOut(
                 id=a.id,
@@ -187,11 +190,14 @@ async def create_status(
     s = LogisticaStatus(
         plataforma=_clean(body.plataforma),
         status_plataforma=_clean(body.status_plataforma),
+        status_atual=_clean(body.status_atual),
         alterar_status_bling=_clean(body.alterar_status_bling),
         monitoramento=bool(body.monitoramento),
         abrir_chamado=bool(body.abrir_chamado),
         abrir_reembolso=bool(body.abrir_reembolso),
         mensagem_chamado=_clean(body.mensagem_chamado),
+        mensagem_bling=_clean(body.mensagem_bling),
+        mensagem_threema=_clean(body.mensagem_threema),
         created_by=user.id,
     )
     session.add(s)
@@ -216,6 +222,8 @@ async def patch_status(
         s.plataforma = _clean(data["plataforma"])
     if "status_plataforma" in data:
         s.status_plataforma = _clean(data["status_plataforma"])
+    if "status_atual" in data:
+        s.status_atual = _clean(data["status_atual"])
     if "alterar_status_bling" in data:
         s.alterar_status_bling = _clean(data["alterar_status_bling"])
     if "monitoramento" in data:
@@ -226,6 +234,10 @@ async def patch_status(
         s.abrir_reembolso = bool(data["abrir_reembolso"])
     if "mensagem_chamado" in data:
         s.mensagem_chamado = _clean(data["mensagem_chamado"])
+    if "mensagem_bling" in data:
+        s.mensagem_bling = _clean(data["mensagem_bling"])
+    if "mensagem_threema" in data:
+        s.mensagem_threema = _clean(data["mensagem_threema"])
 
     await session.commit()
     s = await _load_status(session, s.id)

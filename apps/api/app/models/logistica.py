@@ -67,6 +67,8 @@ class LogisticaStatus(Base, TimestampMixin):
     plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Opcional: linha pode nascer vazia pra ser completada pelo operador.
     status_plataforma: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Status que se identifica hoje no Bling (referência, antes de alterar).
+    status_atual: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Novo status do Bling; se vazio "não faz nada" (obs "alterado logística").
     alterar_status_bling: Mapped[str | None] = mapped_column(Text, nullable=True)
     monitoramento: Mapped[bool] = mapped_column(
@@ -80,6 +82,10 @@ class LogisticaStatus(Base, TimestampMixin):
     )
     # Mensagem do chamado + o que anexar (foto/link/o que for) no envio.
     mensagem_chamado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Mensagem a colar no Bling.
+    mensagem_bling: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Mensagem a enviar às pessoas (Threema) notificando o problema.
+    mensagem_threema: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
