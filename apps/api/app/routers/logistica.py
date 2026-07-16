@@ -39,6 +39,8 @@ from app.schemas.logistica import (
     MensagemBlingOut,
     MensagemBlingPreviewOut,
     OpcoesOut,
+    StatusBlingOut,
+    StatusBlingPreviewOut,
     SugestaoIn,
     SugestaoOut,
 )
@@ -582,6 +584,55 @@ async def aplicar_mensagem_bling(
     await session.commit()
     logger.info("logistica_mensagem_bling_ok", id=str(logistica_id), bling_order_id=data.get("bling_order_id"))
     return MensagemBlingOut(**data)
+
+
+@router.post("/{logistica_id}/alterar-status-bling/preview", response_model=StatusBlingPreviewOut)
+async def preview_alterar_status_bling(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> StatusBlingPreviewOut:
+    """Dry-run: lê a situação ATUAL do pedido no Bling e mostra atual -> alvo
+    (o `alterar_status_bling` da regra casada), SEM mudar nada. Faz só um GET."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        data = await logistica_bling.preview_alterar_status_bling(session, c)
+    except logistica_bling.BlingObsError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_alterar_status_bling_preview_falhou", id=str(logistica_id), err=str(e)[:300])
+        raise HTTPException(502, detail={"code": "logistica_alterar_status_bling_erro", "erro": str(e)[:300]}) from e
+    return StatusBlingPreviewOut(**data)
+
+
+@router.post("/{logistica_id}/alterar-status-bling", response_model=StatusBlingOut)
+async def aplicar_alterar_status_bling(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> StatusBlingOut:
+    """Muda a situação do pedido no Bling para a `alterar_status_bling` da regra
+    casada (via PATCH /situacoes — não reenvia o pedido) e sincroniza o
+    `status_bling` local da linha."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        data = await logistica_bling.apply_alterar_status_bling(session, c)
+    except logistica_bling.BlingObsError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_alterar_status_bling_falhou", id=str(logistica_id), err=str(e)[:300])
+        raise HTTPException(502, detail={"code": "logistica_alterar_status_bling_erro", "erro": str(e)[:300]}) from e
+    await session.commit()
+    logger.info("logistica_alterar_status_bling_ok", id=str(logistica_id), bling_order_id=data.get("bling_order_id"))
+    return StatusBlingOut(**data)
 
 
 @router.patch("/{logistica_id}", response_model=LogisticaOut)

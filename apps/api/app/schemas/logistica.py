@@ -142,6 +142,26 @@ class MensagemBlingOut(BaseModel):
     observacoes_novo: str
 
 
+class StatusBlingPreviewOut(BaseModel):
+    """Dry-run da mudança de situação: mostra a situação ATUAL e a ALVO (nome +
+    id) sem escrever. `ja_no_alvo`=pedido já está na situação alvo."""
+
+    bling_order_id: int
+    situacao_alvo: str
+    situacao_alvo_id: int
+    situacao_atual_id: int | None = None
+    situacao_atual_nome: str | None = None
+    ja_no_alvo: bool = False
+
+
+class StatusBlingOut(BaseModel):
+    """Resultado de mudar a situação do pedido no Bling."""
+
+    bling_order_id: int
+    situacao_alvo: str
+    situacao_alvo_id: int
+
+
 # ---- Sugestão de Status Bling (a partir dos status do Meli) ----
 
 

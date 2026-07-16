@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -762,6 +762,58 @@ async function aplicarMensagemBling(c: Logistica) {
     aplicandoBling.value = s
   }
 }
+
+// ---- Executor: Alterar Status Bling (muda a situação do pedido no Bling) ----
+const STATUS_BLING_ERROS: Record<string, string> = {
+  logistica_sem_status_bling:
+    'Sem regra na aba Status com "Alterar Status Bling" que case com o Status Plataforma deste pedido.',
+  logistica_status_bling_desconhecido: 'A situação alvo não existe no catálogo do Bling.',
+  logistica_sem_pedido_bling: 'Linha sem número de pedido Bling.',
+  logistica_pedido_bling_nao_achado: 'Pedido não encontrado no Bling.',
+  logistica_sem_integracao_bling: 'Integração Bling não configurada.',
+}
+// A regra casada pede mudança de status quando o resumo tem "Status Bling → X".
+function temStatusBlingAcao(c: Logistica): boolean {
+  return c.acao_resumo.some((a) => a.startsWith('Status Bling'))
+}
+const aplicandoStatus = ref<Set<string>>(new Set())
+async function aplicarStatusBling(c: Logistica) {
+  aplicandoStatus.value = new Set(aplicandoStatus.value).add(c.id)
+  error.value = null
+  try {
+    // 1) dry-run: mostra a situação atual -> alvo antes de confirmar.
+    const prev = await api<{
+      situacao_alvo: string
+      situacao_atual_nome: string | null
+      ja_no_alvo: boolean
+    }>(`/api/logistica/${c.id}/alterar-status-bling/preview`, { method: 'POST' })
+    if (prev.ja_no_alvo) {
+      toasts.info('Nada a fazer', `Pedido já está em "${prev.situacao_alvo}".`)
+      return
+    }
+    const atual = prev.situacao_atual_nome || '(desconhecida)'
+    if (
+      !confirm(
+        `Vai mudar a situação do pedido no Bling:\n\n${atual}  →  ${prev.situacao_alvo}\n\nConfirmar?`,
+      )
+    )
+      return
+    // 2) aplica de verdade (PATCH da situação, não reenvia o pedido).
+    await api(`/api/logistica/${c.id}/alterar-status-bling`, { method: 'POST' })
+    c.status_bling = prev.situacao_alvo
+    toasts.success('Status Bling alterado', `${c.pedido_bling || ''} → ${prev.situacao_alvo}`)
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    const msg =
+      (code && STATUS_BLING_ERROS[code]) || e?.data?.detail?.erro || code || e?.message || 'erro'
+    error.value = msg
+    toasts.error('Não foi possível alterar', msg)
+  } finally {
+    const s = new Set(aplicandoStatus.value)
+    s.delete(c.id)
+    aplicandoStatus.value = s
+  }
+}
 </script>
 
 <template>
@@ -920,6 +972,15 @@ async function aplicarMensagemBling(c: Logistica) {
                   <span v-if="c.status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50">{{ c.status_bling }}</span>
                   <span v-else class="text-muted-foreground">—</span>
                   <button
+                    v-if="canEdit && c.pedido_bling && temStatusBlingAcao(c)"
+                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    title="Alterar a situação do pedido no Bling conforme a regra da aba Status"
+                    :disabled="aplicandoStatus.has(c.id)"
+                    @click.stop="aplicarStatusBling(c)"
+                  >
+                    <ArrowLeftRight class="size-3.5" :class="aplicandoStatus.has(c.id) ? 'animate-pulse' : ''" />
+                  </button>
+                  <button
                     v-if="canEdit && c.pedido_bling && c.acao_resumo.includes('Mensagem Bling')"
                     class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
                     title="Aplicar Mensagem Bling nas Observações do pedido"
@@ -997,6 +1058,15 @@ async function aplicarMensagemBling(c: Logistica) {
           >
             <Send class="size-3" :class="sendingChamado.has(c.id) ? 'animate-pulse' : ''" />
             enviar chamado
+          </button>
+          <button
+            v-if="canEdit && c.pedido_bling && temStatusBlingAcao(c)"
+            class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border hover:bg-muted/40 disabled:opacity-50"
+            :disabled="aplicandoStatus.has(c.id)"
+            @click.stop="aplicarStatusBling(c)"
+          >
+            <ArrowLeftRight class="size-3" :class="aplicandoStatus.has(c.id) ? 'animate-pulse' : ''" />
+            Status Bling
           </button>
           <button
             v-if="canEdit && c.pedido_bling && c.acao_resumo.includes('Mensagem Bling')"

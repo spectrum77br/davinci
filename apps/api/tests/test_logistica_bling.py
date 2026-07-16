@@ -17,7 +17,15 @@ import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder, Logistica, LogisticaStatus, User, UserRole, UserStatus
+from app.models import (
+    BlingOrder,
+    Logistica,
+    LogisticaStatus,
+    SituacaoBling,
+    User,
+    UserRole,
+    UserStatus,
+)
 from app.services import logistica_bling, logistica_rules
 
 
@@ -153,6 +161,7 @@ class _FakeBling:
     def __init__(self, order: dict):
         self._order = order
         self.put_body: dict | None = None
+        self.situacao_set: int | None = None
 
     async def get_order(self, bling_id: int) -> dict:
         return self._order
@@ -160,6 +169,9 @@ class _FakeBling:
     async def update_order(self, bling_id: int, body: dict) -> dict:
         self.put_body = body
         return body
+
+    async def update_order_situacao(self, bling_id: int, situacao_id: int) -> None:
+        self.situacao_set = situacao_id
 
 
 @pytest.mark.asyncio
@@ -245,5 +257,187 @@ async def test_aplicar_404(
 ):
     auth_as(admin)
     r = await client.post(f"/api/logistica/{uuid.uuid4()}/mensagem-bling")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "logistica_not_found"
+
+
+# ---- alterar_status_bling_para (puro) ----
+
+
+def test_status_casa_regra():
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    rule = LogisticaStatus(status_plataforma=chave, alterar_status_bling="Entregue")
+    row = Logistica(plataforma="Mercado Livre", meli_status=meli)
+    assert logistica_bling.alterar_status_bling_para([rule], row) == "Entregue"
+
+
+def test_status_none_sem_regra_ou_vazio():
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    row = Logistica(plataforma="Mercado Livre", meli_status=meli)
+    assert logistica_bling.alterar_status_bling_para([], row) is None
+    vazia = LogisticaStatus(status_plataforma=chave, alterar_status_bling="  ")
+    assert logistica_bling.alterar_status_bling_para([vazia], row) is None
+
+
+# ---- endpoints alterar-status-bling ----
+
+
+@pytest.mark.asyncio
+async def test_status_preview_e_aplicar(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+
+    # Catálogo de situações do Bling (nome -> id).
+    db.add_all(
+        [SituacaoBling(id=6, nome="Em aberto"), SituacaoBling(id=83953, nome="Entregue")]
+    )
+    # Regra da aba Status pedindo mudança de status Bling.
+    rs = await client.post(
+        "/api/logistica/status",
+        json={"status_plataforma": chave, "alterar_status_bling": "Entregue"},
+    )
+    assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(bling_id=555, numero="99001", item_codigo="sku1", item_index=0, situacao="6")
+    )
+    await db.commit()
+
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99001", "meli_status": meli},
+    )
+    assert rc.status_code == 201, rc.text
+    lid = rc.json()["id"]
+
+    # Pedido no Bling está na situação 6 (Em aberto); alvo é 83953 (Entregue).
+    fake = _FakeBling({"id": 555, "numero": 99001, "situacao": {"id": 6, "valor": 0}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    # Preview: NÃO muda.
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    body = rp.json()
+    assert body["bling_order_id"] == 555
+    assert body["situacao_alvo"] == "Entregue"
+    assert body["situacao_alvo_id"] == 83953
+    assert body["situacao_atual_id"] == 6
+    assert body["situacao_atual_nome"] == "Em aberto"
+    assert body["ja_no_alvo"] is False
+    assert fake.situacao_set is None  # preview não mexeu
+
+    # Aplicar: PATCH da situação + sincroniza status_bling local.
+    ra = await client.post(f"/api/logistica/{lid}/alterar-status-bling")
+    assert ra.status_code == 200, ra.text
+    assert ra.json()["situacao_alvo_id"] == 83953
+    assert fake.situacao_set == 83953
+    # A linha da Logística passou a refletir a situação alvo.
+    rl = await client.get(f"/api/logistica?plataforma=ml")
+    linha = next(x for x in rl.json() if x["id"] == lid)
+    assert linha["status_bling"] == "Entregue"
+
+
+@pytest.mark.asyncio
+async def test_status_ja_no_alvo(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add(SituacaoBling(id=83953, nome="Entregue"))
+    rs = await client.post(
+        "/api/logistica/status",
+        json={"status_plataforma": chave, "alterar_status_bling": "Entregue"},
+    )
+    assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(bling_id=556, numero="99002", item_codigo="sku1", item_index=0, situacao="83953")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99002", "meli_status": meli},
+    )
+    lid = rc.json()["id"]
+    # Pedido já está em 83953 (Entregue).
+    fake = _FakeBling({"id": 556, "numero": 99002, "situacao": {"id": 83953, "valor": 0}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    assert rp.json()["ja_no_alvo"] is True
+
+
+@pytest.mark.asyncio
+async def test_status_preview_sem_regra_422(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "shipped"}
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "77002", "meli_status": meli},
+    )
+    lid = rc.json()["id"]
+    r = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "logistica_sem_status_bling"
+
+
+@pytest.mark.asyncio
+async def test_status_desconhecido_422(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+):
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    # Regra pede um status que NÃO existe no catálogo situacao_bling.
+    rs = await client.post(
+        "/api/logistica/status",
+        json={"status_plataforma": chave, "alterar_status_bling": "Status Inexistente"},
+    )
+    assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(bling_id=557, numero="99003", item_codigo="sku1", item_index=0, situacao="6")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99003", "meli_status": meli},
+    )
+    lid = rc.json()["id"]
+    r = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "logistica_status_bling_desconhecido"
+
+
+@pytest.mark.asyncio
+async def test_status_aplicar_404(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    r = await client.post(f"/api/logistica/{uuid.uuid4()}/alterar-status-bling")
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "logistica_not_found"
