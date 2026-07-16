@@ -378,9 +378,15 @@ async def test_status_ja_no_alvo(
         BlingOrder(bling_id=556, numero="99002", item_codigo="sku1", item_index=0, situacao="83953")
     )
     await db.commit()
+    # Painel com status_bling STALE ("Em andamento") — o Bling vivo diz Entregue.
     rc = await client.post(
         "/api/logistica",
-        json={"plataforma": "Mercado Livre", "pedido_bling": "99002", "meli_status": meli},
+        json={
+            "plataforma": "Mercado Livre",
+            "pedido_bling": "99002",
+            "meli_status": meli,
+            "status_bling": "Em andamento",
+        },
     )
     lid = rc.json()["id"]
     # Pedido já está em 83953 (Entregue).
@@ -393,6 +399,11 @@ async def test_status_ja_no_alvo(
     rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
     assert rp.status_code == 200, rp.text
     assert rp.json()["ja_no_alvo"] is True
+    assert rp.json()["situacao_atual_nome"] == "Entregue"
+    # O preview sincronizou o status_bling STALE do painel com a situação viva.
+    rl = await client.get("/api/logistica?plataforma=ml")
+    linha = next(x for x in rl.json() if x["id"] == lid)
+    assert linha["status_bling"] == "Entregue"
 
 
 @pytest.mark.asyncio

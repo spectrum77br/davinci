@@ -313,6 +313,12 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
     atual_id = int(atual_id) if atual_id else None
     atual_nome = await _situacao_nome_por_id(session, atual_id) if atual_id else None
 
+    # O painel guarda `status_bling` do momento da ingestão (join do bling_orders)
+    # e NÃO é mantido fresco. O GET acima é a verdade viva — sincroniza aqui de
+    # graça pra a coluna se auto-corrigir ao clicar (mesmo quando é "nada a fazer").
+    if atual_nome and (row.status_bling or "") != atual_nome:
+        row.status_bling = atual_nome
+
     exatas = [i for i in infos if i["de_id"] is not None and i["de_id"] == atual_id]
     curingas = [i for i in infos if i["de_id"] is None]
     chosen = exatas[0] if exatas else (curingas[0] if curingas else None)

@@ -799,6 +799,10 @@ async function aplicarStatusBling(c: Logistica) {
       ja_no_alvo: boolean
       aplicavel: boolean
     }>(`/api/logistica/${c.id}/alterar-status-bling/preview`, { method: 'POST' })
+    // O preview lê a situação viva do Bling e o backend já sincronizou o
+    // status_bling da linha; reflete no painel em qualquer ramo (nada a fazer/fora
+    // do fluxo/confirmar) pra a coluna se auto-corrigir sem esperar recarregar.
+    if (prev.situacao_atual_nome) c.status_bling = prev.situacao_atual_nome
     if (prev.ja_no_alvo) {
       toasts.info('Nada a fazer', `Pedido já está em "${prev.situacao_alvo}".`)
       return

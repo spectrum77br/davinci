@@ -606,6 +606,9 @@ async def preview_alterar_status_bling(
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_alterar_status_bling_preview_falhou", id=str(logistica_id), err=str(e)[:300])
         raise HTTPException(502, detail={"code": "logistica_alterar_status_bling_erro", "erro": str(e)[:300]}) from e
+    # O preview sincroniza `status_bling` com a situação viva do Bling (dentro do
+    # _resolve_status). Persiste pra o painel se auto-corrigir mesmo em "nada a fazer".
+    await session.commit()
     return StatusBlingPreviewOut(**data)
 
 
