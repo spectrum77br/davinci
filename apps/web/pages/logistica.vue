@@ -68,6 +68,14 @@ async function refresh() {
   }
 }
 
+// Recarrega os pedidos E as chaves da aba Status ao mesmo tempo. Como o casador
+// (acao_resumo/acao_match) e o destaque vermelho são derivados das regras da aba
+// Status, ao cadastrar uma chave nova lá basta recarregar aqui: as linhas já
+// casadas somem do vermelho e ganham as ações, sem esperar o status do ML mudar.
+async function recarregar() {
+  await Promise.all([refresh(), refreshStatus()])
+}
+
 // ---- Busca + filtros (client-side sobre as linhas já carregadas) ----
 const search = ref('')
 const contaFilter = ref('all')
@@ -768,6 +776,8 @@ const STATUS_BLING_ERROS: Record<string, string> = {
   logistica_sem_status_bling:
     'Sem regra na aba Status com "Alterar Status Bling" que case com o Status Plataforma deste pedido.',
   logistica_status_bling_desconhecido: 'A situação alvo não existe no catálogo do Bling.',
+  logistica_status_atual_divergente:
+    'O pedido não está no "Status Atual" que a regra exige — a mudança não foi aplicada pra não regredir.',
   logistica_sem_pedido_bling: 'Linha sem número de pedido Bling.',
   logistica_pedido_bling_nao_achado: 'Pedido não encontrado no Bling.',
   logistica_sem_integracao_bling: 'Integração Bling não configurada.',
@@ -781,20 +791,34 @@ async function aplicarStatusBling(c: Logistica) {
   aplicandoStatus.value = new Set(aplicandoStatus.value).add(c.id)
   error.value = null
   try {
-    // 1) dry-run: mostra a situação atual -> alvo antes de confirmar.
+    // 1) dry-run: mostra a transição da regra (Status Atual -> Alvo) antes de confirmar.
     const prev = await api<{
+      situacao_de: string | null
       situacao_alvo: string
       situacao_atual_nome: string | null
       ja_no_alvo: boolean
+      aplicavel: boolean
     }>(`/api/logistica/${c.id}/alterar-status-bling/preview`, { method: 'POST' })
     if (prev.ja_no_alvo) {
       toasts.info('Nada a fazer', `Pedido já está em "${prev.situacao_alvo}".`)
       return
     }
-    const atual = prev.situacao_atual_nome || '(desconhecida)'
+    // A regra tem "Status Atual" (o "de") mas o pedido não está nele → não muda
+    // pra não regredir (ex.: já Entregue, regra "Em andamento → Entregue").
+    if (!prev.aplicavel) {
+      const atualNome = prev.situacao_atual_nome || '(desconhecida)'
+      toasts.info(
+        'Fora do fluxo',
+        `A regra é "${prev.situacao_de} → ${prev.situacao_alvo}", mas o pedido está em "${atualNome}". Nada a fazer.`,
+      )
+      return
+    }
+    // "De" = o Status Atual da regra (o fluxo esperado); cai no atual do Bling se
+    // a regra não exige um "de" específico.
+    const de = prev.situacao_de || prev.situacao_atual_nome || '(desconhecida)'
     if (
       !confirm(
-        `Vai mudar a situação do pedido no Bling:\n\n${atual}  →  ${prev.situacao_alvo}\n\nConfirmar?`,
+        `Vai mudar a situação do pedido no Bling:\n\n${de}  →  ${prev.situacao_alvo}\n\nConfirmar?`,
       )
     )
       return
@@ -845,8 +869,8 @@ async function aplicarStatusBling(c: Logistica) {
     <!-- ============ ABA LOGÍSTICA ============ -->
     <template v-if="tab === 'logistica'">
       <div class="flex flex-wrap items-center gap-3">
-        <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">
-          <RefreshCw class="size-4 mr-1" /> recarregar
+        <Button size="sm" variant="ghost" :disabled="loading || statusLoading" @click="recarregar">
+          <RefreshCw class="size-4 mr-1" :class="loading || statusLoading ? 'animate-spin' : ''" /> recarregar
         </Button>
         <Button v-if="canEdit" size="sm" class="ml-auto" @click="openNew">
           <Plus class="size-4 mr-1" /> Novo caso

@@ -224,11 +224,19 @@ async def apply_mensagem_bling(session: AsyncSession, row: Logistica) -> dict:
 # resolve o id da situação -> PATCH.
 
 
-def alterar_status_bling_para(rows: list[LogisticaStatus], row: Logistica) -> str | None:
-    """Nome da situação-alvo (`alterar_status_bling`) da regra da aba Status que
-    casa com a linha. None se nenhuma casar ou a regra não pedir mudança."""
+def _regra_status_para(rows: list[LogisticaStatus], row: Logistica) -> LogisticaStatus | None:
+    """Regra da aba Status que casa com a linha (prefere específica, cai na
+    geral). None se nenhuma casar."""
     assinatura = logistica_rules.assinatura_pt(row.meli_status or {})
-    rule = logistica_match.find_matching_rule(rows, assinatura=assinatura, plataforma=row.plataforma)
+    return logistica_match.find_matching_rule(
+        rows, assinatura=assinatura, plataforma=row.plataforma
+    )
+
+
+def alterar_status_bling_para(rows: list[LogisticaStatus], row: Logistica) -> str | None:
+    """Nome da situação-alvo (`alterar_status_bling`) da regra que casa. None se
+    nenhuma casar ou a regra não pedir mudança."""
+    rule = _regra_status_para(rows, row)
     if rule is None:
         return None
     alvo = (rule.alterar_status_bling or "").strip()
@@ -236,7 +244,16 @@ def alterar_status_bling_para(rows: list[LogisticaStatus], row: Logistica) -> st
 
 
 async def _situacao_id_por_nome(session: AsyncSession, nome: str) -> int:
-    """id da situação no Bling a partir do nome (case-insensitive)."""
+    """id da situação no Bling a partir do nome (case-insensitive). Levanta se
+    o nome não existir no catálogo."""
+    sid = await _situacao_id_por_nome_opt(session, nome)
+    if sid is None:
+        raise BlingObsError("logistica_status_bling_desconhecido")
+    return sid
+
+
+async def _situacao_id_por_nome_opt(session: AsyncSession, nome: str) -> int | None:
+    """id da situação por nome (case-insensitive) ou None se não achar."""
     sid = (
         await session.execute(
             select(SituacaoBling.id)
@@ -245,9 +262,7 @@ async def _situacao_id_por_nome(session: AsyncSession, nome: str) -> int:
             .limit(1)
         )
     ).scalar_one_or_none()
-    if sid is None:
-        raise BlingObsError("logistica_status_bling_desconhecido")
-    return int(sid)
+    return int(sid) if sid is not None else None
 
 
 async def _situacao_nome_por_id(session: AsyncSession, sid: int) -> str | None:
@@ -258,48 +273,65 @@ async def _situacao_nome_por_id(session: AsyncSession, sid: int) -> str | None:
 
 async def _resolve_status(
     session: AsyncSession, row: Logistica
-) -> tuple[int, str, int, BlingClient]:
-    """Valida a linha e devolve (bling_order_id, nome_alvo, id_alvo, client)."""
+) -> tuple[int, str | None, int | None, str, int, BlingClient]:
+    """Valida a linha e devolve (bling_order_id, nome_de, id_de, nome_alvo,
+    id_alvo, client). `de` = coluna "Status Atual" da regra (a situação a partir
+    da qual a mudança faz sentido); None quando a regra não define."""
     rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
-    alvo = alterar_status_bling_para(rows, row)
+    rule = _regra_status_para(rows, row)
+    alvo = (rule.alterar_status_bling or "").strip() if rule else ""
     if not alvo:
         raise BlingObsError("logistica_sem_status_bling")
     alvo_id = await _situacao_id_por_nome(session, alvo)
+    de = (rule.status_atual or "").strip() if rule else ""
+    de = de or None
+    de_id = await _situacao_id_por_nome_opt(session, de) if de else None
     bling_id = await _bling_order_id_for_row(session, row)
     client = await _bling_client(session)
-    return bling_id, alvo, alvo_id, client
+    return bling_id, de, de_id, alvo, alvo_id, client
 
 
 async def preview_alterar_status_bling(session: AsyncSession, row: Logistica) -> dict:
-    """Dry-run: lê a situação ATUAL do pedido e mostra atual -> alvo, sem
-    escrever. `{bling_order_id, situacao_alvo, situacao_alvo_id,
-    situacao_atual_id, situacao_atual_nome, ja_no_alvo}`."""
-    bling_id, alvo, alvo_id, client = await _resolve_status(session, row)
+    """Dry-run: lê a situação ATUAL do pedido e mostra a transição da regra
+    (Status Atual -> Alterar Status Bling), sem escrever. `aplicavel`=o pedido
+    está na situação "de" esperada (ou a regra não exige "de"); `ja_no_alvo`=já
+    está no alvo."""
+    bling_id, de, de_id, alvo, alvo_id, client = await _resolve_status(session, row)
     order = await client.get_order(bling_id)
     atual_id = (order.get("situacao") or {}).get("id")
     atual_id = int(atual_id) if atual_id else None
     atual_nome = await _situacao_nome_por_id(session, atual_id) if atual_id else None
     return {
         "bling_order_id": bling_id,
+        "situacao_de": de,
+        "situacao_de_id": de_id,
         "situacao_alvo": alvo,
         "situacao_alvo_id": alvo_id,
         "situacao_atual_id": atual_id,
         "situacao_atual_nome": atual_nome,
         "ja_no_alvo": atual_id == alvo_id,
+        "aplicavel": de_id is None or atual_id == de_id,
     }
 
 
 async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> dict:
-    """Aplica de verdade: PATCH da situação do pedido no Bling e sincroniza o
-    `status_bling` local da linha. Retorna `{bling_order_id, situacao_alvo,
-    situacao_alvo_id}`."""
-    bling_id, alvo, alvo_id, client = await _resolve_status(session, row)
+    """Aplica de verdade: só muda se o pedido estiver na situação "de" da regra
+    (guarda contra regressão/estado errado), então PATCH da situação no Bling e
+    sincroniza o `status_bling` local. `logistica_status_atual_divergente` se o
+    pedido não está no "de" esperado."""
+    bling_id, de, de_id, alvo, alvo_id, client = await _resolve_status(session, row)
+    order = await client.get_order(bling_id)
+    atual_id = (order.get("situacao") or {}).get("id")
+    atual_id = int(atual_id) if atual_id else None
+    if de_id is not None and atual_id != de_id:
+        raise BlingObsError("logistica_status_atual_divergente")
     await client.update_order_situacao(bling_id, alvo_id)
     row.status_bling = alvo
     await session.flush()
     logger.info(
         "logistica_alterar_status_bling_aplicada",
         bling_order_id=bling_id,
+        situacao_de=de_id,
         situacao_id=alvo_id,
         pedido=row.pedido_bling,
     )

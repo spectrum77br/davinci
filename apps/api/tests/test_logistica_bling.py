@@ -300,10 +300,14 @@ async def test_status_preview_e_aplicar(
     db.add_all(
         [SituacaoBling(id=6, nome="Em aberto"), SituacaoBling(id=83953, nome="Entregue")]
     )
-    # Regra da aba Status pedindo mudança de status Bling.
+    # Regra da aba Status: transição "Em aberto" -> "Entregue".
     rs = await client.post(
         "/api/logistica/status",
-        json={"status_plataforma": chave, "alterar_status_bling": "Entregue"},
+        json={
+            "status_plataforma": chave,
+            "status_atual": "Em aberto",
+            "alterar_status_bling": "Entregue",
+        },
     )
     assert rs.status_code == 201, rs.text
     db.add(
@@ -331,11 +335,15 @@ async def test_status_preview_e_aplicar(
     assert rp.status_code == 200, rp.text
     body = rp.json()
     assert body["bling_order_id"] == 555
+    assert body["situacao_de"] == "Em aberto"
+    assert body["situacao_de_id"] == 6
     assert body["situacao_alvo"] == "Entregue"
     assert body["situacao_alvo_id"] == 83953
     assert body["situacao_atual_id"] == 6
     assert body["situacao_atual_nome"] == "Em aberto"
     assert body["ja_no_alvo"] is False
+    # Pedido está no "de" da regra (Em aberto) → a mudança se aplica.
+    assert body["aplicavel"] is True
     assert fake.situacao_set is None  # preview não mexeu
 
     # Aplicar: PATCH da situação + sincroniza status_bling local.
@@ -385,6 +393,71 @@ async def test_status_ja_no_alvo(
     rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
     assert rp.status_code == 200, rp.text
     assert rp.json()["ja_no_alvo"] is True
+
+
+@pytest.mark.asyncio
+async def test_status_atual_divergente(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """Regra é 'Em andamento -> Entregue', mas o pedido está em 'Em aberto' (fora
+    do 'de'): preview marca aplicavel=False e aplicar levanta divergente — nunca
+    regride nem pula etapa."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=6, nome="Em aberto"),
+            SituacaoBling(id=15, nome="Em andamento"),
+            SituacaoBling(id=83953, nome="Entregue"),
+        ]
+    )
+    rs = await client.post(
+        "/api/logistica/status",
+        json={
+            "status_plataforma": chave,
+            "status_atual": "Em andamento",
+            "alterar_status_bling": "Entregue",
+        },
+    )
+    assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(bling_id=558, numero="99004", item_codigo="sku1", item_index=0, situacao="6")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99004", "meli_status": meli},
+    )
+    lid = rc.json()["id"]
+    # Pedido está em 6 (Em aberto), mas a regra exige "de" = 15 (Em andamento).
+    fake = _FakeBling({"id": 558, "numero": 99004, "situacao": {"id": 6, "valor": 0}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    # Preview: transição da regra visível, mas NÃO aplicável (pedido fora do "de").
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    body = rp.json()
+    assert body["situacao_de"] == "Em andamento"
+    assert body["situacao_de_id"] == 15
+    assert body["situacao_alvo"] == "Entregue"
+    assert body["situacao_atual_id"] == 6
+    assert body["ja_no_alvo"] is False
+    assert body["aplicavel"] is False
+
+    # Aplicar: recusa e não escreve no Bling.
+    ra = await client.post(f"/api/logistica/{lid}/alterar-status-bling")
+    assert ra.status_code == 422
+    assert ra.json()["detail"]["code"] == "logistica_status_atual_divergente"
+    assert fake.situacao_set is None
 
 
 @pytest.mark.asyncio

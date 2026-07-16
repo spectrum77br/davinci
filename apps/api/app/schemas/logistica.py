@@ -143,15 +143,21 @@ class MensagemBlingOut(BaseModel):
 
 
 class StatusBlingPreviewOut(BaseModel):
-    """Dry-run da mudança de situação: mostra a situação ATUAL e a ALVO (nome +
-    id) sem escrever. `ja_no_alvo`=pedido já está na situação alvo."""
+    """Dry-run da mudança de situação: mostra a transição da regra
+    (`situacao_de` → `situacao_alvo`, nome + id), a situação ATUAL do pedido no
+    Bling e se a mudança se aplica. `ja_no_alvo`=pedido já está na situação
+    alvo; `aplicavel`=pedido está no `situacao_de` (ou a regra não exige um "de"
+    específico), então a mudança pode seguir sem regredir."""
 
     bling_order_id: int
+    situacao_de: str | None = None
+    situacao_de_id: int | None = None
     situacao_alvo: str
     situacao_alvo_id: int
     situacao_atual_id: int | None = None
     situacao_atual_nome: str | None = None
     ja_no_alvo: bool = False
+    aplicavel: bool = True
 
 
 class StatusBlingOut(BaseModel):
