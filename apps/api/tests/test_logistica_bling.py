@@ -461,6 +461,73 @@ async def test_status_atual_divergente(
 
 
 @pytest.mark.asyncio
+async def test_status_maquina_de_estados(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """Duas regras pra MESMA chave (máquina de estados): a transição escolhida
+    depende da situação atual do pedido no Bling. Pedido em 'Em andamento' segue
+    a regra 'Em andamento -> Entregue'; já em 'Entregue' não faz nada."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=83965, nome="Enviado Etiqueta"),
+            SituacaoBling(id=15, nome="Em andamento"),
+            SituacaoBling(id=83953, nome="Entregue"),
+        ]
+    )
+    # Regra A: Enviado Etiqueta -> Em andamento. Regra B: Em andamento -> Entregue.
+    for de, alvo in [("Enviado Etiqueta", "Em andamento"), ("Em andamento", "Entregue")]:
+        rs = await client.post(
+            "/api/logistica/status",
+            json={"status_plataforma": chave, "status_atual": de, "alterar_status_bling": alvo},
+        )
+        assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(bling_id=560, numero="99005", item_codigo="sku1", item_index=0, situacao="15")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99005", "meli_status": meli},
+    )
+    lid = rc.json()["id"]
+
+    # Pedido em 15 (Em andamento): escolhe a regra B (Em andamento -> Entregue).
+    fake = _FakeBling({"id": 560, "numero": 99005, "situacao": {"id": 15, "valor": 0}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    body = rp.json()
+    assert body["situacao_de"] == "Em andamento"
+    assert body["situacao_alvo"] == "Entregue"
+    assert body["aplicavel"] is True
+    assert body["ja_no_alvo"] is False
+
+    ra = await client.post(f"/api/logistica/{lid}/alterar-status-bling")
+    assert ra.status_code == 200, ra.text
+    assert fake.situacao_set == 83953
+
+    # Agora o pedido está em 83953 (Entregue): nenhuma regra parte daí, mas é o
+    # alvo da regra B -> ja_no_alvo, nada a fazer.
+    fake.situacao_set = None
+    fake._order["situacao"]["id"] = 83953
+    rp2 = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp2.status_code == 200, rp2.text
+    assert rp2.json()["ja_no_alvo"] is True
+    assert rp2.json()["aplicavel"] is False
+
+
+@pytest.mark.asyncio
 async def test_status_preview_sem_regra_422(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
 ):

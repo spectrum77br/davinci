@@ -53,6 +53,35 @@ def test_match_prefere_especifica_sobre_geral():
     assert r is espec
 
 
+def test_find_matching_rules_devolve_todas_da_chave():
+    # Máquina de estados: mesma chave, duas transições distintas.
+    a = _rule(status_plataforma="Pago | Entregue", status_atual="Enviado Etiqueta",
+              alterar_status_bling="Em andamento")
+    b = _rule(status_plataforma="Pago | Entregue", status_atual="Em andamento",
+              alterar_status_bling="Entregue")
+    outra = _rule(status_plataforma="Pago | Cancelado", alterar_status_bling="Cancelado")
+    got = logistica_match.find_matching_rules(
+        [a, b, outra], assinatura="pago | entregue", plataforma=None
+    )
+    assert got == [a, b]
+
+
+def test_find_matching_rules_prefere_especificas():
+    geral = _rule(status_plataforma="Pago | Entregue", plataforma=None,
+                  alterar_status_bling="Entregue")
+    espec = _rule(status_plataforma="Pago | Entregue", plataforma="Mercado Livre",
+                  alterar_status_bling="Em andamento")
+    got = logistica_match.find_matching_rules(
+        [geral, espec], assinatura="Pago | Entregue", plataforma="Mercado Livre"
+    )
+    assert got == [espec]  # havendo específica, ignora a geral
+
+
+def test_find_matching_rules_vazio_sem_assinatura():
+    a = _rule(status_plataforma="Pago | Entregue", alterar_status_bling="Entregue")
+    assert logistica_match.find_matching_rules([a], assinatura="", plataforma=None) == []
+
+
 def test_match_cai_na_geral_quando_plataforma_nao_bate():
     geral = _rule(status_plataforma="Pago | Entregue", plataforma=None)
     outra = _rule(status_plataforma="Pago | Entregue", plataforma="Shopee")

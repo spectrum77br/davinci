@@ -46,6 +46,35 @@ def find_matching_rule(
     return especifica or geral
 
 
+def find_matching_rules(
+    rows: list[LogisticaStatus], *, assinatura: str | None, plataforma: str | None
+) -> list[LogisticaStatus]:
+    """TODAS as regras da aba Status cuja chave casa com a assinatura do pedido.
+
+    Como uma mesma assinatura do ML pode ter mais de uma linha (máquina de
+    estados: a transição do Bling depende de onde o pedido está agora), isto
+    devolve o conjunto de candidatas pra quem precisa desambiguar pela situação
+    atual do pedido (ex.: o executor de Alterar Status Bling). Prefere as
+    específicas da plataforma; se não houver nenhuma específica, cai nas gerais
+    (plataforma vazia). Lista vazia se a assinatura estiver vazia ou nada casar.
+    """
+    chave = _norm(assinatura)
+    if not chave:
+        return []
+    plat = _norm(plataforma)
+    especificas: list[LogisticaStatus] = []
+    gerais: list[LogisticaStatus] = []
+    for s in rows:
+        if _norm(s.status_plataforma) != chave:
+            continue
+        sp = _norm(s.plataforma)
+        if sp and sp == plat:
+            especificas.append(s)
+        elif not sp:
+            gerais.append(s)
+    return especificas or gerais
+
+
 def resumo_acoes(rule: LogisticaStatus | None) -> list[str]:
     """Resumo legível do que o sistema faria pra essa regra (só as ações
     preenchidas). Lista vazia = regra sem nenhuma ação (nada a fazer)."""
