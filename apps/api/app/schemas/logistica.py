@@ -124,6 +124,24 @@ class EnviarThreemaOut(BaseModel):
     failed: list[str] = Field(default_factory=list)
 
 
+class MensagemBlingPreviewOut(BaseModel):
+    """Dry-run da Mensagem Bling: o que SERIA escrito nas Observações do pedido
+    (nenhuma escrita foi feita). `put_body` é o corpo exato do PUT."""
+
+    bling_order_id: int
+    mensagem: str
+    observacoes_atual: str | None = None
+    observacoes_novo: str
+    put_body: dict
+
+
+class MensagemBlingOut(BaseModel):
+    """Resultado de aplicar a Mensagem Bling nas Observações do pedido."""
+
+    bling_order_id: int
+    observacoes_novo: str
+
+
 # ---- Sugestão de Status Bling (a partir dos status do Meli) ----
 
 

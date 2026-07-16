@@ -36,11 +36,13 @@ from app.schemas.logistica import (
     LogisticaStatusCreate,
     LogisticaStatusOut,
     LogisticaStatusPatch,
+    MensagemBlingOut,
+    MensagemBlingPreviewOut,
     OpcoesOut,
     SugestaoIn,
     SugestaoOut,
 )
-from app.services import logistica_match, logistica_meli, logistica_rules, threema
+from app.services import logistica_bling, logistica_match, logistica_meli, logistica_rules, threema
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/logistica", tags=["logistica"])
@@ -529,6 +531,57 @@ async def enviar_chamado(
     await session.refresh(c)
     logger.info("logistica_chamado_enviado", id=str(logistica_id), chamado=c.chamado)
     return _to_out(c, await _match_rule(session, c))
+
+
+@router.post("/{logistica_id}/mensagem-bling/preview", response_model=MensagemBlingPreviewOut)
+async def preview_mensagem_bling(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> MensagemBlingPreviewOut:
+    """Dry-run: mostra o que SERIA escrito nas Observações do pedido Bling
+    (linha datada com a `mensagem_bling` da regra casada, no topo), SEM
+    escrever nada. Faz só um GET do pedido pra montar o corpo do PUT."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        data = await logistica_bling.preview_mensagem_bling(session, c)
+    except logistica_bling.BlingObsError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_mensagem_bling_preview_falhou", id=str(logistica_id), err=str(e)[:300])
+        raise HTTPException(502, detail={"code": "logistica_mensagem_bling_erro", "erro": str(e)[:300]}) from e
+    return MensagemBlingPreviewOut(**data)
+
+
+@router.post("/{logistica_id}/mensagem-bling", response_model=MensagemBlingOut)
+async def aplicar_mensagem_bling(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> MensagemBlingOut:
+    """Aplica a Mensagem Bling: anexa a linha datada com a `mensagem_bling` da
+    regra casada NO TOPO das Observações (Dados adicionais) do pedido no Bling
+    via PUT (reenvio do pedido inteiro sanitizado). Nunca sobrescreve o que já
+    estava."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        data = await logistica_bling.apply_mensagem_bling(session, c)
+    except logistica_bling.BlingObsError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_mensagem_bling_falhou", id=str(logistica_id), err=str(e)[:300])
+        raise HTTPException(502, detail={"code": "logistica_mensagem_bling_erro", "erro": str(e)[:300]}) from e
+    await session.commit()
+    logger.info("logistica_mensagem_bling_ok", id=str(logistica_id), bling_order_id=data.get("bling_order_id"))
+    return MensagemBlingOut(**data)
 
 
 @router.patch("/{logistica_id}", response_model=LogisticaOut)

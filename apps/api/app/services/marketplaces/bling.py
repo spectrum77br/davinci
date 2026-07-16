@@ -408,6 +408,19 @@ class BlingClient:
         )
         r.raise_for_status()
 
+    async def update_order(self, bling_order_id: int, body: dict) -> dict:
+        """Substitui o pedido de venda (PUT /pedidos/vendas/{id}).
+
+        O Bling v3 não tem PATCH parcial de pedido: pra mexer em um campo
+        (ex.: Observações) é preciso reenviar o pedido INTEIRO. O `body` já
+        deve vir sanitizado (referências por id, sem campos calculados) —
+        ver `logistica_bling.build_observacoes_put_body`. Retorna o pedido
+        atualizado.
+        """
+        r = await self._request("PUT", f"/pedidos/vendas/{bling_order_id}", json=body)
+        r.raise_for_status()
+        return r.json().get("data") or {}
+
     async def get_default_deposit_id(self) -> int | None:
         """idDeposito do depósito padrão (padrao=True, senão o primeiro ativo).
         Cacheado por integração — o Bling exige idDeposito no POST /estoques."""

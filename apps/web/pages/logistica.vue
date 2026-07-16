@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -723,6 +723,45 @@ async function enviarChamado(c: Logistica) {
     sendingChamado.value = s
   }
 }
+
+const MENSAGEM_BLING_ERROS: Record<string, string> = {
+  logistica_sem_mensagem_bling:
+    'Sem regra na aba Status com Mensagem Bling que case com o Status Plataforma deste pedido.',
+  logistica_sem_pedido_bling: 'Linha sem número de pedido Bling.',
+  logistica_pedido_bling_nao_achado: 'Pedido não encontrado no Bling.',
+  logistica_sem_integracao_bling: 'Integração Bling não configurada.',
+}
+const aplicandoBling = ref<Set<string>>(new Set())
+async function aplicarMensagemBling(c: Logistica) {
+  aplicandoBling.value = new Set(aplicandoBling.value).add(c.id)
+  error.value = null
+  try {
+    // 1) dry-run: mostra o que SERIA escrito nas Observações antes de confirmar.
+    const prev = await api<{ observacoes_novo: string }>(
+      `/api/logistica/${c.id}/mensagem-bling/preview`,
+      { method: 'POST' },
+    )
+    if (
+      !confirm(
+        `Vai anexar nas Observações do pedido no Bling (linha nova no topo, nada é sobrescrito):\n\n${prev.observacoes_novo}\n\nConfirmar?`,
+      )
+    )
+      return
+    // 2) aplica de verdade (PUT do pedido inteiro sanitizado).
+    await api(`/api/logistica/${c.id}/mensagem-bling`, { method: 'POST' })
+    toasts.success('Mensagem Bling aplicada', c.pedido_bling || '')
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    const msg =
+      (code && MENSAGEM_BLING_ERROS[code]) || e?.data?.detail?.erro || code || e?.message || 'erro'
+    error.value = msg
+    toasts.error('Não foi possível aplicar', msg)
+  } finally {
+    const s = new Set(aplicandoBling.value)
+    s.delete(c.id)
+    aplicandoBling.value = s
+  }
+}
 </script>
 
 <template>
@@ -877,8 +916,19 @@ async function enviarChamado(c: Logistica) {
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <td class="px-3 py-2 whitespace-nowrap">
-                <span v-if="c.status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50">{{ c.status_bling }}</span>
-                <span v-else class="text-muted-foreground">—</span>
+                <div class="flex items-center gap-1.5">
+                  <span v-if="c.status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50">{{ c.status_bling }}</span>
+                  <span v-else class="text-muted-foreground">—</span>
+                  <button
+                    v-if="canEdit && c.pedido_bling && c.acao_resumo.includes('Mensagem Bling')"
+                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    title="Aplicar Mensagem Bling nas Observações do pedido"
+                    :disabled="aplicandoBling.has(c.id)"
+                    @click.stop="aplicarMensagemBling(c)"
+                  >
+                    <NotebookPen class="size-3.5" :class="aplicandoBling.has(c.id) ? 'animate-pulse' : ''" />
+                  </button>
+                </div>
               </td>
               <td class="px-3 py-2 whitespace-nowrap">
                 <div class="flex items-center gap-1.5">
@@ -947,6 +997,15 @@ async function enviarChamado(c: Logistica) {
           >
             <Send class="size-3" :class="sendingChamado.has(c.id) ? 'animate-pulse' : ''" />
             enviar chamado
+          </button>
+          <button
+            v-if="canEdit && c.pedido_bling && c.acao_resumo.includes('Mensagem Bling')"
+            class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border hover:bg-muted/40 disabled:opacity-50"
+            :disabled="aplicandoBling.has(c.id)"
+            @click.stop="aplicarMensagemBling(c)"
+          >
+            <NotebookPen class="size-3" :class="aplicandoBling.has(c.id) ? 'animate-pulse' : ''" />
+            Mensagem Bling
           </button>
         </div>
         <div v-if="!loading && filteredRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
