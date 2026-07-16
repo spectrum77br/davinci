@@ -40,7 +40,7 @@ from app.schemas.logistica import (
     SugestaoIn,
     SugestaoOut,
 )
-from app.services import logistica_meli, logistica_rules, threema
+from app.services import logistica_match, logistica_meli, logistica_rules, threema
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/logistica", tags=["logistica"])
@@ -56,7 +56,7 @@ _PLATAFORMA_LABELS = {
 }
 
 
-def _to_out(c: Logistica) -> LogisticaOut:
+def _to_out(c: Logistica, rule: LogisticaStatus | None = None) -> LogisticaOut:
     return LogisticaOut(
         id=c.id,
         data=c.data,
@@ -72,9 +72,21 @@ def _to_out(c: Logistica) -> LogisticaOut:
         status_bling=c.status_bling,
         chamado=c.chamado,
         observacao=c.observacao,
+        acao_match=rule is not None,
+        acao_status_id=rule.id if rule is not None else None,
+        acao_resumo=logistica_match.resumo_acoes(rule),
         created_by=c.created_by,
         created_at=c.created_at,
         updated_at=c.updated_at,
+    )
+
+
+async def _match_rule(session: AsyncSession, c: Logistica) -> LogisticaStatus | None:
+    """Regra da aba Status que casa com a chave (assinatura PT) do pedido."""
+    rows = (await session.execute(select(LogisticaStatus))).scalars().all()
+    assinatura = logistica_rules.assinatura_pt(c.meli_status or {})
+    return logistica_match.find_matching_rule(
+        list(rows), assinatura=assinatura, plataforma=c.plataforma
     )
 
 
@@ -396,7 +408,16 @@ async def list_logistica(
         label = _PLATAFORMA_LABELS.get(plataforma.strip().lower(), plataforma)
         stmt = stmt.where(Logistica.plataforma == label)
     rows = (await session.execute(stmt)).scalars().all()
-    return [_to_out(c) for c in rows]
+    # Casa cada pedido com a regra da aba Status (carrega o índice uma vez).
+    status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
+    out: list[LogisticaOut] = []
+    for c in rows:
+        assinatura = logistica_rules.assinatura_pt(c.meli_status or {})
+        rule = logistica_match.find_matching_rule(
+            status_rows, assinatura=assinatura, plataforma=c.plataforma
+        )
+        out.append(_to_out(c, rule))
+    return out
 
 
 @router.post("", response_model=LogisticaOut, status_code=status.HTTP_201_CREATED)
@@ -423,7 +444,7 @@ async def create_logistica(
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_created", id=str(c.id), pedido_bling=c.pedido_bling)
-    return _to_out(c)
+    return _to_out(c, await _match_rule(session, c))
 
 
 @router.post("/{logistica_id}/atualizar-meli", response_model=LogisticaOut)
@@ -449,7 +470,7 @@ async def atualizar_meli(
         raise HTTPException(502, detail={"code": "logistica_meli_erro"}) from e
     await session.commit()
     await session.refresh(c)
-    return _to_out(c)
+    return _to_out(c, await _match_rule(session, c))
 
 
 async def _mensagem_chamado_para(session: AsyncSession, c: Logistica) -> str | None:
@@ -507,7 +528,7 @@ async def enviar_chamado(
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_chamado_enviado", id=str(logistica_id), chamado=c.chamado)
-    return _to_out(c)
+    return _to_out(c, await _match_rule(session, c))
 
 
 @router.patch("/{logistica_id}", response_model=LogisticaOut)
@@ -549,7 +570,7 @@ async def patch_logistica(
 
     await session.commit()
     await session.refresh(c)
-    return _to_out(c)
+    return _to_out(c, await _match_rule(session, c))
 
 
 @router.delete("/{logistica_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -22,6 +22,13 @@ class LogisticaOut(BaseModel):
     status_bling: str | None = None
     chamado: str | None = None
     observacao: str | None = None
+    # Casador da aba Status: regra que casa com a chave (status_plataforma)
+    # deste pedido. `acao_match`=achou regra; `acao_status_id`=id da linha da
+    # aba Status que casou; `acao_resumo`=o que o sistema faria (só leitura,
+    # derivado — o front só renderiza).
+    acao_match: bool = False
+    acao_status_id: UUID | None = None
+    acao_resumo: list[str] = Field(default_factory=list)
     created_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
