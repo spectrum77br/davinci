@@ -160,6 +160,15 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Threema Gateway (Basic mode) — notifica as pessoas de um caso de
+    # logística. `threema_gateway_id`: o *ID de 8 chars (ex. "*3MAGW01").
+    # `threema_gateway_secret`: API secret do painel. `threema_recipients`:
+    # Threema IDs destino separados por vírgula (8 chars cada). Tudo inerte
+    # vazio — sem config o envio levanta threema_nao_configurado.
+    threema_gateway_id: str = ""
+    threema_gateway_secret: str = ""
+    threema_recipients: str = ""
+
     # Dev: enables /api/dev/mock-login (gated by ENV=development too).
     dev_mock_login: bool = False
 

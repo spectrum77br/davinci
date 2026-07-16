@@ -608,6 +608,31 @@ async function removeStatusRow(s: LogisticaStatus) {
   }
 }
 
+// ---- Enviar a Mensagem Threema (notifica as pessoas do problema) ----
+async function enviarThreema(s: LogisticaStatus) {
+  if (!s.mensagem_threema) return
+  if (!confirm('Enviar a Mensagem Threema para os destinatários?')) return
+  setStatusBusy(s.id, true)
+  statusError.value = null
+  try {
+    const r = await api<{ sent: string[]; failed: string[] }>(
+      `/api/logistica/status/${s.id}/enviar-threema`,
+      { method: 'POST' },
+    )
+    if (r.failed.length) {
+      toasts.error(`Enviado a ${r.sent.length}, falhou ${r.failed.length}`, r.failed.join(', '))
+    } else {
+      toasts.success('Mensagem Threema enviada', `${r.sent.length} destinatário(s)`)
+    }
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    statusError.value = code
+    toasts.error('Não foi possível enviar', code)
+  } finally {
+    setStatusBusy(s.id, false)
+  }
+}
+
 // ---- Anexos de imagem na "Mensagem do Chamado" ----
 function anexoUrl(id: string) {
   // Relativo → o cookie de sessão vai junto no <img src>/<a href>.
@@ -1153,6 +1178,15 @@ async function enviarChamado(c: Logistica) {
                   @keydown.esc="cancelEdit"
                 />
                 <span v-else class="break-words whitespace-pre-line" :class="[canEdit ? 'cursor-text' : '', s.mensagem_threema ? 'text-muted-foreground' : 'text-muted-foreground/60']">{{ s.mensagem_threema || '—' }}</span>
+                <button
+                  v-if="canEdit && s.mensagem_threema"
+                  class="mt-1 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-primary hover:bg-primary/10 disabled:opacity-50"
+                  title="Enviar Mensagem Threema aos destinatários"
+                  :disabled="statusBusy.has(s.id)"
+                  @click.stop="enviarThreema(s)"
+                >
+                  <Send class="size-3" /> Enviar
+                </button>
               </td>
               <!-- Ação -->
               <td v-if="canEdit" class="px-2 py-1 align-top text-center">
@@ -1301,6 +1335,14 @@ async function enviarChamado(c: Logistica) {
               class="w-full rounded border bg-background px-2 py-1 text-sm resize-y"
               @change="patchStatusField(s.id, { mensagem_threema: ($event.target as HTMLTextAreaElement).value.trim() || null })"
             />
+            <button
+              v-if="canEdit && s.mensagem_threema"
+              class="mt-1 inline-flex items-center gap-1 rounded border px-2 py-1 text-xs text-primary hover:bg-primary/10 disabled:opacity-50"
+              :disabled="statusBusy.has(s.id)"
+              @click="enviarThreema(s)"
+            >
+              <Send class="size-3.5" /> Enviar Threema
+            </button>
           </div>
         </div>
         <div v-if="!statusLoading && statusRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">

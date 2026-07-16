@@ -110,6 +110,13 @@ class LogisticaStatusPatch(BaseModel):
     mensagem_threema: str | None = None
 
 
+class EnviarThreemaOut(BaseModel):
+    """Resultado do envio da mensagem_threema de uma linha da aba Status."""
+
+    sent: list[str] = Field(default_factory=list)
+    failed: list[str] = Field(default_factory=list)
+
+
 # ---- Sugestão de Status Bling (a partir dos status do Meli) ----
 
 

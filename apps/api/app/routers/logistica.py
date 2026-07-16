@@ -29,6 +29,7 @@ from app.models import Logistica, LogisticaStatus, LogisticaStatusAnexo, Situaca
 from app.schemas.logistica import (
     AnexoOut,
     CandidatoOut,
+    EnviarThreemaOut,
     LogisticaCreate,
     LogisticaOut,
     LogisticaPatch,
@@ -39,7 +40,7 @@ from app.schemas.logistica import (
     SugestaoIn,
     SugestaoOut,
 )
-from app.services import logistica_meli, logistica_rules
+from app.services import logistica_meli, logistica_rules, threema
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/logistica", tags=["logistica"])
@@ -242,6 +243,34 @@ async def patch_status(
     await session.commit()
     s = await _load_status(session, s.id)
     return _to_status_out(s)
+
+
+@router.post("/status/{status_id}/enviar-threema", response_model=EnviarThreemaOut)
+async def enviar_threema(
+    status_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> EnviarThreemaOut:
+    """Envia a `mensagem_threema` desta linha da aba Status pra lista fixa de
+    destinatários do Threema Gateway (config no `.env`). Notifica as pessoas do
+    problema. 404 se a linha some; 422 sem mensagem/sem config."""
+    s = await _load_status(session, status_id)
+    if s is None:
+        raise HTTPException(404, detail={"code": "logistica_status_not_found"})
+    texto = (s.mensagem_threema or "").strip()
+    if not texto:
+        raise HTTPException(422, detail={"code": "logistica_sem_mensagem_threema"})
+    try:
+        result = await threema.ThreemaClient().send_to_all(texto)
+    except threema.ThreemaConfigError as e:
+        raise HTTPException(422, detail={"code": str(e)}) from e
+    logger.info(
+        "logistica_threema_enviado",
+        status_id=str(status_id),
+        sent=len(result["sent"]),
+        failed=len(result["failed"]),
+    )
+    return EnviarThreemaOut(sent=result["sent"], failed=result["failed"])
 
 
 @router.delete("/status/{status_id}", status_code=status.HTTP_204_NO_CONTENT)
