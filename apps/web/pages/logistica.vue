@@ -869,22 +869,6 @@ async function enviarChamado(c: Logistica) {
                     <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
                   </button>
                 </div>
-                <!-- Casador: o que o sistema faria por esta chave (regra da aba Status). -->
-                <div v-if="assinatura(c)" class="mt-1 flex flex-wrap items-center gap-1">
-                  <span
-                    v-for="a in c.acao_resumo"
-                    :key="a"
-                    class="inline-flex items-center rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300 px-1.5 py-0.5 text-[10px] font-medium"
-                  >{{ a }}</span>
-                  <span
-                    v-if="c.acao_match && c.acao_resumo.length === 0"
-                    class="text-[10px] text-muted-foreground"
-                  >Sem ação</span>
-                  <span
-                    v-else-if="!c.acao_match"
-                    class="text-[10px] text-red-600 dark:text-red-400"
-                  >Sem regra na aba Status</span>
-                </div>
               </td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.rastreio || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.localizacao || '—' }}</td>
@@ -942,15 +926,6 @@ async function enviarChamado(c: Logistica) {
             <button class="shrink-0 hover:text-foreground" title="Copiar chave" @click.stop="copiarChave(c)">
               <Copy class="size-3.5" />
             </button>
-          </div>
-          <div v-if="assinatura(c)" class="flex flex-wrap items-center gap-1">
-            <span
-              v-for="a in c.acao_resumo"
-              :key="a"
-              class="inline-flex items-center rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300 px-1.5 py-0.5 text-[10px] font-medium"
-            >{{ a }}</span>
-            <span v-if="c.acao_match && c.acao_resumo.length === 0" class="text-[10px] text-muted-foreground">Sem ação</span>
-            <span v-else-if="!c.acao_match" class="text-[10px] text-red-600 dark:text-red-400">Sem regra na aba Status</span>
           </div>
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
             <div><span class="text-muted-foreground">Data:</span> {{ fmtDate(c.data) }}</div>
