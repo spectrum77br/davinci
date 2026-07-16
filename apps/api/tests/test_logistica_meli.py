@@ -301,6 +301,50 @@ def test_traduzir_valor_fallback_token_cru():
     assert logistica_rules.traduzir_valor("order_status", "") == ""
 
 
+# ---- divergência ML × físico dos Correios --------------------------------
+
+
+def test_divergencia_correios_entregou_ml_nao():
+    # O caso real: ML consta cancelado/não entregue, mas os Correios mostram
+    # entrega ao destinatário -> avisa que o cliente recebeu.
+    meli = {"order_status": "cancelled", "ship_status": "not_delivered", "ship_substatus": "retained"}
+    d = logistica_rules.detectar_divergencia(
+        meli, "Eusebio/CE — Objeto entregue ao destinatário"
+    )
+    assert d is not None
+    assert "entregue ao destinatário" in d.lower()
+    assert "Cliente recebeu" in d
+
+
+def test_divergencia_ml_entregue_correios_problema():
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    d = logistica_rules.detectar_divergencia(
+        meli, "São Paulo/SP — Objeto devolvido ao remetente"
+    )
+    assert d is not None
+    assert "físico mostra problema" in d
+
+
+def test_divergencia_sem_divergencia_e_sem_sinal():
+    # Ambos entregues -> None.
+    assert (
+        logistica_rules.detectar_divergencia(
+            {"ship_status": "delivered"}, "Recife/PE — Objeto entregue ao destinatário"
+        )
+        is None
+    )
+    # Em trânsito não conta como divergência (só ruído) -> None.
+    assert (
+        logistica_rules.detectar_divergencia(
+            {"ship_status": "shipped"}, "Curitiba/PR — Objeto em trânsito"
+        )
+        is None
+    )
+    # Sem localização física -> None.
+    assert logistica_rules.detectar_divergencia({"ship_status": "not_delivered"}, "") is None
+    assert logistica_rules.detectar_divergencia({"ship_status": "not_delivered"}, None) is None
+
+
 # ---- enviar chamado (open-dispute + send-message ao mediador) -------------
 
 from app.models import Logistica  # noqa: E402

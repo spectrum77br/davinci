@@ -273,6 +273,58 @@ def localizacao_completa(
     return out
 
 
+# Trechos da descrição dos Correios (17track) que indicam ENTREGA ao
+# destinatário — o sinal físico de que o cliente recebeu o pacote.
+_CORREIOS_ENTREGUE = ("entregue ao destinat",)
+# Trechos que indicam um PROBLEMA definitivo no envio físico (não é mero
+# "em trânsito", que não vale divergência pra não virar ruído).
+_CORREIOS_PROBLEMA = (
+    "devolv",
+    "extravi",
+    "roubo",
+    "avaria",
+    "recusad",
+    "endereço incorreto",
+    "endereco incorreto",
+    "aguardando retirada",
+    "não retirado",
+    "nao retirado",
+    "objeto não localizado",
+    "objeto nao localizado",
+)
+
+
+def detectar_divergencia(
+    meli_status: dict[str, str] | None, localizacao: str | None
+) -> str | None:
+    """Explica, em texto, a divergência entre o status do Mercado Livre e o
+    rastreio físico dos Correios (`localizacao` vinda do 17track). Retorna None
+    quando batem ou não há sinal físico claro (mero "em trânsito").
+
+    Casos sinalizados (conservador — só entrega, nos dois sentidos):
+      * Correios consta ENTREGUE ao destinatário mas o ML NÃO consta entrega
+        (cancelado/retido/não entregue) — o mais perigoso: cliente recebeu.
+      * ML consta ENTREGUE mas o físico mostra PROBLEMA (devolvido/extraviado).
+    """
+    loc = (localizacao or "").strip()
+    if not loc:
+        return None
+    low = loc.lower()
+    m = meli_status or {}
+    ml_entregue = (m.get("ship_status") or "").strip().lower() == "delivered"
+    fisico_entregue = any(k in low for k in _CORREIOS_ENTREGUE)
+    fisico_problema = any(k in low for k in _CORREIOS_PROBLEMA)
+    ml_txt = assinatura_pt(m) or "sem status"
+    if fisico_entregue and not ml_entregue:
+        return (
+            f"Correios: entregue ao destinatário. Mercado Livre: {ml_txt}. "
+            "Cliente recebeu, mas o ML não consta a entrega."
+        )
+    if ml_entregue and fisico_problema:
+        return f"Mercado Livre: entregue. Correios: {loc}. O físico mostra problema."
+    return None
+
+
 # 223 linhas curadas (campos + status_bling resultante).
 RULES: list[dict[str, str]] = [
     {"order_status": "cancelled", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "internal", "return_status": "delivered", "claim_stage": "dispute", "claim_status": "closed", "benefited": "complainant", "status_bling": "Aguardando Devolução"},

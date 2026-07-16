@@ -17,6 +17,8 @@ class LogisticaOut(BaseModel):
     status_plataforma: str = ""
     rastreio: str | None = None
     localizacao: str | None = None
+    # Divergência ML × rastreio físico dos Correios (auto-calculada; só leitura).
+    divergencia: str | None = None
     status_bling: str | None = None
     chamado: str | None = None
     observacao: str | None = None

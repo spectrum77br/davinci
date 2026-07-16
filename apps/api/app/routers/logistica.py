@@ -67,6 +67,7 @@ def _to_out(c: Logistica) -> LogisticaOut:
         status_plataforma=logistica_rules.assinatura_pt(c.meli_status or {}),
         rastreio=c.rastreio,
         localizacao=c.localizacao,
+        divergencia=c.divergencia,
         status_bling=c.status_bling,
         chamado=c.chamado,
         observacao=c.observacao,

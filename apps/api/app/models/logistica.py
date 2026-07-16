@@ -36,6 +36,9 @@ class Logistica(Base, TimestampMixin):
     # Número de rastreio do envio (manual por enquanto).
     rastreio: Mapped[str | None] = mapped_column(Text, nullable=True)
     localizacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Explicação da divergência entre o status do ML e o rastreio físico dos
+    # Correios (auto-calculada; vazia quando batem). Ver logistica_rules.
+    divergencia: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Classificação escolhida pelo operador (dica vem de logistica_rules.sugerir).
     status_bling: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Número/ref do chamado aberto na plataforma (manual).

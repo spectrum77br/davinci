@@ -23,7 +23,7 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -31,7 +31,7 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import Logistica, User
 from app.redis_client import redis
-from app.services import logistica_track
+from app.services import logistica_rules, logistica_track
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["logistica_track"])
@@ -78,12 +78,16 @@ async def receive_17track_push(
     updates = logistica_track.parse_push(parsed)
     applied = 0
     for number, loc in updates:
-        res = await session.execute(
-            update(Logistica)
-            .where(Logistica.rastreio == number)
-            .values(localizacao=loc)
-        )
-        applied += res.rowcount or 0
+        rows = (
+            await session.execute(
+                select(Logistica).where(Logistica.rastreio == number)
+            )
+        ).scalars().all()
+        for row in rows:
+            row.localizacao = loc
+            # Recalcula a divergência ML × físico com o local novo dos Correios.
+            row.divergencia = logistica_rules.detectar_divergencia(row.meli_status, loc)
+            applied += 1
     await session.commit()
 
     logger.info("logistica_17track_push_applied", numbers=len(updates), rows=applied)

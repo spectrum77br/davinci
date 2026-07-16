@@ -26,6 +26,7 @@ type Logistica = {
   status_plataforma: string
   rastreio: string | null
   localizacao: string | null
+  divergencia: string | null
   status_bling: string | null
   chamado: string | null
   observacao: string | null
@@ -98,6 +99,7 @@ const filteredRows = computed(() => {
         c.rastreio,
         c.chamado,
         c.localizacao,
+        c.divergencia,
         c.status_bling,
         c.status_plataforma,
       ]
@@ -769,7 +771,7 @@ async function enviarChamado(c: Logistica) {
 
       <!-- Desktop table -->
       <div class="hidden md:block border rounded-md overflow-x-auto">
-        <table class="w-full text-sm min-w-[1050px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
+        <table class="w-full text-sm min-w-[1200px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
           <thead class="bg-muted/40 text-left">
             <tr class="whitespace-nowrap">
               <th class="px-3 py-2">Data</th>
@@ -780,6 +782,7 @@ async function enviarChamado(c: Logistica) {
               <th class="px-3 py-2">Status Plataforma</th>
               <th class="px-3 py-2">Rastreio</th>
               <th class="px-3 py-2">Localização</th>
+              <th class="px-3 py-2">Divergência</th>
               <th class="px-3 py-2">Status Bling</th>
               <th class="px-3 py-2">Chamado</th>
             </tr>
@@ -825,6 +828,10 @@ async function enviarChamado(c: Logistica) {
               </td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.rastreio || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.localizacao || '—' }}</td>
+              <td class="px-3 py-2 text-xs max-w-[280px] break-words">
+                <span v-if="c.divergencia" class="text-amber-700 dark:text-amber-400" :title="c.divergencia">{{ c.divergencia }}</span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
               <td class="px-3 py-2 whitespace-nowrap">
                 <span v-if="c.status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50">{{ c.status_bling }}</span>
                 <span v-else class="text-muted-foreground">—</span>
@@ -846,7 +853,7 @@ async function enviarChamado(c: Logistica) {
               </td>
             </tr>
             <tr v-if="!loading && filteredRows.length === 0">
-              <td colspan="10" class="px-3 py-6 text-center text-muted-foreground">
+              <td colspan="11" class="px-3 py-6 text-center text-muted-foreground">
                 {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
               </td>
             </tr>
@@ -881,6 +888,12 @@ async function enviarChamado(c: Logistica) {
             <div><span class="text-muted-foreground">Rastreio:</span> {{ c.rastreio || '—' }}</div>
             <div><span class="text-muted-foreground">Localização:</span> {{ c.localizacao || '—' }}</div>
             <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || '—' }}</div>
+          </div>
+          <div
+            v-if="c.divergencia"
+            class="text-xs text-amber-700 dark:text-amber-400 border border-amber-300 dark:border-amber-700 rounded px-2 py-1"
+          >
+            <span class="font-medium">Divergência:</span> {{ c.divergencia }}
           </div>
           <button
             v-if="canEdit && isMl(c) && c.pedido_marketplace"

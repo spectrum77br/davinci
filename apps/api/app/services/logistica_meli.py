@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_rules
+from app.services import logistica_rules, logistica_track
 from app.services.marketplaces.ml import MercadoLivreClient
 
 logger = structlog.get_logger()
@@ -310,8 +310,17 @@ async def enrich_row(
     row.meli_status = enr["meli_status"]
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]
-    if enr.get("localizacao"):
-        row.localizacao = enr["localizacao"]
+    # Localização: pra Correios (...BR) o físico do 17track manda — não deixa o
+    # proxy do ML sobrescrever uma localização física já existente.
+    new_loc = enr.get("localizacao")
+    if new_loc and not (logistica_track.is_correios(row.rastreio) and row.localizacao):
+        row.localizacao = new_loc
+    # Divergência ML × físico: só faz sentido pros Correios (onde o 17track dá o
+    # local físico real na `localizacao`); nas outras não há como comparar.
+    if logistica_track.is_correios(row.rastreio):
+        row.divergencia = logistica_rules.detectar_divergencia(
+            row.meli_status, row.localizacao
+        )
     return True
 
 
