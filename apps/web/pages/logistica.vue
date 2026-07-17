@@ -1060,7 +1060,7 @@ async function aplicarStatusBling(c: Logistica) {
                 <div class="flex items-center gap-1.5">
                   <span class="flex-1">{{ c.chamado || '—' }}</span>
                   <button
-                    v-if="canEdit && isMl(c) && c.pedido_marketplace"
+                    v-if="canEdit && isMl(c) && c.pedido_marketplace && c.acao_resumo.includes('Abrir chamado')"
                     class="shrink-0 inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded border hover:bg-muted/40 disabled:opacity-50"
                     title="Enviar chamado direto pro Mercado Livre"
                     :disabled="sendingChamado.has(c.id)"
@@ -1116,7 +1116,7 @@ async function aplicarStatusBling(c: Logistica) {
             <span class="font-medium">Divergência:</span> {{ c.divergencia }}
           </div>
           <button
-            v-if="canEdit && isMl(c) && c.pedido_marketplace"
+            v-if="canEdit && isMl(c) && c.pedido_marketplace && c.acao_resumo.includes('Abrir chamado')"
             class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border hover:bg-muted/40 disabled:opacity-50"
             :disabled="sendingChamado.has(c.id)"
             @click.stop="enviarChamado(c)"
