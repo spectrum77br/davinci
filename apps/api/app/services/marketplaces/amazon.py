@@ -198,10 +198,15 @@ class AmazonClient:
         status = payload.get("OrderStatus")
         if not status:
             return None
+        addr = payload.get("ShippingAddress")
+        addr = addr if isinstance(addr, dict) else {}
         return {
             "order_status": str(status),
             "easyship_status": payload.get("EasyShipShipmentStatus"),
             "last_update_date": payload.get("LastUpdateDate"),
+            # Destino (best-effort; a Amazon costuma redigir sem RDT — fica vazio).
+            "ship_city": addr.get("City"),
+            "ship_state": addr.get("StateOrRegion"),
         }
 
     async def list_listings(

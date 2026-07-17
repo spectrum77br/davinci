@@ -42,6 +42,8 @@ logger = structlog.get_logger()
 
 _ML_PLATAFORMAS = logistica_rules._ML_PLATAFORMAS
 _SHOPEE_PLATAFORMAS = logistica_rules._SHOPEE_PLATAFORMAS
+_TIKTOK_PLATAFORMAS = logistica_rules._TIKTOK_PLATAFORMAS
+_AMAZON_PLATAFORMAS = logistica_rules._AMAZON_PLATAFORMAS
 
 # Campos calculados/read-only do GET que o Bling recomputa ou rejeita no PUT.
 _COMPUTED_DROP = ("totalProdutos", "total", "taxas", "tributacao")
@@ -396,8 +398,9 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
 
 
 async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
-    """Aplica a mudança de situação no Bling de TODAS as linhas ML que casam uma
-    regra da aba Status com `alterar_status_bling`. Best-effort e idempotente:
+    """Aplica a mudança de situação no Bling de TODAS as linhas (ML/Shopee/
+    TikTok/Amazon) que casam uma regra da aba Status com `alterar_status_bling`.
+    Best-effort e idempotente:
     `apply_alterar_status_bling` só age quando a transição parte do estado atual
     (guarda contra regressão/pulo), então rodar de novo não bagunça.
 
@@ -408,9 +411,12 @@ async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
     """
     status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
     todos = list((await session.execute(select(Logistica))).scalars().all())
-    # ML + Shopee: têm assinatura enriquecida (via assinatura_para). As demais
-    # (sem enrich) caem na guarda de "sem regra" logo abaixo e são ignoradas.
-    alvo = _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS
+    # ML + Shopee + TikTok + Amazon: têm assinatura enriquecida (via
+    # assinatura_para). Linhas sem enrich caem na guarda de "sem regra" logo
+    # abaixo e são ignoradas.
+    alvo = (
+        _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS | _TIKTOK_PLATAFORMAS | _AMAZON_PLATAFORMAS
+    )
     rows = [r for r in todos if (r.plataforma or "").strip().lower() in alvo]
     aplicados = pulados = falhas = 0
     for row in rows:

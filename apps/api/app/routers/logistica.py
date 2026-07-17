@@ -46,11 +46,13 @@ from app.schemas.logistica import (
     SugestaoOut,
 )
 from app.services import (
+    logistica_amazon,
     logistica_bling,
     logistica_match,
     logistica_meli,
     logistica_rules,
     logistica_shopee,
+    logistica_tiktok,
     threema,
 )
 from app.worker_pool import get_arq_pool
@@ -528,6 +530,58 @@ async def atualizar_shopee(
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_shopee_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
         raise HTTPException(502, detail={"code": "logistica_shopee_erro"}) from e
+    await session.commit()
+    await session.refresh(c)
+    return _to_out(c, await _match_rules(session, c))
+
+
+@router.post("/{logistica_id}/atualizar-tiktok", response_model=LogisticaOut)
+async def atualizar_tiktok(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> LogisticaOut:
+    """Puxa o status do pedido TikTok (Order API 202309) + rastreio + localização
+    e grava em `meli_status`. Só vale pra pedidos TikTok com pedido de
+    marketplace e conta com integração TikTok."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        await logistica_tiktok.enrich_row(session, c)
+    except logistica_tiktok.TikTokEnrichError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_tiktok_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
+        raise HTTPException(502, detail={"code": "logistica_tiktok_erro"}) from e
+    await session.commit()
+    await session.refresh(c)
+    return _to_out(c, await _match_rules(session, c))
+
+
+@router.post("/{logistica_id}/atualizar-amazon", response_model=LogisticaOut)
+async def atualizar_amazon(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> LogisticaOut:
+    """Puxa o status do pedido Amazon (OrderStatus + EasyShip) e grava em
+    `meli_status`. Só vale pra pedidos Amazon com pedido de marketplace e conta
+    com integração Amazon."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        await logistica_amazon.enrich_row(session, c)
+    except logistica_amazon.AmazonEnrichError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_amazon_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
+        raise HTTPException(502, detail={"code": "logistica_amazon_erro"}) from e
     await session.commit()
     await session.refresh(c)
     return _to_out(c, await _match_rules(session, c))

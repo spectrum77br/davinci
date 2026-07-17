@@ -15,7 +15,13 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services import logistica_bling, logistica_meli, logistica_shopee
+from app.services import (
+    logistica_amazon,
+    logistica_bling,
+    logistica_meli,
+    logistica_shopee,
+    logistica_tiktok,
+)
 
 logger = structlog.get_logger()
 
@@ -94,29 +100,39 @@ async def run_ingest_marketplaces_daily(
     session: AsyncSession, *, dias: int = 3, enrich_limit: int = 400
 ) -> dict[str, int]:
     """Insere os pedidos novos de Shopee/TikTok/Amazon pra aba Logística e
-    enriquece o Status Plataforma da Shopee (order_status da API v2) das linhas
-    ainda vazias. TikTok/Amazon ainda não têm enriquecimento próprio — aparecem
-    com o status do Bling e casam a aba Status quando a regra tiver a chave.
-    Retorna o total inserido por plataforma + o resumo do enrich Shopee."""
+    enriquece o Status Plataforma das três (Shopee via order_status; TikTok via
+    order status + rastreio; Amazon via OrderStatus + EasyShip) nas linhas ainda
+    vazias. Retorna o total inserido por plataforma + o resumo de cada enrich."""
     out: dict[str, int] = {}
     for platform in ("shopee", "tiktok", "amazon"):
         out[platform] = await _ingest_platform(session, platform, dias)
-    enr = await logistica_shopee.enrich_recent(
+    enr_shopee = await logistica_shopee.enrich_recent(
         session, limit=enrich_limit, only_empty=True
     )
-    return {**out, **{f"shopee_enrich_{k}": v for k, v in enr.items()}}
+    enr_tiktok = await logistica_tiktok.enrich_recent(
+        session, limit=enrich_limit, only_empty=True
+    )
+    enr_amazon = await logistica_amazon.enrich_recent(
+        session, limit=enrich_limit, only_empty=True
+    )
+    return {
+        **out,
+        **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
+        **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
+        **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
+    }
 
 
 async def recarregar_ml(
     session: AsyncSession, *, enrich_limit: int = 300
 ) -> dict[str, int]:
-    """Recarga sob demanda do botão "recarregar" das abas Mercado Livre/Shopee.
+    """Recarga sob demanda do botão "recarregar" das abas de marketplace.
 
-    Diferente do cron diário, RE-enriquece TODAS as linhas ML e Shopee (não só
-    as vazias) pra atualizar a assinatura de status, e então aplica em lote a
-    mudança de situação no Bling das linhas que casam uma regra da aba Status.
-    Roda em background (arq) porque o passo de enrich + Bling pode passar dos
-    100s do Cloudflare.
+    Diferente do cron diário, RE-enriquece TODAS as linhas ML/Shopee/TikTok/
+    Amazon (não só as vazias) pra atualizar a assinatura de status, e então
+    aplica em lote a mudança de situação no Bling das linhas que casam uma regra
+    da aba Status. Roda em background (arq) porque o passo de enrich + Bling pode
+    passar dos 100s do Cloudflare.
     """
     enr = await logistica_meli.enrich_recent(
         session, limit=enrich_limit, only_empty=False
@@ -124,15 +140,25 @@ async def recarregar_ml(
     enr_shopee = await logistica_shopee.enrich_recent(
         session, limit=enrich_limit, only_empty=False
     )
+    enr_tiktok = await logistica_tiktok.enrich_recent(
+        session, limit=enrich_limit, only_empty=False
+    )
+    enr_amazon = await logistica_amazon.enrich_recent(
+        session, limit=enrich_limit, only_empty=False
+    )
     lote = await logistica_bling.aplicar_status_em_lote(session)
     logger.info(
         "logistica_recarregar_ml",
         **{f"enrich_{k}": v for k, v in enr.items()},
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
+        **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
+        **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
         **lote,
     )
     return {
         **{f"enrich_{k}": v for k, v in enr.items()},
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
+        **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
+        **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
         **{f"status_{k}": v for k, v in lote.items()},
     }

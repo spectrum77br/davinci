@@ -268,6 +268,8 @@ SHOPEE_STATUS_LABELS_PT: dict[str, str] = {
 # Rótulos de `Logistica.plataforma` que representam cada marketplace.
 _ML_PLATAFORMAS = {"mercado livre", "mercadolivre", "ml"}
 _SHOPEE_PLATAFORMAS = {"shopee"}
+_TIKTOK_PLATAFORMAS = {"tiktok", "tik tok", "tiktok shop"}
+_AMAZON_PLATAFORMAS = {"amazon"}
 
 
 def assinatura_shopee(status: dict[str, str] | None) -> str:
@@ -279,14 +281,94 @@ def assinatura_shopee(status: dict[str, str] | None) -> str:
     return SHOPEE_STATUS_LABELS_PT.get(v, v.replace("_", " ").title())
 
 
+# --- TikTok ---------------------------------------------------------------
+# A assinatura do TikTok é o `status` do pedido (Order API 202309): um único
+# campo com vocabulário PRÓPRIO. O rastreio físico vem dos eventos de tracking
+# (descrição em inglês) e alimenta a localização — não entra na assinatura.
+TIKTOK_STATUS_LABELS_PT: dict[str, str] = {
+    "UNPAID": "Não pago",
+    "ON_HOLD": "Em espera",
+    "AWAITING_SHIPMENT": "Aguardando envio",
+    "AWAITING_COLLECTION": "Aguardando coleta",
+    "PARTIALLY_SHIPPING": "Envio parcial",
+    "IN_TRANSIT": "Em trânsito",
+    "DELIVERED": "Entregue",
+    "COMPLETED": "Concluído",
+    "CANCELLED": "Cancelado",
+}
+
+
+def assinatura_tiktok(status: dict[str, str] | None) -> str:
+    """Assinatura em PT do TikTok = o `order_status` traduzido. Vazio se não
+    houver status."""
+    v = ((status or {}).get("order_status") or "").strip().upper()
+    if not v:
+        return ""
+    return TIKTOK_STATUS_LABELS_PT.get(v, v.replace("_", " ").title())
+
+
+# --- Amazon ---------------------------------------------------------------
+# A Amazon NÃO expõe número de rastreio pelo Orders API (o /shipment dá 403 sem
+# escopo), então a assinatura combina o `order_status` (OrderStatus) com o
+# `easyship_status` (EasyShipShipmentStatus) — os dois sinais que a API dá.
+AMAZON_ORDER_LABELS_PT: dict[str, str] = {
+    "PENDING": "Pendente",
+    "UNSHIPPED": "Não enviado",
+    "PARTIALLYSHIPPED": "Parcialmente enviado",
+    "SHIPPED": "Enviado",
+    "CANCELED": "Cancelado",
+    "CANCELLED": "Cancelado",
+    "UNFULFILLABLE": "Não atendível",
+    "INVOICEUNCONFIRMED": "Nota não confirmada",
+    "PENDINGAVAILABILITY": "Aguardando disponibilidade",
+}
+AMAZON_EASYSHIP_LABELS_PT: dict[str, str] = {
+    "PENDINGPICKUP": "Aguardando coleta",
+    "LABELCANCELED": "Etiqueta cancelada",
+    "PICKEDUP": "Coletado",
+    "OUTFORDELIVERY": "Saiu p/ entrega",
+    "DAMAGED": "Avariado",
+    "DELIVERED": "Entregue",
+    "REJECTEDBYBUYER": "Recusado pelo comprador",
+    "UNDELIVERABLE": "Não entregável",
+    "RETURNEDTOSELLER": "Devolvido ao vendedor",
+    "RETURNINGTOSELLER": "Retornando ao vendedor",
+    "LOST": "Extraviado",
+    "OUTFORRETURN": "Saiu p/ devolução",
+    "RETURNED": "Devolvido",
+}
+
+
+def _amz_label(mapping: dict[str, str], value: str | None) -> str:
+    v = (value or "").strip()
+    if not v:
+        return ""
+    return mapping.get(v.upper(), v)
+
+
+def assinatura_amazon(status: dict[str, str] | None) -> str:
+    """Assinatura em PT da Amazon = OrderStatus + EasyShipShipmentStatus
+    traduzidos, juntados por " | " (omite os ausentes)."""
+    m = status or {}
+    partes = [
+        _amz_label(AMAZON_ORDER_LABELS_PT, m.get("order_status")),
+        _amz_label(AMAZON_EASYSHIP_LABELS_PT, m.get("easyship_status")),
+    ]
+    return " | ".join(p for p in partes if p)
+
+
 def assinatura_para(plataforma: str | None, status: dict[str, str] | None) -> str:
     """Assinatura de "Status Plataforma" da linha, despachando pela plataforma:
-    Shopee usa `assinatura_shopee` (order_status), as demais usam a assinatura
-    de 8 campos do Meli (`assinatura_pt`). TikTok/Amazon caem no Meli e ficam
-    vazias até ganharem vocabulário próprio."""
+    Shopee usa `assinatura_shopee` (order_status), TikTok `assinatura_tiktok`
+    (status), Amazon `assinatura_amazon` (OrderStatus + EasyShip); as demais
+    usam a assinatura de 8 campos do Meli (`assinatura_pt`)."""
     p = (plataforma or "").strip().lower()
     if p in _SHOPEE_PLATAFORMAS:
         return assinatura_shopee(status)
+    if p in _TIKTOK_PLATAFORMAS:
+        return assinatura_tiktok(status)
+    if p in _AMAZON_PLATAFORMAS:
+        return assinatura_amazon(status)
     return assinatura_pt(status)
 
 
@@ -403,6 +485,83 @@ def detectar_divergencia_shopee(
     if order == "COMPLETED" and log in _SHOPEE_LOG_PROBLEMA:
         loc = (localizacao or log).strip()
         return f"Pedido: concluído. SPX: {loc}. O físico mostra problema."
+    return None
+
+
+# --- TikTok divergência ---------------------------------------------------
+# order_status COMERCIAL × último evento de rastreio FÍSICO (descrição em
+# inglês). Conservador — só os dois sentidos de entrega.
+_TIKTOK_ORDER_ABERTO = {"CANCELLED"}
+_TIKTOK_FISICO_ENTREGUE = ("delivered", "entregue")
+_TIKTOK_FISICO_PROBLEMA = (
+    "returned",
+    "return to",
+    "failed",
+    "lost",
+    "undeliverable",
+    "rejected",
+)
+
+
+def detectar_divergencia_tiktok(
+    meli_status: dict[str, str] | None, localizacao: str | None = None
+) -> str | None:
+    """Divergência do TikTok: cruza o `order_status` COMERCIAL com o último
+    evento de rastreio FÍSICO (descrição em inglês, em `localizacao`).
+    Conservador — só os dois sentidos de entrega; None se não há sinal físico."""
+    loc = (localizacao or "").strip()
+    if not loc:
+        return None
+    low = loc.lower()
+    m = meli_status or {}
+    order = (m.get("order_status") or "").strip().upper()
+    fisico_entregue = any(k in low for k in _TIKTOK_FISICO_ENTREGUE)
+    fisico_problema = any(k in low for k in _TIKTOK_FISICO_PROBLEMA)
+    if fisico_entregue and order in _TIKTOK_ORDER_ABERTO:
+        return (
+            f"Rastreio: entregue ao destinatário. Pedido: {assinatura_tiktok(m)}. "
+            "Cliente recebeu, mas o pedido consta cancelamento."
+        )
+    if order in {"COMPLETED", "DELIVERED"} and fisico_problema:
+        return f"Pedido: {assinatura_tiktok(m)}. Rastreio: {loc}. O físico mostra problema."
+    return None
+
+
+# --- Amazon divergência ---------------------------------------------------
+# OrderStatus COMERCIAL × EasyShipShipmentStatus FÍSICO (ambos da Amazon, mas
+# sinais distintos que podem discordar).
+_AMZ_ORDER_ABERTO = {"CANCELED", "CANCELLED"}
+_AMZ_EASYSHIP_ENTREGUE = {"DELIVERED"}
+_AMZ_EASYSHIP_PROBLEMA = {
+    "LOST",
+    "UNDELIVERABLE",
+    "RETURNEDTOSELLER",
+    "DAMAGED",
+    "REJECTEDBYBUYER",
+}
+
+
+def detectar_divergencia_amazon(
+    meli_status: dict[str, str] | None, localizacao: str | None = None
+) -> str | None:
+    """Divergência da Amazon: cruza o `order_status` (OrderStatus) COMERCIAL com
+    o `easyship_status` (EasyShipShipmentStatus) FÍSICO. None se não há sinal
+    físico (easyship vazio) ou se batem."""
+    m = meli_status or {}
+    order = (m.get("order_status") or "").strip().upper()
+    easy = (m.get("easyship_status") or "").strip().upper()
+    if not easy:
+        return None
+    if easy in _AMZ_EASYSHIP_ENTREGUE and order in _AMZ_ORDER_ABERTO:
+        return (
+            f"Entrega: concluída. Pedido: {assinatura_amazon(m)}. "
+            "Cliente recebeu, mas o pedido consta cancelamento."
+        )
+    if order == "SHIPPED" and easy in _AMZ_EASYSHIP_PROBLEMA:
+        return (
+            f"Pedido: enviado. Entrega: "
+            f"{_amz_label(AMAZON_EASYSHIP_LABELS_PT, easy)}. O físico mostra problema."
+        )
     return None
 
 

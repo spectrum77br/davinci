@@ -505,6 +505,34 @@ class TikTokClient:
             f"/finance/202309/orders/{order_id}/statement_transactions"
         )
 
+    async def get_order_detail(self, order_id: str) -> dict:
+        """Detalhe de UM pedido (Order API 202309). Traz `status`
+        (UNPAID/IN_TRANSIT/DELIVERED/COMPLETED/CANCELLED/...), `tracking_number`
+        e `recipient_address.district_info` (destino). Best-effort: devolve o
+        1º pedido de `data.orders` ou {} se a TikTok não achar.
+
+            GET /order/202309/orders?ids={order_id}
+
+        `_get` injeta shop_cipher + assinatura + access_token."""
+        resp = await self._get("/order/202309/orders", {"ids": str(order_id)})
+        if resp.get("code") not in (0, None):
+            return {}
+        orders = (resp.get("data") or {}).get("orders") or []
+        return orders[0] if orders else {}
+
+    async def get_tracking(self, order_id: str) -> dict:
+        """Eventos de rastreio de UM pedido (Fulfillment API 202309). Retorna o
+        `data` com `tracking` = lista de eventos (`description` em inglês,
+        `update_time_millis`). {} se a TikTok não devolver.
+
+            GET /fulfillment/202309/orders/{order_id}/tracking
+
+        `_get` injeta shop_cipher + assinatura + access_token."""
+        resp = await self._get(f"/fulfillment/202309/orders/{order_id}/tracking")
+        if resp.get("code") not in (0, None):
+            return {}
+        return resp.get("data") or {}
+
     async def update_stock(
         self,
         link: "ProductLink",

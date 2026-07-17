@@ -93,9 +93,10 @@ async function refresh() {
 // timeout do Cloudflare) e a lista se atualiza sozinha no poll.
 const recarregando = ref(false)
 async function recarregar() {
-  // O motor (enriquece Status Plataforma + aplica status no Bling) roda pra ML e
-  // Shopee. Nas demais abas o botão só repuxa os pedidos e as chaves da aba Status.
-  if (!canEdit.value || (tab.value !== 'ml' && tab.value !== 'shopee')) {
+  // O motor (enriquece Status Plataforma + aplica status no Bling) roda pras 4
+  // abas de marketplace (ML, Shopee, TikTok, Amazon). Na aba Status o botão só
+  // repuxa os pedidos e as chaves da aba Status.
+  if (!canEdit.value || tab.value === 'status') {
     await Promise.all([refresh(), refreshStatus()])
     return
   }
@@ -422,6 +423,16 @@ function isShopee(c: Logistica): boolean {
   return (c.plataforma || '').trim().toLowerCase() === 'shopee'
 }
 
+function isTiktok(c: Logistica): boolean {
+  return ['tiktok', 'tik tok', 'tiktok shop'].includes(
+    (c.plataforma || '').trim().toLowerCase(),
+  )
+}
+
+function isAmazon(c: Logistica): boolean {
+  return (c.plataforma || '').trim().toLowerCase() === 'amazon'
+}
+
 // Copia a "chave" (assinatura do Status Plataforma, ex. "Pago | Pendente | Programado").
 async function copiarChave(c: Logistica) {
   const chave = assinatura(c)
@@ -459,6 +470,44 @@ async function atualizarShopee(c: Logistica) {
   refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
   try {
     const updated = await api<Logistica>(`/api/logistica/${c.id}/atualizar-shopee`, {
+      method: 'POST',
+    })
+    const i = rows.value.findIndex((r) => r.id === c.id)
+    if (i >= 0) rows.value[i] = updated
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = code
+  } finally {
+    const s = new Set(refreshingMeli.value)
+    s.delete(c.id)
+    refreshingMeli.value = s
+  }
+}
+
+// Puxa o status do pedido TikTok (Order API 202309) + rastreio pra uma linha.
+async function atualizarTiktok(c: Logistica) {
+  refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
+  try {
+    const updated = await api<Logistica>(`/api/logistica/${c.id}/atualizar-tiktok`, {
+      method: 'POST',
+    })
+    const i = rows.value.findIndex((r) => r.id === c.id)
+    if (i >= 0) rows.value[i] = updated
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = code
+  } finally {
+    const s = new Set(refreshingMeli.value)
+    s.delete(c.id)
+    refreshingMeli.value = s
+  }
+}
+
+// Puxa o status do pedido Amazon (OrderStatus + EasyShip) pra uma linha.
+async function atualizarAmazon(c: Logistica) {
+  refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
+  try {
+    const updated = await api<Logistica>(`/api/logistica/${c.id}/atualizar-amazon`, {
       method: 'POST',
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
@@ -1073,6 +1122,24 @@ async function aplicarStatusBling(c: Logistica) {
                     title="Atualizar status da Shopee"
                     :disabled="refreshingMeli.has(c.id)"
                     @click.stop="atualizarShopee(c)"
+                  >
+                    <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
+                  </button>
+                  <button
+                    v-if="canEdit && isTiktok(c) && c.pedido_marketplace"
+                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    title="Atualizar status do TikTok"
+                    :disabled="refreshingMeli.has(c.id)"
+                    @click.stop="atualizarTiktok(c)"
+                  >
+                    <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
+                  </button>
+                  <button
+                    v-if="canEdit && isAmazon(c) && c.pedido_marketplace"
+                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    title="Atualizar status da Amazon"
+                    :disabled="refreshingMeli.has(c.id)"
+                    @click.stop="atualizarAmazon(c)"
                   >
                     <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
                   </button>
