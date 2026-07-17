@@ -35,16 +35,42 @@ logger = structlog.get_logger()
 _SHOPEE_PLATAFORMAS = logistica_rules._SHOPEE_PLATAFORMAS
 
 
-async def build_enrichment(client: ShopeeClient, order_sn: str) -> dict[str, dict]:
-    """Puxa da Shopee o `order_status` do pedido e monta a assinatura.
+async def build_enrichment(client: ShopeeClient, order_sn: str) -> dict:
+    """Monta a assinatura da Shopee + rastreio + localização física da SPX.
 
-    Retorna `{"meli_status": {"order_status": "..."} | {}}`. Best-effort: se a
-    Shopee não devolver o pedido, `meli_status` fica vazio."""
-    status_map = await client.get_order_status_map([str(order_sn)])
-    info = status_map.get(str(order_sn)) or {}
+    Puxa três coisas (best-effort): o `order_status` COMERCIAL (get_order_status_map),
+    o número de rastreio (get_tracking_number) e os eventos da SPX (get_tracking_info)
+    — daí tira o `logistics_status` FÍSICO e a localização (descrição do último
+    evento, ex. "Pedido postado Piracicaba - SP").
+
+    Retorna `{"meli_status": {"order_status": ..., "logistics_status": ...} | {},
+    "rastreio": str | None, "localizacao": str | None}`. Campos que a Shopee não
+    devolver ficam de fora / None."""
+    order_sn = str(order_sn)
+    status_map = await client.get_order_status_map([order_sn])
+    info = status_map.get(order_sn) or {}
     st = (info.get("status") or "").strip().upper()
-    meli: dict[str, str] = {"order_status": st} if st else {}
-    return {"meli_status": meli}
+    meli: dict[str, str] = {}
+    if st:
+        meli["order_status"] = st
+
+    rastreio = await client.get_tracking_number(order_sn)
+
+    localizacao: str | None = None
+    track = await client.get_tracking_info(order_sn)
+    log_status = (track.get("logistics_status") or "").strip().upper()
+    if log_status:
+        meli["logistics_status"] = log_status
+    eventos = track.get("tracking_info") or []
+    if eventos:
+        # Shopee devolve os eventos em ordem decrescente, mas escolhe pelo
+        # maior update_time pra não depender da ordem.
+        top = max(eventos, key=lambda e: (e or {}).get("update_time") or 0)
+        desc = ((top or {}).get("description") or "").strip()
+        if desc:
+            localizacao = desc
+
+    return {"meli_status": meli, "rastreio": rastreio or None, "localizacao": localizacao}
 
 
 async def _shopee_integration_for_conta(
@@ -117,6 +143,14 @@ async def enrich_row(
 
     enr = await build_enrichment(client, order_sn)
     row.meli_status = enr["meli_status"]
+    if enr.get("rastreio"):
+        row.rastreio = enr["rastreio"]
+    if enr.get("localizacao"):
+        row.localizacao = enr["localizacao"]
+    # Divergência Shopee: cruza order_status comercial × logistics_status físico.
+    row.divergencia = logistica_rules.detectar_divergencia_shopee(
+        row.meli_status, row.localizacao
+    )
     return True
 
 

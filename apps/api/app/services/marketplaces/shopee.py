@@ -339,6 +339,61 @@ class ShopeeClient:
                     }
         return out
 
+    async def get_tracking_number(self, order_sn: str) -> str | None:
+        """Número de rastreio de UM pedido.
+
+        Endpoint: GET /api/v2/logistics/get_tracking_number. Best-effort:
+        pedido ainda sem envio (UNPAID/READY_TO_SHIP) ou erro de API devolve
+        None — não derruba o enriquecimento.
+        """
+        path = "/api/v2/logistics/get_tracking_number"
+        params = {"order_sn": str(order_sn)}
+        try:
+            r = await self._request("GET", path, params=params)
+        except httpx.HTTPError as e:
+            logger.warning("shopee_get_tracking_number_http_error", err=str(e)[:200])
+            return None
+        body = r.json() or {}
+        if body.get("error") in _AUTH_CODES:
+            await self.refresh()
+            try:
+                r = await self._request("GET", path, params=params)
+            except httpx.HTTPError as e:
+                logger.warning("shopee_get_tracking_number_retry_failed", err=str(e)[:200])
+                return None
+            body = r.json() or {}
+        if body.get("error"):
+            return None
+        tn = ((body.get("response") or {}).get("tracking_number") or "").strip()
+        return tn or None
+
+    async def get_tracking_info(self, order_sn: str) -> dict:
+        """Eventos de rastreio (SPX) de UM pedido.
+
+        Endpoint: GET /api/v2/logistics/get_tracking_info. Retorna o `response`
+        (`logistics_status` + `tracking_info[]`, cada evento com `description`,
+        `logistics_status`, `update_time`) ou `{}` (best-effort).
+        """
+        path = "/api/v2/logistics/get_tracking_info"
+        params = {"order_sn": str(order_sn)}
+        try:
+            r = await self._request("GET", path, params=params)
+        except httpx.HTTPError as e:
+            logger.warning("shopee_get_tracking_info_http_error", err=str(e)[:200])
+            return {}
+        body = r.json() or {}
+        if body.get("error") in _AUTH_CODES:
+            await self.refresh()
+            try:
+                r = await self._request("GET", path, params=params)
+            except httpx.HTTPError as e:
+                logger.warning("shopee_get_tracking_info_retry_failed", err=str(e)[:200])
+                return {}
+            body = r.json() or {}
+        if body.get("error"):
+            return {}
+        return body.get("response") or {}
+
     async def update_stock(
         self,
         link: "ProductLink",

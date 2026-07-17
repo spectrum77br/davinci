@@ -371,6 +371,41 @@ def detectar_divergencia(
     return None
 
 
+# logistics_status FÍSICO da SPX (get_tracking_info) que importa pro cruzamento
+# com o order_status COMERCIAL da Shopee.
+_SHOPEE_LOG_ENTREGUE = {"LOGISTICS_DELIVERY_DONE"}
+_SHOPEE_LOG_PROBLEMA = {
+    "LOGISTICS_DELIVERY_FAILED",
+    "LOGISTICS_LOST",
+    "LOGISTICS_PICKUP_FAILED",
+}
+# order_status em que o pedido NÃO deveria ter chegado ao cliente.
+_SHOPEE_ORDER_ABERTO = {"CANCELLED", "IN_CANCEL", "TO_RETURN"}
+
+
+def detectar_divergencia_shopee(
+    meli_status: dict[str, str] | None, localizacao: str | None = None
+) -> str | None:
+    """Divergência da Shopee: cruza o `order_status` COMERCIAL com o
+    `logistics_status` FÍSICO da SPX (ambos vêm da Shopee, mas são sinais
+    distintos que podem discordar). Conservador — só os dois sentidos perigosos
+    de entrega; retorna None se não há sinal físico ou se batem."""
+    m = meli_status or {}
+    order = (m.get("order_status") or "").strip().upper()
+    log = (m.get("logistics_status") or "").strip().upper()
+    if not log:
+        return None
+    if log in _SHOPEE_LOG_ENTREGUE and order in _SHOPEE_ORDER_ABERTO:
+        return (
+            f"SPX: entregue ao destinatário. Pedido: {assinatura_shopee(m)}. "
+            "Cliente recebeu, mas o pedido consta cancelamento/devolução."
+        )
+    if order == "COMPLETED" and log in _SHOPEE_LOG_PROBLEMA:
+        loc = (localizacao or log).strip()
+        return f"Pedido: concluído. SPX: {loc}. O físico mostra problema."
+    return None
+
+
 # 223 linhas curadas (campos + status_bling resultante).
 RULES: list[dict[str, str]] = [
     {"order_status": "cancelled", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "internal", "return_status": "delivered", "claim_stage": "dispute", "claim_status": "closed", "benefited": "complainant", "status_bling": "Aguardando Devolução"},
