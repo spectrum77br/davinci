@@ -151,11 +151,31 @@ def test_estado_resolvido_curinga_e_casos_negativos():
     curinga = _rule(alterar_status_bling="Cancelado")  # sem status_atual = vale de qualquer estado
     assert logistica_match.estado_resolvido([curinga], "Cancelado") is True
     assert logistica_match.estado_resolvido([curinga], "Em aberto") is False
-    # Regra só com mensagem/monitorar (sem alterar_status_bling) nunca resolve.
-    so_msg = _rule(monitoramento=True, mensagem_bling="oi")
-    assert logistica_match.estado_resolvido([so_msg], "Entregue") is False
     assert logistica_match.estado_resolvido([], "Entregue") is False
     assert logistica_match.estado_resolvido([curinga], None) is False
+
+
+def test_estado_resolvido_regra_sem_acao_some():
+    # Chave conhecida que não pede NADA → nada a fazer → resolvido (some).
+    vazia = _rule(status_plataforma="Pago | Entregue")
+    assert logistica_match.estado_resolvido([vazia], "Entregue") is True
+    assert logistica_match.estado_resolvido([vazia], None) is True  # nem depende do status
+    # Só monitoramento (sem outra ação): resolvido, mas o front mantém via monitorar.
+    so_mon = _rule(monitoramento=True)
+    assert logistica_match.estado_resolvido([so_mon], "Entregue") is True
+
+
+def test_estado_resolvido_acao_manual_pendente_fica():
+    # Mensagem/chamado/reembolso pendentes mantêm a linha visível (há trabalho).
+    for kw in (
+        {"mensagem_bling": "oi"},
+        {"mensagem_chamado": "oi"},
+        {"mensagem_threema": "oi"},
+        {"abrir_chamado": True},
+        {"abrir_reembolso": True},
+    ):
+        r = _rule(**kw)
+        assert logistica_match.estado_resolvido([r], "Entregue") is False
 
 
 # ---- endpoint GET /api/logistica ----

@@ -82,20 +82,37 @@ def deve_monitorar(rules: list[LogisticaStatus]) -> bool:
 
 
 def estado_resolvido(rules: list[LogisticaStatus], status_bling: str | None) -> bool:
-    """True quando o pedido casa uma regra COM mudança de status, já chegou a um
-    dos alvos da cadeia (status atual == algum `alterar_status_bling`) e não há
-    mais transição pendente a partir daí — ou seja, o fim da máquina de estados.
+    """True quando o pedido casa uma regra da aba Status e NÃO há mais nada a
+    fazer — o painel esconde esses (`resolvido and not monitorar`).
 
-    Serve pro painel esconder o que já foi tratado: `resolvido and not monitorar`.
-    Usa o `status_bling` atual da linha (que o recarregar sincroniza com o Bling
-    vivo). Regras sem `alterar_status_bling` (ex.: só mensagem/monitorar) NUNCA
-    contam como resolvidas — não há status a concluir."""
+    "Nada a fazer" cobre dois casos:
+      - a regra casada não pede AÇÃO NENHUMA (sem mudança de status, sem chamado/
+        reembolso, sem mensagens) — é só uma chave "conhecida/ok"; ou
+      - a regra tem mudança de status e o pedido já chegou ao alvo final da
+        cadeia (status atual == algum `alterar_status_bling`, sem transição
+        exata pendente a partir dele).
+
+    Qualquer ação MANUAL pendente (abrir chamado/reembolso ou mensagem de
+    chamado/Bling/Threema) mantém a linha visível — ainda há trabalho. O
+    monitoramento é ortogonal (o front combina com `not acao_monitorar`)."""
     if not rules:
         return False
+    # Ação manual pendente → ainda há o que fazer, não esconde.
+    for r in rules:
+        if r.abrir_chamado or r.abrir_reembolso:
+            return False
+        if (
+            (r.mensagem_chamado or "").strip()
+            or (r.mensagem_bling or "").strip()
+            or (r.mensagem_threema or "").strip()
+        ):
+            return False
+    alvos = {_norm(r.alterar_status_bling) for r in rules if _norm(r.alterar_status_bling)}
+    if not alvos:
+        return True  # regra sem mudança de status e sem outra ação → nada a fazer
     atual = _norm(status_bling)
     if not atual:
         return False
-    alvos = {_norm(r.alterar_status_bling) for r in rules if _norm(r.alterar_status_bling)}
     if atual not in alvos:
         return False  # ainda não chegou a nenhum alvo da cadeia
     for r in rules:
