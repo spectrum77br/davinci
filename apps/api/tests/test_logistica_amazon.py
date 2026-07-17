@@ -14,11 +14,15 @@ class FakeAmazon:
     `status_by_id` = {order_id: {order_status, easyship_status, ship_city,
     ship_state}} (ausente => None)."""
 
-    def __init__(self, status_by_id: dict[str, dict]):
+    def __init__(self, status_by_id: dict[str, dict], tracking_by_id: dict[str, str] | None = None):
         self._status = status_by_id
+        self._tracking = tracking_by_id or {}
 
     async def get_order_status(self, order_id):
         return self._status.get(str(order_id))
+
+    async def get_easyship_tracking(self, order_id):
+        return self._tracking.get(str(order_id))
 
 
 @pytest.mark.asyncio
@@ -38,9 +42,21 @@ async def test_build_enrichment_completo():
         "order_status": "Shipped",
         "easyship_status": "OutForDelivery",
     }
+    # Sem papel de shipping aprovado a EasyShip devolve None → rastreio vazio.
     assert enr["rastreio"] is None
     # Localização proxy = easyship PT + destino.
     assert enr["localizacao"] == "Saiu p/ entrega → São Paulo/SP"
+
+
+@pytest.mark.asyncio
+async def test_build_enrichment_rastreio_easyship():
+    # Com o papel de shipping aprovado, a Easy Ship API entrega o trackingId.
+    client = FakeAmazon(
+        {"701-2862299-1963401": {"order_status": "Shipped", "easyship_status": "PickedUp"}},
+        tracking_by_id={"701-2862299-1963401": "TBA123456789BR"},
+    )
+    enr = await logistica_amazon.build_enrichment(client, "701-2862299-1963401")
+    assert enr["rastreio"] == "TBA123456789BR"
 
 
 @pytest.mark.asyncio

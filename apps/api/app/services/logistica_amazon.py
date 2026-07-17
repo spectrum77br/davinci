@@ -44,10 +44,14 @@ def _amazon_destino(status: dict) -> str | None:
 
 
 async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
-    """Monta a assinatura da Amazon + localização proxy (sem rastreio).
+    """Monta a assinatura da Amazon + rastreio (EasyShip, best-effort) +
+    localização proxy.
 
     Retorna `{"meli_status": {"order_status": ..., "easyship_status": ...} | {},
-    "rastreio": None, "localizacao": str | None}`."""
+    "rastreio": str | None, "localizacao": str | None}`.
+
+    Rastreio vem da Easy Ship API — hoje 403 sem o papel de shipping aprovado
+    (fica None), popula sozinho quando o papel for liberado."""
     order_id = str(order_id)
     st = await client.get_order_status(order_id) or {}
     meli: dict[str, str] = {}
@@ -56,6 +60,9 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
     if st.get("easyship_status"):
         meli["easyship_status"] = str(st["easyship_status"])
 
+    # Rastreio EasyShip (best-effort; 403 sem o papel de shipping → None).
+    rastreio = await client.get_easyship_tracking(order_id)
+
     # Localização proxy: status físico (easyship) em PT + destino, quando houver.
     easy_pt = logistica_rules._amz_label(
         logistica_rules.AMAZON_EASYSHIP_LABELS_PT, meli.get("easyship_status")
@@ -63,7 +70,7 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
     destino = _amazon_destino(st)
     localizacao = logistica_rules.localizacao_completa(easy_pt, destino=destino) or None
 
-    return {"meli_status": meli, "rastreio": None, "localizacao": localizacao}
+    return {"meli_status": meli, "rastreio": rastreio, "localizacao": localizacao}
 
 
 async def _amazon_integration_for_conta(
@@ -136,6 +143,8 @@ async def enrich_row(
 
     enr = await build_enrichment(client, order_id)
     row.meli_status = enr["meli_status"]
+    if enr.get("rastreio"):
+        row.rastreio = enr["rastreio"]
     if enr.get("localizacao"):
         row.localizacao = enr["localizacao"]
     # Divergência Amazon: order_status comercial × easyship físico.

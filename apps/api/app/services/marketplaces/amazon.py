@@ -209,6 +209,43 @@ class AmazonClient:
             "ship_state": addr.get("StateOrRegion"),
         }
 
+    async def get_easyship_tracking(self, order_id: str) -> str | None:
+        """Número de rastreio de um pedido EasyShip via Easy Ship API
+        (`GET /easyShip/2022-03-23/package?amazonOrderId=`).
+
+        Best-effort: hoje o app SP-API costuma NÃO ter o papel de shipping
+        aprovado (Amazon devolve 403 Unauthorized) → retorna None sem
+        derrubar o enrichment. Assim que o papel `Direct-to-Consumer
+        Shipping`/EasyShip for aprovado no Developer Central, o rastreio
+        passa a popular sozinho, sem novo deploy."""
+        try:
+            r = await self._request(
+                "GET",
+                "/easyShip/2022-03-23/package",
+                params={"amazonOrderId": str(order_id)},
+            )
+        except httpx.HTTPError as e:
+            logger.info("amazon_easyship_http_error", order_id=order_id, err=str(e)[:200])
+            return None
+        if r.status_code != 200:
+            logger.info(
+                "amazon_easyship_non_200",
+                order_id=order_id, status=r.status_code, body=r.text[:200],
+            )
+            return None
+        body = r.json() or {}
+        pkg = body.get("payload") if isinstance(body.get("payload"), dict) else body
+        pkg = pkg or {}
+        details = pkg.get("trackingDetails") if isinstance(pkg.get("trackingDetails"), dict) else {}
+        tracking = (
+            (details or {}).get("trackingId")
+            or (details or {}).get("packageTrackingNumber")
+            or pkg.get("trackingId")
+            or pkg.get("packageIdentifier")
+        )
+        tracking = str(tracking).strip() if tracking else ""
+        return tracking or None
+
     async def list_listings(
         self,
         *,
