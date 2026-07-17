@@ -15,7 +15,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services import logistica_bling, logistica_meli
+from app.services import logistica_bling, logistica_meli, logistica_shopee
 
 logger = structlog.get_logger()
 
@@ -91,16 +91,20 @@ async def run_ingest_ml_daily(
 
 
 async def run_ingest_marketplaces_daily(
-    session: AsyncSession, *, dias: int = 3
+    session: AsyncSession, *, dias: int = 3, enrich_limit: int = 400
 ) -> dict[str, int]:
-    """Insere os pedidos novos de Shopee/TikTok/Amazon pra aba Logística. Só
-    ingestão — esses marketplaces ainda não têm enriquecimento de Status
-    Plataforma (as linhas aparecem com o status do Bling e casam a aba Status
-    quando a regra tiver a chave). Retorna o total inserido por plataforma."""
+    """Insere os pedidos novos de Shopee/TikTok/Amazon pra aba Logística e
+    enriquece o Status Plataforma da Shopee (order_status da API v2) das linhas
+    ainda vazias. TikTok/Amazon ainda não têm enriquecimento próprio — aparecem
+    com o status do Bling e casam a aba Status quando a regra tiver a chave.
+    Retorna o total inserido por plataforma + o resumo do enrich Shopee."""
     out: dict[str, int] = {}
     for platform in ("shopee", "tiktok", "amazon"):
         out[platform] = await _ingest_platform(session, platform, dias)
-    return out
+    enr = await logistica_shopee.enrich_recent(
+        session, limit=enrich_limit, only_empty=True
+    )
+    return {**out, **{f"shopee_enrich_{k}": v for k, v in enr.items()}}
 
 
 async def recarregar_ml(

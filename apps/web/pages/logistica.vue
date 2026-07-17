@@ -418,6 +418,10 @@ function isMl(c: Logistica): boolean {
   )
 }
 
+function isShopee(c: Logistica): boolean {
+  return (c.plataforma || '').trim().toLowerCase() === 'shopee'
+}
+
 // Copia a "chave" (assinatura do Status Plataforma, ex. "Pago | Pendente | Programado").
 async function copiarChave(c: Logistica) {
   const chave = assinatura(c)
@@ -436,6 +440,25 @@ async function atualizarMeli(c: Logistica) {
   refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
   try {
     const updated = await api<Logistica>(`/api/logistica/${c.id}/atualizar-meli`, {
+      method: 'POST',
+    })
+    const i = rows.value.findIndex((r) => r.id === c.id)
+    if (i >= 0) rows.value[i] = updated
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    error.value = code
+  } finally {
+    const s = new Set(refreshingMeli.value)
+    s.delete(c.id)
+    refreshingMeli.value = s
+  }
+}
+
+// Puxa o order_status da Shopee (API v2) pra uma linha.
+async function atualizarShopee(c: Logistica) {
+  refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
+  try {
+    const updated = await api<Logistica>(`/api/logistica/${c.id}/atualizar-shopee`, {
       method: 'POST',
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
@@ -1041,6 +1064,15 @@ async function aplicarStatusBling(c: Logistica) {
                     title="Atualizar status do Meli"
                     :disabled="refreshingMeli.has(c.id)"
                     @click.stop="atualizarMeli(c)"
+                  >
+                    <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
+                  </button>
+                  <button
+                    v-if="canEdit && isShopee(c) && c.pedido_marketplace"
+                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    title="Atualizar status da Shopee"
+                    :disabled="refreshingMeli.has(c.id)"
+                    @click.stop="atualizarShopee(c)"
                   >
                     <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
                   </button>

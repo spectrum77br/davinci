@@ -45,7 +45,14 @@ from app.schemas.logistica import (
     SugestaoIn,
     SugestaoOut,
 )
-from app.services import logistica_bling, logistica_match, logistica_meli, logistica_rules, threema
+from app.services import (
+    logistica_bling,
+    logistica_match,
+    logistica_meli,
+    logistica_rules,
+    logistica_shopee,
+    threema,
+)
 from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
@@ -76,7 +83,7 @@ def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> Logisti
         plataforma=c.plataforma,
         conta=c.conta,
         meli_status=c.meli_status or {},
-        status_plataforma=logistica_rules.assinatura_pt(c.meli_status or {}),
+        status_plataforma=logistica_rules.assinatura_para(c.plataforma, c.meli_status or {}),
         rastreio=c.rastreio,
         localizacao=c.localizacao,
         divergencia=c.divergencia,
@@ -97,7 +104,7 @@ def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> Logisti
 async def _match_rules(session: AsyncSession, c: Logistica) -> list[LogisticaStatus]:
     """Candidatas da aba Status que casam a chave (assinatura PT) do pedido."""
     rows = (await session.execute(select(LogisticaStatus))).scalars().all()
-    assinatura = logistica_rules.assinatura_pt(c.meli_status or {})
+    assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
     return logistica_match.find_matching_rules(
         list(rows), assinatura=assinatura, plataforma=c.plataforma
     )
@@ -425,7 +432,7 @@ async def list_logistica(
     status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
     out: list[LogisticaOut] = []
     for c in rows:
-        assinatura = logistica_rules.assinatura_pt(c.meli_status or {})
+        assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
         cands = logistica_match.find_matching_rules(
             status_rows, assinatura=assinatura, plataforma=c.plataforma
         )
@@ -501,12 +508,37 @@ async def atualizar_meli(
     return _to_out(c, await _match_rules(session, c))
 
 
+@router.post("/{logistica_id}/atualizar-shopee", response_model=LogisticaOut)
+async def atualizar_shopee(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> LogisticaOut:
+    """Puxa o order_status da Shopee (API v2) e grava em `meli_status`. Só vale
+    pra pedidos Shopee com pedido de marketplace e conta com integração Shopee."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        await logistica_shopee.enrich_row(session, c)
+    except logistica_shopee.ShopeeEnrichError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_shopee_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
+        raise HTTPException(502, detail={"code": "logistica_shopee_erro"}) from e
+    await session.commit()
+    await session.refresh(c)
+    return _to_out(c, await _match_rules(session, c))
+
+
 async def _mensagem_chamado_para(session: AsyncSession, c: Logistica) -> str | None:
     """Mensagem do chamado da regra da aba Status que casa com o Status
     Plataforma (assinatura PT) da linha. Prefere a regra específica da
     plataforma; cai na regra geral (plataforma vazia). None se nenhuma casar
     ou a que casou não tiver mensagem."""
-    assinatura = logistica_rules.assinatura_pt(c.meli_status or {}).strip().lower()
+    assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {}).strip().lower()
     if not assinatura:
         return None
     plat = (c.plataforma or "").strip().lower()

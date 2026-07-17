@@ -244,6 +244,52 @@ def assinatura_pt(meli_status: dict[str, str] | None) -> str:
     return " | ".join(p for p in partes if p)
 
 
+# --- Shopee ---------------------------------------------------------------
+# A assinatura da Shopee é o `order_status` do pedido (a API v2 já entrega isso
+# em lote via get_order_status_map). É um vocabulário PRÓPRIO — nada a ver com
+# os 8 campos do Meli — então a chave que o usuário cadastra na aba Status pra
+# Shopee é só esse rótulo (ex. "Devolução solicitada"). Camadas futuras
+# (rastreio/devolução detalhada) podem enriquecer, mas o order_status já casa a
+# maioria dos casos de pós-venda (cancelamento, devolução, concluído).
+SHOPEE_STATUS_LABELS_PT: dict[str, str] = {
+    "UNPAID": "Não pago",
+    "READY_TO_SHIP": "Pronto p/ envio",
+    "PROCESSED": "Processado",
+    "RETRY_SHIP": "Reenvio",
+    "SHIPPED": "Enviado",
+    "TO_CONFIRM_RECEIVE": "Aguardando confirmação",
+    "IN_CANCEL": "Cancelamento em andamento",
+    "CANCELLED": "Cancelado",
+    "TO_RETURN": "Devolução solicitada",
+    "COMPLETED": "Concluído",
+    "INVOICE_PENDING": "Nota pendente",
+}
+
+# Rótulos de `Logistica.plataforma` que representam cada marketplace.
+_ML_PLATAFORMAS = {"mercado livre", "mercadolivre", "ml"}
+_SHOPEE_PLATAFORMAS = {"shopee"}
+
+
+def assinatura_shopee(status: dict[str, str] | None) -> str:
+    """Assinatura em PT da Shopee = o `order_status` traduzido. Vazio se não
+    houver status."""
+    v = ((status or {}).get("order_status") or "").strip().upper()
+    if not v:
+        return ""
+    return SHOPEE_STATUS_LABELS_PT.get(v, v.replace("_", " ").title())
+
+
+def assinatura_para(plataforma: str | None, status: dict[str, str] | None) -> str:
+    """Assinatura de "Status Plataforma" da linha, despachando pela plataforma:
+    Shopee usa `assinatura_shopee` (order_status), as demais usam a assinatura
+    de 8 campos do Meli (`assinatura_pt`). TikTok/Amazon caem no Meli e ficam
+    vazias até ganharem vocabulário próprio."""
+    p = (plataforma or "").strip().lower()
+    if p in _SHOPEE_PLATAFORMAS:
+        return assinatura_shopee(status)
+    return assinatura_pt(status)
+
+
 def localizacao_pt(meli_status: dict[str, str] | None) -> str:
     """Proxy do "último local" a partir do envio do Meli: substatus do envio
     traduzido (mais específico) ou, na falta, o status do envio. O ML NÃO expõe
