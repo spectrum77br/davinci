@@ -75,6 +75,42 @@ def find_matching_rules(
     return especificas or gerais
 
 
+def deve_monitorar(rules: list[LogisticaStatus]) -> bool:
+    """True se alguma regra casada pede monitoramento (o pedido fica no painel
+    pra acompanhar mesmo depois de resolvido)."""
+    return any(bool(r.monitoramento) for r in rules)
+
+
+def estado_resolvido(rules: list[LogisticaStatus], status_bling: str | None) -> bool:
+    """True quando o pedido casa uma regra COM mudança de status, já chegou a um
+    dos alvos da cadeia (status atual == algum `alterar_status_bling`) e não há
+    mais transição pendente a partir daí — ou seja, o fim da máquina de estados.
+
+    Serve pro painel esconder o que já foi tratado: `resolvido and not monitorar`.
+    Usa o `status_bling` atual da linha (que o recarregar sincroniza com o Bling
+    vivo). Regras sem `alterar_status_bling` (ex.: só mensagem/monitorar) NUNCA
+    contam como resolvidas — não há status a concluir."""
+    if not rules:
+        return False
+    atual = _norm(status_bling)
+    if not atual:
+        return False
+    alvos = {_norm(r.alterar_status_bling) for r in rules if _norm(r.alterar_status_bling)}
+    if atual not in alvos:
+        return False  # ainda não chegou a nenhum alvo da cadeia
+    for r in rules:
+        alvo = _norm(r.alterar_status_bling)
+        if not alvo:
+            continue
+        de = _norm(r.status_atual)
+        if de:
+            if de == atual and alvo != atual:
+                return False  # há transição exata a seguir a partir daqui
+        elif alvo != atual:
+            return False  # curinga (vale de qualquer estado) ainda não no alvo
+    return True
+
+
 def resumo_acoes(rule: LogisticaStatus | None) -> list[str]:
     """Resumo legível do que o sistema faria pra essa regra (só as ações
     preenchidas). Lista vazia = regra sem nenhuma ação (nada a fazer)."""

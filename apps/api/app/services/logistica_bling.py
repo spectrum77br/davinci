@@ -390,3 +390,39 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
         pedido=row.pedido_bling,
     )
     return {"bling_order_id": r["bling_id"], "situacao_alvo": alvo, "situacao_alvo_id": alvo_id}
+
+
+async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
+    """Aplica a mudança de situação no Bling de TODAS as linhas ML que casam uma
+    regra da aba Status com `alterar_status_bling`. Best-effort e idempotente:
+    `apply_alterar_status_bling` só age quando a transição parte do estado atual
+    (guarda contra regressão/pulo), então rodar de novo não bagunça.
+
+    - aplicados: mudou a situação de fato.
+    - pulados: casou regra mas não havia o que mudar (já no alvo / fora do fluxo).
+      O `status_bling` local ainda é sincronizado pelo GET que o resolve faz.
+    - falhas: erro inesperado (Bling/rede) — logado, não interrompe o lote.
+    """
+    status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
+    ml = list((await session.execute(select(Logistica))).scalars().all())
+    ml = [r for r in ml if (r.plataforma or "").strip().lower() == "mercado livre"]
+    aplicados = pulados = falhas = 0
+    for row in ml:
+        assinatura = logistica_rules.assinatura_pt(row.meli_status or {})
+        cands = logistica_match.find_matching_rules(
+            status_rows, assinatura=assinatura, plataforma=row.plataforma
+        )
+        if not any((c.alterar_status_bling or "").strip() for c in cands):
+            continue
+        try:
+            await apply_alterar_status_bling(session, row)
+            aplicados += 1
+        except BlingObsError:
+            pulados += 1
+        except Exception as e:  # noqa: BLE001 — best-effort, não derruba o lote
+            falhas += 1
+            logger.warning(
+                "logistica_status_lote_falha", id=str(row.id), err=str(e)[:200]
+            )
+    await session.commit()
+    return {"aplicados": aplicados, "pulados": pulados, "falhas": falhas}

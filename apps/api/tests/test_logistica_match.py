@@ -126,6 +126,38 @@ def test_resumo_vazio_para_regra_sem_acao_e_none():
     assert logistica_match.resumo_acoes(None) == []
 
 
+# ---- deve_monitorar / estado_resolvido (sem DB) ----
+
+
+def test_deve_monitorar_qualquer_regra_com_monitoramento():
+    a = _rule(alterar_status_bling="Entregue", monitoramento=False)
+    b = _rule(alterar_status_bling="Em andamento", monitoramento=True)
+    assert logistica_match.deve_monitorar([a, b]) is True
+    assert logistica_match.deve_monitorar([a]) is False
+    assert logistica_match.deve_monitorar([]) is False
+
+
+def test_estado_resolvido_no_alvo_final():
+    # Cadeia: Enviado Etiqueta→Em andamento→Entregue. No alvo final "Entregue"
+    # não há mais transição partindo dele → resolvido.
+    a = _rule(status_atual="Enviado Etiqueta", alterar_status_bling="Em andamento")
+    b = _rule(status_atual="Em andamento", alterar_status_bling="Entregue")
+    assert logistica_match.estado_resolvido([a, b], "Entregue") is True
+    # No meio da cadeia (Em andamento é alvo de A mas ainda parte de B) → não.
+    assert logistica_match.estado_resolvido([a, b], "Em andamento") is False
+
+
+def test_estado_resolvido_curinga_e_casos_negativos():
+    curinga = _rule(alterar_status_bling="Cancelado")  # sem status_atual = vale de qualquer estado
+    assert logistica_match.estado_resolvido([curinga], "Cancelado") is True
+    assert logistica_match.estado_resolvido([curinga], "Em aberto") is False
+    # Regra só com mensagem/monitorar (sem alterar_status_bling) nunca resolve.
+    so_msg = _rule(monitoramento=True, mensagem_bling="oi")
+    assert logistica_match.estado_resolvido([so_msg], "Entregue") is False
+    assert logistica_match.estado_resolvido([], "Entregue") is False
+    assert logistica_match.estado_resolvido([curinga], None) is False
+
+
 # ---- endpoint GET /api/logistica ----
 
 

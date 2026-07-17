@@ -39,12 +39,14 @@ from app.schemas.logistica import (
     MensagemBlingOut,
     MensagemBlingPreviewOut,
     OpcoesOut,
+    RecarregarOut,
     StatusBlingOut,
     StatusBlingPreviewOut,
     SugestaoIn,
     SugestaoOut,
 )
 from app.services import logistica_bling, logistica_match, logistica_meli, logistica_rules, threema
+from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/logistica", tags=["logistica"])
@@ -60,7 +62,12 @@ _PLATAFORMA_LABELS = {
 }
 
 
-def _to_out(c: Logistica, rule: LogisticaStatus | None = None) -> LogisticaOut:
+def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> LogisticaOut:
+    """`rules` = candidatas da aba Status que casam a chave deste pedido (máquina
+    de estados). A 1ª (preferida) alimenta match/resumo; o conjunto alimenta
+    monitorar/resolvido."""
+    rules = rules or []
+    rule = rules[0] if rules else None
     return LogisticaOut(
         id=c.id,
         data=c.data,
@@ -79,17 +86,19 @@ def _to_out(c: Logistica, rule: LogisticaStatus | None = None) -> LogisticaOut:
         acao_match=rule is not None,
         acao_status_id=rule.id if rule is not None else None,
         acao_resumo=logistica_match.resumo_acoes(rule),
+        acao_monitorar=logistica_match.deve_monitorar(rules),
+        acao_resolvido=logistica_match.estado_resolvido(rules, c.status_bling),
         created_by=c.created_by,
         created_at=c.created_at,
         updated_at=c.updated_at,
     )
 
 
-async def _match_rule(session: AsyncSession, c: Logistica) -> LogisticaStatus | None:
-    """Regra da aba Status que casa com a chave (assinatura PT) do pedido."""
+async def _match_rules(session: AsyncSession, c: Logistica) -> list[LogisticaStatus]:
+    """Candidatas da aba Status que casam a chave (assinatura PT) do pedido."""
     rows = (await session.execute(select(LogisticaStatus))).scalars().all()
     assinatura = logistica_rules.assinatura_pt(c.meli_status or {})
-    return logistica_match.find_matching_rule(
+    return logistica_match.find_matching_rules(
         list(rows), assinatura=assinatura, plataforma=c.plataforma
     )
 
@@ -417,11 +426,26 @@ async def list_logistica(
     out: list[LogisticaOut] = []
     for c in rows:
         assinatura = logistica_rules.assinatura_pt(c.meli_status or {})
-        rule = logistica_match.find_matching_rule(
+        cands = logistica_match.find_matching_rules(
             status_rows, assinatura=assinatura, plataforma=c.plataforma
         )
-        out.append(_to_out(c, rule))
+        out.append(_to_out(c, cands))
     return out
+
+
+@router.post("/recarregar", response_model=RecarregarOut)
+async def recarregar(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> RecarregarOut:
+    """Enfileira a recarga em massa (re-enriquece o status do Meli de TODAS as
+    linhas ML e aplica no Bling a mudança de situação das que casam uma regra da
+    aba Status). Roda em background porque pode passar do timeout do Cloudflare.
+    O front repuxa a lista depois pra ver o resultado."""
+    pool = await get_arq_pool()
+    await pool.enqueue_job("logistica_recarregar")
+    logger.info("logistica_recarregar_enqueued")
+    return RecarregarOut(enqueued=True)
 
 
 @router.post("", response_model=LogisticaOut, status_code=status.HTTP_201_CREATED)
@@ -448,7 +472,7 @@ async def create_logistica(
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_created", id=str(c.id), pedido_bling=c.pedido_bling)
-    return _to_out(c, await _match_rule(session, c))
+    return _to_out(c, await _match_rules(session, c))
 
 
 @router.post("/{logistica_id}/atualizar-meli", response_model=LogisticaOut)
@@ -474,7 +498,7 @@ async def atualizar_meli(
         raise HTTPException(502, detail={"code": "logistica_meli_erro"}) from e
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rule(session, c))
+    return _to_out(c, await _match_rules(session, c))
 
 
 async def _mensagem_chamado_para(session: AsyncSession, c: Logistica) -> str | None:
@@ -532,7 +556,7 @@ async def enviar_chamado(
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_chamado_enviado", id=str(logistica_id), chamado=c.chamado)
-    return _to_out(c, await _match_rule(session, c))
+    return _to_out(c, await _match_rules(session, c))
 
 
 @router.post("/{logistica_id}/mensagem-bling/preview", response_model=MensagemBlingPreviewOut)
@@ -677,7 +701,7 @@ async def patch_logistica(
 
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rule(session, c))
+    return _to_out(c, await _match_rules(session, c))
 
 
 @router.delete("/{logistica_id}", status_code=status.HTTP_204_NO_CONTENT)

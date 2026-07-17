@@ -48,7 +48,7 @@ from app.services.listings_import import (
     run_auto_import_link,
     run_import_listings,
 )
-from app.services.logistica_ingest import run_ingest_ml_daily
+from app.services.logistica_ingest import recarregar_ml, run_ingest_ml_daily
 from app.services.marketplace_financials import (
     run_due_marketplace_financial_retries,
     run_sync_marketplace_financials_for_bling_order,
@@ -788,6 +788,16 @@ async def logistica_ml_ingest(ctx: dict) -> None:
     async with session_scope() as s:
         summary = await run_ingest_ml_daily(s)
     logger.info("logistica_ml_ingest_done", **summary)
+
+
+async def logistica_recarregar(ctx: dict) -> None:
+    """Sob demanda (botão "recarregar" da aba Mercado Livre): re-enriquece o
+    status do Meli de TODAS as linhas ML e aplica no Bling a mudança de situação
+    das que casam uma regra da aba Status. Em background pra não estourar o
+    timeout do Cloudflare na requisição."""
+    async with session_scope() as s:
+        summary = await recarregar_ml(s)
+    logger.info("logistica_recarregar_done", **summary)
 
 
 async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_s: int) -> None:
@@ -1695,6 +1705,7 @@ class WorkerSettings:
         kit_components_sync,
         valuation_estoque_snapshot,
         logistica_ml_ingest,
+        logistica_recarregar,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),

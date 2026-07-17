@@ -15,7 +15,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services import logistica_meli
+from app.services import logistica_bling, logistica_meli
 
 logger = structlog.get_logger()
 
@@ -67,3 +67,22 @@ async def run_ingest_ml_daily(
         session, limit=enrich_limit, only_empty=True
     )
     return {"inserted": inserted, **{f"enrich_{k}": v for k, v in enr.items()}}
+
+
+async def recarregar_ml(
+    session: AsyncSession, *, enrich_limit: int = 300
+) -> dict[str, int]:
+    """Recarga sob demanda do botão "recarregar" da aba Mercado Livre.
+
+    Diferente do cron diário, RE-enriquece TODAS as linhas ML (não só as vazias)
+    pra atualizar a assinatura de status do Meli, e então aplica em lote a
+    mudança de situação no Bling das linhas que casam uma regra da aba Status.
+    Roda em background (arq) porque o passo do ML+Bling pode passar dos 100s do
+    Cloudflare.
+    """
+    enr = await logistica_meli.enrich_recent(
+        session, limit=enrich_limit, only_empty=False
+    )
+    lote = await logistica_bling.aplicar_status_em_lote(session)
+    logger.info("logistica_recarregar_ml", **{f"enrich_{k}": v for k, v in enr.items()}, **lote)
+    return {**{f"enrich_{k}": v for k, v in enr.items()}, **{f"status_{k}": v for k, v in lote.items()}}

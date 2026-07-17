@@ -15,6 +15,7 @@ from datetime import date
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -592,3 +593,112 @@ async def test_status_aplicar_404(
     r = await client.post(f"/api/logistica/{uuid.uuid4()}/alterar-status-bling")
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "logistica_not_found"
+
+
+class _MultiFakeBling:
+    """Fake do Bling que resolve get_order/update por bling_id (pro lote)."""
+
+    def __init__(self, orders: dict[int, dict]):
+        self._orders = orders
+        self.situacao_sets: list[tuple[int, int]] = []
+
+    async def get_order(self, bling_id: int) -> dict:
+        return self._orders[bling_id]
+
+    async def update_order_situacao(self, bling_id: int, situacao_id: int) -> None:
+        self.situacao_sets.append((bling_id, situacao_id))
+        self._orders[bling_id]["situacao"]["id"] = situacao_id
+
+
+@pytest.mark.asyncio
+async def test_aplicar_status_em_lote(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """O lote aplica a mudança de situação das linhas ML que casam uma regra:
+    conta aplicados (mudou), pulados (já no alvo / fora do fluxo) e ignora as sem
+    regra. Sincroniza o status_bling local de quem casa."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=15, nome="Em andamento"),
+            SituacaoBling(id=83953, nome="Entregue"),
+        ]
+    )
+    # Regra curinga (sem status_atual): de qualquer estado -> Entregue.
+    rs = await client.post(
+        "/api/logistica/status",
+        json={"status_plataforma": chave, "alterar_status_bling": "Entregue"},
+    )
+    assert rs.status_code == 201, rs.text
+    db.add_all(
+        [
+            BlingOrder(bling_id=561, numero="99010", item_codigo="s1", item_index=0, situacao="15"),
+            BlingOrder(bling_id=562, numero="99011", item_codigo="s2", item_index=0, situacao="83953"),
+        ]
+    )
+    await db.commit()
+    # row1: casa, pedido em Em andamento -> aplica. row2: casa, já Entregue ->
+    # pulado. row3: sem regra (outra assinatura) -> ignorado.
+    ids = []
+    for num, m in [
+        ("99010", meli),
+        ("99011", meli),
+        ("99012", {"order_status": "paid", "ship_status": "shipped"}),
+    ]:
+        rc = await client.post(
+            "/api/logistica",
+            json={"plataforma": "Mercado Livre", "pedido_bling": num, "meli_status": m},
+        )
+        ids.append(rc.json()["id"])
+
+    fake = _MultiFakeBling(
+        {
+            561: {"id": 561, "numero": 99010, "situacao": {"id": 15, "valor": 0}},
+            562: {"id": 562, "numero": 99011, "situacao": {"id": 83953, "valor": 0}},
+        }
+    )
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    out = await logistica_bling.aplicar_status_em_lote(db)
+    assert out == {"aplicados": 1, "pulados": 1, "falhas": 0}
+    assert fake.situacao_sets == [(561, 83953)]  # só a row1 mudou
+
+    # A row1 teve o status_bling local sincronizado pro alvo aplicado.
+    row1 = (
+        await db.execute(select(Logistica).where(Logistica.pedido_bling == "99010"))
+    ).scalar_one()
+    assert row1.status_bling == "Entregue"
+
+
+@pytest.mark.asyncio
+async def test_recarregar_enfileira_job(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None], monkeypatch
+):
+    """O endpoint só ENFILEIRA o job em background (não roda inline)."""
+    auth_as(admin)
+    calls: list[str] = []
+
+    class _FakePool:
+        async def enqueue_job(self, name: str, *a, **k) -> None:
+            calls.append(name)
+
+    async def _fake_pool():
+        return _FakePool()
+
+    import app.routers.logistica as lr
+
+    monkeypatch.setattr(lr, "get_arq_pool", _fake_pool)
+    r = await client.post("/api/logistica/recarregar")
+    assert r.status_code == 200, r.text
+    assert r.json()["enqueued"] is True
+    assert calls == ["logistica_recarregar"]

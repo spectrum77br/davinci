@@ -29,6 +29,11 @@ class LogisticaOut(BaseModel):
     acao_match: bool = False
     acao_status_id: UUID | None = None
     acao_resumo: list[str] = Field(default_factory=list)
+    # `acao_monitorar`=alguma regra casada pede monitoramento (fica no painel);
+    # `acao_resolvido`=chegou ao fim da cadeia de status (nada mais a fazer). O
+    # front oculta a linha quando resolvido E sem monitorar (painel de pendências).
+    acao_monitorar: bool = False
+    acao_resolvido: bool = False
     created_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
@@ -166,6 +171,13 @@ class StatusBlingOut(BaseModel):
     bling_order_id: int
     situacao_alvo: str
     situacao_alvo_id: int
+
+
+class RecarregarOut(BaseModel):
+    """Confirmação de que a recarga em massa (enriquecer ML + aplicar status no
+    Bling) foi enfileirada em background."""
+
+    enqueued: bool = True
 
 
 # ---- Sugestão de Status Bling (a partir dos status do Meli) ----

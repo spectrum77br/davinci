@@ -34,6 +34,10 @@ type Logistica = {
   acao_match: boolean
   acao_status_id: string | null
   acao_resumo: string[]
+  // acao_monitorar=alguma regra casada pede monitoramento; acao_resolvido=chegou
+  // ao fim da cadeia de status. Ocultamos a linha quando resolvido E sem monitorar.
+  acao_monitorar: boolean
+  acao_resolvido: boolean
   created_by: string | null
   created_at: string
   updated_at: string
@@ -72,8 +76,38 @@ async function refresh() {
 // (acao_resumo/acao_match) e o destaque vermelho são derivados das regras da aba
 // Status, ao cadastrar uma chave nova lá basta recarregar aqui: as linhas já
 // casadas somem do vermelho e ganham as ações, sem esperar o status do ML mudar.
+//
+// Com permissão de edição, o botão também DISPARA o motor em segundo plano:
+// re-enriquece o Status Plataforma de todos os pedidos ML e aplica no Bling a
+// mudança de situação dos que já têm regra. Roda em background (pode passar do
+// timeout do Cloudflare) e a lista se atualiza sozinha no poll.
+const recarregando = ref(false)
 async function recarregar() {
-  await Promise.all([refresh(), refreshStatus()])
+  if (!canEdit.value) {
+    await Promise.all([refresh(), refreshStatus()])
+    return
+  }
+  if (
+    !confirm(
+      'Recarregar vai atualizar o Status Plataforma de todos os pedidos e aplicar no Bling a mudança de situação dos que já têm regra definida. Continuar?',
+    )
+  )
+    return
+  recarregando.value = true
+  try {
+    await api('/api/logistica/recarregar', { method: 'POST' })
+    toasts.info('Recarregando em segundo plano', 'Pode levar alguns minutos; a lista atualiza sozinha.')
+  } catch (e: any) {
+    toasts.error('Não foi possível recarregar', e?.data?.detail?.code || e?.message || 'erro')
+    recarregando.value = false
+    return
+  }
+  // Repuxa algumas vezes pra refletir o progresso do job.
+  for (let i = 0; i < 6; i++) {
+    await new Promise((r) => setTimeout(r, 5000))
+    await Promise.all([refresh(), refreshStatus()])
+  }
+  recarregando.value = false
 }
 
 // ---- Busca + filtros (client-side sobre as linhas já carregadas) ----
@@ -99,6 +133,9 @@ const filteredRows = computed(() => {
   const di = dataInicioFilter.value
   const df = dataFimFilter.value
   return rows.value.filter((c) => {
+    // Painel de pendências: some quando já chegou ao fim da cadeia de status no
+    // Bling (resolvido) E a regra casada não pede monitoramento — nada a fazer.
+    if (c.acao_resolvido && !c.acao_monitorar) return false
     if (contaFilter.value !== 'all' && (c.conta || '') !== contaFilter.value) return false
     if (statusBlingFilter.value !== 'all' && (c.status_bling || '') !== statusBlingFilter.value) return false
     if (di && (!c.data || c.data < di)) return false
@@ -873,8 +910,8 @@ async function aplicarStatusBling(c: Logistica) {
     <!-- ============ ABA LOGÍSTICA ============ -->
     <template v-if="tab === 'logistica'">
       <div class="flex flex-wrap items-center gap-3">
-        <Button size="sm" variant="ghost" :disabled="loading || statusLoading" @click="recarregar">
-          <RefreshCw class="size-4 mr-1" :class="loading || statusLoading ? 'animate-spin' : ''" /> recarregar
+        <Button size="sm" variant="ghost" :disabled="loading || statusLoading || recarregando" @click="recarregar">
+          <RefreshCw class="size-4 mr-1" :class="loading || statusLoading || recarregando ? 'animate-spin' : ''" /> recarregar
         </Button>
         <Button v-if="canEdit" size="sm" class="ml-auto" @click="openNew">
           <Plus class="size-4 mr-1" /> Novo caso
