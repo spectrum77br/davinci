@@ -48,7 +48,11 @@ from app.services.listings_import import (
     run_auto_import_link,
     run_import_listings,
 )
-from app.services.logistica_ingest import recarregar_ml, run_ingest_ml_daily
+from app.services.logistica_ingest import (
+    recarregar_ml,
+    run_ingest_marketplaces_daily,
+    run_ingest_ml_daily,
+)
 from app.services.marketplace_financials import (
     run_due_marketplace_financial_retries,
     run_sync_marketplace_financials_for_bling_order,
@@ -788,6 +792,15 @@ async def logistica_ml_ingest(ctx: dict) -> None:
     async with session_scope() as s:
         summary = await run_ingest_ml_daily(s)
     logger.info("logistica_ml_ingest_done", **summary)
+
+
+async def logistica_marketplaces_ingest(ctx: dict) -> None:
+    """Diário (~07h BRT, junto do ML): importa os novos pedidos Shopee/TikTok/
+    Amazon pra aba Logística (só ingestão — esses marketplaces ainda não têm
+    enriquecimento de Status Plataforma)."""
+    async with session_scope() as s:
+        summary = await run_ingest_marketplaces_daily(s)
+    logger.info("logistica_marketplaces_ingest_done", **summary)
 
 
 async def logistica_recarregar(ctx: dict) -> None:
@@ -1705,6 +1718,7 @@ class WorkerSettings:
         kit_components_sync,
         valuation_estoque_snapshot,
         logistica_ml_ingest,
+        logistica_marketplaces_ingest,
         logistica_recarregar,
     ]
     cron_jobs = [
@@ -1735,6 +1749,8 @@ class WorkerSettings:
         # 10:00 UTC = 07:00 BRT — depois do sync do Bling; importa os novos
         # pedidos ML pra Logística e enriquece o status do Meli.
         cron(logistica_ml_ingest, hour=10, minute=0, run_at_startup=False),
+        # Junto do ML: importa os novos pedidos Shopee/TikTok/Amazon pra Logística.
+        cron(logistica_marketplaces_ingest, hour=10, minute=5, run_at_startup=False),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps
         # 5/5/5/5/4h — sempre abaixo da expiração. minute=45 evita colidir

@@ -11,7 +11,16 @@ const { api } = useApi()
 const canEdit = useCan('logistica', 'edit')
 const toasts = useToasts()
 
-const tab = ref<'logistica' | 'status'>('logistica')
+// Abas por marketplace + a aba Status (playbook único, compartilhado). A chave
+// (Status Plataforma) é a mesma pra todas — só o ML enriquece a assinatura hoje.
+const PLATAFORMA_TABS = [
+  { key: 'ml', label: 'Mercado Livre' },
+  { key: 'shopee', label: 'Shopee' },
+  { key: 'amazon', label: 'Amazon' },
+  { key: 'tiktok', label: 'TikTok' },
+] as const
+type PlataformaTab = (typeof PLATAFORMA_TABS)[number]['key']
+const tab = ref<PlataformaTab | 'status'>('ml')
 
 type MeliStatus = Record<string, string>
 
@@ -62,9 +71,10 @@ async function refresh() {
   loading.value = true
   error.value = null
   try {
-    // Por enquanto a aba mostra só Mercado Livre; futuras abas Shopee/Amazon
-    // vão trocar a plataforma. O backend filtra server-side.
-    rows.value = await api<Logistica[]>('/api/logistica?plataforma=ml')
+    // Cada aba de marketplace filtra server-side pela plataforma. A aba Status
+    // usa outro carregador (refreshStatus); aqui caímos em ML só por garantia.
+    const plat = tab.value === 'status' ? 'ml' : tab.value
+    rows.value = await api<Logistica[]>(`/api/logistica?plataforma=${plat}`)
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -83,7 +93,9 @@ async function refresh() {
 // timeout do Cloudflare) e a lista se atualiza sozinha no poll.
 const recarregando = ref(false)
 async function recarregar() {
-  if (!canEdit.value) {
+  // O motor (enriquece Status Plataforma + aplica status no Bling) é do ML. Nas
+  // outras abas o botão só repuxa os pedidos e as chaves da aba Status.
+  if (!canEdit.value || tab.value !== 'ml') {
     await Promise.all([refresh(), refreshStatus()])
     return
   }
@@ -494,7 +506,13 @@ async function refreshStatus() {
 }
 
 watch(tab, (t) => {
-  if (t === 'status' && !statusLoaded) refreshStatus()
+  if (t === 'status') {
+    if (!statusLoaded) refreshStatus()
+  } else {
+    // Troca de aba de marketplace → recarrega os pedidos daquela plataforma.
+    page.value = 1
+    refresh()
+  }
 })
 
 // Carrega as chaves cadastradas na aba Status já no início, pra a aba
@@ -888,14 +906,16 @@ async function aplicarStatusBling(c: Logistica) {
     </div>
 
     <!-- Tabs -->
-    <div class="flex gap-1 border-b">
+    <div class="flex flex-wrap gap-1 border-b">
       <button
+        v-for="t in PLATAFORMA_TABS"
+        :key="t.key"
         type="button"
         class="px-4 py-2 text-sm font-medium border-b-2 -mb-px"
-        :class="tab === 'logistica' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
-        @click="tab = 'logistica'"
+        :class="tab === t.key ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
+        @click="tab = t.key"
       >
-        Mercado Livre
+        {{ t.label }}
       </button>
       <button
         type="button"
@@ -907,8 +927,8 @@ async function aplicarStatusBling(c: Logistica) {
       </button>
     </div>
 
-    <!-- ============ ABA LOGÍSTICA ============ -->
-    <template v-if="tab === 'logistica'">
+    <!-- ============ ABAS DE MARKETPLACE (ML/Shopee/Amazon/TikTok) ============ -->
+    <template v-if="tab !== 'status'">
       <div class="flex flex-wrap items-center gap-3">
         <Button size="sm" variant="ghost" :disabled="loading || statusLoading || recarregando" @click="recarregar">
           <RefreshCw class="size-4 mr-1" :class="loading || statusLoading || recarregando ? 'animate-spin' : ''" /> recarregar

@@ -19,10 +19,20 @@ from app.services import logistica_bling, logistica_meli
 
 logger = structlog.get_logger()
 
+# Chave (store_info.platform) -> rótulo gravado em `logistica.plataforma`
+# (o filtro da aba por marketplace usa esse rótulo; ver routers/logistica).
+_PLATAFORMA_LABELS = {
+    "ml": "Mercado Livre",
+    "shopee": "Shopee",
+    "amazon": "Amazon",
+    "tiktok": "TikTok",
+}
+
 # Mesmo mapeamento do backfill: plataforma/conta via store_info (o `loja` do
 # pedido é o bling_store_id), status_bling via situacao_bling. meli_status fica
-# vazio até o enriquecimento puxar a assinatura do ML.
-_INSERT_ML_SQL = text(
+# vazio (só o ML enriquece a assinatura; os outros marketplaces ficam sem
+# Status Plataforma por enquanto — a aba mostra a linha com o status do Bling).
+_INSERT_SQL = text(
     """
     INSERT INTO davinci.logistica
         (id, data, pedido_bling, pedido_marketplace, plataforma, conta,
@@ -32,7 +42,7 @@ _INSERT_ML_SQL = text(
         bo.data::date,
         bo.numero,
         bo.numeroloja,
-        'Mercado Livre',
+        :label,
         si.account_name,
         '{}'::jsonb,
         sb.nome,
@@ -40,7 +50,7 @@ _INSERT_ML_SQL = text(
         now()
     FROM davinci.bling_orders bo
     JOIN davinci.store_info si
-        ON si.bling_store_id::text = bo.loja AND si.platform = 'ml'
+        ON si.bling_store_id::text = bo.loja AND si.platform = :platform
     LEFT JOIN davinci.situacao_bling sb ON sb.id::text = bo.situacao
     WHERE bo.data >= now() - make_interval(days => :dias)
       AND bo.numero IS NOT NULL
@@ -53,20 +63,44 @@ _INSERT_ML_SQL = text(
 )
 
 
+async def _ingest_platform(session: AsyncSession, platform: str, dias: int) -> int:
+    """Insere os pedidos novos (janela de `dias`) de UMA plataforma. Idempotente
+    (NOT EXISTS por pedido_bling). Retorna quantas linhas entraram."""
+    label = _PLATAFORMA_LABELS[platform]
+    res = await session.execute(
+        _INSERT_SQL, {"platform": platform, "label": label, "dias": dias}
+    )
+    inserted = res.rowcount or 0
+    await session.commit()
+    logger.info(
+        "logistica_ingest_inserted", platform=platform, inserted=inserted, dias=dias
+    )
+    return inserted
+
+
 async def run_ingest_ml_daily(
     session: AsyncSession, *, dias: int = 3, enrich_limit: int = 400
 ) -> dict[str, int]:
     """Insere os pedidos ML novos (janela de `dias`) e enriquece o status do
     Meli das linhas ML ainda vazias (mais recentes primeiro)."""
-    res = await session.execute(_INSERT_ML_SQL, {"dias": dias})
-    inserted = res.rowcount or 0
-    await session.commit()
-    logger.info("logistica_ingest_ml_inserted", inserted=inserted, dias=dias)
-
+    inserted = await _ingest_platform(session, "ml", dias)
     enr = await logistica_meli.enrich_recent(
         session, limit=enrich_limit, only_empty=True
     )
     return {"inserted": inserted, **{f"enrich_{k}": v for k, v in enr.items()}}
+
+
+async def run_ingest_marketplaces_daily(
+    session: AsyncSession, *, dias: int = 3
+) -> dict[str, int]:
+    """Insere os pedidos novos de Shopee/TikTok/Amazon pra aba Logística. Só
+    ingestão — esses marketplaces ainda não têm enriquecimento de Status
+    Plataforma (as linhas aparecem com o status do Bling e casam a aba Status
+    quando a regra tiver a chave). Retorna o total inserido por plataforma."""
+    out: dict[str, int] = {}
+    for platform in ("shopee", "tiktok", "amazon"):
+        out[platform] = await _ingest_platform(session, platform, dias)
+    return out
 
 
 async def recarregar_ml(
