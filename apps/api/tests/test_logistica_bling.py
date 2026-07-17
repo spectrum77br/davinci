@@ -681,6 +681,63 @@ async def test_aplicar_status_em_lote(
 
 
 @pytest.mark.asyncio
+async def test_aplicar_status_em_lote_inclui_shopee(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """O lote também processa linhas Shopee: a chave usa a assinatura própria da
+    Shopee (assinatura_para) e a transição no Bling se aplica igual ao ML."""
+    auth_as(admin)
+    meli = {"order_status": "COMPLETED"}
+    chave = logistica_rules.assinatura_para("Shopee", meli)  # "Concluído"
+    assert chave == "Concluído"
+    db.add_all(
+        [
+            SituacaoBling(id=15, nome="Em andamento"),
+            SituacaoBling(id=83953, nome="Entregue"),
+        ]
+    )
+    rs = await client.post(
+        "/api/logistica/status",
+        json={
+            "status_plataforma": chave,
+            "plataforma": "Shopee",
+            "alterar_status_bling": "Entregue",
+        },
+    )
+    assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(bling_id=571, numero="98010", item_codigo="s1", item_index=0, situacao="15")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Shopee", "pedido_bling": "98010", "meli_status": meli},
+    )
+    assert rc.status_code == 201, rc.text
+
+    fake = _MultiFakeBling(
+        {571: {"id": 571, "numero": 98010, "situacao": {"id": 15, "valor": 0}}}
+    )
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    out = await logistica_bling.aplicar_status_em_lote(db)
+    assert out == {"aplicados": 1, "pulados": 0, "falhas": 0}
+    assert fake.situacao_sets == [(571, 83953)]
+    row = (
+        await db.execute(select(Logistica).where(Logistica.pedido_bling == "98010"))
+    ).scalar_one()
+    assert row.status_bling == "Entregue"
+
+
+@pytest.mark.asyncio
 async def test_recarregar_enfileira_job(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None], monkeypatch
 ):

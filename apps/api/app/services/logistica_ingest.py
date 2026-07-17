@@ -110,17 +110,29 @@ async def run_ingest_marketplaces_daily(
 async def recarregar_ml(
     session: AsyncSession, *, enrich_limit: int = 300
 ) -> dict[str, int]:
-    """Recarga sob demanda do botão "recarregar" da aba Mercado Livre.
+    """Recarga sob demanda do botão "recarregar" das abas Mercado Livre/Shopee.
 
-    Diferente do cron diário, RE-enriquece TODAS as linhas ML (não só as vazias)
-    pra atualizar a assinatura de status do Meli, e então aplica em lote a
+    Diferente do cron diário, RE-enriquece TODAS as linhas ML e Shopee (não só
+    as vazias) pra atualizar a assinatura de status, e então aplica em lote a
     mudança de situação no Bling das linhas que casam uma regra da aba Status.
-    Roda em background (arq) porque o passo do ML+Bling pode passar dos 100s do
-    Cloudflare.
+    Roda em background (arq) porque o passo de enrich + Bling pode passar dos
+    100s do Cloudflare.
     """
     enr = await logistica_meli.enrich_recent(
         session, limit=enrich_limit, only_empty=False
     )
+    enr_shopee = await logistica_shopee.enrich_recent(
+        session, limit=enrich_limit, only_empty=False
+    )
     lote = await logistica_bling.aplicar_status_em_lote(session)
-    logger.info("logistica_recarregar_ml", **{f"enrich_{k}": v for k, v in enr.items()}, **lote)
-    return {**{f"enrich_{k}": v for k, v in enr.items()}, **{f"status_{k}": v for k, v in lote.items()}}
+    logger.info(
+        "logistica_recarregar_ml",
+        **{f"enrich_{k}": v for k, v in enr.items()},
+        **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
+        **lote,
+    )
+    return {
+        **{f"enrich_{k}": v for k, v in enr.items()},
+        **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
+        **{f"status_{k}": v for k, v in lote.items()},
+    }

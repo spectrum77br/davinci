@@ -93,9 +93,9 @@ async function refresh() {
 // timeout do Cloudflare) e a lista se atualiza sozinha no poll.
 const recarregando = ref(false)
 async function recarregar() {
-  // O motor (enriquece Status Plataforma + aplica status no Bling) é do ML. Nas
-  // outras abas o botão só repuxa os pedidos e as chaves da aba Status.
-  if (!canEdit.value || tab.value !== 'ml') {
+  // O motor (enriquece Status Plataforma + aplica status no Bling) roda pra ML e
+  // Shopee. Nas demais abas o botão só repuxa os pedidos e as chaves da aba Status.
+  if (!canEdit.value || (tab.value !== 'ml' && tab.value !== 'shopee')) {
     await Promise.all([refresh(), refreshStatus()])
     return
   }

@@ -40,6 +40,9 @@ from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
 
+_ML_PLATAFORMAS = logistica_rules._ML_PLATAFORMAS
+_SHOPEE_PLATAFORMAS = logistica_rules._SHOPEE_PLATAFORMAS
+
 # Campos calculados/read-only do GET que o Bling recomputa ou rejeita no PUT.
 _COMPUTED_DROP = ("totalProdutos", "total", "taxas", "tributacao")
 
@@ -130,7 +133,7 @@ def mensagem_bling_para(rows: list[LogisticaStatus], row: Logistica) -> str | No
     """`mensagem_bling` da regra da aba Status que casa com a assinatura PT da
     linha (prefere específica da plataforma, cai na geral). None se nenhuma
     casar ou a que casou não tiver mensagem."""
-    assinatura = logistica_rules.assinatura_pt(row.meli_status or {})
+    assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
     rule = logistica_match.find_matching_rule(rows, assinatura=assinatura, plataforma=row.plataforma)
     if rule is None:
         return None
@@ -227,7 +230,7 @@ async def apply_mensagem_bling(session: AsyncSession, row: Logistica) -> dict:
 def _regra_status_para(rows: list[LogisticaStatus], row: Logistica) -> LogisticaStatus | None:
     """Regra da aba Status que casa com a linha (prefere específica, cai na
     geral). None se nenhuma casar."""
-    assinatura = logistica_rules.assinatura_pt(row.meli_status or {})
+    assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
     return logistica_match.find_matching_rule(
         rows, assinatura=assinatura, plataforma=row.plataforma
     )
@@ -294,7 +297,7 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
         pra explicar a transição esperada.
     Devolve tudo que preview/apply precisam (inclui o pedido já lido)."""
     rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
-    assinatura = logistica_rules.assinatura_pt(row.meli_status or {})
+    assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
     cands = logistica_match.find_matching_rules(
         rows, assinatura=assinatura, plataforma=row.plataforma
     )
@@ -404,11 +407,14 @@ async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
     - falhas: erro inesperado (Bling/rede) — logado, não interrompe o lote.
     """
     status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
-    ml = list((await session.execute(select(Logistica))).scalars().all())
-    ml = [r for r in ml if (r.plataforma or "").strip().lower() == "mercado livre"]
+    todos = list((await session.execute(select(Logistica))).scalars().all())
+    # ML + Shopee: têm assinatura enriquecida (via assinatura_para). As demais
+    # (sem enrich) caem na guarda de "sem regra" logo abaixo e são ignoradas.
+    alvo = _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS
+    rows = [r for r in todos if (r.plataforma or "").strip().lower() in alvo]
     aplicados = pulados = falhas = 0
-    for row in ml:
-        assinatura = logistica_rules.assinatura_pt(row.meli_status or {})
+    for row in rows:
+        assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
         cands = logistica_match.find_matching_rules(
             status_rows, assinatura=assinatura, plataforma=row.plataforma
         )
