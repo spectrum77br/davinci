@@ -122,6 +122,22 @@ class LogisticaStatusPatch(BaseModel):
     mensagem_threema: str | None = None
 
 
+class ThreemaDestinatarioOut(BaseModel):
+    """Um destinatário do Threema pro seletor do front (`id` + `nome`)."""
+
+    id: str
+    nome: str
+
+
+class EnviarThreemaIn(BaseModel):
+    """Corpo do envio: destinatários escolhidos (None/vazio = usa a lista fixa
+    do `.env`) + pedido/loja opcionais pra compor o cabeçalho da mensagem."""
+
+    recipients: list[str] | None = None
+    pedido: str | None = None
+    loja: str | None = None
+
+
 class EnviarThreemaOut(BaseModel):
     """Resultado do envio da mensagem_threema de uma linha da aba Status."""
 

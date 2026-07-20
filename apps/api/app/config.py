@@ -168,6 +168,10 @@ class Settings(BaseSettings):
     threema_gateway_id: str = ""
     threema_gateway_secret: str = ""
     threema_recipients: str = ""
+    # Nomes dos destinatários pro seletor (`ID:Nome` separados por vírgula, ex.
+    # "7KMPCBS5:Londres,M5TT27JA:Cairo,444UXUXN:Churchill"). ID sem nome cai no
+    # próprio ID.
+    threema_recipient_names: str = ""
 
     # Dev: enables /api/dev/mock-login (gated by ENV=development too).
     dev_mock_login: bool = False

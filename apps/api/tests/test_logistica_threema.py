@@ -27,6 +27,7 @@ from app.services import threema
 os.environ["THREEMA_GATEWAY_ID"] = "*3MAGW01"
 os.environ["THREEMA_GATEWAY_SECRET"] = "test-secret"
 os.environ["THREEMA_RECIPIENTS"] = "ABCD1234, EFGH5678"
+os.environ["THREEMA_RECIPIENT_NAMES"] = "ABCD1234:Londres"
 get_settings.cache_clear()  # type: ignore[attr-defined]
 
 
@@ -52,6 +53,27 @@ def test_parse_recipients_variados():
     ]
     assert threema.parse_recipients("") == []
     assert threema.parse_recipients(None) == []
+
+
+def test_parse_recipient_directory():
+    # ID nomeado primeiro, depois o avulso (nome = próprio ID).
+    d = threema.parse_recipient_directory("ABCD1234:Londres", "ABCD1234, EFGH5678")
+    assert d == [
+        {"id": "ABCD1234", "nome": "Londres"},
+        {"id": "EFGH5678", "nome": "EFGH5678"},
+    ]
+    # Sem nomes: cai nos IDs.
+    assert threema.parse_recipient_directory("", "ABCD1234") == [
+        {"id": "ABCD1234", "nome": "ABCD1234"}
+    ]
+
+
+def test_compose_texto_cabecalho():
+    assert threema.compose_texto("oi", pedido="701-1", loja="Amazon") == (
+        "Pedido 701-1 | Loja Amazon\noi"
+    )
+    assert threema.compose_texto("oi", pedido="701-1") == "Pedido 701-1\noi"
+    assert threema.compose_texto("oi") == "oi"
 
 
 # ---- client (respx) ----
@@ -133,6 +155,55 @@ async def test_enviar_threema_ok(
     body = r.json()
     assert sorted(body["sent"]) == ["ABCD1234", "EFGH5678"]
     assert body["failed"] == []
+
+
+@pytest.mark.asyncio
+async def test_threema_destinatarios_lista(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    r = await client.get("/api/logistica/threema/destinatarios")
+    assert r.status_code == 200, r.text
+    assert r.json() == [
+        {"id": "ABCD1234", "nome": "Londres"},
+        {"id": "EFGH5678", "nome": "EFGH5678"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enviar_threema_subset_e_pedido(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    sid = await _cria_status(
+        client, status_plataforma="x", mensagem_threema="avisar equipe"
+    )
+    with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
+        route = router.post("/send_simple").mock(return_value=httpx.Response(200, text="mid"))
+        r = await client.post(
+            f"/api/logistica/status/{sid}/enviar-threema",
+            json={"recipients": ["ABCD1234"], "pedido": "701-9", "loja": "Amazon"},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["sent"] == ["ABCD1234"]
+    # só um destinatário (o escolhido) e o cabeçalho pedido/loja na mensagem.
+    assert len(route.calls) == 1
+    body = route.calls.last.request.content.decode()
+    assert "to=ABCD1234" in body
+    assert "Pedido+701-9" in body and "Loja+Amazon" in body
+
+
+@pytest.mark.asyncio
+async def test_enviar_threema_recipients_vazio_422(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    sid = await _cria_status(client, status_plataforma="x", mensagem_threema="oi")
+    r = await client.post(
+        f"/api/logistica/status/{sid}/enviar-threema", json={"recipients": []}
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "logistica_sem_destinatario_threema"
 
 
 @pytest.mark.asyncio

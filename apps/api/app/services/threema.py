@@ -50,6 +50,47 @@ def parse_recipients(raw: str | None) -> list[str]:
     return out
 
 
+def parse_recipient_directory(
+    names_raw: str | None, ids_raw: str | None
+) -> list[dict[str, str]]:
+    """Diretório `[{id, nome}]` dos destinatários pro seletor do front.
+
+    Nomes vêm de `names_raw` (`ID:Nome` separados por vírgula/;); IDs sem nome
+    caem no próprio ID. Completa com os IDs de `ids_raw` que ficaram sem nome
+    (nome = ID). Preserva a ordem: primeiro os nomeados, depois os avulsos.
+    """
+    names: dict[str, str] = {}
+    order: list[str] = []
+    for part in (names_raw or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        rid, _, nome = part.partition(":")
+        rid = rid.strip().upper()
+        nome = nome.strip()
+        if rid and rid not in names:
+            names[rid] = nome or rid
+            order.append(rid)
+    for rid in parse_recipients(ids_raw):
+        if rid not in names:
+            names[rid] = rid
+            order.append(rid)
+    return [{"id": rid, "nome": names[rid]} for rid in order]
+
+
+def compose_texto(texto: str, *, pedido: str | None = None, loja: str | None = None) -> str:
+    """Prefixa `Pedido X | Loja Y` no topo da mensagem quando houver (pra o
+    destinatário saber a qual pedido/loja o aviso se refere)."""
+    cabecalho = []
+    if (pedido or "").strip():
+        cabecalho.append(f"Pedido {pedido.strip()}")
+    if (loja or "").strip():
+        cabecalho.append(f"Loja {loja.strip()}")
+    if cabecalho:
+        return " | ".join(cabecalho) + "\n" + texto
+    return texto
+
+
 class ThreemaClient:
     def __init__(
         self,

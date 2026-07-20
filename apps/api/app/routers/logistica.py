@@ -26,9 +26,11 @@ from sqlalchemy.orm import selectinload
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import Logistica, LogisticaStatus, LogisticaStatusAnexo, SituacaoBling, User
+from app.config import get_settings
 from app.schemas.logistica import (
     AnexoOut,
     CandidatoOut,
+    EnviarThreemaIn,
     EnviarThreemaOut,
     LogisticaCreate,
     LogisticaOut,
@@ -44,6 +46,7 @@ from app.schemas.logistica import (
     StatusBlingPreviewOut,
     SugestaoIn,
     SugestaoOut,
+    ThreemaDestinatarioOut,
 )
 from app.services import (
     logistica_amazon,
@@ -279,23 +282,46 @@ async def patch_status(
     return _to_status_out(s)
 
 
+@router.get("/threema/destinatarios", response_model=list[ThreemaDestinatarioOut])
+async def threema_destinatarios(
+    _user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> list[ThreemaDestinatarioOut]:
+    """Lista `[{id, nome}]` dos destinatários do Threema (do `.env`) pro seletor
+    de quem recebe a mensagem."""
+    s = get_settings()
+    return [
+        ThreemaDestinatarioOut(**d)
+        for d in threema.parse_recipient_directory(
+            s.threema_recipient_names, s.threema_recipients
+        )
+    ]
+
+
 @router.post("/status/{status_id}/enviar-threema", response_model=EnviarThreemaOut)
 async def enviar_threema(
     status_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+    payload: EnviarThreemaIn | None = None,
 ) -> EnviarThreemaOut:
-    """Envia a `mensagem_threema` desta linha da aba Status pra lista fixa de
-    destinatários do Threema Gateway (config no `.env`). Notifica as pessoas do
-    problema. 404 se a linha some; 422 sem mensagem/sem config."""
+    """Envia a `mensagem_threema` desta linha da aba Status pros destinatários
+    escolhidos (`payload.recipients`; vazio/ausente = lista fixa do `.env`).
+    `pedido`/`loja` opcionais entram no topo da mensagem. 404 se a linha some;
+    422 sem mensagem/sem destinatário/sem config."""
+    payload = payload or EnviarThreemaIn()
     s = await _load_status(session, status_id)
     if s is None:
         raise HTTPException(404, detail={"code": "logistica_status_not_found"})
     texto = (s.mensagem_threema or "").strip()
     if not texto:
         raise HTTPException(422, detail={"code": "logistica_sem_mensagem_threema"})
+    if payload.recipients is not None and not payload.recipients:
+        raise HTTPException(422, detail={"code": "logistica_sem_destinatario_threema"})
+    texto = threema.compose_texto(texto, pedido=payload.pedido, loja=payload.loja)
     try:
-        result = await threema.ThreemaClient().send_to_all(texto)
+        result = await threema.ThreemaClient().send_to_all(
+            texto, recipients=payload.recipients or None
+        )
     except threema.ThreemaConfigError as e:
         raise HTTPException(422, detail={"code": str(e)}) from e
     logger.info(

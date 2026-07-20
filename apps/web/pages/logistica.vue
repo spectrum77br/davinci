@@ -748,26 +748,69 @@ async function removeStatusRow(s: LogisticaStatus) {
 }
 
 // ---- Enviar a Mensagem Threema (notifica as pessoas do problema) ----
+// Ao clicar Enviar abre um modal pra escolher QUEM recebe (checkbox de nomes).
+type ThreemaDestinatario = { id: string; nome: string }
+const threemaDestinatarios = ref<ThreemaDestinatario[]>([])
+const threemaModal = reactive({
+  open: false,
+  status: null as LogisticaStatus | null,
+  selecionados: new Set<string>(),
+  sending: false,
+})
+
+async function loadThreemaDestinatarios() {
+  if (threemaDestinatarios.value.length) return
+  try {
+    threemaDestinatarios.value = await api<ThreemaDestinatario[]>(
+      '/api/logistica/threema/destinatarios',
+    )
+  } catch {
+    threemaDestinatarios.value = []
+  }
+}
+
 async function enviarThreema(s: LogisticaStatus) {
   if (!s.mensagem_threema) return
-  if (!confirm('Enviar a Mensagem Threema para os destinatários?')) return
+  await loadThreemaDestinatarios()
+  threemaModal.status = s
+  // pré-seleciona todos.
+  threemaModal.selecionados = new Set(threemaDestinatarios.value.map((d) => d.id))
+  threemaModal.open = true
+}
+
+function toggleThreemaDest(id: string) {
+  if (threemaModal.selecionados.has(id)) threemaModal.selecionados.delete(id)
+  else threemaModal.selecionados.add(id)
+}
+
+async function confirmarEnviarThreema() {
+  const s = threemaModal.status
+  if (!s) return
+  const recipients = [...threemaModal.selecionados]
+  if (!recipients.length) {
+    toasts.error('Escolha ao menos um destinatário')
+    return
+  }
+  threemaModal.sending = true
   setStatusBusy(s.id, true)
   statusError.value = null
   try {
     const r = await api<{ sent: string[]; failed: string[] }>(
       `/api/logistica/status/${s.id}/enviar-threema`,
-      { method: 'POST' },
+      { method: 'POST', body: { recipients } },
     )
     if (r.failed.length) {
       toasts.error(`Enviado a ${r.sent.length}, falhou ${r.failed.length}`, r.failed.join(', '))
     } else {
       toasts.success('Mensagem Threema enviada', `${r.sent.length} destinatário(s)`)
     }
+    threemaModal.open = false
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     statusError.value = code
     toasts.error('Não foi possível enviar', code)
   } finally {
+    threemaModal.sending = false
     setStatusBusy(s.id, false)
   }
 }
@@ -1753,6 +1796,47 @@ async function aplicarStatusBling(c: Logistica) {
           <Button variant="ghost" @click="showStatusForm = false">Cancelar</Button>
           <Button :disabled="statusSaving" @click="saveStatusForm">
             {{ statusSaving ? 'Salvando…' : 'Salvar' }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: escolher destinatários da Mensagem Threema -->
+    <div v-if="threemaModal.open" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="threemaModal.open = false">
+      <div class="bg-background border rounded-lg w-full max-w-sm p-5 space-y-4">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold">Enviar Threema</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" @click="threemaModal.open = false">
+            <X class="size-4" />
+          </Button>
+        </div>
+        <p class="text-sm text-muted-foreground">Escolha quem recebe a mensagem.</p>
+        <div v-if="!threemaDestinatarios.length" class="text-sm text-muted-foreground">
+          Nenhum destinatário configurado.
+        </div>
+        <div v-else class="space-y-2">
+          <label
+            v-for="d in threemaDestinatarios"
+            :key="d.id"
+            class="flex items-center gap-2 text-sm rounded-md border px-3 py-2 cursor-pointer hover:bg-muted/50"
+          >
+            <input
+              type="checkbox"
+              class="size-4"
+              :checked="threemaModal.selecionados.has(d.id)"
+              @change="toggleThreemaDest(d.id)"
+            />
+            {{ d.nome }}
+          </label>
+        </div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" @click="threemaModal.open = false">Cancelar</Button>
+          <Button
+            :disabled="threemaModal.sending || !threemaModal.selecionados.size"
+            @click="confirmarEnviarThreema"
+          >
+            <Send class="size-4 mr-1" />
+            {{ threemaModal.sending ? 'Enviando…' : 'Enviar' }}
           </Button>
         </div>
       </div>
