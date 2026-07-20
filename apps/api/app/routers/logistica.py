@@ -14,6 +14,7 @@ não escreve no Bling automaticamente.
 Gated pelo recurso `logistica`.
 """
 
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -99,7 +100,9 @@ def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> Logisti
         acao_status_id=rule.id if rule is not None else None,
         acao_resumo=logistica_match.resumo_acoes(rule),
         acao_monitorar=logistica_match.deve_monitorar(rules),
-        acao_resolvido=logistica_match.estado_resolvido(rules, c.status_bling),
+        acao_resolvido=logistica_match.estado_resolvido(
+            rules, c.status_bling, threema_enviado=c.threema_enviado_at is not None
+        ),
         created_by=c.created_by,
         created_at=c.created_at,
         updated_at=c.updated_at,
@@ -659,6 +662,11 @@ async def enviar_threema_pedido(
         result = await threema.ThreemaClient().send_to_all(texto, recipients=recipients or None)
     except threema.ThreemaConfigError as e:
         raise HTTPException(422, detail={"code": str(e)}) from e
+    # Enviou pra ao menos um → o aviso foi feito: carimba e o pedido resolve
+    # (a Mensagem Threema deixa de contar como pendência) e some do painel.
+    if result["sent"]:
+        c.threema_enviado_at = datetime.now(UTC)
+        await session.commit()
     logger.info(
         "logistica_threema_pedido_enviado",
         id=str(logistica_id),

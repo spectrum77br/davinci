@@ -870,6 +870,8 @@ async function enviarThreemaPedido(c: Logistica) {
     } else {
       toasts.success('Mensagem Threema enviada', `${r.sent.length} destinatário(s)`)
     }
+    // Enviou → o aviso foi feito: o pedido resolve e some do painel.
+    if (r.sent.length) await refresh()
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     toasts.error('Não foi possível enviar', code)

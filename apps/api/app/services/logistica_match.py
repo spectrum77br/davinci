@@ -81,7 +81,12 @@ def deve_monitorar(rules: list[LogisticaStatus]) -> bool:
     return any(bool(r.monitoramento) for r in rules)
 
 
-def estado_resolvido(rules: list[LogisticaStatus], status_bling: str | None) -> bool:
+def estado_resolvido(
+    rules: list[LogisticaStatus],
+    status_bling: str | None,
+    *,
+    threema_enviado: bool = False,
+) -> bool:
     """True quando o pedido casa uma regra da aba Status e NÃO há mais nada a
     fazer — o painel esconde esses (`resolvido and not monitorar`).
 
@@ -93,19 +98,19 @@ def estado_resolvido(rules: list[LogisticaStatus], status_bling: str | None) -> 
         exata pendente a partir dele).
 
     Qualquer ação MANUAL pendente (abrir chamado/reembolso ou mensagem de
-    chamado/Bling/Threema) mantém a linha visível — ainda há trabalho. O
-    monitoramento é ortogonal (o front combina com `not acao_monitorar`)."""
+    chamado/Bling/Threema) mantém a linha visível — ainda há trabalho. A
+    Mensagem Threema deixa de contar quando `threema_enviado` é True (o operador
+    já disparou o aviso da linha → feito). O monitoramento é ortogonal (o front
+    combina com `not acao_monitorar`)."""
     if not rules:
         return False
     # Ação manual pendente → ainda há o que fazer, não esconde.
     for r in rules:
         if r.abrir_chamado or r.abrir_reembolso:
             return False
-        if (
-            (r.mensagem_chamado or "").strip()
-            or (r.mensagem_bling or "").strip()
-            or (r.mensagem_threema or "").strip()
-        ):
+        if (r.mensagem_chamado or "").strip() or (r.mensagem_bling or "").strip():
+            return False
+        if (r.mensagem_threema or "").strip() and not threema_enviado:
             return False
     alvos = {_norm(r.alterar_status_bling) for r in rules if _norm(r.alterar_status_bling)}
     if not alvos:

@@ -178,6 +178,24 @@ def test_estado_resolvido_acao_manual_pendente_fica():
         assert logistica_match.estado_resolvido([r], "Entregue") is False
 
 
+def test_estado_resolvido_threema_enviado_resolve():
+    # Regra só com Mensagem Threema: pendente até enviar; depois de enviado
+    # (threema_enviado=True) deixa de contar → resolvido (some).
+    so_threema = _rule(status_plataforma="x", mensagem_threema="avisar")
+    assert logistica_match.estado_resolvido([so_threema], "Entregue") is False
+    assert (
+        logistica_match.estado_resolvido([so_threema], "Entregue", threema_enviado=True)
+        is True
+    )
+    # Se ainda houver OUTRA ação (ex. mensagem_bling), enviar o Threema não
+    # resolve sozinho — segue visível.
+    misto = _rule(mensagem_threema="avisar", mensagem_bling="colar no bling")
+    assert (
+        logistica_match.estado_resolvido([misto], "Entregue", threema_enviado=True)
+        is False
+    )
+
+
 # ---- endpoint GET /api/logistica ----
 
 

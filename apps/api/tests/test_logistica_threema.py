@@ -308,6 +308,10 @@ async def test_enviar_threema_pedido_casa_regra_com_pedido_e_loja(
         pedido_marketplace="SP-777",
         meli_status={"order_status": "COMPLETED"},
     )
+    # Antes de enviar: a regra só tem Mensagem Threema → pendente, NÃO resolvido.
+    r = await client.get("/api/logistica?plataforma=shopee")
+    row = next(x for x in r.json() if x["id"] == lid)
+    assert row["acao_resolvido"] is False
     with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
         route = router.post("/send_simple").mock(
             return_value=httpx.Response(200, text="mid")
@@ -318,6 +322,10 @@ async def test_enviar_threema_pedido_casa_regra_com_pedido_e_loja(
     body = route.calls.last.request.content.decode()
     assert "to=ABCD1234" in body
     assert "Pedido+SP-777" in body and "Loja+Shopee" in body
+    # Depois de enviar: o aviso foi feito → pedido resolvido (some do painel).
+    r = await client.get("/api/logistica?plataforma=shopee")
+    row = next(x for x in r.json() if x["id"] == lid)
+    assert row["acao_resolvido"] is True
 
 
 @pytest.mark.asyncio

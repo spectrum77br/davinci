@@ -1,7 +1,7 @@
-from datetime import date
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Boolean, Date, ForeignKey, LargeBinary, Text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, LargeBinary, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -44,6 +44,12 @@ class Logistica(Base, TimestampMixin):
     # Número/ref do chamado aberto na plataforma (manual).
     chamado: Mapped[str | None] = mapped_column(Text, nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Instante em que o aviso Threema desta linha foi enviado. Enquanto NULL, a
+    # regra casada com `mensagem_threema` mantém o pedido no painel; depois de
+    # enviado a mensagem deixa de contar como pendência (o pedido resolve/some).
+    threema_enviado_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
