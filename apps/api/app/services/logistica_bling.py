@@ -20,7 +20,7 @@ enviado — pra conferir antes. `apply_mensagem_bling` faz o PUT de verdade.
 from __future__ import annotations
 
 import copy
-from datetime import UTC, date, datetime
+from datetime import date
 
 import structlog
 from sqlalchemy import func, select
@@ -35,7 +35,7 @@ from app.models import (
     SituacaoBling,
 )
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_match, logistica_rules, threema
+from app.services import logistica_match, logistica_rules
 from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
@@ -438,60 +438,3 @@ async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
             )
     await session.commit()
     return {"aplicados": aplicados, "pulados": pulados, "falhas": falhas}
-
-
-async def enviar_threema_em_lote(session: AsyncSession) -> dict[str, int]:
-    """Envia AUTOMATICAMENTE a Mensagem Threema das linhas de marketplace que
-    casam uma regra da aba Status com `mensagem_threema` e que AINDA não tiveram
-    o aviso enviado (`threema_enviado_at` NULL).
-
-    Dedupe pela própria coluna: ao enviar com sucesso carimba `threema_enviado_at`
-    — então re-rodar o recarregar/cron NÃO reenvia (sem spam). A mensagem sai já
-    com `Pedido X | Loja Y` da própria linha; destinatários vêm da lista salva na
-    regra (👤) ou da lista fixa do `.env`. Depois de enviado, a Mensagem Threema
-    deixa de contar como pendência e a linha resolve/some do painel.
-
-    - enviados: mandou o aviso e carimbou.
-    - pulados: casou regra com Threema mas o aviso já tinha sido enviado.
-    - falhas: erro no envio (não carimba → tenta de novo no próximo recarregar).
-    """
-    status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
-    todos = list((await session.execute(select(Logistica))).scalars().all())
-    alvo = (
-        _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS | _TIKTOK_PLATAFORMAS | _AMAZON_PLATAFORMAS
-    )
-    rows = [r for r in todos if (r.plataforma or "").strip().lower() in alvo]
-    client = threema.ThreemaClient()
-    enviados = pulados = falhas = 0
-    for row in rows:
-        assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
-        cands = logistica_match.find_matching_rules(
-            status_rows, assinatura=assinatura, plataforma=row.plataforma
-        )
-        rule = next((c for c in cands if (c.mensagem_threema or "").strip()), None)
-        if rule is None:
-            continue
-        if row.threema_enviado_at is not None:
-            pulados += 1  # já avisado antes → dedupe
-            continue
-        texto = threema.compose_texto(
-            (rule.mensagem_threema or "").strip(),
-            pedido=row.pedido_marketplace or row.pedido_bling,
-            loja=row.plataforma,
-        )
-        recipients = threema.parse_recipients(rule.threema_recipients) or None
-        try:
-            result = await client.send_to_all(texto, recipients=recipients)
-        except Exception as e:  # noqa: BLE001 — best-effort, não derruba o lote
-            falhas += 1
-            logger.warning(
-                "logistica_threema_lote_falha", id=str(row.id), err=str(e)[:200]
-            )
-            continue
-        if result["sent"]:
-            row.threema_enviado_at = datetime.now(UTC)
-            enviados += 1
-        else:
-            falhas += 1
-    await session.commit()
-    return {"enviados": enviados, "pulados": pulados, "falhas": falhas}

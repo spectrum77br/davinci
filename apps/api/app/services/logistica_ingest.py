@@ -147,15 +147,13 @@ async def recarregar_ml(
         session, limit=enrich_limit, only_empty=False
     )
     lote = await logistica_bling.aplicar_status_em_lote(session)
-    threema_lote = await logistica_bling.enviar_threema_em_lote(session)
     logger.info(
         "logistica_recarregar_ml",
         **{f"enrich_{k}": v for k, v in enr.items()},
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
         **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
-        **{f"status_{k}": v for k, v in lote.items()},
-        **{f"threema_{k}": v for k, v in threema_lote.items()},
+        **lote,
     )
     return {
         **{f"enrich_{k}": v for k, v in enr.items()},
@@ -163,5 +161,4 @@ async def recarregar_ml(
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
         **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
         **{f"status_{k}": v for k, v in lote.items()},
-        **{f"threema_{k}": v for k, v in threema_lote.items()},
     }
