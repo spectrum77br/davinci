@@ -759,3 +759,66 @@ async def test_recarregar_enfileira_job(
     assert r.status_code == 200, r.text
     assert r.json()["enqueued"] is True
     assert calls == ["logistica_recarregar"]
+
+
+@pytest.mark.asyncio
+async def test_enviar_threema_em_lote(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """O MOTOR envia sozinho a Mensagem Threema das linhas que casam regra com
+    `mensagem_threema` e ainda não avisadas, carimba `threema_enviado_at` (dedupe)
+    e não reenvia no run seguinte. A mensagem sai com Pedido/Loja da linha."""
+    auth_as(admin)
+    meli = {"order_status": "COMPLETED"}
+    chave = logistica_rules.assinatura_para("Shopee", meli)  # "Concluído"
+    rs = await client.post(
+        "/api/logistica/status",
+        json={
+            "status_plataforma": chave,
+            "plataforma": "Shopee",
+            "mensagem_threema": "Esse pedido foi concluído!",
+            "threema_recipients": "AAAA1111",
+        },
+    )
+    assert rs.status_code == 201, rs.text
+    rc = await client.post(
+        "/api/logistica",
+        json={
+            "plataforma": "Shopee",
+            "pedido_bling": "99010",
+            "pedido_marketplace": "SP-777",
+            "meli_status": meli,
+        },
+    )
+    assert rc.status_code == 201, rc.text
+
+    enviados: list[tuple[str, list[str] | None]] = []
+
+    async def _fake_send_to_all(self, text, recipients=None):
+        enviados.append((text, recipients))
+        return {"sent": recipients or ["AAAA1111"], "failed": []}
+
+    monkeypatch.setattr(
+        logistica_bling.threema.ThreemaClient, "send_to_all", _fake_send_to_all
+    )
+
+    out = await logistica_bling.enviar_threema_em_lote(db)
+    assert out == {"enviados": 1, "pulados": 0, "falhas": 0}
+    assert len(enviados) == 1
+    texto, recips = enviados[0]
+    assert "Pedido SP-777" in texto and "Loja Shopee" in texto
+    assert "Esse pedido foi concluído!" in texto
+    assert recips == ["AAAA1111"]  # lista salva na regra (👤)
+    row = (
+        await db.execute(select(Logistica).where(Logistica.pedido_bling == "99010"))
+    ).scalar_one()
+    assert row.threema_enviado_at is not None
+
+    # 2ª rodada: dedupe pela coluna — não reenvia.
+    out2 = await logistica_bling.enviar_threema_em_lote(db)
+    assert out2 == {"enviados": 0, "pulados": 1, "falhas": 0}
+    assert len(enviados) == 1
