@@ -225,3 +225,122 @@ async def test_enviar_threema_status_inexistente_404(
     r = await client.post(f"/api/logistica/status/{uuid.uuid4()}/enviar-threema")
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "logistica_status_not_found"
+
+
+# ---- destinatários salvos por regra (👤) + envio por LINHA do marketplace ----
+
+
+async def test_status_persiste_threema_recipients(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    sid = await _cria_status(
+        client,
+        status_plataforma="x",
+        mensagem_threema="oi",
+        threema_recipients="ABCD1234,EFGH5678",
+    )
+    # veio de volta no GET.
+    r = await client.get("/api/logistica/status")
+    row = next(x for x in r.json() if x["id"] == sid)
+    assert row["threema_recipients"] == "ABCD1234,EFGH5678"
+    # patch atualiza; vazio zera pra NULL.
+    r = await client.patch(
+        f"/api/logistica/status/{sid}", json={"threema_recipients": "ABCD1234"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["threema_recipients"] == "ABCD1234"
+    r = await client.patch(
+        f"/api/logistica/status/{sid}", json={"threema_recipients": ""}
+    )
+    assert r.json()["threema_recipients"] is None
+
+
+@pytest.mark.asyncio
+async def test_enviar_threema_usa_recipients_salvos_da_regra(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """Sem body, o envio da aba Status cai na lista salva na regra (👤), não no
+    `.env`."""
+    auth_as(admin)
+    sid = await _cria_status(
+        client,
+        status_plataforma="x",
+        mensagem_threema="avisar",
+        threema_recipients="EFGH5678",
+    )
+    with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
+        route = router.post("/send_simple").mock(
+            return_value=httpx.Response(200, text="mid")
+        )
+        r = await client.post(f"/api/logistica/status/{sid}/enviar-threema")
+    assert r.status_code == 200, r.text
+    # só o salvo na regra (EFGH5678), não os 2 do .env.
+    assert r.json()["sent"] == ["EFGH5678"]
+    assert len(route.calls) == 1
+    assert "to=EFGH5678" in route.calls.last.request.content.decode()
+
+
+async def _cria_logistica(client: AsyncClient, **extra) -> str:
+    r = await client.post("/api/logistica", json=extra)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_enviar_threema_pedido_casa_regra_com_pedido_e_loja(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """Da LINHA do marketplace: acha a regra casada (coligação), injeta
+    Pedido/Loja da própria linha e usa os destinatários salvos na regra."""
+    auth_as(admin)
+    await _cria_status(
+        client,
+        plataforma="Shopee",
+        status_plataforma="Concluído",
+        mensagem_threema="pedido concluído, avisar",
+        threema_recipients="ABCD1234",
+    )
+    lid = await _cria_logistica(
+        client,
+        plataforma="Shopee",
+        conta="Poofy",
+        pedido_marketplace="SP-777",
+        meli_status={"order_status": "COMPLETED"},
+    )
+    with respx.mock(base_url=threema.THREEMA_API_BASE) as router:
+        route = router.post("/send_simple").mock(
+            return_value=httpx.Response(200, text="mid")
+        )
+        r = await client.post(f"/api/logistica/{lid}/enviar-threema")
+    assert r.status_code == 200, r.text
+    assert r.json()["sent"] == ["ABCD1234"]
+    body = route.calls.last.request.content.decode()
+    assert "to=ABCD1234" in body
+    assert "Pedido+SP-777" in body and "Loja+Shopee" in body
+
+
+@pytest.mark.asyncio
+async def test_enviar_threema_pedido_sem_regra_422(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    lid = await _cria_logistica(
+        client,
+        plataforma="Shopee",
+        pedido_marketplace="SP-1",
+        meli_status={"order_status": "COMPLETED"},
+    )
+    r = await client.post(f"/api/logistica/{lid}/enviar-threema")
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "logistica_sem_mensagem_threema"
+
+
+@pytest.mark.asyncio
+async def test_enviar_threema_pedido_inexistente_404(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    auth_as(admin)
+    r = await client.post(f"/api/logistica/{uuid.uuid4()}/enviar-threema")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "logistica_not_found"

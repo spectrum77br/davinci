@@ -86,6 +86,10 @@ class LogisticaStatus(Base, TimestampMixin):
     mensagem_bling: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Mensagem a enviar às pessoas (Threema) notificando o problema.
     mensagem_threema: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Threema IDs escolhidos pra ESTA regra (separados por vírgula). Salvos pelo
+    # seletor 👤 da aba Status; o envio usa essa lista por padrão. Vazio = lista
+    # fixa do `.env`.
+    threema_recipients: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

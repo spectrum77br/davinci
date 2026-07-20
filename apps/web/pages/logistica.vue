@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -535,6 +535,7 @@ type LogisticaStatus = {
   mensagem_chamado: string | null
   mensagem_bling: string | null
   mensagem_threema: string | null
+  threema_recipients: string | null
   anexos: Anexo[]
   created_by: string | null
   created_at: string
@@ -747,12 +748,14 @@ async function removeStatusRow(s: LogisticaStatus) {
   }
 }
 
-// ---- Enviar a Mensagem Threema (notifica as pessoas do problema) ----
-// Ao clicar Enviar abre um modal pra escolher QUEM recebe (checkbox de nomes).
+// ---- Mensagem Threema (notifica as pessoas do problema) ----
+// O modal serve pra dois modos: 'salvar' (ícone 👤 guarda QUEM recebe na regra,
+// porque vai virar automático) e 'enviar' (dispara agora pros escolhidos).
 type ThreemaDestinatario = { id: string; nome: string }
 const threemaDestinatarios = ref<ThreemaDestinatario[]>([])
 const threemaModal = reactive({
   open: false,
+  mode: 'enviar' as 'enviar' | 'salvar',
   status: null as LogisticaStatus | null,
   selecionados: new Set<string>(),
   sending: false,
@@ -769,12 +772,38 @@ async function loadThreemaDestinatarios() {
   }
 }
 
+// IDs salvos na regra (string "A,B" → Set). Se vazio, cai em "todos".
+function parseThreemaIds(raw: string | null): Set<string> {
+  if (!raw) return new Set()
+  return new Set(
+    raw
+      .split(/[,;\s]+/)
+      .map((x) => x.trim().toUpperCase())
+      .filter(Boolean),
+  )
+}
+
+function preselecionarThreema(s: LogisticaStatus): Set<string> {
+  const salvos = parseThreemaIds(s.threema_recipients)
+  if (salvos.size) return salvos
+  return new Set(threemaDestinatarios.value.map((d) => d.id))
+}
+
+// 👤 — escolher e SALVAR na regra quem recebe (base do envio automático futuro).
+async function escolherDestinatarios(s: LogisticaStatus) {
+  await loadThreemaDestinatarios()
+  threemaModal.mode = 'salvar'
+  threemaModal.status = s
+  threemaModal.selecionados = preselecionarThreema(s)
+  threemaModal.open = true
+}
+
 async function enviarThreema(s: LogisticaStatus) {
   if (!s.mensagem_threema) return
   await loadThreemaDestinatarios()
+  threemaModal.mode = 'enviar'
   threemaModal.status = s
-  // pré-seleciona todos.
-  threemaModal.selecionados = new Set(threemaDestinatarios.value.map((d) => d.id))
+  threemaModal.selecionados = preselecionarThreema(s)
   threemaModal.open = true
 }
 
@@ -783,7 +812,7 @@ function toggleThreemaDest(id: string) {
   else threemaModal.selecionados.add(id)
 }
 
-async function confirmarEnviarThreema() {
+async function confirmarThreemaModal() {
   const s = threemaModal.status
   if (!s) return
   const recipients = [...threemaModal.selecionados]
@@ -795,6 +824,16 @@ async function confirmarEnviarThreema() {
   setStatusBusy(s.id, true)
   statusError.value = null
   try {
+    if (threemaModal.mode === 'salvar') {
+      await patchStatusField(s.id, { threema_recipients: recipients.join(',') })
+      if (statusError.value) {
+        toasts.error('Não foi possível salvar', statusError.value)
+        return
+      }
+      toasts.success('Destinatários salvos', `${recipients.length} contato(s)`)
+      threemaModal.open = false
+      return
+    }
     const r = await api<{ sent: string[]; failed: string[] }>(
       `/api/logistica/status/${s.id}/enviar-threema`,
       { method: 'POST', body: { recipients } },
@@ -808,10 +847,36 @@ async function confirmarEnviarThreema() {
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     statusError.value = code
-    toasts.error('Não foi possível enviar', code)
+    toasts.error(threemaModal.mode === 'salvar' ? 'Não foi possível salvar' : 'Não foi possível enviar', code)
   } finally {
     threemaModal.sending = false
     setStatusBusy(s.id, false)
+  }
+}
+
+// Enviar Threema a partir de uma LINHA do marketplace (aba Amazon/Shopee/etc):
+// o servidor acha a regra casada (coligação), injeta Pedido/Loja da própria
+// linha e usa os destinatários salvos na regra.
+async function enviarThreemaPedido(c: Logistica) {
+  if (!confirm(`Enviar aviso Threema do pedido ${c.pedido_marketplace || c.pedido_bling || ''} (loja ${c.plataforma || '—'})?`)) return
+  refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
+  try {
+    const r = await api<{ sent: string[]; failed: string[] }>(
+      `/api/logistica/${c.id}/enviar-threema`,
+      { method: 'POST' },
+    )
+    if (r.failed.length) {
+      toasts.error(`Enviado a ${r.sent.length}, falhou ${r.failed.length}`, r.failed.join(', '))
+    } else {
+      toasts.success('Mensagem Threema enviada', `${r.sent.length} destinatário(s)`)
+    }
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    toasts.error('Não foi possível enviar', code)
+  } finally {
+    const s = new Set(refreshingMeli.value)
+    s.delete(c.id)
+    refreshingMeli.value = s
   }
 }
 
@@ -1216,6 +1281,15 @@ async function aplicarStatusBling(c: Logistica) {
                   >
                     <NotebookPen class="size-3.5" :class="aplicandoBling.has(c.id) ? 'animate-pulse' : ''" />
                   </button>
+                  <button
+                    v-if="canEdit && c.pedido_marketplace && c.acao_resumo.includes('Mensagem Threema')"
+                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    title="Enviar aviso Threema deste pedido (com pedido e loja)"
+                    :disabled="refreshingMeli.has(c.id)"
+                    @click.stop="enviarThreemaPedido(c)"
+                  >
+                    <MessageCircle class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-pulse' : ''" />
+                  </button>
                 </div>
               </td>
               <td class="px-3 py-2 whitespace-nowrap">
@@ -1303,6 +1377,15 @@ async function aplicarStatusBling(c: Logistica) {
           >
             <NotebookPen class="size-3" :class="aplicandoBling.has(c.id) ? 'animate-pulse' : ''" />
             Mensagem Bling
+          </button>
+          <button
+            v-if="canEdit && c.pedido_marketplace && c.acao_resumo.includes('Mensagem Threema')"
+            class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border hover:bg-muted/40 disabled:opacity-50"
+            :disabled="refreshingMeli.has(c.id)"
+            @click.stop="enviarThreemaPedido(c)"
+          >
+            <MessageCircle class="size-3" :class="refreshingMeli.has(c.id) ? 'animate-pulse' : ''" />
+            Enviar Threema
           </button>
         </div>
         <div v-if="!loading && filteredRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
@@ -1538,15 +1621,24 @@ async function aplicarStatusBling(c: Logistica) {
                   @keydown.esc="cancelEdit"
                 />
                 <span v-else class="break-words whitespace-pre-line" :class="[canEdit ? 'cursor-text' : '', s.mensagem_threema ? 'text-muted-foreground' : 'text-muted-foreground/60']">{{ s.mensagem_threema || '—' }}</span>
-                <button
-                  v-if="canEdit && s.mensagem_threema"
-                  class="mt-1 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-primary hover:bg-primary/10 disabled:opacity-50"
-                  title="Enviar Mensagem Threema aos destinatários"
-                  :disabled="statusBusy.has(s.id)"
-                  @click.stop="enviarThreema(s)"
-                >
-                  <Send class="size-3" /> Enviar
-                </button>
+                <div v-if="canEdit && s.mensagem_threema" class="mt-1 flex items-center gap-1">
+                  <button
+                    class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-primary hover:bg-primary/10 disabled:opacity-50"
+                    title="Enviar Mensagem Threema aos destinatários"
+                    :disabled="statusBusy.has(s.id)"
+                    @click.stop="enviarThreema(s)"
+                  >
+                    <Send class="size-3" /> Enviar
+                  </button>
+                  <button
+                    class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-50"
+                    :title="s.threema_recipients ? `Destinatários salvos: ${s.threema_recipients}` : 'Escolher quem recebe (salvar na regra)'"
+                    :disabled="statusBusy.has(s.id)"
+                    @click.stop="escolherDestinatarios(s)"
+                  >
+                    <UserRound class="size-3" />
+                  </button>
+                </div>
               </td>
               <!-- Ação -->
               <td v-if="canEdit" class="px-2 py-1 align-top text-center">
@@ -1695,14 +1787,23 @@ async function aplicarStatusBling(c: Logistica) {
               class="w-full rounded border bg-background px-2 py-1 text-sm resize-y"
               @change="patchStatusField(s.id, { mensagem_threema: ($event.target as HTMLTextAreaElement).value.trim() || null })"
             />
-            <button
-              v-if="canEdit && s.mensagem_threema"
-              class="mt-1 inline-flex items-center gap-1 rounded border px-2 py-1 text-xs text-primary hover:bg-primary/10 disabled:opacity-50"
-              :disabled="statusBusy.has(s.id)"
-              @click="enviarThreema(s)"
-            >
-              <Send class="size-3.5" /> Enviar Threema
-            </button>
+            <div v-if="canEdit && s.mensagem_threema" class="mt-1 flex items-center gap-1">
+              <button
+                class="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs text-primary hover:bg-primary/10 disabled:opacity-50"
+                :disabled="statusBusy.has(s.id)"
+                @click="enviarThreema(s)"
+              >
+                <Send class="size-3.5" /> Enviar Threema
+              </button>
+              <button
+                class="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs text-muted-foreground hover:bg-muted disabled:opacity-50"
+                :title="s.threema_recipients ? `Destinatários salvos: ${s.threema_recipients}` : 'Escolher quem recebe (salvar na regra)'"
+                :disabled="statusBusy.has(s.id)"
+                @click="escolherDestinatarios(s)"
+              >
+                <UserRound class="size-3.5" />
+              </button>
+            </div>
           </div>
         </div>
         <div v-if="!statusLoading && statusRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
@@ -1805,12 +1906,12 @@ async function aplicarStatusBling(c: Logistica) {
     <div v-if="threemaModal.open" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="threemaModal.open = false">
       <div class="bg-background border rounded-lg w-full max-w-sm p-5 space-y-4">
         <div class="flex items-center">
-          <h2 class="text-lg font-semibold">Enviar Threema</h2>
+          <h2 class="text-lg font-semibold">{{ threemaModal.mode === 'salvar' ? 'Destinatários da regra' : 'Enviar Threema' }}</h2>
           <Button class="ml-auto" size="sm" variant="ghost" @click="threemaModal.open = false">
             <X class="size-4" />
           </Button>
         </div>
-        <p class="text-sm text-muted-foreground">Escolha quem recebe a mensagem.</p>
+        <p class="text-sm text-muted-foreground">{{ threemaModal.mode === 'salvar' ? 'Escolha quem recebe o aviso desta regra (usado no envio e no automático).' : 'Escolha quem recebe a mensagem.' }}</p>
         <div v-if="!threemaDestinatarios.length" class="text-sm text-muted-foreground">
           Nenhum destinatário configurado.
         </div>
@@ -1833,10 +1934,12 @@ async function aplicarStatusBling(c: Logistica) {
           <Button variant="ghost" @click="threemaModal.open = false">Cancelar</Button>
           <Button
             :disabled="threemaModal.sending || !threemaModal.selecionados.size"
-            @click="confirmarEnviarThreema"
+            @click="confirmarThreemaModal"
           >
-            <Send class="size-4 mr-1" />
-            {{ threemaModal.sending ? 'Enviando…' : 'Enviar' }}
+            <component :is="threemaModal.mode === 'salvar' ? UserRound : Send" class="size-4 mr-1" />
+            {{ threemaModal.sending
+              ? (threemaModal.mode === 'salvar' ? 'Salvando…' : 'Enviando…')
+              : (threemaModal.mode === 'salvar' ? 'Salvar' : 'Enviar') }}
           </Button>
         </div>
       </div>

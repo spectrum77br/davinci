@@ -90,6 +90,7 @@ class LogisticaStatusOut(BaseModel):
     mensagem_chamado: str | None = None
     mensagem_bling: str | None = None
     mensagem_threema: str | None = None
+    threema_recipients: str | None = None
     anexos: list[AnexoOut] = Field(default_factory=list)
     created_by: UUID | None = None
     created_at: datetime
@@ -107,6 +108,7 @@ class LogisticaStatusCreate(BaseModel):
     mensagem_chamado: str | None = None
     mensagem_bling: str | None = None
     mensagem_threema: str | None = None
+    threema_recipients: str | None = None
 
 
 class LogisticaStatusPatch(BaseModel):
@@ -120,6 +122,7 @@ class LogisticaStatusPatch(BaseModel):
     mensagem_chamado: str | None = None
     mensagem_bling: str | None = None
     mensagem_threema: str | None = None
+    threema_recipients: str | None = None
 
 
 class ThreemaDestinatarioOut(BaseModel):

@@ -128,6 +128,7 @@ def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
         mensagem_chamado=s.mensagem_chamado,
         mensagem_bling=s.mensagem_bling,
         mensagem_threema=s.mensagem_threema,
+        threema_recipients=s.threema_recipients,
         anexos=[
             AnexoOut(
                 id=a.id,
@@ -236,6 +237,7 @@ async def create_status(
         mensagem_chamado=_clean(body.mensagem_chamado),
         mensagem_bling=_clean(body.mensagem_bling),
         mensagem_threema=_clean(body.mensagem_threema),
+        threema_recipients=_clean(body.threema_recipients),
         created_by=user.id,
     )
     session.add(s)
@@ -276,6 +278,8 @@ async def patch_status(
         s.mensagem_bling = _clean(data["mensagem_bling"])
     if "mensagem_threema" in data:
         s.mensagem_threema = _clean(data["mensagem_threema"])
+    if "threema_recipients" in data:
+        s.threema_recipients = _clean(data["threema_recipients"])
 
     await session.commit()
     s = await _load_status(session, s.id)
@@ -317,10 +321,14 @@ async def enviar_threema(
         raise HTTPException(422, detail={"code": "logistica_sem_mensagem_threema"})
     if payload.recipients is not None and not payload.recipients:
         raise HTTPException(422, detail={"code": "logistica_sem_destinatario_threema"})
+    # Destinatários: escolha explícita do body > lista salva na regra (👤) > .env.
+    recipients = payload.recipients
+    if recipients is None:
+        recipients = threema.parse_recipients(s.threema_recipients) or None
     texto = threema.compose_texto(texto, pedido=payload.pedido, loja=payload.loja)
     try:
         result = await threema.ThreemaClient().send_to_all(
-            texto, recipients=payload.recipients or None
+            texto, recipients=recipients or None
         )
     except threema.ThreemaConfigError as e:
         raise HTTPException(422, detail={"code": str(e)}) from e
@@ -611,6 +619,53 @@ async def atualizar_amazon(
     await session.commit()
     await session.refresh(c)
     return _to_out(c, await _match_rules(session, c))
+
+
+@router.post("/{logistica_id}/enviar-threema", response_model=EnviarThreemaOut)
+async def enviar_threema_pedido(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+    payload: EnviarThreemaIn | None = None,
+) -> EnviarThreemaOut:
+    """Envia a Mensagem Threema da regra que CASA com este pedido (coligação da
+    aba Status), já com `Pedido X | Loja Y` no topo — vindos da própria linha do
+    marketplace. Destinatários: escolha explícita do body > lista salva na regra
+    (👤) > lista fixa do `.env`. 404 se a linha some; 422 sem regra com mensagem
+    Threema / sem destinatário / sem config."""
+    payload = payload or EnviarThreemaIn()
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    rule = next(
+        (r for r in await _match_rules(session, c) if (r.mensagem_threema or "").strip()),
+        None,
+    )
+    if rule is None:
+        raise HTTPException(422, detail={"code": "logistica_sem_mensagem_threema"})
+    if payload.recipients is not None and not payload.recipients:
+        raise HTTPException(422, detail={"code": "logistica_sem_destinatario_threema"})
+    recipients = payload.recipients
+    if recipients is None:
+        recipients = threema.parse_recipients(rule.threema_recipients) or None
+    texto = threema.compose_texto(
+        (rule.mensagem_threema or "").strip(),
+        pedido=c.pedido_marketplace or c.pedido_bling,
+        loja=c.plataforma,
+    )
+    try:
+        result = await threema.ThreemaClient().send_to_all(texto, recipients=recipients or None)
+    except threema.ThreemaConfigError as e:
+        raise HTTPException(422, detail={"code": str(e)}) from e
+    logger.info(
+        "logistica_threema_pedido_enviado",
+        id=str(logistica_id),
+        sent=len(result["sent"]),
+        failed=len(result["failed"]),
+    )
+    return EnviarThreemaOut(sent=result["sent"], failed=result["failed"])
 
 
 async def _mensagem_chamado_para(session: AsyncSession, c: Logistica) -> str | None:
