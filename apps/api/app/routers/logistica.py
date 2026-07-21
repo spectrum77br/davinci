@@ -542,6 +542,10 @@ async def atualizar_meli(
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_meli_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
         raise HTTPException(502, detail={"code": "logistica_meli_erro"}) from e
+    try:
+        await logistica_bling.sync_status_bling_row(session, c)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
     return _to_out(c, await _match_rules(session, c))
@@ -567,6 +571,10 @@ async def atualizar_shopee(
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_shopee_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
         raise HTTPException(502, detail={"code": "logistica_shopee_erro"}) from e
+    try:
+        await logistica_bling.sync_status_bling_row(session, c)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
     return _to_out(c, await _match_rules(session, c))
@@ -593,6 +601,10 @@ async def atualizar_tiktok(
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_tiktok_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
         raise HTTPException(502, detail={"code": "logistica_tiktok_erro"}) from e
+    try:
+        await logistica_bling.sync_status_bling_row(session, c)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
     return _to_out(c, await _match_rules(session, c))
@@ -619,6 +631,10 @@ async def atualizar_amazon(
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_amazon_atualizar_falhou", id=str(logistica_id), err=str(e)[:200])
         raise HTTPException(502, detail={"code": "logistica_amazon_erro"}) from e
+    try:
+        await logistica_bling.sync_status_bling_row(session, c)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
     return _to_out(c, await _match_rules(session, c))

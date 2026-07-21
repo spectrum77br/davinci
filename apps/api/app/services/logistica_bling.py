@@ -276,6 +276,26 @@ async def _situacao_nome_por_id(session: AsyncSession, sid: int) -> str | None:
     ).scalar_one_or_none()
 
 
+async def sync_status_bling_row(session: AsyncSession, row: Logistica) -> str | None:
+    """Lê a situação VIVA do pedido no Bling e sincroniza `row.status_bling` do
+    painel (que é populado só na ingestão e envelhece). Best-effort: engole
+    BlingObsError (sem pedido/integração) devolvendo None. Independe de a regra
+    ter "Alterar Status Bling" — só espelha o Bling. Devolve o nome atual."""
+    try:
+        bling_id = await _bling_order_id_for_row(session, row)
+        client = await _bling_client(session)
+    except BlingObsError:
+        return None
+    order = await client.get_order(bling_id)
+    atual_id = (order.get("situacao") or {}).get("id")
+    if atual_id is None:
+        return None
+    atual_nome = await _situacao_nome_por_id(session, int(atual_id))
+    if atual_nome and (row.status_bling or "") != atual_nome:
+        row.status_bling = atual_nome
+    return atual_nome
+
+
 async def _cand_info(session: AsyncSession, rule: LogisticaStatus) -> dict:
     """Resolve os nomes/ids de "de" (Status Atual) e "alvo" (Alterar Status
     Bling) de uma regra candidata. Levanta se o alvo não existir no catálogo."""

@@ -759,3 +759,53 @@ async def test_recarregar_enfileira_job(
     assert r.status_code == 200, r.text
     assert r.json()["enqueued"] is True
     assert calls == ["logistica_recarregar"]
+
+
+@pytest.mark.asyncio
+async def test_sync_status_bling_row_espelha_bling_vivo(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """O helper lê a situação VIVA do Bling e corrige o status_bling STALE do
+    painel — independe de haver regra com Alterar Status Bling."""
+    auth_as(admin)
+    db.add(SituacaoBling(id=15, nome="Em andamento"))
+    db.add(
+        BlingOrder(bling_id=700, numero="88800", item_codigo="s1", item_index=0, situacao="83960")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "88800", "status_bling": "Em aberto"},
+    )
+    assert rc.status_code == 201, rc.text
+
+    fake = _MultiFakeBling({700: {"id": 700, "numero": 88800, "situacao": {"id": 15}}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    row = (
+        await db.execute(select(Logistica).where(Logistica.pedido_bling == "88800"))
+    ).scalar_one()
+    nome = await logistica_bling.sync_status_bling_row(db, row)
+    await db.commit()
+    assert nome == "Em andamento"
+    assert row.status_bling == "Em andamento"
+
+
+@pytest.mark.asyncio
+async def test_sync_status_bling_row_best_effort_sem_pedido(
+    db: AsyncSession, monkeypatch
+):
+    """Sem pedido_bling (ou sem integração) engole o BlingObsError e devolve
+    None, sem tocar no status_bling."""
+    row = Logistica(plataforma="Mercado Livre", status_bling="Em aberto")
+    nome = await logistica_bling.sync_status_bling_row(db, row)
+    assert nome is None
+    assert row.status_bling == "Em aberto"
