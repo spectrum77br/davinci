@@ -11,6 +11,9 @@ const props = defineProps<{
   sku: string
   // Condição efetiva — só pro rótulo (Novo/Usado).
   condicao?: string
+  // Correção de mala/eletro: modo "destino completo" — lista os bins regionais
+  // .mala/.pi/.sp pra escolher (Novo E Usado), gravando base.<suffix>.
+  fullDestino?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -110,6 +113,17 @@ const tagChoices = computed(() => {
   ]
 })
 
+// Modo destino completo (correção de mala): todos os bins regionais + mala/eletro
+// (SEM excluir sp), gravando base.<suffix> via `suffix` (cria se não existir).
+const destinoSuffixes = computed(() => [
+  ...(data.value?.allowed_suffixes ?? []),
+  'mala',
+  'eletro',
+])
+function destinoSku(suffix: string) {
+  return data.value ? `${data.value.base}.${suffix}` : ''
+}
+
 // SKU usado a manter: base.us (ex.: dg020.us). Só pra Usado.
 const usadoSku = computed(() => (data.value ? `${data.value.base}.us` : ''))
 
@@ -206,9 +220,30 @@ function confirm() {
           </div>
         </div>
 
+        <!-- Destino completo (correção de mala): escolher o bin regional
+             .mala/.pi/.sp — grava base.<suffix> (cria no Bling se não existir),
+             tanto Novo quanto Usado. -->
+        <div v-if="fullDestino" class="space-y-1.5">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Destino do estoque</p>
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <button
+              v-for="s in destinoSuffixes"
+              :key="s"
+              type="button"
+              class="flex flex-col items-center rounded-md border px-3 py-2 text-center transition-colors"
+              :class="selectedSuffix === s ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
+              @click="pickSuffix(s)"
+            >
+              <span class="font-mono text-sm">{{ destinoSku(s) }}</span>
+              <span class="mt-0.5 text-[11px] text-muted-foreground">.{{ s }}</span>
+            </button>
+          </div>
+        </div>
+
         <!-- Bins já existentes: entrada direta de N unidades. Oculto para Usado,
-             que sempre vira produto z (não entra em bin regional existente). -->
-        <div v-if="hasExisting && !isUsado" class="space-y-1.5">
+             que sempre vira produto z (não entra em bin regional existente).
+             No destino completo (mala) mostra mesmo em Usado. -->
+        <div v-if="hasExisting && (!isUsado || fullDestino)" class="space-y-1.5">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Estoques existentes</p>
           <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
@@ -226,8 +261,9 @@ function confirm() {
         </div>
 
         <!-- Manter o SKU usado base.us (ex.: dg020.us) — só pra Usado. Entra no
-             bin se já existir, senão cria base.us (sem virar produto z). -->
-        <div v-if="isUsado" class="space-y-1.5">
+             bin se já existir, senão cria base.us (sem virar produto z).
+             No destino completo (mala) some: a grade de destino já traz .us. -->
+        <div v-if="isUsado && !fullDestino" class="space-y-1.5">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Manter SKU usado</p>
           <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
@@ -242,8 +278,9 @@ function confirm() {
           </div>
         </div>
 
-        <!-- Criar produto novo z000N.<tag> — sempre disponível (mesmo com bins). -->
-        <div class="space-y-1.5">
+        <!-- Criar produto novo z000N.<tag> — sempre disponível (mesmo com bins).
+             No destino completo (mala) some: o destino é base.<suffix>, não z. -->
+        <div v-if="!fullDestino" class="space-y-1.5">
           <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             Criar novo (<span class="font-mono normal-case">zXXXX.&lt;tag&gt;</span>)
           </p>

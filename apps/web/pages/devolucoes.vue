@@ -318,19 +318,21 @@ function onManutencaoCancel() {
 // Modal de destino de estoque: bin existente, tag p/ criar produto novo
 // (z000N.<tag>) OU `suffix` p/ manter o SKU base.<sufixo> (ex.: .us).
 type EstoqueResult = { destino_sku?: string; nova_tag?: string; suffix?: string }
-const estoqueModal = ref<{ open: boolean; sku: string; condicao: string; resolve: ((v: EstoqueResult | null) => void) | null }>(
-  { open: false, sku: '', condicao: '', resolve: null },
+const estoqueModal = ref<{ open: boolean; sku: string; condicao: string; fullDestino: boolean; resolve: ((v: EstoqueResult | null) => void) | null }>(
+  { open: false, sku: '', condicao: '', fullDestino: false, resolve: null },
 )
-function askEstoque(sku: string, condicao: string): Promise<EstoqueResult | null> {
-  return new Promise((resolve) => { estoqueModal.value = { open: true, sku, condicao, resolve } })
+// fullDestino: modo "destino completo" (correção de mala) — mostra os bins
+// regionais .mala/.pi/.sp pra escolher em Novo E Usado, criando base.<suffix>.
+function askEstoque(sku: string, condicao: string, fullDestino = false): Promise<EstoqueResult | null> {
+  return new Promise((resolve) => { estoqueModal.value = { open: true, sku, condicao, fullDestino, resolve } })
 }
 function onEstoqueConfirm(payload: EstoqueResult) {
   estoqueModal.value.resolve?.(payload)
-  estoqueModal.value = { open: false, sku: '', condicao: '', resolve: null }
+  estoqueModal.value = { open: false, sku: '', condicao: '', fullDestino: false, resolve: null }
 }
 function onEstoqueCancel() {
   estoqueModal.value.resolve?.(null)
-  estoqueModal.value = { open: false, sku: '', condicao: '', resolve: null }
+  estoqueModal.value = { open: false, sku: '', condicao: '', fullDestino: false, resolve: null }
 }
 
 /**
@@ -386,7 +388,10 @@ async function resolveStockModals(
   }
 
   // Destino de estoque: bin existente ou criação de produto novo (z000N.<tag>).
-  const dest = await askEstoque(effSku, effCondicao)
+  // Na correção de mala/eletro (forcarDestinoMala) abre em modo "destino completo":
+  // lista os bins regionais .mala/.pi/.sp pra escolher, tanto Novo quanto Usado.
+  const fullDestino = forcarDestinoMala && isMalaOrEletro(effSku)
+  const dest = await askEstoque(effSku, effCondicao, fullDestino)
   if (!dest) return null
   out.estoque_destino_sku = dest.destino_sku ?? null
   out.estoque_nova_tag = dest.nova_tag ?? null
@@ -1733,6 +1738,7 @@ async function backfillAddresses() {
       :open="estoqueModal.open"
       :sku="estoqueModal.sku"
       :condicao="estoqueModal.condicao"
+      :full-destino="estoqueModal.fullDestino"
       @confirm="onEstoqueConfirm"
       @cancel="onEstoqueCancel"
     />
