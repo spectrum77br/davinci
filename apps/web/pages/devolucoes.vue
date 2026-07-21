@@ -342,6 +342,10 @@ async function resolveStockModals(
   condicao: string | null,
   sku: string | null,
   devolverEstoque: boolean,
+  // Na correção de estoque a mala Novo NÃO volta direto no avulso: força abrir o
+  // modal de destino pra o operador escolher o bin regional (.mala/.pi/.sp),
+  // igual na devolução de pedido (lá o SKU já vem com o sufixo do pedido).
+  forcarDestinoMala = false,
 ): Promise<StockModalFields | null> {
   const empty: StockModalFields = {
     troca_sku: null, troca_condicao: null, estoque_suffix: null,
@@ -373,8 +377,10 @@ async function resolveStockModals(
   }
 
   // Mala/Eletro NOVO: volta direto no próprio SKU, sem modal de tag/bin.
-  // Usado segue a lógica de usados (modal → cria z000N.<tag>).
-  if (effCondicao === 'Novo' && isMalaOrEletro(effSku)) {
+  // Usado segue a lógica de usados (modal → cria z000N.<tag>). Na correção de
+  // estoque (forcarDestinoMala) NÃO pega o atalho: abre o modal pra escolher o
+  // bin regional (.mala/.pi/.sp), já que o avulso base não traz o sufixo.
+  if (effCondicao === 'Novo' && isMalaOrEletro(effSku) && !forcarDestinoMala) {
     out.estoque_destino_sku = effSku
     return out
   }
@@ -698,7 +704,9 @@ async function submitCorrecao() {
   const qtd = Math.max(1, Math.floor(Number(correcaoQtd.value) || 1))
   correcaoError.value = null
   // Resolve o destino pelos modais (Novo/Usado seguem a lógica já existente).
-  const extra = await resolveStockModals(correcaoCondicao.value, sku, true)
+  // forcarDestinoMala=true: na correção a mala Novo NÃO volta direto no avulso —
+  // abre o modal pra o operador escolher o bin regional (.mala/.pi/.sp).
+  const extra = await resolveStockModals(correcaoCondicao.value, sku, true, true)
   if (extra === null) return // modal cancelado → aborta sem chamar a API
   correcaoSubmitting.value = true
   try {
