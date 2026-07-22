@@ -53,6 +53,7 @@ router = APIRouter(prefix="/api/margens", tags=["margens"])
 _BLING_ORDERS_TABLE = _qualified_table("bling_orders")
 _STORES_TABLE = _qualified_table("stores")
 _SITUACAO_BLING_TABLE = _qualified_table("situacao_bling")
+_PRICING_ACCOUNTS_TABLE = _qualified_table("pricing_accounts")
 
 # Situações que compõem a rentabilidade (Em aberto / Em andamento / Entregue),
 # mesmas da rotina diária `rentabilidade_valuation.py`.
@@ -170,6 +171,24 @@ _SALDO_BLING_SQL = (
     " - COALESCE(v.bling_taxacomissao_item, 0))"
 )
 
+# Saldo Plataforma. Normalmente = líquido reconciliado do marketplace
+# (v.marketplace_liquido_base_margem_item). Na Amazon esse líquido só chega
+# DEPOIS do envio (fica NULL antes), então projetamos o saldo:
+#   valor da venda − frete projetado − comissão projetada da loja
+# onde a comissão projetada = valor da venda × commission (fração 0.19 = 19%)
+# do cadastro da conta na Tabela de Preços (pricing_accounts.commission,
+# join por pricing_account_id → pa_comm). Assim que o líquido real chega,
+# o COALESCE volta a usá-lo (a projeção é só fallback pré-envio). Só Amazon.
+_SALDO_PLATAFORMA_SQL = (
+    "COALESCE(v.marketplace_liquido_base_margem_item,"
+    " CASE WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'amazon'"
+    "           AND v.bling_valorbase_item IS NOT NULL"
+    "      THEN (v.bling_valorbase_item"
+    "            - COALESCE(v.frete_projetado_item, 0)"
+    "            - (v.bling_valorbase_item * COALESCE(pa_comm.commission, 0)))"
+    "      ELSE NULL END)"
+)
+
 # Ajuste por item: SÓ o reembolso entra no Saldo Efetivo. O `prejuizo` da tabela
 # refunds é referência visual (base pra abrir o chamado de reembolso) e NUNCA
 # desconta do saldo/margem — inclusive porque o frete que o prejuizo de Logística
@@ -215,7 +234,7 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
                 ELSE (v.marketplace_frete_item - v.marketplace_frete_real_cobrado_item)
             END                                                  AS reembolso,
             {_FRETE_RESULTADO_SQL}                               AS resultado_frete,
-            v.marketplace_liquido_base_margem_item               AS saldo_plataforma,
+            {_SALDO_PLATAFORMA_SQL}                              AS saldo_plataforma,
             {_SALDO_BLING_SQL}                                   AS saldo_bling,
             -- Saldo Efetivo = saldo realizado do item, ancorado no Bling
             -- (valor_base − frete − taxa), NÃO no líquido do marketplace. É lá
@@ -266,6 +285,8 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             {_ATTENTION_FRETE_SQL}                               AS attention_frete,
             {_ATTENTION_SALDO_SQL}                               AS attention_saldo
         FROM {source_table} v
+        LEFT JOIN {_PRICING_ACCOUNTS_TABLE} pa_comm
+            ON pa_comm.id = v.pricing_account_id
         LEFT JOIN LATERAL (
             SELECT bo.observacao
             FROM {_BLING_ORDERS_TABLE} bo

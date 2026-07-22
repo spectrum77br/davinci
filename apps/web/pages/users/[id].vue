@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { ArrowLeft, Save, Trash2 } from 'lucide-vue-next'
+import { ArrowLeft, Save, Trash2, X } from 'lucide-vue-next'
 import { ACTIONS, RESOURCES, RESOURCE_GROUPS, RESOURCE_LABELS, type Action, type Resource } from '~/composables/useCan'
 
 definePageMeta({ middleware: ['admin'] })
@@ -132,6 +132,20 @@ function addSalesTeam() {
     salesTeamOptions.value = [...salesTeamOptions.value, n].sort((a, b) => a - b)
   }
   newSalesTeam.value = ''
+}
+
+// Rótulo estilo Valuation: empresa 1 + subtime → "1.<n>". O número cru
+// (n) segue sendo a chave gravada no banco (sales_team) — só o display muda.
+function teamLabel(n: number) {
+  return `1.${n}`
+}
+
+// Remove a equipe das opções visíveis E da seleção do user. Some da lista
+// (o número não é apagado de outros usuários/lojas — só sai daqui).
+function removeSalesTeamOption(n: number) {
+  salesTeamOptions.value = salesTeamOptions.value.filter((x) => x !== n)
+  const i = form.sales_teams.indexOf(n)
+  if (i >= 0) form.sales_teams.splice(i, 1)
 }
 
 const perms = reactive<Record<Resource, ResourcePerm>>(
@@ -357,18 +371,28 @@ async function removeUser() {
               v-if="salesTeamOptions.length"
               class="grid grid-cols-2 md:grid-cols-6 gap-1.5 mt-1 border rounded-md p-2 bg-background"
             >
-              <label
+              <div
                 v-for="n in salesTeamOptions"
                 :key="n"
-                class="inline-flex items-center gap-1.5 text-sm cursor-pointer hover:bg-muted/50 rounded px-1.5 py-0.5"
+                class="group inline-flex items-center gap-1.5 text-sm rounded px-1.5 py-0.5 hover:bg-muted/50"
               >
-                <input
-                  type="checkbox"
-                  :checked="form.sales_teams.includes(n)"
-                  @change="toggleSalesTeam(n)"
-                />
-                <span>{{ n }}</span>
-              </label>
+                <label class="inline-flex items-center gap-1.5 cursor-pointer flex-1">
+                  <input
+                    type="checkbox"
+                    :checked="form.sales_teams.includes(n)"
+                    @change="toggleSalesTeam(n)"
+                  />
+                  <span>{{ teamLabel(n) }}</span>
+                </label>
+                <button
+                  type="button"
+                  title="Excluir equipe"
+                  class="text-muted-foreground/50 hover:text-destructive opacity-0 group-hover:opacity-100 transition"
+                  @click="removeSalesTeamOption(n)"
+                >
+                  <X class="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
             <p v-else class="text-[11px] text-muted-foreground mt-1 italic">
               Nenhuma equipe cadastrada ainda. Use o campo abaixo pra adicionar.
@@ -389,7 +413,7 @@ async function removeUser() {
               Multi-select de equipes de vendas (números). A loja é vinculada à equipe
               na página Lojas; aqui você seleciona quais equipes esse usuário pertence.
               <span v-if="form.sales_teams.length">
-                Selecionadas: <code>{{ form.sales_teams.join(', ') }}</code>
+                Selecionadas: <code>{{ form.sales_teams.map(teamLabel).join(', ') }}</code>
               </span>
             </p>
           </div>
