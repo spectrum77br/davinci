@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
+from app.deps.team_scope import resolve_team_scope
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
@@ -62,6 +63,13 @@ async def list_listings(
 ) -> ListingPage:
     stmt = select(Listing).where(user_scope(Listing, user))
     count_stmt = select(func.count()).select_from(Listing).where(user_scope(Listing, user))
+
+    # Escopo por equipe: usuário não-admin com equipe(s) só vê os anúncios das
+    # integrações das lojas da sua equipe (admin / sem-equipe = irrestrito).
+    scope = await resolve_team_scope(session, user)
+    if not scope.unrestricted:
+        stmt = stmt.where(Listing.integration_id.in_(scope.integration_ids))
+        count_stmt = count_stmt.where(Listing.integration_id.in_(scope.integration_ids))
 
     if integration_id:
         stmt = stmt.where(Listing.integration_id == integration_id)

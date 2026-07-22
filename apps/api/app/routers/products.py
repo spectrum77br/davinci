@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
+from app.deps.team_scope import resolve_team_scope
 from app.models import (
     Integration,
     IntegrationPlatform,
@@ -135,6 +136,19 @@ async def list_products(
 ) -> ProductPage:
     stmt = select(Product).where(user_scope(Product, user))
     count_stmt = select(func.count()).select_from(Product).where(user_scope(Product, user))
+    # Escopo por equipe: usuário não-admin com equipe(s) só vê os produtos que
+    # têm vínculo com uma integração das lojas da sua equipe (admin / sem-equipe
+    # = irrestrito). Casamos via EXISTS pra não duplicar linhas.
+    scope = await resolve_team_scope(session, user)
+    if not scope.unrestricted:
+        team_link = select(ProductLink.id).where(
+            and_(
+                ProductLink.product_id == Product.id,
+                ProductLink.integration_id.in_(scope.integration_ids),
+            )
+        ).exists()
+        stmt = stmt.where(team_link)
+        count_stmt = count_stmt.where(team_link)
     if search:
         like = f"%{search}%"
         cond = or_(Product.sku.ilike(like), Product.name.ilike(like))

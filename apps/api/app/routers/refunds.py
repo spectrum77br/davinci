@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
+from app.deps.team_scope import TeamScope, resolve_team_scope
 from app.models import BlingOrder, Refund, SituacaoBling, User
 from app.schemas.refunds import (
     RefundCreate,
@@ -61,6 +62,31 @@ def _search_clause(search: str):
         ),
         q,
     )
+
+
+def _team_scope_clause(scope: TeamScope):
+    """Restringe os reembolsos à equipe do usuário (não-admin com equipe). Casa
+    por `conta` (nome da conta normalizado) OU por `pedido_bling` de um pedido
+    das lojas da equipe (bling_orders.loja == bling_store_id). Retorna None
+    quando irrestrito (admin / sem equipe). Sem chaves = clause que zera."""
+    if scope.unrestricted:
+        return None
+    ors = []
+    if scope.account_names:
+        ors.append(
+            func.lower(func.btrim(Refund.conta)).in_(scope.account_names)
+        )
+    if scope.bling_store_ids:
+        ors.append(
+            Refund.pedido_bling.in_(
+                select(BlingOrder.numero).where(
+                    BlingOrder.loja.in_(scope.bling_store_ids)
+                )
+            )
+        )
+    if not ors:
+        return text("1=0")
+    return or_(*ors)
 
 
 async def _situacoes_by_pedido(
@@ -148,7 +174,7 @@ def _build_where(
 @router.get("", response_model=RefundPage)
 async def list_refunds(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("reembolso", "view"))],
+    user: Annotated[User, Depends(require_permission("reembolso", "view"))],
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     search: str | None = Query(None),
@@ -159,6 +185,9 @@ async def list_refunds(
     data_fim: date | None = Query(None),
 ) -> RefundPage:
     where = _build_where(search, platform, tipo, conferido, data_inicio, data_fim)
+    team_clause = _team_scope_clause(await resolve_team_scope(session, user))
+    if team_clause is not None:
+        where = [*where, team_clause]
 
     stmt = (
         select(Refund)

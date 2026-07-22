@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user, require_permission
+from app.deps.team_scope import resolve_team_scope
 from app.models import (
     Integration,
     IntegrationPlatform,
@@ -106,17 +107,21 @@ def _make_token_save_callback(session: AsyncSession, integ: Integration):
 @router.get("", response_model=list[IntegrationOut])
 async def list_integrations(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_active_user)],
+    user: Annotated[User, Depends(require_active_user)],
 ) -> list[IntegrationOut]:
     # Integrações arquivadas (loja suspensa tirada de circulação em Lojas) somem
     # do filtro de contas e de Produtos. archived_at NULL = ativa.
-    rows = (
-        await session.execute(
-            select(Integration)
-            .where(Integration.archived_at.is_(None))
-            .order_by(Integration.created_at.desc())
-        )
-    ).scalars().all()
+    stmt = (
+        select(Integration)
+        .where(Integration.archived_at.is_(None))
+        .order_by(Integration.created_at.desc())
+    )
+    # Escopo por equipe: usuário não-admin com equipe(s) só vê as integrações
+    # das lojas da sua equipe (admin / sem-equipe = irrestrito).
+    scope = await resolve_team_scope(session, user)
+    if not scope.unrestricted:
+        stmt = stmt.where(Integration.id.in_(scope.integration_ids))
+    rows = (await session.execute(stmt)).scalars().all()
     out: list[IntegrationOut] = []
     for i in rows:
         s = await _resolve_store(session, i)

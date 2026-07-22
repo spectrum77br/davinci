@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_active_user, require_permission, user_scope
+from app.deps.team_scope import resolve_team_scope
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
@@ -519,6 +520,11 @@ async def list_sync_logs(
     offset: int = Query(0, ge=0),
 ) -> SyncLogPage:
     where = [user_scope(SyncLog, user)]
+    # Escopo por equipe: não-admin com equipe(s) só vê os logs das integrações
+    # das lojas da sua equipe (admin / sem-equipe = irrestrito).
+    scope = await resolve_team_scope(session, user)
+    if not scope.unrestricted:
+        where.append(SyncLog.integration_id.in_(scope.integration_ids))
     if platform:
         where.append(SyncLog.platform == platform)
     if status_:
@@ -565,15 +571,14 @@ async def sync_logs_stats(
     window_hours: int = Query(24, ge=1, le=168),
 ) -> SyncLogStats:
     cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
+    stats_where = [user_scope(SyncLog, user), SyncLog.created_at >= cutoff]
+    scope = await resolve_team_scope(session, user)
+    if not scope.unrestricted:
+        stats_where.append(SyncLog.integration_id.in_(scope.integration_ids))
     rows = (
         await session.execute(
             select(SyncLog.platform, SyncLog.status, func.count())
-            .where(
-                and_(
-                    user_scope(SyncLog, user),
-                    SyncLog.created_at >= cutoff,
-                )
-            )
+            .where(and_(*stats_where))
             .group_by(SyncLog.platform, SyncLog.status)
         )
     ).all()

@@ -20,13 +20,21 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Logistica, LogisticaStatus, LogisticaStatusAnexo, SituacaoBling, User
+from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.models import (
+    BlingOrder,
+    Logistica,
+    LogisticaStatus,
+    LogisticaStatusAnexo,
+    SituacaoBling,
+    User,
+)
 from app.config import get_settings
 from app.schemas.logistica import (
     AnexoOut,
@@ -453,10 +461,33 @@ async def delete_status_anexo(
 # ---- Aba Logística (casos) ----
 
 
+def _team_scope_clause(scope: TeamScope):
+    """Restringe a Logística à equipe do usuário (não-admin com equipe). Casa
+    por `conta` (nome da conta normalizado) OU por `pedido_bling` de um pedido
+    das lojas da equipe (bling_orders.loja == bling_store_id). Retorna None
+    quando irrestrito (admin / sem equipe). Sem chaves = clause que zera."""
+    if scope.unrestricted:
+        return None
+    ors = []
+    if scope.account_names:
+        ors.append(func.lower(func.btrim(Logistica.conta)).in_(scope.account_names))
+    if scope.bling_store_ids:
+        ors.append(
+            Logistica.pedido_bling.in_(
+                select(BlingOrder.numero).where(
+                    BlingOrder.loja.in_(scope.bling_store_ids)
+                )
+            )
+        )
+    if not ors:
+        return text("1=0")
+    return or_(*ors)
+
+
 @router.get("", response_model=list[LogisticaOut])
 async def list_logistica(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("logistica", "view"))],
+    user: Annotated[User, Depends(require_permission("logistica", "view"))],
     plataforma: Annotated[str | None, Query()] = None,
 ) -> list[LogisticaOut]:
     # Mais recentes primeiro (data desc, depois criação desc).
@@ -466,6 +497,11 @@ async def list_logistica(
     if plataforma:
         label = _PLATAFORMA_LABELS.get(plataforma.strip().lower(), plataforma)
         stmt = stmt.where(Logistica.plataforma == label)
+    # Escopo por equipe: não-admin com equipe(s) só vê as linhas das lojas da
+    # sua equipe (admin / sem-equipe = irrestrito).
+    team_clause = _team_scope_clause(await resolve_team_scope(session, user))
+    if team_clause is not None:
+        stmt = stmt.where(team_clause)
     rows = (await session.execute(stmt)).scalars().all()
     # Casa cada pedido com a regra da aba Status (carrega o índice uma vez).
     status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())

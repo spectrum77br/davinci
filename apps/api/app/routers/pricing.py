@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
+from app.deps.team_scope import resolve_team_scope
 from app.models import (
     AuditDismissedSku,
     BackgroundJob,
@@ -224,6 +225,21 @@ def _exclude_archived_accounts(stmt):
     )
 
 
+def _team_scope_accounts(stmt, scope):
+    """Restringe as contas da Tabela de Preço às lojas da equipe do usuário
+    (não-admin com equipe). A conta casa por `store_info_id` OU por
+    `integration_id` da(s) loja(s) da equipe. Aplicado no `/accounts` E no
+    `/grid` (as colunas do grid vêm da mesma fonte de contas)."""
+    if scope.unrestricted:
+        return stmt
+    return stmt.where(
+        or_(
+            PricingAccount.store_info_id.in_(scope.store_info_ids),
+            PricingAccount.integration_id.in_(scope.integration_ids),
+        )
+    )
+
+
 @router.get("/accounts", response_model=list[PricingAccountOut])
 async def list_accounts(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -243,6 +259,7 @@ async def list_accounts(
     if platform:
         stmt = stmt.where(PricingAccount.platform == _coerce_platform(platform))
     stmt = _exclude_archived_accounts(stmt)
+    stmt = _team_scope_accounts(stmt, await resolve_team_scope(session, user))
     stmt = stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
     rows = (await session.execute(stmt)).scalars().all()
     names_by_id = await _segment_names_by_id(session)
@@ -995,6 +1012,11 @@ async def get_grid(
     # Mesma exclusão do `/accounts`: conta de loja/integração arquivada não
     # pode virar coluna no grid de preços.
     accounts_stmt = _exclude_archived_accounts(accounts_stmt)
+    # Mesmo escopo por equipe do `/accounts`: as colunas do grid não podem
+    # mostrar contas de lojas fora da equipe do usuário.
+    accounts_stmt = _team_scope_accounts(
+        accounts_stmt, await resolve_team_scope(session, user)
+    )
     accounts = (
         await session.execute(
             accounts_stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
