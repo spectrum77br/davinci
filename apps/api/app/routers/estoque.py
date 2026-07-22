@@ -1101,7 +1101,7 @@ async def sync_stocks(
     returns the count of products it managed to refresh."""
     import asyncio
 
-    from app.services.marketing.bling_revenue import _resolve_bling_client
+    from app.services.devolution_stock_return import _get_bling_client
 
     tags = _resolve_tags(user, tag)
 
@@ -1122,7 +1122,7 @@ async def sync_stocks(
     if not products:
         return {"updated": 0, "missing_bling_data": 0, "total_products": 0}
 
-    client = await _resolve_bling_client(session)
+    client = await _get_bling_client(session)
     if client is None:
         raise HTTPException(503, detail={"code": "bling_not_connected"})
 
@@ -1463,7 +1463,7 @@ async def estoque_atualizar_bling(
     another caller already started it."""
     import asyncio
 
-    from app.services.marketing.bling_revenue import _resolve_bling_client
+    from app.services.devolution_stock_return import _get_bling_client
 
     if _refresh_state["running"]:
         raise HTTPException(409, detail={
@@ -1485,7 +1485,7 @@ async def estoque_atualizar_bling(
         if not products:
             return {"success": True, "updated": 0, "total_products": 0}
 
-        client = await _resolve_bling_client(session)
+        client = await _get_bling_client(session)
         if client is None:
             raise HTTPException(503, detail={"code": "bling_not_connected"})
 
