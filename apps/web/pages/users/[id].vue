@@ -119,14 +119,24 @@ function toggleSalesTeam(n: number) {
   else form.sales_teams.push(n)
 }
 
-// Input do "+ adicionar equipe" — inteiro positivo. Inclui em
-// form.sales_teams (dedup) e nas opções visíveis.
+// Converte o texto "empresa.membro" (ex.: "2.1") no int codificado
+// E*100+M (2.1 → 201). Retorna null se o formato for inválido.
+function parseTeam(raw: unknown): number | null {
+  const s = String(raw ?? '').trim()
+  const m = s.match(/^(\d+)\.(\d+)$/)
+  if (!m) return null
+  const e = parseInt(m[1], 10)
+  const mem = parseInt(m[2], 10)
+  if (e < 1 || mem < 1 || mem > 99) return null
+  return e * 100 + mem
+}
+
+// Input do "+ adicionar equipe" — formato "empresa.membro" (ex.: 2.1).
+// Guarda o int codificado (E*100+M) em form.sales_teams (dedup) e nas opções.
 const newSalesTeam = ref<string>('')
 function addSalesTeam() {
-  const raw = String(newSalesTeam.value ?? '').trim()
-  if (!raw) return
-  const n = parseInt(raw, 10)
-  if (Number.isNaN(n) || n <= 0) return
+  const n = parseTeam(newSalesTeam.value)
+  if (n == null) return
   if (!form.sales_teams.includes(n)) form.sales_teams.push(n)
   if (!salesTeamOptions.value.includes(n)) {
     salesTeamOptions.value = [...salesTeamOptions.value, n].sort((a, b) => a - b)
@@ -134,10 +144,11 @@ function addSalesTeam() {
   newSalesTeam.value = ''
 }
 
-// Rótulo estilo Valuation: empresa 1 + subtime → "1.<n>". O número cru
-// (n) segue sendo a chave gravada no banco (sales_team) — só o display muda.
+// Rótulo estilo Valuation: o int codificado E*100+M vira "empresa.membro"
+// (201 → "2.1"). O número cru segue sendo a chave gravada no banco
+// (sales_team) — só o display muda.
 function teamLabel(n: number) {
-  return `1.${n}`
+  return `${Math.floor(n / 100)}.${n % 100}`
 }
 
 // Remove a equipe das opções visíveis E da seleção do user. Some da lista
@@ -400,8 +411,8 @@ async function removeUser() {
             <div class="flex items-center gap-2 mt-2">
               <Input
                 v-model="newSalesTeam"
-                type="number" min="1" step="1"
-                placeholder="+ adicionar equipe (nº)"
+                type="text"
+                placeholder="+ adicionar equipe (ex: 2.1)"
                 class="w-48"
                 @keydown.enter.prevent="addSalesTeam"
               />
@@ -410,8 +421,9 @@ async function removeUser() {
               </Button>
             </div>
             <p class="text-[11px] text-muted-foreground mt-1">
-              Multi-select de equipes de vendas (números). A loja é vinculada à equipe
-              na página Lojas; aqui você seleciona quais equipes esse usuário pertence.
+              Multi-select de equipes de vendas no formato empresa.membro (ex.: 1.1, 2.1).
+              A loja é vinculada à equipe na página Lojas; aqui você seleciona quais
+              equipes esse usuário pertence.
               <span v-if="form.sales_teams.length">
                 Selecionadas: <code>{{ form.sales_teams.map(teamLabel).join(', ') }}</code>
               </span>

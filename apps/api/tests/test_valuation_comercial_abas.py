@@ -80,15 +80,16 @@ async def test_comercial_agrupa_empresa_membros(
     auth_as: Callable[[User | None], None],
 ):
     admin = await _admin(db)
-    await _loja(db, admin, loja="9001", team=1)
-    await _loja(db, admin, loja="9002", team=2)
-    # Membro 1.1 (equipe 1): 2 pedidos faturamento; 1 pedido devolvido → 50%.
+    # Equipes codificadas empresa.membro: 101 = 1.1, 102 = 1.2.
+    await _loja(db, admin, loja="9001", team=101)
+    await _loja(db, admin, loja="9002", team=102)
+    # Membro 1.1 (equipe 101): 2 pedidos faturamento; 1 pedido devolvido → 50%.
     await _pedido(db, bling_id=9101, loja="9001", situacao="83953")
     await _pedido(db, bling_id=9102, loja="9001", situacao="6")
     await _devolucao(db, pedido=9101, condicao="Novo", quantidade=1)
     # + 1 pedido aguardando devolução (83957) → aguardando_devolucao R$ 500 (não é faturamento).
     await _pedido(db, bling_id=9103, loja="9001", situacao="83957", total=500.0)
-    # Membro 1.2 (equipe 2): 4 pedidos faturamento; kit do pedido 9201 ramificou
+    # Membro 1.2 (equipe 102): 4 pedidos faturamento; kit do pedido 9201 ramificou
     # em 2 linhas (mesmo pedido) → conta 1 pedido devolvido → 25%.
     await _pedido(db, bling_id=9201, loja="9002", situacao="83953")
     await _pedido(db, bling_id=9202, loja="9002", situacao="83953")
@@ -121,6 +122,33 @@ async def test_comercial_agrupa_empresa_membros(
     # 33.33; subtotal da empresa idem.
     assert com["total_taxa_devolucao"][i] == 33.33
     assert emp["taxa_devolucao"][i] == 33.33
+
+
+@pytest.mark.asyncio
+async def test_comercial_multiplas_empresas(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None],
+):
+    admin = await _admin(db)
+    # Empresa 1: membro 1.1 (101). Empresa 2: membros 2.1 (201) e 2.2 (202).
+    await _loja(db, admin, loja="8001", team=101)
+    await _loja(db, admin, loja="8002", team=201)
+    await _loja(db, admin, loja="8003", team=202)
+    for bid, loja in ((8101, "8001"), (8201, "8002"), (8202, "8003")):
+        await _pedido(db, bling_id=bid, loja=loja, situacao="83953")
+    auth_as(admin)
+
+    r = await client.get("/api/financeiro/valuation", headers=_headers())
+    assert r.status_code == 200, r.text
+    com = r.json()["comercial"]
+
+    labels = {e["label"]: e for e in com["empresas"]}
+    assert "Empresa 1" in labels and "Empresa 2" in labels
+    assert {e["empresa"] for e in com["empresas"] if e["empresa"] is not None} == {1, 2}
+    m1 = {m["label"] for m in labels["Empresa 1"]["membros"]}
+    m2 = {m["label"] for m in labels["Empresa 2"]["membros"]}
+    assert m1 == {"1.1"}
+    assert m2 == {"2.1", "2.2"}
 
 
 @pytest.mark.asyncio

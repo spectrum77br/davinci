@@ -309,6 +309,21 @@ function flash(id: string, field: string) {
   setTimeout(() => flashed.value.delete(k), 1200)
 }
 
+// Equipe no formato empresa.membro: o int codificado E*100+M vira "2.1"
+// (display) e "2.1" digitado vira 201 (gravado). O número cru é a chave.
+function teamLabel(n: number) {
+  return `${Math.floor(n / 100)}.${n % 100}`
+}
+function parseTeam(raw: unknown): number | null {
+  const s = String(raw ?? '').trim()
+  const m = s.match(/^(\d+)\.(\d+)$/)
+  if (!m) return null
+  const e = parseInt(m[1], 10)
+  const mem = parseInt(m[2], 10)
+  if (e < 1 || mem < 1 || mem > 99) return null
+  return e * 100 + mem
+}
+
 async function startEdit(row: StoreInfo, field: string) {
   if (!canEdit.value) return
   editing.value = { id: row.id, field }
@@ -325,6 +340,9 @@ async function startEdit(row: StoreInfo, field: string) {
       } catch { /* mantém vazio se falhar */ }
     }
     initial = revealedPasswords.value.get(row.id) ?? ''
+  } else if (field === 'sales_team') {
+    // Edita no formato "empresa.membro" (ex.: 2.1), não o int cru.
+    initial = row.sales_team == null ? '' : teamLabel(row.sales_team)
   } else {
     const raw = (row as any)[field]
     initial = raw == null ? '' : String(raw)
@@ -366,12 +384,12 @@ async function commitEdit() {
     if (Number.isNaN(n)) return cancelEdit()
     payload.sort_order = n
   } else if (field === 'sales_team') {
-    // Vazio limpa a equipe; senão exige inteiro positivo.
+    // Vazio limpa a equipe; senão exige "empresa.membro" (ex.: 2.1).
     if (!raw) {
       payload.sales_team = null
     } else {
-      const n = parseInt(raw, 10)
-      if (Number.isNaN(n) || n <= 0) return cancelEdit()
+      const n = parseTeam(raw)
+      if (n == null) return cancelEdit()
       payload.sales_team = n
     }
   } else if (field === 'password') {
@@ -777,12 +795,12 @@ async function copyText(text: string) {
               <input
                 v-if="isEditing(row.id, 'sales_team')"
                 :ref="setEditInputRef"
-                v-model="editValue" type="number" min="1" step="1"
+                v-model="editValue" type="text" placeholder="2.1"
                 class="w-full text-xs bg-transparent outline-none text-center"
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               />
               <span v-else :class="{ 'text-muted-foreground': row.sales_team == null }">
-                {{ row.sales_team ?? '—' }}
+                {{ row.sales_team == null ? '—' : teamLabel(row.sales_team) }}
               </span>
             </td>
             <!-- text fields: server / cnpj / email / phone -->

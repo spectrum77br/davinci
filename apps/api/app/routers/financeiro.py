@@ -1332,29 +1332,34 @@ async def valuation_report(
         return any(mes in months and pred(team) and c
                    for (mes, team), c in dev_idx.items())
 
-    # Hoje há UMA empresa: todo `sales_team` é membro dela, rotulado
-    # "1.<rank>" pela ordem do sales_team. Quando ramificar, este bloco troca
-    # pelo mapeamento real (loja → empresa).
+    # Cada `sales_team` codifica empresa.membro no int E*100+M (ex.: 101 = 1.1,
+    # 201 = 2.1). A empresa vem de team // 100 e o membro de team % 100 — os
+    # membros são agrupados por empresa (uma aba por empresa).
     _teams = sorted(
         set(teams)
         | {t for (_m, t) in bo_idx if t is not None}
         | {t for (_m, t) in dev_idx if t is not None}
     )
-    _rank = {t: i + 1 for i, t in enumerate(_teams)}
 
     total_aguard, total_taxa = _com_series(lambda t: True)
 
+    _by_empresa: dict[int, list[int]] = {}
+    for team in _teams:
+        _by_empresa.setdefault(team // 100, []).append(team)
+
     empresas: list[ComercialEmpresaOut] = []
-    if _teams:
+    for emp in sorted(_by_empresa):
+        emp_teams = _by_empresa[emp]
         membros = []
-        for team in _teams:
+        for team in emp_teams:
             a, t = _com_series(lambda x, team=team: x == team)
             membros.append(ComercialMembroOut(
-                label=f"1.{_rank[team]}", aguardando_devolucao=a, taxa_devolucao=t,
+                label=f"{emp}.{team % 100}", aguardando_devolucao=a, taxa_devolucao=t,
             ))
-        a, t = _com_series(lambda x: x is not None)
+        team_set = set(emp_teams)
+        a, t = _com_series(lambda x, s=team_set: x in s)
         empresas.append(ComercialEmpresaOut(
-            empresa=1, label="Empresa 1",
+            empresa=emp, label=f"Empresa {emp}",
             aguardando_devolucao=a, taxa_devolucao=t, membros=membros,
         ))
     # "Sem equipe" só aparece quando houver dados não atribuídos a equipe.
