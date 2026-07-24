@@ -989,6 +989,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             >
               <template v-if="r.pricing_account_name">{{ r.pricing_account_name }}</template>
               <template v-else-if="!r.pricing_leaf_segment_name">⚠️ sem cadastro</template>
+              <template v-else-if="r.conta"><span class="text-muted-foreground">{{ r.conta }}</span></template>
               <template v-else><span class="text-amber-500">sem account</span></template>
             </td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ r.pricing_leaf_segment_name || '—' }}</td>
