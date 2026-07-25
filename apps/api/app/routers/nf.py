@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import asc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_admin
 from app.models import NfEtiqueta, NfFaturador, NfImpressao, User
@@ -31,6 +32,7 @@ from app.schemas.nf import (
 from app.security.cipher import encrypt
 
 logger = structlog.get_logger()
+_SCHEMA = get_settings().database_schema
 # Prefixo próprio (/api/nf já é usado pelo nf_upload). Umbrella dos cadastros
 # do sistema de NF automáticas (faturador; etiqueta/impressão virão depois).
 router = APIRouter(prefix="/api/nf-cadastro", tags=["nf_cadastro"])
@@ -378,7 +380,7 @@ async def delete_impressao(
 # ---------------------------------------------------------------------------
 
 _FATURAMENTO_SQL = text(
-    """
+    f"""
     SELECT * FROM (
         SELECT DISTINCT ON (bo.numero)
             bo.data::date                         AS data,
@@ -393,11 +395,11 @@ _FATURAMENTO_SQL = text(
             nf.erro_etiqueta                      AS erro_etiqueta,
             COALESCE(nf.status_impressao, 'pendente')   AS status_impressao,
             nf.erro_impressao                     AS erro_impressao
-        FROM davinci.bling_orders bo
-        JOIN davinci.store_info si
+        FROM "{_SCHEMA}".bling_orders bo
+        JOIN "{_SCHEMA}".store_info si
             ON si.bling_store_id::text = bo.loja
-        LEFT JOIN davinci.situacao_bling sb ON sb.id::text = bo.situacao
-        LEFT JOIN davinci.nf_faturamento nf ON nf.pedido_bling = bo.numero
+        LEFT JOIN "{_SCHEMA}".situacao_bling sb ON sb.id::text = bo.situacao
+        LEFT JOIN "{_SCHEMA}".nf_faturamento nf ON nf.pedido_bling = bo.numero
         LEFT JOIN (VALUES
             ('ml', 'Mercado Livre'), ('shopee', 'Shopee'), ('amazon', 'Amazon'),
             ('tiktok', 'TikTok'), ('magalu', 'Magalu'), ('aliexpress', 'AliExpress'),
