@@ -6,6 +6,7 @@ import {
   Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
   Store, Tags, ClipboardList, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
+  ReceiptText,
 } from 'lucide-vue-next'
 
 const props = defineProps<{ collapsed: boolean }>()
@@ -145,6 +146,7 @@ const sections: Section[] = [
       { to: '/companies', label: 'Empresas', icon: Building2, resource: 'empresa' },
       { to: '/cadastros', label: 'Cadastros', icon: ContactRound, resource: 'cadastro' },
       { to: '/store-info', label: 'Lojas', icon: Store, resource: 'lojas_info' },
+      { to: '/nf-cadastros', label: 'NF (Faturador)', icon: ReceiptText, adminOnly: true },
       { to: '/admin/segments', label: 'Segmentos', icon: Tags, resource: 'segmentos' },
     ],
   },

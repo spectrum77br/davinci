@@ -32,6 +32,7 @@ from app.routers import logistica_track as logistica_track_router
 from app.routers import margem_audit as margem_audit_router
 from app.routers import margens as margens_router
 from app.routers import metrics as metrics_router
+from app.routers import nf as nf_router
 from app.routers import nf_upload as nf_upload_router
 from app.routers import notas_fiscais as notas_fiscais_router
 from app.routers import oauth as oauth_router
@@ -180,6 +181,7 @@ app.include_router(estoque_router.router)
 app.include_router(faturamento_router.router)
 app.include_router(financeiro_router.router)
 app.include_router(importacao_router.router)
+app.include_router(nf_router.router)
 app.include_router(nf_upload_router.router)
 app.include_router(notas_fiscais_router.router)
 app.include_router(dev_router.router)

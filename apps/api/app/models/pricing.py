@@ -287,6 +287,24 @@ class StoreInfo(Base, TimestampMixin):
     archived_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # NF automáticas (migration 0196): cada loja aponta pra um cadastro de
+    # Faturador / Etiqueta / Impressão. A coluna "Impressão" substitui "Frete"
+    # na tela Lojas. NULL = sem cadastro atribuído. FK SET NULL.
+    nf_faturador_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("nf_faturador.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    nf_etiqueta_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("nf_etiqueta.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    nf_impressao_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("nf_impressao.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class PricingPushIdempotency(Base):

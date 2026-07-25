@@ -38,10 +38,15 @@ type StoreInfo = {
   duoker: boolean | null
   uf_restrictions: string[] | null
   sales_team: number | null
+  nf_faturador_id: string | null
+  nf_etiqueta_id: string | null
+  nf_impressao_id: string | null
   archived_at: string | null
   created_at: string
   updated_at: string
 }
+
+type NfRef = { id: string; label: string }
 
 const UF_OPTIONS = [
   'AC','AL','AM','AP','BA','CE','DF','ES','GO','MA','MG','MS','MT',
@@ -115,6 +120,11 @@ const canDelete = useCan('tabela_precos', 'delete')
 
 const items = ref<StoreInfo[]>([])
 const integrations = ref<IntegrationRef[]>([])
+// Cadastros de NF (admin-only). Não-admin recebe 403 → lista vazia (dropdowns
+// ficam sem opção, o que é ok: quem gerencia NF é admin).
+const faturadores = ref<NfRef[]>([])
+const etiquetas = ref<NfRef[]>([])
+const impressoes = ref<NfRef[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const filterPlatform = ref<string>('all')
@@ -128,12 +138,18 @@ async function load() {
   error.value = null
   try {
     const q = archivedView.value ? '?archived=true' : ''
-    const [storeInfo, integs] = await Promise.all([
+    const [storeInfo, integs, fats, etqs, imps] = await Promise.all([
       api<StoreInfo[]>(`/api/pricing/store-info${q}`),
       api<IntegrationRef[]>('/api/integrations').catch(() => [] as IntegrationRef[]),
+      api<any[]>('/api/nf-cadastro/faturadores').catch(() => [] as any[]),
+      api<any[]>('/api/nf-cadastro/etiquetas').catch(() => [] as any[]),
+      api<any[]>('/api/nf-cadastro/impressoes').catch(() => [] as any[]),
     ])
     items.value = storeInfo
     integrations.value = integs
+    faturadores.value = fats.map((f) => ({ id: f.id, label: f.nome }))
+    etiquetas.value = etqs.map((e) => ({ id: e.id, label: e.plataforma }))
+    impressoes.value = imps.map((i) => ({ id: i.id, label: i.tipo }))
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -146,6 +162,11 @@ await load()
 function integrationFor(row: StoreInfo): IntegrationRef | null {
   if (!row.integration_id) return null
   return integrations.value.find((i) => i.id === row.integration_id) || null
+}
+
+function nfLabel(list: NfRef[], id: string | null): string {
+  if (!id) return '—'
+  return list.find((x) => x.id === id)?.label ?? '—'
 }
 
 function availableIntegrationsFor(row: StoreInfo): IntegrationRef[] {
@@ -630,7 +651,9 @@ async function copyText(text: string) {
           <tr>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Plataforma</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Conta</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Frete</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Faturador</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Etiqueta</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Impressão</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Equipe</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Servidor</th>
@@ -653,12 +676,12 @@ async function copyText(text: string) {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colSpan="17" class="text-center py-6 text-muted-foreground">
+            <td colSpan="19" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!sorted.length && !showAdd">
-            <td colSpan="17" class="text-center py-8 text-muted-foreground">Nenhuma loja cadastrada.</td>
+            <td colSpan="19" class="text-center py-8 text-muted-foreground">Nenhuma loja cadastrada.</td>
           </tr>
 
           <!-- add row -->
@@ -678,7 +701,7 @@ async function copyText(text: string) {
                 @keydown.escape="showAdd = false"
               />
             </td>
-            <td v-for="i in 14" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
+            <td v-for="i in 16" :key="i" class="border border-border text-center text-xs text-muted-foreground">—</td>
             <td class="border border-border px-1 py-1 text-center">
               <div class="flex gap-0.5 justify-center">
                 <button class="p-1 text-emerald-600 hover:bg-emerald-50 rounded" :disabled="adding" @click="submitNew">
@@ -695,7 +718,7 @@ async function copyText(text: string) {
           <!-- platform groups: header + rows -->
           <template v-for="group in groups" :key="group.platform">
             <tr class="bg-muted/60">
-              <td colSpan="16" class="px-3 py-2 text-xs font-bold uppercase tracking-wide text-foreground/80 border-b border-border">
+              <td colSpan="18" class="px-3 py-2 text-xs font-bold uppercase tracking-wide text-foreground/80 border-b border-border">
                 {{ group.platform }}
                 <span class="font-normal text-muted-foreground normal-case">
                   {{ group.count }} conta{{ group.count > 1 ? 's' : '' }}
@@ -757,9 +780,77 @@ async function copyText(text: string) {
                 </button>
               </div>
             </td>
-            <!-- text fields: freight + cpf_name (responsável) -->
+            <!-- NF: Faturador / Etiqueta / Impressão (esta última substitui a
+                 antiga coluna "Frete"). Select inline igual ao de plataforma. -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'nf_faturador_id'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'nf_faturador_id'),
+              }"
+              @click="!isEditing(row.id, 'nf_faturador_id') && startEdit(row, 'nf_faturador_id')"
+            >
+              <select
+                v-if="isEditing(row.id, 'nf_faturador_id')"
+                :ref="setEditInputRef"
+                v-model="editValue"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @change="commitEdit" @keydown.escape.prevent="cancelEdit"
+              >
+                <option value="">—</option>
+                <option v-for="o in faturadores" :key="o.id" :value="o.id">{{ o.label }}</option>
+              </select>
+              <span v-else :class="{ 'text-muted-foreground': !row.nf_faturador_id }">
+                {{ nfLabel(faturadores, row.nf_faturador_id) }}
+              </span>
+            </td>
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'nf_etiqueta_id'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'nf_etiqueta_id'),
+              }"
+              @click="!isEditing(row.id, 'nf_etiqueta_id') && startEdit(row, 'nf_etiqueta_id')"
+            >
+              <select
+                v-if="isEditing(row.id, 'nf_etiqueta_id')"
+                :ref="setEditInputRef"
+                v-model="editValue"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @change="commitEdit" @keydown.escape.prevent="cancelEdit"
+              >
+                <option value="">—</option>
+                <option v-for="o in etiquetas" :key="o.id" :value="o.id">{{ o.label }}</option>
+              </select>
+              <span v-else :class="{ 'text-muted-foreground': !row.nf_etiqueta_id }">
+                {{ nfLabel(etiquetas, row.nf_etiqueta_id) }}
+              </span>
+            </td>
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'nf_impressao_id'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'nf_impressao_id'),
+              }"
+              @click="!isEditing(row.id, 'nf_impressao_id') && startEdit(row, 'nf_impressao_id')"
+            >
+              <select
+                v-if="isEditing(row.id, 'nf_impressao_id')"
+                :ref="setEditInputRef"
+                v-model="editValue"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @change="commitEdit" @keydown.escape.prevent="cancelEdit"
+              >
+                <option value="">—</option>
+                <option v-for="o in impressoes" :key="o.id" :value="o.id">{{ o.label }}</option>
+              </select>
+              <span v-else :class="{ 'text-muted-foreground': !row.nf_impressao_id }">
+                {{ nfLabel(impressoes, row.nf_impressao_id) }}
+              </span>
+            </td>
+            <!-- text field: cpf_name (responsável) -->
             <template
-              v-for="f in ['freight', 'cpf_name']"
+              v-for="f in ['cpf_name']"
               :key="f"
             >
               <td

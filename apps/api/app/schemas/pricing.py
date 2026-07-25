@@ -361,6 +361,10 @@ class StoreInfoBase(BaseModel):
     uf_restrictions: list[str] | None = None
     # Equipe de Vendas (migration 0136). Número inteiro; NULL = sem equipe.
     sales_team: int | None = None
+    # NF automáticas (migration 0196): cadastros Faturador/Etiqueta/Impressão.
+    nf_faturador_id: UUID | None = None
+    nf_etiqueta_id: UUID | None = None
+    nf_impressao_id: UUID | None = None
 
 
 class StoreInfoCreate(StoreInfoBase):
@@ -389,6 +393,9 @@ class StoreInfoPatch(BaseModel):
     duoker: bool | None = None
     uf_restrictions: list[str] | None = None
     sales_team: int | None = None
+    nf_faturador_id: UUID | None = None
+    nf_etiqueta_id: UUID | None = None
+    nf_impressao_id: UUID | None = None
 
 
 class StoreInfoOut(StoreInfoBase):
