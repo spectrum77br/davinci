@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -116,3 +116,23 @@ class NfImpressaoPatch(BaseModel):
     usa_declaracao: bool | None = None
     usa_nota: bool | None = None
     sort_order: int | None = None
+
+
+class NfFaturamentoRowOut(BaseModel):
+    """Uma linha do Painel de Faturamento: descrição do pedido + os 3 status de
+    etapa. Derivada (read-only) de bling_orders × store_info × nf_faturamento —
+    não é o shape da tabela, é a linha exibida no painel."""
+
+    data: date | None = None
+    pedido_bling: str
+    pedido_marketplace: str | None = None
+    plataforma: str | None = None
+    conta: str | None = None
+    status_bling: str | None = None
+    # 'pendente' quando não há registro em nf_faturamento; senão 'ok'/'erro'/...
+    status_faturamento: str = "pendente"
+    erro_faturamento: str | None = None
+    status_etiqueta: str = "pendente"
+    erro_etiqueta: str | None = None
+    status_impressao: str = "pendente"
+    erro_impressao: str | None = None

@@ -94,6 +94,29 @@ class NfEtiqueta(Base, TimestampMixin):
     )
 
 
+class NfFaturamento(Base, TimestampMixin):
+    """Status por ETAPA de um pedido no fluxo de NF automática (faturamento →
+    etiqueta → impressão). Uma linha por pedido; a AUTOMAÇÃO (fases seguintes)
+    grava/atualiza os status aqui. O painel (aba NF R37–R39) LÊ isso via LEFT
+    JOIN com os pedidos do Bling — pedido sem linha aqui aparece 'pendente'.
+
+    Cada `status_*` é um texto curto ('ok' | 'erro' | 'pendente' | ...) e o
+    `erro_*` guarda a mensagem quando a etapa falhou (ex. "Erro de impressão").
+    """
+
+    __tablename__ = "nf_faturamento"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # Número do pedido no Bling (chave de casamento com bling_orders.numero).
+    pedido_bling: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    status_faturamento: Mapped[str | None] = mapped_column(Text, nullable=True)
+    erro_faturamento: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status_etiqueta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    erro_etiqueta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status_impressao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    erro_impressao: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class NfImpressao(Base, TimestampMixin):
     """Cadastro da IMPRESSÃO (como a etiqueta é impressa depois que a NF foi
     emitida + inserida na plataforma). Excel aba NF R26–R29:

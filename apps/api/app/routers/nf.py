@@ -9,8 +9,8 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import asc, select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import asc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -23,6 +23,7 @@ from app.schemas.nf import (
     NfFaturadorCreate,
     NfFaturadorOut,
     NfFaturadorPatch,
+    NfFaturamentoRowOut,
     NfImpressaoCreate,
     NfImpressaoOut,
     NfImpressaoPatch,
@@ -364,3 +365,69 @@ async def delete_impressao(
     await session.commit()
     logger.info("nf_impressao_deleted", id=str(impressao_id))
     return None
+
+
+# ---------------------------------------------------------------------------
+# PAINEL DE FATURAMENTO (aba NF R37–R39) — read-only.
+#
+# Uma linha por pedido do Bling (janela de `dias`), só das lojas que têm algum
+# cadastro de NF atribuído (Faturador/Etiqueta/Impressão). Os 3 status de etapa
+# vêm do LEFT JOIN com nf_faturamento (a automação das fases seguintes grava lá);
+# pedido sem linha aparece 'pendente'. Não há escrita aqui — é o painel de
+# acompanhamento pra ver onde cada pedido travou.
+# ---------------------------------------------------------------------------
+
+_FATURAMENTO_SQL = text(
+    """
+    SELECT * FROM (
+        SELECT DISTINCT ON (bo.numero)
+            bo.data::date                         AS data,
+            bo.numero                             AS pedido_bling,
+            bo.numeroloja                         AS pedido_marketplace,
+            COALESCE(pl.label, initcap(si.platform)) AS plataforma,
+            si.account_name                       AS conta,
+            sb.nome                               AS status_bling,
+            COALESCE(nf.status_faturamento, 'pendente') AS status_faturamento,
+            nf.erro_faturamento                   AS erro_faturamento,
+            COALESCE(nf.status_etiqueta, 'pendente')    AS status_etiqueta,
+            nf.erro_etiqueta                      AS erro_etiqueta,
+            COALESCE(nf.status_impressao, 'pendente')   AS status_impressao,
+            nf.erro_impressao                     AS erro_impressao
+        FROM davinci.bling_orders bo
+        JOIN davinci.store_info si
+            ON si.bling_store_id::text = bo.loja
+        LEFT JOIN davinci.situacao_bling sb ON sb.id::text = bo.situacao
+        LEFT JOIN davinci.nf_faturamento nf ON nf.pedido_bling = bo.numero
+        LEFT JOIN (VALUES
+            ('ml', 'Mercado Livre'), ('shopee', 'Shopee'), ('amazon', 'Amazon'),
+            ('tiktok', 'TikTok'), ('magalu', 'Magalu'), ('aliexpress', 'AliExpress'),
+            ('shein', 'Shein'), ('temu', 'Temu')
+        ) AS pl(code, label) ON pl.code = si.platform
+        WHERE bo.data >= now() - make_interval(days => :dias)
+          AND bo.numero IS NOT NULL
+          AND bo.situacao IS DISTINCT FROM 'excluido'
+          AND si.archived_at IS NULL
+          AND (
+              si.nf_faturador_id IS NOT NULL
+              OR si.nf_etiqueta_id IS NOT NULL
+              OR si.nf_impressao_id IS NOT NULL
+          )
+        ORDER BY bo.numero, bo.data DESC
+    ) t
+    ORDER BY t.data DESC, t.pedido_bling
+    LIMIT :limit
+    """
+)
+
+
+@router.get("/faturamento", response_model=list[NfFaturamentoRowOut])
+async def list_faturamento(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_admin)],
+    dias: Annotated[int, Query(ge=1, le=90)] = 7,
+    limit: Annotated[int, Query(ge=1, le=2000)] = 500,
+) -> list[NfFaturamentoRowOut]:
+    rows = (
+        await session.execute(_FATURAMENTO_SQL, {"dias": dias, "limit": limit})
+    ).mappings().all()
+    return [NfFaturamentoRowOut(**dict(r)) for r in rows]

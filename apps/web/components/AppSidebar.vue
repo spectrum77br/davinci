@@ -147,6 +147,7 @@ const sections: Section[] = [
       { to: '/cadastros', label: 'Cadastros', icon: ContactRound, resource: 'cadastro' },
       { to: '/store-info', label: 'Lojas', icon: Store, resource: 'lojas_info' },
       { to: '/nf-cadastros', label: 'NF (Faturador)', icon: ReceiptText, adminOnly: true },
+      { to: '/nf-faturamento', label: 'Faturamento NF', icon: ClipboardList, adminOnly: true },
       { to: '/admin/segments', label: 'Segmentos', icon: Tags, resource: 'segmentos' },
     ],
   },

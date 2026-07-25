@@ -9,6 +9,7 @@ Impressão. Espelham a aba NF de `tarefa 25.xlsx` + os áudios da spec.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from collections.abc import Callable
 
 import pytest
@@ -16,7 +17,15 @@ import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import User, UserRole, UserStatus
+from app.models import (
+    BlingOrder,
+    NfFaturador,
+    SituacaoBling,
+    StoreInfo,
+    User,
+    UserRole,
+    UserStatus,
+)
 
 
 @pytest_asyncio.fixture
@@ -183,6 +192,89 @@ async def test_non_admin_forbidden(
     for path in ("faturadores", "etiquetas", "impressoes"):
         r = await client.get(f"/api/nf-cadastro/{path}")
         assert r.status_code == 403, path
+
+
+@pytest.mark.asyncio
+async def test_painel_faturamento(
+    db: AsyncSession,
+    client: AsyncClient,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+):
+    auth_as(admin)
+
+    sit = SituacaoBling(id=999001, nome="Em andamento")
+    db.add(sit)
+
+    fat = NfFaturador(nome="bling avulso", modo="bling")
+    db.add(fat)
+    await db.flush()
+
+    # Loja COM cadastro de NF (aparece no painel).
+    info = StoreInfo(
+        user_id=admin.id,
+        platform="amazon",
+        account_name="loja-amz",
+        bling_store_id="880011",
+        nf_faturador_id=fat.id,
+    )
+    db.add(info)
+    # Loja SEM cadastro de NF (não deve aparecer).
+    info_sem = StoreInfo(
+        user_id=admin.id,
+        platform="shopee",
+        account_name="loja-shp",
+        bling_store_id="880022",
+    )
+    db.add(info_sem)
+    await db.flush()
+
+    db.add(
+        BlingOrder(
+            numero="700001",
+            numeroloja="123-ABC",
+            data=datetime.now(UTC),
+            loja="880011",
+            situacao=str(sit.id),
+        )
+    )
+    db.add(
+        BlingOrder(
+            numero="700002",
+            data=datetime.now(UTC),
+            loja="880022",
+            situacao=str(sit.id),
+        )
+    )
+    await db.commit()
+
+    r = await client.get("/api/nf-cadastro/faturamento")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    pedidos = {row["pedido_bling"]: row for row in rows}
+    # Só o pedido da loja com cadastro de NF.
+    assert "700001" in pedidos
+    assert "700002" not in pedidos
+    row = pedidos["700001"]
+    assert row["plataforma"] == "Amazon"
+    assert row["conta"] == "loja-amz"
+    assert row["status_bling"] == "Em andamento"
+    assert row["pedido_marketplace"] == "123-ABC"
+    # Sem linha em nf_faturamento → tudo pendente.
+    assert row["status_faturamento"] == "pendente"
+    assert row["status_etiqueta"] == "pendente"
+    assert row["status_impressao"] == "pendente"
+
+
+@pytest.mark.asyncio
+async def test_painel_faturamento_non_admin_forbidden(
+    client: AsyncClient,
+    normal: User,
+    auth_as: Callable[[User | None], None],
+):
+    auth_as(normal)
+    r = await client.get("/api/nf-cadastro/faturamento")
+    assert r.status_code == 403
 
 
 @pytest.mark.asyncio
