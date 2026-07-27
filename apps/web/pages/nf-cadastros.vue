@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Lock } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Lock, Eye, EyeOff } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -64,6 +64,24 @@ const faturadores = ref<Faturador[]>([])
 const fatForm = ref<FatForm>(emptyFat())
 const fatEditing = ref<Faturador | null>(null)
 const fatShowNew = ref(false)
+// Senha: campo mascarado sem acionar o gerenciador de senhas do navegador.
+// senhaVisible alterna o disco; ao revelar uma senha JÁ salva busca o valor
+// descriptografado no backend (a lista nunca devolve a senha por segurança).
+const senhaVisible = ref(false)
+const senhaRevealing = ref(false)
+
+async function toggleSenha() {
+  if (senhaVisible.value) { senhaVisible.value = false; return }
+  if (canEdit.value && fatEditing.value?.has_senha && !fatForm.value.senha) {
+    senhaRevealing.value = true
+    try {
+      const r = await api<{ senha: string }>(`/api/nf-cadastro/faturadores/${fatEditing.value.id}/senha`)
+      fatForm.value.senha = r.senha || ''
+    } catch (e: any) { saveErr.value = errCode(e); return }
+    finally { senhaRevealing.value = false }
+  }
+  senhaVisible.value = true
+}
 
 function buildFatBody(f: FatForm) {
   return {
@@ -80,9 +98,10 @@ function buildFatBody(f: FatForm) {
     sort_order: f.sort_order.trim() ? Number(f.sort_order) : 0,
   }
 }
-function openFatNew() { fatForm.value = emptyFat(); saveErr.value = null; fatShowNew.value = true }
+function openFatNew() { fatForm.value = emptyFat(); saveErr.value = null; senhaVisible.value = false; fatShowNew.value = true }
 function openFatEdit(f: Faturador) {
   fatEditing.value = f
+  senhaVisible.value = false
   fatForm.value = {
     nome: f.nome, modo: f.modo, nf_cheia: f.nf_cheia,
     percentual: f.percentual != null ? String(f.percentual) : '',
@@ -521,7 +540,32 @@ await loadFaturadores()
           </div>
           <div class="grid grid-cols-2 gap-3">
             <div><Label>Usuário</Label><Input v-model="fatForm.usuario" autocomplete="off" /></div>
-            <div><Label>Senha {{ fatEditing?.has_senha ? '(preenchida)' : '' }}</Label><Input v-model="fatForm.senha" type="password" autocomplete="new-password" :placeholder="fatEditing ? 'branco = manter' : ''" /></div>
+            <div><Label>Senha {{ fatEditing?.has_senha ? '(salva)' : '' }}</Label>
+              <div class="relative">
+                <Input
+                  v-model="fatForm.senha"
+                  type="text"
+                  autocomplete="off"
+                  data-1p-ignore
+                  data-lpignore="true"
+                  data-form-type="other"
+                  name="nf-faturador-secret"
+                  class="pr-9"
+                  :style="senhaVisible ? undefined : { WebkitTextSecurity: 'disc' }"
+                  :placeholder="fatEditing ? 'branco = manter' : ''"
+                />
+                <button
+                  type="button"
+                  class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  :disabled="senhaRevealing"
+                  :title="senhaVisible ? 'ocultar' : 'ver senha salva'"
+                  @click="toggleSenha"
+                >
+                  <EyeOff v-if="senhaVisible" class="size-4" />
+                  <Eye v-else class="size-4" />
+                </button>
+              </div>
+            </div>
           </div>
           <div><Label>Observação</Label><textarea v-model="fatForm.observacao" rows="2" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y" /></div>
           <div><Label>Ordem</Label><Input v-model="fatForm.sort_order" inputmode="numeric" placeholder="0" /></div>

@@ -30,7 +30,7 @@ from app.schemas.nf import (
     NfImpressaoOut,
     NfImpressaoPatch,
 )
-from app.security.cipher import encrypt
+from app.security.cipher import decrypt, encrypt
 
 logger = structlog.get_logger()
 _SCHEMA = get_settings().database_schema
@@ -156,6 +156,25 @@ async def patch_faturador(
     await session.commit()
     await session.refresh(f)
     return _to_out(f)
+
+
+@router.get("/faturadores/{faturador_id}/senha")
+async def reveal_faturador_senha(
+    faturador_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_cad_edit)],
+) -> dict[str, str]:
+    """Devolve a senha descriptografada sob demanda (só quem tem edit).
+
+    O front esvazia o campo ao reabrir (a senha nunca volta no GET da lista);
+    este endpoint permite CONFERIR/ver a senha já salva clicando no olho.
+    """
+    f = (
+        await session.execute(select(NfFaturador).where(NfFaturador.id == faturador_id))
+    ).scalar_one_or_none()
+    if f is None:
+        raise HTTPException(404, detail={"code": "nf_faturador_not_found"})
+    return {"senha": decrypt(f.senha_enc) if f.senha_enc else ""}
 
 
 @router.delete("/faturadores/{faturador_id}", status_code=status.HTTP_204_NO_CONTENT)

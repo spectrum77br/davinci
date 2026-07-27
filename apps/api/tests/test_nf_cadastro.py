@@ -91,6 +91,11 @@ async def test_faturador_crud_e_senha_nunca_volta(
     r = await client.get("/api/nf-cadastro/faturadores")
     assert any(f["id"] == fid for f in r.json())
 
+    # Revelar a senha salva (botão do olho) devolve o texto descriptografado.
+    r = await client.get(f"/api/nf-cadastro/faturadores/{fid}/senha")
+    assert r.status_code == 200, r.text
+    assert r.json()["senha"] == "segredo123"
+
     # Patch: senha "" limpa; texto seta.
     r = await client.patch(
         f"/api/nf-cadastro/faturadores/{fid}", json={"senha": ""}
