@@ -118,6 +118,12 @@ class NfImpressaoPatch(BaseModel):
     sort_order: int | None = None
 
 
+class GerarPlanilhaIn(BaseModel):
+    """Números dos pedidos do Bling a incluir na planilha de importação avulsa."""
+
+    numeros: list[str] = Field(min_length=1)
+
+
 class NfFaturamentoRowOut(BaseModel):
     """Uma linha do Painel de Faturamento: descrição do pedido + os 3 status de
     etapa. Derivada (read-only) de bling_orders × store_info × nf_faturamento —

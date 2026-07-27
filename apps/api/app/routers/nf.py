@@ -6,11 +6,14 @@ faturador; a lista é extensível. A automação (emissão da NF) é construída
 depois — aqui é só o CRUD do cadastro.
 """
 
+import base64
+import json
 from typing import Annotated
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import asc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +22,7 @@ from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import NfEtiqueta, NfFaturador, NfImpressao, User
 from app.schemas.nf import (
+    GerarPlanilhaIn,
     NfEtiquetaCreate,
     NfEtiquetaOut,
     NfEtiquetaPatch,
@@ -31,6 +35,7 @@ from app.schemas.nf import (
     NfImpressaoPatch,
 )
 from app.security.cipher import decrypt, encrypt
+from app.services import nf_emissao_gerar, nf_relatorio
 
 logger = structlog.get_logger()
 _SCHEMA = get_settings().database_schema
@@ -44,6 +49,7 @@ _cad_view = require_permission("nf_faturador", "view")
 _cad_edit = require_permission("nf_faturador", "edit")
 _cad_delete = require_permission("nf_faturador", "delete")
 _painel_view = require_permission("nf_faturamento", "view")
+_painel_edit = require_permission("nf_faturamento", "edit")
 
 
 def _clean(v: str | None) -> str | None:
@@ -460,3 +466,46 @@ async def list_faturamento(
         await session.execute(_FATURAMENTO_SQL, {"dias": dias, "limit": limit})
     ).mappings().all()
     return [NfFaturamentoRowOut(**dict(r)) for r in rows]
+
+
+@router.post("/faturamento/gerar-planilha")
+async def gerar_planilha_faturamento(
+    body: GerarPlanilhaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_painel_edit)],
+) -> StreamingResponse:
+    """Gera a planilha de importação AVULSA (Fase 3a) dos pedidos escolhidos.
+
+    Lê os itens do Bling principal (já no davinci), aplica a regra do faturador
+    da loja de cada pedido e devolve o CSV no layout do relatório de vendas do
+    Bling — que se importa no destino como venda avulsa (desacoplada do
+    intermediador). Pedidos sem faturador/sem itens não entram no arquivo; o
+    total e os pulados (com motivo) vão em headers `X-Pedidos-*`. 422 se
+    nenhum pedido pôde ser gerado."""
+    res = await nf_emissao_gerar.gerar_planilha(session, body.numeros)
+    if not res.pedidos_ok:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "nf_nenhum_pedido_gerado",
+                "pulados": [{"numero": p.numero, "motivo": p.motivo} for p in res.pulados],
+            },
+        )
+    pulados = [{"numero": p.numero, "motivo": p.motivo} for p in res.pulados]
+    # Motivo tem acento → header precisa ser ASCII-safe (base64 do JSON).
+    pulados_b64 = base64.b64encode(json.dumps(pulados).encode("utf-8")).decode("ascii")
+    fname = nf_emissao_gerar.nome_arquivo()
+    return StreamingResponse(
+        iter([res.csv]),
+        media_type=nf_relatorio.CSV_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "X-Pedidos-Ok": str(len(res.pedidos_ok)),
+            "X-Pedidos-Pulados": str(len(res.pulados)),
+            "X-Pedidos-Pulados-Detalhe": pulados_b64,
+            "Access-Control-Expose-Headers": (
+                "Content-Disposition, X-Pedidos-Ok, X-Pedidos-Pulados, "
+                "X-Pedidos-Pulados-Detalhe"
+            ),
+        },
+    )

@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, Loader2, RefreshCw, X } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, FileDown, Loader2, RefreshCw, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
   permission: { resource: 'nf_faturamento', action: 'view' },
 })
 
-const { api } = useApi()
+const { api, url } = useApi()
+const toasts = useToasts()
+const canEdit = useCan('nf_faturamento', 'edit')
 
 type Row = {
   data: string | null
@@ -83,6 +85,93 @@ function limparFiltros() {
   contaFilter.value = ''
 }
 
+// -- Seleção + gerar planilha ----------------------------------------------
+const selected = ref<Set<string>>(new Set())
+const gerando = ref(false)
+
+function toggle(numero: string) {
+  const s = new Set(selected.value)
+  if (s.has(numero)) s.delete(numero)
+  else s.add(numero)
+  selected.value = s
+}
+
+const allFilteredSelected = computed(
+  () => filteredRows.value.length > 0 && filteredRows.value.every((r) => selected.value.has(r.pedido_bling)),
+)
+function toggleAll() {
+  const s = new Set(selected.value)
+  if (allFilteredSelected.value) {
+    for (const r of filteredRows.value) s.delete(r.pedido_bling)
+  } else {
+    for (const r of filteredRows.value) s.add(r.pedido_bling)
+  }
+  selected.value = s
+}
+
+function decodePulados(b64: string | null): { numero: string; motivo: string }[] {
+  if (!b64) return []
+  try {
+    return JSON.parse(decodeURIComponent(escape(atob(b64))))
+  } catch {
+    return []
+  }
+}
+
+async function gerarPlanilha() {
+  const numeros = Array.from(selected.value)
+  if (!numeros.length) {
+    toasts.warning('Selecione ao menos um pedido')
+    return
+  }
+  gerando.value = true
+  try {
+    const resp = await fetch(url('/api/nf-cadastro/faturamento/gerar-planilha'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ numeros }),
+    })
+    if (!resp.ok) {
+      let code = `HTTP ${resp.status}`
+      try {
+        code = (await resp.json())?.detail?.code || code
+      } catch {}
+      toasts.error('Não foi possível gerar a planilha', code)
+      return
+    }
+    const blob = await resp.blob()
+    const ok = resp.headers.get('X-Pedidos-Ok') || '0'
+    const pulados = resp.headers.get('X-Pedidos-Pulados') || '0'
+    const detalhe = decodePulados(resp.headers.get('X-Pedidos-Pulados-Detalhe'))
+
+    const cd = resp.headers.get('Content-Disposition') || ''
+    const m = cd.match(/filename="?([^"]+)"?/)
+    const fname = m?.[1] || 'nf_avulsa.csv'
+
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = fname
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(link.href)
+
+    if (Number(pulados) > 0) {
+      toasts.warning(
+        `${ok} pedido(s) na planilha · ${pulados} pulado(s)`,
+        detalhe.map((d) => `${d.numero}: ${d.motivo}`),
+      )
+    } else {
+      toasts.success(`Planilha gerada com ${ok} pedido(s)`)
+    }
+  } catch (e: any) {
+    toasts.error('Não foi possível gerar a planilha', e?.message || 'erro')
+  } finally {
+    gerando.value = false
+  }
+}
+
 // -- Paginação --------------------------------------------------------------
 const PAGE_SIZE = 50
 const page = ref(1)
@@ -146,6 +235,16 @@ function badgeLabel(status: string): string {
           <RefreshCw class="h-4 w-4" :class="loading ? 'animate-spin' : ''" />
           Recarregar
         </button>
+        <button
+          v-if="canEdit"
+          class="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          :disabled="gerando || !selected.size"
+          @click="gerarPlanilha"
+        >
+          <FileDown v-if="!gerando" class="h-4 w-4" />
+          <Loader2 v-else class="h-4 w-4 animate-spin" />
+          Gerar planilha{{ selected.size ? ` (${selected.size})` : '' }}
+        </button>
       </div>
     </div>
 
@@ -186,6 +285,14 @@ function badgeLabel(status: string): string {
       <table class="min-w-[1000px] w-full text-sm">
         <thead class="bg-muted/50 text-left">
           <tr>
+            <th v-if="canEdit" class="px-3 py-2">
+              <input
+                type="checkbox"
+                :checked="allFilteredSelected"
+                :disabled="!filteredRows.length"
+                @change="toggleAll"
+              />
+            </th>
             <th class="px-3 py-2 font-medium">Data</th>
             <th class="px-3 py-2 font-medium">Pedido Bling</th>
             <th class="px-3 py-2 font-medium">Pedido Marketplace</th>
@@ -199,16 +306,23 @@ function badgeLabel(status: string): string {
         </thead>
         <tbody>
           <tr v-if="loading">
-            <td colspan="9" class="px-3 py-8 text-center text-muted-foreground">
+            <td :colspan="canEdit ? 10 : 9" class="px-3 py-8 text-center text-muted-foreground">
               <Loader2 class="mx-auto h-5 w-5 animate-spin" />
             </td>
           </tr>
           <tr v-else-if="!filteredRows.length">
-            <td colspan="9" class="px-3 py-8 text-center text-muted-foreground">
+            <td :colspan="canEdit ? 10 : 9" class="px-3 py-8 text-center text-muted-foreground">
               Nenhum pedido. As lojas precisam ter um cadastro de NF (Faturador/Etiqueta/Impressão) atribuído na tela Lojas.
             </td>
           </tr>
           <tr v-for="r in pagedRows" :key="r.pedido_bling" class="border-t hover:bg-muted/30">
+            <td v-if="canEdit" class="px-3 py-2">
+              <input
+                type="checkbox"
+                :checked="selected.has(r.pedido_bling)"
+                @change="toggle(r.pedido_bling)"
+              />
+            </td>
             <td class="whitespace-nowrap px-3 py-2">{{ fmtData(r.data) }}</td>
             <td class="whitespace-nowrap px-3 py-2 font-medium">{{ r.pedido_bling }}</td>
             <td class="whitespace-nowrap px-3 py-2">{{ r.pedido_marketplace || '—' }}</td>
