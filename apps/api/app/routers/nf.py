@@ -8,19 +8,30 @@ depois — aqui é só o CRUD do cadastro.
 
 import base64
 import json
+import secrets
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import asc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import NfCatalogoMala, NfEtiqueta, NfFaturador, NfImpressao, User
+from app.models import (
+    NfCatalogoMala,
+    NfCommand,
+    NfEtiqueta,
+    NfFaturador,
+    NfFaturamento,
+    NfImpressao,
+    User,
+)
 from app.schemas.nf import (
     GerarPlanilhaIn,
     NfCatalogoMalaCreate,
@@ -615,3 +626,245 @@ async def gerar_planilha_faturamento(
             ),
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# ENFILEIRAR IMPORTAÇÃO (Fase 3a-4) — cria o outbox pro executor AdsPower.
+#
+# Em vez de baixar o CSV pra importar à mão, o admin ENFILEIRA os pedidos: a
+# planilha é gerada por FATURADOR (cada login/AdsPower vira um comando com seu
+# subconjunto + CSV congelado) e o executor local faz poll de /agent/lease,
+# loga no Bling destino e importa. O status de cada pedido vai pra
+# nf_faturamento.status_faturamento ('processando' aqui; 'ok'/'erro' no result).
+# ---------------------------------------------------------------------------
+
+
+class EnfileirarOut(BaseModel):
+    comandos: int
+    pedidos_ok: int
+    pulados: list[dict]
+
+
+async def _marcar_faturamento(
+    session: AsyncSession, numeros: list[str], *, status_txt: str, erro: str | None
+) -> None:
+    """Upsert do status_faturamento de cada pedido em nf_faturamento (chave
+    única pedido_bling). Não toca as etapas de etiqueta/impressão."""
+    if not numeros:
+        return
+    existentes = {
+        f.pedido_bling: f
+        for f in (
+            await session.execute(
+                select(NfFaturamento).where(NfFaturamento.pedido_bling.in_(numeros))
+            )
+        ).scalars().all()
+    }
+    for numero in numeros:
+        row = existentes.get(numero)
+        if row is None:
+            row = NfFaturamento(pedido_bling=numero)
+            session.add(row)
+        row.status_faturamento = status_txt
+        row.erro_faturamento = erro
+
+
+@router.post("/faturamento/enfileirar", response_model=EnfileirarOut)
+async def enfileirar_importacao(
+    body: GerarPlanilhaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_painel_edit)],
+) -> EnfileirarOut:
+    """Enfileira a importação avulsa dos pedidos escolhidos: gera a planilha por
+    faturador, cria um NfCommand por faturador (CSV congelado) e marca cada
+    pedido como 'processando'. 422 se nenhum pedido pôde ser gerado."""
+    res = await nf_emissao_gerar.gerar_por_faturador(session, body.numeros)
+    if not res.blocos:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "nf_nenhum_pedido_gerado",
+                "pulados": [{"numero": p.numero, "motivo": p.motivo} for p in res.pulados],
+            },
+        )
+    total_ok = 0
+    for bloco in res.blocos:
+        session.add(
+            NfCommand(
+                faturador_id=bloco.faturador_id,
+                action="import_avulsa",
+                numeros=bloco.numeros,
+                planilha=bloco.csv,
+                nome_arquivo=bloco.nome_arquivo,
+                status="pending",
+                source="manual",
+                created_by=user.id,
+            )
+        )
+        await _marcar_faturamento(
+            session, bloco.numeros, status_txt="processando", erro=None
+        )
+        total_ok += len(bloco.numeros)
+    await session.commit()
+    logger.info(
+        "nf_importacao_enfileirada",
+        comandos=len(res.blocos),
+        pedidos_ok=total_ok,
+    )
+    return EnfileirarOut(
+        comandos=len(res.blocos),
+        pedidos_ok=total_ok,
+        pulados=[{"numero": p.numero, "motivo": p.motivo} for p in res.pulados],
+    )
+
+
+# ---------------------------------------------------------------------------
+# AGENTE (executor de importação AdsPower) — superfície M2M gated por token.
+#
+# O executor local faz poll de /agent/lease, abre o AdsPower do faturador (login
+# entregue no lease), importa a planilha no Bling destino e reporta em
+# /agent/commands/{id}/result. A planilha crua sai por /agent/commands/{id}/
+# planilha. Os três são guardados pelo X-Agent-Token (vazio = fechado/401).
+# ---------------------------------------------------------------------------
+
+
+async def _require_nf_agent_token(
+    x_agent_token: Annotated[str | None, Header(alias="X-Agent-Token")] = None,
+) -> None:
+    expected = get_settings().nf_agent_token
+    if (
+        not expected
+        or not x_agent_token
+        or not secrets.compare_digest(x_agent_token, expected)
+    ):
+        raise HTTPException(401, detail={"code": "nf_agent_unauthorized"})
+
+
+class NfAgentLeaseIn(BaseModel):
+    limit: int = Field(default=5, ge=1, le=50)
+
+
+class NfAgentCommandOut(BaseModel):
+    id: UUID
+    faturador_id: UUID | None
+    faturador_nome: str | None
+    ads_power: str | None
+    usuario: str | None
+    senha: str | None
+    action: str
+    numeros: list[str]
+    nome_arquivo: str
+    planilha_b64: str
+
+
+class NfAgentResultIn(BaseModel):
+    status: str  # "done" | "failed"
+    result: str | None = None
+
+
+@router.post("/agent/lease", dependencies=[Depends(_require_nf_agent_token)])
+async def nf_agent_lease(
+    body: NfAgentLeaseIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Reivindica até `limit` comandos pendentes (FOR UPDATE SKIP LOCKED), vira
+    pra 'claimed' e devolve cada um com o login do faturador (AdsPower/usuário/
+    senha descriptografada) + a planilha em base64. Seguro sob concorrência."""
+    claimed = (
+        await session.execute(
+            select(NfCommand)
+            .where(NfCommand.status == "pending")
+            .order_by(NfCommand.created_at.asc())
+            .limit(body.limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+
+    out: list[NfAgentCommandOut] = []
+    if claimed:
+        now = datetime.now(UTC)
+        fat_ids = {c.faturador_id for c in claimed if c.faturador_id}
+        faturadores = {
+            f.id: f
+            for f in (
+                await session.execute(
+                    select(NfFaturador).where(NfFaturador.id.in_(fat_ids))
+                )
+            ).scalars().all()
+        } if fat_ids else {}
+        for cmd in claimed:
+            cmd.status = "claimed"
+            cmd.claimed_at = now
+            cmd.attempts += 1
+            fat = faturadores.get(cmd.faturador_id) if cmd.faturador_id else None
+            out.append(
+                NfAgentCommandOut(
+                    id=cmd.id,
+                    faturador_id=cmd.faturador_id,
+                    faturador_nome=fat.nome if fat else None,
+                    ads_power=fat.ads_power if fat else None,
+                    usuario=fat.usuario if fat else None,
+                    senha=(decrypt(fat.senha_enc) if fat and fat.senha_enc else None),
+                    action=cmd.action,
+                    numeros=list(cmd.numeros or []),
+                    nome_arquivo=cmd.nome_arquivo,
+                    planilha_b64=base64.b64encode(cmd.planilha).decode("ascii"),
+                )
+            )
+        await session.commit()
+
+    logger.info("nf_agent_lease", leased=len(out))
+    return {"commands": [o.model_dump(mode="json") for o in out]}
+
+
+@router.get(
+    "/agent/commands/{command_id}/planilha",
+    dependencies=[Depends(_require_nf_agent_token)],
+)
+async def nf_agent_command_planilha(
+    command_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """CSV cru do comando (o arquivo que o executor sobe no Bling destino)."""
+    cmd = await session.get(NfCommand, command_id)
+    if cmd is None:
+        raise HTTPException(404, detail={"code": "nf_command_not_found"})
+    return Response(
+        content=cmd.planilha,
+        media_type=nf_relatorio.CSV_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="{cmd.nome_arquivo}"'
+        },
+    )
+
+
+@router.post(
+    "/agent/commands/{command_id}/result",
+    dependencies=[Depends(_require_nf_agent_token)],
+)
+async def nf_agent_command_result(
+    command_id: UUID,
+    body: NfAgentResultIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict:
+    """Reporta o resultado de um comando. 'done' marca cada pedido do comando
+    como status_faturamento='ok'; 'failed' marca 'erro' + guarda a mensagem."""
+    cmd = await session.get(NfCommand, command_id)
+    if cmd is None:
+        raise HTTPException(404, detail={"code": "nf_command_not_found"})
+    new_status = "done" if body.status == "done" else "failed"
+    cmd.status = new_status
+    cmd.result = (body.result or "")[:2000] or None
+    cmd.completed_at = datetime.now(UTC)
+
+    numeros = list(cmd.numeros or [])
+    if new_status == "done":
+        await _marcar_faturamento(session, numeros, status_txt="ok", erro=None)
+    else:
+        await _marcar_faturamento(
+            session, numeros, status_txt="erro", erro=cmd.result or "falha na importação"
+        )
+
+    await session.commit()
+    logger.info("nf_agent_result", command_id=str(command_id), status=new_status)
+    return {"ok": True, "status": new_status}

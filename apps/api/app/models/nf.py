@@ -1,7 +1,18 @@
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, ForeignKey, Integer, Numeric, Text, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    Numeric,
+    Text,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -151,6 +162,60 @@ class NfFaturamento(Base, TimestampMixin):
     erro_etiqueta: Mapped[str | None] = mapped_column(Text, nullable=True)
     status_impressao: Mapped[str | None] = mapped_column(Text, nullable=True)
     erro_impressao: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class NfCommand(Base, TimestampMixin):
+    """OUTBOX da importação da planilha avulsa (Fase 3a-4). Um comando =
+    UM faturador com o subconjunto de pedidos daquela loja/AdsPower + o CSV
+    CONGELADO no momento do enfileiramento (imune a drift dos dados).
+
+    O executor LOCAL (marionete/AdsPower, fora deste repo) faz poll de
+    `POST /nf-cadastro/agent/lease` (X-Agent-Token), abre o AdsPower do
+    faturador, loga no Bling destino, importa a planilha como VENDA AVULSA e
+    reporta em `POST /nf-cadastro/agent/commands/{id}/result`. O login
+    (ads_power/usuario/senha descriptografada) é entregue no LEASE, nunca
+    persistido no comando.
+
+    - `numeros` = pedidos do Bling cobertos por este comando (JSONB).
+    - `planilha` = CSV congelado (bytea) — o arquivo que o executor sobe.
+    - `status` = pending → claimed → done | failed.
+    - A cada done/failed a etapa `status_faturamento` de cada pedido em
+      `nf_faturamento` é atualizada (ok / erro).
+    """
+
+    __tablename__ = "nf_command"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    faturador_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("nf_faturador.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    action: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'import_avulsa'")
+    )
+    numeros: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    planilha: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    nome_arquivo: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'pending'")
+    )
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    source: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'manual'")
+    )
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class NfImpressao(Base, TimestampMixin):

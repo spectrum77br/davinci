@@ -65,6 +65,7 @@ from app.models.margem_audit import MargemAudit
 from app.models.margens import Margens
 from app.models.nf import (
     NfCatalogoMala,
+    NfCommand,
     NfEtiqueta,
     NfFaturador,
     NfFaturamento,
@@ -178,6 +179,7 @@ __all__ = [
     "MarketplaceOrderFreightReconciliation",
     "NCMCache",
     "NfCatalogoMala",
+    "NfCommand",
     "NfEtiqueta",
     "NfFaturador",
     "NfFaturamento",

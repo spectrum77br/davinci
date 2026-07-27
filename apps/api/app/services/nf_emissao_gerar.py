@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -69,6 +70,22 @@ class PedidoPulado:
 class ResultadoGeracao:
     csv: bytes
     pedidos_ok: list[str]
+    pulados: list[PedidoPulado]
+
+
+@dataclass(frozen=True)
+class BlocoFaturador:
+    """Um comando de importação: os pedidos de UM faturador + o CSV congelado."""
+
+    faturador_id: UUID
+    numeros: list[str]
+    csv: bytes
+    nome_arquivo: str
+
+
+@dataclass(frozen=True)
+class ResultadoPorFaturador:
+    blocos: list[BlocoFaturador]
     pulados: list[PedidoPulado]
 
 
@@ -140,16 +157,20 @@ async def _carregar_faturadores(
     return {f.id: f for f in rows}
 
 
-async def gerar_planilha(
-    session: AsyncSession, numeros: list[str]
-) -> ResultadoGeracao:
-    """Gera o CSV de importação avulsa dos `numeros` (pedidos do Bling). Cada
-    pedido usa a regra do faturador da sua loja. Pedidos sem faturador ou sem
-    itens saem em `pulados`."""
-    numeros = [n for n in (str(x).strip() for x in numeros) if n]
-    if not numeros:
-        return ResultadoGeracao(csv=nf_relatorio.montar_csv([]), pedidos_ok=[], pulados=[])
+@dataclass(frozen=True)
+class _PedidoMontado:
+    numero: str
+    faturador_id: UUID
+    info: PedidoInfo
+    linhas: list
 
+
+async def _montar_pedidos(
+    session: AsyncSession, numeros: list[str]
+) -> tuple[list[_PedidoMontado], list[PedidoPulado]]:
+    """Núcleo compartilhado: lê itens, resolve o faturador de cada pedido e
+    transforma pelos motores puros. Devolve os pedidos montados (na ordem
+    pedida) + os pulados (sem itens / sem faturador)."""
     rows = (
         await session.execute(_ITENS_SQL, {"numeros": numeros})
     ).mappings().all()
@@ -172,8 +193,7 @@ async def gerar_planilha(
     catalogo_mala = await nf_catalogo.carregar_todos(session)
     modelos_por_base = await _modelos_por_base(session, bases_mala)
 
-    pedidos: list[tuple[PedidoInfo, list]] = []
-    pedidos_ok: list[str] = []
+    montados: list[_PedidoMontado] = []
     pulados: list[PedidoPulado] = []
 
     for numero in numeros:
@@ -213,16 +233,74 @@ async def gerar_planilha(
             cidade_destino=cab["cidade_destino"],
             uf_destino=cab["uf_destino"],
         )
-        pedidos.append((info, linhas))
-        pedidos_ok.append(numero)
+        montados.append(_PedidoMontado(numero, regra.id, info, linhas))
 
+    return montados, pulados
+
+
+async def gerar_planilha(
+    session: AsyncSession, numeros: list[str]
+) -> ResultadoGeracao:
+    """Gera o CSV de importação avulsa dos `numeros` (pedidos do Bling). Cada
+    pedido usa a regra do faturador da sua loja. Pedidos sem faturador ou sem
+    itens saem em `pulados`."""
+    numeros = [n for n in (str(x).strip() for x in numeros) if n]
+    if not numeros:
+        return ResultadoGeracao(csv=nf_relatorio.montar_csv([]), pedidos_ok=[], pulados=[])
+
+    montados, pulados = await _montar_pedidos(session, numeros)
+    pedidos = [(m.info, m.linhas) for m in montados]
     csv_bytes = nf_relatorio.montar_csv(pedidos)
     logger.info(
         "nf_emissao_planilha",
-        pedidos_ok=len(pedidos_ok),
+        pedidos_ok=len(montados),
         pulados=len(pulados),
     )
-    return ResultadoGeracao(csv=csv_bytes, pedidos_ok=pedidos_ok, pulados=pulados)
+    return ResultadoGeracao(
+        csv=csv_bytes,
+        pedidos_ok=[m.numero for m in montados],
+        pulados=pulados,
+    )
+
+
+async def gerar_por_faturador(
+    session: AsyncSession, numeros: list[str]
+) -> ResultadoPorFaturador:
+    """Como `gerar_planilha`, mas quebra o resultado em UM bloco por faturador —
+    cada bloco tem seu subconjunto de pedidos + o próprio CSV congelado. É o que
+    o outbox de importação enfileira (um comando por login/AdsPower)."""
+    numeros = [n for n in (str(x).strip() for x in numeros) if n]
+    if not numeros:
+        return ResultadoPorFaturador(blocos=[], pulados=[])
+
+    montados, pulados = await _montar_pedidos(session, numeros)
+
+    # Agrupa preservando a ordem em que cada faturador apareceu.
+    por_fat: dict[UUID, list[_PedidoMontado]] = {}
+    for m in montados:
+        por_fat.setdefault(m.faturador_id, []).append(m)
+
+    ts = datetime.now(_BRT).strftime("%Y%m%d_%H%M%S")
+    blocos: list[BlocoFaturador] = []
+    for i, (fid, grupo) in enumerate(por_fat.items()):
+        pedidos = [(m.info, m.linhas) for m in grupo]
+        csv_bytes = nf_relatorio.montar_csv(pedidos)
+        blocos.append(
+            BlocoFaturador(
+                faturador_id=fid,
+                numeros=[m.numero for m in grupo],
+                csv=csv_bytes,
+                nome_arquivo=f"nf_avulsa_{ts}_{i + 1}.csv",
+            )
+        )
+
+    logger.info(
+        "nf_emissao_por_faturador",
+        blocos=len(blocos),
+        pedidos_ok=len(montados),
+        pulados=len(pulados),
+    )
+    return ResultadoPorFaturador(blocos=blocos, pulados=pulados)
 
 
 def nome_arquivo() -> str:

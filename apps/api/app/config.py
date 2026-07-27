@@ -199,6 +199,13 @@ class Settings(BaseSettings):
     # marionete .env to turn the integration on.
     marketing_agent_token: str = ""
 
+    # Token M2M do executor de IMPORTAÇÃO DE NF (marionete AdsPower da Fase
+    # 3a-4). Guarda os /nf-cadastro/agent/* (lease/result). Vazio = endpoints
+    # FECHADOS (401). O executor local abre o AdsPower do faturador, loga no
+    # Bling destino e importa a planilha avulsa. Set via NF_AGENT_TOKEN no
+    # servidor E o mesmo valor no .env do executor pra ligar a integração.
+    nf_agent_token: str = ""
+
     # Safety-net cron que re-sincroniza pedidos suspeitos de stale com o
     # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.
     enable_bling_orders_safety_net: bool = True
