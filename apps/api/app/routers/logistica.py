@@ -107,7 +107,7 @@ def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> Logisti
         acao_match=rule is not None,
         acao_status_id=rule.id if rule is not None else None,
         acao_resumo=logistica_match.resumo_acoes(rule),
-        acao_monitorar=logistica_match.deve_monitorar(rules),
+        acao_monitorar=logistica_match.deve_monitorar(rules, c.status_bling),
         acao_resolvido=logistica_match.estado_resolvido(
             rules, c.status_bling, threema_enviado=c.threema_enviado_at is not None
         ),

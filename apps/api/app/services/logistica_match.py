@@ -75,10 +75,25 @@ def find_matching_rules(
     return especificas or gerais
 
 
-def deve_monitorar(rules: list[LogisticaStatus]) -> bool:
-    """True se alguma regra casada pede monitoramento (o pedido fica no painel
-    pra acompanhar mesmo depois de resolvido)."""
-    return any(bool(r.monitoramento) for r in rules)
+def _aplicaveis_agora(
+    rules: list[LogisticaStatus], status_bling: str | None
+) -> list[LogisticaStatus]:
+    """Regras cujo `status_atual` (o "DE" da transição) casa com a situação atual
+    do pedido no Bling — ou curingas (sem `status_atual`, valem de qualquer
+    estado). É a máquina de estados: as ações de uma regra só valem quando o
+    pedido está no estado dela. Se nada casar, devolve só os curingas."""
+    atual = _norm(status_bling)
+    return [r for r in rules if not _norm(r.status_atual) or _norm(r.status_atual) == atual]
+
+
+def deve_monitorar(
+    rules: list[LogisticaStatus], status_bling: str | None = None
+) -> bool:
+    """True se alguma regra APLICÁVEL AO ESTADO ATUAL pede monitoramento (o pedido
+    fica no painel pra acompanhar mesmo depois de resolvido). Uma regra de outro
+    estado (`status_atual` diferente do Bling atual) não monitora agora."""
+    aplicaveis = _aplicaveis_agora(rules, status_bling) if status_bling is not None else rules
+    return any(bool(r.monitoramento) for r in aplicaveis)
 
 
 def estado_resolvido(
@@ -104,8 +119,10 @@ def estado_resolvido(
     combina com `not acao_monitorar`)."""
     if not rules:
         return False
-    # Ação manual pendente → ainda há o que fazer, não esconde.
-    for r in rules:
+    # Ação manual pendente NO ESTADO ATUAL → ainda há o que fazer, não esconde.
+    # Ações de uma regra de OUTRO estado (status_atual diferente do Bling atual)
+    # não pesam agora — máquina de estados: elas valem quando o pedido chegar lá.
+    for r in _aplicaveis_agora(rules, status_bling):
         if r.abrir_chamado or r.abrir_reembolso:
             return False
         if (r.mensagem_chamado or "").strip() or (r.mensagem_bling or "").strip():

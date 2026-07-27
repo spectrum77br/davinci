@@ -178,6 +178,24 @@ def test_estado_resolvido_acao_manual_pendente_fica():
         assert logistica_match.estado_resolvido([r], "Entregue") is False
 
 
+def test_estado_resolvido_acao_de_outro_estado_nao_conta():
+    # Caso real 287618: mesma chave com 2 regras. Uma pro estado "Em andamento"
+    # (com chamado/reembolso/monitorar/mensagens), outra pro estado "Problemas"
+    # (sem ação). O pedido está em "Problemas" → a regra de "Em andamento" NÃO se
+    # aplica agora → nada a fazer → resolvido (some).
+    acao = _rule(
+        status_plataforma="Retido", status_atual="Em andamento",
+        abrir_chamado=True, abrir_reembolso=True,
+        mensagem_chamado="x", mensagem_threema="x", monitoramento=True,
+    )
+    sem = _rule(status_plataforma="Retido", status_atual="Problemas")
+    assert logistica_match.estado_resolvido([acao, sem], "Problemas") is True
+    assert logistica_match.deve_monitorar([acao, sem], "Problemas") is False
+    # Mas QUANDO o pedido está em "Em andamento", a regra se aplica → fica visível.
+    assert logistica_match.estado_resolvido([acao, sem], "Em andamento") is False
+    assert logistica_match.deve_monitorar([acao, sem], "Em andamento") is True
+
+
 def test_estado_resolvido_threema_enviado_resolve():
     # Regra só com Mensagem Threema: pendente até enviar; depois de enviado
     # (threema_enviado=True) deixa de contar → resolvido (some).
