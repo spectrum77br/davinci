@@ -61,7 +61,6 @@ class NfCatalogoMalaOut(BaseModel):
     modelo: str
     tamanho: str | None = None
     valor: Decimal
-    sku_base: str | None = None
     ncm: str | None = None
     sort_order: int
     created_by: UUID | None = None
@@ -73,7 +72,6 @@ class NfCatalogoMalaCreate(BaseModel):
     modelo: str = Field(min_length=1)
     tamanho: str | None = None
     valor: Decimal
-    sku_base: str | None = None
     ncm: str | None = None
     sort_order: int | None = None
 
@@ -82,7 +80,6 @@ class NfCatalogoMalaPatch(BaseModel):
     modelo: str | None = Field(default=None, min_length=1)
     tamanho: str | None = None
     valor: Decimal | None = None
-    sku_base: str | None = None
     ncm: str | None = None
     sort_order: int | None = None
 

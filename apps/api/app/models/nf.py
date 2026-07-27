@@ -67,16 +67,14 @@ class NfCatalogoMala(Base, TimestampMixin):
     tamanho), casado com o NCM 4202.12.10.
 
     - `modelo` = rótulo do catálogo (abs / pp / pp ziper duplo + roda / me1 /
-      me2 / …). É o nome do modelo tal como está na planilha.
+      me2 / …). É o nome do modelo tal como está na planilha. O resolver casa
+      automático: a família da mala (M1..M6 → abs, P1..P6 → pp, ME1 → me1,
+      ME2 → me2) vem do NOME do produto, então o SKU do pedido resolve o modelo
+      sem vínculo manual.
     - `tamanho` = tamanho (ou faixa) do catálogo. Pode ser um único ('20') ou uma
       FAIXA com segmentos separados por ponto ('08.10' = 8 e 10). NULL nos itens
       sem tamanho (acessórios: toy, encosto, mochila, kits).
     - `valor` = valor cheio da NF pra essa (modelo, tamanho).
-    - `sku_base` = VÍNCULO editável com o código-base do SKU da mala (ex. `b001`).
-      É o que amarra o catálogo ao produto: o SKU carrega base+tamanho, e o
-      resolver casa `sku_base` + `tamanho`. Começa NULL — o admin preenche na
-      tela (não dá pra derivar com segurança, é valor fiscal). Enquanto NULL, o
-      motor cai no valor de venda (comportamento seguro atual).
     - `ncm` = NCM da NF (default 4202.12.10).
     """
 
@@ -86,8 +84,6 @@ class NfCatalogoMala(Base, TimestampMixin):
     modelo: Mapped[str] = mapped_column(Text, nullable=False)
     tamanho: Mapped[str | None] = mapped_column(Text, nullable=True)
     valor: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    # Código-base do SKU da mala (ex. b001). NULL = sem vínculo (motor usa venda).
-    sku_base: Mapped[str | None] = mapped_column(Text, nullable=True)
     ncm: Mapped[str | None] = mapped_column(
         Text, nullable=True, server_default=text("'4202.12.10'")
     )

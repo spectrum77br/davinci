@@ -21,7 +21,16 @@ import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder, NfFaturador, StoreInfo, User, UserRole, UserStatus
+from app.models import (
+    BlingOrder,
+    NfCatalogoMala,
+    NfFaturador,
+    Product,
+    StoreInfo,
+    User,
+    UserRole,
+    UserStatus,
+)
 from app.services.nf_relatorio import COLUNAS
 
 
@@ -157,6 +166,41 @@ async def test_pedido_sem_faturador_vai_pra_pulados(
     motivos = {d["numero"]: d["motivo"] for d in detalhe}
     assert "sem faturador" in motivos["810002"]
     assert "não encontrado" in motivos["899999"]
+
+
+@pytest.mark.asyncio
+async def test_mala_cheia_usa_catalogo_pela_familia(
+    db: AsyncSession, client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """NF cheia de MALA usa o valor do catálogo pela família do produto (o nome
+    'Mala Lisa M2' → abs), NÃO o valor de venda (itemvalor)."""
+    auth_as(admin)
+    avulso = NfFaturador(
+        nome="bling avulso", modo="bling", nf_cheia=True,
+        sku_fonte="principal", nome_fonte="produto", ncm="4202.12.10",
+    )
+    db.add(avulso)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="amazon", account_name="l1",
+                     bling_store_id="920001", nf_faturador_id=avulso.id))
+    # Produto com a família no nome (M2 → abs) + catálogo abs/20 = 161.
+    db.add(Product(user_id=admin.id, sku="b001.20", name="Mala Lisa M2 tamanho 20 - Roxa"))
+    db.add(NfCatalogoMala(modelo="abs", tamanho="20", valor=161))
+    await db.flush()
+    # Venda a 50 (promocional); a NF deve sair com o cheio 161.
+    await _seed_pedido(db, admin, avulso, numero="820001", loja="920001",
+                       itens=[{"sku": "b001.20", "nome": "Mala Lisa M2", "qtd": 1, "unit": 50}])
+    await db.commit()
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/gerar-planilha",
+        json={"numeros": ["820001"]},
+    )
+    assert r.status_code == 200, r.text
+    texto = r.content.decode("utf-8-sig")
+    reader = list(csv.reader(io.StringIO(texto), delimiter=";"))
+    a = {row[COLUNAS.index("Número pedido")]: row for row in reader[1:]}["820001"]
+    assert _col(a, "Valor Total") == "161,00"
 
 
 @pytest.mark.asyncio

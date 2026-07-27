@@ -289,16 +289,16 @@ const sortedImpressoes = computed(() =>
 )
 
 // ===========================================================================
-// CATÁLOGO MALA — valor cheio da NF de mala por (modelo, tamanho). O `sku_base`
-// é o vínculo (código-base do SKU, ex. b001) que casa a mala do pedido com a
-// linha; enquanto vazio a emissão cai no valor de venda.
+// CATÁLOGO MALA — valor cheio da NF de mala por (modelo, tamanho). O casamento
+// é automático: a família da mala (M1..M6 → abs, P1..P6 → pp, ME1 → me1,
+// ME2 → me2) vem do nome do produto, então o SKU do pedido resolve sozinho.
 // ===========================================================================
 type CatalogoMala = {
   id: string; modelo: string; tamanho: string | null; valor: string | number
-  sku_base: string | null; ncm: string | null; sort_order: number
+  ncm: string | null; sort_order: number
 }
-type CatForm = { modelo: string; tamanho: string; valor: string; sku_base: string; ncm: string; sort_order: string }
-function emptyCat(): CatForm { return { modelo: '', tamanho: '', valor: '', sku_base: '', ncm: '4202.12.10', sort_order: '' } }
+type CatForm = { modelo: string; tamanho: string; valor: string; ncm: string; sort_order: string }
+function emptyCat(): CatForm { return { modelo: '', tamanho: '', valor: '', ncm: '4202.12.10', sort_order: '' } }
 const catalogos = ref<CatalogoMala[]>([])
 const catForm = ref<CatForm>(emptyCat())
 const catEditing = ref<CatalogoMala | null>(null)
@@ -309,7 +309,6 @@ function buildCatBody(f: CatForm) {
     modelo: f.modelo.trim(),
     tamanho: f.tamanho.trim() || null,
     valor: f.valor.trim() ? Number(f.valor.replace(',', '.')) : 0,
-    sku_base: f.sku_base.trim() || null,
     ncm: f.ncm.trim() || null,
     sort_order: f.sort_order.trim() ? Number(f.sort_order) : 0,
   }
@@ -317,7 +316,7 @@ function buildCatBody(f: CatForm) {
 function openCatNew() { catForm.value = emptyCat(); saveErr.value = null; catShowNew.value = true }
 function openCatEdit(c: CatalogoMala) {
   catEditing.value = c
-  catForm.value = { modelo: c.modelo, tamanho: c.tamanho || '', valor: c.valor != null ? String(c.valor) : '', sku_base: c.sku_base || '', ncm: c.ncm || '', sort_order: String(c.sort_order ?? 0) }
+  catForm.value = { modelo: c.modelo, tamanho: c.tamanho || '', valor: c.valor != null ? String(c.valor) : '', ncm: c.ncm || '', sort_order: String(c.sort_order ?? 0) }
   saveErr.value = null
 }
 async function createCat() {
@@ -596,7 +595,6 @@ await loadFaturadores()
               <th class="px-3 py-2">Modelo</th>
               <th class="px-3 py-2">Tamanho</th>
               <th class="px-3 py-2 text-right">Valor</th>
-              <th class="px-3 py-2">SKU base</th>
               <th class="px-3 py-2">NCM</th>
             </tr>
           </thead>
@@ -605,11 +603,10 @@ await loadFaturadores()
               <td class="px-3 py-2 whitespace-nowrap font-medium">{{ c.modelo }}</td>
               <td class="px-3 py-2 whitespace-nowrap text-muted-foreground">{{ c.tamanho || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap text-right font-mono">{{ fmtValor(c.valor) }}</td>
-              <td class="px-3 py-2 whitespace-nowrap font-mono" :class="c.sku_base ? '' : 'text-amber-500'">{{ c.sku_base || 'vincular' }}</td>
               <td class="px-3 py-2 whitespace-nowrap font-mono text-muted-foreground">{{ c.ncm || '—' }}</td>
             </tr>
             <tr v-if="!loading && catalogos.length === 0">
-              <td colspan="5" class="px-3 py-6 text-center text-muted-foreground">nenhuma linha</td>
+              <td colspan="4" class="px-3 py-6 text-center text-muted-foreground">nenhuma linha</td>
             </tr>
           </tbody>
         </table>
@@ -622,7 +619,6 @@ await loadFaturadores()
             <span class="text-xs text-muted-foreground">{{ c.tamanho || '—' }}</span>
             <span class="ml-auto font-mono text-sm">{{ fmtValor(c.valor) }}</span>
           </div>
-          <div class="text-xs"><span class="text-muted-foreground">SKU base:</span> <span :class="c.sku_base ? 'font-mono' : 'text-amber-500'">{{ c.sku_base || 'vincular' }}</span></div>
           <div class="text-xs text-muted-foreground"><span>NCM:</span> {{ c.ncm || '—' }}</div>
         </div>
         <div v-if="!loading && catalogos.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">nenhuma linha</div>
@@ -771,14 +767,13 @@ await loadFaturadores()
             <div><Label>Tamanho</Label><Input v-model="catForm.tamanho" placeholder="ex: 20 ou 08.10" /></div>
             <div><Label>Valor *</Label><Input v-model="catForm.valor" inputmode="decimal" placeholder="ex: 161,00" /></div>
           </div>
-          <div><Label>SKU base</Label><Input v-model="catForm.sku_base" placeholder="ex: b001 (vínculo p/ casar o pedido)" /></div>
           <div class="grid grid-cols-2 gap-3">
             <div><Label>NCM</Label><Input v-model="catForm.ncm" placeholder="4202.12.10" /></div>
             <div><Label>Ordem</Label><Input v-model="catForm.sort_order" inputmode="numeric" placeholder="0" /></div>
           </div>
           <p class="text-xs text-muted-foreground">
-            Tamanho aceita faixa por pontos: <b>08.10</b> cobre 8 e 10. Deixe <b>SKU base</b> vazio até
-            saber o código da mala; a emissão só usa o valor do catálogo quando o vínculo estiver preenchido.
+            Tamanho aceita faixa por pontos: <b>08.10</b> cobre 8 e 10. O casamento com o pedido é
+            automático pela família da mala (M1–M6 → <b>abs</b>, P1–P6 → <b>pp</b>, ME1 → <b>me1</b>, ME2 → <b>me2</b>).
           </p>
         </div>
         <div v-if="saveErr" class="text-sm text-red-500">erro: {{ saveErr }}</div>

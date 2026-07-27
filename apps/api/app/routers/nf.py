@@ -407,8 +407,8 @@ async def delete_impressao(
 
 # ---------------------------------------------------------------------------
 # CATÁLOGO DE MALA — valor CHEIO da NF de mala por (modelo, tamanho). Usado
-# pela emissão quando o faturador é nf_cheia; o vínculo `sku_base` (editável,
-# começa NULL) é o que casa o SKU do pedido com a linha do catálogo.
+# pela emissão quando o faturador é nf_cheia; o casamento é automático — a
+# família da mala (M1..M6 → abs, P1..P6 → pp, ME1/ME2) vem do nome do produto.
 # ---------------------------------------------------------------------------
 
 
@@ -418,7 +418,6 @@ def _catalogo_out(c: NfCatalogoMala) -> NfCatalogoMalaOut:
         modelo=c.modelo,
         tamanho=c.tamanho,
         valor=c.valor,
-        sku_base=c.sku_base,
         ncm=c.ncm,
         sort_order=c.sort_order,
         created_by=c.created_by,
@@ -451,7 +450,6 @@ async def create_catalogo_mala(
         modelo=body.modelo.strip(),
         tamanho=_clean(body.tamanho),
         valor=body.valor,
-        sku_base=_clean(body.sku_base),
         ncm=_clean(body.ncm),
         sort_order=body.sort_order or 0,
         created_by=admin.id,
@@ -483,8 +481,6 @@ async def patch_catalogo_mala(
         c.tamanho = _clean(data["tamanho"])
     if "valor" in data and data["valor"] is not None:
         c.valor = data["valor"]
-    if "sku_base" in data:
-        c.sku_base = _clean(data["sku_base"])
     if "ncm" in data:
         c.ncm = _clean(data["ncm"])
     if "sort_order" in data and data["sort_order"] is not None:

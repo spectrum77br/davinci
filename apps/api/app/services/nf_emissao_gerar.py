@@ -80,15 +80,52 @@ def _dec(v: object) -> Decimal:
     return Decimal(str(v))
 
 
+# Nome (com a família M1..P6/ME1/ME2) de cada SKU base de mala presente, pra
+# derivar o modelo do catálogo automaticamente (sem vínculo manual).
+_NOMES_BASE_SQL = text(
+    f"""
+    SELECT DISTINCT ON (split_part(sku, '.', 1))
+        split_part(sku, '.', 1) AS base,
+        name                    AS nome
+    FROM "{_SCHEMA}".products
+    WHERE split_part(sku, '.', 1) = ANY(:bases)
+      AND name IS NOT NULL
+    ORDER BY split_part(sku, '.', 1)
+    """
+)
+
+
+async def _modelos_por_base(session: AsyncSession, bases: set[str]) -> dict[str, str]:
+    """Mapa base do SKU (ex. `b001`) → modelo do catálogo (`abs`), derivado do
+    nome do produto. Bases sem família conhecida ficam de fora."""
+    if not bases:
+        return {}
+    rows = (
+        await session.execute(_NOMES_BASE_SQL, {"bases": list(bases)})
+    ).mappings().all()
+    out: dict[str, str] = {}
+    for r in rows:
+        modelo = nf_catalogo.modelo_do_nome(r["nome"])
+        if modelo:
+            out[r["base"]] = modelo
+    return out
+
+
 def _valor_unitario(
-    regra: NfFaturador, catalogo_mala: list, row: object
+    regra: NfFaturador,
+    catalogo_mala: list,
+    modelos_por_base: dict[str, str],
+    row: object,
 ) -> Decimal:
-    """Valor unitário do item: em NF cheia de MALA com vínculo no catálogo, usa o
-    valor CHEIO do catálogo (por tamanho); senão o `itemvalor` (valor de venda)."""
+    """Valor unitário do item: em NF cheia de MALA que casa o catálogo, usa o
+    valor CHEIO do catálogo (por modelo/tamanho); senão o `itemvalor` (venda)."""
     if regra.nf_cheia:
-        do_catalogo = nf_catalogo.valor_para(catalogo_mala, row["sku"])
-        if do_catalogo is not None:
-            return do_catalogo
+        parsed = nf_catalogo.parse_sku_mala(row["sku"])
+        if parsed is not None:
+            modelo = modelos_por_base.get(parsed[0])
+            do_catalogo = nf_catalogo.valor_para(catalogo_mala, row["sku"], modelo)
+            if do_catalogo is not None:
+                return do_catalogo
     return _dec(row["valor_unitario"])
 
 
@@ -125,14 +162,15 @@ async def gerar_planilha(
     faturador_ids = {r["nf_faturador_id"] for r in rows if r["nf_faturador_id"]}
     faturadores = await _carregar_faturadores(session, faturador_ids)
 
-    # Catálogo de mala: valor CHEIO por (base, tamanho). Só interessa às linhas
-    # de faturador nf_cheia; carrega uma vez as bases de SKU presentes.
+    # Catálogo de mala: valor CHEIO por (modelo, tamanho). Só interessa às linhas
+    # de faturador nf_cheia; a família (modelo) vem do nome do produto.
     bases_mala = {
         p[0]
         for r in rows
         if (p := nf_catalogo.parse_sku_mala(r["sku"])) is not None
     }
-    catalogo_mala = await nf_catalogo.carregar_por_bases(session, bases_mala)
+    catalogo_mala = await nf_catalogo.carregar_todos(session)
+    modelos_por_base = await _modelos_por_base(session, bases_mala)
 
     pedidos: list[tuple[PedidoInfo, list]] = []
     pedidos_ok: list[str] = []
@@ -154,7 +192,9 @@ async def gerar_planilha(
                 sku=r["sku"],
                 nome=r["nome"],
                 quantidade=int(r["quantidade"] or 0),
-                valor_unitario=_valor_unitario(regra, catalogo_mala, r),
+                valor_unitario=_valor_unitario(
+                    regra, catalogo_mala, modelos_por_base, r
+                ),
                 ncm=None,
             )
             for r in itens_rows

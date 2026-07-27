@@ -195,7 +195,7 @@ async def test_catalogo_mala_crud(
 ):
     auth_as(admin)
 
-    # sku_base começa vazio (vínculo é preenchido depois); NCM default.
+    # Casamento é automático pela família (modelo/tamanho); NCM default.
     r = await client.post(
         "/api/nf-cadastro/catalogo-mala",
         json={"modelo": "abs", "tamanho": "20", "valor": "161.00"},
@@ -205,27 +205,20 @@ async def test_catalogo_mala_crud(
     assert r.json()["modelo"] == "abs"
     assert r.json()["tamanho"] == "20"
     assert r.json()["valor"] == "161.00"
-    assert r.json()["sku_base"] is None
     assert r.json()["ncm"] == "4202.12.10"
 
     r = await client.get("/api/nf-cadastro/catalogo-mala")
     assert any(c["id"] == cid for c in r.json())
 
-    # Vincula o SKU base e ajusta o valor.
+    # Ajusta modelo/tamanho/valor.
     r = await client.patch(
         f"/api/nf-cadastro/catalogo-mala/{cid}",
-        json={"sku_base": "b001", "valor": "176.40"},
+        json={"modelo": "pp", "tamanho": "24", "valor": "176.40"},
     )
     assert r.status_code == 200
-    assert r.json()["sku_base"] == "b001"
+    assert r.json()["modelo"] == "pp"
+    assert r.json()["tamanho"] == "24"
     assert r.json()["valor"] == "176.40"
-
-    # "" limpa o vínculo.
-    r = await client.patch(
-        f"/api/nf-cadastro/catalogo-mala/{cid}", json={"sku_base": ""}
-    )
-    assert r.status_code == 200
-    assert r.json()["sku_base"] is None
 
     r = await client.delete(f"/api/nf-cadastro/catalogo-mala/{cid}")
     assert r.status_code == 204
