@@ -188,13 +188,59 @@ async def test_impressao_crud(
 
 
 @pytest.mark.asyncio
+async def test_catalogo_mala_crud(
+    client: AsyncClient,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+):
+    auth_as(admin)
+
+    # sku_base começa vazio (vínculo é preenchido depois); NCM default.
+    r = await client.post(
+        "/api/nf-cadastro/catalogo-mala",
+        json={"modelo": "abs", "tamanho": "20", "valor": "161.00"},
+    )
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    assert r.json()["modelo"] == "abs"
+    assert r.json()["tamanho"] == "20"
+    assert r.json()["valor"] == "161.00"
+    assert r.json()["sku_base"] is None
+    assert r.json()["ncm"] == "4202.12.10"
+
+    r = await client.get("/api/nf-cadastro/catalogo-mala")
+    assert any(c["id"] == cid for c in r.json())
+
+    # Vincula o SKU base e ajusta o valor.
+    r = await client.patch(
+        f"/api/nf-cadastro/catalogo-mala/{cid}",
+        json={"sku_base": "b001", "valor": "176.40"},
+    )
+    assert r.status_code == 200
+    assert r.json()["sku_base"] == "b001"
+    assert r.json()["valor"] == "176.40"
+
+    # "" limpa o vínculo.
+    r = await client.patch(
+        f"/api/nf-cadastro/catalogo-mala/{cid}", json={"sku_base": ""}
+    )
+    assert r.status_code == 200
+    assert r.json()["sku_base"] is None
+
+    r = await client.delete(f"/api/nf-cadastro/catalogo-mala/{cid}")
+    assert r.status_code == 204
+    r = await client.get("/api/nf-cadastro/catalogo-mala")
+    assert not any(c["id"] == cid for c in r.json())
+
+
+@pytest.mark.asyncio
 async def test_non_admin_forbidden(
     client: AsyncClient,
     normal: User,
     auth_as: Callable[[User | None], None],
 ):
     auth_as(normal)
-    for path in ("faturadores", "etiquetas", "impressoes"):
+    for path in ("faturadores", "etiquetas", "impressoes", "catalogo-mala"):
         r = await client.get(f"/api/nf-cadastro/{path}")
         assert r.status_code == 403, path
 
@@ -306,3 +352,9 @@ async def test_patch_not_found(
     )
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "nf_impressao_not_found"
+
+    r = await client.patch(
+        f"/api/nf-cadastro/catalogo-mala/{uuid.uuid4()}", json={"modelo": "x"}
+    )
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "nf_catalogo_mala_not_found"

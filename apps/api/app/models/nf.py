@@ -61,6 +61,46 @@ class NfFaturador(Base, TimestampMixin):
     )
 
 
+class NfCatalogoMala(Base, TimestampMixin):
+    """Catálogo de valor CHEIO da NF de MALA (aba `catalogo mala` do xlsx). A NF
+    cheia de mala NÃO usa o valor de VENDA — usa um valor fixo por (modelo,
+    tamanho), casado com o NCM 4202.12.10.
+
+    - `modelo` = rótulo do catálogo (abs / pp / pp ziper duplo + roda / me1 /
+      me2 / …). É o nome do modelo tal como está na planilha.
+    - `tamanho` = tamanho (ou faixa) do catálogo. Pode ser um único ('20') ou uma
+      FAIXA com segmentos separados por ponto ('08.10' = 8 e 10). NULL nos itens
+      sem tamanho (acessórios: toy, encosto, mochila, kits).
+    - `valor` = valor cheio da NF pra essa (modelo, tamanho).
+    - `sku_base` = VÍNCULO editável com o código-base do SKU da mala (ex. `b001`).
+      É o que amarra o catálogo ao produto: o SKU carrega base+tamanho, e o
+      resolver casa `sku_base` + `tamanho`. Começa NULL — o admin preenche na
+      tela (não dá pra derivar com segurança, é valor fiscal). Enquanto NULL, o
+      motor cai no valor de venda (comportamento seguro atual).
+    - `ncm` = NCM da NF (default 4202.12.10).
+    """
+
+    __tablename__ = "nf_catalogo_mala"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    modelo: Mapped[str] = mapped_column(Text, nullable=False)
+    tamanho: Mapped[str | None] = mapped_column(Text, nullable=True)
+    valor: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Código-base do SKU da mala (ex. b001). NULL = sem vínculo (motor usa venda).
+    sku_base: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ncm: Mapped[str | None] = mapped_column(
+        Text, nullable=True, server_default=text("'4202.12.10'")
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
 class NfEtiqueta(Base, TimestampMixin):
     """Cadastro da ETIQUETA (onde a NF já emitida é inserida na plataforma p/
     liberar a etiqueta). Excel aba NF R14–R22: `plataforma | regra etiqueta`.

@@ -63,7 +63,13 @@ from app.models.listing import Listing, ListingRequest
 from app.models.logistica import Logistica, LogisticaStatus, LogisticaStatusAnexo
 from app.models.margem_audit import MargemAudit
 from app.models.margens import Margens
-from app.models.nf import NfEtiqueta, NfFaturador, NfFaturamento, NfImpressao
+from app.models.nf import (
+    NfCatalogoMala,
+    NfEtiqueta,
+    NfFaturador,
+    NfFaturamento,
+    NfImpressao,
+)
 from app.models.marketing import (
     MarketingAccount,
     MarketingCampaign,
@@ -171,6 +177,7 @@ __all__ = [
     "MarketplaceOrderFinancial",
     "MarketplaceOrderFreightReconciliation",
     "NCMCache",
+    "NfCatalogoMala",
     "NfEtiqueta",
     "NfFaturador",
     "NfFaturamento",

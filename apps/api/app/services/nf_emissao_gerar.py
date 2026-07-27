@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import NfFaturador
-from app.services import nf_emissao, nf_relatorio
+from app.services import nf_catalogo, nf_emissao, nf_relatorio
 from app.services.nf_emissao import ItemPedido
 from app.services.nf_relatorio import PedidoInfo
 
@@ -80,6 +80,18 @@ def _dec(v: object) -> Decimal:
     return Decimal(str(v))
 
 
+def _valor_unitario(
+    regra: NfFaturador, catalogo_mala: list, row: object
+) -> Decimal:
+    """Valor unitário do item: em NF cheia de MALA com vínculo no catálogo, usa o
+    valor CHEIO do catálogo (por tamanho); senão o `itemvalor` (valor de venda)."""
+    if regra.nf_cheia:
+        do_catalogo = nf_catalogo.valor_para(catalogo_mala, row["sku"])
+        if do_catalogo is not None:
+            return do_catalogo
+    return _dec(row["valor_unitario"])
+
+
 async def _carregar_faturadores(
     session: AsyncSession, ids: set
 ) -> dict:
@@ -113,6 +125,15 @@ async def gerar_planilha(
     faturador_ids = {r["nf_faturador_id"] for r in rows if r["nf_faturador_id"]}
     faturadores = await _carregar_faturadores(session, faturador_ids)
 
+    # Catálogo de mala: valor CHEIO por (base, tamanho). Só interessa às linhas
+    # de faturador nf_cheia; carrega uma vez as bases de SKU presentes.
+    bases_mala = {
+        p[0]
+        for r in rows
+        if (p := nf_catalogo.parse_sku_mala(r["sku"])) is not None
+    }
+    catalogo_mala = await nf_catalogo.carregar_por_bases(session, bases_mala)
+
     pedidos: list[tuple[PedidoInfo, list]] = []
     pedidos_ok: list[str] = []
     pulados: list[PedidoPulado] = []
@@ -133,7 +154,7 @@ async def gerar_planilha(
                 sku=r["sku"],
                 nome=r["nome"],
                 quantidade=int(r["quantidade"] or 0),
-                valor_unitario=_dec(r["valor_unitario"]),
+                valor_unitario=_valor_unitario(regra, catalogo_mala, r),
                 ncm=None,
             )
             for r in itens_rows

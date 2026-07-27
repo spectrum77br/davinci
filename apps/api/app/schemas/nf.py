@@ -56,6 +56,37 @@ class NfFaturadorPatch(BaseModel):
     sort_order: int | None = None
 
 
+class NfCatalogoMalaOut(BaseModel):
+    id: UUID
+    modelo: str
+    tamanho: str | None = None
+    valor: Decimal
+    sku_base: str | None = None
+    ncm: str | None = None
+    sort_order: int
+    created_by: UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class NfCatalogoMalaCreate(BaseModel):
+    modelo: str = Field(min_length=1)
+    tamanho: str | None = None
+    valor: Decimal
+    sku_base: str | None = None
+    ncm: str | None = None
+    sort_order: int | None = None
+
+
+class NfCatalogoMalaPatch(BaseModel):
+    modelo: str | None = Field(default=None, min_length=1)
+    tamanho: str | None = None
+    valor: Decimal | None = None
+    sku_base: str | None = None
+    ncm: str | None = None
+    sort_order: int | None = None
+
+
 class NfEtiquetaOut(BaseModel):
     id: UUID
     plataforma: str

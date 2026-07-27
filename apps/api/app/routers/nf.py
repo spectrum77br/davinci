@@ -20,9 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import NfEtiqueta, NfFaturador, NfImpressao, User
+from app.models import NfCatalogoMala, NfEtiqueta, NfFaturador, NfImpressao, User
 from app.schemas.nf import (
     GerarPlanilhaIn,
+    NfCatalogoMalaCreate,
+    NfCatalogoMalaOut,
+    NfCatalogoMalaPatch,
     NfEtiquetaCreate,
     NfEtiquetaOut,
     NfEtiquetaPatch,
@@ -399,6 +402,113 @@ async def delete_impressao(
     await session.delete(i)
     await session.commit()
     logger.info("nf_impressao_deleted", id=str(impressao_id))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# CATÁLOGO DE MALA — valor CHEIO da NF de mala por (modelo, tamanho). Usado
+# pela emissão quando o faturador é nf_cheia; o vínculo `sku_base` (editável,
+# começa NULL) é o que casa o SKU do pedido com a linha do catálogo.
+# ---------------------------------------------------------------------------
+
+
+def _catalogo_out(c: NfCatalogoMala) -> NfCatalogoMalaOut:
+    return NfCatalogoMalaOut(
+        id=c.id,
+        modelo=c.modelo,
+        tamanho=c.tamanho,
+        valor=c.valor,
+        sku_base=c.sku_base,
+        ncm=c.ncm,
+        sort_order=c.sort_order,
+        created_by=c.created_by,
+        created_at=c.created_at,
+        updated_at=c.updated_at,
+    )
+
+
+@router.get("/catalogo-mala", response_model=list[NfCatalogoMalaOut])
+async def list_catalogo_mala(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_cad_view)],
+) -> list[NfCatalogoMalaOut]:
+    stmt = select(NfCatalogoMala).order_by(
+        asc(NfCatalogoMala.sort_order),
+        asc(NfCatalogoMala.modelo),
+        asc(NfCatalogoMala.tamanho),
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [_catalogo_out(c) for c in rows]
+
+
+@router.post("/catalogo-mala", response_model=NfCatalogoMalaOut, status_code=status.HTTP_201_CREATED)
+async def create_catalogo_mala(
+    body: NfCatalogoMalaCreate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(_cad_edit)],
+) -> NfCatalogoMalaOut:
+    c = NfCatalogoMala(
+        modelo=body.modelo.strip(),
+        tamanho=_clean(body.tamanho),
+        valor=body.valor,
+        sku_base=_clean(body.sku_base),
+        ncm=_clean(body.ncm),
+        sort_order=body.sort_order or 0,
+        created_by=admin.id,
+    )
+    session.add(c)
+    await session.commit()
+    await session.refresh(c)
+    logger.info("nf_catalogo_mala_created", id=str(c.id), modelo=c.modelo)
+    return _catalogo_out(c)
+
+
+@router.patch("/catalogo-mala/{catalogo_id}", response_model=NfCatalogoMalaOut)
+async def patch_catalogo_mala(
+    catalogo_id: UUID,
+    body: NfCatalogoMalaPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_cad_edit)],
+) -> NfCatalogoMalaOut:
+    c = (
+        await session.execute(select(NfCatalogoMala).where(NfCatalogoMala.id == catalogo_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "nf_catalogo_mala_not_found"})
+
+    data = body.model_dump(exclude_unset=True)
+    if "modelo" in data and data["modelo"] is not None:
+        c.modelo = data["modelo"].strip()
+    if "tamanho" in data:
+        c.tamanho = _clean(data["tamanho"])
+    if "valor" in data and data["valor"] is not None:
+        c.valor = data["valor"]
+    if "sku_base" in data:
+        c.sku_base = _clean(data["sku_base"])
+    if "ncm" in data:
+        c.ncm = _clean(data["ncm"])
+    if "sort_order" in data and data["sort_order"] is not None:
+        c.sort_order = data["sort_order"]
+
+    await session.commit()
+    await session.refresh(c)
+    return _catalogo_out(c)
+
+
+@router.delete("/catalogo-mala/{catalogo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_catalogo_mala(
+    catalogo_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_cad_delete)],
+) -> None:
+    c = (
+        await session.execute(select(NfCatalogoMala).where(NfCatalogoMala.id == catalogo_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "nf_catalogo_mala_not_found"})
+    await session.delete(c)
+    await session.commit()
+    logger.info("nf_catalogo_mala_deleted", id=str(catalogo_id))
     return None
 
 

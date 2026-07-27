@@ -336,6 +336,7 @@ _CLEANUP_TABLES = (
     "companies",
     "faturas",
     "nf_faturamento",
+    "nf_catalogo_mala",
     "nf_faturador",
     "nf_etiqueta",
     "nf_impressao",
