@@ -43,6 +43,10 @@ Resource = Literal[
     "empresa",
     "cadastro",
     "lojas_info",
+    # NF automáticas — cadastros (Faturador/Etiqueta/Impressão) e painel de
+    # faturamento por etapa. Antes admin-only; viraram recursos concedíveis.
+    "nf_faturador",
+    "nf_faturamento",
     "segmentos",
     "usuarios",
     "permissoes",

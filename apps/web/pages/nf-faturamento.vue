@@ -3,7 +3,8 @@ import { computed, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Loader2, RefreshCw, X } from 'lucide-vue-next'
 
 definePageMeta({
-  middleware: ['admin'],
+  middleware: ['permission'],
+  permission: { resource: 'nf_faturamento', action: 'view' },
 })
 
 const { api } = useApi()

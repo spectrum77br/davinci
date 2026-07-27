@@ -3,10 +3,13 @@ import { computed, ref, watch } from 'vue'
 import { Plus, RefreshCw, X, Trash2, Lock } from 'lucide-vue-next'
 
 definePageMeta({
-  middleware: ['admin'],
+  middleware: ['permission'],
+  permission: { resource: 'nf_faturador', action: 'view' },
 })
 
 const { api } = useApi()
+const canEdit = useCan('nf_faturador', 'edit')
+const canDelete = useCan('nf_faturador', 'delete')
 
 type Tab = 'faturador' | 'etiqueta' | 'impressao'
 const TABS: { key: Tab; label: string }[] = [
@@ -314,7 +317,7 @@ await loadFaturadores()
           Emissores de NF. Cada linha é um tipo (bling avulso, exclusivo, upseller…). Lista aberta —
           a regra de emissão é programada depois.
         </p>
-        <Button size="sm" class="ml-auto shrink-0" @click="openFatNew">
+        <Button v-if="canEdit" size="sm" class="ml-auto shrink-0" @click="openFatNew">
           <Plus class="size-4 mr-1" /> Novo faturador
         </Button>
       </div>
@@ -387,7 +390,7 @@ await loadFaturadores()
           Onde a NF já emitida é inserida na plataforma p/ liberar a etiqueta. Só a Amazon tem regra
           própria (site + agenda); o resto vai pelo Upseller.
         </p>
-        <Button size="sm" class="ml-auto shrink-0" @click="openEtqNew">
+        <Button v-if="canEdit" size="sm" class="ml-auto shrink-0" @click="openEtqNew">
           <Plus class="size-4 mr-1" /> Nova etiqueta
         </Button>
       </div>
@@ -434,7 +437,7 @@ await loadFaturadores()
           Como a etiqueta é impressa depois da NF. Tipos: agência (etiqueta+declaração), correios
           (etiqueta+NF) e próprio (Melhor Envio, só Amazon). Uma loja pode ter mais de um.
         </p>
-        <Button size="sm" class="ml-auto shrink-0" @click="openImpNew">
+        <Button v-if="canEdit" size="sm" class="ml-auto shrink-0" @click="openImpNew">
           <Plus class="size-4 mr-1" /> Nova impressão
         </Button>
       </div>
@@ -525,9 +528,9 @@ await loadFaturadores()
         </div>
         <div v-if="saveErr" class="text-sm text-red-500">erro: {{ saveErr }}</div>
         <div class="flex justify-end gap-2">
-          <Button v-if="fatEditing" variant="ghost" :disabled="saving" class="text-red-500 mr-auto" @click="removeFat"><Trash2 class="size-4 mr-1" /> remover</Button>
-          <Button variant="ghost" :disabled="saving" @click="fatShowNew = false; fatEditing = null">cancelar</Button>
-          <Button :disabled="saving" @click="fatEditing ? saveFat() : createFat()">{{ saving ? 'salvando…' : (fatEditing ? 'Salvar' : 'Criar') }}</Button>
+          <Button v-if="fatEditing && canDelete" variant="ghost" :disabled="saving" class="text-red-500 mr-auto" @click="removeFat"><Trash2 class="size-4 mr-1" /> remover</Button>
+          <Button variant="ghost" :disabled="saving" @click="fatShowNew = false; fatEditing = null">{{ canEdit ? 'cancelar' : 'fechar' }}</Button>
+          <Button v-if="canEdit" :disabled="saving" @click="fatEditing ? saveFat() : createFat()">{{ saving ? 'salvando…' : (fatEditing ? 'Salvar' : 'Criar') }}</Button>
         </div>
       </div>
     </div>
@@ -552,9 +555,9 @@ await loadFaturadores()
         </div>
         <div v-if="saveErr" class="text-sm text-red-500">erro: {{ saveErr }}</div>
         <div class="flex justify-end gap-2">
-          <Button v-if="etqEditing" variant="ghost" :disabled="saving" class="text-red-500 mr-auto" @click="removeEtq"><Trash2 class="size-4 mr-1" /> remover</Button>
-          <Button variant="ghost" :disabled="saving" @click="etqShowNew = false; etqEditing = null">cancelar</Button>
-          <Button :disabled="saving" @click="etqEditing ? saveEtq() : createEtq()">{{ saving ? 'salvando…' : (etqEditing ? 'Salvar' : 'Criar') }}</Button>
+          <Button v-if="etqEditing && canDelete" variant="ghost" :disabled="saving" class="text-red-500 mr-auto" @click="removeEtq"><Trash2 class="size-4 mr-1" /> remover</Button>
+          <Button variant="ghost" :disabled="saving" @click="etqShowNew = false; etqEditing = null">{{ canEdit ? 'cancelar' : 'fechar' }}</Button>
+          <Button v-if="canEdit" :disabled="saving" @click="etqEditing ? saveEtq() : createEtq()">{{ saving ? 'salvando…' : (etqEditing ? 'Salvar' : 'Criar') }}</Button>
         </div>
       </div>
     </div>
@@ -579,9 +582,9 @@ await loadFaturadores()
         </div>
         <div v-if="saveErr" class="text-sm text-red-500">erro: {{ saveErr }}</div>
         <div class="flex justify-end gap-2">
-          <Button v-if="impEditing" variant="ghost" :disabled="saving" class="text-red-500 mr-auto" @click="removeImp"><Trash2 class="size-4 mr-1" /> remover</Button>
-          <Button variant="ghost" :disabled="saving" @click="impShowNew = false; impEditing = null">cancelar</Button>
-          <Button :disabled="saving" @click="impEditing ? saveImp() : createImp()">{{ saving ? 'salvando…' : (impEditing ? 'Salvar' : 'Criar') }}</Button>
+          <Button v-if="impEditing && canDelete" variant="ghost" :disabled="saving" class="text-red-500 mr-auto" @click="removeImp"><Trash2 class="size-4 mr-1" /> remover</Button>
+          <Button variant="ghost" :disabled="saving" @click="impShowNew = false; impEditing = null">{{ canEdit ? 'cancelar' : 'fechar' }}</Button>
+          <Button v-if="canEdit" :disabled="saving" @click="impEditing ? saveImp() : createImp()">{{ saving ? 'salvando…' : (impEditing ? 'Salvar' : 'Criar') }}</Button>
         </div>
       </div>
     </div>

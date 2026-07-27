@@ -1,4 +1,5 @@
-"""Notas Fiscais automáticas — cadastros (admin-only).
+"""Notas Fiscais automáticas — cadastros (recurso `nf_faturador`) e painel de
+faturamento (recurso `nf_faturamento`).
 
 Fase 1: cadastro do FATURADOR (emissor da NF). Cada linha é um tipo de
 faturador; a lista é extensível. A automação (emissão da NF) é construída
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps.auth import require_admin
+from app.deps.auth import require_permission
 from app.models import NfEtiqueta, NfFaturador, NfImpressao, User
 from app.schemas.nf import (
     NfEtiquetaCreate,
@@ -36,6 +37,13 @@ _SCHEMA = get_settings().database_schema
 # Prefixo próprio (/api/nf já é usado pelo nf_upload). Umbrella dos cadastros
 # do sistema de NF automáticas (faturador; etiqueta/impressão virão depois).
 router = APIRouter(prefix="/api/nf-cadastro", tags=["nf_cadastro"])
+
+# Cadastros (Faturador/Etiqueta/Impressão) = recurso `nf_faturador`; o painel
+# de faturamento = `nf_faturamento`. Antes tudo era admin-only (require_admin).
+_cad_view = require_permission("nf_faturador", "view")
+_cad_edit = require_permission("nf_faturador", "edit")
+_cad_delete = require_permission("nf_faturador", "delete")
+_painel_view = require_permission("nf_faturamento", "view")
 
 
 def _clean(v: str | None) -> str | None:
@@ -69,7 +77,7 @@ def _to_out(f: NfFaturador) -> NfFaturadorOut:
 @router.get("/faturadores", response_model=list[NfFaturadorOut])
 async def list_faturadores(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_cad_view)],
 ) -> list[NfFaturadorOut]:
     stmt = select(NfFaturador).order_by(asc(NfFaturador.sort_order), asc(NfFaturador.nome))
     rows = (await session.execute(stmt)).scalars().all()
@@ -80,7 +88,7 @@ async def list_faturadores(
 async def create_faturador(
     body: NfFaturadorCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
-    admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[User, Depends(_cad_edit)],
 ) -> NfFaturadorOut:
     f = NfFaturador(
         nome=body.nome.strip(),
@@ -109,7 +117,7 @@ async def patch_faturador(
     faturador_id: UUID,
     body: NfFaturadorPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_cad_edit)],
 ) -> NfFaturadorOut:
     f = (
         await session.execute(select(NfFaturador).where(NfFaturador.id == faturador_id))
@@ -154,7 +162,7 @@ async def patch_faturador(
 async def delete_faturador(
     faturador_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_cad_delete)],
 ) -> None:
     f = (
         await session.execute(select(NfFaturador).where(NfFaturador.id == faturador_id))
@@ -189,7 +197,7 @@ def _etiqueta_out(e: NfEtiqueta) -> NfEtiquetaOut:
 @router.get("/etiquetas", response_model=list[NfEtiquetaOut])
 async def list_etiquetas(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_cad_view)],
 ) -> list[NfEtiquetaOut]:
     stmt = select(NfEtiqueta).order_by(asc(NfEtiqueta.sort_order), asc(NfEtiqueta.plataforma))
     rows = (await session.execute(stmt)).scalars().all()
@@ -200,7 +208,7 @@ async def list_etiquetas(
 async def create_etiqueta(
     body: NfEtiquetaCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
-    admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[User, Depends(_cad_edit)],
 ) -> NfEtiquetaOut:
     e = NfEtiqueta(
         plataforma=body.plataforma.strip(),
@@ -222,7 +230,7 @@ async def patch_etiqueta(
     etiqueta_id: UUID,
     body: NfEtiquetaPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_cad_edit)],
 ) -> NfEtiquetaOut:
     e = (
         await session.execute(select(NfEtiqueta).where(NfEtiqueta.id == etiqueta_id))
@@ -251,7 +259,7 @@ async def patch_etiqueta(
 async def delete_etiqueta(
     etiqueta_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_cad_delete)],
 ) -> None:
     e = (
         await session.execute(select(NfEtiqueta).where(NfEtiqueta.id == etiqueta_id))
@@ -288,7 +296,7 @@ def _impressao_out(i: NfImpressao) -> NfImpressaoOut:
 @router.get("/impressoes", response_model=list[NfImpressaoOut])
 async def list_impressoes(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_cad_view)],
 ) -> list[NfImpressaoOut]:
     stmt = select(NfImpressao).order_by(asc(NfImpressao.sort_order), asc(NfImpressao.tipo))
     rows = (await session.execute(stmt)).scalars().all()
@@ -299,7 +307,7 @@ async def list_impressoes(
 async def create_impressao(
     body: NfImpressaoCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
-    admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[User, Depends(_cad_edit)],
 ) -> NfImpressaoOut:
     i = NfImpressao(
         tipo=body.tipo.strip(),
@@ -323,7 +331,7 @@ async def patch_impressao(
     impressao_id: UUID,
     body: NfImpressaoPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_cad_edit)],
 ) -> NfImpressaoOut:
     i = (
         await session.execute(select(NfImpressao).where(NfImpressao.id == impressao_id))
@@ -356,7 +364,7 @@ async def patch_impressao(
 async def delete_impressao(
     impressao_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_cad_delete)],
 ) -> None:
     i = (
         await session.execute(select(NfImpressao).where(NfImpressao.id == impressao_id))
@@ -425,7 +433,7 @@ _FATURAMENTO_SQL = text(
 @router.get("/faturamento", response_model=list[NfFaturamentoRowOut])
 async def list_faturamento(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _user: Annotated[User, Depends(_painel_view)],
     dias: Annotated[int, Query(ge=1, le=90)] = 7,
     limit: Annotated[int, Query(ge=1, le=2000)] = 500,
 ) -> list[NfFaturamentoRowOut]:

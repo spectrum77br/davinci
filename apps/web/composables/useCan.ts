@@ -26,6 +26,8 @@ export type Resource =
   | 'empresa'
   | 'cadastro'
   | 'lojas_info'
+  | 'nf_faturador'
+  | 'nf_faturamento'
   | 'segmentos'
   | 'usuarios'
   | 'permissoes'
@@ -84,7 +86,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     label: 'Cadastros',
-    resources: ['empresa', 'cadastro', 'lojas_info', 'segmentos'],
+    resources: ['empresa', 'cadastro', 'lojas_info', 'nf_faturador', 'nf_faturamento', 'segmentos'],
   },
   {
     label: 'Admin',
@@ -122,6 +124,8 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   empresa: 'Empresa',
   cadastro: 'Cadastro',
   lojas_info: 'Lojas (info)',
+  nf_faturador: 'NF (Faturador)',
+  nf_faturamento: 'Faturamento NF',
   segmentos: 'Segmentos',
   usuarios: 'Usuários',
   permissoes: 'Permissões',
