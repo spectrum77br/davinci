@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, FileDown, Loader2, RefreshCw, X } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, FileDown, Loader2, RefreshCw, Send, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -172,6 +172,41 @@ async function gerarPlanilha() {
   }
 }
 
+// -- Enfileirar importação (marionete) -------------------------------------
+const enfileirando = ref(false)
+
+async function enfileirar() {
+  const numeros = Array.from(selected.value)
+  if (!numeros.length) {
+    toasts.warning('Selecione ao menos um pedido')
+    return
+  }
+  if (!confirm(`Enfileirar a importação de ${numeros.length} pedido(s)? A marionete vai importar no destino (Bling/Upseller) de cada faturador.`)) {
+    return
+  }
+  enfileirando.value = true
+  try {
+    const res = await api<{ comandos: number; pedidos_ok: number; pulados: { numero: string; motivo: string }[] }>(
+      '/api/nf-cadastro/faturamento/enfileirar',
+      { method: 'POST', body: { numeros } },
+    )
+    if (res.pulados.length > 0) {
+      toasts.warning(
+        `${res.comandos} comando(s) · ${res.pedidos_ok} pedido(s) · ${res.pulados.length} pulado(s)`,
+        res.pulados.map((d) => `${d.numero}: ${d.motivo}`),
+      )
+    } else {
+      toasts.success(`${res.comandos} comando(s) enfileirado(s) com ${res.pedidos_ok} pedido(s)`)
+    }
+    selected.value = new Set()
+    await load()
+  } catch (e: any) {
+    toasts.error('Não foi possível enfileirar', e?.data?.detail?.code || e?.message || 'erro')
+  } finally {
+    enfileirando.value = false
+  }
+}
+
 // -- Paginação --------------------------------------------------------------
 const PAGE_SIZE = 50
 const page = ref(1)
@@ -196,12 +231,14 @@ function badgeClass(status: string): string {
   const s = (status || '').toLowerCase()
   if (s === 'ok') return 'bg-emerald-100 text-emerald-700'
   if (s === 'erro') return 'bg-red-100 text-red-700'
+  if (s === 'processando') return 'bg-amber-100 text-amber-700'
   return 'bg-gray-100 text-gray-600'
 }
 function badgeLabel(status: string): string {
   const s = (status || '').toLowerCase()
   if (s === 'ok') return 'OK'
   if (s === 'erro') return 'Erro'
+  if (s === 'processando') return 'Processando'
   if (s === 'pendente') return 'Pendente'
   return status
 }
@@ -244,6 +281,16 @@ function badgeLabel(status: string): string {
           <FileDown v-if="!gerando" class="h-4 w-4" />
           <Loader2 v-else class="h-4 w-4 animate-spin" />
           Gerar planilha{{ selected.size ? ` (${selected.size})` : '' }}
+        </button>
+        <button
+          v-if="canEdit"
+          class="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          :disabled="enfileirando || !selected.size"
+          @click="enfileirar"
+        >
+          <Send v-if="!enfileirando" class="h-4 w-4" />
+          <Loader2 v-else class="h-4 w-4 animate-spin" />
+          Enfileirar{{ selected.size ? ` (${selected.size})` : '' }}
         </button>
       </div>
     </div>
