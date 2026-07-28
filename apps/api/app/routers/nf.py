@@ -49,7 +49,7 @@ from app.schemas.nf import (
     NfImpressaoPatch,
 )
 from app.security.cipher import decrypt, encrypt
-from app.services import nf_emissao_gerar, nf_relatorio
+from app.services import nf_emissao_gerar, nf_relatorio, nf_upseller
 
 logger = structlog.get_logger()
 _SCHEMA = get_settings().database_schema
@@ -694,7 +694,7 @@ async def enfileirar_importacao(
                 faturador_id=bloco.faturador_id,
                 action="import_avulsa",
                 numeros=bloco.numeros,
-                planilha=bloco.csv,
+                planilha=bloco.planilha,
                 nome_arquivo=bloco.nome_arquivo,
                 status="pending",
                 source="manual",
@@ -825,13 +825,19 @@ async def nf_agent_command_planilha(
     command_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
-    """CSV cru do comando (o arquivo que o executor sobe no Bling destino)."""
+    """Planilha crua do comando (o arquivo que o executor sobe no destino). CSV
+    pro Bling, XLSX pro Upseller — o media type vem da extensão do nome."""
     cmd = await session.get(NfCommand, command_id)
     if cmd is None:
         raise HTTPException(404, detail={"code": "nf_command_not_found"})
+    media = (
+        nf_upseller.UPSELLER_MEDIA
+        if cmd.nome_arquivo.lower().endswith(".xlsx")
+        else nf_relatorio.CSV_MEDIA
+    )
     return Response(
         content=cmd.planilha,
-        media_type=nf_relatorio.CSV_MEDIA,
+        media_type=media,
         headers={
             "Content-Disposition": f'attachment; filename="{cmd.nome_arquivo}"'
         },

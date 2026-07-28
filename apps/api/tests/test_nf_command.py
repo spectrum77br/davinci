@@ -288,6 +288,39 @@ async def test_agent_result_comando_inexistente_404(
 
 
 @pytest.mark.asyncio
+async def test_enfileirar_upseller_gera_xlsx(
+    db: AsyncSession, client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """Faturador modo 'upseller' congela a planilha no template .xlsx do Upseller
+    (não o CSV do Bling), servida com o media type de planilha."""
+    auth_as(admin)
+    f = NfFaturador(
+        nome="upseller 100%", modo="upseller", nf_cheia=True,
+        sku_fonte="principal", nome_fonte="produto", ncm="4202.12.10",
+        ads_power="perfil-U", usuario="user-u", senha_enc=encrypt("segredoU"),
+    )
+    db.add(f)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="amazon", account_name="lU",
+                     bling_store_id="950001", nf_faturador_id=f.id))
+    await db.flush()
+    await _seed_pedido(db, numero="850001", loja="950001", sku="dg053.ci", nome="Capa", unit=500)
+    await db.commit()
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/enfileirar",
+        json={"numeros": ["850001"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["comandos"] == 1
+
+    cmd = (await db.execute(select(NfCommand))).scalars().one()
+    assert cmd.nome_arquivo.endswith(".xlsx")
+    # .xlsx é um zip (assinatura PK\x03\x04), não o BOM do CSV
+    assert cmd.planilha.startswith(b"PK\x03\x04")
+
+
+@pytest.mark.asyncio
 async def test_agent_planilha_serve_csv(
     db: AsyncSession, client: AsyncClient, admin: User,
     auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,

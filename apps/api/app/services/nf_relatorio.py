@@ -95,6 +95,12 @@ class PedidoInfo:
     bairro_destino: str | None = None
     cidade_destino: str | None = None
     uf_destino: str | None = None
+    # CPF/CNPJ + tipo de pessoa (F/J) + telefone do destinatário — necessários
+    # pra NF-e no Upseller. O davinci não persiste isso na bling_orders (só o
+    # nome/documento), então vêm enriquecidos do Bling na camada de banco.
+    documento: str | None = None
+    tipo_pessoa: str | None = None
+    telefone: str | None = None
 
 
 def _s(v: object) -> str:
@@ -132,6 +138,7 @@ def montar_linhas(pedido: PedidoInfo, linhas: list[NfLinha]) -> list[list[str]]:
     uf = _s(pedido.uf_destino)
     numero_pedido = _s(pedido.numero)
     data = _data_br(pedido.data)
+    documento = _s(pedido.documento)
 
     out: list[list[str]] = []
     for l in linhas:
@@ -139,7 +146,7 @@ def montar_linhas(pedido: PedidoInfo, linhas: list[NfLinha]) -> list[list[str]]:
             numero_pedido,              # Número pedido
             nome,                       # Nome Comprador
             data,                       # Data
-            "",                         # CPF/CNPJ Comprador (não temos)
+            documento,                  # CPF/CNPJ Comprador (enriquecido do Bling)
             endereco,                   # Endereço Comprador
             bairro,                     # Bairro Comprador
             numero_end,                 # Número Comprador
