@@ -23,7 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.security.cipher import decrypt_json, encrypt_json
 from app.models import Integration, IntegrationPlatform, NfFaturador
-from app.services import nf_catalogo, nf_emissao, nf_relatorio, nf_upseller
+from app.services import (
+    nf_bling_xml,
+    nf_catalogo,
+    nf_emissao,
+    nf_relatorio,
+    nf_upseller,
+)
 from app.services.marketplaces.bling import BlingClient
 from app.services.nf_emissao import ItemPedido
 from app.services.nf_relatorio import PedidoInfo
@@ -353,8 +359,9 @@ async def gerar_por_faturador(
     cada bloco tem seu subconjunto de pedidos + a própria planilha CONGELADA. É
     o que o outbox de importação enfileira (um comando por login/AdsPower). O
     FORMATO da planilha depende do `modo` do faturador: 'upseller' vira .xlsx no
-    template do Upseller; 'bling' (ou qualquer outro) vira o .csv do relatório de
-    vendas do Bling."""
+    template do Upseller; 'bling' (ou qualquer outro) vira um .zip de XMLs de
+    pedido (um XML por pedido) — o único formato que o "Importar → Pedido XML" do
+    Bling aceita."""
     numeros = [n for n in (str(x).strip() for x in numeros) if n]
     if not numeros:
         return ResultadoPorFaturador(blocos=[], pulados=[])
@@ -375,8 +382,11 @@ async def gerar_por_faturador(
             planilha = nf_upseller.montar_xlsx(regra.nome, pedidos)
             ext = "xlsx"
         else:
-            planilha = nf_relatorio.montar_csv(pedidos)
-            ext = "csv"
+            # Bling destino só importa PEDIDO por XML (a tela rejeita CSV). Cada
+            # pedido é um XML; o faturador vira um .zip que a marionete abre e
+            # importa um a um na tela "Pedido XML".
+            planilha = nf_bling_xml.montar_zip(pedidos)
+            ext = "zip"
         blocos.append(
             BlocoFaturador(
                 faturador_id=fid,

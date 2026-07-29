@@ -11,7 +11,9 @@ base64, e reporta em `/agent/commands/{id}/result` (done → 'ok', failed →
 from __future__ import annotations
 
 import base64
+import io
 import uuid
+import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -116,7 +118,10 @@ async def test_enfileirar_cria_comando_por_faturador(
     cmds = (await db.execute(select(NfCommand))).scalars().all()
     assert len(cmds) == 2
     assert {c.status for c in cmds} == {"pending"}
-    assert all(c.planilha and c.nome_arquivo.endswith(".csv") for c in cmds)
+    # modo 'bling' congela um .zip de XMLs de pedido (a tela do Bling só importa
+    # PEDIDO por XML; cada pedido é um <pedido> num arquivo do zip)
+    assert all(c.planilha and c.nome_arquivo.endswith(".zip") for c in cmds)
+    assert all(c.planilha.startswith(b"PK\x03\x04") for c in cmds)
     # cada comando cobre exatamente o pedido da sua loja/faturador
     cobertos = sorted(n for c in cmds for n in c.numeros)
     assert cobertos == ["830001", "830002"]
@@ -171,9 +176,13 @@ async def test_agent_lease_entrega_login_e_planilha(
     assert a["ads_power"] == "perfil-A"
     assert a["senha"] == "segredoA"  # descriptografada no lease
     assert a["numeros"] == ["830001"]
-    # planilha em base64 decodifica pro CSV congelado (BOM + cabeçalho)
-    csv_bytes = base64.b64decode(a["planilha_b64"])
-    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    # planilha em base64 decodifica pro .zip congelado de XMLs de pedido
+    zip_bytes = base64.b64decode(a["planilha_b64"])
+    assert zip_bytes.startswith(b"PK\x03\x04")
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        nomes = zf.namelist()
+        assert nomes and all(n.endswith(".xml") for n in nomes)
+        assert b"<pedido>" in zf.read(nomes[0])
 
     # os comandos viraram 'claimed' com attempts=1
     rows = (await db.execute(select(NfCommand))).scalars().all()
@@ -321,7 +330,7 @@ async def test_enfileirar_upseller_gera_xlsx(
 
 
 @pytest.mark.asyncio
-async def test_agent_planilha_serve_csv(
+async def test_agent_planilha_serve_zip(
     db: AsyncSession, client: AsyncClient, admin: User,
     auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
 ):
@@ -338,4 +347,5 @@ async def test_agent_planilha_serve_csv(
     )
     assert r.status_code == 200, r.text
     assert "attachment" in r.headers["content-disposition"]
-    assert r.content.startswith(b"\xef\xbb\xbf")
+    # modo 'bling' serve o .zip de XMLs (assinatura PK\x03\x04)
+    assert r.content.startswith(b"PK\x03\x04")
