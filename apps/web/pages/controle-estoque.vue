@@ -15,7 +15,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
-  AlertTriangle, FileUp, Upload, Download, Trash2,
+  AlertTriangle, FileUp, Upload, Download, Trash2, Printer,
 } from 'lucide-vue-next'
 import { isoDaysAgo, isoToday } from '~/lib/date'
 
@@ -66,6 +66,7 @@ type PedidoRow = {
   conferido: boolean
   observacao: string | null
   bling_id: number | null
+  etiqueta_disponivel: boolean
 }
 type EnvioRow = {
   data: string
@@ -623,6 +624,11 @@ async function patchPedidoObs(row: PedidoRow, newObs: string) {
     await toggleCheck('pedido', row.id, refDate, row.conferido, newObs)
   } catch { /* next reload reverts */ }
 }
+// Etiqueta transformada (landing zone da NF automática). URL relativa → o
+// cookie de sessão vai junto quando o <a> abre numa aba nova.
+function etiquetaUrl(row: PedidoRow) {
+  return `/api/estoque/pedidos/${encodeURIComponent(row.pedido_bling || '')}/etiqueta`
+}
 async function toggleEnvio(row: EnvioRow) {
   if (!isAdmin.value) return
   const next = !row.conferido
@@ -1145,11 +1151,12 @@ async function conferirTodos() {
             <th class="text-right">Qtd</th>
             <th class="text-center">Status</th>
             <th class="text-left bg-emerald-50/40">Obs</th>
+            <th class="text-center">Imprimir Etiqueta</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="pedidosFiltered.length === 0">
-            <td colspan="9" class="py-6 text-center text-muted-foreground">
+            <td colspan="10" class="py-6 text-center text-muted-foreground">
               Nenhum pedido para esse dia.
             </td>
           </tr>
@@ -1186,6 +1193,20 @@ async function conferirTodos() {
                 class="w-full h-6 border rounded px-1 bg-background text-[11px]"
                 @blur="(e) => patchPedidoObs(row, (e.target as HTMLInputElement).value)"
               />
+            </td>
+            <td class="text-center">
+              <a
+                v-if="row.etiqueta_disponivel"
+                :href="etiquetaUrl(row)"
+                target="_blank"
+                rel="noopener"
+                class="inline-flex items-center gap-1 rounded-md border bg-primary text-primary-foreground px-2 py-1 text-[10px] hover:opacity-90"
+                title="Abrir etiqueta pronta pra impressão"
+              >
+                <Printer class="size-3" />
+                Imprimir
+              </a>
+              <span v-else class="text-[10px] text-muted-foreground/50">—</span>
             </td>
           </tr>
         </tbody>

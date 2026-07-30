@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -254,6 +255,35 @@ class NfImpressao(Base, TimestampMixin):
     sort_order: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
+class NfEtiquetaArquivo(Base, TimestampMixin):
+    """Etiqueta (já TRANSFORMADA pela regra de visualização — remetente =
+    destinatário, sem número/cód. barras/chave da NF, sem nome do marketplace)
+    guardada por pedido, pronta pra impressão em Controle de Estoque → Pedidos.
+
+    O blob fica no próprio banco (bytea), servido por endpoint autenticado por
+    cookie — mesmo desenho de `logistica_status_anexo`. Chaveada por
+    `pedido_bling` (igual `nf_faturamento`): uma etiqueta por pedido, a etapa de
+    transformação regrava (upsert) quando reprocessa.
+    """
+
+    __tablename__ = "nf_etiqueta_arquivo"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # Número do pedido no Bling (chave de casamento com bling_orders.numero).
+    pedido_bling: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+    blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

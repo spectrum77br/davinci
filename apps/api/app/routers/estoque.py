@@ -49,6 +49,7 @@ from app.models import (
 )
 from app.models.company import Store
 from app.models.integration import Integration
+from app.models.nf import NfEtiquetaArquivo
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
 from app.services.sku_tags import VALID_TAGS as _VALID_TAGS
@@ -562,6 +563,22 @@ async def list_estoque_pedidos(
                     "observacao": r.observacao,
                 }
 
+    # Etiqueta transformada disponível? (landing zone da NF automática — a
+    # etapa de visualização grava o blob em nf_etiqueta_arquivo por pedido).
+    # Uma query, chaveada por pedido_bling (= o.numero). O botão "Imprimir
+    # Etiqueta" só aparece/habilita quando existe blob pro pedido.
+    numeros = {o.numero for o in orders if o.numero}
+    etiquetas_por_pedido: set[str] = set()
+    if numeros:
+        et_rows = (
+            await session.execute(
+                select(NfEtiquetaArquivo.pedido_bling).where(
+                    NfEtiquetaArquivo.pedido_bling.in_(numeros)
+                )
+            )
+        ).all()
+        etiquetas_por_pedido = {r.pedido_bling for r in et_rows}
+
     result: list[dict[str, Any]] = []
     for o in orders:
         check = checks_map.get(str(o.id), {"conferido": False, "observacao": None})
@@ -602,6 +619,7 @@ async def list_estoque_pedidos(
             "conferido": check["conferido"],
             "observacao": check["observacao"],
             "bling_id": o.bling_id,
+            "etiqueta_disponivel": bool(o.numero) and o.numero in etiquetas_por_pedido,
         })
 
     # Atrasados (INDEPENDENTE do filtro de data): pedidos com etiqueta
@@ -638,6 +656,36 @@ async def list_estoque_pedidos(
         "periodo": {"inicio": str(data_inicio), "fim": str(data_fim)},
         "atrasados": atrasados,
     }
+
+
+@router.get("/pedidos/{pedido_bling}/etiqueta")
+async def get_pedido_etiqueta(
+    pedido_bling: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+) -> Response:
+    """Serve a etiqueta transformada do pedido (blob em nf_etiqueta_arquivo).
+
+    Autenticado por cookie — o botão "Imprimir Etiqueta" abre a URL numa aba
+    nova e o browser manda o cookie sozinho. 404 se ainda não há etiqueta
+    (a etapa de visualização da NF automática não rodou pra este pedido)."""
+    row = (
+        await session.execute(
+            select(NfEtiquetaArquivo).where(
+                NfEtiquetaArquivo.pedido_bling == pedido_bling
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
+    return Response(
+        content=row.blob,
+        media_type=row.content_type or "application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{row.filename}"',
+            "Cache-Control": "private, max-age=86400",
+        },
+    )
 
 
 # ─── SEÇÃO 3: ENVIOS ─────────────────────────────────────────────────────
