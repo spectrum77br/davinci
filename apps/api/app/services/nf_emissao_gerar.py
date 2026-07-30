@@ -351,6 +351,48 @@ async def gerar_planilha(
     )
 
 
+# Limites POR ARQUIVO das telas de importação — um faturador com mais pedidos
+# que isso gera VÁRIOS blocos (comandos), senão a tela recusa o arquivo inteiro.
+#   Bling "Importar vendas": até 500 vendas/arquivo.
+#   Upseller "Importar Pedidos": até 300 pedidos E 1500 linhas/arquivo.
+_LIMITE_BLING_VENDAS = 500
+_LIMITE_UPSELLER_PEDIDOS = 300
+_LIMITE_UPSELLER_LINHAS = 1500
+
+
+def _chunks_por_limite(
+    grupo: list[_PedidoMontado], modo: str | None
+) -> list[list[_PedidoMontado]]:
+    """Fatia os pedidos de UM faturador em pedaços que cabem num arquivo da tela
+    de destino. Preenche de forma gulosa preservando a ordem e NUNCA quebra um
+    pedido no meio. Upseller respeita os DOIS tetos (pedidos E linhas)."""
+    if not grupo:
+        return []
+    if modo == "upseller":
+        lim_pedidos, lim_linhas = _LIMITE_UPSELLER_PEDIDOS, _LIMITE_UPSELLER_LINHAS
+    else:
+        lim_pedidos, lim_linhas = _LIMITE_BLING_VENDAS, None
+
+    chunks: list[list[_PedidoMontado]] = []
+    atual: list[_PedidoMontado] = []
+    linhas_atual = 0
+    for m in grupo:
+        n_linhas = len(m.linhas)
+        estoura_pedidos = len(atual) >= lim_pedidos
+        estoura_linhas = (
+            lim_linhas is not None and atual and linhas_atual + n_linhas > lim_linhas
+        )
+        if atual and (estoura_pedidos or estoura_linhas):
+            chunks.append(atual)
+            atual = []
+            linhas_atual = 0
+        atual.append(m)
+        linhas_atual += n_linhas
+    if atual:
+        chunks.append(atual)
+    return chunks
+
+
 async def gerar_por_faturador(
     session: AsyncSession, numeros: list[str]
 ) -> ResultadoPorFaturador:
@@ -374,26 +416,32 @@ async def gerar_por_faturador(
 
     ts = datetime.now(_BRT).strftime("%Y%m%d_%H%M%S")
     blocos: list[BlocoFaturador] = []
-    for i, (fid, grupo) in enumerate(por_fat.items()):
-        pedidos = [(m.info, m.linhas) for m in grupo]
+    seq = 0
+    for fid, grupo in por_fat.items():
         regra = faturadores.get(fid)
-        if regra is not None and regra.modo == "upseller":
-            planilha = nf_upseller.montar_xlsx(regra.nome, pedidos)
-            ext = "xlsx"
-        else:
-            # Bling destino importa a VENDA avulsa na tela "Importar vendas"
-            # (Importações de Dados), que aceita o CSV do relatório de vendas —
-            # exatamente o layout que `nf_relatorio.montar_csv` produz.
-            planilha = nf_relatorio.montar_csv(pedidos)
-            ext = "csv"
-        blocos.append(
-            BlocoFaturador(
-                faturador_id=fid,
-                numeros=[m.numero for m in grupo],
-                planilha=planilha,
-                nome_arquivo=f"nf_avulsa_{ts}_{i + 1}.{ext}",
+        modo = regra.modo if regra is not None else None
+        # Quebra o faturador em N arquivos que caibam no limite da tela de
+        # destino (Bling 500 vendas; Upseller 300 pedidos/1500 linhas).
+        for chunk in _chunks_por_limite(grupo, modo):
+            pedidos = [(m.info, m.linhas) for m in chunk]
+            if modo == "upseller":
+                planilha = nf_upseller.montar_xlsx(regra.nome, pedidos)
+                ext = "xlsx"
+            else:
+                # Bling destino importa a VENDA avulsa na tela "Importar vendas"
+                # (Importações de Dados), que aceita o CSV do relatório de vendas
+                # — exatamente o layout que `nf_relatorio.montar_csv` produz.
+                planilha = nf_relatorio.montar_csv(pedidos)
+                ext = "csv"
+            seq += 1
+            blocos.append(
+                BlocoFaturador(
+                    faturador_id=fid,
+                    numeros=[m.numero for m in chunk],
+                    planilha=planilha,
+                    nome_arquivo=f"nf_avulsa_{ts}_{seq}.{ext}",
+                )
             )
-        )
 
     logger.info(
         "nf_emissao_por_faturador",

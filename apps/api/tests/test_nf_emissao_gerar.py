@@ -214,3 +214,70 @@ async def test_nenhum_pedido_gerado_422(
     )
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "nf_nenhum_pedido_gerado"
+
+
+def test_chunks_por_limite_bling_e_upseller():
+    """Bling limita por PEDIDOS; Upseller pelos DOIS tetos (pedidos E linhas).
+    Um pedido nunca é quebrado no meio."""
+    from app.services import nf_emissao_gerar as g
+
+    def ped(numero: str, n_linhas: int) -> g._PedidoMontado:
+        return g._PedidoMontado(
+            numero=numero, faturador_id=uuid.uuid4(), info=None, linhas=[0] * n_linhas
+        )
+
+    # Bling: teto 500 pedidos → 501 pedidos de 1 linha viram 2 arquivos.
+    grupo = [ped(str(i), 1) for i in range(501)]
+    chunks = g._chunks_por_limite(grupo, "bling")
+    assert [len(c) for c in chunks] == [500, 1]
+
+    # Upseller: teto 300 pedidos E 1500 linhas. Aqui as LINHAS estouram antes:
+    # 300 pedidos de 6 linhas = 1800 > 1500 → corta em 250 (250×6=1500).
+    grupo = [ped(str(i), 6) for i in range(300)]
+    chunks = g._chunks_por_limite(grupo, "upseller")
+    assert [len(c) for c in chunks] == [250, 50]
+
+    # Nunca quebra um pedido: um único pedido com mais linhas que o teto
+    # ainda cabe sozinho num arquivo.
+    chunks = g._chunks_por_limite([ped("x", 2000)], "upseller")
+    assert [len(c) for c in chunks] == [1]
+
+    assert g._chunks_por_limite([], "bling") == []
+
+
+@pytest.mark.asyncio
+async def test_gerar_por_faturador_quebra_em_varios_blocos(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Faturador com mais pedidos que o teto do arquivo gera VÁRIOS blocos
+    (comandos), cada um com um subconjunto dos pedidos e nome de arquivo único."""
+    from app.services import nf_emissao_gerar as g
+
+    monkeypatch.setattr(g, "_LIMITE_BLING_VENDAS", 2)
+
+    avulso = NfFaturador(
+        nome="bling avulso", modo="bling", nf_cheia=True,
+        sku_fonte="principal", nome_fonte="produto",
+    )
+    db.add(avulso)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="amazon", account_name="l1",
+                     bling_store_id="930001", nf_faturador_id=avulso.id))
+    await db.flush()
+    numeros = ["83001", "83002", "83003"]
+    for n in numeros:
+        await _seed_pedido(db, admin, avulso, numero=n, loja="930001",
+                           itens=[{"sku": "a", "nome": "A", "qtd": 1, "unit": 100}])
+    await db.commit()
+
+    res = await g.gerar_por_faturador(db, numeros)
+    # 3 pedidos, teto 2 → 2 blocos (2 + 1).
+    assert len(res.blocos) == 2
+    assert [len(b.numeros) for b in res.blocos] == [2, 1]
+    # Cobrem todos os pedidos, sem repetição.
+    cobertos = [n for b in res.blocos for n in b.numeros]
+    assert sorted(cobertos) == sorted(numeros)
+    # Nomes de arquivo únicos.
+    nomes = [b.nome_arquivo for b in res.blocos]
+    assert len(set(nomes)) == 2
+    assert all(nm.endswith(".csv") for nm in nomes)
