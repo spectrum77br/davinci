@@ -11,9 +11,7 @@ base64, e reporta em `/agent/commands/{id}/result` (done → 'ok', failed →
 from __future__ import annotations
 
 import base64
-import io
 import uuid
-import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -35,6 +33,7 @@ from app.models import (
     UserStatus,
 )
 from app.security.cipher import encrypt
+from app.services import nf_relatorio
 
 _TOKEN = "nf-agent-test-token"
 
@@ -118,10 +117,10 @@ async def test_enfileirar_cria_comando_por_faturador(
     cmds = (await db.execute(select(NfCommand))).scalars().all()
     assert len(cmds) == 2
     assert {c.status for c in cmds} == {"pending"}
-    # modo 'bling' congela um .zip de XMLs de pedido (a tela do Bling só importa
-    # PEDIDO por XML; cada pedido é um <pedido> num arquivo do zip)
-    assert all(c.planilha and c.nome_arquivo.endswith(".zip") for c in cmds)
-    assert all(c.planilha.startswith(b"PK\x03\x04") for c in cmds)
+    # modo 'bling' congela o CSV do relatório de vendas (tela Importar vendas
+    # aceita CSV); o arquivo começa com o BOM UTF-8
+    assert all(c.planilha and c.nome_arquivo.endswith(".csv") for c in cmds)
+    assert all(c.planilha.startswith(b"\xef\xbb\xbf") for c in cmds)
     # cada comando cobre exatamente o pedido da sua loja/faturador
     cobertos = sorted(n for c in cmds for n in c.numeros)
     assert cobertos == ["830001", "830002"]
@@ -176,13 +175,10 @@ async def test_agent_lease_entrega_login_e_planilha(
     assert a["ads_power"] == "perfil-A"
     assert a["senha"] == "segredoA"  # descriptografada no lease
     assert a["numeros"] == ["830001"]
-    # planilha em base64 decodifica pro .zip congelado de XMLs de pedido
-    zip_bytes = base64.b64decode(a["planilha_b64"])
-    assert zip_bytes.startswith(b"PK\x03\x04")
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        nomes = zf.namelist()
-        assert nomes and all(n.endswith(".xml") for n in nomes)
-        assert b"<pedido>" in zf.read(nomes[0])
+    # planilha em base64 decodifica pro CSV congelado (BOM UTF-8 + cabeçalho)
+    csv_bytes = base64.b64decode(a["planilha_b64"])
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    assert b"N\xc3\xbamero pedido" in csv_bytes
 
     # os comandos viraram 'claimed' com attempts=1
     rows = (await db.execute(select(NfCommand))).scalars().all()
@@ -347,5 +343,6 @@ async def test_agent_planilha_serve_zip(
     )
     assert r.status_code == 200, r.text
     assert "attachment" in r.headers["content-disposition"]
-    # modo 'bling' serve o .zip de XMLs (assinatura PK\x03\x04)
-    assert r.content.startswith(b"PK\x03\x04")
+    # modo 'bling' serve o CSV (BOM UTF-8) na tela Importar vendas
+    assert r.content.startswith(b"\xef\xbb\xbf")
+    assert r.headers["content-type"].startswith(nf_relatorio.CSV_MEDIA)

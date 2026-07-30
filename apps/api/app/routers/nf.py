@@ -49,7 +49,7 @@ from app.schemas.nf import (
     NfImpressaoPatch,
 )
 from app.security.cipher import decrypt, encrypt
-from app.services import nf_bling_xml, nf_emissao_gerar, nf_relatorio, nf_upseller
+from app.services import nf_emissao_gerar, nf_relatorio, nf_upseller
 
 logger = structlog.get_logger()
 _SCHEMA = get_settings().database_schema
@@ -825,16 +825,15 @@ async def nf_agent_command_planilha(
     command_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
-    """Planilha crua do comando (o arquivo que o executor sobe no destino). ZIP
-    de XMLs pro Bling, XLSX pro Upseller — o media type vem da extensão do nome."""
+    """Planilha crua do comando (o arquivo que o executor sobe no destino). CSV
+    pro Bling (Importar vendas), XLSX pro Upseller — o media type vem da extensão
+    do nome."""
     cmd = await session.get(NfCommand, command_id)
     if cmd is None:
         raise HTTPException(404, detail={"code": "nf_command_not_found"})
     nome = cmd.nome_arquivo.lower()
     if nome.endswith(".xlsx"):
         media = nf_upseller.UPSELLER_MEDIA
-    elif nome.endswith(".zip"):
-        media = nf_bling_xml.BLING_ZIP_MEDIA
     else:
         media = nf_relatorio.CSV_MEDIA
     return Response(
