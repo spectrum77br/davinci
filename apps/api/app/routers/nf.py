@@ -14,7 +14,17 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import asc, select, text
@@ -27,6 +37,7 @@ from app.models import (
     NfCatalogoMala,
     NfCommand,
     NfEtiqueta,
+    NfEtiquetaArquivo,
     NfFaturador,
     NfFaturamento,
     NfImpressao,
@@ -50,6 +61,13 @@ from app.schemas.nf import (
 )
 from app.security.cipher import decrypt, encrypt
 from app.services import nf_emissao_gerar, nf_relatorio, nf_upseller
+from app.services.nf_etiqueta_transform import (
+    EtiquetaTransformError,
+    transformar_etiqueta,
+)
+
+# Teto do PDF cru da etiqueta que a marionete sobe pra transformação (item 2).
+_ETIQUETA_MAX_BYTES = 8 * 1024 * 1024
 
 logger = structlog.get_logger()
 _SCHEMA = get_settings().database_schema
@@ -875,3 +893,52 @@ async def nf_agent_command_result(
     await session.commit()
     logger.info("nf_agent_result", command_id=str(command_id), status=new_status)
     return {"ok": True, "status": new_status}
+
+
+@router.post(
+    "/agent/etiqueta",
+    dependencies=[Depends(_require_nf_agent_token)],
+)
+async def nf_agent_etiqueta(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    pedido_bling: Annotated[str, Form()],
+    file: Annotated[UploadFile, File()],
+    destinatario_nome: Annotated[str | None, Form()] = None,
+) -> dict:
+    """Recebe o PDF CRU da etiqueta (a marionete pega no Upseller/Correios),
+    aplica a regra de visualização (item 2: remetente=destinatário, sem bloco NF,
+    sem logo do marketplace) e faz UPSERT do PDF transformado em
+    `nf_etiqueta_arquivo` por pedido — de onde o Controle de Estoque serve o botão
+    "Imprimir Etiqueta". O nome do destinatário é lido da própria etiqueta quando
+    `destinatario_nome` não vem.
+    """
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, detail={"code": "nf_etiqueta_vazia"})
+    if len(raw) > _ETIQUETA_MAX_BYTES:
+        raise HTTPException(413, detail={"code": "nf_etiqueta_grande"})
+    try:
+        transformado = transformar_etiqueta(raw, (destinatario_nome or "").strip() or None)
+    except EtiquetaTransformError as exc:
+        raise HTTPException(422, detail={"code": "nf_etiqueta_invalida", "erro": str(exc)}) from exc
+
+    filename = f"etiqueta_{pedido_bling}.pdf"
+    row = (
+        await session.execute(
+            select(NfEtiquetaArquivo).where(
+                NfEtiquetaArquivo.pedido_bling == pedido_bling
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = NfEtiquetaArquivo(pedido_bling=pedido_bling)
+        session.add(row)
+    row.filename = filename
+    row.content_type = "application/pdf"
+    row.size_bytes = len(transformado)
+    row.blob = transformado
+    await session.commit()
+    logger.info(
+        "nf_agent_etiqueta", pedido_bling=pedido_bling, size=len(transformado)
+    )
+    return {"ok": True, "pedido_bling": pedido_bling, "size_bytes": len(transformado)}

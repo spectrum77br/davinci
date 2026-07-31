@@ -346,3 +346,102 @@ async def test_agent_planilha_serve_zip(
     # modo 'bling' serve o CSV (BOM UTF-8) na tela Importar vendas
     assert r.content.startswith(b"\xef\xbb\xbf")
     assert r.headers["content-type"].startswith(nf_relatorio.CSV_MEDIA)
+
+
+def _etiqueta_pdf() -> bytes:
+    """Etiqueta sintética com REMETENTE/DESTINATÁRIO + bloco NF pra transformar."""
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=442)
+    page.insert_text((20, 20), "DESTINATÁRIO", fontsize=7, fontname="helv")
+    page.insert_text((20, 32), "Fulano De Tal", fontsize=8, fontname="helv")
+    page.insert_text((20, 280), "REMETENTE", fontsize=7, fontname="helv")
+    page.insert_text((20, 294), "Loja Origem XYZ", fontsize=8, fontname="helv")
+    page.insert_text((20, 340), "DANFE SIMPLIFICADO", fontsize=6, fontname="helv")
+    page.insert_text(
+        (20, 350), "35260730734713000140550040000029931203736630",
+        fontsize=5, fontname="helv",
+    )
+    return doc.tobytes()
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_upsert_transformada(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """A marionete sobe o PDF cru; o endpoint transforma (remetente=destinatário,
+    sem bloco NF) e faz upsert em nf_etiqueta_arquivo; a 2ª subida regrava."""
+    import fitz
+
+    from app.models import NfEtiquetaArquivo
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870001"},
+        files={"file": ("etq.pdf", _etiqueta_pdf(), "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] == "870001"
+
+    row = (
+        await db.execute(
+            select(NfEtiquetaArquivo).where(
+                NfEtiquetaArquivo.pedido_bling == "870001"
+            )
+        )
+    ).scalar_one()
+    txt = fitz.open(stream=row.blob, filetype="pdf")[0].get_text()
+    assert "Loja Origem" not in txt  # remetente virou destinatário
+    assert "DANFE" not in txt  # bloco NF removido
+    assert txt.count("Fulano") == 2
+
+    # 2ª subida (upsert) não duplica e regrava
+    r2 = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870001", "destinatario_nome": "Beltrano Oficial"},
+        files={"file": ("etq.pdf", _etiqueta_pdf(), "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r2.status_code == 200, r2.text
+    db.expire_all()  # o request comitou em outra sessão; recarrega do banco
+    rows = (
+        await db.execute(
+            select(NfEtiquetaArquivo).where(
+                NfEtiquetaArquivo.pedido_bling == "870001"
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    txt2 = fitz.open(stream=rows[0].blob, filetype="pdf")[0].get_text()
+    assert "Beltrano Oficial" in txt2
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_sem_token_401(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870002"},
+        files={"file": ("etq.pdf", _etiqueta_pdf(), "application/pdf")},
+    )
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_pdf_invalido_422(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870003"},
+        files={"file": ("x.pdf", b"nao sou pdf", "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "nf_etiqueta_invalida"
