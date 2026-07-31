@@ -152,6 +152,53 @@ class GerarPlanilhaIn(BaseModel):
     numeros: list[str] = Field(min_length=1)
 
 
+class ConferirFreteProduto(BaseModel):
+    """Uma caixa/volume no formato do Melhor Envio (cm e kg)."""
+
+    id: str = "1"
+    width: Decimal = Field(gt=0)
+    height: Decimal = Field(gt=0)
+    length: Decimal = Field(gt=0)
+    weight: Decimal = Field(gt=0)
+    insurance_value: Decimal = Field(default=Decimal("0"), ge=0)
+    quantity: int = Field(default=1, ge=1)
+
+
+class ConferirFreteIn(BaseModel):
+    """Cota o frete no Melhor Envio e confere contra o frete projetado.
+
+    Impressão tipo "próprio" (Amazon): depois da NF, cota a etiqueta e vê se a
+    menor opção cabe no `frete_projetado` (Tabela de Preços). `frete_projetado`
+    None → só cota (não decide libera)."""
+
+    from_cep: str = Field(min_length=8)
+    to_cep: str = Field(min_length=8)
+    produtos: list[ConferirFreteProduto] = Field(min_length=1)
+    frete_projetado: Decimal | None = None
+    servicos: str | None = None
+
+
+class ConferirFreteCotacaoOut(BaseModel):
+    servico_id: int | None = None
+    servico_nome: str
+    empresa: str
+    preco: Decimal | None = None
+    prazo_dias: int | None = None
+    erro: str | None = None
+
+
+class ConferirFreteOut(BaseModel):
+    libera: bool
+    motivo: str
+    menor_frete: Decimal | None = None
+    servico_escolhido: str | None = None
+    empresa_escolhida: str | None = None
+    prazo_dias: int | None = None
+    frete_projetado: Decimal | None = None
+    diferenca: Decimal | None = None
+    cotacoes: list[ConferirFreteCotacaoOut] = []
+
+
 class NfFaturamentoRowOut(BaseModel):
     """Uma linha do Painel de Faturamento: descrição do pedido + os 3 status de
     etapa. Derivada (read-only) de bling_orders × store_info × nf_faturamento —

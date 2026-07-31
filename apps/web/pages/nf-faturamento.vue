@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, FileDown, Loader2, RefreshCw, Send, X } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, FileDown, Loader2, RefreshCw, Send, Truck, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -207,6 +207,93 @@ async function enfileirar() {
   }
 }
 
+// -- Conferir frete (Melhor Envio × frete projetado) -----------------------
+type ConfereCotacao = {
+  servico_id: number | null
+  servico_nome: string
+  empresa: string
+  preco: string | null
+  prazo_dias: number | null
+  erro: string | null
+}
+type ConfereResult = {
+  libera: boolean
+  motivo: string
+  menor_frete: string | null
+  servico_escolhido: string | null
+  empresa_escolhida: string | null
+  prazo_dias: number | null
+  frete_projetado: string | null
+  diferenca: string | null
+  cotacoes: ConfereCotacao[]
+}
+const confereOpen = ref(false)
+const conferindo = ref(false)
+const confereErro = ref<string | null>(null)
+const confereRes = ref<ConfereResult | null>(null)
+const confere = ref({
+  from_cep: '',
+  to_cep: '',
+  width: '20',
+  height: '10',
+  length: '20',
+  weight: '1',
+  insurance_value: '0',
+  frete_projetado: '',
+})
+
+function abrirConfere() {
+  confereErro.value = null
+  confereRes.value = null
+  confereOpen.value = true
+}
+
+async function conferirFrete() {
+  conferindo.value = true
+  confereErro.value = null
+  confereRes.value = null
+  try {
+    const body: Record<string, unknown> = {
+      from_cep: confere.value.from_cep,
+      to_cep: confere.value.to_cep,
+      produtos: [
+        {
+          id: '1',
+          width: confere.value.width,
+          height: confere.value.height,
+          length: confere.value.length,
+          weight: confere.value.weight,
+          insurance_value: confere.value.insurance_value || '0',
+          quantity: 1,
+        },
+      ],
+    }
+    if (confere.value.frete_projetado.trim()) {
+      body.frete_projetado = confere.value.frete_projetado.replace(',', '.')
+    }
+    confereRes.value = await api<ConfereResult>('/api/nf-cadastro/faturamento/conferir-frete', {
+      method: 'POST',
+      body,
+    })
+  } catch (e: any) {
+    confereErro.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    conferindo.value = false
+  }
+}
+
+const CONFERE_MOTIVO: Record<string, string> = {
+  dentro_do_projetado: 'Menor frete cabe no projetado — libera a etiqueta',
+  acima_do_projetado: 'Menor frete acima do projetado — não libera',
+  sem_cotacao: 'Nenhuma transportadora atende este trecho',
+  sem_frete_projetado: 'Informe o frete projetado para decidir',
+}
+function fmtBrl(v: string | null): string {
+  if (v == null) return '—'
+  const n = Number(v)
+  return Number.isFinite(n) ? n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : v
+}
+
 // -- Paginação --------------------------------------------------------------
 const PAGE_SIZE = 50
 const page = ref(1)
@@ -291,6 +378,14 @@ function badgeLabel(status: string): string {
           <Send v-if="!enfileirando" class="h-4 w-4" />
           <Loader2 v-else class="h-4 w-4 animate-spin" />
           Enfileirar{{ selected.size ? ` (${selected.size})` : '' }}
+        </button>
+        <button
+          v-if="canEdit"
+          class="inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-sm hover:bg-muted"
+          @click="abrirConfere"
+        >
+          <Truck class="h-4 w-4" />
+          Conferir frete
         </button>
       </div>
     </div>
@@ -419,6 +514,108 @@ function badgeLabel(status: string): string {
       >
         <ChevronRight class="h-4 w-4" />
       </button>
+    </div>
+
+    <!-- Modal: Conferir frete (Melhor Envio) -->
+    <div
+      v-if="confereOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      @click.self="confereOpen = false"
+    >
+      <div class="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg bg-background p-4 shadow-lg">
+        <div class="mb-3 flex items-center justify-between">
+          <h2 class="text-lg font-semibold">Conferir frete (Melhor Envio)</h2>
+          <button class="rounded p-1 hover:bg-muted" @click="confereOpen = false">
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+        <p class="mb-3 text-xs text-muted-foreground">
+          Impressão "próprio" (Amazon): cota a etiqueta e vê se a menor opção cabe no frete projetado da Tabela de Preços. Só consulta — não compra.
+        </p>
+
+        <div class="grid grid-cols-2 gap-3">
+          <label class="text-sm">
+            CEP origem
+            <input v-model="confere.from_cep" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" placeholder="13400-000" />
+          </label>
+          <label class="text-sm">
+            CEP destino
+            <input v-model="confere.to_cep" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" placeholder="01310-100" />
+          </label>
+          <label class="text-sm">
+            Largura (cm)
+            <input v-model="confere.width" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+          </label>
+          <label class="text-sm">
+            Altura (cm)
+            <input v-model="confere.height" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+          </label>
+          <label class="text-sm">
+            Comprimento (cm)
+            <input v-model="confere.length" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+          </label>
+          <label class="text-sm">
+            Peso (kg)
+            <input v-model="confere.weight" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+          </label>
+          <label class="text-sm">
+            Valor segurado (R$)
+            <input v-model="confere.insurance_value" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+          </label>
+          <label class="text-sm">
+            Frete projetado (R$)
+            <input v-model="confere.frete_projetado" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" placeholder="opcional" />
+          </label>
+        </div>
+
+        <button
+          class="mt-3 inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          :disabled="conferindo || !confere.from_cep || !confere.to_cep"
+          @click="conferirFrete"
+        >
+          <Loader2 v-if="conferindo" class="h-4 w-4 animate-spin" />
+          <Truck v-else class="h-4 w-4" />
+          Cotar
+        </button>
+
+        <div v-if="confereErro" class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {{ confereErro }}
+        </div>
+
+        <div v-if="confereRes" class="mt-3 space-y-2">
+          <div
+            class="rounded-md px-3 py-2 text-sm font-medium"
+            :class="confereRes.libera ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'"
+          >
+            {{ confereRes.libera ? 'LIBERA' : 'NÃO LIBERA' }} — {{ CONFERE_MOTIVO[confereRes.motivo] || confereRes.motivo }}
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-sm">
+            <div>Menor frete: <strong>{{ fmtBrl(confereRes.menor_frete) }}</strong></div>
+            <div>Projetado: <strong>{{ fmtBrl(confereRes.frete_projetado) }}</strong></div>
+            <div v-if="confereRes.servico_escolhido">Serviço: {{ confereRes.empresa_escolhida }} {{ confereRes.servico_escolhido }}</div>
+            <div v-if="confereRes.prazo_dias != null">Prazo: {{ confereRes.prazo_dias }} dia(s)</div>
+            <div v-if="confereRes.diferenca != null">Folga: <strong>{{ fmtBrl(confereRes.diferenca) }}</strong></div>
+          </div>
+          <div v-if="confereRes.cotacoes.length" class="overflow-x-auto rounded-md border">
+            <table class="w-full text-xs">
+              <thead class="bg-muted/50 text-left">
+                <tr>
+                  <th class="px-2 py-1 font-medium">Transportadora</th>
+                  <th class="px-2 py-1 font-medium">Preço</th>
+                  <th class="px-2 py-1 font-medium">Prazo</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(c, i) in confereRes.cotacoes" :key="i" class="border-t">
+                  <td class="px-2 py-1">{{ c.empresa }} {{ c.servico_nome }}</td>
+                  <td class="px-2 py-1">{{ c.erro ? '—' : fmtBrl(c.preco) }}</td>
+                  <td class="px-2 py-1">{{ c.erro ? c.erro : (c.prazo_dias != null ? `${c.prazo_dias}d` : '—') }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>

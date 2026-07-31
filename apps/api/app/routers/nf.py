@@ -44,6 +44,8 @@ from app.models import (
     User,
 )
 from app.schemas.nf import (
+    ConferirFreteIn,
+    ConferirFreteOut,
     GerarPlanilhaIn,
     NfCatalogoMalaCreate,
     NfCatalogoMalaOut,
@@ -60,7 +62,12 @@ from app.schemas.nf import (
     NfImpressaoPatch,
 )
 from app.security.cipher import decrypt, encrypt
-from app.services import nf_emissao_gerar, nf_relatorio, nf_upseller
+from app.services import melhor_envio, nf_emissao_gerar, nf_relatorio, nf_upseller
+from app.services.melhor_envio import (
+    MelhorEnvioApiError,
+    MelhorEnvioClient,
+    MelhorEnvioConfigError,
+)
 from app.services.nf_etiqueta_transform import (
     EtiquetaTransformError,
     transformar_etiqueta,
@@ -643,6 +650,56 @@ async def gerar_planilha_faturamento(
                 "X-Pedidos-Pulados-Detalhe"
             ),
         },
+    )
+
+
+@router.post("/faturamento/conferir-frete", response_model=ConferirFreteOut)
+async def conferir_frete_faturamento(
+    body: ConferirFreteIn,
+    _user: Annotated[User, Depends(_painel_edit)],
+) -> ConferirFreteOut:
+    """Cota o frete no Melhor Envio e confere contra o frete projetado.
+
+    Fluxo "impressão tipo próprio" (Amazon): depois da NF emitida, cota a
+    etiqueta (CEP origem/destino + caixa) e vê se a menor opção cabe no frete
+    projetado da Tabela de Preços. Só CONSULTA o ME (não compra); a decisão
+    `libera` é o sinal pra gerar a etiqueta. 502 se o ME falhar; 400 se o token
+    não estiver configurado."""
+    produtos = [p.model_dump(mode="json") for p in body.produtos]
+    client = MelhorEnvioClient()
+    try:
+        cotacoes = await client.calcular_frete(
+            from_cep=body.from_cep,
+            to_cep=body.to_cep,
+            produtos=produtos,
+            servicos=body.servicos,
+        )
+    except MelhorEnvioConfigError:
+        raise HTTPException(400, detail={"code": "melhor_envio_token_missing"})
+    except MelhorEnvioApiError as exc:
+        logger.warning("nf_conferir_frete_api_erro", status=exc.status, body=exc.body[:200])
+        raise HTTPException(502, detail={"code": "melhor_envio_erro"})
+    res = melhor_envio.conferir_frete(cotacoes, body.frete_projetado)
+    return ConferirFreteOut(
+        libera=res.libera,
+        motivo=res.motivo,
+        menor_frete=res.menor_frete,
+        servico_escolhido=res.servico_escolhido,
+        empresa_escolhida=res.empresa_escolhida,
+        prazo_dias=res.prazo_dias,
+        frete_projetado=res.frete_projetado,
+        diferenca=res.diferenca,
+        cotacoes=[
+            {
+                "servico_id": c.servico_id,
+                "servico_nome": c.servico_nome,
+                "empresa": c.empresa,
+                "preco": c.preco,
+                "prazo_dias": c.prazo_dias,
+                "erro": c.erro,
+            }
+            for c in cotacoes
+        ],
     )
 
 
