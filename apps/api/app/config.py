@@ -85,6 +85,13 @@ class Settings(BaseSettings):
     logi_17track_token: str = ""
     logi_17track_webhook_secret: str = ""
 
+    # Melhor Envio — confere o frete da impressão tipo "próprio" (só Amazon).
+    # `melhor_envio_token`: Bearer token OAuth2 da conta ME (calcula frete).
+    # `melhor_envio_sandbox`: usa o ambiente de testes do ME quando True.
+    # Inerte vazio — sem token o cálculo levanta MelhorEnvioConfigError.
+    melhor_envio_token: str = ""
+    melhor_envio_sandbox: bool = False
+
     shopee_partner_id: str = ""
     shopee_partner_key: str = ""
     shopee_use_sandbox: bool = False
