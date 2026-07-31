@@ -196,6 +196,35 @@ def test_estado_resolvido_acao_de_outro_estado_nao_conta():
     assert logistica_match.deve_monitorar([acao, sem], "Em andamento") is True
 
 
+def test_estado_resolvido_alvo_de_outro_estado_nao_bloqueia():
+    # Caso real 287924: chave "Cancelado | Não entregue | Devolvido ao hub | Envio"
+    # com 2 regras — (1) status_atual "Em andamento" → "Aguardando Devolução";
+    # (2) status_atual "Problemas" → NÃO faz nada. O pedido está em "Problemas".
+    # A regra aplicável (2) não pede nada → resolvido (some), mesmo a regra (1)
+    # tendo um alvo ("Aguardando Devolução") que o pedido ainda não atingiu.
+    r1 = _rule(status_atual="Em andamento", alterar_status_bling="Aguardando Devolução")
+    r2 = _rule(status_atual="Problemas")  # sem ação
+    assert logistica_match.estado_resolvido([r1, r2], "Problemas") is True
+    assert logistica_match.deve_monitorar([r1, r2], "Problemas") is False
+    # Em "Em andamento" a regra (1) se aplica e tem transição pendente → fica.
+    assert logistica_match.estado_resolvido([r1, r2], "Em andamento") is False
+
+
+def test_regra_ativa_desambigua_pelo_status_atual():
+    # A regra MOSTRADA/aplicada tem que respeitar onde o pedido está (287924).
+    r1 = _rule(status_atual="Em andamento", alterar_status_bling="Aguardando Devolução")
+    r2 = _rule(status_atual="Problemas")  # sem ação
+    assert logistica_match.regra_ativa([r1, r2], "Problemas") is r2
+    assert logistica_match.regra_ativa([r1, r2], "Em andamento") is r1
+    # Em "Problemas" a regra ativa (r2) não pede nada → sem setinha, resumo vazio.
+    assert logistica_match.resumo_acoes(logistica_match.regra_ativa([r1, r2], "Problemas")) == []
+    # Estado sem regra exata cai no curinga, senão na primeira.
+    curinga = _rule(alterar_status_bling="Cancelado")
+    assert logistica_match.regra_ativa([r1, curinga], "Entregue") is curinga
+    assert logistica_match.regra_ativa([r1, r2], "Entregue") is r1
+    assert logistica_match.regra_ativa([], "Problemas") is None
+
+
 def test_estado_resolvido_threema_enviado_resolve():
     # Regra só com Mensagem Threema: pendente até enviar; depois de enviado
     # (threema_enviado=True) deixa de contar → resolvido (some).

@@ -85,10 +85,10 @@ _PLATAFORMA_LABELS = {
 
 def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> LogisticaOut:
     """`rules` = candidatas da aba Status que casam a chave deste pedido (máquina
-    de estados). A 1ª (preferida) alimenta match/resumo; o conjunto alimenta
-    monitorar/resolvido."""
+    de estados). A regra ATIVA (desambiguada pela situação atual do Bling) alimenta
+    match/setinha/resumo; o conjunto alimenta monitorar/resolvido."""
     rules = rules or []
-    rule = rules[0] if rules else None
+    rule = logistica_match.regra_ativa(rules, c.status_bling)
     return LogisticaOut(
         id=c.id,
         data=c.data,

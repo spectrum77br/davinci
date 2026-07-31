@@ -86,6 +86,28 @@ def _aplicaveis_agora(
     return [r for r in rules if not _norm(r.status_atual) or _norm(r.status_atual) == atual]
 
 
+def regra_ativa(
+    rules: list[LogisticaStatus], status_bling: str | None
+) -> LogisticaStatus | None:
+    """A regra a MOSTRAR/aplicar AGORA, desambiguada pela situação atual do Bling.
+
+    Quando a mesma chave tem várias linhas (máquina de estados), o que aparece na
+    UI (match/setinha/resumo de ações) tem que respeitar ONDE o pedido está: se há
+    uma regra cujo `status_atual` casa com o Bling atual, é ELA; senão a curinga
+    (sem `status_atual`, vale de qualquer estado); só em último caso a primeira."""
+    if not rules:
+        return None
+    atual = _norm(status_bling)
+    if atual:
+        for r in rules:
+            if _norm(r.status_atual) == atual:
+                return r
+    for r in rules:
+        if not _norm(r.status_atual):
+            return r
+    return rules[0]
+
+
 def deve_monitorar(
     rules: list[LogisticaStatus], status_bling: str | None = None
 ) -> bool:
@@ -119,35 +141,33 @@ def estado_resolvido(
     combina com `not acao_monitorar`)."""
     if not rules:
         return False
-    # Ação manual pendente NO ESTADO ATUAL → ainda há o que fazer, não esconde.
-    # Ações de uma regra de OUTRO estado (status_atual diferente do Bling atual)
-    # não pesam agora — máquina de estados: elas valem quando o pedido chegar lá.
-    for r in _aplicaveis_agora(rules, status_bling):
+    atual = _norm(status_bling)
+    # Só pesam as regras APLICÁVEIS ao estado atual do Bling. Uma regra de OUTRO
+    # estado (status_atual diferente do atual) não conta agora — máquina de
+    # estados: ela vale quando o pedido chegar naquele estado.
+    aplicaveis = _aplicaveis_agora(rules, status_bling)
+    # Ação manual pendente no estado atual → ainda há o que fazer, não esconde.
+    for r in aplicaveis:
         if r.abrir_chamado or r.abrir_reembolso:
             return False
         if (r.mensagem_chamado or "").strip() or (r.mensagem_bling or "").strip():
             return False
         if (r.mensagem_threema or "").strip() and not threema_enviado:
             return False
+    # Transição de status ainda pendente a partir do estado atual → não esconde.
+    for r in aplicaveis:
+        alvo = _norm(r.alterar_status_bling)
+        if alvo and alvo != atual:
+            return False
+    if aplicaveis:
+        return True  # há regra pro estado atual e nada pendente → resolvido
+    # Nenhuma regra aplicável ao estado atual (todas são de outros estados). Se
+    # nenhuma delas muda status, é chave "conhecida/ok" → nada a fazer (some).
+    # Senão, só resolve quando o pedido chegou a algum alvo da cadeia.
     alvos = {_norm(r.alterar_status_bling) for r in rules if _norm(r.alterar_status_bling)}
     if not alvos:
-        return True  # regra sem mudança de status e sem outra ação → nada a fazer
-    atual = _norm(status_bling)
-    if not atual:
-        return False
-    if atual not in alvos:
-        return False  # ainda não chegou a nenhum alvo da cadeia
-    for r in rules:
-        alvo = _norm(r.alterar_status_bling)
-        if not alvo:
-            continue
-        de = _norm(r.status_atual)
-        if de:
-            if de == atual and alvo != atual:
-                return False  # há transição exata a seguir a partir daqui
-        elif alvo != atual:
-            return False  # curinga (vale de qualquer estado) ainda não no alvo
-    return True
+        return True
+    return bool(atual) and atual in alvos
 
 
 def resumo_acoes(rule: LogisticaStatus | None) -> list[str]:

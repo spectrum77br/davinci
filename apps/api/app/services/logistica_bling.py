@@ -445,6 +445,17 @@ async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
             status_rows, assinatura=assinatura, plataforma=row.plataforma
         )
         if not any((c.alterar_status_bling or "").strip() for c in cands):
+            # A chave casa regra(s) mas nenhuma muda status (ex.: "Problemas →
+            # não faz nada"). Ainda assim sincroniza o status_bling do painel com
+            # a situação VIVA do Bling (best-effort) pra o recarregar refletir o
+            # estado atual — sem isso a linha só atualizava pelo ⟳ por coluna.
+            if cands:
+                try:
+                    await sync_status_bling_row(session, row)
+                except Exception as e:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "logistica_status_lote_sync_falha", id=str(row.id), err=str(e)[:200]
+                    )
             continue
         try:
             await apply_alterar_status_bling(session, row)
