@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     # Inerte vazio — sem token o cálculo levanta MelhorEnvioConfigError.
     melhor_envio_token: str = ""
     melhor_envio_sandbox: bool = False
+    # CEP de ORIGEM da postagem (remetente) usado no confere-frete automático.
+    # Não fica no cadastro de empresa/loja — vem do .env. Inerte vazio: o
+    # prefill do confere-frete AUTO levanta 400 nf_origem_cep_missing.
+    nf_origem_cep: str = ""
 
     shopee_partner_id: str = ""
     shopee_partner_key: str = ""

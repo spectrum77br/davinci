@@ -227,6 +227,25 @@ type ConfereResult = {
   diferenca: string | null
   cotacoes: ConfereCotacao[]
 }
+type ConfereProduto = {
+  id: string
+  width: string
+  height: string
+  length: string
+  weight: string
+  insurance_value: string
+  quantity: number
+}
+type ConfereAutoResult = {
+  from_cep: string
+  to_cep: string
+  produtos: ConfereProduto[]
+  frete_projetado: string | null
+  plataforma: string | null
+  conta: string | null
+  nome_destinatario: string | null
+  avisos: string[]
+}
 const confereOpen = ref(false)
 const conferindo = ref(false)
 const confereErro = ref<string | null>(null)
@@ -241,11 +260,67 @@ const confere = ref({
   insurance_value: '0',
   frete_projetado: '',
 })
+// Prefill "puxar do pedido": quando ativo, `autoProdutos` tem as caixas do
+// pedido (uma por item) e a cotação manda TODAS — a caixa editável abaixo só
+// espelha a 1ª. Editar qualquer campo cai pro modo manual (limpa autoProdutos).
+const pedidoAuto = ref('')
+const prefilling = ref(false)
+const autoProdutos = ref<ConfereProduto[]>([])
+const autoInfo = ref<{ plataforma: string | null; conta: string | null; nome: string | null } | null>(null)
+const autoAvisos = ref<string[]>([])
 
 function abrirConfere() {
   confereErro.value = null
   confereRes.value = null
+  pedidoAuto.value = ''
+  autoProdutos.value = []
+  autoInfo.value = null
+  autoAvisos.value = []
   confereOpen.value = true
+}
+
+async function prefillDoPedido() {
+  const numero = pedidoAuto.value.trim()
+  if (!numero) return
+  prefilling.value = true
+  confereErro.value = null
+  confereRes.value = null
+  autoAvisos.value = []
+  try {
+    const res = await api<ConfereAutoResult>('/api/nf-cadastro/faturamento/conferir-frete/auto', {
+      method: 'POST',
+      body: { pedido_bling: numero },
+    })
+    confere.value.from_cep = res.from_cep || confere.value.from_cep
+    confere.value.to_cep = res.to_cep || ''
+    confere.value.frete_projetado = res.frete_projetado ?? ''
+    autoProdutos.value = res.produtos
+    const p0 = res.produtos[0]
+    if (p0) {
+      confere.value.width = p0.width
+      confere.value.height = p0.height
+      confere.value.length = p0.length
+      confere.value.weight = p0.weight
+      confere.value.insurance_value = p0.insurance_value || '0'
+    }
+    autoInfo.value = { plataforma: res.plataforma, conta: res.conta, nome: res.nome_destinatario }
+    autoAvisos.value = res.avisos || []
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    confereErro.value = code === 'nf_pedido_nao_encontrado'
+      ? 'Pedido não encontrado no Bling'
+      : code === 'nf_origem_cep_missing'
+        ? 'CEP de origem não configurado (NF_ORIGEM_CEP)'
+        : code
+  } finally {
+    prefilling.value = false
+  }
+}
+
+// Editar a caixa à mão descola do prefill: cota só a caixa visível.
+function onBoxEdit() {
+  autoProdutos.value = []
+  autoInfo.value = null
 }
 
 async function conferirFrete() {
@@ -253,20 +328,31 @@ async function conferirFrete() {
   confereErro.value = null
   confereRes.value = null
   try {
+    const produtos = autoProdutos.value.length
+      ? autoProdutos.value.map((p) => ({
+          id: p.id,
+          width: p.width,
+          height: p.height,
+          length: p.length,
+          weight: p.weight,
+          insurance_value: p.insurance_value || '0',
+          quantity: p.quantity,
+        }))
+      : [
+          {
+            id: '1',
+            width: confere.value.width,
+            height: confere.value.height,
+            length: confere.value.length,
+            weight: confere.value.weight,
+            insurance_value: confere.value.insurance_value || '0',
+            quantity: 1,
+          },
+        ]
     const body: Record<string, unknown> = {
       from_cep: confere.value.from_cep,
       to_cep: confere.value.to_cep,
-      produtos: [
-        {
-          id: '1',
-          width: confere.value.width,
-          height: confere.value.height,
-          length: confere.value.length,
-          weight: confere.value.weight,
-          insurance_value: confere.value.insurance_value || '0',
-          quantity: 1,
-        },
-      ],
+      produtos,
     }
     if (confere.value.frete_projetado.trim()) {
       body.frete_projetado = confere.value.frete_projetado.replace(',', '.')
@@ -533,6 +619,39 @@ function badgeLabel(status: string): string {
           Impressão "próprio" (Amazon): cota a etiqueta e vê se a menor opção cabe no frete projetado da Tabela de Preços. Só consulta — não compra.
         </p>
 
+        <!-- Puxar do pedido: prefill de CEP destino, caixas e frete projetado -->
+        <div class="mb-3 rounded-md border bg-muted/30 p-3">
+          <label class="text-sm font-medium">Puxar do pedido</label>
+          <div class="mt-1 flex items-center gap-2">
+            <input
+              v-model="pedidoAuto"
+              class="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+              placeholder="Nº do pedido no Bling"
+              @keyup.enter="prefillDoPedido"
+            />
+            <button
+              class="inline-flex shrink-0 items-center gap-1 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              :disabled="prefilling || !pedidoAuto.trim()"
+              @click="prefillDoPedido"
+            >
+              <Loader2 v-if="prefilling" class="h-4 w-4 animate-spin" />
+              <FileDown v-else class="h-4 w-4" />
+              Puxar
+            </button>
+          </div>
+          <div v-if="autoInfo" class="mt-2 text-xs text-muted-foreground">
+            <span v-if="autoInfo.plataforma">{{ autoInfo.plataforma }}</span>
+            <span v-if="autoInfo.conta"> · {{ autoInfo.conta }}</span>
+            <span v-if="autoInfo.nome"> · {{ autoInfo.nome }}</span>
+          </div>
+          <div v-if="autoProdutos.length > 1" class="mt-1 text-xs text-emerald-700">
+            {{ autoProdutos.length }} caixas do pedido serão cotadas (a caixa abaixo mostra a 1ª).
+          </div>
+          <ul v-if="autoAvisos.length" class="mt-2 space-y-1">
+            <li v-for="(a, i) in autoAvisos" :key="i" class="text-xs text-amber-700">• {{ a }}</li>
+          </ul>
+        </div>
+
         <div class="grid grid-cols-2 gap-3">
           <label class="text-sm">
             CEP origem
@@ -544,23 +663,23 @@ function badgeLabel(status: string): string {
           </label>
           <label class="text-sm">
             Largura (cm)
-            <input v-model="confere.width" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+            <input v-model="confere.width" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" @input="onBoxEdit" />
           </label>
           <label class="text-sm">
             Altura (cm)
-            <input v-model="confere.height" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+            <input v-model="confere.height" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" @input="onBoxEdit" />
           </label>
           <label class="text-sm">
             Comprimento (cm)
-            <input v-model="confere.length" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+            <input v-model="confere.length" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" @input="onBoxEdit" />
           </label>
           <label class="text-sm">
             Peso (kg)
-            <input v-model="confere.weight" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+            <input v-model="confere.weight" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" @input="onBoxEdit" />
           </label>
           <label class="text-sm">
             Valor segurado (R$)
-            <input v-model="confere.insurance_value" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+            <input v-model="confere.insurance_value" type="number" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" @input="onBoxEdit" />
           </label>
           <label class="text-sm">
             Frete projetado (R$)

@@ -178,6 +178,27 @@ class ConferirFreteIn(BaseModel):
     servicos: str | None = None
 
 
+class ConferirFreteAutoIn(BaseModel):
+    """Puxa CEP destino, dimensões e frete projetado direto de um pedido."""
+
+    pedido_bling: str = Field(min_length=1)
+
+
+class ConferirFreteAutoOut(BaseModel):
+    """Prefill do confere-frete resolvido do pedido — o operador revê no modal
+    antes de cotar. `frete_projetado` None quando não resolve com segurança
+    (nunca chuta — cai em `avisos`)."""
+
+    from_cep: str
+    to_cep: str
+    produtos: list[ConferirFreteProduto] = []
+    frete_projetado: Decimal | None = None
+    plataforma: str | None = None
+    conta: str | None = None
+    nome_destinatario: str | None = None
+    avisos: list[str] = []
+
+
 class ConferirFreteCotacaoOut(BaseModel):
     servico_id: int | None = None
     servico_nome: str

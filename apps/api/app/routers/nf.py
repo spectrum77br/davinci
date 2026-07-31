@@ -44,8 +44,11 @@ from app.models import (
     User,
 )
 from app.schemas.nf import (
+    ConferirFreteAutoIn,
+    ConferirFreteAutoOut,
     ConferirFreteIn,
     ConferirFreteOut,
+    ConferirFreteProduto,
     GerarPlanilhaIn,
     NfCatalogoMalaCreate,
     NfCatalogoMalaOut,
@@ -62,7 +65,13 @@ from app.schemas.nf import (
     NfImpressaoPatch,
 )
 from app.security.cipher import decrypt, encrypt
-from app.services import melhor_envio, nf_emissao_gerar, nf_relatorio, nf_upseller
+from app.services import (
+    melhor_envio,
+    nf_emissao_gerar,
+    nf_frete_auto,
+    nf_relatorio,
+    nf_upseller,
+)
 from app.services.melhor_envio import (
     MelhorEnvioApiError,
     MelhorEnvioClient,
@@ -650,6 +659,48 @@ async def gerar_planilha_faturamento(
                 "X-Pedidos-Pulados-Detalhe"
             ),
         },
+    )
+
+
+@router.post("/faturamento/conferir-frete/auto", response_model=ConferirFreteAutoOut)
+async def conferir_frete_auto(
+    body: ConferirFreteAutoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_painel_edit)],
+) -> ConferirFreteAutoOut:
+    """Prefill do confere-frete a partir de um pedido do Bling.
+
+    Resolve CEP destino (`bling_orders.cep_destino`), a caixa (dimensões do
+    produto no Bling) e o frete projetado (Tabela de Preços da loja) pra o
+    operador só revisar e cotar. Não cota nem decide `libera` — isso segue no
+    `/conferir-frete`. 400 se o CEP de origem (.env) não estiver configurado;
+    404 se o pedido não existir."""
+    origem_cep = (get_settings().nf_origem_cep or "").strip()
+    if not origem_cep:
+        raise HTTPException(400, detail={"code": "nf_origem_cep_missing"})
+    try:
+        res = await nf_frete_auto.resolver_prefill(session, body.pedido_bling)
+    except nf_frete_auto.PedidoNaoEncontrado:
+        raise HTTPException(404, detail={"code": "nf_pedido_nao_encontrado"})
+    return ConferirFreteAutoOut(
+        from_cep=origem_cep,
+        to_cep=res.to_cep,
+        produtos=[
+            ConferirFreteProduto(
+                id=p.id,
+                width=p.width,
+                height=p.height,
+                length=p.length,
+                weight=p.weight,
+                quantity=p.quantity,
+            )
+            for p in res.produtos
+        ],
+        frete_projetado=res.frete_projetado,
+        plataforma=res.plataforma,
+        conta=res.conta,
+        nome_destinatario=res.nome_destinatario,
+        avisos=res.avisos,
     )
 
 
