@@ -157,6 +157,7 @@ async def sync_all_run(
     product_ids: list[str] | None,
     include_all_stock: bool = False,
     integration_ids: list[str] | None = None,
+    force: bool = False,
 ) -> None:
     """Fase 4a: full sync run. Acquires per-user advisory lock; if busy, marks
     job as `failed` with `error='sync_already_running'`.
@@ -164,6 +165,11 @@ async def sync_all_run(
     `include_all_stock=True` bypasses the cron-driven low-stock filter — used
     when the UI explicitly clicks "sync all" and the user expects every
     product to be pushed to its marketplaces.
+
+    `force=True` makes the push bypass the marketplace-side safety guards (ML's
+    B1 zero-guard + the paused/closed short-circuit), like the individual sync.
+    Used when the operator explicitly wants the mass sync to re-push stock and
+    reactivate listings ML auto-paused on stockout.
     """
     uid = UUID(user_id)
     jid = UUID(job_id)
@@ -271,7 +277,7 @@ async def sync_all_run(
             # flag stays explicit so the intent is clear if the constant
             # changes later.)
             orch = SyncOrchestrator(
-                s, user_id=uid, job=job, force_bling_refresh=True
+                s, user_id=uid, job=job, force=force, force_bling_refresh=True
             )
             # SSH delta #1 — run_with_retry wraps run_parallel with up to
             # MAX_RESYNC_ROUNDS-1 retry passes for products whose links

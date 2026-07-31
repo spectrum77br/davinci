@@ -140,6 +140,10 @@ function dismissToast(id: number) {
 const showImport = ref(false)
 const showAutoLink = ref(false)
 const showSyncAll = ref(false)
+// Força a sincronização em massa a furar as travas do marketplace (zero-guard
+// da B1 + short-circuit de pausado/encerrado), reativando anúncios que o ML
+// pausou sozinho ao zerar o estoque. Igual ao sync individual por produto.
+const forceSyncAll = ref(false)
 const showRefreshStock = ref(false)
 
 // SSH-style selection dialogs
@@ -915,6 +919,7 @@ function linkedIntegrationsFor(p: Product): Integration[] {
 function openSyncAllDialog() {
   // Pre-select all marketplace integrations (matches SSH default behavior).
   selectedSyncAllIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
+  forceSyncAll.value = false
   activeJob.value = null
   showSyncAll.value = true
 }
@@ -940,6 +945,7 @@ async function runSyncAll() {
         integration_ids: Array.from(selectedSyncAllIds.value),
         product_ids: syncAllProductIds.value,
         include_all_stock: true,
+        force: forceSyncAll.value,
       },
     })
     startPolling(r.job_id)
@@ -953,6 +959,7 @@ function openSyncSelected() {
   if (selected.value.size === 0) return
   syncAllProductIds.value = [...selected.value]
   selectedSyncAllIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
+  forceSyncAll.value = false
   activeJob.value = null
   showSyncAll.value = true
 }
@@ -2346,6 +2353,22 @@ onUnmounted(() => {
             </li>
           </ul>
         </div>
+
+        <!-- Forçar: fura as travas do marketplace e reativa anúncios pausados
+             pelo ML por falta de estoque (mesma trava do sync individual). -->
+        <label
+          v-if="!activeJob"
+          class="border-t px-3 pt-3 flex items-start gap-2 text-xs cursor-pointer select-none"
+        >
+          <input type="checkbox" v-model="forceSyncAll" class="mt-0.5" />
+          <span>
+            <span class="font-medium">Forçar (reativar anúncios pausados)</span>
+            <span class="block text-muted-foreground">
+              Empurra o estoque mesmo em anúncios que o ML pausou por estarem
+              zerados, religando-os. Use ao repor estoque depois de zerar.
+            </span>
+          </span>
+        </label>
 
         <!-- Footer -->
         <div class="border-t p-3 flex gap-2 justify-end">

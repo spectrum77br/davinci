@@ -83,6 +83,7 @@ async def enqueue_sync_all(
             "integration_ids": [str(i) for i in (body.integration_ids or [])],
             "product_ids": [str(p) for p in (body.product_ids or [])],
             "include_all_stock": bool(body.include_all_stock),
+            "force": bool(body.force),
         },
     )
     session.add(job)
@@ -96,6 +97,7 @@ async def enqueue_sync_all(
         body.product_ids and [str(p) for p in body.product_ids],
         bool(body.include_all_stock),
         body.integration_ids and [str(i) for i in body.integration_ids],
+        bool(body.force),
     )
     if arq is not None:
         job.arq_job_id = arq.job_id

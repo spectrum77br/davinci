@@ -51,6 +51,12 @@ class SyncAllIn(BaseModel):
     # When the UI explicitly clicks "sync all", users expect every product to
     # push to marketplaces — not just the ones near stockout.
     include_all_stock: bool = False
+    # `force=True` makes the mass sync bypass the marketplace-side safety guards
+    # (notably ML's B1 zero-guard and the paused/closed short-circuit), exactly
+    # like the individual per-product sync. Needed to re-push stock to listings
+    # ML auto-paused when their stock hit zero — the default (force=False) skips
+    # paused/closed listings and never reactivates them.
+    force: bool = False
 
 
 class SyncLogOut(BaseModel):

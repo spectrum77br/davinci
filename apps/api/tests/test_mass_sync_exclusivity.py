@@ -134,6 +134,32 @@ async def test_sync_all_sem_selecao_nao_escopa(
     assert r.status_code == 201
     args = fake_pool.enqueue_job.await_args.args
     assert args[5] is None
+    # `force` (7º arg) default False quando o body não pede.
+    assert args[6] is False
+
+
+@pytest.mark.asyncio
+async def test_sync_all_encaminha_force_pro_worker(
+    client: AsyncClient,
+    make_user: Callable,
+    auth_as: Callable[[User | None], None],
+):
+    """Marcar "Forçar" no dialog "Sincronizar Todos" tem que encaminhar
+    `force=True` como 7º arg pro worker `sync_all_run` — só assim a massa fura
+    as travas do marketplace e reativa anúncios que o ML pausou por estoque 0."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock(return_value=type("J", (), {"job_id": "x"}))
+    with patch("app.routers.sync.get_arq_sync_pool", return_value=fake_pool):
+        r = await client.post("/api/jobs/sync-all", json={"force": True})
+
+    assert r.status_code == 201
+    args = fake_pool.enqueue_job.await_args.args
+    assert args[0] == "sync_all_run"
+    # (fn, job_id, user_id, product_ids, include_all_stock, integration_ids, force)
+    assert args[6] is True
 
 
 @pytest.mark.asyncio
