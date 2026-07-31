@@ -419,6 +419,150 @@ async def test_agent_etiqueta_upsert_transformada(
     assert "Beltrano Oficial" in txt2
 
 
+async def _seed_upseller(db: AsyncSession, admin: User, *, numero: str = "850001") -> None:
+    """Faturador Upseller + 1 pedido → 1 comando .xlsx (fluxo com etiqueta)."""
+    f = NfFaturador(
+        nome="upseller 100%", modo="upseller", nf_cheia=True,
+        sku_fonte="principal", nome_fonte="produto", ncm="4202.12.10",
+        ads_power="perfil-U", usuario="user-u", senha_enc=encrypt("segredoU"),
+    )
+    db.add(f)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="amazon", account_name="lU",
+                     bling_store_id="950001", nf_faturador_id=f.id))
+    await db.flush()
+    await _seed_pedido(db, numero=numero, loja="950001", sku="dg053.ci", nome="Capa", unit=500)
+    await db.commit()
+
+
+async def _import_done(client: AsyncClient, numeros: list[str]) -> None:
+    """Enfileira o faturamento, reivindica e reporta 'done' (dispara o motor)."""
+    await client.post("/api/nf-cadastro/faturamento/enfileirar", json={"numeros": numeros})
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                              headers={"X-Agent-Token": _TOKEN})
+    imp = next(c for c in lease.json()["commands"] if c["action"] == "import_avulsa")
+    await client.post(f"/api/nf-cadastro/agent/commands/{imp['id']}/result",
+                      json={"status": "done"}, headers={"X-Agent-Token": _TOKEN})
+
+
+@pytest.mark.asyncio
+async def test_faturamento_ok_auto_enfileira_etiqueta(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Faturador Upseller: ao fechar o faturamento 'ok' o motor auto-enfileira
+    UM comando `imprimir_etiqueta` por pedido (planilha vazia) + marca
+    status_etiqueta='processando'."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_upseller(db, admin)
+    await _import_done(client, ["850001"])
+
+    etq = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "imprimir_etiqueta")
+    )).scalars().all()
+    assert len(etq) == 1
+    assert etq[0].numeros == ["850001"]
+    assert etq[0].status == "pending"
+    assert etq[0].source == "auto"
+    assert etq[0].planilha == b""
+    assert etq[0].faturador_id is not None
+
+    fat = (await db.execute(
+        select(NfFaturamento).where(NfFaturamento.pedido_bling == "850001")
+    )).scalar_one()
+    await db.refresh(fat)
+    assert fat.status_faturamento == "ok"
+    assert fat.status_etiqueta == "processando"
+
+
+@pytest.mark.asyncio
+async def test_faturamento_bling_nao_enfileira_etiqueta(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Faturador Bling (correios/agência) NÃO tem fluxo de etiqueta construído →
+    o motor não cria comando de etiqueta ao fechar o faturamento."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)
+    await _import_done(client, ["830001", "830002"])
+
+    etq = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "imprimir_etiqueta")
+    )).scalars().all()
+    assert etq == []
+
+
+@pytest.mark.asyncio
+async def test_lease_entrega_comando_etiqueta(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """O comando de etiqueta é entregue no lease com o login do faturador Upseller
+    e planilha vazia (a marionete captura o PDF, não sobe arquivo)."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_upseller(db, admin)
+    await _import_done(client, ["850001"])
+
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                              headers={"X-Agent-Token": _TOKEN})
+    etq = next(c for c in lease.json()["commands"] if c["action"] == "imprimir_etiqueta")
+    assert etq["numeros"] == ["850001"]
+    assert etq["ads_power"] == "perfil-U"
+    assert etq["usuario"] == "user-u"
+    assert etq["senha"] == "segredoU"
+    assert etq["planilha_b64"] == ""  # comando de etiqueta não carrega planilha
+
+
+@pytest.mark.asyncio
+async def test_result_etiqueta_marca_status_etiqueta(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """result 'done' num comando de etiqueta marca status_etiqueta='ok' (não toca
+    o status_faturamento, que já estava 'ok')."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_upseller(db, admin)
+    await _import_done(client, ["850001"])
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                              headers={"X-Agent-Token": _TOKEN})
+    etq = next(c for c in lease.json()["commands"] if c["action"] == "imprimir_etiqueta")
+
+    r = await client.post(f"/api/nf-cadastro/agent/commands/{etq['id']}/result",
+                          json={"status": "done"}, headers={"X-Agent-Token": _TOKEN})
+    assert r.status_code == 200, r.text
+
+    fat = (await db.execute(
+        select(NfFaturamento).where(NfFaturamento.pedido_bling == "850001")
+    )).scalar_one()
+    await db.refresh(fat)
+    assert fat.status_etiqueta == "ok"
+    assert fat.erro_etiqueta is None
+    assert fat.status_faturamento == "ok"
+
+
+@pytest.mark.asyncio
+async def test_dedupe_nao_reenfileira_etiqueta(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Um 2º faturamento 'ok' do mesmo pedido NÃO cria um 2º comando de etiqueta
+    enquanto já existe um ativo (pending/claimed) na fila."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_upseller(db, admin)
+    await _import_done(client, ["850001"])
+    await _import_done(client, ["850001"])  # segunda passada
+
+    etq = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "imprimir_etiqueta")
+    )).scalars().all()
+    assert len(etq) == 1
+
+
 @pytest.mark.asyncio
 async def test_agent_etiqueta_sem_token_401(
     db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch

@@ -795,6 +795,87 @@ async def _marcar_faturamento(
         row.erro_faturamento = erro
 
 
+async def _marcar_etiqueta(
+    session: AsyncSession, numeros: list[str], *, status_txt: str, erro: str | None
+) -> None:
+    """Upsert do status_etiqueta de cada pedido em nf_faturamento (chave única
+    pedido_bling). Não toca as etapas de faturamento/impressão."""
+    if not numeros:
+        return
+    existentes = {
+        f.pedido_bling: f
+        for f in (
+            await session.execute(
+                select(NfFaturamento).where(NfFaturamento.pedido_bling.in_(numeros))
+            )
+        ).scalars().all()
+    }
+    for numero in numeros:
+        row = existentes.get(numero)
+        if row is None:
+            row = NfFaturamento(pedido_bling=numero)
+            session.add(row)
+        row.status_etiqueta = status_txt
+        row.erro_etiqueta = erro
+
+
+async def _enfileirar_etiquetas(
+    session: AsyncSession, faturador_id: UUID | None, numeros: list[str]
+) -> int:
+    """Auto-enfileira UM comando `imprimir_etiqueta` por pedido (grão = 1 etiqueta
+    = 1 pedido) quando o faturamento de um faturador fecha 'ok'. Comando
+    DESACOPLADO da importação: a etiqueta pode não estar imprimível na hora (NF
+    async) e o comando fica pending até a marionete conseguir.
+
+    Só pra faturador `modo='upseller'` — é o único fluxo de etiqueta construído
+    (Upseller: import → "Etiqueta não impressa" → captura o PDF). Faturador Bling
+    (correios/agência) tem etiqueta por outro caminho ainda não construído.
+
+    Dedupe por pedido: pula quem já tem etiqueta 'ok' ou um comando de etiqueta
+    ATIVO (pending/claimed) na fila — não reenfileira a cada faturamento."""
+    if not numeros or faturador_id is None:
+        return 0
+    fat = await session.get(NfFaturador, faturador_id)
+    if fat is None or (fat.modo or "").lower() != "upseller":
+        return 0
+    ja_ok = {
+        f.pedido_bling
+        for f in (
+            await session.execute(
+                select(NfFaturamento).where(
+                    NfFaturamento.pedido_bling.in_(numeros),
+                    NfFaturamento.status_etiqueta == "ok",
+                )
+            )
+        ).scalars().all()
+    }
+    ativos = (
+        await session.execute(
+            select(NfCommand.numeros).where(
+                NfCommand.action == "imprimir_etiqueta",
+                NfCommand.status.in_(["pending", "claimed"]),
+            )
+        )
+    ).scalars().all()
+    em_fila = {n for arr in ativos for n in (arr or [])}
+    criar = [n for n in numeros if n not in ja_ok and n not in em_fila]
+    for numero in criar:
+        session.add(
+            NfCommand(
+                faturador_id=faturador_id,
+                action="imprimir_etiqueta",
+                numeros=[numero],
+                planilha=b"",
+                nome_arquivo="",
+                status="pending",
+                source="auto",
+            )
+        )
+    if criar:
+        await _marcar_etiqueta(session, criar, status_txt="processando", erro=None)
+    return len(criar)
+
+
 @router.post("/faturamento/enfileirar", response_model=EnfileirarOut)
 async def enfileirar_importacao(
     body: GerarPlanilhaIn,
@@ -980,8 +1061,10 @@ async def nf_agent_command_result(
     body: NfAgentResultIn,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
-    """Reporta o resultado de um comando. 'done' marca cada pedido do comando
-    como status_faturamento='ok'; 'failed' marca 'erro' + guarda a mensagem."""
+    """Reporta o resultado de um comando. Marca a etapa do pedido conforme a
+    `action`: 'import_avulsa' → status_faturamento (e, ao fechar 'ok', auto-
+    enfileira a etiqueta); 'imprimir_etiqueta' → status_etiqueta. 'done' vira
+    'ok', 'failed' vira 'erro' + guarda a mensagem."""
     cmd = await session.get(NfCommand, command_id)
     if cmd is None:
         raise HTTPException(404, detail={"code": "nf_command_not_found"})
@@ -991,8 +1074,17 @@ async def nf_agent_command_result(
     cmd.completed_at = datetime.now(UTC)
 
     numeros = list(cmd.numeros or [])
-    if new_status == "done":
+    if cmd.action == "imprimir_etiqueta":
+        if new_status == "done":
+            await _marcar_etiqueta(session, numeros, status_txt="ok", erro=None)
+        else:
+            await _marcar_etiqueta(
+                session, numeros, status_txt="erro",
+                erro=cmd.result or "falha na etiqueta",
+            )
+    elif new_status == "done":
         await _marcar_faturamento(session, numeros, status_txt="ok", erro=None)
+        await _enfileirar_etiquetas(session, cmd.faturador_id, numeros)
     else:
         await _marcar_faturamento(
             session, numeros, status_txt="erro", erro=cmd.result or "falha na importação"
