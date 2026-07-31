@@ -24,10 +24,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import User, UserRole
+from app.models.integration import Integration
 from app.models.pricing import StoreInfo
 
 
@@ -65,18 +66,43 @@ async def resolve_team_scope(session: AsyncSession, user: User) -> TeamScope:
                 StoreInfo.integration_id,
                 StoreInfo.bling_store_id,
                 StoreInfo.account_name,
+                StoreInfo.platform,
             ).where(StoreInfo.sales_team.in_(teams))
         )
     ).all()
 
     scope = TeamScope(unrestricted=False)
-    for store_info_id, integration_id, bling_store_id, account_name in rows:
+    # Lojas sem o FK `integration_id` preenchido (backfill preguiçoso) — caso
+    # comum: só `marquezini` tinha o FK. Resolvemos a integração pelo par
+    # (nome, plataforma), espelhando `_resolve_linked_integration`, pra que
+    # TODAS as contas do membro apareçam (Integrações/Sync de estoque), não só
+    # as que já tinham o FK. Leitura pura (sem backfill aqui).
+    pendentes: set[tuple[str, str]] = set()
+    for store_info_id, integration_id, bling_store_id, account_name, platform in rows:
         scope.store_info_ids.add(store_info_id)
         if integration_id is not None:
             scope.integration_ids.add(integration_id)
+        else:
+            nm_plat = _norm(account_name)
+            if nm_plat and platform:
+                pendentes.add((nm_plat, platform.strip().lower()))
         if bling_store_id:
             scope.bling_store_ids.add(bling_store_id)
         nm = _norm(account_name)
         if nm:
             scope.account_names.add(nm)
+
+    if pendentes:
+        nomes = {nome for nome, _ in pendentes}
+        integ_rows = (
+            await session.execute(
+                select(Integration.id, Integration.name, Integration.platform).where(
+                    func.lower(func.trim(Integration.name)).in_(nomes)
+                )
+            )
+        ).all()
+        for integ_id, integ_name, integ_platform in integ_rows:
+            plat = getattr(integ_platform, "value", integ_platform)
+            if (_norm(integ_name), str(plat).strip().lower()) in pendentes:
+                scope.integration_ids.add(integ_id)
     return scope

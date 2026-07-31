@@ -138,6 +138,44 @@ async def test_resolver_team_user_restricted(db: AsyncSession, scope_setup: dict
 
 
 @pytest.mark.asyncio
+async def test_resolver_resolve_integracao_sem_fk_por_nome_plataforma(
+    db: AsyncSession, scope_setup: dict
+):
+    """Loja da equipe SEM `integration_id` preenchido ainda deve trazer a
+    integração pro escopo, casando por (nome, plataforma) — senão as contas do
+    membro somem do Sync de estoque / Integrações."""
+    owner = _mk_user(UserRole.ADMIN, None)
+    db.add(owner)
+    await db.flush()
+    integ = Integration(
+        user_id=owner.id,
+        platform=IntegrationPlatform.ML,
+        name="marquezini",
+        credentials=b"x",
+    )
+    db.add(integ)
+    await db.flush()
+    # loja da equipe 3 SEM o FK (integration_id=None), mas com nome+plataforma
+    # que casam a integração acima
+    db.add(
+        StoreInfo(
+            user_id=owner.id,
+            platform="ml",
+            account_name="marquezini",
+            integration_id=None,
+            bling_store_id="loja3",
+            sales_team=3,
+        )
+    )
+    await db.commit()
+
+    u = _mk_user(UserRole.USER, [3])
+    scope = await resolve_team_scope(db, u)
+    assert scope.unrestricted is False
+    assert integ.id in scope.integration_ids
+
+
+@pytest.mark.asyncio
 async def test_integrations_and_listings_scoped(
     db: AsyncSession,
     client: AsyncClient,
