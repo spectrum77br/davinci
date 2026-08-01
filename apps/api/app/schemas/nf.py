@@ -220,6 +220,33 @@ class ConferirFreteOut(BaseModel):
     cotacoes: list[ConferirFreteCotacaoOut] = []
 
 
+class ConferirFretePedidoIn(BaseModel):
+    """Confere-frete AUTO ponta a ponta: puxa do pedido E cota numa chamada só.
+
+    Fluxo "impressão tipo próprio" (Amazon): dado só o nº do pedido, resolve
+    CEP/caixa/frete projetado (como o /auto) e já cota no Melhor Envio (como o
+    /conferir-frete), devolvendo a decisão `libera` + o contexto pra exibir."""
+
+    pedido_bling: str = Field(min_length=1)
+    servicos: str | None = None
+
+
+class ConferirFretePedidoOut(BaseModel):
+    """Decisão do confere-frete + contexto resolvido do pedido. `prefill_ok`
+    False quando o frete projetado não pôde ser resolvido com segurança (a
+    cotação ainda roda, mas a decisão `libera` fica sem base — ver `avisos`)."""
+
+    pedido_bling: str
+    from_cep: str
+    to_cep: str
+    plataforma: str | None = None
+    conta: str | None = None
+    nome_destinatario: str | None = None
+    avisos: list[str] = []
+    prefill_ok: bool = True
+    conferencia: ConferirFreteOut
+
+
 class NfFaturamentoRowOut(BaseModel):
     """Uma linha do Painel de Faturamento: descrição do pedido + os 3 status de
     etapa. Derivada (read-only) de bling_orders × store_info × nf_faturamento —

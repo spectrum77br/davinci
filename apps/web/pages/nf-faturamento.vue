@@ -317,6 +317,54 @@ async function prefillDoPedido() {
   }
 }
 
+// Fio automático: um clique puxa CEP/caixa/frete do pedido E já cota no Melhor
+// Envio, mostrando a decisão libera — sem o passo manual de "Puxar" + "Cotar".
+type ConferePedidoResult = {
+  pedido_bling: string
+  from_cep: string
+  to_cep: string
+  plataforma: string | null
+  conta: string | null
+  nome_destinatario: string | null
+  avisos: string[]
+  prefill_ok: boolean
+  conferencia: ConfereResult
+}
+const cotandoPedido = ref(false)
+async function cotarDoPedido() {
+  const numero = pedidoAuto.value.trim()
+  if (!numero) return
+  cotandoPedido.value = true
+  confereErro.value = null
+  confereRes.value = null
+  autoAvisos.value = []
+  try {
+    const res = await api<ConferePedidoResult>(
+      '/api/nf-cadastro/faturamento/conferir-frete/pedido',
+      { method: 'POST', body: { pedido_bling: numero } },
+    )
+    confere.value.from_cep = res.from_cep || confere.value.from_cep
+    confere.value.to_cep = res.to_cep || ''
+    confere.value.frete_projetado = res.conferencia.frete_projetado ?? ''
+    autoInfo.value = { plataforma: res.plataforma, conta: res.conta, nome: res.nome_destinatario }
+    autoAvisos.value = res.avisos || []
+    confereRes.value = res.conferencia
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    confereErro.value = code === 'nf_pedido_nao_encontrado'
+      ? 'Pedido não encontrado no Bling'
+      : code === 'nf_origem_cep_missing'
+        ? 'CEP de origem não configurado (NF_ORIGEM_CEP)'
+        : code === 'melhor_envio_token_missing'
+          ? 'Token do Melhor Envio não configurado'
+          : code === 'melhor_envio_erro'
+            ? 'Melhor Envio indisponível — tente de novo'
+            : code
+  } finally {
+    cotandoPedido.value = false
+  }
+}
+
 // Editar a caixa à mão descola do prefill: cota só a caixa visível.
 function onBoxEdit() {
   autoProdutos.value = []
@@ -631,14 +679,26 @@ function badgeLabel(status: string): string {
             />
             <button
               class="inline-flex shrink-0 items-center gap-1 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-              :disabled="prefilling || !pedidoAuto.trim()"
+              :disabled="prefilling || cotandoPedido || !pedidoAuto.trim()"
               @click="prefillDoPedido"
             >
               <Loader2 v-if="prefilling" class="h-4 w-4 animate-spin" />
               <FileDown v-else class="h-4 w-4" />
               Puxar
             </button>
+            <button
+              class="inline-flex shrink-0 items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              :disabled="prefilling || cotandoPedido || !pedidoAuto.trim()"
+              @click="cotarDoPedido"
+            >
+              <Loader2 v-if="cotandoPedido" class="h-4 w-4 animate-spin" />
+              <Truck v-else class="h-4 w-4" />
+              Cotar
+            </button>
           </div>
+          <p class="mt-1 text-xs text-muted-foreground">
+            "Cotar" puxa e cota o frete do pedido de uma vez; "Puxar" só preenche pra você revisar antes.
+          </p>
           <div v-if="autoInfo" class="mt-2 text-xs text-muted-foreground">
             <span v-if="autoInfo.plataforma">{{ autoInfo.plataforma }}</span>
             <span v-if="autoInfo.conta"> · {{ autoInfo.conta }}</span>

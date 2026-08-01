@@ -48,6 +48,8 @@ from app.schemas.nf import (
     ConferirFreteAutoOut,
     ConferirFreteIn,
     ConferirFreteOut,
+    ConferirFretePedidoIn,
+    ConferirFretePedidoOut,
     ConferirFreteProduto,
     GerarPlanilhaIn,
     NfCatalogoMalaCreate,
@@ -731,6 +733,11 @@ async def conferir_frete_faturamento(
         logger.warning("nf_conferir_frete_api_erro", status=exc.status, body=exc.body[:200])
         raise HTTPException(502, detail={"code": "melhor_envio_erro"})
     res = melhor_envio.conferir_frete(cotacoes, body.frete_projetado)
+    return _montar_conferir_out(res, cotacoes)
+
+
+def _montar_conferir_out(res, cotacoes) -> ConferirFreteOut:
+    """Monta o ConferirFreteOut da conferência + lista de cotações."""
     return ConferirFreteOut(
         libera=res.libera,
         motivo=res.motivo,
@@ -751,6 +758,73 @@ async def conferir_frete_faturamento(
             }
             for c in cotacoes
         ],
+    )
+
+
+@router.post(
+    "/faturamento/conferir-frete/pedido", response_model=ConferirFretePedidoOut
+)
+async def conferir_frete_pedido(
+    body: ConferirFretePedidoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_painel_edit)],
+) -> ConferirFretePedidoOut:
+    """Confere-frete AUTO ponta a ponta a partir do nº do pedido.
+
+    Junta o /auto (resolve CEP/caixa/frete projetado do pedido) com o
+    /conferir-frete (cota no Melhor Envio e decide `libera`) numa chamada só —
+    é o "fio automático" da impressão tipo próprio (Amazon): um clique cota e
+    já mostra se libera. Reusa `resolver_prefill` e o cliente do ME.
+
+    400 nf_origem_cep_missing (CEP origem no .env) / 404 nf_pedido_nao_encontrado
+    / 400 melhor_envio_token_missing / 502 melhor_envio_erro."""
+    origem_cep = (get_settings().nf_origem_cep or "").strip()
+    if not origem_cep:
+        raise HTTPException(400, detail={"code": "nf_origem_cep_missing"})
+    try:
+        pref = await nf_frete_auto.resolver_prefill(session, body.pedido_bling)
+    except nf_frete_auto.PedidoNaoEncontrado:
+        raise HTTPException(404, detail={"code": "nf_pedido_nao_encontrado"})
+
+    produtos = [
+        {
+            "id": p.id,
+            "width": str(p.width),
+            "height": str(p.height),
+            "length": str(p.length),
+            "weight": str(p.weight),
+            "insurance_value": "0",
+            "quantity": p.quantity,
+        }
+        for p in pref.produtos
+    ]
+    client = MelhorEnvioClient()
+    try:
+        cotacoes = await client.calcular_frete(
+            from_cep=origem_cep,
+            to_cep=pref.to_cep,
+            produtos=produtos,
+            servicos=body.servicos,
+        )
+    except MelhorEnvioConfigError:
+        raise HTTPException(400, detail={"code": "melhor_envio_token_missing"})
+    except MelhorEnvioApiError as exc:
+        logger.warning(
+            "nf_conferir_frete_pedido_api_erro", status=exc.status, body=exc.body[:200]
+        )
+        raise HTTPException(502, detail={"code": "melhor_envio_erro"})
+
+    res = melhor_envio.conferir_frete(cotacoes, pref.frete_projetado)
+    return ConferirFretePedidoOut(
+        pedido_bling=body.pedido_bling,
+        from_cep=origem_cep,
+        to_cep=pref.to_cep,
+        plataforma=pref.plataforma,
+        conta=pref.conta,
+        nome_destinatario=pref.nome_destinatario,
+        avisos=pref.avisos,
+        prefill_ok=pref.frete_projetado is not None,
+        conferencia=_montar_conferir_out(res, cotacoes),
     )
 
 
