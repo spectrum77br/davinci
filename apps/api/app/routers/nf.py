@@ -1036,6 +1036,7 @@ class NfAgentCommandOut(BaseModel):
     numeros: list[str]
     nome_arquivo: str
     planilha_b64: str
+    ncm: str | None
 
 
 class NfAgentResultIn(BaseModel):
@@ -1090,6 +1091,7 @@ async def nf_agent_lease(
                     numeros=list(cmd.numeros or []),
                     nome_arquivo=cmd.nome_arquivo,
                     planilha_b64=base64.b64encode(cmd.planilha).decode("ascii"),
+                    ncm=(fat.ncm if fat else None),
                 )
             )
         await session.commit()

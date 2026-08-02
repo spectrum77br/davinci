@@ -175,6 +175,8 @@ async def test_agent_lease_entrega_login_e_planilha(
     assert a["ads_power"] == "perfil-A"
     assert a["senha"] == "segredoA"  # descriptografada no lease
     assert a["numeros"] == ["830001"]
+    assert a["ncm"] == "4202.12.10"  # NCM do faturador entregue pro agente
+    assert por_user["user-b"]["ncm"] is None  # faturador sem NCM
     # planilha em base64 decodifica pro CSV congelado (BOM UTF-8 + cabeçalho)
     csv_bytes = base64.b64decode(a["planilha_b64"])
     assert csv_bytes.startswith(b"\xef\xbb\xbf")
