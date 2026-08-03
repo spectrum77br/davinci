@@ -1061,37 +1061,65 @@ async def exportar_lote_excel(
     _u: Annotated[User, Depends(require_permission("importacao", "view"))],
 ) -> Response:
     """Baixa o .xlsx de conferência de um lote: uma linha por produto
-    com quantidade > 0 nesse lote (modelo, sku, custo, quantidade,
-    total = qtd × custo)."""
+    DA CATEGORIA do lote (todos os SKUs da tabela, mesmo sem quantidade
+    nesse lote), com estoque Bling, quantidade e total = qtd × custo."""
     lote = await session.get(ImportLote, lote_id)
     if lote is None:
         raise HTTPException(404, detail={"code": "lote_not_found"})
 
-    rows = (
+    # TODOS os produtos da categoria do lote, na mesma ordenação da
+    # tabela (modelo alfabético case-insensitive, NULLs no fim, sku de
+    # tiebreaker). Antes o Excel só trazia produtos com quantidade > 0
+    # no lote — pedido do operador: planilha completa pra planejar.
+    products = (
         await session.execute(
-            select(ImportLoteItem, ImportProduct)
-            .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
-            .where(
-                ImportLoteItem.lote_id == lote_id,
-                ImportLoteItem.quantidade > 0,
-            )
+            select(ImportProduct)
+            .where(ImportProduct.categoria == lote.categoria)
             .order_by(
                 ImportProduct.modelo_bling.is_(None),
                 func.lower(ImportProduct.modelo_bling),
                 ImportProduct.sku,
             )
         )
-    ).all()
+    ).scalars().all()
+
+    items_by_pid = {
+        item.product_id: item
+        for item in (
+            await session.execute(
+                select(ImportLoteItem).where(ImportLoteItem.lote_id == lote_id)
+            )
+        ).scalars().all()
+    }
+
+    # Estoque Bling: auto-pull de products.stock por SKU (case-
+    # insensitive), com fallback no estoque_bling manual do produto —
+    # mesma regra do GET /products (coluna "estoque bling" da tabela).
+    skus_lower = [(p.sku or "").lower() for p in products if p.sku]
+    stock_by_sku: dict[str, int | None] = {}
+    if skus_lower:
+        stock_rows = (await session.execute(
+            select(func.lower(Product.sku).label("sku"), Product.stock)
+            .where(func.lower(Product.sku).in_(skus_lower))
+        )).all()
+        stock_by_sku = {r.sku: r.stock for r in stock_rows if r.sku}
 
     linhas = []
-    for item, prod in rows:
-        qtd = int(item.quantidade or 0)
-        custo = _custo_unitario_lote(lote, item, prod)
+    for prod in products:
+        item = items_by_pid.get(prod.id)
+        qtd = int(item.quantidade or 0) if item is not None else 0
+        if item is not None:
+            custo = _custo_unitario_lote(lote, item, prod)
+        else:
+            custo = Decimal(prod.custo_bling or 0)
+        auto_stock = stock_by_sku.get((prod.sku or "").lower())
+        estoque = int(auto_stock) if auto_stock is not None else prod.estoque_bling
         linhas.append(
             importacao_lote_excel.LinhaLote(
                 modelo=prod.modelo_bling,
                 sku=prod.sku,
                 custo=custo,
+                estoque=estoque,
                 quantidade=qtd,
                 total=custo * Decimal(qtd),
             )

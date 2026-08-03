@@ -531,9 +531,10 @@ const reposicaoFilter = ref<ReposicaoFilter>('todos')
 const visibleLotes = computed(() => lotes.value.filter((l) => showClosedLotes.value || l.is_aberto))
 
 // Exportar Excel de conferência de UM lote escolhido: baixa .xlsx com
-// uma linha por produto com quantidade > 0 nesse lote (modelo/sku/
-// custo/quantidade/total). Blob cru (não usa api()) pra baixar o
-// arquivo via <a download> com o nome do Content-Disposition.
+// uma linha por produto DA CATEGORIA do lote — todos os SKUs, mesmo os
+// sem quantidade nesse lote (modelo/sku/custo/estoque bling/quantidade/
+// total; qtd/total em branco quando não há compra). Blob cru (não usa
+// api()) pra baixar o arquivo via <a download> com o Content-Disposition.
 const loteExport = ref('')
 const exportandoLote = ref(false)
 watch(visibleLotes, (ls) => {
