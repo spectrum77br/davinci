@@ -223,7 +223,8 @@ def test_chunks_por_limite_bling_e_upseller():
 
     def ped(numero: str, n_linhas: int) -> g._PedidoMontado:
         return g._PedidoMontado(
-            numero=numero, faturador_id=uuid.uuid4(), info=None, linhas=[0] * n_linhas
+            numero=numero, faturador_id=uuid.uuid4(), etiqueta_id=None,
+            info=None, linhas=[0] * n_linhas
         )
 
     # Bling: teto 500 pedidos → 501 pedidos de 1 linha viram 2 arquivos.

@@ -100,6 +100,17 @@ def test_xlsx_itens_seguintes_sem_destinatario():
     assert not _c(ws, 5, "CEP (Obrigatório para NF-e)")
 
 
+def test_xlsx_nfe_nao_para_import_ml():
+    # Fluxo ML: a NF já saiu do Bling; o Upseller entra só pra puxar a etiqueta,
+    # então "Necessita Emitir NF-e = NÃO" (senão o Upseller emitiria 2ª NF). O
+    # destinatário continua indo (é quem recebe a etiqueta).
+    xlsx = nf_upseller.montar_xlsx("Loja Avulsa", [_pedido()], emitir_nfe=False)
+    ws = load_workbook(io.BytesIO(xlsx)).active
+    assert _c(ws, 4, "Necessita Emitir NF-e*") == "NÃO"
+    assert _c(ws, 4, "Nome do Destinatário (Obrigatório para NF-e)") == "Cleso Menezes"
+    assert _c(ws, 4, "SKU*") == "a001"
+
+
 def test_tipo_tributacao_infere_por_documento():
     # sem tipoPessoa, infere pelo tamanho do documento (14 dígitos = CNPJ)
     assert nf_upseller._tipo_tributacao(None, "12345678000199") == "CNPJ"

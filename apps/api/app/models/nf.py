@@ -217,6 +217,9 @@ class NfCommand(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # AdsPower do comando (etiqueta ML: perfil do cadastro Etiqueta, NÃO do
+    # faturador). None → o lease cai no ads_power do faturador (fluxo antigo).
+    ads_power: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class NfImpressao(Base, TimestampMixin):

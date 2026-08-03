@@ -11,6 +11,7 @@ base64, e reporta em `/agent/commands/{id}/result` (done → 'ok', failed →
 from __future__ import annotations
 
 import base64
+import io
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from datetime import UTC, datetime
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +27,7 @@ from app.config import get_settings
 from app.models import (
     BlingOrder,
     NfCommand,
+    NfEtiqueta,
     NfFaturador,
     NfFaturamento,
     StoreInfo,
@@ -591,3 +594,99 @@ async def test_agent_etiqueta_pdf_invalido_422(
     )
     assert r.status_code == 422
     assert r.json()["detail"]["code"] == "nf_etiqueta_invalida"
+
+
+async def _seed_ml_etiqueta(db: AsyncSession, admin: User, *, numero: str = "860001") -> None:
+    """Loja ML: faturador Bling (NF sai do Bling no faturamento) + cadastro de
+    Etiqueta 'upseller' (a etiqueta é puxada pelo Upseller, perfil AdsPower 58)."""
+    fat = NfFaturador(
+        nome="bling avulso ml", modo="bling", nf_cheia=True,
+        sku_fonte="principal", nome_fonte="produto", ncm="4202.12.10",
+        ads_power="perfil-A", usuario="user-a", senha_enc=encrypt("segredoA"),
+    )
+    etq = NfEtiqueta(plataforma="ml", modo="upseller", ads_power="58")
+    db.add_all([fat, etq])
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="ml", account_name="lML",
+                     bling_store_id="960001", nf_faturador_id=fat.id, nf_etiqueta_id=etq.id))
+    await db.flush()
+    await _seed_pedido(db, numero=numero, loja="960001", sku="dg053.ci", nome="Capa", unit=500)
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_import_avulsa_ml_enfileira_import_etiqueta(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Loja ML (faturador Bling + etiqueta Upseller): ao fechar o faturamento 'ok'
+    o motor auto-enfileira UM comando `import_etiqueta` (.xlsx NF-e=NÃO, no perfil
+    AdsPower do cadastro de Etiqueta = 58, sem faturador_id), NÃO um
+    `imprimir_etiqueta` ainda (esse vem depois que a importação fecha)."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_ml_etiqueta(db, admin)
+    await _import_done(client, ["860001"])
+
+    imp = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "import_etiqueta")
+    )).scalars().all()
+    assert len(imp) == 1
+    cmd = imp[0]
+    assert cmd.numeros == ["860001"]
+    assert cmd.status == "pending"
+    assert cmd.source == "auto"
+    assert cmd.ads_power == "58"
+    assert cmd.faturador_id is None
+    assert cmd.nome_arquivo.endswith(".xlsx")
+    assert cmd.planilha[:4] == b"PK\x03\x04"
+
+    # NF-e=NÃO (a NF já saiu do Bling; o Upseller entra só pra puxar a etiqueta).
+    ws = load_workbook(io.BytesIO(cmd.planilha)).active
+    from app.services.nf_upseller import _HEADERS
+    col = _HEADERS.index("Necessita Emitir NF-e*") + 1
+    assert ws.cell(row=4, column=col).value == "NÃO"
+
+    # ainda NÃO existe imprimir_etiqueta (só nasce quando o import_etiqueta fecha).
+    pri = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "imprimir_etiqueta")
+    )).scalars().all()
+    assert pri == []
+
+    fat = (await db.execute(
+        select(NfFaturamento).where(NfFaturamento.pedido_bling == "860001")
+    )).scalar_one()
+    await db.refresh(fat)
+    assert fat.status_faturamento == "ok"
+    assert fat.status_etiqueta == "processando"
+
+
+@pytest.mark.asyncio
+async def test_import_etiqueta_done_encadeia_imprimir_etiqueta(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """`import_etiqueta` 'done' encadeia o `imprimir_etiqueta` no MESMO perfil
+    AdsPower (58) do cadastro de Etiqueta — a marionete captura o PDF depois."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_ml_etiqueta(db, admin)
+    await _import_done(client, ["860001"])
+
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                              headers={"X-Agent-Token": _TOKEN})
+    imp = next(c for c in lease.json()["commands"] if c["action"] == "import_etiqueta")
+    assert imp["ads_power"] == "58"
+
+    r = await client.post(f"/api/nf-cadastro/agent/commands/{imp['id']}/result",
+                          json={"status": "done"}, headers={"X-Agent-Token": _TOKEN})
+    assert r.status_code == 200, r.text
+
+    pri = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "imprimir_etiqueta")
+    )).scalars().all()
+    assert len(pri) == 1
+    assert pri[0].numeros == ["860001"]
+    assert pri[0].ads_power == "58"
+    assert pri[0].status == "pending"
+    assert pri[0].source == "auto"

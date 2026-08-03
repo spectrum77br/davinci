@@ -40,6 +40,7 @@ UPSELLER_MEDIA = (
 _SHEET = "order_"
 _PAGAMENTO_PADRAO = "Dinheiro"
 _NFE_SIM = "SIM"
+_NFE_NAO = "NÃO"
 
 # Texto de observação da linha 1 do modelo (verbatim do "Baixar o Modelo").
 _OBS_TEXTO = (
@@ -205,6 +206,7 @@ def _linha(
     linha: NfLinha,
     *,
     incluir_destinatario: bool,
+    emitir_nfe: bool,
 ) -> list[str]:
     """Uma linha (item) do arquivo. Nome da Loja / Nº do Pedido / NF-e / SKU /
     pagamento repetem em todo item; o bloco do destinatário só vai na 1ª linha
@@ -212,7 +214,7 @@ def _linha(
     row = [""] * 44
     row[1] = _s(loja_nome)                       # Nome da Loja*
     row[2] = _s(pedido.numero)                   # Nº do Pedido da Loja*
-    row[4] = _NFE_SIM                            # Necessita Emitir NF-e*
+    row[4] = _NFE_SIM if emitir_nfe else _NFE_NAO  # Necessita Emitir NF-e*
     row[19] = _s(linha.sku)                      # SKU*
     row[20] = str(int(linha.quantidade))         # Quantidade*
     row[21] = _preco_br(linha.valor_unitario)    # Preço Unitário*
@@ -234,11 +236,19 @@ def _linha(
 
 
 def montar_xlsx(
-    loja_nome: str, pedidos: list[tuple[PedidoInfo, list[NfLinha]]]
+    loja_nome: str,
+    pedidos: list[tuple[PedidoInfo, list[NfLinha]]],
+    *,
+    emitir_nfe: bool = True,
 ) -> bytes:
     """.xlsx no template do Upseller (aba `order_`): linhas 1-3 = cabeçalho do
     modelo; da linha 4 em diante, um item por linha. `loja_nome` é o nome da
-    loja avulsa no Upseller (unifica os itens do mesmo pedido)."""
+    loja avulsa no Upseller (unifica os itens do mesmo pedido).
+
+    `emitir_nfe=True` (padrão) marca "Necessita Emitir NF-e = SIM" (faturador
+    Upseller: a NF sai do Upseller). Pro fluxo ML — em que a NF já foi emitida
+    pelo Bling e o Upseller entra SÓ pra puxar a etiqueta — usa
+    `emitir_nfe=False` ("NÃO"), senão o Upseller emitiria uma 2ª NF."""
     wb = Workbook()
     ws = wb.active
     ws.title = _SHEET
@@ -247,7 +257,15 @@ def montar_xlsx(
     ws.append(_HEADERS)
     for pedido, linhas in pedidos:
         for i, linha in enumerate(linhas):
-            ws.append(_linha(loja_nome, pedido, linha, incluir_destinatario=(i == 0)))
+            ws.append(
+                _linha(
+                    loja_nome,
+                    pedido,
+                    linha,
+                    incluir_destinatario=(i == 0),
+                    emitir_nfe=emitir_nfe,
+                )
+            )
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

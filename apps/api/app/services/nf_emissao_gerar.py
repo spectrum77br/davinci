@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.security.cipher import decrypt_json, encrypt_json
-from app.models import Integration, IntegrationPlatform, NfFaturador
+from app.models import Integration, IntegrationPlatform, NfEtiqueta, NfFaturador
 from app.services import (
     nf_catalogo,
     nf_emissao,
@@ -59,7 +59,8 @@ _ITENS_SQL = text(
         bo.bairro_destino      AS bairro_destino,
         bo.cidade_destino      AS cidade_destino,
         bo.uf_destino          AS uf_destino,
-        si.nf_faturador_id     AS nf_faturador_id
+        si.nf_faturador_id     AS nf_faturador_id,
+        si.nf_etiqueta_id      AS nf_etiqueta_id
     FROM "{_SCHEMA}".bling_orders bo
     JOIN "{_SCHEMA}".store_info si ON si.bling_store_id::text = bo.loja
     WHERE bo.numero = ANY(:numeros)
@@ -240,10 +241,39 @@ async def _carregar_faturadores(
     return {f.id: f for f in rows}
 
 
+async def _carregar_etiquetas(session: AsyncSession, ids: set) -> dict:
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(select(NfEtiqueta).where(NfEtiqueta.id.in_(ids)))
+    ).scalars().all()
+    return {e.id: e for e in rows}
+
+
+@dataclass(frozen=True)
+class BlocoEtiqueta:
+    """Um comando de importação da ETIQUETA no Upseller: os pedidos de UM cadastro
+    de Etiqueta + a planilha do Upseller com NF-e=NÃO (a NF já saiu do Bling no
+    faturamento; o Upseller entra só pra puxar a etiqueta)."""
+
+    etiqueta_id: UUID
+    ads_power: str | None
+    numeros: list[str]
+    planilha: bytes
+    nome_arquivo: str
+
+
+@dataclass(frozen=True)
+class ResultadoEtiqueta:
+    blocos: list[BlocoEtiqueta]
+    pulados: list[PedidoPulado]
+
+
 @dataclass(frozen=True)
 class _PedidoMontado:
     numero: str
     faturador_id: UUID
+    etiqueta_id: UUID | None
     info: PedidoInfo
     linhas: list
 
@@ -324,7 +354,9 @@ async def _montar_pedidos(
             "documento": cab["documento"],
         }
         info = await _montar_info(client, base, cab["bling_id"])
-        montados.append(_PedidoMontado(numero, regra.id, info, linhas))
+        montados.append(
+            _PedidoMontado(numero, regra.id, cab["nf_etiqueta_id"], info, linhas)
+        )
 
     return montados, pulados, faturadores
 
@@ -453,6 +485,71 @@ async def gerar_por_faturador(
         pulados=len(pulados),
     )
     return ResultadoPorFaturador(blocos=blocos, pulados=pulados)
+
+
+async def gerar_etiqueta_upseller(
+    session: AsyncSession, numeros: list[str]
+) -> ResultadoEtiqueta:
+    """Gera a planilha de IMPORTAÇÃO da ETIQUETA no Upseller (fluxo ML): a NF já
+    saiu do Bling no faturamento, então o Upseller entra só pra puxar a etiqueta
+    — o pedido é importado como loja avulsa com **NF-e=NÃO** (senão o Upseller
+    emitiria uma 2ª NF). Um bloco por cadastro de ETIQUETA (o AdsPower do comando
+    vem do cadastro Etiqueta, não do faturador). PULA:
+      - pedido cujo faturador é 'upseller' (já entrou no Upseller com NF-e=SIM no
+        fluxo normal — nada a reimportar);
+      - pedido cujo cadastro de Etiqueta não é 'upseller' (Amazon ou sem cadastro
+        — a etiqueta sai por outro caminho)."""
+    numeros = [n for n in (str(x).strip() for x in numeros) if n]
+    if not numeros:
+        return ResultadoEtiqueta(blocos=[], pulados=[])
+
+    montados, pulados, faturadores = await _montar_pedidos(session, numeros)
+    etiquetas = await _carregar_etiquetas(
+        session, {m.etiqueta_id for m in montados if m.etiqueta_id}
+    )
+
+    # Agrupa por cadastro de Etiqueta preservando a ordem; separa por faturador
+    # (o nome da loja avulsa no Upseller vem do faturador).
+    por_etq: dict[tuple[UUID, UUID], list[_PedidoMontado]] = {}
+    for m in montados:
+        etq = etiquetas.get(m.etiqueta_id) if m.etiqueta_id else None
+        fat = faturadores.get(m.faturador_id)
+        if etq is None or etq.modo != "upseller":
+            pulados.append(PedidoPulado(m.numero, "etiqueta não é upseller"))
+            continue
+        if fat is not None and fat.modo == "upseller":
+            pulados.append(PedidoPulado(m.numero, "faturador upseller já importa"))
+            continue
+        por_etq.setdefault((m.etiqueta_id, m.faturador_id), []).append(m)
+
+    ts = datetime.now(_BRT).strftime("%Y%m%d_%H%M%S")
+    blocos: list[BlocoEtiqueta] = []
+    seq = 0
+    for (eid, fid), grupo in por_etq.items():
+        etq = etiquetas[eid]
+        fat = faturadores.get(fid)
+        loja_nome = fat.nome if fat is not None else ""
+        for chunk in _chunks_por_limite(grupo, "upseller"):
+            pedidos = [(m.info, m.linhas) for m in chunk]
+            planilha = nf_upseller.montar_xlsx(loja_nome, pedidos, emitir_nfe=False)
+            seq += 1
+            blocos.append(
+                BlocoEtiqueta(
+                    etiqueta_id=eid,
+                    ads_power=etq.ads_power,
+                    numeros=[m.numero for m in chunk],
+                    planilha=planilha,
+                    nome_arquivo=f"nf_etiqueta_{ts}_{seq}.xlsx",
+                )
+            )
+
+    logger.info(
+        "nf_emissao_etiqueta_upseller",
+        blocos=len(blocos),
+        pedidos_ok=sum(len(b.numeros) for b in blocos),
+        pulados=len(pulados),
+    )
+    return ResultadoEtiqueta(blocos=blocos, pulados=pulados)
 
 
 def nome_arquivo() -> str:

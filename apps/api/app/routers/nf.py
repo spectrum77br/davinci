@@ -912,6 +912,23 @@ async def _enfileirar_etiquetas(
     fat = await session.get(NfFaturador, faturador_id)
     if fat is None or (fat.modo or "").lower() != "upseller":
         return 0
+    return await _criar_comandos_etiqueta(
+        session, numeros, faturador_id=faturador_id, ads_power=fat.ads_power
+    )
+
+
+async def _criar_comandos_etiqueta(
+    session: AsyncSession,
+    numeros: list[str],
+    *,
+    faturador_id: UUID | None = None,
+    ads_power: str | None = None,
+) -> int:
+    """Cria UM comando `imprimir_etiqueta` por pedido (grão = 1 etiqueta), com o
+    AdsPower do comando (perfil do cadastro Etiqueta no fluxo ML). Dedupe: pula
+    quem já tem etiqueta 'ok' ou um comando de etiqueta ATIVO (pending/claimed)."""
+    if not numeros:
+        return 0
     ja_ok = {
         f.pedido_bling
         for f in (
@@ -943,11 +960,43 @@ async def _enfileirar_etiquetas(
                 nome_arquivo="",
                 status="pending",
                 source="auto",
+                ads_power=ads_power,
             )
         )
     if criar:
         await _marcar_etiqueta(session, criar, status_txt="processando", erro=None)
     return len(criar)
+
+
+async def _enfileirar_etiqueta_ml(
+    session: AsyncSession, numeros: list[str]
+) -> int:
+    """Auto-enfileira a IMPORTAÇÃO da etiqueta no Upseller (fluxo ML): pedidos com
+    faturador Bling + cadastro de Etiqueta 'upseller'. A NF já saiu do Bling, então
+    o Upseller importa a venda avulsa com NF-e=NÃO só pra puxar a etiqueta. Um
+    comando `import_etiqueta` por cadastro de Etiqueta (o AdsPower do cadastro
+    Etiqueta viaja no próprio comando). A captura (`imprimir_etiqueta`) é
+    encadeada quando este import fechar 'ok'."""
+    if not numeros:
+        return 0
+    res = await nf_emissao_gerar.gerar_etiqueta_upseller(session, numeros)
+    for bloco in res.blocos:
+        session.add(
+            NfCommand(
+                faturador_id=None,
+                action="import_etiqueta",
+                numeros=bloco.numeros,
+                planilha=bloco.planilha,
+                nome_arquivo=bloco.nome_arquivo,
+                status="pending",
+                source="auto",
+                ads_power=bloco.ads_power,
+            )
+        )
+        await _marcar_etiqueta(
+            session, bloco.numeros, status_txt="processando", erro=None
+        )
+    return len(res.blocos)
 
 
 @router.post("/faturamento/enfileirar", response_model=EnfileirarOut)
@@ -1084,7 +1133,9 @@ async def nf_agent_lease(
                     id=cmd.id,
                     faturador_id=cmd.faturador_id,
                     faturador_nome=fat.nome if fat else None,
-                    ads_power=fat.ads_power if fat else None,
+                    # etiqueta ML carrega o perfil do cadastro Etiqueta no
+                    # próprio comando; senão cai no ads_power do faturador.
+                    ads_power=cmd.ads_power or (fat.ads_power if fat else None),
                     usuario=fat.usuario if fat else None,
                     senha=(decrypt(fat.senha_enc) if fat and fat.senha_enc else None),
                     action=cmd.action,
@@ -1139,8 +1190,10 @@ async def nf_agent_command_result(
 ) -> dict:
     """Reporta o resultado de um comando. Marca a etapa do pedido conforme a
     `action`: 'import_avulsa' → status_faturamento (e, ao fechar 'ok', auto-
-    enfileira a etiqueta); 'imprimir_etiqueta' → status_etiqueta. 'done' vira
-    'ok', 'failed' vira 'erro' + guarda a mensagem."""
+    enfileira a etiqueta — Upseller direto e/ou import ML no Upseller);
+    'import_etiqueta' → ao fechar 'ok' encadeia a captura da etiqueta;
+    'imprimir_etiqueta' → status_etiqueta. 'done' vira 'ok', 'failed' vira 'erro'
+    + guarda a mensagem."""
     cmd = await session.get(NfCommand, command_id)
     if cmd is None:
         raise HTTPException(404, detail={"code": "nf_command_not_found"})
@@ -1158,9 +1211,22 @@ async def nf_agent_command_result(
                 session, numeros, status_txt="erro",
                 erro=cmd.result or "falha na etiqueta",
             )
+    elif cmd.action == "import_etiqueta":
+        # Importou a venda avulsa NF-e=NÃO no Upseller — agora encadeia a captura
+        # da etiqueta (imprimir_etiqueta) no mesmo AdsPower do cadastro Etiqueta.
+        if new_status == "done":
+            await _criar_comandos_etiqueta(
+                session, numeros, ads_power=cmd.ads_power
+            )
+        else:
+            await _marcar_etiqueta(
+                session, numeros, status_txt="erro",
+                erro=cmd.result or "falha ao importar a etiqueta",
+            )
     elif new_status == "done":
         await _marcar_faturamento(session, numeros, status_txt="ok", erro=None)
         await _enfileirar_etiquetas(session, cmd.faturador_id, numeros)
+        await _enfileirar_etiqueta_ml(session, numeros)
     else:
         await _marcar_faturamento(
             session, numeros, status_txt="erro", erro=cmd.result or "falha na importação"
