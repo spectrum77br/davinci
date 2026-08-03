@@ -39,8 +39,21 @@ UPSELLER_MEDIA = (
 
 _SHEET = "order_"
 _PAGAMENTO_PADRAO = "Dinheiro"
-_NFE_SIM = "SIM"
-_NFE_NAO = "NÃO"
+# Valores EXATOS da lista suspensa do Upseller (case-sensitive: "SIM"/"NÃO"
+# são rejeitados com "Apenas Sim ou Não são permitidos").
+_NFE_SIM = "Sim"
+_NFE_NAO = "Não"
+
+# Loja avulsa REGISTRADA na conta Upseller — o import rejeita qualquer nome
+# que não exista no sistema ("A loja X não existe ou não está autorizada").
+LOJA_AVULSA = "Loja Padrão"
+
+# SKUs GENÉRICOS do catálogo de produtos do Upseller (o SKU do arquivo TEM
+# que existir lá; o SKU real do pedido — ex. 'dg053.sp' — é rejeitado).
+# Mapa por categoria do Bling (bling_orders.categoria_nome).
+_SKU_CELULAR = "e3"
+_SKU_MALA = "m200"
+_SKU_MALA_KIT = "m100"
 
 # Texto de observação da linha 1 do modelo (verbatim do "Baixar o Modelo").
 _OBS_TEXTO = (
@@ -173,11 +186,19 @@ def _s(v: object) -> str:
     return "" if v is None else str(v).strip()
 
 
-def _preco_br(v: Decimal) -> str:
-    """Preço no formato local BR: vírgula decimal, 2 casas (ex.: '1.003,37')."""
-    q = v.quantize(Decimal("0.01"))
-    txt = f"{q:,.2f}"
-    return txt.replace(",", "@").replace(".", ",").replace("@", ".")
+def _preco_num(v: Decimal) -> float:
+    """Preço como NÚMERO (célula numérica). Texto BR '35,06' é rejeitado pelo
+    Upseller ("O preço unitário deve ser um número entre 0,01 e 999999999")."""
+    return float(v.quantize(Decimal("0.01")))
+
+
+def sku_para_categoria(categoria: str | None) -> str:
+    """SKU genérico do catálogo Upseller pela categoria do Bling.
+    'Mala Kit'→m100, 'Mala'/'Mala Usada'→m200, resto (celular etc.)→e3."""
+    c = _s(categoria).lower()
+    if "mala" in c:
+        return _SKU_MALA_KIT if "kit" in c else _SKU_MALA
+    return _SKU_CELULAR
 
 
 def estado_por_extenso(uf: str | None) -> str:
@@ -207,17 +228,17 @@ def _linha(
     *,
     incluir_destinatario: bool,
     emitir_nfe: bool,
-) -> list[str]:
+) -> list[object]:
     """Uma linha (item) do arquivo. Nome da Loja / Nº do Pedido / NF-e / SKU /
     pagamento repetem em todo item; o bloco do destinatário só vai na 1ª linha
     do pedido (o Upseller unifica pelo par Loja + Nº do Pedido)."""
-    row = [""] * 44
+    row: list[object] = [""] * 44
     row[1] = _s(loja_nome)                       # Nome da Loja*
     row[2] = _s(pedido.numero)                   # Nº do Pedido da Loja*
     row[4] = _NFE_SIM if emitir_nfe else _NFE_NAO  # Necessita Emitir NF-e*
     row[19] = _s(linha.sku)                      # SKU*
-    row[20] = str(int(linha.quantidade))         # Quantidade*
-    row[21] = _preco_br(linha.valor_unitario)    # Preço Unitário*
+    row[20] = int(linha.quantidade)              # Quantidade* (numérico)
+    row[21] = _preco_num(linha.valor_unitario)   # Preço Unitário* (numérico)
     row[40] = _PAGAMENTO_PADRAO                  # Método de Pagamento
 
     if incluir_destinatario:

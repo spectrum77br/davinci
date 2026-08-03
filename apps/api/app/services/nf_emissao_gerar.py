@@ -10,7 +10,7 @@ chamador (endpoint) decide o que reportar.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
@@ -49,6 +49,7 @@ _ITENS_SQL = text(
         bo.item_descricao      AS nome,
         bo.item_quantidade     AS quantidade,
         bo.itemvalor           AS valor_unitario,
+        bo.categoria_nome      AS categoria,
         bo.bling_id            AS bling_id,
         bo.numero_documento    AS documento,
         bo.nome_destinatario   AS nome_destinatario,
@@ -276,6 +277,20 @@ class _PedidoMontado:
     etiqueta_id: UUID | None
     info: PedidoInfo
     linhas: list
+    # Categoria do Bling (bling_orders.categoria_nome) de cada item, na mesma
+    # ordem de `linhas` — usada só no arquivo do Upseller (SKU genérico).
+    categorias: list = field(default_factory=list)
+
+
+def _linhas_upseller(m: _PedidoMontado) -> list:
+    """Linhas com o SKU trocado pelo GENÉRICO do catálogo Upseller (e3/m200/
+    m100 por categoria) — o import rejeita SKU que não exista lá. Só o arquivo
+    .xlsx do Upseller usa; o CSV do Bling mantém o SKU real."""
+    cats = m.categorias or [None] * len(m.linhas)
+    return [
+        replace(linha, sku=nf_upseller.sku_para_categoria(cat))
+        for linha, cat in zip(m.linhas, cats)
+    ]
 
 
 async def _montar_pedidos(
@@ -355,7 +370,14 @@ async def _montar_pedidos(
         }
         info = await _montar_info(client, base, cab["bling_id"])
         montados.append(
-            _PedidoMontado(numero, regra.id, cab["nf_etiqueta_id"], info, linhas)
+            _PedidoMontado(
+                numero,
+                regra.id,
+                cab["nf_etiqueta_id"],
+                info,
+                linhas,
+                [r["categoria"] for r in itens_rows],
+            )
         )
 
     return montados, pulados, faturadores
@@ -458,11 +480,14 @@ async def gerar_por_faturador(
         # Quebra o faturador em N arquivos que caibam no limite da tela de
         # destino (Bling 500 vendas; Upseller 300 pedidos/1500 linhas).
         for chunk in _chunks_por_limite(grupo, modo):
-            pedidos = [(m.info, m.linhas) for m in chunk]
             if modo == "upseller":
-                planilha = nf_upseller.montar_xlsx(regra.nome, pedidos)
+                # Loja avulsa REGISTRADA + SKU genérico do catálogo Upseller
+                # (nome do faturador/SKU real são rejeitados pelo import).
+                pedidos = [(m.info, _linhas_upseller(m)) for m in chunk]
+                planilha = nf_upseller.montar_xlsx(nf_upseller.LOJA_AVULSA, pedidos)
                 ext = "xlsx"
             else:
+                pedidos = [(m.info, m.linhas) for m in chunk]
                 # Bling destino importa a VENDA avulsa na tela "Importar vendas"
                 # (Importações de Dados), que aceita o CSV do relatório de vendas
                 # — exatamente o layout que `nf_relatorio.montar_csv` produz.
@@ -527,11 +552,11 @@ async def gerar_etiqueta_upseller(
     seq = 0
     for (eid, fid), grupo in por_etq.items():
         etq = etiquetas[eid]
-        fat = faturadores.get(fid)
-        loja_nome = fat.nome if fat is not None else ""
         for chunk in _chunks_por_limite(grupo, "upseller"):
-            pedidos = [(m.info, m.linhas) for m in chunk]
-            planilha = nf_upseller.montar_xlsx(loja_nome, pedidos, emitir_nfe=False)
+            pedidos = [(m.info, _linhas_upseller(m)) for m in chunk]
+            planilha = nf_upseller.montar_xlsx(
+                nf_upseller.LOJA_AVULSA, pedidos, emitir_nfe=False
+            )
             seq += 1
             blocos.append(
                 BlocoEtiqueta(

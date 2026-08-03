@@ -737,11 +737,14 @@ async def test_import_avulsa_ml_enfileira_import_etiqueta(
     assert cmd.nome_arquivo.endswith(".xlsx")
     assert cmd.planilha[:4] == b"PK\x03\x04"
 
-    # NF-e=NÃO (a NF já saiu do Bling; o Upseller entra só pra puxar a etiqueta).
+    # NF-e=Não (a NF já saiu do Bling; o Upseller entra só pra puxar a etiqueta).
+    # Loja avulsa fixa "Loja Padrão" (loja registrada na conta Upseller).
     ws = load_workbook(io.BytesIO(cmd.planilha)).active
     from app.services.nf_upseller import _HEADERS
     col = _HEADERS.index("Necessita Emitir NF-e*") + 1
-    assert ws.cell(row=4, column=col).value == "NÃO"
+    assert ws.cell(row=4, column=col).value == "Não"
+    col_loja = _HEADERS.index("Nome da Loja*") + 1
+    assert ws.cell(row=4, column=col_loja).value == "Loja Padrão"
 
     # ainda NÃO existe imprimir_etiqueta (só nasce quando o import_etiqueta fecha).
     pri = (await db.execute(

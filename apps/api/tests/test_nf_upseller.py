@@ -66,10 +66,11 @@ def test_xlsx_primeira_linha_traz_destinatario():
     # dados começam na linha 4 (1ª linha do pedido)
     assert _c(ws, 4, "Nome da Loja*") == "Loja Avulsa"
     assert _c(ws, 4, "Nº do Pedido da Loja*") == "830001"
-    assert _c(ws, 4, "Necessita Emitir NF-e*") == "SIM"
+    assert _c(ws, 4, "Necessita Emitir NF-e*") == "Sim"
     assert _c(ws, 4, "SKU*") == "a001"
-    assert _c(ws, 4, "Quantidade*") == "2"
-    assert _c(ws, 4, "Preço Unitário* ") == "161,00"
+    # quantidade/preço são células NUMÉRICAS (texto BR é rejeitado no import)
+    assert _c(ws, 4, "Quantidade*") == 2
+    assert _c(ws, 4, "Preço Unitário* ") == 161.0
     assert _c(ws, 4, "Método de Pagamento") == "Dinheiro"
     # destinatário (obrigatório pra NF-e) na 1ª linha
     assert _c(ws, 4, "Nome do Destinatário (Obrigatório para NF-e)") == "Cleso Menezes"
@@ -93,8 +94,8 @@ def test_xlsx_itens_seguintes_sem_destinatario():
     assert _c(ws, 5, "Nome da Loja*") == "Loja Avulsa"
     assert _c(ws, 5, "Nº do Pedido da Loja*") == "830001"
     assert _c(ws, 5, "SKU*") == "a002"
-    assert _c(ws, 5, "Quantidade*") == "1"
-    assert _c(ws, 5, "Preço Unitário* ") == "50,00"
+    assert _c(ws, 5, "Quantidade*") == 1
+    assert _c(ws, 5, "Preço Unitário* ") == 50.0
     # o bloco do destinatário só na 1ª linha (o Upseller unifica pelo par loja+pedido)
     assert not _c(ws, 5, "Nome do Destinatário (Obrigatório para NF-e)")
     assert not _c(ws, 5, "CEP (Obrigatório para NF-e)")
@@ -106,9 +107,26 @@ def test_xlsx_nfe_nao_para_import_ml():
     # destinatário continua indo (é quem recebe a etiqueta).
     xlsx = nf_upseller.montar_xlsx("Loja Avulsa", [_pedido()], emitir_nfe=False)
     ws = load_workbook(io.BytesIO(xlsx)).active
-    assert _c(ws, 4, "Necessita Emitir NF-e*") == "NÃO"
+    assert _c(ws, 4, "Necessita Emitir NF-e*") == "Não"
     assert _c(ws, 4, "Nome do Destinatário (Obrigatório para NF-e)") == "Cleso Menezes"
     assert _c(ws, 4, "SKU*") == "a001"
+
+
+def test_sku_generico_por_categoria():
+    # SKU do arquivo TEM que existir no catálogo do Upseller — mapeamento
+    # confirmado: celular→e3, mala→m200, mala kit→m100.
+    assert nf_upseller.sku_para_categoria("Celular") == "e3"
+    assert nf_upseller.sku_para_categoria("Celular Kit") == "e3"
+    assert nf_upseller.sku_para_categoria("Mala") == "m200"
+    assert nf_upseller.sku_para_categoria("Mala Usada") == "m200"
+    assert nf_upseller.sku_para_categoria("Mala Kit") == "m100"
+    assert nf_upseller.sku_para_categoria(None) == "e3"
+    assert nf_upseller.sku_para_categoria("") == "e3"
+
+
+def test_loja_avulsa_registrada():
+    # A loja do arquivo precisa ser uma loja REGISTRADA na conta Upseller.
+    assert nf_upseller.LOJA_AVULSA == "Loja Padrão"
 
 
 def test_tipo_tributacao_infere_por_documento():
