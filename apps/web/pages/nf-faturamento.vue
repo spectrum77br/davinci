@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, FileDown, FileSpreadsheet, Loader2, RefreshCw, Send, Truck, X } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, FileDown, Loader2, RefreshCw, Send, Truck, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -200,70 +200,10 @@ async function enfileirar() {
     }
     selected.value = new Set()
     await load()
-    await carregarLotes()
   } catch (e: any) {
     toasts.error('Não foi possível enfileirar', e?.data?.detail?.code || e?.message || 'erro')
   } finally {
     enfileirando.value = false
-  }
-}
-
-// -- Excel de conferência do lote ------------------------------------------
-type Lote = {
-  id: string
-  nome_arquivo: string
-  status: string
-  faturador_nome: string | null
-  qtd_pedidos: number
-  created_at: string
-}
-const lotes = ref<Lote[]>([])
-const loteSel = ref('')
-const exportandoLote = ref(false)
-
-function loteLabel(l: Lote): string {
-  const data = l.created_at ? new Date(l.created_at).toLocaleString('pt-BR') : ''
-  const fat = l.faturador_nome || 'sem faturador'
-  return `${data} · ${fat} · ${l.qtd_pedidos} pedido(s) · ${l.status}`
-}
-
-async function carregarLotes() {
-  try {
-    lotes.value = await api<Lote[]>('/api/nf-cadastro/faturamento/lotes?limit=200')
-  } catch (e: any) {
-    toasts.error('Não foi possível carregar os lotes', e?.data?.detail?.code || e?.message || 'erro')
-  }
-}
-carregarLotes()
-
-async function exportarLote() {
-  if (!loteSel.value) {
-    toasts.warning('Escolha um lote')
-    return
-  }
-  exportandoLote.value = true
-  try {
-    const resp = await fetch(url(`/api/nf-cadastro/faturamento/lotes/${loteSel.value}/excel`), {
-      credentials: 'include',
-    })
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}`)
-    }
-    const blob = await resp.blob()
-    const cd = resp.headers.get('Content-Disposition') || ''
-    const m = cd.match(/filename="?([^"]+)"?/)
-    const fname = m ? m[1] : 'conferencia_lote.xlsx'
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = fname
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(a.href)
-  } catch (e: any) {
-    toasts.error('Não foi possível exportar o Excel do lote', e?.message || 'erro')
-  } finally {
-    exportandoLote.value = false
   }
 }
 
@@ -581,24 +521,6 @@ function badgeLabel(status: string): string {
           <Truck class="h-4 w-4" />
           Conferir frete
         </button>
-        <div class="flex items-center gap-1">
-          <select
-            v-model="loteSel"
-            class="max-w-xs rounded-md border bg-background px-2 py-1.5 text-sm"
-          >
-            <option value="">Escolher lote…</option>
-            <option v-for="l in lotes" :key="l.id" :value="l.id">{{ loteLabel(l) }}</option>
-          </select>
-          <button
-            class="inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-            :disabled="exportandoLote || !loteSel"
-            @click="exportarLote"
-          >
-            <FileSpreadsheet v-if="!exportandoLote" class="h-4 w-4" />
-            <Loader2 v-else class="h-4 w-4 animate-spin" />
-            Exportar Excel
-          </button>
-        </div>
       </div>
     </div>
 
