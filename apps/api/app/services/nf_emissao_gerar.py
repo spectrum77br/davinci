@@ -149,7 +149,10 @@ def _extrair_destinatario(order: dict) -> dict:
     return {
         "documento": _clean(contato.get("numeroDocumento")),
         "tipo_pessoa": _clean(contato.get("tipoPessoa")),
-        "nome_destinatario": _clean(etiqueta.get("nome")) or _clean(contato.get("nome")),
+        # Nome do Comprador tem que vir da MESMA fonte do CPF (contato) — a
+        # etiqueta guarda quem RECEBE (pode ser outra pessoa, ex. Amazon) e
+        # pareado com o CPF do contato geraria NF com nome que não bate.
+        "nome_destinatario": _clean(contato.get("nome")) or _clean(etiqueta.get("nome")),
         "endereco_destino": _clean(etiqueta.get("endereco")),
         "numero_destino": _clean(etiqueta.get("numero")),
         "complemento_destino": _clean(etiqueta.get("complemento")),

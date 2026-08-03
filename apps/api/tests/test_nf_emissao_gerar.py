@@ -281,3 +281,34 @@ async def test_gerar_por_faturador_quebra_em_varios_blocos(
     nomes = [b.nome_arquivo for b in res.blocos]
     assert len(set(nomes)) == 2
     assert all(nm.endswith(".csv") for nm in nomes)
+
+
+def test_extrair_destinatario_nome_vem_do_contato_nao_da_etiqueta():
+    """O nome do Comprador tem que casar com o CPF (ambos do `contato`). A
+    etiqueta guarda quem RECEBE (Amazon pode mandar outra pessoa) — se virasse
+    o nome, a NF sairia com nome que não bate com o CPF."""
+    from app.services import nf_emissao_gerar as g
+    order = {
+        "contato": {"nome": "Leonardo Scorsatto", "numeroDocumento": "03244034101",
+                    "tipoPessoa": "F"},
+        "transporte": {"etiqueta": {"nome": "Sheila Alves", "endereco": "Quadra CNB 10",
+                                    "numero": "301", "municipio": "Brasília",
+                                    "uf": "DF", "cep": "72115105"}},
+    }
+    d = g._extrair_destinatario(order)
+    assert d["nome_destinatario"] == "Leonardo Scorsatto"
+    assert d["documento"] == "03244034101"
+    # Endereço de entrega segue vindo da etiqueta.
+    assert d["cidade_destino"] == "Brasília"
+    assert d["cep_destino"] == "72115105"
+
+
+def test_extrair_destinatario_cai_na_etiqueta_sem_contato_nome():
+    """Sem nome no contato, usa o da etiqueta como fallback (melhor que vazio)."""
+    from app.services import nf_emissao_gerar as g
+    order = {
+        "contato": {"numeroDocumento": "03244034101"},
+        "transporte": {"etiqueta": {"nome": "Sheila Alves"}},
+    }
+    d = g._extrair_destinatario(order)
+    assert d["nome_destinatario"] == "Sheila Alves"
