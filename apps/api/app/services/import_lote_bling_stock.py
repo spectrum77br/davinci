@@ -1,7 +1,7 @@
 """Lança entradas de estoque no Bling para cada item de um lote fechado.
 
 Disparo: PATCH /lotes/{id} setando `fechamento` (NULL → date) numa
-categoria 'celular'. O router enfileira `push_lote_stock_to_bling_job`
+categoria 'celular' ou 'mala'. O router enfileira `push_lote_stock_to_bling_job`
 na fila UI; o worker resolve o `bling_product_id` do ImportProduct de
 cada ImportLoteItem e chama `POST /Api/v3/estoques` com operação 'E'
 (Entrada — soma à quantidade atual).
@@ -39,9 +39,10 @@ from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
 
-# Só celular usa esse fluxo por enquanto. Mala/Eletro fecham lote sem
-# tocar no Bling (compra é em moeda diferente, sem entrada automática).
-_TARGET_CATEGORIA = "celular"
+# Celular + mala usam esse fluxo (mala habilitada 2026-08-03 a pedido do
+# operador: fechar o lote deve lançar as quantidades no Bling). Eletro
+# segue fora — fecha lote sem tocar no Bling.
+_TARGET_CATEGORIAS = frozenset({"celular", "mala"})
 
 
 async def _bling_client(
@@ -114,7 +115,7 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
         if lote is None:
             logger.warning("import_lote_stock_missing", lote_id=str(lote_id))
             return {"ok": False, "error": "lote_not_found"}
-        if lote.categoria != _TARGET_CATEGORIA:
+        if lote.categoria not in _TARGET_CATEGORIAS:
             logger.info(
                 "import_lote_stock_skip_categoria",
                 lote_id=str(lote_id), categoria=lote.categoria,

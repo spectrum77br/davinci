@@ -1193,7 +1193,7 @@ async def patch_lote(
     # re-fechar o sistema reenvie pro target_sku corrigido. Útil quando
     # o operador percebe que escolheu o destino errado no dropdown.
     # NÃO reverte o que já foi mandado pro Bling — operador ajusta lá.
-    if was_closed and row.categoria == "celular" and row.fechamento is None:
+    if was_closed and row.categoria in ("celular", "mala") and row.fechamento is None:
         from sqlalchemy import update as sql_update
 
         await session.execute(
@@ -1229,11 +1229,12 @@ async def patch_lote(
             "importacao_lote_auto_resumo",
             lote_id=str(row.id), nome=row.nome, saldo=str(enriched.saldo),
         )
-        # Celular: enfileira entrada de estoque no Bling pra cada item.
+        # Celular + mala: enfileira entrada de estoque no Bling pra cada
+        # item (mala habilitada 2026-08-03 — fechar lote lança estoque).
         # Operação 'E' (soma) — operador pediu só a quantidade, sem custo.
         # Job é idempotente (pula items com bling_stock_pushed_at), então
         # re-fechar um lote (ex.: reabrir/fechar de novo) não duplica.
-        if row.categoria == "celular":
+        if row.categoria in ("celular", "mala"):
             pool = await get_arq_ui_pool()
             await pool.enqueue_job("push_lote_stock_to_bling_job", str(row.id))
             logger.info(
