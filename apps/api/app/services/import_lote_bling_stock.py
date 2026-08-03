@@ -8,6 +8,9 @@ cada ImportLoteItem e chama `POST /Api/v3/estoques` com operação 'E'
 
 Idempotente:
 - Pula items com `bling_stock_pushed_at` preenchido (já enviados).
+- Commit por item: cada entrada lançada é marcada no banco na hora,
+  então timeout/crash no meio do lote nunca perde marcação (re-rodar
+  o job continua de onde parou, sem duplicar).
 - Item sem `bling_product_id` no ImportProduct: registra status
   'skipped' com a razão; segue os outros. Operador resolve enviando
   o produto pro Bling primeiro e re-fechando o lote.
@@ -149,6 +152,7 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
                 item.bling_stock_status = "skipped"
                 item.bling_stock_error = "quantidade_zero"
                 summary["skipped"] += 1
+                await session.commit()
                 continue
             # SKU destino: override do item (operador escolheu redirecionar
             # via dropdown na aba Celular) tem prioridade sobre o SKU do
@@ -180,6 +184,7 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
                     product_id=str(product.id),
                     sku=product.sku, target_sku=target_sku,
                 )
+                await session.commit()
                 continue
 
             try:
@@ -210,6 +215,13 @@ async def push_lote_stock_to_bling(lote_id: UUID | str) -> dict[str, Any]:
                     lote_id=str(lote_id), item_id=str(item.id),
                     sku=product.sku, error=str(exc)[:200],
                 )
+
+            # Commit POR ITEM: o POST no Bling já aconteceu — persistir a
+            # marcação na hora garante que timeout/crash no meio do lote
+            # não desfaça o 'sent' (incidente ML27/ML28 3/ago: rollback
+            # deixou 42 items lançados no Bling sem marca no banco, com
+            # risco de double-post no retry).
+            await session.commit()
 
         await session.commit()
 

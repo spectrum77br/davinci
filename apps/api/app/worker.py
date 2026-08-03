@@ -1882,7 +1882,10 @@ class WorkerSettingsUI:
     functions = [
         sync_import_product_to_bling_job,
         create_bling_kit_for_mark_job,
-        push_lote_stock_to_bling_job,
+        # Lote de importação grande (40+ items) leva ~2-3 min com o rate
+        # limit do Bling (~3 req/s) — o job_timeout global de 60s matou os
+        # pushes dos lotes ML27/ML28 em 3/ago (TimeoutError aos 21 items).
+        func(push_lote_stock_to_bling_job, timeout=1800),
     ]
     queue_name = ARQ_UI_QUEUE
     # Concorrência baixa — jobs UI são curtos (1-2 chamadas Bling) e
