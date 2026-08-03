@@ -73,6 +73,7 @@ const categoria = ref<Categoria>(
 )
 const isEletro = computed(() => categoria.value === 'eletro')
 const isCelular = computed(() => categoria.value === 'celular')
+const isMala = computed(() => categoria.value === 'mala')
 // Colunas que só existem em Mala (Eletro e Celular não usam). Mala
 // continua mostrando exatamente o que mostrava — só ocultamos quando
 // muda pra Eletro ou Celular. Mantém isEletro como flag separada pra
@@ -939,6 +940,9 @@ async function fecharLote(lote: Lote) {
     if (idx >= 0) lotes.value[idx] = updated
     // Resumo got a new row server-side — refresh.
     void loadResumoOnly()
+    if (updated.fechamento && (isCelular.value || isMala.value)) {
+      watchStockPush(updated.id, updated.nome)
+    }
   } catch (e: any) {
     errorText.value = `Falha ao fechar lote: ${e?.data?.detail?.code || 'erro'}`
   }
@@ -985,7 +989,14 @@ async function persistLote(lote: Lote, field: keyof Lote) {
     })
     const idx = lotes.value.findIndex((l) => l.id === lote.id)
     if (idx >= 0) lotes.value[idx] = updated
-    if (field === 'fechamento') void loadResumoOnly()
+    if (field === 'fechamento') {
+      void loadResumoOnly()
+      // Fechou celular/mala → worker começa a lançar estoque no Bling.
+      // Vigia o progresso (selo azul) e avisa quando terminar (toast).
+      if (updated.fechamento && (isCelular.value || isMala.value)) {
+        watchStockPush(updated.id, updated.nome)
+      }
+    }
   } catch (e: any) {
     errorText.value = `Falha ao salvar lote: ${e?.data?.detail?.code || 'erro'}`
   }
@@ -1136,6 +1147,99 @@ async function setLoteItemTargetSku(
 async function loadLotesOnly() {
   try { lotes.value = await api<Lote[]>(`/api/importacao/lotes?${catQs()}`) } catch { /* ignore */ }
 }
+
+// ── Bling stock push: progresso ao vivo + aviso de conclusão ──────
+// Fechar lote celular/mala dispara o job que lança as entradas no
+// Bling item a item (commit por item no worker → os contadores
+// bling_stock_* do GET /lotes avançam em tempo real). Aqui: poll de
+// 4s enquanto o lote vigiado tiver item pendente; ao zerar, toast com
+// o resumo. Retoma sozinho após F5 no meio do push (watch imediato).
+const toasts = useToasts()
+const stockWatchSet = ref<Record<string, true>>({})
+const stockWatchTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+
+function stockProcessed(l: Lote): number {
+  return (l.bling_stock_sent ?? 0) + (l.bling_stock_skipped ?? 0) + (l.bling_stock_errors ?? 0)
+}
+function stockPending(l: Lote): number {
+  return Math.max(0, (l.bling_stock_total ?? 0) - stockProcessed(l))
+}
+function stockRunning(l: Lote): boolean {
+  // Em andamento = fechado + resto pendente + (algum item já processado
+  // OU vigiado neste browser). O `processed > 0` evita rotular lotes
+  // antigos (fechados antes da feature, status tudo NULL) como
+  // "rodando"; o início real (job na fila, 0 processados) é coberto
+  // pelo stockWatchSet, setado na hora do fechamento.
+  return !!l.fechamento && stockPending(l) > 0
+    && (stockProcessed(l) > 0 || !!stockWatchSet.value[l.id])
+}
+function stopStockWatch(loteId: string) {
+  const t = stockWatchTimers[loteId]
+  if (t) { clearTimeout(t); delete stockWatchTimers[loteId] }
+  if (stockWatchSet.value[loteId]) {
+    const next = { ...stockWatchSet.value }
+    delete next[loteId]
+    stockWatchSet.value = next
+  }
+}
+function watchStockPush(loteId: string, nome: string) {
+  if (!import.meta.client) return
+  if (stockWatchSet.value[loteId]) return
+  stockWatchSet.value = { ...stockWatchSet.value, [loteId]: true }
+  const startedAt = Date.now()
+  const tick = async () => {
+    delete stockWatchTimers[loteId]
+    await loadLotesOnly()
+    const l = lotes.value.find((x) => x.id === loteId)
+    // Lote sumiu (trocou de categoria) ou foi reaberto → para em silêncio.
+    if (!l || !l.fechamento) { stopStockWatch(loteId); return }
+    if ((l.bling_stock_total ?? 0) > 0 && stockPending(l) === 0) {
+      const sent = l.bling_stock_sent ?? 0
+      const skipped = l.bling_stock_skipped ?? 0
+      const errs = l.bling_stock_errors ?? 0
+      if (errs > 0) {
+        toasts.error(
+          `Lote ${nome}: estoque no Bling com ${errs} erro${errs > 1 ? 's' : ''}`,
+          `${sent} enviados, ${skipped} pulados, ${errs} com erro. Reabra e feche o lote de novo pra retentar só os que falharam.`,
+        )
+      } else if (skipped > 0) {
+        toasts.warning(
+          `Lote ${nome}: estoque no Bling (parcial)`,
+          `${sent} enviados, ${skipped} pulados (sem quantidade ou SKU não encontrado no Bling).`,
+        )
+      } else {
+        toasts.success(
+          `Lote ${nome}: estoque lançado no Bling ✓`,
+          `${sent} ${sent === 1 ? 'item enviado' : 'itens enviados'}.`,
+        )
+      }
+      stopStockWatch(loteId)
+      return
+    }
+    if (Date.now() - startedAt > 20 * 60_000) {
+      toasts.warning(
+        `Lote ${nome}: lançamento no Bling ainda em andamento`,
+        'Passou de 20 min — acompanhe pelo selo azul no lote ou recarregue a página.',
+      )
+      stopStockWatch(loteId)
+      return
+    }
+    stockWatchTimers[loteId] = setTimeout(tick, 4000)
+  }
+  stockWatchTimers[loteId] = setTimeout(tick, 2500)
+}
+// Push em andamento detectado em qualquer reload da lista (F5 no meio,
+// ou fechamento feito por outro usuário/navegador) → começa a vigiar.
+watch(lotes, (ls) => {
+  for (const l of ls) {
+    if (l.fechamento && stockProcessed(l) > 0 && stockPending(l) > 0) {
+      watchStockPush(l.id, l.nome)
+    }
+  }
+}, { immediate: true })
+onBeforeUnmount(() => {
+  for (const id of Object.keys(stockWatchTimers)) clearTimeout(stockWatchTimers[id])
+})
 async function loadResumoOnly() {
   try {
     resumo.value = await api<{ items: ResumoRow[]; total: string | number }>(
@@ -1807,27 +1911,34 @@ onScopeDispose(() => {
                   <button v-if="canDelete" class="ml-1 text-destructive" @click="removeLote(lote)" :title="`Excluir ${lote.nome}`">
                     <Trash2 class="size-3 inline" />
                   </button>
-                  <!-- Badge "Bling estoque": só Celular, só lote fechado. Cores:
-                       verde = tudo sent; vermelho = qualquer erro;
-                       amarelo = só skipped; cinza = sem items. -->
+                  <!-- Badge "Bling estoque": celular + mala, só lote fechado.
+                       Azul pulsando = push em andamento (contadores avançam
+                       em tempo real via poll); verde = tudo sent; vermelho =
+                       qualquer erro; amarelo = só skipped. Lotes antigos
+                       (fechados antes da feature, sem status nenhum) ficam
+                       sem badge. -->
                   <span
-                    v-if="isCelular && lote.fechamento && (lote.bling_stock_total ?? 0) > 0"
+                    v-if="(isCelular || isMala) && lote.fechamento && (lote.bling_stock_total ?? 0) > 0 && (stockProcessed(lote) > 0 || stockRunning(lote))"
                     class="ml-2 inline-block rounded px-1.5 py-0.5 text-[9px] font-medium border"
                     :class="{
+                      'bg-blue-50 text-blue-700 border-blue-300 animate-pulse': stockRunning(lote),
                       'bg-emerald-50 text-emerald-700 border-emerald-300':
-                        (lote.bling_stock_errors ?? 0) === 0
+                        !stockRunning(lote)
+                        && (lote.bling_stock_errors ?? 0) === 0
                         && (lote.bling_stock_skipped ?? 0) === 0
                         && (lote.bling_stock_sent ?? 0) > 0,
                       'bg-red-50 text-red-700 border-red-300':
-                        (lote.bling_stock_errors ?? 0) > 0,
+                        !stockRunning(lote) && (lote.bling_stock_errors ?? 0) > 0,
                       'bg-amber-50 text-amber-700 border-amber-300':
-                        (lote.bling_stock_errors ?? 0) === 0
+                        !stockRunning(lote)
+                        && (lote.bling_stock_errors ?? 0) === 0
                         && (lote.bling_stock_skipped ?? 0) > 0,
                     }"
-                    :title="`Bling: ${lote.bling_stock_sent ?? 0} enviados, ${lote.bling_stock_skipped ?? 0} pulados, ${lote.bling_stock_errors ?? 0} erros`"
+                    :title="`Bling: ${lote.bling_stock_sent ?? 0} enviados, ${lote.bling_stock_skipped ?? 0} pulados, ${lote.bling_stock_errors ?? 0} erros` + (stockPending(lote) > 0 ? `, ${stockPending(lote)} pendentes` : '')"
                   >
                     Bling
-                    <template v-if="(lote.bling_stock_errors ?? 0) > 0">✗ {{ lote.bling_stock_errors }} erro<span v-if="(lote.bling_stock_errors ?? 0) > 1">s</span></template>
+                    <template v-if="stockRunning(lote)">⏳ {{ stockProcessed(lote) }}/{{ lote.bling_stock_total }} lançando…</template>
+                    <template v-else-if="(lote.bling_stock_errors ?? 0) > 0">✗ {{ lote.bling_stock_errors }} erro<span v-if="(lote.bling_stock_errors ?? 0) > 1">s</span></template>
                     <template v-else-if="(lote.bling_stock_skipped ?? 0) > 0">⚠ {{ lote.bling_stock_skipped }} pulado<span v-if="(lote.bling_stock_skipped ?? 0) > 1">s</span></template>
                     <template v-else>✓ {{ lote.bling_stock_sent }} enviado<span v-if="(lote.bling_stock_sent ?? 0) > 1">s</span></template>
                   </span>

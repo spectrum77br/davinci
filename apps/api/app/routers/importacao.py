@@ -951,10 +951,12 @@ async def _enrich_lote(
     prazo = (lote.fechamento - lote.abertura).days if lote.fechamento else None
 
     # Migration 0138: agregados pro badge "Bling stock" no header do
-    # lote. Só vale pra Celular (única categoria que dispara entrada de
-    # estoque ao fechar); pras outras fica tudo zerado.
+    # lote. Vale pras categorias que disparam entrada de estoque ao
+    # fechar (celular; mala desde 2026-08-03); pra eletro fica zerado.
+    # Com o commit por item no push, esses contadores avançam em tempo
+    # real — o front faz poll e mostra o progresso/aviso de conclusão.
     stock_total = stock_sent = stock_skipped = stock_errors = 0
-    if lote.categoria == "celular":
+    if lote.categoria in ("celular", "mala"):
         st_rows = (await session.execute(
             select(
                 ImportLoteItem.bling_stock_status,
@@ -1189,20 +1191,24 @@ async def patch_lote(
     await session.refresh(row)
 
     # Transition closed → open (operador apagou a data de fechamento):
-    # reseta o estado de push do Bling pros items desse lote, pra que ao
-    # re-fechar o sistema reenvie pro target_sku corrigido. Útil quando
-    # o operador percebe que escolheu o destino errado no dropdown.
-    # NÃO reverte o que já foi mandado pro Bling — operador ajusta lá.
+    # limpa o estado de push SÓ dos items que não completaram (skipped/
+    # error, pushed_at NULL) — re-fechar retenta esses. Items 'sent'
+    # ficam intocados: apagar a marca deles faria o re-fechamento
+    # LANÇAR O ESTOQUE EM DOBRO no Bling (lote de 40 malas → 40 entradas
+    # duplicadas). Correção de target_sku não precisa reabrir: o PATCH
+    # do item já re-enfileira sozinho (patch_lote_item).
     if was_closed and row.categoria in ("celular", "mala") and row.fechamento is None:
         from sqlalchemy import update as sql_update
 
         await session.execute(
             sql_update(ImportLoteItem)
-            .where(ImportLoteItem.lote_id == row.id)
+            .where(
+                ImportLoteItem.lote_id == row.id,
+                ImportLoteItem.bling_stock_pushed_at.is_(None),
+            )
             .values(
                 bling_stock_status=None,
                 bling_stock_error=None,
-                bling_stock_pushed_at=None,
             )
         )
         await session.commit()
