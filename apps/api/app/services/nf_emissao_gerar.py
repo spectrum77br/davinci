@@ -455,6 +455,63 @@ async def gerar_por_faturador(
     return ResultadoPorFaturador(blocos=blocos, pulados=pulados)
 
 
+@dataclass(frozen=True)
+class LinhaAgregada:
+    """Uma linha do resumo de conferência do lote: um SKU agregado (soma da
+    quantidade e do valor total das linhas daquele SKU no lote)."""
+
+    sku: str
+    nome: str
+    modelo: str | None
+    quantidade: int
+    valor_total: Decimal
+
+
+async def agregar_por_sku(
+    session: AsyncSession, numeros: list[str]
+) -> list[LinhaAgregada]:
+    """Agrega os itens dos `numeros` (pedidos de um lote) por SKU, aplicando a
+    regra do faturador de cada pedido. Devolve uma linha por SKU com a soma da
+    quantidade e do valor total; pula linhas sem informação (qtd e total zero).
+    O `modelo` é a família da mala derivada do nome (abs/pp/me1/me2), ou None."""
+    numeros = [n for n in (str(x).strip() for x in numeros) if n]
+    if not numeros:
+        return []
+    montados, _, _ = await _montar_pedidos(session, numeros)
+
+    acc: dict[str, dict] = {}
+    for m in montados:
+        for ln in m.linhas:
+            sku = (ln.sku or "").strip()
+            slot = acc.get(sku)
+            if slot is None:
+                slot = {
+                    "nome": ln.nome or "",
+                    "modelo": nf_catalogo.modelo_do_nome(ln.nome),
+                    "quantidade": 0,
+                    "valor_total": Decimal("0.00"),
+                }
+                acc[sku] = slot
+            slot["quantidade"] += int(ln.quantidade or 0)
+            slot["valor_total"] += _dec(ln.valor_total)
+
+    out: list[LinhaAgregada] = []
+    for sku, s in acc.items():
+        if s["quantidade"] == 0 and s["valor_total"] == 0:
+            continue
+        out.append(
+            LinhaAgregada(
+                sku=sku,
+                nome=s["nome"],
+                modelo=s["modelo"],
+                quantidade=s["quantidade"],
+                valor_total=s["valor_total"],
+            )
+        )
+    out.sort(key=lambda x: x.sku)
+    return out
+
+
 def nome_arquivo() -> str:
     ts = datetime.now(_BRT).strftime("%Y%m%d_%H%M%S")
     return f"nf_avulsa_{ts}.csv"

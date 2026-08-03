@@ -71,6 +71,7 @@ from app.services import (
     melhor_envio,
     nf_emissao_gerar,
     nf_frete_auto,
+    nf_lote_excel,
     nf_relatorio,
     nf_upseller,
 )
@@ -619,6 +620,86 @@ async def list_faturamento(
         await session.execute(_FATURAMENTO_SQL, {"dias": dias, "limit": limit})
     ).mappings().all()
     return [NfFaturamentoRowOut(**dict(r)) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# LOTES (NfCommand de importação avulsa) — listagem + Excel de conferência.
+#
+# Cada lote é um comando de importação (um faturador + o subconjunto de pedidos
+# congelado). O Excel de conferência é uma visão RESUMIDA por SKU (modelo,
+# descrição, quantidade, valor total) pra o humano analisar se o lote está certo
+# antes/depois de importar — não é a planilha crua que a marionete sobe.
+# ---------------------------------------------------------------------------
+
+
+class LoteOut(BaseModel):
+    id: UUID
+    nome_arquivo: str
+    action: str
+    status: str
+    faturador_id: UUID | None
+    faturador_nome: str | None
+    faturador_modo: str | None
+    qtd_pedidos: int
+    created_at: datetime
+
+
+@router.get("/faturamento/lotes", response_model=list[LoteOut])
+async def list_lotes(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_painel_view)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[LoteOut]:
+    """Lista os lotes de importação avulsa (mais recentes primeiro) com o nome
+    do faturador e a quantidade de pedidos, pra o seletor do Excel."""
+    rows = (
+        await session.execute(
+            select(NfCommand, NfFaturador.nome, NfFaturador.modo)
+            .outerjoin(NfFaturador, NfFaturador.id == NfCommand.faturador_id)
+            .where(NfCommand.action == "import_avulsa")
+            .order_by(NfCommand.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return [
+        LoteOut(
+            id=cmd.id,
+            nome_arquivo=cmd.nome_arquivo,
+            action=cmd.action,
+            status=cmd.status,
+            faturador_id=cmd.faturador_id,
+            faturador_nome=fnome,
+            faturador_modo=fmodo,
+            qtd_pedidos=len(cmd.numeros or []),
+            created_at=cmd.created_at,
+        )
+        for cmd, fnome, fmodo in rows
+    ]
+
+
+@router.get("/faturamento/lotes/{lote_id}/excel")
+async def exportar_lote_excel(
+    lote_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_painel_view)],
+) -> StreamingResponse:
+    """Exporta o Excel de conferência do lote: uma linha por SKU (modelo,
+    descrição, quantidade e valor total agregados). 404 se o lote não existe."""
+    cmd = await session.get(NfCommand, lote_id)
+    if cmd is None:
+        raise HTTPException(404, detail={"code": "nf_command_not_found"})
+    linhas = await nf_emissao_gerar.agregar_por_sku(session, cmd.numeros or [])
+    conteudo = nf_lote_excel.montar_xlsx(linhas)
+    base = (cmd.nome_arquivo or "lote").rsplit(".", 1)[0]
+    fname = f"conferencia_{base}.xlsx"
+    return StreamingResponse(
+        iter([conteudo]),
+        media_type=nf_lote_excel.LOTE_EXCEL_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
+    )
 
 
 @router.post("/faturamento/gerar-planilha")
