@@ -27,7 +27,7 @@ definePageMeta({
   permission: { resource: 'importacao', action: 'view' },
 })
 
-const { api } = useApi()
+const { api, url } = useApi()
 const auth = useAuthStore()
 const canEdit = computed(() => {
   if (auth.isAdmin) return true
@@ -529,6 +529,39 @@ type ReposicaoFilter = 'todos' | 'positivo' | 'negativo' | 'nenhum'
 const reposicaoFilter = ref<ReposicaoFilter>('todos')
 
 const visibleLotes = computed(() => lotes.value.filter((l) => showClosedLotes.value || l.is_aberto))
+
+// Exportar Excel de conferência de UM lote escolhido: baixa .xlsx com
+// uma linha por produto com quantidade > 0 nesse lote (modelo/sku/
+// custo/quantidade/total). Blob cru (não usa api()) pra baixar o
+// arquivo via <a download> com o nome do Content-Disposition.
+const loteExport = ref('')
+const exportandoLote = ref(false)
+watch(visibleLotes, (ls) => {
+  if (loteExport.value && !ls.some((l) => l.id === loteExport.value)) loteExport.value = ''
+})
+async function exportarLote() {
+  if (!loteExport.value || exportandoLote.value) return
+  exportandoLote.value = true
+  try {
+    const resp = await fetch(url(`/api/importacao/lotes/${loteExport.value}/excel`), {
+      credentials: 'include',
+    })
+    if (!resp.ok) throw new Error(String(resp.status))
+    const blob = await resp.blob()
+    const cd = resp.headers.get('Content-Disposition') || ''
+    const m = cd.match(/filename="?([^";]+)"?/)
+    const filename = m ? m[1] : 'lote.xlsx'
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(a.href)
+  } catch {
+    errorText.value = 'Falha ao exportar o Excel do lote.'
+  } finally {
+    exportandoLote.value = false
+  }
+}
 
 const filteredProducts = computed(() => {
   const q = search.value.trim().toLowerCase()
@@ -1558,8 +1591,28 @@ onScopeDispose(() => {
           {{ subtabLabel(t) }}
         </button>
       </div>
+      <div v-if="visibleLotes.length" class="ml-auto flex items-center gap-1.5">
+        <select
+          v-model="loteExport"
+          class="h-8 border rounded px-2 text-sm bg-background"
+          title="Escolha o lote para exportar"
+        >
+          <option value="">Exportar lote…</option>
+          <option v-for="l in visibleLotes" :key="`exp-${l.id}`" :value="l.id">
+            {{ l.nome }}
+          </option>
+        </select>
+        <button
+          class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+          :disabled="!loteExport || exportandoLote"
+          @click="exportarLote"
+        >
+          <Download class="size-3.5" :class="{ 'animate-spin': exportandoLote }" /> Excel
+        </button>
+      </div>
       <button
-        class="ml-auto inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        :class="{ 'ml-auto': !visibleLotes.length }"
         :disabled="loading"
         @click="loadAll"
       >

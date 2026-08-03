@@ -23,6 +23,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,6 +80,7 @@ from app.schemas.importacao import (
     ImportResumoOut,
     ImportResumoPatch,
 )
+from app.services import importacao_lote_excel
 from app.services.importacao_naming import generate_product_name, parse_kit_variation
 from app.services.pricing.audit import build_match_indexes, match_one_sku_to_keys
 from app.worker_pool import get_arq_ui_pool
@@ -1029,6 +1031,79 @@ async def list_lotes(
         )
     ).scalars().all()
     return [await _enrich_lote(session, lt) for lt in lotes]
+
+
+def _custo_unitario_lote(lote: ImportLote, item: ImportLoteItem, prod: ImportProduct) -> Decimal:
+    """Custo unitário do produto NAQUELE lote, espelhando o front.
+
+    Celular: custoBRL = valor_usd × taxa × (1 + frete_pct) + adicional
+    (params do próprio lote). Se faltar param/valor_usd, cai no
+    custo_manual do item, senão no custo_bling do produto.
+    Mala/Eletro: custo_bling do produto (com override custo_manual).
+    """
+    if lote.categoria == "celular" and item.valor_usd is not None \
+            and lote.taxa is not None and lote.frete_pct is not None \
+            and lote.adicional is not None:
+        return (
+            Decimal(item.valor_usd) * Decimal(lote.taxa)
+            * (Decimal("1") + Decimal(lote.frete_pct))
+            + Decimal(lote.adicional)
+        )
+    if item.custo_manual is not None:
+        return Decimal(item.custo_manual)
+    return Decimal(prod.custo_bling or 0)
+
+
+@router.get("/lotes/{lote_id}/excel")
+async def exportar_lote_excel(
+    lote_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+) -> Response:
+    """Baixa o .xlsx de conferência de um lote: uma linha por produto
+    com quantidade > 0 nesse lote (modelo, sku, custo, quantidade,
+    total = qtd × custo)."""
+    lote = await session.get(ImportLote, lote_id)
+    if lote is None:
+        raise HTTPException(404, detail={"code": "lote_not_found"})
+
+    rows = (
+        await session.execute(
+            select(ImportLoteItem, ImportProduct)
+            .join(ImportProduct, ImportProduct.id == ImportLoteItem.product_id)
+            .where(
+                ImportLoteItem.lote_id == lote_id,
+                ImportLoteItem.quantidade > 0,
+            )
+            .order_by(
+                ImportProduct.modelo_bling.is_(None),
+                func.lower(ImportProduct.modelo_bling),
+                ImportProduct.sku,
+            )
+        )
+    ).all()
+
+    linhas = []
+    for item, prod in rows:
+        qtd = int(item.quantidade or 0)
+        custo = _custo_unitario_lote(lote, item, prod)
+        linhas.append(
+            importacao_lote_excel.LinhaLote(
+                modelo=prod.modelo_bling,
+                sku=prod.sku,
+                custo=custo,
+                quantidade=qtd,
+                total=custo * Decimal(qtd),
+            )
+        )
+
+    conteudo = importacao_lote_excel.montar_xlsx(lote.nome, linhas)
+    nome_arquivo = f"lote_{re.sub(r'[^A-Za-z0-9_-]+', '_', lote.nome or 'lote')}.xlsx"
+    return Response(
+        content=conteudo,
+        media_type=importacao_lote_excel.LOTE_EXCEL_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'},
+    )
 
 
 @router.post("/lotes", response_model=ImportLoteOut, status_code=status.HTTP_201_CREATED)
