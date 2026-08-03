@@ -1,8 +1,11 @@
 """Refresh-stock-only job — manual quick path.
 
 Iterates every Bling integration the user owns, paginates `/produtos`
-100-at-a-time, and writes only `stock` (and `min_stock` when present) to
-local `products` + `product_links`. No marketplace push, no full
+100-at-a-time, and writes `stock` (and `min_stock` when present) to
+local `products` + `product_links`. Também refresca `name` quando o
+produto foi renomeado no Bling — antes só o sync completo fazia isso e
+renomeações ficavam defasadas por dias no Controle de Estoque (caso
+z0239 Fossibot→Doogee, 2026-08). No marketplace push, no full
 orchestrator pipeline.
 
 Use case: user wants fresh Bling stock without paying the full sync_all
@@ -249,6 +252,7 @@ async def run_refresh_bling_stock(
 
     summary = {
         "updated": 0,
+        "renamed": 0,
         "missing_local": 0,
         "pages": 0,
         "integrations": len(integrations),
@@ -333,6 +337,14 @@ async def run_refresh_bling_stock(
                     product.stock = int(new_stock)
                     if parsed.get("min_stock") is not None:
                         product.min_stock = int(parsed["min_stock"])
+                    # Nome acompanha o Bling: renomeou lá → reflete aqui no
+                    # próximo refresh. Sem isso, só o sync completo atualizava
+                    # nome e o Controle de Estoque exibia nome velho por dias
+                    # (caso z0239 Fossibot→Doogee, 2026-08).
+                    new_name = (parsed.get("name") or "").strip()
+                    if new_name and (product.name or "").strip() != new_name:
+                        product.name = new_name
+                        summary["renamed"] += 1
                     # Backfill situacao/formato em produtos pré-existentes
                     # que ainda têm NULL (criados antes do fix do parse).
                     # Não sobrescrevemos valor já populado pra preservar
