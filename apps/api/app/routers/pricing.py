@@ -1715,9 +1715,10 @@ async def list_dismissed_skus(
         User, Depends(require_permission("tabela_precos", "view"))
     ],
 ) -> list[str]:
+    # Dispensar é global: retorna todos os SKUs dispensados por qualquer usuário.
     rows = (
         await session.execute(
-            select(AuditDismissedSku.sku).where(user_scope(AuditDismissedSku, user))
+            select(AuditDismissedSku.sku)
         )
     ).scalars().all()
     return list(rows)
@@ -1731,16 +1732,15 @@ async def dismiss_sku(
         User, Depends(require_permission("tabela_precos", "edit"))
     ],
 ) -> None:
+    # Dispensar é global: se qualquer usuário já dispensou este SKU, não recria.
+    # Guardamos user_id apenas como rastro de quem dispensou primeiro.
     existing = (
         await session.execute(
-            select(AuditDismissedSku).where(
-                and_(
-                    user_scope(AuditDismissedSku, user),
-                    AuditDismissedSku.sku == sku,
-                )
-            )
+            select(AuditDismissedSku)
+            .where(AuditDismissedSku.sku == sku)
+            .limit(1)
         )
-    ).scalar_one_or_none()
+    ).scalars().first()
     if existing is None:
         session.add(AuditDismissedSku(user_id=user.id, sku=sku))
         await session.commit()
@@ -1755,13 +1755,9 @@ async def undismiss_sku(
         User, Depends(require_permission("tabela_precos", "edit"))
     ],
 ) -> None:
+    # Dispensar é global: remove a dispensa deste SKU para todos os usuários.
     await session.execute(
-        delete(AuditDismissedSku).where(
-            and_(
-                user_scope(AuditDismissedSku, user),
-                AuditDismissedSku.sku == sku,
-            )
-        )
+        delete(AuditDismissedSku).where(AuditDismissedSku.sku == sku)
     )
     await session.commit()
     return None

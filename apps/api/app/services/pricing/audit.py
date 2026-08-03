@@ -316,12 +316,13 @@ async def scan_missing_skus(
         bucket = links_by_pid.setdefault(link.product_id, [])
         bucket.append(integ_name or link.platform or "—")
 
+    # Dispensar é GLOBAL: um SKU dispensado por qualquer usuário fica oculto
+    # para todos. Os endpoints de dismiss/undismiss já operam globalmente, então
+    # aqui não filtramos por user_id (senão cada um só enxergaria os próprios).
     dismissed_skus = set(
         (
             await session.execute(
-                select(AuditDismissedSku.sku).where(
-                    AuditDismissedSku.user_id == user_id
-                )
+                select(AuditDismissedSku.sku)
             )
         ).scalars().all()
     )
