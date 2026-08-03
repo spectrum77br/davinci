@@ -127,3 +127,104 @@ async def test_etiqueta_requer_permissao(
     auth_as(outsider)
     r = await client.get("/api/estoque/pedidos/920001/etiqueta")
     assert r.status_code == 403, r.text
+
+
+def _pdf(*textos: str) -> bytes:
+    """PDF com uma página por texto (marca por página pra rastrear ordem)."""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open()
+    for txt in textos:
+        page = doc.new_page(width=300, height=442)
+        page.insert_text((20, 20), txt, fontsize=10, fontname="helv")
+    return doc.tobytes()
+
+
+def _paginas_texto(pdf_bytes: bytes) -> list[str]:
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    return [p.get_text().strip() for p in doc]
+
+
+@pytest.mark.asyncio
+async def test_serve_junta_etiqueta_com_nf(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None],
+):
+    """Fluxo correios/ML: quando há nf_pdf, o serve devolve etiqueta + NF juntadas
+    (etiqueta primeiro, NF depois), sem mexer no botão."""
+    db.add(BlingOrder(
+        bling_id=920003, numero="920003", item_codigo="sku-c",
+        item_index=0, situacao="15", em_andamento_data=date(2026, 5, 28),
+    ))
+    db.add(NfEtiquetaArquivo(
+        pedido_bling="920003",
+        filename="etiqueta_920003.pdf",
+        content_type="application/pdf",
+        size_bytes=1,
+        blob=_pdf("ETIQUETA"),
+        nf_pdf=_pdf("NOTA FISCAL"),
+        nf_size_bytes=1,
+    ))
+    await db.commit()
+
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/920003/etiqueta")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/pdf")
+    assert _paginas_texto(r.content) == ["ETIQUETA", "NOTA FISCAL"]
+
+
+@pytest.mark.asyncio
+async def test_serve_sem_nf_so_etiqueta(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None],
+):
+    """Sem nf_pdf (fluxo agência) o serve devolve só a etiqueta, intacta."""
+    etq = _pdf("ETIQUETA")
+    db.add(BlingOrder(
+        bling_id=920004, numero="920004", item_codigo="sku-a",
+        item_index=0, situacao="15", em_andamento_data=date(2026, 5, 28),
+    ))
+    db.add(NfEtiquetaArquivo(
+        pedido_bling="920004",
+        filename="etiqueta_920004.pdf",
+        content_type="application/pdf",
+        size_bytes=len(etq),
+        blob=etq,
+    ))
+    await db.commit()
+
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/920004/etiqueta")
+    assert r.status_code == 200, r.text
+    assert r.content == etq
+    assert _paginas_texto(r.content) == ["ETIQUETA"]
+
+
+@pytest.mark.asyncio
+async def test_serve_so_nf_sem_etiqueta_404(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None],
+):
+    """A NF chegou antes da etiqueta (blob vazio) → 404, não há o que colar."""
+    db.add(BlingOrder(
+        bling_id=920005, numero="920005", item_codigo="sku-n",
+        item_index=0, situacao="15", em_andamento_data=date(2026, 5, 28),
+    ))
+    db.add(NfEtiquetaArquivo(
+        pedido_bling="920005",
+        filename="etiqueta_920005.pdf",
+        content_type="application/pdf",
+        size_bytes=0,
+        blob=b"",
+        nf_pdf=_pdf("NOTA FISCAL"),
+        nf_size_bytes=1,
+    ))
+    await db.commit()
+
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/920005/etiqueta")
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"] == "nf_etiqueta_nao_encontrada"

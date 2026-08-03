@@ -52,6 +52,7 @@ from app.models.integration import Integration
 from app.models.nf import NfEtiquetaArquivo
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
+from app.services.nf_etiqueta_juntar import EtiquetaJuntarError, juntar_etiqueta_nf
 from app.services.sku_tags import VALID_TAGS as _VALID_TAGS
 from app.services.sku_tags import sql_clause_for_tag as _sql_clause_for_tag
 
@@ -676,10 +677,21 @@ async def get_pedido_etiqueta(
             )
         )
     ).scalar_one_or_none()
-    if row is None:
+    if row is None or not row.blob:
+        # Sem etiqueta ainda (a NF pode ter chegado antes, mas não há o que
+        # imprimir sem a etiqueta que cola no volume).
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
+    conteudo = row.blob
+    if row.nf_pdf:
+        # Fluxo correios/ML: a etiqueta vai junto com a NF do Bling (correios
+        # não aceita declaração). A presença da NF é o sinal do fluxo correios.
+        try:
+            conteudo = juntar_etiqueta_nf(row.blob, row.nf_pdf)
+        except EtiquetaJuntarError:
+            logger.warning("nf_etiqueta_juntar_falhou", pedido_bling=pedido_bling)
+            conteudo = row.blob
     return Response(
-        content=row.blob,
+        content=conteudo,
         media_type=row.content_type or "application/pdf",
         headers={
             "Content-Disposition": f'inline; filename="{row.filename}"',

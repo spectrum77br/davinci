@@ -424,6 +424,102 @@ async def test_agent_etiqueta_upsert_transformada(
     assert "Beltrano Oficial" in txt2
 
 
+@pytest.mark.asyncio
+async def test_agent_nf_grava_danfe_em_linha_existente(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """A etiqueta já chegou; a marionete sobe o DANFE do Bling → grava nf_pdf
+    sem tocar o blob da etiqueta transformada."""
+    from app.models import NfEtiquetaArquivo
+
+    db.add(NfEtiquetaArquivo(
+        pedido_bling="880001",
+        filename="etiqueta_880001.pdf",
+        content_type="application/pdf",
+        size_bytes=3,
+        blob=b"ETQ",
+    ))
+    await db.commit()
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/nf",
+        data={"pedido_bling": "880001"},
+        files={"file": ("danfe.pdf", b"%PDF-DANFE-BYTES", "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["nf_size_bytes"] == len(b"%PDF-DANFE-BYTES")
+
+    db.expire_all()
+    row = (
+        await db.execute(
+            select(NfEtiquetaArquivo).where(
+                NfEtiquetaArquivo.pedido_bling == "880001"
+            )
+        )
+    ).scalar_one()
+    assert row.blob == b"ETQ"  # etiqueta intacta
+    assert row.nf_pdf == b"%PDF-DANFE-BYTES"
+    assert row.nf_size_bytes == len(b"%PDF-DANFE-BYTES")
+
+
+@pytest.mark.asyncio
+async def test_agent_nf_cria_linha_quando_etiqueta_nao_chegou(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """A NF pode chegar antes da etiqueta: cria a linha só com a NF (blob vazio)."""
+    from app.models import NfEtiquetaArquivo
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/nf",
+        data={"pedido_bling": "880002"},
+        files={"file": ("danfe.pdf", b"%PDF-DANFE", "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+
+    db.expire_all()
+    row = (
+        await db.execute(
+            select(NfEtiquetaArquivo).where(
+                NfEtiquetaArquivo.pedido_bling == "880002"
+            )
+        )
+    ).scalar_one()
+    assert row.blob == b""  # sem etiqueta ainda
+    assert row.nf_pdf == b"%PDF-DANFE"
+
+
+@pytest.mark.asyncio
+async def test_agent_nf_vazia_400(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/nf",
+        data={"pedido_bling": "880003"},
+        files={"file": ("danfe.pdf", b"", "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"]["code"] == "nf_pdf_vazia"
+
+
+@pytest.mark.asyncio
+async def test_agent_nf_sem_token_401(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/nf",
+        data={"pedido_bling": "880004"},
+        files={"file": ("danfe.pdf", b"%PDF", "application/pdf")},
+    )
+    assert r.status_code == 401, r.text
+
+
 async def _seed_upseller(db: AsyncSession, admin: User, *, numero: str = "850001") -> None:
     """Faturador Upseller + 1 pedido → 1 comando .xlsx (fluxo com etiqueta)."""
     f = NfFaturador(

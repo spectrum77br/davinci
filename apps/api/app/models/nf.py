@@ -287,6 +287,12 @@ class NfEtiquetaArquivo(Base, TimestampMixin):
         BigInteger, nullable=False, default=0, server_default=text("0")
     )
     blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # DANFE do Bling (fluxo correios/ML): a NF vem do Bling via "Gerar PDF
+    # DANFE", capturada pela marionete e gravada aqui. Quando presente, o botão
+    # "Imprimir Etiqueta" serve etiqueta + NF juntadas (correios não aceita
+    # declaração). NULL = fluxo agência (só etiqueta).
+    nf_pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    nf_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

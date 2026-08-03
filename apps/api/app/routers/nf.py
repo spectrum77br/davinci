@@ -1284,3 +1284,50 @@ async def nf_agent_etiqueta(
         "nf_agent_etiqueta", pedido_bling=pedido_bling, size=len(transformado)
     )
     return {"ok": True, "pedido_bling": pedido_bling, "size_bytes": len(transformado)}
+
+
+@router.post(
+    "/agent/nf",
+    dependencies=[Depends(_require_nf_agent_token)],
+)
+async def nf_agent_nf(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    pedido_bling: Annotated[str, Form()],
+    file: Annotated[UploadFile, File()],
+) -> dict:
+    """Recebe o PDF do DANFE do Bling (fluxo correios/ML) por pedido e grava em
+    `nf_etiqueta_arquivo.nf_pdf`. A NF vem do Bling ("Gerar PDF DANFE") — a
+    marionete captura e sobe aqui. Guardado CRU (sem transformar — a NF vai
+    como está). Quando a etiqueta já existe, o botão "Imprimir Etiqueta" passa a
+    servir etiqueta + NF juntadas (correios não aceita declaração). A ordem de
+    chegada (etiqueta antes ou depois da NF) não importa — a junção é feita na
+    hora de servir.
+    """
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, detail={"code": "nf_pdf_vazia"})
+    if len(raw) > _ETIQUETA_MAX_BYTES:
+        raise HTTPException(413, detail={"code": "nf_pdf_grande"})
+    row = (
+        await session.execute(
+            select(NfEtiquetaArquivo).where(
+                NfEtiquetaArquivo.pedido_bling == pedido_bling
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        # A NF pode chegar antes da etiqueta; cria a linha só com a NF (a
+        # etiqueta preenche blob/filename depois via /agent/etiqueta).
+        row = NfEtiquetaArquivo(
+            pedido_bling=pedido_bling,
+            filename=f"etiqueta_{pedido_bling}.pdf",
+            content_type="application/pdf",
+            size_bytes=0,
+            blob=b"",
+        )
+        session.add(row)
+    row.nf_pdf = raw
+    row.nf_size_bytes = len(raw)
+    await session.commit()
+    logger.info("nf_agent_nf", pedido_bling=pedido_bling, size=len(raw))
+    return {"ok": True, "pedido_bling": pedido_bling, "nf_size_bytes": len(raw)}
