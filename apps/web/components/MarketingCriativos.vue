@@ -35,7 +35,9 @@ const isAdmin = computed(() => auth.user?.role === 'admin')
 const canEdit = useCan('marketing_criativos', 'edit')
 
 // Opções fixas — modelo e marca são escolhidos, não digitados.
-const MODELO_OPTIONS = ['imagem', 'video 15s', 'video 30s', 'video 60s']
+const MODELO_OPTIONS = ['imagem', 'carrossel', 'video 15s', 'video 30s', 'video 60s']
+// Dica mostrada ao passar o mouse por cima (atributo title do navegador).
+const MODELO_HINTS: Record<string, string> = { carrossel: 'carrossel com 6 imagens' }
 const MARCA_OPTIONS = ['uranyx', 'charlots']
 
 // Equipes de marketing conhecidas (cadastradas nos usuários) — opções do
@@ -404,9 +406,9 @@ async function remove(r: Creative) {
                   v-if="editValue && !MODELO_OPTIONS.includes(editValue)"
                   :value="editValue"
                 >{{ editValue }}</option>
-                <option v-for="o in MODELO_OPTIONS" :key="o" :value="o">{{ o }}</option>
+                <option v-for="o in MODELO_OPTIONS" :key="o" :value="o" :title="MODELO_HINTS[o]">{{ o }}</option>
               </select>
-              <span v-else class="font-medium">{{ r.modelo }}</span>
+              <span v-else class="font-medium" :title="MODELO_HINTS[r.modelo]">{{ r.modelo }}</span>
             </td>
             <!-- marca -->
             <td
@@ -600,7 +602,7 @@ async function remove(r: Creative) {
                 :class="{ 'text-muted-foreground': !newRow.modelo }"
               >
                 <option value="" disabled>modelo…</option>
-                <option v-for="o in MODELO_OPTIONS" :key="o" :value="o">{{ o }}</option>
+                <option v-for="o in MODELO_OPTIONS" :key="o" :value="o" :title="MODELO_HINTS[o]">{{ o }}</option>
               </select>
             </td>
             <td class="border border-border px-1 py-1">
