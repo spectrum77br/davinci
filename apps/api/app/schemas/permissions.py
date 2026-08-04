@@ -5,6 +5,11 @@ from pydantic import BaseModel, RootModel, model_validator
 Resource = Literal[
     "produtos",
     "anuncios",
+    # Marketing — dashboards de Ads (ML/Shopee) e aba Criativos (briefing
+    # + arquivos + aprovação → MEGA). Mesmos nomes usados no useCan e nos
+    # require_permission dos routers marketing.py / marketing_creatives.py.
+    "marketing",
+    "marketing_criativos",
     "tabela_precos",
     "tabela_precos_contas",
     "tabela_precos_produtos",
