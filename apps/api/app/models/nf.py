@@ -33,8 +33,10 @@ class NfFaturador(Base, TimestampMixin):
       'upseller' (manda pro serviço Upseller).
     - `nf_cheia` = True emite pelo valor cheio do pedido (avulso); False usa
       `percentual` do valor (exclusivo 0,1% / upseller 2,1,70,100%).
-    - `sku_fonte` = de onde vem o SKU: 'principal' (SKU do produto no Bling
-      principal) ou 'a001' (SKU fixo a001).
+    - `sku_fonte` = de onde vem o SKU: 'principal' (ou vazio) usa o SKU do
+      produto no Bling principal; qualquer outro valor é o SKU LITERAL da NF
+      ('a001' no bling avulso celular, 'e3'/'m200' nos upseller — lá o produto
+      é casado pelo SKU e só existem os de embalagem/mala).
     - `nome_fonte` = 'produto' (nome do produto) ou 'embalagem' (nome fixo).
     - `ncm` = NCM default (4202.12.10 na maioria; 3923.21.10 nos upseller de
       mala 70/100). A Joana valida/corrige o NCM quando não bate.
@@ -54,7 +56,7 @@ class NfFaturador(Base, TimestampMixin):
     )
     # Percentual do valor a emitir quando não é NF cheia (0.1 / 2 / 1 / 70 / 100).
     percentual: Mapped[Decimal | None] = mapped_column(Numeric(6, 3), nullable=True)
-    # 'principal' (SKU do produto do Bling principal) | 'a001' (SKU fixo).
+    # 'principal'/vazio = SKU do produto do Bling principal; senão SKU literal.
     sku_fonte: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 'produto' (nome do produto) | 'embalagem' (nome fixo).
     nome_fonte: Mapped[str | None] = mapped_column(Text, nullable=True)

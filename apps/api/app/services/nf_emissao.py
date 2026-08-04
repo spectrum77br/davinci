@@ -7,7 +7,10 @@ Upseller). É a "planilha do Bling principal" transformada — a NF sai como ven
 AVULSA no destino, desacoplada do intermediador do marketplace.
 
 Regras da spec (aba NF, áudios 25/07):
-- `sku_fonte`: 'a001' usa o SKU fixo `a001`; senão o SKU do produto do principal.
+- `sku_fonte`: vazio ou 'principal' usa o SKU do produto do principal; qualquer
+  outro valor é o SKU LITERAL que vai na NF ('a001' no bling avulso celular,
+  'e3'/'m200' nos upseller — o Upseller casa o produto pelo SKU, e lá só existem
+  os SKUs de embalagem/mala).
 - `nome_fonte`: 'embalagem' usa o nome fixo "embalagem"; senão o nome do produto.
 - `ncm`: o NCM da regra sobrepõe o do item (4202.12.10 na maioria; 3923.21.10
   nos upseller de mala). Vazio na regra = mantém o NCM do item.
@@ -26,7 +29,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Protocol
 
 _CENT = Decimal("0.01")
-_SKU_FIXO_A001 = "a001"
+_SKU_FONTE_PRINCIPAL = "principal"
 _NOME_FIXO_EMBALAGEM = "embalagem"
 
 
@@ -84,8 +87,11 @@ def transformar_item(regra: _RegraFaturador, item: ItemPedido) -> NfLinha:
     redistribuído no unitário, pra o percentual bater com o valor do pedido
     (ex.: exclusivo 0,1% de R$1000 = R$1) sem erro de arredondamento por item.
     """
-    sku = _SKU_FIXO_A001 if (regra.sku_fonte or "").strip().lower() == _SKU_FIXO_A001 else (
+    fonte_sku = (regra.sku_fonte or "").strip()
+    sku = (
         (item.sku or "").strip()
+        if not fonte_sku or fonte_sku.lower() == _SKU_FONTE_PRINCIPAL
+        else fonte_sku
     )
     nome = (
         _NOME_FIXO_EMBALAGEM

@@ -60,6 +60,14 @@ def test_exclusivo_percentual_0_1():
     assert linha.valor_total == Decimal("1.00")
 
 
+def test_sku_fonte_literal_vira_o_sku_da_nf():
+    # O Upseller casa o produto pelo SKU e lá só existem os de embalagem/mala;
+    # qualquer sku_fonte que não seja 'principal'/vazio é o SKU literal da NF.
+    r = _Regra(nf_cheia=False, percentual=Decimal("2"), sku_fonte="e3")
+    linha = nf_emissao.transformar_item(r, _item(sku="dg057.ci+a001.ci", unit="1000"))
+    assert linha.sku == "e3"
+
+
 def test_upseller_2pct_mantem_sku_nome_item():
     # upseller 2%: sem troca de SKU/nome/NCM na regra → mantém os do item.
     r = _Regra(nf_cheia=False, percentual=Decimal("2"))
