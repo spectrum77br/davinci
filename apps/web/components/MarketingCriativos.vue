@@ -33,6 +33,10 @@ const auth = useAuthStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
 const canEdit = useCan('marketing_criativos', 'edit')
 
+// Opções fixas — modelo e marca são escolhidos, não digitados.
+const MODELO_OPTIONS = ['imagem', 'video 15s', 'video 30s', 'video 60s']
+const MARCA_OPTIONS = ['uranyx', 'charlots']
+
 const rows = ref<Creative[]>([])
 const loading = ref(false)
 const uploadingId = ref<string | null>(null)
@@ -153,7 +157,7 @@ const adding = ref(false)
 
 async function addRow() {
   if (!newRow.modelo.trim()) {
-    toasts.warning('Preencha o modelo (ex.: imagem lifestyle, video 15s...)')
+    toasts.warning('Escolha o modelo (imagem, video 15s, video 30s ou video 60s)')
     return
   }
   adding.value = true
@@ -336,9 +340,9 @@ async function remove(r: Creative) {
       <table class="w-full text-sm border-collapse">
         <thead class="sticky top-0 bg-muted z-10">
           <tr>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[170px]">Modelo</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Marca</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[150px]">SKU</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Modelo</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[95px]">Marca</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border w-28 min-w-[80px]">SKU</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[340px]">Roteiro</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">Arquivos</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Aprovado</th>
@@ -374,13 +378,19 @@ async function remove(r: Creative) {
               }"
               @click="!isEditing(r.id, 'modelo') && startEdit(r, 'modelo')"
             >
-              <input
+              <select
                 v-if="isEditing(r.id, 'modelo')"
                 :ref="setEditInputRef"
-                v-model="editValue" type="text"
-                class="w-full text-xs bg-transparent outline-none"
-                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
-              />
+                v-model="editValue"
+                class="w-full text-xs bg-background outline-none rounded"
+                @change="commitEdit" @blur="commitEdit" @keydown.escape.prevent="cancelEdit"
+              >
+                <option
+                  v-if="editValue && !MODELO_OPTIONS.includes(editValue)"
+                  :value="editValue"
+                >{{ editValue }}</option>
+                <option v-for="o in MODELO_OPTIONS" :key="o" :value="o">{{ o }}</option>
+              </select>
               <span v-else class="font-medium">{{ r.modelo }}</span>
             </td>
             <!-- marca -->
@@ -393,13 +403,20 @@ async function remove(r: Creative) {
               }"
               @click="!isEditing(r.id, 'marca') && startEdit(r, 'marca')"
             >
-              <input
+              <select
                 v-if="isEditing(r.id, 'marca')"
                 :ref="setEditInputRef"
-                v-model="editValue" type="text"
-                class="w-full text-xs bg-transparent outline-none"
-                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
-              />
+                v-model="editValue"
+                class="w-full text-xs bg-background outline-none rounded"
+                @change="commitEdit" @blur="commitEdit" @keydown.escape.prevent="cancelEdit"
+              >
+                <option value="">—</option>
+                <option
+                  v-if="editValue && !MARCA_OPTIONS.includes(editValue)"
+                  :value="editValue"
+                >{{ editValue }}</option>
+                <option v-for="o in MARCA_OPTIONS" :key="o" :value="o">{{ o }}</option>
+              </select>
               <span v-else>{{ r.marca || '—' }}</span>
             </td>
             <!-- sku -->
@@ -419,7 +436,7 @@ async function remove(r: Creative) {
                 class="w-full text-xs bg-transparent outline-none font-mono"
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               />
-              <span v-else>{{ r.sku || '—' }}</span>
+              <span v-else class="break-all">{{ r.sku || '—' }}</span>
             </td>
             <!-- roteiro (célula grande — textarea ao editar) -->
             <td
@@ -536,20 +553,24 @@ async function remove(r: Creative) {
           <!-- add row -->
           <tr v-if="canEdit" class="bg-blue-50/40 dark:bg-blue-900/10">
             <td class="border border-border px-1 py-1">
-              <input
+              <select
                 v-model="newRow.modelo"
-                type="text" placeholder="novo modelo — ex. video 30s problema"
                 class="w-full text-xs border rounded px-1.5 py-1 bg-background"
-                @keydown.enter="addRow"
-              />
+                :class="{ 'text-muted-foreground': !newRow.modelo }"
+              >
+                <option value="" disabled>modelo…</option>
+                <option v-for="o in MODELO_OPTIONS" :key="o" :value="o">{{ o }}</option>
+              </select>
             </td>
             <td class="border border-border px-1 py-1">
-              <input
+              <select
                 v-model="newRow.marca"
-                type="text" placeholder="marca"
                 class="w-full text-xs border rounded px-1.5 py-1 bg-background"
-                @keydown.enter="addRow"
-              />
+                :class="{ 'text-muted-foreground': !newRow.marca }"
+              >
+                <option value="">marca —</option>
+                <option v-for="o in MARCA_OPTIONS" :key="o" :value="o">{{ o }}</option>
+              </select>
             </td>
             <td class="border border-border px-1 py-1">
               <input
