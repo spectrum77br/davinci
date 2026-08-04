@@ -1,16 +1,18 @@
 """Aba Criativos do Marketing — briefing de imagens/vídeos.
 
 Fluxo: admin (ou quem tiver edit) cadastra as linhas (modelo/marca/sku/
-roteiro); o criador de conteúdo anexa o arquivo; o admin aprova (V) ou
-reprova (X). Ao aprovar, o arquivo sobe pra pasta do produto no MEGA —
-o produto é achado pelo SKU na tabela de preços (aba Produtos) e o
-destino é o fotos_path dele. pushed_at/pushed_dest registram o envio.
+roteiro); o criador de conteúdo anexa um ou mais arquivos; o admin aprova
+(V) ou reprova (X). Ao aprovar, TODOS os arquivos sobem pra pasta do
+produto no MEGA — o produto é achado pelo SKU na tabela de preços (aba
+Produtos) e o destino é o fotos_path dele. pushed_at/pushed_dest
+registram o envio.
 
 Permissões: recurso "marketing_criativos" (view/edit); aprovação é
 sempre admin. Independente do recurso "marketing" (dashboards de Ads).
 """
 from __future__ import annotations
 
+import contextlib
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,11 +29,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_admin, require_permission
-from app.models import MarketingCreative, PricingProduct, User, UserRole
+from app.models import (
+    MarketingCreative,
+    MarketingCreativeFile,
+    PricingProduct,
+    User,
+    UserRole,
+)
 from app.services.mega_fotos import MegaError, sidecar_request
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/marketing/creatives", tags=["marketing"])
+
+MAX_FILES_PER_ROW = 20
+
+
+def _file_out(f: MarketingCreativeFile) -> dict[str, Any]:
+    return {
+        "id": str(f.id),
+        "file_name": f.file_name,
+        "file_mime": f.file_mime,
+        "file_size": f.file_size,
+    }
 
 
 def _row_out(row: MarketingCreative) -> dict[str, Any]:
@@ -41,9 +60,7 @@ def _row_out(row: MarketingCreative) -> dict[str, Any]:
         "marca": row.marca,
         "sku": row.sku,
         "roteiro": row.roteiro,
-        "file_name": row.file_name,
-        "file_mime": row.file_mime,
-        "file_size": row.file_size,
+        "files": [_file_out(f) for f in row.files],
         "aprovado": row.aprovado,
         "pushed_at": row.pushed_at.isoformat() if row.pushed_at else None,
         "pushed_dest": row.pushed_dest,
@@ -109,7 +126,7 @@ async def create_creative(
     )
     session.add(row)
     await session.commit()
-    await session.refresh(row)
+    row = await _get_row(session, row.id)
     return _row_out(row)
 
 
@@ -141,67 +158,110 @@ async def patch_creative(
     if "roteiro" in data:
         row.roteiro = data["roteiro"]
     await session.commit()
-    await session.refresh(row)
     return _row_out(row)
 
 
 @router.post("/{creative_id}/arquivo")
-async def upload_arquivo(
+async def upload_arquivos(
     creative_id: UUID,
-    file: Annotated[UploadFile, File(...)],
+    files: Annotated[list[UploadFile], File(...)],
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("marketing_criativos", "edit"))],
 ) -> dict[str, Any]:
     row = await _get_row(session, creative_id)
     if row.pushed_at is not None:
         raise HTTPException(409, detail={"code": "ja_enviado_pro_mega"})
-
-    name = Path(file.filename or "arquivo").name
-    if not name or name in {".", ".."}:
-        raise HTTPException(400, detail={"code": "nome_invalido"})
+    if not files:
+        raise HTTPException(400, detail={"code": "sem_arquivo"})
+    if len(row.files) + len(files) > MAX_FILES_PER_ROW:
+        raise HTTPException(400, detail={"code": "muitos_arquivos"})
 
     base = _file_dir(row)
-    if base.exists():
-        shutil.rmtree(base, ignore_errors=True)
     base.mkdir(parents=True, exist_ok=True)
-    abs_path = base / name
-    with abs_path.open("wb") as fh:
-        shutil.copyfileobj(file.file, fh)
+    existing = {f.file_name: f for f in row.files}
+    added: list[str] = []
+    for up in files:
+        name = Path(up.filename or "arquivo").name
+        if not name or name in {".", ".."}:
+            raise HTTPException(400, detail={"code": "nome_invalido"})
+        abs_path = base / name
+        with abs_path.open("wb") as fh:
+            shutil.copyfileobj(up.file, fh)
+        old = existing.get(name)
+        if old is not None:  # mesmo nome substitui o registro antigo
+            row.files.remove(old)
+        rec = MarketingCreativeFile(
+            id=uuid4(),
+            file_name=name,
+            file_mime=up.content_type or "application/octet-stream",
+            file_size=abs_path.stat().st_size,
+            file_rel=f"creatives/{row.id}/{name}",
+        )
+        row.files.append(rec)
+        existing[name] = rec
+        added.append(name)
 
-    row.file_name = name
-    row.file_mime = file.content_type or "application/octet-stream"
-    row.file_size = abs_path.stat().st_size
-    row.file_rel = f"creatives/{row.id}/{name}"
     row.aprovado = None  # arquivo novo volta pra "pendente"
     await session.commit()
-    await session.refresh(row)
     logger.info(
-        "creative_file_upload",
+        "creative_files_upload",
         creative_id=str(row.id),
-        file=name,
-        size=row.file_size,
+        files=added,
         user_id=str(user.id),
     )
     return _row_out(row)
 
 
-@router.get("/{creative_id}/arquivo")
+@router.get("/{creative_id}/arquivo/{file_id}")
 async def download_arquivo(
     creative_id: UUID,
+    file_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("marketing_criativos", "view"))],
+    download: bool = False,
 ) -> FileResponse:
     row = await _get_row(session, creative_id)
-    if not row.file_rel:
+    rec = next((f for f in row.files if f.id == file_id), None)
+    if rec is None:
         raise HTTPException(404, detail={"code": "sem_arquivo"})
-    abs_path = Path(get_settings().uploads_dir) / row.file_rel
+    abs_path = Path(get_settings().uploads_dir) / rec.file_rel
     if not abs_path.is_file():
         raise HTTPException(404, detail={"code": "arquivo_sumiu"})
+    # inline = abre no navegador (preview de imagem/vídeo); ?download=1 força baixar
     return FileResponse(
         abs_path,
-        filename=row.file_name or abs_path.name,
-        media_type=row.file_mime or "application/octet-stream",
+        filename=rec.file_name,
+        media_type=rec.file_mime or "application/octet-stream",
+        content_disposition_type="attachment" if download else "inline",
     )
+
+
+@router.delete("/{creative_id}/arquivo/{file_id}")
+async def delete_arquivo(
+    creative_id: UUID,
+    file_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("marketing_criativos", "edit"))],
+) -> dict[str, Any]:
+    row = await _get_row(session, creative_id)
+    if row.pushed_at is not None:
+        raise HTTPException(409, detail={"code": "ja_enviado_pro_mega"})
+    rec = next((f for f in row.files if f.id == file_id), None)
+    if rec is None:
+        raise HTTPException(404, detail={"code": "sem_arquivo"})
+    abs_path = Path(get_settings().uploads_dir) / rec.file_rel
+    with contextlib.suppress(OSError):
+        abs_path.unlink(missing_ok=True)
+    name = rec.file_name
+    row.files.remove(rec)
+    await session.commit()
+    logger.info(
+        "creative_file_delete",
+        creative_id=str(row.id),
+        file=name,
+        user_id=str(user.id),
+    )
+    return _row_out(row)
 
 
 def _match_product_by_sku(
@@ -231,23 +291,26 @@ async def aprovar_creative(
     if payload.aprovado is False:
         row.aprovado = False
         await session.commit()
-        await session.refresh(row)
         return _row_out(row)
 
     if row.pushed_at is not None:  # já foi pro MEGA — só garante o V
         row.aprovado = True
         await session.commit()
-        await session.refresh(row)
         return _row_out(row)
 
-    if not row.file_rel:
+    recs = list(row.files)
+    if not recs:
         raise HTTPException(400, detail={"code": "sem_arquivo"})
     sku = (row.sku or "").strip()
     if not sku:
         raise HTTPException(400, detail={"code": "sem_sku"})
-    abs_path = Path(get_settings().uploads_dir) / row.file_rel
-    if not abs_path.is_file():
-        raise HTTPException(404, detail={"code": "arquivo_sumiu"})
+    uploads_dir = Path(get_settings().uploads_dir)
+    paths: list[tuple[MarketingCreativeFile, Path]] = []
+    for rec in recs:
+        abs_path = uploads_dir / rec.file_rel
+        if not abs_path.is_file():
+            raise HTTPException(404, detail={"code": "arquivo_sumiu"})
+        paths.append((rec, abs_path))
 
     candidates = (
         (
@@ -266,7 +329,7 @@ async def aprovar_creative(
         raise HTTPException(400, detail={"code": "produto_sem_pasta"})
 
     try:
-        with abs_path.open("rb") as fh:
+        with contextlib.ExitStack() as stack:
             await sidecar_request(
                 "POST",
                 "/upload",
@@ -275,11 +338,12 @@ async def aprovar_creative(
                     (
                         "files",
                         (
-                            row.file_name or abs_path.name,
-                            fh,
-                            row.file_mime or "application/octet-stream",
+                            rec.file_name,
+                            stack.enter_context(abs_path.open("rb")),
+                            rec.file_mime or "application/octet-stream",
                         ),
                     )
+                    for rec, abs_path in paths
                 ],
                 timeout=3600.0,
             )
@@ -315,15 +379,16 @@ async def aprovar_creative(
     row.pushed_at = datetime.now(timezone.utc)
     row.pushed_dest = dest
     await session.commit()
-    await session.refresh(row)
     logger.info(
         "creative_pushed_to_mega",
         creative_id=str(row.id),
         sku=sku,
         dest=dest,
+        n_files=len(paths),
         user_id=str(user.id),
     )
     out = _row_out(row)
+    out["enviados"] = len(paths)
     out["fotos_count"] = fotos_count
     out["videos_count"] = videos_count
     return out

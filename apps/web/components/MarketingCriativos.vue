@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
-  Check, X, Trash2, Upload, Loader2, Plus, Download, CloudUpload,
+  Check, X, Trash2, Upload, Loader2, Plus, Download, CloudUpload, Search,
+  Film, Image as ImageIcon, File as FileIcon,
 } from 'lucide-vue-next'
+
+type CreativeFile = {
+  id: string
+  file_name: string
+  file_mime: string | null
+  file_size: number | null
+}
 
 type Creative = {
   id: string
@@ -10,9 +18,7 @@ type Creative = {
   marca: string | null
   sku: string | null
   roteiro: string | null
-  file_name: string | null
-  file_mime: string | null
-  file_size: number | null
+  files: CreativeFile[]
   aprovado: boolean | null
   pushed_at: string | null
   pushed_dest: string | null
@@ -33,13 +39,15 @@ const uploadingId = ref<string | null>(null)
 const approvingId = ref<string | null>(null)
 
 const ERR_PT: Record<string, string> = {
-  ja_enviado_pro_mega: 'Esse arquivo já foi pro MEGA — não dá mais pra trocar ou excluir.',
-  sem_arquivo: 'Falta anexar o arquivo antes de aprovar.',
+  ja_enviado_pro_mega: 'Essa linha já foi pro MEGA — não dá mais pra mexer nos arquivos.',
+  sem_arquivo: 'Falta anexar pelo menos um arquivo antes de aprovar.',
   sem_sku: 'Preencha o SKU antes de aprovar.',
   produto_nao_encontrado: 'Nenhum produto na tabela de preços tem esse SKU.',
   produto_sem_pasta: 'O produto desse SKU ainda não tem pasta no MEGA.',
   modelo_obrigatorio: 'O campo modelo é obrigatório.',
   arquivo_sumiu: 'O arquivo não foi encontrado no servidor — anexe de novo.',
+  muitos_arquivos: 'Limite de 20 arquivos por linha.',
+  nome_invalido: 'Nome de arquivo inválido.',
   forbidden: 'Você não tem permissão pra isso.',
 }
 
@@ -63,6 +71,25 @@ async function load() {
   }
 }
 onMounted(() => { void load() })
+
+// ---- filtro ---------------------------------------------------------------
+const q = ref('')
+const statusFilter = ref<'todos' | 'pendente' | 'aprovado' | 'reprovado'>('todos')
+
+const filteredRows = computed(() => {
+  const term = q.value.trim().toLowerCase()
+  return rows.value.filter((r) => {
+    if (statusFilter.value === 'pendente' && r.aprovado !== null) return false
+    if (statusFilter.value === 'aprovado' && r.aprovado !== true) return false
+    if (statusFilter.value === 'reprovado' && r.aprovado !== false) return false
+    if (!term) return true
+    const hay = [r.modelo, r.marca, r.sku, r.roteiro, ...r.files.map((f) => f.file_name)]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+    return hay.includes(term)
+  })
+})
 
 // ---- edição estilo planilha (clica na célula → edita; Enter/blur salva,
 // ---- Esc cancela; flash verde ao salvar — mesmo padrão da Tabela de Preços)
@@ -146,7 +173,7 @@ async function addRow() {
   }
 }
 
-// ---- arquivo --------------------------------------------------------------
+// ---- arquivos (vários por linha) ------------------------------------------
 const fileInput = ref<HTMLInputElement | null>(null)
 const fileTarget = ref<Creative | null>(null)
 
@@ -161,24 +188,41 @@ function pickFile(r: Creative) {
 
 async function onFilePicked(ev: Event) {
   const input = ev.target as HTMLInputElement
-  const file = input.files?.[0]
+  const files = Array.from(input.files ?? [])
   const target = fileTarget.value
   input.value = ''
-  if (!file || !target) return
+  if (!files.length || !target) return
   uploadingId.value = target.id
   try {
     const fd = new FormData()
-    fd.append('file', file)
+    for (const f of files) fd.append('files', f)
     const updated = await api<Creative>(
       `/api/marketing/creatives/${target.id}/arquivo`,
       { method: 'POST', body: fd },
     )
     Object.assign(target, updated)
-    toasts.success('Arquivo anexado', file.name)
+    toasts.success(
+      files.length === 1 ? 'Arquivo anexado' : `${files.length} arquivos anexados`,
+      files.map((f) => f.name).join(', '),
+    )
   } catch (e: any) {
     toasts.error('Erro no upload', errMsg(e))
   } finally {
     uploadingId.value = null
+  }
+}
+
+async function removeFile(r: Creative, f: CreativeFile) {
+  if (!window.confirm(`Apagar o arquivo "${f.file_name}"?`)) return
+  try {
+    const updated = await api<Creative>(
+      `/api/marketing/creatives/${r.id}/arquivo/${f.id}`,
+      { method: 'DELETE' },
+    )
+    Object.assign(r, updated)
+    toasts.info('Arquivo apagado', f.file_name)
+  } catch (e: any) {
+    toasts.error('Erro ao apagar arquivo', errMsg(e))
   }
 }
 
@@ -188,20 +232,47 @@ function fmtSize(n: number | null): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`
 }
 
+// ---- preview (imagem/vídeo no modal, com botão de baixar) ------------------
+const preview = ref<{ row: Creative; file: CreativeFile } | null>(null)
+
+function fileUrl(r: Creative, f: CreativeFile, download = false) {
+  return `/api/marketing/creatives/${r.id}/arquivo/${f.id}${download ? '?download=1' : ''}`
+}
+
+const previewIsImage = computed(() => preview.value?.file.file_mime?.startsWith('image/') ?? false)
+const previewIsVideo = computed(() => preview.value?.file.file_mime?.startsWith('video/') ?? false)
+
+function openPreview(r: Creative, f: CreativeFile) {
+  preview.value = { row: r, file: f }
+}
+function closePreview() {
+  preview.value = null
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && preview.value) closePreview()
+}
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+
 // ---- aprovação (admin) ----------------------------------------------------
 async function aprovar(r: Creative, ok: boolean) {
   approvingId.value = r.id
   const t = ok && !r.pushed_at
-    ? toasts.push({ kind: 'info', title: 'Aprovando…', lines: 'Enviando o arquivo pra pasta do produto no MEGA.' }, 0)
+    ? toasts.push({ kind: 'info', title: 'Aprovando…', lines: 'Enviando os arquivos pra pasta do produto no MEGA.' }, 0)
     : null
   try {
-    const updated = await api<Creative & { fotos_count?: number | null }>(
+    const updated = await api<Creative & { enviados?: number; fotos_count?: number | null }>(
       `/api/marketing/creatives/${r.id}/aprovar`,
       { method: 'POST', body: { aprovado: ok } },
     )
     Object.assign(r, updated)
     if (ok && updated.pushed_dest) {
-      toasts.success('Aprovado — enviado pro MEGA', `Pasta: ${updated.pushed_dest}`)
+      const n = updated.enviados ?? r.files.length
+      toasts.success(
+        n === 1 ? 'Aprovado — arquivo no MEGA' : `Aprovado — ${n} arquivos no MEGA`,
+        `Pasta: ${updated.pushed_dest}`,
+      )
     } else if (!ok) {
       toasts.info('Marcado como não aprovado')
     }
@@ -231,11 +302,37 @@ async function remove(r: Creative) {
       ref="fileInput"
       type="file"
       accept="image/*,video/*"
+      multiple
       class="hidden"
       @change="onFilePicked"
     >
 
-    <div class="border rounded-lg overflow-auto max-h-[calc(100vh-260px)]">
+    <!-- filtro -->
+    <div class="flex flex-wrap items-center gap-2">
+      <div class="relative">
+        <Search class="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+        <input
+          v-model="q"
+          type="text"
+          placeholder="filtrar por modelo, marca, SKU, roteiro…"
+          class="h-8 w-72 max-w-full rounded-md border bg-background pl-7 pr-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+        />
+      </div>
+      <select
+        v-model="statusFilter"
+        class="h-8 rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+      >
+        <option value="todos">todos</option>
+        <option value="pendente">pendentes</option>
+        <option value="aprovado">aprovados</option>
+        <option value="reprovado">não aprovados</option>
+      </select>
+      <span class="ml-auto text-xs text-muted-foreground">
+        {{ filteredRows.length }} de {{ rows.length }}
+      </span>
+    </div>
+
+    <div class="border rounded-lg overflow-auto max-h-[calc(100vh-300px)]">
       <table class="w-full text-sm border-collapse">
         <thead class="sticky top-0 bg-muted z-10">
           <tr>
@@ -243,7 +340,7 @@ async function remove(r: Creative) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Marca</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[150px]">SKU</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[340px]">Roteiro</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">Arquivo</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">Arquivos</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Aprovado</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
           </tr>
@@ -259,9 +356,14 @@ async function remove(r: Creative) {
               Nenhum criativo ainda — adicione a primeira linha abaixo.
             </td>
           </tr>
+          <tr v-else-if="!filteredRows.length">
+            <td colspan="7" class="text-center py-6 text-muted-foreground">
+              Nenhuma linha bate com o filtro.
+            </td>
+          </tr>
 
           <!-- data rows -->
-          <tr v-for="r in rows" :key="r.id" class="hover:bg-accent/30 align-top">
+          <tr v-for="r in filteredRows" :key="r.id" class="hover:bg-accent/30 align-top">
             <!-- modelo -->
             <td
               class="border border-border px-2 py-1.5 text-xs"
@@ -341,20 +443,30 @@ async function remove(r: Creative) {
               <span v-else-if="r.roteiro" class="block whitespace-pre-wrap leading-snug">{{ r.roteiro }}</span>
               <span v-else class="text-muted-foreground italic">clique pra escrever o roteiro…</span>
             </td>
-            <!-- arquivo -->
+            <!-- arquivos -->
             <td class="border border-border px-2 py-1.5 text-xs">
               <div class="space-y-1">
-                <div v-if="r.file_name" class="flex items-center gap-1.5">
-                  <a
-                    :href="`/api/marketing/creatives/${r.id}/arquivo`"
-                    target="_blank"
-                    class="inline-flex items-center gap-1 text-primary hover:underline"
-                    :title="r.file_name"
+                <div v-for="f in r.files" :key="f.id" class="flex items-center gap-1">
+                  <button
+                    type="button"
+                    class="inline-flex min-w-0 items-center gap-1 text-primary hover:underline"
+                    :title="`Visualizar ${f.file_name}`"
+                    @click.stop="openPreview(r, f)"
                   >
-                    <Download class="size-3.5 shrink-0" />
-                    <span class="truncate max-w-[130px]">{{ r.file_name }}</span>
-                  </a>
-                  <span class="text-muted-foreground shrink-0">{{ fmtSize(r.file_size) }}</span>
+                    <ImageIcon v-if="f.file_mime?.startsWith('image/')" class="size-3.5 shrink-0" />
+                    <Film v-else-if="f.file_mime?.startsWith('video/')" class="size-3.5 shrink-0" />
+                    <FileIcon v-else class="size-3.5 shrink-0" />
+                    <span class="truncate max-w-[140px]">{{ f.file_name }}</span>
+                  </button>
+                  <span class="text-muted-foreground shrink-0 text-[10px]">{{ fmtSize(f.file_size) }}</span>
+                  <button
+                    v-if="canEdit && !r.pushed_at"
+                    class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                    title="Apagar arquivo"
+                    @click.stop="removeFile(r, f)"
+                  >
+                    <X class="size-3" />
+                  </button>
                 </div>
                 <div class="flex items-center gap-1.5">
                   <button
@@ -365,7 +477,7 @@ async function remove(r: Creative) {
                   >
                     <Loader2 v-if="uploadingId === r.id" class="size-3 animate-spin" />
                     <Upload v-else class="size-3" />
-                    {{ r.file_name ? 'trocar' : 'anexar' }}
+                    {{ r.files.length ? 'adicionar' : 'anexar' }}
                   </button>
                   <span
                     v-if="r.pushed_at"
@@ -386,7 +498,7 @@ async function remove(r: Creative) {
                     ? 'bg-emerald-500 text-white border-emerald-500'
                     : 'text-emerald-600 bg-background hover:bg-emerald-500/10'"
                   :disabled="approvingId === r.id"
-                  title="Aprovar (envia pro MEGA)"
+                  title="Aprovar (envia os arquivos pro MEGA)"
                   @click.stop="aprovar(r, true)"
                 >
                   <Loader2 v-if="approvingId === r.id" class="size-3.5 animate-spin" />
@@ -448,7 +560,7 @@ async function remove(r: Creative) {
               />
             </td>
             <td colspan="3" class="border border-border px-2 py-1 text-[11px] text-muted-foreground align-middle">
-              Roteiro e arquivo você preenche clicando na célula depois de adicionar.
+              Roteiro e arquivos você preenche clicando na célula depois de adicionar.
             </td>
             <td class="border border-border px-1 py-1 text-center">
               <button
@@ -467,9 +579,57 @@ async function remove(r: Creative) {
     </div>
 
     <p class="text-xs text-muted-foreground">
-      Clique numa célula pra editar (Enter salva, Esc cancela). Ao aprovar
-      (<Check class="size-3 inline text-emerald-600" />), o arquivo sobe automaticamente
-      pra pasta do produto no MEGA — o produto é achado pelo SKU na Tabela de Preços (aba Produtos).
+      Clique numa célula pra editar (Enter salva, Esc cancela). Dá pra anexar vários
+      arquivos por linha; clique no nome pra visualizar a imagem ou o vídeo (com opção
+      de baixar). Ao aprovar (<Check class="size-3 inline text-emerald-600" />), todos os
+      arquivos sobem pra pasta do produto no MEGA — o produto é achado pelo SKU na
+      Tabela de Preços (aba Produtos).
     </p>
+
+    <!-- preview modal -->
+    <div
+      v-if="preview"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+      @click.self="closePreview"
+    >
+      <div class="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl">
+        <div class="flex items-center gap-2 border-b px-3 py-2">
+          <ImageIcon v-if="previewIsImage" class="size-4 shrink-0 text-muted-foreground" />
+          <Film v-else-if="previewIsVideo" class="size-4 shrink-0 text-muted-foreground" />
+          <FileIcon v-else class="size-4 shrink-0 text-muted-foreground" />
+          <span class="truncate text-sm font-medium">{{ preview.file.file_name }}</span>
+          <span class="shrink-0 text-xs text-muted-foreground">{{ fmtSize(preview.file.file_size) }}</span>
+          <div class="ml-auto flex shrink-0 items-center gap-1.5">
+            <a
+              :href="fileUrl(preview.row, preview.file, true)"
+              class="btn btn-sm gap-1"
+            >
+              <Download class="size-3.5" /> baixar
+            </a>
+            <button class="btn btn-sm btn-ghost px-1.5" title="Fechar (Esc)" @click="closePreview">
+              <X class="size-4" />
+            </button>
+          </div>
+        </div>
+        <div class="flex min-h-[200px] flex-1 items-center justify-center overflow-auto bg-black/40 p-2">
+          <img
+            v-if="previewIsImage"
+            :src="fileUrl(preview.row, preview.file)"
+            :alt="preview.file.file_name"
+            class="max-h-[75vh] max-w-full object-contain"
+          />
+          <video
+            v-else-if="previewIsVideo"
+            :src="fileUrl(preview.row, preview.file)"
+            controls
+            autoplay
+            class="max-h-[75vh] max-w-full"
+          />
+          <div v-else class="p-8 text-center text-sm text-muted-foreground">
+            Não dá pra visualizar esse tipo de arquivo aqui — use o botão baixar.
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

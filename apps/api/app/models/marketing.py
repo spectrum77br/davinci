@@ -24,7 +24,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
 
@@ -283,10 +283,11 @@ class MarketingAgentHeartbeat(Base, TimestampMixin):
 
 
 class MarketingCreative(Base, TimestampMixin):
-    """Linha da aba Criativos: briefing (modelo/marca/sku/roteiro) + arquivo
-    do criador de conteúdo + aprovação. `aprovado` é tri-state: NULL =
-    pendente, True = aprovado (arquivo vai pro MEGA), False = reprovado.
-    `pushed_at`/`pushed_dest` registram o envio pra pasta do produto."""
+    """Linha da aba Criativos: briefing (modelo/marca/sku/roteiro) + arquivos
+    do criador de conteúdo (1:N em MarketingCreativeFile) + aprovação.
+    `aprovado` é tri-state: NULL = pendente, True = aprovado (arquivos vão
+    pro MEGA), False = reprovado. `pushed_at`/`pushed_dest` registram o envio
+    pra pasta do produto."""
 
     __tablename__ = "marketing_creatives"
 
@@ -295,11 +296,6 @@ class MarketingCreative(Base, TimestampMixin):
     marca: Mapped[str | None] = mapped_column(String(64), nullable=True)
     sku: Mapped[str | None] = mapped_column(String(512), nullable=True)
     roteiro: Mapped[str | None] = mapped_column(Text, nullable=True)
-    file_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    file_mime: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # Caminho relativo a settings.uploads_dir (ex.: "creatives/<id>/<nome>").
-    file_rel: Mapped[str | None] = mapped_column(String(512), nullable=True)
     aprovado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pushed_dest: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -308,3 +304,29 @@ class MarketingCreative(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+
+    files: Mapped[list["MarketingCreativeFile"]] = relationship(
+        back_populates="creative",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="MarketingCreativeFile.created_at",
+    )
+
+
+class MarketingCreativeFile(Base, TimestampMixin):
+    __tablename__ = "marketing_creative_files"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    creative_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketing_creatives.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    file_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    file_mime: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Caminho relativo a settings.uploads_dir (ex.: "creatives/<id>/<nome>").
+    file_rel: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    creative: Mapped[MarketingCreative] = relationship(back_populates="files")
