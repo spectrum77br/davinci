@@ -82,9 +82,8 @@ def login(body: LoginIn, _: None = Depends(check_token)) -> dict:
     return {"ok": True, "message": "logged in"}
 
 
-@app.get("/folders")
-def folders(root: str = "/", _: None = Depends(check_token)) -> dict:
-    """Lista as entradas de primeiro nível de `root`.
+def _list_one(root: str) -> tuple[list[dict], bool]:
+    """Entradas de primeiro nível de `root`.
 
     Junta `mega-ls` (nomes puros, 1/linha) com `mega-ls -l` (flags: linhas de
     pasta começam com "d") pra marcar o que é pasta. Se os dois listamentos
@@ -108,16 +107,46 @@ def folders(root: str = "/", _: None = Depends(check_token)) -> dict:
             flags = [ln.lstrip().startswith("d") for ln in rows]
 
     base = root.rstrip("/")
-    items = []
-    for i, name in enumerate(names):
-        items.append(
-            {
-                "name": name,
-                "path": f"{base}/{name}",
-                "is_folder": flags[i] if flags is not None else True,
-            }
-        )
-    return {"root": root, "items": items, "flags_parsed": flags is not None}
+    items = [
+        {
+            "name": name,
+            "path": f"{base}/{name}",
+            "is_folder": flags[i] if flags is not None else True,
+            "level": 1,
+            "has_children": False,
+        }
+        for i, name in enumerate(names)
+    ]
+    return items, flags is not None
+
+
+@app.get("/folders")
+def folders(root: str = "/", depth: int = 1, _: None = Depends(check_token)) -> dict:
+    """Lista pastas de `root`; depth=2 desce um nível dentro de cada pasta.
+
+    Com depth=2, pastas de nível 1 que contêm subpastas ganham
+    has_children=True (containers de marca, ex.: /Uranyx) e as subpastas
+    entram na lista com level=2 — o matching usa as subpastas e ignora o
+    container.
+    """
+    items, parsed = _list_one(root)
+    if depth >= 2:
+        merged: list[dict] = []
+        for it in items:
+            merged.append(it)
+            if not it["is_folder"]:
+                continue
+            try:
+                kids, _ = _list_one(it["path"])
+            except HTTPException:
+                kids = []
+            sub = [k for k in kids if k["is_folder"]]
+            it["has_children"] = bool(sub)
+            for k in sub:
+                k["level"] = 2
+                merged.append(k)
+        items = merged
+    return {"root": root, "items": items, "flags_parsed": parsed}
 
 
 @app.get("/debug/ls")
@@ -131,20 +160,23 @@ class ExportIn(BaseModel):
     path: str
 
 
-@app.post("/export")
-def export(body: ExportIn, _: None = Depends(check_token)) -> dict:
+def _export_link(path: str) -> tuple[str | None, str]:
     # 1) já existe link? `mega-export <path>` lista as exportações atuais.
-    rc, out = run(["mega-export", body.path], timeout=90)
+    rc, out = run(["mega-export", path], timeout=90)
     m = _MEGA_URL_RE.search(out)
     if not m:
         # 2) cria o link público ("yes" aceita o aviso de copyright).
-        rc, out = run(
-            ["mega-export", "-a", body.path], timeout=120, input_text="yes\n"
-        )
+        rc, out = run(["mega-export", "-a", path], timeout=120, input_text="yes\n")
         m = _MEGA_URL_RE.search(out)
-    if not m:
+    return (m.group(0).rstrip(").,") if m else None), out
+
+
+@app.post("/export")
+def export(body: ExportIn, _: None = Depends(check_token)) -> dict:
+    url, out = _export_link(body.path)
+    if not url:
         raise HTTPException(status_code=502, detail=out[-400:] or "export failed")
-    return {"url": m.group(0).rstrip(").,")}
+    return {"url": url}
 
 
 class MkdirIn(BaseModel):
@@ -157,6 +189,41 @@ def mkdir(body: MkdirIn, _: None = Depends(check_token)) -> dict:
     if rc != 0 and "already exists" not in out.lower():
         raise HTTPException(status_code=502, detail=out[-400:])
     return {"ok": True}
+
+
+class ScaffoldIn(BaseModel):
+    root: str
+    names: list[str]
+
+
+@app.post("/scaffold")
+def scaffold(body: ScaffoldIn, _: None = Depends(check_token)) -> dict:
+    """Cria <root>/<name> pra cada nome e devolve o link público de cada
+    pasta. Idempotente: pasta existente só tem o link (re)exportado."""
+    stripped = body.root.strip().strip("/")
+    base = f"/{stripped}" if stripped else ""
+    results = []
+    for raw in body.names[:300]:
+        name = raw.strip().strip("/").replace("/", "-")
+        if not name:
+            continue
+        path = f"{base}/{name}"
+        rc, out = run(["mega-mkdir", "-p", path], timeout=90)
+        if rc != 0 and "already exists" not in out.lower():
+            results.append(
+                {"name": name, "path": path, "url": None, "error": out[-300:]}
+            )
+            continue
+        url, exp_out = _export_link(path)
+        results.append(
+            {
+                "name": name,
+                "path": path,
+                "url": url,
+                "error": None if url else (exp_out[-300:] or "export failed"),
+            }
+        )
+    return {"root": base or "/", "results": results}
 
 
 @app.post("/upload")

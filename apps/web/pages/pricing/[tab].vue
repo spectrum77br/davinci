@@ -3,7 +3,7 @@ import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
   Star, Send, Ban, Check, Link2, Copy, Minus,
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
-  ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, Pencil,
+  ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, Pencil, FolderPlus,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
@@ -889,6 +889,87 @@ async function megaApply() {
     toast.error('Sincronizar MEGA', [megaErrMsg(e)])
   } finally {
     megaApplyBusy.value = false
+  }
+}
+
+// -- criação da estrutura de pastas marca/modelo no MEGA ---------------
+const showMegaScaffold = ref(false)
+const megaScaffoldBrand = ref('Uranyx')
+const megaScaffoldText = ref('')
+const megaScaffoldBusy = ref(false)
+const megaScaffoldCount = computed(
+  () => megaScaffoldText.value.split('\n').map(s => s.trim()).filter(Boolean).length,
+)
+
+// Sugere uma pasta por MODELO a partir dos produtos sem link: corta
+// tamanho/kit de mala ("M2 listrada mala 12+18" → "M2 listrada") e
+// memória/cor de eletrônico ("uranyx Fossibot S7 8.128 - …" → "Fossibot S7"),
+// então várias linhas da tabela apontam pra mesma pasta de fotos.
+function suggestMegaFolders(): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const p of products.value) {
+    if (p.fotos_url) continue
+    let n = (p.name || '').trim()
+    if (!n) continue
+    if (/^uranyx\s/i.test(n)) {
+      n = n.split(/\s+-\s+/)[0].replace(/^uranyx\s+/i, '')
+      n = n.replace(/\s+\d+\.\d+.*$/, '').replace(/\s*\(.*$/, '')
+    } else if (/\b(mala|maleta)\b/i.test(n)) {
+      n = n.replace(/\s+(mala|maleta)\b.*$/i, '')
+    } else {
+      n = n.split(/\s+-\s+/)[0].replace(/\s+\d+\.\d+.*$/, '')
+    }
+    n = n.replace(/\s*\+\s*acess\w*.*$/i, '').trim()
+    if (!n) continue
+    const key = n.toLowerCase()
+    if (!seen.has(key)) {
+      seen.add(key)
+      out.push(n)
+    }
+  }
+  const norm = (s: string) =>
+    s.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ').trim()
+  // descarta nome que é prefixo de outro ("M2" × "M2 listrada") pra não
+  // criar pastas ambíguas no matching
+  return out.filter(a => !out.some(b => b !== a && norm(b).startsWith(norm(a) + ' ')))
+}
+
+function openMegaScaffold() {
+  if (!megaScaffoldText.value.trim())
+    megaScaffoldText.value = suggestMegaFolders().join('\n')
+  showMegaScaffold.value = true
+}
+
+async function megaScaffoldCreate() {
+  const brand = megaScaffoldBrand.value.trim()
+  const names = megaScaffoldText.value.split('\n').map(s => s.trim()).filter(Boolean)
+  if (!brand || !names.length || megaScaffoldBusy.value) return
+  megaScaffoldBusy.value = true
+  try {
+    const rep = await api<any>('/api/pricing/mega/scaffold', {
+      method: 'POST',
+      body: { brand, names },
+    })
+    const lines = [
+      `${rep.folders_created} pasta(s) em ${rep.brand_path}`,
+      `${rep.applied} produto(s) receberam o link`,
+    ]
+    if (rep.unmatched_products?.length)
+      lines.push(`${rep.unmatched_products.length} produto(s) continuam sem pasta`)
+    if (rep.errors?.length) {
+      toast.warning('Estrutura criada com avisos', [...lines, ...rep.errors.slice(0, 3)])
+    } else {
+      toast.success('Estrutura criada no MEGA', lines)
+    }
+    showMegaScaffold.value = false
+    await loadProducts()
+    await megaDryRun()
+  } catch (e: any) {
+    toast.error('Criar pastas no MEGA', [megaErrMsg(e)])
+  } finally {
+    megaScaffoldBusy.value = false
   }
 }
 
@@ -3143,6 +3224,10 @@ watch(department, async () => {
             <b class="text-foreground">{{ megaPreview.to_apply }}</b> vão receber link agora
             (quem já tem link não é alterado)
           </p>
+          <p v-if="!megaPreview.folders_total && canEditProdutos" class="text-xs text-amber-700">
+            A conta MEGA ainda está sem pastas — use "Criar pastas no MEGA" pra montar a
+            estrutura (marca → uma pasta por modelo) a partir dos seus produtos.
+          </p>
           <div v-if="megaPreview.to_apply" class="border rounded max-h-56 overflow-auto">
             <table class="w-full text-xs">
               <tbody>
@@ -3185,15 +3270,68 @@ watch(department, async () => {
               <li v-for="(f, i) in megaPreview.unmatched_folders" :key="i">{{ f }}</li>
             </ul>
           </details>
+          <div class="flex items-center justify-between gap-2 pt-1">
+            <button v-if="canEditProdutos" class="btn btn-sm" @click="openMegaScaffold">
+              <FolderPlus class="h-4 w-4 mr-1" /> Criar pastas no MEGA…
+            </button>
+            <span v-else></span>
+            <div class="flex gap-2">
+              <button class="btn btn-sm" @click="showMegaPreview = false">Fechar</button>
+              <button
+                class="btn btn-sm btn-primary"
+                :disabled="megaApplyBusy || !megaPreview.to_apply"
+                @click="megaApply"
+              >
+                <Loader2 v-if="megaApplyBusy" class="h-4 w-4 mr-1 animate-spin" />
+                Aplicar {{ megaPreview.to_apply }} link(s)
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MEGA: modal de criação da estrutura de pastas (marca/modelo) -->
+      <div
+        v-if="showMegaScaffold"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        @click.self="showMegaScaffold = false"
+      >
+        <div class="bg-background border rounded-lg shadow-xl w-full max-w-lg p-4 space-y-3 max-h-[85vh] overflow-auto">
+          <h3 class="text-sm font-semibold flex items-center gap-2">
+            <FolderPlus class="h-4 w-4" /> Criar pastas no MEGA
+          </h3>
+          <p class="text-xs text-muted-foreground">
+            Cria a pasta da marca com uma subpasta por modelo (ex.: /Uranyx/M2 listrada)
+            e já preenche o link de fotos de todos os produtos daquele modelo.
+            As fotos podem ser adicionadas depois — o link continua o mesmo.
+          </p>
+          <label class="block text-xs">
+            <span class="text-muted-foreground">Pasta principal (marca)</span>
+            <input
+              v-model="megaScaffoldBrand"
+              placeholder="Uranyx"
+              class="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-background"
+            />
+          </label>
+          <label class="block text-xs">
+            <span class="text-muted-foreground">
+              Modelos — uma pasta por linha ({{ megaScaffoldCount }}); edite à vontade
+            </span>
+            <textarea
+              v-model="megaScaffoldText"
+              rows="12"
+              class="mt-1 w-full border rounded px-2 py-1.5 text-xs font-mono bg-background"
+            ></textarea>
+          </label>
           <div class="flex justify-end gap-2 pt-1">
-            <button class="btn btn-sm" @click="showMegaPreview = false">Fechar</button>
+            <button class="btn btn-sm" @click="showMegaScaffold = false">Cancelar</button>
             <button
               class="btn btn-sm btn-primary"
-              :disabled="megaApplyBusy || !megaPreview.to_apply"
-              @click="megaApply"
+              :disabled="megaScaffoldBusy || !megaScaffoldCount || !megaScaffoldBrand.trim()"
+              @click="megaScaffoldCreate"
             >
-              <Loader2 v-if="megaApplyBusy" class="h-4 w-4 mr-1 animate-spin" />
-              Aplicar {{ megaPreview.to_apply }} link(s)
+              <Loader2 v-if="megaScaffoldBusy" class="h-4 w-4 mr-1 animate-spin" />
+              Criar {{ megaScaffoldCount }} pasta(s)
             </button>
           </div>
         </div>

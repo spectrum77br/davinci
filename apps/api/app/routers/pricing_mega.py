@@ -4,9 +4,11 @@ Fluxo do operador:
   * GET  /status  → sidecar no ar? conta logada?
   * POST /login   → login na conta MEGA (senha vai direto pro sidecar e não
                     é armazenada; a sessão persiste no volume do container).
-  * POST /sync    → casa pastas de fotos ↔ produtos pelo nome; dry_run
-                    devolve a prévia, apply gera link público (mega-export)
-                    e grava fotos_url/fotos_path.
+  * POST /sync    → casa pastas de fotos ↔ produtos pelo nome (2 níveis:
+                    marca/modelo); dry_run devolve a prévia, apply gera
+                    link público (mega-export) e grava fotos_url/fotos_path.
+  * POST /scaffold → cria a estrutura marca/modelo no MEGA a partir de uma
+                    lista de nomes e já preenche os links dos produtos.
   * POST /products/{id}/fotos/upload → sobe fotos pro MEGA na pasta do
                     produto (cria se não existir) e salva o link.
 """
@@ -111,10 +113,16 @@ async def mega_sync(
     root = (body.root or _root()).strip() or "/"
     try:
         listing = await sidecar_request(
-            "GET", "/folders", params={"root": root}, timeout=300.0
+            "GET", "/folders", params={"root": root, "depth": 2}, timeout=600.0
         )
     except MegaError as exc:
         raise _sidecar_http_error(exc) from exc
+
+    # Containers de marca (pastas com subpastas, ex.: /Uranyx) ficam fora do
+    # matching — os modelos são as subpastas deles.
+    folder_items = [
+        f for f in listing.get("items", []) if not f.get("has_children")
+    ]
 
     products = (
         (
@@ -127,7 +135,7 @@ async def mega_sync(
         .scalars()
         .all()
     )
-    rep = match_products_to_folders(list(products), listing.get("items", []))
+    rep = match_products_to_folders(list(products), folder_items)
 
     applied = 0
     errors: list[str] = []
@@ -135,6 +143,10 @@ async def mega_sync(
         url_by_path: dict[str, str] = {}
         for p, f in rep["matches"]:
             if body.only_missing and p.fotos_url:
+                # Não mexe no link, mas corrige o destino de upload se a
+                # pasta mudou de lugar (o link público sobrevive a moves).
+                if p.fotos_path != f["path"]:
+                    p.fotos_path = f["path"]
                 continue
             path = f["path"]
             url = url_by_path.get(path)
@@ -193,7 +205,120 @@ async def mega_sync(
             {"sku": p.sku, "name": p.name}
             for p in rep["unmatched_products"][:500]
         ],
-        "unmatched_folders": [f["name"] for f in rep["unmatched_folders"][:500]],
+        "unmatched_folders": [
+            f.get("path", f["name"]) for f in rep["unmatched_folders"][:500]
+        ],
+        "errors": errors[:50],
+    }
+
+
+class MegaScaffoldIn(BaseModel):
+    # Cria <root>/<brand>/<name> pra cada nome (uma pasta por modelo) e já
+    # preenche fotos_url/fotos_path dos produtos que casarem pelo nome —
+    # links de pasta valem mesmo vazias, as fotos entram depois.
+    brand: str
+    names: list[str]
+    only_missing: bool = True
+
+
+@router.post("/scaffold")
+async def mega_scaffold(
+    body: MegaScaffoldIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos_produtos", "edit"))
+    ],
+) -> dict[str, Any]:
+    brand = body.brand.strip().strip("/").replace("/", "-")
+    if not brand:
+        raise HTTPException(400, detail={"code": "brand_required"})
+    seen: set[str] = set()
+    names: list[str] = []
+    for raw in body.names:
+        n = (raw or "").strip()
+        if n and n.lower() not in seen:
+            seen.add(n.lower())
+            names.append(n)
+    if not names:
+        raise HTTPException(400, detail={"code": "names_required"})
+    if len(names) > 300:
+        raise HTTPException(400, detail={"code": "too_many_folders"})
+
+    brand_path = f"{_root().rstrip('/')}/{brand}"
+    try:
+        res = await sidecar_request(
+            "POST",
+            "/scaffold",
+            json={"root": brand_path, "names": names},
+            timeout=1800.0,
+        )
+    except MegaError as exc:
+        raise _sidecar_http_error(exc) from exc
+    results = res.get("results", [])
+    created = [r for r in results if r.get("url")]
+    errors = [f"{r['name']}: {r['error']}" for r in results if r.get("error")]
+
+    products = (
+        (
+            await session.execute(
+                select(PricingProduct)
+                .where(user_scope(PricingProduct, user))
+                .order_by(PricingProduct.sku)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    folder_items = [
+        {"name": r["name"], "path": r["path"], "is_folder": True}
+        for r in created
+    ]
+    rep = match_products_to_folders(list(products), folder_items)
+    url_by_path = {r["path"]: r["url"] for r in created}
+    applied = 0
+    for p, f in rep["matches"]:
+        url = url_by_path.get(f["path"])
+        if not url:
+            continue
+        if body.only_missing and p.fotos_url:
+            if p.fotos_path != f["path"]:
+                p.fotos_path = f["path"]
+            continue
+        p.fotos_url = url
+        p.fotos_path = f["path"]
+        applied += 1
+    await session.commit()
+    logger.info(
+        "mega_fotos_scaffold",
+        brand_path=brand_path,
+        folders=len(created),
+        applied=applied,
+        errors=len(errors),
+        user_id=str(user.id),
+    )
+    return {
+        "brand_path": brand_path,
+        "folders_created": len(created),
+        "applied": applied,
+        "matched": [
+            {"sku": p.sku, "name": p.name, "folder": f["name"]}
+            for p, f in rep["matches"][:800]
+        ],
+        "ambiguous": [
+            {
+                "sku": a["product"].sku,
+                "name": a["product"].name,
+                "candidates": a["candidates"][:6],
+            }
+            for a in rep["ambiguous"][:200]
+        ],
+        "unmatched_products": [
+            {"sku": p.sku, "name": p.name}
+            for p in rep["unmatched_products"][:500]
+        ],
+        "unmatched_folders": [
+            f.get("path", f["name"]) for f in rep["unmatched_folders"][:500]
+        ],
         "errors": errors[:50],
     }
 
