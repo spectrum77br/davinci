@@ -101,6 +101,9 @@ class PedidoInfo:
     documento: str | None = None
     tipo_pessoa: str | None = None
     telefone: str | None = None
+    # Nome da conta de marketplace (store_info.account_name). Só o arquivo do
+    # Upseller usa: cada conta é uma Loja registrada lá. O CSV do Bling ignora.
+    loja: str | None = None
 
 
 def _s(v: object) -> str:

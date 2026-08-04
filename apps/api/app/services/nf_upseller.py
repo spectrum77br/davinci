@@ -263,8 +263,9 @@ def montar_xlsx(
     emitir_nfe: bool = True,
 ) -> bytes:
     """.xlsx no template do Upseller (aba `order_`): linhas 1-3 = cabeçalho do
-    modelo; da linha 4 em diante, um item por linha. `loja_nome` é o nome da
-    loja avulsa no Upseller (unifica os itens do mesmo pedido).
+    modelo; da linha 4 em diante, um item por linha. A loja de cada pedido é a
+    `PedidoInfo.loja` (a conta de marketplace, registrada como Loja no
+    Upseller); `loja_nome` é só o fallback de quem não tem conta resolvida.
 
     `emitir_nfe=True` (padrão) marca "Necessita Emitir NF-e = SIM" (faturador
     Upseller: a NF sai do Upseller). Pro fluxo ML — em que a NF já foi emitida
@@ -277,10 +278,13 @@ def montar_xlsx(
     ws.append(_ROW2_GRUPOS)
     ws.append(_HEADERS)
     for pedido, linhas in pedidos:
+        # Cada conta de marketplace é uma Loja registrada no Upseller; o arquivo
+        # pode misturar lojas (a unificação é pelo par Loja + Nº do Pedido).
+        loja_pedido = _s(pedido.loja) or loja_nome
         for i, linha in enumerate(linhas):
             ws.append(
                 _linha(
-                    loja_nome,
+                    loja_pedido,
                     pedido,
                     linha,
                     incluir_destinatario=(i == 0),

@@ -61,7 +61,8 @@ _ITENS_SQL = text(
         bo.cidade_destino      AS cidade_destino,
         bo.uf_destino          AS uf_destino,
         si.nf_faturador_id     AS nf_faturador_id,
-        si.nf_etiqueta_id      AS nf_etiqueta_id
+        si.nf_etiqueta_id      AS nf_etiqueta_id,
+        si.account_name        AS conta
     FROM "{_SCHEMA}".bling_orders bo
     JOIN "{_SCHEMA}".store_info si ON si.bling_store_id::text = bo.loja
     WHERE bo.numero = ANY(:numeros)
@@ -367,6 +368,8 @@ async def _montar_pedidos(
             "cidade_destino": cab["cidade_destino"],
             "uf_destino": cab["uf_destino"],
             "documento": cab["documento"],
+            # Conta de marketplace = Loja no Upseller (o CSV do Bling ignora).
+            "loja": _clean(cab["conta"]),
         }
         info = await _montar_info(client, base, cab["bling_id"])
         montados.append(
