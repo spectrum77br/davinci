@@ -194,6 +194,11 @@ const department = computed<DeptKey>({
   },
 })
 
+// Quantas colunas de kit cada departamento mostra na aba Produtos
+// (celular vai até kit 8; mala e eletro usam só o kit 1).
+const KIT_COUNT_BY_DEPT: Record<string, number> = { celular: 8, mala: 1, eletro: 1 }
+const kitCount = computed(() => KIT_COUNT_BY_DEPT[department.value] ?? 4)
+
 // =========================================================== accounts state
 
 type Account = {
@@ -390,6 +395,10 @@ type PricingProduct = {
   cost_kit2: string | number | null
   cost_kit3: string | number | null
   cost_kit4: string | number | null
+  cost_kit5: string | number | null
+  cost_kit6: string | number | null
+  cost_kit7: string | number | null
+  cost_kit8: string | number | null
   description: string | null
   model: string | null
   ean: string | null
@@ -663,7 +672,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
     payload.platform = raw
   } else if (field === 'kit_number') {
     const n = parseInt(raw)
-    if (!Number.isFinite(n) || n < 1 || n > 5) return
+    if (!Number.isFinite(n) || n < 1 || n > 8) return
     payload.kit_number = n
   } else if (field === 'commission') {
     if (!raw) {
@@ -1196,6 +1205,10 @@ const newProd = reactive({
   cost_kit2: '',
   cost_kit3: '',
   cost_kit4: '',
+  cost_kit5: '',
+  cost_kit6: '',
+  cost_kit7: '',
+  cost_kit8: '',
   ean: '',
   description: '',
   model: '',
@@ -1210,6 +1223,10 @@ function openAddProd() {
   newProd.cost_kit2 = ''
   newProd.cost_kit3 = ''
   newProd.cost_kit4 = ''
+  newProd.cost_kit5 = ''
+  newProd.cost_kit6 = ''
+  newProd.cost_kit7 = ''
+  newProd.cost_kit8 = ''
   newProd.ean = ''
   newProd.description = ''
   newProd.model = ''
@@ -1231,9 +1248,10 @@ async function submitNewProd() {
       product_type: newProd.product_type || 2,
       cost_kit1: Number(newProd.cost_kit1 || 0).toFixed(2),
     }
-    if (newProd.cost_kit2) body.cost_kit2 = Number(newProd.cost_kit2).toFixed(2)
-    if (newProd.cost_kit3) body.cost_kit3 = Number(newProd.cost_kit3).toFixed(2)
-    if (newProd.cost_kit4) body.cost_kit4 = Number(newProd.cost_kit4).toFixed(2)
+    for (let k = 2; k <= 8; k++) {
+      const v = (newProd as any)[`cost_kit${k}`]
+      if (v) body[`cost_kit${k}`] = Number(v).toFixed(2)
+    }
     if (newProd.ean) body.ean = newProd.ean
     if (newProd.description) body.description = newProd.description
     if (newProd.model) body.model = newProd.model
@@ -1921,7 +1939,7 @@ const filteredGridProducts = computed(() => {
 
 // Feature 9: negative margin helpers + counter
 function getKitCost(prod: PricingProduct, kitNumber: number): number {
-  const key = `cost_kit${Math.max(1, Math.min(4, kitNumber || 1))}` as keyof PricingProduct
+  const key = `cost_kit${Math.max(1, Math.min(8, kitNumber || 1))}` as keyof PricingProduct
   const v = prod[key] ?? prod.cost_kit1
   return Number(v ?? 0)
 }
@@ -2092,7 +2110,9 @@ function handleExportExcel() {
   const accs = grid.value.accounts
   const prods = filteredGridProducts.value
   const headers = ['SKU', 'Produto', 'Bling', '7d', '30d', department.value === 'celular' ? 'Kit1' : 'Custo']
-  if (department.value === 'celular') headers.push('Kit2', 'Kit3', 'Kit4')
+  if (department.value === 'celular') {
+    for (let k = 2; k <= 8; k++) headers.push(`Kit${k}`)
+  }
   for (const acc of accs) headers.push(acc.name)
   const rows = prods.map(p => {
     const row: string[] = [
@@ -2104,11 +2124,9 @@ function handleExportExcel() {
       String(Number(p.cost_kit1 || 0).toFixed(0)),
     ]
     if (department.value === 'celular') {
-      row.push(
-        String(Number(p.cost_kit2 || 0).toFixed(0)),
-        String(Number(p.cost_kit3 || 0).toFixed(0)),
-        String(Number(p.cost_kit4 || 0).toFixed(0)),
-      )
+      for (let k = 2; k <= 8; k++) {
+        row.push(String(Number((p as any)[`cost_kit${k}`] || 0).toFixed(0)))
+      }
     }
     for (const acc of accs) {
       const c = cellOf(p.id, acc.id)
@@ -2902,10 +2920,7 @@ watch(department, async () => {
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Descrição</th>
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Modelo</th>
               </template>
-              <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 1</th>
-              <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 2</th>
-              <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 3</th>
-              <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 4</th>
+              <th v-for="k in kitCount" :key="`kith-${k}`" class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit {{ k }}</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-14">Fotos</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Tabela</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-16">Catálogo</th>
@@ -2959,17 +2974,8 @@ watch(department, async () => {
                   <input v-model="newProd.model" type="text" placeholder="Modelo" class="w-full text-xs border rounded px-1.5 py-1 bg-background" />
                 </td>
               </template>
-              <td class="border border-border px-1 py-1">
-                <input v-model="newProd.cost_kit1" type="text" inputmode="decimal" placeholder="0.00" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
-              </td>
-              <td class="border border-border px-1 py-1">
-                <input v-model="newProd.cost_kit2" type="text" inputmode="decimal" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
-              </td>
-              <td class="border border-border px-1 py-1">
-                <input v-model="newProd.cost_kit3" type="text" inputmode="decimal" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
-              </td>
-              <td class="border border-border px-1 py-1">
-                <input v-model="newProd.cost_kit4" type="text" inputmode="decimal" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
+              <td v-for="k in kitCount" :key="`newkit-${k}`" class="border border-border px-1 py-1">
+                <input v-model="(newProd as any)[`cost_kit${k}`]" type="text" inputmode="decimal" :placeholder="k === 1 ? '0.00' : ''" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
               <!-- Fotos: link é adicionado depois, editando a linha criada. -->
               <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
@@ -3077,7 +3083,7 @@ watch(department, async () => {
                 </td>
               </template>
               <td
-                v-for="k in 4" :key="`kit-${k}`"
+                v-for="k in kitCount" :key="`kit-${k}`"
                 class="border border-border px-2 py-1.5 text-xs text-right cursor-pointer"
                 :class="{
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, `cost_kit${k}`),

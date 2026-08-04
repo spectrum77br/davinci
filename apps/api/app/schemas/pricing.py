@@ -14,7 +14,7 @@ class PricingAccountBase(BaseModel):
     # legacy `department` slug; outputs always include both for UI compat.
     segment_id: UUID | None = None
     department: str | None = None
-    kit_number: int = Field(default=1, ge=1, le=5)
+    kit_number: int = Field(default=1, ge=1, le=8)
     commission: Decimal | None = None
     margin1: Decimal | None = None
     shipping1: Decimal | None = None
@@ -62,7 +62,7 @@ class PricingAccountPatch(BaseModel):
     listing_type: str | None = None
     segment_id: UUID | None = None
     department: str | None = None
-    kit_number: int | None = Field(default=None, ge=1, le=5)
+    kit_number: int | None = Field(default=None, ge=1, le=8)
     commission: Decimal | None = None
     margin1: Decimal | None = None
     shipping1: Decimal | None = None
@@ -127,6 +127,10 @@ class PricingProductBase(BaseModel):
     cost_kit2: Decimal | None = None
     cost_kit3: Decimal | None = None
     cost_kit4: Decimal | None = None
+    cost_kit5: Decimal | None = None
+    cost_kit6: Decimal | None = None
+    cost_kit7: Decimal | None = None
+    cost_kit8: Decimal | None = None
     description: str | None = None
     model: str | None = None
     ean: str | None = None
@@ -154,6 +158,10 @@ class PricingProductPatch(BaseModel):
     cost_kit2: Decimal | None = None
     cost_kit3: Decimal | None = None
     cost_kit4: Decimal | None = None
+    cost_kit5: Decimal | None = None
+    cost_kit6: Decimal | None = None
+    cost_kit7: Decimal | None = None
+    cost_kit8: Decimal | None = None
     description: str | None = None
     model: str | None = None
     ean: str | None = None
@@ -188,6 +196,10 @@ class PricingProductImportItem(BaseModel):
     cost_kit2: Decimal | None = None
     cost_kit3: Decimal | None = None
     cost_kit4: Decimal | None = None
+    cost_kit5: Decimal | None = None
+    cost_kit6: Decimal | None = None
+    cost_kit7: Decimal | None = None
+    cost_kit8: Decimal | None = None
     description: str | None = None
     model: str | None = None
     ean: str | None = None

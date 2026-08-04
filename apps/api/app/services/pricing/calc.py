@@ -60,6 +60,10 @@ def _kit_value(product: PricingProduct, kit: int) -> Decimal | None:
         2: product.cost_kit2,
         3: product.cost_kit3,
         4: product.cost_kit4,
+        5: product.cost_kit5,
+        6: product.cost_kit6,
+        7: product.cost_kit7,
+        8: product.cost_kit8,
     }.get(kit)
     if val is None:
         return None
