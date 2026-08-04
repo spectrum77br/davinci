@@ -295,6 +295,9 @@ class MarketingCreative(Base, TimestampMixin):
     modelo: Mapped[str] = mapped_column(String(160), nullable=False)
     marca: Mapped[str | None] = mapped_column(String(64), nullable=True)
     sku: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Equipe de marketing dona da linha (nome livre; casa com
+    # users.marketing_teams). NULL = sem equipe (só admin/sem-equipe vê).
+    equipe: Mapped[str | None] = mapped_column(String(64), nullable=True)
     roteiro: Mapped[str | None] = mapped_column(Text, nullable=True)
     aprovado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

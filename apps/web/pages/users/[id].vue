@@ -19,6 +19,7 @@ type UserDetail = {
   duoke: string | null
   stock_tags: string[] | null
   sales_teams: number[] | null
+  marketing_teams: string[] | null
   permissions: Partial<Record<Resource, Partial<ResourcePerm>>>
   has_password: boolean
   disabled_at: string | null
@@ -68,6 +69,7 @@ const form = reactive({
   duoke: '',
   stock_tags: [] as string[],
   sales_teams: [] as number[],
+  marketing_teams: [] as string[],
   status: 'pending' as 'pending' | 'active' | 'suspended',
 })
 
@@ -104,6 +106,7 @@ function resetForm() {
   form.duoke = user.value.duoke || ''
   form.stock_tags = [...(user.value.stock_tags || [])]
   form.sales_teams = [...(user.value.sales_teams || [])]
+  form.marketing_teams = [...(user.value.marketing_teams || [])]
   form.status = user.value.status
 }
 
@@ -159,6 +162,50 @@ function removeSalesTeamOption(n: number) {
   if (i >= 0) form.sales_teams.splice(i, 1)
 }
 
+// ---- Equipe de Marketing — espelho das Equipes de Vendas, mas com
+// ---- nomes livres (strings). Opções = equipes já usadas (endpoint
+// ---- /equipes dos Criativos) ∪ equipes do próprio user.
+const marketingTeamOptions = ref<string[]>([])
+
+async function loadMarketingTeamOptions() {
+  const own = user.value?.marketing_teams || []
+  try {
+    const opts = await api<string[]>('/api/marketing/creatives/equipes')
+    const map = new Map<string, string>()
+    for (const t of [...opts, ...own]) {
+      const k = t.trim().toLowerCase()
+      if (k && !map.has(k)) map.set(k, t.trim())
+    }
+    marketingTeamOptions.value = [...map.values()].sort((a, b) => a.localeCompare(b))
+  } catch {
+    marketingTeamOptions.value = [...own].sort((a, b) => a.localeCompare(b))
+  }
+}
+
+function toggleMarketingTeam(t: string) {
+  const i = form.marketing_teams.indexOf(t)
+  if (i >= 0) form.marketing_teams.splice(i, 1)
+  else form.marketing_teams.push(t)
+}
+
+const newMarketingTeam = ref<string>('')
+function addMarketingTeam() {
+  const t = newMarketingTeam.value.trim().slice(0, 64)
+  if (!t) return
+  const k = t.toLowerCase()
+  if (!form.marketing_teams.some((x) => x.toLowerCase() === k)) form.marketing_teams.push(t)
+  if (!marketingTeamOptions.value.some((x) => x.toLowerCase() === k)) {
+    marketingTeamOptions.value = [...marketingTeamOptions.value, t].sort((a, b) => a.localeCompare(b))
+  }
+  newMarketingTeam.value = ''
+}
+
+function removeMarketingTeamOption(t: string) {
+  marketingTeamOptions.value = marketingTeamOptions.value.filter((x) => x !== t)
+  const i = form.marketing_teams.indexOf(t)
+  if (i >= 0) form.marketing_teams.splice(i, 1)
+}
+
 const perms = reactive<Record<Resource, ResourcePerm>>(
   Object.fromEntries(RESOURCES.map((r) => [r, { view: false, edit: false, delete: false }])) as any,
 )
@@ -177,6 +224,7 @@ function resetPerms() {
 
 await load()
 await loadSalesTeamOptions()
+await loadMarketingTeamOptions()
 
 // Cascade rules: delete → edit → view
 function onChange(r: Resource, action: Action) {
@@ -255,6 +303,8 @@ async function saveCadastral() {
     body.stock_tags = [...form.stock_tags]
     // Equipes de Vendas (mesma semântica de stock_tags).
     body.sales_teams = [...form.sales_teams]
+    // Equipe de Marketing (nomes livres — mesma semântica).
+    body.marketing_teams = [...form.marketing_teams]
     user.value = await api<UserDetail>(`/api/users/${userId}`, { method: 'PATCH', body })
     resetPerms()
   } catch (e: any) {
@@ -426,6 +476,59 @@ async function removeUser() {
               equipes esse usuário pertence.
               <span v-if="form.sales_teams.length">
                 Selecionadas: <code>{{ form.sales_teams.map(teamLabel).join(', ') }}</code>
+              </span>
+            </p>
+          </div>
+          <div class="md:col-span-2">
+            <Label>Equipe de Marketing</Label>
+            <div
+              v-if="marketingTeamOptions.length"
+              class="grid grid-cols-2 md:grid-cols-6 gap-1.5 mt-1 border rounded-md p-2 bg-background"
+            >
+              <div
+                v-for="t in marketingTeamOptions"
+                :key="t"
+                class="group inline-flex items-center gap-1.5 text-sm rounded px-1.5 py-0.5 hover:bg-muted/50"
+              >
+                <label class="inline-flex items-center gap-1.5 cursor-pointer flex-1">
+                  <input
+                    type="checkbox"
+                    :checked="form.marketing_teams.includes(t)"
+                    @change="toggleMarketingTeam(t)"
+                  />
+                  <span>{{ t }}</span>
+                </label>
+                <button
+                  type="button"
+                  title="Excluir equipe"
+                  class="text-muted-foreground/50 hover:text-destructive opacity-0 group-hover:opacity-100 transition"
+                  @click="removeMarketingTeamOption(t)"
+                >
+                  <X class="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+            <p v-else class="text-[11px] text-muted-foreground mt-1 italic">
+              Nenhuma equipe de marketing cadastrada ainda. Use o campo abaixo pra adicionar.
+            </p>
+            <div class="flex items-center gap-2 mt-2">
+              <Input
+                v-model="newMarketingTeam"
+                type="text"
+                placeholder="+ adicionar equipe (ex: video)"
+                class="w-48"
+                @keydown.enter.prevent="addMarketingTeam"
+              />
+              <Button type="button" variant="outline" size="sm" @click="addMarketingTeam">
+                Adicionar
+              </Button>
+            </div>
+            <p class="text-[11px] text-muted-foreground mt-1">
+              Multi-select de equipes de marketing (nome livre). Usuário não-admin com
+              ≥1 equipe marcada só enxerga, na aba Criativos, as linhas com o campo
+              Equipe igual a uma das dele.
+              <span v-if="form.marketing_teams.length">
+                Selecionadas: <code>{{ form.marketing_teams.join(', ') }}</code>
               </span>
             </p>
           </div>

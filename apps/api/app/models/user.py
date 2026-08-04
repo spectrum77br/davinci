@@ -74,3 +74,8 @@ class User(Base, TimestampMixin):
     # por "lista de inteiros". O número é a etiqueta da equipe; o vínculo
     # loja↔equipe vive em StoreInfo.sales_team (migration 0136).
     sales_teams: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True)
+
+    # Equipes de Marketing (multi). Lista de NOMES livres de equipe —
+    # espelha sales_teams trocando ints por strings. Usuário não-admin
+    # com ≥1 equipe só enxerga linhas de Criativos da(s) equipe(s) dele.
+    marketing_teams: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)

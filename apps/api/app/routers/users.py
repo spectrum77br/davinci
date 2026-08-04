@@ -22,6 +22,7 @@ from app.schemas.users import (
     UserOut,
     UserPatch,
     _normalize_sales_teams,
+    _normalize_marketing_teams,
     _normalize_stock_tags,
 )
 from app.security.password import hash_password
@@ -47,6 +48,7 @@ def _to_out(u: User) -> UserOut:
         duoke=u.duoke,
         stock_tags=u.stock_tags or None,
         sales_teams=u.sales_teams or None,
+        marketing_teams=u.marketing_teams or None,
         permissions=u.permissions or {},
         has_password=u.password_hash is not None,
         last_login_at=u.last_login_at,
@@ -175,6 +177,7 @@ async def create_user(
         duoke=body.duoke,
         stock_tags=_normalize_stock_tags(body.stock_tags),
         sales_teams=_normalize_sales_teams(body.sales_teams),
+        marketing_teams=_normalize_marketing_teams(body.marketing_teams),
         role=UserRole.USER,
         status=UserStatus.PENDING,
         permissions=perms,
@@ -231,6 +234,10 @@ async def patch_user(
     # sorts/drops non-positives; lista vazia → null.
     if "sales_teams" in data:
         u.sales_teams = _normalize_sales_teams(data["sales_teams"])
+
+    # marketing_teams: nomes livres de equipe. Mesma semântica.
+    if "marketing_teams" in data:
+        u.marketing_teams = _normalize_marketing_teams(data["marketing_teams"])
 
     await session.commit()
     await session.refresh(u)

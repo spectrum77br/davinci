@@ -59,6 +59,7 @@ def _row_out(row: MarketingCreative) -> dict[str, Any]:
         "modelo": row.modelo,
         "marca": row.marca,
         "sku": row.sku,
+        "equipe": row.equipe,
         "roteiro": row.roteiro,
         "files": [_file_out(f) for f in row.files],
         "aprovado": row.aprovado,
@@ -83,6 +84,46 @@ def _file_dir(row: MarketingCreative) -> Path:
     return Path(get_settings().uploads_dir) / "creatives" / str(row.id)
 
 
+def _user_equipes(user: User) -> set[str] | None:
+    """Equipes (lowercase) que restringem o que o usuário vê. None =
+    sem restrição (admin ou usuário sem equipe de marketing) — mesmo
+    espírito das stock_tags no Controle de Estoque."""
+    if user.role == UserRole.ADMIN:
+        return None
+    teams = {
+        t.strip().lower()
+        for t in (user.marketing_teams or [])
+        if isinstance(t, str) and t.strip()
+    }
+    return teams or None
+
+
+def _ensure_equipe(user: User, row: MarketingCreative) -> None:
+    allowed = _user_equipes(user)
+    if allowed is None:
+        return
+    if (row.equipe or "").strip().lower() not in allowed:
+        raise HTTPException(403, detail={"code": "fora_da_sua_equipe"})
+
+
+@router.get("/equipes")
+async def list_equipes(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("marketing_criativos", "view"))],
+) -> list[str]:
+    """Opções de equipe pros selects: união das equipes de marketing dos
+    usuários + valores já usados nas linhas (pra nada órfão sumir)."""
+    out: dict[str, str] = {}
+    for lst in (await session.execute(select(User.marketing_teams))).scalars().all():
+        for t in lst or []:
+            if isinstance(t, str) and t.strip():
+                out.setdefault(t.strip().lower(), t.strip())
+    for t in (await session.execute(select(MarketingCreative.equipe))).scalars().all():
+        if t and t.strip():
+            out.setdefault(t.strip().lower(), t.strip())
+    return sorted(out.values(), key=str.lower)
+
+
 @router.get("")
 async def list_creatives(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -97,6 +138,9 @@ async def list_creatives(
         .scalars()
         .all()
     )
+    allowed = _user_equipes(user)
+    if allowed is not None:
+        rows = [r for r in rows if (r.equipe or "").strip().lower() in allowed]
     return [_row_out(r) for r in rows]
 
 
@@ -104,6 +148,7 @@ class CreativeIn(BaseModel):
     modelo: str
     marca: str | None = None
     sku: str | None = None
+    equipe: str | None = None
     roteiro: str | None = None
 
 
@@ -116,11 +161,19 @@ async def create_creative(
     modelo = payload.modelo.strip()
     if not modelo:
         raise HTTPException(400, detail={"code": "modelo_obrigatorio"})
+    equipe = (payload.equipe or "").strip() or None
+    allowed = _user_equipes(user)
+    if allowed is not None and (equipe is None or equipe.lower() not in allowed):
+        # Usuário restrito: a linha nasce na equipe dele (senão sumiria
+        # da própria listagem). Usa a primeira equipe com grafia original.
+        firsts = [t.strip() for t in (user.marketing_teams or []) if isinstance(t, str) and t.strip()]
+        equipe = sorted(firsts, key=str.lower)[0]
     row = MarketingCreative(
         id=uuid4(),
         modelo=modelo,
         marca=(payload.marca or "").strip() or None,
         sku=(payload.sku or "").strip() or None,
+        equipe=equipe,
         roteiro=payload.roteiro,
         created_by=user.id,
     )
@@ -134,6 +187,7 @@ class CreativePatch(BaseModel):
     modelo: str | None = None
     marca: str | None = None
     sku: str | None = None
+    equipe: str | None = None
     roteiro: str | None = None
 
 
@@ -145,6 +199,7 @@ async def patch_creative(
     user: Annotated[User, Depends(require_permission("marketing_criativos", "edit"))],
 ) -> dict[str, Any]:
     row = await _get_row(session, creative_id)
+    _ensure_equipe(user, row)
     data = payload.model_dump(exclude_unset=True)
     if "modelo" in data:
         modelo = (data["modelo"] or "").strip()
@@ -155,6 +210,12 @@ async def patch_creative(
         row.marca = (data["marca"] or "").strip() or None
     if "sku" in data:
         row.sku = (data["sku"] or "").strip() or None
+    if "equipe" in data:
+        nova = (data["equipe"] or "").strip() or None
+        allowed = _user_equipes(user)
+        if allowed is not None and (nova is None or nova.lower() not in allowed):
+            raise HTTPException(403, detail={"code": "fora_da_sua_equipe"})
+        row.equipe = nova
     if "roteiro" in data:
         row.roteiro = data["roteiro"]
     await session.commit()
@@ -169,6 +230,7 @@ async def upload_arquivos(
     user: Annotated[User, Depends(require_permission("marketing_criativos", "edit"))],
 ) -> dict[str, Any]:
     row = await _get_row(session, creative_id)
+    _ensure_equipe(user, row)
     if row.pushed_at is not None:
         raise HTTPException(409, detail={"code": "ja_enviado_pro_mega"})
     if not files:
@@ -221,6 +283,7 @@ async def download_arquivo(
     download: bool = False,
 ) -> FileResponse:
     row = await _get_row(session, creative_id)
+    _ensure_equipe(user, row)
     rec = next((f for f in row.files if f.id == file_id), None)
     if rec is None:
         raise HTTPException(404, detail={"code": "sem_arquivo"})
@@ -244,6 +307,7 @@ async def delete_arquivo(
     user: Annotated[User, Depends(require_permission("marketing_criativos", "edit"))],
 ) -> dict[str, Any]:
     row = await _get_row(session, creative_id)
+    _ensure_equipe(user, row)
     if row.pushed_at is not None:
         raise HTTPException(409, detail={"code": "ja_enviado_pro_mega"})
     rec = next((f for f in row.files if f.id == file_id), None)
@@ -401,6 +465,7 @@ async def delete_creative(
     user: Annotated[User, Depends(require_permission("marketing_criativos", "edit"))],
 ) -> dict[str, str]:
     row = await _get_row(session, creative_id)
+    _ensure_equipe(user, row)
     if row.pushed_at is not None and user.role != UserRole.ADMIN:
         raise HTTPException(403, detail={"code": "ja_enviado_pro_mega"})
     base = _file_dir(row)

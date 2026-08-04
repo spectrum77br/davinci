@@ -17,6 +17,7 @@ type Creative = {
   modelo: string
   marca: string | null
   sku: string | null
+  equipe: string | null
   roteiro: string | null
   files: CreativeFile[]
   aprovado: boolean | null
@@ -25,7 +26,7 @@ type Creative = {
   created_at: string | null
 }
 
-type Field = 'modelo' | 'marca' | 'sku' | 'roteiro'
+type Field = 'modelo' | 'marca' | 'sku' | 'equipe' | 'roteiro'
 
 const { api } = useApi()
 const toasts = useToasts()
@@ -36,6 +37,17 @@ const canEdit = useCan('marketing_criativos', 'edit')
 // Opções fixas — modelo e marca são escolhidos, não digitados.
 const MODELO_OPTIONS = ['imagem', 'video 15s', 'video 30s', 'video 60s']
 const MARCA_OPTIONS = ['uranyx', 'charlots']
+
+// Equipes de marketing conhecidas (cadastradas nos usuários) — opções do
+// seletor da coluna Equipe.
+const equipeOptions = ref<string[]>([])
+async function loadEquipes() {
+  try {
+    equipeOptions.value = await api<string[]>('/api/marketing/creatives/equipes')
+  } catch {
+    equipeOptions.value = []
+  }
+}
 
 const rows = ref<Creative[]>([])
 const loading = ref(false)
@@ -50,6 +62,7 @@ const ERR_PT: Record<string, string> = {
   produto_sem_pasta: 'O produto desse SKU ainda não tem pasta no MEGA.',
   modelo_obrigatorio: 'O campo modelo é obrigatório.',
   arquivo_sumiu: 'O arquivo não foi encontrado no servidor — anexe de novo.',
+  fora_da_sua_equipe: 'Essa linha é de outra equipe de marketing.',
   muitos_arquivos: 'Limite de 20 arquivos por linha.',
   nome_invalido: 'Nome de arquivo inválido.',
   forbidden: 'Você não tem permissão pra isso.',
@@ -74,7 +87,7 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(() => { void load() })
+onMounted(() => { void load(); void loadEquipes() })
 
 // ---- filtro ---------------------------------------------------------------
 const q = ref('')
@@ -87,7 +100,7 @@ const filteredRows = computed(() => {
     if (statusFilter.value === 'aprovado' && r.aprovado !== true) return false
     if (statusFilter.value === 'reprovado' && r.aprovado !== false) return false
     if (!term) return true
-    const hay = [r.modelo, r.marca, r.sku, r.roteiro, ...r.files.map((f) => f.file_name)]
+    const hay = [r.modelo, r.marca, r.sku, r.equipe, r.roteiro, ...r.files.map((f) => f.file_name)]
       .filter(Boolean)
       .join(' ')
       .toLowerCase()
@@ -152,7 +165,7 @@ async function commitEdit() {
 }
 
 // ---- adicionar linha ------------------------------------------------------
-const newRow = reactive({ modelo: '', marca: '', sku: '' })
+const newRow = reactive({ modelo: '', marca: '', sku: '', equipe: '' })
 const adding = ref(false)
 
 async function addRow() {
@@ -164,12 +177,13 @@ async function addRow() {
   try {
     const created = await api<Creative>('/api/marketing/creatives', {
       method: 'POST',
-      body: { modelo: newRow.modelo, marca: newRow.marca || null, sku: newRow.sku || null },
+      body: { modelo: newRow.modelo, marca: newRow.marca || null, sku: newRow.sku || null, equipe: newRow.equipe || null },
     })
     rows.value = [...rows.value, created]
     newRow.modelo = ''
     newRow.marca = ''
     newRow.sku = ''
+    newRow.equipe = ''
   } catch (e: any) {
     toasts.error('Erro ao adicionar', errMsg(e))
   } finally {
@@ -342,6 +356,7 @@ async function remove(r: Creative) {
           <tr>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Modelo</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[95px]">Marca</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[90px]">Equipe</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border w-28 min-w-[80px]">SKU</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[340px]">Roteiro</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[200px]">Arquivos</th>
@@ -351,17 +366,17 @@ async function remove(r: Creative) {
         </thead>
         <tbody>
           <tr v-if="loading && !rows.length">
-            <td colspan="7" class="text-center py-6 text-muted-foreground">
+            <td colspan="8" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!rows.length">
-            <td colspan="7" class="text-center py-6 text-muted-foreground">
+            <td colspan="8" class="text-center py-6 text-muted-foreground">
               Nenhum criativo ainda — adicione a primeira linha abaixo.
             </td>
           </tr>
           <tr v-else-if="!filteredRows.length">
-            <td colspan="7" class="text-center py-6 text-muted-foreground">
+            <td colspan="8" class="text-center py-6 text-muted-foreground">
               Nenhuma linha bate com o filtro.
             </td>
           </tr>
@@ -418,6 +433,32 @@ async function remove(r: Creative) {
                 <option v-for="o in MARCA_OPTIONS" :key="o" :value="o">{{ o }}</option>
               </select>
               <span v-else>{{ r.marca || '—' }}</span>
+            </td>
+            <!-- equipe -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs"
+              :class="{
+                'cursor-pointer': canEdit,
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(r.id, 'equipe'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(r.id, 'equipe'),
+              }"
+              @click="!isEditing(r.id, 'equipe') && startEdit(r, 'equipe')"
+            >
+              <select
+                v-if="isEditing(r.id, 'equipe')"
+                :ref="setEditInputRef"
+                v-model="editValue"
+                class="w-full text-xs bg-background outline-none rounded"
+                @change="commitEdit" @blur="commitEdit" @keydown.escape.prevent="cancelEdit"
+              >
+                <option value="">—</option>
+                <option
+                  v-if="editValue && !equipeOptions.includes(editValue)"
+                  :value="editValue"
+                >{{ editValue }}</option>
+                <option v-for="o in equipeOptions" :key="o" :value="o">{{ o }}</option>
+              </select>
+              <span v-else>{{ r.equipe || '—' }}</span>
             </td>
             <!-- sku -->
             <td
@@ -570,6 +611,16 @@ async function remove(r: Creative) {
               >
                 <option value="">marca —</option>
                 <option v-for="o in MARCA_OPTIONS" :key="o" :value="o">{{ o }}</option>
+              </select>
+            </td>
+            <td class="border border-border px-1 py-1">
+              <select
+                v-model="newRow.equipe"
+                class="w-full text-xs border rounded px-1.5 py-1 bg-background"
+                :class="{ 'text-muted-foreground': !newRow.equipe }"
+              >
+                <option value="">equipe —</option>
+                <option v-for="o in equipeOptions" :key="o" :value="o">{{ o }}</option>
               </select>
             </td>
             <td class="border border-border px-1 py-1">

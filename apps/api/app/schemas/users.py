@@ -52,6 +52,22 @@ def _normalize_sales_teams(raw: list | None) -> list[int] | None:
     return sorted(out) or None
 
 
+def _normalize_marketing_teams(raw: list | None) -> list[str] | None:
+    """Nomes livres de equipe de marketing: strip, descarta vazios,
+    dedupe case-insensitive (mantém a grafia da primeira ocorrência),
+    ordena. Lista vazia vira None — espelha _normalize_sales_teams."""
+    if raw is None:
+        return None
+    out: dict[str, str] = {}
+    for v in raw:
+        if not isinstance(v, str):
+            continue
+        t = v.strip()[:64]
+        if t and t.lower() not in out:
+            out[t.lower()] = t
+    return sorted(out.values(), key=str.lower) or None
+
+
 class UserOut(BaseModel):
     id: str
     open_id: str
@@ -66,6 +82,7 @@ class UserOut(BaseModel):
     duoke: str | None = None
     stock_tags: list[str] | None = None
     sales_teams: list[int] | None = None
+    marketing_teams: list[str] | None = None
     permissions: dict
     # Apenas indica se há senha definida — o hash nunca sai da API.
     has_password: bool = False
@@ -95,6 +112,7 @@ class UserCreate(BaseModel):
     duoke: str | None = None
     stock_tags: list[str] | None = None
     sales_teams: list[int] | None = None
+    marketing_teams: list[str] | None = None
     permissions: Permissions | None = None
 
 
@@ -116,6 +134,7 @@ class UserPatch(BaseModel):
     # Pass a list of positive integers or [] / null to clear. Backend
     # dedupes/sorts/drops non-positives.
     sales_teams: list[int] | None = None
+    marketing_teams: list[str] | None = None
     status: str | None = Field(default=None, pattern="^(pending|active|suspended)$")
 
 
