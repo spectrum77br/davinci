@@ -695,7 +695,9 @@ async def get_pedido_etiqueta(
         media_type=row.content_type or "application/pdf",
         headers={
             "Content-Disposition": f'inline; filename="{row.filename}"',
-            "Cache-Control": "private, max-age=86400",
+            # Sem cache: a etiqueta é REGRAVADA (recaptura, regra de visualização
+            # nova) sob a mesma URL — cachear serviria a versão velha por horas.
+            "Cache-Control": "no-store, must-revalidate",
         },
     )
 
