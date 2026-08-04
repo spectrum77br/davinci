@@ -41,6 +41,11 @@ def _etiqueta_sintetica(*, com_logo: bool = True) -> bytes:
     page.insert_text((20, 294), "Loja Origem XYZ", fontsize=8, fontname="helv")
     page.insert_text((20, 340), "DANFE SIMPLIFICADO - ETIQUETA", fontsize=6, fontname="helv")
     page.insert_text((20, 350), _CHAVE, fontsize=5, fontname="helv")
+    page.insert_text(
+        (5, 392), "SKU: 1; Total Items: 1; #UP123; Deadline:05/08/2026",
+        fontsize=6, fontname="helv",
+    )
+    page.insert_text((5, 402), "1. dg053.sp+a001.sp", fontsize=6, fontname="helv")
     if com_logo:
         logo = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 79, 22), False)
         logo.set_rect(logo.irect, (200, 120, 255))
@@ -84,6 +89,16 @@ def test_remove_logo_preserva_qr():
     # o logo pequeno (79x22) sai; o QR quadrado (60x60) fica
     assert (60, 60) in imgs
     assert (79, 22) not in imgs
+
+
+def test_remove_rodape_picking():
+    out = transformar_etiqueta(_etiqueta_sintetica())
+    txt = _texto(out)
+    assert "Total Items" not in txt
+    assert "Deadline" not in txt
+    assert "dg053.sp+a001.sp" not in txt
+    # o resto da etiqueta continua lá
+    assert "Fulano" in txt
 
 
 def test_destinatario_nome_sobrepoe_o_lido():

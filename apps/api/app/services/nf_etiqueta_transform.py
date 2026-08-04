@@ -8,11 +8,13 @@ Agência, ela passa por uma limpeza pra NÃO expor a origem real do envio:
 2. Sem NF — apaga o bloco DANFE SIMPLIFICADO (número, série, emissão, a chave
    de acesso em texto E o código de barras da chave).
 3. Sem marketplace — remove o logo do marketplace (imagem pequena no topo).
+4. Sem picking — apaga o rodapé "SKU: N; Total Items: N; #PEDIDO; Deadline:..."
+   e a linha de itens abaixo (a Declaração de Conteúdo já traz SKU e descrição).
 
 O que é PRESERVADO: QR codes, código de barras de rastreio dos Correios, blocos
-de roteirização (agência/rota), picking (SKU) e a Declaração de Conteúdo. O nome
-do destinatário é lido da própria etiqueta (bloco DESTINATÁRIO) quando não vem
-explícito, então o transform funciona só com os bytes do PDF.
+de roteirização (agência/rota) e a Declaração de Conteúdo. O nome do destinatário
+é lido da própria etiqueta (bloco DESTINATÁRIO) quando não vem explícito, então o
+transform funciona só com os bytes do PDF.
 
 Camada PURA (sem rede, sem banco): `transformar_etiqueta(pdf_bytes, nome?) -> bytes`.
 O landing zone (nf_etiqueta_arquivo) e o endpoint de impressão são de outra camada.
@@ -122,8 +124,19 @@ def _remover_logo_marketplace(page: fitz.Page) -> None:
                 _redigir(page, r, pad=0.5)
 
 
+def _remover_picking(page: fitz.Page) -> None:
+    """Redige o rodapé de picking da etiqueta (SKU/Total Items/pedido/Deadline
+    + a linha de itens abaixo). A âncora é "Total Items", que só existe nesse
+    rodapé — a Declaração de Conteúdo tem a coluna "SKU", mas não esse rótulo."""
+    anchors = page.search_for("Total Items")
+    if not anchors:
+        return
+    top = min(a.y0 for a in anchors) - 2
+    _redigir(page, fitz.Rect(0, top, page.rect.width, page.rect.height), pad=0)
+
+
 def transformar_etiqueta(pdf_bytes: bytes, destinatario_nome: str | None = None) -> bytes:
-    """Aplica as 3 regras de visualização e devolve os bytes do PDF transformado.
+    """Aplica as 4 regras de visualização e devolve os bytes do PDF transformado.
 
     `destinatario_nome` opcional sobrepõe o nome lido da etiqueta (o caller que
     tem o pedido pode passar o nome oficial). Sem ele, lê do bloco DESTINATÁRIO.
@@ -140,6 +153,7 @@ def transformar_etiqueta(pdf_bytes: bytes, destinatario_nome: str | None = None)
     for page in doc:
         _remover_logo_marketplace(page)          # 3) logo (imagem)
         _remover_nf(page)                        # 2) bloco NF
+        _remover_picking(page)                   # 4) rodapé de picking
         if nome:                                 # 1) remetente = destinatário
             plano = _plano_remetente(page)
             if plano:
