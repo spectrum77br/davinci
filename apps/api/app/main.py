@@ -37,6 +37,7 @@ from app.routers import nf_upload as nf_upload_router
 from app.routers import notas_fiscais as notas_fiscais_router
 from app.routers import oauth as oauth_router
 from app.routers import pricing as pricing_router
+from app.routers import pricing_mega as pricing_mega_router
 from app.routers import products as products_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
@@ -163,6 +164,7 @@ app.include_router(settings_router.router)
 app.include_router(alerts_router.router)
 app.include_router(listings_router.router)
 app.include_router(pricing_router.router)
+app.include_router(pricing_mega_router.router)
 app.include_router(segments_router.router)
 app.include_router(audit_router.router)
 app.include_router(discrepancies_router.router)

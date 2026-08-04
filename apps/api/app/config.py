@@ -30,6 +30,13 @@ class Settings(BaseSettings):
 
     uploads_dir: str = "/data/uploads"
 
+    # Sidecar MEGAcmd (fotos dos produtos da Tabela de Preços).
+    # mega_fotos_root: pasta da conta MEGA onde ficam as pastas de fotos
+    # por produto — ajustar via env quando a estrutura real for conhecida.
+    mega_sidecar_url: str = "http://megacmd:9000"
+    mega_sidecar_token: str = ""
+    mega_fotos_root: str = "/"
+
     jwt_secret: str = "dev-secret-change-me"
     jwt_ttl_seconds: int = 7 * 24 * 3600
     # Senha extra que protege a página /financeiro/valuation, exigida

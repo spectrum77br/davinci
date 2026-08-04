@@ -184,6 +184,10 @@ class PricingProduct(Base, TimestampMixin):
     # Link das fotos do produto (pasta do MEGA com todas as cores) —
     # aba Produtos mostra ícone de câmera que abre pra ver/baixar.
     fotos_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Caminho da pasta DENTRO da conta MEGA (ex.: "/Fotos/Redmi 13C").
+    # Alimentado pela sincronização/upload via sidecar MEGAcmd; é o alvo
+    # do mega-put quando o operador sobe fotos pelo DaVinci.
+    fotos_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PricingOverride(Base, TimestampMixin):

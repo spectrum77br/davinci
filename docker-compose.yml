@@ -186,6 +186,25 @@ services:
         aliases:
           - worker_marketing_agent
 
+  # Sidecar MEGAcmd: ponte com a conta MEGA (fotos dos produtos da Tabela
+  # de Preços). A API fala com ele em http://megacmd:9000 (rede interna,
+  # sem porta no host); a sessão de login persiste no volume. Como a
+  # davinci_net é compartilhada, os endpoints exigem MEGA_SIDECAR_TOKEN
+  # (mesmo valor no .env, lido também pela api).
+  megacmd:
+    build:
+      context: ./infra/megacmd
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MEGA_SIDECAR_TOKEN: ${MEGA_SIDECAR_TOKEN:-}
+    volumes:
+      - ./data/megacmd:/root/.megaCmd
+    networks:
+      davinci_net:
+        aliases:
+          - megacmd
+
   web:
     build:
       context: ./apps/web

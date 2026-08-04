@@ -782,6 +782,150 @@ async function submitNewAcc() {
   }
 }
 
+// ---- Fotos via MEGA (sidecar megacmd) --------------------------------
+const megaBusy = ref(false)
+const showMegaLogin = ref(false)
+const megaLoginForm = reactive({ email: '', password: '', code: '' })
+const megaLoginBusy = ref(false)
+const megaLoginErr = ref('')
+const showMegaPreview = ref(false)
+const megaPreview = ref<any | null>(null)
+const megaApplyBusy = ref(false)
+const uploadingFotosId = ref<string | null>(null)
+const fotosFileInput = ref<HTMLInputElement | null>(null)
+let fotosUploadTarget: PricingProduct | null = null
+
+function megaErrMsg(e: any): string {
+  const d = e?.data?.detail
+  const msg = d?.message || d?.code || e?.message || 'erro'
+  if (/not logged/i.test(String(msg)))
+    return 'Conta MEGA não conectada — clique em "Fotos (MEGA)" pra fazer login'
+  return String(msg)
+}
+
+async function megaSyncClick() {
+  if (megaBusy.value) return
+  megaBusy.value = true
+  try {
+    const st = await api<any>('/api/pricing/mega/status')
+    if (!st.available) {
+      toast.error('MEGA indisponível', [st.error || 'serviço não está no ar'])
+      return
+    }
+    if (!st.logged_in) {
+      megaLoginErr.value = ''
+      showMegaLogin.value = true
+      return
+    }
+    await megaDryRun()
+  } catch (e: any) {
+    toast.error('MEGA', [megaErrMsg(e)])
+  } finally {
+    megaBusy.value = false
+  }
+}
+
+async function megaDryRun() {
+  const rep = await api<any>('/api/pricing/mega/sync', {
+    method: 'POST',
+    body: { dry_run: true, only_missing: true },
+  })
+  megaPreview.value = rep
+  showMegaPreview.value = true
+}
+
+async function submitMegaLogin() {
+  if (megaLoginBusy.value) return
+  megaLoginBusy.value = true
+  megaLoginErr.value = ''
+  try {
+    const res = await api<any>('/api/pricing/mega/login', {
+      method: 'POST',
+      body: {
+        email: megaLoginForm.email.trim(),
+        password: megaLoginForm.password,
+        code: megaLoginForm.code.trim() || null,
+      },
+    })
+    if (!res.ok) {
+      megaLoginErr.value = res.message || 'login falhou — confira email e senha'
+      return
+    }
+    showMegaLogin.value = false
+    megaLoginForm.password = ''
+    megaLoginForm.code = ''
+    toast.success('MEGA conectado', ['Buscando pastas de fotos…'])
+    megaBusy.value = true
+    try {
+      await megaDryRun()
+    } finally {
+      megaBusy.value = false
+    }
+  } catch (e: any) {
+    megaLoginErr.value = megaErrMsg(e)
+  } finally {
+    megaLoginBusy.value = false
+  }
+}
+
+async function megaApply() {
+  if (megaApplyBusy.value) return
+  megaApplyBusy.value = true
+  try {
+    const rep = await api<any>('/api/pricing/mega/sync', {
+      method: 'POST',
+      body: { dry_run: false, only_missing: true },
+    })
+    showMegaPreview.value = false
+    const lines = [`${rep.applied} produto(s) receberam link de fotos`]
+    if (rep.errors?.length) {
+      lines.push(`${rep.errors.length} erro(s) ao gerar link`)
+      toast.warning('Fotos do MEGA sincronizadas', lines)
+    } else {
+      toast.success('Fotos do MEGA sincronizadas', lines)
+    }
+    await loadProducts()
+  } catch (e: any) {
+    toast.error('Sincronizar MEGA', [megaErrMsg(e)])
+  } finally {
+    megaApplyBusy.value = false
+  }
+}
+
+function pickFotosUpload(p: PricingProduct) {
+  fotosUploadTarget = p
+  fotosFileInput.value?.click()
+}
+
+async function onFotosPicked(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const files = input.files
+  const p = fotosUploadTarget
+  if (!files?.length || !p) {
+    if (input) input.value = ''
+    return
+  }
+  uploadingFotosId.value = p.id
+  try {
+    const fd = new FormData()
+    for (const f of Array.from(files)) fd.append('files', f)
+    const res = await api<any>(
+      `/api/pricing/mega/products/${p.id}/fotos/upload`,
+      { method: 'POST', body: fd },
+    )
+    p.fotos_url = res.fotos_url
+    toast.success('Fotos enviadas pro MEGA', [
+      `${res.uploaded} foto(s) → ${p.name}`,
+    ])
+  } catch (e: any) {
+    toast.error('Upload de fotos', [megaErrMsg(e)])
+  } finally {
+    uploadingFotosId.value = null
+    fotosUploadTarget = null
+    input.value = ''
+  }
+}
+
 // =========================================================== product inline edit
 
 function startEditProduct(p: PricingProduct, field: string) {
@@ -2602,6 +2746,16 @@ watch(department, async () => {
             placeholder="buscar SKU, nome, EAN…"
             class="border rounded px-2 py-1 text-sm bg-background w-56"
           />
+          <button
+            v-if="canEditProdutos"
+            class="btn btn-sm"
+            :disabled="megaBusy"
+            title="Conectar a conta MEGA e preencher os links de fotos automaticamente pelo nome"
+            @click="megaSyncClick"
+          >
+            <Loader2 v-if="megaBusy" class="h-4 w-4 mr-1 animate-spin" />
+            <Camera v-else class="h-4 w-4 mr-1" /> Fotos (MEGA)
+          </button>
           <button v-if="canEditProdutos" class="btn btn-sm btn-primary" :disabled="showAddProd" @click="openAddProd">
             <Plus class="h-4 w-4 mr-1" /> Adicionar Produto
           </button>
@@ -2824,8 +2978,12 @@ watch(department, async () => {
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'fotos_url'),
                 }"
               >
+                <Loader2
+                  v-if="uploadingFotosId === p.id"
+                  class="h-3.5 w-3.5 animate-spin text-blue-600 inline"
+                />
                 <input
-                  v-if="isEditing(p.id, 'fotos_url')"
+                  v-else-if="isEditing(p.id, 'fotos_url')"
                   :ref="setEditInputRef"
                   v-model="editValue" type="text"
                   placeholder="cole o link das fotos (MEGA)…"
@@ -2844,13 +3002,25 @@ watch(department, async () => {
                     title="Editar link das fotos"
                     @click="startEditProduct(p, 'fotos_url')"
                   ><Pencil class="h-2.5 w-2.5" /></button>
+                  <button
+                    v-if="canEditProdutos"
+                    class="p-0.5 text-muted-foreground hover:text-foreground rounded"
+                    title="Enviar mais fotos pra pasta deste produto no MEGA"
+                    @click="pickFotosUpload(p)"
+                  ><Upload class="h-2.5 w-2.5" /></button>
                 </span>
-                <button
-                  v-else-if="canEditProdutos"
-                  class="p-1 text-muted-foreground/50 hover:text-blue-600 rounded"
-                  title="Adicionar link das fotos (ex.: pasta do MEGA com todas as cores)"
-                  @click="startEditProduct(p, 'fotos_url')"
-                ><Camera class="h-3.5 w-3.5" /></button>
+                <span v-else-if="canEditProdutos" class="inline-flex items-center gap-0.5">
+                  <button
+                    class="p-1 text-muted-foreground/50 hover:text-blue-600 rounded"
+                    title="Colar link das fotos (pasta do MEGA com todas as cores)"
+                    @click="startEditProduct(p, 'fotos_url')"
+                  ><Camera class="h-3.5 w-3.5" /></button>
+                  <button
+                    class="p-0.5 text-muted-foreground/50 hover:text-foreground rounded"
+                    title="Enviar fotos pro MEGA (cria a pasta do produto e salva o link)"
+                    @click="pickFotosUpload(p)"
+                  ><Upload class="h-2.5 w-2.5" /></button>
+                </span>
                 <span v-else class="text-xs text-muted-foreground">—</span>
               </td>
               <td
@@ -2902,6 +3072,131 @@ watch(department, async () => {
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- MEGA: input de upload compartilhado (alvo = fotosUploadTarget) -->
+      <input
+        ref="fotosFileInput"
+        type="file" multiple accept="image/*,video/*"
+        class="hidden"
+        @change="onFotosPicked"
+      />
+
+      <!-- MEGA: modal de login -->
+      <div
+        v-if="showMegaLogin"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        @click.self="showMegaLogin = false"
+      >
+        <div class="bg-background border rounded-lg shadow-xl w-full max-w-sm p-4 space-y-3">
+          <h3 class="text-sm font-semibold flex items-center gap-2">
+            <Camera class="h-4 w-4" /> Conectar conta MEGA
+          </h3>
+          <p class="text-xs text-muted-foreground">
+            Login feito uma única vez — a sessão fica salva no servidor.
+            A senha não é armazenada.
+          </p>
+          <input
+            v-model="megaLoginForm.email"
+            type="email" placeholder="email do MEGA"
+            class="w-full border rounded px-2 py-1.5 text-sm bg-background"
+          />
+          <input
+            v-model="megaLoginForm.password"
+            type="password" placeholder="senha do MEGA"
+            class="w-full border rounded px-2 py-1.5 text-sm bg-background"
+            @keydown.enter="submitMegaLogin"
+          />
+          <input
+            v-model="megaLoginForm.code"
+            type="text" placeholder="código 2FA (só se a conta tiver)"
+            class="w-full border rounded px-2 py-1.5 text-sm bg-background"
+            @keydown.enter="submitMegaLogin"
+          />
+          <p v-if="megaLoginErr" class="text-xs text-destructive">{{ megaLoginErr }}</p>
+          <div class="flex justify-end gap-2">
+            <button class="btn btn-sm" @click="showMegaLogin = false">Cancelar</button>
+            <button
+              class="btn btn-sm btn-primary"
+              :disabled="megaLoginBusy || !megaLoginForm.email || !megaLoginForm.password"
+              @click="submitMegaLogin"
+            >
+              <Loader2 v-if="megaLoginBusy" class="h-4 w-4 mr-1 animate-spin" /> Conectar
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- MEGA: modal de prévia da sincronização -->
+      <div
+        v-if="showMegaPreview && megaPreview"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        @click.self="showMegaPreview = false"
+      >
+        <div class="bg-background border rounded-lg shadow-xl w-full max-w-2xl p-4 space-y-3 max-h-[85vh] overflow-auto">
+          <h3 class="text-sm font-semibold flex items-center gap-2">
+            <Camera class="h-4 w-4" /> Fotos do MEGA — prévia da sincronização
+          </h3>
+          <p class="text-xs text-muted-foreground">
+            {{ megaPreview.folders_total }} pasta(s) no MEGA ·
+            {{ megaPreview.matched_total }} produto(s) casaram pelo nome ·
+            <b class="text-foreground">{{ megaPreview.to_apply }}</b> vão receber link agora
+            (quem já tem link não é alterado)
+          </p>
+          <div v-if="megaPreview.to_apply" class="border rounded max-h-56 overflow-auto">
+            <table class="w-full text-xs">
+              <tbody>
+                <tr
+                  v-for="m in megaPreview.matched.filter(x => !x.has_url)"
+                  :key="m.sku"
+                  class="border-b border-border/50"
+                >
+                  <td class="px-2 py-1 font-mono whitespace-nowrap">{{ m.sku }}</td>
+                  <td class="px-2 py-1">{{ m.name }}</td>
+                  <td class="px-2 py-1 text-muted-foreground">📁 {{ m.folder }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <details v-if="megaPreview.ambiguous?.length" class="text-xs">
+            <summary class="cursor-pointer text-amber-700">
+              {{ megaPreview.ambiguous.length }} produto(s) com mais de uma pasta possível
+              (resolver colando o link à mão)
+            </summary>
+            <ul class="mt-1 pl-4 list-disc space-y-0.5">
+              <li v-for="a in megaPreview.ambiguous" :key="a.sku">
+                {{ a.name }} → {{ a.candidates.join(' | ') }}
+              </li>
+            </ul>
+          </details>
+          <details v-if="megaPreview.unmatched_products?.length" class="text-xs">
+            <summary class="cursor-pointer text-muted-foreground">
+              {{ megaPreview.unmatched_products.length }} produto(s) sem pasta no MEGA
+            </summary>
+            <ul class="mt-1 pl-4 list-disc space-y-0.5">
+              <li v-for="u in megaPreview.unmatched_products" :key="u.sku">{{ u.name }}</li>
+            </ul>
+          </details>
+          <details v-if="megaPreview.unmatched_folders?.length" class="text-xs">
+            <summary class="cursor-pointer text-muted-foreground">
+              {{ megaPreview.unmatched_folders.length }} pasta(s) do MEGA sem produto
+            </summary>
+            <ul class="mt-1 pl-4 list-disc space-y-0.5">
+              <li v-for="(f, i) in megaPreview.unmatched_folders" :key="i">{{ f }}</li>
+            </ul>
+          </details>
+          <div class="flex justify-end gap-2 pt-1">
+            <button class="btn btn-sm" @click="showMegaPreview = false">Fechar</button>
+            <button
+              class="btn btn-sm btn-primary"
+              :disabled="megaApplyBusy || !megaPreview.to_apply"
+              @click="megaApply"
+            >
+              <Loader2 v-if="megaApplyBusy" class="h-4 w-4 mr-1 animate-spin" />
+              Aplicar {{ megaPreview.to_apply }} link(s)
+            </button>
+          </div>
+        </div>
       </div>
     </section>
 

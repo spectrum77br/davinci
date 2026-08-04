@@ -134,6 +134,8 @@ class PricingProductBase(BaseModel):
     in_catalog: bool = False
     # Link das fotos do produto (pasta do MEGA com todas as cores).
     fotos_url: str | None = None
+    # Caminho da pasta na conta MEGA (gerido pela sincronização/upload).
+    fotos_path: str | None = None
     product_id: UUID | None = None
 
 
