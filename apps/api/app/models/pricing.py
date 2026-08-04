@@ -181,6 +181,9 @@ class PricingProduct(Base, TimestampMixin):
     in_catalog: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # Link das fotos do produto (pasta do MEGA com todas as cores) —
+    # aba Produtos mostra ícone de câmera que abre pra ver/baixar.
+    fotos_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PricingOverride(Base, TimestampMixin):

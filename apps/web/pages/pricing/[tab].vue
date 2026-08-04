@@ -3,7 +3,7 @@ import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
   Star, Send, Ban, Check, Link2, Copy, Minus,
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
-  ChevronDown, Download, Undo2, Redo2, Search, Tags,
+  ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, Pencil,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
@@ -394,6 +394,7 @@ type PricingProduct = {
   ean: string | null
   is_active: boolean
   in_catalog: boolean
+  fotos_url: string | null
   created_at: string
   updated_at: string
 }
@@ -842,6 +843,9 @@ async function _patchProduct(id: string, field: string, raw: string) {
     }
   } else if (field === 'description' || field === 'model' || field === 'ean') {
     payload[field] = raw || null
+  } else if (field === 'fotos_url') {
+    // Normaliza links colados sem protocolo (ex.: "mega.nz/folder/...").
+    payload[field] = raw ? (/^https?:\/\//i.test(raw) ? raw : `https://${raw}`) : null
   } else {
     return
   }
@@ -2623,6 +2627,7 @@ watch(department, async () => {
               <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 2</th>
               <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 3</th>
               <th class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit 4</th>
+              <th class="text-center px-2 py-2 font-medium border-b border-border w-14">Fotos</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Tabela</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-16">Catálogo</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
@@ -2630,12 +2635,12 @@ watch(department, async () => {
           </thead>
           <tbody>
             <tr v-if="productsLoading && !products.length">
-              <td colSpan="15" class="text-center py-6 text-muted-foreground">
+              <td colSpan="16" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!productsCurrent.length && !showAddProd">
-              <td colSpan="15" class="text-center py-6 text-muted-foreground">
+              <td colSpan="16" class="text-center py-6 text-muted-foreground">
                 Nenhum produto neste departamento.
               </td>
             </tr>
@@ -2687,6 +2692,8 @@ watch(department, async () => {
               <td class="border border-border px-1 py-1">
                 <input v-model="newProd.cost_kit4" type="text" inputmode="decimal" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
               </td>
+              <!-- Fotos: link é adicionado depois, editando a linha criada. -->
+              <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1">
                 <select v-model.number="newProd.product_type" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-center">
                   <option
@@ -2807,6 +2814,44 @@ watch(department, async () => {
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
                 <span v-else>{{ fmtBRL((p as any)[`cost_kit${k}`]) }}</span>
+              </td>
+              <!-- Fotos: link da pasta (MEGA) com as fotos de todas as cores.
+                   Câmera azul abre o link; cinza = sem link (clique pra colar). -->
+              <td
+                class="border border-border px-1 py-1.5 text-center"
+                :class="{
+                  'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'fotos_url'),
+                  'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'fotos_url'),
+                }"
+              >
+                <input
+                  v-if="isEditing(p.id, 'fotos_url')"
+                  :ref="setEditInputRef"
+                  v-model="editValue" type="text"
+                  placeholder="cole o link das fotos (MEGA)…"
+                  class="w-56 text-xs bg-transparent outline-none"
+                  @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
+                />
+                <span v-else-if="p.fotos_url" class="inline-flex items-center gap-0.5">
+                  <a
+                    :href="p.fotos_url" target="_blank" rel="noopener"
+                    class="p-1 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded"
+                    :title="`Abrir fotos — ${p.fotos_url}`"
+                  ><Camera class="h-3.5 w-3.5" /></a>
+                  <button
+                    v-if="canEditProdutos"
+                    class="p-0.5 text-muted-foreground hover:text-foreground rounded"
+                    title="Editar link das fotos"
+                    @click="startEditProduct(p, 'fotos_url')"
+                  ><Pencil class="h-2.5 w-2.5" /></button>
+                </span>
+                <button
+                  v-else-if="canEditProdutos"
+                  class="p-1 text-muted-foreground/50 hover:text-blue-600 rounded"
+                  title="Adicionar link das fotos (ex.: pasta do MEGA com todas as cores)"
+                  @click="startEditProduct(p, 'fotos_url')"
+                ><Camera class="h-3.5 w-3.5" /></button>
+                <span v-else class="text-xs text-muted-foreground">—</span>
               </td>
               <td
                 class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"

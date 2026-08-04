@@ -132,6 +132,8 @@ class PricingProductBase(BaseModel):
     ean: str | None = None
     is_active: bool = True
     in_catalog: bool = False
+    # Link das fotos do produto (pasta do MEGA com todas as cores).
+    fotos_url: str | None = None
     product_id: UUID | None = None
 
 
@@ -155,6 +157,7 @@ class PricingProductPatch(BaseModel):
     ean: str | None = None
     is_active: bool | None = None
     in_catalog: bool | None = None
+    fotos_url: str | None = None
     product_id: UUID | None = None
 
 
