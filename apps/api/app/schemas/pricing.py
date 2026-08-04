@@ -171,6 +171,9 @@ class PricingProductOut(PricingProductBase):
     user_id: UUID
     created_at: datetime
     updated_at: datetime
+    # Contagem de mídias na pasta do MEGA (NULL = nunca contado).
+    fotos_count: int | None = None
+    videos_count: int | None = None
 
 
 class PricingProductImportItem(BaseModel):

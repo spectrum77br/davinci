@@ -9,8 +9,11 @@ Fluxo do operador:
                     link público (mega-export) e grava fotos_url/fotos_path.
   * POST /scaffold → cria a estrutura marca/modelo no MEGA a partir de uma
                     lista de nomes e já preenche os links dos produtos.
-  * POST /products/{id}/fotos/upload → sobe fotos pro MEGA na pasta do
-                    produto (cria se não existir) e salva o link.
+  * POST /counts/refresh → reconta fotos/vídeos por pasta (mega-find no
+                    sidecar) e grava fotos_count/videos_count nos produtos.
+  * POST /products/{id}/fotos/upload → sobe fotos/vídeos pro MEGA na pasta
+                    do produto (cria se não existir), salva o link e atualiza
+                    a contagem de todos os produtos que dividem a pasta.
 """
 from __future__ import annotations
 
@@ -212,6 +215,74 @@ async def mega_sync(
     }
 
 
+class MegaCountsIn(BaseModel):
+    root: str | None = None
+
+
+@router.post("/counts/refresh")
+async def mega_counts_refresh(
+    body: MegaCountsIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[
+        User, Depends(require_permission("tabela_precos_produtos", "edit"))
+    ],
+) -> dict[str, Any]:
+    """Reconta as mídias de cada pasta-folha e espelha nos produtos que
+    apontam pra ela (mesma pasta ⇒ mesma contagem em todas as linhas)."""
+    root = (body.root or _root()).strip() or "/"
+    try:
+        listing = await sidecar_request(
+            "GET",
+            "/folders",
+            params={"root": root, "depth": 2, "media_counts": 1},
+            timeout=1800.0,
+        )
+    except MegaError as exc:
+        raise _sidecar_http_error(exc) from exc
+
+    counts_by_path: dict[str, tuple[int, int]] = {}
+    for f in listing.get("items", []):
+        if f.get("has_children") or not f.get("is_folder"):
+            continue
+        if f.get("fotos") is None:
+            continue
+        counts_by_path[f["path"]] = (int(f["fotos"]), int(f.get("videos") or 0))
+
+    products = (
+        (
+            await session.execute(
+                select(PricingProduct).where(
+                    user_scope(PricingProduct, user),
+                    PricingProduct.fotos_path.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    updated = 0
+    for p in products:
+        c = counts_by_path.get(p.fotos_path or "")
+        if c is None:
+            continue
+        if (p.fotos_count, p.videos_count) != c:
+            p.fotos_count, p.videos_count = c
+            updated += 1
+    await session.commit()
+    logger.info(
+        "mega_fotos_counts_refresh",
+        folders=len(counts_by_path),
+        updated=updated,
+        user_id=str(user.id),
+    )
+    return {
+        "root": root,
+        "folders_counted": len(counts_by_path),
+        "products_updated": updated,
+        "products_with_folder": len(products),
+    }
+
+
 class MegaScaffoldIn(BaseModel):
     # Cria <root>/<brand>/<name> pra cada nome (uma pasta por modelo) e já
     # preenche fotos_url/fotos_path dos produtos que casarem pelo nome —
@@ -376,6 +447,34 @@ async def upload_product_fotos(
 
     row.fotos_path = dest
     row.fotos_url = str(exp["url"])
+
+    fotos_count = videos_count = None
+    try:
+        cnt = await sidecar_request(
+            "GET", "/media_counts", params={"path": dest}, timeout=300.0
+        )
+        fotos_count = int(cnt["fotos"])
+        videos_count = int(cnt["videos"])
+    except (MegaError, KeyError, TypeError, ValueError):
+        pass  # contagem é cosmética; o upload em si já deu certo
+    if fotos_count is not None:
+        siblings = (
+            (
+                await session.execute(
+                    select(PricingProduct).where(
+                        PricingProduct.fotos_path == dest
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for sib in siblings:
+            sib.fotos_count = fotos_count
+            sib.videos_count = videos_count
+        row.fotos_count = fotos_count
+        row.videos_count = videos_count
+
     await session.commit()
     logger.info(
         "mega_fotos_upload",
@@ -388,4 +487,6 @@ async def upload_product_fotos(
         "fotos_url": row.fotos_url,
         "fotos_path": dest,
         "uploaded": up.get("uploaded", len(files)),
+        "fotos_count": fotos_count,
+        "videos_count": videos_count,
     }

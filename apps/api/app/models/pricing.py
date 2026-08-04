@@ -188,6 +188,10 @@ class PricingProduct(Base, TimestampMixin):
     # Alimentado pela sincronização/upload via sidecar MEGAcmd; é o alvo
     # do mega-put quando o operador sobe fotos pelo DaVinci.
     fotos_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Quantas fotos/vídeos existem na pasta (contado pelo sidecar via
+    # mega-find; NULL = nunca contado). Atualizado no sync/refresh/upload.
+    fotos_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    videos_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class PricingOverride(Base, TimestampMixin):

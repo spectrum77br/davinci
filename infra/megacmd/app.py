@@ -120,14 +120,45 @@ def _list_one(root: str) -> tuple[list[dict], bool]:
     return items, flags is not None
 
 
+_IMG_EXT = {"jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "bmp", "tif", "tiff", "avif", "jfif"}
+_VID_EXT = {"mp4", "mov", "m4v", "avi", "mkv", "webm", "3gp", "mpg", "mpeg", "wmv", "flv"}
+
+
+def _count_media(path: str) -> tuple[int, int]:
+    """(fotos, vídeos) dentro da pasta, recursivo, classificado por extensão
+    via `mega-find` (lista a própria pasta + descendentes, 1 caminho/linha)."""
+    rc, out = run(["mega-find", path], timeout=300)
+    if rc != 0:
+        raise HTTPException(status_code=502, detail=out[-400:])
+    fotos = videos = 0
+    for ln in out.splitlines():
+        leaf = ln.strip().rstrip("/").rsplit("/", 1)[-1]
+        if "." not in leaf:
+            continue
+        ext = leaf.rsplit(".", 1)[-1].lower()
+        if ext in _IMG_EXT:
+            fotos += 1
+        elif ext in _VID_EXT:
+            videos += 1
+    return fotos, videos
+
+
 @app.get("/folders")
-def folders(root: str = "/", depth: int = 1, _: None = Depends(check_token)) -> dict:
+def folders(
+    root: str = "/",
+    depth: int = 1,
+    media_counts: int = 0,
+    _: None = Depends(check_token),
+) -> dict:
     """Lista pastas de `root`; depth=2 desce um nível dentro de cada pasta.
 
     Com depth=2, pastas de nível 1 que contêm subpastas ganham
     has_children=True (containers de marca, ex.: /Uranyx) e as subpastas
     entram na lista com level=2 — o matching usa as subpastas e ignora o
     container.
+
+    media_counts=1 acrescenta fotos/videos (contagem por extensão) em cada
+    pasta-folha — um mega-find por pasta, então só ligue quando precisar.
     """
     items, parsed = _list_one(root)
     if depth >= 2:
@@ -146,7 +177,21 @@ def folders(root: str = "/", depth: int = 1, _: None = Depends(check_token)) -> 
                 k["level"] = 2
                 merged.append(k)
         items = merged
+    if media_counts:
+        for it in items:
+            if not it["is_folder"] or it["has_children"]:
+                continue
+            try:
+                it["fotos"], it["videos"] = _count_media(it["path"])
+            except HTTPException:
+                it["fotos"] = it["videos"] = None
     return {"root": root, "items": items, "flags_parsed": parsed}
+
+
+@app.get("/media_counts")
+def media_counts_one(path: str, _: None = Depends(check_token)) -> dict:
+    fotos, videos = _count_media(path)
+    return {"path": path, "fotos": fotos, "videos": videos}
 
 
 @app.get("/debug/ls")

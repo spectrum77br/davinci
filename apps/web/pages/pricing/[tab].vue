@@ -4,6 +4,7 @@ import {
   Star, Send, Ban, Check, Link2, Copy, Minus,
   Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
   ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, Pencil, FolderPlus,
+  Image as ImageIcon, Film,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
@@ -395,6 +396,8 @@ type PricingProduct = {
   is_active: boolean
   in_catalog: boolean
   fotos_url: string | null
+  fotos_count: number | null
+  videos_count: number | null
   created_at: string
   updated_at: string
 }
@@ -885,6 +888,8 @@ async function megaApply() {
       toast.success('Fotos do MEGA sincronizadas', lines)
     }
     await loadProducts()
+    // Reconta fotos/vídeos em segundo plano (não segura o fechamento do modal).
+    void megaCountsRefresh(true)
   } catch (e: any) {
     toast.error('Sincronizar MEGA', [megaErrMsg(e)])
   } finally {
@@ -892,9 +897,39 @@ async function megaApply() {
   }
 }
 
+// -- contagem de fotos/vídeos por pasta (mega-find via sidecar) --------
+const megaCountsBusy = ref(false)
+async function megaCountsRefresh(silent = false) {
+  if (megaCountsBusy.value) return
+  megaCountsBusy.value = true
+  try {
+    const rep = await api<any>('/api/pricing/mega/counts/refresh', {
+      method: 'POST',
+      body: {},
+    })
+    await loadProducts()
+    if (!silent)
+      toast.success('Contagem de mídias atualizada', [
+        `${rep.folders_counted} pasta(s) contadas`,
+        `${rep.products_updated} produto(s) atualizados`,
+      ])
+  } catch (e: any) {
+    if (!silent) toast.error('Contar fotos/vídeos', [megaErrMsg(e)])
+  } finally {
+    megaCountsBusy.value = false
+  }
+}
+
 // -- criação da estrutura de pastas marca/modelo no MEGA ---------------
+// Pasta principal sugerida = departamento ativo (espelha /Celular, /Malas,
+// /Eletro no MEGA — mesma organização das abas do DaVinci).
+const MEGA_PASTA_POR_DEPT: Record<string, string> = {
+  celular: 'Celular',
+  mala: 'Malas',
+  eletro: 'Eletro',
+}
 const showMegaScaffold = ref(false)
-const megaScaffoldBrand = ref('Uranyx')
+const megaScaffoldBrand = ref('')
 const megaScaffoldText = ref('')
 const megaScaffoldBusy = ref(false)
 const megaScaffoldCount = computed(
@@ -937,6 +972,8 @@ function suggestMegaFolders(): string[] {
 }
 
 function openMegaScaffold() {
+  if (!megaScaffoldBrand.value.trim())
+    megaScaffoldBrand.value = MEGA_PASTA_POR_DEPT[department.value] ?? ''
   if (!megaScaffoldText.value.trim())
     megaScaffoldText.value = suggestMegaFolders().join('\n')
   showMegaScaffold.value = true
@@ -995,11 +1032,18 @@ async function onFotosPicked(ev: Event) {
       { method: 'POST', body: fd },
     )
     p.fotos_url = res.fotos_url
-    toast.success('Fotos enviadas pro MEGA', [
-      `${res.uploaded} foto(s) → ${p.name}`,
-    ])
+    const lines = [`${res.uploaded} arquivo(s) → ${p.name}`]
+    if (typeof res.fotos_count === 'number') {
+      p.fotos_count = res.fotos_count
+      p.videos_count = res.videos_count ?? 0
+      lines.push(
+        `pasta agora tem ${res.fotos_count} foto(s) e ${res.videos_count ?? 0} vídeo(s)`,
+      )
+    }
+    toast.success('Enviado pro MEGA', lines)
+    await loadProducts()
   } catch (e: any) {
-    toast.error('Upload de fotos', [megaErrMsg(e)])
+    toast.error('Upload de fotos/vídeos', [megaErrMsg(e)])
   } finally {
     uploadingFotosId.value = null
     fotosUploadTarget = null
@@ -3086,9 +3130,17 @@ watch(department, async () => {
                   <button
                     v-if="canEditProdutos"
                     class="p-0.5 text-muted-foreground hover:text-foreground rounded"
-                    title="Enviar mais fotos pra pasta deste produto no MEGA"
+                    title="Enviar mais fotos/vídeos pra pasta deste produto no MEGA"
                     @click="pickFotosUpload(p)"
                   ><Upload class="h-2.5 w-2.5" /></button>
+                  <span
+                    v-if="typeof p.fotos_count === 'number'"
+                    class="ml-1 inline-flex items-center gap-0.5 text-[10px] tabular-nums text-muted-foreground whitespace-nowrap"
+                    :title="`${p.fotos_count} foto(s) e ${p.videos_count ?? 0} vídeo(s) na pasta — recontagem pelo botão Fotos (MEGA)`"
+                  >
+                    <ImageIcon class="h-2.5 w-2.5" />{{ p.fotos_count }}
+                    <Film class="h-2.5 w-2.5 ml-0.5" />{{ p.videos_count ?? 0 }}
+                  </span>
                 </span>
                 <span v-else-if="canEditProdutos" class="inline-flex items-center gap-0.5">
                   <button
@@ -3271,9 +3323,21 @@ watch(department, async () => {
             </ul>
           </details>
           <div class="flex items-center justify-between gap-2 pt-1">
-            <button v-if="canEditProdutos" class="btn btn-sm" @click="openMegaScaffold">
-              <FolderPlus class="h-4 w-4 mr-1" /> Criar pastas no MEGA…
-            </button>
+            <div v-if="canEditProdutos" class="flex gap-2">
+              <button class="btn btn-sm" @click="openMegaScaffold">
+                <FolderPlus class="h-4 w-4 mr-1" /> Criar pastas no MEGA…
+              </button>
+              <button
+                class="btn btn-sm"
+                :disabled="megaCountsBusy"
+                title="Reconta as fotos e vídeos de cada pasta do MEGA e mostra os números na coluna Fotos"
+                @click="megaCountsRefresh()"
+              >
+                <Loader2 v-if="megaCountsBusy" class="h-4 w-4 mr-1 animate-spin" />
+                <RefreshCw v-else class="h-4 w-4 mr-1" />
+                Contar fotos/vídeos
+              </button>
+            </div>
             <span v-else></span>
             <div class="flex gap-2">
               <button class="btn btn-sm" @click="showMegaPreview = false">Fechar</button>
@@ -3301,15 +3365,16 @@ watch(department, async () => {
             <FolderPlus class="h-4 w-4" /> Criar pastas no MEGA
           </h3>
           <p class="text-xs text-muted-foreground">
-            Cria a pasta da marca com uma subpasta por modelo (ex.: /Uranyx/M2 listrada)
-            e já preenche o link de fotos de todos os produtos daquele modelo.
-            As fotos podem ser adicionadas depois — o link continua o mesmo.
+            Cria a pasta do departamento com uma subpasta por modelo
+            (ex.: /Malas/M2 listrada, /Celular/Fossibot S7) e já preenche o
+            link de fotos de todos os produtos daquele modelo. As fotos e
+            vídeos podem ser adicionados depois — o link continua o mesmo.
           </p>
           <label class="block text-xs">
-            <span class="text-muted-foreground">Pasta principal (marca)</span>
+            <span class="text-muted-foreground">Pasta principal (departamento)</span>
             <input
               v-model="megaScaffoldBrand"
-              placeholder="Uranyx"
+              placeholder="Celular"
               class="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-background"
             />
           </label>
