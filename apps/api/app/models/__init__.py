@@ -75,6 +75,7 @@ from app.models.nf import (
 from app.models.marketing import (
     MarketingAccount,
     MarketingCampaign,
+    MarketingCreative,
     MarketingDecision,
     MarketingMetric,
     MarketingPattern,
@@ -169,6 +170,7 @@ __all__ = [
     "Margens",
     "MarketingAccount",
     "MarketingCampaign",
+    "MarketingCreative",
     "MarketingDecision",
     "MarketingMetric",
     "MarketingPattern",

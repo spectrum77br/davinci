@@ -192,7 +192,9 @@ if settings.enable_marketing:
     # Optional Marketing module — see config.enable_marketing. Import lazily so
     # prod boots even when marketing_* tables don't exist on the DB.
     from app.routers import marketing as marketing_router
+    from app.routers import marketing_creatives as marketing_creatives_router
     app.include_router(marketing_router.router)
+    app.include_router(marketing_creatives_router.router)
 
 
 @app.get("/api/health")

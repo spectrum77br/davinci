@@ -12,6 +12,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -279,3 +280,31 @@ class MarketingAgentHeartbeat(Base, TimestampMixin):
     adspower_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     accounts_online: Mapped[int | None] = mapped_column(Integer, nullable=True)
     info: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+
+class MarketingCreative(Base, TimestampMixin):
+    """Linha da aba Criativos: briefing (modelo/marca/sku/roteiro) + arquivo
+    do criador de conteúdo + aprovação. `aprovado` é tri-state: NULL =
+    pendente, True = aprovado (arquivo vai pro MEGA), False = reprovado.
+    `pushed_at`/`pushed_dest` registram o envio pra pasta do produto."""
+
+    __tablename__ = "marketing_creatives"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    modelo: Mapped[str] = mapped_column(String(160), nullable=False)
+    marca: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sku: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    roteiro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    file_mime: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Caminho relativo a settings.uploads_dir (ex.: "creatives/<id>/<nome>").
+    file_rel: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    aprovado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pushed_dest: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )

@@ -3,6 +3,8 @@ import { computed } from 'vue'
 export type Resource =
   | 'produtos'
   | 'anuncios'
+  | 'marketing'
+  | 'marketing_criativos'
   | 'tabela_precos'
   | 'tabela_precos_contas'
   | 'tabela_precos_produtos'
@@ -49,6 +51,8 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     resources: [
       'produtos',
       'anuncios',
+      'marketing',
+      'marketing_criativos',
       'tabela_precos',
       'tabela_precos_contas',
       'tabela_precos_produtos',
@@ -101,6 +105,8 @@ export const ACTIONS: Action[] = ['view', 'edit', 'delete']
 export const RESOURCE_LABELS: Record<Resource, string> = {
   produtos: 'Produtos',
   anuncios: 'Anúncios',
+  marketing: 'Marketing (Ads)',
+  marketing_criativos: 'Marketing — Criativos',
   tabela_precos: 'Tabela de Preços',
   tabela_precos_contas: 'Tabela Preços — Contas',
   tabela_precos_produtos: 'Tabela Preços — Produtos',

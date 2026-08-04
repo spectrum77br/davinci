@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  AlertCircle, BarChart3, Bell, Bot, Clock,
+  AlertCircle, BarChart3, Bell, Bot, Clapperboard, Clock,
   Pause, Play, RefreshCw, Sparkles,
 } from 'lucide-vue-next'
 
 const { api } = useApi()
 const { success: toastOk, error: toastErr } = useToasts()
+
+// Permissões: "marketing" = dashboards de Ads; "marketing_criativos" = aba
+// Criativos. Quem só tem criativos não carrega (nem enxerga) nada de Ads.
+const canAds = useCan('marketing', 'view')
+const canCriativos = useCan('marketing_criativos', 'view')
 
 // ── Types ────────────────────────────────────────────────────────────
 type Account = {
@@ -172,7 +177,7 @@ type AgentPresence = {
 // ── State ────────────────────────────────────────────────────────────
 // The page is organised by marketplace — only Mercado Livre + Shopee are
 // surfaced. The platform tab replaces the old mode + department tabs.
-type Platform = 'ml' | 'shopee'
+type Platform = 'ml' | 'shopee' | 'criativos'
 const platform = ref<Platform>('ml')
 
 const summary = ref<Summary | null>(null)
@@ -660,6 +665,7 @@ const executorBadge = computed(() => {
 })
 
 async function refresh() {
+  if (!canAds.value) return
   loading.value = true
   errorText.value = null
   try {
@@ -706,6 +712,15 @@ async function toggleScheduleCell(dow: number, hour: number) {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 onMounted(async () => {
+  if (!canAds.value && !canCriativos.value) {
+    await navigateTo('/403')
+    return
+  }
+  if (!canAds.value) {
+    // Usuário só de Criativos: pula todo o carregamento/polling de Ads.
+    platform.value = 'criativos'
+    return
+  }
   await refresh()
   pollTimer = setInterval(() => {
     Promise.all([
@@ -718,6 +733,7 @@ onBeforeUnmount(() => {
 })
 
 watch(platform, async () => {
+  if (platform.value === 'criativos' || !canAds.value) return
   await Promise.all([
     loadSummary(), loadCreditAlerts(), loadTimeseries(),
   ])
@@ -743,11 +759,12 @@ definePageMeta({ middleware: [] })
         <BarChart3 class="h-6 w-6 text-primary" />
         <h1 class="text-2xl font-semibold">Marketing</h1>
       </div>
-      <button class="rounded-md border px-2 py-1 text-sm hover:bg-muted disabled:opacity-50 inline-flex items-center gap-1"
+      <button v-if="canAds && platform !== 'criativos'"
+        class="rounded-md border px-2 py-1 text-sm hover:bg-muted disabled:opacity-50 inline-flex items-center gap-1"
         :disabled="loading" @click="refresh">
         <RefreshCw class="size-4" :class="{ 'animate-spin': loading }" /> recarregar
       </button>
-      <div class="ml-auto flex items-center gap-2">
+      <div v-if="canAds" class="ml-auto flex items-center gap-2">
         <span
           class="rounded-md border px-2 py-1 text-xs inline-flex items-center gap-1.5"
           :class="executorBadge.online
@@ -767,30 +784,43 @@ definePageMeta({ middleware: [] })
       </div>
     </div>
 
-    <div v-if="errorText" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
+    <div v-if="errorText && platform !== 'criativos'" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
       <AlertCircle class="size-4" /> {{ errorText }}
     </div>
 
-    <div v-if="(summary?.accounts.length ?? 0) === 0 && !loading"
+    <div v-if="canAds && platform !== 'criativos' && (summary?.accounts.length ?? 0) === 0 && !loading"
       class="rounded-md border bg-muted/30 px-6 py-10 text-center text-sm text-muted-foreground">
       Nenhuma conta sincronizada ainda. As integrações Shopee/ML/Amazon com <code>ads_enabled</code> são populadas automaticamente pelo cron.
     </div>
 
-    <!-- Abas por plataforma (Mercado Livre | Shopee) -->
-    <div v-if="(summary?.accounts.length ?? 0) > 0" class="flex flex-wrap items-center gap-3">
+    <!-- Abas: Mercado Livre | Shopee (Ads) + Criativos. Cada uma aparece
+         conforme a permissão do usuário (marketing / marketing_criativos). -->
+    <div v-if="(canAds && (summary?.accounts.length ?? 0) > 0) || canCriativos" class="flex flex-wrap items-center gap-3">
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit">
-        <button v-for="p in (['ml', 'shopee'] as const)" :key="p"
+        <template v-if="canAds && (summary?.accounts.length ?? 0) > 0">
+          <button v-for="p in (['ml', 'shopee'] as const)" :key="p"
+            class="px-4 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
+            :class="platform === p ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+            @click="platform = p">
+            <span class="inline-block size-2 rounded-full" :style="{ background: platformColor[p] }" />
+            {{ platformLabel[p] ?? p }}
+          </button>
+        </template>
+        <button v-if="canCriativos"
           class="px-4 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
-          :class="platform === p ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
-          @click="platform = p">
-          <span class="inline-block size-2 rounded-full" :style="{ background: platformColor[p] }" />
-          {{ platformLabel[p] ?? p }}
+          :class="platform === 'criativos' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+          @click="platform = 'criativos'">
+          <Clapperboard class="size-3.5" />
+          Criativos
         </button>
       </div>
     </div>
 
+    <!-- ═══════════════════════════════ CRIATIVOS ══════════════════════ -->
+    <MarketingCriativos v-if="platform === 'criativos' && canCriativos" />
+
     <!-- ═══════════════════════════════ MÉTRICAS ═══════════════════════ -->
-    <template v-if="summary">
+    <template v-if="platform !== 'criativos' && summary">
       <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <template v-for="(period, idx) in [{ key: 'period_1', days: period1Days }, { key: 'period_2', days: period2Days }] as const" :key="period.key">
           <div class="rounded-md border overflow-hidden">

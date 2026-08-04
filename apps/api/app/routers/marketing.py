@@ -4,8 +4,10 @@ Endpoints (all under /api/marketing):
   accounts, metrics (summary + per-account), schedules CRUD,
   agents/status, decisions, intensity, patterns, chart-data, seed, trigger.
 
-Auth: require_active_user. The marketing data is not user-scoped (it's a
-single-tenant ops dashboard for the whole shop).
+Auth: require_permission("marketing", view/edit) — GETs pedem view,
+mutações pedem edit; admin tem bypass. Os dados não são user-scoped
+(dashboard single-tenant da operação). Endpoints /agent/* M2M usam
+X-Agent-Token e ficam fora do sistema de permissões.
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps.auth import require_active_user
+from app.deps.auth import require_permission
 from app.models import User
 from app.models.marketing import (
     MarketingAccount,
@@ -222,7 +224,7 @@ def _assessment(intensity: int) -> str:
 @router.get("/accounts")
 async def list_accounts(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     department: str | None = Query(None),
     platform: str | None = Query(None),
 ) -> list[AccountOut]:
@@ -240,7 +242,7 @@ async def list_accounts(
 @router.get("/metrics/summary")
 async def metrics_summary(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     department: str | None = Query(None),
     platform: str | None = Query(None),
     period1_days: int = Query(7, ge=1, le=365),
@@ -305,7 +307,7 @@ async def metrics_summary(
 async def metrics_by_account(
     account_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     start: date | None = Query(None),
     end: date | None = Query(None),
 ) -> list[dict]:
@@ -345,7 +347,7 @@ async def metrics_by_account(
 @router.get("/timeseries")
 async def metrics_timeseries(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     days: int = Query(7, ge=1, le=90),
     department: str | None = Query(None),
     platform: str | None = Query(None),
@@ -413,7 +415,7 @@ async def metrics_timeseries(
 async def get_schedules(
     account_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
 ) -> list[ScheduleOut]:
     rows = (
         await session.execute(
@@ -436,7 +438,7 @@ async def replace_schedules(
     account_id: UUID,
     schedules: list[ScheduleIn],
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> list[ScheduleOut]:
     acc = await session.get(MarketingAccount, account_id)
     if acc is None:
@@ -468,7 +470,7 @@ async def replace_schedules(
 async def schedule_heatmap(
     account_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     days: int = Query(30, ge=1, le=180),
 ) -> dict:
     """7×24 ACOS heatmap. Aggregates the last N days of MarketingMetric by
@@ -519,7 +521,7 @@ async def copy_schedules(
     account_id: UUID,
     body: CopyScheduleIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> list[ScheduleOut]:
     src = await session.get(MarketingAccount, account_id)
     tgt = await session.get(MarketingAccount, body.target_account_id)
@@ -559,7 +561,7 @@ async def copy_schedules(
 @router.get("/agents/status")
 async def agents_status(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
 ) -> list[AgentStatusOut]:
     now = datetime.now(UTC)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -610,7 +612,7 @@ async def agents_status(
 @router.get("/decisions")
 async def list_decisions(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     account_id: UUID | None = Query(None),
     platform: str | None = Query(None),
     department: str | None = Query(None),
@@ -644,7 +646,7 @@ async def list_decisions(
 @router.get("/intensity")
 async def get_intensity(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     department: str | None = Query(None),
     platform: str | None = Query(None),
 ) -> list[IntensityOut]:
@@ -676,7 +678,7 @@ async def get_intensity(
 @router.get("/patterns")
 async def list_patterns(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     account_id: UUID | None = Query(None),
     active: bool | None = Query(True),
 ) -> list[PatternOut]:
@@ -702,7 +704,7 @@ async def list_patterns(
 @router.get("/credit-alerts")
 async def list_credit_alerts(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
 ) -> list[CreditAlertOut]:
     """Per Shopee account: credit / avg-daily-spend → days_remaining. Severity:
     critical ≤2, warning ≤4, ok otherwise."""
@@ -756,7 +758,7 @@ _PLATFORM_ORDER = sa.case(
 @router.get("/campaigns")
 async def list_campaigns(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     department: str | None = Query(None),
     platform: str | None = Query(None),
     account_id: UUID | None = Query(None),
@@ -788,7 +790,7 @@ async def list_campaigns(
 async def get_campaign(
     campaign_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
 ) -> dict:
     row = (
         await session.execute(
@@ -830,7 +832,7 @@ async def create_command(
     account_id: UUID,
     body: CommandIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_active_user)],
+    user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> CommandOut:
     """Enqueue a manual ad action (pause/resume/set_budget/adjust_budget_pct).
     Inserts a `pending` command; the dedicated agent node executes it. Returns
@@ -883,7 +885,7 @@ async def create_command(
 async def list_commands(
     account_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
     limit: int = Query(20, ge=1, le=100),
 ) -> list[CommandOut]:
     """Recent commands for an account (newest first) so the UI can show the
@@ -903,7 +905,7 @@ async def list_commands(
 async def get_schedule_state(
     account_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
 ) -> dict:
     """Current desired state (computed in BRT) + override info + next flip,
     for the agenda panel's "Agora: LIGADO até 15:00" hint."""
@@ -923,7 +925,7 @@ async def patch_schedule(
     account_id: UUID,
     body: SchedulePatchIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> dict:
     """Toggle the automatic agenda and/or set a manual override. Only fields
     present in the request are touched (so a pure override change doesn't
@@ -1141,7 +1143,7 @@ async def agent_heartbeat(
 @router.get("/agent/status")
 async def agent_status(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "view"))],
 ) -> dict:
     """Executor presence for the dashboard. `online` = a heartbeat within the
     last 120s. Returns the most-recently-seen agent row (singleton in practice)."""
@@ -1173,7 +1175,7 @@ async def agent_status(
 async def sync_shopee(
     integration_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> dict:
     """Manually pull live Shopee Ads data for one integration. Persists to
     MarketingAccount + MarketingMetric + MarketingCampaign so the dashboard
@@ -1186,7 +1188,7 @@ async def sync_shopee(
 @router.post("/sync-shopee-all")
 async def sync_shopee_all(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> list[dict]:
     """Loop over every active Shopee integration and sync each one. Each
     failure is recorded inline so a single bad shop doesn't abort the run."""
@@ -1199,7 +1201,7 @@ async def sync_shopee_all(
 async def sync_ml(
     integration_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> dict:
     """Manually pull live ML Product Ads data for one integration."""
     from app.services.marketing.ml_sync import sync_ml_integration
@@ -1210,7 +1212,7 @@ async def sync_ml(
 @router.post("/sync-ml-all")
 async def sync_ml_all(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> list[dict]:
     """Loop over every ads-enabled ML integration."""
     from app.services.marketing.ml_sync import sync_all_ml_integrations
@@ -1222,7 +1224,7 @@ async def sync_ml_all(
 async def sync_amazon(
     integration_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> dict:
     """Manually pull live Amazon Sponsored Products data for one integration."""
     from app.services.marketing.amazon_sync import sync_amazon_integration
@@ -1233,7 +1235,7 @@ async def sync_amazon(
 @router.post("/sync-amazon-all")
 async def sync_amazon_all(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> list[dict]:
     """Loop over every ads-enabled Amazon integration."""
     from app.services.marketing.amazon_sync import sync_all_amazon_integrations
@@ -1244,7 +1246,7 @@ async def sync_amazon_all(
 @router.post("/sync-all")
 async def sync_all_platforms(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> dict:
     """Sync every ads-enabled integration across Shopee + ML + Amazon. Each
     platform runs sequentially so a slow Amazon report doesn't block Shopee;
@@ -1266,7 +1268,7 @@ async def sync_all_platforms(
 @router.post("/trigger-cycle/{account_id}")
 async def trigger_cycle(
     account_id: UUID,
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> dict:
     result = await agent_decision_cycle(account_id)
     return result or {"status": "skipped", "reason": "agent_disabled"}
@@ -1275,7 +1277,7 @@ async def trigger_cycle(
 @router.post("/trigger-all")
 async def trigger_all(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> list[dict]:
     rows = (
         await session.execute(
@@ -1379,7 +1381,7 @@ def _mock_campaign_metrics(platform: str, status: str) -> dict:
 @router.post("/seed")
 async def seed(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_active_user)],
+    _user: Annotated[User, Depends(require_permission("marketing", "edit"))],
 ) -> dict:
     """Idempotent: accounts + base schedules + 30 days of metrics + recent
     decisions + 4 learned patterns per account. Re-runs are no-ops once
