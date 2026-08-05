@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
 import {
   LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
   Package, Megaphone, DollarSign, RefreshCw, Undo2,
   Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
-  Store, Tags, ClipboardList, ChevronLeft, ChevronRight, Warehouse,
+  Store, Tags, ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
   ReceiptText,
 } from 'lucide-vue-next'
@@ -208,6 +208,60 @@ function isActive(to: string) {
   if (to === '/') return route.path === '/'
   return route.path === to || route.path.startsWith(to + '/')
 }
+
+// ── Grupos recolhíveis ─────────────────────────────────────────────────
+// Clicar no título da seção (Operação, Pós-venda…) abre/fecha o grupo.
+// O que ficou fechado é lembrado no navegador (localStorage) e o grupo
+// da página atual reabre sozinho ao navegar pra ela.
+const CLOSED_KEY = 'davinci.sidebar.closed'
+const closedGroups = ref<string[]>([])
+
+function persistClosed() {
+  try {
+    localStorage.setItem(CLOSED_KEY, JSON.stringify(closedGroups.value))
+  } catch {
+    // navegador sem localStorage — só não lembra entre visitas
+  }
+}
+
+function toggleGroup(label?: string) {
+  if (!label) return
+  closedGroups.value = closedGroups.value.includes(label)
+    ? closedGroups.value.filter((l) => l !== label)
+    : [...closedGroups.value, label]
+  persistClosed()
+}
+
+function isGroupOpen(section: Section) {
+  if (!section.label) return true
+  return !closedGroups.value.includes(section.label)
+}
+
+// Reabre o grupo que contém a rota atual (se estiver fechado).
+function openSectionOf(path: string) {
+  const label = sections.find((s) =>
+    s.label && s.items.some((it) => it.to !== '/' && (path === it.to || path.startsWith(it.to + '/'))),
+  )?.label
+  if (label && closedGroups.value.includes(label)) {
+    closedGroups.value = closedGroups.value.filter((l) => l !== label)
+    persistClosed()
+  }
+}
+
+onMounted(() => {
+  try {
+    const raw = localStorage.getItem(CLOSED_KEY)
+    if (raw) {
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr)) closedGroups.value = arr.filter((x): x is string => typeof x === 'string')
+    }
+  } catch {
+    // JSON inválido/localStorage bloqueado — começa tudo aberto
+  }
+  openSectionOf(route.path)
+})
+
+watch(() => route.path, (p) => openSectionOf(p))
 </script>
 
 <template>
@@ -229,25 +283,29 @@ function isActive(to: string) {
       </button>
     </div>
 
-    <nav class="flex-1 overflow-y-auto py-3 space-y-4">
+    <nav class="flex-1 overflow-y-auto py-2 space-y-1.5">
       <div v-for="(section, idx) in visibleSections" :key="idx">
-        <div
+        <button
           v-if="section.label && !props.collapsed"
-          class="px-4 pb-1 text-[10px] uppercase tracking-[0.12em] font-semibold text-[hsl(var(--sidebar-muted))]"
+          type="button"
+          class="w-full flex items-center px-4 py-1 text-[10px] uppercase tracking-[0.12em] font-semibold text-[hsl(var(--sidebar-muted))] hover:text-foreground transition-colors"
+          @click="toggleGroup(section.label)"
         >
-          {{ section.label }}
-        </div>
-        <ul class="px-2 space-y-0.5">
+          <span>{{ section.label }}</span>
+          <ChevronDown v-if="isGroupOpen(section)" class="size-3 ml-auto" />
+          <ChevronRight v-else class="size-3 ml-auto" />
+        </button>
+        <ul v-show="props.collapsed || isGroupOpen(section)" class="px-2 space-y-px">
           <li v-for="it in section.items" :key="it.to">
             <NuxtLink
               :to="it.to"
               :title="props.collapsed ? it.label : undefined"
-              class="group relative flex items-center gap-3 rounded-lg px-2.5 h-9 text-sm font-medium transition-colors"
+              class="group relative flex items-center gap-2.5 rounded-md px-2.5 h-8 text-[13px] font-medium transition-colors"
               :class="isActive(it.to)
                 ? 'bg-[hsl(var(--sidebar-active-bg))] text-[hsl(var(--sidebar-active-fg))]'
                 : 'text-[hsl(var(--sidebar-foreground))] hover:bg-muted'"
             >
-              <component :is="it.icon" class="size-[18px] shrink-0" />
+              <component :is="it.icon" class="size-4 shrink-0" />
               <span v-if="!props.collapsed" class="truncate">{{ it.label }}</span>
               <!-- Solid red dot when this user has pending tarefas.
                    Static (no animation) — the pulsing version was too
