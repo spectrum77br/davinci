@@ -30,6 +30,7 @@ from app.models import (
     NfEtiqueta,
     NfFaturador,
     NfFaturamento,
+    Product,
     StoreInfo,
     User,
     UserRole,
@@ -39,6 +40,11 @@ from app.security.cipher import encrypt
 from app.services import nf_emissao_gerar, nf_relatorio
 
 _TOKEN = "nf-agent-test-token"
+
+
+async def _async_return(value: object) -> object:
+    """`_bling_client_opt` é async — o monkeypatch devolve a coroutine pronta."""
+    return value
 
 
 @pytest_asyncio.fixture
@@ -155,6 +161,109 @@ async def test_enfileirar_sem_faturador_422(
     )
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "nf_nenhum_pedido_gerado"
+
+
+class _FakeBlingSituacao:
+    """Captura os PATCH de situação que o motor manda pro Bling."""
+
+    def __init__(self) -> None:
+        self.chamadas: list[tuple[int, int]] = []
+
+    async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
+        self.chamadas.append((bling_order_id, situacao_id))
+
+
+@pytest.mark.asyncio
+async def test_enfileirar_pula_pedido_sem_estoque(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Item com saldo virtual negativo não vira NF/etiqueta: o pedido sai da fila
+    e vai pra Aguardando Cancelamento (83955) no Bling."""
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)
+    db.add(Product(user_id=admin.id, sku="x1", name="Produto X", stock=-3))
+    db.add(Product(user_id=admin.id, sku="dg053.ci", name="Capa", stock=5))
+    await db.commit()
+    fake = _FakeBlingSituacao()
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/enfileirar",
+        json={"numeros": ["830001", "830002"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["comandos"] == 1
+    assert body["pedidos_ok"] == 1
+    assert [p["numero"] for p in body["pulados"]] == ["830002"]
+    assert "sem estoque" in body["pulados"][0]["motivo"]
+
+    # só o pedido COM estoque foi enfileirado
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert [n for c in cmds for n in c.numeros] == ["830001"]
+
+    # o sem estoque foi pra Aguardando Cancelamento no Bling e localmente
+    assert fake.chamadas == [(700001, 83955)]
+    situacoes = {
+        r.numero: r.situacao
+        for r in (
+            await db.execute(select(BlingOrder.numero, BlingOrder.situacao))
+        ).all()
+    }
+    assert situacoes["830002"] == "83955"
+    assert situacoes["830001"] == "15"
+
+    fats = {f.pedido_bling: f for f in (await db.execute(select(NfFaturamento))).scalars().all()}
+    assert fats["830002"].status_faturamento == "sem_estoque"
+    assert fats["830001"].status_faturamento == "processando"
+
+
+@pytest.mark.asyncio
+async def test_enfileirar_todos_sem_estoque_422(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Nenhum pedido sobra pra fila → 422, mas os pulados por estoque aparecem
+    na resposta (o front lista o motivo)."""
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)
+    db.add(Product(user_id=admin.id, sku="x1", name="Produto X", stock=-1))
+    await db.commit()
+    monkeypatch.setattr(
+        nf_emissao_gerar,
+        "_bling_client_opt",
+        lambda _s: _async_return(_FakeBlingSituacao()),
+    )
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/enfileirar", json={"numeros": ["830002"]}
+    )
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "nf_nenhum_pedido_gerado"
+    assert [p["numero"] for p in detail["pulados"]] == ["830002"]
+
+
+@pytest.mark.asyncio
+async def test_enfileirar_saldo_zero_tem_estoque(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None],
+):
+    """Saldo virtual 0 já desconta a reserva do próprio pedido — ainda é
+    atendível. Só o NEGATIVO bloqueia."""
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)
+    db.add(Product(user_id=admin.id, sku="x1", name="Produto X", stock=0))
+    await db.commit()
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/enfileirar", json={"numeros": ["830002"]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["pedidos_ok"] == 1
 
 
 @pytest.mark.asyncio
@@ -677,16 +786,6 @@ async def test_result_etiqueta_marca_status_etiqueta(
     assert fat.status_etiqueta == "ok"
     assert fat.erro_etiqueta is None
     assert fat.status_faturamento == "ok"
-
-
-class _FakeBlingSituacao:
-    """Captura os PATCH de situação que o motor manda pro Bling."""
-
-    def __init__(self) -> None:
-        self.chamadas: list[tuple[int, int]] = []
-
-    async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
-        self.chamadas.append((bling_order_id, situacao_id))
 
 
 @pytest.mark.asyncio

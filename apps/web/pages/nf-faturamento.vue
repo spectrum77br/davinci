@@ -453,6 +453,7 @@ function badgeClass(status: string): string {
   if (s === 'ok') return 'bg-emerald-100 text-emerald-700'
   if (s === 'erro') return 'bg-red-100 text-red-700'
   if (s === 'processando') return 'bg-amber-100 text-amber-700'
+  if (s === 'sem_estoque') return 'bg-orange-100 text-orange-700'
   return 'bg-gray-100 text-gray-600'
 }
 function badgeLabel(status: string): string {
@@ -460,6 +461,7 @@ function badgeLabel(status: string): string {
   if (s === 'ok') return 'OK'
   if (s === 'erro') return 'Erro'
   if (s === 'processando') return 'Processando'
+  if (s === 'sem_estoque') return 'Sem estoque'
   if (s === 'pendente') return 'Pendente'
   return status
 }

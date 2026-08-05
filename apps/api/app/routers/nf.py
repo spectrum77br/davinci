@@ -42,6 +42,7 @@ from app.models import (
     NfFaturador,
     NfFaturamento,
     NfImpressao,
+    Product,
     User,
 )
 from app.schemas.nf import (
@@ -91,6 +92,10 @@ _ETIQUETA_MAX_BYTES = 8 * 1024 * 1024
 # Situação custom do shop no Bling. É ela que faz o pedido aparecer na aba
 # Pedidos do Controle de Estoque pra ser impresso (ver routers/estoque.py).
 _SITUACAO_ENVIADO_ETIQUETA = 83965
+
+# Pedido sem estoque não vira etiqueta: vai pra Aguardando Cancelamento e sai
+# do fluxo (o humano decide cancelar ou repor). Id da davinci.situacao_bling.
+_SITUACAO_AGUARDANDO_CANCELAMENTO = 83955
 
 logger = structlog.get_logger()
 _SCHEMA = get_settings().database_schema
@@ -949,6 +954,90 @@ async def _marcar_enviado_etiqueta(
         logger.info("nf_enviado_etiqueta", numero=numero)
 
 
+async def _pedidos_sem_estoque(
+    session: AsyncSession, numeros: list[str]
+) -> dict[str, list[str]]:
+    """Pedidos com algum item de saldo VIRTUAL negativo (`products.stock`).
+
+    O virtual do Bling já desconta a reserva dos pedidos em aberto: 0 ainda é
+    atendível, negativo é que a peça não existe. SKU fora do cadastro NÃO
+    bloqueia — só bloqueamos com evidência de negativo. Devolve numero → SKUs.
+    """
+    if not numeros:
+        return {}
+    itens = (
+        await session.execute(
+            select(BlingOrder.numero, BlingOrder.item_codigo)
+            .where(BlingOrder.numero.in_(numeros))
+            .where(BlingOrder.item_codigo.is_not(None))
+            .distinct()
+        )
+    ).all()
+    skus = {r.item_codigo for r in itens if r.item_codigo}
+    if not skus:
+        return {}
+    negativos = set(
+        (
+            await session.execute(
+                select(Product.sku).where(Product.sku.in_(skus), Product.stock < 0)
+            )
+        ).scalars().all()
+    )
+    faltando: dict[str, list[str]] = {}
+    for r in itens:
+        if r.item_codigo in negativos:
+            faltando.setdefault(r.numero, []).append(r.item_codigo)
+    return faltando
+
+
+async def _marcar_aguardando_cancelamento(
+    session: AsyncSession, numeros: list[str]
+) -> None:
+    """Move os pedidos sem estoque pra "Aguardando Cancelamento" no Bling.
+
+    BEST-EFFORT igual ao `_marcar_enviado_etiqueta`: falha no Bling só loga (o
+    pedido fica de fora da fila do mesmo jeito, e a situação pode ser corrigida
+    à mão). Espelha na `bling_orders` pra a tela refletir sem esperar o sync.
+    """
+    if not numeros:
+        return
+    rows = (
+        await session.execute(
+            select(BlingOrder.numero, BlingOrder.bling_id, BlingOrder.situacao)
+            .where(BlingOrder.numero.in_(numeros))
+            .where(BlingOrder.bling_id.is_not(None))
+            .distinct()
+        )
+    ).all()
+    pendentes = {
+        r.numero: r.bling_id
+        for r in rows
+        if str(r.situacao or "") != str(_SITUACAO_AGUARDANDO_CANCELAMENTO)
+    }
+    if not pendentes:
+        return
+    client = await nf_emissao_gerar._bling_client_opt(session)
+    if client is None:
+        logger.warning("nf_aguardando_cancelamento_sem_bling", numeros=list(pendentes))
+        return
+    for numero, bling_id in pendentes.items():
+        try:
+            await client.update_order_situacao(
+                int(bling_id), _SITUACAO_AGUARDANDO_CANCELAMENTO
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "nf_aguardando_cancelamento_falhou", numero=numero, erro=str(exc)
+            )
+            continue
+        await session.execute(
+            update(BlingOrder)
+            .where(BlingOrder.numero == numero)
+            .values(situacao=str(_SITUACAO_AGUARDANDO_CANCELAMENTO))
+        )
+        logger.info("nf_aguardando_cancelamento", numero=numero)
+
+
 async def _enfileirar_etiquetas(
     session: AsyncSession, faturador_id: UUID | None, numeros: list[str]
 ) -> int:
@@ -1063,15 +1152,41 @@ async def enfileirar_importacao(
 ) -> EnfileirarOut:
     """Enfileira a importação avulsa dos pedidos escolhidos: gera a planilha por
     faturador, cria um NfCommand por faturador (CSV congelado) e marca cada
-    pedido como 'processando'. 422 se nenhum pedido pôde ser gerado."""
-    res = await nf_emissao_gerar.gerar_por_faturador(session, body.numeros)
+    pedido como 'processando'. 422 se nenhum pedido pôde ser gerado.
+
+    Pedido sem estoque (saldo virtual negativo) NÃO entra na fila: vai pra
+    Aguardando Cancelamento no Bling e sai como pulado — não faz sentido emitir
+    NF/etiqueta de peça que não existe."""
+    sem_estoque = await _pedidos_sem_estoque(session, body.numeros)
+    pulados_estoque = [
+        {
+            "numero": numero,
+            "motivo": f"sem estoque ({', '.join(skus)}) — Aguardando Cancelamento",
+        }
+        for numero, skus in sem_estoque.items()
+    ]
+    if sem_estoque:
+        await _marcar_aguardando_cancelamento(session, list(sem_estoque))
+        await _marcar_faturamento(
+            session,
+            list(sem_estoque),
+            status_txt="sem_estoque",
+            erro="Aguardando Cancelamento — saldo negativo",
+        )
+        await session.commit()
+    numeros = [n for n in body.numeros if n not in sem_estoque]
+    res = (
+        await nf_emissao_gerar.gerar_por_faturador(session, numeros)
+        if numeros
+        else nf_emissao_gerar.ResultadoPorFaturador(blocos=[], pulados=[])
+    )
+    pulados = pulados_estoque + [
+        {"numero": p.numero, "motivo": p.motivo} for p in res.pulados
+    ]
     if not res.blocos:
         raise HTTPException(
             422,
-            detail={
-                "code": "nf_nenhum_pedido_gerado",
-                "pulados": [{"numero": p.numero, "motivo": p.motivo} for p in res.pulados],
-            },
+            detail={"code": "nf_nenhum_pedido_gerado", "pulados": pulados},
         )
     total_ok = 0
     for bloco in res.blocos:
@@ -1096,11 +1211,12 @@ async def enfileirar_importacao(
         "nf_importacao_enfileirada",
         comandos=len(res.blocos),
         pedidos_ok=total_ok,
+        sem_estoque=len(sem_estoque),
     )
     return EnfileirarOut(
         comandos=len(res.blocos),
         pedidos_ok=total_ok,
-        pulados=[{"numero": p.numero, "motivo": p.motivo} for p in res.pulados],
+        pulados=pulados,
     )
 
 
