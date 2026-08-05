@@ -17,7 +17,7 @@ import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, FileUp, Upload, Download, Trash2, Printer,
 } from 'lucide-vue-next'
-import { isoDaysAgo, isoToday } from '~/lib/date'
+import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
 
 definePageMeta({
   middleware: ['permission'],
@@ -67,6 +67,8 @@ type PedidoRow = {
   observacao: string | null
   bling_id: number | null
   etiqueta_disponivel: boolean
+  // Quando a etiqueta chegou (ISO com fuso). Null quando não há etiqueta.
+  etiqueta_em: string | null
 }
 type EnvioRow = {
   data: string
@@ -628,6 +630,17 @@ async function patchPedidoObs(row: PedidoRow, newObs: string) {
 // cookie de sessão vai junto quando o <a> abre numa aba nova.
 function etiquetaUrl(row: PedidoRow) {
   return `/api/estoque/pedidos/${encodeURIComponent(row.pedido_bling || '')}/etiqueta`
+}
+// Hora BRT em que a etiqueta chegou (dd/mm quando não é hoje).
+const _HORA_BRT = new Intl.DateTimeFormat('pt-BR', {
+  timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit',
+})
+function etiquetaHora(row: PedidoRow) {
+  if (!row.etiqueta_em) return ''
+  const d = new Date(row.etiqueta_em)
+  const hora = _HORA_BRT.format(d)
+  const dia = isoDateBrt(d)
+  return dia === isoToday() ? hora : `${dia.slice(8)}/${dia.slice(5, 7)} ${hora}`
 }
 async function toggleEnvio(row: EnvioRow) {
   if (!isAdmin.value) return
@@ -1206,7 +1219,14 @@ async function conferirTodos() {
                 <Printer class="size-3" />
                 Imprimir
               </a>
-              <span v-else class="text-[10px] text-muted-foreground/50">—</span>
+              <div
+                v-if="row.etiqueta_em"
+                class="text-[9px] text-muted-foreground mt-0.5"
+                title="Quando a etiqueta chegou"
+              >
+                {{ etiquetaHora(row) }}
+              </div>
+              <span v-if="!row.etiqueta_disponivel" class="text-[10px] text-muted-foreground/50">—</span>
             </td>
           </tr>
         </tbody>

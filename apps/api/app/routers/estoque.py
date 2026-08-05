@@ -568,17 +568,19 @@ async def list_estoque_pedidos(
     # etapa de visualização grava o blob em nf_etiqueta_arquivo por pedido).
     # Uma query, chaveada por pedido_bling (= o.numero). O botão "Imprimir
     # Etiqueta" só aparece/habilita quando existe blob pro pedido.
+    # `created_at` = quando a etiqueta chegou (a linha nasce com o blob). A tela
+    # mostra a hora pra o operador saber há quanto tempo está pronta pra imprimir.
     numeros = {o.numero for o in orders if o.numero}
-    etiquetas_por_pedido: set[str] = set()
+    etiquetas_por_pedido: dict[str, datetime] = {}
     if numeros:
         et_rows = (
             await session.execute(
-                select(NfEtiquetaArquivo.pedido_bling).where(
-                    NfEtiquetaArquivo.pedido_bling.in_(numeros)
-                )
+                select(
+                    NfEtiquetaArquivo.pedido_bling, NfEtiquetaArquivo.created_at
+                ).where(NfEtiquetaArquivo.pedido_bling.in_(numeros))
             )
         ).all()
-        etiquetas_por_pedido = {r.pedido_bling for r in et_rows}
+        etiquetas_por_pedido = {r.pedido_bling: r.created_at for r in et_rows}
 
     result: list[dict[str, Any]] = []
     for o in orders:
@@ -621,6 +623,11 @@ async def list_estoque_pedidos(
             "observacao": check["observacao"],
             "bling_id": o.bling_id,
             "etiqueta_disponivel": bool(o.numero) and o.numero in etiquetas_por_pedido,
+            "etiqueta_em": (
+                etiquetas_por_pedido[o.numero].isoformat()
+                if o.numero in etiquetas_por_pedido
+                else None
+            ),
         })
 
     # Atrasados (INDEPENDENTE do filtro de data): pedidos com etiqueta

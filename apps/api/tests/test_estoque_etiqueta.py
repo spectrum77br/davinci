@@ -79,6 +79,9 @@ async def test_pedidos_flag_etiqueta_disponivel(
     by_numero = {p["pedido_bling"]: p for p in r.json()["data"]}
     assert by_numero["920001"]["etiqueta_disponivel"] is True
     assert by_numero["920002"]["etiqueta_disponivel"] is False
+    # o horário de chegada acompanha o flag (é o created_at da linha)
+    assert by_numero["920001"]["etiqueta_em"]
+    assert by_numero["920002"]["etiqueta_em"] is None
 
 
 @pytest.mark.asyncio
