@@ -1038,28 +1038,58 @@ async def _marcar_aguardando_cancelamento(
         logger.info("nf_aguardando_cancelamento", numero=numero)
 
 
-async def _enfileirar_etiquetas(
+async def _enfileirar_emissao_upseller(
     session: AsyncSession, faturador_id: UUID | None, numeros: list[str]
-) -> int:
-    """Auto-enfileira UM comando `imprimir_etiqueta` por pedido (grão = 1 etiqueta
-    = 1 pedido) quando o faturamento de um faturador fecha 'ok'. Comando
-    DESACOPLADO da importação: a etiqueta pode não estar imprimível na hora (NF
-    async) e o comando fica pending até a marionete conseguir.
+) -> bool:
+    """Auto-enfileira UM comando `emitir_nf_upseller` por pedido depois que a
+    importação avulsa fecha no Upseller.
 
-    Só pra faturador `modo='upseller'` — é o único fluxo de etiqueta construído
-    (Upseller: import → "Etiqueta não impressa" → captura o PDF). Faturador Bling
-    (correios/agência) tem etiqueta por outro caminho ainda não construído.
+    Importar o avulso NÃO emite a nota: o pedido cai na fila "Para Emitir" e
+    ainda faltam três passos na tela (emitir a NF, exportar o XML e subir esse
+    XML no pedido ORIGINAL do marketplace). Só depois disso a etiqueta fica
+    imprimível — por isso a captura (`imprimir_etiqueta`) é encadeada quando
+    ESTE comando fecha 'ok', não quando o import fecha.
 
-    Dedupe por pedido: pula quem já tem etiqueta 'ok' ou um comando de etiqueta
-    ATIVO (pending/claimed) na fila — não reenfileira a cada faturamento."""
+    Só pra faturador `modo='upseller'`. Grão = 1 pedido: um pedido que falhe na
+    tela não segura os outros. Dedupe: pula quem já tem um comando de emissão
+    ATIVO (pending/claimed) na fila.
+
+    Devolve se o faturador é Upseller — quem chama usa isso pra saber se o
+    faturamento fechou (Bling) ou ainda está em curso (Upseller)."""
     if not numeros or faturador_id is None:
-        return 0
+        return False
     fat = await session.get(NfFaturador, faturador_id)
     if fat is None or (fat.modo or "").lower() != "upseller":
-        return 0
-    return await _criar_comandos_etiqueta(
-        session, numeros, faturador_id=faturador_id, ads_power=fat.ads_power
-    )
+        return False
+    em_fila = await _em_fila(session, "emitir_nf_upseller")
+    criar = [n for n in numeros if n not in em_fila]
+    for numero in criar:
+        session.add(
+            NfCommand(
+                faturador_id=faturador_id,
+                action="emitir_nf_upseller",
+                numeros=[numero],
+                planilha=b"",
+                nome_arquivo="",
+                status="pending",
+                source="auto",
+                ads_power=fat.ads_power,
+            )
+        )
+    return True
+
+
+async def _em_fila(session: AsyncSession, action: str) -> set[str]:
+    """Pedidos que já têm um comando ATIVO (pending/claimed) dessa ação."""
+    ativos = (
+        await session.execute(
+            select(NfCommand.numeros).where(
+                NfCommand.action == action,
+                NfCommand.status.in_(["pending", "claimed"]),
+            )
+        )
+    ).scalars().all()
+    return {n for arr in ativos for n in (arr or [])}
 
 
 async def _criar_comandos_etiqueta(
@@ -1085,15 +1115,7 @@ async def _criar_comandos_etiqueta(
             )
         ).scalars().all()
     }
-    ativos = (
-        await session.execute(
-            select(NfCommand.numeros).where(
-                NfCommand.action == "imprimir_etiqueta",
-                NfCommand.status.in_(["pending", "claimed"]),
-            )
-        )
-    ).scalars().all()
-    em_fila = {n for arr in ativos for n in (arr or [])}
+    em_fila = await _em_fila(session, "imprimir_etiqueta")
     criar = [n for n in numeros if n not in ja_ok and n not in em_fila]
     for numero in criar:
         session.add(
@@ -1383,9 +1405,10 @@ async def nf_agent_command_result(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict:
     """Reporta o resultado de um comando. Marca a etapa do pedido conforme a
-    `action`: 'import_avulsa' → status_faturamento (e, ao fechar 'ok', auto-
-    enfileira a etiqueta — Upseller direto e/ou import ML no Upseller);
-    'import_etiqueta' → ao fechar 'ok' encadeia a captura da etiqueta;
+    `action`: 'import_avulsa' → status_faturamento (Upseller segue 'processando'
+    e encadeia a emissão da NF; Bling fecha 'ok'; ML encadeia o import da
+    etiqueta); 'emitir_nf_upseller' → fecha o faturamento e encadeia a captura
+    da etiqueta; 'import_etiqueta' → ao fechar 'ok' encadeia a captura;
     'imprimir_etiqueta' → status_etiqueta. 'done' vira 'ok', 'failed' vira 'erro'
     + guarda a mensagem."""
     cmd = await session.get(NfCommand, command_id)
@@ -1407,6 +1430,22 @@ async def nf_agent_command_result(
                 session, numeros, status_txt="erro",
                 erro=cmd.result or "falha na etiqueta",
             )
+    elif cmd.action == "emitir_nf_upseller":
+        # Emitiu a NF, exportou o XML e subiu no pedido ORIGINAL — só AGORA o
+        # faturamento fechou de fato e a etiqueta fica imprimível.
+        if new_status == "done":
+            await _marcar_faturamento(session, numeros, status_txt="ok", erro=None)
+            await _criar_comandos_etiqueta(
+                session,
+                numeros,
+                faturador_id=cmd.faturador_id,
+                ads_power=cmd.ads_power,
+            )
+        else:
+            await _marcar_faturamento(
+                session, numeros, status_txt="erro",
+                erro=cmd.result or "falha ao emitir a NF no Upseller",
+            )
     elif cmd.action == "import_etiqueta":
         # Importou a venda avulsa NF-e=NÃO no Upseller — agora encadeia a captura
         # da etiqueta (imprimir_etiqueta) no mesmo AdsPower do cadastro Etiqueta.
@@ -1420,8 +1459,13 @@ async def nf_agent_command_result(
                 erro=cmd.result or "falha ao importar a etiqueta",
             )
     elif new_status == "done":
-        await _marcar_faturamento(session, numeros, status_txt="ok", erro=None)
-        await _enfileirar_etiquetas(session, cmd.faturador_id, numeros)
+        # Upseller: importar o avulso é só o 1º passo — a NF ainda não saiu, então
+        # o pedido segue 'processando' até a emissão fechar.
+        upseller = await _enfileirar_emissao_upseller(
+            session, cmd.faturador_id, numeros
+        )
+        if not upseller:
+            await _marcar_faturamento(session, numeros, status_txt="ok", erro=None)
         await _enfileirar_etiqueta_ml(session, numeros)
     else:
         await _marcar_faturamento(
