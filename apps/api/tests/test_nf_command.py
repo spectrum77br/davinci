@@ -53,12 +53,13 @@ async def admin(db: AsyncSession) -> User:
 
 async def _seed_pedido(
     db: AsyncSession, *, numero: str, loja: str, sku: str, nome: str, unit: float,
-    bling_id: int = 700001,
+    bling_id: int = 700001, numeroloja: str | None = None,
 ) -> None:
     db.add(
         BlingOrder(
             bling_id=bling_id,
             numero=numero,
+            numeroloja=numeroloja,
             data=datetime(2026, 6, 23, tzinfo=UTC),
             loja=loja,
             situacao="15",
@@ -541,7 +542,8 @@ async def _seed_upseller(db: AsyncSession, admin: User, *, numero: str = "850001
     db.add(StoreInfo(user_id=admin.id, platform="amazon", account_name="lU",
                      bling_store_id="950001", nf_faturador_id=f.id))
     await db.flush()
-    await _seed_pedido(db, numero=numero, loja="950001", sku="dg053.ci", nome="Capa", unit=500)
+    await _seed_pedido(db, numero=numero, loja="950001", sku="dg053.ci", nome="Capa",
+                       unit=500, numeroloja=f"PLAT-{numero}")
     await db.commit()
 
 
@@ -624,6 +626,29 @@ async def test_lease_entrega_comando_etiqueta(
     assert etq["usuario"] == "user-u"
     assert etq["senha"] == "segredoU"
     assert etq["planilha_b64"] == ""  # comando de etiqueta não carrega planilha
+    # A fila do Upseller lista pelo nº da PLATAFORMA — sem ele a marionete
+    # procurava pelo nº do Bling e não achava a linha.
+    assert etq["numeros_plataforma"] == ["PLAT-850001"]
+
+
+@pytest.mark.asyncio
+async def test_lease_numero_plataforma_cai_no_proprio_numero(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Pedido sem numeroloja (avulso digitado à mão) → o nº de busca é o próprio
+    número do Bling, mantendo o comportamento antigo."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)  # _seed_pedido sem numeroloja
+    await client.post("/api/nf-cadastro/faturamento/enfileirar",
+                      json={"numeros": ["830001"]})
+
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                              headers={"X-Agent-Token": _TOKEN})
+    cmd = lease.json()["commands"][0]
+    assert cmd["numeros"] == ["830001"]
+    assert cmd["numeros_plataforma"] == ["830001"]
 
 
 @pytest.mark.asyncio

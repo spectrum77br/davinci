@@ -1139,6 +1139,11 @@ class NfAgentCommandOut(BaseModel):
     senha: str | None
     action: str
     numeros: list[str]
+    # Mesma ordem de `numeros`: o número do pedido NA PLATAFORMA (numeroloja do
+    # Bling). É por ele que a fila do Upseller lista o pedido; o `numeros` (nº do
+    # Bling) segue sendo a chave de gravação da etiqueta. Cai no próprio número
+    # quando o pedido não tem numeroloja (avulso digitado à mão).
+    numeros_plataforma: list[str]
     nome_arquivo: str
     planilha_b64: str
     ncm: str | None
@@ -1179,6 +1184,19 @@ async def nf_agent_lease(
                 )
             ).scalars().all()
         } if fat_ids else {}
+        todos_numeros = {n for c in claimed for n in (c.numeros or [])}
+        plataforma_por_numero = {
+            r.numero: r.numeroloja
+            for r in (
+                await session.execute(
+                    select(BlingOrder.numero, BlingOrder.numeroloja)
+                    .where(BlingOrder.numero.in_(todos_numeros))
+                    .where(BlingOrder.numeroloja.is_not(None))
+                    .distinct()
+                )
+            ).all()
+            if r.numeroloja
+        } if todos_numeros else {}
         for cmd in claimed:
             cmd.status = "claimed"
             cmd.claimed_at = now
@@ -1196,6 +1214,10 @@ async def nf_agent_lease(
                     senha=(decrypt(fat.senha_enc) if fat and fat.senha_enc else None),
                     action=cmd.action,
                     numeros=list(cmd.numeros or []),
+                    numeros_plataforma=[
+                        plataforma_por_numero.get(n) or n
+                        for n in (cmd.numeros or [])
+                    ],
                     nome_arquivo=cmd.nome_arquivo,
                     planilha_b64=base64.b64encode(cmd.planilha).decode("ascii"),
                     ncm=(fat.ncm if fat else None),
