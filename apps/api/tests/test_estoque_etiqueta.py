@@ -231,3 +231,109 @@ async def test_serve_so_nf_sem_etiqueta_404(
     r = await client.get("/api/estoque/pedidos/920005/etiqueta")
     assert r.status_code == 404, r.text
     assert r.json()["detail"] == "nf_etiqueta_nao_encontrada"
+
+
+@pytest_asyncio.fixture
+async def tres_com_etiqueta(db: AsyncSession) -> None:
+    """Três pedidos com etiqueta; o do meio é do fluxo correios (tem NF)."""
+    d = date(2026, 5, 29)
+    for n, extra in (
+        ("930001", {}),
+        ("930002", {"nf_pdf": _pdf("NOTA 2"), "nf_size_bytes": 1}),
+        ("930003", {}),
+    ):
+        db.add(BlingOrder(
+            bling_id=int(n), numero=n, item_codigo=f"sku-{n}",
+            item_index=0, situacao="15", em_andamento_data=d,
+        ))
+        db.add(NfEtiquetaArquivo(
+            pedido_bling=n,
+            filename=f"etiqueta_{n}.pdf",
+            content_type="application/pdf",
+            size_bytes=1,
+            blob=_pdf(f"ETIQUETA {n[-1]}"),
+            **extra,
+        ))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_lote_junta_na_ordem_da_selecao(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], tres_com_etiqueta: None,
+):
+    """O PDF do lote sai na ordem enviada e embute a NF de quem é correios."""
+    auth_as(admin_view)
+    r = await client.post(
+        "/api/estoque/pedidos/etiquetas",
+        json={"pedidos": ["930003", "930002", "930001"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/pdf")
+    assert r.headers["x-etiquetas-total"] == "3"
+    assert _paginas_texto(r.content) == [
+        "ETIQUETA 3", "ETIQUETA 2", "NOTA 2", "ETIQUETA 1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lote_carimba_impressao_e_expoe_na_lista(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], tres_com_etiqueta: None,
+):
+    """Imprimir o lote carimba `impressa_em` e a lista passa a mostrar — é o
+    sinal que evita o operador imprimir o mesmo pedido duas vezes."""
+    auth_as(admin_view)
+    lista = "/api/estoque/pedidos?data_inicio=2026-05-29&data_fim=2026-05-29"
+    antes = {p["pedido_bling"]: p for p in (await client.get(lista)).json()["data"]}
+    assert antes["930001"]["etiqueta_impressa_em"] is None
+
+    r = await client.post(
+        "/api/estoque/pedidos/etiquetas", json={"pedidos": ["930001"]}
+    )
+    assert r.status_code == 200, r.text
+
+    depois = {p["pedido_bling"]: p for p in (await client.get(lista)).json()["data"]}
+    carimbo = depois["930001"]["etiqueta_impressa_em"]
+    assert carimbo
+    # Quem não entrou no lote continua sem carimbo.
+    assert depois["930002"]["etiqueta_impressa_em"] is None
+
+    # Reimprimir NÃO reescreve a data da primeira impressão.
+    await client.post("/api/estoque/pedidos/etiquetas", json={"pedidos": ["930001"]})
+    de_novo = {p["pedido_bling"]: p for p in (await client.get(lista)).json()["data"]}
+    assert de_novo["930001"]["etiqueta_impressa_em"] == carimbo
+
+
+@pytest.mark.asyncio
+async def test_lote_ignora_sem_etiqueta_e_404_quando_nenhum(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], tres_com_etiqueta: None,
+):
+    """Pedido sem etiqueta é pulado; só 404 quando nenhum selecionado tem."""
+    auth_as(admin_view)
+    r = await client.post(
+        "/api/estoque/pedidos/etiquetas",
+        json={"pedidos": ["930001", "inexistente"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["x-etiquetas-total"] == "1"
+
+    r = await client.post(
+        "/api/estoque/pedidos/etiquetas", json={"pedidos": ["inexistente"]}
+    )
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"] == "nf_etiqueta_nao_encontrada"
+
+
+@pytest.mark.asyncio
+async def test_serve_individual_tambem_carimba(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], tres_com_etiqueta: None,
+):
+    """Abrir a etiqueta pelo botão de sempre também conta como impressão."""
+    auth_as(admin_view)
+    assert (await client.get("/api/estoque/pedidos/930003/etiqueta")).status_code == 200
+    lista = "/api/estoque/pedidos?data_inicio=2026-05-29&data_fim=2026-05-29"
+    rows = {p["pedido_bling"]: p for p in (await client.get(lista)).json()["data"]}
+    assert rows["930003"]["etiqueta_impressa_em"]

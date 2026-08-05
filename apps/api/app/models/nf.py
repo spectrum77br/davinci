@@ -295,6 +295,12 @@ class NfEtiquetaArquivo(Base, TimestampMixin):
     # declaração). NULL = fluxo agência (só etiqueta).
     nf_pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     nf_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Quando a etiqueta saiu da impressora pela PRIMEIRA vez (a reimpressão não
+    # sobrescreve). NULL = nunca impressa. É o sinal que o Controle de Estoque
+    # usa pra marcar "Impressa" e evitar duplicidade na impressão em lote.
+    impressa_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 from sqlalchemy import Date, and_, cast, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,7 +53,11 @@ from app.models.integration import Integration
 from app.models.nf import NfEtiquetaArquivo
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
-from app.services.nf_etiqueta_juntar import EtiquetaJuntarError, juntar_etiqueta_nf
+from app.services.nf_etiqueta_juntar import (
+    EtiquetaJuntarError,
+    juntar_etiqueta_nf,
+    juntar_varios,
+)
 from app.services.sku_tags import VALID_TAGS as _VALID_TAGS
 from app.services.sku_tags import sql_clause_for_tag as _sql_clause_for_tag
 
@@ -572,15 +577,24 @@ async def list_estoque_pedidos(
     # mostra a hora pra o operador saber há quanto tempo está pronta pra imprimir.
     numeros = {o.numero for o in orders if o.numero}
     etiquetas_por_pedido: dict[str, datetime] = {}
+    # Quando a etiqueta já foi impressa (NULL = nunca). É o que segura a
+    # duplicidade na impressão em lote: a tela marca "Impressa" e o operador
+    # deixa de selecionar de novo sem querer.
+    impressa_por_pedido: dict[str, datetime] = {}
     if numeros:
         et_rows = (
             await session.execute(
                 select(
-                    NfEtiquetaArquivo.pedido_bling, NfEtiquetaArquivo.created_at
+                    NfEtiquetaArquivo.pedido_bling,
+                    NfEtiquetaArquivo.created_at,
+                    NfEtiquetaArquivo.impressa_em,
                 ).where(NfEtiquetaArquivo.pedido_bling.in_(numeros))
             )
         ).all()
         etiquetas_por_pedido = {r.pedido_bling: r.created_at for r in et_rows}
+        impressa_por_pedido = {
+            r.pedido_bling: r.impressa_em for r in et_rows if r.impressa_em
+        }
 
     result: list[dict[str, Any]] = []
     for o in orders:
@@ -628,6 +642,11 @@ async def list_estoque_pedidos(
                 if o.numero in etiquetas_por_pedido
                 else None
             ),
+            "etiqueta_impressa_em": (
+                impressa_por_pedido[o.numero].isoformat()
+                if o.numero in impressa_por_pedido
+                else None
+            ),
         })
 
     # Atrasados (INDEPENDENTE do filtro de data): pedidos com etiqueta
@@ -666,6 +685,81 @@ async def list_estoque_pedidos(
     }
 
 
+def _pdf_para_impressao(row: NfEtiquetaArquivo) -> bytes:
+    """PDF final de UM pedido: etiqueta, ou etiqueta + NF quando é correios.
+
+    A presença de `nf_pdf` é o sinal do fluxo correios/ML (não aceita declaração
+    de conteúdo, vai a NF junto). Falha na junção degrada pra só a etiqueta —
+    melhor imprimir a etiqueta sozinha do que travar o despacho.
+    """
+    if not row.nf_pdf:
+        return row.blob
+    try:
+        return juntar_etiqueta_nf(row.blob, row.nf_pdf)
+    except EtiquetaJuntarError:
+        logger.warning("nf_etiqueta_juntar_falhou", pedido_bling=row.pedido_bling)
+        return row.blob
+
+
+class EtiquetasLoteIn(BaseModel):
+    """Pedidos selecionados na aba Pedidos pra imprimir de uma vez."""
+
+    pedidos: list[str] = Field(min_length=1)
+
+
+@router.post("/pedidos/etiquetas")
+async def get_pedidos_etiquetas_lote(
+    payload: EtiquetasLoteIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+) -> Response:
+    """Junta as etiquetas dos pedidos selecionados num PDF só (impressão em lote).
+
+    A ordem segue a da seleção que veio da tela. Pedidos sem etiqueta são
+    IGNORADOS (o operador seleciona um bloco e imprime o que está pronto) —
+    404 só quando nenhum dos selecionados tem etiqueta. Carimba `impressa_em`
+    nos que entraram no PDF, pra tela marcar "Impressa" e evitar duplicidade.
+    """
+    # dict.fromkeys: dedupe preservando a ordem da seleção.
+    pedidos = [p for p in dict.fromkeys(payload.pedidos) if p]
+    rows = (
+        await session.execute(
+            select(NfEtiquetaArquivo).where(
+                NfEtiquetaArquivo.pedido_bling.in_(pedidos)
+            )
+        )
+    ).scalars().all()
+    por_pedido = {r.pedido_bling: r for r in rows if r.blob}
+    ordenados = [por_pedido[p] for p in pedidos if p in por_pedido]
+    if not ordenados:
+        raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
+
+    try:
+        conteudo = juntar_varios([_pdf_para_impressao(r) for r in ordenados])
+    except EtiquetaJuntarError as exc:
+        logger.warning("nf_etiqueta_lote_falhou", erro=str(exc))
+        raise HTTPException(status_code=422, detail="nf_etiqueta_lote_invalido") from exc
+
+    agora = datetime.now(UTC)
+    for r in ordenados:
+        # Só a PRIMEIRA impressão carimba — reimprimir não reescreve a data,
+        # senão o operador perde a referência de quando aquilo já saiu.
+        if r.impressa_em is None:
+            r.impressa_em = agora
+    await session.commit()
+
+    return Response(
+        content=conteudo,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'inline; filename="etiquetas_lote.pdf"',
+            "Cache-Control": "no-store, must-revalidate",
+            "X-Etiquetas-Total": str(len(ordenados)),
+            "Access-Control-Expose-Headers": "X-Etiquetas-Total",
+        },
+    )
+
+
 @router.get("/pedidos/{pedido_bling}/etiqueta")
 async def get_pedido_etiqueta(
     pedido_bling: str,
@@ -688,15 +782,12 @@ async def get_pedido_etiqueta(
         # Sem etiqueta ainda (a NF pode ter chegado antes, mas não há o que
         # imprimir sem a etiqueta que cola no volume).
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
-    conteudo = row.blob
-    if row.nf_pdf:
-        # Fluxo correios/ML: a etiqueta vai junto com a NF do Bling (correios
-        # não aceita declaração). A presença da NF é o sinal do fluxo correios.
-        try:
-            conteudo = juntar_etiqueta_nf(row.blob, row.nf_pdf)
-        except EtiquetaJuntarError:
-            logger.warning("nf_etiqueta_juntar_falhou", pedido_bling=pedido_bling)
-            conteudo = row.blob
+    conteudo = _pdf_para_impressao(row)
+    if row.impressa_em is None:
+        # Abrir a etiqueta é imprimir — carimba pra tela marcar "Impressa"
+        # (mesma regra do lote: só a primeira vez).
+        row.impressa_em = datetime.now(UTC)
+        await session.commit()
     return Response(
         content=conteudo,
         media_type=row.content_type or "application/pdf",

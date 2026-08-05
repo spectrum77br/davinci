@@ -40,3 +40,18 @@ def juntar_etiqueta_nf(etiqueta_pdf: bytes, nf_pdf: bytes) -> bytes:
     nf = _abrir(nf_pdf, "nf")
     etiqueta.insert_pdf(nf)
     return etiqueta.tobytes()
+
+
+def juntar_varios(pdfs: list[bytes]) -> bytes:
+    """Concatena N PDFs na ordem recebida (impressão em LOTE de etiquetas).
+
+    Cada item já é o PDF final de um pedido (etiqueta, ou etiqueta+NF quando o
+    fluxo é correios). Levanta `EtiquetaJuntarError` se a lista vier vazia ou
+    se algum PDF for inválido.
+    """
+    if not pdfs:
+        raise EtiquetaJuntarError("lote_vazio")
+    saida = _abrir(pdfs[0], "etiqueta")
+    for pdf in pdfs[1:]:
+        saida.insert_pdf(_abrir(pdf, "etiqueta"))
+    return saida.tobytes()

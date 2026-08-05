@@ -69,6 +69,8 @@ type PedidoRow = {
   etiqueta_disponivel: boolean
   // Quando a etiqueta chegou (ISO com fuso). Null quando não há etiqueta.
   etiqueta_em: string | null
+  // Quando a etiqueta foi impressa pela 1ª vez. Null = nunca impressa.
+  etiqueta_impressa_em: string | null
 }
 type EnvioRow = {
   data: string
@@ -642,6 +644,14 @@ function etiquetaHora(row: PedidoRow) {
   const dia = isoDateBrt(d)
   return dia === isoToday() ? hora : `${dia.slice(8)}/${dia.slice(5, 7)} ${hora}`
 }
+function impressaHora(row: PedidoRow) {
+  if (!row.etiqueta_impressa_em) return ''
+  const d = new Date(row.etiqueta_impressa_em)
+  const hora = _HORA_BRT.format(d)
+  const dia = isoDateBrt(d)
+  return dia === isoToday() ? hora : `${dia.slice(8)}/${dia.slice(5, 7)} ${hora}`
+}
+
 async function toggleEnvio(row: EnvioRow) {
   if (!isAdmin.value) return
   const next = !row.conferido
@@ -794,6 +804,73 @@ const pedidosFilteredGrouped = computed<PedidoRowWithGroup[]>(() => {
   }
   return out
 })
+
+// ── Impressão de etiquetas em LOTE ───────────────────────────────────
+// A seleção é por PEDIDO (não por linha): um pedido com N itens rende N
+// linhas na tabela, mas UMA etiqueta só.
+const etiquetasSel = ref<Set<string>>(new Set())
+const imprimindoLote = ref(false)
+// Pedidos com etiqueta pronta, na ordem em que aparecem na tela — é essa
+// ordem que vai pro PDF do lote.
+const pedidosComEtiqueta = computed(() => {
+  const out: string[] = []
+  for (const r of pedidosFilteredGrouped.value) {
+    if (r._isFirstOfGroup && r.etiqueta_disponivel && r.pedido_bling) out.push(r.pedido_bling)
+  }
+  return out
+})
+const selecionadosCount = computed(() => etiquetasSel.value.size)
+const todasSelecionadas = computed(() =>
+  pedidosComEtiqueta.value.length > 0
+  && pedidosComEtiqueta.value.every(p => etiquetasSel.value.has(p)),
+)
+function toggleEtiquetaSel(pedido: string | null) {
+  if (!pedido) return
+  const next = new Set(etiquetasSel.value)
+  if (next.has(pedido)) next.delete(pedido)
+  else next.add(pedido)
+  etiquetasSel.value = next
+}
+function toggleTodasEtiquetas() {
+  etiquetasSel.value = todasSelecionadas.value
+    ? new Set()
+    : new Set(pedidosComEtiqueta.value)
+}
+async function imprimirLote() {
+  const pedidos = pedidosComEtiqueta.value.filter(p => etiquetasSel.value.has(p))
+  if (!pedidos.length || imprimindoLote.value) return
+  // Reimprimir é permitido (etiqueta pode rasgar), mas avisa — o pedido
+  // do usuário é justamente não duplicar sem querer.
+  const jaImpressos = pedidos.filter(p =>
+    pedidosFilteredGrouped.value.some(r => r.pedido_bling === p && r.etiqueta_impressa_em),
+  )
+  if (jaImpressos.length && !confirm(
+    `${jaImpressos.length} etiqueta(s) já foram impressas (${jaImpressos.join(', ')}). Imprimir de novo?`,
+  )) return
+
+  imprimindoLote.value = true
+  try {
+    // fetch cru (não useApi): a resposta é um PDF binário, não JSON.
+    const resp = await fetch('/api/estoque/pedidos/etiquetas', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pedidos }),
+    })
+    if (!resp.ok) throw new Error(String(resp.status))
+    const blob = await resp.blob()
+    const objUrl = URL.createObjectURL(blob)
+    window.open(objUrl, '_blank', 'noopener')
+    // Só revoga depois que a aba pegou o blob.
+    setTimeout(() => URL.revokeObjectURL(objUrl), 60_000)
+    etiquetasSel.value = new Set()
+    await loadPedidos()  // repuxa pra marcar "Impressa"
+  } catch {
+    alert('Não foi possível gerar o lote de etiquetas.')
+  } finally {
+    imprimindoLote.value = false
+  }
+}
 
 // Tag extraction from SKU — mirrors the backend rule subset that's
 // derivable from the SKU string alone:
@@ -1150,11 +1227,33 @@ async function conferirTodos() {
         <span class="uppercase font-semibold tracking-wide text-[10px]">{{ bucket.tag }}</span>
         <span class="text-foreground font-mono">{{ bucket.count }}</span>
       </span>
+      <!-- Impressão em lote: junta as etiquetas selecionadas num PDF só. -->
+      <button
+        v-if="pedidosComEtiqueta.length > 0"
+        type="button"
+        class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-primary text-primary-foreground px-2.5 py-1 font-semibold disabled:opacity-50"
+        :disabled="selecionadosCount === 0 || imprimindoLote"
+        title="Junta as etiquetas selecionadas num PDF único"
+        @click="imprimirLote"
+      >
+        <Printer class="size-3.5" />
+        {{ imprimindoLote ? 'Gerando…' : `Imprimir selecionadas (${selecionadosCount})` }}
+      </button>
     </div>
     <div v-if="tab === 'pedidos'" class="border rounded-md overflow-x-auto">
       <table class="grid-table w-full text-xs border-collapse">
         <thead>
           <tr class="bg-muted/30 text-[10px] uppercase tracking-wide">
+            <th class="text-center w-8">
+              <input
+                type="checkbox"
+                class="cursor-pointer"
+                :checked="todasSelecionadas"
+                :disabled="pedidosComEtiqueta.length === 0"
+                title="Selecionar todos os pedidos com etiqueta"
+                @change="toggleTodasEtiquetas"
+              />
+            </th>
             <th class="text-left">Data Envio</th>
             <th class="text-left">Pedido Bling</th>
             <th class="text-left">Marketplace</th>
@@ -1169,7 +1268,7 @@ async function conferirTodos() {
         </thead>
         <tbody>
           <tr v-if="pedidosFiltered.length === 0">
-            <td colspan="10" class="py-6 text-center text-muted-foreground">
+            <td colspan="11" class="py-6 text-center text-muted-foreground">
               Nenhum pedido para esse dia.
             </td>
           </tr>
@@ -1178,6 +1277,16 @@ async function conferirTodos() {
             class="hover:bg-muted/20"
             :class="{ 'border-t-2 border-t-muted-foreground/30': row._isFirstOfGroup && idx > 0 }"
           >
+            <!-- Só a 1ª linha do pedido tem checkbox: a etiqueta é do PEDIDO. -->
+            <td class="text-center">
+              <input
+                v-if="row._isFirstOfGroup && row.etiqueta_disponivel && row.pedido_bling"
+                type="checkbox"
+                class="cursor-pointer"
+                :checked="etiquetasSel.has(row.pedido_bling)"
+                @change="toggleEtiquetaSel(row.pedido_bling)"
+              />
+            </td>
             <td class="whitespace-nowrap">
               {{ row._isFirstOfGroup ? (row.data_envio ? row.data_envio.slice(0, 10) : '—') : '' }}
             </td>
@@ -1225,6 +1334,14 @@ async function conferirTodos() {
                 title="Quando a etiqueta chegou"
               >
                 {{ etiquetaHora(row) }}
+              </div>
+              <!-- Carimbo da 1ª impressão: é o que evita imprimir duas vezes. -->
+              <div
+                v-if="row.etiqueta_impressa_em"
+                class="text-[9px] font-semibold text-emerald-700 dark:text-emerald-300"
+                :title="`Impressa em ${impressaHora(row)}`"
+              >
+                Impressa {{ impressaHora(row) }}
               </div>
               <span v-if="!row.etiqueta_disponivel" class="text-[10px] text-muted-foreground/50">—</span>
             </td>
