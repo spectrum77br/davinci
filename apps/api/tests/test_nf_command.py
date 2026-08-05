@@ -36,7 +36,7 @@ from app.models import (
     UserStatus,
 )
 from app.security.cipher import encrypt
-from app.services import nf_relatorio
+from app.services import nf_emissao_gerar, nf_relatorio
 
 _TOKEN = "nf-agent-test-token"
 
@@ -52,10 +52,12 @@ async def admin(db: AsyncSession) -> User:
 
 
 async def _seed_pedido(
-    db: AsyncSession, *, numero: str, loja: str, sku: str, nome: str, unit: float
+    db: AsyncSession, *, numero: str, loja: str, sku: str, nome: str, unit: float,
+    bling_id: int = 700001,
 ) -> None:
     db.add(
         BlingOrder(
+            bling_id=bling_id,
             numero=numero,
             data=datetime(2026, 6, 23, tzinfo=UTC),
             loja=loja,
@@ -650,6 +652,82 @@ async def test_result_etiqueta_marca_status_etiqueta(
     assert fat.status_etiqueta == "ok"
     assert fat.erro_etiqueta is None
     assert fat.status_faturamento == "ok"
+
+
+class _FakeBlingSituacao:
+    """Captura os PATCH de situação que o motor manda pro Bling."""
+
+    def __init__(self) -> None:
+        self.chamadas: list[tuple[int, int]] = []
+
+    async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
+        self.chamadas.append((bling_order_id, situacao_id))
+
+
+@pytest.mark.asyncio
+async def test_result_etiqueta_move_pedido_pra_enviado_etiqueta(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Etiqueta capturada → o pedido vai pra "Enviado Etiqueta" (83965) no Bling e
+    a situação local espelha, que é o que faz ele aparecer no Controle de Estoque
+    pra ser impresso."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    fake = _FakeBlingSituacao()
+
+    async def _fake_client(_session):
+        return fake
+
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", _fake_client)
+    auth_as(admin)
+    await _seed_upseller(db, admin)
+    await _import_done(client, ["850001"])
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                              headers={"X-Agent-Token": _TOKEN})
+    etq = next(c for c in lease.json()["commands"] if c["action"] == "imprimir_etiqueta")
+
+    r = await client.post(f"/api/nf-cadastro/agent/commands/{etq['id']}/result",
+                          json={"status": "done"}, headers={"X-Agent-Token": _TOKEN})
+    assert r.status_code == 200, r.text
+
+    assert fake.chamadas == [(700001, 83965)]
+    sit = (await db.execute(
+        select(BlingOrder.situacao).where(BlingOrder.numero == "850001")
+    )).scalars().all()
+    assert set(sit) == {"83965"}
+
+
+@pytest.mark.asyncio
+async def test_result_etiqueta_falhou_nao_move_situacao(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Sem etiqueta na mão não há o que imprimir → a situação do Bling fica onde
+    está (o pedido não entra na fila do Controle de Estoque)."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    fake = _FakeBlingSituacao()
+
+    async def _fake_client(_session):
+        return fake
+
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", _fake_client)
+    auth_as(admin)
+    await _seed_upseller(db, admin)
+    await _import_done(client, ["850001"])
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                              headers={"X-Agent-Token": _TOKEN})
+    etq = next(c for c in lease.json()["commands"] if c["action"] == "imprimir_etiqueta")
+
+    r = await client.post(f"/api/nf-cadastro/agent/commands/{etq['id']}/result",
+                          json={"status": "failed", "result": "sem etiqueta"},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert r.status_code == 200, r.text
+
+    assert fake.chamadas == []
+    sit = (await db.execute(
+        select(BlingOrder.situacao).where(BlingOrder.numero == "850001")
+    )).scalars().all()
+    assert set(sit) == {"15"}
 
 
 @pytest.mark.asyncio

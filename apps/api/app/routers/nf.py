@@ -27,13 +27,14 @@ from fastapi import (
 )
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import asc, select, text
+from sqlalchemy import asc, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models import (
+    BlingOrder,
     NfCatalogoMala,
     NfCommand,
     NfEtiqueta,
@@ -86,6 +87,10 @@ from app.services.nf_etiqueta_transform import (
 
 # Teto do PDF cru da etiqueta que a marionete sobe pra transformação (item 2).
 _ETIQUETA_MAX_BYTES = 8 * 1024 * 1024
+
+# Situação custom do shop no Bling. É ela que faz o pedido aparecer na aba
+# Pedidos do Controle de Estoque pra ser impresso (ver routers/estoque.py).
+_SITUACAO_ENVIADO_ETIQUETA = 83965
 
 logger = structlog.get_logger()
 _SCHEMA = get_settings().database_schema
@@ -893,6 +898,57 @@ async def _marcar_etiqueta(
         row.erro_etiqueta = erro
 
 
+async def _marcar_enviado_etiqueta(
+    session: AsyncSession, numeros: list[str]
+) -> None:
+    """Move os pedidos pra "Enviado Etiqueta" no Bling depois que a etiqueta foi
+    capturada — é o gatilho que faz o pedido aparecer no Controle de Estoque pra
+    impressão. Espelha a situação na `bling_orders` local pra a tela refletir na
+    hora (sem esperar o próximo sync).
+
+    BEST-EFFORT: o comando já fechou e a etiqueta está guardada; falha no Bling
+    só loga (a situação pode ser corrigida à mão), nunca derruba o /result.
+    """
+    if not numeros:
+        return
+    rows = (
+        await session.execute(
+            select(BlingOrder.numero, BlingOrder.bling_id, BlingOrder.situacao)
+            .where(BlingOrder.numero.in_(numeros))
+            .where(BlingOrder.bling_id.is_not(None))
+            .distinct()
+        )
+    ).all()
+    # bling_orders tem uma linha por ITEM — o pedido só precisa de um PATCH.
+    pendentes = {
+        r.numero: r.bling_id
+        for r in rows
+        if str(r.situacao or "") != str(_SITUACAO_ENVIADO_ETIQUETA)
+    }
+    if not pendentes:
+        return
+    client = await nf_emissao_gerar._bling_client_opt(session)
+    if client is None:
+        logger.warning("nf_enviado_etiqueta_sem_bling", numeros=list(pendentes))
+        return
+    for numero, bling_id in pendentes.items():
+        try:
+            await client.update_order_situacao(
+                int(bling_id), _SITUACAO_ENVIADO_ETIQUETA
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "nf_enviado_etiqueta_falhou", numero=numero, erro=str(exc)
+            )
+            continue
+        await session.execute(
+            update(BlingOrder)
+            .where(BlingOrder.numero == numero)
+            .values(situacao=str(_SITUACAO_ENVIADO_ETIQUETA))
+        )
+        logger.info("nf_enviado_etiqueta", numero=numero)
+
+
 async def _enfileirar_etiquetas(
     session: AsyncSession, faturador_id: UUID | None, numeros: list[str]
 ) -> int:
@@ -1206,6 +1262,8 @@ async def nf_agent_command_result(
     if cmd.action == "imprimir_etiqueta":
         if new_status == "done":
             await _marcar_etiqueta(session, numeros, status_txt="ok", erro=None)
+            # Etiqueta na mão → o pedido entra na fila de impressão do DaVinci.
+            await _marcar_enviado_etiqueta(session, numeros)
         else:
             await _marcar_etiqueta(
                 session, numeros, status_txt="erro",
