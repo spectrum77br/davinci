@@ -38,6 +38,7 @@ class PricingAccountBase(BaseModel):
     affiliate: str | None = None
     ads: str | None = None
     coupon: str | None = None
+    offer: str | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int = 0
@@ -87,6 +88,7 @@ class PricingAccountPatch(BaseModel):
     affiliate: str | None = None
     ads: str | None = None
     coupon: str | None = None
+    offer: str | None = None
     store_info_id: UUID | None = None
     integration_id: UUID | None = None
     sort_order: int | None = None

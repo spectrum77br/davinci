@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TABS_SISTEMA } from '~/lib/navGroups'
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { SquarePen, Plus, RefreshCw, Trash2, Zap, Search, KeyRound } from 'lucide-vue-next'
 
@@ -267,6 +268,7 @@ const tab = ref<'integracoes' | 'automacoes'>(
 
 <template>
   <div class="space-y-4">
+    <RouteTabs :tabs="TABS_SISTEMA" />
     <h1 class="text-2xl font-semibold">Integrações</h1>
 
     <div class="flex items-center gap-1 border-b border-border">

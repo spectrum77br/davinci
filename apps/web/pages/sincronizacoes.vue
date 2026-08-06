@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TABS_SISTEMA } from '~/lib/navGroups'
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { RefreshCw, Activity, AlertCircle, CheckCircle2, Clock } from 'lucide-vue-next'
 
@@ -151,6 +152,7 @@ function fmtPayloadHint(j: Job): string {
 
 <template>
   <div class="space-y-5">
+    <RouteTabs :tabs="TABS_SISTEMA" />
     <PageHeader title="Sincronizações" description="Jobs em execução e histórico recente. Atualiza a cada 5s.">
       <template #actions>
         <Button size="sm" variant="outline" @click="refresh">

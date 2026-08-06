@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
 import {
-  LayoutDashboard, Rocket, Plug, Building2, ContactRound, Users,
-  Package, Megaphone, DollarSign, RefreshCw, Undo2,
-  Receipt, TrendingUp, ShieldCheck, Settings, Bell, BarChart3,
-  Store, Tags, ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
+  LayoutDashboard, Rocket, Plug, ContactRound, Users,
+  Package, Megaphone, DollarSign, Undo2,
+  Receipt, TrendingUp, Settings, BarChart3,
+  ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
   ReceiptText,
 } from 'lucide-vue-next'
+import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
 const props = defineProps<{ collapsed: boolean }>()
 const emit = defineEmits<{ (e: 'toggle'): void }>()
@@ -83,11 +84,28 @@ type Item = {
   adminOnly?: boolean
   ownerOnly?: boolean
   featureFlag?: 'marketing'
+  // Grupo unificado (lib/navGroups): o item destaca quando QUALQUER rota
+  // do grupo está ativa, e some quando o usuário não pode ver nenhuma aba.
+  match?: string[]
+  // Item que só aparece pra NÃO-admin (ex.: Tarefas — admin acessa via
+  // aba dentro de Usuários).
+  hideForAdmin?: boolean
 }
 
 type Section = { label?: string; items: Item[] }
 
-const sections: Section[] = [
+// Itens de grupo unificado: `to` aponta pra primeira aba que o usuário pode
+// ver (admin vê todas). Devolve null quando nenhuma — o item some do menu.
+function groupItem(
+  tabs: typeof TABS_CADASTROS,
+  base: { label: string; icon: any },
+): Item | null {
+  const allowed = allowedTabs(tabs, auth.user as any)
+  if (!allowed.length) return null
+  return { ...base, to: allowed[0].to, match: tabs.map((t) => t.to) }
+}
+
+const sections = computed<Section[]>(() => [
   {
     items: [
       { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -134,36 +152,36 @@ const sections: Section[] = [
   {
     label: 'Sistema',
     items: [
-      { to: '/sincronizacoes', label: 'Sincronizações', icon: RefreshCw, resource: 'sincronizacoes' },
+      // Sincronizações + Integrações + Alertas viraram abas de um item só.
+      groupItem(TABS_SISTEMA, { label: 'Integrações', icon: Plug }),
       { to: '/margem-audit', label: 'Auditoria de pedidos', icon: ClipboardList, ownerOnly: true },
-      { to: '/integrations', label: 'Integrações', icon: Plug, resource: 'integracoes' },
-      { to: '/alertas', label: 'Alertas', icon: Bell, resource: 'alertas' },
-    ],
+    ].filter((x): x is Item => x !== null),
   },
   {
     label: 'Cadastros',
     items: [
-      { to: '/companies', label: 'Empresas', icon: Building2, resource: 'empresa' },
-      { to: '/cadastros', label: 'Cadastros', icon: ContactRound, resource: 'cadastro' },
-      { to: '/store-info', label: 'Lojas', icon: Store, resource: 'lojas_info' },
-      { to: '/nf-cadastros', label: 'NF (Faturador)', icon: ReceiptText, resource: 'nf_faturador' },
-      { to: '/nf-faturamento', label: 'Faturamento NF', icon: ClipboardList, resource: 'nf_faturamento' },
-      { to: '/admin/segments', label: 'Segmentos', icon: Tags, resource: 'segmentos' },
-    ],
+      // Empresas + Cadastros + Lojas + Segmentos viraram abas de um item só.
+      groupItem(TABS_CADASTROS, { label: 'Cadastros', icon: ContactRound }),
+      // NF (Faturador) + Faturamento NF idem.
+      groupItem(TABS_NF, { label: 'NF Faturador', icon: ReceiptText }),
+    ].filter((x): x is Item => x !== null),
   },
   {
     label: 'Admin',
     items: [
-      { to: '/users', label: 'Usuários', icon: Users, adminOnly: true },
-      { to: '/permissoes', label: 'Permissões', icon: ShieldCheck, adminOnly: true },
+      // Permissões e Tarefas agora são abas dentro de Usuários.
+      {
+        to: '/users', label: 'Usuários', icon: Users, adminOnly: true,
+        match: ['/users', '/permissoes', '/tarefas'],
+      },
       { to: '/configuracoes', label: 'Configurações', icon: Settings, resource: 'configuracoes' },
-      // Regular users see their own tarefas (router-level filter), so this
-      // is NOT marked adminOnly — the page itself hides admin-only controls.
-      { to: '/tarefas', label: 'Tarefas', icon: ClipboardList },
+      // Não-admin segue com o item próprio de Tarefas (vê só as dele;
+      // não enxerga Usuários/Permissões). Admin acessa via aba.
+      { to: '/tarefas', label: 'Tarefas', icon: ClipboardList, hideForAdmin: true },
       { to: '/faturas', label: 'Faturas', icon: Receipt, adminOnly: true },
     ],
   },
-]
+])
 
 // "Operador de estoque" = role !== 'admin' AND has at least one stock tag
 // AND has no view permission on any resource other than controle_estoque.
@@ -191,11 +209,12 @@ const visibleSections = computed(() => {
       },
     ]
   }
-  return sections
+  return sections.value
     .map((s) => ({
       ...s,
       items: s.items.filter((it) => {
         if (it.adminOnly && !auth.isAdmin) return false
+        if (it.hideForAdmin && auth.isAdmin) return false
         if (it.ownerOnly && !isOwner.value) return false
         if (it.featureFlag === 'marketing' && !enableMarketing.value) return false
         return true
@@ -204,9 +223,10 @@ const visibleSections = computed(() => {
     .filter((s) => s.items.length > 0)
 })
 
-function isActive(to: string) {
-  if (to === '/') return route.path === '/'
-  return route.path === to || route.path.startsWith(to + '/')
+function isActive(it: Item) {
+  if (it.to === '/') return route.path === '/'
+  const targets = it.match ?? [it.to]
+  return targets.some((to) => route.path === to || route.path.startsWith(to + '/'))
 }
 
 // ── Grupos recolhíveis ─────────────────────────────────────────────────
@@ -239,8 +259,10 @@ function isGroupOpen(section: Section) {
 
 // Reabre o grupo que contém a rota atual (se estiver fechado).
 function openSectionOf(path: string) {
-  const label = sections.find((s) =>
-    s.label && s.items.some((it) => it.to !== '/' && (path === it.to || path.startsWith(it.to + '/'))),
+  const label = sections.value.find((s) =>
+    s.label && s.items.some((it) =>
+      it.to !== '/' && (it.match ?? [it.to]).some((to) => path === to || path.startsWith(to + '/')),
+    ),
   )?.label
   if (label && closedGroups.value.includes(label)) {
     closedGroups.value = closedGroups.value.filter((l) => l !== label)
@@ -301,7 +323,7 @@ watch(() => route.path, (p) => openSectionOf(p))
               :to="it.to"
               :title="props.collapsed ? it.label : undefined"
               class="group relative flex items-center gap-2.5 rounded-md px-2.5 h-8 text-[13px] font-medium transition-colors"
-              :class="isActive(it.to)
+              :class="isActive(it)
                 ? 'bg-[hsl(var(--sidebar-active-bg))] text-[hsl(var(--sidebar-active-fg))]'
                 : 'text-[hsl(var(--sidebar-foreground))] hover:bg-muted'"
             >
@@ -311,8 +333,10 @@ watch(() => route.path, (p) => openSectionOf(p))
                    Static (no animation) — the pulsing version was too
                    visually noisy. Expanded layout: right-aligned next
                    to the label. Collapsed: top-right of the icon. -->
+              <!-- Pro admin o item Tarefas não existe — a bolinha aparece no
+                   item Usuários (que contém a aba Tarefas via `match`). -->
               <span
-                v-if="it.to === '/tarefas' && pendingTarefasCount > 0"
+                v-if="(it.to === '/tarefas' || (it.match?.includes('/tarefas') ?? false)) && pendingTarefasCount > 0"
                 :class="props.collapsed
                   ? 'absolute top-1 right-1 inline-block size-2.5 rounded-full bg-red-500'
                   : 'ml-auto inline-block size-2.5 rounded-full bg-red-500'"

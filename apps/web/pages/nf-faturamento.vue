@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TABS_NF } from '~/lib/navGroups'
 import { computed, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, FileDown, Loader2, RefreshCw, Send, Truck, X } from 'lucide-vue-next'
 
@@ -469,6 +470,7 @@ function badgeLabel(status: string): string {
 
 <template>
   <div class="space-y-4 p-4">
+    <RouteTabs :tabs="TABS_NF" />
     <div class="flex flex-wrap items-center justify-between gap-2">
       <div>
         <h1 class="text-xl font-semibold">Painel de Faturamento (NF)</h1>

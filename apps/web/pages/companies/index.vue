@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TABS_CADASTROS } from '~/lib/navGroups'
 import { ref, computed, reactive } from 'vue'
 import { Plus, RefreshCw, X, ExternalLink, Trash2 } from 'lucide-vue-next'
 import {
@@ -509,6 +510,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
 
 <template>
   <div class="space-y-4">
+    <RouteTabs :tabs="TABS_CADASTROS" />
     <div class="flex items-center gap-3 flex-wrap">
       <h1 class="text-2xl font-semibold">Empresas</h1>
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">

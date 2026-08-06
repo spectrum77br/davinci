@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TABS_USUARIOS } from '~/lib/navGroups'
 import { ShieldCheck, Users as UsersIcon, ArrowRight } from 'lucide-vue-next'
 import { RESOURCE_GROUPS, RESOURCE_LABELS } from '~/composables/useCan'
 
@@ -14,6 +15,7 @@ const roles: RoleSummary[] = [
 
 <template>
   <div class="space-y-5">
+    <RouteTabs :tabs="TABS_USUARIOS" />
     <PageHeader title="Permissões" description="Visão geral da matriz por recurso. Edite por usuário em Usuários.">
       <template #actions>
         <NuxtLink to="/users">

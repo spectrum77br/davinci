@@ -81,6 +81,8 @@ class PricingAccount(Base, TimestampMixin):
     affiliate: Mapped[str | None] = mapped_column(Text, nullable=True)
     ads: Mapped[str | None] = mapped_column(Text, nullable=True)
     coupon: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "Oferta" — mesmo padrão dos 4 acima. Migration 0213.
+    offer: Mapped[str | None] = mapped_column(Text, nullable=True)
     store_info_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("store_info.id", ondelete="SET NULL"),

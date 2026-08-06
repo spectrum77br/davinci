@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TABS_NF } from '~/lib/navGroups'
 import { computed, ref, watch } from 'vue'
 import { Plus, RefreshCw, X, Trash2, Lock, Eye, EyeOff } from 'lucide-vue-next'
 
@@ -11,12 +12,11 @@ const { api } = useApi()
 const canEdit = useCan('nf_faturador', 'edit')
 const canDelete = useCan('nf_faturador', 'delete')
 
-type Tab = 'faturador' | 'etiqueta' | 'impressao' | 'catalogo'
+type Tab = 'faturador' | 'etiqueta' | 'impressao'
 const TABS: { key: Tab; label: string }[] = [
   { key: 'faturador', label: 'Faturador' },
   { key: 'etiqueta', label: 'Etiqueta' },
   { key: 'impressao', label: 'Impressão' },
-  { key: 'catalogo', label: 'Catálogo Mala' },
 ]
 const tab = ref<Tab>('faturador')
 
@@ -289,75 +289,6 @@ const sortedImpressoes = computed(() =>
 )
 
 // ===========================================================================
-// CATÁLOGO MALA — valor cheio da NF de mala por (modelo, tamanho). O casamento
-// é automático: a família da mala (M1..M6 → abs, P1..P6 → pp, ME1 → me1,
-// ME2 → me2) vem do nome do produto, então o SKU do pedido resolve sozinho.
-// ===========================================================================
-type CatalogoMala = {
-  id: string; modelo: string; tamanho: string | null; valor: string | number
-  ncm: string | null; sort_order: number
-}
-type CatForm = { modelo: string; tamanho: string; valor: string; ncm: string; sort_order: string }
-function emptyCat(): CatForm { return { modelo: '', tamanho: '', valor: '', ncm: '4202.12.10', sort_order: '' } }
-const catalogos = ref<CatalogoMala[]>([])
-const catForm = ref<CatForm>(emptyCat())
-const catEditing = ref<CatalogoMala | null>(null)
-const catShowNew = ref(false)
-
-function buildCatBody(f: CatForm) {
-  return {
-    modelo: f.modelo.trim(),
-    tamanho: f.tamanho.trim() || null,
-    valor: f.valor.trim() ? Number(f.valor.replace(',', '.')) : 0,
-    ncm: f.ncm.trim() || null,
-    sort_order: f.sort_order.trim() ? Number(f.sort_order) : 0,
-  }
-}
-function openCatNew() { catForm.value = emptyCat(); saveErr.value = null; catShowNew.value = true }
-function openCatEdit(c: CatalogoMala) {
-  catEditing.value = c
-  catForm.value = { modelo: c.modelo, tamanho: c.tamanho || '', valor: c.valor != null ? String(c.valor) : '', ncm: c.ncm || '', sort_order: String(c.sort_order ?? 0) }
-  saveErr.value = null
-}
-async function createCat() {
-  if (!catForm.value.modelo.trim()) { saveErr.value = 'preencha o modelo'; return }
-  if (!catForm.value.valor.trim()) { saveErr.value = 'preencha o valor'; return }
-  saving.value = true; saveErr.value = null
-  try { await api('/api/nf-cadastro/catalogo-mala', { method: 'POST', body: buildCatBody(catForm.value) }); catShowNew.value = false; await loadCatalogos() }
-  catch (e: any) { saveErr.value = errCode(e) } finally { saving.value = false }
-}
-async function saveCat() {
-  if (!catEditing.value) return
-  saving.value = true; saveErr.value = null
-  try { await api(`/api/nf-cadastro/catalogo-mala/${catEditing.value.id}`, { method: 'PATCH', body: buildCatBody(catForm.value) }); catEditing.value = null; await loadCatalogos() }
-  catch (e: any) { saveErr.value = errCode(e) } finally { saving.value = false }
-}
-async function removeCat() {
-  if (!catEditing.value) return
-  if (!confirm('Remover esta linha do catálogo?')) return
-  saving.value = true; saveErr.value = null
-  try { await api(`/api/nf-cadastro/catalogo-mala/${catEditing.value.id}`, { method: 'DELETE' }); catEditing.value = null; await loadCatalogos() }
-  catch (e: any) { saveErr.value = errCode(e) } finally { saving.value = false }
-}
-async function loadCatalogos() {
-  loading.value = true; error.value = null
-  try { catalogos.value = await api<CatalogoMala[]>('/api/nf-cadastro/catalogo-mala') }
-  catch (e: any) { error.value = errCode(e) } finally { loading.value = false }
-}
-const sortedCatalogos = computed(() =>
-  [...catalogos.value].sort((a, b) =>
-    a.sort_order !== b.sort_order ? a.sort_order - b.sort_order
-      : (a.modelo || '').localeCompare(b.modelo || '', 'pt-BR', { sensitivity: 'base', numeric: true })
-        || (a.tamanho || '').localeCompare(b.tamanho || '', 'pt-BR', { sensitivity: 'base', numeric: true })),
-)
-function fmtValor(v: string | number | null) {
-  if (v == null || v === '') return '—'
-  const n = Number(v)
-  if (Number.isNaN(n)) return '—'
-  return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
-}
-
-// ===========================================================================
 // Shared
 // ===========================================================================
 const loading = ref(false)
@@ -369,8 +300,7 @@ function errCode(e: any) { return e?.data?.detail?.code || e?.message || 'erro' 
 async function loadCurrent() {
   if (tab.value === 'faturador') return loadFaturadores()
   if (tab.value === 'etiqueta') return loadEtiquetas()
-  if (tab.value === 'impressao') return loadImpressoes()
-  return loadCatalogos()
+  return loadImpressoes()
 }
 watch(tab, () => { void loadCurrent() })
 await loadFaturadores()
@@ -378,6 +308,7 @@ await loadFaturadores()
 
 <template>
   <div class="space-y-4">
+    <RouteTabs :tabs="TABS_NF" />
     <div class="flex flex-wrap items-center gap-3">
       <h1 class="text-2xl font-semibold">NF — Cadastros</h1>
       <Button size="sm" variant="ghost" :disabled="loading" @click="loadCurrent">
@@ -521,7 +452,7 @@ await loadFaturadores()
     </div>
 
     <!-- ==================== IMPRESSÃO ==================== -->
-    <div v-else-if="tab === 'impressao'" class="space-y-3">
+    <div v-else class="space-y-3">
       <div class="flex items-center">
         <p class="text-sm text-muted-foreground">
           Como a etiqueta é impressa depois da NF. Tipos: agência (etiqueta+declaração), correios
@@ -572,56 +503,6 @@ await loadFaturadores()
           <div v-if="i.observacao" class="text-xs break-words"><span class="text-muted-foreground">Regra:</span> {{ i.observacao }}</div>
         </div>
         <div v-if="!loading && impressoes.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">nenhuma impressão</div>
-      </div>
-    </div>
-
-    <!-- ==================== CATÁLOGO MALA ==================== -->
-    <div v-else class="space-y-3">
-      <div class="flex items-center">
-        <p class="text-sm text-muted-foreground">
-          Valor CHEIO da NF de mala por (modelo, tamanho), NCM 4202.12.10. A NF cheia de mala usa
-          este valor, não o de venda. O <b>SKU base</b> (ex. b001) é o vínculo que casa a mala do
-          pedido — enquanto vazio, a emissão cai no valor de venda.
-        </p>
-        <Button v-if="canEdit" size="sm" class="ml-auto shrink-0" @click="openCatNew">
-          <Plus class="size-4 mr-1" /> Nova linha
-        </Button>
-      </div>
-
-      <div class="hidden md:block border rounded-md overflow-x-auto">
-        <table class="w-full text-sm min-w-[640px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
-          <thead class="bg-muted/40 text-left">
-            <tr class="whitespace-nowrap">
-              <th class="px-3 py-2">Modelo</th>
-              <th class="px-3 py-2">Tamanho</th>
-              <th class="px-3 py-2 text-right">Valor</th>
-              <th class="px-3 py-2">NCM</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="c in sortedCatalogos" :key="c.id" class="border-t hover:bg-muted/20 cursor-pointer" @click="openCatEdit(c)">
-              <td class="px-3 py-2 whitespace-nowrap font-medium">{{ c.modelo }}</td>
-              <td class="px-3 py-2 whitespace-nowrap text-muted-foreground">{{ c.tamanho || '—' }}</td>
-              <td class="px-3 py-2 whitespace-nowrap text-right font-mono">{{ fmtValor(c.valor) }}</td>
-              <td class="px-3 py-2 whitespace-nowrap font-mono text-muted-foreground">{{ c.ncm || '—' }}</td>
-            </tr>
-            <tr v-if="!loading && catalogos.length === 0">
-              <td colspan="4" class="px-3 py-6 text-center text-muted-foreground">nenhuma linha</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div class="md:hidden space-y-2">
-        <div v-for="c in sortedCatalogos" :key="c.id" class="border rounded-md p-3 space-y-1 hover:bg-muted/20 cursor-pointer" @click="openCatEdit(c)">
-          <div class="flex items-center gap-2">
-            <span class="font-medium">{{ c.modelo }}</span>
-            <span class="text-xs text-muted-foreground">{{ c.tamanho || '—' }}</span>
-            <span class="ml-auto font-mono text-sm">{{ fmtValor(c.valor) }}</span>
-          </div>
-          <div class="text-xs text-muted-foreground"><span>NCM:</span> {{ c.ncm || '—' }}</div>
-        </div>
-        <div v-if="!loading && catalogos.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">nenhuma linha</div>
       </div>
     </div>
 
@@ -754,35 +635,5 @@ await loadFaturadores()
       </div>
     </div>
 
-    <!-- ==================== CATÁLOGO MALA modals ==================== -->
-    <div v-if="catShowNew || catEditing" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="catShowNew = false; catEditing = null">
-      <div class="bg-background border rounded-lg w-full max-w-md p-5 space-y-4 max-h-[90vh] overflow-y-auto">
-        <div class="flex items-center">
-          <h2 class="text-lg font-semibold">{{ catEditing ? 'Editar linha' : 'Nova linha' }}</h2>
-          <Button class="ml-auto" size="sm" variant="ghost" @click="catShowNew = false; catEditing = null"><X class="size-4" /></Button>
-        </div>
-        <div class="space-y-3">
-          <div><Label>Modelo *</Label><Input v-model="catForm.modelo" placeholder="ex: abs, pp, me1, me2" /></div>
-          <div class="grid grid-cols-2 gap-3">
-            <div><Label>Tamanho</Label><Input v-model="catForm.tamanho" placeholder="ex: 20 ou 08.10" /></div>
-            <div><Label>Valor *</Label><Input v-model="catForm.valor" inputmode="decimal" placeholder="ex: 161,00" /></div>
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div><Label>NCM</Label><Input v-model="catForm.ncm" placeholder="4202.12.10" /></div>
-            <div><Label>Ordem</Label><Input v-model="catForm.sort_order" inputmode="numeric" placeholder="0" /></div>
-          </div>
-          <p class="text-xs text-muted-foreground">
-            Tamanho aceita faixa por pontos: <b>08.10</b> cobre 8 e 10. O casamento com o pedido é
-            automático pela família da mala (M1–M6 → <b>abs</b>, P1–P6 → <b>pp</b>, ME1 → <b>me1</b>, ME2 → <b>me2</b>).
-          </p>
-        </div>
-        <div v-if="saveErr" class="text-sm text-red-500">erro: {{ saveErr }}</div>
-        <div class="flex justify-end gap-2">
-          <Button v-if="catEditing && canDelete" variant="ghost" :disabled="saving" class="text-red-500 mr-auto" @click="removeCat"><Trash2 class="size-4 mr-1" /> remover</Button>
-          <Button variant="ghost" :disabled="saving" @click="catShowNew = false; catEditing = null">{{ canEdit ? 'cancelar' : 'fechar' }}</Button>
-          <Button v-if="canEdit" :disabled="saving" @click="catEditing ? saveCat() : createCat()">{{ saving ? 'salvando…' : (catEditing ? 'Salvar' : 'Criar') }}</Button>
-        </div>
-      </div>
-    </div>
   </div>
 </template>

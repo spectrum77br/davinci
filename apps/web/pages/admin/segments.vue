@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TABS_CADASTROS } from '~/lib/navGroups'
 import { AlertCircle, Check, ChevronDown, ChevronRight, Loader2, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
 definePageMeta({
@@ -212,6 +213,7 @@ async function remove(seg: Segment, depth: number) {
 
 <template>
   <div class="space-y-4">
+    <RouteTabs :tabs="TABS_CADASTROS" />
     <PageHeader title="Segmentos">
       <template #actions>
         <Button size="sm" variant="ghost" :disabled="loading" @click="load">

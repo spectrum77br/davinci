@@ -227,6 +227,7 @@ type Account = {
   affiliate: string | null
   ads: string | null
   coupon: string | null
+  offer: string | null
   has_password: boolean
   integration_id: string | null
   segment_id: string | null
@@ -613,6 +614,7 @@ const STORE_NOTE_FIELDS: { key: string; label: string }[] = [
   { key: 'affiliate', label: 'afiliado' },
   { key: 'ads', label: 'ads' },
   { key: 'coupon', label: 'cupom' },
+  { key: 'offer', label: 'oferta' },
   { key: 'observation', label: 'obs' },
 ]
 
@@ -698,7 +700,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
       if (Number.isNaN(n)) return
       payload[field] = n
     }
-  } else if (field.startsWith('observation') || field === 'discount' || field === 'affiliate' || field === 'ads' || field === 'coupon' || field === 'email' || field === 'phone' || field === 'listing_type') {
+  } else if (field.startsWith('observation') || field === 'discount' || field === 'affiliate' || field === 'ads' || field === 'coupon' || field === 'offer' || field === 'email' || field === 'phone' || field === 'listing_type') {
     payload[field] = raw || null
   } else {
     return

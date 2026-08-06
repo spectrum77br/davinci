@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TABS_CADASTROS } from '~/lib/navGroups'
 import { ref, computed } from 'vue'
 import { Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 import {
@@ -354,6 +355,7 @@ async function submitResolve() {
 
 <template>
   <div class="space-y-4">
+    <RouteTabs :tabs="TABS_CADASTROS" />
     <div class="flex items-center gap-3 flex-wrap">
       <h1 class="text-2xl font-semibold">Cadastros</h1>
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TABS_CADASTROS } from '~/lib/navGroups'
 import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle, Unlink, Link2, Archive, ArchiveRestore } from 'lucide-vue-next'
 
 definePageMeta({
@@ -610,6 +611,7 @@ async function copyText(text: string) {
 
 <template>
   <div class="space-y-4">
+    <RouteTabs :tabs="TABS_CADASTROS" />
     <PageHeader
       title="Lojas"
       description="Cadastros completos das lojas — clique em qualquer célula para editar"
