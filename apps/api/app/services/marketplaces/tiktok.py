@@ -520,6 +520,48 @@ class TikTokClient:
         orders = (resp.get("data") or {}).get("orders") or []
         return orders[0] if orders else {}
 
+    async def get_order_status_map(self, order_ids: list[str]) -> dict[str, dict]:
+        """Batch: `status` + `update_time` de até 50 pedidos por chamada.
+
+            GET /order/202309/orders?ids=id1,id2,...
+
+        Retorna `{order_id: {"status": STR_UPPER, "update_time": int | None}}`
+        só pros pedidos que a TikTok devolveu — ausentes ficam fora do mapa.
+        Espelha `ShopeeClient.get_order_status_map` pra que o sweep de envio
+        (`marketplace_shipment_check`) resolva TikTok em lote em vez de 1
+        request por pedido.
+
+        `update_time` é epoch (UTC) da última mudança de estado — usado pra
+        carimbar `em_andamento_data` com a data real do envio.
+        """
+        if not order_ids:
+            return {}
+        out: dict[str, dict] = {}
+        chunk_size = 50  # máximo da TikTok por chamada.
+        for i in range(0, len(order_ids), chunk_size):
+            chunk = [str(o) for o in order_ids[i : i + chunk_size]]
+            try:
+                resp = await self._get("/order/202309/orders", {"ids": ",".join(chunk)})
+            except httpx.HTTPError as e:
+                logger.warning("tiktok_get_order_status_http_error", err=str(e)[:200])
+                continue
+            if resp.get("code") not in (0, None):
+                logger.warning(
+                    "tiktok_get_order_status_api_error",
+                    code=resp.get("code"), msg=str(resp.get("message"))[:200],
+                )
+                continue
+            for o in (resp.get("data") or {}).get("orders") or []:
+                oid = str((o or {}).get("id") or "").strip()
+                if not oid:
+                    continue
+                update_time = o.get("update_time")
+                out[oid] = {
+                    "status": str(o.get("status") or "").strip().upper(),
+                    "update_time": int(update_time) if update_time else None,
+                }
+        return out
+
     async def get_tracking(self, order_id: str) -> dict:
         """Eventos de rastreio de UM pedido (Fulfillment API 202309). Retorna o
         `data` com `tracking` = lista de eventos (`description` em inglês,

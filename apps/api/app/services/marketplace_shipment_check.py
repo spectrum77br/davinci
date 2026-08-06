@@ -30,6 +30,8 @@ ends up correct.
 """
 from __future__ import annotations
 
+import asyncio
+import time
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -37,7 +39,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_scope
@@ -49,8 +51,13 @@ from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
+from app.services.marketplaces.tiktok import TikTokClient
+from app.services.advisory_lock import SYNC_NAMESPACE
 
 logger = structlog.get_logger()
+
+# Chave do advisory lock que serializa o sweep (namespace SYNC compartilhado).
+_SWEEP_LOCK_KEY = 0x73686970  # ascii "ship"
 
 # Candidate "open" situacao to sweep. The shop uses 83965 as their
 # custom "Em aberto" — that's where orders sit between Bling import
@@ -74,6 +81,13 @@ _CANDIDATE_WINDOW = timedelta(days=7)
 _SHOPEE_SHIPPED = {"SHIPPED", "TO_RETURN", "COMPLETED"}
 _ML_SHIPPED = {"shipped", "delivered"}
 _AMAZON_SHIPPED = {"Shipped"}
+# TikTok Shop (Order API 202309) — vocabulário próprio, mesmo mapa usado em
+# logistica_rules.TIKTOK_STATUS_LABELS_PT. Só entram os estados em que o
+# pacote JÁ saiu da mão do vendedor, mesmo critério do Shopee/Amazon:
+# AWAITING_COLLECTION (etiqueta pronta, transportadora não coletou) fica de
+# fora igual "PendingPickUp" da Amazon; PARTIALLY_SHIPPING é ambíguo (parte
+# do pedido) e também fica fora.
+_TIKTOK_SHIPPED = {"IN_TRANSIT", "DELIVERED", "COMPLETED"}
 
 # ML shipment substatuses where the seller has NOT yet handed the package.
 # Any OTHER substatus under status=ready_to_ship means the package already
@@ -102,6 +116,38 @@ _ML_CONFIRMED_SHIPPED_SUBSTATUS = {
 # date instead of the day the sweep finally noticed.
 _BRT = ZoneInfo("America/Sao_Paulo")
 
+# Quantas consultas por pedido rodam em paralelo dentro de UMA loja. ML e
+# Amazon não têm endpoint em lote (Shopee/TikTok têm), então antes o sweep
+# fazia N requests em fila indiana — com o cron a cada 1 min isso não cabe
+# na janela. 6 é conservador pro rate limit dos dois (ML ~ centenas/min,
+# Amazon getOrder 0,5 req/s sustentado com burst 30).
+_PER_ORDER_CONCURRENCY = 6
+
+# Pedidos que o marketplace responde 404 ("não é meu") ficam nos candidatos
+# até saírem da janela de 7 dias e eram re-consultados a cada tick — 2.768
+# chamadas ML inúteis em 12h para 21 pedidos. Guardamos o instante do último
+# 404 em memória do worker e só re-tentamos depois de _NOT_FOUND_BACKOFF.
+# Em memória de propósito: zera no deploy/restart (auto-cura se o 404 era
+# transitório) e não precisa de coluna nova.
+_NOT_FOUND_BACKOFF = timedelta(minutes=30)
+_not_found_until: dict[str, float] = {}
+
+
+def _skip_not_found(key: str) -> bool:
+    """True se esse pedido levou 404 recentemente (ainda em backoff)."""
+    until = _not_found_until.get(key)
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        del _not_found_until[key]
+        return False
+    return True
+
+
+def _mark_not_found(key: str) -> None:
+    _not_found_until[key] = time.monotonic() + _NOT_FOUND_BACKOFF.total_seconds()
+
+
 def _operational_ship_date(ship_dt: datetime) -> date:
     """Retorna a data BRT em que o evento aconteceu. Sem cutoff —
     operador quer ver o dia exato em que a etiqueta foi gerada,
@@ -125,8 +171,9 @@ def _operational_ship_date(ship_dt: datetime) -> date:
     return d
 
 
-def _shopee_ship_date(update_time: Any) -> date | None:
-    """Shopee `update_time` (unix epoch UTC) → data operacional BRT."""
+def _epoch_to_brt_date(update_time: Any) -> date | None:
+    """`update_time` em unix epoch UTC (Shopee e TikTok usam esse formato)
+    → data operacional BRT."""
     if not update_time:
         return None
     try:
@@ -162,6 +209,23 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
         "bling_updated": 0, "local_updated": 0, "errors": 0,
     }
     async with session_scope() as session:
+        # Lock transacional: com o cron a cada 1 min (era 5) um tick lento
+        # ainda pode estar rodando quando o próximo dispara. Sem o lock os
+        # dois consultariam os mesmos candidatos e fariam PATCH duplicado no
+        # Bling. Quem não pega o lock sai na hora — o tick seguinte cobre.
+        got_lock = bool(
+            (
+                await session.execute(
+                    text("SELECT pg_try_advisory_xact_lock(:ns, :k)"),
+                    {"ns": SYNC_NAMESPACE, "k": _SWEEP_LOCK_KEY},
+                )
+            ).scalar()
+        )
+        if not got_lock:
+            logger.info("shipment_check_already_running")
+            summary["skipped_locked"] = 1
+            return summary
+
         # One sweep = one DB transaction. The Bling PATCH calls happen
         # inside the transaction; failures roll back the local write,
         # keeping local and Bling in sync (worst case: Bling stamped,
@@ -415,13 +479,20 @@ async def _check_marketplace_shipped(
     today-in-BRT in that case. Soft-fails per order — one bad fetch
     doesn't drop the rest."""
     creds = decrypt_json(integration.credentials)
+    # ML/Amazon consultam vários pedidos em paralelo (_PER_ORDER_CONCURRENCY)
+    # e qualquer uma dessas tasks pode disparar um refresh de token, que grava
+    # na MESMA AsyncSession. AsyncSession/asyncpg não aceitam duas operações
+    # simultâneas na mesma conexão ("another operation is in progress"), então
+    # o flush do refresh fica serializado por este lock.
+    persist_lock = asyncio.Lock()
 
     async def _persist(new_creds: dict) -> None:
-        integration.credentials = encrypt_json(new_creds)
-        exp = new_creds.get("expires_at")
-        if exp:
-            integration.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
-        await session.flush()
+        async with persist_lock:
+            integration.credentials = encrypt_json(new_creds)
+            exp = new_creds.get("expires_at")
+            if exp:
+                integration.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
+            await session.flush()
 
     platform = integration.platform
     shipped: dict[int, date | None] = {}
@@ -435,104 +506,70 @@ async def _check_marketplace_shipped(
                 continue
             info = status_map.get(str(o.numeroloja))
             if info and info.get("status") in _SHOPEE_SHIPPED:
-                shipped[int(o.bling_id)] = _shopee_ship_date(info.get("update_time"))
+                shipped[int(o.bling_id)] = _epoch_to_brt_date(info.get("update_time"))
         logger.info(
             "shipment_check_shopee",
             orders=len(orders), found_in_response=len(status_map),
             shipped=len(shipped),
         )
 
-    elif platform == IntegrationPlatform.ML:
-        client = MercadoLivreClient(creds, on_token_refresh=_persist)
+    elif platform == IntegrationPlatform.TIKTOK:
+        client = TikTokClient(creds, on_token_refresh=_persist)
+        order_ids = [str(o.numeroloja) for o in orders if o.numeroloja]
+        status_map = await client.get_order_status_map(order_ids)
         for o in orders:
             if not o.numeroloja or not o.bling_id:
                 continue
-            try:
-                data = await client.get_order(str(o.numeroloja))
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    "shipment_check_ml_order_failed",
-                    numeroloja=o.numeroloja, err=str(e)[:200],
-                )
-                continue
+            info = status_map.get(str(o.numeroloja))
+            if info and info.get("status") in _TIKTOK_SHIPPED:
+                shipped[int(o.bling_id)] = _epoch_to_brt_date(info.get("update_time"))
+        logger.info(
+            "shipment_check_tiktok",
+            orders=len(orders), found_in_response=len(status_map),
+            shipped=len(shipped),
+        )
 
-            # Skip cancelled orders outright — top-level status=cancelled
-            # means the buyer/seller dropped the order; no shipment is
-            # ever going to happen, no need to ask ML for a shipment row.
-            top_status = data.get("status")
-            if top_status == "cancelled":
-                continue
+    elif platform == IntegrationPlatform.ML:
+        client = MercadoLivreClient(creds, on_token_refresh=_persist)
+        sem = asyncio.Semaphore(_PER_ORDER_CONCURRENCY)
 
-            # Pass 1 — order/shipping level says shipped/delivered outright.
-            ship_status = ((data.get("shipping") or {}) or {}).get("status")
-            if (ship_status and str(ship_status).lower() in _ML_SHIPPED) or (
-                top_status and str(top_status).lower() in _ML_SHIPPED
-            ):
-                shipped[int(o.bling_id)] = _iso_to_brt_date(
-                    data.get("last_updated") or data.get("date_closed")
-                )
-                continue
+        async def _one_ml(o: BlingOrder) -> tuple[int, date | None] | None:
+            """Estado de envio de UM pedido ML. None = não enviado/erro."""
+            async with sem:
+                return await _ml_shipped_for(client, o)
 
-            # Pass 2 — order.status still "paid" but the shipment may
-            # already be moving. ML's order endpoint lags the shipment
-            # state: once the seller hands the package off and it gets
-            # scanned anywhere downstream (drop-off, hub, packing list,
-            # first mile), `/shipments/{id}` flips to status=ready_to_ship
-            # with a substatus that means "no longer with the seller",
-            # while the order resource still says status=paid.
-            #
-            # INCLUSION list — only confirmed-handoff substatuses count.
-            # The previous "exclusion" version (everything outside
-            # {pending, printed, ready_to_print} = shipped) falsely
-            # flipped 335 orders on 2026-05-26 because `invoice_pending`
-            # (NF not yet emitted) wasn't in the exclusion set. Inclusion
-            # is safer: any new substatus ML emits goes to NOT shipped
-            # until we explicitly whitelist it.
-            shipment_id = (data.get("shipping") or {}).get("id")
-            if shipment_id:
-                try:
-                    ship_data = await client.get_shipment(str(shipment_id))
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        "shipment_check_ml_shipment_failed",
-                        numeroloja=o.numeroloja, shipment_id=shipment_id,
-                        err=str(e)[:200],
-                    )
-                    continue
-                substatus = str(ship_data.get("substatus") or "").lower()
-                ship_status2 = str(ship_data.get("status") or "").lower()
-                if ship_status2 in _ML_SHIPPED or (
-                    ship_status2 == "ready_to_ship"
-                    and substatus in _ML_CONFIRMED_SHIPPED_SUBSTATUS
-                ):
-                    shipped[int(o.bling_id)] = _iso_to_brt_date(
-                        ship_data.get("last_updated") or ship_data.get("date_created")
-                    )
-        logger.info("shipment_check_ml", orders=len(orders), shipped=len(shipped))
+        targets = [
+            o for o in orders
+            if o.numeroloja and o.bling_id and not _skip_not_found(f"ml:{o.numeroloja}")
+        ]
+        results = await asyncio.gather(
+            *(_one_ml(o) for o in targets), return_exceptions=True,
+        )
+        for res in results:
+            if isinstance(res, BaseException) or res is None:
+                continue
+            shipped[res[0]] = res[1]
+        logger.info(
+            "shipment_check_ml",
+            orders=len(orders), queried=len(targets), shipped=len(shipped),
+        )
 
     elif platform == IntegrationPlatform.AMAZON:
         client = AmazonClient(creds, on_token_refresh=_persist)
-        for o in orders:
-            if not o.numeroloja or not o.bling_id:
+        sem = asyncio.Semaphore(_PER_ORDER_CONCURRENCY)
+
+        async def _one_amazon(o: BlingOrder) -> tuple[int, date | None] | None:
+            async with sem:
+                return await _amazon_shipped_for(client, o)
+
+        targets = [o for o in orders if o.numeroloja and o.bling_id]
+        results = await asyncio.gather(
+            *(_one_amazon(o) for o in targets), return_exceptions=True,
+        )
+        for res in results:
+            if isinstance(res, BaseException) or res is None:
                 continue
-            result = await client.get_order_status(str(o.numeroloja))
-            if not result:
-                continue
-            order_status = result.get("order_status")
-            easyship_status = result.get("easyship_status")
-            # Amazon flips OrderStatus to "Shipped" the moment the NF is
-            # emitted, BEFORE the carrier picks the package up. EasyShip
-            # orders also carry EasyShipShipmentStatus, which stays at
-            # "PendingPickUp" until the carrier scans the package. Treat
-            # "PendingPickUp" as NOT shipped; any other EasyShip state
-            # (PickedUp, Delivered, OutForDelivery, …) or no EasyShip
-            # status at all (non-EasyShip orders) means it really left
-            # the seller's hands.
-            if order_status not in _AMAZON_SHIPPED:
-                continue
-            if easyship_status == "PendingPickUp":
-                continue
-            shipped[int(o.bling_id)] = _iso_to_brt_date(result.get("last_update_date"))
+            shipped[res[0]] = res[1]
         logger.info("shipment_check_amazon", orders=len(orders), shipped=len(shipped))
 
     else:
@@ -542,3 +579,111 @@ async def _check_marketplace_shipped(
         )
 
     return shipped
+
+
+async def _ml_shipped_for(
+    client: MercadoLivreClient, o: BlingOrder,
+) -> tuple[int, date | None] | None:
+    """`(bling_id, data_envio)` se o ML confirma que o pacote saiu; None se
+    não saiu (ou se a consulta falhou). Extraído do laço pra rodar N pedidos
+    em paralelo — a lógica de decisão é idêntica à de antes."""
+    try:
+        data = await client.get_order(str(o.numeroloja))
+    except httpx.HTTPStatusError as e:
+        # 404 = pedido não pertence a essa conta (troca de loja/integração
+        # errada). Repetia a cada tick pra sempre; entra em backoff.
+        if e.response.status_code == 404:
+            _mark_not_found(f"ml:{o.numeroloja}")
+            logger.info("shipment_check_ml_order_404", numeroloja=o.numeroloja)
+        else:
+            logger.warning(
+                "shipment_check_ml_order_failed",
+                numeroloja=o.numeroloja, status=e.response.status_code,
+            )
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "shipment_check_ml_order_failed",
+            numeroloja=o.numeroloja, err=str(e)[:200],
+        )
+        return None
+
+    # Skip cancelled orders outright — top-level status=cancelled means the
+    # buyer/seller dropped the order; no shipment is ever going to happen,
+    # no need to ask ML for a shipment row.
+    top_status = data.get("status")
+    if top_status == "cancelled":
+        return None
+
+    # Pass 1 — order/shipping level says shipped/delivered outright.
+    ship_status = ((data.get("shipping") or {}) or {}).get("status")
+    if (ship_status and str(ship_status).lower() in _ML_SHIPPED) or (
+        top_status and str(top_status).lower() in _ML_SHIPPED
+    ):
+        return int(o.bling_id), _iso_to_brt_date(
+            data.get("last_updated") or data.get("date_closed")
+        )
+
+    # Pass 2 — order.status still "paid" but the shipment may already be
+    # moving. ML's order endpoint lags the shipment state: once the seller
+    # hands the package off and it gets scanned anywhere downstream
+    # (drop-off, hub, packing list, first mile), `/shipments/{id}` flips to
+    # status=ready_to_ship with a substatus that means "no longer with the
+    # seller", while the order resource still says status=paid.
+    #
+    # INCLUSION list — only confirmed-handoff substatuses count. The previous
+    # "exclusion" version (everything outside {pending, printed,
+    # ready_to_print} = shipped) falsely flipped 335 orders on 2026-05-26
+    # because `invoice_pending` (NF not yet emitted) wasn't in the exclusion
+    # set. Inclusion is safer: any new substatus ML emits goes to NOT shipped
+    # until we explicitly whitelist it.
+    shipment_id = (data.get("shipping") or {}).get("id")
+    if not shipment_id:
+        return None
+    try:
+        ship_data = await client.get_shipment(str(shipment_id))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "shipment_check_ml_shipment_failed",
+            numeroloja=o.numeroloja, shipment_id=shipment_id, err=str(e)[:200],
+        )
+        return None
+    substatus = str(ship_data.get("substatus") or "").lower()
+    ship_status2 = str(ship_data.get("status") or "").lower()
+    if ship_status2 in _ML_SHIPPED or (
+        ship_status2 == "ready_to_ship"
+        and substatus in _ML_CONFIRMED_SHIPPED_SUBSTATUS
+    ):
+        return int(o.bling_id), _iso_to_brt_date(
+            ship_data.get("last_updated") or ship_data.get("date_created")
+        )
+    return None
+
+
+async def _amazon_shipped_for(
+    client: AmazonClient, o: BlingOrder,
+) -> tuple[int, date | None] | None:
+    """`(bling_id, data_envio)` quando a Amazon confirma que o pacote saiu.
+
+    Amazon vira OrderStatus pra "Shipped" no momento em que a NF é emitida,
+    ANTES da transportadora coletar. Pedidos EasyShip carregam também
+    EasyShipShipmentStatus, que fica em "PendingPickUp" até a coleta ser
+    escaneada. "PendingPickUp" conta como NÃO enviado; qualquer outro estado
+    EasyShip (PickedUp, Delivered, OutForDelivery, …) ou nenhum status
+    EasyShip (pedido fora do EasyShip) significa que saiu de verdade.
+    """
+    try:
+        result = await client.get_order_status(str(o.numeroloja))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "shipment_check_amazon_order_failed",
+            numeroloja=o.numeroloja, err=str(e)[:200],
+        )
+        return None
+    if not result:
+        return None
+    if result.get("order_status") not in _AMAZON_SHIPPED:
+        return None
+    if result.get("easyship_status") == "PendingPickUp":
+        return None
+    return int(o.bling_id), _iso_to_brt_date(result.get("last_update_date"))

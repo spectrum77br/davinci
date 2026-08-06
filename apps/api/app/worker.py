@@ -1918,12 +1918,18 @@ class WorkerSettingsMarketplace:
         check_marketplace_shipped_orders,
     ]
     cron_jobs = [
-        cron(check_marketplace_shipped_orders, minute=_FIVE_MIN, run_at_startup=False),
+        # A CADA MINUTO (era a cada 5). O operador reclamava que o pedido
+        # já aparecia enviado no marketplace e só entrava no Controle de
+        # Estoque "muito tempo depois": os 5 min de cron eram o piso, e o
+        # sweep leva ~15-25s pra 200 candidatos (Shopee/TikTok em lote de
+        # 50, ML/Amazon com 6 consultas em paralelo). Overlap de ticks é
+        # barrado pelo advisory lock em marketplace_shipment_check.
+        cron(check_marketplace_shipped_orders, run_at_startup=False),
     ]
     queue_name = ARQ_MARKETPLACE_QUEUE
-    # Concorrência baixa — só roda 1 instance a cada 5 min, com lock
-    # interno via advisory. 3 paralelos cobre overrun se o tick anterior
-    # demorar mais que 5 min (overlap protegido pelo lock).
+    # Concorrência baixa — 1 tick por minuto, serializado pelo advisory
+    # lock (`_SWEEP_LOCK_KEY`): quem chega e acha o lock tomado sai na
+    # hora. 3 slots cobrem o overrun de um tick lento sem enfileirar.
     max_jobs = 3
     # 2 min cobre consulta a N marketplaces; mais que isso indica
     # marketplace fora do ar, melhor abortar e re-tentar no próximo tick.
