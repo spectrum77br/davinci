@@ -12,8 +12,8 @@ loja sem integração).
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "0210_bling_orders_ship_deadline"
-down_revision: str | None = "0209_marketing_creative_files"
+revision: str = "0212_bling_orders_ship_deadline"
+down_revision: str | None = "0211_nf_etiqueta_impressa_em"
 branch_labels = None
 depends_on = None
 
