@@ -238,6 +238,17 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_shipment_sla(self, shipment_id: str) -> dict:
+        """`/shipments/{id}/sla` → `{expected_date, last_updated, ...}`.
+
+        `expected_date` é o "despachar até" que o Seller Central mostra —
+        com hora real de coleta no cross-docking (ex.: 13:00) e 23:59:59
+        quando é agência (conta o dia). Usado pelo sweep de envio pra
+        carimbar o horário de corte do pedido na aba Pedidos."""
+        r = await self._request("GET", f"/shipments/{shipment_id}/sla")
+        r.raise_for_status()
+        return r.json() or {}
+
     async def get_claim(self, claim_id: str | int) -> dict:
         """Fetch a post-purchase claim/mediation detail.
 

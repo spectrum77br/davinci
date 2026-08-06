@@ -306,7 +306,9 @@ class ShopeeClient:
             chunk = order_sns[i : i + chunk_size]
             params = {
                 "order_sn_list": ",".join(chunk),
-                "response_optional_fields": "order_status,update_time",
+                # ship_by_date = "despachar até" (epoch UTC) — vira o horário
+                # de corte do pedido na aba Pedidos do Controle de Estoque.
+                "response_optional_fields": "order_status,update_time,ship_by_date",
             }
             try:
                 r = await self._request("GET", path, params=params)
@@ -336,6 +338,7 @@ class ShopeeClient:
                     out[str(sn)] = {
                         "status": str(status).upper(),
                         "update_time": o.get("update_time"),
+                        "ship_by_date": o.get("ship_by_date"),
                     }
         return out
 

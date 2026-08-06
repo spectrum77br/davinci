@@ -71,6 +71,9 @@ type PedidoRow = {
   etiqueta_em: string | null
   // Quando a etiqueta foi impressa pela 1ª vez. Null = nunca impressa.
   etiqueta_impressa_em: string | null
+  // "Despachar até" prometido ao marketplace (horário de corte do pedido),
+  // ISO tz-aware vindo da API de cada plataforma. Null = não capturado.
+  ship_deadline: string | null
 }
 type EnvioRow = {
   data: string
@@ -650,6 +653,44 @@ function impressaHora(row: PedidoRow) {
   const hora = _HORA_BRT.format(d)
   const dia = isoDateBrt(d)
   return dia === isoToday() ? hora : `${dia.slice(8)}/${dia.slice(5, 7)} ${hora}`
+}
+
+// ── Horário de corte ("despachar até" do marketplace) ─────────────────
+// Mostrado embaixo do nome da loja, só em pedido ainda NÃO enviado.
+// Relógio de 60s mantém "falta Xmin"/"estourou" vivos sem recarregar.
+const corteAgoraMs = ref(Date.now())
+let corteClock: number | null = null
+onMounted(() => {
+  corteClock = window.setInterval(() => { corteAgoraMs.value = Date.now() }, 60_000)
+})
+onBeforeUnmount(() => {
+  if (corteClock !== null) window.clearInterval(corteClock)
+})
+function corteInfo(row: PedidoRow): { label: string; cls: string } | null {
+  if (!row.ship_deadline || row.status === 'enviado') return null
+  const dl = new Date(row.ship_deadline)
+  const hora = _HORA_BRT.format(dl)
+  const dia = isoDateBrt(dl)
+  const hoje = isoToday()
+  const ddmm = `${dia.slice(8)}/${dia.slice(5, 7)}`
+  if (dia > hoje) {
+    // Corte só amanhã ou depois: discreto, sem urgência.
+    return { label: `corte ${ddmm} ${hora}`, cls: 'text-muted-foreground' }
+  }
+  const faltaMin = Math.floor((dl.getTime() - corteAgoraMs.value) / 60_000)
+  if (faltaMin < 0) {
+    return {
+      label: `corte ${dia === hoje ? hora : `${ddmm} ${hora}`} — estourou`,
+      cls: 'text-red-600 dark:text-red-400 font-semibold',
+    }
+  }
+  if (faltaMin < 60) {
+    return {
+      label: `corte ${hora} — falta ${faltaMin}min`,
+      cls: 'text-amber-700 dark:text-amber-400 font-semibold',
+    }
+  }
+  return { label: `corte ${hora}`, cls: 'text-amber-700 dark:text-amber-400' }
 }
 
 async function toggleEnvio(row: EnvioRow) {
@@ -1303,7 +1344,19 @@ async function conferirTodos() {
               {{ row._isFirstOfGroup ? (row.pedido_bling || '—') : '' }}
             </td>
             <td class="font-mono text-[11px]">{{ row.pedido_marketplace || '—' }}</td>
-            <td>{{ row.loja || '—' }}</td>
+            <td>
+              {{ row.loja || '—' }}
+              <!-- Horário de corte ("despachar até" do marketplace). Só em
+                   pedido não enviado; some sozinho quando o envio confirma. -->
+              <div
+                v-if="corteInfo(row)"
+                class="text-[9px] mt-0.5 whitespace-nowrap"
+                :class="corteInfo(row)!.cls"
+                title="Despachar até (prazo do marketplace)"
+              >
+                {{ corteInfo(row)!.label }}
+              </div>
+            </td>
             <td class="font-mono text-[11px]">{{ row.sku || '—' }}</td>
             <td class="truncate max-w-[280px]" :title="row.produto || ''">{{ row.produto || '—' }}</td>
             <td class="text-right">{{ row.quantidade }}</td>

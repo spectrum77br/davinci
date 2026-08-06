@@ -211,11 +211,40 @@ def _iso_to_brt_date(iso_str: Any) -> date | None:
         return None
 
 
+def _epoch_to_utc_dt(v: Any) -> datetime | None:
+    """Epoch (segundos, UTC) → datetime tz-aware. Usado pros prazos de
+    despacho (Shopee `ship_by_date`, TikTok `rts_sla_time`)."""
+    if not v:
+        return None
+    try:
+        return datetime.fromtimestamp(int(v), tz=UTC)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _iso_to_utc_dt(v: Any) -> datetime | None:
+    """ISO-8601 (Amazon `LatestShipDate`, ML `sla.expected_date`) →
+    datetime tz-aware normalizado pra UTC."""
+    if not v:
+        return None
+    try:
+        s = str(v)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    except (TypeError, ValueError):
+        return None
+
+
 async def run_check_marketplace_shipped_orders() -> dict[str, int]:
     """One sweep. Returns counters for logging/observability."""
     summary = {
         "candidates": 0, "stores_checked": 0, "shipped_found": 0,
-        "bling_updated": 0, "local_updated": 0, "errors": 0,
+        "bling_updated": 0, "local_updated": 0, "deadlines_updated": 0,
+        "errors": 0,
     }
     async with session_scope() as session:
         # Lock transacional: com o cron a cada 1 min (era 5) um tick lento
@@ -278,9 +307,10 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                 continue
             summary["stores_checked"] += 1
 
+            deadlines: dict[int, datetime] = {}
             try:
                 shipped_bling_ids = await _check_marketplace_shipped(
-                    session, integration, orders,
+                    session, integration, orders, deadlines,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.exception(
@@ -290,6 +320,23 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                 summary["errors"] += 1
                 continue
             summary["shipped_found"] += len(shipped_bling_ids)
+
+            # Prazo de despacho ("despachar até") capturado nas MESMAS
+            # consultas acima — carimba mesmo quando nada foi enviado (é
+            # justamente o pedido parado que precisa do corte na tela).
+            # Cobre todas as linhas do bling_id (pedido multi-item);
+            # IS DISTINCT FROM evita reescrever valor idêntico a cada tick.
+            for _bid, _dl in deadlines.items():
+                res = await session.execute(
+                    update(BlingOrder)
+                    .where(BlingOrder.bling_id == _bid)
+                    .where(
+                        BlingOrder.marketplace_ship_deadline.is_distinct_from(_dl)
+                    )
+                    .values(marketplace_ship_deadline=_dl)
+                )
+                if res.rowcount:
+                    summary["deadlines_updated"] += 1
 
             if not shipped_bling_ids:
                 continue
@@ -481,12 +528,21 @@ async def _check_marketplace_shipped(
     session: AsyncSession,
     integration: Integration,
     orders: list[BlingOrder],
+    deadlines: dict[int, datetime] | None = None,
 ) -> dict[int, date | None]:
     """Returns `{bling_id: real_ship_date_BRT}` for orders the marketplace
     reports as shipped. Value is None when the marketplace surfaced the
     shipped state without a usable timestamp — callers fall back to
     today-in-BRT in that case. Soft-fails per order — one bad fetch
-    doesn't drop the rest."""
+    doesn't drop the rest.
+
+    `deadlines` (opcional, mutado in-place): recebe `{bling_id: "despachar
+    até" (UTC)}` capturado de carona nas mesmas respostas — Shopee
+    `ship_by_date`, TikTok `rts_sla_time`, Amazon `LatestShipDate`, ML
+    `/shipments/{id}/sla` (este só quando ainda NULL no banco: custa 1
+    request extra por pedido)."""
+    if deadlines is None:
+        deadlines = {}
     creds = decrypt_json(integration.credentials)
     # ML/Amazon consultam vários pedidos em paralelo (_PER_ORDER_CONCURRENCY)
     # e qualquer uma dessas tasks pode disparar um refresh de token, que grava
@@ -514,7 +570,12 @@ async def _check_marketplace_shipped(
             if not o.numeroloja or not o.bling_id:
                 continue
             info = status_map.get(str(o.numeroloja))
-            if info and info.get("status") in _SHOPEE_SHIPPED:
+            if not info:
+                continue
+            dl = _epoch_to_utc_dt(info.get("ship_by_date"))
+            if dl is not None:
+                deadlines[int(o.bling_id)] = dl
+            if info.get("status") in _SHOPEE_SHIPPED:
                 shipped[int(o.bling_id)] = _epoch_to_brt_date(info.get("update_time"))
         logger.info(
             "shipment_check_shopee",
@@ -530,7 +591,12 @@ async def _check_marketplace_shipped(
             if not o.numeroloja or not o.bling_id:
                 continue
             info = status_map.get(str(o.numeroloja))
-            if info and info.get("status") in _TIKTOK_SHIPPED:
+            if not info:
+                continue
+            dl = _epoch_to_utc_dt(info.get("rts_sla_time"))
+            if dl is not None:
+                deadlines[int(o.bling_id)] = dl
+            if info.get("status") in _TIKTOK_SHIPPED:
                 shipped[int(o.bling_id)] = _epoch_to_brt_date(info.get("update_time"))
         logger.info(
             "shipment_check_tiktok",
@@ -545,7 +611,7 @@ async def _check_marketplace_shipped(
         async def _one_ml(o: BlingOrder) -> tuple[int, date | None] | None:
             """Estado de envio de UM pedido ML. None = não enviado/erro."""
             async with sem:
-                return await _ml_shipped_for(client, o)
+                return await _ml_shipped_for(client, o, deadlines)
 
         targets = [
             o for o in orders
@@ -569,7 +635,7 @@ async def _check_marketplace_shipped(
 
         async def _one_amazon(o: BlingOrder) -> tuple[int, date | None] | None:
             async with sem:
-                return await _amazon_shipped_for(client, o)
+                return await _amazon_shipped_for(client, o, deadlines)
 
         targets = [o for o in orders if o.numeroloja and o.bling_id]
         results = await asyncio.gather(
@@ -591,7 +657,9 @@ async def _check_marketplace_shipped(
 
 
 async def _ml_shipped_for(
-    client: MercadoLivreClient, o: BlingOrder,
+    client: MercadoLivreClient,
+    o: BlingOrder,
+    deadlines: dict[int, datetime] | None = None,
 ) -> tuple[int, date | None] | None:
     """`(bling_id, data_envio)` se o ML confirma que o pacote saiu; None se
     não saiu (ou se a consulta falhou). Extraído do laço pra rodar N pedidos
@@ -685,6 +753,22 @@ async def _ml_shipped_for(
         return int(o.bling_id), _iso_to_brt_date(
             ship_data.get("last_updated") or ship_data.get("date_created")
         )
+
+    # NÃO enviado — aproveita que já temos o shipment em mãos pra capturar
+    # o "despachar até" (/sla.expected_date = horário de corte: 13:00 em
+    # coleta, 23:59 em agência). Só quando ainda NULL no banco: custa 1
+    # request extra por pedido, e o ML raramente muda o prazo depois.
+    if deadlines is not None and o.marketplace_ship_deadline is None:
+        try:
+            sla = await client.get_shipment_sla(str(shipment_id))
+            dl = _iso_to_utc_dt(sla.get("expected_date"))
+            if dl is not None:
+                deadlines[int(o.bling_id)] = dl
+        except Exception as e:  # noqa: BLE001
+            logger.info(
+                "shipment_check_ml_sla_failed",
+                numeroloja=numeroloja, err=str(e)[:120],
+            )
     return None
 
 
@@ -729,7 +813,9 @@ async def _ml_resolve_pack(
 
 
 async def _amazon_shipped_for(
-    client: AmazonClient, o: BlingOrder,
+    client: AmazonClient,
+    o: BlingOrder,
+    deadlines: dict[int, datetime] | None = None,
 ) -> tuple[int, date | None] | None:
     """`(bling_id, data_envio)` quando a Amazon confirma que o pacote saiu.
 
@@ -750,6 +836,12 @@ async def _amazon_shipped_for(
         return None
     if not result:
         return None
+    # "Despachar até" vem no mesmo payload — captura antes dos filtros de
+    # status (o prazo interessa justamente enquanto NÃO está enviado).
+    if deadlines is not None and o.bling_id:
+        dl = _iso_to_utc_dt(result.get("latest_ship_date"))
+        if dl is not None:
+            deadlines[int(o.bling_id)] = dl
     if result.get("order_status") not in _AMAZON_SHIPPED:
         return None
     if result.get("easyship_status") == "PendingPickUp":

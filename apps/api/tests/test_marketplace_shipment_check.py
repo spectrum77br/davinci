@@ -379,3 +379,195 @@ async def test_ml_404_sem_pack_entra_em_backoff():
     res = await m._ml_shipped_for(_FakeMLNotMineClient(), _fake_order("123456"))
     assert res is None
     assert m._skip_not_found("ml:123456")
+
+
+# ---------------------------------------------------------------------------
+# Horário de corte ("despachar até") — captura do prazo de despacho que cada
+# marketplace promete ao comprador, feita de carona nas MESMAS consultas do
+# sweep. Persistido em bling_orders.marketplace_ship_deadline (migration
+# 0210) e mostrado na aba Pedidos do Controle de Estoque.
+# ---------------------------------------------------------------------------
+
+def _fake_pending_order(numeroloja: str, bling_id: int = 999):
+    """Pedido fake AINDA sem prazo capturado (deadline NULL no banco)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        numeroloja=numeroloja, bling_id=bling_id,
+        marketplace_ship_deadline=None,
+    )
+
+
+def test_epoch_to_utc_dt():
+    from datetime import UTC, datetime
+
+    from app.services.marketplace_shipment_check import _epoch_to_utc_dt
+
+    # Shopee ship_by_date / TikTok rts_sla_time: epoch segundos (UTC).
+    assert _epoch_to_utc_dt(86400) == datetime(1970, 1, 2, tzinfo=UTC)
+    assert _epoch_to_utc_dt("86400") == datetime(1970, 1, 2, tzinfo=UTC)
+    # 0 = "sem prazo" (alguns marketplaces mandam 0 em vez de null).
+    assert _epoch_to_utc_dt(0) is None
+    assert _epoch_to_utc_dt(None) is None
+    assert _epoch_to_utc_dt("") is None
+    assert _epoch_to_utc_dt("abc") is None
+
+
+def test_iso_to_utc_dt():
+    from datetime import UTC, datetime
+
+    from app.services.marketplace_shipment_check import _iso_to_utc_dt
+
+    # ML /sla expected_date vem com offset explícito (ex.: -04:00) —
+    # o que importa aqui é só a normalização pra UTC tz-aware.
+    assert _iso_to_utc_dt("2026-08-06T13:00:00.000-04:00") == datetime(
+        2026, 8, 6, 17, 0, tzinfo=UTC,
+    )
+    # Amazon LatestShipDate vem com Z.
+    assert _iso_to_utc_dt("2026-08-07T02:59:59Z") == datetime(
+        2026, 8, 7, 2, 59, 59, tzinfo=UTC,
+    )
+    # Naive → assume UTC; lixo → None.
+    assert _iso_to_utc_dt("2026-08-06T13:00:00") == datetime(
+        2026, 8, 6, 13, 0, tzinfo=UTC,
+    )
+    assert _iso_to_utc_dt(None) is None
+    assert _iso_to_utc_dt("n/a") is None
+
+
+class _FakeMLPendingClient:
+    """Pedido pago mas NÃO enviado (substatus printed) — com /sla."""
+
+    def __init__(self, expected_date: str | None = "2026-08-06T13:00:00.000-04:00"):
+        self.expected_date = expected_date
+        self.sla_calls = 0
+
+    async def get_order(self, order_id: str) -> dict:
+        return {
+            "status": "paid",
+            "shipping": {"status": "to_be_agreed", "id": 44444},
+        }
+
+    async def get_shipment(self, shipment_id: str) -> dict:
+        return {"status": "ready_to_ship", "substatus": "printed"}
+
+    async def get_shipment_sla(self, shipment_id: str) -> dict:
+        self.sla_calls += 1
+        if self.expected_date is None:
+            raise RuntimeError("sla indisponível")
+        return {"expected_date": self.expected_date}
+
+
+@pytest.mark.asyncio
+async def test_ml_nao_enviado_captura_sla():
+    from datetime import UTC, datetime
+
+    from app.services import marketplace_shipment_check as m
+
+    m._ml_pack_real_order.clear()
+    m._not_found_until.clear()
+    client = _FakeMLPendingClient()
+    deadlines: dict[int, datetime] = {}
+    res = await m._ml_shipped_for(client, _fake_pending_order("111"), deadlines)
+    assert res is None  # continua não-enviado
+    assert deadlines == {999: datetime(2026, 8, 6, 17, 0, tzinfo=UTC)}
+    assert client.sla_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ml_sla_pulado_quando_ja_tem_prazo_no_banco():
+    """Prazo já capturado → NÃO gasta o request extra de /sla de novo."""
+    from types import SimpleNamespace
+    from datetime import UTC, datetime
+
+    from app.services import marketplace_shipment_check as m
+
+    m._ml_pack_real_order.clear()
+    m._not_found_until.clear()
+    client = _FakeMLPendingClient()
+    o = SimpleNamespace(
+        numeroloja="111", bling_id=999,
+        marketplace_ship_deadline=datetime(2026, 8, 6, 17, 0, tzinfo=UTC),
+    )
+    deadlines: dict[int, datetime] = {}
+    res = await m._ml_shipped_for(client, o, deadlines)
+    assert res is None
+    assert deadlines == {}
+    assert client.sla_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_ml_sla_falha_nao_derruba_sweep():
+    from datetime import datetime
+
+    from app.services import marketplace_shipment_check as m
+
+    m._ml_pack_real_order.clear()
+    m._not_found_until.clear()
+    client = _FakeMLPendingClient(expected_date=None)  # /sla explode
+    deadlines: dict[int, datetime] = {}
+    res = await m._ml_shipped_for(client, _fake_pending_order("111"), deadlines)
+    assert res is None
+    assert deadlines == {}
+
+
+@pytest.mark.asyncio
+async def test_ml_sem_deadlines_mantem_comportamento_antigo():
+    """Chamada legada (sem dict) não toca /sla nem exige o atributo novo."""
+    from app.services import marketplace_shipment_check as m
+
+    m._ml_pack_real_order.clear()
+    m._not_found_until.clear()
+    client = _FakeMLPendingClient()
+    res = await m._ml_shipped_for(client, _fake_order("111"))
+    assert res is None
+    assert client.sla_calls == 0
+
+
+class _FakeAmazonClient:
+    def __init__(self, payload: dict | None):
+        self.payload = payload
+
+    async def get_order_status(self, order_id: str) -> dict | None:
+        return self.payload
+
+
+@pytest.mark.asyncio
+async def test_amazon_captura_latest_ship_date_mesmo_nao_enviado():
+    from datetime import UTC, datetime
+
+    from app.services import marketplace_shipment_check as m
+
+    client = _FakeAmazonClient({
+        "order_status": "Unshipped",
+        "easyship_status": None,
+        "last_update_date": "2026-08-06T12:00:00Z",
+        "latest_ship_date": "2026-08-07T02:59:59Z",  # 06/08 23:59 BRT
+    })
+    deadlines: dict[int, datetime] = {}
+    res = await m._amazon_shipped_for(
+        client, _fake_pending_order("701-1"), deadlines,
+    )
+    assert res is None  # Unshipped continua não-enviado
+    assert deadlines == {999: datetime(2026, 8, 7, 2, 59, 59, tzinfo=UTC)}
+
+
+@pytest.mark.asyncio
+async def test_amazon_enviado_tambem_carimba_prazo():
+    """Mesmo Shipped o prazo vem junto — inofensivo e mantém histórico."""
+    from datetime import UTC, datetime
+
+    from app.services import marketplace_shipment_check as m
+
+    client = _FakeAmazonClient({
+        "order_status": "Shipped",
+        "easyship_status": None,
+        "last_update_date": "2026-08-06T12:00:00Z",
+        "latest_ship_date": "2026-08-07T02:59:59Z",
+    })
+    deadlines: dict[int, datetime] = {}
+    res = await m._amazon_shipped_for(
+        client, _fake_pending_order("701-1"), deadlines,
+    )
+    assert res == (999, date(2026, 8, 6))
+    assert deadlines == {999: datetime(2026, 8, 7, 2, 59, 59, tzinfo=UTC)}

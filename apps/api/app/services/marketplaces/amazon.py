@@ -204,6 +204,8 @@ class AmazonClient:
             "order_status": str(status),
             "easyship_status": payload.get("EasyShipShipmentStatus"),
             "last_update_date": payload.get("LastUpdateDate"),
+            # "Despachar até" (ISO) — horário de corte do pedido na aba Pedidos.
+            "latest_ship_date": payload.get("LatestShipDate"),
             # Destino (best-effort; a Amazon costuma redigir sem RDT — fica vazio).
             "ship_city": addr.get("City"),
             "ship_state": addr.get("StateOrRegion"),

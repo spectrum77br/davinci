@@ -556,9 +556,11 @@ class TikTokClient:
                 if not oid:
                     continue
                 update_time = o.get("update_time")
+                rts_sla = o.get("rts_sla_time")  # "despachar até" (epoch UTC)
                 out[oid] = {
                     "status": str(o.get("status") or "").strip().upper(),
                     "update_time": int(update_time) if update_time else None,
+                    "rts_sla_time": int(rts_sla) if rts_sla else None,
                 }
         return out
 

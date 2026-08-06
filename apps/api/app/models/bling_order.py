@@ -73,6 +73,14 @@ class BlingOrder(Base, TimestampMixin):
     categoria_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     categoria_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
     em_andamento_data: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # "Despachar até" prometido ao marketplace (horário de corte do pedido),
+    # capturado pelo sweep de envio direto da API de cada plataforma (Shopee
+    # ship_by_date, TikTok rts_sla_time, Amazon LatestShipDate, ML
+    # /shipments/{id}/sla). Replicado em todas as linhas do mesmo bling_id.
+    # NULL = ainda não capturado.
+    marketplace_ship_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     verificado: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, server_default=text("false")
     )

@@ -647,6 +647,15 @@ async def list_estoque_pedidos(
                 if o.numero in impressa_por_pedido
                 else None
             ),
+            # "Despachar até" prometido ao marketplace (horário de corte do
+            # pedido), capturado pelo sweep de envio direto da API de cada
+            # plataforma. ISO tz-aware (UTC) ou null. A tela só mostra
+            # quando status != enviado.
+            "ship_deadline": (
+                o.marketplace_ship_deadline.isoformat()
+                if o.marketplace_ship_deadline
+                else None
+            ),
         })
 
     # Atrasados (INDEPENDENTE do filtro de data): pedidos com etiqueta
