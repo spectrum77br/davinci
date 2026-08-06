@@ -860,8 +860,17 @@ async function imprimirLote() {
     if (!resp.ok) throw new Error(String(resp.status))
     const blob = await resp.blob()
     const objUrl = URL.createObjectURL(blob)
-    window.open(objUrl, '_blank', 'noopener')
-    // Só revoga depois que a aba pegou o blob.
+    // <a download> em vez de window.open: depois do await o navegador já perdeu
+    // o "user activation" do clique e bloqueia o popup SEM avisar. Quanto mais
+    // etiquetas, mais demora a resposta e mais certo é o bloqueio — por isso 5
+    // funcionava e 8 não. Download não depende de gesto, então não tem limite.
+    const a = document.createElement('a')
+    a.href = objUrl
+    a.download = `etiquetas_lote_${pedidos.length}.pdf`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    // Só revoga depois que o navegador pegou o blob.
     setTimeout(() => URL.revokeObjectURL(objUrl), 60_000)
     etiquetasSel.value = new Set()
     await loadPedidos()  // repuxa pra marcar "Impressa"
