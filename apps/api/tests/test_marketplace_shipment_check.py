@@ -292,3 +292,90 @@ def test_operational_ship_date_apos_10h_brt_inalterado():
 
     dt = datetime(2026, 6, 3, 13, 30, tzinfo=UTC)
     assert _operational_ship_date(dt) == date(2026, 6, 3)
+
+
+# ---------------------------------------------------------------------------
+# ML pack (compra de carrinho): numeroloja é PACK id, /orders/{pack} dá 404.
+# O sweep resolve via /packs/{id} e re-checa com o pedido real. Em 06/08
+# eram 12/18 pedidos ML "não enviados" do dia presos pra sempre nesse 404.
+# ---------------------------------------------------------------------------
+
+_PACK_ID = "2000014000000001"
+_REAL_ID = "2000017000000009"
+
+
+def _http_404() -> "httpx.HTTPStatusError":
+    import httpx
+
+    req = httpx.Request("GET", "https://api.mercadolibre.com/orders/x")
+    return httpx.HTTPStatusError(
+        "404", request=req, response=httpx.Response(404, request=req)
+    )
+
+
+class _FakeMLPackClient:
+    """404 no pack id; resolve /packs; pedido real vem shipped."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    async def get_order(self, order_id: str) -> dict:
+        self.calls.append(("order", order_id))
+        if order_id == _PACK_ID:
+            raise _http_404()
+        return {
+            "status": "paid",
+            "shipping": {"status": "shipped", "id": 47679786004},
+            "last_updated": "2026-08-05T14:00:00.000-03:00",
+        }
+
+    async def get_pack(self, pack_id: str) -> dict:
+        self.calls.append(("pack", pack_id))
+        return {"id": pack_id, "orders": [{"id": int(_REAL_ID)}]}
+
+
+class _FakeMLNotMineClient:
+    """404 tanto em /orders quanto em /packs — pedido de outra conta."""
+
+    async def get_order(self, order_id: str) -> dict:
+        raise _http_404()
+
+    async def get_pack(self, pack_id: str) -> dict:
+        raise _http_404()
+
+
+def _fake_order(numeroloja: str, bling_id: int = 999):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(numeroloja=numeroloja, bling_id=bling_id)
+
+
+@pytest.mark.asyncio
+async def test_ml_pack_id_resolve_e_confirma_envio():
+    from app.services import marketplace_shipment_check as m
+
+    m._ml_pack_real_order.clear()
+    m._not_found_until.clear()
+    client = _FakeMLPackClient()
+    res = await m._ml_shipped_for(client, _fake_order(_PACK_ID))
+    assert res == (999, date(2026, 8, 5))
+    # Mapeamento pack→pedido real ficou em cache…
+    assert m._ml_pack_real_order[_PACK_ID] == _REAL_ID
+    # …e o pedido NÃO entrou em backoff de 404.
+    assert not m._skip_not_found(f"ml:{_PACK_ID}")
+    # Segunda rodada usa o cache: nada de /packs de novo.
+    client.calls.clear()
+    res2 = await m._ml_shipped_for(client, _fake_order(_PACK_ID))
+    assert res2 == (999, date(2026, 8, 5))
+    assert client.calls == [("order", _REAL_ID)]
+
+
+@pytest.mark.asyncio
+async def test_ml_404_sem_pack_entra_em_backoff():
+    from app.services import marketplace_shipment_check as m
+
+    m._ml_pack_real_order.clear()
+    m._not_found_until.clear()
+    res = await m._ml_shipped_for(_FakeMLNotMineClient(), _fake_order("123456"))
+    assert res is None
+    assert m._skip_not_found("ml:123456")

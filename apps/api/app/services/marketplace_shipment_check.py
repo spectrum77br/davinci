@@ -148,6 +148,15 @@ def _mark_not_found(key: str) -> None:
     _not_found_until[key] = time.monotonic() + _NOT_FOUND_BACKOFF.total_seconds()
 
 
+# Compra de carrinho no ML: o Bling grava o PACK id em numeroloja e
+# `/orders/{pack}` responde 404 — em 06/08 eram 12 dos 18 pedidos ML
+# "não enviados" do dia, presos pra sempre. `/packs/{id}` devolve os
+# pedidos reais (todos compartilham o MESMO envio, checar o primeiro
+# basta). O mapa pack→pedido real é imutável, então fica em cache no
+# processo — 1 resolução por pedido por vida do worker.
+_ml_pack_real_order: dict[str, str] = {}
+
+
 def _operational_ship_date(ship_dt: datetime) -> date:
     """Retorna a data BRT em que o evento aconteceu. Sem cutoff —
     operador quer ver o dia exato em que a etiqueta foi gerada,
@@ -587,24 +596,43 @@ async def _ml_shipped_for(
     """`(bling_id, data_envio)` se o ML confirma que o pacote saiu; None se
     não saiu (ou se a consulta falhou). Extraído do laço pra rodar N pedidos
     em paralelo — a lógica de decisão é idêntica à de antes."""
+    numeroloja = str(o.numeroloja)
+    order_id = _ml_pack_real_order.get(numeroloja, numeroloja)
+    via_pack = order_id != numeroloja
     try:
-        data = await client.get_order(str(o.numeroloja))
+        data = await client.get_order(order_id)
     except httpx.HTTPStatusError as e:
-        # 404 = pedido não pertence a essa conta (troca de loja/integração
-        # errada). Repetia a cada tick pra sempre; entra em backoff.
-        if e.response.status_code == 404:
-            _mark_not_found(f"ml:{o.numeroloja}")
-            logger.info("shipment_check_ml_order_404", numeroloja=o.numeroloja)
+        if e.response.status_code == 404 and not via_pack:
+            # Pode ser um PACK id (compra de carrinho) — resolve e re-tenta
+            # com o pedido real. Só se nem o pack existir é que o pedido de
+            # fato não pertence a essa conta (aí entra em backoff).
+            real_id = await _ml_resolve_pack(client, numeroloja)
+            if real_id is None:
+                return None
+            try:
+                data = await client.get_order(real_id)
+            except Exception as e2:  # noqa: BLE001
+                logger.warning(
+                    "shipment_check_ml_order_failed",
+                    numeroloja=numeroloja, order_id=real_id, err=str(e2)[:200],
+                )
+                return None
+        elif e.response.status_code == 404:
+            # Pedido real (cacheado do pack) sumiu — não deveria acontecer;
+            # trata como "não é meu" e entra em backoff.
+            _mark_not_found(f"ml:{numeroloja}")
+            logger.info("shipment_check_ml_order_404", numeroloja=numeroloja)
+            return None
         else:
             logger.warning(
                 "shipment_check_ml_order_failed",
-                numeroloja=o.numeroloja, status=e.response.status_code,
+                numeroloja=numeroloja, status=e.response.status_code,
             )
-        return None
+            return None
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "shipment_check_ml_order_failed",
-            numeroloja=o.numeroloja, err=str(e)[:200],
+            numeroloja=numeroloja, err=str(e)[:200],
         )
         return None
 
@@ -658,6 +686,46 @@ async def _ml_shipped_for(
             ship_data.get("last_updated") or ship_data.get("date_created")
         )
     return None
+
+
+async def _ml_resolve_pack(
+    client: MercadoLivreClient, numeroloja: str,
+) -> str | None:
+    """Resolve um numeroloja que deu 404 em `/orders` como PACK id.
+
+    Devolve o id do primeiro pedido real do pacote (todos compartilham o
+    mesmo envio) e guarda no cache do processo. None = também não é pack →
+    o pedido realmente não pertence a essa conta; marca backoff."""
+    try:
+        pack = await client.get_pack(numeroloja)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            _mark_not_found(f"ml:{numeroloja}")
+            logger.info("shipment_check_ml_order_404", numeroloja=numeroloja)
+        else:
+            logger.warning(
+                "shipment_check_ml_pack_failed",
+                numeroloja=numeroloja, status=e.response.status_code,
+            )
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "shipment_check_ml_pack_failed",
+            numeroloja=numeroloja, err=str(e)[:200],
+        )
+        return None
+    ids = [str((po or {}).get("id") or "").strip() for po in pack.get("orders") or []]
+    ids = [i for i in ids if i]
+    if not ids:
+        _mark_not_found(f"ml:{numeroloja}")
+        logger.info("shipment_check_ml_pack_empty", numeroloja=numeroloja)
+        return None
+    _ml_pack_real_order[numeroloja] = ids[0]
+    logger.info(
+        "shipment_check_ml_pack_resolved",
+        numeroloja=numeroloja, order_id=ids[0], orders_in_pack=len(ids),
+    )
+    return ids[0]
 
 
 async def _amazon_shipped_for(
