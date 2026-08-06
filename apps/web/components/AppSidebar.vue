@@ -102,7 +102,14 @@ function groupItem(
 ): Item | null {
   const allowed = allowedTabs(tabs, auth.user as any)
   if (!allowed.length) return null
-  return { ...base, to: allowed[0].to, match: tabs.map((t) => t.to) }
+  return {
+    ...base,
+    // Com UMA aba visível não existe "grupo" pra essa pessoa: o item assume
+    // o nome da própria página (ex.: só vê Lojas → item vira "Lojas").
+    label: allowed.length === 1 ? allowed[0].label : base.label,
+    to: allowed[0].to,
+    match: tabs.map((t) => t.to),
+  }
 }
 
 const sections = computed<Section[]>(() => [
