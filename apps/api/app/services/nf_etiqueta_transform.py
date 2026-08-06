@@ -39,7 +39,7 @@ def _nome_destinatario(page: fitz.Page) -> str | None:
     hdr = hits[0]
     linha = [
         w for w in page.get_text("words")
-        if hdr.y1 <= w[1] <= hdr.y1 + 14 and (hdr.x0 - 8) <= w[0] <= (hdr.x0 + 130)
+        if hdr.y1 <= w[1] <= hdr.y1 + 14 and (hdr.x0 - 20) <= w[0] <= (hdr.x0 + 130)
     ]
     linha.sort(key=lambda w: w[0])
     nome = " ".join(w[4] for w in linha).strip()
@@ -92,14 +92,20 @@ def _plano_remetente(page: fitz.Page) -> tuple[fitz.Rect, float, float, float] |
 
 def _remover_nf(page: fitz.Page) -> None:
     """Redige o bloco DANFE/NF: número, série, emissão, chave texto + barras."""
+    chaves = [
+        w for w in page.get_text("words")
+        if len(w[4]) >= _MIN_CHAVE_DIGITOS and w[4].isdigit()
+    ]
     anchors = page.search_for("DANFE") or page.search_for("NF:")
     if not anchors:
+        # etiqueta sem rótulo do bloco (ex. J&T): apaga só a chave solta
+        for w in chaves:
+            _redigir(page, fitz.Rect(w[0], w[1], w[2], w[3]))
         return
     top = min(a.y0 for a in anchors) - 2
     bottom = top + 24
-    for w in page.get_text("words"):
-        if len(w[4]) >= _MIN_CHAVE_DIGITOS and w[4].isdigit():
-            bottom = max(bottom, w[3])
+    for w in chaves:
+        bottom = max(bottom, w[3])
     for img in page.get_images(full=True):
         for r in page.get_image_rects(img[0]):
             if r.y0 >= top - 4:

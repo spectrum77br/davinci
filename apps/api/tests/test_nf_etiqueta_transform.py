@@ -56,6 +56,20 @@ def _etiqueta_sintetica(*, com_logo: bool = True) -> bytes:
     return doc.tobytes()
 
 
+def _etiqueta_jt() -> bytes:
+    """Etiqueta tipo J&T (TikTok): o nome do destinatário começa um pouco à
+    ESQUERDA do rótulo e a chave da NF vem solta, sem o rótulo DANFE/NF:.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=442)
+    page.insert_text((42.9, 20), "DESTINATÁRIO", fontsize=7, fontname="helv")
+    page.insert_text((34, 32), "yasmin", fontsize=8, fontname="helv")
+    page.insert_text((34, 280), "REMETENTE:", fontsize=7, fontname="helv")
+    page.insert_text((34, 292), "m**1", fontsize=8, fontname="helv")
+    page.insert_text((60, 376), _CHAVE, fontsize=5, fontname="helv")
+    return doc.tobytes()
+
+
 def _texto(pdf_bytes: bytes) -> str:
     return fitz.open(stream=pdf_bytes, filetype="pdf")[0].get_text()
 
@@ -106,6 +120,15 @@ def test_destinatario_nome_sobrepoe_o_lido():
     txt = _texto(out)
     assert "Beltrano Oficial" in txt
     assert "Loja Origem" not in txt
+
+
+def test_etiqueta_jt_nome_desalinhado_e_chave_sem_rotulo():
+    txt = _texto(transformar_etiqueta(_etiqueta_jt()))
+    # 1) o nome do destinatário é lido mesmo começando à esquerda do rótulo
+    assert "m**1" not in txt
+    assert txt.count("yasmin") == 2
+    # 2) a chave da NF sai mesmo sem o rótulo DANFE/NF: como âncora
+    assert _CHAVE not in txt
 
 
 def test_pdf_invalido_levanta():
