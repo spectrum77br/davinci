@@ -71,6 +71,10 @@ type PedidoRow = {
   etiqueta_em: string | null
   // Quando a etiqueta foi impressa pela 1ª vez. Null = nunca impressa.
   etiqueta_impressa_em: string | null
+  // Instante em que o envio confirmou (entrada na situação 15, ledger
+  // bling_envio_evento). Null = não enviado ou pedido anterior ao ledger —
+  // nesse caso a coluna "Envio" mostra o rótulo "Enviado" de sempre.
+  enviado_em: string | null
   // "Despachar até" prometido ao marketplace (horário de corte do pedido),
   // ISO tz-aware vindo da API de cada plataforma. Null = não capturado.
   ship_deadline: string | null
@@ -650,6 +654,13 @@ function etiquetaHora(row: PedidoRow) {
 function impressaHora(row: PedidoRow) {
   if (!row.etiqueta_impressa_em) return ''
   const d = new Date(row.etiqueta_impressa_em)
+  const hora = _HORA_BRT.format(d)
+  const dia = isoDateBrt(d)
+  return dia === isoToday() ? hora : `${dia.slice(8)}/${dia.slice(5, 7)} ${hora}`
+}
+function envioHora(row: PedidoRow) {
+  if (!row.enviado_em) return ''
+  const d = new Date(row.enviado_em)
   const hora = _HORA_BRT.format(d)
   const dia = isoDateBrt(d)
   return dia === isoToday() ? hora : `${dia.slice(8)}/${dia.slice(5, 7)} ${hora}`
@@ -1311,14 +1322,16 @@ async function conferirTodos() {
             <th class="text-left">SKU</th>
             <th class="text-left">Produto</th>
             <th class="text-right">Qtd</th>
-            <th class="text-center">Status</th>
+            <th class="text-center">Etiqueta</th>
+            <th class="text-center">Impressão</th>
+            <th class="text-center">Envio</th>
             <th class="text-left bg-emerald-50/40">Obs</th>
             <th class="text-center">Imprimir Etiqueta</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="pedidosFiltered.length === 0">
-            <td colspan="11" class="py-6 text-center text-muted-foreground">
+            <td colspan="13" class="py-6 text-center text-muted-foreground">
               Nenhum pedido para esse dia.
             </td>
           </tr>
@@ -1360,14 +1373,26 @@ async function conferirTodos() {
             <td class="font-mono text-[11px]">{{ row.sku || '—' }}</td>
             <td class="truncate max-w-[280px]" :title="row.produto || ''">{{ row.produto || '—' }}</td>
             <td class="text-right">{{ row.quantidade }}</td>
+            <!-- Hora em que a etiqueta CHEGOU (nf_etiqueta_arquivo.created_at). -->
+            <td class="text-center whitespace-nowrap text-[11px]" title="Hora que a etiqueta chegou">
+              {{ etiquetaHora(row) || '—' }}
+            </td>
+            <!-- Hora da 1ª IMPRESSÃO da etiqueta (impressa_em). -->
+            <td class="text-center whitespace-nowrap text-[11px]" title="Hora que a etiqueta foi impressa">
+              {{ impressaHora(row) || '—' }}
+            </td>
+            <!-- Ex-coluna "Status". Mesma lógica de sempre (badge por
+                 situacao); só o TEXTO do badge verde muda: mostra a hora do
+                 envio quando o ledger tem o instante, senão "Enviado". -->
             <td class="text-center">
               <span
-                class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium"
+                class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium whitespace-nowrap"
                 :class="row.status === 'enviado'
                   ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
                   : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
+                :title="row.status === 'enviado' && envioHora(row) ? 'Hora que o envio confirmou' : undefined"
               >
-                {{ row.status === 'enviado' ? 'Enviado' : 'Não enviado' }}
+                {{ row.status === 'enviado' ? (envioHora(row) || 'Enviado') : 'Não enviado' }}
               </span>
             </td>
             <td class="bg-emerald-50/30">

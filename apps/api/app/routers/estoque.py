@@ -596,6 +596,27 @@ async def list_estoque_pedidos(
             r.pedido_bling: r.impressa_em for r in et_rows if r.impressa_em
         }
 
+    # Hora do ENVIO (coluna "Envio" da tela): instante em que o pedido entrou
+    # na situação 15 ("em andamento"), lido do ledger bling_envio_evento
+    # (trigger de banco — migration 0156). Pedido antigo (pré-ledger) não tem
+    # evento → enviado_em fica null e a tela cai no rótulo "Enviado" de
+    # sempre. MIN() porque o ledger tem grão de item; todos os itens do
+    # pedido entram em 15 no mesmo instante.
+    enviado_em_por_bling_id: dict[int, datetime] = {}
+    bling_ids = {o.bling_id for o in orders if o.bling_id}
+    if bling_ids:
+        ev_rows = (
+            await session.execute(
+                select(
+                    BlingEnvioEvento.bling_id,
+                    func.min(BlingEnvioEvento.occurred_at).label("occurred_at"),
+                )
+                .where(BlingEnvioEvento.bling_id.in_(bling_ids))
+                .group_by(BlingEnvioEvento.bling_id)
+            )
+        ).all()
+        enviado_em_por_bling_id = {r.bling_id: r.occurred_at for r in ev_rows}
+
     result: list[dict[str, Any]] = []
     for o in orders:
         check = checks_map.get(str(o.id), {"conferido": False, "observacao": None})
@@ -645,6 +666,13 @@ async def list_estoque_pedidos(
             "etiqueta_impressa_em": (
                 impressa_por_pedido[o.numero].isoformat()
                 if o.numero in impressa_por_pedido
+                else None
+            ),
+            # Instante em que o envio confirmou (entrada na situação 15,
+            # via ledger). Null: pedido não enviado ou anterior ao ledger.
+            "enviado_em": (
+                enviado_em_por_bling_id[o.bling_id].isoformat()
+                if o.bling_id and o.bling_id in enviado_em_por_bling_id
                 else None
             ),
             # "Despachar até" prometido ao marketplace (horário de corte do
