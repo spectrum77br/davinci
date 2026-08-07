@@ -157,6 +157,19 @@ def _user_sees_all_checks(user: User) -> bool:
     return bool(perms.get("controle_estoque_see_all", False))
 
 
+def _pedidos_todas_tags(user: User) -> bool:
+    """True se o user enxerga TODAS as tags no GET /pedidos — papel de
+    "gerente de etiquetas" (cairo SA): é ele quem imprime e despacha as
+    etiquetas do time inteiro, então a aba Pedidos precisa listar tudo.
+
+    Flag: permissions['controle_estoque_pedidos_todas_tags']=true.
+    Vale SÓ para a listagem de pedidos (e, por consequência, pros botões
+    de imprimir — que já não cercam por tag). Estoque, Envios e
+    conferências continuam cercados pelas stock_tags do usuário."""
+    perms = user.permissions or {}
+    return bool(perms.get("controle_estoque_pedidos_todas_tags", False))
+
+
 def _resolve_tags(user: User, override: str | None) -> list[str] | None:
     """Returns the list of tags to OR-filter products by. `None` means
     "no tag filter" (admin viewing all). Empty list also collapses to
@@ -447,7 +460,17 @@ async def list_estoque_pedidos(
     zumbi de webhook perdido; outras situações custom não pertencem ao
     fluxo. Data de referência: ship date se confirmado, senão HOJE (BRT)
     — pendente "fixa" no dia atual e aparece todo dia até confirmar."""
-    tags = _resolve_tags(user, tag)
+    if user.role != UserRole.ADMIN and _pedidos_todas_tags(user):
+        # Gerente de etiquetas: sem cerca de tag AQUI (e só aqui — o
+        # /produtos e o /envios continuam passando por _resolve_tags).
+        # O dropdown de tag segue funcionando: override validado contra a
+        # lista global, espelhando o caminho do admin em _resolve_tags.
+        ov = (tag or "").strip().lower()
+        if ov and ov not in _VALID_TAGS:
+            raise HTTPException(400, detail={"code": "invalid_tag"})
+        tags = [ov] if ov else None
+    else:
+        tags = _resolve_tags(user, tag)
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
     # HOJE em BRT — usado tanto no corte anti-zumbi quanto no "pin" da

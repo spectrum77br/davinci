@@ -120,6 +120,16 @@ const canUseTagFilter = computed(() => {
   if (isAdmin.value) return true
   return (auth.user?.name || '').toLowerCase() === 'churchill'
 })
+// Gerente de etiquetas (cairo SA): na aba PEDIDOS enxerga todas as tags —
+// é ele quem imprime e despacha as etiquetas do time inteiro. Estoque e
+// Envios continuam cercados pelas stock_tags. A fonte da verdade é a flag
+// permissions.controle_estoque_pedidos_todas_tags (backend valida; aqui
+// ela só decide se mostramos o dropdown de tag na aba Pedidos).
+const isGerenteEtiquetas = computed(
+  () =>
+    (auth.user?.permissions as Record<string, unknown> | undefined)
+      ?.controle_estoque_pedidos_todas_tags === true,
+)
 const tagOverride = ref<string>('')
 
 // Aba "Estoque Negativo" só aparece para admin, churchill (gerente) e
@@ -339,6 +349,12 @@ async function loadPedidos() {
   errorText.value = null
   try {
     const qs = [singleDayDates()]
+    // Gerente de etiquetas: o tag= do dropdown vale na aba Pedidos mesmo
+    // sem canUseTagFilter (que também alimenta o /produtos — lá o cairo
+    // continua cercado nas stock_tags dele, então não entra no
+    // singleDayDates compartilhado).
+    if (!canUseTagFilter.value && isGerenteEtiquetas.value && tagOverride.value)
+      qs.push(`tag=${tagOverride.value}`)
     if (statusFilter.value !== 'all') qs.push(`status=${statusFilter.value}`)
     const r = await api<{ data: PedidoRow[]; atrasados?: { date: string; count: number }[] }>(
       `/api/estoque/pedidos?${qs.join('&')}`,
@@ -1110,7 +1126,10 @@ async function conferirTodos() {
           </select>
         </label>
       </template>
-      <label v-if="canUseTagFilter" class="inline-flex items-center gap-1">
+      <label
+        v-if="canUseTagFilter || (isGerenteEtiquetas && tab === 'pedidos')"
+        class="inline-flex items-center gap-1"
+      >
         Tag:
         <select v-model="tagOverride" class="h-7 border rounded px-2 bg-background">
           <option value="">todas</option>
