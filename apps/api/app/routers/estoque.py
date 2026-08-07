@@ -665,6 +665,9 @@ async def list_estoque_pedidos(
             "pedido_bling": o.numero,
             "pedido_marketplace": o.numeroloja,
             "loja": loja_name,
+            # Nome de quem comprou (destinatário do pedido no Bling). Usado
+            # na coluna Cliente da aba Pedidos e no relatório imprimível.
+            "cliente": o.nome_destinatario,
             "sku": o.item_codigo,
             "produto": o.item_descricao,
             "quantidade": o.item_quantidade or 1,

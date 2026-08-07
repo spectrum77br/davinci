@@ -15,7 +15,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
-  AlertTriangle, FileUp, Upload, Download, Trash2, Printer,
+  AlertTriangle, FileUp, Upload, Download, Trash2, Printer, FileText,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
 
@@ -59,6 +59,8 @@ type PedidoRow = {
   pedido_bling: string | null
   pedido_marketplace: string | null
   loja: string | null         // already pretty-formatted by backend
+  // Nome de quem comprou (nome_destinatario do Bling). Null em pedidos antigos.
+  cliente: string | null
   sku: string | null
   produto: string | null
   quantidade: number
@@ -964,6 +966,67 @@ async function imprimirLote() {
   }
 }
 
+// ── Relatório imprimível dos pedidos selecionados ────────────────────
+// Réplica da planilha manual do operador: Nome da Loja | Número do
+// pedido | Nome | Código (SKU) | Quantidade | Descrição, ordenada pelo
+// nome do comprador. Um pedido com N itens rende N linhas (cada uma com
+// seu SKU/qtd). Abre numa aba nova já com o diálogo de impressão —
+// window.open síncrono no clique, então o popup não é bloqueado.
+function imprimirRelatorio() {
+  const sel = etiquetasSel.value
+  if (!sel.size) return
+  const rows = pedidosFilteredGrouped.value.filter(
+    r => r.pedido_bling && sel.has(r.pedido_bling),
+  )
+  if (!rows.length) return
+  const sorted = [...rows].sort((a, b) =>
+    (a.cliente || '').localeCompare(b.cliente || '', 'pt-BR', { sensitivity: 'base' })
+    || (a.pedido_bling || '').localeCompare(b.pedido_bling || ''))
+  const esc = (s: string | null | undefined) => (s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const linhas = sorted.map(r => `<tr>
+      <td class="loja">${esc(r.loja)}</td>
+      <td>${esc(r.pedido_bling)}</td>
+      <td class="nome">${esc(r.cliente)}</td>
+      <td>${esc(r.sku)}</td>
+      <td>${r.quantidade}</td>
+      <td class="desc">${esc(r.produto)}</td>
+    </tr>`).join('')
+  const diaLabel = dia.value
+    ? `${dia.value.slice(8)}/${dia.value.slice(5, 7)}/${dia.value.slice(0, 4)}`
+    : ''
+  const html = `<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<title>Relatório de pedidos ${esc(diaLabel)}</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; margin: 16px; color: #000; }
+  h1 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { border: 1px solid #000; padding: 3px 6px; text-align: center; }
+  th { font-weight: 700; }
+  td.loja { color: #7cb342; font-weight: 600; }
+  td.nome, td.desc { text-align: left; }
+  @media print { body { margin: 8px; } h1 { display: none; } }
+</style></head><body>
+<h1>Relatório de pedidos ${esc(diaLabel)} — ${sel.size} pedido(s), ${sorted.length} linha(s)</h1>
+<table>
+  <thead><tr>
+    <th>Nome da Loja</th><th>Número do pedido</th><th>Nome</th>
+    <th>Código (SKU)</th><th>Quantidade</th><th>Descrição</th>
+  </tr></thead>
+  <tbody>${linhas}</tbody>
+</table>
+<script>window.onload = () => { window.focus(); window.print() }<\/script>
+</body></html>`
+  const w = window.open('', '_blank')
+  if (!w) {
+    alert('O navegador bloqueou a janela do relatório. Libere popups para o DaVinci.')
+    return
+  }
+  w.document.write(html)
+  w.document.close()
+}
+
 // Tag extraction from SKU — mirrors the backend rule subset that's
 // derivable from the SKU string alone:
 //   * fake.* prefix      → 'fake'
@@ -1343,6 +1406,19 @@ async function conferirTodos() {
         <Printer class="size-3.5" />
         {{ imprimindoLote ? 'Gerando…' : `Imprimir selecionadas (${selecionadosCount})` }}
       </button>
+      <!-- Relatório imprimível (papel) dos pedidos selecionados: Loja,
+           nº pedido, cliente, SKU, qtd, descrição — ordenado por cliente. -->
+      <button
+        v-if="pedidosComEtiqueta.length > 0"
+        type="button"
+        class="inline-flex items-center gap-1.5 rounded-md border bg-background px-2.5 py-1 font-semibold disabled:opacity-50"
+        :disabled="selecionadosCount === 0"
+        title="Abre uma página pronta pra imprimir com os pedidos selecionados"
+        @click="imprimirRelatorio"
+      >
+        <FileText class="size-3.5" />
+        Imprimir relatório
+      </button>
     </div>
     <div v-if="tab === 'pedidos'" class="border rounded-md overflow-x-auto">
       <table class="grid-table w-full text-xs border-collapse">
@@ -1362,6 +1438,7 @@ async function conferirTodos() {
             <th class="text-left">Pedido Bling</th>
             <th class="text-left">Marketplace</th>
             <th class="text-left">Loja</th>
+            <th class="text-left">Cliente</th>
             <th class="text-left">SKU</th>
             <th class="text-left">Produto</th>
             <th class="text-right">Qtd</th>
@@ -1374,7 +1451,7 @@ async function conferirTodos() {
         </thead>
         <tbody>
           <tr v-if="pedidosFiltered.length === 0">
-            <td colspan="13" class="py-6 text-center text-muted-foreground">
+            <td colspan="14" class="py-6 text-center text-muted-foreground">
               Nenhum pedido para esse dia.
             </td>
           </tr>
@@ -1412,6 +1489,10 @@ async function conferirTodos() {
               >
                 {{ corteInfo(row)!.label }}
               </div>
+            </td>
+            <!-- Nome de quem comprou (nome_destinatario do Bling). -->
+            <td class="truncate max-w-[160px]" :title="row.cliente || ''">
+              {{ row.cliente || '—' }}
             </td>
             <td class="font-mono text-[11px]">{{ row.sku || '—' }}</td>
             <td class="truncate max-w-[280px]" :title="row.produto || ''">{{ row.produto || '—' }}</td>
