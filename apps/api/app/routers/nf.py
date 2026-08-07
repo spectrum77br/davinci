@@ -1266,6 +1266,11 @@ async def _require_nf_agent_token(
 
 class NfAgentLeaseIn(BaseModel):
     limit: int = Field(default=5, ge=1, le=50)
+    # Filtros opcionais por action: o loop contínuo do executor exclui
+    # `imprimir_etiqueta` (impressão roda em passe horário separado) e o passe
+    # horário pede SÓ `imprimir_etiqueta`. Vazio/None = sem filtro (compat).
+    actions: list[str] | None = None
+    exclude_actions: list[str] | None = None
 
 
 class NfAgentCommandOut(BaseModel):
@@ -1300,15 +1305,18 @@ async def nf_agent_lease(
     """Reivindica até `limit` comandos pendentes (FOR UPDATE SKIP LOCKED), vira
     pra 'claimed' e devolve cada um com o login do faturador (AdsPower/usuário/
     senha descriptografada) + a planilha em base64. Seguro sob concorrência."""
-    claimed = (
-        await session.execute(
-            select(NfCommand)
-            .where(NfCommand.status == "pending")
-            .order_by(NfCommand.created_at.asc())
-            .limit(body.limit)
-            .with_for_update(skip_locked=True)
-        )
-    ).scalars().all()
+    stmt = (
+        select(NfCommand)
+        .where(NfCommand.status == "pending")
+        .order_by(NfCommand.created_at.asc())
+        .limit(body.limit)
+        .with_for_update(skip_locked=True)
+    )
+    if body.actions:
+        stmt = stmt.where(NfCommand.action.in_(body.actions))
+    if body.exclude_actions:
+        stmt = stmt.where(NfCommand.action.not_in(body.exclude_actions))
+    claimed = (await session.execute(stmt)).scalars().all()
 
     out: list[NfAgentCommandOut] = []
     if claimed:

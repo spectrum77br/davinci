@@ -304,6 +304,47 @@ async def test_agent_lease_entrega_login_e_planilha(
 
 
 @pytest.mark.asyncio
+async def test_agent_lease_filtra_por_action(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """`actions` reivindica só as actions pedidas; `exclude_actions` pula as
+    excluídas (loop contínuo vs passe horário de etiquetas)."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    db.add_all([
+        NfCommand(action="import_avulsa", numeros=["910001"], planilha=b"x",
+                  nome_arquivo="a.csv", status="pending", source="manual"),
+        NfCommand(action="imprimir_etiqueta", numeros=["910002"], planilha=b"",
+                  nome_arquivo="", status="pending", source="auto"),
+    ])
+    await db.commit()
+
+    # passe horário: só etiquetas
+    r = await client.post(
+        "/api/nf-cadastro/agent/lease",
+        json={"limit": 5, "actions": ["imprimir_etiqueta"]},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    cmds = r.json()["commands"]
+    assert [c["action"] for c in cmds] == ["imprimir_etiqueta"]
+
+    # loop contínuo: tudo MENOS etiquetas (o import segue pending)
+    r = await client.post(
+        "/api/nf-cadastro/agent/lease",
+        json={"limit": 5, "exclude_actions": ["imprimir_etiqueta"]},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    cmds = r.json()["commands"]
+    assert [c["action"] for c in cmds] == ["import_avulsa"]
+
+    # sem filtro segue funcionando (compat) — nada pending sobrou
+    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert r.json()["commands"] == []
+
+
+@pytest.mark.asyncio
 async def test_agent_lease_sem_token_401(
     db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ):
