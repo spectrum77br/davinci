@@ -967,10 +967,10 @@ async function imprimirLote() {
 }
 
 // ── Relatório imprimível dos pedidos selecionados ────────────────────
-// Réplica da planilha manual do operador: Nome da Loja | Número do
-// pedido | Nome | Código (SKU) | Quantidade | Descrição, ordenada pelo
-// nome do comprador. Um pedido com N itens rende N linhas (cada uma com
-// seu SKU/qtd). Abre numa aba nova já com o diálogo de impressão —
+// Espelha as colunas da tela (Data Envio | Loja + corte | Pedido Bling |
+// Marketplace | Cliente | SKU | Qtd | Produto), ordenado pelo nome do
+// comprador. Um pedido com N itens rende N linhas (cada uma com seu
+// SKU/qtd). Abre numa aba nova já com o diálogo de impressão —
 // window.open síncrono no clique, então o popup não é bloqueado.
 function imprimirRelatorio() {
   const sel = etiquetasSel.value
@@ -984,11 +984,23 @@ function imprimirRelatorio() {
     || (a.pedido_bling || '').localeCompare(b.pedido_bling || ''))
   const esc = (s: string | null | undefined) => (s ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  // Corte na versão papel: mesmo texto da tela; a cor Tailwind vira uma
+  // classe de print (vermelho = estourou, laranja = hoje, cinza = futuro).
+  const corteHtml = (r: PedidoRow) => {
+    const info = corteInfo(r)
+    if (!info) return ''
+    const cls = info.cls.includes('red')
+      ? 'corte-vermelho'
+      : info.cls.includes('amber') ? 'corte-laranja' : 'corte-cinza'
+    return `<div class="corte ${cls}">${esc(info.label)}</div>`
+  }
   const linhas = sorted.map(r => `<tr>
-      <td class="loja">${esc(r.loja)}</td>
+      <td>${esc(r.data_envio ? r.data_envio.slice(0, 10) : '')}</td>
+      <td class="loja">${esc(r.loja)}${corteHtml(r)}</td>
       <td>${esc(r.pedido_bling)}</td>
+      <td class="mono">${esc(r.pedido_marketplace)}</td>
       <td class="nome">${esc(r.cliente)}</td>
-      <td>${esc(r.sku)}</td>
+      <td class="mono">${esc(r.sku)}</td>
       <td>${r.quantidade}</td>
       <td class="desc">${esc(r.produto)}</td>
     </tr>`).join('')
@@ -999,20 +1011,27 @@ function imprimirRelatorio() {
 <html lang="pt-BR"><head><meta charset="utf-8">
 <title>Relatório de pedidos ${esc(diaLabel)}</title>
 <style>
+  @page { size: A4 landscape; margin: 8mm; }
   body { font-family: Calibri, Arial, sans-serif; margin: 16px; color: #000; }
   h1 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
-  table { border-collapse: collapse; width: 100%; font-size: 12px; }
-  th, td { border: 1px solid #000; padding: 3px 6px; text-align: center; }
+  table { border-collapse: collapse; width: 100%; font-size: 11px; }
+  th, td { border: 1px solid #000; padding: 3px 5px; text-align: center; }
   th { font-weight: 700; }
   td.loja { color: #7cb342; font-weight: 600; }
   td.nome, td.desc { text-align: left; }
-  @media print { body { margin: 8px; } h1 { display: none; } }
+  td.mono { font-family: Consolas, monospace; font-size: 10px; }
+  .corte { font-size: 8px; font-weight: 600; margin-top: 1px; }
+  .corte-vermelho { color: #c62828; }
+  .corte-laranja { color: #b45309; }
+  .corte-cinza { color: #666; }
+  @media print { body { margin: 0; } h1 { display: none; } }
 </style></head><body>
 <h1>Relatório de pedidos ${esc(diaLabel)} — ${sel.size} pedido(s), ${sorted.length} linha(s)</h1>
 <table>
   <thead><tr>
-    <th>Nome da Loja</th><th>Número do pedido</th><th>Nome</th>
-    <th>Código (SKU)</th><th>Quantidade</th><th>Descrição</th>
+    <th>Data Envio</th><th>Nome da Loja</th><th>Pedido Bling</th>
+    <th>Pedido Marketplace</th><th>Cliente</th><th>Código (SKU)</th>
+    <th>Qtd</th><th>Descrição</th>
   </tr></thead>
   <tbody>${linhas}</tbody>
 </table>
