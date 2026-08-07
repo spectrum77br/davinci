@@ -269,6 +269,11 @@ function pollBlingJob(jobId: string) {
 onBeforeUnmount(stopBlingPoll)
 
 const statusFilter = ref<'all' | 'enviado' | 'nao_enviado'>('all')
+// Filtro por estado da etiqueta (aba Pedidos) — 100% client-side: as
+// linhas já carregam etiqueta_em / etiqueta_impressa_em. "não impressa" =
+// etiqueta JÁ chegou e ninguém imprimiu (a fila de impressão do gerente
+// de etiquetas); "sem etiqueta" = ainda nem chegou.
+const etiquetaFilter = ref<'all' | 'impressa' | 'nao_impressa' | 'sem'>('all')
 const conferidoFilter = ref<'all' | 'conferidos' | 'nao_conferidos'>('all')
 const search = ref('')
 
@@ -781,9 +786,17 @@ const produtosFiltered = computed(() => {
   )
 })
 const pedidosFiltered = computed(() => {
+  let rows = pedidos.value
+  if (etiquetaFilter.value === 'impressa') {
+    rows = rows.filter((p) => p.etiqueta_impressa_em)
+  } else if (etiquetaFilter.value === 'nao_impressa') {
+    rows = rows.filter((p) => p.etiqueta_em && !p.etiqueta_impressa_em)
+  } else if (etiquetaFilter.value === 'sem') {
+    rows = rows.filter((p) => !p.etiqueta_em)
+  }
   const q = search.value.trim().toLowerCase()
-  if (!q) return pedidos.value
-  return pedidos.value.filter(
+  if (!q) return rows
+  return rows.filter(
     (p) =>
       (p.sku || '').toLowerCase().includes(q)
       || (p.produto || '').toLowerCase().includes(q)
@@ -1156,6 +1169,15 @@ async function conferirTodos() {
           <option value="all">todos</option>
           <option value="enviado">enviado</option>
           <option value="nao_enviado">não enviado</option>
+        </select>
+      </label>
+      <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
+        Etiqueta:
+        <select v-model="etiquetaFilter" class="h-7 border rounded px-2 bg-background">
+          <option value="all">todas</option>
+          <option value="impressa">impressa</option>
+          <option value="nao_impressa">não impressa</option>
+          <option value="sem">sem etiqueta</option>
         </select>
       </label>
       <div class="ml-auto inline-flex items-center gap-2 text-muted-foreground">
