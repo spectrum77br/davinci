@@ -661,9 +661,11 @@ function impressaHora(row: PedidoRow) {
 function envioHora(row: PedidoRow) {
   if (!row.enviado_em) return ''
   const d = new Date(row.enviado_em)
-  const hora = _HORA_BRT.format(d)
+  // SEMPRE com o dia (pedido do Eduardo): o badge verde é o comprovante de
+  // quando saiu — "07/08 09:07" —, sem o "sem dia = hoje" implícito que as
+  // colunas Etiqueta/Impressão usam.
   const dia = isoDateBrt(d)
-  return dia === isoToday() ? hora : `${dia.slice(8)}/${dia.slice(5, 7)} ${hora}`
+  return `${dia.slice(8)}/${dia.slice(5, 7)} ${_HORA_BRT.format(d)}`
 }
 
 // ── Horário de corte ("despachar até" do marketplace) ─────────────────
