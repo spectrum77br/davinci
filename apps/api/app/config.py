@@ -224,6 +224,14 @@ class Settings(BaseSettings):
     # servidor E o mesmo valor no .env do executor pra ligar a integração.
     nf_agent_token: str = ""
 
+    # Auto-enfileirador de NF (sweep): a cada tick varre pedidos Shopee/TikTok
+    # "Em aberto" (situacao=6) de loja com faturador atribuído, confere o
+    # estoque (saldo negativo → Aguardando Cancelamento) e enfileira a
+    # importação avulsa sozinho — mesma cadeia do botão "Enfileirar" do
+    # painel Faturamento. Desligado por default; ligar via
+    # NF_AUTO_ENFILEIRAR=true no .env.
+    nf_auto_enfileirar: bool = False
+
     # Safety-net cron que re-sincroniza pedidos suspeitos de stale com o
     # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.
     enable_bling_orders_safety_net: bool = True

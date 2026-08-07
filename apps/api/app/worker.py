@@ -62,6 +62,7 @@ from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.ml_backfill import run_backfill_ml_stock
+from app.services.nf_auto_enfileirar import run_auto_enfileirar_nf
 from app.services.notas_fiscais_export import run_export_notas
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
@@ -1093,6 +1094,32 @@ async def check_marketplace_shipped_orders(ctx: dict) -> None:
         logger.exception("shipment_check_cron_unhandled")
 
 
+async def nf_auto_enfileirar_tick(ctx: dict) -> None:
+    """Sweep do auto-enfileirador de NF (pedidos Shopee/TikTok "Em aberto").
+
+    Confere o estoque antes de tudo (saldo negativo → Aguardando
+    Cancelamento) e cria os NfCommand de import_avulsa — a mesma cadeia do
+    botão "Enfileirar" do painel Faturamento, sem humano no gatilho.
+    Gated pela flag nf_auto_enfileirar (default DESLIGADO); serializado por
+    advisory xact lock dentro do service.
+    """
+    if not get_settings().nf_auto_enfileirar:
+        logger.debug("nf_auto_enfileirar_disabled")
+        return
+    try:
+        summary = await run_auto_enfileirar_nf()
+        if (
+            summary.get("enfileirados")
+            or summary.get("sem_estoque")
+            or summary.get("pulados")
+        ):
+            logger.info("nf_auto_enfileirar_done", **summary)
+        else:
+            logger.debug("nf_auto_enfileirar_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("nf_auto_enfileirar_unhandled")
+
+
 async def failed_jobs_alert_scan(ctx: dict) -> None:
     """Emit `sync_failure` alert per BackgroundJob that finished failed in
     the last 10 minutes. Dedupe key per job id keeps it idempotent across
@@ -1726,6 +1753,7 @@ class WorkerSettings:
         logistica_ml_ingest,
         logistica_marketplaces_ingest,
         logistica_recarregar,
+        nf_auto_enfileirar_tick,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -1849,6 +1877,10 @@ class WorkerSettings:
         # bling_id do payload (sem re-listar o Bling), com teto de tentativas.
         # Recuperação em minutos em vez de esperar o backfill diário.
         cron(ingest_orders_retry_sweep, minute=_FIVE_MIN, run_at_startup=False),
+        # Auto-enfileirador de NF: varre Shopee/TikTok "Em aberto" a cada
+        # 5 min, confere estoque e enfileira a importação avulsa sozinho.
+        # Inerte enquanto NF_AUTO_ENFILEIRAR não estiver true no .env.
+        cron(nf_auto_enfileirar_tick, minute=_FIVE_MIN, run_at_startup=False),
     ]
     # Marketing agent-node crons (Shopee sync + command consumer + schedule
     # reconciler) are NOT registered here — they run ONLY on the dedicated
