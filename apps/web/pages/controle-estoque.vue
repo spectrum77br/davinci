@@ -1415,21 +1415,10 @@ async function conferirTodos() {
                 <Printer class="size-3" />
                 Imprimir
               </a>
-              <div
-                v-if="row.etiqueta_em"
-                class="text-[9px] text-muted-foreground mt-0.5"
-                title="Quando a etiqueta chegou"
-              >
-                {{ etiquetaHora(row) }}
-              </div>
-              <!-- Carimbo da 1ª impressão: é o que evita imprimir duas vezes. -->
-              <div
-                v-if="row.etiqueta_impressa_em"
-                class="text-[9px] font-semibold text-emerald-700 dark:text-emerald-300"
-                :title="`Impressa em ${impressaHora(row)}`"
-              >
-                Impressa {{ impressaHora(row) }}
-              </div>
+              <!-- Horas de chegada/impressão da etiqueta agora moram nas
+                   colunas "Etiqueta" e "Impressão" — sem carimbo duplicado
+                   aqui. O aviso de reimpressão em lote continua (usa
+                   etiqueta_impressa_em direto). -->
               <span v-if="!row.etiqueta_disponivel" class="text-[10px] text-muted-foreground/50">—</span>
             </td>
           </tr>
