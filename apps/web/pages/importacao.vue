@@ -1963,8 +1963,8 @@ onScopeDispose(() => {
             <!-- Header multi-row (10 rows na Mala, 14 no Celular).
                  Fixed left columns use rowspan pra ocupar a altura
                  toda. Each lote occupies 2 cols (label + value) and
-                 fills as rows com metadata (lote/abertura/fechamento/
-                 previsto/realizado/saldo/prazo/simulação/DI) e a última com the
+                 fills as rows com metadata (lote/DI/abertura/fechamento/
+                 previsto/realizado/saldo/prazo/simulação) e a última com the
                  actual sub-headers (quant | total) that align with
                  the per-cell inputs in tbody. Mirrors the operator's
                  Excel layout 1:1. -->
@@ -2082,6 +2082,47 @@ onScopeDispose(() => {
               <th :rowspan="isCelular ? 14 : 10" v-if="canEdit" class="col-head text-center">bling</th>
               <th :rowspan="isCelular ? 14 : 10" v-if="canDelete" class="col-head w-8"></th>
             </tr>
+            <!-- DI (nº manual, PDF anexado, pagamento Bling) logo abaixo do
+                 nome do lote. Migration 0214. -->
+            <tr>
+              <template v-for="lote in visibleLotes" :key="`lote-rdi-${lote.id}`">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">DI</td>
+                <td class="lote-value editable" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
+                  <div class="flex items-center gap-1.5">
+                    <input type="text" :value="lote.di_numero ?? ''" :disabled="!canEdit" placeholder="nº DI"
+                      class="w-14 min-w-0 flex-1 bg-transparent border-0 p-0 text-[11px]"
+                      @input="(e) => schedulePatchLote(lote, 'di_numero', (e.target as HTMLInputElement).value || null)" />
+                    <label
+                      v-if="canEdit"
+                      class="cursor-pointer text-[10px] underline hover:text-primary shrink-0"
+                      :title="`Anexar PDF da DI ao lote ${lote.nome}`"
+                    >
+                      anexar
+                      <input type="file" accept="application/pdf" class="hidden" @change="(e) => anexarDi(lote, e)" />
+                    </label>
+                    <button
+                      v-if="lote.tem_di_pdf"
+                      class="text-[10px] underline hover:text-primary shrink-0"
+                      title="Baixar PDF da DI"
+                      @click="baixarPdfLote(lote, 'di-pdf')"
+                    >
+                      <Download class="size-3 inline" />
+                    </button>
+                    <span
+                      v-if="lote.di_pagamento?.status === 'ok'"
+                      class="inline-block rounded px-1 py-0.5 text-[9px] font-medium border bg-emerald-50 text-emerald-700 border-emerald-300 shrink-0"
+                      title="Pagamento da DI já lançado no Bling"
+                    >pago</span>
+                    <button
+                      v-else-if="canEdit && lote.tem_di_pdf"
+                      class="text-[10px] underline hover:text-primary shrink-0"
+                      title="Lançar pagamento da DI no Bling (isatrading)"
+                      @click="openDiPagamento(lote)"
+                    >$ Bling</button>
+                  </div>
+                </td>
+              </template>
+            </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r2-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">abertura</td>
@@ -2133,8 +2174,7 @@ onScopeDispose(() => {
                 <td class="lote-value calculated" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">{{ lote.prazo != null ? lote.prazo + 'd' : '—' }}</td>
               </template>
             </tr>
-            <!-- Simulação (PDF vindo do Financeiro → Simulação) + DI
-                 (nº manual, PDF anexado, pagamento Bling). Migration 0214. -->
+            <!-- Simulação (PDF vindo do Financeiro → Simulação). Migration 0214. -->
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-rsim-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">simulação</td>
@@ -2148,45 +2188,6 @@ onScopeDispose(() => {
                     <Download class="size-3" /> PDF
                   </button>
                   <span v-else class="text-muted-foreground">—</span>
-                </td>
-              </template>
-            </tr>
-            <tr>
-              <template v-for="lote in visibleLotes" :key="`lote-rdi-${lote.id}`">
-                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">DI</td>
-                <td class="lote-value editable" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
-                  <div class="flex items-center gap-1.5">
-                    <input type="text" :value="lote.di_numero ?? ''" :disabled="!canEdit" placeholder="nº DI"
-                      class="w-14 min-w-0 flex-1 bg-transparent border-0 p-0 text-[11px]"
-                      @input="(e) => schedulePatchLote(lote, 'di_numero', (e.target as HTMLInputElement).value || null)" />
-                    <label
-                      v-if="canEdit"
-                      class="cursor-pointer text-[10px] underline hover:text-primary shrink-0"
-                      :title="`Anexar PDF da DI ao lote ${lote.nome}`"
-                    >
-                      anexar
-                      <input type="file" accept="application/pdf" class="hidden" @change="(e) => anexarDi(lote, e)" />
-                    </label>
-                    <button
-                      v-if="lote.tem_di_pdf"
-                      class="text-[10px] underline hover:text-primary shrink-0"
-                      title="Baixar PDF da DI"
-                      @click="baixarPdfLote(lote, 'di-pdf')"
-                    >
-                      <Download class="size-3 inline" />
-                    </button>
-                    <span
-                      v-if="lote.di_pagamento?.status === 'ok'"
-                      class="inline-block rounded px-1 py-0.5 text-[9px] font-medium border bg-emerald-50 text-emerald-700 border-emerald-300 shrink-0"
-                      title="Pagamento da DI já lançado no Bling"
-                    >pago</span>
-                    <button
-                      v-else-if="canEdit && lote.tem_di_pdf"
-                      class="text-[10px] underline hover:text-primary shrink-0"
-                      title="Lançar pagamento da DI no Bling (isatrading)"
-                      @click="openDiPagamento(lote)"
-                    >$ Bling</button>
-                  </div>
                 </td>
               </template>
             </tr>
