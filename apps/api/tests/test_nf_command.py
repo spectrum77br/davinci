@@ -1252,6 +1252,45 @@ async def test_agent_etiqueta_lote_casa_grava_e_processa(
 
 
 @pytest.mark.asyncio
+async def test_agent_etiqueta_lote_danfe_numeroloja_solto(
+    db: AsyncSession, client: AsyncClient, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Layout DANFE SIMPLIFICADO (Shopee): o "Pedido:" da etiqueta traz o
+    código de triagem (SOCSP7) e o numeroloja real aparece SOLTO no corpo —
+    casa mesmo assim, porque TODOS os candidatos são validados no banco."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    fake = _FakeBlingSituacao()
+
+    async def _fake_client(_session):
+        return fake
+
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", _fake_client)
+    await _seed_pedido(
+        db, numero="890010", loja="930010", sku="uaf001m1.110", nome="AirFryer",
+        unit=500, bling_id=920010, numeroloja="260808STCA6RQ5",
+    )
+    await db.commit()
+
+    pdf = _lote_pdf([
+        [
+            "Pedido:", "SOCSP7", "DESTINATÁRIO", "Julia Vieira",
+            "260808STCA6RQ5", "DANFE SIMPLIFICADO - ETIQUETA",
+        ],
+        ["DECLARAÇÃO DE CONTEÚDO", "uaf001m1.110"],
+    ])
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta-lote",
+        files={"file": ("lote.pdf", pdf, "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["casadas"] == ["890010"]
+    assert body["nao_casadas"] == []
+    assert body["falhas"] == []
+
+
+@pytest.mark.asyncio
 async def test_agent_etiqueta_lote_pdf_invalido_422(
     db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ):

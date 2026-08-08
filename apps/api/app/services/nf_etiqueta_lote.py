@@ -8,14 +8,20 @@ módulo é a camada PURA (sem rede, sem banco) que:
 1. `fatiar_lote(pdf_bytes)` — quebra o PDF em fatias (uma por pedido). A regra
    de corte: toda página abre uma fatia NOVA, exceto página de "DECLARAÇÃO DE
    CONTEÚDO", que continua a fatia anterior (fica atrás da etiqueta dela).
-   De cada fatia extrai o texto completo e o nº do pedido da plataforma quando
-   impresso na etiqueta ("Pedido: 260808R7G290SQ" — Shopee).
+   De cada fatia extrai o texto completo e os CANDIDATOS a nº do pedido da
+   plataforma (`numerolojas`): todos os matches de "Pedido: X" + tokens com o
+   formato de order_sn da Shopee — no layout DANFE SIMPLIFICADO o "Pedido:"
+   vem seguido do código de triagem (ex. "SOCSP7") e o numeroloja real aparece
+   solto no corpo. Quem decide qual candidato vale é o lookup no banco
+   (bling_orders.numeroloja) — a fatia nunca chuta.
 
 2. `casa_por_texto(texto, candidatos)` — casamento reserva pra etiqueta SEM o
    nº da plataforma no corpo (TikTok): casa pelo NOME do destinatário + pelo
-   menos um SKU da declaração de conteúdo. Só devolve pedido quando o casamento
-   é INEQUÍVOCO (exatamente um candidato) — ambíguo é melhor não casar do que
-   subir a etiqueta no pedido errado.
+   menos um SKU da declaração de conteúdo. A etiqueta TikTok imprime o nome
+   ABREVIADO ("ana clara" pra "ANA CLARA ANACLETO PINTO"), então aceita
+   qualquer PREFIXO por token do nome do Bling. Só devolve pedido quando o
+   casamento é INEQUÍVOCO (exatamente um candidato) — ambíguo é melhor não
+   casar do que subir a etiqueta no pedido errado.
 
 Quem consome é o endpoint `/agent/etiqueta-lote` (routers/nf.py), que casa
 contra `bling_orders`, transforma cada fatia e grava por pedido.
@@ -41,14 +47,29 @@ class EtiquetaFatia:
     # Intervalo de páginas no PDF original (0-based, inclusivo) — diagnóstico.
     pagina_ini: int
     pagina_fim: int
-    # Nº do pedido da plataforma impresso na etiqueta ("Pedido: X"), se houver.
+    # 1º match de "Pedido: X" — diagnóstico/retrocompat.
     numeroloja: str | None
+    # TODOS os candidatos a nº da plataforma (matches de "Pedido:" + tokens no
+    # formato de order_sn da Shopee). O router valida contra o banco.
+    numerolojas: list[str]
     # Texto completo da fatia (todas as páginas) pro casamento reserva.
     texto: str
 
 
 # "Pedido: 260808R7G290SQ" na etiqueta Shopee. Aceita dígitos/letras/hífen.
 _RE_PEDIDO = re.compile(r"Pedido:\s*([A-Z0-9][A-Z0-9-]{5,})", re.IGNORECASE)
+
+# order_sn da Shopee solto no texto (layout DANFE SIMPLIFICADO): 6 dígitos de
+# data (AAMMDD) + 8 alfanuméricos MAIÚSCULOS, como token isolado — não casa
+# dentro do código de barras (44 dígitos), do rastreio TikTok (15 dígitos) nem
+# do rastreio "BR...Z" (precedido de letra).
+_RE_SHOPEE_SN = re.compile(r"(?<![A-Za-z0-9])\d{6}[A-Z0-9]{8}(?![A-Za-z0-9])")
+
+
+def _numerolojas_do_texto(texto: str) -> list[str]:
+    """Candidatos a nº da plataforma, na ordem, sem duplicar."""
+    achados = _RE_PEDIDO.findall(texto) + _RE_SHOPEE_SN.findall(texto)
+    return list(dict.fromkeys(achados))
 
 
 def _e_declaracao(texto: str) -> bool:
@@ -85,6 +106,7 @@ def fatiar_lote(pdf_bytes: bytes) -> list[EtiquetaFatia]:
                 pagina_ini=pages[0],
                 pagina_fim=pages[-1],
                 numeroloja=m.group(1) if m else None,
+                numerolojas=_numerolojas_do_texto(texto),
                 texto=texto,
             )
         )
@@ -107,6 +129,24 @@ def _sku_no_texto(sku: str, texto: str) -> bool:
     )
 
 
+def _nome_no_texto(nome: str, texto_norm: str) -> bool:
+    """Nome do Bling (ou um PREFIXO dele, por token) presente no texto.
+
+    A etiqueta TikTok imprime o destinatário abreviado ("ana clara") enquanto o
+    Bling guarda o nome completo ("ANA CLARA ANACLETO PINTO") — então basta o
+    começo do nome aparecer, como palavras inteiras (fronteira: "ANA" não casa
+    dentro de "SANTANA"). Prefixo mínimo de 3 caracteres.
+    """
+    tokens = _norm(nome).split(" ")
+    for k in range(len(tokens), 0, -1):
+        prefixo = " ".join(tokens[:k])
+        if len(prefixo) < 3:
+            break  # prefixos seguintes só encurtam
+        if re.search(rf"(?<!\w){re.escape(prefixo)}(?!\w)", texto_norm):
+            return True
+    return False
+
+
 def casa_por_texto(
     texto: str, candidatos: list[tuple[str, str | None, set[str]]]
 ) -> str | None:
@@ -114,14 +154,15 @@ def casa_por_texto(
 
     `candidatos` = [(numero, nome_destinatario, skus)]. Devolve o `numero` só
     quando EXATAMENTE UM candidato casa; None se nenhum ou se ambíguo. Candidato
-    sem nome ou sem SKU não participa (nome sozinho casaria homônimo).
+    sem nome ou sem SKU não participa (nome sozinho casaria homônimo). O nome
+    casa por prefixo (etiqueta TikTok abrevia) — ver `_nome_no_texto`.
     """
     t = _norm(texto)
     hits: list[str] = []
     for numero, nome, skus in candidatos:
         if not nome or not skus:
             continue
-        if _norm(nome) not in t:
+        if not _nome_no_texto(nome, t):
             continue
         if not any(_sku_no_texto(sku, texto) for sku in skus if sku):
             continue

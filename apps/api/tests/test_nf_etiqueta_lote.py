@@ -61,6 +61,43 @@ def test_fatiar_pdf_invalido():
         nf_etiqueta_lote.fatiar_lote(b"nao sou um pdf")
 
 
+def test_fatiar_danfe_numeroloja_solto():
+    """Layout DANFE SIMPLIFICADO (Shopee): o "Pedido:" da etiqueta traz o
+    código de TRIAGEM (SOCSP7) e o numeroloja real aparece SOLTO no corpo —
+    os dois viram candidatos; o router valida contra o banco."""
+    pdf = _lote_pdf(
+        [
+            [
+                "SP7",
+                "Pedido:",
+                "SOCSP7",
+                "DESTINATÁRIO",
+                "260808STCA6RQ5",
+                "BR267780939818Z",
+                "35260859882322000154550020000002961253235925",
+                "DANFE SIMPLIFICADO - ETIQUETA",
+            ],
+            ["DECLARAÇÃO DE CONTEÚDO", "uaf001m1.110"],
+        ]
+    )
+    fatias = nf_etiqueta_lote.fatiar_lote(pdf)
+    assert len(fatias) == 1
+    assert fatias[0].numeroloja == "SOCSP7"  # 1º match — diagnóstico
+    assert fatias[0].numerolojas == ["SOCSP7", "260808STCA6RQ5"]
+
+
+def test_numerolojas_nao_casa_dentro_de_codigos():
+    """O formato Shopee não pode casar DENTRO do código de barras (44 díg.),
+    do rastreio TikTok (15 díg.) nem do rastreio BR...Z."""
+    texto = (
+        "Pedido:\n999881646186225\n"
+        "35260854386601000103550040000008281255060742\n"
+        "BR267780939818Z"
+    )
+    # só o match de "Pedido:" (rastreio TikTok — inofensivo, o banco filtra)
+    assert nf_etiqueta_lote._numerolojas_do_texto(texto) == ["999881646186225"]
+
+
 def test_casa_por_texto_unico():
     texto = "DESTINATÁRIO\nMaria Aparecida Silva\nDECLARAÇÃO DE CONTEÚDO\nb011.20"
     candidatos = [
@@ -97,6 +134,41 @@ def test_casa_por_texto_exige_nome_e_sku():
     assert (
         nf_etiqueta_lote.casa_por_texto(
             texto, [("860002", "Maria Aparecida Silva", set())]
+        )
+        is None
+    )
+
+
+def test_casa_por_texto_nome_abreviado_tiktok():
+    """A etiqueta TikTok imprime o nome ABREVIADO; o Bling tem o completo —
+    casa por prefixo do nome (+ SKU, como sempre)."""
+    candidatos = [
+        ("289312", "ANA CLARA ANACLETO PINTO", {"dg054.sp"}),
+        ("289318", "SANDRO BASTOS PEREIRA", {"dg053.sp"}),
+    ]
+    texto = (
+        "DESTINATÁRIO\nana clara\ncasa 1, Sorocaba, SP\n"
+        "DECLARAÇÃO DE CONTEÚDO\ndg054.sp"
+    )
+    assert nf_etiqueta_lote.casa_por_texto(texto, candidatos) == "289312"
+    texto2 = "DESTINATÁRIO\nsandro\nDECLARAÇÃO DE CONTEÚDO\ndg053.sp"
+    assert nf_etiqueta_lote.casa_por_texto(texto2, candidatos) == "289318"
+
+
+def test_casa_por_texto_nome_abreviado_ambiguo_nao_casa():
+    """Duas 'Ana' com o MESMO SKU na janela → ambíguo → não casa (manual)."""
+    candidatos = [
+        ("111", "ANA CLARA ANACLETO", {"dg054.sp"}),
+        ("222", "ANA BEATRIZ SOUZA", {"dg054.sp"}),
+    ]
+    assert nf_etiqueta_lote.casa_por_texto("ana clara\ndg054.sp", candidatos) is None
+
+
+def test_casa_por_texto_nome_nao_casa_dentro_de_palavra():
+    """Prefixo casa como palavra inteira: 'ANA' não casa dentro de 'SANTANA'."""
+    assert (
+        nf_etiqueta_lote.casa_por_texto(
+            "SANTANA SILVA\ndg054.sp", [("111", "ANA CLARA", {"dg054.sp"})]
         )
         is None
     )

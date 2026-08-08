@@ -1612,8 +1612,13 @@ async def nf_agent_etiqueta_lote(
             422, detail={"code": "nf_etiqueta_lote_invalido", "erro": str(exc)}
         ) from exc
 
-    # 1) Casamento primário: nº da plataforma na etiqueta → numeroloja.
-    numerolojas = [f.numeroloja for f in fatias if f.numeroloja]
+    # 1) Casamento primário: nº da plataforma na etiqueta → numeroloja. Cada
+    #    fatia traz TODOS os candidatos (no layout DANFE o "Pedido:" vem com o
+    #    código de triagem e o numeroloja real aparece solto) — quem existir no
+    #    banco vence.
+    numerolojas = list(
+        dict.fromkeys(n for f in fatias for n in f.numerolojas)
+    )
     por_loja: dict[str, tuple[str, str | None]] = {}
     if numerolojas:
         rows = (
@@ -1660,8 +1665,10 @@ async def nf_agent_etiqueta_lote(
     for i, fatia in enumerate(fatias):
         numero: str | None = None
         nome: str | None = None
-        if fatia.numeroloja and fatia.numeroloja in por_loja:
-            numero, nome = por_loja[fatia.numeroloja]
+        for candidato_loja in fatia.numerolojas:
+            if candidato_loja in por_loja:
+                numero, nome = por_loja[candidato_loja]
+                break
         if numero is None:
             numero = nf_etiqueta_lote.casa_por_texto(fatia.texto, candidatos)
             if numero is not None:
