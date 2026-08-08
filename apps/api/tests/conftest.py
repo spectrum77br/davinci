@@ -299,6 +299,7 @@ _CLEANUP_TABLES = (
     # antes das pais — items refs lotes+products, resumo refs lotes.
     "import_lote_items",
     "import_resumo",
+    "financeiro_simulacao",
     "import_lotes",
     "import_products",
     "import_cotacao_params",

@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # ── Config ─────────────────────────────────────────────────────────────
 
@@ -178,6 +179,8 @@ class ImportLotePatch(BaseModel):
     taxa: Decimal | None = None
     frete_pct: Decimal | None = None
     adicional: Decimal | None = None
+    # Nº da DI (migration 0214) — editável direto no header do lote.
+    di_numero: str | None = None
 
 
 class ImportLoteOut(BaseModel):
@@ -211,6 +214,24 @@ class ImportLoteOut(BaseModel):
     bling_stock_sent: int = 0
     bling_stock_skipped: int = 0
     bling_stock_errors: int = 0
+    # Simulação + DI (migration 0214). Blobs NÃO vão na listagem — só
+    # os derivados booleanos; PDFs servidos por endpoints dedicados.
+    di_numero: str | None = None
+    tem_simulacao_pdf: bool = False
+    tem_di_pdf: bool = False
+    di_pagamento: dict | None = None
+
+
+class DiPagamentoIn(BaseModel):
+    """Lançamento do pagamento da DI no Bling (contas a pagar).
+
+    O valor total é dividido em N parcelas iguais (resto de centavos na
+    última), vencimentos espaçados por período a partir do 1º vencimento.
+    """
+    valor_total: Decimal = Field(gt=0)
+    parcelas: int = Field(ge=1, le=60)
+    periodo: Literal["mensal", "semanal"] = "mensal"
+    primeiro_vencimento: date
 
 
 # ── LoteItem (quantity per SKU per lote) ───────────────────────────────

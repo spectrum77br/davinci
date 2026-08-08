@@ -222,6 +222,11 @@ type Lote = {
   bling_stock_sent?: number
   bling_stock_skipped?: number
   bling_stock_errors?: number
+  // Migration 0214 — simulação + DI do lote.
+  di_numero?: string | null
+  tem_simulacao_pdf?: boolean
+  tem_di_pdf?: boolean
+  di_pagamento?: Record<string, any> | null
 }
 type ResumoRow = {
   id: string
@@ -562,6 +567,136 @@ async function exportarLote() {
     errorText.value = 'Falha ao exportar o Excel do lote.'
   } finally {
     exportandoLote.value = false
+  }
+}
+
+// ── Simulação + DI por lote (migration 0214) ─────────────────────────
+// PDF da simulação vem do Financeiro → Simulação ("Anexar ao lote").
+// DI é anexada manualmente aqui; ao anexar, oferece lançar o pagamento
+// no Bling (contas a pagar, contato isatrading) em N parcelas.
+// Regra: blob obtido após await NUNCA usa window.open — <a download>.
+async function baixarPdfLote(lote: Lote, kind: 'simulacao-pdf' | 'di-pdf') {
+  try {
+    const resp = await fetch(url(`/api/importacao/lotes/${lote.id}/${kind}`), {
+      credentials: 'include',
+    })
+    if (!resp.ok) throw new Error(String(resp.status))
+    const blob = await resp.blob()
+    const cd = resp.headers.get('Content-Disposition') || ''
+    const m = cd.match(/filename="?([^";]+)"?/)
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = m ? m[1] : `${kind === 'di-pdf' ? 'di' : 'simulacao'}_${lote.nome}.pdf`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 60_000)
+  } catch {
+    toasts.error('PDF indisponível', 'Não foi possível baixar o arquivo.')
+  }
+}
+
+const anexandoDi = ref(false)
+async function anexarDi(lote: Lote, ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || anexandoDi.value) return
+  anexandoDi.value = true
+  try {
+    const fd = new FormData()
+    fd.append('file', file)
+    const updated = await api<Lote>(`/api/importacao/lotes/${lote.id}/di`, {
+      method: 'POST',
+      body: fd,
+    })
+    const idx = lotes.value.findIndex((l) => l.id === lote.id)
+    if (idx >= 0) lotes.value[idx] = updated
+    toasts.success('DI anexada', `PDF da DI anexado ao lote ${lote.nome}.`)
+    // Fluxo da spec: ao anexar a DI, pergunta se lança o pagamento no
+    // Bling. Se já foi lançado, não oferece de novo.
+    if (updated.di_pagamento?.status !== 'ok'
+      && confirm(`Inserir o pagamento da DI no Bling (isatrading) para o lote ${lote.nome}?`)) {
+      openDiPagamento(updated)
+    }
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    toasts.error(
+      'Falha ao anexar DI',
+      code === 'di_pdf_tipo_invalido' ? 'O arquivo precisa ser um PDF.'
+        : code === 'di_pdf_grande' ? 'PDF acima de 8MB.'
+          : code === 'di_pdf_vazio' ? 'Arquivo vazio.' : 'Erro no upload.',
+    )
+  } finally {
+    anexandoDi.value = false
+  }
+}
+
+// Modal do pagamento da DI no Bling (parcelas + período).
+const diPagModal = reactive({
+  open: false,
+  lote: null as Lote | null,
+  valor_total: '',
+  parcelas: 1,
+  periodo: 'mensal' as 'mensal' | 'semanal',
+  primeiro_vencimento: '',
+  saving: false,
+})
+function openDiPagamento(lote: Lote) {
+  diPagModal.lote = lote
+  diPagModal.valor_total = ''
+  diPagModal.parcelas = 1
+  diPagModal.periodo = 'mensal'
+  diPagModal.primeiro_vencimento = new Date().toISOString().slice(0, 10)
+  diPagModal.open = true
+}
+async function lancarDiPagamento() {
+  const lote = diPagModal.lote
+  const valor = Number(diPagModal.valor_total)
+  if (!lote || diPagModal.saving) return
+  if (!valor || valor <= 0) {
+    toasts.warning('Valor inválido', 'Informe o valor total da DI.')
+    return
+  }
+  if (!diPagModal.primeiro_vencimento) {
+    toasts.warning('Vencimento inválido', 'Informe o primeiro vencimento.')
+    return
+  }
+  diPagModal.saving = true
+  try {
+    const updated = await api<Lote>(`/api/importacao/lotes/${lote.id}/di-pagamento`, {
+      method: 'POST',
+      body: {
+        valor_total: valor,
+        parcelas: diPagModal.parcelas,
+        periodo: diPagModal.periodo,
+        primeiro_vencimento: diPagModal.primeiro_vencimento,
+      },
+    })
+    const idx = lotes.value.findIndex((l) => l.id === lote.id)
+    if (idx >= 0) lotes.value[idx] = updated
+    toasts.success(
+      'Pagamento lançado',
+      `${diPagModal.parcelas}x (${diPagModal.periodo}) no Bling em nome de isatrading.`,
+    )
+    diPagModal.open = false
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    if (code === 'di_pagamento_ja_lancado') {
+      toasts.warning('Já lançado', 'O pagamento desta DI já foi lançado no Bling.')
+      diPagModal.open = false
+    } else if (code === 'bling_sem_integracao') {
+      toasts.error('Sem integração Bling', 'Configure a integração do Bling primeiro.')
+    } else if (code === 'di_pagamento_parcial') {
+      toasts.error(
+        'Lançamento parcial',
+        `Parte das parcelas falhou (${e?.data?.detail?.lancadas ?? 0} lançadas). Confira no Bling antes de tentar de novo.`,
+      )
+      diPagModal.open = false
+      void loadLotesOnly()
+    } else {
+      toasts.error('Falha no lançamento', 'Erro ao lançar o pagamento no Bling.')
+    }
+  } finally {
+    diPagModal.saving = false
   }
 }
 
@@ -1825,11 +1960,11 @@ onScopeDispose(() => {
       <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 220px)">
         <table class="grid-table estoque-grid text-xs border-collapse">
           <thead class="thead-sticky">
-            <!-- 8-row header. Fixed left columns use rowspan=8 so their
-                 label sits centered across the full header height.
-                 Each lote occupies 2 cols (label + value) and fills
-                 rows 1-7 with metadata (lote/abertura/fechamento/
-                 previsto/realizado/saldo/prazo) then row 8 with the
+            <!-- Header multi-row (10 rows na Mala, 14 no Celular).
+                 Fixed left columns use rowspan pra ocupar a altura
+                 toda. Each lote occupies 2 cols (label + value) and
+                 fills as rows com metadata (lote/abertura/fechamento/
+                 previsto/realizado/saldo/prazo/simulação/DI) e a última com the
                  actual sub-headers (quant | total) that align with
                  the per-cell inputs in tbody. Mirrors the operator's
                  Excel layout 1:1. -->
@@ -1844,49 +1979,49 @@ onScopeDispose(() => {
                    consolidado do Bling. Campos seguem no DB (sync ainda
                    grava) e no modal "Criar produto". -->
               <th
-                :rowspan="isCelular ? 12 : 8"
+                :rowspan="isCelular ? 14 : 10"
                 class="col-head text-left"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : { minWidth: '500px' }"
               >modelo bling</th>
               <th
-                :rowspan="isCelular ? 12 : 8"
+                :rowspan="isCelular ? 14 : 10"
                 class="col-head text-left"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('sku'), minWidth: '130px' } : { minWidth: '130px' }"
               >sku</th>
               <th
-                :rowspan="isCelular ? 12 : 8"
+                :rowspan="isCelular ? 14 : 10"
                 class="col-head text-right"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('custo_bling'), minWidth: '60px' } : { minWidth: '60px' }"
               >custo bling</th>
               <th
-                :rowspan="isCelular ? 12 : 8"
+                :rowspan="isCelular ? 14 : 10"
                 class="col-head text-right"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('estoque_bling'), minWidth: '66px' } : { minWidth: '66px' }"
               >estoque bling</th>
               <th
-                :rowspan="isCelular ? 12 : 8"
+                :rowspan="isCelular ? 14 : 10"
                 class="col-head text-right"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('consumo_diario'), minWidth: '66px' } : { minWidth: '66px' }"
               >consumo diário</th>
               <th
-                :rowspan="isCelular ? 12 : 8"
+                :rowspan="isCelular ? 14 : 10"
                 class="col-head text-right"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('memoria_consumo'), minWidth: '70px' } : { minWidth: '70px' }"
               >memória consumo</th>
               <th
-                :rowspan="isCelular ? 12 : 8"
+                :rowspan="isCelular ? 14 : 10"
                 class="col-head text-right"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('reposicao_estoque'), minWidth: '76px' } : { minWidth: '76px' }"
               >reposição estoque</th>
               <th
-                :rowspan="isCelular ? 12 : 8"
+                :rowspan="isCelular ? 14 : 10"
                 class="col-head text-right"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('saldo_reposicao'), minWidth: '76px' } : { minWidth: '76px' }"
@@ -1894,12 +2029,12 @@ onScopeDispose(() => {
               <!-- Mala: `obs` fica nas colunas fixas. Celular não usa
                    obs nesta tabela (operador anotou que é unused no
                    Excel celular); ficar oculto pra não confundir. -->
-              <th v-if="!isCelular" :rowspan="isCelular ? 12 : 8" class="col-head text-left" style="min-width: 100px">obs</th>
+              <th v-if="!isCelular" :rowspan="isCelular ? 14 : 10" class="col-head text-left" style="min-width: 100px">obs</th>
               <!-- Celular: `custo realizado` (coluna J do Excel — "media
                    do custo", editável manualmente). -->
               <th
                 v-if="isCelular"
-                :rowspan="isCelular ? 12 : 8"
+                :rowspan="isCelular ? 14 : 10"
                 class="col-head text-right sticky bg-background z-30 lote-divider-anchor"
                 :style="{ left: stickyLeftCelular('custo_realizado'), minWidth: '90px' }"
               >custo realizado</th>
@@ -1944,8 +2079,8 @@ onScopeDispose(() => {
                   </span>
                 </td>
               </template>
-              <th :rowspan="isCelular ? 12 : 8" v-if="canEdit" class="col-head text-center">bling</th>
-              <th :rowspan="isCelular ? 12 : 8" v-if="canDelete" class="col-head w-8"></th>
+              <th :rowspan="isCelular ? 14 : 10" v-if="canEdit" class="col-head text-center">bling</th>
+              <th :rowspan="isCelular ? 14 : 10" v-if="canDelete" class="col-head w-8"></th>
             </tr>
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-r2-${lote.id}`">
@@ -1996,6 +2131,63 @@ onScopeDispose(() => {
               <template v-for="lote in visibleLotes" :key="`lote-r7-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">prazo</td>
                 <td class="lote-value calculated" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">{{ lote.prazo != null ? lote.prazo + 'd' : '—' }}</td>
+              </template>
+            </tr>
+            <!-- Simulação (PDF vindo do Financeiro → Simulação) + DI
+                 (nº manual, PDF anexado, pagamento Bling). Migration 0214. -->
+            <tr>
+              <template v-for="lote in visibleLotes" :key="`lote-rsim-${lote.id}`">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">simulação</td>
+                <td class="lote-value" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
+                  <button
+                    v-if="lote.tem_simulacao_pdf"
+                    class="text-[10px] underline hover:text-primary inline-flex items-center gap-1"
+                    title="Baixar PDF da simulação"
+                    @click="baixarPdfLote(lote, 'simulacao-pdf')"
+                  >
+                    <Download class="size-3" /> PDF
+                  </button>
+                  <span v-else class="text-muted-foreground">—</span>
+                </td>
+              </template>
+            </tr>
+            <tr>
+              <template v-for="lote in visibleLotes" :key="`lote-rdi-${lote.id}`">
+                <td class="lote-label border-l" :class="loteBgClass(lote.nome)">DI</td>
+                <td class="lote-value editable" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
+                  <div class="flex items-center gap-1.5">
+                    <input type="text" :value="lote.di_numero ?? ''" :disabled="!canEdit" placeholder="nº DI"
+                      class="w-14 min-w-0 flex-1 bg-transparent border-0 p-0 text-[11px]"
+                      @input="(e) => schedulePatchLote(lote, 'di_numero', (e.target as HTMLInputElement).value || null)" />
+                    <label
+                      v-if="canEdit"
+                      class="cursor-pointer text-[10px] underline hover:text-primary shrink-0"
+                      :title="`Anexar PDF da DI ao lote ${lote.nome}`"
+                    >
+                      anexar
+                      <input type="file" accept="application/pdf" class="hidden" @change="(e) => anexarDi(lote, e)" />
+                    </label>
+                    <button
+                      v-if="lote.tem_di_pdf"
+                      class="text-[10px] underline hover:text-primary shrink-0"
+                      title="Baixar PDF da DI"
+                      @click="baixarPdfLote(lote, 'di-pdf')"
+                    >
+                      <Download class="size-3 inline" />
+                    </button>
+                    <span
+                      v-if="lote.di_pagamento?.status === 'ok'"
+                      class="inline-block rounded px-1 py-0.5 text-[9px] font-medium border bg-emerald-50 text-emerald-700 border-emerald-300 shrink-0"
+                      title="Pagamento da DI já lançado no Bling"
+                    >pago</span>
+                    <button
+                      v-else-if="canEdit && lote.tem_di_pdf"
+                      class="text-[10px] underline hover:text-primary shrink-0"
+                      title="Lançar pagamento da DI no Bling (isatrading)"
+                      @click="openDiPagamento(lote)"
+                    >$ Bling</button>
+                  </div>
+                </td>
               </template>
             </tr>
             <!-- 4 rows extras só pra Celular (transportadora, taxa,
@@ -2942,6 +3134,63 @@ onScopeDispose(() => {
               {{ ajusteEditId ? 'Salvar' : 'Criar' }}
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: pagamento da DI no Bling (contato isatrading, parcelado). -->
+    <div v-if="diPagModal.open"
+      class="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+      @click.self="diPagModal.open = false">
+      <div class="bg-background rounded-lg shadow-xl w-full max-w-md">
+        <div class="flex items-center justify-between border-b px-4 py-3">
+          <h3 class="font-semibold text-sm">
+            Pagamento da DI — {{ diPagModal.lote?.nome }}
+          </h3>
+          <button class="text-muted-foreground hover:text-foreground"
+            @click="diPagModal.open = false">
+            <X class="size-4" />
+          </button>
+        </div>
+        <div class="p-4 space-y-3 text-sm">
+          <p class="text-[11px] text-muted-foreground">
+            Lança contas a pagar no Bling em nome de <strong>isatrading</strong>,
+            dividindo o valor total nas parcelas escolhidas.
+          </p>
+          <label class="flex flex-col gap-1">
+            <span class="text-[10px] text-muted-foreground">Valor total (R$) *</span>
+            <input v-model="diPagModal.valor_total" type="number" step="0.01" min="0"
+              class="h-8 border rounded px-2 bg-background text-right" placeholder="0,00" />
+          </label>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] text-muted-foreground">Parcelas *</span>
+              <input v-model.number="diPagModal.parcelas" type="number" min="1" max="60"
+                class="h-8 border rounded px-2 bg-background text-right" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[10px] text-muted-foreground">Período *</span>
+              <select v-model="diPagModal.periodo" class="h-8 border rounded px-2 bg-background">
+                <option value="mensal">Mensal</option>
+                <option value="semanal">Semanal</option>
+              </select>
+            </label>
+          </div>
+          <label class="flex flex-col gap-1">
+            <span class="text-[10px] text-muted-foreground">Primeiro vencimento *</span>
+            <input v-model="diPagModal.primeiro_vencimento" type="date"
+              class="h-8 border rounded px-2 bg-background" />
+          </label>
+        </div>
+        <div class="flex gap-2 justify-end border-t px-4 py-3">
+          <button class="rounded-md border px-3 py-1 text-sm"
+            :disabled="diPagModal.saving"
+            @click="diPagModal.open = false">Cancelar</button>
+          <button class="rounded-md bg-primary text-primary-foreground px-3 py-1 text-sm disabled:opacity-50"
+            :disabled="diPagModal.saving"
+            @click="lancarDiPagamento">
+            {{ diPagModal.saving ? 'Lançando…' : 'Lançar no Bling' }}
+          </button>
         </div>
       </div>
     </div>

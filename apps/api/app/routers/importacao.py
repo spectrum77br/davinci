@@ -15,14 +15,15 @@ devolution adjustments).
 """
 from __future__ import annotations
 
+import calendar
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +54,7 @@ from app.schemas.importacao import (
     CotacaoProdutoPatch,
     CotacaoValorOut,
     CotacaoValorUpsert,
+    DiPagamentoIn,
     ImportConfigOut,
     ImportConfigPatch,
     ImportCotacaoParamsOut,
@@ -986,6 +988,10 @@ async def _enrich_lote(
         bling_stock_sent=stock_sent,
         bling_stock_skipped=stock_skipped,
         bling_stock_errors=stock_errors,
+        di_numero=lote.di_numero,
+        tem_simulacao_pdf=lote.simulacao_pdf is not None,
+        tem_di_pdf=lote.di_pdf is not None,
+        di_pagamento=lote.di_pagamento,
     )
 
 
@@ -1134,6 +1140,163 @@ async def exportar_lote_excel(
         media_type=importacao_lote_excel.LOTE_EXCEL_MEDIA,
         headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'},
     )
+
+
+# ── Simulação + DI (migration 0214) ────────────────────────────────────
+
+_DI_PDF_MAX_BYTES = 8 * 1024 * 1024  # 8MB
+_DI_CONTATO_BLING_ID = 108074  # isatrading — contato fixo do pagamento da DI
+
+
+async def _lote_or_404(session: AsyncSession, lote_id: UUID) -> ImportLote:
+    lote = await session.get(ImportLote, lote_id)
+    if lote is None:
+        raise HTTPException(404, detail={"code": "lote_not_found"})
+    return lote
+
+
+@router.get("/lotes/{lote_id}/simulacao-pdf")
+async def baixar_simulacao_pdf(
+    lote_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+) -> Response:
+    """Serve o PDF da simulação anexado ao lote (Financeiro → Simulação)."""
+    lote = await _lote_or_404(session, lote_id)
+    if lote.simulacao_pdf is None:
+        raise HTTPException(404, detail={"code": "simulacao_pdf_nao_encontrado"})
+    nome = re.sub(r"[^A-Za-z0-9_-]+", "_", lote.nome or "lote")
+    return Response(
+        content=lote.simulacao_pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="simulacao_{nome}.pdf"',
+        },
+    )
+
+
+@router.post("/lotes/{lote_id}/di", response_model=ImportLoteOut)
+async def anexar_di(
+    lote_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+    file: Annotated[UploadFile, File()],
+) -> ImportLoteOut:
+    """Anexa o PDF da DI ao lote (upload manual)."""
+    lote = await _lote_or_404(session, lote_id)
+    if (file.content_type or "").lower() != "application/pdf":
+        raise HTTPException(400, detail={"code": "di_pdf_tipo_invalido"})
+    conteudo = await file.read()
+    if not conteudo:
+        raise HTTPException(400, detail={"code": "di_pdf_vazio"})
+    if len(conteudo) > _DI_PDF_MAX_BYTES:
+        raise HTTPException(413, detail={"code": "di_pdf_grande"})
+    lote.di_pdf = conteudo
+    lote.di_pdf_filename = file.filename or "di.pdf"
+    await session.commit()
+    await session.refresh(lote)
+    return await _enrich_lote(session, lote)
+
+
+@router.get("/lotes/{lote_id}/di-pdf")
+async def baixar_di_pdf(
+    lote_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "view"))],
+) -> Response:
+    """Serve o PDF da DI anexado ao lote."""
+    lote = await _lote_or_404(session, lote_id)
+    if lote.di_pdf is None:
+        raise HTTPException(404, detail={"code": "di_pdf_nao_encontrado"})
+    nome = lote.di_pdf_filename or "di.pdf"
+    return Response(
+        content=lote.di_pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{nome}"'},
+    )
+
+
+def _add_months(d: date, meses: int) -> date:
+    """Soma meses clampando o dia no fim do mês (31/01 + 1m = 28/02)."""
+    total = d.month - 1 + meses
+    ano = d.year + total // 12
+    mes = total % 12 + 1
+    dia = min(d.day, calendar.monthrange(ano, mes)[1])
+    return date(ano, mes, dia)
+
+
+@router.post("/lotes/{lote_id}/di-pagamento", response_model=ImportLoteOut)
+async def lancar_di_pagamento(
+    lote_id: UUID,
+    body: DiPagamentoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("importacao", "edit"))],
+) -> ImportLoteOut:
+    """Lança o pagamento da DI no Bling (contas a pagar) em N parcelas
+    no nome do contato isatrading. Divide valor_total igualmente com o
+    resto de centavos na última parcela; vencimentos mensais/semanais."""
+    lote = await _lote_or_404(session, lote_id)
+    if (lote.di_pagamento or {}).get("status") == "ok":
+        raise HTTPException(422, detail={"code": "di_pagamento_ja_lancado"})
+
+    from app.services.nf_emissao_gerar import _bling_client_opt
+
+    client = await _bling_client_opt(session)
+    if client is None:
+        raise HTTPException(422, detail={"code": "bling_sem_integracao"})
+
+    n = body.parcelas
+    centavos = Decimal("0.01")
+    valor_parcela = (body.valor_total / n).quantize(centavos)
+    ultima = body.valor_total - valor_parcela * (n - 1)
+    hoje = datetime.now(UTC).date().isoformat()
+    di_ref = f"DI {lote.di_numero}" if lote.di_numero else "DI"
+
+    ids: list[int] = []
+    erro: str | None = None
+    for i in range(n):
+        valor = ultima if i == n - 1 else valor_parcela
+        if body.periodo == "semanal":
+            venc = body.primeiro_vencimento + timedelta(weeks=i)
+        else:
+            venc = _add_months(body.primeiro_vencimento, i)
+        try:
+            criado = await client.create_conta_pagar(
+                contato_id=_DI_CONTATO_BLING_ID,
+                valor=float(valor),
+                vencimento=venc.isoformat(),
+                data_emissao=hoje,
+                historico=f"{di_ref} — lote {lote.nome} — parcela {i + 1}/{n}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "di_pagamento_parcela_falhou",
+                lote_id=str(lote_id), parcela=i + 1, error=str(exc),
+            )
+            erro = str(exc)[:300]
+            break
+        conta_id = criado.get("id")
+        if conta_id is not None:
+            ids.append(conta_id)
+
+    lote.di_pagamento = {
+        "status": "ok" if erro is None else "erro",
+        "erro": erro,
+        "valor_total": str(body.valor_total),
+        "parcelas": n,
+        "periodo": body.periodo,
+        "primeiro_vencimento": body.primeiro_vencimento.isoformat(),
+        "lancado_em": datetime.now(UTC).isoformat(),
+        "bling_ids": ids,
+    }
+    await session.commit()
+    await session.refresh(lote)
+    if erro is not None:
+        raise HTTPException(
+            502,
+            detail={"code": "di_pagamento_parcial", "lancadas": len(ids), "erro": erro},
+        )
+    return await _enrich_lote(session, lote)
 
 
 @router.post("/lotes", response_model=ImportLoteOut, status_code=status.HTTP_201_CREATED)

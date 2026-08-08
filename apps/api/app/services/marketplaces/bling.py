@@ -408,6 +408,34 @@ class BlingClient:
         )
         r.raise_for_status()
 
+    async def create_conta_pagar(
+        self,
+        *,
+        contato_id: int,
+        valor: float,
+        vencimento: str,
+        data_emissao: str | None = None,
+        historico: str | None = None,
+    ) -> dict:
+        """Cria uma conta a pagar (POST /contas/pagar).
+
+        Usado pelo fluxo da DI (Importação): ao anexar a DI o operador
+        pode lançar o pagamento parcelado em nome do contato isatrading.
+        Datas em YYYY-MM-DD. Retorna o `data` do Bling ({"id": ...}).
+        """
+        body: dict = {
+            "contato": {"id": contato_id},
+            "vencimento": vencimento,
+            "valor": valor,
+        }
+        if data_emissao:
+            body["dataEmissao"] = data_emissao
+        if historico:
+            body["historico"] = historico
+        r = await self._request("POST", "/contas/pagar", json=body)
+        r.raise_for_status()
+        return r.json().get("data") or {}
+
     async def update_order(self, bling_order_id: int, body: dict) -> dict:
         """Substitui o pedido de venda (PUT /pedidos/vendas/{id}).
 

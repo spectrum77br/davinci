@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 import aiofiles
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,6 +36,7 @@ from app.models import (
     FinanceiroConsorcio,
     FinanceiroSimulacao,
     FinanceiroSuprimentos,
+    ImportLote,
     NCMCache,
     User,
 )
@@ -271,6 +272,15 @@ async def create_simulacao(
     data.setdefault("aliquota_impostos_fed", 0.035)
     data.setdefault("aliquota_icms", 0.04)
     data.setdefault("aliquota_intermediacao", 0.16)
+    # Taxas fixas brasileiras (BRL) — spec da aba `simulaçao`. Defaults
+    # pré-preenchidos mas editáveis por cotação.
+    data.setdefault("taxa_siscomex_brl", Decimal("154.23"))
+    data.setdefault("taxa_bl_brl", Decimal("3300"))
+    data.setdefault("armazenagem_brl", Decimal("3644.18"))
+    data.setdefault("despachante_sda_brl", Decimal("500"))
+    data.setdefault("despachante_honorarios_brl", Decimal("1688"))
+    data.setdefault("corretagem_cambio_brl", Decimal("70"))
+    data.setdefault("inspecao_brl", Decimal("200"))
     row = FinanceiroSimulacao(**data)
     session.add(row)
     await session.commit()
@@ -315,6 +325,65 @@ async def delete_simulacao(
     await session.delete(row)
     await session.commit()
     return None
+
+
+async def _simulacao_or_404(session: AsyncSession, row_id: UUID) -> FinanceiroSimulacao:
+    row = (
+        await session.execute(
+            select(FinanceiroSimulacao).where(FinanceiroSimulacao.id == row_id)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "simulacao_not_found"})
+    return row
+
+
+@router.get("/simulacao/{row_id}/pdf")
+async def simulacao_pdf(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_simulacao", "view"))],
+) -> Response:
+    """PDF da simulação (imprimível). Sempre gerado ao vivo dos dados
+    atuais — o congelado fica no lote (anexar-lote)."""
+    from app.services.simulacao_pdf import PDF_MEDIA, montar_pdf
+
+    row = await _simulacao_or_404(session, row_id)
+    lote_nome = None
+    if row.lote_id is not None:
+        lote = await session.get(ImportLote, row.lote_id)
+        lote_nome = lote.nome if lote is not None else None
+    pdf = montar_pdf(row, lote_nome=lote_nome)
+    nome = (row.numero_cotacao or str(row.id)[:8]).replace('"', "")
+    return Response(
+        content=pdf,
+        media_type=PDF_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="simulacao_{nome}.pdf"'
+        },
+    )
+
+
+@router.post("/simulacao/{row_id}/anexar-lote", response_model=SimulacaoOut)
+async def simulacao_anexar_lote(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_simulacao", "edit"))],
+) -> SimulacaoOut:
+    """Congela o PDF da simulação no lote vinculado (`import_lotes.
+    simulacao_pdf`). Spec: "se não tiver o lote não envia"."""
+    from app.services.simulacao_pdf import montar_pdf
+
+    row = await _simulacao_or_404(session, row_id)
+    if row.lote_id is None:
+        raise HTTPException(422, detail={"code": "simulacao_sem_lote"})
+    lote = await session.get(ImportLote, row.lote_id)
+    if lote is None:
+        raise HTTPException(404, detail={"code": "lote_not_found"})
+    lote.simulacao_pdf = montar_pdf(row, lote_nome=lote.nome)
+    await session.commit()
+    await session.refresh(row)
+    return SimulacaoOut.model_validate(row, from_attributes=True)
 
 
 # ── NCM ────────────────────────────────────────────────────────────────

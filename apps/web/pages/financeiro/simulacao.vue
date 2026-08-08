@@ -1,9 +1,16 @@
 <script setup lang="ts">
 // Simulação — calculadora de custo de importação (1 mercadoria por
-// cotação). Form vertical em seções (Cabeçalho, Mercadoria, Logística,
-// Custos). Linhas calculadas (CIF, II, IPI, …, TOTAL DO PROCESSO, valor
+// cotação). Form vertical em seções (Cabeçalho, Mercadoria, Custos).
+// Linhas calculadas (CIF, II, IPI, …, TOTAL DO PROCESSO, valor
 // unidade, fator de multiplicação) recalculam em tempo real conforme
 // o operador edita inputs.
+//
+// Spec `simulaçao` (qwdwqd.xlsx): AFRMM = 8% do Frete+Seguro; Taxa BL
+// vira valor fixo em BRL; as 7 taxas brasileiras são armazenadas em
+// BRL (`*_brl`) e entram no espaço USD como valor ÷ câmbio. Colunas
+// USD e BRL são BIDIRECIONAIS nas linhas de input (editar um lado
+// converte e salva no campo canônico). O cálculo ESPELHA
+// services/simulacao_pdf.py::calcular — mudar lá junto.
 //
 // NCM: ao desfocar o campo, bate em /api/financeiro/ncm/{codigo} —
 //      brasilapi devolve a descrição; alíquotas saem do cache local
@@ -11,7 +18,7 @@
 //      botão "Salvar alíquotas no cache" persiste o que estiver no
 //      form atual, para reaproveitar nas próximas cotações.
 import { computed, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, Trash2, Save } from 'lucide-vue-next'
+import { FileDown, Paperclip, Plus, RefreshCw, Trash2, Save } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
 definePageMeta({
@@ -19,7 +26,7 @@ definePageMeta({
   permission: { resource: 'financeiro_simulacao', action: 'view' },
 })
 
-const { api } = useApi()
+const { api, url } = useApi()
 const auth = useAuthStore()
 const canEdit = computed(() => {
   if (auth.isAdmin) return true
@@ -36,19 +43,10 @@ type Cotacao = {
   numero_cotacao: string | null
   cliente: string | null
   data: string | null
-  processo: string | null
-  exportador: string | null
-  pais_origem: string | null
   descricao: string | null
-  fornecedor: string | null
   quantidade: number | null
   ncm: string | null
   descricao_ncm: string | null
-  invoice_numero: string | null
-  porto_origem: string | null
-  porto_destino: string | null
-  etd: string | null
-  eta: string | null
   taxa_cambio: number | null
   frete_seguro_usd: number | null
   valor_unitario_usd: number | null
@@ -56,20 +54,24 @@ type Cotacao = {
   aliquota_ipi: number | null
   aliquota_pis: number | null
   aliquota_cofins: number | null
-  taxa_siscomex_usd: number | null
-  armazenagem_usd: number | null
-  despachante_sda_usd: number | null
-  despachante_honorarios_usd: number | null
-  corretagem_cambio_usd: number | null
-  inspecao_usd: number | null
-  outras_taxas_usd: number | null
+  taxa_siscomex_brl: number | null
+  taxa_bl_brl: number | null
+  armazenagem_brl: number | null
+  despachante_sda_brl: number | null
+  despachante_honorarios_brl: number | null
+  corretagem_cambio_brl: number | null
+  inspecao_brl: number | null
+  outras_taxas_brl: number | null
   aliquota_taxas_gerais: number | null
   aliquota_impostos_fed: number | null
   aliquota_icms: number | null
   frete_nacional_usd: number | null
   aliquota_intermediacao: number | null
+  lote_id: string | null
   created_at: string
 }
+
+type Lote = { id: string; nome: string; categoria: string }
 
 const cotacoes = ref<Cotacao[]>([])
 const selectedId = ref<string | null>(null)
@@ -77,7 +79,25 @@ const current = ref<Cotacao | null>(null)
 const loading = ref(false)
 const errorText = ref<string | null>(null)
 const ncmStatus = ref<string | null>(null)
+const acaoStatus = ref<string | null>(null)
 const saveTimers = reactive<Record<string, ReturnType<typeof setTimeout>>>({})
+
+// Lotes da Importação pro dropdown "Lote". Best-effort: quem tem só
+// financeiro_simulacao.view (sem importacao.view) leva 403 → dropdown
+// fica vazio, resto da tela funciona.
+const lotes = ref<Lote[]>([])
+async function loadLotes() {
+  const cats = ['mala', 'eletro', 'celular']
+  const results = await Promise.all(
+    cats.map((c) => api<Lote[]>(`/api/importacao/lotes?categoria=${c}`).catch(() => [] as Lote[])),
+  )
+  lotes.value = results.flat()
+}
+
+function loteNome(id: string | null): string {
+  if (!id) return ''
+  return lotes.value.find((l) => l.id === id)?.nome || ''
+}
 
 async function loadList() {
   loading.value = true
@@ -97,9 +117,10 @@ async function loadList() {
     loading.value = false
   }
 }
-await loadList()
+await Promise.all([loadList(), loadLotes()])
 
 watch(selectedId, (id) => {
+  acaoStatus.value = null
   if (!id) {
     current.value = null
     return
@@ -142,7 +163,9 @@ async function novaCotacao() {
       body: {
         numero_cotacao: '',
         data: isoToday(),
-        // Defaults explícitos pra UI já mostrar as alíquotas finais
+        // Defaults explícitos pra UI já mostrar as alíquotas finais.
+        // As taxas BRL fixas (SISCOMEX 154,23 / BL 3.300 / …) vêm do
+        // backend (setdefault no create).
         aliquota_taxas_gerais: 0.03,
         aliquota_impostos_fed: 0.035,
         aliquota_icms: 0.04,
@@ -169,6 +192,60 @@ async function excluirCotacao() {
       : null
   } catch (e: any) {
     errorText.value = e?.data?.detail?.code || 'erro_delete'
+  }
+}
+
+// ── PDF + anexar ao lote ──────────────────────────────────────────────
+const gerandoPdf = ref(false)
+async function imprimirPdf() {
+  if (!current.value || gerandoPdf.value) return
+  gerandoPdf.value = true
+  acaoStatus.value = null
+  try {
+    const resp = await fetch(url(`/api/financeiro/simulacao/${current.value.id}/pdf`), {
+      credentials: 'include',
+    })
+    if (!resp.ok) throw new Error(`http_${resp.status}`)
+    const blob = await resp.blob()
+    const nome = current.value.numero_cotacao || current.value.id.slice(0, 8)
+    // Blob obtido após await: NUNCA window.open (popup block) —
+    // sempre <a download> sintético.
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `simulacao_${nome}.pdf`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(a.href), 60_000)
+  } catch (e: any) {
+    acaoStatus.value = `Falha ao gerar o PDF: ${e?.message || 'erro'}`
+  } finally {
+    gerandoPdf.value = false
+  }
+}
+
+const anexando = ref(false)
+async function anexarAoLote() {
+  if (!current.value || anexando.value) return
+  if (!current.value.lote_id) {
+    acaoStatus.value = 'Selecione o Lote no cabeçalho antes de anexar.'
+    return
+  }
+  const nome = loteNome(current.value.lote_id) || 'lote'
+  if (!confirm(`Anexar o PDF desta simulação ao lote ${nome}?`)) return
+  anexando.value = true
+  acaoStatus.value = null
+  try {
+    await api(`/api/financeiro/simulacao/${current.value.id}/anexar-lote`, { method: 'POST' })
+    acaoStatus.value = `PDF da simulação anexado ao lote ${nome}.`
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    acaoStatus.value =
+      code === 'simulacao_sem_lote'
+        ? 'Selecione o Lote no cabeçalho antes de anexar.'
+        : `Falha ao anexar: ${code || 'erro'}`
+  } finally {
+    anexando.value = false
   }
 }
 
@@ -223,6 +300,7 @@ function n(v: number | null | undefined): number {
   return v == null || isNaN(Number(v)) ? 0 : Number(v)
 }
 
+// ESPELHA services/simulacao_pdf.py::calcular — mudar lá junto.
 const calc = computed(() => {
   const c = current.value
   if (!c) return null
@@ -236,17 +314,16 @@ const calc = computed(() => {
   const ipi = cif * n(c.aliquota_ipi)
   const pis = cif * n(c.aliquota_pis)
   const cofins = cif * n(c.aliquota_cofins)
-  const afrmm = cif * 0.02
-  const siscomex = n(c.taxa_siscomex_usd)
-  const taxaBL = cif * 0.09
-  const armaz = n(c.armazenagem_usd)
-  const desp_sda = n(c.despachante_sda_usd)
-  const desp_hon = n(c.despachante_honorarios_usd)
-  const corret = n(c.corretagem_cambio_usd)
-  const inspec = n(c.inspecao_usd)
-  const outras = n(c.outras_taxas_usd)
-  // SUBTOTAL: CIF + impostos federais + AFRMM + Siscomex + BL + armaz +
-  // desp + corret + inspec + outras (linhas 28→41 do spec)
+  const afrmm = frete * 0.08
+  // Taxas brasileiras fixas (BRL) → contribuição no espaço USD.
+  const siscomex = n(c.taxa_siscomex_brl) / cambio
+  const taxaBL = n(c.taxa_bl_brl) / cambio
+  const armaz = n(c.armazenagem_brl) / cambio
+  const desp_sda = n(c.despachante_sda_brl) / cambio
+  const desp_hon = n(c.despachante_honorarios_brl) / cambio
+  const corret = n(c.corretagem_cambio_brl) / cambio
+  const inspec = n(c.inspecao_brl) / cambio
+  const outras = n(c.outras_taxas_brl) / cambio
   const subtotal = cif + ii + ipi + pis + cofins + afrmm + siscomex + taxaBL + armaz + desp_sda + desp_hon + corret + inspec + outras
   const taxas_gerais = subtotal * n(c.aliquota_taxas_gerais)
   const imp_fed = subtotal * n(c.aliquota_impostos_fed)
@@ -256,13 +333,12 @@ const calc = computed(() => {
   const totalProcesso = subtotal + taxas_gerais + imp_fed + icms + frete_nac + intermed
   const valorUnidade = qtd > 0 ? totalProcesso / qtd : 0
   const fator = valorUnit > 0 ? valorUnidade / valorUnit : 0
-  const lance_imposto = false
   return {
     cambio, frete, valorUnit, qtd, totalInvoice, cif,
     ii, ipi, pis, cofins, afrmm, siscomex, taxaBL,
     armaz, desp_sda, desp_hon, corret, inspec, outras,
     subtotal, taxas_gerais, imp_fed, icms, frete_nac, intermed,
-    totalProcesso, valorUnidade, fator, lance_imposto,
+    totalProcesso, valorUnidade, fator,
   }
 })
 
@@ -279,48 +355,77 @@ function fmtPct(v: number | null | undefined): string {
   return v == null ? '' : `${(n(v) * 100).toFixed(2)}%`
 }
 
-// Helper pra montar as linhas da tabela de custos
+// Helper pra montar as linhas da tabela de custos. `cur` = moeda
+// CANÔNICA do campo persistido (usd → coluna BRL converte na
+// gravação; brl → coluna USD converte). Bidirecional.
+type CustoRow = {
+  label: string
+  usd: number
+  aliq: string | number | null
+  kind: 'input' | 'calc' | 'aliquota'
+  field?: keyof Cotacao
+  cur?: 'usd' | 'brl'
+  step?: string
+  bold?: boolean
+  raw?: boolean
+}
+
 const custoRows = computed(() => {
   const c = calc.value
   if (!c) return []
   return [
-    { label: 'Frete + Seguro', usd: c.frete, aliq: null, kind: 'input', field: 'frete_seguro_usd' },
-    { label: 'Valor Unitário Origem', usd: c.valorUnit, aliq: null, kind: 'input', field: 'valor_unitario_usd', step: '0.0001' },
+    { label: 'Frete + Seguro', usd: c.frete, aliq: null, kind: 'input', field: 'frete_seguro_usd', cur: 'usd' },
+    { label: 'Valor Unitário Origem', usd: c.valorUnit, aliq: null, kind: 'input', field: 'valor_unitario_usd', cur: 'usd', step: '0.0001' },
     { label: 'Total Invoice (Valor × Qtd)', usd: c.totalInvoice, aliq: null, kind: 'calc' },
     { label: 'TOTAL CIF', usd: c.cif, aliq: null, kind: 'calc', bold: true },
     { label: 'II', usd: c.ii, aliq: 'aliquota_ii', kind: 'aliquota' },
     { label: 'IPI', usd: c.ipi, aliq: 'aliquota_ipi', kind: 'aliquota' },
     { label: 'PIS', usd: c.pis, aliq: 'aliquota_pis', kind: 'aliquota' },
     { label: 'COFINS', usd: c.cofins, aliq: 'aliquota_cofins', kind: 'aliquota' },
-    { label: 'AFRMM (2% CIF)', usd: c.afrmm, aliq: 0.02, kind: 'calc' },
-    { label: 'Taxa SISCOMEX', usd: c.siscomex, aliq: null, kind: 'input', field: 'taxa_siscomex_usd' },
-    { label: 'Taxa BL (9% CIF)', usd: c.taxaBL, aliq: 0.09, kind: 'calc' },
-    { label: 'Armazenagem Terminal', usd: c.armaz, aliq: null, kind: 'input', field: 'armazenagem_usd' },
-    { label: 'Despachante S.D.A', usd: c.desp_sda, aliq: null, kind: 'input', field: 'despachante_sda_usd' },
-    { label: 'Despachante Honorários', usd: c.desp_hon, aliq: null, kind: 'input', field: 'despachante_honorarios_usd' },
-    { label: 'Corretagem Câmbio', usd: c.corret, aliq: null, kind: 'input', field: 'corretagem_cambio_usd' },
-    { label: 'Inspeção (pré-embarque)', usd: c.inspec, aliq: null, kind: 'input', field: 'inspecao_usd' },
-    { label: 'Outras Taxas', usd: c.outras, aliq: null, kind: 'input', field: 'outras_taxas_usd' },
+    { label: 'AFRMM (8% Frete+Seguro)', usd: c.afrmm, aliq: 0.08, kind: 'calc' },
+    { label: 'Taxa SISCOMEX', usd: c.siscomex, aliq: null, kind: 'input', field: 'taxa_siscomex_brl', cur: 'brl' },
+    { label: 'Taxa BL', usd: c.taxaBL, aliq: null, kind: 'input', field: 'taxa_bl_brl', cur: 'brl' },
+    { label: 'Armazenagem Terminal', usd: c.armaz, aliq: null, kind: 'input', field: 'armazenagem_brl', cur: 'brl' },
+    { label: 'Despachante S.D.A', usd: c.desp_sda, aliq: null, kind: 'input', field: 'despachante_sda_brl', cur: 'brl' },
+    { label: 'Despachante Honorários', usd: c.desp_hon, aliq: null, kind: 'input', field: 'despachante_honorarios_brl', cur: 'brl' },
+    { label: 'Corretagem Câmbio', usd: c.corret, aliq: null, kind: 'input', field: 'corretagem_cambio_brl', cur: 'brl' },
+    { label: 'Inspeção (pré-embarque)', usd: c.inspec, aliq: null, kind: 'input', field: 'inspecao_brl', cur: 'brl' },
+    { label: 'Outras Taxas', usd: c.outras, aliq: null, kind: 'input', field: 'outras_taxas_brl', cur: 'brl' },
     { label: 'SUBTOTAL', usd: c.subtotal, aliq: null, kind: 'calc', bold: true },
     { label: 'Taxas Gerais Importação', usd: c.taxas_gerais, aliq: 'aliquota_taxas_gerais', kind: 'aliquota' },
     { label: 'Impostos Federais Saída NF', usd: c.imp_fed, aliq: 'aliquota_impostos_fed', kind: 'aliquota' },
     { label: 'ICMS', usd: c.icms, aliq: 'aliquota_icms', kind: 'aliquota' },
-    { label: 'Frete Nacional', usd: c.frete_nac, aliq: null, kind: 'input', field: 'frete_nacional_usd' },
+    { label: 'Frete Nacional', usd: c.frete_nac, aliq: null, kind: 'input', field: 'frete_nacional_usd', cur: 'usd' },
     { label: 'Intermediação (% CIF)', usd: c.intermed, aliq: 'aliquota_intermediacao', kind: 'aliquota' },
     { label: 'TOTAL DO PROCESSO', usd: c.totalProcesso, aliq: null, kind: 'calc', bold: true },
     { label: 'VALOR POR UNIDADE / KIT', usd: c.valorUnidade, aliq: null, kind: 'calc', bold: true },
     { label: 'FATOR DE MULTIPLICAÇÃO', usd: c.fator, aliq: null, kind: 'calc', bold: true, raw: true },
-  ] as Array<{
-    label: string
-    usd: number
-    aliq: string | number | null
-    kind: 'input' | 'calc' | 'aliquota'
-    field?: keyof Cotacao
-    step?: string
-    bold?: boolean
-    raw?: boolean
-  }>
+  ] as CustoRow[]
 })
+
+// Bidirecional USD↔BRL: editar o lado não-canônico converte pelo
+// câmbio e persiste no campo canônico.
+function round2(v: number): number {
+  return Math.round(v * 100) / 100
+}
+function onEditUsd(r: CustoRow, raw: string) {
+  const v = Number(raw)
+  if (!raw || isNaN(v)) {
+    scheduleSave(r.field!, null)
+    return
+  }
+  const cambio = calc.value?.cambio || 1
+  scheduleSave(r.field!, r.cur === 'brl' ? round2(v * cambio) : v)
+}
+function onEditBrl(r: CustoRow, raw: string) {
+  const v = Number(raw)
+  if (!raw || isNaN(v)) {
+    scheduleSave(r.field!, null)
+    return
+  }
+  const cambio = calc.value?.cambio || 1
+  scheduleSave(r.field!, r.cur === 'usd' ? round2(v / cambio) : v)
+}
 </script>
 
 <template>
@@ -333,7 +438,7 @@ const custoRows = computed(() => {
       >
         <option v-if="cotacoes.length === 0" :value="null" disabled>Nenhuma cotação</option>
         <option v-for="c in cotacoes" :key="c.id" :value="c.id">
-          {{ c.numero_cotacao || `#${c.id.slice(0, 8)}` }} — {{ c.cliente || 'sem cliente' }}{{ c.data ? ` (${c.data})` : '' }}
+          {{ loteNome(c.lote_id) || c.numero_cotacao || `#${c.id.slice(0, 8)}` }} — {{ c.cliente || 'sem cliente' }}{{ c.data ? ` (${c.data})` : '' }}
         </option>
       </select>
       <button
@@ -343,6 +448,25 @@ const custoRows = computed(() => {
       >
         <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" />
         Recarregar
+      </button>
+      <button
+        v-if="current"
+        class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        :disabled="gerandoPdf"
+        @click="imprimirPdf"
+      >
+        <FileDown class="size-3.5" :class="{ 'animate-pulse': gerandoPdf }" />
+        Imprimir PDF
+      </button>
+      <button
+        v-if="canEdit && current"
+        class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        :disabled="anexando || !current.lote_id"
+        :title="current.lote_id ? 'Gerar o PDF e anexar ao lote da Importação' : 'Selecione o Lote no cabeçalho primeiro'"
+        @click="anexarAoLote"
+      >
+        <Paperclip class="size-3.5" :class="{ 'animate-pulse': anexando }" />
+        Anexar ao lote
       </button>
       <button
         v-if="canEdit"
@@ -361,6 +485,7 @@ const custoRows = computed(() => {
     </div>
 
     <div v-if="errorText" class="text-sm text-destructive">erro: {{ errorText }}</div>
+    <div v-if="acaoStatus" class="text-sm text-muted-foreground">{{ acaoStatus }}</div>
 
     <div v-if="!current" class="border p-10 text-center text-muted-foreground text-sm">
       Selecione uma cotação ou crie uma nova.
@@ -374,9 +499,16 @@ const custoRows = computed(() => {
         </thead>
         <tbody>
           <tr>
-            <td class="label">Nº Cotação</td>
-            <td><input class="cell-input" :value="current.numero_cotacao ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('numero_cotacao', (e.target as HTMLInputElement).value)" /></td>
+            <td class="label">Lote</td>
+            <td>
+              <select class="cell-input" :value="current.lote_id ?? ''" :disabled="!canEdit"
+                @change="(e) => scheduleSave('lote_id', (e.target as HTMLSelectElement).value || null)">
+                <option value="">— sem lote —</option>
+                <option v-for="l in lotes" :key="l.id" :value="l.id">
+                  {{ l.nome }} ({{ l.categoria }})
+                </option>
+              </select>
+            </td>
           </tr>
           <tr>
             <td class="label">Cliente</td>
@@ -388,25 +520,10 @@ const custoRows = computed(() => {
             <td><input type="date" class="cell-input" :value="current.data ?? ''" :disabled="!canEdit"
               @input="(e) => scheduleSave('data', (e.target as HTMLInputElement).value || null)" /></td>
           </tr>
-          <tr>
-            <td class="label">Processo</td>
-            <td><input class="cell-input" :value="current.processo ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('processo', (e.target as HTMLInputElement).value)" /></td>
-          </tr>
-          <tr>
-            <td class="label">Exportador</td>
-            <td><input class="cell-input" :value="current.exportador ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('exportador', (e.target as HTMLInputElement).value)" /></td>
-          </tr>
-          <tr>
-            <td class="label">País Origem</td>
-            <td><input class="cell-input" :value="current.pais_origem ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('pais_origem', (e.target as HTMLInputElement).value)" /></td>
-          </tr>
         </tbody>
       </table>
 
-      <!-- MERCADORIA — campos editáveis (amarelo) + NCM/Qtd em laranja -->
+      <!-- MERCADORIA — campos editáveis (amarelo) + NCM/Qtd/Câmbio em laranja -->
       <table class="grid-table border-collapse text-xs">
         <thead>
           <tr class="bg-black text-white"><th colspan="2" class="text-left tracking-wider">MERCADORIA</th></tr>
@@ -416,11 +533,6 @@ const custoRows = computed(() => {
             <td class="label">Descrição</td>
             <td><input class="cell-input" :value="current.descricao ?? ''" :disabled="!canEdit"
               @input="(e) => scheduleSave('descricao', (e.target as HTMLInputElement).value)" /></td>
-          </tr>
-          <tr>
-            <td class="label">Fornecedor</td>
-            <td><input class="cell-input" :value="current.fornecedor ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('fornecedor', (e.target as HTMLInputElement).value)" /></td>
           </tr>
           <tr>
             <td class="label">Quantidade</td>
@@ -446,9 +558,10 @@ const custoRows = computed(() => {
             <td class="calc">{{ current.descricao_ncm || '—' }}</td>
           </tr>
           <tr>
-            <td class="label">Invoice nº</td>
-            <td><input class="cell-input" :value="current.invoice_numero ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('invoice_numero', (e.target as HTMLInputElement).value)" /></td>
+            <td class="label">Taxa Câmbio (USD/BRL)</td>
+            <td><input type="number" step="0.0001" class="cell-input cell-orange text-right"
+              :value="current.taxa_cambio ?? ''" :disabled="!canEdit"
+              @input="(e) => scheduleSave('taxa_cambio', Number((e.target as HTMLInputElement).value) || null)" /></td>
           </tr>
           <tr v-if="ncmStatus">
             <td colspan="2" class="text-[10px] text-muted-foreground px-2 py-1">{{ ncmStatus }}</td>
@@ -456,42 +569,8 @@ const custoRows = computed(() => {
         </tbody>
       </table>
 
-      <!-- LOGÍSTICA — span 2 columns -->
-      <table class="grid-table border-collapse text-xs lg:col-span-2">
-        <thead>
-          <tr class="bg-black text-white"><th colspan="2" class="text-left tracking-wider">LOGÍSTICA</th></tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td class="label">Porto Origem</td>
-            <td><input class="cell-input" :value="current.porto_origem ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('porto_origem', (e.target as HTMLInputElement).value)" /></td>
-          </tr>
-          <tr>
-            <td class="label">Porto Destino</td>
-            <td><input class="cell-input" :value="current.porto_destino ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('porto_destino', (e.target as HTMLInputElement).value)" /></td>
-          </tr>
-          <tr>
-            <td class="label">ETD (Saída)</td>
-            <td><input type="date" class="cell-input" :value="current.etd ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('etd', (e.target as HTMLInputElement).value || null)" /></td>
-          </tr>
-          <tr>
-            <td class="label">ETA (Chegada)</td>
-            <td><input type="date" class="cell-input" :value="current.eta ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('eta', (e.target as HTMLInputElement).value || null)" /></td>
-          </tr>
-          <tr>
-            <td class="label">Taxa Câmbio (USD/BRL)</td>
-            <td><input type="number" step="0.0001" class="cell-input cell-orange text-right"
-              :value="current.taxa_cambio ?? ''" :disabled="!canEdit"
-              @input="(e) => scheduleSave('taxa_cambio', Number((e.target as HTMLInputElement).value) || null)" /></td>
-          </tr>
-        </tbody>
-      </table>
-
-      <!-- CUSTOS — 4 colunas estilo planilha completa -->
+      <!-- CUSTOS — 4 colunas estilo planilha completa. USD e BRL são
+           editáveis nas linhas de input (bidirecional pelo câmbio). -->
       <div class="lg:col-span-2 overflow-x-auto">
         <table class="grid-table w-full text-xs border-collapse">
           <thead>
@@ -508,12 +587,19 @@ const custoRows = computed(() => {
               :class="{ 'font-semibold bg-emerald-100/60 dark:bg-emerald-900/30': r.bold }">
               <td class="label">{{ r.label }}</td>
               <td class="text-right" :class="r.kind === 'calc' ? 'calc' : ''">
-                <input v-if="r.kind === 'input' && canEdit" type="number" :step="r.step || '0.01'" class="cell-input text-right"
-                  :value="r.usd || ''"
-                  @input="(e) => scheduleSave(r.field!, Number((e.target as HTMLInputElement).value) || null)" />
+                <input v-if="r.kind === 'input' && canEdit" type="number" :step="r.step || '0.01'"
+                  class="cell-input text-right" :class="{ 'cell-derived': r.cur === 'brl' }"
+                  :value="r.usd ? Number(r.usd.toFixed(4)) : ''"
+                  @change="(e) => onEditUsd(r, (e.target as HTMLInputElement).value)" />
                 <span v-else>{{ r.raw ? r.usd.toFixed(4) : fmtUSD(r.usd) }}</span>
               </td>
-              <td class="text-right calc">{{ r.raw ? '—' : fmtBRL(brl(r.usd)) }}</td>
+              <td class="text-right" :class="r.kind === 'input' && canEdit ? '' : 'calc'">
+                <input v-if="r.kind === 'input' && canEdit" type="number" step="0.01"
+                  class="cell-input text-right" :class="{ 'cell-derived': r.cur === 'usd' }"
+                  :value="brl(r.usd) ? Number(brl(r.usd).toFixed(2)) : ''"
+                  @change="(e) => onEditBrl(r, (e.target as HTMLInputElement).value)" />
+                <span v-else>{{ r.raw ? '—' : fmtBRL(brl(r.usd)) }}</span>
+              </td>
               <td class="text-right">
                 <input v-if="r.kind === 'aliquota' && canEdit" type="number" step="0.0001"
                   class="cell-input cell-orange text-right"
@@ -532,9 +618,9 @@ const custoRows = computed(() => {
 </template>
 
 <style scoped>
-/* Visual de planilha — 3 minitabelas 2-col (Cabeçalho/Mercadoria/
-   Logística) e a tabela grande de Custos. Header preto nas seções,
-   verde escuro no thead da tabela de Custos. */
+/* Visual de planilha — 2 minitabelas 2-col (Cabeçalho/Mercadoria) e a
+   tabela grande de Custos. Header preto nas seções, verde escuro no
+   thead da tabela de Custos. */
 .grid-table {
   width: 100%;
 }
@@ -587,6 +673,14 @@ const custoRows = computed(() => {
   cursor: not-allowed;
   opacity: 0.7;
   background: transparent;
+}
+/* Lado NÃO-canônico do par USD/BRL: editável, mas o valor é derivado
+   pelo câmbio (tom levemente esverdeado pra diferenciar). */
+.cell-derived {
+  background: rgb(236 253 245 / 0.7); /* emerald-50 */
+}
+:global(.dark) .cell-derived {
+  background: rgb(6 78 59 / 0.2);
 }
 /* Inputs "automáticos / impactam cálculo" em laranja (NCM, Quantidade,
    Câmbio, Alíquotas NCM) */

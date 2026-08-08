@@ -97,18 +97,20 @@ class SimulacaoOut(BaseModel):
     aliquota_ipi: Decimal | None = None
     aliquota_pis: Decimal | None = None
     aliquota_cofins: Decimal | None = None
-    taxa_siscomex_usd: Decimal | None = None
-    armazenagem_usd: Decimal | None = None
-    despachante_sda_usd: Decimal | None = None
-    despachante_honorarios_usd: Decimal | None = None
-    corretagem_cambio_usd: Decimal | None = None
-    inspecao_usd: Decimal | None = None
-    outras_taxas_usd: Decimal | None = None
+    taxa_siscomex_brl: Decimal | None = None
+    armazenagem_brl: Decimal | None = None
+    despachante_sda_brl: Decimal | None = None
+    despachante_honorarios_brl: Decimal | None = None
+    corretagem_cambio_brl: Decimal | None = None
+    inspecao_brl: Decimal | None = None
+    outras_taxas_brl: Decimal | None = None
+    taxa_bl_brl: Decimal | None = None
     aliquota_taxas_gerais: Decimal | None = None
     aliquota_impostos_fed: Decimal | None = None
     aliquota_icms: Decimal | None = None
     frete_nacional_usd: Decimal | None = None
     aliquota_intermediacao: Decimal | None = None
+    lote_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -139,18 +141,20 @@ class SimulacaoPatch(BaseModel):
     aliquota_ipi: Decimal | None = None
     aliquota_pis: Decimal | None = None
     aliquota_cofins: Decimal | None = None
-    taxa_siscomex_usd: Decimal | None = None
-    armazenagem_usd: Decimal | None = None
-    despachante_sda_usd: Decimal | None = None
-    despachante_honorarios_usd: Decimal | None = None
-    corretagem_cambio_usd: Decimal | None = None
-    inspecao_usd: Decimal | None = None
-    outras_taxas_usd: Decimal | None = None
+    taxa_siscomex_brl: Decimal | None = None
+    armazenagem_brl: Decimal | None = None
+    despachante_sda_brl: Decimal | None = None
+    despachante_honorarios_brl: Decimal | None = None
+    corretagem_cambio_brl: Decimal | None = None
+    inspecao_brl: Decimal | None = None
+    outras_taxas_brl: Decimal | None = None
+    taxa_bl_brl: Decimal | None = None
     aliquota_taxas_gerais: Decimal | None = None
     aliquota_impostos_fed: Decimal | None = None
     aliquota_icms: Decimal | None = None
     frete_nacional_usd: Decimal | None = None
     aliquota_intermediacao: Decimal | None = None
+    lote_id: UUID | None = None
 
 
 # ── NCM Cache ──────────────────────────────────────────────────────────

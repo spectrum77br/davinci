@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Date, DateTime, Integer, Numeric, Text, func
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -73,20 +73,27 @@ class FinanceiroSimulacao(Base, TimestampMixin):
     aliquota_ipi: Mapped[Decimal | None] = mapped_column(Numeric(7, 4), nullable=True)
     aliquota_pis: Mapped[Decimal | None] = mapped_column(Numeric(7, 4), nullable=True)
     aliquota_cofins: Mapped[Decimal | None] = mapped_column(Numeric(7, 4), nullable=True)
-    # Outras taxas USD
-    taxa_siscomex_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
-    armazenagem_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
-    despachante_sda_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
-    despachante_honorarios_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
-    corretagem_cambio_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
-    inspecao_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
-    outras_taxas_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # Outras taxas (BRL — taxas brasileiras fixas; entram no cálculo USD ÷ câmbio)
+    taxa_siscomex_brl: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    armazenagem_brl: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    despachante_sda_brl: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    despachante_honorarios_brl: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    corretagem_cambio_brl: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    inspecao_brl: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    outras_taxas_brl: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    taxa_bl_brl: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     # Alíquotas finais
     aliquota_taxas_gerais: Mapped[Decimal | None] = mapped_column(Numeric(7, 4), nullable=True)
     aliquota_impostos_fed: Mapped[Decimal | None] = mapped_column(Numeric(7, 4), nullable=True)
     aliquota_icms: Mapped[Decimal | None] = mapped_column(Numeric(7, 4), nullable=True)
     frete_nacional_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     aliquota_intermediacao: Mapped[Decimal | None] = mapped_column(Numeric(7, 4), nullable=True)
+    # Vínculo com o lote da Importação (pra anexar o PDF da simulação)
+    lote_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("import_lotes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class DNPConfig(Base):

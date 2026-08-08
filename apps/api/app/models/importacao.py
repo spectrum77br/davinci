@@ -18,13 +18,14 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -169,6 +170,13 @@ class ImportLote(Base, TimestampMixin):
     taxa: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
     frete_pct: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
     adicional: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    # Simulação + DI (migration 0214): PDF da simulação anexada ao lote,
+    # nº/PDF da DI anexados manualmente e o estado do pagamento no Bling.
+    simulacao_pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    di_numero: Mapped[str | None] = mapped_column(Text, nullable=True)
+    di_pdf: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    di_pdf_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    di_pagamento: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class ImportLoteItem(Base, TimestampMixin):
