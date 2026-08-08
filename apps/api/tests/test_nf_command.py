@@ -1122,3 +1122,156 @@ async def test_import_etiqueta_done_encadeia_imprimir_etiqueta(
     assert pri[0].ads_power == "58"
     assert pri[0].status == "pending"
     assert pri[0].source == "auto"
+
+
+def _lote_pdf(paginas: list[list[str]]) -> bytes:
+    """PDF do LOTE sintético: cada item é uma página com as linhas dadas."""
+    import fitz
+
+    doc = fitz.open()
+    for linhas in paginas:
+        page = doc.new_page(width=300, height=442)
+        y = 20
+        for linha in linhas:
+            page.insert_text((20, y), linha, fontsize=8, fontname="helv")
+            y += 14
+    return doc.tobytes()
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_lote_casa_grava_e_processa(
+    db: AsyncSession, client: AsyncClient, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """PDF único do lote → fatia por pedido, casa (numeroloja na Shopee; nome+SKU
+    na TikTok), transforma+grava, marca status_etiqueta='ok', fecha o comando
+    `imprimir_etiqueta` coberto e move os pedidos pra 83965 no Bling. A fatia
+    sem dono volta em `nao_casadas` (nunca chuta)."""
+    import fitz
+
+    from app.models import NfEtiquetaArquivo
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    fake = _FakeBlingSituacao()
+
+    async def _fake_client(_session):
+        return fake
+
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", _fake_client)
+
+    # Shopee: casa pelo nº da plataforma impresso na etiqueta (numeroloja).
+    await _seed_pedido(
+        db, numero="890001", loja="930001", sku="dg053.ci", nome="Capa",
+        unit=500, bling_id=920001, numeroloja="260808LOTE01",
+    )
+    # TikTok: sem nº na etiqueta → casa pelo destinatário + SKU da declaração
+    # (precisa estar na janela recente do casamento reserva).
+    db.add(BlingOrder(
+        bling_id=920002, numero="890002", data=datetime.now(UTC),
+        loja="930002", situacao="15", item_index=0, item_codigo="b011.20",
+        item_descricao="Mala Lisa", item_quantidade=1, itemvalor=161,
+        nome_destinatario="Maria Aparecida Silva",
+    ))
+    # Comando de etiqueta individual coberto pelo lote → fecha 'done'.
+    db.add(NfCommand(
+        action="imprimir_etiqueta", numeros=["890001", "890002"],
+        planilha=b"", nome_arquivo="", status="pending", source="auto",
+    ))
+    # Coberto só EM PARTE (999999 não veio no lote) → segue pending.
+    db.add(NfCommand(
+        action="imprimir_etiqueta", numeros=["890001", "999999"],
+        planilha=b"", nome_arquivo="", status="pending", source="auto",
+    ))
+    await db.commit()
+
+    pdf = _lote_pdf([
+        [
+            "DESTINATÁRIO", "Cleso Menezes", "Pedido: 260808LOTE01",
+            "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+            "REMETENTE", "Loja Origem XYZ",
+        ],
+        ["DECLARAÇÃO DE CONTEÚDO", "SKU", "dg053.ci"],
+        ["DESTINATÁRIO", "Maria Aparecida Silva"],
+        ["DECLARAÇÃO DE CONTEÚDO", "SKU", "b011.20"],
+        ["DESTINATÁRIO", "Cliente Desconhecido"],  # órfã → nao_casadas
+    ])
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta-lote",
+        files={"file": ("lote.pdf", pdf, "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total_fatias"] == 3
+    assert body["casadas"] == ["890001", "890002"]
+    assert body["falhas"] == []
+    assert len(body["nao_casadas"]) == 1
+    assert body["nao_casadas"][0]["fatia"] == 2
+    assert body["comandos_resolvidos"] == 1
+
+    db.expire_all()
+    # etiquetas gravadas TRANSFORMADAS (remetente=destinatário, fatia inteira)
+    etq1 = (await db.execute(
+        select(NfEtiquetaArquivo).where(NfEtiquetaArquivo.pedido_bling == "890001")
+    )).scalar_one()
+    doc1 = fitz.open(stream=etq1.blob, filetype="pdf")
+    assert doc1.page_count == 2  # etiqueta + declaração juntas
+    assert "Loja Origem" not in doc1[0].get_text()
+    etq2 = (await db.execute(
+        select(NfEtiquetaArquivo).where(NfEtiquetaArquivo.pedido_bling == "890002")
+    )).scalar_one()
+    assert etq2.size_bytes == len(etq2.blob)
+
+    # status_etiqueta='ok' nos casados
+    fats = (await db.execute(
+        select(NfFaturamento).where(
+            NfFaturamento.pedido_bling.in_(["890001", "890002"])
+        )
+    )).scalars().all()
+    assert {f.pedido_bling: f.status_etiqueta for f in fats} == {
+        "890001": "ok", "890002": "ok",
+    }
+
+    # comando coberto fechou; o parcialmente coberto segue na fila
+    cmds = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "imprimir_etiqueta")
+    )).scalars().all()
+    por_numeros = {tuple(c.numeros): c for c in cmds}
+    fechado = por_numeros[("890001", "890002")]
+    assert fechado.status == "done"
+    assert fechado.result == "etiqueta capturada pelo lote"
+    assert por_numeros[("890001", "999999")].status == "pending"
+
+    # pedidos movidos pra "Enviado Etiqueta" (83965) no Bling + espelho local
+    assert set(fake.chamadas) == {(920001, 83965), (920002, 83965)}
+    sit = (await db.execute(
+        select(BlingOrder.situacao).where(
+            BlingOrder.numero.in_(["890001", "890002"])
+        )
+    )).scalars().all()
+    assert set(sit) == {"83965"}
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_lote_pdf_invalido_422(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta-lote",
+        files={"file": ("lote.pdf", b"nao sou pdf", "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "nf_etiqueta_lote_invalido"
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_lote_sem_token_401(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta-lote",
+        files={"file": ("lote.pdf", _lote_pdf([["x"]]), "application/pdf")},
+    )
+    assert r.status_code == 401

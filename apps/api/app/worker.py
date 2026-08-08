@@ -63,6 +63,7 @@ from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.nf_auto_enfileirar import run_auto_enfileirar_nf
+from app.services.nf_recuperar import run_recuperar_nf
 from app.services.notas_fiscais_export import run_export_notas
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
@@ -1120,6 +1121,28 @@ async def nf_auto_enfileirar_tick(ctx: dict) -> None:
         logger.exception("nf_auto_enfileirar_unhandled")
 
 
+async def nf_recuperar_tick(ctx: dict) -> None:
+    """Recuperador de NF: retry de comando failed (teto 3), destrava de lease
+    expirado e re-encadeamento de pedidos 'processando' órfãos (varredura
+    anti-esquecimento). Mesma flag nf_auto_enfileirar (default DESLIGADO);
+    serializado por advisory xact lock próprio dentro do service.
+    """
+    if not get_settings().nf_auto_enfileirar:
+        logger.debug("nf_recuperar_disabled")
+        return
+    try:
+        summary = await run_recuperar_nf()
+        if any(summary.get(k) for k in (
+            "retry", "esgotados", "destravados",
+            "orfaos_faturamento", "orfaos_etiqueta",
+        )):
+            logger.info("nf_recuperar_done", **summary)
+        else:
+            logger.debug("nf_recuperar_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("nf_recuperar_unhandled")
+
+
 async def failed_jobs_alert_scan(ctx: dict) -> None:
     """Emit `sync_failure` alert per BackgroundJob that finished failed in
     the last 10 minutes. Dedupe key per job id keeps it idempotent across
@@ -1754,6 +1777,7 @@ class WorkerSettings:
         logistica_marketplaces_ingest,
         logistica_recarregar,
         nf_auto_enfileirar_tick,
+        nf_recuperar_tick,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -1878,9 +1902,14 @@ class WorkerSettings:
         # Recuperação em minutos em vez de esperar o backfill diário.
         cron(ingest_orders_retry_sweep, minute=_FIVE_MIN, run_at_startup=False),
         # Auto-enfileirador de NF: varre Shopee/TikTok "Em aberto" a cada
-        # 5 min, confere estoque e enfileira a importação avulsa sozinho.
+        # 2 min, confere estoque e enfileira a importação avulsa sozinho
+        # (fundindo o backlog pending num arquivo só por faturador).
         # Inerte enquanto NF_AUTO_ENFILEIRAR não estiver true no .env.
-        cron(nf_auto_enfileirar_tick, minute=_FIVE_MIN, run_at_startup=False),
+        cron(nf_auto_enfileirar_tick, minute=_TWO_MIN, run_at_startup=False),
+        # Recuperador de NF: retry de failed (teto 3 tentativas), destrava de
+        # lease preso (>45min) e re-encadeamento de 'processando' órfão. Mesma
+        # flag NF_AUTO_ENFILEIRAR — inerte enquanto não estiver true no .env.
+        cron(nf_recuperar_tick, minute=_FIVE_MIN, run_at_startup=False),
     ]
     # Marketing agent-node crons (Shopee sync + command consumer + schedule
     # reconciler) are NOT registered here — they run ONLY on the dedicated

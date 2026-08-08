@@ -187,6 +187,8 @@ async def test_sweep_sem_estoque_vai_para_aguardando_cancelamento(
     ).scalar_one()
     assert fat.status_faturamento == "sem_estoque"
     assert "Aguardando Cancelamento" in (fat.erro_faturamento or "")
+    # motivo visível no painel: o erro nomeia o SKU negativo
+    assert "x1" in (fat.erro_faturamento or "")
 
     # tentativa automática única: o sweep NÃO re-pega quem já tem status
     summary2 = await run_auto_enfileirar_nf()
@@ -237,6 +239,112 @@ async def test_sweep_filtra_candidatos(db: AsyncSession, admin: User):
     db.expire_all()
     assert (await db.execute(select(NfCommand))).scalars().all() == []
     assert (await db.execute(select(NfFaturamento))).scalars().all() == []
+
+
+async def _faturador_id(db: AsyncSession, bling_store_id: str):
+    return (
+        await db.execute(
+            select(NfFaturador.id).where(
+                NfFaturador.nome == f"faturador {bling_store_id}"
+            )
+        )
+    ).scalar_one()
+
+
+def _cmd_pending(faturador_id, numeros: list[str]) -> NfCommand:
+    """Pending do próprio sweep (source='auto') aguardando lease."""
+    return NfCommand(
+        faturador_id=faturador_id,
+        action="import_avulsa",
+        numeros=numeros,
+        planilha=b"velho",
+        nome_arquivo="velho.csv",
+        status="pending",
+        source="auto",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sweep_funde_backlog_do_mesmo_faturador(db: AsyncSession, admin: User):
+    """2 pendings do mesmo faturador (executor atrasado) fundem num comando
+    só com planilha nova — mesmo SEM candidato novo no tick."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(db, numero="830001", loja="930001", sku="a1", bling_id=700001)
+    await _seed_pedido(db, numero="830002", loja="930001", sku="a2", bling_id=700002)
+    fat_id = await _faturador_id(db, "930001")
+    db.add(NfFaturamento(pedido_bling="830001", status_faturamento="processando"))
+    db.add(NfFaturamento(pedido_bling="830002", status_faturamento="processando"))
+    db.add(_cmd_pending(fat_id, ["830001"]))
+    db.add(_cmd_pending(fat_id, ["830002"]))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 0
+    assert summary["fundidos"] == 2
+    assert summary["comandos"] == 1
+    assert summary["enfileirados"] == 2
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert len(cmds) == 1
+    assert cmds[0].status == "pending"
+    assert cmds[0].faturador_id == fat_id
+    assert sorted(cmds[0].numeros) == ["830001", "830002"]
+    assert cmds[0].planilha != b"velho"  # planilha regenerada com os 2
+
+
+@pytest.mark.asyncio
+async def test_sweep_pending_unico_nao_recria(db: AsyncSession, admin: User):
+    """Anti-churn: 1 pending por faturador e nada novo → tick não mexe (não
+    deleta/recria o mesmo comando a cada 2 min)."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(db, numero="830001", loja="930001", sku="a1")
+    fat_id = await _faturador_id(db, "930001")
+    db.add(NfFaturamento(pedido_bling="830001", status_faturamento="processando"))
+    db.add(_cmd_pending(fat_id, ["830001"]))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 0
+    assert summary["fundidos"] == 0
+    assert summary["comandos"] == 0
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert len(cmds) == 1
+    assert cmds[0].planilha == b"velho"  # comando original intacto
+
+
+@pytest.mark.asyncio
+async def test_sweep_novo_candidato_funde_com_pending(db: AsyncSession, admin: User):
+    """Candidato novo do mesmo faturador funde com o pending existente: o
+    comando velho some e nasce UM comando com os dois pedidos."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(db, numero="830001", loja="930001", sku="a1", bling_id=700001)
+    await _seed_pedido(db, numero="830002", loja="930001", sku="a2", bling_id=700002)
+    db.add(Product(user_id=admin.id, sku="a2", name="A2", stock=3))
+    fat_id = await _faturador_id(db, "930001")
+    db.add(NfFaturamento(pedido_bling="830001", status_faturamento="processando"))
+    db.add(_cmd_pending(fat_id, ["830001"]))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1
+    assert summary["fundidos"] == 1
+    assert summary["comandos"] == 1
+    assert summary["enfileirados"] == 2
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert len(cmds) == 1
+    assert sorted(cmds[0].numeros) == ["830001", "830002"]
+    assert cmds[0].planilha != b"velho"
+    fat = (
+        await db.execute(
+            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830002")
+        )
+    ).scalar_one()
+    assert fat.status_faturamento == "processando"
 
 
 @pytest.mark.asyncio

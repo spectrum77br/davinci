@@ -12,6 +12,14 @@ existe) e:
                    `import_avulsa` (source='auto') — daí a cadeia normal segue
                    (import → emitir_nf_upseller → imprimir_etiqueta).
 
+MERGE do backlog: comandos `import_avulsa` pending (source='auto') que o
+executor ainda não leaseou são FUNDIDOS com os candidatos novos do tick — o
+faturador recebe UM xlsx com tudo em vez de N arquivos de 1 pedido ("se tiver
+5 importa 5, se tiver 1 importa um"). FOR UPDATE SKIP LOCKED espelha o
+/agent/lease: comando em lease é pulado aqui e vice-versa. Comando fundido é
+DELETADO (nunca 'done' — done encadearia a etiqueta); bloco idêntico a um
+pending existente reusa o comando antigo (anti-churn).
+
 Tentativa automática ÚNICA por pedido: quem já tem QUALQUER
 `nf_faturamento.status_faturamento` (processando/ok/erro/sem_estoque) nunca é
 re-pego pelo sweep — falha exige re-enfileirar humano pelo painel. Isso também
@@ -64,6 +72,7 @@ async def run_auto_enfileirar_nf() -> dict:
         "comandos": 0,
         "sem_estoque": 0,
         "pulados": 0,
+        "fundidos": 0,
     }
     async with session_scope() as session:
         got = (
@@ -78,8 +87,6 @@ async def run_auto_enfileirar_nf() -> dict:
 
         numeros = await _candidatos(session)
         summary["candidatos"] = len(numeros)
-        if not numeros:
-            return summary
 
         # Helpers do endpoint manual — mesma regra, mesmo comportamento.
         from app.routers.nf import (
@@ -89,27 +96,66 @@ async def run_auto_enfileirar_nf() -> dict:
             _pedidos_sem_estoque,
         )
 
+        # 0) Backlog fundível: pendings do próprio sweep que o executor ainda
+        #    não leaseou. SKIP LOCKED = comando no meio de um /agent/lease é
+        #    invisível aqui (e o lease pula os que travamos agora).
+        pendings = (
+            await session.execute(
+                select(NfCommand)
+                .where(
+                    NfCommand.action == "import_avulsa",
+                    NfCommand.status == "pending",
+                    NfCommand.source == "auto",
+                )
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars().all()
+        pendings_por_fat: dict = {}
+        for cmd in pendings:
+            pendings_por_fat.setdefault(cmd.faturador_id, []).append(cmd)
+        # Fragmentado = algum faturador com MAIS de um pending (vale fundir
+        # mesmo sem candidato novo). 1 pending por faturador já está ótimo.
+        fragmentado = any(len(v) > 1 for v in pendings_por_fat.values())
+        if not numeros and not fragmentado:
+            return summary
+
         # 1) Estoque primeiro: saldo virtual negativo → Aguardando Cancelamento.
-        sem_estoque = await _pedidos_sem_estoque(session, numeros)
+        #    Só os candidatos NOVOS — o backlog já passou no check ao entrar.
+        sem_estoque = await _pedidos_sem_estoque(session, numeros) if numeros else {}
         if sem_estoque:
             await _marcar_aguardando_cancelamento(session, list(sem_estoque))
-            await _marcar_faturamento(
-                session,
-                list(sem_estoque),
-                status_txt="sem_estoque",
-                erro="Aguardando Cancelamento — saldo negativo",
-            )
+            # Erro por pedido com os SKUs negativos — o painel mostra no
+            # tooltip do badge "Sem estoque" QUAL peça travou.
+            for numero, skus in sem_estoque.items():
+                await _marcar_faturamento(
+                    session,
+                    [numero],
+                    status_txt="sem_estoque",
+                    erro=(
+                        "Aguardando Cancelamento — saldo negativo: "
+                        + ", ".join(skus)
+                    ),
+                )
             summary["sem_estoque"] = len(sem_estoque)
             logger.info(
                 "nf_auto_enfileirar_sem_estoque",
                 pedidos={n: skus for n, skus in sem_estoque.items()},
             )
         restantes = [n for n in numeros if n not in sem_estoque]
-        if not restantes:
+        if not restantes and not fragmentado:
             return summary
 
         # 2) Planilha por faturador + comandos de import (cadeia normal).
-        res = await nf_emissao_gerar.gerar_por_faturador(session, restantes)
+        #    União: candidatos novos + números do backlog pending — o gerador
+        #    reagrupa por faturador e sai UM arquivo por faturador/chunk.
+        pend_numeros = [
+            n
+            for cmd in pendings
+            for n in (cmd.numeros or [])
+            if n not in restantes
+        ]
+        uniao = restantes + list(dict.fromkeys(pend_numeros))
+        res = await nf_emissao_gerar.gerar_por_faturador(session, uniao)
 
         # Pulado (ex. loja sem faturador que escapou do filtro) vira 'erro' de
         # uma vez — sem isso o mesmo pedido voltaria a cada tick pra sempre.
@@ -124,17 +170,54 @@ async def run_auto_enfileirar_nf() -> dict:
                 pulados=[{"numero": p.numero, "motivo": p.motivo} for p in res.pulados],
             )
 
+        # 3) Anti-churn: bloco idêntico a UM pending do mesmo faturador reusa
+        #    o comando antigo (não deleta/recria a cada tick). O resto do
+        #    backlog lockado é fundido nos blocos novos e DELETADO — nunca
+        #    'done' (done encadearia etiqueta como se tivesse importado).
+        fundir = list(pendings)
+        blocos_novos = []
+        for bloco in res.blocos:
+            alvo = set(bloco.numeros)
+            match = next(
+                (
+                    c
+                    for c in pendings_por_fat.get(bloco.faturador_id, [])
+                    if c in fundir and set(c.numeros or []) == alvo
+                ),
+                None,
+            )
+            if match is not None:
+                fundir.remove(match)
+                continue
+            blocos_novos.append(bloco)
+        for cmd in fundir:
+            await session.delete(cmd)
+        if fundir:
+            summary["fundidos"] = len(fundir)
+            logger.info(
+                "nf_auto_enfileirar_fundidos",
+                comandos=[str(c.id) for c in fundir],
+            )
+
+        # Recalcula a fila DEPOIS dos deletes (autoflush emite os DELETEs
+        # antes do SELECT) — sobram claimed + pendings mantidos/skip-locked.
         em_fila = await _em_fila(session, "import_avulsa")
         total_ok = 0
-        for bloco in res.blocos:
-            criar = [n for n in bloco.numeros if n not in em_fila]
-            if not criar:
+        for bloco in blocos_novos:
+            if any(n in em_fila for n in bloco.numeros):
+                # NUNCA criar comando cujos números divergem da planilha
+                # congelada (o Upseller importaria o pedido extra). Conflito
+                # aqui é raro (número reapareceu num comando claimed no meio
+                # do tick) — fica pro próximo tick / varredura de órfãos.
+                logger.warning(
+                    "nf_auto_enfileirar_bloco_conflito", numeros=bloco.numeros
+                )
                 continue
             session.add(
                 NfCommand(
                     faturador_id=bloco.faturador_id,
                     action="import_avulsa",
-                    numeros=criar,
+                    numeros=bloco.numeros,
                     planilha=bloco.planilha,
                     nome_arquivo=bloco.nome_arquivo,
                     status="pending",
@@ -142,10 +225,10 @@ async def run_auto_enfileirar_nf() -> dict:
                 )
             )
             await _marcar_faturamento(
-                session, criar, status_txt="processando", erro=None
+                session, bloco.numeros, status_txt="processando", erro=None
             )
             summary["comandos"] += 1
-            total_ok += len(criar)
+            total_ok += len(bloco.numeros)
         summary["enfileirados"] = total_ok
     # session_scope commita na saída — tudo numa transação só (o advisory
     # xact lock vive até aqui).

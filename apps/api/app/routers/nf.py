@@ -6,10 +6,11 @@ faturador; a lista é extensível. A automação (emissão da NF) é construída
 depois — aqui é só o CRUD do cadastro.
 """
 
+import asyncio
 import base64
 import json
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -72,6 +73,7 @@ from app.security.cipher import decrypt, encrypt
 from app.services import (
     melhor_envio,
     nf_emissao_gerar,
+    nf_etiqueta_lote,
     nf_frete_auto,
     nf_relatorio,
     nf_upseller,
@@ -88,6 +90,17 @@ from app.services.nf_etiqueta_transform import (
 
 # Teto do PDF cru da etiqueta que a marionete sobe pra transformação (item 2).
 _ETIQUETA_MAX_BYTES = 8 * 1024 * 1024
+
+# Teto do PDF ÚNICO da impressão em LOTE (N etiquetas + declarações num PDF só).
+_ETIQUETA_LOTE_MAX_BYTES = 40 * 1024 * 1024
+
+# Janela do casamento reserva do lote (destinatário + SKU): pedidos mais velhos
+# que isso não entram como candidatos — evita casar homônimo antigo.
+_ETIQUETA_LOTE_JANELA = timedelta(days=14)
+
+# Pausa entre PATCHes de situação no Bling (rate limit — PATCHes em rajada
+# derrubavam parte dos "Enviado Etiqueta").
+_BLING_PATCH_PAUSA_S = 0.5
 
 # Situação custom do shop no Bling. É ela que faz o pedido aparecer na aba
 # Pedidos do Controle de Estoque pra ser impresso (ver routers/estoque.py).
@@ -936,7 +949,11 @@ async def _marcar_enviado_etiqueta(
     if client is None:
         logger.warning("nf_enviado_etiqueta_sem_bling", numeros=list(pendentes))
         return
+    primeiro = True
     for numero, bling_id in pendentes.items():
+        if not primeiro:
+            await asyncio.sleep(_BLING_PATCH_PAUSA_S)
+        primeiro = False
         try:
             await client.update_order_situacao(
                 int(bling_id), _SITUACAO_ENVIADO_ETIQUETA
@@ -1135,6 +1152,33 @@ async def _criar_comandos_etiqueta(
     return len(criar)
 
 
+async def _resolver_comandos_etiqueta(
+    session: AsyncSession, numeros: list[str]
+) -> int:
+    """Fecha como 'done' os comandos `imprimir_etiqueta` ativos cujos pedidos
+    tiveram a etiqueta capturada pelo LOTE — o comando individual não precisa
+    mais rodar. Só fecha quando TODOS os numeros do comando foram cobertos."""
+    if not numeros:
+        return 0
+    cobertos = set(numeros)
+    cmds = (
+        await session.execute(
+            select(NfCommand).where(
+                NfCommand.action == "imprimir_etiqueta",
+                NfCommand.status.in_(["pending", "claimed"]),
+            )
+        )
+    ).scalars().all()
+    fechados = 0
+    for cmd in cmds:
+        if cmd.numeros and set(cmd.numeros) <= cobertos:
+            cmd.status = "done"
+            cmd.result = "etiqueta capturada pelo lote"
+            cmd.completed_at = datetime.now(UTC)
+            fechados += 1
+    return fechados
+
+
 async def _enfileirar_etiqueta_ml(
     session: AsyncSession, numeros: list[str]
 ) -> int:
@@ -1189,12 +1233,15 @@ async def enfileirar_importacao(
     ]
     if sem_estoque:
         await _marcar_aguardando_cancelamento(session, list(sem_estoque))
-        await _marcar_faturamento(
-            session,
-            list(sem_estoque),
-            status_txt="sem_estoque",
-            erro="Aguardando Cancelamento — saldo negativo",
-        )
+        # Erro por pedido com os SKUs negativos — o painel mostra no tooltip
+        # do badge "Sem estoque" QUAL peça travou (sem ir caçar no log).
+        for numero, skus in sem_estoque.items():
+            await _marcar_faturamento(
+                session,
+                [numero],
+                status_txt="sem_estoque",
+                erro=f"Aguardando Cancelamento — saldo negativo: {', '.join(skus)}",
+            )
         await session.commit()
     numeros = [n for n in body.numeros if n not in sem_estoque]
     res = (
@@ -1532,6 +1579,150 @@ async def nf_agent_etiqueta(
         "nf_agent_etiqueta", pedido_bling=pedido_bling, size=len(transformado)
     )
     return {"ok": True, "pedido_bling": pedido_bling, "size_bytes": len(transformado)}
+
+
+@router.post(
+    "/agent/etiqueta-lote",
+    dependencies=[Depends(_require_nf_agent_token)],
+)
+async def nf_agent_etiqueta_lote(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    file: Annotated[UploadFile, File()],
+) -> dict:
+    """Recebe o PDF ÚNICO da impressão em LOTE do Upseller (todas as etiquetas
+    marcadas de uma vez), fatia em uma etiqueta por pedido, casa cada fatia com
+    o pedido do davinci, transforma (mesma regra do /agent/etiqueta) e grava.
+    Pros pedidos gravados: status_etiqueta='ok', fecha os comandos
+    `imprimir_etiqueta` cobertos e move pra "Enviado Etiqueta" no Bling.
+
+    Casamento: 1º pelo nº da plataforma impresso na etiqueta ("Pedido: X" →
+    bling_orders.numeroloja, Shopee); reserva pelo NOME do destinatário + SKU
+    da declaração (TikTok), só quando inequívoco. O que não casar volta em
+    `nao_casadas` pra tratamento humano — nunca chuta.
+    """
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, detail={"code": "nf_etiqueta_lote_vazio"})
+    if len(raw) > _ETIQUETA_LOTE_MAX_BYTES:
+        raise HTTPException(413, detail={"code": "nf_etiqueta_lote_grande"})
+    try:
+        fatias = nf_etiqueta_lote.fatiar_lote(raw)
+    except nf_etiqueta_lote.EtiquetaLoteError as exc:
+        raise HTTPException(
+            422, detail={"code": "nf_etiqueta_lote_invalido", "erro": str(exc)}
+        ) from exc
+
+    # 1) Casamento primário: nº da plataforma na etiqueta → numeroloja.
+    numerolojas = [f.numeroloja for f in fatias if f.numeroloja]
+    por_loja: dict[str, tuple[str, str | None]] = {}
+    if numerolojas:
+        rows = (
+            await session.execute(
+                select(
+                    BlingOrder.numeroloja,
+                    BlingOrder.numero,
+                    BlingOrder.nome_destinatario,
+                )
+                .where(BlingOrder.numeroloja.in_(numerolojas))
+                .where(BlingOrder.numero.is_not(None))
+                .distinct()
+            )
+        ).all()
+        por_loja = {r.numeroloja: (r.numero, r.nome_destinatario) for r in rows}
+
+    # 2) Candidatos do casamento reserva (destinatário + SKU), janela recente.
+    cutoff = datetime.now(UTC) - _ETIQUETA_LOTE_JANELA
+    cand_rows = (
+        await session.execute(
+            select(
+                BlingOrder.numero,
+                BlingOrder.nome_destinatario,
+                BlingOrder.item_codigo,
+            )
+            .where(
+                BlingOrder.numero.is_not(None),
+                BlingOrder.nome_destinatario.is_not(None),
+                BlingOrder.data >= cutoff,
+            )
+            .distinct()
+        )
+    ).all()
+    cand_map: dict[str, tuple[str | None, set[str]]] = {}
+    for r in cand_rows:
+        _nome, skus = cand_map.setdefault(r.numero, (r.nome_destinatario, set()))
+        if r.item_codigo:
+            skus.add(r.item_codigo)
+    candidatos = [(n, nome, skus) for n, (nome, skus) in cand_map.items()]
+
+    gravadas: list[str] = []
+    nao_casadas: list[dict] = []
+    falhas: list[dict] = []
+    for i, fatia in enumerate(fatias):
+        numero: str | None = None
+        nome: str | None = None
+        if fatia.numeroloja and fatia.numeroloja in por_loja:
+            numero, nome = por_loja[fatia.numeroloja]
+        if numero is None:
+            numero = nf_etiqueta_lote.casa_por_texto(fatia.texto, candidatos)
+            if numero is not None:
+                nome = cand_map[numero][0]
+        if numero is None:
+            nao_casadas.append(
+                {
+                    "fatia": i,
+                    "numeroloja": fatia.numeroloja,
+                    "paginas": [fatia.pagina_ini, fatia.pagina_fim],
+                }
+            )
+            continue
+        try:
+            transformado = transformar_etiqueta(
+                fatia.pdf, (nome or "").strip() or None
+            )
+        except EtiquetaTransformError as exc:
+            falhas.append({"numero": numero, "erro": str(exc)})
+            continue
+        row = (
+            await session.execute(
+                select(NfEtiquetaArquivo).where(
+                    NfEtiquetaArquivo.pedido_bling == numero
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = NfEtiquetaArquivo(pedido_bling=numero)
+            session.add(row)
+        row.filename = f"etiqueta_{numero}.pdf"
+        row.content_type = "application/pdf"
+        row.size_bytes = len(transformado)
+        row.blob = transformado
+        # Flush pra próxima fatia do mesmo pedido achar a linha no SELECT.
+        await session.flush()
+        gravadas.append(numero)
+
+    unicos = list(dict.fromkeys(gravadas))
+    comandos_resolvidos = 0
+    if unicos:
+        await _marcar_etiqueta(session, unicos, status_txt="ok", erro=None)
+        comandos_resolvidos = await _resolver_comandos_etiqueta(session, unicos)
+        await _marcar_enviado_etiqueta(session, unicos)
+    await session.commit()
+    logger.info(
+        "nf_agent_etiqueta_lote",
+        total_fatias=len(fatias),
+        casadas=len(unicos),
+        nao_casadas=len(nao_casadas),
+        falhas=len(falhas),
+        comandos_resolvidos=comandos_resolvidos,
+    )
+    return {
+        "ok": True,
+        "total_fatias": len(fatias),
+        "casadas": unicos,
+        "nao_casadas": nao_casadas,
+        "falhas": falhas,
+        "comandos_resolvidos": comandos_resolvidos,
+    }
 
 
 @router.post(
