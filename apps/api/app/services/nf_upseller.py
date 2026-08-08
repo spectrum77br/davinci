@@ -55,6 +55,16 @@ _SKU_CELULAR = "e3"
 _SKU_MALA = "m200"
 _SKU_MALA_KIT = "m100"
 
+# O Upseller REJEITA SKUs repetidos no mesmo pedido ("Não são permitidos SKUs
+# duplicados no mesmo pedido") — pedidos multi-item da MESMA família precisam
+# alternar SKUs equivalentes do catálogo (regra do usuário 08/08: celular
+# e3→e4; mala alterna m200/m100), mantendo o MESMO nº do pedido (unificação).
+_SKU_ALTERNATIVAS = {
+    _SKU_CELULAR: [_SKU_CELULAR, "e4"],
+    _SKU_MALA: [_SKU_MALA, _SKU_MALA_KIT],
+    _SKU_MALA_KIT: [_SKU_MALA_KIT, _SKU_MALA],
+}
+
 # Texto de observação da linha 1 do modelo (verbatim do "Baixar o Modelo").
 _OBS_TEXTO = (
     "Observação:Preencha o modelo de acordo com as regras abaixo para evitar "
@@ -199,6 +209,24 @@ def sku_para_categoria(categoria: str | None) -> str:
     if "mala" in c:
         return _SKU_MALA_KIT if "kit" in c else _SKU_MALA
     return _SKU_CELULAR
+
+
+def skus_para_itens(categorias: list) -> list[str]:
+    """SKU genérico por ITEM de um mesmo pedido, SEM repetir SKU (o Upseller
+    rejeita duplicados no pedido). Cada item pega o SKU base da categoria; se
+    já foi usado no pedido, cai na alternativa (e3→e4, m200↔m100). Esgotadas
+    as alternativas, repete a base (o import aponta o erro em vez de mascarar)."""
+    usados: set[str] = set()
+    out: list[str] = []
+    for cat in categorias:
+        base = sku_para_categoria(cat)
+        sku = next(
+            (s for s in _SKU_ALTERNATIVAS.get(base, [base]) if s not in usados),
+            base,
+        )
+        usados.add(sku)
+        out.append(sku)
+    return out
 
 
 def estado_por_extenso(uf: str | None) -> str:

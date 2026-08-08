@@ -286,12 +286,12 @@ class _PedidoMontado:
 def _linhas_upseller(m: _PedidoMontado) -> list:
     """Linhas com o SKU trocado pelo GENÉRICO do catálogo Upseller (e3/m200/
     m100 por categoria) — o import rejeita SKU que não exista lá. Só o arquivo
-    .xlsx do Upseller usa; o CSV do Bling mantém o SKU real."""
+    .xlsx do Upseller usa; o CSV do Bling mantém o SKU real. SKUs NÃO se
+    repetem no mesmo pedido (Upseller rejeita duplicados): 2º celular vira e4,
+    malas alternam m200/m100."""
     cats = m.categorias or [None] * len(m.linhas)
-    return [
-        replace(linha, sku=nf_upseller.sku_para_categoria(cat))
-        for linha, cat in zip(m.linhas, cats)
-    ]
+    skus = nf_upseller.skus_para_itens(cats)
+    return [replace(linha, sku=sku) for linha, sku in zip(m.linhas, skus)]
 
 
 async def _montar_pedidos(

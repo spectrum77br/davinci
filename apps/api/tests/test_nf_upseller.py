@@ -124,6 +124,22 @@ def test_sku_generico_por_categoria():
     assert nf_upseller.sku_para_categoria("") == "e3"
 
 
+def test_skus_para_itens_nao_repete_no_pedido():
+    # O Upseller rejeita SKUs duplicados no mesmo pedido: 2º celular vira e4,
+    # malas alternam m200/m100. Esgotadas as alternativas, repete a base.
+    assert nf_upseller.skus_para_itens(["Celular", "Celular"]) == ["e3", "e4"]
+    assert nf_upseller.skus_para_itens(["Mala", "Mala"]) == ["m200", "m100"]
+    assert nf_upseller.skus_para_itens(["Mala Kit", "Mala"]) == ["m100", "m200"]
+    # 1 item só: mantém o base (comportamento antigo intacto).
+    assert nf_upseller.skus_para_itens(["Celular"]) == ["e3"]
+    assert nf_upseller.skus_para_itens([None]) == ["e3"]
+    # Misto celular+mala não colide, cada um fica no seu base.
+    assert nf_upseller.skus_para_itens(["Celular", "Mala"]) == ["e3", "m200"]
+    # 3º da mesma família: alternativas esgotadas → repete a base (o import
+    # aponta o erro em vez de inventar SKU que não existe no catálogo).
+    assert nf_upseller.skus_para_itens(["Celular"] * 3) == ["e3", "e4", "e3"]
+
+
 def test_loja_avulsa_registrada():
     # A loja do arquivo precisa ser uma loja REGISTRADA na conta Upseller.
     assert nf_upseller.LOJA_AVULSA == "Loja Padrão"
