@@ -102,8 +102,12 @@ def test_calcular_afrmm_8pct_frete_e_taxas_brl_via_cambio():
     assert linhas["Taxa SISCOMEX"].brl == pytest.approx(154.23)
     assert linhas["Taxa BL"].usd == pytest.approx(3300 / 5.0)
     assert linhas["Taxa BL"].brl == pytest.approx(3300.0)
-    # subtotal = CIF + impostos + AFRMM + taxas BRL/câmbio
-    impostos = 2000 * (0.16 + 0.05 + 0.021 + 0.0965)
+    # subtotal = CIF + impostos + AFRMM + taxas BRL/câmbio.
+    # Só o IPI tem base (CIF + II); os demais são sobre o CIF.
+    ii = 2000 * 0.16
+    ipi = (2000 + ii) * 0.05
+    assert linhas["IPI"].usd == pytest.approx(ipi)
+    impostos = ii + ipi + 2000 * (0.021 + 0.0965)
     taxas = (154.23 + 3300 + 3644.18 + 500 + 1688 + 70 + 200) / 5.0
     assert d["subtotal"] == pytest.approx(2000 + impostos + 80 + taxas)
 

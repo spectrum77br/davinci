@@ -265,10 +265,11 @@ async function lookupNCM() {
     }
     const r = await api<NCMOut>(`/api/financeiro/ncm/${encodeURIComponent(current.value.ncm)}`)
     if (r.descricao) scheduleSave('descricao_ncm', r.descricao)
-    if (r.aliquota_ii != null) scheduleSave('aliquota_ii', r.aliquota_ii)
-    if (r.aliquota_ipi != null) scheduleSave('aliquota_ipi', r.aliquota_ipi)
-    if (r.aliquota_pis != null) scheduleSave('aliquota_pis', r.aliquota_pis)
-    if (r.aliquota_cofins != null) scheduleSave('aliquota_cofins', r.aliquota_cofins)
+    // O cache guarda PERCENTUAL (18,5); a simulação guarda FRAÇÃO (0,185).
+    if (r.aliquota_ii != null) scheduleSave('aliquota_ii', round6(r.aliquota_ii / 100))
+    if (r.aliquota_ipi != null) scheduleSave('aliquota_ipi', round6(r.aliquota_ipi / 100))
+    if (r.aliquota_pis != null) scheduleSave('aliquota_pis', round6(r.aliquota_pis / 100))
+    if (r.aliquota_cofins != null) scheduleSave('aliquota_cofins', round6(r.aliquota_cofins / 100))
     ncmStatus.value = r.cached
       ? 'NCM em cache — alíquotas preenchidas.'
       : 'Descrição carregada da brasilapi. Preencha as alíquotas e clique em "Salvar no cache".'
@@ -282,11 +283,12 @@ async function salvarAliquotasNoCache() {
   try {
     await api(`/api/financeiro/ncm/${encodeURIComponent(current.value.ncm)}`, {
       method: 'PATCH',
+      // Volta pra PERCENTUAL — formato do cache.
       body: {
-        aliquota_ii: current.value.aliquota_ii,
-        aliquota_ipi: current.value.aliquota_ipi,
-        aliquota_pis: current.value.aliquota_pis,
-        aliquota_cofins: current.value.aliquota_cofins,
+        aliquota_ii: pctParaCache(current.value.aliquota_ii),
+        aliquota_ipi: pctParaCache(current.value.aliquota_ipi),
+        aliquota_pis: pctParaCache(current.value.aliquota_pis),
+        aliquota_cofins: pctParaCache(current.value.aliquota_cofins),
       },
     })
     ncmStatus.value = 'Alíquotas salvas no cache.'
@@ -311,7 +313,8 @@ const calc = computed(() => {
   const totalInvoice = valorUnit * qtd
   const cif = totalInvoice + frete
   const ii = cif * n(c.aliquota_ii)
-  const ipi = cif * n(c.aliquota_ipi)
+  // Só o IPI tem base (TOTAL CIF + II); os demais são sobre o CIF.
+  const ipi = (cif + ii) * n(c.aliquota_ipi)
   const pis = cif * n(c.aliquota_pis)
   const cofins = cif * n(c.aliquota_cofins)
   const afrmm = frete * 0.08
@@ -405,8 +408,10 @@ const custoRows = computed(() => {
 
 // Bidirecional USD↔BRL: editar o lado não-canônico converte pelo
 // câmbio e persiste no campo canônico.
-function round2(v: number): number {
-  return Math.round(v * 100) / 100
+// 6 casas na conversão: arredondar em 2 perdia centavo no round-trip
+// (12000 / 5,2 = 2307,69 → × 5,2 = 11999,99).
+function round6(v: number): number {
+  return Math.round(v * 1e6) / 1e6
 }
 function onEditUsd(r: CustoRow, raw: string) {
   const v = Number(raw)
@@ -415,7 +420,7 @@ function onEditUsd(r: CustoRow, raw: string) {
     return
   }
   const cambio = calc.value?.cambio || 1
-  scheduleSave(r.field!, r.cur === 'brl' ? round2(v * cambio) : v)
+  scheduleSave(r.field!, r.cur === 'brl' ? round6(v * cambio) : v)
 }
 function onEditBrl(r: CustoRow, raw: string) {
   const v = Number(raw)
@@ -424,7 +429,20 @@ function onEditBrl(r: CustoRow, raw: string) {
     return
   }
   const cambio = calc.value?.cambio || 1
-  scheduleSave(r.field!, r.cur === 'usd' ? round2(v / cambio) : v)
+  scheduleSave(r.field!, r.cur === 'usd' ? round6(v / cambio) : v)
+}
+
+// Alíquotas são persistidas como FRAÇÃO (0,185) mas o operador digita
+// PERCENTUAL (18,5) — igual ao que a coluna mostra em modo leitura.
+function aliqPct(v: number | null | undefined): string {
+  return v == null ? '' : String(round6(Number(v) * 100))
+}
+function onEditAliquota(field: keyof Cotacao, raw: string) {
+  const v = Number(raw)
+  scheduleSave(field, raw === '' || isNaN(v) ? null : round6(v / 100))
+}
+function pctParaCache(v: number | null | undefined): number | null {
+  return v == null ? null : round6(Number(v) * 100)
 }
 </script>
 
@@ -578,7 +596,7 @@ function onEditBrl(r: CustoRow, raw: string) {
               <th class="text-left">Descrição</th>
               <th class="text-right">USD</th>
               <th class="text-right">BRL</th>
-              <th class="text-right w-[110px]">Alíquota</th>
+              <th class="text-right w-[110px]">Alíquota %</th>
             </tr>
           </thead>
           <tbody>
@@ -601,10 +619,10 @@ function onEditBrl(r: CustoRow, raw: string) {
                 <span v-else>{{ r.raw ? '—' : fmtBRL(brl(r.usd)) }}</span>
               </td>
               <td class="text-right">
-                <input v-if="r.kind === 'aliquota' && canEdit" type="number" step="0.0001"
-                  class="cell-input cell-orange text-right"
-                  :value="(current as any)[r.aliq] ?? ''"
-                  @input="(e) => scheduleSave(r.aliq as keyof Cotacao, Number((e.target as HTMLInputElement).value) || null)" />
+                <input v-if="r.kind === 'aliquota' && canEdit" type="number" step="0.01"
+                  class="cell-input cell-orange text-right" title="Em porcentagem (ex: 18,5 = 18,5%)"
+                  :value="aliqPct((current as any)[r.aliq])"
+                  @input="(e) => onEditAliquota(r.aliq as keyof Cotacao, (e.target as HTMLInputElement).value)" />
                 <span v-else-if="typeof r.aliq === 'number'" class="calc-inline">{{ fmtPct(r.aliq) }}</span>
                 <span v-else-if="r.aliq" class="calc-inline">{{ fmtPct((current as any)[r.aliq]) }}</span>
                 <span v-else>—</span>

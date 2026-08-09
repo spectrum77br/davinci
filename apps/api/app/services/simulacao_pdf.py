@@ -57,7 +57,8 @@ def calcular(sim: object) -> dict:
     total_invoice = valor_unit * qtd
     cif = total_invoice + frete
     ii = cif * g("aliquota_ii")
-    ipi = cif * g("aliquota_ipi")
+    # Só o IPI tem base (TOTAL CIF + II); os demais são sobre o CIF.
+    ipi = (cif + ii) * g("aliquota_ipi")
     pis = cif * g("aliquota_pis")
     cofins = cif * g("aliquota_cofins")
     afrmm = frete * _AFRMM_PCT
