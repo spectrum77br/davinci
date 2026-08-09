@@ -51,7 +51,7 @@ _ITENS_SQL = text(
         bo.itemvalor           AS valor_unitario,
         bo.categoria_nome      AS categoria,
         bo.bling_id            AS bling_id,
-        bo.numero_documento    AS documento,
+        bo.documento_destinatario AS documento,
         bo.nome_destinatario   AS nome_destinatario,
         bo.cep_destino         AS cep_destino,
         bo.endereco_destino    AS endereco_destino,

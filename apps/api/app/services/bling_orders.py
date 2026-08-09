@@ -105,6 +105,14 @@ def _int(raw: Any) -> int | None:
         return None
 
 
+def _documento(raw: Any) -> str | None:
+    """CPF/CNPJ só com dígitos (o Bling manda formatado, com pontos e traços)."""
+    if raw is None:
+        return None
+    digitos = "".join(c for c in str(raw) if c.isdigit())
+    return digitos or None
+
+
 async def _resolve_store_id(
     session: AsyncSession, bling_loja_id: int | None
 ) -> UUID | None:
@@ -291,6 +299,9 @@ def _row_from_item(
         "categoria_id": categoria_id,
         "categoria_nome": categoria_nome,
         "nome_destinatario": _t_contato.get("nome") or _buyer.get("nome") or None,
+        "documento_destinatario": _documento(
+            _buyer.get("numeroDocumento") or _t_contato.get("numeroDocumento")
+        ),
         "cep_destino": _addr("cep"),
         "endereco_destino": _addr("endereco"),
         "numero_destino": _addr("numero"),
@@ -604,6 +615,13 @@ async def upsert_order(
             nome = _ct.get("nome") or _buyer.get("nome") or None
             if nome:
                 values["nome_destinatario"] = nome
+            # Backfill do CPF/CNPJ (migration 0215): cada webhook de mudança de
+            # situação preenche os pedidos antigos, sem varredura em massa.
+            doc = _documento(
+                _buyer.get("numeroDocumento") or _ct.get("numeroDocumento")
+            )
+            if doc:
+                values["documento_destinatario"] = doc
             for col, tp_f, buyer_f in [
                 ("cep_destino", "cep", None),
                 ("endereco_destino", "endereco", None),

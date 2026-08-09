@@ -95,6 +95,10 @@ class BlingOrder(Base, TimestampMixin):
     )
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     nome_destinatario: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # CPF/CNPJ do cliente (contato.numeroDocumento), só dígitos. Chave do
+    # casamento das etiquetas em lote. NÃO confundir com `numero_documento`,
+    # que guarda o numeroPedidoCompra.
+    documento_destinatario: Mapped[str | None] = mapped_column(Text, nullable=True)
     cep_destino: Mapped[str | None] = mapped_column(Text, nullable=True)
     endereco_destino: Mapped[str | None] = mapped_column(Text, nullable=True)
     numero_destino: Mapped[str | None] = mapped_column(Text, nullable=True)

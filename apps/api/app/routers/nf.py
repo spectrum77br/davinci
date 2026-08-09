@@ -28,7 +28,7 @@ from fastapi import (
 )
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import asc, select, text, update
+from sqlalchemy import asc, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -1595,10 +1595,12 @@ async def nf_agent_etiqueta_lote(
     Pros pedidos gravados: status_etiqueta='ok', fecha os comandos
     `imprimir_etiqueta` cobertos e move pra "Enviado Etiqueta" no Bling.
 
-    Casamento: 1º pelo nº da plataforma impresso na etiqueta ("Pedido: X" →
-    bling_orders.numeroloja, Shopee); reserva pelo NOME do destinatário + SKU
-    da declaração (TikTok), só quando inequívoco. O que não casar volta em
-    `nao_casadas` pra tratamento humano — nunca chuta.
+    Casamento em cascata: 1º pelo nº da plataforma impresso na etiqueta
+    ("Pedido: X" → bling_orders.numeroloja, Shopee); 2º pelo CPF/CNPJ da
+    declaração de conteúdo → bling_orders.documento_destinatario (chave mais
+    específica, cobre os layouts sem o nº da plataforma); 3º pelo NOME do
+    destinatário + SKU da declaração (TikTok). Todos só quando inequívoco — o
+    que não casar volta em `nao_casadas` pra tratamento humano, nunca chuta.
     """
     raw = await file.read()
     if not raw:
@@ -1635,29 +1637,37 @@ async def nf_agent_etiqueta_lote(
         ).all()
         por_loja = {r.numeroloja: (r.numero, r.nome_destinatario) for r in rows}
 
-    # 2) Candidatos do casamento reserva (destinatário + SKU), janela recente.
+    # 2) Candidatos dos casamentos reserva (CPF/CNPJ e destinatário + SKU),
+    #    janela recente.
     cutoff = datetime.now(UTC) - _ETIQUETA_LOTE_JANELA
     cand_rows = (
         await session.execute(
             select(
                 BlingOrder.numero,
                 BlingOrder.nome_destinatario,
+                BlingOrder.documento_destinatario,
                 BlingOrder.item_codigo,
             )
             .where(
                 BlingOrder.numero.is_not(None),
-                BlingOrder.nome_destinatario.is_not(None),
+                or_(
+                    BlingOrder.nome_destinatario.is_not(None),
+                    BlingOrder.documento_destinatario.is_not(None),
+                ),
                 BlingOrder.data >= cutoff,
             )
             .distinct()
         )
     ).all()
-    cand_map: dict[str, tuple[str | None, set[str]]] = {}
+    cand_map: dict[str, tuple[str | None, str | None, set[str]]] = {}
     for r in cand_rows:
-        _nome, skus = cand_map.setdefault(r.numero, (r.nome_destinatario, set()))
+        _nome, _doc, skus = cand_map.setdefault(
+            r.numero, (r.nome_destinatario, r.documento_destinatario, set())
+        )
         if r.item_codigo:
             skus.add(r.item_codigo)
-    candidatos = [(n, nome, skus) for n, (nome, skus) in cand_map.items()]
+    cand_doc = [(n, doc, skus) for n, (_nome, doc, skus) in cand_map.items()]
+    cand_nome = [(n, nome, skus) for n, (nome, _doc, skus) in cand_map.items()]
 
     gravadas: list[str] = []
     nao_casadas: list[dict] = []
@@ -1670,9 +1680,13 @@ async def nf_agent_etiqueta_lote(
                 numero, nome = por_loja[candidato_loja]
                 break
         if numero is None:
-            numero = nf_etiqueta_lote.casa_por_texto(fatia.texto, candidatos)
-            if numero is not None:
-                nome = cand_map[numero][0]
+            numero = nf_etiqueta_lote.casa_por_documento(
+                fatia.documentos, fatia.texto, cand_doc
+            )
+        if numero is None:
+            numero = nf_etiqueta_lote.casa_por_texto(fatia.texto, cand_nome)
+        if numero is not None and nome is None:
+            nome = cand_map.get(numero, (None, None, set()))[0]
         if numero is None:
             nao_casadas.append(
                 {

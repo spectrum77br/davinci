@@ -98,6 +98,87 @@ def test_numerolojas_nao_casa_dentro_de_codigos():
     assert nf_etiqueta_lote._numerolojas_do_texto(texto) == ["999881646186225"]
 
 
+def test_documentos_destinatario_na_frente():
+    """A declaração traz remetente E destinatário; o do destinatário vem 1º."""
+    texto = (
+        "REMETENTE\nISA TRADING LTDA\nCNPJ: 59.882.322/0001-54\n"
+        "DESTINATÁRIO\nMaria Aparecida Silva\nCPF: 123.456.789-01\n"
+    )
+    assert nf_etiqueta_lote._documentos_do_texto(texto) == [
+        "12345678901",
+        "59882322000154",
+    ]
+
+
+def test_documentos_descarta_numero_de_tamanho_errado():
+    texto = "CPF: 123.456\nCNPJ: 59.882.322/0001-54"
+    assert nf_etiqueta_lote._documentos_do_texto(texto) == ["59882322000154"]
+
+
+def test_fatiar_lote_extrai_documentos():
+    pdf = _lote_pdf(
+        [
+            ["DESTINATÁRIO", "Maria Aparecida Silva"],
+            ["DECLARAÇÃO DE CONTEÚDO", "DESTINATÁRIO", "CPF/CNPJ: 123.456.789-01"],
+        ]
+    )
+    fatias = nf_etiqueta_lote.fatiar_lote(pdf)
+    assert fatias[0].documentos == ["12345678901"]
+
+
+def test_casa_por_documento_unico():
+    candidatos = [
+        ("289404", "12345678901", {"b011.20"}),
+        ("289400", "98765432100", {"a001"}),
+    ]
+    assert (
+        nf_etiqueta_lote.casa_por_documento(["12345678901"], "texto", candidatos)
+        == "289404"
+    )
+
+
+def test_casa_por_documento_sem_match_devolve_none():
+    candidatos = [("289404", "12345678901", {"b011.20"})]
+    assert (
+        nf_etiqueta_lote.casa_por_documento(["00000000000"], "texto", candidatos)
+        is None
+    )
+    # candidato sem documento não participa
+    assert (
+        nf_etiqueta_lote.casa_por_documento(
+            ["12345678901"], "texto", [("289404", None, {"b011.20"})]
+        )
+        is None
+    )
+
+
+def test_casa_por_documento_mesmo_cliente_desempata_por_sku():
+    """Mesmo CPF em 2 pedidos do lote → o SKU da declaração decide."""
+    candidatos = [
+        ("289404", "12345678901", {"b011.20"}),
+        ("289405", "12345678901", {"a001"}),
+    ]
+    texto = "DECLARAÇÃO DE CONTEÚDO\nb011.20"
+    assert (
+        nf_etiqueta_lote.casa_por_documento(["12345678901"], texto, candidatos)
+        == "289404"
+    )
+
+
+def test_casa_por_documento_ambiguo_nao_casa():
+    """Mesmo CPF e mesmo SKU nos dois → não casa (fila manual)."""
+    candidatos = [
+        ("289404", "12345678901", {"b011.20"}),
+        ("289405", "12345678901", {"b011.20"}),
+    ]
+    assert (
+        nf_etiqueta_lote.casa_por_documento(
+            ["12345678901"], "b011.20", candidatos
+        )
+        is None
+    )
+
+
 def test_casa_por_texto_unico():
     texto = "DESTINATÁRIO\nMaria Aparecida Silva\nDECLARAÇÃO DE CONTEÚDO\nb011.20"
     candidatos = [

@@ -15,7 +15,13 @@ módulo é a camada PURA (sem rede, sem banco) que:
    solto no corpo. Quem decide qual candidato vale é o lookup no banco
    (bling_orders.numeroloja) — a fatia nunca chuta.
 
-2. `casa_por_texto(texto, candidatos)` — casamento reserva pra etiqueta SEM o
+2. `casa_por_documento(documentos, texto, candidatos)` — casamento pelo CPF/CNPJ
+   impresso na declaração de conteúdo contra `bling_orders.documento_destinatario`.
+   É a chave mais específica que temos (mais que nome+SKU) e cobre os layouts
+   onde o nº da plataforma não aparece no papel. CPF repetido no lote (mesmo
+   cliente, 2 pedidos) desempata por SKU; se continuar ambíguo, não casa.
+
+3. `casa_por_texto(texto, candidatos)` — casamento reserva pra etiqueta SEM o
    nº da plataforma no corpo (TikTok): casa pelo NOME do destinatário + pelo
    menos um SKU da declaração de conteúdo. A etiqueta TikTok imprime o nome
    ABREVIADO ("ana clara" pra "ANA CLARA ANACLETO PINTO"), então aceita
@@ -52,6 +58,8 @@ class EtiquetaFatia:
     # TODOS os candidatos a nº da plataforma (matches de "Pedido:" + tokens no
     # formato de order_sn da Shopee). O router valida contra o banco.
     numerolojas: list[str]
+    # CPF/CNPJ (só dígitos) achados no papel, destinatário PRIMEIRO.
+    documentos: list[str]
     # Texto completo da fatia (todas as páginas) pro casamento reserva.
     texto: str
 
@@ -66,10 +74,33 @@ _RE_PEDIDO = re.compile(r"Pedido:\s*([A-Z0-9][A-Z0-9-]{5,})", re.IGNORECASE)
 _RE_SHOPEE_SN = re.compile(r"(?<![A-Za-z0-9])\d{6}[A-Z0-9]{8}(?![A-Za-z0-9])")
 
 
+# "CPF/CNPJ: 123.456.789-01" na declaração de conteúdo. Aceita formatado.
+_RE_DOC = re.compile(r"(?:CPF|CNPJ)[^:\d]{0,12}:?\s*([\d.\-/]{11,18})", re.IGNORECASE)
+
+
 def _numerolojas_do_texto(texto: str) -> list[str]:
     """Candidatos a nº da plataforma, na ordem, sem duplicar."""
     achados = _RE_PEDIDO.findall(texto) + _RE_SHOPEE_SN.findall(texto)
     return list(dict.fromkeys(achados))
+
+
+def _documentos_do_texto(texto: str) -> list[str]:
+    """CPF/CNPJ do papel, só dígitos, DESTINATÁRIO na frente.
+
+    A declaração traz o documento do remetente e o do destinatário; qual é
+    qual se decide pelo rótulo mais próximo ANTES do número no texto extraído.
+    Quem não tem 11 (CPF) nem 14 (CNPJ) dígitos é descartado.
+    """
+    up = texto.upper()
+    dest: list[str] = []
+    outros: list[str] = []
+    for m in _RE_DOC.finditer(texto):
+        digitos = "".join(c for c in m.group(1) if c.isdigit())
+        if len(digitos) not in (11, 14):
+            continue
+        alvo = dest if up.rfind("DESTINAT", 0, m.start()) > up.rfind("REMET", 0, m.start()) else outros
+        alvo.append(digitos)
+    return list(dict.fromkeys(dest + outros))
 
 
 def _e_declaracao(texto: str) -> bool:
@@ -107,6 +138,7 @@ def fatiar_lote(pdf_bytes: bytes) -> list[EtiquetaFatia]:
                 pagina_fim=pages[-1],
                 numeroloja=m.group(1) if m else None,
                 numerolojas=_numerolojas_do_texto(texto),
+                documentos=_documentos_do_texto(texto),
                 texto=texto,
             )
         )
@@ -127,6 +159,41 @@ def _sku_no_texto(sku: str, texto: str) -> bool:
         )
         is not None
     )
+
+
+def casa_por_documento(
+    documentos: list[str],
+    texto: str,
+    candidatos: list[tuple[str, str | None, set[str]]],
+) -> str | None:
+    """Casamento pelo CPF/CNPJ do destinatário impresso na declaração.
+
+    `candidatos` = [(numero, documento, skus)] — `documento` é o
+    `bling_orders.documento_destinatario` (só dígitos). Devolve o `numero` do
+    ÚNICO pedido com aquele documento; se o mesmo cliente tem 2 pedidos no
+    lote, desempata exigindo um SKU da declaração. Ambíguo → None (manual).
+    """
+    por_doc: dict[str, list[tuple[str, set[str]]]] = {}
+    for numero, doc, skus in candidatos:
+        if doc:
+            por_doc.setdefault(doc, []).append((numero, skus))
+
+    for doc in documentos:
+        hits = por_doc.get(doc)
+        if not hits:
+            continue
+        numeros = list(dict.fromkeys(n for n, _ in hits))
+        if len(numeros) == 1:
+            return numeros[0]
+        com_sku = [
+            n
+            for n, skus in hits
+            if any(_sku_no_texto(s, texto) for s in skus if s)
+        ]
+        unicos = list(dict.fromkeys(com_sku))
+        if len(unicos) == 1:
+            return unicos[0]
+    return None
 
 
 def _nome_no_texto(nome: str, texto_norm: str) -> bool:
