@@ -66,6 +66,11 @@ _CADEIA_ELETRO = [_SKU_CELULAR, "e4", "e2", "e5"]
 # Contas (account_name, platform) cujo catálogo do Upseller é o de MALA.
 _CONTAS_CATALOGO_MALA = {("poofy", "shopee")}
 
+# Contas cuja Loja registrada no Upseller tem nome DIFERENTE do nome da conta
+# no DaVinci. O import rejeita nome que não exista lá, então o arquivo precisa
+# sair com o nome da loja física (chave = nome da conta em minúsculas).
+_LOJA_UPSELLER = {"victor mei": "rodgrigues (victor mei)"}
+
 # Texto de observação da linha 1 do modelo (verbatim do "Baixar o Modelo").
 _OBS_TEXTO = (
     "Observação:Preencha o modelo de acordo com as regras abaixo para evitar "
@@ -236,6 +241,12 @@ def skus_para_itens(categorias: list, *, catalogo_mala: bool = False) -> list[st
     return out
 
 
+def loja_upseller(conta: str | None) -> str:
+    """Nome da Loja registrada no Upseller para a conta do marketplace."""
+    v = _s(conta)
+    return _LOJA_UPSELLER.get(v.lower(), v)
+
+
 def estado_por_extenso(uf: str | None) -> str:
     """Nome completo do estado a partir da UF; devolve o valor cru se não casar."""
     v = _s(uf).upper()
@@ -315,7 +326,7 @@ def montar_xlsx(
     for pedido, linhas in pedidos:
         # Cada conta de marketplace é uma Loja registrada no Upseller; o arquivo
         # pode misturar lojas (a unificação é pelo par Loja + Nº do Pedido).
-        loja_pedido = _s(pedido.loja) or loja_nome
+        loja_pedido = loja_upseller(pedido.loja) or loja_nome
         for i, linha in enumerate(linhas):
             ws.append(
                 _linha(
