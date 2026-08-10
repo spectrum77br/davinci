@@ -1155,9 +1155,12 @@ async def _criar_comandos_etiqueta(
 async def _resolver_comandos_etiqueta(
     session: AsyncSession, numeros: list[str]
 ) -> int:
-    """Fecha como 'done' os comandos `imprimir_etiqueta` ativos cujos pedidos
-    tiveram a etiqueta capturada pelo LOTE — o comando individual não precisa
-    mais rodar. Só fecha quando TODOS os numeros do comando foram cobertos."""
+    """Fecha como 'done' os comandos `imprimir_etiqueta` não concluídos cujos
+    pedidos tiveram a etiqueta capturada pelo LOTE — o comando individual não
+    precisa mais rodar. Só fecha quando TODOS os numeros do comando foram
+    cobertos. Inclui os 'failed': o recuperador devolve failed→pending, então
+    sem isso o comando voltaria a tentar pra sempre uma etiqueta que já saiu
+    da fila do Upseller."""
     if not numeros:
         return 0
     cobertos = set(numeros)
@@ -1165,7 +1168,7 @@ async def _resolver_comandos_etiqueta(
         await session.execute(
             select(NfCommand).where(
                 NfCommand.action == "imprimir_etiqueta",
-                NfCommand.status.in_(["pending", "claimed"]),
+                NfCommand.status.in_(["pending", "claimed", "failed"]),
             )
         )
     ).scalars().all()

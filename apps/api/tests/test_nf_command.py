@@ -1181,6 +1181,13 @@ async def test_agent_etiqueta_lote_casa_grava_e_processa(
         action="imprimir_etiqueta", numeros=["890001", "999999"],
         planilha=b"", nome_arquivo="", status="pending", source="auto",
     ))
+    # Já FALHOU no robô (etiqueta saiu da fila do Upseller) → o lote fecha
+    # também, senão o recuperador devolve failed→pending pra sempre.
+    db.add(NfCommand(
+        action="imprimir_etiqueta", numeros=["890002"],
+        planilha=b"", nome_arquivo="", status="failed", source="auto",
+        result="NoSuchElementException",
+    ))
     await db.commit()
 
     pdf = _lote_pdf([
@@ -1206,7 +1213,7 @@ async def test_agent_etiqueta_lote_casa_grava_e_processa(
     assert body["falhas"] == []
     assert len(body["nao_casadas"]) == 1
     assert body["nao_casadas"][0]["fatia"] == 2
-    assert body["comandos_resolvidos"] == 1
+    assert body["comandos_resolvidos"] == 2
 
     db.expire_all()
     # etiquetas gravadas TRANSFORMADAS (remetente=destinatário, fatia inteira)
@@ -1240,6 +1247,7 @@ async def test_agent_etiqueta_lote_casa_grava_e_processa(
     assert fechado.status == "done"
     assert fechado.result == "etiqueta capturada pelo lote"
     assert por_numeros[("890001", "999999")].status == "pending"
+    assert por_numeros[("890002",)].status == "done"
 
     # pedidos movidos pra "Enviado Etiqueta" (83965) no Bling + espelho local
     assert set(fake.chamadas) == {(920001, 83965), (920002, 83965)}
