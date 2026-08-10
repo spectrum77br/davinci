@@ -69,7 +69,7 @@ _CONTAS_CATALOGO_MALA = {("poofy", "shopee")}
 # Contas cuja Loja registrada no Upseller tem nome DIFERENTE do nome da conta
 # no DaVinci. O import rejeita nome que não exista lá, então o arquivo precisa
 # sair com o nome da loja física (chave = nome da conta em minúsculas).
-_LOJA_UPSELLER = {"victor mei": "rodgrigues (victor mei)"}
+_LOJA_UPSELLER = {"victor mei": "rodrigues (victor mei)"}
 
 # Texto de observação da linha 1 do modelo (verbatim do "Baixar o Modelo").
 _OBS_TEXTO = (

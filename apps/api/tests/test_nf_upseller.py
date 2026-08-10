@@ -178,8 +178,8 @@ def test_skus_para_itens_catalogo_mala():
 def test_loja_upseller_renomeia_victor_mei():
     # A Loja física registrada no Upseller mudou de nome; o arquivo tem que
     # sair com o nome de lá, senão o import rejeita ("loja não existe").
-    assert nf_upseller.loja_upseller("victor mei") == "rodgrigues (victor mei)"
-    assert nf_upseller.loja_upseller(" Victor Mei ") == "rodgrigues (victor mei)"
+    assert nf_upseller.loja_upseller("victor mei") == "rodrigues (victor mei)"
+    assert nf_upseller.loja_upseller(" Victor Mei ") == "rodrigues (victor mei)"
     # Conta sem renome passa direto.
     assert nf_upseller.loja_upseller("poofy") == "poofy"
     assert nf_upseller.loja_upseller(None) == ""
