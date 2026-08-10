@@ -894,7 +894,8 @@ const pedidosFilteredGrouped = computed<PedidoRowWithGroup[]>(() => {
 // A seleção é por PEDIDO (não por linha): um pedido com N itens rende N
 // linhas na tabela, mas UMA etiqueta só.
 const etiquetasSel = ref<Set<string>>(new Set())
-const imprimindoLote = ref(false)
+// Qual dos dois botões está gerando (só um roda por vez).
+const imprimindoLote = ref<'etiquetas' | 'relatorio' | null>(null)
 // Pedidos com etiqueta pronta, na ordem em que aparecem na tela — é essa
 // ordem que vai pro PDF do lote.
 const pedidosComEtiqueta = computed(() => {
@@ -921,7 +922,9 @@ function toggleTodasEtiquetas() {
     ? new Set()
     : new Set(pedidosComEtiqueta.value)
 }
-async function imprimirLote() {
+// `comRelatorio`: o backend anexa o relatório de conferência como últimas
+// páginas do mesmo PDF (etiquetas em cima, relatório embaixo).
+async function imprimirLote(comRelatorio = false) {
   const pedidos = pedidosComEtiqueta.value.filter(p => etiquetasSel.value.has(p))
   if (!pedidos.length || imprimindoLote.value) return
   // Reimprimir é permitido (etiqueta pode rasgar), mas avisa — o pedido
@@ -933,14 +936,14 @@ async function imprimirLote() {
     `${jaImpressos.length} etiqueta(s) já foram impressas (${jaImpressos.join(', ')}). Imprimir de novo?`,
   )) return
 
-  imprimindoLote.value = true
+  imprimindoLote.value = comRelatorio ? 'relatorio' : 'etiquetas'
   try {
     // fetch cru (não useApi): a resposta é um PDF binário, não JSON.
     const resp = await fetch('/api/estoque/pedidos/etiquetas', {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pedidos }),
+      body: JSON.stringify({ pedidos, incluir_relatorio: comRelatorio }),
     })
     if (!resp.ok) throw new Error(String(resp.status))
     const blob = await resp.blob()
@@ -951,7 +954,9 @@ async function imprimirLote() {
     // funcionava e 8 não. Download não depende de gesto, então não tem limite.
     const a = document.createElement('a')
     a.href = objUrl
-    a.download = `etiquetas_lote_${pedidos.length}.pdf`
+    a.download = comRelatorio
+      ? `etiquetas_relatorio_${pedidos.length}.pdf`
+      : `etiquetas_lote_${pedidos.length}.pdf`
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -962,7 +967,7 @@ async function imprimirLote() {
   } catch {
     alert('Não foi possível gerar o lote de etiquetas.')
   } finally {
-    imprimindoLote.value = false
+    imprimindoLote.value = null
   }
 }
 
@@ -1418,12 +1423,25 @@ async function conferirTodos() {
         v-if="pedidosComEtiqueta.length > 0"
         type="button"
         class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-primary text-primary-foreground px-2.5 py-1 font-semibold disabled:opacity-50"
-        :disabled="selecionadosCount === 0 || imprimindoLote"
+        :disabled="selecionadosCount === 0 || imprimindoLote !== null"
         title="Junta as etiquetas selecionadas num PDF único"
-        @click="imprimirLote"
+        @click="imprimirLote(false)"
       >
         <Printer class="size-3.5" />
-        {{ imprimindoLote ? 'Gerando…' : `Imprimir selecionadas (${selecionadosCount})` }}
+        {{ imprimindoLote === 'etiquetas' ? 'Gerando…' : `Imprimir selecionadas (${selecionadosCount})` }}
+      </button>
+      <!-- Etiquetas + relatório num PDF só: as etiquetas primeiro (é o que
+           cola no volume), o relatório de conferência nas últimas páginas. -->
+      <button
+        v-if="pedidosComEtiqueta.length > 0"
+        type="button"
+        class="inline-flex items-center gap-1.5 rounded-md border bg-primary text-primary-foreground px-2.5 py-1 font-semibold disabled:opacity-50"
+        :disabled="selecionadosCount === 0 || imprimindoLote !== null"
+        title="Um PDF só: etiquetas em cima, relatório de conferência embaixo"
+        @click="imprimirLote(true)"
+      >
+        <Printer class="size-3.5" />
+        {{ imprimindoLote === 'relatorio' ? 'Gerando…' : 'Etiquetas + relatório' }}
       </button>
       <!-- Relatório imprimível (papel) dos pedidos selecionados: Loja,
            nº pedido, cliente, SKU, qtd, descrição — ordenado por cliente. -->

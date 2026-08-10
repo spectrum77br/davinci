@@ -53,6 +53,7 @@ from app.models.integration import Integration
 from app.models.nf import NfEtiquetaArquivo
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
+from app.services.estoque_relatorio_pdf import relatorio_pedidos_pdf
 from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
@@ -768,6 +769,85 @@ class EtiquetasLoteIn(BaseModel):
     """Pedidos selecionados na aba Pedidos pra imprimir de uma vez."""
 
     pedidos: list[str] = Field(min_length=1)
+    # Anexa o relatório de conferência como últimas páginas do PDF
+    # (etiquetas em cima, relatório embaixo — um documento só).
+    incluir_relatorio: bool = False
+
+
+async def _linhas_relatorio(
+    session: AsyncSession, pedidos: list[str],
+) -> list[dict[str, Any]]:
+    """Monta as linhas do relatório dos pedidos (1 linha por item).
+
+    Reconsulta o banco em vez de confiar na tela: o PDF impresso é o
+    documento de conferência, então tem que refletir o que está gravado.
+    Ordena por cliente (é assim que o operador separa os pacotes).
+    """
+    orders = (
+        await session.execute(
+            select(BlingOrder)
+            .where(BlingOrder.numero.in_(pedidos))
+            .order_by(
+                BlingOrder.nome_destinatario,
+                BlingOrder.numero,
+                BlingOrder.item_index,
+            )
+        )
+    ).scalars().all()
+    if not orders:
+        return []
+
+    store_ids: set[int] = set()
+    for o in orders:
+        try:
+            store_ids.add(int(o.loja))
+        except (TypeError, ValueError):
+            continue
+    store_name_by_id: dict[int, str] = {}
+    if store_ids:
+        for r in (
+            await session.execute(
+                select(Store.bling_store_id, Integration.name, Integration.platform)
+                .join(Integration, Integration.id == Store.integration_id, isouter=True)
+                .where(Store.bling_store_id.in_(store_ids))
+            )
+        ).all():
+            try:
+                bsid = int(r.bling_store_id)
+            except (TypeError, ValueError):
+                continue
+            plat = (
+                r.platform.value if hasattr(r.platform, "value") else str(r.platform or "")
+            ).strip()
+            label = (r.name or "").strip()
+            if plat and label:
+                store_name_by_id[bsid] = f"{plat.upper()} {label}"
+            elif label:
+                store_name_by_id[bsid] = label
+
+    linhas: list[dict[str, Any]] = []
+    for o in orders:
+        try:
+            bsid = int(o.loja) if o.loja else None
+        except (TypeError, ValueError):
+            bsid = None
+        # Corte só interessa em pedido ainda não enviado — igual à tela.
+        corte = ""
+        if o.marketplace_ship_deadline and o.situacao in _SITUACAO_NAO_VERDE:
+            dl = o.marketplace_ship_deadline.astimezone(_BRT)
+            corte = f"corte {dl.strftime('%d/%m %H:%M')}"
+        linhas.append({
+            "data_envio": o.em_andamento_data.isoformat() if o.em_andamento_data else "",
+            "loja": (store_name_by_id.get(bsid) if bsid is not None else None) or (o.loja or ""),
+            "corte": corte,
+            "pedido_bling": o.numero or "",
+            "pedido_marketplace": o.numeroloja or "",
+            "cliente": o.nome_destinatario or "",
+            "sku": o.item_codigo or "",
+            "quantidade": o.item_quantidade or 1,
+            "produto": o.item_descricao or "",
+        })
+    return linhas
 
 
 @router.post("/pedidos/etiquetas")
@@ -798,7 +878,18 @@ async def get_pedidos_etiquetas_lote(
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
 
     try:
-        conteudo = juntar_varios([_pdf_para_impressao(r) for r in ordenados])
+        partes = [_pdf_para_impressao(r) for r in ordenados]
+        if payload.incluir_relatorio:
+            impressos = [r.pedido_bling for r in ordenados]
+            linhas = await _linhas_relatorio(session, impressos)
+            if linhas:
+                hoje = datetime.now(_BRT).strftime("%d/%m/%Y")
+                partes.append(relatorio_pedidos_pdf(
+                    linhas,
+                    f"Relatório de pedidos — {hoje} — "
+                    f"{len(impressos)} pedido(s), {len(linhas)} item(ns)",
+                ))
+        conteudo = juntar_varios(partes)
     except EtiquetaJuntarError as exc:
         logger.warning("nf_etiqueta_lote_falhou", erro=str(exc))
         raise HTTPException(status_code=422, detail="nf_etiqueta_lote_invalido") from exc
