@@ -93,17 +93,35 @@ def _plano_remetente(page: fitz.Page) -> tuple[fitz.Rect, float, float, float] |
     return (caixa, x0, y1, fs)
 
 
+def _redigir_numero_nf(page: fitz.Page) -> None:
+    """Apaga só o rótulo "NF:" e o número ao lado, sem tocar no resto da linha."""
+    words = page.get_text("words")
+    for hit in page.search_for("NF:"):
+        alvo = fitz.Rect(hit)
+        for w in words:
+            mesma_linha = abs(w[1] - hit.y0) < 3
+            a_direita = hit.x1 - 1 <= w[0] <= hit.x1 + 60
+            if mesma_linha and a_direita and w[4].strip(".-/").isdigit():
+                alvo |= fitz.Rect(w[0], w[1], w[2], w[3])
+        _redigir(page, alvo)
+
+
 def _remover_nf(page: fitz.Page) -> None:
     """Redige o bloco DANFE/NF: número, série, emissão, chave texto + barras."""
     chaves = [
         w for w in page.get_text("words")
         if len(w[4]) >= _MIN_CHAVE_DIGITOS and w[4].isdigit()
     ]
-    anchors = page.search_for("DANFE") or page.search_for("NF:")
+    # o "NF:" só vale como âncora de bloco quando a chave de acesso está junto.
+    # Nas etiquetas do Mercado Livre ele aparece solto no cabeçalho dos Correios
+    # (Contrato/Sedex/PESO/rastreio) — ali a faixa comeria o código de rastreio.
+    anchors = page.search_for("DANFE") or (page.search_for("NF:") if chaves else [])
     if not anchors:
-        # etiqueta sem rótulo do bloco (ex. J&T): apaga só a chave solta
+        # etiqueta sem bloco DANFE (ex. J&T, Mercado Livre): apaga a chave solta
+        # e o número da NF, preservando o cabeçalho postal em volta.
         for w in chaves:
             _redigir(page, fitz.Rect(w[0], w[1], w[2], w[3]))
+        _redigir_numero_nf(page)
         return
     top = min(a.y0 for a in anchors) - 2
     teto = top + page.rect.height * _MAX_BLOCO_NF

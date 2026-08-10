@@ -89,6 +89,25 @@ def _etiqueta_ml() -> bytes:
     return doc.tobytes()
 
 
+def _etiqueta_ml_correios() -> bytes:
+    """Etiqueta ML postada nos Correios: o "NF:" aparece SOLTO no cabeçalho
+    postal (Contrato/Sedex/PESO), colado no código de rastreio e no código de
+    barras dele — e sem nenhuma chave de acesso na página.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=442)
+    page.insert_text((20, 20), "NF: 1464559", fontsize=7, fontname="helv")
+    page.insert_text((20, 30), "SHP: 47733455146", fontsize=7, fontname="helv")
+    page.insert_text((20, 40), "Contrato: 9912278851", fontsize=7, fontname="helv")
+    page.insert_text((20, 50), "AD779019760BR", fontsize=7, fontname="helv")
+    barras = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 260, 40), False)
+    barras.set_rect(barras.irect, (0, 0, 0))
+    page.insert_image(fitz.Rect(20, 60, 280, 100), pixmap=barras)
+    page.insert_text((20, 150), "DESTINATARIO", fontsize=7, fontname="helv")
+    page.insert_text((20, 162), "Daniel do Carmo", fontsize=8, fontname="helv")
+    return doc.tobytes()
+
+
 def _texto(pdf_bytes: bytes) -> str:
     return fitz.open(stream=pdf_bytes, filetype="pdf")[0].get_text()
 
@@ -160,6 +179,20 @@ def test_etiqueta_ml_nao_corta_o_destinatario():
     assert "KFA" not in txt
     assert txt.count("Daniel Do Carmo") == 2
     assert "Rua Teste 100" in txt
+    assert (260, 40) in _imagens_renderizadas(out)
+
+
+def test_etiqueta_ml_correios_preserva_cabecalho_postal():
+    # O "NF:" solto no cabeçalho dos Correios NÃO pode virar âncora de bloco: a
+    # faixa branca comia o rastreio, o código de barras dele e o destinatário.
+    out = transformar_etiqueta(_etiqueta_ml_correios())
+    txt = _texto(out)
+    assert "NF:" not in txt
+    assert "1464559" not in txt
+    assert "AD779019760BR" in txt
+    assert "Contrato: 9912278851" in txt
+    assert "SHP: 47733455146" in txt
+    assert "Daniel do Carmo" in txt
     assert (260, 40) in _imagens_renderizadas(out)
 
 
