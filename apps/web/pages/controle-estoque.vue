@@ -277,6 +277,11 @@ const statusFilter = ref<'all' | 'enviado' | 'nao_enviado'>('all')
 // etiqueta JÁ chegou e ninguém imprimiu (a fila de impressão do gerente
 // de etiquetas); "sem etiqueta" = ainda nem chegou.
 const etiquetaFilter = ref<'all' | 'impressa' | 'nao_impressa' | 'sem'>('all')
+// Loja e plataforma (aba Pedidos) — client-side, as opções nascem do que
+// veio no dia. Plataforma = 1ª palavra do nome da loja, que o backend monta
+// como "{PLATAFORMA} {apelido}" (ex.: "SHOPEE Jlas" → SHOPEE).
+const lojaFilter = ref('')
+const plataformaFilter = ref('')
 const conferidoFilter = ref<'all' | 'conferidos' | 'nao_conferidos'>('all')
 const search = ref('')
 
@@ -788,8 +793,35 @@ const produtosFiltered = computed(() => {
       || (p.nome || '').toLowerCase().includes(q),
   )
 })
+function plataformaDe(loja: string | null): string {
+  const primeira = (loja || '').trim().split(/\s+/)[0] || ''
+  // Loja sem cadastro cai no ID cru do Bling — não vira plataforma.
+  return /^[A-Za-z]/.test(primeira) ? primeira.toUpperCase() : ''
+}
+const plataformaOptions = computed(() =>
+  [...new Set(pedidos.value.map((p) => plataformaDe(p.loja)).filter(Boolean))].sort(),
+)
+// As lojas listadas respeitam a plataforma escolhida (dropdown menor).
+const lojaOptions = computed(() => {
+  const plat = plataformaFilter.value
+  const nomes = pedidos.value
+    .filter((p) => !plat || plataformaDe(p.loja) === plat)
+    .map((p) => (p.loja || '').trim())
+    .filter(Boolean)
+  return [...new Set(nomes)].sort((a, b) => a.localeCompare(b, 'pt-BR'))
+})
+// Trocar de plataforma zera a loja: a anterior provavelmente não existe
+// mais na lista e o operador ficaria com a tabela vazia sem entender.
+watch(plataformaFilter, () => { lojaFilter.value = '' })
+
 const pedidosFiltered = computed(() => {
   let rows = pedidos.value
+  if (plataformaFilter.value) {
+    rows = rows.filter((p) => plataformaDe(p.loja) === plataformaFilter.value)
+  }
+  if (lojaFilter.value) {
+    rows = rows.filter((p) => (p.loja || '').trim() === lojaFilter.value)
+  }
   if (etiquetaFilter.value === 'impressa') {
     rows = rows.filter((p) => p.etiqueta_impressa_em)
   } else if (etiquetaFilter.value === 'nao_impressa') {
@@ -804,7 +836,8 @@ const pedidosFiltered = computed(() => {
       (p.sku || '').toLowerCase().includes(q)
       || (p.produto || '').toLowerCase().includes(q)
       || (p.pedido_bling || '').toLowerCase().includes(q)
-      || (p.pedido_marketplace || '').toLowerCase().includes(q),
+      || (p.pedido_marketplace || '').toLowerCase().includes(q)
+      || (p.cliente || '').toLowerCase().includes(q),
   )
 })
 
@@ -1320,6 +1353,43 @@ async function conferirTodos() {
           <option value="nao_impressa">não impressa</option>
           <option value="sem">sem etiqueta</option>
         </select>
+      </label>
+      <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
+        Plataforma:
+        <select v-model="plataformaFilter" class="h-7 border rounded px-2 bg-background">
+          <option value="">todas</option>
+          <option v-for="p in plataformaOptions" :key="p" :value="p">{{ p }}</option>
+        </select>
+      </label>
+      <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
+        Loja:
+        <select v-model="lojaFilter" class="h-7 border rounded px-2 bg-background max-w-[180px]">
+          <option value="">todas</option>
+          <option v-for="l in lojaOptions" :key="l" :value="l">{{ l }}</option>
+        </select>
+      </label>
+      <!-- Mesma ordenação dos cabeçalhos clicáveis (estado compartilhado):
+           aqui fica visível qual coluna manda e pra que lado. -->
+      <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
+        Ordenar:
+        <select
+          class="h-7 border rounded px-2 bg-background"
+          :value="sortKey"
+          @change="ordenarPor(($event.target as HTMLSelectElement).value as PedidoSortKey)"
+        >
+          <option v-for="col in PEDIDO_COLS" :key="col.key" :value="col.key">
+            {{ col.label }}
+          </option>
+        </select>
+        <button
+          type="button"
+          class="h-7 px-1.5 border rounded bg-background inline-flex items-center"
+          :title="sortDir === 'asc' ? 'Crescente (A→Z, menor→maior)' : 'Decrescente (Z→A, maior→menor)'"
+          @click="sortDir = sortDir === 'asc' ? 'desc' : 'asc'"
+        >
+          <ArrowUp v-if="sortDir === 'asc'" class="size-3.5" />
+          <ArrowDown v-else class="size-3.5" />
+        </button>
       </label>
       <div class="ml-auto inline-flex items-center gap-2 text-muted-foreground">
         <Loader2 v-if="loading" class="size-3 animate-spin" />
