@@ -232,6 +232,12 @@ class Settings(BaseSettings):
     # NF_AUTO_ENFILEIRAR=true no .env.
     nf_auto_enfileirar: bool = False
 
+    # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
+    # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado
+    # (o sweep segue funcionando normal). Set via
+    # NF_SEM_ESTOQUE_THREEMA_RECIPIENTS no .env.
+    nf_sem_estoque_threema_recipients: str = ""
+
     # Safety-net cron que re-sincroniza pedidos suspeitos de stale com o
     # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.
     enable_bling_orders_safety_net: bool = True

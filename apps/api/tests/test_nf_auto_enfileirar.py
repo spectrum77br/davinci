@@ -31,8 +31,9 @@ from app.models import (
     UserRole,
     UserStatus,
 )
+from app.config import get_settings
 from app.security.cipher import encrypt
-from app.services import nf_emissao_gerar
+from app.services import nf_emissao_gerar, threema
 from app.services.nf_auto_enfileirar import run_auto_enfileirar_nf
 
 
@@ -42,13 +43,18 @@ async def _async_return(value: object) -> object:
 
 
 class _FakeBlingSituacao:
-    """Captura os PATCH de situação que o motor manda pro Bling."""
+    """Captura os PATCH de situação que o motor manda pro Bling e serve o
+    saldo VIVO (`get_product`) do check de estoque ao vivo."""
 
-    def __init__(self) -> None:
+    def __init__(self, saldos: dict[int, float] | None = None) -> None:
         self.chamadas: list[tuple[int, int]] = []
+        self.saldos = saldos or {}
 
     async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
         self.chamadas.append((bling_order_id, situacao_id))
+
+    async def get_product(self, bling_product_id: int) -> dict:
+        return {"estoque": {"saldoVirtualTotal": self.saldos[bling_product_id]}}
 
 
 @pytest_asyncio.fixture
@@ -88,7 +94,7 @@ async def _seed_loja(
 async def _seed_pedido(
     db: AsyncSession, *, numero: str, loja: str, sku: str,
     situacao: str = "6", bling_id: int = 700001,
-    data: datetime | None = None,
+    data: datetime | None = None, item_produto_id: int | None = None,
 ) -> None:
     db.add(
         BlingOrder(
@@ -99,6 +105,7 @@ async def _seed_pedido(
             situacao=situacao,
             item_index=0,
             item_codigo=sku,
+            item_produto_id=item_produto_id,
             item_descricao=f"Produto {sku}",
             item_quantidade=1,
             itemvalor=100,
@@ -193,6 +200,138 @@ async def test_sweep_sem_estoque_vai_para_aguardando_cancelamento(
     # tentativa automática única: o sweep NÃO re-pega quem já tem status
     summary2 = await run_auto_enfileirar_nf()
     assert summary2["candidatos"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sweep_estoque_ao_vivo_bling_detecta_negativo(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """A fonte do check é o saldo VIVO do Bling: local clampado em 0 (o sync
+    faz max(0, saldo)) mas saldoVirtualTotal negativo → sem_estoque."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="dg055.ci",
+        bling_id=700009, item_produto_id=555,
+    )
+    db.add(Product(user_id=admin.id, sku="dg055.ci", name="DG055", stock=0))
+    await db.commit()
+    fake = _FakeBlingSituacao(saldos={555: -7.0})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1
+    assert summary["sem_estoque"] == 1
+    assert summary["enfileirados"] == 0
+    assert (700009, 83955) in fake.chamadas
+    db.expire_all()
+    assert (await db.execute(select(NfCommand))).scalars().all() == []
+    fat = (
+        await db.execute(
+            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830001")
+        )
+    ).scalar_one()
+    assert fat.status_faturamento == "sem_estoque"
+    assert "dg055.ci" in (fat.erro_faturamento or "")
+
+
+@pytest.mark.asyncio
+async def test_sweep_estoque_ao_vivo_bling_positivo_vence_local(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Precedência: local negativo (cache podre) mas Bling vivo positivo →
+    enfileira normal, sem Aguardando Cancelamento."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="a1",
+        bling_id=700009, item_produto_id=555,
+    )
+    db.add(Product(user_id=admin.id, sku="a1", name="A1", stock=-2))
+    await db.commit()
+    fake = _FakeBlingSituacao(saldos={555: 5.0})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1
+    assert summary["sem_estoque"] == 0
+    assert summary["enfileirados"] == 1
+    assert fake.chamadas == []  # nenhum PATCH de situação
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert len(cmds) == 1
+    assert cmds[0].numeros == ["830001"]
+
+
+class _FakeThreema:
+    """Captura o send_to_all do aviso de sem_estoque."""
+
+    enviados: list[tuple[str, list[str] | None]] = []
+
+    async def send_to_all(
+        self, text: str, recipients: list[str] | None = None
+    ) -> dict[str, list[str]]:
+        _FakeThreema.enviados.append((text, recipients))
+        return {"sent": recipients or [], "failed": []}
+
+
+@pytest.mark.asyncio
+async def test_sweep_sem_estoque_avisa_threema(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Movido pra Aguardando Cancelamento automaticamente → UMA mensagem
+    Threema com pedido, loja e SKUs pros IDs configurados."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(db, numero="830001", loja="930001", sku="x1", bling_id=700009)
+    db.add(Product(user_id=admin.id, sku="x1", name="X1", stock=-2))
+    await db.commit()
+    fake = _FakeBlingSituacao()
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+    monkeypatch.setattr(
+        get_settings(), "nf_sem_estoque_threema_recipients",
+        "7KMPCBS5,M5TT27JA", raising=False,
+    )
+    _FakeThreema.enviados = []
+    monkeypatch.setattr(threema, "ThreemaClient", _FakeThreema)
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["sem_estoque"] == 1
+
+    assert len(_FakeThreema.enviados) == 1
+    texto, recipients = _FakeThreema.enviados[0]
+    assert recipients == ["7KMPCBS5", "M5TT27JA"]
+    assert "830001" in texto
+    assert "loja 930001" in texto
+    assert "x1" in texto
+    assert "Aguardando Cancelamento" in texto
+
+
+@pytest.mark.asyncio
+async def test_sweep_sem_estoque_sem_recipients_nao_avisa(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Config vazia (default) = aviso desligado; o sweep segue normal."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(db, numero="830001", loja="930001", sku="x1", bling_id=700009)
+    db.add(Product(user_id=admin.id, sku="x1", name="X1", stock=-2))
+    await db.commit()
+    fake = _FakeBlingSituacao()
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+    monkeypatch.setattr(
+        get_settings(), "nf_sem_estoque_threema_recipients", "", raising=False
+    )
+    _FakeThreema.enviados = []
+    monkeypatch.setattr(threema, "ThreemaClient", _FakeThreema)
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["sem_estoque"] == 1
+    assert _FakeThreema.enviados == []
 
 
 @pytest.mark.asyncio

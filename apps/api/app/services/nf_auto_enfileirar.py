@@ -37,9 +37,10 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from sqlalchemy import func, select, text
 
+from app.config import get_settings
 from app.db import session_scope
 from app.models import BlingOrder, NfCommand, NfFaturamento, StoreInfo
-from app.services import nf_emissao_gerar
+from app.services import nf_emissao_gerar, threema
 from app.services.advisory_lock import SYNC_NAMESPACE
 
 logger = structlog.get_logger()
@@ -141,6 +142,7 @@ async def run_auto_enfileirar_nf() -> dict:
                 "nf_auto_enfileirar_sem_estoque",
                 pedidos={n: skus for n, skus in sem_estoque.items()},
             )
+            await _notificar_sem_estoque(session, sem_estoque)
         restantes = [n for n in numeros if n not in sem_estoque]
         if not restantes and not fragmentado:
             return summary
@@ -233,6 +235,51 @@ async def run_auto_enfileirar_nf() -> dict:
     # session_scope commita na saída — tudo numa transação só (o advisory
     # xact lock vive até aqui).
     return summary
+
+
+async def _notificar_sem_estoque(
+    session, sem_estoque: dict[str, list[str]]
+) -> None:
+    """Aviso Threema quando o sweep move pedido pra Aguardando Cancelamento.
+
+    Destinatários em `nf_sem_estoque_threema_recipients` (vazio = desligado).
+    UMA mensagem agregada por tick, uma linha por pedido com loja + SKUs
+    negativos. BEST-EFFORT: falha no envio só loga, nunca quebra o sweep.
+    """
+    recipients = threema.parse_recipients(
+        get_settings().nf_sem_estoque_threema_recipients
+    )
+    if not recipients or not sem_estoque:
+        return
+    try:
+        lojas = dict(
+            (
+                await session.execute(
+                    select(BlingOrder.numero, func.max(StoreInfo.account_name))
+                    .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
+                    .where(BlingOrder.numero.in_(list(sem_estoque)))
+                    .group_by(BlingOrder.numero)
+                )
+            ).all()
+        )
+        linhas = [
+            f"Pedido {numero}"
+            + (f" ({lojas[numero]})" if lojas.get(numero) else "")
+            + ": " + ", ".join(skus)
+            for numero, skus in sorted(sem_estoque.items())
+        ]
+        texto = (
+            "Estoque negativo — movido pra Aguardando Cancelamento:\n"
+            + "\n".join(linhas)
+        )
+        result = await threema.ThreemaClient().send_to_all(texto, recipients)
+        logger.info(
+            "nf_auto_enfileirar_threema",
+            sent=result.get("sent"),
+            failed=result.get("failed"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("nf_sem_estoque_threema_falhou", erro=str(exc))
 
 
 async def _candidatos(session) -> list[str]:

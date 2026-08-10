@@ -974,17 +974,25 @@ async def _marcar_enviado_etiqueta(
 async def _pedidos_sem_estoque(
     session: AsyncSession, numeros: list[str]
 ) -> dict[str, list[str]]:
-    """Pedidos com algum item de saldo VIRTUAL negativo (`products.stock`).
+    """Pedidos com algum item de saldo VIRTUAL negativo — conferido AO VIVO.
 
-    O virtual do Bling já desconta a reserva dos pedidos em aberto: 0 ainda é
-    atendível, negativo é que a peça não existe. SKU fora do cadastro NÃO
-    bloqueia — só bloqueamos com evidência de negativo. Devolve numero → SKUs.
+    A fonte é o Bling (`get_product` → `estoque.saldoVirtualTotal`), nunca o
+    `products.stock` local: o sync clampa negativo pra 0 no cache (pro push),
+    então o local é estruturalmente cego pra saldo negativo. O virtual já
+    desconta a reserva dos pedidos em aberto: 0 ainda é atendível, negativo é
+    que a peça não existe. SKU sem evidência de negativo NÃO bloqueia (sem
+    integração/id/erro na consulta cai no check local, best-effort). Devolve
+    numero → SKUs.
     """
     if not numeros:
         return {}
     itens = (
         await session.execute(
-            select(BlingOrder.numero, BlingOrder.item_codigo)
+            select(
+                BlingOrder.numero,
+                BlingOrder.item_codigo,
+                BlingOrder.item_produto_id,
+            )
             .where(BlingOrder.numero.in_(numeros))
             .where(BlingOrder.item_codigo.is_not(None))
             .distinct()
@@ -993,16 +1001,51 @@ async def _pedidos_sem_estoque(
     skus = {r.item_codigo for r in itens if r.item_codigo}
     if not skus:
         return {}
-    negativos = set(
-        (
-            await session.execute(
-                select(Product.sku).where(Product.sku.in_(skus), Product.stock < 0)
-            )
-        ).scalars().all()
-    )
+    pid_por_sku: dict[str, int] = {}
+    for r in itens:
+        if r.item_codigo and r.item_produto_id:
+            pid_por_sku.setdefault(r.item_codigo, int(r.item_produto_id))
+
+    client = await nf_emissao_gerar._bling_client_opt(session)
+    negativos: set[str] = set()
+    fallback_local: set[str] = set()
+    if client is None:
+        logger.warning("nf_sem_estoque_sem_bling_fallback_local", skus=len(skus))
+        fallback_local = skus
+    else:
+        for sku in skus:
+            pid = pid_por_sku.get(sku)
+            if pid is None:
+                fallback_local.add(sku)
+                continue
+            try:
+                data = await client.get_product(pid)
+                saldo = (data.get("estoque") or {}).get("saldoVirtualTotal")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "nf_sem_estoque_bling_falhou", sku=sku, erro=str(exc)
+                )
+                fallback_local.add(sku)
+                continue
+            if saldo is None:
+                fallback_local.add(sku)
+            elif float(saldo) < 0:
+                negativos.add(sku)
+    if fallback_local:
+        negativos |= set(
+            (
+                await session.execute(
+                    select(Product.sku).where(
+                        Product.sku.in_(fallback_local), Product.stock < 0
+                    )
+                )
+            ).scalars().all()
+        )
     faltando: dict[str, list[str]] = {}
     for r in itens:
-        if r.item_codigo in negativos:
+        if r.item_codigo in negativos and r.item_codigo not in faltando.get(
+            r.numero, []
+        ):
             faltando.setdefault(r.numero, []).append(r.item_codigo)
     return faltando
 
