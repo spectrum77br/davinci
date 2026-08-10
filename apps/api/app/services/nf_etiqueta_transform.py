@@ -25,6 +25,9 @@ from __future__ import annotations
 import fitz  # PyMuPDF
 
 _MIN_CHAVE_DIGITOS = 40  # a chave da NF-e tem 44 dígitos
+_MAX_BLOCO_NF = 0.25     # bloco NF nunca passa de 1/4 da altura da página
+_GAP_IMAGEM = 6.0        # imagem só estende o bloco se estiver colada nele
+_MIN_TOPO_PICKING = 0.55  # rodapé de picking só existe na parte de baixo
 
 
 class EtiquetaTransformError(RuntimeError):
@@ -103,14 +106,22 @@ def _remover_nf(page: fitz.Page) -> None:
             _redigir(page, fitz.Rect(w[0], w[1], w[2], w[3]))
         return
     top = min(a.y0 for a in anchors) - 2
+    teto = top + page.rect.height * _MAX_BLOCO_NF
     bottom = top + 24
     for w in chaves:
-        bottom = max(bottom, w[3])
-    for img in page.get_images(full=True):
-        for r in page.get_image_rects(img[0]):
-            if r.y0 >= top - 4:
-                bottom = max(bottom, r.y1)
-    bottom = min(bottom + 2, page.rect.height)
+        if w[1] <= teto:
+            bottom = max(bottom, w[3])
+    # só a imagem COLADA no bloco (o código de barras da chave) o estende. Uma
+    # imagem solta mais abaixo não pode arrastar a faixa branca até o fim da
+    # página — foi o que apagava o destinatário nas etiquetas do Mercado Livre.
+    rects = sorted(
+        (r for img in page.get_images(full=True) for r in page.get_image_rects(img[0])),
+        key=lambda r: r.y0,
+    )
+    for r in rects:
+        if top - 4 <= r.y0 <= bottom + _GAP_IMAGEM:
+            bottom = max(bottom, r.y1)
+    bottom = min(bottom + 2, teto, page.rect.height)
     _redigir(page, fitz.Rect(0, top, page.rect.width, bottom), pad=0)
 
 
@@ -138,6 +149,8 @@ def _remover_picking(page: fitz.Page) -> None:
     if not anchors:
         return
     top = min(a.y0 for a in anchors) - 2
+    if top < page.rect.height * _MIN_TOPO_PICKING:
+        return  # âncora fora do rodapé: apagar daqui até o fim comeria a etiqueta
     _redigir(page, fitz.Rect(0, top, page.rect.width, page.rect.height), pad=0)
 
 

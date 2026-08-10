@@ -70,6 +70,25 @@ def _etiqueta_jt() -> bytes:
     return doc.tobytes()
 
 
+def _etiqueta_ml() -> bytes:
+    """Etiqueta tipo Mercado Livre: o bloco da NF fica no MEIO da etiqueta, com o
+    destinatário e o código de barras de rastreio LOGO ABAIXO dele.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=442)
+    page.insert_text((20, 20), "REMETENTE", fontsize=7, fontname="helv")
+    page.insert_text((20, 32), "KFA Comercio Varejista", fontsize=8, fontname="helv")
+    page.insert_text((20, 150), "DANFE SIMPLIFICADO", fontsize=6, fontname="helv")
+    page.insert_text((20, 160), _CHAVE, fontsize=5, fontname="helv")
+    page.insert_text((20, 200), "DESTINATÁRIO", fontsize=7, fontname="helv")
+    page.insert_text((20, 212), "Daniel Do Carmo", fontsize=8, fontname="helv")
+    page.insert_text((20, 230), "Rua Teste 100 - Sumaré/SP", fontsize=7, fontname="helv")
+    barras = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 260, 40), False)
+    barras.set_rect(barras.irect, (0, 0, 0))
+    page.insert_image(fitz.Rect(20, 300, 280, 340), pixmap=barras)
+    return doc.tobytes()
+
+
 def _texto(pdf_bytes: bytes) -> str:
     return fitz.open(stream=pdf_bytes, filetype="pdf")[0].get_text()
 
@@ -129,6 +148,19 @@ def test_etiqueta_jt_nome_desalinhado_e_chave_sem_rotulo():
     assert txt.count("yasmin") == 2
     # 2) a chave da NF sai mesmo sem o rótulo DANFE/NF: como âncora
     assert _CHAVE not in txt
+
+
+def test_etiqueta_ml_nao_corta_o_destinatario():
+    # O bloco da NF no meio da etiqueta NÃO pode arrastar a faixa branca até o
+    # fim da página (era o que apagava destinatário/endereço/barras no ML).
+    out = transformar_etiqueta(_etiqueta_ml())
+    txt = _texto(out)
+    assert _CHAVE not in txt
+    assert "DANFE" not in txt
+    assert "KFA" not in txt
+    assert txt.count("Daniel Do Carmo") == 2
+    assert "Rua Teste 100" in txt
+    assert (260, 40) in _imagens_renderizadas(out)
 
 
 def test_pdf_invalido_levanta():
