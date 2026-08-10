@@ -64,6 +64,50 @@ _CANDIDATE_WINDOW = timedelta(days=7)
 # vez quando a flag liga com backlog acumulado; o resto entra nos próximos.
 _MAX_POR_TICK = 30
 
+# Roteamento do aviso Threema por TAG de estoque: o grupo GERAL (env
+# `NF_SEM_ESTOQUE_THREEMA_RECIPIENTS`, master switch — vazio desliga TUDO)
+# recebe a mensagem completa; cada responsável abaixo recebe só as linhas do
+# estoque dele. Destinatário de tag que também esteja no grupo geral não
+# recebe duplicado.
+_THREEMA_TAG_ROTA: dict[str, tuple[str, ...]] = {
+    "ci": ("5WWUUBTT", "2YSBC69R", "EV6NR2BU"),  # Espanha + Israel + África
+    "sa": ("M5TT27JA", "2YSBC69R", "EV6NR2BU"),  # Cairo + Israel + África
+    "pi": ("C3PC3RJ2", "2YSBC69R", "EV6NR2BU"),  # Paris + Israel + África
+    "sp": ("U72YYYY5", "2YSBC69R", "EV6NR2BU"),  # Correia + Israel + África
+    "mala": ("HVEMH8NM", "BZMZWXC5"),  # Ghost + Marrocos
+    "eletro": ("HVEMH8NM",),  # Ghost
+    "usados": ("SMCYJFZD",),  # Thatcher
+}
+
+# Sufixos de armazém que roteiam (os demais — .us/.cd/.ra/sem sufixo — vão
+# só pro grupo geral).
+_TAGS_ARMAZEM = ("ci", "sa", "pi", "sp")
+
+
+def _tags_do_sku(sku: str) -> set[str]:
+    """Tags de rota de um SKU (composto com '+' classifica cada parte).
+
+    Precedência confirmada pelo usuário: `.mala` no fim OU prefixo b+dígito →
+    mala (z0137.mala é mala, não usados); prefixo u → eletro; prefixo z →
+    usados; sufixo .ci/.sa/.pi/.sp → armazém; senão nenhuma (só grupo geral).
+    """
+    tags: set[str] = set()
+    for parte in sku.split("+"):
+        p = parte.strip().lower()
+        if not p:
+            continue
+        if p.endswith(".mala") or (p[0] == "b" and len(p) > 1 and p[1].isdigit()):
+            tags.add("mala")
+        elif p[0] == "u":
+            tags.add("eletro")
+        elif p[0] == "z":
+            tags.add("usados")
+        else:
+            sufixo = p.rsplit(".", 1)[-1] if "." in p else ""
+            if sufixo in _TAGS_ARMAZEM:
+                tags.add(sufixo)
+    return tags
+
 
 async def run_auto_enfileirar_nf() -> dict:
     """Uma passada do sweep. Devolve um resumo com contadores."""
@@ -242,14 +286,16 @@ async def _notificar_sem_estoque(
 ) -> None:
     """Aviso Threema quando o sweep move pedido pra Aguardando Cancelamento.
 
-    Destinatários em `nf_sem_estoque_threema_recipients` (vazio = desligado).
-    UMA mensagem agregada por tick, uma linha por pedido com loja + SKUs
-    negativos. BEST-EFFORT: falha no envio só loga, nunca quebra o sweep.
+    Grupo GERAL (`nf_sem_estoque_threema_recipients`, vazio = TUDO desligado)
+    recebe a mensagem completa; os responsáveis de `_THREEMA_TAG_ROTA`
+    recebem só os pedidos/SKUs do estoque deles (classificação por
+    `_tags_do_sku`). Destinatários com conteúdo idêntico saem num envio só.
+    BEST-EFFORT: falha no envio só loga, nunca quebra o sweep.
     """
-    recipients = threema.parse_recipients(
+    gerais = threema.parse_recipients(
         get_settings().nf_sem_estoque_threema_recipients
     )
-    if not recipients or not sem_estoque:
+    if not gerais or not sem_estoque:
         return
     try:
         lojas = dict(
@@ -262,22 +308,48 @@ async def _notificar_sem_estoque(
                 )
             ).all()
         )
-        linhas = [
-            f"Pedido {numero}"
-            + (f" ({lojas[numero]})" if lojas.get(numero) else "")
-            + ": " + ", ".join(skus)
-            for numero, skus in sorted(sem_estoque.items())
-        ]
-        texto = (
-            "Estoque negativo — movido pra Aguardando Cancelamento:\n"
-            + "\n".join(linhas)
-        )
-        result = await threema.ThreemaClient().send_to_all(texto, recipients)
-        logger.info(
-            "nf_auto_enfileirar_threema",
-            sent=result.get("sent"),
-            failed=result.get("failed"),
-        )
+
+        def _texto(pedidos: dict[str, list[str]]) -> str:
+            linhas = [
+                f"Pedido {numero}"
+                + (f" ({lojas[numero]})" if lojas.get(numero) else "")
+                + ": " + ", ".join(skus)
+                for numero, skus in sorted(pedidos.items())
+            ]
+            return (
+                "Estoque negativo — movido pra Aguardando Cancelamento:\n"
+                + "\n".join(linhas)
+            )
+
+        # Por responsável de tag: só as linhas do estoque dele.
+        por_dest: dict[str, dict[str, list[str]]] = {}
+        for numero, skus in sem_estoque.items():
+            for sku in skus:
+                for tag in _tags_do_sku(sku):
+                    for dest in _THREEMA_TAG_ROTA[tag]:
+                        if dest in gerais:
+                            continue  # geral já recebe tudo
+                        pedidos = por_dest.setdefault(dest, {})
+                        lista = pedidos.setdefault(numero, [])
+                        if sku not in lista:
+                            lista.append(sku)
+
+        # Grupo geral primeiro (mensagem completa) + grupos de tag com o
+        # mesmo conteúdo agregados num envio só.
+        envios: list[tuple[str, list[str]]] = [(_texto(sem_estoque), gerais)]
+        agrupado: dict[str, list[str]] = {}
+        for dest, pedidos in sorted(por_dest.items()):
+            agrupado.setdefault(_texto(pedidos), []).append(dest)
+        envios.extend(agrupado.items())
+
+        client = threema.ThreemaClient()
+        sent: list = []
+        failed: list = []
+        for texto, dests in envios:
+            result = await client.send_to_all(texto, dests)
+            sent.extend(result.get("sent") or [])
+            failed.extend(result.get("failed") or [])
+        logger.info("nf_auto_enfileirar_threema", sent=sent, failed=failed)
     except Exception as exc:  # noqa: BLE001
         logger.warning("nf_sem_estoque_threema_falhou", erro=str(exc))
 
