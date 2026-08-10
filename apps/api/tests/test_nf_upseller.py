@@ -112,32 +112,67 @@ def test_xlsx_nfe_nao_para_import_ml():
     assert _c(ws, 4, "SKU*") == "a001"
 
 
+def test_usa_catalogo_mala_so_shopee_poofy():
+    # O catálogo do Upseller é por CONTA, não por categoria: só a Shopee da
+    # poofy importa com m100/m200; as outras lojas da poofy, não.
+    assert nf_upseller.usa_catalogo_mala("poofy", "shopee") is True
+    assert nf_upseller.usa_catalogo_mala(" Poofy ", "Shopee") is True
+    assert nf_upseller.usa_catalogo_mala("poofy", "tiktok") is False
+    assert nf_upseller.usa_catalogo_mala("minas", "shopee") is False
+    assert nf_upseller.usa_catalogo_mala(None, None) is False
+
+
 def test_sku_generico_por_categoria():
-    # SKU do arquivo TEM que existir no catálogo do Upseller — mapeamento
-    # confirmado: celular→e3, mala→m200, mala kit→m100.
+    # Fora do catálogo de mala é sempre e3, mesmo que a categoria seja mala.
     assert nf_upseller.sku_para_categoria("Celular") == "e3"
-    assert nf_upseller.sku_para_categoria("Celular Kit") == "e3"
-    assert nf_upseller.sku_para_categoria("Mala") == "m200"
-    assert nf_upseller.sku_para_categoria("Mala Usada") == "m200"
-    assert nf_upseller.sku_para_categoria("Mala Kit") == "m100"
+    assert nf_upseller.sku_para_categoria("Mala") == "e3"
+    assert nf_upseller.sku_para_categoria("Mala Kit") == "e3"
     assert nf_upseller.sku_para_categoria(None) == "e3"
-    assert nf_upseller.sku_para_categoria("") == "e3"
+    # No catálogo de mala, kit→m100 e o resto→m200.
+    m = {"catalogo_mala": True}
+    assert nf_upseller.sku_para_categoria("Mala", **m) == "m200"
+    assert nf_upseller.sku_para_categoria("Mala Usada", **m) == "m200"
+    assert nf_upseller.sku_para_categoria("Mala Kit", **m) == "m100"
+    assert nf_upseller.sku_para_categoria("Celular", **m) == "m200"
+    assert nf_upseller.sku_para_categoria(None, **m) == "m200"
 
 
 def test_skus_para_itens_nao_repete_no_pedido():
-    # O Upseller rejeita SKUs duplicados no mesmo pedido: 2º celular vira e4,
-    # malas alternam m200/m100. Esgotadas as alternativas, repete a base.
+    # O Upseller rejeita SKUs duplicados no mesmo pedido: os itens seguintes
+    # andam na cadeia da conta (e3→e4→e2→e5) e só então na do outro catálogo.
     assert nf_upseller.skus_para_itens(["Celular", "Celular"]) == ["e3", "e4"]
-    assert nf_upseller.skus_para_itens(["Mala", "Mala"]) == ["m200", "m100"]
-    assert nf_upseller.skus_para_itens(["Mala Kit", "Mala"]) == ["m100", "m200"]
-    # 1 item só: mantém o base (comportamento antigo intacto).
+    assert nf_upseller.skus_para_itens(["Mala", "Mala"]) == ["e3", "e4"]
+    # 1 item só: mantém o base.
     assert nf_upseller.skus_para_itens(["Celular"]) == ["e3"]
     assert nf_upseller.skus_para_itens([None]) == ["e3"]
-    # Misto celular+mala não colide, cada um fica no seu base.
-    assert nf_upseller.skus_para_itens(["Celular", "Mala"]) == ["e3", "m200"]
-    # 3º da mesma família: alternativas esgotadas → repete a base (o import
-    # aponta o erro em vez de inventar SKU que não existe no catálogo).
-    assert nf_upseller.skus_para_itens(["Celular"] * 3) == ["e3", "e4", "e3"]
+    assert nf_upseller.skus_para_itens(["Celular"] * 4) == ["e3", "e4", "e2", "e5"]
+    # 5º item: esgotada a cadeia da conta, segue na do outro catálogo.
+    assert nf_upseller.skus_para_itens(["Celular"] * 6) == [
+        "e3",
+        "e4",
+        "e2",
+        "e5",
+        "m200",
+        "m100",
+    ]
+
+
+def test_skus_para_itens_catalogo_mala():
+    # Shopee poofy: mala vira m200/m100 e, esgotado, cai na cadeia eletro.
+    m = {"catalogo_mala": True}
+    assert nf_upseller.skus_para_itens(["Mala", "Mala"], **m) == ["m200", "m100"]
+    assert nf_upseller.skus_para_itens(["Mala Kit", "Mala"], **m) == ["m100", "m200"]
+    assert nf_upseller.skus_para_itens(["Mala"], **m) == ["m200"]
+    assert nf_upseller.skus_para_itens(["Mala"] * 3, **m) == ["m200", "m100", "e3"]
+    assert nf_upseller.skus_para_itens(["Mala"] * 7, **m) == [
+        "m200",
+        "m100",
+        "e3",
+        "e4",
+        "e2",
+        "e5",
+        "m200",
+    ]
 
 
 def test_loja_avulsa_registrada():

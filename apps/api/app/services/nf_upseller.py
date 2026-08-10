@@ -49,21 +49,22 @@ _NFE_NAO = "Não"
 LOJA_AVULSA = "Loja Padrão"
 
 # SKUs GENÉRICOS do catálogo de produtos do Upseller (o SKU do arquivo TEM
-# que existir lá; o SKU real do pedido — ex. 'dg053.sp' — é rejeitado).
-# Mapa por categoria do Bling (bling_orders.categoria_nome).
+# que existir lá; o SKU real do pedido — ex. 'dg053.sp' — é rejeitado). O
+# catálogo é POR CONTA (regra do usuário 10/08): a Shopee da poofy importa
+# com os SKUs de MALA (m100/m200); todas as outras contas usam e2/e3/e4/e5.
 _SKU_CELULAR = "e3"
 _SKU_MALA = "m200"
 _SKU_MALA_KIT = "m100"
 
 # O Upseller REJEITA SKUs repetidos no mesmo pedido ("Não são permitidos SKUs
-# duplicados no mesmo pedido") — pedidos multi-item da MESMA família precisam
-# alternar SKUs equivalentes do catálogo (regra do usuário 08/08: celular
-# e3→e4; mala alterna m200/m100), mantendo o MESMO nº do pedido (unificação).
-_SKU_ALTERNATIVAS = {
-    _SKU_CELULAR: [_SKU_CELULAR, "e4"],
-    _SKU_MALA: [_SKU_MALA, _SKU_MALA_KIT],
-    _SKU_MALA_KIT: [_SKU_MALA_KIT, _SKU_MALA],
-}
+# duplicados no mesmo pedido") — pedidos multi-item precisam alternar SKUs
+# equivalentes do catálogo, mantendo o MESMO nº do pedido (unificação). A
+# cadeia começa no catálogo da conta e, se ele esgotar, segue no outro.
+_CADEIA_MALA = [_SKU_MALA, _SKU_MALA_KIT]
+_CADEIA_ELETRO = [_SKU_CELULAR, "e4", "e2", "e5"]
+
+# Contas (account_name, platform) cujo catálogo do Upseller é o de MALA.
+_CONTAS_CATALOGO_MALA = {("poofy", "shopee")}
 
 # Texto de observação da linha 1 do modelo (verbatim do "Baixar o Modelo").
 _OBS_TEXTO = (
@@ -202,28 +203,34 @@ def _preco_num(v: Decimal) -> float:
     return float(v.quantize(Decimal("0.01")))
 
 
-def sku_para_categoria(categoria: str | None) -> str:
-    """SKU genérico do catálogo Upseller pela categoria do Bling.
-    'Mala Kit'→m100, 'Mala'/'Mala Usada'→m200, resto (celular etc.)→e3."""
-    c = _s(categoria).lower()
-    if "mala" in c:
-        return _SKU_MALA_KIT if "kit" in c else _SKU_MALA
-    return _SKU_CELULAR
+def usa_catalogo_mala(conta: str | None, plataforma: str | None) -> bool:
+    """A conta importa no Upseller com os SKUs de mala (m100/m200)?"""
+    return (_s(conta).lower(), _s(plataforma).lower()) in _CONTAS_CATALOGO_MALA
 
 
-def skus_para_itens(categorias: list) -> list[str]:
+def sku_para_categoria(categoria: str | None, *, catalogo_mala: bool = False) -> str:
+    """SKU genérico do catálogo Upseller da conta. No catálogo de mala,
+    'Kit'→m100 e o resto→m200; nas demais contas é sempre e3."""
+    if not catalogo_mala:
+        return _SKU_CELULAR
+    return _SKU_MALA_KIT if "kit" in _s(categoria).lower() else _SKU_MALA
+
+
+def skus_para_itens(categorias: list, *, catalogo_mala: bool = False) -> list[str]:
     """SKU genérico por ITEM de um mesmo pedido, SEM repetir SKU (o Upseller
-    rejeita duplicados no pedido). Cada item pega o SKU base da categoria; se
-    já foi usado no pedido, cai na alternativa (e3→e4, m200↔m100). Esgotadas
-    as alternativas, repete a base (o import aponta o erro em vez de mascarar)."""
+    rejeita duplicados no pedido). Cada item pega o SKU base da conta; se já foi
+    usado no pedido, anda na cadeia do catálogo e depois na do outro. Esgotadas
+    as opções, repete a base (o import aponta o erro em vez de mascarar)."""
+    if catalogo_mala:
+        cadeia = _CADEIA_MALA + _CADEIA_ELETRO
+    else:
+        cadeia = _CADEIA_ELETRO + _CADEIA_MALA
     usados: set[str] = set()
     out: list[str] = []
     for cat in categorias:
-        base = sku_para_categoria(cat)
-        sku = next(
-            (s for s in _SKU_ALTERNATIVAS.get(base, [base]) if s not in usados),
-            base,
-        )
+        base = sku_para_categoria(cat, catalogo_mala=catalogo_mala)
+        opcoes = [base] + [s for s in cadeia if s != base]
+        sku = next((s for s in opcoes if s not in usados), base)
         usados.add(sku)
         out.append(sku)
     return out

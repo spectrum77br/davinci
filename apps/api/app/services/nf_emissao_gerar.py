@@ -62,7 +62,8 @@ _ITENS_SQL = text(
         bo.uf_destino          AS uf_destino,
         si.nf_faturador_id     AS nf_faturador_id,
         si.nf_etiqueta_id      AS nf_etiqueta_id,
-        si.account_name        AS conta
+        si.account_name        AS conta,
+        si.platform            AS plataforma
     FROM "{_SCHEMA}".bling_orders bo
     JOIN "{_SCHEMA}".store_info si ON si.bling_store_id::text = bo.loja
     WHERE bo.numero = ANY(:numeros)
@@ -281,16 +282,18 @@ class _PedidoMontado:
     # Categoria do Bling (bling_orders.categoria_nome) de cada item, na mesma
     # ordem de `linhas` — usada só no arquivo do Upseller (SKU genérico).
     categorias: list = field(default_factory=list)
+    # A conta importa no Upseller com o catálogo de mala (m100/m200)?
+    catalogo_mala: bool = False
 
 
 def _linhas_upseller(m: _PedidoMontado) -> list:
-    """Linhas com o SKU trocado pelo GENÉRICO do catálogo Upseller (e3/m200/
-    m100 por categoria) — o import rejeita SKU que não exista lá. Só o arquivo
-    .xlsx do Upseller usa; o CSV do Bling mantém o SKU real. SKUs NÃO se
-    repetem no mesmo pedido (Upseller rejeita duplicados): 2º celular vira e4,
-    malas alternam m200/m100."""
+    """Linhas com o SKU trocado pelo GENÉRICO do catálogo Upseller — o import
+    rejeita SKU que não exista lá. Só o arquivo .xlsx do Upseller usa; o CSV do
+    Bling mantém o SKU real. O catálogo é por CONTA: Shopee poofy usa m200/m100
+    (por categoria), as demais usam e3/e4/e2/e5. SKUs NÃO se repetem no mesmo
+    pedido (Upseller rejeita duplicados) — itens seguintes andam na cadeia."""
     cats = m.categorias or [None] * len(m.linhas)
-    skus = nf_upseller.skus_para_itens(cats)
+    skus = nf_upseller.skus_para_itens(cats, catalogo_mala=m.catalogo_mala)
     return [replace(linha, sku=sku) for linha, sku in zip(m.linhas, skus)]
 
 
@@ -380,6 +383,7 @@ async def _montar_pedidos(
                 info,
                 linhas,
                 [r["categoria"] for r in itens_rows],
+                nf_upseller.usa_catalogo_mala(cab["conta"], cab["plataforma"]),
             )
         )
 
