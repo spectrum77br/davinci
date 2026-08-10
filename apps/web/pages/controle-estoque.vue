@@ -16,6 +16,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, FileUp, Upload, Download, Trash2, Printer, FileText,
+  ArrowUp, ArrowDown,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
 
@@ -859,33 +860,86 @@ function formatDateBR(iso: string): string {
   return `${d}/${m}`
 }
 
-// Ordena por data envio (desc, primário) + pedido_bling (secundário) pra
-// que itens do mesmo pedido fiquem consecutivos. Adiciona meta-flags
-// usadas no render (`_isFirstOfGroup` controla render do número e
-// separador visual entre grupos).
+// ── Ordenação clicável das colunas (estilo Excel) ────────────────────
+// A ordenação é por PEDIDO, não por linha: os itens de um mesmo pedido
+// ficam sempre juntos (a etiqueta é do pedido, e o checkbox/separador
+// dependem disso). O critério vem da 1ª linha do grupo.
+type PedidoSortKey =
+  | 'data' | 'loja' | 'pedido_bling' | 'pedido_marketplace' | 'cliente'
+  | 'sku' | 'produto' | 'quantidade' | 'etiqueta' | 'impressao' | 'envio'
+const sortKey = ref<PedidoSortKey>('data')
+const sortDir = ref<'asc' | 'desc'>('desc')
+// Datas/horas abrem no mais recente; texto e número abrem no crescente.
+const _SORT_DESC_PRIMEIRO: PedidoSortKey[] = ['data', 'etiqueta', 'impressao', 'envio']
+function ordenarPor(key: PedidoSortKey) {
+  if (sortKey.value === key) {
+    sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+    return
+  }
+  sortKey.value = key
+  sortDir.value = _SORT_DESC_PRIMEIRO.includes(key) ? 'desc' : 'asc'
+}
+// Ordem das colunas ordenáveis da aba Pedidos (a tabela renderiza os <th>
+// a partir daqui — as células continuam escritas à mão, na mesma ordem).
+const PEDIDO_COLS: { key: PedidoSortKey; label: string; cls: string }[] = [
+  { key: 'data', label: 'Data Envio', cls: 'text-left' },
+  { key: 'pedido_bling', label: 'Pedido Bling', cls: 'text-left' },
+  { key: 'pedido_marketplace', label: 'Marketplace', cls: 'text-left' },
+  { key: 'loja', label: 'Loja', cls: 'text-left' },
+  { key: 'cliente', label: 'Cliente', cls: 'text-left' },
+  { key: 'sku', label: 'SKU', cls: 'text-left' },
+  { key: 'produto', label: 'Produto', cls: 'text-left' },
+  { key: 'quantidade', label: 'Qtd', cls: 'text-right' },
+  { key: 'etiqueta', label: 'Etiqueta', cls: 'text-center' },
+  { key: 'impressao', label: 'Impressão', cls: 'text-center' },
+  { key: 'envio', label: 'Envio', cls: 'text-center' },
+]
+function sortValue(r: PedidoRow): string | number {
+  switch (sortKey.value) {
+    case 'data': return r.data_envio || r.data || ''
+    case 'loja': return r.loja || ''
+    case 'pedido_bling': return Number(r.pedido_bling) || 0
+    case 'pedido_marketplace': return r.pedido_marketplace || ''
+    case 'cliente': return r.cliente || ''
+    case 'sku': return r.sku || ''
+    case 'produto': return r.produto || ''
+    case 'quantidade': return r.quantidade
+    case 'etiqueta': return r.etiqueta_em || ''
+    case 'impressao': return r.etiqueta_impressa_em || ''
+    // Sem instante no ledger, "enviado" ainda ordena antes de "não enviado".
+    case 'envio': return r.enviado_em || (r.status === 'enviado' ? '0' : '')
+  }
+}
+
 type PedidoRowWithGroup = PedidoRow & { _isFirstOfGroup: boolean; _groupSize: number }
 const pedidosFilteredGrouped = computed<PedidoRowWithGroup[]>(() => {
-  const sorted = [...pedidosFiltered.value].sort((a, b) => {
-    const da = a.data || ''
-    const db = b.data || ''
-    if (da !== db) return db.localeCompare(da)
-    return (a.pedido_bling || '').localeCompare(b.pedido_bling || '')
-  })
-  const groupSizes = new Map<string, number>()
-  for (const r of sorted) {
+  const grupos = new Map<string, PedidoRow[]>()
+  for (const r of pedidosFiltered.value) {
     const key = r.pedido_bling || ''
-    groupSizes.set(key, (groupSizes.get(key) || 0) + 1)
+    const arr = grupos.get(key)
+    if (arr) arr.push(r)
+    else grupos.set(key, [r])
   }
+  const vazio = (v: string | number) =>
+    v === '' || (v === 0 && sortKey.value === 'pedido_bling')
+  const ordenados = [...grupos.entries()].sort(([ka, ga], [kb, gb]) => {
+    const va = sortValue(ga[0]!)
+    const vb = sortValue(gb[0]!)
+    // Célula em branco vai pro fim nas DUAS direções (igual planilha).
+    if (vazio(va) !== vazio(vb)) return vazio(va) ? 1 : -1
+    const cmp = typeof va === 'number' && typeof vb === 'number'
+      ? va - vb
+      : String(va).localeCompare(String(vb), 'pt-BR', { numeric: true, sensitivity: 'base' })
+    if (cmp !== 0) return sortDir.value === 'asc' ? cmp : -cmp
+    return ka.localeCompare(kb)
+  })
   const out: PedidoRowWithGroup[] = []
-  let lastPedido: string | null = null
-  for (const r of sorted) {
-    const isFirst = (r.pedido_bling || '') !== lastPedido
-    out.push({
+  for (const [, grupo] of ordenados) {
+    grupo.forEach((r, i) => out.push({
       ...r,
-      _isFirstOfGroup: isFirst,
-      _groupSize: groupSizes.get(r.pedido_bling || '') || 1,
-    })
-    lastPedido = r.pedido_bling || null
+      _isFirstOfGroup: i === 0,
+      _groupSize: grupo.length,
+    }))
   }
   return out
 })
@@ -1471,17 +1525,21 @@ async function conferirTodos() {
                 @change="toggleTodasEtiquetas"
               />
             </th>
-            <th class="text-left">Data Envio</th>
-            <th class="text-left">Pedido Bling</th>
-            <th class="text-left">Marketplace</th>
-            <th class="text-left">Loja</th>
-            <th class="text-left">Cliente</th>
-            <th class="text-left">SKU</th>
-            <th class="text-left">Produto</th>
-            <th class="text-right">Qtd</th>
-            <th class="text-center">Etiqueta</th>
-            <th class="text-center">Impressão</th>
-            <th class="text-center">Envio</th>
+            <!-- Cabeçalhos clicáveis: ordenam a tabela como numa planilha
+                 (2º clique inverte). Os itens de um pedido andam juntos. -->
+            <th v-for="col in PEDIDO_COLS" :key="col.key" :class="col.cls">
+              <button
+                type="button"
+                class="inline-flex items-center gap-0.5 uppercase tracking-wide hover:text-foreground"
+                :class="sortKey === col.key ? 'text-foreground font-semibold' : ''"
+                :title="`Ordenar por ${col.label}`"
+                @click="ordenarPor(col.key)"
+              >
+                {{ col.label }}
+                <ArrowDown v-if="sortKey === col.key && sortDir === 'desc'" class="size-3" />
+                <ArrowUp v-else-if="sortKey === col.key" class="size-3" />
+              </button>
+            </th>
             <th class="text-left bg-emerald-50/40">Obs</th>
             <th class="text-center">Imprimir Etiqueta</th>
           </tr>
