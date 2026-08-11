@@ -177,9 +177,13 @@ async def test_sweep_enfileira_com_estoque(db: AsyncSession, admin: User):
 
 
 @pytest.mark.asyncio
-async def test_sweep_ml_entra_no_escopo(db: AsyncSession, admin: User):
-    """Pedido de loja ML 'Em aberto' com faturador entra no sweep — o fluxo
-    do Mercado Livre é o mesmo (importa no Bling destino e a marionete emite)."""
+async def test_sweep_ml_entra_no_escopo(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Pedido de loja ML 'Em aberto' com faturador entra no sweep quando a
+    flag NF_AUTO_ML está ligada — o fluxo do Mercado Livre é o mesmo
+    (importa no Bling destino e a marionete emite)."""
+    monkeypatch.setattr(get_settings(), "nf_auto_ml", True, raising=False)
     await _seed_loja(db, admin, plataforma="ml", bling_store_id="930003")
     await _seed_pedido(db, numero="830003", loja="930003", sku="a3")
     db.add(Product(user_id=admin.id, sku="a3", name="A3", stock=3))
@@ -200,6 +204,30 @@ async def test_sweep_ml_entra_no_escopo(db: AsyncSession, admin: User):
         )
     ).scalar_one()
     assert fat.status_faturamento == "processando"
+
+
+@pytest.mark.asyncio
+async def test_sweep_ml_fora_sem_flag(db: AsyncSession, admin: User):
+    """Com NF_AUTO_ML desligada (default) o pedido ML NÃO entra no sweep —
+    trava até a marionete emitir_nf_bling estar calibrada."""
+    await _seed_loja(db, admin, plataforma="ml", bling_store_id="930004")
+    await _seed_pedido(db, numero="830004", loja="930004", sku="a4")
+    db.add(Product(user_id=admin.id, sku="a4", name="A4", stock=3))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 0
+    assert summary["enfileirados"] == 0
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert cmds == []
+    fat = (
+        await db.execute(
+            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830004")
+        )
+    ).scalar_one_or_none()
+    assert fat is None
 
 
 @pytest.mark.asyncio

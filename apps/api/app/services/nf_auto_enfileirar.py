@@ -496,6 +496,14 @@ async def _candidatos(session) -> list[str]:
     OU qualquer status_faturamento já registrado (tentativa única).
     """
     cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
+    # ML fica atrás de flag própria até a marionete de emissão no Bling
+    # destino (emitir_nf_bling) estar calibrada — senão o import cria a
+    # venda avulsa e ninguém emite a NF.
+    plataformas = (
+        _PLATAFORMAS
+        if get_settings().nf_auto_ml
+        else tuple(p for p in _PLATAFORMAS if p != "ml")
+    )
     numeros = (
         await session.execute(
             select(BlingOrder.numero)
@@ -506,7 +514,7 @@ async def _candidatos(session) -> list[str]:
                 BlingOrder.numero.is_not(None),
                 BlingOrder.loja.is_not(None),
                 BlingOrder.data >= cutoff,
-                func.lower(StoreInfo.platform).in_(_PLATAFORMAS),
+                func.lower(StoreInfo.platform).in_(plataformas),
                 StoreInfo.archived_at.is_(None),
                 StoreInfo.nf_faturador_id.is_not(None),
             )

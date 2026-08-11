@@ -232,6 +232,12 @@ class Settings(BaseSettings):
     # NF_AUTO_ENFILEIRAR=true no .env.
     nf_auto_enfileirar: bool = False
 
+    # Inclui o Mercado Livre no sweep automático. Fica desligado até a
+    # marionete de emissão no Bling destino (emitir_nf_bling) estar
+    # calibrada — senão o import cria a venda mas ninguém emite a NF.
+    # Ligar via NF_AUTO_ML=true no .env.
+    nf_auto_ml: bool = False
+
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado
     # (o sweep segue funcionando normal). Set via
