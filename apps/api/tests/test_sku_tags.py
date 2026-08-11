@@ -1,7 +1,7 @@
 """classify_sku_tag + sql_clause_for_tag.
 
 Cobertura:
-  - _SKU_TAG_OVERRIDES (8 SKUs hand-curated, precedência máxima)
+  - _SKU_TAG_OVERRIDES (SKUs hand-curated, precedência máxima)
   - Regra 0 (z*): z*.mala/eletro mantêm operador; z* SEM sufixo → us;
                   z* COM sufixo regional cai na regra 1 (sufixo vence)
   - Regras 1-4 originais (sufixo / fake / mala / eletro)
@@ -29,6 +29,15 @@ _col = Column("sku", String)
     ("zr010.us", "sa"),    # override vence regra 0 + sufixo
     ("b000.us", "mala"),
     ("z0097.us", "mala"),  # override vence regra 0
+    # Acessórios de mala a* (sem sufixo) → mala
+    ("a006", "mala"),
+    ("a015", "mala"),
+    ("a073", "mala"),
+    ("a074", "mala"),
+    ("a075", "mala"),
+    ("a076", "mala"),
+    ("A015", "mala"),   # normalização lowercase
+    ("a001", None),     # a* fora da lista segue sem tag
     # Regra 0: z* SEM sufixo → us
     ("z0099", "us"),
     ("z0101", "us"),
@@ -108,6 +117,16 @@ def _matches(tag: str, sku: str) -> bool:
     # Overrides — mala pega b000.us e z0097.us
     ("mala", "b000.us", True),
     ("mala", "z0097.us", True),
+    # Overrides — acessórios de mala a*
+    ("mala", "a006", True),
+    ("mala", "a015", True),
+    ("mala", "a073", True),
+    ("mala", "a074", True),
+    ("mala", "a075", True),
+    ("mala", "a076", True),
+    ("mala", "a001", False),
+    ("eletro", "a015", False),
+    ("us", "a015", False),
     ("mala", "b001", True),      # natural
     ("mala", "b1234", True),
     ("mala", "bp001", False),

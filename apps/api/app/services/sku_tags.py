@@ -56,6 +56,16 @@ _SKU_TAG_OVERRIDES: dict[str, str] = {
     # sufixo .us venceria o infixo .mala e jogava a mala pro estoque de
     # usados. Override manda pra tag mala.
     "z0207.mala.us": "mala",
+    # Acessórios de mala com SKU a* (sem sufixo regional) — pertencem ao
+    # time da mala, mas `a*` não casa nenhuma regra de prefixo/sufixo e
+    # ficava invisível pra quem tem cerca de tags (ex.: pedidos 289273 e
+    # 289422 sumiam pros usuários factor/marrocos).
+    "a006": "mala",   # Kit 2 Rodinha Dtluggage
+    "a015": "mala",   # Balança de Mala
+    "a073": "mala",   # Kit 2 Rodinha Omaska
+    "a074": "mala",   # Kit 8 Silicone rodinha
+    "a075": "mala",   # Chaveiro charlots
+    "a076": "mala",   # Encosto Cabeça
 }
 
 _MALA_RE = re.compile(r"^b[0-9]")
@@ -140,7 +150,7 @@ def sql_clause_for_tag(column, tag: str):
         """Aplica os overrides do classifier no SQL:
           - SKUs cujo override aponta pra `tag` ENTRAM (OR);
           - SKUs cujo override aponta pra OUTRA tag SAEM (AND NOT IN).
-        Mantém o classifier e o clause batendo 1:1 pros 8 SKUs da
+        Mantém o classifier e o clause batendo 1:1 pros SKUs da
         lista. lower() pro `func.lower(column).in_` casar a normalização
         do classifier."""
         to_this = sorted(s for s, t in _SKU_TAG_OVERRIDES.items() if t == tag)

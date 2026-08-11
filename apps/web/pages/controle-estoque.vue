@@ -327,7 +327,10 @@ const errorText = ref<string | null>(null)
 function singleDayDates(): string {
   // Estoque + Pedidos send the same value for both endpoints — backend
   // tolerates either treating the window as a single point or a range.
-  const parts = [`data_inicio=${dia.value}`, `data_fim=${dia.value}`]
+  // Input de data limpo → string vazia quebra o parse de date no backend
+  // (422); cai pra hoje.
+  const d = dia.value || isoToday()
+  const parts = [`data_inicio=${d}`, `data_fim=${d}`]
   if (canUseTagFilter.value && tagOverride.value) parts.push(`tag=${tagOverride.value}`)
   // estoque_filter applies only to the Estoque tab (the /produtos call
   // below). Pedidos and Envios ignore the param.
@@ -336,8 +339,8 @@ function singleDayDates(): string {
 }
 function rangeDates(): string {
   const parts = [
-    `data_inicio=${enviosInicio.value}`,
-    `data_fim=${enviosFim.value}`,
+    `data_inicio=${enviosInicio.value || isoDaysAgo(6)}`,
+    `data_fim=${enviosFim.value || isoToday()}`,
   ]
   if (canUseTagFilter.value && tagOverride.value) parts.push(`tag=${tagOverride.value}`)
   return parts.join('&')
