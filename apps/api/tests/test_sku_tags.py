@@ -38,6 +38,10 @@ _col = Column("sku", String)
     ("a076", "mala"),
     ("A015", "mala"),   # normalização lowercase
     ("a001", None),     # a* fora da lista segue sem tag
+    # Mochilas bp* → mala (override; não casam ^b[0-9])
+    ("bp001", "mala"),
+    ("bp002", "mala"),
+    ("bp003", "mala"),
     # Regra 0: z* SEM sufixo → us
     ("z0099", "us"),
     ("z0101", "us"),
@@ -64,7 +68,7 @@ _col = Column("sku", String)
     ("u001", "eletro"),
     ("u300", "eletro"),
     ("fake.x", "fake"),
-    ("bp001", None),    # mochila, não casa ^b[0-9]
+    ("bp999", None),    # bp fora da lista não casa ^b[0-9] nem override
     ("", None),
     (None, None),
 ])
@@ -129,7 +133,10 @@ def _matches(tag: str, sku: str) -> bool:
     ("us", "a015", False),
     ("mala", "b001", True),      # natural
     ("mala", "b1234", True),
-    ("mala", "bp001", False),
+    ("mala", "bp001", True),     # mochila via override
+    ("mala", "bp002", True),
+    ("mala", "bp003", True),
+    ("mala", "bp999", False),
     ("mala", "z0099", False),
     # Carve-outs continuam
     ("mala", "z0094.mala", True),

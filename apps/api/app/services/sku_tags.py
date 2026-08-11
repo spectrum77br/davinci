@@ -14,7 +14,8 @@ Precedência:
                    (z* COM sufixo regional cai na regra 1)
    1. sufixo regional   `.ci/.pi/.ra/.sa/.sp/.us/.cd`  (z*.pi cai aqui)
    2. fake    prefixo  `fake.`
-   3. mala    prefixo  `b` + dígito  (`^b[0-9]`) — exclui `bp001` (mochila)
+   3. mala    prefixo  `b` + dígito  (`^b[0-9]`) — mochilas `bp*` não
+      casam a regex, entram via override
    4. eletro  prefixo  `u`           (`^u`)
    5. resto → None
 
@@ -66,6 +67,10 @@ _SKU_TAG_OVERRIDES: dict[str, str] = {
     "a074": "mala",   # Kit 8 Silicone rodinha
     "a075": "mala",   # Chaveiro charlots
     "a076": "mala",   # Encosto Cabeça
+    # Mochilas (bp*) — não casam ^b[0-9], mas são do time da mala.
+    "bp001": "mala",  # Mochila - Bege
+    "bp002": "mala",  # Mochila - Preto
+    "bp003": "mala",  # Mochila - Cinza
 }
 
 _MALA_RE = re.compile(r"^b[0-9]")
