@@ -370,10 +370,13 @@ async def test_agent_lease_token_vazio_fecha(
 
 
 @pytest.mark.asyncio
-async def test_agent_result_done_marca_ok(
+async def test_agent_result_done_encadeia_emissao_bling(
     db: AsyncSession, client: AsyncClient, admin: User,
     auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
 ):
+    """Import avulsa 'done' de faturador Bling NÃO fecha o faturamento: importar
+    a venda não emite a NF — o motor encadeia `emitir_nf_bling` (marionete emite
+    na tela de Vendas) e o pedido segue 'processando' até a emissão fechar."""
     monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
     auth_as(admin)
     await _seed_dois_faturadores(db, admin)
@@ -401,8 +404,18 @@ async def test_agent_result_done_marca_ok(
         select(NfFaturamento).where(NfFaturamento.pedido_bling == numero)
     )).scalar_one()
     await db.refresh(fat)
-    assert fat.status_faturamento == "ok"
+    assert fat.status_faturamento == "processando"
     assert fat.erro_faturamento is None
+
+    emi = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "emitir_nf_bling")
+    )).scalars().all()
+    assert len(emi) == 1
+    assert emi[0].numeros == [numero]
+    assert emi[0].status == "pending"
+    assert emi[0].source == "auto"
+    assert emi[0].planilha == b""
+    assert emi[0].ads_power == cmd["ads_power"]
 
 
 @pytest.mark.asyncio
@@ -838,6 +851,106 @@ async def test_faturamento_bling_nao_enfileira_etiqueta(
     assert etq == []
 
 
+async def _emissao_bling_done(client: AsyncClient, *, status: str = "done") -> None:
+    """Reivindica os comandos `emitir_nf_bling` e reporta o resultado."""
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 20},
+                              headers={"X-Agent-Token": _TOKEN})
+    for cmd in lease.json()["commands"]:
+        if cmd["action"] != "emitir_nf_bling":
+            continue
+        await client.post(f"/api/nf-cadastro/agent/commands/{cmd['id']}/result",
+                          json={"status": status}, headers={"X-Agent-Token": _TOKEN})
+
+
+@pytest.mark.asyncio
+async def test_emissao_bling_done_fecha_faturamento_e_captura_nf(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """`emitir_nf_bling` 'done' fecha o faturamento 'ok' e encadeia UM
+    `capturar_nf` por pedido (best-effort, mesmo perfil AdsPower) que alimenta a
+    junção etiqueta+DANFE do fluxo correios/ML."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)
+    await _import_done(client, ["830001"])
+    await _emissao_bling_done(client)
+
+    cap = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "capturar_nf")
+    )).scalars().all()
+    assert len(cap) == 1
+    assert cap[0].numeros == ["830001"]
+    assert cap[0].status == "pending"
+    assert cap[0].source == "auto"
+    assert cap[0].planilha == b""
+    assert cap[0].ads_power == "perfil-A"
+    assert cap[0].faturador_id is not None
+
+    fat = (await db.execute(
+        select(NfFaturamento).where(NfFaturamento.pedido_bling == "830001")
+    )).scalar_one()
+    await db.refresh(fat)
+    assert fat.status_faturamento == "ok"
+    assert fat.erro_faturamento is None
+
+
+@pytest.mark.asyncio
+async def test_emissao_bling_failed_marca_erro(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """Emissão que falha na tela deixa o faturamento em 'erro' e NÃO encadeia a
+    captura da DANFE (sem NF não há o que capturar)."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)
+    await _import_done(client, ["830001"])
+    await _emissao_bling_done(client, status="failed")
+
+    cap = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "capturar_nf")
+    )).scalars().all()
+    assert cap == []
+
+    fat = (await db.execute(
+        select(NfFaturamento).where(NfFaturamento.pedido_bling == "830001")
+    )).scalar_one()
+    await db.refresh(fat)
+    assert fat.status_faturamento == "erro"
+
+
+@pytest.mark.asyncio
+async def test_capturar_nf_failed_nao_derruba_faturamento(
+    db: AsyncSession, client: AsyncClient, admin: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """`capturar_nf` é best-effort: a NF já foi emitida, então a falha da captura
+    NÃO desfaz o 'ok' do faturamento (vira só log)."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    auth_as(admin)
+    await _seed_dois_faturadores(db, admin)
+    await _import_done(client, ["830001"])
+    await _emissao_bling_done(client)
+
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 20},
+                              headers={"X-Agent-Token": _TOKEN})
+    cap = next(c for c in lease.json()["commands"] if c["action"] == "capturar_nf")
+    r = await client.post(
+        f"/api/nf-cadastro/agent/commands/{cap['id']}/result",
+        json={"status": "failed", "result": "DANFE não baixou"},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+
+    fat = (await db.execute(
+        select(NfFaturamento).where(NfFaturamento.pedido_bling == "830001")
+    )).scalar_one()
+    await db.refresh(fat)
+    assert fat.status_faturamento == "ok"
+    assert fat.erro_faturamento is None
+
+
 @pytest.mark.asyncio
 async def test_lease_entrega_comando_etiqueta(
     db: AsyncSession, client: AsyncClient, admin: User,
@@ -1047,10 +1160,12 @@ async def test_import_avulsa_ml_enfileira_import_etiqueta(
     db: AsyncSession, client: AsyncClient, admin: User,
     auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
 ):
-    """Loja ML (faturador Bling + etiqueta Upseller): ao fechar o faturamento 'ok'
-    o motor auto-enfileira UM comando `import_etiqueta` (.xlsx NF-e=NÃO, no perfil
+    """Loja ML (faturador Bling + etiqueta Upseller): quando o IMPORT fecha, o
+    motor auto-enfileira UM comando `import_etiqueta` (.xlsx NF-e=NÃO, no perfil
     AdsPower do cadastro de Etiqueta = 58, sem faturador_id), NÃO um
-    `imprimir_etiqueta` ainda (esse vem depois que a importação fecha)."""
+    `imprimir_etiqueta` ainda (esse vem depois que a importação fecha). A etiqueta
+    anda em paralelo à emissão: o faturamento segue 'processando' até o
+    `emitir_nf_bling` fechar."""
     monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
     auth_as(admin)
     await _seed_ml_etiqueta(db, admin)
@@ -1085,11 +1200,18 @@ async def test_import_avulsa_ml_enfileira_import_etiqueta(
     )).scalars().all()
     assert pri == []
 
+    # emissão da NF no Bling destino encadeada em paralelo à etiqueta.
+    emi = (await db.execute(
+        select(NfCommand).where(NfCommand.action == "emitir_nf_bling")
+    )).scalars().all()
+    assert len(emi) == 1
+    assert emi[0].numeros == ["860001"]
+
     fat = (await db.execute(
         select(NfFaturamento).where(NfFaturamento.pedido_bling == "860001")
     )).scalar_one()
     await db.refresh(fat)
-    assert fat.status_faturamento == "ok"
+    assert fat.status_faturamento == "processando"
     assert fat.status_etiqueta == "processando"
 
 

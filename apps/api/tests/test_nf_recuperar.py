@@ -192,11 +192,12 @@ async def test_claimed_esgotado_vira_failed(db: AsyncSession):
 @pytest.mark.asyncio
 async def test_orfao_faturamento_reencadeia_emissao(db: AsyncSession):
     """Pedido 'processando' sem comando ativo mas com import_avulsa done:
-    faturador upseller ganha `emitir_nf_upseller`; faturador bling fecha 'ok'
-    (o import done já encerrava o faturamento)."""
+    faturador upseller ganha `emitir_nf_upseller`; faturador bling ganha
+    `emitir_nf_bling` (o import não emite a NF — o elo perdido é a emissão)."""
     fat_up = await _seed_faturador(db, modo="upseller")
     fat_bl = await _seed_faturador(db, modo="bling")
     fat_up_id = fat_up.id
+    fat_bl_id = fat_bl.id
     _seed_cmd(
         db, action="import_avulsa", status="done", numeros=["830001"],
         faturador_id=fat_up_id,
@@ -225,12 +226,22 @@ async def test_orfao_faturamento_reencadeia_emissao(db: AsyncSession):
     assert novos[0].numeros == ["830001"]
     assert novos[0].faturador_id == fat_up_id
     assert novos[0].ads_power == "perfil-58"
+    novos_bl = (
+        await db.execute(
+            select(NfCommand).where(NfCommand.action == "emitir_nf_bling")
+        )
+    ).scalars().all()
+    assert len(novos_bl) == 1
+    assert novos_bl[0].status == "pending"
+    assert novos_bl[0].numeros == ["830002"]
+    assert novos_bl[0].faturador_id == fat_bl_id
+    assert novos_bl[0].ads_power == "perfil-58"
     fats = {
         f.pedido_bling: f
         for f in (await db.execute(select(NfFaturamento))).scalars().all()
     }
     assert fats["830001"].status_faturamento == "processando"  # segue em curso
-    assert fats["830002"].status_faturamento == "ok"
+    assert fats["830002"].status_faturamento == "processando"  # emissão em fila
 
     # 2ª passada: o comando novo cobre o 830001 → nada a fazer
     summary2 = await run_recuperar_nf()

@@ -58,7 +58,7 @@ _MAX_POR_TICK = 30
 
 # Qual etapa do painel cada action alimenta (capturar_nf fica fora — não tem
 # coluna própria no nf_faturamento).
-_ETAPA_FATURAMENTO = ("import_avulsa", "emitir_nf_upseller")
+_ETAPA_FATURAMENTO = ("import_avulsa", "emitir_nf_upseller", "emitir_nf_bling")
 _ETAPA_ETIQUETA = ("import_etiqueta", "imprimir_etiqueta")
 
 
@@ -233,6 +233,7 @@ async def _reenfileirar_orfaos(session, summary: dict) -> None:
     """Re-encadeia pedidos 'processando' cuja cadeia de comandos se perdeu."""
     from app.routers.nf import (
         _criar_comandos_etiqueta,
+        _enfileirar_emissao_bling,
         _enfileirar_emissao_upseller,
         _enfileirar_etiqueta_ml,
         _marcar_faturamento,
@@ -248,13 +249,16 @@ async def _reenfileirar_orfaos(session, summary: dict) -> None:
         for n in orfaos:
             done = import_done.get(n)
             if done is not None:
-                # Import já fechou — o elo perdido é a emissão no Upseller.
-                up = await _enfileirar_emissao_upseller(
+                # Import já fechou — o elo perdido é a emissão da NF
+                # (Upseller ou Bling destino).
+                emitindo = await _enfileirar_emissao_upseller(
+                    session, done.faturador_id, [n]
+                ) or await _enfileirar_emissao_bling(
                     session, done.faturador_id, [n]
                 )
-                if not up:
-                    # Faturador Bling (ou sumiu): o import done JÁ encerrava o
-                    # faturamento — espelha o endpoint /result.
+                if not emitindo:
+                    # Faturador sumiu: nada mais a encadear — espelha o
+                    # endpoint /result e fecha o faturamento.
                     await _marcar_faturamento(
                         session, [n], status_txt="ok", erro=None
                     )

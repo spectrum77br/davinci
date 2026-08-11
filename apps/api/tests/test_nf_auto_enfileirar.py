@@ -1,7 +1,7 @@
-"""Sweep do auto-enfileirador de NF (pedidos Shopee/TikTok "Em aberto").
+"""Sweep do auto-enfileirador de NF (pedidos Shopee/TikTok/ML "Em aberto").
 
 `run_auto_enfileirar_nf()` faz sozinho o que o botão "Enfileirar" do painel
-faz: varre situacao=6 de loja Shopee/TikTok com faturador, confere o estoque
+faz: varre situacao=6 de loja Shopee/TikTok/ML com faturador, confere o estoque
 (saldo virtual negativo → Aguardando Cancelamento) e cria os NfCommand de
 import_avulsa com source='auto'. Tentativa automática é ÚNICA por pedido:
 qualquer status_faturamento pré-existente exclui o pedido do sweep.
@@ -174,6 +174,32 @@ async def test_sweep_enfileira_com_estoque(db: AsyncSession, admin: User):
     db.expire_all()
     cmds2 = (await db.execute(select(NfCommand))).scalars().all()
     assert len(cmds2) == len(cmds)
+
+
+@pytest.mark.asyncio
+async def test_sweep_ml_entra_no_escopo(db: AsyncSession, admin: User):
+    """Pedido de loja ML 'Em aberto' com faturador entra no sweep — o fluxo
+    do Mercado Livre é o mesmo (importa no Bling destino e a marionete emite)."""
+    await _seed_loja(db, admin, plataforma="ml", bling_store_id="930003")
+    await _seed_pedido(db, numero="830003", loja="930003", sku="a3")
+    db.add(Product(user_id=admin.id, sku="a3", name="A3", stock=3))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1
+    assert summary["enfileirados"] == 1
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert len(cmds) == 1
+    assert cmds[0].action == "import_avulsa"
+    assert cmds[0].numeros == ["830003"]
+    fat = (
+        await db.execute(
+            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830003")
+        )
+    ).scalar_one()
+    assert fat.status_faturamento == "processando"
 
 
 @pytest.mark.asyncio

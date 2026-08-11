@@ -56,7 +56,7 @@ _SWEEP_LOCK_KEY = 0x6E666165  # ascii "nfae"
 _SITUACAO_EM_ABERTO = "6"
 
 # Plataformas que o fluxo automatizado cobre hoje (codes de store_info.platform).
-_PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok")
+_PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok", "ml")
 
 # Pedido mais velho que isso não entra sozinho — se ficou pra trás, é caso de
 # olhar no painel e enfileirar à mão (evita o sweep ressuscitar pedido antigo
