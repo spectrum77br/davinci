@@ -6,6 +6,9 @@ faturador atribuído, confere o ESTOQUE antes de tudo (regra do usuário: kit
 confere o saldo do próprio SKU do kit; saldo virtual negativo = peça não
 existe) e:
 
+  - restrição    → Shopee + produto Apple (pelo nome) + destino RJ não é
+                   enviado: "restrição" nas Observações do pedido no Bling +
+                   Aguardando Cancelamento + status 'restricao';
   - sem estoque  → Aguardando Cancelamento no Bling + status 'sem_estoque'
                    (não emite NF/etiqueta de peça que não existe);
   - com estoque  → gera a planilha por faturador e cria os NfCommand de
@@ -35,7 +38,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 
 from app.config import get_settings
 from app.db import session_scope
@@ -63,6 +66,23 @@ _CANDIDATE_WINDOW = timedelta(days=7)
 # Teto de pedidos NOVOS por tick: não inunda a fila (nem o Upseller) de uma
 # vez quando a flag liga com backlog acumulado; o resto entra nos próximos.
 _MAX_POR_TICK = 30
+
+# Restrição Shopee: produto Apple NÃO é enviado pro Rio de Janeiro. Pedido
+# que casa (loja Shopee + destino RJ + nome do item com uma das palavras)
+# não gera NF/etiqueta: vai pra Aguardando Cancelamento com "restrição" nas
+# Observações do pedido no Bling. Detecção pelo NOME ("pelo nome ja da pra
+# saber") — qualquer item que case bloqueia o pedido inteiro.
+_RESTRICAO_UF = "RJ"
+_RESTRICAO_PLATAFORMAS: tuple[str, ...] = ("shopee",)
+_RESTRICAO_KEYWORDS: tuple[str, ...] = (
+    "apple",
+    "iphone",
+    "ipad",
+    "macbook",
+    "airpod",
+    "imac",
+)
+_RESTRICAO_OBSERVACAO = "restrição"
 
 # Roteamento do aviso Threema por TAG de estoque: o grupo GERAL (env
 # `NF_SEM_ESTOQUE_THREEMA_RECIPIENTS`, master switch — vazio desliga TUDO)
@@ -116,6 +136,7 @@ async def run_auto_enfileirar_nf() -> dict:
         "enfileirados": 0,
         "comandos": 0,
         "sem_estoque": 0,
+        "restricao": 0,
         "pulados": 0,
         "fundidos": 0,
     }
@@ -163,6 +184,31 @@ async def run_auto_enfileirar_nf() -> dict:
         fragmentado = any(len(v) > 1 for v in pendings_por_fat.values())
         if not numeros and not fragmentado:
             return summary
+
+        # 1a) Restrição Shopee Apple→RJ ANTES do check de estoque (não gasta
+        #     chamada do Bling com pedido que já vai ser bloqueado). ORDEM:
+        #     Observação (GET→PUT) PRIMEIRO, situação (PATCH 83955) DEPOIS —
+        #     um PUT com body stale reverteria a situação recém-mudada.
+        restricao = await _pedidos_restricao(session, numeros) if numeros else {}
+        if restricao:
+            await _escrever_observacao_restricao(session, list(restricao))
+            await _marcar_aguardando_cancelamento(session, list(restricao))
+            for numero, itens in restricao.items():
+                await _marcar_faturamento(
+                    session,
+                    [numero],
+                    status_txt="restricao",
+                    erro=(
+                        "Restrição Shopee — Apple não envia pro RJ: "
+                        + ", ".join(itens)
+                    ),
+                )
+            summary["restricao"] = len(restricao)
+            logger.info(
+                "nf_auto_enfileirar_restricao",
+                pedidos={n: itens for n, itens in restricao.items()},
+            )
+        numeros = [n for n in numeros if n not in restricao]
 
         # 1) Estoque primeiro: saldo virtual negativo → Aguardando Cancelamento.
         #    Só os candidatos NOVOS — o backlog já passou no check ao entrar.
@@ -352,6 +398,93 @@ async def _notificar_sem_estoque(
         logger.info("nf_auto_enfileirar_threema", sent=sent, failed=failed)
     except Exception as exc:  # noqa: BLE001
         logger.warning("nf_sem_estoque_threema_falhou", erro=str(exc))
+
+
+async def _pedidos_restricao(
+    session, numeros: list[str]
+) -> dict[str, list[str]]:
+    """Pedidos que caem na restrição Shopee Apple→RJ.
+
+    Olha TODOS os itens do pedido (não só item_index=0): um item Apple
+    bloqueia o pedido inteiro. Retorna numero → nomes dos itens que casaram.
+    """
+    if not numeros:
+        return {}
+    rows = (
+        await session.execute(
+            select(BlingOrder.numero, BlingOrder.item_descricao)
+            .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
+            .where(
+                BlingOrder.numero.in_(numeros),
+                func.lower(StoreInfo.platform).in_(_RESTRICAO_PLATAFORMAS),
+                func.upper(func.trim(BlingOrder.uf_destino)) == _RESTRICAO_UF,
+                BlingOrder.item_descricao.is_not(None),
+                or_(
+                    *[
+                        BlingOrder.item_descricao.ilike(f"%{kw}%")
+                        for kw in _RESTRICAO_KEYWORDS
+                    ]
+                ),
+            )
+            .distinct()
+            .order_by(BlingOrder.numero, BlingOrder.item_descricao)
+        )
+    ).all()
+    restricao: dict[str, list[str]] = {}
+    for numero, descricao in rows:
+        itens = restricao.setdefault(numero, [])
+        if descricao not in itens:
+            itens.append(descricao)
+    return restricao
+
+
+async def _escrever_observacao_restricao(
+    session, numeros: list[str]
+) -> None:
+    """Escreve "restrição" nas Observações do pedido no Bling.
+
+    A API v3 não tem endpoint de Ocorrência (404 nos caminhos candidatos) —
+    o usuário escolheu as Observações. Reusa o round-trip já validado da
+    Mensagem Bling (GET → compose → sanitiza → PUT). BEST-EFFORT por pedido:
+    falha só loga, nunca segura o bloqueio (a situação muda mesmo assim).
+    Chamar ANTES do PATCH de situação — o PUT leva o body inteiro e um GET
+    stale reverteria o 83955.
+    """
+    from app.services.logistica_bling import (
+        build_observacoes_put_body,
+        compose_observacoes,
+    )
+
+    client = await nf_emissao_gerar._bling_client_opt(session)
+    if client is None:
+        logger.warning("nf_restricao_observacao_sem_bling", pedidos=numeros)
+        return
+    bling_ids = dict(
+        (
+            await session.execute(
+                select(BlingOrder.numero, func.max(BlingOrder.bling_id))
+                .where(BlingOrder.numero.in_(numeros))
+                .group_by(BlingOrder.numero)
+            )
+        ).all()
+    )
+    for numero in numeros:
+        bling_id = bling_ids.get(numero)
+        if not bling_id:
+            logger.warning("nf_restricao_observacao_sem_bling_id", pedido=numero)
+            continue
+        try:
+            order = await client.get_order(int(bling_id))
+            novo = compose_observacoes(
+                order.get("observacoes"), _RESTRICAO_OBSERVACAO
+            )
+            if novo != (order.get("observacoes") or ""):
+                body = build_observacoes_put_body(order, novo)
+                await client.update_order(int(bling_id), body)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "nf_restricao_observacao_falhou", pedido=numero, erro=str(exc)
+            )
 
 
 async def _candidatos(session) -> list[str]:

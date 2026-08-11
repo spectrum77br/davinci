@@ -44,17 +44,34 @@ async def _async_return(value: object) -> object:
 
 class _FakeBlingSituacao:
     """Captura os PATCH de situação que o motor manda pro Bling e serve o
-    saldo VIVO (`get_product`) do check de estoque ao vivo."""
+    saldo VIVO (`get_product`) do check de estoque ao vivo. Pra restrição,
+    serve o pedido (`get_order`) e captura o PUT das Observações."""
 
-    def __init__(self, saldos: dict[int, float] | None = None) -> None:
+    def __init__(
+        self,
+        saldos: dict[int, float] | None = None,
+        orders: dict[int, dict] | None = None,
+    ) -> None:
         self.chamadas: list[tuple[int, int]] = []
         self.saldos = saldos or {}
+        self.orders = orders or {}
+        self.puts: list[tuple[int, dict]] = []
+        self.eventos: list[tuple[str, int]] = []
 
     async def update_order_situacao(self, bling_order_id: int, situacao_id: int) -> None:
         self.chamadas.append((bling_order_id, situacao_id))
+        self.eventos.append(("situacao", bling_order_id))
 
     async def get_product(self, bling_product_id: int) -> dict:
         return {"estoque": {"saldoVirtualTotal": self.saldos[bling_product_id]}}
+
+    async def get_order(self, bling_order_id: int) -> dict:
+        return self.orders[bling_order_id]
+
+    async def update_order(self, bling_order_id: int, body: dict) -> dict:
+        self.puts.append((bling_order_id, body))
+        self.eventos.append(("put", bling_order_id))
+        return body
 
 
 @pytest_asyncio.fixture
@@ -95,6 +112,7 @@ async def _seed_pedido(
     db: AsyncSession, *, numero: str, loja: str, sku: str,
     situacao: str = "6", bling_id: int = 700001,
     data: datetime | None = None, item_produto_id: int | None = None,
+    item_descricao: str | None = None, uf_destino: str = "MG",
 ) -> None:
     db.add(
         BlingOrder(
@@ -106,7 +124,7 @@ async def _seed_pedido(
             item_index=0,
             item_codigo=sku,
             item_produto_id=item_produto_id,
-            item_descricao=f"Produto {sku}",
+            item_descricao=item_descricao or f"Produto {sku}",
             item_quantidade=1,
             itemvalor=100,
             nome_destinatario="Cleso Menezes",
@@ -115,7 +133,7 @@ async def _seed_pedido(
             numero_destino="30",
             bairro_destino="Cinquentenário",
             cidade_destino="Belo Horizonte",
-            uf_destino="MG",
+            uf_destino=uf_destino,
         )
     )
 
@@ -623,3 +641,97 @@ async def test_sweep_sem_estoque_tag_nao_duplica_geral(
     assert dest_geral == ["CDSA84BZ", "5WWUUBTT"]
     _, dest_ci = _FakeThreema.enviados[1]
     assert sorted(dest_ci) == ["2YSBC69R", "EV6NR2BU"]  # Espanha não repete
+
+
+@pytest.mark.asyncio
+async def test_sweep_restricao_apple_rj_bloqueia(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Shopee + produto Apple (pelo nome) + destino RJ: NÃO enfileira;
+    "restrição" vai pras Observações do pedido (PUT) ANTES do PATCH pra
+    83955, e nf_faturamento fica 'restricao' (tentativa única)."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="ap1", bling_id=700009,
+        item_descricao="Iphone 15 Apple 128GB", uf_destino="RJ",
+    )
+    await db.commit()
+    fake = _FakeBlingSituacao(
+        orders={700009: {"id": 700009, "observacoes": ""}}
+    )
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1
+    assert summary["restricao"] == 1
+    assert summary["sem_estoque"] == 0
+    assert summary["enfileirados"] == 0
+
+    # ORDEM crítica: Observação (PUT) primeiro, situação (PATCH) depois —
+    # um PUT com body stale reverteria o 83955 recém-aplicado.
+    assert fake.eventos == [("put", 700009), ("situacao", 700009)]
+    assert fake.chamadas == [(700009, 83955)]
+    [(_put_id, body)] = fake.puts
+    assert "restrição" in (body.get("observacoes") or "")
+
+    db.expire_all()
+    assert (await db.execute(select(NfCommand))).scalars().all() == []
+    situacao = (
+        await db.execute(
+            select(BlingOrder.situacao).where(BlingOrder.numero == "830001")
+        )
+    ).scalar()
+    assert situacao == "83955"
+    fat = (
+        await db.execute(
+            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830001")
+        )
+    ).scalar_one()
+    assert fat.status_faturamento == "restricao"
+    assert "Restrição" in (fat.erro_faturamento or "")
+    assert "Iphone 15 Apple 128GB" in (fat.erro_faturamento or "")
+
+    # tentativa automática única: não re-pega nem re-escreve no Bling
+    summary2 = await run_auto_enfileirar_nf()
+    assert summary2["candidatos"] == 0
+    assert len(fake.puts) == 1
+    assert len(fake.chamadas) == 1
+
+
+@pytest.mark.asyncio
+async def test_sweep_restricao_fora_do_escopo_enfileira_normal(
+    db: AsyncSession, admin: User
+):
+    """Contra-casos NÃO bloqueiam: Apple→MG, não-Apple→RJ e Apple→RJ mas
+    TikTok seguem o fluxo normal de enfileiramento."""
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_loja(db, admin, plataforma="tiktok", bling_store_id="930002")
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="a1", bling_id=700001,
+        item_descricao="Iphone 14 Apple", uf_destino="MG",
+    )
+    await _seed_pedido(
+        db, numero="830002", loja="930001", sku="a2", bling_id=700002,
+        item_descricao="Capinha Galaxy", uf_destino="RJ",
+    )
+    await _seed_pedido(
+        db, numero="830003", loja="930002", sku="a3", bling_id=700003,
+        item_descricao="Ipad Apple 10", uf_destino="RJ",
+    )
+    db.add(Product(user_id=admin.id, sku="a1", name="A1", stock=3))
+    db.add(Product(user_id=admin.id, sku="a2", name="A2", stock=3))
+    db.add(Product(user_id=admin.id, sku="a3", name="A3", stock=3))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 3
+    assert summary["restricao"] == 0
+    assert summary["enfileirados"] == 3
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert sorted(n for c in cmds for n in c.numeros) == [
+        "830001", "830002", "830003"
+    ]
