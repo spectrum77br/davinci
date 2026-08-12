@@ -640,6 +640,33 @@ const diPagModal = reactive({
   primeiro_vencimento: '',
   saving: false,
 })
+// O campo é texto (não `type=number`) pra aceitar o formato BR digitado
+// à mão: "208.500,00". `type=number` recusa a vírgula e o operador acaba
+// mandando o valor sem separador nenhum.
+function parseValorBr(raw: string): number {
+  const s = String(raw).replace(/[R$\s]/g, '')
+  if (!s) return NaN
+  if (s.includes(',')) return Number(s.replace(/\./g, '').replace(',', '.'))
+  // Sem vírgula, ponto só é milhar quando os grupos têm 3 dígitos ("208.500").
+  if (/^\d{1,3}(\.\d{3})+$/.test(s)) return Number(s.replace(/\./g, ''))
+  return Number(s)
+}
+function formatarValorDi() {
+  const n = parseValorBr(diPagModal.valor_total)
+  if (!Number.isFinite(n) || n <= 0) return
+  diPagModal.valor_total = n.toLocaleString('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+}
+// Confere em voz alta o que vai pro Bling — evita o erro de casa decimal
+// (20850000 quando se queria 208.500,00).
+const diPagValorPreview = computed(() => {
+  const n = parseValorBr(diPagModal.valor_total)
+  if (!Number.isFinite(n) || n <= 0) return ''
+  const p = diPagModal.parcelas > 0 ? diPagModal.parcelas : 1
+  return `${fmtMoney(n)} em ${p}x de ${fmtMoney(n / p)}`
+})
 function openDiPagamento(lote: Lote) {
   diPagModal.lote = lote
   diPagModal.valor_total = ''
@@ -650,7 +677,7 @@ function openDiPagamento(lote: Lote) {
 }
 async function lancarDiPagamento() {
   const lote = diPagModal.lote
-  const valor = Number(diPagModal.valor_total)
+  const valor = parseValorBr(diPagModal.valor_total)
   if (!lote || diPagModal.saving) return
   if (!valor || valor <= 0) {
     toasts.warning('Valor inválido', 'Informe o valor total da DI.')
@@ -3160,9 +3187,13 @@ onScopeDispose(() => {
           </p>
           <label class="flex flex-col gap-1">
             <span class="text-[10px] text-muted-foreground">Valor total (R$) *</span>
-            <input v-model="diPagModal.valor_total" type="number" step="0.01" min="0"
-              class="h-8 border rounded px-2 bg-background text-right" placeholder="0,00" />
+            <input v-model="diPagModal.valor_total" type="text" inputmode="decimal"
+              class="h-8 border rounded px-2 bg-background text-right" placeholder="208.500,00"
+              @blur="formatarValorDi" />
           </label>
+          <p v-if="diPagValorPreview" class="text-[11px] text-muted-foreground -mt-2">
+            {{ diPagValorPreview }}
+          </p>
           <div class="grid grid-cols-2 gap-3">
             <label class="flex flex-col gap-1">
               <span class="text-[10px] text-muted-foreground">Parcelas *</span>
