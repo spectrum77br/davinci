@@ -1145,7 +1145,9 @@ async def exportar_lote_excel(
 # ── Simulação + DI (migration 0214) ────────────────────────────────────
 
 _DI_PDF_MAX_BYTES = 8 * 1024 * 1024  # 8MB
-_DI_CONTATO_BLING_ID = 108074  # isatrading — contato fixo do pagamento da DI
+# isatrading — contato fixo do pagamento da DI. É o `id` do Bling
+# (o 108074 que aparece na tela é o CÓDIGO do contato, não serve na API).
+_DI_CONTATO_BLING_ID = 17052389798
 
 
 async def _lote_or_404(session: AsyncSession, lote_id: UUID) -> ImportLote:

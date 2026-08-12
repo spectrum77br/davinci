@@ -422,11 +422,15 @@ class BlingClient:
         Usado pelo fluxo da DI (Importação): ao anexar a DI o operador
         pode lançar o pagamento parcelado em nome do contato isatrading.
         Datas em YYYY-MM-DD. Retorna o `data` do Bling ({"id": ...}).
+
+        `competencia` é obrigatória no Bling e só aceita YYYY-MM-DD; sem
+        ela vem 400 "A competência está inválida".
         """
         body: dict = {
             "contato": {"id": contato_id},
             "vencimento": vencimento,
             "valor": valor,
+            "competencia": data_emissao or vencimento,
         }
         if data_emissao:
             body["dataEmissao"] = data_emissao
