@@ -77,6 +77,30 @@ def require_permission(resource: str, action: Literal["view", "edit", "delete"])
     return dep
 
 
+def require_permission_any(
+    resources: tuple[str, ...], action: Literal["view", "edit", "delete"]
+):
+    """Como `require_permission`, mas libera se QUALQUER um dos recursos tiver a
+    ação. Pra endpoints compartilhados por mais de uma tela/permissão — ex.
+    `/pricing/store-info`: a tela Lojas é liberada por `lojas_info`, mas o
+    endpoint nasceu na Tabela de Preços (`tabela_precos`) e usuários antigos só
+    têm essa. O 403 reporta o primeiro recurso da tupla (o "principal")."""
+
+    async def dep(user: Annotated[User, Depends(require_active_user)]) -> User:
+        if user.role == UserRole.ADMIN:
+            return user
+        perms = user.permissions or {}
+        for resource in resources:
+            if (perms.get(resource) or {}).get(action, False):
+                return user
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={"code": "forbidden", "resource": resources[0], "action": action},
+        )
+
+    return dep
+
+
 def user_scope(model, user):
     """SQLAlchemy where-predicate.
 
