@@ -364,13 +364,14 @@ class CompetitorPriceRow(BaseModel):
 class StoreExcecao(BaseModel):
     """Regra de exceção de envio da loja (campo "Exceções" da tela Lojas).
 
-    Bloqueia o envio automático quando o destino é a `uf` e:
+    A UF vem do campo "Restrição" da loja (uf_restrictions) — a regra
+    bloqueia o envio automático quando o destino está nas UFs da Restrição e:
       - tipo "valor":   o valor total do pedido é >= `valor`;
       - tipo "sku":     algum item tem um dos SKUs em `termos`;
       - tipo "palavra": o nome de algum item contém uma palavra de `termos`.
+    (Regras antigas salvas com `uf` seguem válidas — a chave é ignorada.)
     """
 
-    uf: str = Field(min_length=2, max_length=2)
     tipo: Literal["valor", "sku", "palavra"]
     valor: float | None = None
     termos: list[str] | None = None

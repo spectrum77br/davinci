@@ -212,7 +212,8 @@ async def run_auto_enfileirar_nf() -> dict:
         numeros = [n for n in numeros if n not in restricao]
 
         # 1b) Exceções POR LOJA (campo "Exceções" da tela Lojas, store_info.
-        #     excecoes) — regras configuráveis de UF + valor/sku/palavra,
+        #     excecoes) — regras de valor/sku/palavra que valem pras UFs do
+        #     campo "Restrição" (store_info.uf_restrictions) da loja,
         #     ADICIONAIS à restrição hardcoded acima. Mesma mecânica: obs
         #     "restrição" (GET→PUT) ANTES do PATCH 83955.
         excecao = await _pedidos_excecao(session, numeros) if numeros else {}
@@ -478,28 +479,36 @@ def avaliar_excecoes(
     regras: list[dict],
     *,
     uf_destino: str | None,
+    ufs_restricao: list[str] | None,
     valor_total,
     itens: list[tuple[str | None, str | None]],
 ) -> list[str]:
     """Motivos das regras de exceção da loja que o pedido casa. [] = passa.
 
     `regras` = store_info.excecoes (lista JSONB, ver schemas.StoreExcecao);
-    `itens` = [(sku, nome), ...] de TODOS os itens do pedido. Regra só vale
-    quando a `uf` bate com o destino; aí:
+    `ufs_restricao` = store_info.uf_restrictions (campo "Restrição" da tela
+    Lojas) — as regras só valem quando o destino do pedido está nessas UFs
+    (loja sem Restrição = exceção nunca casa);
+    `itens` = [(sku, nome), ...] de TODOS os itens do pedido. Tipos:
       - "valor":   bloqueia se o valor total do pedido >= regra["valor"];
       - "sku":     bloqueia se algum item tem SKU da lista (exato, casefold);
       - "palavra": bloqueia se o nome de algum item contém um dos termos.
-    Defensivo com dados sujos (regra não-dict, valor não-numérico, termos
-    vazios) — regra malformada é ignorada, nunca derruba o sweep.
+    Regras antigas ainda podem carregar "uf" — a chave é IGNORADA (a UF vem
+    da Restrição). Defensivo com dados sujos (regra não-dict, valor
+    não-numérico, termos vazios) — regra malformada é ignorada, nunca
+    derruba o sweep.
     """
     uf = (uf_destino or "").strip().upper()
-    if not uf or not regras:
+    ufs = {
+        str(u).strip().upper()
+        for u in (ufs_restricao or [])
+        if str(u).strip()
+    }
+    if not uf or uf not in ufs or not regras:
         return []
     motivos: list[str] = []
     for regra in regras:
         if not isinstance(regra, dict):
-            continue
-        if str(regra.get("uf") or "").strip().upper() != uf:
             continue
         tipo = regra.get("tipo")
         if tipo == "valor":
@@ -568,6 +577,7 @@ async def _pedidos_excecao(
                 BlingOrder.item_codigo,
                 BlingOrder.item_descricao,
                 StoreInfo.excecoes,
+                StoreInfo.uf_restrictions,
             )
             .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
             .where(
@@ -578,10 +588,16 @@ async def _pedidos_excecao(
         )
     ).all()
     por_pedido: dict[str, dict] = {}
-    for numero, uf, valor, sku, descricao, regras in rows:
+    for numero, uf, valor, sku, descricao, regras, ufs_restricao in rows:
         info = por_pedido.setdefault(
             numero,
-            {"uf": uf, "valor": valor, "regras": regras, "itens": []},
+            {
+                "uf": uf,
+                "valor": valor,
+                "regras": regras,
+                "ufs_restricao": ufs_restricao,
+                "itens": [],
+            },
         )
         info["itens"].append((sku, descricao))
     excecao: dict[str, list[str]] = {}
@@ -589,6 +605,7 @@ async def _pedidos_excecao(
         motivos = avaliar_excecoes(
             info["regras"] or [],
             uf_destino=info["uf"],
+            ufs_restricao=info["ufs_restricao"],
             valor_total=info["valor"],
             itens=info["itens"],
         )

@@ -301,11 +301,14 @@ class StoreInfo(Base, TimestampMixin):
     # Exceções de envio POR LOJA (migration 0216): lista de regras que o sweep
     # automático de NF avalia — pedido que casa vai pra Aguardando Cancelamento
     # com "restrição" nas Observações (igual à restrição Apple→RJ, que segue
-    # hardcoded e NÃO é substituída por isto). Cada regra:
-    #   {"uf": "RJ", "tipo": "valor", "valor": 700}       → valor total >= 700
-    #   {"uf": "RJ", "tipo": "sku", "termos": [...]}      → SKU do item
-    #   {"uf": "RJ", "tipo": "palavra", "termos": [...]}  → nome do item contém
-    # NULL/[] = sem exceções.
+    # hardcoded e NÃO é substituída por isto). As regras valem pras UFs do
+    # campo "Restrição" acima (uf_restrictions); loja sem Restrição = exceção
+    # nunca casa. Cada regra:
+    #   {"tipo": "valor", "valor": 700}       → valor total >= 700
+    #   {"tipo": "sku", "termos": [...]}      → SKU do item
+    #   {"tipo": "palavra", "termos": [...]}  → nome do item contém
+    # (regras antigas podem carregar "uf" — chave ignorada.) NULL/[] = sem
+    # exceções.
     excecoes: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
     # "Arquivada": loja suspensa tirada de circulação. Quando != NULL, some da
     # tela Lojas (e a integração vinculada é arquivada junto). NULL = ativa.

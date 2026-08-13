@@ -14,8 +14,8 @@ definePageMeta({
 
 // Regra de exceção de envio da loja (campo "Exceções") — o sweep automático
 // de NF bloqueia o pedido que casa (Aguardando Cancelamento + "restrição").
+// A UF vem do campo "Restrição" da loja (uf_restrictions).
 type StoreExcecao = {
-  uf: string
   tipo: 'valor' | 'sku' | 'palavra'
   valor?: number | null
   termos?: string[] | null
@@ -287,7 +287,6 @@ const openExcRow = computed(() =>
   openExcRowId.value ? items.value.find((r) => r.id === openExcRowId.value) || null : null
 )
 const excDraft = reactive({
-  uf: 'RJ',
   tipo: 'valor' as StoreExcecao['tipo'],
   valor: '',
   termos: '',
@@ -295,21 +294,21 @@ const excDraft = reactive({
 function excecaoLabel(r: StoreExcecao): string {
   if (r.tipo === 'valor') {
     const v = Number(r.valor ?? 0)
-    return `${r.uf}: valor ≥ R$ ${v.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
+    return `valor ≥ R$ ${v.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
   }
   const termos = (r.termos || []).join(', ')
-  return r.tipo === 'sku' ? `${r.uf}: SKU ${termos}` : `${r.uf}: nome contém ${termos}`
+  return r.tipo === 'sku' ? `SKU ${termos}` : `nome contém ${termos}`
 }
 async function addExcecao(row: StoreInfo) {
   let regra: StoreExcecao
   if (excDraft.tipo === 'valor') {
     const v = Number(String(excDraft.valor).replace(/\./g, '').replace(',', '.'))
     if (!Number.isFinite(v) || v <= 0) return
-    regra = { uf: excDraft.uf, tipo: 'valor', valor: v }
+    regra = { tipo: 'valor', valor: v }
   } else {
     const termos = excDraft.termos.split(',').map((t) => t.trim()).filter(Boolean)
     if (!termos.length) return
-    regra = { uf: excDraft.uf, tipo: excDraft.tipo, termos }
+    regra = { tipo: excDraft.tipo, termos }
   }
   await updateField(row, 'excecoes', [...(row.excecoes || []), regra])
   excDraft.valor = ''
@@ -1346,8 +1345,10 @@ async function copyText(text: string) {
           </button>
         </div>
         <p class="text-[11px] text-muted-foreground mb-3">
-          Pedido pra UF que casar uma regra NÃO é enviado — vai pra Aguardando
-          Cancelamento com "restrição" nas observações do Bling.
+          As regras valem pras UFs do campo <b>Restrição</b> da loja
+          ({{ (openExcRow.uf_restrictions || []).join(', ') || 'nenhuma UF — configure a Restrição' }}).
+          Pedido pra essas UFs que casar uma regra NÃO é enviado — vai pra
+          Aguardando Cancelamento com "restrição" nas observações do Bling.
         </p>
         <div v-if="openExcRow.excecoes && openExcRow.excecoes.length" class="space-y-1 mb-3">
           <div
@@ -1367,16 +1368,11 @@ async function copyText(text: string) {
         </div>
         <div v-else class="text-xs text-muted-foreground mb-3">Nenhuma regra.</div>
         <div class="border rounded p-2 space-y-2 text-xs">
-          <div class="flex gap-2">
-            <select v-model="excDraft.uf" class="border rounded px-1 py-1 bg-background w-20">
-              <option v-for="uf in UF_OPTIONS" :key="uf" :value="uf">{{ uf }}</option>
-            </select>
-            <select v-model="excDraft.tipo" class="border rounded px-1 py-1 bg-background flex-1">
-              <option value="valor">Valor do pedido (≥)</option>
-              <option value="sku">SKU do item</option>
-              <option value="palavra">Palavra no nome</option>
-            </select>
-          </div>
+          <select v-model="excDraft.tipo" class="border rounded px-1 py-1 bg-background w-full">
+            <option value="valor">Valor do pedido (≥)</option>
+            <option value="sku">SKU do item</option>
+            <option value="palavra">Palavra no nome</option>
+          </select>
           <input
             v-if="excDraft.tipo === 'valor'"
             v-model="excDraft.valor"
