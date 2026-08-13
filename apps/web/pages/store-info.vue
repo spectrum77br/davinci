@@ -725,7 +725,7 @@ async function copyText(text: string) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Bling ID</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Upseller</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Duoke</th>
-            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">UF</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Restrição</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[100px]">Exceções</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
           </tr>
