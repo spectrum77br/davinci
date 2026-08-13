@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission, require_permission_any, user_scope
+from app.deps.auth import require_permission, user_scope
 from app.deps.team_scope import resolve_team_scope
 from app.models import (
     AuditDismissedSku,
@@ -2056,7 +2056,7 @@ def _store_info_out(
 async def list_store_info(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission_any(("lojas_info", "tabela_precos"), "view"))
+        User, Depends(require_permission("lojas_info", "view"))
     ],
     archived: bool = Query(False),
 ) -> list[StoreInfoOut]:
@@ -2161,7 +2161,7 @@ async def create_store_info(
     body: StoreInfoCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission_any(("lojas_info", "tabela_precos"), "edit"))
+        User, Depends(require_permission("lojas_info", "edit"))
     ],
 ) -> StoreInfoOut:
     data = body.model_dump(exclude={"password"})
@@ -2180,7 +2180,7 @@ async def patch_store_info(
     body: StoreInfoPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission_any(("lojas_info", "tabela_precos"), "edit"))
+        User, Depends(require_permission("lojas_info", "edit"))
     ],
 ) -> StoreInfoOut:
     row = (
@@ -2255,7 +2255,7 @@ async def archive_store_info(
     store_info_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission_any(("lojas_info", "tabela_precos"), "edit"))
+        User, Depends(require_permission("lojas_info", "edit"))
     ],
 ) -> StoreInfoOut:
     """Arquiva uma loja suspensa: some de Lojas, da Tabela de Preço e de
@@ -2296,7 +2296,7 @@ async def unarchive_store_info(
     store_info_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission_any(("lojas_info", "tabela_precos"), "edit"))
+        User, Depends(require_permission("lojas_info", "edit"))
     ],
 ) -> StoreInfoOut:
     """Reativa uma loja arquivada (botão "Ativar"): volta pra Lojas, Tabela de
@@ -2336,7 +2336,7 @@ async def reveal_store_info_password(
     store_info_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission_any(("lojas_info", "tabela_precos"), "edit"))
+        User, Depends(require_permission("lojas_info", "edit"))
     ],
 ) -> dict[str, str]:
     row = (
@@ -2367,7 +2367,7 @@ async def set_store_info_department(
     body: AccountSetDepartmentIn,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission_any(("lojas_info", "tabela_precos"), "edit"))
+        User, Depends(require_permission("lojas_info", "edit"))
     ],
 ) -> PricingAccountOut:
     """Bind a department to a store_info. SSH parity:
@@ -2494,7 +2494,7 @@ async def unbind_store_info_department(
     slug: str,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission_any(("lojas_info", "tabela_precos"), "edit"))
+        User, Depends(require_permission("lojas_info", "edit"))
     ],
 ) -> None:
     """Removes the pricing_accounts that wire `store_info_id` to a root segment
@@ -2559,7 +2559,7 @@ async def delete_store_info(
     store_info_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission_any(("lojas_info", "tabela_precos"), "delete"))
+        User, Depends(require_permission("lojas_info", "delete"))
     ],
 ) -> None:
     res = await session.execute(
