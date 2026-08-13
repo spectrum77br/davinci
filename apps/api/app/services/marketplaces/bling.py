@@ -416,6 +416,8 @@ class BlingClient:
         vencimento: str,
         data_emissao: str | None = None,
         historico: str | None = None,
+        categoria_id: int | None = None,
+        numero_documento: str | None = None,
     ) -> dict:
         """Cria uma conta a pagar (POST /contas/pagar).
 
@@ -436,6 +438,10 @@ class BlingClient:
             body["dataEmissao"] = data_emissao
         if historico:
             body["historico"] = historico
+        if categoria_id is not None:
+            body["categoria"] = {"id": categoria_id}
+        if numero_documento:
+            body["numeroDocumento"] = numero_documento
         r = await self._request("POST", "/contas/pagar", json=body)
         r.raise_for_status()
         return r.json().get("data") or {}

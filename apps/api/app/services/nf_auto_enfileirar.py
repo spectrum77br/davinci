@@ -344,16 +344,23 @@ async def _notificar_sem_estoque(
     if not gerais or not sem_estoque:
         return
     try:
-        lojas = dict(
-            (
+        # Rótulo = "plataforma conta" (ex. "shopee vortan") — só o nome da
+        # conta não diz de qual marketplace o pedido veio.
+        lojas = {
+            numero: " ".join(p for p in (plataforma, conta) if p)
+            for numero, plataforma, conta in (
                 await session.execute(
-                    select(BlingOrder.numero, func.max(StoreInfo.account_name))
+                    select(
+                        BlingOrder.numero,
+                        func.max(func.lower(StoreInfo.platform)),
+                        func.max(StoreInfo.account_name),
+                    )
                     .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
                     .where(BlingOrder.numero.in_(list(sem_estoque)))
                     .group_by(BlingOrder.numero)
                 )
             ).all()
-        )
+        }
 
         def _texto(pedidos: dict[str, list[str]]) -> str:
             linhas = [

@@ -377,7 +377,8 @@ async def test_sweep_sem_estoque_avisa_threema(
     texto, recipients = _FakeThreema.enviados[0]
     assert recipients == ["7KMPCBS5", "M5TT27JA"]
     assert "830001" in texto
-    assert "loja 930001" in texto
+    # rótulo = "plataforma conta", ex. "(shopee vortan)"
+    assert "(shopee loja 930001)" in texto
     assert "x1" in texto
     assert "Aguardando Cancelamento" in texto
 

@@ -328,10 +328,14 @@ async def test_di_pagamento_parcelas_mensais(
     # vencimentos mensais com clamp de fim de mês (31/08 → 30/09 → 31/10)
     vencs = [c["vencimento"] for c in fake.contas]
     assert vencs == ["2026-08-31", "2026-09-30", "2026-10-31"]
-    # contato fixo isatrading + histórico com nº da DI
-    assert all(c["contato_id"] == 108074 for c in fake.contas)
+    # contato fixo isatrading (id real da API) + histórico com nº da DI
+    assert all(c["contato_id"] == 17052389798 for c in fake.contas)
     assert "26/1234567-8" in fake.contas[0]["historico"]
     assert "parcela 1/3" in fake.contas[0]["historico"]
+    # categoria "importado" + nº do documento = nome do lote/parcela
+    assert all(c["categoria_id"] == 14693438796 for c in fake.contas)
+    docs = [c["numero_documento"] for c in fake.contas]
+    assert docs == ["ML30/1", "ML30/2", "ML30/3"]
 
 
 @pytest.mark.asyncio

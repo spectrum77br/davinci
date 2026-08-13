@@ -1148,6 +1148,9 @@ _DI_PDF_MAX_BYTES = 8 * 1024 * 1024  # 8MB
 # isatrading — contato fixo do pagamento da DI. É o `id` do Bling
 # (o 108074 que aparece na tela é o CÓDIGO do contato, não serve na API).
 _DI_CONTATO_BLING_ID = 17052389798
+# Categoria "importado" das contas a pagar — mesmo id usado em todos os
+# lançamentos manuais de lote do usuário (mala04, i14, I36...).
+_DI_CATEGORIA_BLING_ID = 14693438796
 
 
 async def _lote_or_404(session: AsyncSession, lote_id: UUID) -> ImportLote:
@@ -1262,6 +1265,9 @@ async def lancar_di_pagamento(
             venc = body.primeiro_vencimento + timedelta(weeks=i)
         else:
             venc = _add_months(body.primeiro_vencimento, i)
+        # nº do documento = nome do lote (padrão manual do usuário:
+        # "mala04/2" por parcela quando parcelado, só o nome se única).
+        numero_doc = lote.nome if n == 1 else f"{lote.nome}/{i + 1}"
         try:
             criado = await client.create_conta_pagar(
                 contato_id=_DI_CONTATO_BLING_ID,
@@ -1269,6 +1275,8 @@ async def lancar_di_pagamento(
                 vencimento=venc.isoformat(),
                 data_emissao=hoje,
                 historico=f"{di_ref} — lote {lote.nome} — parcela {i + 1}/{n}",
+                categoria_id=_DI_CATEGORIA_BLING_ID,
+                numero_documento=numero_doc,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
