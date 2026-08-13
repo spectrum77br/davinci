@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -360,6 +361,21 @@ class CompetitorPriceRow(BaseModel):
 
 # ----------------------------------------------------------------- store_info (9d)
 
+class StoreExcecao(BaseModel):
+    """Regra de exceção de envio da loja (campo "Exceções" da tela Lojas).
+
+    Bloqueia o envio automático quando o destino é a `uf` e:
+      - tipo "valor":   o valor total do pedido é >= `valor`;
+      - tipo "sku":     algum item tem um dos SKUs em `termos`;
+      - tipo "palavra": o nome de algum item contém uma palavra de `termos`.
+    """
+
+    uf: str = Field(min_length=2, max_length=2)
+    tipo: Literal["valor", "sku", "palavra"]
+    valor: float | None = None
+    termos: list[str] | None = None
+
+
 class StoreInfoBase(BaseModel):
     platform: str = Field(min_length=1, max_length=64)
     segment: str | None = None
@@ -381,6 +397,8 @@ class StoreInfoBase(BaseModel):
     upseseller: bool | None = None
     duoker: bool | None = None
     uf_restrictions: list[str] | None = None
+    # Exceções de envio por loja (migration 0216) — ver StoreExcecao.
+    excecoes: list[StoreExcecao] | None = None
     # Equipe de Vendas (migration 0136). Número inteiro; NULL = sem equipe.
     sales_team: int | None = None
     # NF automáticas (migration 0196): cadastros Faturador/Etiqueta/Impressão.
@@ -414,6 +432,7 @@ class StoreInfoPatch(BaseModel):
     upseseller: bool | None = None
     duoker: bool | None = None
     uf_restrictions: list[str] | None = None
+    excecoes: list[StoreExcecao] | None = None
     sales_team: int | None = None
     nf_faturador_id: UUID | None = None
     nf_etiqueta_id: UUID | None = None

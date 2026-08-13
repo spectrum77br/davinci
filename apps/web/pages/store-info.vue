@@ -12,6 +12,15 @@ definePageMeta({
   permission: { resource: 'lojas_info', action: 'view' },
 })
 
+// Regra de exceção de envio da loja (campo "Exceções") — o sweep automático
+// de NF bloqueia o pedido que casa (Aguardando Cancelamento + "restrição").
+type StoreExcecao = {
+  uf: string
+  tipo: 'valor' | 'sku' | 'palavra'
+  valor?: number | null
+  termos?: string[] | null
+}
+
 type StoreInfo = {
   id: string
   user_id: string
@@ -38,6 +47,7 @@ type StoreInfo = {
   upseseller: boolean | null
   duoker: boolean | null
   uf_restrictions: string[] | null
+  excecoes: StoreExcecao[] | null
   sales_team: number | null
   nf_faturador_id: string | null
   nf_etiqueta_id: string | null
@@ -262,6 +272,49 @@ async function cycleTriBool(row: StoreInfo, field: 'upseseller' | 'duoker') {
 const openUfRow = computed(() =>
   openUfRowId.value ? items.value.find((r) => r.id === openUfRowId.value) || null : null
 )
+
+// Exceções popover — mirrors the UF popover pattern (overlay outside the
+// table). Each add/remove PATCHes `excecoes` via updateField.
+const openExcRowId = ref<string | null>(null)
+function toggleExcPopover(id: string) {
+  openExcRowId.value = openExcRowId.value === id ? null : id
+}
+const openExcRow = computed(() =>
+  openExcRowId.value ? items.value.find((r) => r.id === openExcRowId.value) || null : null
+)
+const excDraft = reactive({
+  uf: 'RJ',
+  tipo: 'valor' as StoreExcecao['tipo'],
+  valor: '',
+  termos: '',
+})
+function excecaoLabel(r: StoreExcecao): string {
+  if (r.tipo === 'valor') {
+    const v = Number(r.valor ?? 0)
+    return `${r.uf}: valor ≥ R$ ${v.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
+  }
+  const termos = (r.termos || []).join(', ')
+  return r.tipo === 'sku' ? `${r.uf}: SKU ${termos}` : `${r.uf}: nome contém ${termos}`
+}
+async function addExcecao(row: StoreInfo) {
+  let regra: StoreExcecao
+  if (excDraft.tipo === 'valor') {
+    const v = Number(String(excDraft.valor).replace(/\./g, '').replace(',', '.'))
+    if (!Number.isFinite(v) || v <= 0) return
+    regra = { uf: excDraft.uf, tipo: 'valor', valor: v }
+  } else {
+    const termos = excDraft.termos.split(',').map((t) => t.trim()).filter(Boolean)
+    if (!termos.length) return
+    regra = { uf: excDraft.uf, tipo: excDraft.tipo, termos }
+  }
+  await updateField(row, 'excecoes', [...(row.excecoes || []), regra])
+  excDraft.valor = ''
+  excDraft.termos = ''
+}
+async function removeExcecao(row: StoreInfo, idx: number) {
+  const next = (row.excecoes || []).filter((_, i) => i !== idx)
+  await updateField(row, 'excecoes', next.length ? next : null)
+}
 
 const sorted = computed(() => {
   let list = [...items.value]
@@ -673,6 +726,7 @@ async function copyText(text: string) {
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Upseller</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Duoke</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">UF</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[100px]">Exceções</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
           </tr>
         </thead>
@@ -1166,6 +1220,22 @@ async function copyText(text: string) {
                   : '—' }}
               </button>
             </td>
+            <!-- Exceções — badge com contagem de regras; popover editor. -->
+            <td class="border border-border px-1 py-1 text-center">
+              <button
+                type="button"
+                :disabled="!canEdit"
+                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
+                :class="(row.excecoes && row.excecoes.length)
+                  ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
+                  : 'bg-muted/40 text-muted-foreground border-border'"
+                @click="canEdit && toggleExcPopover(row.id)"
+              >
+                {{ (row.excecoes && row.excecoes.length)
+                  ? `${row.excecoes.length} regra${row.excecoes.length > 1 ? 's' : ''}`
+                  : '—' }}
+              </button>
+            </td>
             <!-- actions: arquivar/ativar + delete -->
             <td class="border border-border px-1 py-1 text-center whitespace-nowrap">
               <button
@@ -1245,6 +1315,91 @@ async function copyText(text: string) {
           <button
             class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
             @click="openUfRowId = null"
+          >
+            fechar
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Exceções popover — editor de regras de bloqueio de envio da loja.
+         Pedido que casa vai pra Aguardando Cancelamento no sweep de NF. -->
+    <div
+      v-if="openExcRow"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      @click.self="openExcRowId = null"
+    >
+      <div class="bg-background border rounded-lg shadow-xl p-4 w-[26rem]">
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-sm font-semibold">
+            Exceções — {{ openExcRow.platform }} / {{ openExcRow.account_name || '—' }}
+          </div>
+          <button
+            class="text-muted-foreground hover:text-foreground"
+            @click="openExcRowId = null"
+          >
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+        <p class="text-[11px] text-muted-foreground mb-3">
+          Pedido pra UF que casar uma regra NÃO é enviado — vai pra Aguardando
+          Cancelamento com "restrição" nas observações do Bling.
+        </p>
+        <div v-if="openExcRow.excecoes && openExcRow.excecoes.length" class="space-y-1 mb-3">
+          <div
+            v-for="(r, i) in openExcRow.excecoes"
+            :key="i"
+            class="flex items-center justify-between gap-2 text-xs px-2 py-1 rounded border bg-muted/30"
+          >
+            <span class="truncate">{{ excecaoLabel(r) }}</span>
+            <button
+              class="text-destructive hover:bg-destructive/10 rounded p-0.5 shrink-0"
+              title="Remover regra"
+              @click="removeExcecao(openExcRow, i)"
+            >
+              <Trash2 class="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+        <div v-else class="text-xs text-muted-foreground mb-3">Nenhuma regra.</div>
+        <div class="border rounded p-2 space-y-2 text-xs">
+          <div class="flex gap-2">
+            <select v-model="excDraft.uf" class="border rounded px-1 py-1 bg-background w-20">
+              <option v-for="uf in UF_OPTIONS" :key="uf" :value="uf">{{ uf }}</option>
+            </select>
+            <select v-model="excDraft.tipo" class="border rounded px-1 py-1 bg-background flex-1">
+              <option value="valor">Valor do pedido (≥)</option>
+              <option value="sku">SKU do item</option>
+              <option value="palavra">Palavra no nome</option>
+            </select>
+          </div>
+          <input
+            v-if="excDraft.tipo === 'valor'"
+            v-model="excDraft.valor"
+            placeholder="Valor mínimo bloqueado, ex. 700"
+            class="border rounded px-2 py-1 bg-background w-full"
+          />
+          <input
+            v-else
+            v-model="excDraft.termos"
+            :placeholder="excDraft.tipo === 'sku'
+              ? 'SKUs separados por vírgula, ex. a001, b002'
+              : 'Palavras separadas por vírgula, ex. apple, iphone'"
+            class="border rounded px-2 py-1 bg-background w-full"
+          />
+          <div class="flex justify-end">
+            <button
+              class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
+              @click="addExcecao(openExcRow)"
+            >
+              adicionar regra
+            </button>
+          </div>
+        </div>
+        <div class="mt-3 flex justify-end text-xs">
+          <button
+            class="px-2 py-1 rounded border hover:bg-muted"
+            @click="openExcRowId = null"
           >
             fechar
           </button>

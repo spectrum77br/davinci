@@ -34,7 +34,11 @@ from app.models import (
 from app.config import get_settings
 from app.security.cipher import encrypt
 from app.services import nf_emissao_gerar, threema
-from app.services.nf_auto_enfileirar import _tags_do_sku, run_auto_enfileirar_nf
+from app.services.nf_auto_enfileirar import (
+    _tags_do_sku,
+    avaliar_excecoes,
+    run_auto_enfileirar_nf,
+)
 
 
 async def _async_return(value: object) -> object:
@@ -86,7 +90,7 @@ async def admin(db: AsyncSession) -> User:
 
 async def _seed_loja(
     db: AsyncSession, admin: User, *, plataforma: str, bling_store_id: str,
-    com_faturador: bool = True,
+    com_faturador: bool = True, excecoes: list[dict] | None = None,
 ) -> None:
     faturador_id = None
     if com_faturador:
@@ -103,6 +107,7 @@ async def _seed_loja(
             user_id=admin.id, platform=plataforma,
             account_name=f"loja {bling_store_id}",
             bling_store_id=bling_store_id, nf_faturador_id=faturador_id,
+            excecoes=excecoes,
         )
     )
     await db.flush()
@@ -113,11 +118,13 @@ async def _seed_pedido(
     situacao: str = "6", bling_id: int = 700001,
     data: datetime | None = None, item_produto_id: int | None = None,
     item_descricao: str | None = None, uf_destino: str = "MG",
+    valorbase: float | None = None,
 ) -> None:
     db.add(
         BlingOrder(
             bling_id=bling_id,
             numero=numero,
+            valorbase=valorbase,
             data=data or (datetime.now(UTC) - timedelta(days=1)),
             loja=loja,
             situacao=situacao,
@@ -783,6 +790,138 @@ async def test_sweep_restricao_fora_do_escopo_enfileira_normal(
     summary = await run_auto_enfileirar_nf()
     assert summary["candidatos"] == 3
     assert summary["restricao"] == 0
+    assert summary["enfileirados"] == 3
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert sorted(n for c in cmds for n in c.numeros) == [
+        "830001", "830002", "830003"
+    ]
+
+
+def test_avaliar_excecoes_regras_puras():
+    """Motor puro das exceções por loja: valor/sku/palavra, filtro por UF,
+    dados sujos ignorados sem quebrar."""
+    itens = [("A001", "Carregador Apple 20W"), ("B002", "Capinha Galaxy")]
+
+    # valor: >= limite bloqueia, abaixo passa, UF diferente passa
+    regra_valor = [{"uf": "RJ", "tipo": "valor", "valor": 700}]
+    assert avaliar_excecoes(regra_valor, uf_destino="RJ", valor_total=700, itens=itens)
+    assert avaliar_excecoes(regra_valor, uf_destino="rj", valor_total=800, itens=itens)
+    assert avaliar_excecoes(regra_valor, uf_destino="RJ", valor_total=699.99, itens=itens) == []
+    assert avaliar_excecoes(regra_valor, uf_destino="MG", valor_total=900, itens=itens) == []
+    assert avaliar_excecoes(regra_valor, uf_destino=None, valor_total=900, itens=itens) == []
+
+    # sku: casa exato case-insensitive, não casa por substring
+    regra_sku = [{"uf": "RJ", "tipo": "sku", "termos": ["a001"]}]
+    [motivo] = avaliar_excecoes(regra_sku, uf_destino="RJ", valor_total=50, itens=itens)
+    assert "A001" in motivo
+    assert avaliar_excecoes(
+        regra_sku, uf_destino="RJ", valor_total=50, itens=[("A0011", "Outro")]
+    ) == []
+
+    # palavra: substring no nome, case-insensitive
+    regra_palavra = [{"uf": "RJ", "tipo": "palavra", "termos": ["apple"]}]
+    [motivo] = avaliar_excecoes(regra_palavra, uf_destino="RJ", valor_total=50, itens=itens)
+    assert "Carregador Apple 20W" in motivo
+    assert avaliar_excecoes(
+        regra_palavra, uf_destino="RJ", valor_total=50, itens=[(None, "Capinha Galaxy")]
+    ) == []
+
+    # dados sujos: regra não-dict, valor não numérico, sem regras → passa
+    sujas = ["lixo", {"uf": "RJ", "tipo": "valor", "valor": "abc"}, {"uf": "RJ", "tipo": "zzz"}]
+    assert avaliar_excecoes(sujas, uf_destino="RJ", valor_total=999, itens=itens) == []
+    assert avaliar_excecoes([], uf_destino="RJ", valor_total=999, itens=itens) == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_excecao_valor_bloqueia(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Loja com exceção "RJ: valor >= 700" bloqueia o pedido de 800 pro RJ:
+    obs "restrição" (PUT) antes do PATCH 83955, painel 'restricao' com
+    "Exceção da loja", tentativa única."""
+    await _seed_loja(
+        db, admin, plataforma="shopee", bling_store_id="930001",
+        excecoes=[{"uf": "RJ", "tipo": "valor", "valor": 700}],
+    )
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="c1", bling_id=700009,
+        uf_destino="RJ", valorbase=800,
+    )
+    await db.commit()
+    fake = _FakeBlingSituacao(orders={700009: {"id": 700009, "observacoes": ""}})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1
+    assert summary["excecao"] == 1
+    assert summary["restricao"] == 0
+    assert summary["enfileirados"] == 0
+
+    # mesma ordem crítica da restrição hardcoded: PUT antes do PATCH
+    assert fake.eventos == [("put", 700009), ("situacao", 700009)]
+    assert fake.chamadas == [(700009, 83955)]
+    [(_put_id, body)] = fake.puts
+    assert "restrição" in (body.get("observacoes") or "")
+
+    db.expire_all()
+    assert (await db.execute(select(NfCommand))).scalars().all() == []
+    situacao = (
+        await db.execute(
+            select(BlingOrder.situacao).where(BlingOrder.numero == "830001")
+        )
+    ).scalar()
+    assert situacao == "83955"
+    fat = (
+        await db.execute(
+            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830001")
+        )
+    ).scalar_one()
+    assert fat.status_faturamento == "restricao"
+    assert "Exceção da loja" in (fat.erro_faturamento or "")
+    assert "R$ 700,00" in (fat.erro_faturamento or "")
+
+    # tentativa automática única
+    summary2 = await run_auto_enfileirar_nf()
+    assert summary2["candidatos"] == 0
+    assert len(fake.puts) == 1
+    assert len(fake.chamadas) == 1
+
+
+@pytest.mark.asyncio
+async def test_sweep_excecao_fora_do_escopo_enfileira_normal(
+    db: AsyncSession, admin: User
+):
+    """Contra-casos passam direto: valor abaixo do limite, UF diferente e
+    loja SEM exceções enfileiram normal."""
+    await _seed_loja(
+        db, admin, plataforma="shopee", bling_store_id="930001",
+        excecoes=[{"uf": "RJ", "tipo": "valor", "valor": 700}],
+    )
+    await _seed_loja(db, admin, plataforma="tiktok", bling_store_id="930002")
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="a1", bling_id=700001,
+        uf_destino="RJ", valorbase=500,
+    )
+    await _seed_pedido(
+        db, numero="830002", loja="930001", sku="a2", bling_id=700002,
+        uf_destino="MG", valorbase=900,
+    )
+    await _seed_pedido(
+        db, numero="830003", loja="930002", sku="a3", bling_id=700003,
+        uf_destino="RJ", valorbase=900,
+    )
+    db.add(Product(user_id=admin.id, sku="a1", name="A1", stock=3))
+    db.add(Product(user_id=admin.id, sku="a2", name="A2", stock=3))
+    db.add(Product(user_id=admin.id, sku="a3", name="A3", stock=3))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 3
+    assert summary["excecao"] == 0
     assert summary["enfileirados"] == 3
 
     db.expire_all()
