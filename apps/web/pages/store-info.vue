@@ -126,8 +126,15 @@ const DEPARTMENTS = [
 ]
 
 const { api } = useApi()
-const canEdit = useCan('tabela_precos', 'edit')
-const canDelete = useCan('tabela_precos', 'delete')
+// Espelha o backend (`require_permission_any`): a tela Lojas é liberada por
+// `lojas_info`, mas usuários antigos só têm `tabela_precos` (a tela nasceu na
+// Tabela de Preços) — QUALQUER uma das duas habilita editar/excluir aqui.
+const canEditLojas = useCan('lojas_info', 'edit')
+const canEditTabela = useCan('tabela_precos', 'edit')
+const canEdit = computed(() => canEditLojas.value || canEditTabela.value)
+const canDeleteLojas = useCan('lojas_info', 'delete')
+const canDeleteTabela = useCan('tabela_precos', 'delete')
+const canDelete = computed(() => canDeleteLojas.value || canDeleteTabela.value)
 
 const items = ref<StoreInfo[]>([])
 const integrations = ref<IntegrationRef[]>([])
