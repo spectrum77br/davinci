@@ -402,6 +402,25 @@ async def receive_bling_webhook(
         session, sku=sku, bling_product_id=bling_product_id
     )
 
+    # Bling renomeou o código do produto? Quando o match veio por
+    # bling_product_id/link (não por SKU), o payload traz o codigo NOVO e a
+    # linha local ainda tem o antigo — espelha aqui, senão o SKU velho vira
+    # fantasma duplicado no Controle de Estoque e o novo "não existe" nas
+    # devoluções (caso a017.pi → a017.cd, 13/ago/2026).
+    if (
+        product is not None
+        and sku
+        and bling_product_id is not None
+        and (product.sku or "").strip() != sku
+    ):
+        logger.info(
+            "bling_webhook_sku_renamed",
+            old=product.sku,
+            new=sku,
+            bling_product_id=bling_product_id,
+        )
+        product.sku = sku
+
     # ── Intelligent threshold logic (matches SSH behavior) ──
     # Old approach: drop all webhooks with stock > 10.
     # New approach:
