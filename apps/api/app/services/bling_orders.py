@@ -230,6 +230,12 @@ def _row_from_item(
     _t_endereco = transporte.get("enderecoEntrega") or {}
     if not isinstance(_t_endereco, dict):
         _t_endereco = {}
+    # Na API v3 o endereço de entrega costuma vir SÓ em transporte.etiqueta
+    # (enderecoEntrega chega null) — sem esse fallback, uf/cep_destino ficam
+    # vazios e regras como a restrição Apple→RJ nunca disparam.
+    _t_etiqueta = transporte.get("etiqueta") or {}
+    if not isinstance(_t_etiqueta, dict):
+        _t_etiqueta = {}
 
     # Fallback to contato.nome / contato.endereco when transporte has no data.
     # Amazon orders typically have no transporte.enderecoEntrega but do have the
@@ -244,6 +250,7 @@ def _row_from_item(
     def _addr(tp_field: str, buyer_field: str | None = None) -> str | None:
         return (
             _t_endereco.get(tp_field)
+            or _t_etiqueta.get(tp_field)
             or _buyer_endereco.get(buyer_field or tp_field)
             or None
         )
@@ -602,15 +609,24 @@ async def upsert_order(
             _tp = _tp if isinstance(_tp, dict) else {}
             _ct = _tp.get("contato") or {}
             _en = _tp.get("enderecoEntrega") or {}
+            # v3 entrega o endereço em transporte.etiqueta (enderecoEntrega
+            # vem null) — mesma cadeia de fallback do parse principal.
+            _et = _tp.get("etiqueta") or {}
             _ct = _ct if isinstance(_ct, dict) else {}
             _en = _en if isinstance(_en, dict) else {}
+            _et = _et if isinstance(_et, dict) else {}
             _buyer = raw_order.get("contato") or {}
             _buyer = _buyer if isinstance(_buyer, dict) else {}
             _ben = _buyer.get("endereco") or {}
             _ben = _ben if isinstance(_ben, dict) else {}
 
             def _v(tp_f: str, buyer_f: str | None = None) -> str | None:
-                return _en.get(tp_f) or _ben.get(buyer_f or tp_f) or None
+                return (
+                    _en.get(tp_f)
+                    or _et.get(tp_f)
+                    or _ben.get(buyer_f or tp_f)
+                    or None
+                )
 
             nome = _ct.get("nome") or _buyer.get("nome") or None
             if nome:
