@@ -11,14 +11,19 @@ trouxe com atraso.
 """
 from __future__ import annotations
 
+from uuid import UUID
+
 import structlog
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import Logistica, LogisticaStatus
 from app.services import (
     logistica_amazon,
     logistica_bling,
+    logistica_match,
     logistica_meli,
+    logistica_rules,
     logistica_shopee,
     logistica_tiktok,
 )
@@ -123,30 +128,74 @@ async def run_ingest_marketplaces_daily(
     }
 
 
+async def _ids_pendentes(session: AsyncSession) -> dict[str, list[UUID]]:
+    """Ids das linhas PENDENTES por plataforma — a mesma regra que o painel usa
+    pra decidir o que MOSTRAR (esconde `resolvido and not monitorar`). É o
+    conjunto que o operador está vendo e quer ver atualizado."""
+    regras = list((await session.execute(select(LogisticaStatus))).scalars().all())
+    linhas = list((await session.execute(select(Logistica))).scalars().all())
+    por_chave: dict[str, set[str]] = {
+        "ml": logistica_rules._ML_PLATAFORMAS,
+        "shopee": logistica_rules._SHOPEE_PLATAFORMAS,
+        "tiktok": logistica_rules._TIKTOK_PLATAFORMAS,
+        "amazon": logistica_rules._AMAZON_PLATAFORMAS,
+    }
+    pend: dict[str, list[UUID]] = {k: [] for k in por_chave}
+    for r in linhas:
+        plat = (r.plataforma or "").strip().lower()
+        chave = next((k for k, nomes in por_chave.items() if plat in nomes), None)
+        if chave is None:
+            continue
+        assinatura = logistica_rules.assinatura_para(r.plataforma, r.meli_status or {})
+        cands = logistica_match.find_matching_rules(
+            regras, assinatura=assinatura, plataforma=r.plataforma
+        )
+        resolvido = logistica_match.estado_resolvido(
+            cands, r.status_bling, threema_enviado=r.threema_enviado_at is not None
+        )
+        if resolvido and not logistica_match.deve_monitorar(cands, r.status_bling):
+            continue
+        pend[chave].append(r.id)
+    return pend
+
+
 async def recarregar_ml(
     session: AsyncSession, *, enrich_limit: int = 300
 ) -> dict[str, int]:
     """Recarga sob demanda do botão "recarregar" das abas de marketplace.
 
-    Diferente do cron diário, RE-enriquece TODAS as linhas ML/Shopee/TikTok/
-    Amazon (não só as vazias) pra atualizar a assinatura de status, e então
-    aplica em lote a mudança de situação no Bling das linhas que casam uma regra
-    da aba Status. Roda em background (arq) porque o passo de enrich + Bling pode
+    Diferente do cron diário, RE-enriquece linhas que já têm assinatura — mas SÓ
+    as PENDENTES do painel, e então aplica no Bling a mudança de situação das
+    que casam uma regra da aba Status. Já foi "300 mais recentes de cada
+    marketplace + Bling em TODAS as linhas": ~25 min só de enrich e o passo do
+    Bling morrendo no job_timeout (1800s) ANTES do commit — o botão nunca
+    terminava (12-13/ago, TimeoutError em aplicar_status_em_lote). Com ~2.7k
+    linhas e só ~50 pendentes, mirar o painel termina em poucos minutos e cobre
+    exatamente o que o operador está vendo. Linha resolvida que mudar depois no
+    marketplace não volta sozinha — o ⟳ por linha continua sendo o caminho pra
+    re-checar uma antiga. Roda em background (arq) porque mesmo assim pode
     passar dos 100s do Cloudflare.
     """
+    pend = await _ids_pendentes(session)
+    logger.info(
+        "logistica_recarregar_pendentes",
+        **{k: len(v) for k, v in pend.items()},
+    )
     enr = await logistica_meli.enrich_recent(
-        session, limit=enrich_limit, only_empty=False
+        session, limit=enrich_limit, only_empty=False, ids=pend["ml"]
     )
     enr_shopee = await logistica_shopee.enrich_recent(
-        session, limit=enrich_limit, only_empty=False
+        session, limit=enrich_limit, only_empty=False, ids=pend["shopee"]
     )
     enr_tiktok = await logistica_tiktok.enrich_recent(
-        session, limit=enrich_limit, only_empty=False
+        session, limit=enrich_limit, only_empty=False, ids=pend["tiktok"]
     )
     enr_amazon = await logistica_amazon.enrich_recent(
-        session, limit=enrich_limit, only_empty=False
+        session, limit=enrich_limit, only_empty=False, ids=pend["amazon"]
     )
-    lote = await logistica_bling.aplicar_status_em_lote(session)
+    lote = await logistica_bling.aplicar_status_em_lote(
+        session, ids=[i for ids in pend.values() for i in ids]
+    )
     logger.info(
         "logistica_recarregar_ml",
         **{f"enrich_{k}": v for k, v in enr.items()},

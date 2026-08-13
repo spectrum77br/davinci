@@ -20,7 +20,9 @@ enviado — pra conferir antes. `apply_mensagem_bling` faz o PUT de verdade.
 from __future__ import annotations
 
 import copy
+from collections.abc import Collection
 from datetime import date
+from uuid import UUID
 
 import structlog
 from sqlalchemy import func, select
@@ -417,10 +419,13 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
     return {"bling_order_id": r["bling_id"], "situacao_alvo": alvo, "situacao_alvo_id": alvo_id}
 
 
-async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
-    """Aplica a mudança de situação no Bling de TODAS as linhas (ML/Shopee/
-    TikTok/Amazon) que casam uma regra da aba Status com `alterar_status_bling`.
-    Best-effort e idempotente:
+async def aplicar_status_em_lote(
+    session: AsyncSession, ids: Collection[UUID] | None = None
+) -> dict[str, int]:
+    """Aplica a mudança de situação no Bling das linhas (ML/Shopee/TikTok/
+    Amazon) que casam uma regra da aba Status com `alterar_status_bling`.
+    `ids` restringe às linhas dadas (o recarregar passa as pendentes do painel);
+    sem `ids` varre todas. Best-effort e idempotente:
     `apply_alterar_status_bling` só age quando a transição parte do estado atual
     (guarda contra regressão/pulo), então rodar de novo não bagunça.
 
@@ -428,9 +433,17 @@ async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
     - pulados: casou regra mas não havia o que mudar (já no alvo / fora do fluxo).
       O `status_bling` local ainda é sincronizado pelo GET que o resolve faz.
     - falhas: erro inesperado (Bling/rede) — logado, não interrompe o lote.
+
+    Commit por linha (não só no fim): se o job morrer no meio (timeout), o que
+    já foi feito fica gravado — a versão commit-só-no-fim perdeu TODAS as
+    marcas em 12-13/ago, quando três recargas estouraram os 1800s bem neste
+    passo. Mesma lição do push de estoque (incidente ML27/28).
     """
     status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
-    todos = list((await session.execute(select(Logistica))).scalars().all())
+    stmt = select(Logistica)
+    if ids is not None:
+        stmt = stmt.where(Logistica.id.in_(list(ids)))
+    todos = list((await session.execute(stmt)).scalars().all())
     # ML + Shopee + TikTok + Amazon: têm assinatura enriquecida (via
     # assinatura_para). Linhas sem enrich caem na guarda de "sem regra" logo
     # abaixo e são ignoradas.
@@ -452,7 +465,9 @@ async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
             if cands:
                 try:
                     await sync_status_bling_row(session, row)
+                    await session.commit()
                 except Exception as e:  # noqa: BLE001 — best-effort
+                    await session.rollback()
                     logger.warning(
                         "logistica_status_lote_sync_falha", id=str(row.id), err=str(e)[:200]
                     )
@@ -460,10 +475,13 @@ async def aplicar_status_em_lote(session: AsyncSession) -> dict[str, int]:
         try:
             await apply_alterar_status_bling(session, row)
             aplicados += 1
+            await session.commit()
         except BlingObsError:
             pulados += 1
+            await session.commit()  # o GET do resolve pode ter sincronizado o status_bling
         except Exception as e:  # noqa: BLE001 — best-effort, não derruba o lote
             falhas += 1
+            await session.rollback()
             logger.warning(
                 "logistica_status_lote_falha", id=str(row.id), err=str(e)[:200]
             )

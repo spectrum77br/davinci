@@ -812,10 +812,10 @@ async def logistica_marketplaces_ingest(ctx: dict) -> None:
 
 
 async def logistica_recarregar(ctx: dict) -> None:
-    """Sob demanda (botão "recarregar" da aba Mercado Livre): re-enriquece o
-    status do Meli de TODAS as linhas ML e aplica no Bling a mudança de situação
-    das que casam uma regra da aba Status. Em background pra não estourar o
-    timeout do Cloudflare na requisição."""
+    """Sob demanda (botão "recarregar" das abas de marketplace): re-enriquece o
+    Status Plataforma das linhas PENDENTES do painel (ML/Shopee/TikTok/Amazon) e
+    aplica no Bling a mudança de situação das que casam uma regra da aba Status.
+    Em background pra não estourar o timeout do Cloudflare na requisição."""
     async with session_scope() as s:
         summary = await recarregar_ml(s)
     logger.info("logistica_recarregar_done", **summary)
@@ -1775,7 +1775,10 @@ class WorkerSettings:
         valuation_estoque_snapshot,
         logistica_ml_ingest,
         logistica_marketplaces_ingest,
-        logistica_recarregar,
+        # Escopo normal (pendentes do painel) termina em minutos, mas se a fila
+        # de pendências crescer o 1800s global mataria o job de novo — foi
+        # exatamente o que aconteceu em 12-13/ago com o escopo antigo.
+        func(logistica_recarregar, timeout=10800),
         nf_auto_enfileirar_tick,
         nf_recuperar_tick,
     ]

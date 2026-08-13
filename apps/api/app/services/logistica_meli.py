@@ -26,8 +26,10 @@ nunca derruba os campos de pedido/envio.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 import structlog
 from sqlalchemy import Text, cast, func, select
@@ -395,15 +397,22 @@ async def enrich_recent(
     *,
     limit: int = 100,
     only_empty: bool = True,
+    ids: Collection[UUID] | None = None,
 ) -> dict[str, int]:
     """Enriquece um lote de linhas ML (mais recentes primeiro), reusando o
-    client por conta. `only_empty` pula linhas que já têm meli_status."""
+    client por conta. `only_empty` pula linhas que já têm meli_status.
+    `ids` restringe às linhas dadas (o recarregar passa as pendentes do
+    painel) — aí o `limit` não se aplica."""
     stmt = select(Logistica).where(
         func.lower(func.trim(Logistica.plataforma)).in_(tuple(_ML_PLATAFORMAS))
     )
     if only_empty:
         stmt = stmt.where(cast(Logistica.meli_status, Text) == "{}")
-    stmt = stmt.order_by(Logistica.data.desc().nulls_last(), Logistica.created_at.desc()).limit(limit)
+    stmt = stmt.order_by(Logistica.data.desc().nulls_last(), Logistica.created_at.desc())
+    if ids is not None:
+        stmt = stmt.where(Logistica.id.in_(list(ids)))
+    else:
+        stmt = stmt.limit(limit)
     rows = (await session.execute(stmt)).scalars().all()
 
     cache: dict[str, MercadoLivreClient] = {}

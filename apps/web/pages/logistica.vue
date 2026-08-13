@@ -88,9 +88,10 @@ async function refresh() {
 // casadas somem do vermelho e ganham as ações, sem esperar o status do ML mudar.
 //
 // Com permissão de edição, o botão também DISPARA o motor em segundo plano:
-// re-enriquece o Status Plataforma de todos os pedidos ML e aplica no Bling a
-// mudança de situação dos que já têm regra. Roda em background (pode passar do
-// timeout do Cloudflare) e a lista se atualiza sozinha no poll.
+// re-enriquece o Status Plataforma dos pedidos PENDENTES do painel (as 4 abas
+// de marketplace) e aplica no Bling a mudança de situação dos que já têm regra.
+// Roda em background (pode passar do timeout do Cloudflare) e a lista se
+// atualiza sozinha no poll.
 const recarregando = ref(false)
 async function recarregar() {
   // O motor (enriquece Status Plataforma + aplica status no Bling) roda pras 4
@@ -102,22 +103,23 @@ async function recarregar() {
   }
   if (
     !confirm(
-      'Recarregar vai atualizar o Status Plataforma de todos os pedidos e aplicar no Bling a mudança de situação dos que já têm regra definida. Continuar?',
+      'Recarregar vai atualizar o Status Plataforma dos pedidos pendentes do painel (todas as abas) e aplicar no Bling a mudança de situação dos que já têm regra definida. Continuar?',
     )
   )
     return
   recarregando.value = true
   try {
     await api('/api/logistica/recarregar', { method: 'POST' })
-    toasts.info('Recarregando em segundo plano', 'Pode levar alguns minutos; a lista atualiza sozinha.')
+    toasts.info('Recarregando em segundo plano', 'Leva uns 2-3 minutos; a lista atualiza sozinha.')
   } catch (e: any) {
     toasts.error('Não foi possível recarregar', e?.data?.detail?.code || e?.message || 'erro')
     recarregando.value = false
     return
   }
-  // Repuxa algumas vezes pra refletir o progresso do job.
-  for (let i = 0; i < 6; i++) {
-    await new Promise((r) => setTimeout(r, 5000))
+  // Repuxa periodicamente até o job terminar (~2-3 min com o escopo pendente;
+  // o poll antigo de 30s parava antes e o botão parecia "não fazer nada").
+  for (let i = 0; i < 24; i++) {
+    await new Promise((r) => setTimeout(r, 10000))
     await Promise.all([refresh(), refreshStatus()])
   }
   recarregando.value = false
