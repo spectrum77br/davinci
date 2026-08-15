@@ -1,8 +1,9 @@
-"""Auto-enfileirador de NF (sweep) — pedidos Shopee/TikTok "Em aberto".
+"""Auto-enfileirador de NF (sweep) — pedidos Shopee/TikTok/ML/Amazon "Em aberto".
 
 Faz sozinho o que o botão "Enfileirar" do Painel Faturamento faz: a cada tick
-varre os pedidos com situacao=6 ("Em aberto") de lojas Shopee/TikTok que têm
-faturador atribuído, confere o ESTOQUE antes de tudo (regra do usuário: kit
+varre os pedidos com situacao=6 ("Em aberto") de lojas com faturador
+atribuído — Shopee/TikTok contínuos; ML/Amazon SÓ nas janelas das 10h e das
+14h BRT —, confere o ESTOQUE antes de tudo (regra do usuário: kit
 confere o saldo do próprio SKU do kit; saldo virtual negativo = peça não
 existe) e:
 
@@ -36,6 +37,7 @@ flag `nf_auto_enfileirar` (checada no wrapper do worker) — default DESLIGADO.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import func, or_, select, text
@@ -56,7 +58,21 @@ _SWEEP_LOCK_KEY = 0x6E666165  # ascii "nfae"
 _SITUACAO_EM_ABERTO = "6"
 
 # Plataformas que o fluxo automatizado cobre hoje (codes de store_info.platform).
-_PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok", "ml")
+_PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok", "ml", "amazon")
+
+# ML e Amazon NÃO faturam o tempo todo: só nas janelas das 10h e das 14h de
+# Brasília (decisão do usuário, 15/08: "ao invés de faturar o tempo todo,
+# vamos faturar somente às 10:00 e às 14:00"). Shopee/TikTok seguem
+# contínuos a cada tick. Janela = a HORA cheia (10:00–10:59 / 14:00–14:59):
+# o tick de 2min dá várias passadas com teto de 30, drenando o acumulado.
+_PLATAFORMAS_JANELA: tuple[str, ...] = ("ml", "amazon")
+_HORAS_JANELA: tuple[int, ...] = (10, 14)
+_TZ_BRT = ZoneInfo("America/Sao_Paulo")
+
+
+def _hora_brt() -> int:
+    """Hora atual em Brasília (função separada pra teste monkeypatchar)."""
+    return datetime.now(_TZ_BRT).hour
 
 # Pedido mais velho que isso não entra sozinho — se ficou pra trás, é caso de
 # olhar no painel e enfileirar à mão (evita o sweep ressuscitar pedido antigo
@@ -666,19 +682,19 @@ async def _escrever_observacao_restricao(
 async def _candidatos(session) -> list[str]:
     """Pedidos elegíveis pro sweep, já deduplicados contra fila e histórico.
 
-    Elegível = "Em aberto" (6), loja Shopee/TikTok ativa COM faturador
-    atribuído, dentro da janela de 7 dias. `item_index==0` porque
+    Elegível = "Em aberto" (6), loja ativa COM faturador atribuído, dentro
+    da janela de 7 dias; Shopee/TikTok sempre, ML/Amazon só nas horas da
+    janela (10h/14h BRT). `item_index==0` porque
     bling_orders tem uma linha por item. Dedupe duplo: comando ativo na fila
     OU qualquer status_faturamento já registrado (tentativa única).
     """
     cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
-    # ML fica atrás de flag própria até a marionete de emissão no Bling
-    # destino (emitir_nf_bling) estar calibrada — senão o import cria a
-    # venda avulsa e ninguém emite a NF.
+    # ML/Amazon só entram nas janelas das 10h e das 14h BRT; fora delas o
+    # sweep segue só com Shopee/TikTok (contínuos).
     plataformas = (
         _PLATAFORMAS
-        if get_settings().nf_auto_ml
-        else tuple(p for p in _PLATAFORMAS if p != "ml")
+        if _hora_brt() in _HORAS_JANELA
+        else tuple(p for p in _PLATAFORMAS if p not in _PLATAFORMAS_JANELA)
     )
     numeros = (
         await session.execute(

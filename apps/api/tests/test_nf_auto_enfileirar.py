@@ -33,7 +33,7 @@ from app.models import (
 )
 from app.config import get_settings
 from app.security.cipher import encrypt
-from app.services import nf_emissao_gerar, threema
+from app.services import nf_auto_enfileirar, nf_emissao_gerar, threema
 from app.services.nf_auto_enfileirar import (
     _tags_do_sku,
     avaliar_excecoes,
@@ -185,51 +185,66 @@ async def test_sweep_enfileira_com_estoque(db: AsyncSession, admin: User):
 
 
 @pytest.mark.asyncio
-async def test_sweep_ml_entra_no_escopo(
+async def test_sweep_ml_amazon_entram_na_janela(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
 ):
-    """Pedido de loja ML 'Em aberto' com faturador entra no sweep quando a
-    flag NF_AUTO_ML está ligada — o fluxo do Mercado Livre é o mesmo
-    (importa no Bling destino e a marionete emite)."""
-    monkeypatch.setattr(get_settings(), "nf_auto_ml", True, raising=False)
+    """Nas janelas das 10h/14h BRT, pedidos ML e Amazon 'Em aberto' com
+    faturador entram no sweep junto com os contínuos."""
+    monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 10)
     await _seed_loja(db, admin, plataforma="ml", bling_store_id="930003")
+    await _seed_loja(db, admin, plataforma="amazon", bling_store_id="930005")
     await _seed_pedido(db, numero="830003", loja="930003", sku="a3")
+    await _seed_pedido(db, numero="830005", loja="930005", sku="a5")
     db.add(Product(user_id=admin.id, sku="a3", name="A3", stock=3))
+    db.add(Product(user_id=admin.id, sku="a5", name="A5", stock=2))
     await db.commit()
 
     summary = await run_auto_enfileirar_nf()
-    assert summary["candidatos"] == 1
+    assert summary["candidatos"] == 2
+    assert summary["enfileirados"] == 2
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert {c.action for c in cmds} == {"import_avulsa"}
+    assert sorted(n for c in cmds for n in c.numeros) == ["830003", "830005"]
+    fats = {
+        f.pedido_bling: f
+        for f in (await db.execute(select(NfFaturamento))).scalars().all()
+    }
+    assert fats["830003"].status_faturamento == "processando"
+    assert fats["830005"].status_faturamento == "processando"
+
+    # às 14h também entra
+    monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 14)
+    summary14 = await run_auto_enfileirar_nf()
+    assert summary14["candidatos"] == 0  # dedupe: já processados
+
+
+@pytest.mark.asyncio
+async def test_sweep_ml_amazon_fora_da_janela(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Fora das 10h/14h BRT, ML e Amazon NÃO entram no sweep (Shopee/TikTok
+    seguem contínuos)."""
+    monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 12)
+    await _seed_loja(db, admin, plataforma="ml", bling_store_id="930004")
+    await _seed_loja(db, admin, plataforma="amazon", bling_store_id="930006")
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(db, numero="830004", loja="930004", sku="a4")
+    await _seed_pedido(db, numero="830006", loja="930006", sku="a6")
+    await _seed_pedido(db, numero="830001", loja="930001", sku="a1")
+    db.add(Product(user_id=admin.id, sku="a4", name="A4", stock=3))
+    db.add(Product(user_id=admin.id, sku="a6", name="A6", stock=3))
+    db.add(Product(user_id=admin.id, sku="a1", name="A1", stock=3))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1  # só o shopee
     assert summary["enfileirados"] == 1
 
     db.expire_all()
     cmds = (await db.execute(select(NfCommand))).scalars().all()
-    assert len(cmds) == 1
-    assert cmds[0].action == "import_avulsa"
-    assert cmds[0].numeros == ["830003"]
-    fat = (
-        await db.execute(
-            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830003")
-        )
-    ).scalar_one()
-    assert fat.status_faturamento == "processando"
-
-
-@pytest.mark.asyncio
-async def test_sweep_ml_fora_sem_flag(db: AsyncSession, admin: User):
-    """Com NF_AUTO_ML desligada (default) o pedido ML NÃO entra no sweep —
-    trava até a marionete emitir_nf_bling estar calibrada."""
-    await _seed_loja(db, admin, plataforma="ml", bling_store_id="930004")
-    await _seed_pedido(db, numero="830004", loja="930004", sku="a4")
-    db.add(Product(user_id=admin.id, sku="a4", name="A4", stock=3))
-    await db.commit()
-
-    summary = await run_auto_enfileirar_nf()
-    assert summary["candidatos"] == 0
-    assert summary["enfileirados"] == 0
-
-    db.expire_all()
-    cmds = (await db.execute(select(NfCommand))).scalars().all()
-    assert cmds == []
+    assert sorted(n for c in cmds for n in c.numeros) == ["830001"]
     fat = (
         await db.execute(
             select(NfFaturamento).where(NfFaturamento.pedido_bling == "830004")
