@@ -188,8 +188,9 @@ async def test_sweep_enfileira_com_estoque(db: AsyncSession, admin: User):
 async def test_sweep_ml_amazon_entram_na_janela(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
 ):
-    """Nas janelas das 10h/14h BRT, pedidos ML e Amazon 'Em aberto' com
-    faturador entram no sweep junto com os contínuos."""
+    """Com a flag ligada e nas janelas das 10h/14h BRT, pedidos ML e Amazon
+    'Em aberto' com faturador entram no sweep junto com os contínuos."""
+    monkeypatch.setattr(get_settings(), "nf_auto_ml_amazon", True, raising=False)
     monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 10)
     await _seed_loja(db, admin, plataforma="ml", bling_store_id="930003")
     await _seed_loja(db, admin, plataforma="amazon", bling_store_id="930005")
@@ -224,8 +225,9 @@ async def test_sweep_ml_amazon_entram_na_janela(
 async def test_sweep_ml_amazon_fora_da_janela(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
 ):
-    """Fora das 10h/14h BRT, ML e Amazon NÃO entram no sweep (Shopee/TikTok
-    seguem contínuos)."""
+    """Fora das 10h/14h BRT (mesmo com a flag ligada), ML e Amazon NÃO
+    entram no sweep (Shopee/TikTok seguem contínuos)."""
+    monkeypatch.setattr(get_settings(), "nf_auto_ml_amazon", True, raising=False)
     monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 12)
     await _seed_loja(db, admin, plataforma="ml", bling_store_id="930004")
     await _seed_loja(db, admin, plataforma="amazon", bling_store_id="930006")
@@ -251,6 +253,34 @@ async def test_sweep_ml_amazon_fora_da_janela(
         )
     ).scalar_one_or_none()
     assert fat is None
+
+
+@pytest.mark.asyncio
+async def test_sweep_ml_amazon_flag_desligada_nao_entram(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Flag nf_auto_ml_amazon DESLIGADA (default): mesmo dentro da janela
+    das 10h, ML e Amazon ficam de fora — pausa pra testar supervisionado."""
+    monkeypatch.setattr(get_settings(), "nf_auto_ml_amazon", False, raising=False)
+    monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 10)
+    await _seed_loja(db, admin, plataforma="ml", bling_store_id="930007")
+    await _seed_loja(db, admin, plataforma="amazon", bling_store_id="930008")
+    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_pedido(db, numero="830007", loja="930007", sku="a7")
+    await _seed_pedido(db, numero="830008", loja="930008", sku="a8")
+    await _seed_pedido(db, numero="830001", loja="930001", sku="a1")
+    db.add(Product(user_id=admin.id, sku="a7", name="A7", stock=3))
+    db.add(Product(user_id=admin.id, sku="a8", name="A8", stock=3))
+    db.add(Product(user_id=admin.id, sku="a1", name="A1", stock=3))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 1  # só o shopee
+    assert summary["enfileirados"] == 1
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert sorted(n for c in cmds for n in c.numeros) == ["830001"]
 
 
 @pytest.mark.asyncio

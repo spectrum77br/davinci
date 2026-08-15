@@ -232,6 +232,12 @@ class Settings(BaseSettings):
     # NF_AUTO_ENFILEIRAR=true no .env.
     nf_auto_enfileirar: bool = False
 
+    # Libera ML/Amazon no sweep (dentro das janelas 10h/14h BRT). Desligado
+    # por default — usuário quer testar supervisionado antes de ligar
+    # ("nao e para ativar mercado livre ainda", 15/08). Ligar via
+    # NF_AUTO_ML_AMAZON=true no .env.
+    nf_auto_ml_amazon: bool = False
+
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado
     # (o sweep segue funcionando normal). Set via

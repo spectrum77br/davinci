@@ -65,6 +65,8 @@ _PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok", "ml", "amazon")
 # vamos faturar somente às 10:00 e às 14:00"). Shopee/TikTok seguem
 # contínuos a cada tick. Janela = a HORA cheia (10:00–10:59 / 14:00–14:59):
 # o tick de 2min dá várias passadas com teto de 30, drenando o acumulado.
+# ALÉM da janela, ML/Amazon exigem a flag `nf_auto_ml_amazon` LIGADA
+# (usuário: "nao e para ativar mercado livre ainda... vamos testar de noite").
 _PLATAFORMAS_JANELA: tuple[str, ...] = ("ml", "amazon")
 _HORAS_JANELA: tuple[int, ...] = (10, 14)
 _TZ_BRT = ZoneInfo("America/Sao_Paulo")
@@ -683,17 +685,19 @@ async def _candidatos(session) -> list[str]:
     """Pedidos elegíveis pro sweep, já deduplicados contra fila e histórico.
 
     Elegível = "Em aberto" (6), loja ativa COM faturador atribuído, dentro
-    da janela de 7 dias; Shopee/TikTok sempre, ML/Amazon só nas horas da
-    janela (10h/14h BRT). `item_index==0` porque
+    da janela de 7 dias; Shopee/TikTok sempre, ML/Amazon só com a flag
+    nf_auto_ml_amazon ligada E nas horas da janela (10h/14h BRT).
+    `item_index==0` porque
     bling_orders tem uma linha por item. Dedupe duplo: comando ativo na fila
     OU qualquer status_faturamento já registrado (tentativa única).
     """
     cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
-    # ML/Amazon só entram nas janelas das 10h e das 14h BRT; fora delas o
-    # sweep segue só com Shopee/TikTok (contínuos).
+    # ML/Amazon só entram com a flag nf_auto_ml_amazon LIGADA e dentro das
+    # janelas das 10h e das 14h BRT; fora disso o sweep segue só com
+    # Shopee/TikTok (contínuos).
     plataformas = (
         _PLATAFORMAS
-        if _hora_brt() in _HORAS_JANELA
+        if get_settings().nf_auto_ml_amazon and _hora_brt() in _HORAS_JANELA
         else tuple(p for p in _PLATAFORMAS if p not in _PLATAFORMAS_JANELA)
     )
     numeros = (
