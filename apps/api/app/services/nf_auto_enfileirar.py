@@ -339,16 +339,26 @@ async def _notificar_sem_estoque(
     if not gerais or not sem_estoque:
         return
     try:
-        # Rótulo = "plataforma conta" (ex. "shopee vortan") — só o nome da
-        # conta não diz de qual marketplace o pedido veio.
+        # Rótulo = "plataforma conta equipe N" (ex. "shopee vortan equipe 2")
+        # — nome da loja + equipe de vendas a que ela pertence (pedido do
+        # usuário 17/08); equipe NULL fica de fora.
         lojas = {
-            numero: " ".join(p for p in (plataforma, conta) if p)
-            for numero, plataforma, conta in (
+            numero: " ".join(
+                p
+                for p in (
+                    plataforma,
+                    conta,
+                    f"equipe {equipe}" if equipe is not None else None,
+                )
+                if p
+            )
+            for numero, plataforma, conta, equipe in (
                 await session.execute(
                     select(
                         BlingOrder.numero,
                         func.max(func.lower(StoreInfo.platform)),
                         func.max(StoreInfo.account_name),
+                        func.max(StoreInfo.sales_team),
                     )
                     .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
                     .where(BlingOrder.numero.in_(list(sem_estoque)))

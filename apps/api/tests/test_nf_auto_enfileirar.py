@@ -90,7 +90,7 @@ async def admin(db: AsyncSession) -> User:
 async def _seed_loja(
     db: AsyncSession, admin: User, *, plataforma: str, bling_store_id: str,
     com_faturador: bool = True, excecoes: list[dict] | None = None,
-    uf_restrictions: list[str] | None = None,
+    uf_restrictions: list[str] | None = None, sales_team: int | None = None,
 ) -> None:
     faturador_id = None
     if com_faturador:
@@ -108,6 +108,7 @@ async def _seed_loja(
             account_name=f"loja {bling_store_id}",
             bling_store_id=bling_store_id, nf_faturador_id=faturador_id,
             excecoes=excecoes, uf_restrictions=uf_restrictions,
+            sales_team=sales_team,
         )
     )
     await db.flush()
@@ -407,7 +408,9 @@ async def test_sweep_sem_estoque_avisa_threema(
 ):
     """Movido pra Aguardando Cancelamento automaticamente → UMA mensagem
     Threema com pedido, loja e SKUs pros IDs configurados."""
-    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
+    await _seed_loja(
+        db, admin, plataforma="shopee", bling_store_id="930001", sales_team=2
+    )
     await _seed_pedido(db, numero="830001", loja="930001", sku="x1", bling_id=700009)
     db.add(Product(user_id=admin.id, sku="x1", name="X1", stock=-2))
     await db.commit()
@@ -429,8 +432,8 @@ async def test_sweep_sem_estoque_avisa_threema(
     texto, recipients = _FakeThreema.enviados[0]
     assert recipients == ["7KMPCBS5", "M5TT27JA"]
     assert "830001" in texto
-    # rótulo = "plataforma conta", ex. "(shopee vortan)"
-    assert "(shopee loja 930001)" in texto
+    # rótulo = "plataforma conta equipe N", ex. "(shopee vortan equipe 2)"
+    assert "(shopee loja 930001 equipe 2)" in texto
     assert "x1" in texto
     assert "Aguardando Cancelamento" in texto
 
