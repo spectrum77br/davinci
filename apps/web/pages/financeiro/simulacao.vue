@@ -327,13 +327,16 @@ const calc = computed(() => {
   const corret = n(c.corretagem_cambio_brl) / cambio
   const inspec = n(c.inspecao_brl) / cambio
   const outras = n(c.outras_taxas_brl) / cambio
-  const subtotal = cif + ii + ipi + pis + cofins + afrmm + siscomex + taxaBL + armaz + desp_sda + desp_hon + corret + inspec + outras
+  // Inspeção (pré-embarque) fica FORA do subtotal: não entra na base
+  // das alíquotas (Taxas Gerais/Imp. Federais/ICMS); soma direto no
+  // total, como o Frete Nacional.
+  const subtotal = cif + ii + ipi + pis + cofins + afrmm + siscomex + taxaBL + armaz + desp_sda + desp_hon + corret + outras
   const taxas_gerais = subtotal * n(c.aliquota_taxas_gerais)
   const imp_fed = subtotal * n(c.aliquota_impostos_fed)
   const icms = subtotal * n(c.aliquota_icms)
   const frete_nac = n(c.frete_nacional_usd)
   const intermed = cif * n(c.aliquota_intermediacao)
-  const totalProcesso = subtotal + taxas_gerais + imp_fed + icms + frete_nac + intermed
+  const totalProcesso = subtotal + taxas_gerais + imp_fed + icms + frete_nac + inspec + intermed
   const valorUnidade = qtd > 0 ? totalProcesso / qtd : 0
   const fator = valorUnit > 0 ? valorUnidade / valorUnit : 0
   return {
@@ -392,13 +395,13 @@ const custoRows = computed(() => {
     { label: 'Despachante S.D.A', usd: c.desp_sda, aliq: null, kind: 'input', field: 'despachante_sda_brl', cur: 'brl' },
     { label: 'Despachante Honorários', usd: c.desp_hon, aliq: null, kind: 'input', field: 'despachante_honorarios_brl', cur: 'brl' },
     { label: 'Corretagem Câmbio', usd: c.corret, aliq: null, kind: 'input', field: 'corretagem_cambio_brl', cur: 'brl' },
-    { label: 'Inspeção (pré-embarque)', usd: c.inspec, aliq: null, kind: 'input', field: 'inspecao_brl', cur: 'brl' },
     { label: 'Outras Taxas', usd: c.outras, aliq: null, kind: 'input', field: 'outras_taxas_brl', cur: 'brl' },
     { label: 'SUBTOTAL', usd: c.subtotal, aliq: null, kind: 'calc', bold: true },
     { label: 'Taxas Gerais Importação', usd: c.taxas_gerais, aliq: 'aliquota_taxas_gerais', kind: 'aliquota' },
     { label: 'Impostos Federais Saída NF', usd: c.imp_fed, aliq: 'aliquota_impostos_fed', kind: 'aliquota' },
     { label: 'ICMS', usd: c.icms, aliq: 'aliquota_icms', kind: 'aliquota' },
     { label: 'Frete Nacional', usd: c.frete_nac, aliq: null, kind: 'input', field: 'frete_nacional_usd', cur: 'usd' },
+    { label: 'Inspeção (pré-embarque)', usd: c.inspec, aliq: null, kind: 'input', field: 'inspecao_brl', cur: 'brl' },
     { label: 'Intermediação (% CIF)', usd: c.intermed, aliq: 'aliquota_intermediacao', kind: 'aliquota' },
     { label: 'TOTAL DO PROCESSO', usd: c.totalProcesso, aliq: null, kind: 'calc', bold: true },
     { label: 'VALOR POR UNIDADE / KIT', usd: c.valorUnidade, aliq: null, kind: 'calc', bold: true },

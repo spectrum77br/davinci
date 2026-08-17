@@ -76,16 +76,19 @@ def calcular(sim: object) -> dict:
     inspec = brl_to_usd("inspecao_brl")
     outras = brl_to_usd("outras_taxas_brl")
 
+    # Inspeção (pré-embarque) fica FORA do subtotal: não entra na base
+    # das alíquotas (Taxas Gerais/Imp. Federais/ICMS); soma direto no
+    # total, como o Frete Nacional.
     subtotal = (
         cif + ii + ipi + pis + cofins + afrmm + siscomex + taxa_bl
-        + armaz + desp_sda + desp_hon + corret + inspec + outras
+        + armaz + desp_sda + desp_hon + corret + outras
     )
     taxas_gerais = subtotal * g("aliquota_taxas_gerais")
     imp_fed = subtotal * g("aliquota_impostos_fed")
     icms = subtotal * g("aliquota_icms")
     frete_nac = g("frete_nacional_usd")
     intermed = cif * g("aliquota_intermediacao")
-    total_processo = subtotal + taxas_gerais + imp_fed + icms + frete_nac + intermed
+    total_processo = subtotal + taxas_gerais + imp_fed + icms + frete_nac + inspec + intermed
     valor_unidade = total_processo / qtd if qtd > 0 else 0.0
     fator = valor_unidade / valor_unit if valor_unit > 0 else 0.0
 
@@ -114,13 +117,13 @@ def calcular(sim: object) -> dict:
             LinhaCusto("Despachante S.D.A", desp_sda, g("despachante_sda_brl")),
             LinhaCusto("Despachante Honorários", desp_hon, g("despachante_honorarios_brl")),
             LinhaCusto("Corretagem Câmbio", corret, g("corretagem_cambio_brl")),
-            LinhaCusto("Inspeção (pré-embarque)", inspec, g("inspecao_brl")),
             LinhaCusto("Outras Taxas", outras, g("outras_taxas_brl")),
             LinhaCusto("SUBTOTAL", subtotal, subtotal * cambio, bold=True),
             LinhaCusto("Taxas Gerais Importação", taxas_gerais, taxas_gerais * cambio, aliquota=g("aliquota_taxas_gerais")),
             LinhaCusto("Impostos Federais Saída NF", imp_fed, imp_fed * cambio, aliquota=g("aliquota_impostos_fed")),
             LinhaCusto("ICMS", icms, icms * cambio, aliquota=g("aliquota_icms")),
             LinhaCusto("Frete Nacional", frete_nac, frete_nac * cambio),
+            LinhaCusto("Inspeção (pré-embarque)", inspec, g("inspecao_brl")),
             LinhaCusto("Intermediação (% CIF)", intermed, intermed * cambio, aliquota=g("aliquota_intermediacao")),
             LinhaCusto("TOTAL DO PROCESSO", total_processo, total_processo * cambio, bold=True),
             LinhaCusto("VALOR POR UNIDADE / KIT", valor_unidade, valor_unidade * cambio, bold=True),

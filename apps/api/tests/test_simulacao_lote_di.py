@@ -104,12 +104,16 @@ def test_calcular_afrmm_8pct_frete_e_taxas_brl_via_cambio():
     assert linhas["Taxa BL"].brl == pytest.approx(3300.0)
     # subtotal = CIF + impostos + AFRMM + taxas BRL/câmbio.
     # Só o IPI tem base (CIF + II); os demais são sobre o CIF.
+    # Inspeção (pré-embarque) fica FORA do subtotal (não entra na base
+    # das alíquotas) e aparece depois do Frete Nacional.
     ii = 2000 * 0.16
     ipi = (2000 + ii) * 0.05
     assert linhas["IPI"].usd == pytest.approx(ipi)
     impostos = ii + ipi + 2000 * (0.021 + 0.0965)
-    taxas = (154.23 + 3300 + 3644.18 + 500 + 1688 + 70 + 200) / 5.0
+    taxas = (154.23 + 3300 + 3644.18 + 500 + 1688 + 70) / 5.0
     assert d["subtotal"] == pytest.approx(2000 + impostos + 80 + taxas)
+    labels = [ln.label for ln in d["linhas"]]
+    assert labels.index("Inspeção (pré-embarque)") == labels.index("Frete Nacional") + 1
 
 
 def test_calcular_fator_e_valor_unidade():
@@ -121,6 +125,7 @@ def test_calcular_fator_e_valor_unidade():
     esperado = (
         d["subtotal"] * (1 + 0.01 + 0.18)
         + d["cif"] * 0.02
+        + 200 / 5.0  # inspeção soma por fora, sem alíquotas
     )
     assert d["total_processo"] == pytest.approx(esperado)
     assert d["valor_unidade"] == pytest.approx(d["total_processo"] / 100)
