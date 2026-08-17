@@ -388,6 +388,26 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                             "shipment_check_bling_already_state",
                             bling_id=bling_id, status=e.response.status_code,
                         )
+                        # Alguém (integração nativa do Bling / painel) já pôs
+                        # o pedido em 15 no Bling ANTES do nosso PATCH. Sem
+                        # este registro a trilha fica cega: em 17/08 foram 78
+                        # carimbos locais "fantasmas" num dia (corridas
+                        # perdidas pro push do canal contra nosso poll de
+                        # 1 min) e a auditoria não explicava quem/quando.
+                        # Origem própria pra distinguir do flip que foi nosso.
+                        _cand = cand_by_id.get(int(bling_id))
+                        if _cand is not None:
+                            await record_margem_audit(
+                                session,
+                                acao="situacao",
+                                pedido_bling=str(_cand.numero),
+                                bling_id=bling_id,
+                                sku=_cand.item_codigo,
+                                valor_antigo=_cand.situacao,
+                                valor_novo=_SHIPPED_SITUACAO,
+                                origem="job_envio_espelho",
+                                mudado_por=None,
+                            )
                     else:
                         logger.warning(
                             "shipment_check_bling_update_failed",

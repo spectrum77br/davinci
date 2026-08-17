@@ -34,7 +34,9 @@ class MargemAudit(Base):
     acao: Mapped[str] = mapped_column(Text, nullable=False)
     valor_antigo: Mapped[str | None] = mapped_column(Text, nullable=True)
     valor_novo: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 'margens' | 'devolucao' | 'job_envio'
+    # 'margens' | 'devolucao' | 'job_envio' | 'job_envio_espelho'
+    # (espelho = Bling já estava em 15 quando o sweep ia mudar; registro
+    #  do carimbo local pra trilha não ficar cega — incidente 17/08).
     origem: Mapped[str] = mapped_column(Text, nullable=False)
     # NULL = ação disparada pelo sistema (job automático)
     mudado_por: Mapped[UUID | None] = mapped_column(
