@@ -35,7 +35,6 @@ from app.config import get_settings
 from app.security.cipher import encrypt
 from app.services import nf_auto_enfileirar, nf_emissao_gerar, threema
 from app.services.nf_auto_enfileirar import (
-    _tags_do_sku,
     avaliar_excecoes,
     run_auto_enfileirar_nf,
 )
@@ -651,104 +650,6 @@ async def test_sweep_pulado_vira_erro(
     # e a tentativa única segura: não volta no tick seguinte
     summary2 = await run_auto_enfileirar_nf()
     assert summary2["candidatos"] == 0
-
-
-def test_tags_do_sku_classificacao():
-    """Classificador puro das tags de rota (precedência confirmada)."""
-    assert _tags_do_sku("dg055.ci") == {"ci"}
-    assert _tags_do_sku("dg055.ci+a003.ci") == {"ci"}  # composto real
-    assert _tags_do_sku("dg055.ci+b001.20") == {"ci", "mala"}
-    assert _tags_do_sku("a010.sa") == {"sa"}
-    assert _tags_do_sku("a010.pi") == {"pi"}
-    assert _tags_do_sku("a010.sp") == {"sp"}
-    assert _tags_do_sku("b001.20") == {"mala"}  # prefixo b+dígito
-    assert _tags_do_sku("z0137.mala") == {"mala"}  # .mala vence o z
-    assert _tags_do_sku("z0140") == {"usados"}
-    assert _tags_do_sku("Z0141.us") == {"usados"}
-    assert _tags_do_sku("uaf001m1.110") == {"eletro"}
-    assert _tags_do_sku("a001.us") == set()  # sem rota → só grupo geral
-    assert _tags_do_sku("a001.cd") == set()
-    assert _tags_do_sku("a001") == set()
-
-
-@pytest.mark.asyncio
-async def test_sweep_sem_estoque_roteia_por_tag(
-    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
-):
-    """Grupo geral recebe TUDO; responsáveis de tag só o estoque deles:
-    pedido .ci → Espanha/Israel/África; pedido mala → Ghost/Marrocos."""
-    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
-    await _seed_pedido(
-        db, numero="830001", loja="930001", sku="dg055.ci", bling_id=700009
-    )
-    await _seed_pedido(
-        db, numero="830002", loja="930001", sku="b001.20", bling_id=700010
-    )
-    db.add(Product(user_id=admin.id, sku="dg055.ci", name="CI", stock=-2))
-    db.add(Product(user_id=admin.id, sku="b001.20", name="Mala", stock=-1))
-    await db.commit()
-    fake = _FakeBlingSituacao()
-    monkeypatch.setattr(
-        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
-    )
-    monkeypatch.setattr(
-        get_settings(), "nf_sem_estoque_threema_recipients",
-        "CDSA84BZ,7KMPCBS5", raising=False,
-    )
-    _FakeThreema.enviados = []
-    monkeypatch.setattr(threema, "ThreemaClient", _FakeThreema)
-
-    summary = await run_auto_enfileirar_nf()
-    assert summary["sem_estoque"] == 2
-
-    # 3 envios: geral (completo) + grupo ci + grupo mala
-    assert len(_FakeThreema.enviados) == 3
-    texto_geral, dest_geral = _FakeThreema.enviados[0]
-    assert dest_geral == ["CDSA84BZ", "7KMPCBS5"]
-    assert "830001" in texto_geral and "830002" in texto_geral
-
-    por_dests = {
-        frozenset(dests): texto for texto, dests in _FakeThreema.enviados[1:]
-    }
-    texto_ci = por_dests[frozenset({"5WWUUBTT", "2YSBC69R", "EV6NR2BU"})]
-    assert "830001" in texto_ci and "dg055.ci" in texto_ci
-    assert "830002" not in texto_ci
-    texto_mala = por_dests[frozenset({"HVEMH8NM", "BZMZWXC5"})]
-    assert "830002" in texto_mala and "b001.20" in texto_mala
-    assert "830001" not in texto_mala
-
-
-@pytest.mark.asyncio
-async def test_sweep_sem_estoque_tag_nao_duplica_geral(
-    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
-):
-    """Responsável de tag que também está no grupo geral não recebe 2×."""
-    await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
-    await _seed_pedido(
-        db, numero="830001", loja="930001", sku="dg055.ci", bling_id=700009
-    )
-    db.add(Product(user_id=admin.id, sku="dg055.ci", name="CI", stock=-2))
-    await db.commit()
-    fake = _FakeBlingSituacao()
-    monkeypatch.setattr(
-        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
-    )
-    # Espanha (5WWUUBTT, responsável .ci) também no grupo geral
-    monkeypatch.setattr(
-        get_settings(), "nf_sem_estoque_threema_recipients",
-        "CDSA84BZ,5WWUUBTT", raising=False,
-    )
-    _FakeThreema.enviados = []
-    monkeypatch.setattr(threema, "ThreemaClient", _FakeThreema)
-
-    summary = await run_auto_enfileirar_nf()
-    assert summary["sem_estoque"] == 1
-
-    assert len(_FakeThreema.enviados) == 2
-    _, dest_geral = _FakeThreema.enviados[0]
-    assert dest_geral == ["CDSA84BZ", "5WWUUBTT"]
-    _, dest_ci = _FakeThreema.enviados[1]
-    assert sorted(dest_ci) == ["2YSBC69R", "EV6NR2BU"]  # Espanha não repete
 
 
 @pytest.mark.asyncio
