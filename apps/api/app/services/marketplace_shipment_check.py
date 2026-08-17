@@ -211,6 +211,24 @@ def _iso_to_brt_date(iso_str: Any) -> date | None:
         return None
 
 
+def _ml_corte_agencia(dl: datetime) -> datetime:
+    """Corte EFETIVO de pedido ML postado em agência (Itu/Sumaré).
+
+    Agência é reconhecida pela hora: o SLA do ML vem 23:59 BRT ("conta o
+    dia"), enquanto coleta/cross-docking traz hora real (confirmado no
+    banco em 17/08: 181×23:59:59 vs 12:00/13:00/16:15). A operação leva
+    os pacotes às agências na MANHÃ SEGUINTE ao dia em que o pedido cai
+    — postar no outro dia não é atraso. Logo, SLA 23:59 de hoje (ou
+    passado) ganha +1 dia; data futura fica como veio (o ML já embutiu
+    a folga do próprio corte da agência)."""
+    dl_brt = dl.astimezone(_BRT)
+    if (dl_brt.hour, dl_brt.minute) != (23, 59):
+        return dl  # coleta/cross-docking: hora real de coleta vale como veio
+    if dl_brt.date() > datetime.now(tz=_BRT).date():
+        return dl
+    return dl + timedelta(days=1)
+
+
 def _epoch_to_utc_dt(v: Any) -> datetime | None:
     """Epoch (segundos, UTC) → datetime tz-aware. Usado pros prazos de
     despacho (Shopee `ship_by_date`, TikTok `rts_sla_time`)."""
@@ -756,14 +774,15 @@ async def _ml_shipped_for(
 
     # NÃO enviado — aproveita que já temos o shipment em mãos pra capturar
     # o "despachar até" (/sla.expected_date = horário de corte: 13:00 em
-    # coleta, 23:59 em agência). Só quando ainda NULL no banco: custa 1
+    # coleta, 23:59 em agência — este ganha +1 dia quando cai no próprio
+    # dia, ver _ml_corte_agencia). Só quando ainda NULL no banco: custa 1
     # request extra por pedido, e o ML raramente muda o prazo depois.
     if deadlines is not None and o.marketplace_ship_deadline is None:
         try:
             sla = await client.get_shipment_sla(str(shipment_id))
             dl = _iso_to_utc_dt(sla.get("expected_date"))
             if dl is not None:
-                deadlines[int(o.bling_id)] = dl
+                deadlines[int(o.bling_id)] = _ml_corte_agencia(dl)
         except Exception as e:  # noqa: BLE001
             logger.info(
                 "shipment_check_ml_sla_failed",

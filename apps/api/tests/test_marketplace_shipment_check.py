@@ -475,6 +475,49 @@ async def test_ml_nao_enviado_captura_sla():
 
 
 @pytest.mark.asyncio
+async def test_ml_sla_agencia_2359_hoje_ganha_um_dia():
+    """Agência (Itu/Sumaré): SLA 23:59 BRT de HOJE → corte vira amanhã.
+
+    A operação só leva os pacotes às agências na manhã seguinte ao dia
+    em que o pedido cai; postar no outro dia não é atraso, então o corte
+    não pode estourar no próprio dia."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.services import marketplace_shipment_check as m
+
+    m._ml_pack_real_order.clear()
+    m._not_found_until.clear()
+    hoje_2359 = datetime.now(tz=m._BRT).replace(
+        hour=23, minute=59, second=59, microsecond=0,
+    )
+    client = _FakeMLPendingClient(expected_date=hoje_2359.isoformat())
+    deadlines: dict[int, datetime] = {}
+    res = await m._ml_shipped_for(client, _fake_pending_order("111"), deadlines)
+    assert res is None
+    assert deadlines == {999: (hoje_2359 + timedelta(days=1)).astimezone(UTC)}
+
+
+def test_ml_corte_agencia_futuro_e_coleta_ficam_como_estao():
+    from datetime import UTC, datetime, timedelta
+
+    from app.services import marketplace_shipment_check as m
+
+    # Coleta/cross-docking: hora real → intocado.
+    coleta = datetime(2026, 8, 6, 17, 0, tzinfo=UTC)  # 14:00 BRT
+    assert m._ml_corte_agencia(coleta) == coleta
+    # Agência com data FUTURA: o ML já deu a folga → intocado.
+    fut = (datetime.now(tz=m._BRT) + timedelta(days=2)).replace(
+        hour=23, minute=59, second=59, microsecond=0,
+    )
+    assert m._ml_corte_agencia(fut) == fut
+    # Agência caindo HOJE → +1 dia.
+    hoje = datetime.now(tz=m._BRT).replace(
+        hour=23, minute=59, second=59, microsecond=0,
+    )
+    assert m._ml_corte_agencia(hoje) == hoje + timedelta(days=1)
+
+
+@pytest.mark.asyncio
 async def test_ml_sla_pulado_quando_ja_tem_prazo_no_banco():
     """Prazo já capturado → NÃO gasta o request extra de /sla de novo."""
     from types import SimpleNamespace
