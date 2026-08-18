@@ -58,6 +58,7 @@ from app.models.importacao import (
     ImportProduct,
     ImportResumo,
 )
+from app.models.informar import ThreemaInformarConfig
 from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
 from app.models.logistica import Logistica, LogisticaStatus, LogisticaStatusAnexo
@@ -212,6 +213,7 @@ __all__ = [
     "SyncLogAction",
     "Fatura",
     "Tarefa",
+    "ThreemaInformarConfig",
     "User",
     "UserRole",
     "UserSettings",

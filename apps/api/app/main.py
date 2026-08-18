@@ -24,6 +24,7 @@ from app.routers import faturamento as faturamento_router
 from app.routers import faturas as faturas_router
 from app.routers import financeiro as financeiro_router
 from app.routers import importacao as importacao_router
+from app.routers import informar as informar_router
 from app.routers import integrations as integrations_router
 from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
@@ -177,6 +178,7 @@ app.include_router(faturas_router.router)
 app.include_router(automacoes_router.router)
 app.include_router(logistica_router.router)
 app.include_router(logistica_track_router.router)
+app.include_router(informar_router.router)
 app.include_router(refunds_router.router)
 app.include_router(devolutions_router.router)
 app.include_router(estoque_router.router)

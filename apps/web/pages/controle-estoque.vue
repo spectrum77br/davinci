@@ -16,7 +16,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, FileUp, Upload, Download, Trash2, Printer, FileText,
-  ArrowUp, ArrowDown,
+  ArrowUp, ArrowDown, Megaphone,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
 
@@ -106,6 +106,10 @@ const enviosFim = ref(isoToday())
 
 // Admin-only tag override.
 const isAdmin = computed(() => auth.user?.role === 'admin')
+
+// Modal do botão INFORMAR (admin-only): relatório via Threema dos pedidos
+// movidos pra Aguardando Cancelamento por falta de estoque.
+const informarEstoqueOpen = ref(false)
 
 // "Atualizar Bling" (job refresh-bling-stock) libera pra quem pode editar o
 // Controle de Estoque — mesma permissão do botão "Recarregar" (sync-stocks).
@@ -1260,6 +1264,15 @@ async function conferirTodos() {
         v-if="blingJobToast"
         class="text-xs text-muted-foreground bg-muted/40 border rounded px-2 py-1"
       >{{ blingJobToast }}</span>
+      <button
+        v-if="isAdmin"
+        class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted"
+        :title="'Manda via Threema os pedidos em Aguardando Cancelamento por falta de estoque (só admins)'"
+        @click="informarEstoqueOpen = true"
+      >
+        <Megaphone class="size-3.5" />
+        Informar
+      </button>
       <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap">
         <button
           v-for="t in visibleTabs"
@@ -2024,6 +2037,14 @@ async function conferirTodos() {
         </div>
       </section>
     </div>
+
+    <!-- Modal do botão INFORMAR (admin-only) -->
+    <InformarThreemaModal
+      :open="informarEstoqueOpen"
+      contexto="controle_estoque"
+      descricao="Manda via Threema os pedidos movidos pra Aguardando Cancelamento por falta de estoque (que ainda estão nessa situação). A seleção de destinatários fica salva."
+      @close="informarEstoqueOpen = false"
+    />
   </div>
 </template>
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -9,7 +9,14 @@ definePageMeta({
 
 const { api } = useApi()
 const canEdit = useCan('logistica', 'edit')
+const isAdmin = useIsAdmin()
 const toasts = useToasts()
+
+// Botão "Mostrar tudo": ligado = inclui também os pedidos que o painel
+// normalmente esconde (resolvidos/desconsiderados). Só muda a exibição.
+const mostrarTudo = ref(false)
+// Modal do botão INFORMAR (admin-only) — relatório via Threema.
+const informarOpen = ref(false)
 
 // Abas por marketplace + a aba Status (playbook único, compartilhado). A chave
 // (Status Plataforma) é a mesma pra todas — só o ML enriquece a assinatura hoje.
@@ -150,7 +157,8 @@ const filteredRows = computed(() => {
   return rows.value.filter((c) => {
     // Painel de pendências: some quando já chegou ao fim da cadeia de status no
     // Bling (resolvido) E a regra casada não pede monitoramento — nada a fazer.
-    if (c.acao_resolvido && !c.acao_monitorar) return false
+    // "Mostrar tudo" ligado ignora essa regra e exibe também os escondidos.
+    if (!mostrarTudo.value && c.acao_resolvido && !c.acao_monitorar) return false
     if (contaFilter.value !== 'all' && (c.conta || '') !== contaFilter.value) return false
     if (statusBlingFilter.value !== 'all' && (c.status_bling || '') !== statusBlingFilter.value) return false
     if (di && (!c.data || c.data < di)) return false
@@ -1113,6 +1121,16 @@ async function aplicarStatusBling(c: Logistica) {
       >
         Status
       </button>
+      <Button
+        v-if="isAdmin"
+        size="sm"
+        variant="outline"
+        class="ml-auto self-center mb-1"
+        title="Manda via Threema a lista dos pedidos acompanhados no painel (só admins)"
+        @click="informarOpen = true"
+      >
+        <Megaphone class="size-4 mr-1" /> Informar
+      </Button>
     </div>
 
     <!-- ============ ABAS DE MARKETPLACE (ML/Shopee/Amazon/TikTok) ============ -->
@@ -1120,6 +1138,14 @@ async function aplicarStatusBling(c: Logistica) {
       <div class="flex flex-wrap items-center gap-3">
         <Button size="sm" variant="ghost" :disabled="loading || statusLoading || recarregando" @click="recarregar">
           <RefreshCw class="size-4 mr-1" :class="loading || statusLoading || recarregando ? 'animate-spin' : ''" /> recarregar
+        </Button>
+        <Button
+          size="sm"
+          :variant="mostrarTudo ? 'default' : 'outline'"
+          title="Ligado = mostra também os pedidos que o painel esconde (resolvidos/desconsiderados)"
+          @click="mostrarTudo = !mostrarTudo"
+        >
+          <Eye class="size-4 mr-1" /> {{ mostrarTudo ? 'Mostrando tudo' : 'Mostrar tudo' }}
         </Button>
         <Button v-if="canEdit" size="sm" class="ml-auto" @click="openNew">
           <Plus class="size-4 mr-1" /> Novo caso
@@ -2085,6 +2111,14 @@ async function aplicarStatusBling(c: Logistica) {
         </div>
       </div>
     </div>
+
+    <!-- Modal do botão INFORMAR (admin-only) -->
+    <InformarThreemaModal
+      :open="informarOpen"
+      contexto="logistica"
+      descricao="Manda via Threema a lista dos pedidos acompanhados no painel, no formato: pedido marketplace - conta - status plataforma - status bling. A seleção de destinatários fica salva."
+      @close="informarOpen = false"
+    />
 
   </div>
 </template>

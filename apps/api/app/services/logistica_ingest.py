@@ -64,6 +64,7 @@ _INSERT_SQL = text(
         ON si.bling_store_id::text = bo.loja AND si.platform = :platform
     LEFT JOIN davinci.situacao_bling sb ON sb.id::text = bo.situacao
     WHERE bo.data >= now() - make_interval(days => :dias)
+      AND (:so_problemas = false OR sb.nome = 'Problemas')
       AND bo.numero IS NOT NULL
       AND bo.situacao IS DISTINCT FROM 'excluido'
       AND NOT EXISTS (
@@ -74,43 +75,78 @@ _INSERT_SQL = text(
 )
 
 
-async def _ingest_platform(session: AsyncSession, platform: str, dias: int) -> int:
+async def _ingest_platform(
+    session: AsyncSession, platform: str, dias: int, *, so_problemas: bool = False
+) -> int:
     """Insere os pedidos novos (janela de `dias`) de UMA plataforma. Idempotente
-    (NOT EXISTS por pedido_bling). Retorna quantas linhas entraram."""
+    (NOT EXISTS por pedido_bling). `so_problemas=True` restringe aos pedidos com
+    situação Bling "Problemas" (a passada extra de 360 dias). Retorna quantas
+    linhas entraram."""
     label = _PLATAFORMA_LABELS[platform]
     res = await session.execute(
-        _INSERT_SQL, {"platform": platform, "label": label, "dias": dias}
+        _INSERT_SQL,
+        {
+            "platform": platform,
+            "label": label,
+            "dias": dias,
+            "so_problemas": so_problemas,
+        },
     )
     inserted = res.rowcount or 0
     await session.commit()
     logger.info(
-        "logistica_ingest_inserted", platform=platform, inserted=inserted, dias=dias
+        "logistica_ingest_inserted",
+        platform=platform,
+        inserted=inserted,
+        dias=dias,
+        so_problemas=so_problemas,
     )
     return inserted
 
 
 async def run_ingest_ml_daily(
-    session: AsyncSession, *, dias: int = 3, enrich_limit: int = 400
+    session: AsyncSession,
+    *,
+    dias: int = 60,
+    problemas_dias: int = 360,
+    enrich_limit: int = 400,
 ) -> dict[str, int]:
-    """Insere os pedidos ML novos (janela de `dias`) e enriquece o status do
-    Meli das linhas ML ainda vazias (mais recentes primeiro)."""
+    """Insere os pedidos ML novos (janela de `dias`, 60 por padrão — pedido do
+    usuário 18/08) + os com situação Bling "Problemas" dos últimos
+    `problemas_dias`, e enriquece o status do Meli das linhas ML ainda vazias
+    (mais recentes primeiro)."""
     inserted = await _ingest_platform(session, "ml", dias)
+    problemas = await _ingest_platform(
+        session, "ml", problemas_dias, so_problemas=True
+    )
     enr = await logistica_meli.enrich_recent(
         session, limit=enrich_limit, only_empty=True
     )
-    return {"inserted": inserted, **{f"enrich_{k}": v for k, v in enr.items()}}
+    return {
+        "inserted": inserted,
+        "problemas": problemas,
+        **{f"enrich_{k}": v for k, v in enr.items()},
+    }
 
 
 async def run_ingest_marketplaces_daily(
-    session: AsyncSession, *, dias: int = 3, enrich_limit: int = 400
+    session: AsyncSession,
+    *,
+    dias: int = 60,
+    problemas_dias: int = 360,
+    enrich_limit: int = 400,
 ) -> dict[str, int]:
-    """Insere os pedidos novos de Shopee/TikTok/Amazon pra aba Logística e
-    enriquece o Status Plataforma das três (Shopee via order_status; TikTok via
-    order status + rastreio; Amazon via OrderStatus + EasyShip) nas linhas ainda
+    """Insere os pedidos novos de Shopee/TikTok/Amazon pra aba Logística
+    (janela de `dias` + "Problemas" dos últimos `problemas_dias`) e enriquece o
+    Status Plataforma das três (Shopee via order_status; TikTok via order
+    status + rastreio; Amazon via OrderStatus + EasyShip) nas linhas ainda
     vazias. Retorna o total inserido por plataforma + o resumo de cada enrich."""
     out: dict[str, int] = {}
     for platform in ("shopee", "tiktok", "amazon"):
         out[platform] = await _ingest_platform(session, platform, dias)
+        out[f"{platform}_problemas"] = await _ingest_platform(
+            session, platform, problemas_dias, so_problemas=True
+        )
     enr_shopee = await logistica_shopee.enrich_recent(
         session, limit=enrich_limit, only_empty=True
     )
@@ -153,7 +189,11 @@ async def _ids_pendentes(session: AsyncSession) -> dict[str, list[UUID]]:
         resolvido = logistica_match.estado_resolvido(
             cands, r.status_bling, threema_enviado=r.threema_enviado_at is not None
         )
-        if resolvido and not logistica_match.deve_monitorar(cands, r.status_bling):
+        if (
+            resolvido
+            and not logistica_match.deve_monitorar(cands, r.status_bling)
+            and not logistica_match.problema_bling_visivel(r.status_bling, r.data)
+        ):
             continue
         pend[chave].append(r.id)
     return pend

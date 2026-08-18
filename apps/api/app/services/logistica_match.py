@@ -13,7 +13,13 @@ pra saber o que executar, então o que a UI mostra bate com o que o sistema far�
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from app.models import LogisticaStatus
+
+# Passe-livre do painel: pedido com situação Bling "Problemas" fica visível
+# por este prazo, não importa o que as regras digam (pedido do usuário 18/08).
+PROBLEMA_BLING_DIAS = 360
 
 
 def _norm(v: str | None) -> str:
@@ -100,6 +106,24 @@ def _tem_alguma_acao(r: LogisticaStatus) -> bool:
         or (r.mensagem_bling or "").strip()
         or (r.mensagem_threema or "").strip()
     )
+
+
+def problema_bling_visivel(
+    status_bling: str | None,
+    data: date | None,
+    *,
+    dias: int = PROBLEMA_BLING_DIAS,
+) -> bool:
+    """True se o pedido está em "Problemas" no Bling dentro da janela de `dias`.
+
+    Esses pedidos IGNORAM desconsiderar/resolvido e ficam sempre no painel —
+    problema não some por regra. Pedido sem data conta como dentro da janela
+    (melhor mostrar demais que esconder um problema)."""
+    if _norm(status_bling) != "problemas":
+        return False
+    if data is None:
+        return True
+    return data >= date.today() - timedelta(days=dias)
 
 
 def regra_ativa(

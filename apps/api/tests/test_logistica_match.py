@@ -265,6 +265,27 @@ def test_estado_resolvido_threema_enviado_resolve():
     )
 
 
+def test_problema_bling_visivel_janela_360():
+    # Pedido em "Problemas" no Bling ganha passe-livre no painel por 360 dias:
+    # ignora desconsiderar/resolvido. Fora da janela (ou outro status), não.
+    from datetime import date, timedelta
+
+    hoje = date.today()
+    assert logistica_match.problema_bling_visivel("Problemas", hoje) is True
+    assert (
+        logistica_match.problema_bling_visivel(" problemas ", hoje - timedelta(days=359))
+        is True
+    )
+    assert (
+        logistica_match.problema_bling_visivel("Problemas", hoje - timedelta(days=361))
+        is False
+    )
+    # Sem data = mostra (melhor sobrar que esconder um problema).
+    assert logistica_match.problema_bling_visivel("Problemas", None) is True
+    assert logistica_match.problema_bling_visivel("Atendido", hoje) is False
+    assert logistica_match.problema_bling_visivel(None, hoje) is False
+
+
 # ---- endpoint GET /api/logistica ----
 
 

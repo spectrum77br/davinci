@@ -108,9 +108,12 @@ def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> Logisti
         acao_status_id=rule.id if rule is not None else None,
         acao_resumo=logistica_match.resumo_acoes(rule),
         acao_monitorar=logistica_match.deve_monitorar(rules, c.status_bling),
+        # "Problemas" no Bling ignora resolvido/desconsiderar por 360 dias —
+        # o painel nunca esconde um pedido com problema por causa de regra.
         acao_resolvido=logistica_match.estado_resolvido(
             rules, c.status_bling, threema_enviado=c.threema_enviado_at is not None
-        ),
+        )
+        and not logistica_match.problema_bling_visivel(c.status_bling, c.data),
         created_by=c.created_by,
         created_at=c.created_at,
         updated_at=c.updated_at,
