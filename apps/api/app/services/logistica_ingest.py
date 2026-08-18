@@ -8,6 +8,12 @@ Meli — assim a lista cresce sozinha sem backfill manual.
 O INSERT é idempotente (`NOT EXISTS` por `pedido_bling`), então re-rodar não
 duplica; a janela de dias dá folga pra pegar pedidos que o sync do Bling só
 trouxe com atraso.
+
+Além de inserir, cada rodada REALINHA o `status_bling` de quem já está na
+tabela com o espelho `bling_orders` (que o sync do Bling mantém fresco) — sem
+isso o painel ficava com a foto do momento da ingestão e um pedido que virava
+"Problemas" depois nunca ganhava o passe-livre de 360 dias (caso real: 289863,
+18/08).
 """
 from __future__ import annotations
 
@@ -75,6 +81,37 @@ _INSERT_SQL = text(
 )
 
 
+# O status_bling de quem JÁ está na tabela ficava congelado na foto da
+# ingestão (só o ⟳ por linha atualizava, via API). Como o espelho
+# `bling_orders` é mantido fresco pelo sync do Bling, um UPDATE barato realinha
+# todo mundo sem nenhuma chamada de API. item_index=0 é a linha canônica do
+# pedido (a tabela tem uma linha por item).
+_REFRESH_STATUS_SQL = text(
+    """
+    UPDATE davinci.logistica l
+       SET status_bling = sb.nome,
+           updated_at = now()
+      FROM davinci.bling_orders bo
+      JOIN davinci.situacao_bling sb ON sb.id::text = bo.situacao
+     WHERE bo.numero = l.pedido_bling
+       AND bo.item_index = 0
+       AND sb.nome IS DISTINCT FROM l.status_bling
+    """
+)
+
+
+async def refresh_status_bling(session: AsyncSession) -> int:
+    """Realinha `logistica.status_bling` com a situação atual do espelho
+    `bling_orders`. Retorna quantas linhas mudaram. É o que faz um pedido que
+    virou "Problemas" DEPOIS de entrar na tabela aparecer no painel (o
+    passe-livre de 360d olha esse campo)."""
+    res = await session.execute(_REFRESH_STATUS_SQL)
+    changed = res.rowcount or 0
+    await session.commit()
+    logger.info("logistica_refresh_status_bling", changed=changed)
+    return changed
+
+
 async def _ingest_platform(
     session: AsyncSession, platform: str, dias: int, *, so_problemas: bool = False
 ) -> int:
@@ -114,7 +151,9 @@ async def run_ingest_ml_daily(
     """Insere os pedidos ML novos (janela de `dias`, 60 por padrão — pedido do
     usuário 18/08) + os com situação Bling "Problemas" dos últimos
     `problemas_dias`, e enriquece o status do Meli das linhas ML ainda vazias
-    (mais recentes primeiro)."""
+    (mais recentes primeiro). Antes de tudo realinha o status_bling de quem já
+    está na tabela (todas as plataformas — o UPDATE é global e barato)."""
+    refreshed = await refresh_status_bling(session)
     inserted = await _ingest_platform(session, "ml", dias)
     problemas = await _ingest_platform(
         session, "ml", problemas_dias, so_problemas=True
@@ -123,6 +162,7 @@ async def run_ingest_ml_daily(
         session, limit=enrich_limit, only_empty=True
     )
     return {
+        "status_refresh": refreshed,
         "inserted": inserted,
         "problemas": problemas,
         **{f"enrich_{k}": v for k, v in enr.items()},
@@ -140,8 +180,10 @@ async def run_ingest_marketplaces_daily(
     (janela de `dias` + "Problemas" dos últimos `problemas_dias`) e enriquece o
     Status Plataforma das três (Shopee via order_status; TikTok via order
     status + rastreio; Amazon via OrderStatus + EasyShip) nas linhas ainda
-    vazias. Retorna o total inserido por plataforma + o resumo de cada enrich."""
-    out: dict[str, int] = {}
+    vazias. Retorna o total inserido por plataforma + o resumo de cada enrich.
+    Também realinha o status_bling primeiro (idempotente; o cron do ML faz o
+    mesmo — tanto faz qual roda antes)."""
+    out: dict[str, int] = {"status_refresh": await refresh_status_bling(session)}
     for platform in ("shopee", "tiktok", "amazon"):
         out[platform] = await _ingest_platform(session, platform, dias)
         out[f"{platform}_problemas"] = await _ingest_platform(
@@ -211,14 +253,18 @@ async def recarregar_ml(
     Bling morrendo no job_timeout (1800s) ANTES do commit — o botão nunca
     terminava (12-13/ago, TimeoutError em aplicar_status_em_lote). Com ~2.7k
     linhas e só ~50 pendentes, mirar o painel termina em poucos minutos e cobre
-    exatamente o que o operador está vendo. Linha resolvida que mudar depois no
-    marketplace não volta sozinha — o ⟳ por linha continua sendo o caminho pra
-    re-checar uma antiga. Roda em background (arq) porque mesmo assim pode
-    passar dos 100s do Cloudflare.
+    exatamente o que o operador está vendo. Antes de escolher as pendentes,
+    realinha o status_bling com o espelho do Bling — assim linha resolvida cujo
+    BLING mudou (ex.: virou "Problemas") volta pro conjunto sozinha. Mudança só
+    no lado do MARKETPLACE de linha resolvida continua exigindo o ⟳ por linha.
+    Roda em background (arq) porque mesmo assim pode passar dos 100s do
+    Cloudflare.
     """
+    refreshed = await refresh_status_bling(session)
     pend = await _ids_pendentes(session)
     logger.info(
         "logistica_recarregar_pendentes",
+        status_refresh=refreshed,
         **{k: len(v) for k, v in pend.items()},
     )
     enr = await logistica_meli.enrich_recent(
@@ -245,6 +291,7 @@ async def recarregar_ml(
         **lote,
     )
     return {
+        "status_refresh": refreshed,
         **{f"enrich_{k}": v for k, v in enr.items()},
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
