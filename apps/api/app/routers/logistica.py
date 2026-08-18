@@ -108,7 +108,7 @@ def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> Logisti
         acao_status_id=rule.id if rule is not None else None,
         acao_resumo=logistica_match.resumo_acoes(rule),
         acao_monitorar=logistica_match.deve_monitorar(rules, c.status_bling),
-        # "Problemas" no Bling ignora resolvido/desconsiderar por 360 dias —
+        # "Problemas" no Bling ignora o resolvido das regras por 360 dias —
         # o painel nunca esconde um pedido com problema por causa de regra.
         acao_resolvido=logistica_match.estado_resolvido(
             rules, c.status_bling, threema_enviado=c.threema_enviado_at is not None
@@ -139,7 +139,6 @@ def _to_status_out(s: LogisticaStatus) -> LogisticaStatusOut:
         monitoramento=s.monitoramento,
         abrir_chamado=s.abrir_chamado,
         abrir_reembolso=s.abrir_reembolso,
-        desconsiderar=s.desconsiderar,
         mensagem_chamado=s.mensagem_chamado,
         mensagem_bling=s.mensagem_bling,
         mensagem_threema=s.mensagem_threema,
@@ -249,7 +248,6 @@ async def create_status(
         monitoramento=bool(body.monitoramento),
         abrir_chamado=bool(body.abrir_chamado),
         abrir_reembolso=bool(body.abrir_reembolso),
-        desconsiderar=bool(body.desconsiderar),
         mensagem_chamado=_clean(body.mensagem_chamado),
         mensagem_bling=_clean(body.mensagem_bling),
         mensagem_threema=_clean(body.mensagem_threema),
@@ -288,8 +286,6 @@ async def patch_status(
         s.abrir_chamado = bool(data["abrir_chamado"])
     if "abrir_reembolso" in data:
         s.abrir_reembolso = bool(data["abrir_reembolso"])
-    if "desconsiderar" in data:
-        s.desconsiderar = bool(data["desconsiderar"])
     if "mensagem_chamado" in data:
         s.mensagem_chamado = _clean(data["mensagem_chamado"])
     if "mensagem_bling" in data:

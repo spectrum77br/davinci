@@ -155,19 +155,17 @@ def test_estado_resolvido_curinga_e_casos_negativos():
     assert logistica_match.estado_resolvido([curinga], None) is False
 
 
-def test_estado_resolvido_regra_sem_acao_so_some_com_desconsiderar():
-    # Regra sem NENHUMA ação não esconde mais sozinha (caso real 290662: a chave
-    # "Pago | Pronto p/ envio | Aguardando NF" travada sumia do painel). Agora
-    # esconder é decisão explícita: o botão "Desconsiderar" da aba Status.
+def test_estado_resolvido_regra_sem_acao_esconde():
+    # Regra sem NENHUMA ação = chave conhecida/ok → esconde. Pra manter a chave
+    # à vista o operador marca Monitorar; pra espiar os escondidos existe o
+    # "Mostrar tudo" do painel (e "Problemas" fura tudo via problema_bling_visivel).
     vazia = _rule(status_plataforma="Pago | Entregue")
-    assert logistica_match.estado_resolvido([vazia], "Entregue") is False
-    assert logistica_match.estado_resolvido([vazia], None) is False
-    marcada = _rule(status_plataforma="Pago | Entregue", desconsiderar=True)
-    assert logistica_match.estado_resolvido([marcada], "Entregue") is True
-    assert logistica_match.estado_resolvido([marcada], None) is True  # nem depende do status
+    assert logistica_match.estado_resolvido([vazia], "Entregue") is True
+    assert logistica_match.estado_resolvido([vazia], None) is True  # nem depende do status
     # Só monitoramento (sem outra ação): resolvido, mas o front mantém via monitorar.
     so_mon = _rule(monitoramento=True)
     assert logistica_match.estado_resolvido([so_mon], "Entregue") is True
+    assert logistica_match.deve_monitorar([so_mon], "Entregue") is True
 
 
 def test_estado_resolvido_acao_manual_pendente_fica():
@@ -187,19 +185,16 @@ def test_estado_resolvido_acao_de_outro_estado_nao_conta():
     # Caso real 287618: mesma chave com 2 regras. Uma pro estado "Em andamento"
     # (com chamado/reembolso/monitorar/mensagens), outra pro estado "Problemas"
     # (sem ação). O pedido está em "Problemas" → a regra de "Em andamento" NÃO se
-    # aplica agora; a vazia só esconde se estiver marcada como Desconsiderar.
+    # aplica agora; a vazia aplicável esconde (quem mantém pedido com problema
+    # no painel é o passe-livre problema_bling_visivel, aplicado por quem chama).
     acao = _rule(
         status_plataforma="Retido", status_atual="Em andamento",
         abrir_chamado=True, abrir_reembolso=True,
         mensagem_chamado="x", mensagem_threema="x", monitoramento=True,
     )
-    sem = _rule(status_plataforma="Retido", status_atual="Problemas", desconsiderar=True)
+    sem = _rule(status_plataforma="Retido", status_atual="Problemas")
     assert logistica_match.estado_resolvido([acao, sem], "Problemas") is True
     assert logistica_match.deve_monitorar([acao, sem], "Problemas") is False
-    # SEM a marca, a regra vazia não esconde: pedido retido com problema deve
-    # PERMANECER na Logística.
-    sem_marca = _rule(status_plataforma="Retido", status_atual="Problemas")
-    assert logistica_match.estado_resolvido([acao, sem_marca], "Problemas") is False
     # Mas QUANDO o pedido está em "Em andamento", a regra se aplica → fica visível.
     assert logistica_match.estado_resolvido([acao, sem], "Em andamento") is False
     assert logistica_match.deve_monitorar([acao, sem], "Em andamento") is True
@@ -208,16 +203,13 @@ def test_estado_resolvido_acao_de_outro_estado_nao_conta():
 def test_estado_resolvido_alvo_de_outro_estado_nao_bloqueia():
     # Caso real 287924: chave "Cancelado | Não entregue | Devolvido ao hub | Envio"
     # com 2 regras — (1) status_atual "Em andamento" → "Aguardando Devolução";
-    # (2) status_atual "Problemas" → NÃO faz nada, marcada Desconsiderar. O
-    # pedido está em "Problemas". A regra aplicável (2) esconde por decisão
-    # explícita, mesmo a regra (1) tendo um alvo ainda não atingido.
+    # (2) status_atual "Problemas" → NÃO faz nada. O pedido está em "Problemas".
+    # A regra aplicável (2) não pede nada → esconde, mesmo a regra (1) tendo um
+    # alvo ainda não atingido (ela vale quando o pedido estiver no estado dela).
     r1 = _rule(status_atual="Em andamento", alterar_status_bling="Aguardando Devolução")
-    r2 = _rule(status_atual="Problemas", desconsiderar=True)  # sem ação, marcada
+    r2 = _rule(status_atual="Problemas")  # sem ação
     assert logistica_match.estado_resolvido([r1, r2], "Problemas") is True
     assert logistica_match.deve_monitorar([r1, r2], "Problemas") is False
-    # Sem a marca, a vazia não esconde: o pedido em "Problemas" fica visível.
-    r2_sem = _rule(status_atual="Problemas")
-    assert logistica_match.estado_resolvido([r1, r2_sem], "Problemas") is False
     # Em "Em andamento" a regra (1) se aplica e tem transição pendente → fica.
     assert logistica_match.estado_resolvido([r1, r2], "Em andamento") is False
 
@@ -235,16 +227,6 @@ def test_regra_ativa_desambigua_pelo_status_atual():
     assert logistica_match.regra_ativa([r1, curinga], "Entregue") is curinga
     assert logistica_match.regra_ativa([r1, r2], "Entregue") is r1
     assert logistica_match.regra_ativa([], "Problemas") is None
-
-
-def test_estado_resolvido_desconsiderar_nao_afeta_regra_com_acao():
-    # A marca só muda o destino das regras SEM ação. Regra com ação pendente
-    # continua segurando a linha mesmo se alguém marcar Desconsiderar…
-    com_acao = _rule(abrir_chamado=True, desconsiderar=True)
-    assert logistica_match.estado_resolvido([com_acao], "Em aberto") is False
-    # …e regra com ações cumpridas continua resolvendo sozinha, sem marca.
-    cumprida = _rule(alterar_status_bling="Entregue")
-    assert logistica_match.estado_resolvido([cumprida], "Entregue") is True
 
 
 def test_estado_resolvido_threema_enviado_resolve():
@@ -267,7 +249,7 @@ def test_estado_resolvido_threema_enviado_resolve():
 
 def test_problema_bling_visivel_janela_360():
     # Pedido em "Problemas" no Bling ganha passe-livre no painel por 360 dias:
-    # ignora desconsiderar/resolvido. Fora da janela (ou outro status), não.
+    # ignora o resolvido das regras. Fora da janela (ou outro status), não.
     from datetime import date, timedelta
 
     hoje = date.today()

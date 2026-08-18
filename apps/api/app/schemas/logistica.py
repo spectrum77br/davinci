@@ -87,7 +87,6 @@ class LogisticaStatusOut(BaseModel):
     monitoramento: bool = False
     abrir_chamado: bool = False
     abrir_reembolso: bool = False
-    desconsiderar: bool = False
     mensagem_chamado: str | None = None
     mensagem_bling: str | None = None
     mensagem_threema: str | None = None
@@ -106,7 +105,6 @@ class LogisticaStatusCreate(BaseModel):
     monitoramento: bool = False
     abrir_chamado: bool = False
     abrir_reembolso: bool = False
-    desconsiderar: bool = False
     mensagem_chamado: str | None = None
     mensagem_bling: str | None = None
     mensagem_threema: str | None = None
@@ -121,7 +119,6 @@ class LogisticaStatusPatch(BaseModel):
     monitoramento: bool | None = None
     abrir_chamado: bool | None = None
     abrir_reembolso: bool | None = None
-    desconsiderar: bool | None = None
     mensagem_chamado: str | None = None
     mensagem_bling: str | None = None
     mensagem_threema: str | None = None

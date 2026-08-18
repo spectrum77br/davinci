@@ -92,22 +92,6 @@ def _aplicaveis_agora(
     return [r for r in rules if not _norm(r.status_atual) or _norm(r.status_atual) == atual]
 
 
-def _tem_alguma_acao(r: LogisticaStatus) -> bool:
-    """True se a regra tem QUALQUER ação configurada (transição de status,
-    monitorar, abrir chamado/reembolso ou alguma mensagem). Regra sem nenhuma
-    ação não "resolve" o pedido por si — só o esconde se o operador marcou
-    explicitamente `desconsiderar` (botão da aba Status)."""
-    if bool(r.monitoramento) or bool(r.abrir_chamado) or bool(r.abrir_reembolso):
-        return True
-    if (r.alterar_status_bling or "").strip():
-        return True
-    return bool(
-        (r.mensagem_chamado or "").strip()
-        or (r.mensagem_bling or "").strip()
-        or (r.mensagem_threema or "").strip()
-    )
-
-
 def problema_bling_visivel(
     status_bling: str | None,
     data: date | None,
@@ -116,7 +100,7 @@ def problema_bling_visivel(
 ) -> bool:
     """True se o pedido está em "Problemas" no Bling dentro da janela de `dias`.
 
-    Esses pedidos IGNORAM desconsiderar/resolvido e ficam sempre no painel —
+    Esses pedidos IGNORAM o resolvido das regras e ficam sempre no painel —
     problema não some por regra. Pedido sem data conta como dentro da janela
     (melhor mostrar demais que esconder um problema)."""
     if _norm(status_bling) != "problemas":
@@ -167,16 +151,10 @@ def estado_resolvido(
     """True quando o pedido casa uma regra da aba Status e NÃO há mais nada a
     fazer — o painel esconde esses (`resolvido and not monitorar`).
 
-    "Nada a fazer" cobre dois casos:
-      - a regra casada está marcada como DESCONSIDERAR (botão da aba Status):
-        o operador decidiu explicitamente que essa chave some do painel; ou
-      - a regra tem ações e todas já foram cumpridas (status atual == algum
-        `alterar_status_bling` da cadeia, sem transição exata pendente e sem
-        ação manual pendente).
-
-    Regra sem NENHUMA ação e SEM a marca desconsiderar NÃO resolve — o pedido
-    fica visível. Sumir do painel é decisão do operador, não efeito colateral
-    de uma regra vazia (chaves de problema, ex. retido, ficam à vista).
+    Regra SEM NENHUMA ação = chave conhecida/ok → esconde. Pra manter uma chave
+    à vista, o operador marca Monitorar na regra; pra espiar o que está
+    escondido existe o botão "Mostrar tudo" do painel. ("Problemas" no Bling
+    fura tudo isso via `problema_bling_visivel` — aplicado por quem chama.)
 
     Qualquer ação MANUAL pendente (abrir chamado/reembolso ou mensagem de
     chamado/Bling/Threema) mantém a linha visível — ainda há trabalho. A
@@ -204,17 +182,15 @@ def estado_resolvido(
         if alvo and alvo != atual:
             return False
     if aplicaveis:
-        # Nada pendente no estado atual. Regra COM ações cumpriu tudo →
-        # resolvido. Regra sem ação nenhuma só resolve se o operador marcou
-        # "desconsiderar" — senão o pedido continua visível.
-        return all(bool(r.desconsiderar) or _tem_alguma_acao(r) for r in aplicaveis)
+        # Nada pendente no estado atual → resolvido (regra sem ação = chave
+        # conhecida/ok; quem quer a chave na tela marca Monitorar).
+        return True
     # Nenhuma regra aplicável ao estado atual (todas são de outros estados). Se
-    # nenhuma delas muda status, não há cadeia a cumprir: some só se todas são
-    # desconsideradas (ou têm outras ações — que valem nos estados delas).
+    # nenhuma delas muda status, não há cadeia a cumprir → nada a fazer.
     # Senão, só resolve quando o pedido chegou a algum alvo da cadeia.
     alvos = {_norm(r.alterar_status_bling) for r in rules if _norm(r.alterar_status_bling)}
     if not alvos:
-        return all(bool(r.desconsiderar) or _tem_alguma_acao(r) for r in rules)
+        return True
     return bool(atual) and atual in alvos
 
 

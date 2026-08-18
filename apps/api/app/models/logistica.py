@@ -86,12 +86,6 @@ class LogisticaStatus(Base, TimestampMixin):
     abrir_reembolso: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
-    # "Desconsiderar": o operador decidiu que os pedidos desta chave somem do
-    # painel mesmo sem nenhuma ação preenchida. Sem essa marca, regra sem ação
-    # MANTÉM o pedido visível (regra vazia não resolve nada sozinha).
-    desconsiderar: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="false"
-    )
     # Mensagem do chamado + o que anexar (foto/link/o que for) no envio.
     mensagem_chamado: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Mensagem a colar no Bling.

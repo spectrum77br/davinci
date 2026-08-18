@@ -542,7 +542,6 @@ type LogisticaStatus = {
   monitoramento: boolean
   abrir_chamado: boolean
   abrir_reembolso: boolean
-  desconsiderar: boolean
   mensagem_chamado: string | null
   mensagem_bling: string | null
   mensagem_threema: string | null
@@ -678,7 +677,7 @@ async function commitEdit(s: LogisticaStatus) {
 
 async function toggleStatusBool(
   s: LogisticaStatus,
-  field: 'monitoramento' | 'abrir_chamado' | 'abrir_reembolso' | 'desconsiderar',
+  field: 'monitoramento' | 'abrir_chamado' | 'abrir_reembolso',
 ) {
   if (!canEdit.value) return
   await patchStatusField(s.id, { [field]: !s[field] })
@@ -695,7 +694,6 @@ const statusForm = ref({
   monitoramento: false,
   abrir_chamado: false,
   abrir_reembolso: false,
-  desconsiderar: false,
   mensagem_chamado: '',
   mensagem_bling: '',
   mensagem_threema: '',
@@ -710,7 +708,6 @@ function openStatusForm() {
     monitoramento: false,
     abrir_chamado: false,
     abrir_reembolso: false,
-    desconsiderar: false,
     mensagem_chamado: '',
     mensagem_bling: '',
     mensagem_threema: '',
@@ -733,7 +730,6 @@ async function saveStatusForm() {
         monitoramento: f.monitoramento,
         abrir_chamado: f.abrir_chamado,
         abrir_reembolso: f.abrir_reembolso,
-        desconsiderar: f.desconsiderar,
         mensagem_chamado: f.mensagem_chamado.trim() || null,
         mensagem_bling: f.mensagem_bling.trim() || null,
         mensagem_threema: f.mensagem_threema.trim() || null,
@@ -1476,7 +1472,6 @@ async function aplicarStatusBling(c: Logistica) {
               <th class="px-3 py-2">Monitoramento</th>
               <th class="px-3 py-2">Abrir Chamado</th>
               <th class="px-3 py-2">Abrir Reembolso</th>
-              <th class="px-3 py-2">Desconsiderar</th>
               <th class="px-3 py-2">Mensagem do Chamado</th>
               <th class="px-3 py-2">Mensagem Bling</th>
               <th class="px-3 py-2">Mensagem Threema</th>
@@ -1587,19 +1582,6 @@ async function aplicarStatusBling(c: Logistica) {
                     @change="toggleStatusBool(s, 'abrir_reembolso')"
                   />
                   <span :class="s.abrir_reembolso ? 'text-emerald-500' : 'text-muted-foreground'">{{ s.abrir_reembolso ? 'Sim' : 'Não' }}</span>
-                </label>
-              </td>
-              <!-- Desconsiderar (toggle direto): Sim = pedidos desta chave somem do painel -->
-              <td class="px-3 py-1 whitespace-nowrap align-top">
-                <label class="inline-flex items-center gap-1.5" :class="canEdit ? 'cursor-pointer' : ''" title="Sim = pedidos com esta chave somem do painel Logística (mesmo sem nenhuma ação). Não = continuam visíveis.">
-                  <input
-                    type="checkbox"
-                    :checked="s.desconsiderar"
-                    :disabled="!canEdit || statusBusy.has(s.id)"
-                    class="size-4"
-                    @change="toggleStatusBool(s, 'desconsiderar')"
-                  />
-                  <span :class="s.desconsiderar ? 'text-amber-500' : 'text-muted-foreground'">{{ s.desconsiderar ? 'Sim' : 'Não' }}</span>
                 </label>
               </td>
               <!-- Mensagem do Chamado (textarea inline) -->
@@ -1777,10 +1759,6 @@ async function aplicarStatusBling(c: Logistica) {
               <input type="checkbox" :checked="s.abrir_reembolso" :disabled="!canEdit || statusBusy.has(s.id)" class="size-4" @change="toggleStatusBool(s, 'abrir_reembolso')" />
               Abrir reembolso
             </label>
-            <label class="flex items-center gap-2 text-sm" title="Sim = pedidos com esta chave somem do painel Logística (mesmo sem nenhuma ação). Não = continuam visíveis.">
-              <input type="checkbox" :checked="s.desconsiderar" :disabled="!canEdit || statusBusy.has(s.id)" class="size-4" @change="toggleStatusBool(s, 'desconsiderar')" />
-              Desconsiderar
-            </label>
           </div>
           <div>
             <label class="text-xs text-muted-foreground">Mensagem do Chamado</label>
@@ -1914,10 +1892,6 @@ async function aplicarStatusBling(c: Logistica) {
           <label class="flex items-center gap-2 text-sm">
             <input v-model="statusForm.abrir_reembolso" type="checkbox" class="size-4" />
             Abrir reembolso
-          </label>
-          <label class="flex items-center gap-2 text-sm" title="Sim = pedidos com esta chave somem do painel Logística (mesmo sem nenhuma ação). Não = continuam visíveis.">
-            <input v-model="statusForm.desconsiderar" type="checkbox" class="size-4" />
-            Desconsiderar
           </label>
         </div>
         <div>
