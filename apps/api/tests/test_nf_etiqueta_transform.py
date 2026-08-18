@@ -108,12 +108,53 @@ def _etiqueta_ml_correios() -> bytes:
     return doc.tobytes()
 
 
-def _texto(pdf_bytes: bytes) -> str:
-    return fitz.open(stream=pdf_bytes, filetype="pdf")[0].get_text()
+def _etiqueta_ml_flex() -> bytes:
+    """Etiqueta tipo Mercado Livre Flex: a 1ª página NÃO tem rótulo REMETENTE nem
+    DESTINATÁRIO — o remetente vem SOLTO no topo (nome da loja, endereço,
+    cidade/UF/CEP e Pack ID) logo abaixo da tarja de cabeçalho, com o logo do
+    marketplace colado à esquerda. O nome do destinatário só existe na Declaração
+    de Conteúdo (2ª página), onde REMETENTE e DESTINATÁRIO são colunas LADO A LADO.
+    """
+    doc = fitz.open()
+    p0 = doc.new_page(width=300, height=442)
+    p0.insert_text((10, 10), "UP2NYY220582  18/08/2026  13:02:07", fontsize=7, fontname="helv")
+    p0.insert_text((64, 25), "Keila Lojas #1423186352", fontsize=7, fontname="helv")
+    p0.insert_text((64, 36), "Estrada Particular Sadae Takagi 2235", fontsize=7, fontname="helv")
+    p0.insert_text((64, 47), "Sao Bernardo do Campo BR-SP 09852070", fontsize=7, fontname="helv")
+    p0.insert_text((64, 59), "Pack ID: 2000014590774099", fontsize=7, fontname="helv")
+    p0.insert_text((51, 82), "XSP4", fontsize=7, fontname="helv")
+    p0.insert_text((92, 199), "SSP36", fontsize=7, fontname="helv")
+    p0.insert_text((33, 285), "Retira na JULLY BANHO E TOSA", fontsize=7, fontname="helv")
+    logo = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 25, 18), False)
+    logo.set_rect(logo.irect, (200, 120, 255))
+    p0.insert_image(fitz.Rect(33, 17, 58, 35), pixmap=logo)
+    barras = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 170, 52), False)
+    barras.set_rect(barras.irect, (0, 0, 0))
+    p0.insert_image(fitz.Rect(50, 100, 220, 152), pixmap=barras)
+
+    p1 = doc.new_page(width=297, height=421)
+    p1.insert_text((68, 25), "DECLARAÇÃO DE CONTEÚDO", fontsize=8, fontname="helv")
+    p1.insert_text((55, 48), "REMETENTE", fontsize=7, fontname="helv")
+    p1.insert_text((194, 48), "DESTINATÁRIO", fontsize=7, fontname="helv")
+    for x_rot, x_val, valores in (
+        (9, 34, ("Aguiar", "30734713000140", "09852070")),
+        (152, 177, ("Júnior graça", "11728252890", "13423580")),
+    ):
+        for i, (rotulo, valor) in enumerate(
+            zip(("NOME:", "CPF/CNPJ:", "CEP:"), valores)
+        ):
+            y = 59 + i * 7
+            p1.insert_text((x_rot, y), rotulo, fontsize=6, fontname="helv")
+            p1.insert_text((x_val, y), valor, fontsize=6, fontname="helv")
+    return doc.tobytes()
 
 
-def _imagens_renderizadas(pdf_bytes: bytes) -> list[tuple[int, int]]:
-    page = fitz.open(stream=pdf_bytes, filetype="pdf")[0]
+def _texto(pdf_bytes: bytes, pagina: int = 0) -> str:
+    return fitz.open(stream=pdf_bytes, filetype="pdf")[pagina].get_text()
+
+
+def _imagens_renderizadas(pdf_bytes: bytes, pagina: int = 0) -> list[tuple[int, int]]:
+    page = fitz.open(stream=pdf_bytes, filetype="pdf")[pagina]
     return [
         (round(r.width), round(r.height))
         for img in page.get_images(full=True)
@@ -194,6 +235,44 @@ def test_etiqueta_ml_correios_preserva_cabecalho_postal():
     assert "SHP: 47733455146" in txt
     assert "Daniel do Carmo" in txt
     assert (260, 40) in _imagens_renderizadas(out)
+
+
+def test_etiqueta_ml_flex_apaga_remetente_solto_do_topo():
+    # Sem rótulo REMETENTE na 1ª página, o bloco solto do topo (loja, endereço,
+    # cidade/UF/CEP e Pack ID) some inteiro e o nome do destinatário — lido da
+    # Declaração, na 2ª página — volta na primeira linha.
+    out = transformar_etiqueta(_etiqueta_ml_flex())
+    txt = _texto(out)
+    for vazamento in ("Keila", "1423186352", "Sadae", "Bernardo", "09852070",
+                      "Pack ID", "2000014590774099"):
+        assert vazamento not in txt
+    assert "Júnior graça" in txt
+    # roteirização e destinatário da etiqueta continuam lá
+    assert "XSP4" in txt
+    assert "SSP36" in txt
+    assert "JULLY" in txt
+    imgs = _imagens_renderizadas(out)
+    assert (25, 18) not in imgs   # logo do marketplace colado no bloco sai
+    assert (170, 52) in imgs      # código de barras do rastreio fica
+
+
+def test_declaracao_apaga_cpf_e_cep_do_remetente():
+    txt = _texto(transformar_etiqueta(_etiqueta_ml_flex()), pagina=1)
+    # lado REMETENTE: nome trocado, documento e CEP apagados
+    assert "Aguiar" not in txt
+    assert "30734713000140" not in txt
+    assert txt.count("Júnior graça") == 2
+    # lado DESTINATÁRIO intacto
+    assert "11728252890" in txt
+    assert "13423580" in txt
+    assert txt.count("09852070") == 0
+
+
+def test_declaracao_nao_apaga_dados_quando_blocos_sao_empilhados():
+    # Na etiqueta tipo Correios REMETENTE e DESTINATÁRIO ficam um embaixo do
+    # outro — ali o corte horizontal não vale e nada pode ser apagado por ele.
+    txt = _texto(transformar_etiqueta(_etiqueta_sintetica()))
+    assert "Fulano" in txt
 
 
 def test_pdf_invalido_levanta():

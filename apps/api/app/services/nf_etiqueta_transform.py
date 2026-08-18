@@ -4,7 +4,10 @@ Regra do faturador (áudios 25/07): antes de imprimir a etiqueta tipo Correios/
 Agência, ela passa por uma limpeza pra NÃO expor a origem real do envio:
 
 1. REMETENTE = DESTINATÁRIO — o nome do remetente (a loja/marketplace, ex.
-   "Ribeiro Malas" / "Shopee Minas") é trocado pelo nome do destinatário.
+   "Ribeiro Malas" / "Shopee Minas") é trocado pelo nome do destinatário. No
+   Mercado Livre o remetente não tem rótulo: são linhas soltas no topo (nome,
+   endereço, cidade/UF/CEP e Pack ID) que somem inteiras. Na Declaração de
+   Conteúdo o CPF/CNPJ e o CEP do remetente também são apagados.
 2. Sem NF — apaga o bloco DANFE SIMPLIFICADO (número, série, emissão, a chave
    de acesso em texto E o código de barras da chave).
 3. Sem marketplace — remove o logo do marketplace (imagem pequena no topo).
@@ -22,12 +25,17 @@ O landing zone (nf_etiqueta_arquivo) e o endpoint de impressão são de outra ca
 
 from __future__ import annotations
 
+import re
+
 import fitz  # PyMuPDF
 
 _MIN_CHAVE_DIGITOS = 40  # a chave da NF-e tem 44 dígitos
 _MAX_BLOCO_NF = 0.25     # bloco NF nunca passa de 1/4 da altura da página
 _GAP_IMAGEM = 6.0        # imagem só estende o bloco se estiver colada nele
 _MIN_TOPO_PICKING = 0.55  # rodapé de picking só existe na parte de baixo
+_MAX_TOPO_REMETENTE_ML = 0.25  # bloco do remetente do ML fica no topo da etiqueta
+
+_RE_UF_ML = re.compile(r"^BR-[A-Z]{2}$")  # o ML escreve o estado como "BR-SP"
 
 
 class EtiquetaTransformError(RuntimeError):
@@ -40,11 +48,16 @@ def _nome_destinatario(page: fitz.Page) -> str | None:
     if not hits:
         return None
     hdr = hits[0]
-    linha = [
+    faixa = [
         w for w in page.get_text("words")
         if hdr.y1 <= w[1] <= hdr.y1 + 14 and (hdr.x0 - 20) <= w[0] <= (hdr.x0 + 130)
     ]
-    linha.sort(key=lambda w: w[0])
+    if not faixa:
+        return None
+    # a faixa pode abraçar mais de uma linha quando a fonte é miúda (na
+    # Declaração o CPF/CNPJ vem logo abaixo) — fica só com a primeira.
+    topo = min(w[1] for w in faixa)
+    linha = sorted((w for w in faixa if w[1] - topo < 3), key=lambda w: w[0])
     nome = " ".join(w[4] for w in linha).strip()
     return nome or None
 
@@ -54,11 +67,87 @@ def _redigir(page: fitz.Page, rect: fitz.Rect, pad: float = 1.0) -> None:
     page.add_redact_annot(r, fill=(1, 1, 1))
 
 
+def _plano_remetente_ml(page: fitz.Page) -> tuple[fitz.Rect, float, float, float] | None:
+    """Layout Mercado Livre: o remetente vem SOLTO no topo, sem o rótulo REMETENTE.
+
+    São 3-4 linhas coladas logo abaixo da tarja de cabeçalho (lote/data/hora) e à
+    direita do logo do marketplace: nome da loja, endereço, cidade/UF/CEP e o
+    "Pack ID". Tudo isso entrega a origem, então o bloco inteiro (mais o logo ao
+    lado) é apagado e só o nome do destinatário volta na primeira linha.
+    """
+    words = page.get_text("words")
+    if not words:
+        return None
+    cabecalho = min(w[3] for w in words)  # fim da 1ª linha (lote/data/hora)
+    pack = page.search_for("Pack ID:")
+    if pack:
+        fim = max(p.y1 for p in pack)
+    else:  # envio avulso não traz Pack ID — o bloco acaba na linha do "BR-UF"
+        ufs = [w[3] for w in words if _RE_UF_ML.match(w[4])]
+        if not ufs:
+            return None
+        fim = max(ufs)
+    if fim > page.rect.height * _MAX_TOPO_REMETENTE_ML:
+        return None  # âncora longe do topo: não é o bloco do remetente
+    bloco = [w for w in words if w[1] > cabecalho and w[3] <= fim + 1]
+    if not bloco:
+        return None
+    y0 = min(w[1] for w in bloco)
+    primeira = [w for w in bloco if w[1] - y0 < 3]
+    x0 = min(w[0] for w in primeira)
+    y1 = max(w[3] for w in primeira)
+    fs = (y1 - y0) * 0.92
+    caixa = fitz.Rect(
+        min(w[0] for w in bloco) - 0.5,
+        y0 - 0.5,
+        max(w[2] for w in bloco) + 0.5,
+        max(w[3] for w in bloco) + 0.5,
+    )
+    # o logo do marketplace fica colado à esquerda do bloco: entra na mesma
+    # redação (é a regra 3 — a etiqueta não pode mostrar o marketplace).
+    for img in page.get_images(full=True):
+        for r in page.get_image_rects(img[0]):
+            if r.y0 >= cabecalho and r.y1 <= caixa.y1 and r.x1 <= x0:
+                caixa |= r
+    return (caixa, x0, y1, fs)
+
+
+def _limpar_dados_remetente_declaracao(page: fitz.Page) -> None:
+    """Na Declaração de Conteúdo, apaga CPF/CNPJ e CEP do lado do REMETENTE.
+
+    Só age quando REMETENTE e DESTINATÁRIO são cabeçalhos LADO A LADO (o layout
+    da declaração). Nas etiquetas em que os dois blocos são empilhados, o corte
+    horizontal não valeria e apagaria dados do destinatário.
+    """
+    rem = page.search_for("REMETENTE")
+    dest = page.search_for("DESTINATÁRIO")
+    if not rem or not dest or abs(rem[0].y0 - dest[0].y0) >= 3:
+        return
+    corte = (rem[0].x1 + dest[0].x0) / 2
+    words = page.get_text("words")
+    for rotulo in ("CPF/CNPJ:", "CEP:"):
+        for hit in page.search_for(rotulo):
+            if hit.x0 >= corte:
+                continue  # lado do destinatário
+            alvo = [
+                w for w in words
+                if abs(w[1] - hit.y0) < 3 and hit.x1 - 1 <= w[0] < corte
+            ]
+            if not alvo:
+                continue
+            _redigir(page, fitz.Rect(
+                min(w[0] for w in alvo),
+                min(w[1] for w in alvo),
+                max(w[2] for w in alvo),
+                max(w[3] for w in alvo),
+            ))
+
+
 def _plano_remetente(page: fitz.Page) -> tuple[fitz.Rect, float, float, float] | None:
     """Localiza o NOME do remetente e devolve (caixa_p/redigir, x, baseline, fonte)."""
     rem = page.search_for("REMETENTE")
     if not rem:
-        return None
+        return _plano_remetente_ml(page)
     rr = rem[0]
     words = page.get_text("words")
     nomes = [w for w in words if w[4].upper().rstrip(":").startswith("NOME")]
@@ -185,12 +274,19 @@ def transformar_etiqueta(pdf_bytes: bytes, destinatario_nome: str | None = None)
     if doc.page_count == 0:
         raise EtiquetaTransformError("pdf_vazio")
 
-    nome = (destinatario_nome or _nome_destinatario(doc[0]) or "").strip()
+    nome = (destinatario_nome or "").strip()
+    if not nome:
+        # no ML o rótulo DESTINATÁRIO só existe na Declaração (2ª página).
+        for page in doc:
+            nome = (_nome_destinatario(page) or "").strip()
+            if nome:
+                break
     inserts: list[tuple[fitz.Page, float, float, float]] = []
     for page in doc:
         _remover_logo_marketplace(page)          # 3) logo (imagem)
         _remover_nf(page)                        # 2) bloco NF
         _remover_picking(page)                   # 4) rodapé de picking
+        _limpar_dados_remetente_declaracao(page)  # 1) CPF/CEP do remetente
         if nome:                                 # 1) remetente = destinatário
             plano = _plano_remetente(page)
             if plano:
