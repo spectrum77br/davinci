@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,35 +15,41 @@ from app.services.refunds_freight_sync import (
 pytestmark = pytest.mark.asyncio
 
 
+# No prod as duas views diferem só na janela de tempo (20d vs nenhuma);
+# aqui os stubs não têm janela, então são idênticos.
+_VIEW_STUBS = (
+    "vw_conciliacao_margens_marketplace",  # hook (por pedido)
+    "vw_conciliacao_margens_marketplace_all",  # backfill (janela própria 90d)
+)
+
+# Datas relativas pro teste da janela de 90d do backfill.
+_DATA_RECENTE = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+_DATA_ANTIGA = (datetime.now(UTC) - timedelta(days=120)).isoformat()
+
+
 # Conftest cria o schema dos models do SQLAlchemy — migrations não rodam
-# nos testes, então recriamos a view stub que o serviço lê.
+# nos testes, então recriamos as views stub que o serviço lê.
 async def _setup_view(db: AsyncSession, rows: list[dict]) -> None:
     schema = get_settings().database_schema
-    await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_conciliacao_margens_marketplace'))
 
     if not rows:
-        await db.execute(
-            text(
-                f"""
-                CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace AS
-                SELECT
-                    NULL::timestamptz AS data,
-                    NULL::text AS pedido_bling,
-                    NULL::text AS pedido_marketplace,
-                    NULL::text AS plataforma_bling,
-                    NULL::text AS plataforma_financeiro,
-                    NULL::text AS loja_nome,
-                    NULL::numeric AS frete_projetado_item,
-                    NULL::numeric AS evento_freight,
-                    NULL::numeric AS evento_frete_anuncio,
-                    NULL::numeric AS item_proportion,
-                    NULL::numeric AS marketplace_frete_real_cobrado_item
-                WHERE false
-                """  # noqa: S608
-            )
-        )
+        body = """
+            SELECT
+                NULL::timestamptz AS data,
+                NULL::text AS pedido_bling,
+                NULL::text AS pedido_marketplace,
+                NULL::text AS plataforma_bling,
+                NULL::text AS plataforma_financeiro,
+                NULL::text AS loja_nome,
+                NULL::numeric AS frete_projetado_item,
+                NULL::numeric AS evento_freight,
+                NULL::numeric AS evento_frete_anuncio,
+                NULL::numeric AS item_proportion,
+                NULL::numeric AS marketplace_frete_real_cobrado_item
+            WHERE false
+        """
     else:
-        unions = " UNION ALL ".join(
+        body = " UNION ALL ".join(
             f"""SELECT
                 {f"'{r['data']}'::timestamptz" if r.get('data') else "NULL::timestamptz"} AS data,
                 {f"'{r['pedido_bling']}'::text" if r.get('pedido_bling') else "NULL::text"} AS pedido_bling,
@@ -57,13 +65,11 @@ async def _setup_view(db: AsyncSession, rows: list[dict]) -> None:
             """
             for r in rows
         )
+
+    for view in _VIEW_STUBS:
+        await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".{view}'))
         await db.execute(
-            text(
-                f"""
-                CREATE VIEW "{schema}".vw_conciliacao_margens_marketplace AS
-                {unions}
-                """  # noqa: S608
-            )
+            text(f'CREATE VIEW "{schema}".{view} AS {body}')  # noqa: S608
         )
     await db.commit()
 
@@ -327,11 +333,14 @@ async def test_shopee_uses_evento_freight_with_floor_at_zero(db: AsyncSession):
 
 
 async def test_backfill_processes_all_qualifying_pedidos(db: AsyncSession):
+    # O backfill filtra por data (janela de 90d), então as linhas precisam
+    # de uma data dentro da janela.
     await _setup_view(
         db,
         [
             # Qualifica (prejuizo 12 - 5 = 7, acima do piso de R$5).
             {
+                "data": _DATA_RECENTE,
                 "pedido_bling": "PED-100",
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja A",
@@ -341,6 +350,7 @@ async def test_backfill_processes_all_qualifying_pedidos(db: AsyncSession):
             },
             # Qualifica.
             {
+                "data": _DATA_RECENTE,
                 "pedido_bling": "PED-101",
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja A",
@@ -350,6 +360,7 @@ async def test_backfill_processes_all_qualifying_pedidos(db: AsyncSession):
             },
             # Não qualifica (cobrado < anuncio).
             {
+                "data": _DATA_RECENTE,
                 "pedido_bling": "PED-102",
                 "plataforma_bling": "ml",
                 "loja_nome": "Loja A",
@@ -368,3 +379,41 @@ async def test_backfill_processes_all_qualifying_pedidos(db: AsyncSession):
     assert await _count_refunds(db, pedido_bling="PED-100") == 1
     assert await _count_refunds(db, pedido_bling="PED-101") == 1
     assert await _count_refunds(db, pedido_bling="PED-102") == 0
+
+
+async def test_backfill_window_90d_ignora_pedidos_antigos(db: AsyncSession):
+    # A janela própria do backfill (90d na view _all) existe pra pegar
+    # cobranças de frete que o ML fecha semanas depois — mas sem
+    # ressuscitar pedidos antigos demais. Fora da janela → não cria.
+    await _setup_view(
+        db,
+        [
+            # Dentro da janela → cria.
+            {
+                "data": _DATA_RECENTE,
+                "pedido_bling": "PED-200",
+                "plataforma_bling": "ml",
+                "loja_nome": "Loja A",
+                "frete_projetado_item": 5,
+                "evento_frete_anuncio": 5,
+                "marketplace_frete_real_cobrado_item": 15,
+            },
+            # Fora da janela (120 dias atrás) → backfill não cria.
+            {
+                "data": _DATA_ANTIGA,
+                "pedido_bling": "PED-201",
+                "plataforma_bling": "ml",
+                "loja_nome": "Loja A",
+                "frete_projetado_item": 5,
+                "evento_frete_anuncio": 5,
+                "marketplace_frete_real_cobrado_item": 15,
+            },
+        ],
+    )
+
+    result = await backfill_freight_refunds(db)
+    await db.commit()
+
+    assert result["ok"] is True
+    assert await _count_refunds(db, pedido_bling="PED-200") == 1
+    assert await _count_refunds(db, pedido_bling="PED-201") == 0

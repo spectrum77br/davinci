@@ -15,9 +15,14 @@ final do refund.
 
 Duas entradas:
   * upsert_freight_refund_for_bling_order — escopado a um pedido,
-    chamado pelo hook após o sync financeiro (baixa latência).
-  * backfill_freight_refunds — varre a view inteira, chamado pelo cron
-    diário pra pegar reconciliations de ML que fecham dias depois.
+    chamado pelo hook após o sync financeiro (baixa latência). Lê a view
+    de 20 dias (barata).
+  * backfill_freight_refunds — chamado pelo cron diário pra pegar
+    reconciliations de ML que fecham semanas depois. Lê a view `_all`
+    (sem janela interna) com janela própria de 90 dias: com a view de
+    20d, pedidos cuja cobrança de frete chegava atrasada já tinham saído
+    do campo de visão e o chamado nunca nascia (ago/2026: 23 pedidos,
+    R$528 sem chamado).
 
 O fragmento SQL de "frete plataforma" é duplicado de
 app/routers/margens.py em vez de importado, pra evitar dependência
@@ -38,6 +43,22 @@ logger = structlog.get_logger()
 
 _settings = get_settings()
 SCHEMA = _settings.database_schema
+
+# View com janela de 20d embutida (a mesma da página de margens) — barata,
+# usada pelo hook por pedido (chamado a cada sync financeiro).
+_VIEW_20D = "vw_conciliacao_margens_marketplace"
+
+# View idêntica SEM janela interna (diferem só nos dois filtros de data;
+# ver migration 0080). Cara (~3 min: pricing de todo o histórico), então
+# usada só pelo backfill diário — nunca no hook.
+_VIEW_ALL = "vw_conciliacao_margens_marketplace_all"
+
+# Janela própria do backfill sobre a _all. O ML fecha a conciliação de
+# frete de alguns pedidos SEMANAS depois da venda (observado: ~35 dias);
+# com a view de 20d o pedido saía do campo de visão antes da cobrança
+# chegar e o chamado nunca nascia. 90 dias cobre o atraso com folga; o
+# WHERE NOT EXISTS mantém a re-varredura segura (nunca duplica).
+_BACKFILL_WINDOW_SQL = "AND v.data >= now() - interval '90 days'"
 
 
 # Espelha _FRETE_PLATAFORMA_SQL em app/routers/margens.py.
@@ -84,7 +105,7 @@ SELECT
     COALESCE(v.plataforma_bling, v.plataforma_financeiro)::text AS plataforma,
     btrim(v.loja_nome) AS conta,
     SUM({_FRETE_RESULTADO_SQL}) AS prejuizo
-FROM {{schema}}.vw_conciliacao_margens_marketplace v
+FROM {{schema}}.{{view}} v
 WHERE {_FRETE_ATTENTION_FILTER}
   AND v.pedido_bling IS NOT NULL
   AND v.loja_nome IS NOT NULL
@@ -127,14 +148,16 @@ async def upsert_freight_refund_for_bling_order(
     """Insere o refund Logistica de um pedido se ainda não existir.
 
     Chamado pelo hook em marketplace_financials. Escopa a varredura da
-    view a um pedido_bling pra que o custo seja constante independente
-    do tamanho da janela de 20 dias.
+    view a um pedido_bling pra que o custo seja constante. Usa a view de
+    20 dias (barata); se a cobrança de frete chegou depois do pedido sair
+    dessa janela, quem cria o chamado é o backfill diário (90d).
     """
     if not pedido_bling:
         return {"ok": False, "skipped": "missing_pedido_bling"}
 
     sql = _INSERT_TMPL.format(
         schema=SCHEMA,
+        view=_VIEW_20D,
         extra_where="AND v.pedido_bling::text = :pedido_bling",
     )
     result = await session.execute(text(sql), {"pedido_bling": str(pedido_bling)})
@@ -149,12 +172,19 @@ async def upsert_freight_refund_for_bling_order(
 
 
 async def backfill_freight_refunds(session: AsyncSession) -> dict[str, Any]:
-    """Varre a view inteira e insere refunds Logistica faltantes.
+    """Varre os últimos 90 dias e insere refunds Logistica faltantes.
 
-    Chamado pelo cron diário. A janela de 20d da view limita o escopo,
-    então é O(pedidos_nos_ultimos_20d).
+    Chamado pelo cron diário (03:20 BRT). Lê a view `_all` com janela
+    própria de 90d pra enxergar cobranças de frete que o ML fecha semanas
+    depois da venda — a view de 20d escondia esses pedidos. Custa ~3 min
+    (a `_all` resolve pricing de todo o histórico), ok pra madrugada e
+    dentro do job_timeout global de 1800s do worker.
     """
-    sql = _INSERT_TMPL.format(schema=SCHEMA, extra_where="")
+    sql = _INSERT_TMPL.format(
+        schema=SCHEMA,
+        view=_VIEW_ALL,
+        extra_where=_BACKFILL_WINDOW_SQL,
+    )
     result = await session.execute(text(sql))
     rowcount = result.rowcount or 0
     logger.info("refunds_freight_backfill_done", rows=rowcount)
