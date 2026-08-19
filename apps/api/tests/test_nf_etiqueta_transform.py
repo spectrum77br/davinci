@@ -237,22 +237,25 @@ def test_etiqueta_ml_correios_preserva_cabecalho_postal():
     assert (260, 40) in _imagens_renderizadas(out)
 
 
-def test_etiqueta_ml_flex_apaga_remetente_solto_do_topo():
-    # Sem rótulo REMETENTE na 1ª página, o bloco solto do topo (loja, endereço,
-    # cidade/UF/CEP e Pack ID) some inteiro e o nome do destinatário — lido da
-    # Declaração, na 2ª página — volta na primeira linha.
+def test_etiqueta_ml_flex_troca_nome_e_preserva_o_resto_do_topo():
+    # Sem rótulo REMETENTE na 1ª página: da 1ª linha some SÓ o nome da loja
+    # (entra o destinatário, lido da Declaração na 2ª página) — endereço,
+    # cidade/UF/CEP, Pack ID e o logo do ML FICAM (triagem do ML usa).
     out = transformar_etiqueta(_etiqueta_ml_flex())
     txt = _texto(out)
-    for vazamento in ("Keila", "1423186352", "Sadae", "Bernardo", "09852070",
-                      "Pack ID", "2000014590774099"):
+    for vazamento in ("Keila", "1423186352"):
         assert vazamento not in txt
     assert "Júnior graça" in txt
+    # endereço/cidade do hub e o Pack ID continuam na etiqueta
+    assert "Sadae Takagi 2235" in txt
+    assert "Sao Bernardo do Campo BR-SP 09852070" in txt
+    assert "Pack ID: 2000014590774099" in txt
     # roteirização e destinatário da etiqueta continuam lá
     assert "XSP4" in txt
     assert "SSP36" in txt
     assert "JULLY" in txt
     imgs = _imagens_renderizadas(out)
-    assert (25, 18) not in imgs   # logo do marketplace colado no bloco sai
+    assert (25, 18) in imgs       # logo do ML colado no bloco FICA
     assert (170, 52) in imgs      # código de barras do rastreio fica
 
 

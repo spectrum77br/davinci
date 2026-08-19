@@ -6,8 +6,10 @@ Agência, ela passa por uma limpeza pra NÃO expor a origem real do envio:
 1. REMETENTE = DESTINATÁRIO — o nome do remetente (a loja/marketplace, ex.
    "Ribeiro Malas" / "Shopee Minas") é trocado pelo nome do destinatário. No
    Mercado Livre o remetente não tem rótulo: são linhas soltas no topo (nome,
-   endereço, cidade/UF/CEP e Pack ID) que somem inteiras. Na Declaração de
-   Conteúdo o CPF/CNPJ e o CEP do remetente também são apagados.
+   endereço, cidade/UF/CEP e Pack ID); TUDO fica (endereço/cidade são do hub do
+   ML, o Pack ID e o logo o ML usa na triagem) — só o nome da 1ª linha vira o
+   do destinatário. Na Declaração de Conteúdo o CPF/CNPJ e o CEP do remetente
+   também são apagados.
 2. Sem NF — apaga o bloco DANFE SIMPLIFICADO (número, série, emissão, a chave
    de acesso em texto E o código de barras da chave).
 3. Sem marketplace — remove o logo do marketplace (imagem pequena no topo).
@@ -72,8 +74,8 @@ def _plano_remetente_ml(page: fitz.Page) -> tuple[fitz.Rect, float, float, float
 
     São 3-4 linhas coladas logo abaixo da tarja de cabeçalho (lote/data/hora) e à
     direita do logo do marketplace: nome da loja, endereço, cidade/UF/CEP e o
-    "Pack ID". Tudo isso entrega a origem, então o bloco inteiro (mais o logo ao
-    lado) é apagado e só o nome do destinatário volta na primeira linha.
+    "Pack ID". Endereço, cidade, Pack ID e o logo FICAM (o ML/correio usam na
+    triagem) — some SÓ o nome da loja na 1ª linha, que vira o do destinatário.
     """
     words = page.get_text("words")
     if not words:
@@ -97,18 +99,13 @@ def _plano_remetente_ml(page: fitz.Page) -> tuple[fitz.Rect, float, float, float
     x0 = min(w[0] for w in primeira)
     y1 = max(w[3] for w in primeira)
     fs = (y1 - y0) * 0.92
+    # a caixa cobre SÓ a linha do nome — endereço, cidade, Pack ID e o logo
+    # (à esquerda de x0, fora da caixa) ficam na etiqueta.
     caixa = fitz.Rect(
-        min(w[0] for w in bloco) - 0.5,
-        y0 - 0.5,
-        max(w[2] for w in bloco) + 0.5,
-        max(w[3] for w in bloco) + 0.5,
+        x0 - 0.5, y0 - 0.5,
+        max(w[2] for w in primeira) + 0.5,
+        y1 + 0.5,
     )
-    # o logo do marketplace fica colado à esquerda do bloco: entra na mesma
-    # redação (é a regra 3 — a etiqueta não pode mostrar o marketplace).
-    for img in page.get_images(full=True):
-        for r in page.get_image_rects(img[0]):
-            if r.y0 >= cabecalho and r.y1 <= caixa.y1 and r.x1 <= x0:
-                caixa |= r
     return (caixa, x0, y1, fs)
 
 
