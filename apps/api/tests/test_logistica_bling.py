@@ -155,6 +155,22 @@ def test_mensagem_none_sem_regra_ou_vazia():
     assert logistica_bling.mensagem_bling_para([vazia], row) is None
 
 
+def test_mensagem_so_de_regra_aplicavel_ao_estado():
+    # Regra de OUTRO estado não empresta mensagem (bug 19/08: cruzamento de
+    # combinações). Só a exata do estado atual (ou curinga) vale.
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    outra = LogisticaStatus(
+        status_plataforma=chave, status_atual="Em andamento", mensagem_bling="de outro estado"
+    )
+    row = Logistica(plataforma="Mercado Livre", meli_status=meli, status_bling="Problemas")
+    assert logistica_bling.mensagem_bling_para([outra], row) is None
+    exata = LogisticaStatus(
+        status_plataforma=chave, status_atual="Problemas", mensagem_bling="desta"
+    )
+    assert logistica_bling.mensagem_bling_para([outra, exata], row) == "desta"
+
+
 # ---- endpoints preview + aplicar ----
 
 

@@ -222,11 +222,27 @@ def test_regra_ativa_desambigua_pelo_status_atual():
     assert logistica_match.regra_ativa([r1, r2], "Em andamento") is r1
     # Em "Problemas" a regra ativa (r2) não pede nada → sem setinha, resumo vazio.
     assert logistica_match.resumo_acoes(logistica_match.regra_ativa([r1, r2], "Problemas")) == []
-    # Estado sem regra exata cai no curinga, senão na primeira.
+    # Estado sem regra exata cai no curinga; sem curinga é None — regra de
+    # OUTRO estado não empresta match/ações (o painel pinta de vermelho:
+    # combinação chave+estado sem cadastro, bug relatado 19/08).
     curinga = _rule(alterar_status_bling="Cancelado")
     assert logistica_match.regra_ativa([r1, curinga], "Entregue") is curinga
-    assert logistica_match.regra_ativa([r1, r2], "Entregue") is r1
+    assert logistica_match.regra_ativa([r1, r2], "Entregue") is None
     assert logistica_match.regra_ativa([], "Problemas") is None
+
+
+def test_regras_aplicaveis_exatas_primeiro_e_sem_emprestimo():
+    # Aplicáveis = status_atual igual ao Bling atual (primeiro) + curingas.
+    # Regra de outro estado fica de fora; lista vazia = combinação sem regra.
+    exata = _rule(status_atual="Problemas", mensagem_threema="avisar")
+    outra = _rule(status_atual="Em andamento", mensagem_threema="não é esta")
+    curinga = _rule(mensagem_threema="qualquer estado")
+    assert logistica_match.regras_aplicaveis([outra, curinga, exata], "Problemas") == [
+        exata,
+        curinga,
+    ]
+    assert logistica_match.regras_aplicaveis([outra, exata], "Entregue") == []
+    assert logistica_match.regras_aplicaveis([outra], None) == []
 
 
 def test_estado_resolvido_threema_enviado_resolve():

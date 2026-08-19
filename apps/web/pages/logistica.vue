@@ -90,8 +90,8 @@ async function refresh() {
 }
 
 // Recarrega os pedidos E as chaves da aba Status ao mesmo tempo. Como o casador
-// (acao_resumo/acao_match) e o destaque vermelho são derivados das regras da aba
-// Status, ao cadastrar uma chave nova lá basta recarregar aqui: as linhas já
+// (acao_resumo/acao_match) e o destaque vermelho vêm do backend por pedido, ao
+// cadastrar uma regra nova na aba Status basta recarregar aqui: as linhas já
 // casadas somem do vermelho e ganham as ações, sem esperar o status do ML mudar.
 //
 // Com permissão de edição, o botão também DISPARA o motor em segundo plano:
@@ -598,9 +598,8 @@ watch(tab, (t) => {
   }
 })
 
-// Carrega as chaves cadastradas na aba Status já no início, pra a aba
-// Mercado Livre poder pintar de vermelho os pedidos cuja chave ainda não
-// foi cadastrada (= status que a gente ainda não decidiu o que fazer).
+// Pré-carrega a aba Status pra ela abrir instantânea (o vermelho do painel
+// NÃO depende mais dela: vem pronto do backend em acao_match).
 onMounted(() => {
   if (!statusLoaded) refreshStatus()
 })
@@ -608,18 +607,13 @@ onMounted(() => {
 function normKey(s: string | null | undefined): string {
   return (s || '').trim().toLowerCase()
 }
-const registeredKeys = computed(() => {
-  const set = new Set<string>()
-  for (const s of statusRows.value) {
-    const k = normKey(s.status_plataforma)
-    if (k) set.add(k)
-  }
-  return set
-})
-// Vermelho: tem chave (Status Plataforma) e ela NÃO está na aba Status.
+// Vermelho: a linha tem chave (Status Plataforma) mas NENHUMA regra da aba
+// Status vale pra COMBINAÇÃO real dela (chave + plataforma + situação atual no
+// Bling) — regra de outra plataforma ou de outro estado não conta. É o backend
+// quem decide (acao_match), com o MESMO casador que executa as ações. Linha já
+// resolvida (só aparece no "Mostrar tudo") não pinta: não há decisão pendente.
 function precisaAtencao(c: Logistica): boolean {
-  const k = normKey(assinatura(c))
-  return !!k && !registeredKeys.value.has(k)
+  return !!normKey(assinatura(c)) && !c.acao_match && !c.acao_resolvido
 }
 
 // ---- Edição inline (uma célula por vez) ----

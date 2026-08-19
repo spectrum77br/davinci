@@ -81,15 +81,18 @@ def find_matching_rules(
     return especificas or gerais
 
 
-def _aplicaveis_agora(
+def regras_aplicaveis(
     rules: list[LogisticaStatus], status_bling: str | None
 ) -> list[LogisticaStatus]:
-    """Regras cujo `status_atual` (o "DE" da transição) casa com a situação atual
-    do pedido no Bling — ou curingas (sem `status_atual`, valem de qualquer
-    estado). É a máquina de estados: as ações de uma regra só valem quando o
-    pedido está no estado dela. Se nada casar, devolve só os curingas."""
+    """Regras que valem pro estado ATUAL do pedido no Bling: primeiro as com
+    `status_atual` (o "DE" da transição) igual à situação atual, depois as
+    curingas (sem `status_atual`, valem de qualquer estado). É a máquina de
+    estados: regra de OUTRO estado fica de fora — ela só vale quando o pedido
+    chegar lá. Lista vazia = a combinação (chave + estado) não tem regra."""
     atual = _norm(status_bling)
-    return [r for r in rules if not _norm(r.status_atual) or _norm(r.status_atual) == atual]
+    exatas = [r for r in rules if _norm(r.status_atual) and _norm(r.status_atual) == atual]
+    curingas = [r for r in rules if not _norm(r.status_atual)]
+    return exatas + curingas
 
 
 def problema_bling_visivel(
@@ -118,18 +121,11 @@ def regra_ativa(
     Quando a mesma chave tem várias linhas (máquina de estados), o que aparece na
     UI (match/setinha/resumo de ações) tem que respeitar ONDE o pedido está: se há
     uma regra cujo `status_atual` casa com o Bling atual, é ELA; senão a curinga
-    (sem `status_atual`, vale de qualquer estado); só em último caso a primeira."""
-    if not rules:
-        return None
-    atual = _norm(status_bling)
-    if atual:
-        for r in rules:
-            if _norm(r.status_atual) == atual:
-                return r
-    for r in rules:
-        if not _norm(r.status_atual):
-            return r
-    return rules[0]
+    (sem `status_atual`, vale de qualquer estado). Se NENHUMA vale pro estado
+    atual, None — regra de outro estado não empresta match nem ações (o painel
+    pinta a linha de vermelho: combinação chave+estado sem cadastro)."""
+    aplicaveis = regras_aplicaveis(rules, status_bling)
+    return aplicaveis[0] if aplicaveis else None
 
 
 def deve_monitorar(
@@ -138,7 +134,7 @@ def deve_monitorar(
     """True se alguma regra APLICÁVEL AO ESTADO ATUAL pede monitoramento (o pedido
     fica no painel pra acompanhar mesmo depois de resolvido). Uma regra de outro
     estado (`status_atual` diferente do Bling atual) não monitora agora."""
-    aplicaveis = _aplicaveis_agora(rules, status_bling) if status_bling is not None else rules
+    aplicaveis = regras_aplicaveis(rules, status_bling) if status_bling is not None else rules
     return any(bool(r.monitoramento) for r in aplicaveis)
 
 
@@ -167,7 +163,7 @@ def estado_resolvido(
     # Só pesam as regras APLICÁVEIS ao estado atual do Bling. Uma regra de OUTRO
     # estado (status_atual diferente do atual) não conta agora — máquina de
     # estados: ela vale quando o pedido chegar naquele estado.
-    aplicaveis = _aplicaveis_agora(rules, status_bling)
+    aplicaveis = regras_aplicaveis(rules, status_bling)
     # Ação manual pendente no estado atual → ainda há o que fazer, não esconde.
     for r in aplicaveis:
         if r.abrir_chamado or r.abrir_reembolso:

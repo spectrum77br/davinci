@@ -134,15 +134,19 @@ def build_observacoes_put_body(order: dict, novo_texto: str) -> dict:
 
 
 def mensagem_bling_para(rows: list[LogisticaStatus], row: Logistica) -> str | None:
-    """`mensagem_bling` da regra da aba Status que casa com a assinatura PT da
-    linha (prefere específica da plataforma, cai na geral). None se nenhuma
-    casar ou a que casou não tiver mensagem."""
+    """`mensagem_bling` da regra da aba Status que vale AGORA pra linha: chave
+    (assinatura PT) casada — específica da plataforma > geral — E aplicável ao
+    estado atual do Bling (status_atual igual ou curinga). Regra de outro
+    estado não empresta mensagem. None se nenhuma aplicável tiver."""
     assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
-    rule = logistica_match.find_matching_rule(rows, assinatura=assinatura, plataforma=row.plataforma)
-    if rule is None:
-        return None
-    msg = (rule.mensagem_bling or "").strip()
-    return msg or None
+    cands = logistica_match.find_matching_rules(
+        rows, assinatura=assinatura, plataforma=row.plataforma
+    )
+    for r in logistica_match.regras_aplicaveis(cands, row.status_bling):
+        msg = (r.mensagem_bling or "").strip()
+        if msg:
+            return msg
+    return None
 
 
 async def _bling_order_id_for_row(session: AsyncSession, row: Logistica) -> int:

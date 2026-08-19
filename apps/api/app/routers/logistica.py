@@ -697,8 +697,16 @@ async def enviar_threema_pedido(
     ).scalar_one_or_none()
     if c is None:
         raise HTTPException(404, detail={"code": "logistica_not_found"})
+    # Só regra aplicável ao estado atual do Bling (a mesma que deixa a linha
+    # pendente no painel) — regra de outro estado não empresta a mensagem.
     rule = next(
-        (r for r in await _match_rules(session, c) if (r.mensagem_threema or "").strip()),
+        (
+            r
+            for r in logistica_match.regras_aplicaveis(
+                await _match_rules(session, c), c.status_bling
+            )
+            if (r.mensagem_threema or "").strip()
+        ),
         None,
     )
     if rule is None:
@@ -732,29 +740,16 @@ async def enviar_threema_pedido(
 
 
 async def _mensagem_chamado_para(session: AsyncSession, c: Logistica) -> str | None:
-    """Mensagem do chamado da regra da aba Status que casa com o Status
-    Plataforma (assinatura PT) da linha. Prefere a regra específica da
-    plataforma; cai na regra geral (plataforma vazia). None se nenhuma casar
-    ou a que casou não tiver mensagem."""
-    assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {}).strip().lower()
-    if not assinatura:
-        return None
-    plat = (c.plataforma or "").strip().lower()
-    rows = (await session.execute(select(LogisticaStatus))).scalars().all()
-    especifica: str | None = None
-    geral: str | None = None
-    for s in rows:
-        if (s.status_plataforma or "").strip().lower() != assinatura:
-            continue
-        msg = (s.mensagem_chamado or "").strip()
-        if not msg:
-            continue
-        sp = (s.plataforma or "").strip().lower()
-        if sp and sp == plat:
-            especifica = msg
-        elif not sp:
-            geral = msg
-    return especifica or geral
+    """Mensagem do chamado da regra da aba Status que vale AGORA pra linha:
+    chave (assinatura PT) casada — específica da plataforma > geral — E
+    aplicável ao estado atual do Bling (status_atual igual ou curinga). Regra
+    de outro estado não empresta mensagem. None se nenhuma aplicável tiver."""
+    cands = await _match_rules(session, c)
+    for r in logistica_match.regras_aplicaveis(cands, c.status_bling):
+        msg = (r.mensagem_chamado or "").strip()
+        if msg:
+            return msg
+    return None
 
 
 @router.post("/{logistica_id}/enviar-chamado", response_model=LogisticaOut)
