@@ -19,6 +19,7 @@ sem status (não derruba o lote).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Collection
 from datetime import UTC, datetime
 from uuid import UUID
@@ -29,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_rules
+from app.services import logistica_enrich, logistica_rules
 from app.services.marketplaces.shopee import ShopeeClient
 
 logger = structlog.get_logger()
@@ -93,7 +94,12 @@ async def _shopee_integration_for_conta(
     return None
 
 
-def _build_shopee_client(session: AsyncSession, integration: Integration) -> ShopeeClient:
+def _build_shopee_client(
+    session: AsyncSession,
+    integration: Integration,
+    *,
+    lock: asyncio.Lock | None = None,
+) -> ShopeeClient:
     creds = decrypt_json(integration.credentials)
 
     async def _persist(new_creds: dict) -> None:
@@ -101,7 +107,10 @@ def _build_shopee_client(session: AsyncSession, integration: Integration) -> Sho
         exp = new_creds.get("expires_at")
         if exp:
             integration.token_expires_at = datetime.fromtimestamp(int(exp), tz=UTC)
-        await session.flush()
+        # Único acesso ao banco durante a rajada concorrente do enrich_recent —
+        # serializado pelo lock (sessão async não aceita flush simultâneo).
+        async with (lock or logistica_enrich.NOLOCK):
+            await session.flush()
 
     return ShopeeClient(creds, on_token_refresh=_persist)
 
@@ -182,21 +191,36 @@ async def enrich_recent(
     rows = (await session.execute(stmt)).scalars().all()
 
     cache: dict[str, ShopeeClient] = {}
+    lock = asyncio.Lock()
+    await logistica_enrich.prewarm_clients(
+        session,
+        rows,
+        cache,
+        resolve=_shopee_integration_for_conta,
+        build=lambda s, i: _build_shopee_client(s, i, lock=lock),
+    )
+    # Conta sem integração fica fora do cache: descarta aqui pra o enrich_row
+    # não ir ao banco no meio da rajada concorrente.
+    alvo = [r for r in rows if r.conta in cache]
     updated = 0
-    skipped = 0
+    skipped = len(rows) - len(alvo)
     failed = 0
-    for row in rows:
-        try:
-            if await enrich_row(session, row, client_cache=cache):
+    for lote in logistica_enrich.chunked(alvo):
+        res = await asyncio.gather(
+            *(enrich_row(session, r, client_cache=cache) for r in lote),
+            return_exceptions=True,
+        )
+        for row, r in zip(lote, res, strict=True):
+            if isinstance(r, ShopeeEnrichError):
+                skipped += 1
+            elif isinstance(r, BaseException):
+                failed += 1
+                logger.warning(
+                    "logistica_shopee_row_failed",
+                    id=str(row.id), pedido=row.pedido_marketplace, err=str(r)[:200],
+                )
+            elif r:
                 updated += 1
-        except ShopeeEnrichError:
-            skipped += 1
-        except Exception as e:  # noqa: BLE001
-            failed += 1
-            logger.warning(
-                "logistica_shopee_row_failed",
-                id=str(row.id), pedido=row.pedido_marketplace, err=str(e)[:200],
-            )
     await session.commit()
     summary = {"seen": len(rows), "updated": updated, "skipped": skipped, "failed": failed}
     logger.info("logistica_shopee_enrich_batch", **summary)

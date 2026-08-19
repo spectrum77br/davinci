@@ -17,6 +17,7 @@ isso o painel ficava com a foto do momento da ingestão e um pedido que virava
 """
 from __future__ import annotations
 
+from collections.abc import Collection
 from uuid import UUID
 
 import structlog
@@ -96,20 +97,24 @@ _REFRESH_STATUS_SQL = text(
      WHERE bo.numero = l.pedido_bling
        AND bo.item_index = 0
        AND sb.nome IS DISTINCT FROM l.status_bling
+    RETURNING l.id
     """
 )
 
 
-async def refresh_status_bling(session: AsyncSession) -> int:
+async def refresh_status_bling(session: AsyncSession) -> list[UUID]:
     """Realinha `logistica.status_bling` com a situação atual do espelho
-    `bling_orders`. Retorna quantas linhas mudaram. É o que faz um pedido que
-    virou "Problemas" DEPOIS de entrar na tabela aparecer no painel (o
-    passe-livre de 360d olha esse campo)."""
+    `bling_orders`. Retorna os ids das linhas que mudaram. É o que faz um pedido
+    que virou "Problemas" DEPOIS de entrar na tabela aparecer no painel (o
+    passe-livre de 360d olha esse campo).
+
+    A lista de ids é o sinal BARATO de "esse pedido mexeu": o recarregar usa ela
+    pra não varrer as milhares de linhas que continuam iguais."""
     res = await session.execute(_REFRESH_STATUS_SQL)
-    changed = res.rowcount or 0
+    mudaram = list(res.scalars().all())
     await session.commit()
-    logger.info("logistica_refresh_status_bling", changed=changed)
-    return changed
+    logger.info("logistica_refresh_status_bling", changed=len(mudaram))
+    return mudaram
 
 
 async def _ingest_platform(
@@ -153,7 +158,7 @@ async def run_ingest_ml_daily(
     `problemas_dias`, e enriquece o status do Meli das linhas ML ainda vazias
     (mais recentes primeiro). Antes de tudo realinha o status_bling de quem já
     está na tabela (todas as plataformas — o UPDATE é global e barato)."""
-    refreshed = await refresh_status_bling(session)
+    refreshed = len(await refresh_status_bling(session))
     inserted = await _ingest_platform(session, "ml", dias)
     problemas = await _ingest_platform(
         session, "ml", problemas_dias, so_problemas=True
@@ -183,7 +188,7 @@ async def run_ingest_marketplaces_daily(
     vazias. Retorna o total inserido por plataforma + o resumo de cada enrich.
     Também realinha o status_bling primeiro (idempotente; o cron do ML faz o
     mesmo — tanto faz qual roda antes)."""
-    out: dict[str, int] = {"status_refresh": await refresh_status_bling(session)}
+    out: dict[str, int] = {"status_refresh": len(await refresh_status_bling(session))}
     for platform in ("shopee", "tiktok", "amazon"):
         out[platform] = await _ingest_platform(session, platform, dias)
         out[f"{platform}_problemas"] = await _ingest_platform(
@@ -206,10 +211,17 @@ async def run_ingest_marketplaces_daily(
     }
 
 
-async def _ids_pendentes(session: AsyncSession) -> dict[str, list[UUID]]:
+async def _ids_pendentes(
+    session: AsyncSession, *, extras: Collection[UUID] = ()
+) -> dict[str, list[UUID]]:
     """Ids das linhas PENDENTES por plataforma — a mesma regra que o painel usa
     pra decidir o que MOSTRAR (esconde `resolvido and not monitorar`). É o
-    conjunto que o operador está vendo e quer ver atualizado."""
+    conjunto que o operador está vendo e quer ver atualizado.
+
+    `extras` entra mesmo estando escondido: o recarregar passa aí as linhas cuja
+    situação no Bling acabou de mudar — mudou, então precisa ser re-avaliada,
+    ainda que a foto anterior a desse como resolvida."""
+    forcadas = set(extras)
     regras = list((await session.execute(select(LogisticaStatus))).scalars().all())
     linhas = list((await session.execute(select(Logistica))).scalars().all())
     por_chave: dict[str, set[str]] = {
@@ -223,6 +235,9 @@ async def _ids_pendentes(session: AsyncSession) -> dict[str, list[UUID]]:
         plat = (r.plataforma or "").strip().lower()
         chave = next((k for k, nomes in por_chave.items() if plat in nomes), None)
         if chave is None:
+            continue
+        if r.id in forcadas:
+            pend[chave].append(r.id)
             continue
         assinatura = logistica_rules.assinatura_para(r.plataforma, r.meli_status or {})
         cands = logistica_match.find_matching_rules(
@@ -241,46 +256,44 @@ async def _ids_pendentes(session: AsyncSession) -> dict[str, list[UUID]]:
     return pend
 
 
-async def recarregar_ml(
-    session: AsyncSession, *, enrich_limit: int = 300
-) -> dict[str, int]:
+async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     """Recarga sob demanda do botão "recarregar" das abas de marketplace.
 
-    Diferente do cron diário, RE-enriquece linhas que já têm assinatura — mas SÓ
-    as PENDENTES do painel, e então aplica no Bling a mudança de situação das
-    que casam uma regra da aba Status. Já foi "300 mais recentes de cada
-    marketplace + Bling em TODAS as linhas": ~25 min só de enrich e o passo do
-    Bling morrendo no job_timeout (1800s) ANTES do commit — o botão nunca
-    terminava (12-13/ago, TimeoutError em aplicar_status_em_lote). Com ~2.7k
-    linhas e só ~50 pendentes, mirar o painel termina em poucos minutos e cobre
-    exatamente o que o operador está vendo. Antes de escolher as pendentes,
-    realinha o status_bling com o espelho do Bling — assim linha resolvida cujo
-    BLING mudou (ex.: virou "Problemas") volta pro conjunto sozinha. Mudança só
-    no lado do MARKETPLACE de linha resolvida continua exigindo o ⟳ por linha.
-    Roda em background (arq) porque mesmo assim pode passar dos 100s do
-    Cloudflare.
+    Num clique cobre os três lados — situação no Bling, Status Bling e Status
+    Plataforma — mas SÓ das linhas que realmente mexeram, não das ~9 mil. O alvo
+    é a união de:
+
+    - as linhas cuja situação no Bling mudou agora (o `refresh_status_bling`
+      devolve exatamente essas — é um UPDATE barato, sem chamada de API);
+    - as pendentes do painel (o que o operador está olhando).
+
+    Varrer tudo custava ~55min mesmo com a rajada concorrente do
+    `logistica_enrich`; o delta resolve em segundos. O preço: uma linha JÁ
+    resolvida (escondida) cujo status mudou só do lado do MARKETPLACE, sem mexer
+    na situação do Bling, não entra sozinha — pra essas continua valendo o ⟳ da
+    linha.
+
+    Roda em background (arq) porque ainda pode passar dos 100s do Cloudflare.
     """
-    refreshed = await refresh_status_bling(session)
-    pend = await _ids_pendentes(session)
+    mudaram = await refresh_status_bling(session)
+    alvo = await _ids_pendentes(session, extras=mudaram)
     logger.info(
-        "logistica_recarregar_pendentes",
-        status_refresh=refreshed,
-        **{k: len(v) for k, v in pend.items()},
+        "logistica_recarregar_inicio",
+        status_refresh=len(mudaram),
+        **{f"alvo_{k}": len(v) for k, v in alvo.items()},
     )
-    enr = await logistica_meli.enrich_recent(
-        session, limit=enrich_limit, only_empty=False, ids=pend["ml"]
-    )
+    enr = await logistica_meli.enrich_recent(session, ids=alvo["ml"], only_empty=False)
     enr_shopee = await logistica_shopee.enrich_recent(
-        session, limit=enrich_limit, only_empty=False, ids=pend["shopee"]
+        session, ids=alvo["shopee"], only_empty=False
     )
     enr_tiktok = await logistica_tiktok.enrich_recent(
-        session, limit=enrich_limit, only_empty=False, ids=pend["tiktok"]
+        session, ids=alvo["tiktok"], only_empty=False
     )
     enr_amazon = await logistica_amazon.enrich_recent(
-        session, limit=enrich_limit, only_empty=False, ids=pend["amazon"]
+        session, ids=alvo["amazon"], only_empty=False
     )
     lote = await logistica_bling.aplicar_status_em_lote(
-        session, ids=[i for ids in pend.values() for i in ids]
+        session, [i for ids in alvo.values() for i in ids]
     )
     logger.info(
         "logistica_recarregar_ml",
@@ -291,7 +304,7 @@ async def recarregar_ml(
         **lote,
     )
     return {
-        "status_refresh": refreshed,
+        "status_refresh": len(mudaram),
         **{f"enrich_{k}": v for k, v in enr.items()},
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
