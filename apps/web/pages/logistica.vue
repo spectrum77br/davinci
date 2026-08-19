@@ -588,6 +588,30 @@ async function refreshStatus() {
   }
 }
 
+// Filtro por plataforma na aba Status ('' = todas; '__geral__' = regras sem
+// plataforma, que valem pra todas). Só filtra a listagem — não muda as regras.
+const statusFiltroPlataforma = ref('')
+const statusPlataformas = computed(() => {
+  const vistos = new Map<string, string>()
+  let temGeral = false
+  for (const s of statusRows.value) {
+    const p = (s.plataforma || '').trim()
+    if (!p) {
+      temGeral = true
+      continue
+    }
+    const k = p.toLowerCase()
+    if (!vistos.has(k)) vistos.set(k, p)
+  }
+  return { nomes: [...vistos.values()].sort((a, b) => a.localeCompare(b)), temGeral }
+})
+const statusRowsFiltradas = computed(() => {
+  const f = statusFiltroPlataforma.value
+  if (!f) return statusRows.value
+  if (f === '__geral__') return statusRows.value.filter((s) => !(s.plataforma || '').trim())
+  return statusRows.value.filter((s) => (s.plataforma || '').trim().toLowerCase() === f)
+})
+
 watch(tab, (t) => {
   if (t === 'status') {
     if (!statusLoaded) refreshStatus()
@@ -1442,6 +1466,17 @@ async function aplicarStatusBling(c: Logistica) {
         <Button size="sm" variant="ghost" :disabled="statusLoading" @click="refreshStatus">
           <RefreshCw class="size-4 mr-1" /> recarregar
         </Button>
+        <label class="flex items-center gap-1.5 text-sm text-muted-foreground">
+          Plataforma:
+          <select
+            v-model="statusFiltroPlataforma"
+            class="h-9 rounded-md border bg-background px-2 text-sm text-foreground"
+          >
+            <option value="">todas</option>
+            <option v-for="p in statusPlataformas.nomes" :key="p" :value="p.toLowerCase()">{{ p }}</option>
+            <option v-if="statusPlataformas.temGeral" value="__geral__">Geral (sem plataforma)</option>
+          </select>
+        </label>
         <Button v-if="canEdit" size="sm" class="ml-auto" @click="openStatusForm">
           <Plus class="size-4 mr-1" /> Novo status
         </Button>
@@ -1473,7 +1508,7 @@ async function aplicarStatusBling(c: Logistica) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in statusRows" :key="s.id" class="border-t hover:bg-muted/20">
+            <tr v-for="s in statusRowsFiltradas" :key="s.id" class="border-t hover:bg-muted/20">
               <!-- Plataforma -->
               <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'plataforma')">
                 <input
@@ -1676,8 +1711,10 @@ async function aplicarStatusBling(c: Logistica) {
                 </button>
               </td>
             </tr>
-            <tr v-if="!statusLoading && statusRows.length === 0">
-              <td :colspan="canEdit ? 11 : 10" class="px-3 py-6 text-center text-muted-foreground">nenhum status</td>
+            <tr v-if="!statusLoading && statusRowsFiltradas.length === 0">
+              <td :colspan="canEdit ? 11 : 10" class="px-3 py-6 text-center text-muted-foreground">
+                {{ statusRows.length ? 'nenhum status pra essa plataforma' : 'nenhum status' }}
+              </td>
             </tr>
           </tbody>
         </table>
@@ -1685,7 +1722,7 @@ async function aplicarStatusBling(c: Logistica) {
 
       <!-- Mobile cards (campos editáveis diretos) -->
       <div class="md:hidden space-y-2">
-        <div v-for="s in statusRows" :key="s.id" class="border rounded-md p-3 space-y-2">
+        <div v-for="s in statusRowsFiltradas" :key="s.id" class="border rounded-md p-3 space-y-2">
           <div class="flex items-start gap-2">
             <div class="flex-1 min-w-0 text-xs text-muted-foreground">Status</div>
             <button
@@ -1830,8 +1867,8 @@ async function aplicarStatusBling(c: Logistica) {
             </div>
           </div>
         </div>
-        <div v-if="!statusLoading && statusRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
-          nenhum status
+        <div v-if="!statusLoading && statusRowsFiltradas.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
+          {{ statusRows.length ? 'nenhum status pra essa plataforma' : 'nenhum status' }}
         </div>
       </div>
     </template>
