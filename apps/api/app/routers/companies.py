@@ -29,6 +29,16 @@ def _company_label(c: Company, override: str | None = None) -> str:
     return override or c.apelido
 
 
+def _norm_conta(s: str | None) -> str:
+    """Nome de conta comparável: minúsculas e SEM espaços ("dream 2" == "dream2").
+
+    Os nomes são digitados à mão em telas diferentes (companies.apelido vs
+    store_info.account_name), então espaço a mais/a menos não pode quebrar o
+    casamento que pinta o X verde no grid.
+    """
+    return "".join((s or "").split()).lower()
+
+
 @router.get("/grid", response_model=CompanyGridOut)
 async def companies_grid(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -57,14 +67,14 @@ async def companies_grid(
         if not name:
             continue
         si_by_platform.setdefault((plat or "").strip().lower(), set()).add(
-            name.strip().lower()
+            _norm_conta(name)
         )
 
     rows: list[CompanyGridRow] = []
     for c in companies:
         cells: dict[str, GridStoreCell | None] = {}
         company_stores = by_company.get(c.id, {})
-        apelido_lower = (c.apelido or "").strip().lower()
+        apelido_lower = _norm_conta(c.apelido)
         for mk in MARKETPLACES:
             s = company_stores.get(mk)
             if s is not None:

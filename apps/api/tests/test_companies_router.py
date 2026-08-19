@@ -205,3 +205,34 @@ async def test_cadastro_resolve_raw_link(client, make_user, auth_as, db):
     )
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "marketplace_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_companies_grid_store_info_fallback_ignora_espacos(
+    client, make_user, auth_as, db
+):
+    """store_info "dream2" (sem espaço) acende o X da empresa "dream 2"."""
+    from sqlalchemy import text as _text
+
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    r = await client.post(
+        "/api/companies",
+        json={"razao_social": "DREAM COMERCIO", "apelido": "dream 2"},
+    )
+    company_id = r.json()["id"]
+    await db.execute(
+        _text(
+            "INSERT INTO davinci_test.store_info (id, user_id, platform, account_name)"
+            " VALUES (gen_random_uuid(), CAST(:u AS uuid), 'ml', 'dream2')"
+        ),
+        {"u": str(admin.id)},
+    )
+    await db.commit()
+
+    g = await client.get("/api/companies/grid")
+    assert g.status_code == 200
+    row = next(r for r in g.json()["rows"] if r["company"]["id"] == company_id)
+    assert row["stores"]["ml"] is not None, "match deve ignorar espaços"
+    assert row["stores"]["ml"]["from_store_info"] is True
+    assert row["stores"]["shopee"] is None

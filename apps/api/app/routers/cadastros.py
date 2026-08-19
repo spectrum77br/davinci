@@ -36,6 +36,11 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/cadastros", tags=["cadastros"])
 
 
+def _norm_conta(s: str | None) -> str:
+    """Nome de conta comparável: minúsculas e SEM espaços ("dream 2" == "dream2")."""
+    return "".join((s or "").split()).lower()
+
+
 def _to_tipo(v: str) -> CadastroTipo:
     try:
         return CadastroTipo(v)
@@ -103,8 +108,9 @@ async def cadastros_grid(
             company = companies.get(s.company_id)
             # Dedup key uses company.apelido (canonical) so an FK cell with
             # apelido_override "Shopee Poofy" + store_info entry "poofy" are
-            # recognized as the same loja and don't render twice.
-            canonical = (company.apelido if company else "").strip().lower()
+            # recognized as the same loja and don't render twice. Sem espaços,
+            # como no grid de companies ("dream 2" == "dream2").
+            canonical = _norm_conta(company.apelido if company else "")
             display = (company.apelido if company else "") or s.apelido_override or ""
             cells[s.marketplace.value].append(
                 CadastroGridStoreCell(
@@ -124,7 +130,7 @@ async def cadastros_grid(
                 apelido = idx.get((mk, cod))
                 if apelido is None:
                     continue
-                if apelido.strip().lower() in covered[mk]:
+                if _norm_conta(apelido) in covered[mk]:
                     continue  # already represented by an FK link
                 cells[mk].append(
                     CadastroGridStoreCell(

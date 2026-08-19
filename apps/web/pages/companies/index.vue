@@ -66,6 +66,10 @@ const showNew = ref(false)
 const canEdit = useCan('empresa', 'edit')
 const canDelete = useCan('empresa', 'delete')
 
+// Compara nomes de conta ignorando espaços e maiúsculas ("dream 2" == "dream2")
+// — mesmo normalizador do backend (companies.py/_norm_conta).
+const normConta = (s: string | null | undefined) => (s || '').replace(/\s+/g, '').toLowerCase()
+
 async function refresh() {
   loading.value = true
   error.value = null
@@ -100,7 +104,7 @@ const responsaveisOpts = computed(() => {
 const respByApelido = computed(() => {
   const m = new Map<string, { cpf: string; ids: string[] }>()
   for (const s of storeInfos.value) {
-    const k = (s.account_name || '').trim().toLowerCase()
+    const k = normConta(s.account_name)
     if (!k) continue
     const e = m.get(k) || { cpf: '', ids: [] }
     e.ids.push(s.id)
@@ -121,7 +125,7 @@ const responsavelByCompany = computed(() => {
     : storeInfos.value
   const namesByLower = new Set<string>()
   for (const s of filtered) {
-    const n = (s.account_name || '').trim().toLowerCase()
+    const n = normConta(s.account_name)
     if (n) namesByLower.add(n)
   }
   return namesByLower
@@ -134,13 +138,13 @@ const filteredRows = computed(() => {
   if (filterMk.value) rows = rows.filter(r => r.stores[filterMk.value] != null)
   if (filterResponsavel.value) {
     const allowed = responsavelByCompany.value
-    rows = rows.filter(r => allowed.has((r.company.apelido || '').trim().toLowerCase()))
+    rows = rows.filter(r => allowed.has(normConta(r.company.apelido)))
   }
   if (search.value) {
     const q = search.value.toLowerCase()
     const respMap = respByApelido.value
     rows = rows.filter(r => {
-      const resp = (respMap.get(r.company.apelido.trim().toLowerCase())?.cpf || '').toLowerCase()
+      const resp = (respMap.get(normConta(r.company.apelido))?.cpf || '').toLowerCase()
       return (
         r.company.razao_social.toLowerCase().includes(q) ||
         r.company.apelido.toLowerCase().includes(q) ||
@@ -195,7 +199,7 @@ const respValue = ref('')
 const respSaving = ref(false)
 function startEditResp(apelido: string) {
   if (!canEdit.value) return
-  const k = apelido.trim().toLowerCase()
+  const k = normConta(apelido)
   editingResp.value = k
   respValue.value = respByApelido.value.get(k)?.cpf || ''
 }
@@ -204,7 +208,7 @@ function cancelEditResp() {
   respValue.value = ''
 }
 async function commitEditResp(apelido: string) {
-  const k = apelido.trim().toLowerCase()
+  const k = normConta(apelido)
   if (editingResp.value !== k) return
   const next = respValue.value.trim()
   const entry = respByApelido.value.get(k)
@@ -233,7 +237,7 @@ async function commitEditResp(apelido: string) {
     )
     // Patch in-memory so the cell updates without a full refresh.
     for (const s of storeInfos.value) {
-      if ((s.account_name || '').trim().toLowerCase() === k) {
+      if (normConta(s.account_name) === k) {
         s.cpf_name = next || null
       }
     }
@@ -452,9 +456,9 @@ onMounted(() => document.addEventListener('click', onDocClickCell))
 onBeforeUnmount(() => document.removeEventListener('click', onDocClickCell))
 
 function storeInfoFor(row: GridRow, mk: Marketplace): StoreInfoLite | undefined {
-  const apelido = (row.company.apelido || '').trim().toLowerCase()
+  const apelido = normConta(row.company.apelido)
   return storeInfos.value.find(
-    (s) => s.platform === mk && (s.account_name || '').trim().toLowerCase() === apelido,
+    (s) => s.platform === mk && normConta(s.account_name) === apelido,
   )
 }
 
@@ -672,17 +676,17 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
               class="px-3 py-2 text-xs max-w-40"
               :class="{
                 'cursor-pointer hover:bg-accent/30':
-                  canEdit && editingResp !== row.company.apelido.trim().toLowerCase(),
+                  canEdit && editingResp !== normConta(row.company.apelido),
               }"
-              :title="respByApelido.get(row.company.apelido.trim().toLowerCase())?.cpf || ''"
+              :title="respByApelido.get(normConta(row.company.apelido))?.cpf || ''"
               @click="
                 canEdit
-                && editingResp !== row.company.apelido.trim().toLowerCase()
+                && editingResp !== normConta(row.company.apelido)
                 && startEditResp(row.company.apelido)
               "
             >
               <input
-                v-if="editingResp === row.company.apelido.trim().toLowerCase()"
+                v-if="editingResp === normConta(row.company.apelido)"
                 v-model="respValue"
                 type="text"
                 class="w-full text-xs bg-transparent outline-none border-b border-blue-500"
@@ -694,10 +698,10 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
               />
               <span
                 v-else
-                :class="{ 'text-muted-foreground': !respByApelido.get(row.company.apelido.trim().toLowerCase())?.cpf }"
+                :class="{ 'text-muted-foreground': !respByApelido.get(normConta(row.company.apelido))?.cpf }"
                 class="block truncate"
               >
-                {{ respByApelido.get(row.company.apelido.trim().toLowerCase())?.cpf || '—' }}
+                {{ respByApelido.get(normConta(row.company.apelido))?.cpf || '—' }}
               </span>
             </td>
             <td
