@@ -605,11 +605,17 @@ const statusPlataformas = computed(() => {
   }
   return { nomes: [...vistos.values()].sort((a, b) => a.localeCompare(b)), temGeral }
 })
+// Busca pela chave (Status Plataforma) — dá pra colar a chave copiada do painel
+// e conferir se a regra existe cadastrada letra por letra.
+const statusBusca = ref('')
 const statusRowsFiltradas = computed(() => {
   const f = statusFiltroPlataforma.value
-  if (!f) return statusRows.value
-  if (f === '__geral__') return statusRows.value.filter((s) => !(s.plataforma || '').trim())
-  return statusRows.value.filter((s) => (s.plataforma || '').trim().toLowerCase() === f)
+  const q = statusBusca.value.trim().toLowerCase()
+  let rows = statusRows.value
+  if (f === '__geral__') rows = rows.filter((s) => !(s.plataforma || '').trim())
+  else if (f) rows = rows.filter((s) => (s.plataforma || '').trim().toLowerCase() === f)
+  if (q) rows = rows.filter((s) => (s.status_plataforma || '').toLowerCase().includes(q))
+  return rows
 })
 
 watch(tab, (t) => {
@@ -1477,6 +1483,17 @@ async function aplicarStatusBling(c: Logistica) {
             <option v-if="statusPlataformas.temGeral" value="__geral__">Geral (sem plataforma)</option>
           </select>
         </label>
+        <label class="flex items-center gap-1.5 text-sm text-muted-foreground">
+          Status:
+          <div class="relative">
+            <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+            <input
+              v-model="statusBusca"
+              class="h-9 w-80 rounded-md border bg-background pl-8 pr-3 text-sm text-foreground"
+              placeholder="buscar chave (cole a chave copiada)…"
+            />
+          </div>
+        </label>
         <Button v-if="canEdit" size="sm" class="ml-auto" @click="openStatusForm">
           <Plus class="size-4 mr-1" /> Novo status
         </Button>
@@ -1713,7 +1730,7 @@ async function aplicarStatusBling(c: Logistica) {
             </tr>
             <tr v-if="!statusLoading && statusRowsFiltradas.length === 0">
               <td :colspan="canEdit ? 11 : 10" class="px-3 py-6 text-center text-muted-foreground">
-                {{ statusRows.length ? 'nenhum status pra essa plataforma' : 'nenhum status' }}
+                {{ statusRows.length ? 'nenhum status bate com o filtro' : 'nenhum status' }}
               </td>
             </tr>
           </tbody>
@@ -1868,7 +1885,7 @@ async function aplicarStatusBling(c: Logistica) {
           </div>
         </div>
         <div v-if="!statusLoading && statusRowsFiltradas.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
-          {{ statusRows.length ? 'nenhum status pra essa plataforma' : 'nenhum status' }}
+          {{ statusRows.length ? 'nenhum status bate com o filtro' : 'nenhum status' }}
         </div>
       </div>
     </template>
