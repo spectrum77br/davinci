@@ -114,6 +114,52 @@ async def test_crud_lifecycle(
 
 
 @pytest.mark.asyncio
+async def test_status_detalhe_traz_a_data_de_cada_campo(
+    client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """A coluna "Status Plataforma" agora responde "isso é de quando?": cada
+    campo da assinatura vem aberto com o carimbo de desde quando está assim."""
+    auth_as(admin)
+    r = await client.post(
+        "/api/logistica",
+        json={
+            "pedido_bling": "9001",
+            "plataforma": "Mercado Livre",
+            "meli_status": {"order_status": "paid", "ship_status": "shipped"},
+        },
+    )
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    det = {d["campo"]: d for d in r.json()["status_detalhe"]}
+    assert [d["rotulo"] for d in r.json()["status_detalhe"]] == [
+        "Status do pedido", "Status do envio",
+    ]
+    # Preenchido na mão: quem carimba é o DaVinci, na hora.
+    assert det["order_status"]["fonte"] == "davinci"
+    criado_em = det["order_status"]["em"]
+    assert criado_em
+
+    # Edita só o envio: o pedido NÃO muda de valor → mantém a data original.
+    r = await client.patch(
+        f"/api/logistica/{cid}",
+        json={"meli_status": {"order_status": "paid", "ship_status": "delivered"}},
+    )
+    assert r.status_code == 200
+    det2 = {d["campo"]: d for d in r.json()["status_detalhe"]}
+    assert det2["order_status"]["em"] == criado_em  # congelado
+    assert det2["ship_status"]["em"] >= criado_em  # recarimbado
+
+    # Campo que sai da assinatura sai também do detalhe.
+    r = await client.patch(
+        f"/api/logistica/{cid}", json={"meli_status": {"order_status": "paid"}}
+    )
+    assert [d["campo"] for d in r.json()["status_detalhe"]] == ["order_status"]
+    assert r.json()["status_detalhe"][0]["em"] == criado_em
+
+    await client.delete(f"/api/logistica/{cid}")
+
+
+@pytest.mark.asyncio
 async def test_list_filtra_por_plataforma(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
 ):

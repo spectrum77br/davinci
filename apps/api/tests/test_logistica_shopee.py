@@ -65,6 +65,12 @@ async def test_build_enrichment_completo():
         },
         "rastreio": "BR263091239254C",
         "localizacao": "Pedido postado Piracicaba - SP",
+        # O status físico é datado pelo último evento da SPX (este fake não data
+        # o pedido, então order_status fica sem proposta). Ver
+        # test_logistica_status_datas.
+        "datas": {
+            "logistics_status": {"em": "1970-01-01T00:03:20+00:00", "fonte": "plataforma"},
+        },
     }
 
 
@@ -72,7 +78,7 @@ async def test_build_enrichment_completo():
 async def test_build_enrichment_pedido_ausente_fica_vazio():
     client = FakeShopee({})  # Shopee não devolve nada
     enr = await logistica_shopee.build_enrichment(client, "2504XYZ")
-    assert enr == {"meli_status": {}, "rastreio": None, "localizacao": None}
+    assert enr == {"meli_status": {}, "rastreio": None, "localizacao": None, "datas": {}}
 
 
 def test_assinatura_shopee_traduz():

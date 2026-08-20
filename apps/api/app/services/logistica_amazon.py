@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_enrich, logistica_rules
+from app.services import logistica_datas, logistica_enrich, logistica_rules
 from app.services.marketplaces.amazon import AmazonClient
 
 logger = structlog.get_logger()
@@ -55,17 +55,29 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
     localização proxy.
 
     Retorna `{"meli_status": {"order_status": ..., "easyship_status": ...} | {},
-    "rastreio": str | None, "localizacao": str | None}`.
+    "rastreio": str | None, "localizacao": str | None, "datas": {...}}`.
 
     Rastreio vem da Easy Ship API — hoje 403 sem o papel de shipping aprovado
-    (fica None), popula sozinho quando o papel for liberado."""
+    (fica None), popula sozinho quando o papel for liberado.
+
+    `datas` = quando o status mudou. A Amazon só data o PEDIDO inteiro
+    (`LastUpdateDate`), não cada campo — então os dois entram como estimativa e
+    o DaVinci refina quando vê o valor mudar (ver logistica_datas)."""
     order_id = str(order_id)
     st = await client.get_order_status(order_id) or {}
     meli: dict[str, str] = {}
+    datas: dict[str, dict[str, str]] = {}
+    atualizado_em = st.get("last_update_date")
     if st.get("order_status"):
         meli["order_status"] = str(st["order_status"])
+        logistica_datas.propor(
+            datas, "order_status", atualizado_em, logistica_datas.FONTE_APROX
+        )
     if st.get("easyship_status"):
         meli["easyship_status"] = str(st["easyship_status"])
+        logistica_datas.propor(
+            datas, "easyship_status", atualizado_em, logistica_datas.FONTE_APROX
+        )
 
     # Rastreio EasyShip (best-effort; 403 sem o papel de shipping → None).
     rastreio = await client.get_easyship_tracking(order_id)
@@ -77,7 +89,12 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
     destino = _amazon_destino(st)
     localizacao = logistica_rules.localizacao_completa(easy_pt, destino=destino) or None
 
-    return {"meli_status": meli, "rastreio": rastreio, "localizacao": localizacao}
+    return {
+        "meli_status": meli,
+        "rastreio": rastreio,
+        "localizacao": localizacao,
+        "datas": {f: datas[f] for f in meli if f in datas},
+    }
 
 
 async def _amazon_integration_for_conta(
@@ -157,6 +174,8 @@ async def enrich_row(
             client_cache[conta] = client
 
     enr = await build_enrichment(client, order_id)
+    # Antes de trocar o status: o carimbo compara o valor velho com o novo.
+    row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
     row.meli_status = enr["meli_status"]
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]

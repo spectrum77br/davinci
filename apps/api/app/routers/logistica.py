@@ -53,6 +53,7 @@ from app.schemas.logistica import (
     RecarregarOut,
     StatusBlingOut,
     StatusBlingPreviewOut,
+    StatusDetalheOut,
     SugestaoIn,
     SugestaoOut,
     ThreemaDestinatarioOut,
@@ -60,6 +61,7 @@ from app.schemas.logistica import (
 from app.services import (
     logistica_amazon,
     logistica_bling,
+    logistica_datas,
     logistica_match,
     logistica_meli,
     logistica_rules,
@@ -83,6 +85,26 @@ _PLATAFORMA_LABELS = {
 }
 
 
+def _status_detalhe(c: Logistica) -> list[StatusDetalheOut]:
+    """Assinatura da plataforma aberta linha a linha + a data de cada campo
+    (`logistica.status_datas`). É o que o balãozinho da coluna mostra."""
+    datas = c.status_datas if isinstance(c.status_datas, dict) else {}
+    out: list[StatusDetalheOut] = []
+    for linha in logistica_rules.detalhe_para(c.plataforma, c.meli_status or {}):
+        carimbo = datas.get(linha["campo"])
+        carimbo = carimbo if isinstance(carimbo, dict) else {}
+        out.append(
+            StatusDetalheOut(
+                campo=linha["campo"],
+                rotulo=linha["rotulo"],
+                valor=linha["valor"],
+                em=str(carimbo["em"]) if carimbo.get("em") else None,
+                fonte=str(carimbo["fonte"]) if carimbo.get("fonte") else None,
+            )
+        )
+    return out
+
+
 def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> LogisticaOut:
     """`rules` = candidatas da aba Status que casam a chave deste pedido (máquina
     de estados). A regra ATIVA (desambiguada pela situação atual do Bling) alimenta
@@ -98,6 +120,7 @@ def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> Logisti
         conta=c.conta,
         meli_status=c.meli_status or {},
         status_plataforma=logistica_rules.assinatura_para(c.plataforma, c.meli_status or {}),
+        status_detalhe=_status_detalhe(c),
         rastreio=c.rastreio,
         localizacao=c.localizacao,
         divergencia=c.divergencia,
@@ -546,6 +569,10 @@ async def create_logistica(
         plataforma=_clean(body.plataforma),
         conta=_clean(body.conta),
         meli_status=_clean_meli(body.meli_status),
+        # Linha nascendo com status preenchido na mão: carimba agora.
+        status_datas=logistica_datas.merge_datas(
+            anterior_status={}, novo_status=_clean_meli(body.meli_status)
+        ),
         rastreio=_clean(body.rastreio),
         localizacao=_clean(body.localizacao),
         status_bling=_clean(body.status_bling),
@@ -912,7 +939,12 @@ async def patch_logistica(
     if "conta" in data:
         c.conta = _clean(data["conta"])
     if "meli_status" in data:
-        c.meli_status = _clean_meli(data["meli_status"])
+        # Edição na mão também carimba: o campo que o operador mudar passa a
+        # contar a partir de agora (fonte "davinci"); o que ele não mexeu
+        # mantém a data que já tinha.
+        novo_status = _clean_meli(data["meli_status"])
+        c.status_datas = logistica_datas.aplicar(c, novo_status)
+        c.meli_status = novo_status
     if "rastreio" in data:
         c.rastreio = _clean(data["rastreio"])
     if "localizacao" in data:

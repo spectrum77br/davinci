@@ -45,6 +45,9 @@ async def test_build_enrichment_completo():
         "meli_status": {"order_status": "IN_TRANSIT"},
         "rastreio": "TT123BR",
         "localizacao": "Package dropped off with carrier.",
+        # Pedido sem update_time no payload => sem data proposta (quem carimba
+        # nesse caso é o merge). Ver test_logistica_status_datas.
+        "datas": {},
     }
 
 
@@ -74,7 +77,7 @@ async def test_build_enrichment_sem_tracking_usa_destino():
 async def test_build_enrichment_pedido_ausente_fica_vazio():
     client = FakeTikTok({})
     enr = await logistica_tiktok.build_enrichment(client, "000")
-    assert enr == {"meli_status": {}, "rastreio": None, "localizacao": None}
+    assert enr == {"meli_status": {}, "rastreio": None, "localizacao": None, "datas": {}}
 
 
 def test_assinatura_tiktok_traduz():

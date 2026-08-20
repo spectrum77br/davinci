@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_enrich, logistica_rules, logistica_track
+from app.services import logistica_datas, logistica_enrich, logistica_rules, logistica_track
 from app.services.marketplaces.ml import MercadoLivreClient
 
 logger = structlog.get_logger()
@@ -66,6 +66,22 @@ def _extract_return_status(rets: Any) -> str:
     if s:
         return s
     return (obj.get("status") or "").strip()
+
+
+def _return_em(rets: Any) -> Any:
+    """Última mexida na devolução (estimativa da data do `return_status`).
+    Mesmo formato solto do `_extract_return_status`: objeto ou lista."""
+    if not rets:
+        return None
+    obj = rets[0] if isinstance(rets, list) and rets else rets
+    if not isinstance(obj, dict):
+        return None
+    shipments = obj.get("shipments")
+    if isinstance(shipments, list) and shipments and isinstance(shipments[0], dict):
+        em = shipments[0].get("last_updated") or shipments[0].get("date_created")
+        if em:
+            return em
+    return obj.get("last_updated") or obj.get("date_created")
 
 
 def _ship_destino(sh: dict) -> str | None:
@@ -150,23 +166,50 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     """Puxa do ML tudo que a Logística consome de um pedido: a assinatura de 8
     campos (`meli_status`) + o número de rastreio (`rastreio`, vem do shipment).
 
-    Retorna `{"meli_status": {...}, "rastreio": str|None}`. Best-effort: falha
-    em shipment/claim/returns deixa aqueles campos de fora, mas mantém os que já
-    resolveram. Levanta só se nem order nem pack existirem."""
+    Retorna `{"meli_status": {...}, "rastreio": str|None, "datas": {...}}`.
+    Best-effort: falha em shipment/claim/returns deixa aqueles campos de fora,
+    mas mantém os que já resolveram. Levanta só se nem order nem pack existirem.
+
+    `datas` = quando cada campo mudou, pelo que o ML conta (ver
+    logistica_datas). O ML data o pedido (`date_closed`/`cancel_detail.date`) e
+    cada status do envio (`status_history.date_*`), mas NÃO data o substatus —
+    esse fica com a última mexida no envio (`aprox`)."""
     out: dict[str, str] = {}
+    datas: dict[str, dict[str, str]] = {}
     rastreio: str | None = None
     destino: str | None = None
     previsao: str | None = None
     order = await _fetch_order(client, str(order_id))
 
+    cancel_detail = order.get("cancel_detail") or {}
     st = (order.get("status") or "").strip()
     if st:
         out["order_status"] = st
+        # Cancelado tem data própria; pago fecha o pedido em date_closed. Se
+        # nenhum dos dois vier, a última mexida no pedido é a estimativa.
+        if st == "cancelled":
+            logistica_datas.propor(
+                datas, "order_status", cancel_detail.get("date"),
+                logistica_datas.FONTE_PLATAFORMA,
+            )
+        else:
+            logistica_datas.propor(
+                datas, "order_status", order.get("date_closed"),
+                logistica_datas.FONTE_PLATAFORMA,
+            )
+        logistica_datas.propor(
+            datas, "order_status", order.get("last_updated"), logistica_datas.FONTE_APROX
+        )
 
-    cancel_detail = order.get("cancel_detail") or {}
     grp = (cancel_detail.get("group") or "").strip()
     if grp:
         out["cancel_group"] = grp
+        logistica_datas.propor(
+            datas, "cancel_group", cancel_detail.get("date"), logistica_datas.FONTE_PLATAFORMA
+        )
+        logistica_datas.propor(
+            datas, "cancel_group", order.get("last_updated"), logistica_datas.FONTE_APROX
+        )
 
     shipping = order.get("shipping") or {}
     ship_id = shipping.get("id")
@@ -176,12 +219,30 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
         except Exception as e:  # noqa: BLE001
             logger.warning("logistica_meli_shipment_failed", order_id=order_id, err=str(e)[:200])
             sh = {}
+        # O ML guarda a data de CADA status do envio aqui
+        # ({"date_shipped": ..., "date_delivered": ...}) — data oficial, sem
+        # nenhuma chamada extra.
+        historico = sh.get("status_history") or {}
+        historico = historico if isinstance(historico, dict) else {}
         ship_status = (sh.get("status") or "").strip()
         if ship_status:
             out["ship_status"] = ship_status
+            logistica_datas.propor(
+                datas, "ship_status", historico.get(f"date_{ship_status}"),
+                logistica_datas.FONTE_PLATAFORMA,
+            )
+            logistica_datas.propor(
+                datas, "ship_status", sh.get("last_updated"), logistica_datas.FONTE_APROX
+            )
         sub = (sh.get("substatus") or "").strip()
         if sub:
             out["ship_substatus"] = sub
+            # O ML não data substatus (nem /shipments/{id}/history traz linha do
+            # tempo por substatus): a melhor estimativa é a última mexida no
+            # envio. A partir daí, mudou o substatus → o DaVinci carimba.
+            logistica_datas.propor(
+                datas, "ship_substatus", sh.get("last_updated"), logistica_datas.FONTE_APROX
+            )
         tn = (sh.get("tracking_number") or "").strip()
         if tn:
             rastreio = tn
@@ -191,6 +252,9 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
         ship_status = (shipping.get("status") or "").strip()
         if ship_status:
             out["ship_status"] = ship_status
+            logistica_datas.propor(
+                datas, "ship_status", order.get("last_updated"), logistica_datas.FONTE_APROX
+            )
 
     # Reclamação/mediação — o id vem em order.mediations[].id (ML só lista
     # quando abriu um caso de pós-venda).
@@ -206,17 +270,24 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
         except Exception as e:  # noqa: BLE001
             logger.warning("logistica_meli_claim_failed", order_id=order_id, err=str(e)[:200])
             claim = {}
+        # A reclamação só datou ela inteira (last_updated) — vale pros 3 campos
+        # que saem dela como estimativa.
+        claim_em = claim.get("last_updated") or claim.get("date_created")
         stage = (claim.get("stage") or "").strip()
         if stage:
             out["claim_stage"] = stage
+            logistica_datas.propor(datas, "claim_stage", claim_em, logistica_datas.FONTE_APROX)
         cstatus = (claim.get("status") or "").strip()
         if cstatus:
             out["claim_status"] = cstatus
+            logistica_datas.propor(datas, "claim_status", claim_em, logistica_datas.FONTE_APROX)
         benefited = (claim.get("resolution") or {}).get("benefited")
         if isinstance(benefited, list):
             benefited = benefited[0] if benefited else None
         if benefited:
             out["benefited"] = str(benefited).strip()
+            resolucao_em = (claim.get("resolution") or {}).get("date_created") or claim_em
+            logistica_datas.propor(datas, "benefited", resolucao_em, logistica_datas.FONTE_APROX)
         try:
             rets = await client.get_claim_returns(claim_id)
         except Exception as e:  # noqa: BLE001
@@ -225,9 +296,13 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
         rstatus = _extract_return_status(rets)
         if rstatus:
             out["return_status"] = rstatus
+            logistica_datas.propor(
+                datas, "return_status", _return_em(rets) or claim_em, logistica_datas.FONTE_APROX
+            )
 
     # Mantém só campos conhecidos (defesa contra tokens estranhos entrando).
     meli = {f: out[f] for f in logistica_rules.FIELD_ORDER if out.get(f)}
+    datas = {f: datas[f] for f in meli if f in datas}
     # Localização = proxy do "último local" (substatus/status do envio em PT) +
     # destino (cidade/UF) + previsão de entrega; o ML não dá o local físico da
     # rede própria.
@@ -235,7 +310,12 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     localizacao = (
         logistica_rules.localizacao_completa(status_pt, destino=destino, previsao=previsao) or None
     )
-    return {"meli_status": meli, "rastreio": rastreio, "localizacao": localizacao}
+    return {
+        "meli_status": meli,
+        "rastreio": rastreio,
+        "localizacao": localizacao,
+        "datas": datas,
+    }
 
 
 async def build_meli_status(client: MercadoLivreClient, order_id: str) -> dict[str, str]:
@@ -318,6 +398,8 @@ async def enrich_row(
             client_cache[conta] = client
 
     enr = await build_enrichment(client, order_id)
+    # Antes de trocar o status: o carimbo compara o valor velho com o novo.
+    row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
     row.meli_status = enr["meli_status"]
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]

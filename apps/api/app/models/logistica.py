@@ -33,6 +33,14 @@ class Logistica(Base, TimestampMixin):
     # Assinatura de status do Meli (dict dos 8 campos). Vazio pra plataformas
     # sem esse fluxo — a sugestão simplesmente não se aplica.
     meli_status: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    # "Isso é de quando?" — carimbo por campo do `meli_status`:
+    # {"ship_substatus": {"em": "2026-08-12T08:05:00+00:00", "fonte": "aprox"}}.
+    # Fica FORA do meli_status de propósito: aquele dict é a assinatura que casa
+    # com as regras da aba Status (`_clean_meli` descarta qualquer chave extra).
+    # Ver app.services.logistica_datas.
+    status_datas: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
     # Número de rastreio do envio (manual por enquanto).
     rastreio: Mapped[str | None] = mapped_column(Text, nullable=True)
     localizacao: Mapped[str | None] = mapped_column(Text, nullable=True)

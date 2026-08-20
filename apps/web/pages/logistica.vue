@@ -31,6 +31,17 @@ const tab = ref<PlataformaTab | 'status'>('ml')
 
 type MeliStatus = Record<string, string>
 
+// Uma linha do balãozinho da coluna "Status Plataforma".
+// `em` = ISO-8601 UTC; `fonte` = plataforma (data oficial do canal) | aprox
+// (melhor estimativa que o canal deu) | davinci (quando o sistema viu mudar).
+type StatusDetalhe = {
+  campo: string
+  rotulo: string
+  valor: string
+  em: string | null
+  fonte: string | null
+}
+
 type Logistica = {
   id: string
   data: string | null
@@ -40,6 +51,8 @@ type Logistica = {
   conta: string | null
   meli_status: MeliStatus
   status_plataforma: string
+  // Assinatura aberta campo a campo + desde quando cada um está assim (backend).
+  status_detalhe?: StatusDetalhe[]
   rastreio: string | null
   localizacao: string | null
   divergencia: string | null
@@ -407,11 +420,71 @@ function assinatura(c: Logistica): string {
   return parts.join(' | ')
 }
 
-// Tooltip da coluna "Status Plataforma": mostra qual campo do Meli é cada
-// pedaço da assinatura (order_status, ship_status, ...) pra dar pra identificar.
-// Pareia os campos NÃO-vazios (na ordem fixa) com os valores PT já traduzidos
-// (a assinatura junta esses mesmos valores por " | ").
+// ---- Datas do Status Plataforma ------------------------------------------
+// Cada campo da assinatura carrega DESDE QUANDO está naquele valor (o backend
+// carimba em logistica.status_datas). "~" na frente = data aproximada: o canal
+// não datou aquele campo específico, é a melhor estimativa que ele deu.
+
+function fmtDataHora(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString('pt-BR', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  })
+}
+
+// "há 8 dias" / "há 3 h" / "há 12 min" — o que o operador realmente quer saber
+// olhando pra um pedido parado.
+function fmtDesde(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const seg = Math.floor((Date.now() - d.getTime()) / 1000)
+  if (seg < 0) return ''
+  if (seg < 60) return 'agora há pouco'
+  if (seg < 3600) return `há ${Math.floor(seg / 60)} min`
+  if (seg < 86400) return `há ${Math.floor(seg / 3600)} h`
+  const dias = Math.floor(seg / 86400)
+  return dias === 1 ? 'há 1 dia' : `há ${dias} dias`
+}
+
+// Data mais recente entre os campos = "quando esse status mudou pela última
+// vez". É o que aparece embaixo da assinatura, sem precisar passar o mouse.
+function statusUltimaData(c: Logistica): StatusDetalhe | null {
+  const linhas = (c.status_detalhe || []).filter((l) => l.em)
+  if (!linhas.length) return null
+  return linhas.reduce((a, b) =>
+    new Date(b.em as string).getTime() > new Date(a.em as string).getTime() ? b : a,
+  )
+}
+
+function statusResumoData(c: Logistica): string {
+  const top = statusUltimaData(c)
+  if (!top) return ''
+  const aprox = top.fonte && top.fonte !== 'plataforma' ? '~' : ''
+  const desde = fmtDesde(top.em)
+  return `${aprox}${fmtDataHora(top.em)}${desde ? ` · ${desde}` : ''}`
+}
+
+// Tooltip da coluna "Status Plataforma": uma linha por campo da assinatura, com
+// o rótulo do campo, o valor em PT e desde quando está assim. O backend manda
+// tudo pronto em `status_detalhe` (ele sabe os campos de cada plataforma);
+// o fallback antigo cobre resposta velha de cache, sem data.
 function statusTooltip(c: Logistica): string {
+  const det = c.status_detalhe || []
+  if (det.length) {
+    const linhas = det.map((l) => {
+      const aprox = l.em && l.fonte && l.fonte !== 'plataforma' ? '~' : ''
+      const quando = l.em ? ` — ${aprox}${fmtDataHora(l.em)} (${fmtDesde(l.em)})` : ''
+      return `${l.rotulo}: ${l.valor}${quando}`
+    })
+    if (det.some((l) => l.em && l.fonte && l.fonte !== 'plataforma')) {
+      linhas.push('', '~ data aproximada: a plataforma não informa a hora exata deste campo.')
+    }
+    return linhas.join('\n')
+  }
   const fo = opcoes.value.field_order
   const labels = opcoes.value.field_labels
   const ms = c.meli_status || {}
@@ -1260,7 +1333,15 @@ async function aplicarStatusBling(c: Logistica) {
                     class="flex-1 break-words"
                     :class="statusTooltip(c) ? 'cursor-help' : ''"
                     :title="statusTooltip(c)"
-                  >{{ assinatura(c) || '—' }}</span>
+                  >
+                    {{ assinatura(c) || '—' }}
+                    <!-- Desde quando o status está assim (o balãozinho abre a
+                         data campo a campo). "~" = data aproximada. -->
+                    <span
+                      v-if="statusResumoData(c)"
+                      class="block text-[10px] text-muted-foreground/80 mt-0.5 whitespace-nowrap"
+                    >{{ statusResumoData(c) }}</span>
+                  </span>
                   <button
                     v-if="assinatura(c)"
                     class="shrink-0 text-muted-foreground hover:text-foreground"
@@ -1388,7 +1469,13 @@ async function aplicarStatusBling(c: Logistica) {
             <span v-if="c.status_bling" class="text-[10px] px-1.5 py-0.5 rounded border border-primary/50 shrink-0">{{ c.status_bling }}</span>
           </div>
           <div v-if="assinatura(c)" class="flex items-start gap-1.5 text-xs text-muted-foreground break-words">
-            <span class="flex-1 break-words" :title="statusTooltip(c)">{{ assinatura(c) }}</span>
+            <span class="flex-1 break-words" :title="statusTooltip(c)">
+              {{ assinatura(c) }}
+              <span
+                v-if="statusResumoData(c)"
+                class="block text-[10px] text-muted-foreground/80 mt-0.5"
+              >{{ statusResumoData(c) }}</span>
+            </span>
             <button class="shrink-0 hover:text-foreground" title="Copiar chave" @click.stop="copiarChave(c)">
               <Copy class="size-3.5" />
             </button>

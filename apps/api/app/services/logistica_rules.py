@@ -357,6 +357,88 @@ def assinatura_amazon(status: dict[str, str] | None) -> str:
     return " | ".join(p for p in partes if p)
 
 
+# Campos que compõem a assinatura de CADA plataforma, na ordem de exibição, com
+# o rótulo PT de cada um. O Meli usa os 8 de FIELD_ORDER/FIELD_LABELS; as outras
+# têm vocabulário próprio e bem mais curto.
+SHOPEE_LOG_LABELS_PT: dict[str, str] = {
+    "LOGISTICS_REQUEST_CREATED": "Coleta solicitada",
+    "LOGISTICS_PICKUP_DONE": "Coletado",
+    "LOGISTICS_PICKUP_RETRY": "Nova tentativa de coleta",
+    "LOGISTICS_PICKUP_FAILED": "Falha na coleta",
+    "LOGISTICS_DELIVERY_DONE": "Entregue",
+    "LOGISTICS_DELIVERY_FAILED": "Falha na entrega",
+    "LOGISTICS_REQUEST_CANCELED": "Coleta cancelada",
+    "LOGISTICS_COD_REJECTED": "Pagamento na entrega recusado",
+    "LOGISTICS_READY": "Pronto p/ envio",
+    "LOGISTICS_INVALID": "Envio inválido",
+    "LOGISTICS_LOST": "Extraviado",
+    "LOGISTICS_PENDING_ARRANGE": "Aguardando postagem",
+}
+
+_CAMPOS_POR_PLATAFORMA: dict[str, tuple[list[str], dict[str, str], dict[str, dict[str, str]]]] = {
+    "shopee": (
+        ["order_status", "logistics_status"],
+        {"order_status": "Status do pedido", "logistics_status": "Status do envio"},
+        {"order_status": SHOPEE_STATUS_LABELS_PT, "logistics_status": SHOPEE_LOG_LABELS_PT},
+    ),
+    "tiktok": (
+        ["order_status"],
+        {"order_status": "Status do pedido"},
+        {"order_status": TIKTOK_STATUS_LABELS_PT},
+    ),
+    "amazon": (
+        ["order_status", "easyship_status"],
+        {"order_status": "Status do pedido", "easyship_status": "Status do envio"},
+        {
+            "order_status": AMAZON_ORDER_LABELS_PT,
+            "easyship_status": AMAZON_EASYSHIP_LABELS_PT,
+        },
+    ),
+}
+
+
+def _config_campos(
+    plataforma: str | None,
+) -> tuple[list[str], dict[str, str], dict[str, dict[str, str]]]:
+    p = (plataforma or "").strip().lower()
+    if p in _SHOPEE_PLATAFORMAS:
+        return _CAMPOS_POR_PLATAFORMA["shopee"]
+    if p in _TIKTOK_PLATAFORMAS:
+        return _CAMPOS_POR_PLATAFORMA["tiktok"]
+    if p in _AMAZON_PLATAFORMAS:
+        return _CAMPOS_POR_PLATAFORMA["amazon"]
+    return FIELD_ORDER, FIELD_LABELS, VALUE_LABELS_PT
+
+
+def detalhe_para(
+    plataforma: str | None, status: dict[str, str] | None
+) -> list[dict[str, str]]:
+    """A assinatura ABERTA em linhas: `[{"campo","rotulo","valor"}]`, uma por
+    campo preenchido, na ordem da plataforma e já traduzida pra PT.
+
+    É a mesma informação de `assinatura_para` (que junta tudo num texto só),
+    mas com o campo identificado — é o que o balãozinho da coluna "Status
+    Plataforma" mostra pra poder pendurar a data de cada linha ao lado."""
+    m = status or {}
+    ordem, rotulos, valores = _config_campos(plataforma)
+    fora_da_ordem = [k for k in m if k not in ordem]
+    linhas: list[dict[str, str]] = []
+    for campo in [*ordem, *fora_da_ordem]:
+        bruto = str(m.get(campo) or "").strip()
+        if not bruto:
+            continue
+        mapa = valores.get(campo, {})
+        pt = mapa.get(bruto) or mapa.get(bruto.upper()) or bruto
+        linhas.append(
+            {
+                "campo": campo,
+                "rotulo": rotulos.get(campo) or campo,
+                "valor": pt,
+            }
+        )
+    return linhas
+
+
 def assinatura_para(plataforma: str | None, status: dict[str, str] | None) -> str:
     """Assinatura de "Status Plataforma" da linha, despachando pela plataforma:
     Shopee usa `assinatura_shopee` (order_status), TikTok `assinatura_tiktok`

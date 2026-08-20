@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_enrich, logistica_rules
+from app.services import logistica_datas, logistica_enrich, logistica_rules
 from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
@@ -64,14 +64,21 @@ async def build_enrichment(client: TikTokClient, order_id: str) -> dict:
     """Monta a assinatura do TikTok + rastreio + localização física.
 
     Retorna `{"meli_status": {"order_status": ...} | {}, "rastreio": str | None,
-    "localizacao": str | None}`. Campos que o TikTok não devolver ficam de fora
-    / None."""
+    "localizacao": str | None, "datas": {...}}`. Campos que o TikTok não
+    devolver ficam de fora / None.
+
+    `datas` = quando o status mudou: o `update_time` do pedido (epoch), que a
+    TikTok mexe a cada mudança de estado."""
     order_id = str(order_id)
     order = await client.get_order_detail(order_id)
     st = (order.get("status") or "").strip().upper()
     meli: dict[str, str] = {}
+    datas: dict[str, dict[str, str]] = {}
     if st:
         meli["order_status"] = st
+        logistica_datas.propor(
+            datas, "order_status", order.get("update_time"), logistica_datas.FONTE_PLATAFORMA
+        )
 
     rastreio = (order.get("tracking_number") or "").strip() or None
 
@@ -80,7 +87,12 @@ async def build_enrichment(client: TikTokClient, order_id: str) -> dict:
     if not localizacao:
         localizacao = _tiktok_destino(order)
 
-    return {"meli_status": meli, "rastreio": rastreio, "localizacao": localizacao}
+    return {
+        "meli_status": meli,
+        "rastreio": rastreio,
+        "localizacao": localizacao,
+        "datas": {f: datas[f] for f in meli if f in datas},
+    }
 
 
 async def _tiktok_integration_for_conta(
@@ -160,6 +172,8 @@ async def enrich_row(
             client_cache[conta] = client
 
     enr = await build_enrichment(client, order_id)
+    # Antes de trocar o status: o carimbo compara o valor velho com o novo.
+    row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
     row.meli_status = enr["meli_status"]
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]

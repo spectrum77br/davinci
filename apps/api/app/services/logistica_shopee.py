@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_enrich, logistica_rules
+from app.services import logistica_datas, logistica_enrich, logistica_rules
 from app.services.marketplaces.shopee import ShopeeClient
 
 logger = structlog.get_logger()
@@ -47,15 +47,23 @@ async def build_enrichment(client: ShopeeClient, order_sn: str) -> dict:
     evento, ex. "Pedido postado Piracicaba - SP").
 
     Retorna `{"meli_status": {"order_status": ..., "logistics_status": ...} | {},
-    "rastreio": str | None, "localizacao": str | None}`. Campos que a Shopee não
-    devolver ficam de fora / None."""
+    "rastreio": str | None, "localizacao": str | None, "datas": {...}}`. Campos
+    que a Shopee não devolver ficam de fora / None.
+
+    `datas` = quando cada campo mudou (ver logistica_datas). A Shopee data as
+    duas pontas: `update_time` do pedido e o horário do último evento da SPX."""
     order_sn = str(order_sn)
     status_map = await client.get_order_status_map([order_sn])
     info = status_map.get(order_sn) or {}
     st = (info.get("status") or "").strip().upper()
     meli: dict[str, str] = {}
+    datas: dict[str, dict[str, str]] = {}
     if st:
         meli["order_status"] = st
+        # `update_time` = quando o pedido mudou de estado na Shopee.
+        logistica_datas.propor(
+            datas, "order_status", info.get("update_time"), logistica_datas.FONTE_PLATAFORMA
+        )
 
     rastreio = await client.get_tracking_number(order_sn)
 
@@ -72,8 +80,23 @@ async def build_enrichment(client: ShopeeClient, order_sn: str) -> dict:
         desc = ((top or {}).get("description") or "").strip()
         if desc:
             localizacao = desc
+        if log_status:
+            # O último evento da SPX é o que produziu o logistics_status atual.
+            logistica_datas.propor(
+                datas, "logistics_status", (top or {}).get("update_time"),
+                logistica_datas.FONTE_PLATAFORMA,
+            )
+    if log_status:
+        logistica_datas.propor(
+            datas, "logistics_status", info.get("update_time"), logistica_datas.FONTE_APROX
+        )
 
-    return {"meli_status": meli, "rastreio": rastreio or None, "localizacao": localizacao}
+    return {
+        "meli_status": meli,
+        "rastreio": rastreio or None,
+        "localizacao": localizacao,
+        "datas": {f: datas[f] for f in meli if f in datas},
+    }
 
 
 async def _shopee_integration_for_conta(
@@ -153,6 +176,8 @@ async def enrich_row(
             client_cache[conta] = client
 
     enr = await build_enrichment(client, order_sn)
+    # Antes de trocar o status: o carimbo compara o valor velho com o novo.
+    row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
     row.meli_status = enr["meli_status"]
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]

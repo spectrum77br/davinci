@@ -4,6 +4,21 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+class StatusDetalheOut(BaseModel):
+    """Uma linha do balãozinho da coluna "Status Plataforma": o campo já
+    traduzido + desde quando está assim."""
+
+    campo: str
+    rotulo: str
+    valor: str
+    # ISO-8601 UTC de quando esse campo mudou; None quando ainda não há carimbo
+    # (linha antiga, que se carimba sozinha no próximo 🔄/recarregar).
+    em: str | None = None
+    # plataforma = data oficial do canal | aprox = melhor estimativa do canal |
+    # davinci = instante em que o DaVinci viu mudar. Ver logistica_datas.
+    fonte: str | None = None
+
+
 class LogisticaOut(BaseModel):
     id: UUID
     data: date | None = None
@@ -15,6 +30,9 @@ class LogisticaOut(BaseModel):
     # Assinatura em PT p/ exibir na coluna "Status Plataforma" (derivada de
     # meli_status; vazia quando não há assinatura). O front só renderiza.
     status_plataforma: str = ""
+    # A mesma assinatura ABERTA campo a campo, com a data de cada um — alimenta
+    # o balãozinho da coluna. Derivada (meli_status × status_datas × plataforma).
+    status_detalhe: list[StatusDetalheOut] = Field(default_factory=list)
     rastreio: str | None = None
     localizacao: str | None = None
     # Divergência ML × rastreio físico dos Correios (auto-calculada; só leitura).

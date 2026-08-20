@@ -71,7 +71,7 @@ async def test_build_enrichment_sem_easyship_nem_endereco():
 async def test_build_enrichment_pedido_ausente_fica_vazio():
     client = FakeAmazon({})
     enr = await logistica_amazon.build_enrichment(client, "000")
-    assert enr == {"meli_status": {}, "rastreio": None, "localizacao": None}
+    assert enr == {"meli_status": {}, "rastreio": None, "localizacao": None, "datas": {}}
 
 
 def test_assinatura_amazon_traduz():
