@@ -35,7 +35,7 @@ from app.config import get_settings
 from app.security.cipher import encrypt
 from app.services import nf_auto_enfileirar, nf_emissao_gerar, threema
 from app.services.nf_auto_enfileirar import (
-    avaliar_excecoes,
+    avaliar_restricao_loja,
     run_auto_enfileirar_nf,
 )
 
@@ -749,86 +749,96 @@ async def test_sweep_restricao_fora_do_escopo_enfileira_normal(
     ]
 
 
-def test_avaliar_excecoes_regras_puras():
-    """Motor puro das exceções por loja: valor/sku/palavra, UF vem do campo
-    Restrição da loja (uf_restrictions), dados sujos ignorados sem quebrar."""
+def test_avaliar_restricao_loja_regras_puras():
+    """Motor puro: a Restrição (uf_restrictions) BLOQUEIA a UF; as Exceções
+    (valor/sku/palavra) LIBERAM. Dados sujos ignorados sem quebrar."""
     itens = [("A001", "Carregador Apple 20W"), ("B002", "Capinha Galaxy")]
     rj = ["RJ"]
 
-    # valor: >= limite bloqueia, abaixo passa, UF fora da Restrição passa
+    # valor: libera abaixo do limite, bloqueia daí pra cima
     regra_valor = [{"tipo": "valor", "valor": 700}]
-    assert avaliar_excecoes(
+    assert avaliar_restricao_loja(
         regra_valor, uf_destino="RJ", ufs_restricao=rj, valor_total=700, itens=itens
     )
-    assert avaliar_excecoes(
+    assert avaliar_restricao_loja(
         regra_valor, uf_destino="rj", ufs_restricao=rj, valor_total=800, itens=itens
     )
-    assert avaliar_excecoes(
+    assert avaliar_restricao_loja(
         regra_valor, uf_destino="RJ", ufs_restricao=rj, valor_total=699.99, itens=itens
-    ) == []
-    assert avaliar_excecoes(
+    ) is None
+    # UF fora da Restrição nunca bloqueia
+    assert avaliar_restricao_loja(
         regra_valor, uf_destino="MG", ufs_restricao=rj, valor_total=900, itens=itens
-    ) == []
-    assert avaliar_excecoes(
+    ) is None
+    assert avaliar_restricao_loja(
         regra_valor, uf_destino=None, ufs_restricao=rj, valor_total=900, itens=itens
-    ) == []
-    # loja sem Restrição configurada → exceção nunca casa
-    assert avaliar_excecoes(
+    ) is None
+    # loja sem Restrição configurada → nada bloqueia
+    assert avaliar_restricao_loja(
         regra_valor, uf_destino="RJ", ufs_restricao=None, valor_total=900, itens=itens
-    ) == []
-    assert avaliar_excecoes(
+    ) is None
+    assert avaliar_restricao_loja(
         regra_valor, uf_destino="RJ", ufs_restricao=[], valor_total=900, itens=itens
-    ) == []
+    ) is None
     # Restrição com várias UFs: qualquer uma casa
-    assert avaliar_excecoes(
+    assert avaliar_restricao_loja(
         regra_valor, uf_destino="MG", ufs_restricao=["RJ", "mg"],
         valor_total=900, itens=itens,
     )
     # regra legada gravada com "uf" segue válida (chave ignorada)
     legada = [{"uf": "SP", "tipo": "valor", "valor": 700}]
-    assert avaliar_excecoes(
+    assert avaliar_restricao_loja(
         legada, uf_destino="RJ", ufs_restricao=rj, valor_total=800, itens=itens
     )
 
-    # sku: casa exato case-insensitive, não casa por substring
+    # sku: item na lista LIBERA (exato, case-insensitive); fora dela bloqueia
     regra_sku = [{"tipo": "sku", "termos": ["a001"]}]
-    [motivo] = avaliar_excecoes(
+    assert avaliar_restricao_loja(
         regra_sku, uf_destino="RJ", ufs_restricao=rj, valor_total=50, itens=itens
-    )
-    assert "A001" in motivo
-    assert avaliar_excecoes(
+    ) is None
+    motivo = avaliar_restricao_loja(
         regra_sku, uf_destino="RJ", ufs_restricao=rj, valor_total=50,
         itens=[("A0011", "Outro")],
-    ) == []
-
-    # palavra: substring no nome, case-insensitive
-    regra_palavra = [{"tipo": "palavra", "termos": ["apple"]}]
-    [motivo] = avaliar_excecoes(
-        regra_palavra, uf_destino="RJ", ufs_restricao=rj, valor_total=50, itens=itens
     )
-    assert "Carregador Apple 20W" in motivo
-    assert avaliar_excecoes(
+    assert "RJ" in motivo and "a001" in motivo
+
+    # palavra: substring no nome LIBERA (case-insensitive)
+    regra_palavra = [{"tipo": "palavra", "termos": ["apple"]}]
+    assert avaliar_restricao_loja(
+        regra_palavra, uf_destino="RJ", ufs_restricao=rj, valor_total=50, itens=itens
+    ) is None
+    assert avaliar_restricao_loja(
         regra_palavra, uf_destino="RJ", ufs_restricao=rj, valor_total=50,
         itens=[(None, "Capinha Galaxy")],
-    ) == []
+    )
+    # basta UM item casar pra liberar o pedido inteiro
+    assert avaliar_restricao_loja(
+        regra_palavra, uf_destino="RJ", ufs_restricao=rj, valor_total=50,
+        itens=[("Z9", "Capinha Galaxy"), ("A1", "Fone Apple")],
+    ) is None
 
-    # dados sujos: regra não-dict, valor não numérico, sem regras → passa
+    # dados sujos: regra não-dict, valor não numérico, termos vazios, sem
+    # regras → loja fica inerte, nunca bloqueia
     sujas = ["lixo", {"tipo": "valor", "valor": "abc"}, {"tipo": "zzz"}]
-    assert avaliar_excecoes(
+    assert avaliar_restricao_loja(
         sujas, uf_destino="RJ", ufs_restricao=rj, valor_total=999, itens=itens
-    ) == []
-    assert avaliar_excecoes(
+    ) is None
+    assert avaliar_restricao_loja(
+        [{"tipo": "palavra", "termos": []}], uf_destino="RJ", ufs_restricao=rj,
+        valor_total=999, itens=itens,
+    ) is None
+    assert avaliar_restricao_loja(
         [], uf_destino="RJ", ufs_restricao=rj, valor_total=999, itens=itens
-    ) == []
+    ) is None
 
 
 @pytest.mark.asyncio
-async def test_sweep_excecao_valor_bloqueia(
+async def test_sweep_restricao_loja_valor_bloqueia(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
 ):
-    """Loja com Restrição RJ + exceção "valor >= 700" bloqueia o pedido de
-    800 pro RJ: obs "restrição" (PUT) antes do PATCH 83955, painel
-    'restricao' com "Exceção da loja", tentativa única."""
+    """Loja que não envia pro RJ, com exceção "valor" 700 (libera só abaixo
+    disso), bloqueia o pedido de 800: obs "restrição" (PUT) antes do PATCH
+    83955, painel 'restricao' com o motivo, tentativa única."""
     await _seed_loja(
         db, admin, plataforma="shopee", bling_store_id="930001",
         excecoes=[{"tipo": "valor", "valor": 700}],
@@ -846,7 +856,7 @@ async def test_sweep_excecao_valor_bloqueia(
 
     summary = await run_auto_enfileirar_nf()
     assert summary["candidatos"] == 1
-    assert summary["excecao"] == 1
+    assert summary["restricao_loja"] == 1
     assert summary["restricao"] == 0
     assert summary["enfileirados"] == 0
 
@@ -870,7 +880,7 @@ async def test_sweep_excecao_valor_bloqueia(
         )
     ).scalar_one()
     assert fat.status_faturamento == "restricao"
-    assert "Exceção da loja" in (fat.erro_faturamento or "")
+    assert "não envia pro RJ" in (fat.erro_faturamento or "")
     assert "R$ 700,00" in (fat.erro_faturamento or "")
 
     # tentativa automática única
@@ -881,11 +891,11 @@ async def test_sweep_excecao_valor_bloqueia(
 
 
 @pytest.mark.asyncio
-async def test_sweep_excecao_fora_do_escopo_enfileira_normal(
+async def test_sweep_restricao_loja_fora_do_escopo_enfileira_normal(
     db: AsyncSession, admin: User
 ):
-    """Contra-casos passam direto: valor abaixo do limite, UF fora da
-    Restrição e loja SEM exceções enfileiram normal."""
+    """Contra-casos passam direto: valor abaixo do limite (exceção LIBERA),
+    UF fora da Restrição e loja SEM exceções enfileiram normal."""
     await _seed_loja(
         db, admin, plataforma="shopee", bling_store_id="930001",
         excecoes=[{"tipo": "valor", "valor": 700}],
@@ -911,7 +921,7 @@ async def test_sweep_excecao_fora_do_escopo_enfileira_normal(
 
     summary = await run_auto_enfileirar_nf()
     assert summary["candidatos"] == 3
-    assert summary["excecao"] == 0
+    assert summary["restricao_loja"] == 0
     assert summary["enfileirados"] == 3
 
     db.expire_all()
@@ -919,3 +929,41 @@ async def test_sweep_excecao_fora_do_escopo_enfileira_normal(
     assert sorted(n for c in cmds for n in c.numeros) == [
         "830001", "830002", "830003"
     ]
+
+
+@pytest.mark.asyncio
+async def test_sweep_restricao_loja_palavra_libera_o_que_casa(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Caso real: loja não envia pro RS, EXCETO airfryer. O pedido de
+    airfryer fatura normal; o de outro produto vai pra 83955."""
+    await _seed_loja(
+        db, admin, plataforma="shopee", bling_store_id="930001",
+        excecoes=[{"tipo": "palavra", "termos": ["airfryer"]}],
+        uf_restrictions=["RS"],
+    )
+    await _seed_pedido(
+        db, numero="830001", loja="930001", sku="a1", bling_id=700001,
+        uf_destino="RS", item_descricao="Airfryer Vidro UAF001 M1 220v",
+    )
+    await _seed_pedido(
+        db, numero="830002", loja="930001", sku="a2", bling_id=700002,
+        uf_destino="RS", item_descricao="Capinha Galaxy",
+    )
+    db.add(Product(user_id=admin.id, sku="a1", name="A1", stock=3))
+    db.add(Product(user_id=admin.id, sku="a2", name="A2", stock=3))
+    await db.commit()
+    fake = _FakeBlingSituacao(orders={700002: {"id": 700002, "observacoes": ""}})
+    monkeypatch.setattr(
+        nf_emissao_gerar, "_bling_client_opt", lambda _s: _async_return(fake)
+    )
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 2
+    assert summary["restricao_loja"] == 1
+    assert summary["enfileirados"] == 1
+
+    assert fake.chamadas == [(700002, 83955)]
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert sorted(n for c in cmds for n in c.numeros) == ["830001"]

@@ -110,7 +110,7 @@ async def run_auto_enfileirar_nf() -> dict:
         "comandos": 0,
         "sem_estoque": 0,
         "restricao": 0,
-        "excecao": 0,
+        "restricao_loja": 0,
         "pulados": 0,
         "fundidos": 0,
     }
@@ -184,28 +184,26 @@ async def run_auto_enfileirar_nf() -> dict:
             )
         numeros = [n for n in numeros if n not in restricao]
 
-        # 1b) Exceções POR LOJA (campo "Exceções" da tela Lojas, store_info.
-        #     excecoes) — regras de valor/sku/palavra que valem pras UFs do
-        #     campo "Restrição" (store_info.uf_restrictions) da loja,
-        #     ADICIONAIS à restrição hardcoded acima. Mesma mecânica: obs
-        #     "restrição" (GET→PUT) ANTES do PATCH 83955.
-        excecao = await _pedidos_excecao(session, numeros) if numeros else {}
-        if excecao:
-            await _escrever_observacao_restricao(session, list(excecao))
-            await _marcar_aguardando_cancelamento(session, list(excecao))
-            for numero, motivos in excecao.items():
+        # 1b) Restrição POR LOJA (campos "Restrição" + "Exceções" da tela
+        #     Lojas): a loja NÃO envia pras UFs de store_info.uf_restrictions;
+        #     store_info.excecoes lista o que PODE ir mesmo assim. Pedido pra
+        #     UF restrita que não casa nenhuma exceção é bloqueado, ADICIONAL
+        #     à restrição hardcoded acima. Mesma mecânica: obs "restrição"
+        #     (GET→PUT) ANTES do PATCH 83955.
+        bloqueio = await _pedidos_restricao_loja(session, numeros) if numeros else {}
+        if bloqueio:
+            await _escrever_observacao_restricao(session, list(bloqueio))
+            await _marcar_aguardando_cancelamento(session, list(bloqueio))
+            for numero, motivo in bloqueio.items():
                 await _marcar_faturamento(
-                    session,
-                    [numero],
-                    status_txt="restricao",
-                    erro="Exceção da loja: " + "; ".join(motivos),
+                    session, [numero], status_txt="restricao", erro=motivo
                 )
-            summary["excecao"] = len(excecao)
+            summary["restricao_loja"] = len(bloqueio)
             logger.info(
-                "nf_auto_enfileirar_excecao",
-                pedidos={n: motivos for n, motivos in excecao.items()},
+                "nf_auto_enfileirar_restricao_loja",
+                pedidos={n: motivo for n, motivo in bloqueio.items()},
             )
-        numeros = [n for n in numeros if n not in excecao]
+        numeros = [n for n in numeros if n not in bloqueio]
 
         # 1) Estoque primeiro: saldo virtual negativo → Aguardando Cancelamento.
         #    Só os candidatos NOVOS — o backlog já passou no check ao entrar.
@@ -434,28 +432,29 @@ def _brl(valor) -> str:
     return "R$ " + txt.replace("_", ".")
 
 
-def avaliar_excecoes(
+def avaliar_restricao_loja(
     regras: list[dict],
     *,
     uf_destino: str | None,
     ufs_restricao: list[str] | None,
     valor_total,
     itens: list[tuple[str | None, str | None]],
-) -> list[str]:
-    """Motivos das regras de exceção da loja que o pedido casa. [] = passa.
+) -> str | None:
+    """Motivo do bloqueio pela restrição da loja. None = pode faturar.
 
-    `regras` = store_info.excecoes (lista JSONB, ver schemas.StoreExcecao);
     `ufs_restricao` = store_info.uf_restrictions (campo "Restrição" da tela
-    Lojas) — as regras só valem quando o destino do pedido está nessas UFs
-    (loja sem Restrição = exceção nunca casa);
-    `itens` = [(sku, nome), ...] de TODOS os itens do pedido. Tipos:
-      - "valor":   bloqueia se o valor total do pedido >= regra["valor"];
-      - "sku":     bloqueia se algum item tem SKU da lista (exato, casefold);
-      - "palavra": bloqueia se o nome de algum item contém um dos termos.
-    Regras antigas ainda podem carregar "uf" — a chave é IGNORADA (a UF vem
-    da Restrição). Defensivo com dados sujos (regra não-dict, valor
-    não-numérico, termos vazios) — regra malformada é ignorada, nunca
-    derruba o sweep.
+    Lojas) = as UFs pras quais a loja NÃO envia. `regras` = store_info.
+    excecoes (lista JSONB, ver schemas.StoreExcecao) = o que PODE ir mesmo
+    assim; casou uma exceção, LIBERA. `itens` = [(sku, nome), ...] de TODOS
+    os itens do pedido. Tipos:
+      - "valor":   libera se o valor total do pedido < regra["valor"];
+      - "sku":     libera se algum item tem SKU da lista (exato, casefold);
+      - "palavra": libera se o nome de algum item contém um dos termos.
+    Loja sem Restrição, UF fora dela ou loja sem exceção válida cadastrada
+    ficam inertes (nunca bloqueiam). Regras antigas ainda podem carregar
+    "uf" — a chave é IGNORADA (a UF vem da Restrição). Defensivo com dados
+    sujos (regra não-dict, valor não-numérico, termos vazios) — regra
+    malformada é ignorada, nunca derruba o sweep.
     """
     uf = (uf_destino or "").strip().upper()
     ufs = {
@@ -464,8 +463,10 @@ def avaliar_excecoes(
         if str(u).strip()
     }
     if not uf or uf not in ufs or not regras:
-        return []
-    motivos: list[str] = []
+        return None
+    validas = 0
+    detalhes: list[str] = []
+    termos_livres: set[str] = set()
     for regra in regras:
         if not isinstance(regra, dict):
             continue
@@ -475,55 +476,53 @@ def avaliar_excecoes(
                 limite = float(regra.get("valor"))
             except (TypeError, ValueError):
                 continue
-            if valor_total is not None and float(valor_total) >= limite:
-                motivos.append(
-                    f"valor {_brl(valor_total)} >= {_brl(limite)} pra {uf}"
-                )
-        elif tipo == "sku":
-            termos = {
-                str(t).strip().lower()
-                for t in (regra.get("termos") or [])
-                if str(t).strip()
-            }
-            casados = sorted(
-                {
-                    sku
-                    for sku, _ in itens
-                    if sku and sku.strip().lower() in termos
-                }
-            )
-            if casados:
-                motivos.append(
-                    f"SKU bloqueado pra {uf}: " + ", ".join(casados)
-                )
-        elif tipo == "palavra":
+            validas += 1
+            if valor_total is None or float(valor_total) < limite:
+                return None
+            detalhes.append(f"valor {_brl(valor_total)} >= {_brl(limite)}")
+        elif tipo in ("sku", "palavra"):
             termos = [
                 str(t).strip().lower()
                 for t in (regra.get("termos") or [])
                 if str(t).strip()
             ]
-            casados: list[str] = []
-            for _, nome in itens:
-                if not nome or nome in casados:
-                    continue
-                baixo = nome.lower()
-                if any(t in baixo for t in termos):
-                    casados.append(nome)
-            if casados:
-                motivos.append(
-                    f"palavra bloqueada pra {uf}: " + ", ".join(casados)
+            if not termos:
+                continue
+            validas += 1
+            termos_livres.update(termos)
+            if tipo == "sku":
+                alvo = set(termos)
+                casou = any(
+                    sku and sku.strip().lower() in alvo for sku, _ in itens
                 )
-    return motivos
+            else:
+                casou = any(
+                    nome and any(t in nome.lower() for t in termos)
+                    for _, nome in itens
+                )
+            if casou:
+                return None
+    if not validas:
+        return None
+    if termos_livres:
+        detalhes.append(
+            "nenhum item na exceção (" + ", ".join(sorted(termos_livres)) + ")"
+        )
+    motivo = f"Restrição da loja: não envia pro {uf}"
+    if detalhes:
+        motivo += " — " + "; ".join(detalhes)
+    return motivo
 
 
-async def _pedidos_excecao(
+async def _pedidos_restricao_loja(
     session, numeros: list[str]
-) -> dict[str, list[str]]:
-    """Pedidos que caem numa exceção configurada na loja (store_info.excecoes).
+) -> dict[str, str]:
+    """Pedidos bloqueados pela restrição de UF da loja (store_info).
 
-    Só olha pedidos de loja COM exceções (filtro no WHERE); a avaliação em si
-    é da `avaliar_excecoes` (pura). `valorbase` = valor total do pedido,
-    replicado em todas as linhas do mesmo bling_id. Retorna numero → motivos.
+    Só olha pedidos de loja COM exceções cadastradas (filtro no WHERE — loja
+    com Restrição e sem exceção nenhuma fica inerte); a avaliação em si é da
+    `avaliar_restricao_loja` (pura). `valorbase` = valor total do pedido,
+    replicado em todas as linhas do mesmo bling_id. Retorna numero → motivo.
     """
     if not numeros:
         return {}
@@ -559,18 +558,18 @@ async def _pedidos_excecao(
             },
         )
         info["itens"].append((sku, descricao))
-    excecao: dict[str, list[str]] = {}
+    bloqueio: dict[str, str] = {}
     for numero, info in por_pedido.items():
-        motivos = avaliar_excecoes(
+        motivo = avaliar_restricao_loja(
             info["regras"] or [],
             uf_destino=info["uf"],
             ufs_restricao=info["ufs_restricao"],
             valor_total=info["valor"],
             itens=info["itens"],
         )
-        if motivos:
-            excecao[numero] = motivos
-    return excecao
+        if motivo:
+            bloqueio[numero] = motivo
+    return bloqueio
 
 
 async def _escrever_observacao_restricao(
