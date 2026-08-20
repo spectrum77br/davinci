@@ -40,6 +40,7 @@ from app.models import (
     NfCommand,
     NfEtiqueta,
     NfEtiquetaArquivo,
+    NfEtiquetaHorario,
     NfFaturador,
     NfFaturamento,
     NfImpressao,
@@ -59,6 +60,9 @@ from app.schemas.nf import (
     NfCatalogoMalaOut,
     NfCatalogoMalaPatch,
     NfEtiquetaCreate,
+    NfEtiquetaHorarioCreate,
+    NfEtiquetaHorarioOut,
+    NfEtiquetaHorarioPatch,
     NfEtiquetaOut,
     NfEtiquetaPatch,
     NfFaturadorCreate,
@@ -367,6 +371,121 @@ async def delete_etiqueta(
     await session.delete(e)
     await session.commit()
     logger.info("nf_etiqueta_deleted", id=str(etiqueta_id))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# HORÁRIO DA ETIQUETA — quando a etiqueta de cada plataforma é impressa.
+# Só cadastro; nenhum worker lê isso ainda.
+# ---------------------------------------------------------------------------
+
+
+def _etiqueta_horario_out(h: NfEtiquetaHorario) -> NfEtiquetaHorarioOut:
+    return NfEtiquetaHorarioOut(
+        id=h.id,
+        plataforma=h.plataforma,
+        modo=h.modo,
+        horarios=list(h.horarios or []),
+        observacao=h.observacao,
+        sort_order=h.sort_order,
+        created_by=h.created_by,
+        created_at=h.created_at,
+        updated_at=h.updated_at,
+    )
+
+
+@router.get("/etiqueta-horarios", response_model=list[NfEtiquetaHorarioOut])
+async def list_etiqueta_horarios(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_cad_view)],
+) -> list[NfEtiquetaHorarioOut]:
+    stmt = select(NfEtiquetaHorario).order_by(
+        asc(NfEtiquetaHorario.sort_order), asc(NfEtiquetaHorario.plataforma)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [_etiqueta_horario_out(h) for h in rows]
+
+
+@router.post(
+    "/etiqueta-horarios",
+    response_model=NfEtiquetaHorarioOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_etiqueta_horario(
+    body: NfEtiquetaHorarioCreate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(_cad_edit)],
+) -> NfEtiquetaHorarioOut:
+    h = NfEtiquetaHorario(
+        plataforma=body.plataforma.strip(),
+        modo=body.modo,
+        horarios=[] if body.modo == "continuo" else list(body.horarios or []),
+        observacao=_clean(body.observacao),
+        sort_order=body.sort_order or 0,
+        created_by=admin.id,
+    )
+    session.add(h)
+    await session.commit()
+    await session.refresh(h)
+    logger.info(
+        "nf_etiqueta_horario_created",
+        id=str(h.id),
+        plataforma=h.plataforma,
+        modo=h.modo,
+    )
+    return _etiqueta_horario_out(h)
+
+
+@router.patch("/etiqueta-horarios/{horario_id}", response_model=NfEtiquetaHorarioOut)
+async def patch_etiqueta_horario(
+    horario_id: UUID,
+    body: NfEtiquetaHorarioPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_cad_edit)],
+) -> NfEtiquetaHorarioOut:
+    h = (
+        await session.execute(
+            select(NfEtiquetaHorario).where(NfEtiquetaHorario.id == horario_id)
+        )
+    ).scalar_one_or_none()
+    if h is None:
+        raise HTTPException(404, detail={"code": "nf_etiqueta_horario_not_found"})
+
+    data = body.model_dump(exclude_unset=True)
+    if "plataforma" in data and data["plataforma"] is not None:
+        h.plataforma = data["plataforma"].strip()
+    if "modo" in data and data["modo"] is not None:
+        h.modo = data["modo"]
+    if "horarios" in data and data["horarios"] is not None:
+        h.horarios = list(data["horarios"])
+    if "observacao" in data:
+        h.observacao = _clean(data["observacao"])
+    if "sort_order" in data and data["sort_order"] is not None:
+        h.sort_order = data["sort_order"]
+    if h.modo == "continuo":
+        h.horarios = []
+
+    await session.commit()
+    await session.refresh(h)
+    return _etiqueta_horario_out(h)
+
+
+@router.delete("/etiqueta-horarios/{horario_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_etiqueta_horario(
+    horario_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_cad_delete)],
+) -> None:
+    h = (
+        await session.execute(
+            select(NfEtiquetaHorario).where(NfEtiquetaHorario.id == horario_id)
+        )
+    ).scalar_one_or_none()
+    if h is None:
+        raise HTTPException(404, detail={"code": "nf_etiqueta_horario_not_found"})
+    await session.delete(h)
+    await session.commit()
+    logger.info("nf_etiqueta_horario_deleted", id=str(horario_id))
     return None
 
 

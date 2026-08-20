@@ -12,10 +12,11 @@ const { api } = useApi()
 const canEdit = useCan('nf_faturador', 'edit')
 const canDelete = useCan('nf_faturador', 'delete')
 
-type Tab = 'faturador' | 'etiqueta' | 'impressao'
+type Tab = 'faturador' | 'etiqueta' | 'etiqueta_horario' | 'impressao'
 const TABS: { key: Tab; label: string }[] = [
   { key: 'faturador', label: 'Faturador' },
   { key: 'etiqueta', label: 'Etiqueta' },
+  { key: 'etiqueta_horario', label: 'Horário Etiqueta' },
   { key: 'impressao', label: 'Impressão' },
 ]
 const tab = ref<Tab>('faturador')
@@ -225,6 +226,74 @@ const sortedEtiquetas = computed(() =>
 function etqModoLabel(m: string | null) { return ETQ_MODO_OPTIONS.find((o) => o.value === (m || ''))?.label || m || '—' }
 
 // ===========================================================================
+// HORÁRIO ETIQUETA — quando a etiqueta de cada plataforma é impressa (BRT).
+// ===========================================================================
+type EtqHorario = {
+  id: string; plataforma: string; modo: string; horarios: string[]
+  observacao: string | null; sort_order: number
+}
+type EhForm = { plataforma: string; modo: string; horarios: string; observacao: string; sort_order: string }
+function emptyEh(): EhForm { return { plataforma: '', modo: 'horario', horarios: '', observacao: '', sort_order: '' } }
+const EH_MODO_OPTIONS = [
+  { value: 'continuo', label: 'Contínuo — imprime assim que a NF fecha' },
+  { value: 'horario', label: 'Horário — só nos horários abaixo' },
+]
+const etqHorarios = ref<EtqHorario[]>([])
+const ehForm = ref<EhForm>(emptyEh())
+const ehEditing = ref<EtqHorario | null>(null)
+const ehShowNew = ref(false)
+
+function buildEhBody(f: EhForm) {
+  return {
+    plataforma: f.plataforma.trim(),
+    modo: f.modo,
+    horarios: f.modo === 'continuo' ? [] : f.horarios.split(/[,;\s]+/).filter(Boolean),
+    observacao: f.observacao.trim() || null,
+    sort_order: f.sort_order.trim() ? Number(f.sort_order) : 0,
+  }
+}
+function openEhNew() { ehForm.value = emptyEh(); saveErr.value = null; ehShowNew.value = true }
+function openEhEdit(h: EtqHorario) {
+  ehEditing.value = h
+  ehForm.value = { plataforma: h.plataforma, modo: h.modo, horarios: (h.horarios || []).join(', '), observacao: h.observacao || '', sort_order: String(h.sort_order ?? 0) }
+  saveErr.value = null
+}
+async function createEh() {
+  if (!ehForm.value.plataforma.trim()) { saveErr.value = 'preencha a plataforma'; return }
+  saving.value = true; saveErr.value = null
+  try { await api('/api/nf-cadastro/etiqueta-horarios', { method: 'POST', body: buildEhBody(ehForm.value) }); ehShowNew.value = false; await loadEtqHorarios() }
+  catch (e: any) { saveErr.value = errCode(e) } finally { saving.value = false }
+}
+async function saveEh() {
+  if (!ehEditing.value) return
+  saving.value = true; saveErr.value = null
+  try { await api(`/api/nf-cadastro/etiqueta-horarios/${ehEditing.value.id}`, { method: 'PATCH', body: buildEhBody(ehForm.value) }); ehEditing.value = null; await loadEtqHorarios() }
+  catch (e: any) { saveErr.value = errCode(e) } finally { saving.value = false }
+}
+async function removeEh() {
+  if (!ehEditing.value) return
+  if (!confirm('Remover este horário?')) return
+  saving.value = true; saveErr.value = null
+  try { await api(`/api/nf-cadastro/etiqueta-horarios/${ehEditing.value.id}`, { method: 'DELETE' }); ehEditing.value = null; await loadEtqHorarios() }
+  catch (e: any) { saveErr.value = errCode(e) } finally { saving.value = false }
+}
+async function loadEtqHorarios() {
+  loading.value = true; error.value = null
+  try { etqHorarios.value = await api<EtqHorario[]>('/api/nf-cadastro/etiqueta-horarios') }
+  catch (e: any) { error.value = errCode(e) } finally { loading.value = false }
+}
+const sortedEtqHorarios = computed(() =>
+  [...etqHorarios.value].sort((a, b) =>
+    a.sort_order !== b.sort_order ? a.sort_order - b.sort_order
+      : (a.plataforma || '').localeCompare(b.plataforma || '', 'pt-BR', { sensitivity: 'base', numeric: true })),
+)
+function ehModoLabel(m: string) { return m === 'continuo' ? 'Contínuo' : 'Horário' }
+function ehHorariosLabel(h: EtqHorario) {
+  if (h.modo === 'continuo') return 'assim que a NF fecha'
+  return h.horarios?.length ? h.horarios.join(', ') : '— (sem horário)'
+}
+
+// ===========================================================================
 // IMPRESSÃO
 // ===========================================================================
 type Impressao = {
@@ -300,6 +369,7 @@ function errCode(e: any) { return e?.data?.detail?.code || e?.message || 'erro' 
 async function loadCurrent() {
   if (tab.value === 'faturador') return loadFaturadores()
   if (tab.value === 'etiqueta') return loadEtiquetas()
+  if (tab.value === 'etiqueta_horario') return loadEtqHorarios()
   return loadImpressoes()
 }
 watch(tab, () => { void loadCurrent() })
@@ -448,6 +518,54 @@ await loadFaturadores()
           <div v-if="e.observacao" class="text-xs break-words">{{ e.observacao }}</div>
         </div>
         <div v-if="!loading && etiquetas.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">nenhuma etiqueta</div>
+      </div>
+    </div>
+
+    <!-- ==================== HORÁRIO ETIQUETA ==================== -->
+    <div v-else-if="tab === 'etiqueta_horario'" class="space-y-3">
+      <div class="flex items-center">
+        <p class="text-sm text-muted-foreground">
+          Quando as etiquetas de cada plataforma são impressas no DaVinci (horário de Brasília).
+          Contínuo = imprime assim que a NF fecha (Shopee/TikTok, fluxo todo automático); Horário =
+          só nos horários cadastrados. Vale pra todas as lojas da plataforma.
+        </p>
+        <Button v-if="canEdit" size="sm" class="ml-auto shrink-0" @click="openEhNew">
+          <Plus class="size-4 mr-1" /> Novo horário
+        </Button>
+      </div>
+
+      <div class="hidden md:block border rounded-md overflow-x-auto">
+        <table class="w-full text-sm min-w-[600px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
+          <thead class="bg-muted/40 text-left">
+            <tr class="whitespace-nowrap">
+              <th class="px-3 py-2">Plataforma</th>
+              <th class="px-3 py-2">Modo</th>
+              <th class="px-3 py-2">Horários (BRT)</th>
+              <th class="px-3 py-2">Observação</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="h in sortedEtqHorarios" :key="h.id" class="border-t hover:bg-muted/20 cursor-pointer" @click="openEhEdit(h)">
+              <td class="px-3 py-2 whitespace-nowrap font-medium">{{ h.plataforma }}</td>
+              <td class="px-3 py-2 whitespace-nowrap text-muted-foreground">{{ ehModoLabel(h.modo) }}</td>
+              <td class="px-3 py-2 whitespace-nowrap">{{ ehHorariosLabel(h) }}</td>
+              <td class="px-3 py-2 text-muted-foreground">{{ h.observacao || '—' }}</td>
+            </tr>
+            <tr v-if="!loading && etqHorarios.length === 0">
+              <td colspan="4" class="px-3 py-6 text-center text-muted-foreground">nenhum horário</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="md:hidden space-y-2">
+        <div v-for="h in sortedEtqHorarios" :key="h.id" class="border rounded-md p-3 space-y-1 hover:bg-muted/20 cursor-pointer" @click="openEhEdit(h)">
+          <div class="font-medium">{{ h.plataforma }}</div>
+          <div class="text-xs text-muted-foreground">{{ ehModoLabel(h.modo) }}</div>
+          <div class="text-xs">{{ ehHorariosLabel(h) }}</div>
+          <div v-if="h.observacao" class="text-xs break-words">{{ h.observacao }}</div>
+        </div>
+        <div v-if="!loading && etqHorarios.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">nenhum horário</div>
       </div>
     </div>
 
@@ -604,6 +722,37 @@ await loadFaturadores()
           <Button v-if="etqEditing && canDelete" variant="ghost" :disabled="saving" class="text-red-500 mr-auto" @click="removeEtq"><Trash2 class="size-4 mr-1" /> remover</Button>
           <Button variant="ghost" :disabled="saving" @click="etqShowNew = false; etqEditing = null">{{ canEdit ? 'cancelar' : 'fechar' }}</Button>
           <Button v-if="canEdit" :disabled="saving" @click="etqEditing ? saveEtq() : createEtq()">{{ saving ? 'salvando…' : (etqEditing ? 'Salvar' : 'Criar') }}</Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== HORÁRIO ETIQUETA modals ==================== -->
+    <div v-if="ehShowNew || ehEditing" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="ehShowNew = false; ehEditing = null">
+      <div class="bg-background border rounded-lg w-full max-w-md p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold">{{ ehEditing ? 'Editar horário' : 'Novo horário' }}</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" @click="ehShowNew = false; ehEditing = null"><X class="size-4" /></Button>
+        </div>
+        <div class="space-y-3">
+          <div><Label>Plataforma *</Label><Input v-model="ehForm.plataforma" placeholder="ex: ml, amazon, shopee" /></div>
+          <div><Label>Modo</Label>
+            <select v-model="ehForm.modo" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm">
+              <option v-for="o in EH_MODO_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </select>
+          </div>
+          <div v-if="ehForm.modo === 'horario'">
+            <Label>Horários (BRT)</Label>
+            <Input v-model="ehForm.horarios" placeholder="ex: 10:00, 14:00" />
+            <p class="text-xs text-muted-foreground mt-1">separe por vírgula; pode ter vários</p>
+          </div>
+          <div><Label>Observação</Label><textarea v-model="ehForm.observacao" rows="2" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm resize-y" /></div>
+          <div><Label>Ordem</Label><Input v-model="ehForm.sort_order" inputmode="numeric" placeholder="0" /></div>
+        </div>
+        <div v-if="saveErr" class="text-sm text-red-500">erro: {{ saveErr }}</div>
+        <div class="flex justify-end gap-2">
+          <Button v-if="ehEditing && canDelete" variant="ghost" :disabled="saving" class="text-red-500 mr-auto" @click="removeEh"><Trash2 class="size-4 mr-1" /> remover</Button>
+          <Button variant="ghost" :disabled="saving" @click="ehShowNew = false; ehEditing = null">{{ canEdit ? 'cancelar' : 'fechar' }}</Button>
+          <Button v-if="canEdit" :disabled="saving" @click="ehEditing ? saveEh() : createEh()">{{ saving ? 'salvando…' : (ehEditing ? 'Salvar' : 'Criar') }}</Button>
         </div>
       </div>
     </div>

@@ -144,6 +144,40 @@ class NfEtiqueta(Base, TimestampMixin):
     )
 
 
+class NfEtiquetaHorario(Base, TimestampMixin):
+    """QUANDO as etiquetas de cada plataforma são impressas no DaVinci.
+
+    Mesma granularidade da aba Etiqueta: uma linha por PLATAFORMA, valendo pra
+    todas as lojas dela.
+
+    - `modo` = 'continuo' (imprime assim que a NF fecha — Shopee/TikTok, fluxo
+      todo automático) ou 'horario' (só nos horários cadastrados — ML/Amazon).
+    - `horarios` = lista de "HH:MM" no fuso de Brasília (America/Sao_Paulo),
+      ex. ["10:00", "14:00"]. Vazia no modo contínuo.
+
+    Por enquanto é só CADASTRO — nenhum worker lê isso ainda.
+    """
+
+    __tablename__ = "nf_etiqueta_horario"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    plataforma: Mapped[str] = mapped_column(Text, nullable=False)
+    # 'continuo' | 'horario'
+    modo: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'horario'"))
+    horarios: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
 class NfFaturamento(Base, TimestampMixin):
     """Status por ETAPA de um pedido no fluxo de NF automática (faturamento →
     etiqueta → impressão). Uma linha por pedido; a AUTOMAÇÃO (fases seguintes)
