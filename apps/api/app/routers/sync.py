@@ -34,6 +34,8 @@ from app.models import (
 )
 from app.schemas.products import JobCreatedOut, JobOut
 from app.schemas.sync import (
+    AnuncioLookupOut,
+    AnuncioSyncIn,
     ReloadLinkMove,
     ReloadLinksOut,
     SyncAllIn,
@@ -47,6 +49,7 @@ from app.services.advisory_lock import (
     _user_lock_key,
     mass_sync_active,
 )
+from app.services.anuncio_lookup import lookup_anuncio, vincular_anuncio
 from app.services.job_details import append_job_detail, load_job_details_tail
 from app.services.link_reconcile import reconcile_product_links
 from app.services.sync_orchestrator import SyncOrchestrator
@@ -372,6 +375,146 @@ async def sync_product(
     # Per-link detail now lives in `background_job_details` (off the hot job
     # row). Hydrate the response from there so the front's per-link toast keeps
     # working — a single product's log is a handful of entries.
+    out.details = await load_job_details_tail(session, job.id)
+    return out
+
+
+@router.get("/anuncio/lookup", response_model=AnuncioLookupOut)
+async def anuncio_lookup(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "view"))],
+    id: Annotated[str, Query(min_length=3, max_length=64)],
+    integration_id: UUID | None = None,
+) -> AnuncioLookupOut:
+    """Busca UM anúncio pelo ID (sem varrer a conta inteira) e devolve as
+    variações com o casamento por SKU já resolvido. Só leitura — não cria
+    vínculo nem mexe em estoque."""
+    dados = await lookup_anuncio(
+        session, user, external_id=id, integration_id=integration_id
+    )
+    return AnuncioLookupOut.model_validate(dados)
+
+
+@router.post("/anuncio/sync", response_model=JobOut)
+async def anuncio_sync(
+    body: AnuncioSyncIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("produtos", "edit"))],
+) -> JobOut:
+    """Vincula (opcional) e sincroniza o estoque SÓ das variações deste anúncio.
+
+    Mesmo motor do sync individual (`SyncOrchestrator`, force + Bling fresco),
+    só que o escopo é o anúncio inteiro em vez de um produto — é o que evita
+    ter que rodar "Sincronizar Todos" da conta por causa de um anúncio novo.
+    """
+    if body.vincular:
+        dados = await vincular_anuncio(
+            session, user, external_id=body.external_id, integration_id=body.integration_id
+        )
+    else:
+        dados = await lookup_anuncio(
+            session, user, external_id=body.external_id, integration_id=body.integration_id
+        )
+    if not dados.get("encontrado"):
+        raise HTTPException(
+            404, detail={"code": "anuncio_nao_encontrado", "external_id": body.external_id}
+        )
+
+    raw_ids = dados.get("link_ids") or [
+        v["link_id"] for v in dados.get("variacoes", []) if v.get("link_id")
+    ]
+    link_ids = [UUID(str(i)) for i in raw_ids]
+    if not link_ids:
+        # Nada vinculado e nada vinculável: sem SKU casado não há o que empurrar.
+        raise HTTPException(
+            400,
+            detail={
+                "code": "anuncio_sem_vinculos",
+                "external_id": dados.get("external_id"),
+                "resumo": dados.get("resumo"),
+            },
+        )
+
+    product_ids = list(
+        (
+            await session.execute(
+                select(ProductLink.product_id).where(
+                    and_(user_scope(ProductLink, user), ProductLink.id.in_(link_ids))
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    products_to_sync = list(
+        (
+            await session.execute(
+                select(Product).where(
+                    and_(Product.id.in_(product_ids), user_scope(Product, user))
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not products_to_sync:
+        raise HTTPException(400, detail={"code": "anuncio_sem_produtos"})
+
+    # Os links Bling desses produtos entram no escopo para o estoque chegar
+    # fresco ANTES do push pro marketplace — mesmo truque do sync individual.
+    bling_ids = list(
+        (
+            await session.execute(
+                select(ProductLink.id).where(
+                    and_(
+                        ProductLink.product_id.in_(product_ids),
+                        ProductLink.platform == IntegrationPlatform.BLING,
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    job = BackgroundJob(
+        type=BackgroundJobType.SYNC_PRODUCT,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={
+            "anuncio_external_id": dados.get("external_id"),
+            "integration_id": str(body.integration_id),
+            "links": len(link_ids),
+        },
+    )
+    session.add(job)
+    await session.flush()
+
+    orch = SyncOrchestrator(
+        session,
+        user_id=user.id,
+        job=job,
+        force=True,
+        force_bling_refresh=True,
+    )
+    await orch.run(products_to_sync, only_link_ids=[*link_ids, *bling_ids])
+
+    # orch.run() sobrescreve job.result — devolve o contexto do anúncio junto.
+    job.result = {
+        **(job.result or {}),
+        "anuncio": {
+            "external_id": dados.get("external_id"),
+            "titulo": dados.get("titulo"),
+            "conta": dados.get("conta"),
+            "plataforma": dados.get("plataforma"),
+            "vinculos_criados": dados.get("criados", 0),
+            "variacoes": dados.get("resumo"),
+        },
+    }
+    await session.commit()
+
+    await session.refresh(job)
+    out = JobOut.model_validate(job, from_attributes=True)
     out.details = await load_job_details_tail(session, job.id)
     return out
 

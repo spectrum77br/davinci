@@ -44,6 +44,55 @@ class ReloadLinksOut(BaseModel):
     warnings_detail: list[dict] = []
 
 
+class AnuncioVariacaoOut(BaseModel):
+    """Uma variação (SKU) do anúncio pesquisado por ID."""
+
+    variation_id: str | None = None
+    variacao: str | None = None
+    sku: str | None = None
+    # vinculado | pronto | sem_sku | sku_ambiguo | sem_produto
+    estado: str
+    listing_type: str | None = None
+    product_id: UUID | None = None
+    produto_nome: str | None = None
+    estoque_bling: int | None = None
+    estoque_anuncio: int | None = None
+    link_id: UUID | None = None
+
+
+class AnuncioResumoOut(BaseModel):
+    total: int = 0
+    prontos: int = 0
+    ja_vinculados: int = 0
+    sem_sku: int = 0
+    sku_ambiguo: int = 0
+    sem_produto: int = 0
+
+
+class AnuncioLookupOut(BaseModel):
+    """Anúncio achado pelo ID, com todas as variações agrupadas embaixo."""
+
+    encontrado: bool
+    motivo: str | None = None
+    external_id: str
+    plataforma: str | None = None
+    integration_id: UUID | None = None
+    conta: str | None = None
+    titulo: str | None = None
+    # "marketplace" = veio da API do canal | "local" = montado dos vínculos
+    origem: str | None = None
+    resumo: AnuncioResumoOut = AnuncioResumoOut()
+    variacoes: list[AnuncioVariacaoOut] = []
+
+
+class AnuncioSyncIn(BaseModel):
+    external_id: str
+    integration_id: UUID
+    # Cria os vínculos que faltam antes de empurrar o estoque (mesma regra do
+    # Vincular Automático, só que restrita a este anúncio).
+    vincular: bool = True
+
+
 class SyncAllIn(BaseModel):
     integration_ids: list[UUID] | None = None
     product_ids: list[UUID] | None = None

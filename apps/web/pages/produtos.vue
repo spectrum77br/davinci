@@ -106,7 +106,6 @@ const segments = ref<Segment[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = 50
-const search = ref('')
 const filtroIntegration = ref<string>('')
 const filtroSegment = ref<string>('')
 const stockFilter = ref<'' | 'low' | 'ok' | 'zero'>('')
@@ -117,6 +116,19 @@ const selected = ref<Set<string>>(new Set())
 const selectedLinks = ref<Set<string>>(new Set())
 const loading = ref(false)
 const error = ref<string | null>(null)
+
+// Busca por ID do anúncio (estado declarado aqui em cima porque `refreshAll`
+// — chamada no setup — consulta `anuncioAberto`). Detalhes lá embaixo, na
+// seção "Anúncio por ID".
+// MLB1234567 (ML) ou 6+ dígitos (Shopee/TikTok). Menos que isso é SKU/nome.
+const ID_ANUNCIO_RE = /^(MLB\d{5,}|\d{6,})$/i
+const search = ref('')
+const buscaEhIdAnuncio = computed(() => ID_ANUNCIO_RE.test(search.value.trim()))
+const anuncio = ref<AnuncioLookup | null>(null)
+const anuncioLoading = ref(false)
+const anuncioErro = ref<string | null>(null)
+const anuncioSyncing = ref(false)
+const anuncioAberto = computed(() => !!anuncio.value?.encontrado)
 
 type Toast = {
   id: number
@@ -216,10 +228,13 @@ const togglingAutoSync = ref(false)
 async function refreshAll() {
   loading.value = true
   error.value = null
+  // Com o painel de um anúncio aberto (busca por ID), o texto do campo é o ID
+  // do anúncio — mandá-lo como filtro esvaziaria a tabela de produtos à toa.
+  const buscaProdutos = anuncioAberto.value ? '' : search.value
   try {
     const [pg, integ, settings, segs] = await Promise.all([
       api<ProductPage>(`/api/products?page=${page.value}&page_size=${pageSize}` +
-        (search.value ? `&search=${encodeURIComponent(search.value)}` : '') +
+        (buscaProdutos ? `&search=${encodeURIComponent(buscaProdutos)}` : '') +
         (filtroIntegration.value ? `&integration_id=${filtroIntegration.value}` : '') +
         (stockFilter.value === 'low' ? `&low_stock=true` : '') +
         (stockFilter.value === 'zero' ? `&zero_stock=true` : '')),
@@ -778,6 +793,140 @@ async function syncProduct(id: string, integrationIds?: string[]) {
   } finally {
     syncingProduct.value.delete(id)
     syncingProduct.value = new Set(syncingProduct.value)
+  }
+}
+
+// -------------------- Anúncio por ID (não varre a conta toda) --------------
+// Colar o ID do anúncio no campo de busca e apertar Enter (ou clicar em
+// "Buscar anúncio") traz SÓ aquele anúncio, com todas as variações/SKUs
+// agrupados embaixo. Antes, um anúncio novo — ex.: 52 variações na Shopee —
+// obrigava a rodar "Vincular Automático"/"Sincronizar Todos" da conta inteira.
+type AnuncioEstado = 'vinculado' | 'pronto' | 'sem_sku' | 'sku_ambiguo' | 'sem_produto'
+type AnuncioVariacao = {
+  variation_id: string | null
+  variacao: string | null
+  sku: string | null
+  estado: AnuncioEstado
+  listing_type: string | null
+  product_id: string | null
+  produto_nome: string | null
+  estoque_bling: number | null
+  estoque_anuncio: number | null
+  link_id: string | null
+}
+type AnuncioLookup = {
+  encontrado: boolean
+  motivo?: string | null
+  external_id: string
+  plataforma: string | null
+  integration_id: string | null
+  conta: string | null
+  titulo: string | null
+  origem: string | null
+  resumo: {
+    total: number
+    prontos: number
+    ja_vinculados: number
+    sem_sku: number
+    sku_ambiguo: number
+    sem_produto: number
+  }
+  variacoes: AnuncioVariacao[]
+}
+
+const ESTADO_ANUNCIO: Record<AnuncioEstado, { label: string; cls: string }> = {
+  vinculado: { label: 'já vinculado', cls: 'bg-blue-100 text-blue-700' },
+  pronto: { label: 'pronto p/ vincular', cls: 'bg-green-100 text-green-700' },
+  sem_sku: { label: 'sem SKU no anúncio', cls: 'bg-gray-100 text-gray-600' },
+  sku_ambiguo: { label: 'SKU em 2+ produtos', cls: 'bg-amber-100 text-amber-700' },
+  sem_produto: { label: 'SKU não existe no DaVinci', cls: 'bg-red-100 text-red-700' },
+}
+
+async function buscarAnuncio() {
+  const id = search.value.trim()
+  if (!id) return
+  anuncioLoading.value = true
+  anuncioErro.value = null
+  try {
+    anuncio.value = await api<AnuncioLookup>(`/api/anuncio/lookup?id=${encodeURIComponent(id)}`)
+    if (!anuncio.value?.encontrado) {
+      anuncioErro.value = `Nenhum anúncio ${id} nas suas contas conectadas.`
+    }
+  } catch (e: any) {
+    anuncio.value = null
+    anuncioErro.value = e?.data?.detail?.code || e?.message || 'erro ao buscar o anúncio'
+  } finally {
+    anuncioLoading.value = false
+  }
+}
+
+function fecharAnuncio() {
+  anuncio.value = null
+  anuncioErro.value = null
+}
+
+// Enter no campo de busca: ID → busca o anúncio (a tabela de produtos fica
+// como está); qualquer outro texto → busca normal por nome/SKU.
+async function onBuscaEnter() {
+  if (buscaEhIdAnuncio.value) {
+    await buscarAnuncio()
+    return
+  }
+  fecharAnuncio()
+  await refreshAll()
+}
+
+async function sincronizarAnuncio() {
+  const a = anuncio.value
+  if (!a?.encontrado || !a.integration_id || anuncioSyncing.value) return
+  anuncioSyncing.value = true
+  try {
+    const job = await api<Job>('/api/anuncio/sync', {
+      method: 'POST',
+      body: { external_id: a.external_id, integration_id: a.integration_id, vincular: true },
+    })
+    const details = (job?.details || []) as Array<Record<string, any>>
+    const okLines: string[] = []
+    const errLines: string[] = []
+    for (const d of details) {
+      if (d.kind) continue
+      const plat = String(d.platform || '').toUpperCase()
+      const alvo = d.sku || d.external_id || ''
+      if (d.status === 'ok') {
+        okLines.push(`${plat} ${alvo}: ${d.qty_before ?? '—'} → ${d.qty_after ?? '—'} ✓`)
+      } else if (d.status === 'skipped') {
+        okLines.push(`${plat} ${alvo}: pulado${d.error_code ? ` (${d.error_code})` : ''}`)
+      } else {
+        errLines.push(`${plat} ${alvo}: ${d.error_code || 'erro'}${d.error_detail ? ': ' + d.error_detail : ''}`)
+      }
+    }
+    const criados = Number((job?.result as any)?.anuncio?.vinculos_criados || 0)
+    const cabecalho = criados ? `${criados} vínculo(s) novo(s)` : 'sem vínculo novo'
+    if (errLines.length === 0) {
+      pushToast({
+        kind: 'success',
+        title: `✓ ${a.external_id} sincronizado · ${cabecalho}`,
+        lines: okLines.slice(0, 20),
+      })
+    } else {
+      pushToast({
+        kind: okLines.length ? 'warning' : 'error',
+        title: `${a.external_id}: ${okLines.length} ok · ${errLines.length} erro(s)`,
+        lines: [...okLines.slice(0, 10), ...errLines.slice(0, 10)],
+      })
+    }
+    // Tabela e painel voltam a refletir o que ficou vinculado/empurrado.
+    await refreshAll()
+    await buscarAnuncio()
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    const msg = code === 'anuncio_sem_vinculos'
+      ? 'Nenhuma variação deste anúncio casou com um produto do DaVinci (confira os SKUs).'
+      : code
+    anuncioErro.value = msg
+    pushToast({ kind: 'error', title: '✗ Erro ao sincronizar o anúncio', lines: [msg] })
+  } finally {
+    anuncioSyncing.value = false
   }
 }
 
@@ -1446,8 +1595,18 @@ onUnmounted(() => {
     <div class="flex flex-wrap gap-3 items-center">
       <div class="relative flex-1 min-w-[260px]">
         <Search class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-        <Input v-model="search" placeholder="Buscar por nome, SKU ou título do anúncio..." class="pl-9" @keyup.enter="refreshAll" />
+        <Input v-model="search" placeholder="Buscar por nome, SKU ou ID do anúncio..." class="pl-9" @keyup.enter="onBuscaEnter" />
       </div>
+      <Button
+        v-if="buscaEhIdAnuncio"
+        size="sm"
+        variant="outline"
+        :disabled="anuncioLoading"
+        @click="buscarAnuncio"
+      >
+        <Search class="size-4 mr-1.5" />
+        {{ anuncioLoading ? 'buscando anúncio…' : 'Buscar anúncio' }}
+      </Button>
       <select v-model="stockFilter" class="h-9 w-[180px] rounded-md border bg-background px-2 text-sm" @change="refreshAll">
         <option value="">Todo estoque</option>
         <option value="low">Estoque baixo</option>
@@ -1474,6 +1633,107 @@ onUnmounted(() => {
       <Button v-if="canDelete && selected.size > 0" size="sm" variant="destructive" @click="bulkDelete">
         <Trash2 class="size-4 mr-1.5" /> excluir {{ selected.size }}
       </Button>
+    </div>
+
+    <!-- Anúncio buscado por ID: todas as variações/SKUs agrupados embaixo,
+         com um botão que vincula + sincroniza só este anúncio. -->
+    <div
+      v-if="anuncioErro && !anuncio?.encontrado"
+      class="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+    >
+      <span class="flex-1">{{ anuncioErro }}</span>
+      <button class="text-amber-700 hover:text-amber-900" title="fechar" @click="fecharAnuncio">
+        <X class="size-4" />
+      </button>
+    </div>
+
+    <div v-if="anuncio?.encontrado" class="table-card p-0">
+      <div class="flex flex-wrap items-start gap-3 border-b px-4 py-3">
+        <div class="min-w-[240px] flex-1">
+          <div class="flex items-center gap-2">
+            <span :class="platformBadgeClass(anuncio.plataforma || '')">{{ anuncio.plataforma }}</span>
+            <span class="font-medium">{{ anuncio.titulo || anuncio.external_id }}</span>
+          </div>
+          <div class="mt-1 text-xs text-muted-foreground">
+            ID {{ anuncio.external_id }} · conta {{ anuncio.conta }} ·
+            {{ anuncio.resumo.total }} variação(ões)
+            <span v-if="anuncio.origem === 'local'" class="text-amber-700">
+              · o marketplace não respondeu, mostrando os vínculos já salvos
+            </span>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center gap-1.5 text-xs">
+          <span v-if="anuncio.resumo.prontos" class="rounded px-2 py-0.5 bg-green-100 text-green-700">
+            {{ anuncio.resumo.prontos }} pronto(s) p/ vincular
+          </span>
+          <span v-if="anuncio.resumo.ja_vinculados" class="rounded px-2 py-0.5 bg-blue-100 text-blue-700">
+            {{ anuncio.resumo.ja_vinculados }} já vinculado(s)
+          </span>
+          <span v-if="anuncio.resumo.sem_produto" class="rounded px-2 py-0.5 bg-red-100 text-red-700">
+            {{ anuncio.resumo.sem_produto }} sem produto
+          </span>
+          <span v-if="anuncio.resumo.sku_ambiguo" class="rounded px-2 py-0.5 bg-amber-100 text-amber-700">
+            {{ anuncio.resumo.sku_ambiguo }} SKU ambíguo
+          </span>
+          <span v-if="anuncio.resumo.sem_sku" class="rounded px-2 py-0.5 bg-gray-100 text-gray-600">
+            {{ anuncio.resumo.sem_sku }} sem SKU
+          </span>
+        </div>
+        <div class="flex items-center gap-2">
+          <Button
+            v-if="canEdit"
+            size="sm"
+            :disabled="anuncioSyncing"
+            @click="sincronizarAnuncio"
+          >
+            <Loader2 v-if="anuncioSyncing" class="size-4 mr-1.5 animate-spin" />
+            <Zap v-else class="size-4 mr-1.5" />
+            {{ anuncioSyncing ? 'sincronizando…' : 'Vincular e sincronizar estoque deste anúncio' }}
+          </Button>
+          <Button size="sm" variant="outline" :disabled="anuncioLoading" @click="buscarAnuncio">
+            <RefreshCw class="size-4" :class="anuncioLoading ? 'animate-spin' : ''" />
+          </Button>
+          <button class="text-muted-foreground hover:text-foreground" title="fechar" @click="fecharAnuncio">
+            <X class="size-4" />
+          </button>
+        </div>
+      </div>
+      <div v-if="anuncioErro" class="border-b bg-red-50 px-4 py-2 text-sm text-red-700">
+        {{ anuncioErro }}
+      </div>
+      <table class="w-full">
+        <thead>
+          <tr>
+            <th>Variação</th>
+            <th>SKU do anúncio</th>
+            <th>Produto no DaVinci</th>
+            <th class="text-center">Estoque Bling</th>
+            <th class="text-center">Estoque no anúncio</th>
+            <th>Situação</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(v, i) in anuncio.variacoes" :key="v.variation_id || `v${i}`">
+            <td>{{ v.variacao || '—' }}</td>
+            <td class="font-mono text-xs">{{ v.sku || '—' }}</td>
+            <td>{{ v.produto_nome || '—' }}</td>
+            <td class="text-center">{{ v.estoque_bling ?? '—' }}</td>
+            <td class="text-center">{{ v.estoque_anuncio ?? '—' }}</td>
+            <td>
+              <span
+                class="inline-block rounded px-2 py-0.5 text-xs font-medium"
+                :class="ESTADO_ANUNCIO[v.estado].cls"
+              >
+                {{ ESTADO_ANUNCIO[v.estado].label }}
+              </span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="border-t px-4 py-2 text-xs text-muted-foreground">
+        Sincroniza só as variações deste anúncio — a conta inteira não é varrida.
+        Variação sem SKU casado com um produto continua de fora (mesma regra do Vincular Automático).
+      </div>
     </div>
 
     <div class="table-card">
