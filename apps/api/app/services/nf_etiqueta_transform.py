@@ -64,6 +64,43 @@ def _nome_destinatario(page: fitz.Page) -> str | None:
     return nome or None
 
 
+def _metricas_da_linha(
+    page: fitz.Page, x0: float, y0: float, y1: float
+) -> tuple[float, float] | None:
+    """(tamanho da fonte, baseline) do span que escreve a linha em (x0, y0..y1).
+
+    O bbox de `get_text("words")` inclui a entrelinha, então derivar a fonte da
+    altura dele sai maior que a original — o nome reescrito ficava graúdo. O
+    span traz o `size` e a `origin` (baseline) exatos do texto que está lá.
+    """
+    meio = (y0 + y1) / 2
+    for bloco in page.get_text("dict")["blocks"]:
+        for linha in bloco.get("lines", []):
+            for span in linha["spans"]:
+                sx0, sy0, _sx1, sy1 = span["bbox"]
+                if sy0 <= meio <= sy1 and abs(sx0 - x0) < 2:
+                    return float(span["size"]), float(span["origin"][1])
+    return None
+
+
+def _plano_da_linha(
+    page: fitz.Page, alvo: list, folga_baixo: float = 0.5
+) -> tuple[fitz.Rect, float, float, float]:
+    """Monta (caixa, x, baseline, fonte) pra redigir e reescrever UMA linha."""
+    x0 = min(w[0] for w in alvo)
+    y0 = min(w[1] for w in alvo)
+    y1 = max(w[3] for w in alvo)
+    x1 = max(w[2] for w in alvo)
+    metricas = _metricas_da_linha(page, x0, y0, y1)
+    if metricas:
+        fs, baseline = metricas
+    else:
+        fs = (y1 - y0) * 0.92
+        baseline = y1 - fs * 0.15
+    caixa = fitz.Rect(x0 - 0.5, y0 + 0.3, x1 + 0.5, y1 - folga_baixo)
+    return (caixa, x0, baseline, fs)
+
+
 def _redigir(page: fitz.Page, rect: fitz.Rect, pad: float = 1.0) -> None:
     r = fitz.Rect(rect.x0 - pad, rect.y0 - pad, rect.x1 + pad, rect.y1 + pad)
     page.add_redact_annot(r, fill=(1, 1, 1))
@@ -96,17 +133,9 @@ def _plano_remetente_ml(page: fitz.Page) -> tuple[fitz.Rect, float, float, float
         return None
     y0 = min(w[1] for w in bloco)
     primeira = [w for w in bloco if w[1] - y0 < 3]
-    x0 = min(w[0] for w in primeira)
-    y1 = max(w[3] for w in primeira)
-    fs = (y1 - y0) * 0.92
     # a caixa cobre SÓ a linha do nome — endereço, cidade, Pack ID e o logo
     # (à esquerda de x0, fora da caixa) ficam na etiqueta.
-    caixa = fitz.Rect(
-        x0 - 0.5, y0 - 0.5,
-        max(w[2] for w in primeira) + 0.5,
-        y1 + 0.5,
-    )
-    return (caixa, x0, y1, fs)
+    return _plano_da_linha(page, primeira)
 
 
 def _limpar_dados_remetente_declaracao(page: fitz.Page) -> None:
@@ -168,15 +197,13 @@ def _plano_remetente(page: fitz.Page) -> tuple[fitz.Rect, float, float, float] |
         ]
     if not alvo:
         return None
-    alvo.sort(key=lambda w: w[0])
-    x0 = min(w[0] for w in alvo)
-    y0 = min(w[1] for w in alvo)
-    y1 = max(w[3] for w in alvo)
-    x1 = max(w[2] for w in alvo)
-    fs = (y1 - y0) * 0.92
-    # caixa apertada: encolhe o fundo pra não invadir a linha seguinte (ex. CPF/CNPJ:)
-    caixa = fitz.Rect(x0 - 0.5, y0 + 0.3, x1 + 0.5, y1 - 0.8)
-    return (caixa, x0, y1, fs)
+    # só a PRIMEIRA linha da janela é o nome. Quando as linhas do bloco vêm
+    # coladas (etiqueta dos Correios), a janela pega também o endereço logo
+    # abaixo — aí o nome seria redigido junto e reescrito no dobro do tamanho.
+    topo = min(w[1] for w in alvo)
+    alvo = [w for w in alvo if w[1] - topo < 3]
+    # caixa apertada no fundo pra não invadir a linha seguinte (ex. CPF/CNPJ:)
+    return _plano_da_linha(page, alvo, folga_baixo=0.8)
 
 
 def _redigir_numero_nf(page: fitz.Page) -> None:
@@ -287,12 +314,12 @@ def transformar_etiqueta(pdf_bytes: bytes, destinatario_nome: str | None = None)
         if nome:                                 # 1) remetente = destinatário
             plano = _plano_remetente(page)
             if plano:
-                caixa, x0, y1, fs = plano
+                caixa, x0, baseline, fs = plano
                 _redigir(page, caixa, pad=0)
-                inserts.append((page, x0, y1, fs))
+                inserts.append((page, x0, baseline, fs))
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_REMOVE)
-    for page, x0, y1, fs in inserts:
+    for page, x0, baseline, fs in inserts:
         page.insert_text(
-            (x0, y1 - fs * 0.15), nome, fontsize=fs, fontname="helv", color=(0, 0, 0)
+            (x0, baseline), nome, fontsize=fs, fontname="helv", color=(0, 0, 0)
         )
     return doc.tobytes()

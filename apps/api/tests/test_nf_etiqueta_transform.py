@@ -149,6 +149,39 @@ def _etiqueta_ml_flex() -> bytes:
     return doc.tobytes()
 
 
+_FONTE_REMETENTE = 5.98  # a real do bloco do remetente (etiqueta_291332.pdf)
+
+
+def _etiqueta_remetente_multilinha() -> bytes:
+    """Etiqueta dos Correios com a geometria REAL do bloco do remetente: rótulo
+    "Remetente:" e, abaixo dele, nome / endereço / complemento a 9,2pt um do
+    outro — nome e endereço caem os DOIS dentro da janela de busca do rótulo.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=442)
+    page.insert_text((28.8, 178.6), "DESTINATÁRIO", fontsize=6.8, fontname="helv")
+    page.insert_text((24.3, 192.3), "walmir da Silva Xavier", fontsize=6.8, fontname="helv")
+    fs = _FONTE_REMETENTE
+    for i, linha in enumerate((
+        "Remetente:",
+        "Comercio JLLAS",
+        "Rua Particular Flora Bulcao 70",
+        "torre 3 apto 84 sl13",
+    )):
+        page.insert_text((24.3, 278.1 + i * 9.2), linha, fontsize=fs, fontname="helv")
+    return doc.tobytes()
+
+
+def _span_do_texto(pdf_bytes: bytes, trecho: str, *, abaixo_de: float = 0) -> dict:
+    page = fitz.open(stream=pdf_bytes, filetype="pdf")[0]
+    for bloco in page.get_text("dict")["blocks"]:
+        for linha in bloco.get("lines", []):
+            for span in linha["spans"]:
+                if trecho in span["text"] and span["origin"][1] > abaixo_de:
+                    return span
+    raise AssertionError(f"{trecho!r} não encontrado")
+
+
 def _texto(pdf_bytes: bytes, pagina: int = 0) -> str:
     return fitz.open(stream=pdf_bytes, filetype="pdf")[pagina].get_text()
 
@@ -168,6 +201,20 @@ def test_remetente_vira_destinatario():
     # o nome antigo do remetente sumiu e virou o nome do destinatário
     assert "Loja Origem" not in txt
     assert txt.count("Fulano") == 2
+
+
+def test_remetente_reescrito_no_tamanho_original():
+    out = transformar_etiqueta(_etiqueta_remetente_multilinha())
+    txt = _texto(out)
+    assert "Comercio JLLAS" not in txt
+    # só a linha do NOME entra na caixa: endereço e complemento ficam
+    assert "Rua Particular Flora Bulcao 70" in txt
+    assert "torre 3 apto 84 sl13" in txt
+    # o nome sai na fonte e na baseline da linha que ele substituiu — antes
+    # a fonte era derivada da altura de DUAS linhas e saía com o dobro.
+    span = _span_do_texto(out, "walmir da Silva Xavier", abaixo_de=250)
+    assert span["size"] == pytest.approx(_FONTE_REMETENTE, abs=0.05)
+    assert span["origin"][1] == pytest.approx(278.1 + 9.2, abs=0.05)
 
 
 def test_remove_bloco_nf():
