@@ -199,6 +199,30 @@ const department = computed<DeptKey>({
 const KIT_COUNT_BY_DEPT: Record<string, number> = { celular: 8, mala: 1, eletro: 1 }
 const kitCount = computed(() => KIT_COUNT_BY_DEPT[department.value] ?? 4)
 
+// Composição de cada kit do Celular (anotação do Eduardo, 2026-08-21).
+// Só informativo: aparece embaixo do "Kit N" no cabeçalho da aba Produtos
+// e no hover das colunas "kit N" da calculadora. Mala e eletro têm um kit
+// só, sem nome — ficam sem legenda.
+const KIT_NOMES_CELULAR: Record<number, string> = {
+  1: 'Celular + Fone c/ fio',
+  2: 'Celular + Fone',
+  3: 'Celular + Relógio',
+  4: 'Celular + Fone + Relógio',
+  5: 'Celular + Carregador',
+  6: 'Celular + Fone + Airtag',
+  7: 'Celular + Óculos',
+  8: 'Celular + Airtag',
+}
+// Versão curta pro cabeçalho (coluna estreita): "Celular" vira "Cel".
+function kitNome(k: number): string {
+  const nome = department.value === 'celular' ? KIT_NOMES_CELULAR[k] : undefined
+  return nome ? nome.replace('Celular', 'Cel') : ''
+}
+function kitTitulo(k: number): string {
+  const nome = department.value === 'celular' ? KIT_NOMES_CELULAR[k] : undefined
+  return nome ? `Kit ${k} = ${nome}` : `Kit ${k}`
+}
+
 // =========================================================== accounts state
 
 type Account = {
@@ -2922,7 +2946,10 @@ watch(department, async () => {
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Descrição</th>
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Modelo</th>
               </template>
-              <th v-for="k in kitCount" :key="`kith-${k}`" class="text-right px-2 py-2 font-medium border-b border-border w-24">Kit {{ k }}</th>
+              <th v-for="k in kitCount" :key="`kith-${k}`" class="text-right px-2 py-2 font-medium border-b border-border w-24" :title="kitTitulo(k)">
+                Kit {{ k }}
+                <span v-if="kitNome(k)" class="block text-[9px] font-normal text-muted-foreground leading-tight whitespace-normal">{{ kitNome(k) }}</span>
+              </th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-14">Fotos</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Tabela</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-16">Catálogo</th>
@@ -3656,10 +3683,10 @@ watch(department, async () => {
               <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 min-w-[56px]" :style="{ left: '256px' }">7d</th>
               <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 min-w-[56px]" :style="{ left: '312px' }">30d</th>
               <template v-if="department === 'celular'">
-                <th class="sticky bg-background px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">kit 1</th>
-                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '424px' }">kit 2</th>
-                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '480px' }">kit 3</th>
-                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '536px' }">kit 4</th>
+                <th class="sticky bg-background px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }" :title="kitTitulo(1)">kit 1</th>
+                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '424px' }" :title="kitTitulo(2)">kit 2</th>
+                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '480px' }" :title="kitTitulo(3)">kit 3</th>
+                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '536px' }" :title="kitTitulo(4)">kit 4</th>
               </template>
               <template v-else>
                 <th class="sticky bg-background px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">custo</th>
