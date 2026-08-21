@@ -14,18 +14,25 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
+import httpx
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import BlingOrder
+from app.models import BlingOrder, SituacaoBling
 from app.routers import margens as margens_router
 from app.services import margem_auto_hold
 
 pytestmark = pytest.mark.asyncio
 
 HOJE = date(2026, 8, 21)
+
+
+def _http_error(status: int, body: str) -> httpx.HTTPStatusError:
+    req = httpx.Request("PUT", "https://api.bling.com.br/Api/v3/pedidos/vendas/1")
+    resp = httpx.Response(status, request=req, text=body)
+    return httpx.HTTPStatusError(f"{status}", request=req, response=resp)
 
 
 class FakeBling:
@@ -36,9 +43,11 @@ class FakeBling:
         observacoes: str | None = None,
         *,
         fail_situacao_for: set[int] | None = None,
+        fail_obs_for: dict[int, int] | None = None,
     ) -> None:
         self._observacoes = observacoes
         self.fail_situacao_for = fail_situacao_for or set()
+        self.fail_obs_for = fail_obs_for or {}
         self.get_calls: list[int] = []
         self.put_bodies: list[tuple[int, dict]] = []
         self.situacao_calls: list[tuple[int, int]] = []
@@ -54,6 +63,11 @@ class FakeBling:
         }
 
     async def update_order(self, bling_id: int, body: dict) -> None:
+        if bling_id in self.fail_obs_for:
+            raise _http_error(
+                self.fail_obs_for[bling_id],
+                '{"error":{"fields":[{"code":67,"msg":"saldo insuficiente"}]}}',
+            )
         self.put_bodies.append((bling_id, body))
 
     async def update_order_situacao(self, bling_id: int, situacao_id: int) -> None:
@@ -81,6 +95,10 @@ async def _seed_pedido(
     saldo_aguardando → valorbase presente e líquido NULL (não reconciliado).
     frete_estourado → frete plataforma 30 > frete anúncio 10.
     """
+    # Catálogo id→nome (merge = idempotente entre seeds do mesmo teste): os
+    # espelhos de situação também gravam situacao_nome via subselect daqui.
+    await db.merge(SituacaoBling(id=6, nome="Em aberto"))
+    await db.merge(SituacaoBling(id=83955, nome="Aguardando Cancelamento"))
     db.add(
         BlingOrder(
             bling_id=bling_id,
@@ -106,7 +124,7 @@ async def _seed_pedido(
             )
             VALUES (
                 :id, :pedido, :bling_id, :sku,
-                :situacao, 'Em aberto', 'amazon', 1,
+                :situacao, :situacao_nome, 'amazon', 1,
                 :status,
                 :margem, :minima,
                 :valorbase,
@@ -121,6 +139,9 @@ async def _seed_pedido(
             "bling_id": bling_id,
             "sku": f"sku-{pedido}",
             "situacao": situacao,
+            "situacao_nome": (
+                "Aguardando Cancelamento" if situacao == "83955" else "Em aberto"
+            ),
             "status": status,
             "margem": 5 if margem_baixa else 50,
             "minima": 10,
@@ -138,7 +159,7 @@ async def _snapshot(db: AsyncSession, pedido: str) -> dict:
         (
             await db.execute(
                 text(
-                    "SELECT situacao, bling_status_margem "
+                    "SELECT situacao, situacao_nome, bling_status_margem "
                     "FROM verificar_margem WHERE pedido_bling = :p"
                 ),
                 {"p": pedido},
@@ -188,6 +209,7 @@ async def test_segura_pendente_em_aberto(db: AsyncSession):
     assert tuple(order) == ("83955", "Pendente")
     snap = await _snapshot(db, "291670")
     assert snap["situacao"] == "83955"
+    assert snap["situacao_nome"] == "Aguardando Cancelamento"
     assert snap["bling_status_margem"] == "Pendente"
     # Auditoria: ação do robô (mudado_por NULL, origem própria).
     audits = await _audits(db, "291670")
@@ -302,6 +324,41 @@ async def test_motivo_distingue_ramos_do_saldo(db: AsyncSession):
     assert "divergente" not in obs[402]
 
 
+async def test_obs_rejeitada_pelo_bling_ainda_segura_o_pedido(db: AsyncSession):
+    """Bling recusa o PUT da venda com 400 (ex.: erro 67, estoque insuficiente
+    — caso real do 291676): determinístico, retry nunca resolveria. O recado
+    fica de fora, mas o pedido É segurado (o PATCH de situação usa endpoint
+    dedicado e não revalida a venda)."""
+    await _seed_pedido(db, pedido="291676", bling_id=444)
+    fake = FakeBling(fail_obs_for={444: 400})
+
+    res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
+
+    assert res == {"held": 1, "failed": 0}
+    assert fake.put_bodies == []  # recado rejeitado
+    assert fake.situacao_calls == [(444, 83955)]
+    snap = await _snapshot(db, "291676")
+    assert snap["situacao"] == "83955"
+    assert snap["bling_status_margem"] == "Pendente"
+    assert len(await _audits(db, "291676")) == 1
+
+
+async def test_obs_erro_transiente_nao_segura_e_deixa_pro_retry(db: AsyncSession):
+    """503 no PUT das Observações = transiente: NÃO segue pra situação — o
+    pedido fica como está e o próximo tick refaz os dois passos."""
+    await _seed_pedido(db, pedido="291677", bling_id=555)
+    fake = FakeBling(fail_obs_for={555: 503})
+
+    res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
+
+    assert res == {"held": 0, "failed": 1}
+    assert fake.situacao_calls == []
+    snap = await _snapshot(db, "291677")
+    assert snap["situacao"] == "6"
+    assert snap["bling_status_margem"] is None
+    assert await _audits(db, "291677") == []
+
+
 async def test_flag_desligada(db: AsyncSession, monkeypatch):
     await _seed_pedido(db, pedido="291670", bling_id=111)
     monkeypatch.setattr(get_settings(), "margem_auto_hold", False, raising=False)
@@ -405,6 +462,7 @@ async def test_aprovar_pedido_segurado_espelha_situacao_no_snapshot(
     ]
     snap = await _snapshot(db, "291670")
     assert snap["situacao"] == "6"
+    assert snap["situacao_nome"] == "Em aberto"
     assert snap["bling_status_margem"] == "Aprovado"
 
 

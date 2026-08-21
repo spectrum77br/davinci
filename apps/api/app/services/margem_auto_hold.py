@@ -20,9 +20,16 @@ envio, não há o que segurar.
 
 Ordem das escritas por pedido: Observações primeiro (GET → compose → PUT,
 a mesma caneta do fluxo Logística — preserva o texto existente e não duplica
-a linha do dia), situação depois. Se qualquer passo falhar, o pedido fica
-como está e o próximo tick (cron 30min / botão) tenta de novo; um pedido com
-erro não derruba os demais. `mudado_por=None` na auditoria = ação do robô.
+a linha do dia), situação depois. Se um passo falhar por erro transiente
+(rede, 5xx, 429), o pedido fica como está e o próximo tick (cron 30min /
+botão) tenta de novo; um pedido com erro não derruba os demais. EXCEÇÃO: se o
+Bling recusar o PUT das Observações com 4xx, é validação da VENDA — o PUT
+reenvia o pedido inteiro e o Bling revalida tudo (caso real 291676: erro 67,
+"saldo de estoque insuficiente" num dos itens; retry nunca resolveria) — aí o
+recado fica de fora (logado com o corpo do erro) e o hold SEGUE para a
+situação, que usa endpoint dedicado e não revalida a venda. Segurar o pedido
+é o essencial; o recado é acessório. `mudado_por=None` na auditoria = ação do
+robô.
 
 Espelhos locais atualizados na hora (bling_orders + snapshot
 verificar_margem): situacao='83955' e bling_status_margem='Pendente'. O
@@ -37,6 +44,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import httpx
 import structlog
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,7 +55,7 @@ from app.security.cipher import decrypt_json
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
-from app.services.verificar_margem import SNAPSHOT_TABLE
+from app.services.verificar_margem import SITUACAO_BLING_TABLE, SNAPSHOT_TABLE
 
 logger = structlog.get_logger()
 
@@ -137,13 +145,28 @@ async def _hold_one(
     motivo: str,
     hoje: date | None,
 ) -> None:
-    # 1) Observações (o recado) — antes da situação: se o PUT falhar, o pedido
-    #    continua candidato e o próximo tick refaz os dois passos.
+    # 1) Observações (o recado) — antes da situação: se o PUT falhar por erro
+    #    transiente, o pedido continua candidato e o próximo tick refaz os dois
+    #    passos. 4xx (menos 429) = o Bling recusou a VENDA em validação (ex.:
+    #    erro 67, estoque insuficiente) — determinístico, retry não resolve:
+    #    loga o corpo do erro e segue pro passo essencial (segurar).
     order = await client.get_order(bling_id)
     atual = order.get("observacoes")
     novo = compose_observacoes(atual, _mensagem(motivo), hoje=hoje)
     if novo != (atual or "").strip():
-        await client.update_order(bling_id, build_observacoes_put_body(order, novo))
+        try:
+            await client.update_order(bling_id, build_observacoes_put_body(order, novo))
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status >= 500 or status == 429:
+                raise
+            logger.warning(
+                "margem_auto_hold_obs_rejeitada",
+                pedido_bling=pedido_bling,
+                bling_id=bling_id,
+                status=status,
+                bling=e.response.text[:300],
+            )
 
     # 2) Situação: endpoint dedicado do Bling (não reenvia o pedido).
     await client.update_order_situacao(bling_id, SITUACAO_AGUARDANDO_CANCELAMENTO)
@@ -157,7 +180,10 @@ async def _hold_one(
     await session.execute(
         text(
             f"UPDATE {SNAPSHOT_TABLE} "
-            "SET situacao = :sit, bling_status_margem = 'Pendente' "
+            "SET situacao = :sit, bling_status_margem = 'Pendente', "
+            "    situacao_nome = COALESCE("
+            f"       (SELECT s.nome FROM {SITUACAO_BLING_TABLE} s"
+            "         WHERE s.id::text = :sit), situacao_nome) "
             "WHERE bling_id = :bling_id"
         ),
         {"sit": str(SITUACAO_AGUARDANDO_CANCELAMENTO), "bling_id": bling_id},
@@ -221,9 +247,13 @@ async def run(
         except Exception as e:  # noqa: BLE001 — um pedido não derruba os demais
             failed += 1
             await session.rollback()
+            erro = str(e)[:200]
+            if isinstance(e, httpx.HTTPStatusError):
+                # o corpo da resposta do Bling diz O QUE foi rejeitado
+                erro = f"{erro} | bling: {e.response.text[:300]}"
             logger.warning(
                 "margem_auto_hold_falhou",
                 pedido_bling=str(r["pedido_bling"]),
-                erro=str(e)[:200],
+                erro=erro,
             )
     return {"held": held, "failed": failed}

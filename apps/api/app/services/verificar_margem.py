@@ -38,6 +38,7 @@ def qualified_table(name: str) -> str:
 SNAPSHOT_TABLE = qualified_table("verificar_margem")
 VIEW_TABLE = qualified_table("vw_conciliacao_margens_marketplace")
 BLING_ORDERS_TABLE = qualified_table("bling_orders")
+SITUACAO_BLING_TABLE = qualified_table("situacao_bling")
 
 # Serializa TODO refresh do snapshot (rebuild_all + targeted) num único lock
 # de transação. Cada refresh roda `INSERT ... SELECT * FROM
@@ -234,7 +235,11 @@ async def patch_status_for_pedido(
             SET bling_status_margem = :status,
                 aprovado_por = COALESCE(CAST(:aprovado_por AS uuid), aprovado_por),
                 verificado = COALESCE(CAST(:verificado AS boolean), verificado),
-                situacao = COALESCE(CAST(:situacao AS text), situacao)
+                situacao = COALESCE(CAST(:situacao AS text), situacao),
+                situacao_nome = COALESCE(
+                    (SELECT s.nome FROM {SITUACAO_BLING_TABLE} s
+                     WHERE s.id::text = CAST(:situacao AS text)),
+                    situacao_nome)
             WHERE pedido_bling = :pedido_bling
             """
         ),
