@@ -337,6 +337,11 @@ class StoreInfo(Base, TimestampMixin):
     # Migration 0222: horários (BRT) em que as etiquetas desta loja são
     # impressas, "HH:MM" separados por vírgula. NULL/vazio = contínuo.
     etiqueta_horarios: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Migration 0223: regra de sábado (só Mercado Livre). Correios segue
+    # contínuo; agência emite uma vez em `etiqueta_sabado_horario` ("HH:MM"
+    # BRT) e só para os estoques de `etiqueta_sabado_tags` (slugs por vírgula).
+    etiqueta_sabado_horario: Mapped[str | None] = mapped_column(Text, nullable=True)
+    etiqueta_sabado_tags: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PricingPushIdempotency(Base):

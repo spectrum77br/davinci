@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.schemas.users import STOCK_TAGS
+
 # --------------------------------------------------------------- pricing accounts
 
 class PricingAccountBase(BaseModel):
@@ -403,6 +405,28 @@ def normaliza_etiqueta_horarios(v: str | None) -> str | None:
     return ", ".join(sorted(saida)) or None
 
 
+def normaliza_hora_sabado(v: str | None) -> str | None:
+    """Um único "HH:MM" (BRT). Vazio = a loja não emite no sábado."""
+    saida = normaliza_etiqueta_horarios(v)
+    if saida and "," in saida:
+        raise ValueError("informe um único horário para o sábado")
+    return saida
+
+
+def normaliza_tags_estoque(v: str | None) -> str | None:
+    """Slugs de estoque separados por vírgula, na ordem canônica de STOCK_TAGS.
+
+    Ex. "SP, pi" → "pi, sp". Vazio = nenhum estoque marcado.
+    """
+    if v is None:
+        return None
+    escolhidas = {t.strip().lower() for t in str(v).replace(";", ",").split(",") if t.strip()}
+    invalidas = escolhidas - set(STOCK_TAGS)
+    if invalidas:
+        raise ValueError(f"tag de estoque inválida: {', '.join(sorted(invalidas))}")
+    return ", ".join(t for t in STOCK_TAGS if t in escolhidas) or None
+
+
 class StoreInfoBase(BaseModel):
     platform: str = Field(min_length=1, max_length=64)
     segment: str | None = None
@@ -435,8 +459,14 @@ class StoreInfoBase(BaseModel):
     # Horários (BRT) em que as etiquetas da loja são impressas (migration
     # 0222), ex. "10:00, 14:00". Vazio = contínuo.
     etiqueta_horarios: str | None = None
+    # Sábado (migration 0223) — só Mercado Livre. Correios segue contínuo;
+    # agência emite uma vez neste horário, só nos estoques marcados.
+    etiqueta_sabado_horario: str | None = None
+    etiqueta_sabado_tags: str | None = None
 
     _norm_horarios = field_validator("etiqueta_horarios")(normaliza_etiqueta_horarios)
+    _norm_sabado_hora = field_validator("etiqueta_sabado_horario")(normaliza_hora_sabado)
+    _norm_sabado_tags = field_validator("etiqueta_sabado_tags")(normaliza_tags_estoque)
 
 
 class StoreInfoCreate(StoreInfoBase):
@@ -470,8 +500,12 @@ class StoreInfoPatch(BaseModel):
     nf_etiqueta_id: UUID | None = None
     nf_impressao_id: UUID | None = None
     etiqueta_horarios: str | None = None
+    etiqueta_sabado_horario: str | None = None
+    etiqueta_sabado_tags: str | None = None
 
     _norm_horarios = field_validator("etiqueta_horarios")(normaliza_etiqueta_horarios)
+    _norm_sabado_hora = field_validator("etiqueta_sabado_horario")(normaliza_hora_sabado)
+    _norm_sabado_tags = field_validator("etiqueta_sabado_tags")(normaliza_tags_estoque)
 
 
 class StoreInfoOut(StoreInfoBase):

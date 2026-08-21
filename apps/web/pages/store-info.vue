@@ -52,6 +52,8 @@ type StoreInfo = {
   nf_faturador_id: string | null
   nf_etiqueta_id: string | null
   etiqueta_horarios: string | null
+  etiqueta_sabado_horario: string | null
+  etiqueta_sabado_tags: string | null
   nf_impressao_id: string | null
   archived_at: string | null
   created_at: string
@@ -303,6 +305,35 @@ async function addHorario(row: StoreInfo) {
 }
 async function removeHorario(row: StoreInfo, hhmm: string) {
   await setHorarios(row, horariosDe(row).filter((h) => h !== hhmm))
+}
+
+// Sábado (só Mercado Livre): correios segue contínuo; agência emite uma vez
+// no horário abaixo e só nos estoques/tags marcados.
+const TAG_OPTIONS: { slug: string; label: string }[] = [
+  { slug: 'ci', label: 'CI' },
+  { slug: 'pi', label: 'PI' },
+  { slug: 'ra', label: 'RA' },
+  { slug: 'sa', label: 'SA' },
+  { slug: 'sp', label: 'SP' },
+  { slug: 'us', label: 'Usados' },
+  { slug: 'cd', label: 'Centro de Distribuição' },
+  { slug: 'fake', label: 'Fake' },
+  { slug: 'mala', label: 'Mala' },
+  { slug: 'eletro', label: 'Eletro' },
+  { slug: 'insumos', label: 'Insumos' },
+]
+function tagsSabadoDe(row: StoreInfo): string[] {
+  return (row.etiqueta_sabado_tags || '').split(',').map((s) => s.trim()).filter(Boolean)
+}
+async function toggleTagSabado(row: StoreInfo, slug: string) {
+  const atuais = tagsSabadoDe(row)
+  const next = atuais.includes(slug)
+    ? atuais.filter((t) => t !== slug)
+    : TAG_OPTIONS.map((o) => o.slug).filter((s) => s === slug || atuais.includes(s))
+  await updateField(row, 'etiqueta_sabado_tags', next.length ? next.join(', ') : null)
+}
+async function setHoraSabado(row: StoreInfo, hhmm: string) {
+  await updateField(row, 'etiqueta_sabado_horario', hhmm || null)
 }
 
 // Exceções popover — mirrors the UF popover pattern (overlay outside the
@@ -1378,7 +1409,7 @@ async function copyText(text: string) {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
       @click.self="openHorRowId = null"
     >
-      <div class="bg-background border rounded-lg shadow-xl p-4 w-80">
+      <div class="bg-background border rounded-lg shadow-xl p-4 w-80 max-h-[85vh] overflow-y-auto">
         <div class="flex items-center justify-between mb-1">
           <div class="text-sm font-semibold">
             Horário Etiqueta — {{ openHorRow.platform }} / {{ openHorRow.account_name || '—' }}
@@ -1427,6 +1458,40 @@ async function copyText(text: string) {
             adicionar
           </button>
         </div>
+
+        <!-- Sábado — regra só do Mercado Livre. -->
+        <template v-if="openHorRow.platform === 'ml'">
+          <div class="mt-4 pt-3 border-t">
+            <div class="text-sm font-semibold mb-1">
+              Sábado
+            </div>
+            <p class="text-xs text-muted-foreground mb-2">
+              Correios segue contínuo. Agência emite uma vez neste horário, só
+              nos estoques marcados. Sem horário = não emite no sábado.
+            </p>
+            <input
+              :value="openHorRow.etiqueta_sabado_horario || ''"
+              type="time"
+              class="w-full border rounded px-2 py-1 bg-background text-xs mb-2"
+              @change="setHoraSabado(openHorRow, ($event.target as HTMLInputElement).value)"
+            >
+            <div class="grid grid-cols-2 gap-1 text-xs">
+              <label
+                v-for="t in TAG_OPTIONS"
+                :key="t.slug"
+                class="flex items-center gap-1.5 cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  :checked="tagsSabadoDe(openHorRow).includes(t.slug)"
+                  @change="toggleTagSabado(openHorRow, t.slug)"
+                >
+                {{ t.label }}
+              </label>
+            </div>
+          </div>
+        </template>
+
         <div class="mt-3 flex justify-end gap-2 text-xs">
           <button
             class="px-2 py-1 rounded border hover:bg-muted"
