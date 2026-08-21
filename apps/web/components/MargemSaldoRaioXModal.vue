@@ -304,7 +304,7 @@ const diverge = computed(() => {
         <div v-if="data.itens.length > 1" class="space-y-1.5">
           <p class="text-xs text-muted-foreground">
             Pedido com {{ data.itens.length }} itens — o repasse chega por pedido e é
-            rateado pela proporção de cada item:
+            rateado pelo custo de cada item (se faltar custo cadastrado, pelo preço):
           </p>
           <table class="w-full text-xs">
             <thead>
