@@ -218,15 +218,23 @@ async def patch_status_for_pedido(
     status: str,
     aprovado_por: str | None = None,
     verificado: bool | None = None,
+    situacao: str | None = None,
 ) -> int:
-    """Patch user-facing approval status in the snapshot without rebuilding it."""
+    """Patch user-facing approval status in the snapshot without rebuilding it.
+
+    `situacao` (opcional) espelha a situação Bling recém-patcheada — sem isso o
+    snapshot fica defasado até o próximo rebuild e a listagem pode esconder a
+    linha (ex.: Aprovar um pedido auto-segurado em 83955 precisa voltar a '6'
+    na hora, senão o filtro base a trata como reprovada/segurada por 30min).
+    """
     result = await session.execute(
         text(
             f"""
             UPDATE {SNAPSHOT_TABLE}
             SET bling_status_margem = :status,
                 aprovado_por = COALESCE(CAST(:aprovado_por AS uuid), aprovado_por),
-                verificado = COALESCE(CAST(:verificado AS boolean), verificado)
+                verificado = COALESCE(CAST(:verificado AS boolean), verificado),
+                situacao = COALESCE(CAST(:situacao AS text), situacao)
             WHERE pedido_bling = :pedido_bling
             """
         ),
@@ -235,6 +243,7 @@ async def patch_status_for_pedido(
             "status": status,
             "aprovado_por": aprovado_por,
             "verificado": verificado,
+            "situacao": situacao,
         },
     )
     return result.rowcount or 0
@@ -247,6 +256,7 @@ async def patch_status_for_pedido_silent(
     status: str,
     aprovado_por: str | None = None,
     verificado: bool | None = None,
+    situacao: str | None = None,
 ) -> None:
     try:
         await patch_status_for_pedido(
@@ -255,6 +265,7 @@ async def patch_status_for_pedido_silent(
             status=status,
             aprovado_por=aprovado_por,
             verificado=verificado,
+            situacao=situacao,
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(

@@ -1046,6 +1046,7 @@ async def verificar_margem_snapshot(ctx: dict) -> None:
     ao snapshot só via rebuild_all. O load da página /margem já reconstrói
     (throttle 5min), e este cron cobre os períodos sem ninguém olhando.
     Serializado pelo advisory lock do rebuild_all (sem herd)."""
+    from app.services.margem_auto_hold import run as margem_auto_hold_run
     from app.services.verificar_margem import rebuild_all
 
     async with session_scope() as s:
@@ -1054,6 +1055,17 @@ async def verificar_margem_snapshot(ctx: dict) -> None:
             logger.info("verificar_margem_snapshot_done", rebuilt=n)
         except Exception as e:  # noqa: BLE001
             logger.warning("verificar_margem_snapshot_failed", error=str(e)[:200])
+            return
+
+    # Snapshot fresco → segura os pendentes "Em aberto" (Aguardando
+    # Cancelamento + Observações no Bling). Sessão própria: o hold commita por
+    # pedido e não deve conviver com o advisory lock/estado do rebuild.
+    async with session_scope() as s:
+        try:
+            res = await margem_auto_hold_run(s)
+            logger.info("margem_auto_hold_done", **res)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("margem_auto_hold_cron_failed", error=str(e)[:200])
 
 
 async def sync_lock_safety_release(ctx: dict) -> None:

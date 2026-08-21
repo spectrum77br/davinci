@@ -244,6 +244,15 @@ class Settings(BaseSettings):
     # NF_SEM_ESTOQUE_THREEMA_RECIPIENTS no .env.
     nf_sem_estoque_threema_recipients: str = ""
 
+    # Auto-hold da Margem (pedido do dono, 21/08): pedido que CAI na aba
+    # Pendentes da Margem (margem baixa / saldo divergente) e ainda está
+    # "Em aberto" (6) no Bling é movido SOZINHO pra Aguardando Cancelamento
+    # (83955) + recado datado nas Observações do pedido — segura etiqueta/NF
+    # até o humano decidir na própria aba (Aprovar solta, Reprovar confirma).
+    # Roda após cada rebuild do snapshot (cron :15/:45 e botão "atualizar").
+    # Kill-switch: MARGEM_AUTO_HOLD=false no .env.
+    margem_auto_hold: bool = True
+
     # Safety-net cron que re-sincroniza pedidos suspeitos de stale com o
     # Bling (webhooks perdidos). Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false.
     enable_bling_orders_safety_net: bool = True

@@ -343,9 +343,16 @@ async def list_margens_marketplace(
     # pedido reprovado no Bling (SITUACAO_REPROVADO) — o estado é transitório até
     # virar "Cancelado". Filtrado por código (situacao) porque situacao_nome vem
     # de um JOIN e pode ser NULL; IS DISTINCT FROM preserva linhas com situacao NULL.
+    #
+    # EXCEÇÃO (auto-hold, 21/08): pedido segurado pelo robô da Margem também
+    # está em 83955, mas com bling_status_margem='Pendente' GRAVADO — esse
+    # PRECISA continuar visível, senão ninguém consegue analisá-lo (Aprovar/
+    # Reprovar). Os 83955 dos outros fluxos seguem fora: reprovado no clique
+    # (status='Reprovado') e falta de estoque (status NULL).
     where = [
         "v.situacao_nome != 'Cancelado'",
-        f"v.situacao IS DISTINCT FROM '{SITUACAO_REPROVADO}'",
+        f"(v.situacao IS DISTINCT FROM '{SITUACAO_REPROVADO}'"
+        " OR v.bling_status_margem = 'Pendente')",
         f"NOT {_ATTENTION_FRETE_SQL}",
     ]
     params: dict = {"limit": limit, "offset": offset}
@@ -952,7 +959,19 @@ async def refresh_marketplace_mv(
     # Marca o snapshot como fresco pela janela do chamador (default 5min para
     # coalescer rajadas mesmo quando o gatilho foi o botão manual).
     await redis.set(_REFRESH_FRESH_KEY, "1", ex=max_age_s if max_age_s > 0 else 300)
-    return {"refreshed": True, "rows": inserted}
+
+    # Snapshot fresco → auto-hold dos pendentes "Em aberto" (Aguardando
+    # Cancelamento + Observações no Bling). Import tardio: o serviço lê os
+    # gatilhos de atenção DESTE módulo (fonte única) — em cima criaria ciclo.
+    # Best-effort: falha do hold não pode derrubar o refresh do botão.
+    auto_hold: dict | None = None
+    try:
+        from app.services.margem_auto_hold import run as _margem_auto_hold
+
+        auto_hold = await _margem_auto_hold(session)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("margem_auto_hold_refresh_failed", error=str(e)[:200])
+    return {"refreshed": True, "rows": inserted, "auto_hold": auto_hold}
 
 
 class MarketplaceStatusPatch(BaseModel):
@@ -1092,6 +1111,19 @@ async def _apply_bling_decision_by_pedido(
     patch_bling = update_bling
     if new_status == "Reprovado" and str(current_situacao_id or "") != str(SITUACAO_APROVADO):
         patch_bling = False
+    # Pedido segurado pelo auto-hold da Margem (83955 + pino 'Pendente'):
+    # Aprovar TEM de soltar no Bling mesmo quando o chamador pediu local-only.
+    # A UI manda local_only para pendências de saldo/frete e o sync-saldo-final
+    # auto-aprova com update_bling=False — sem esta exceção, a venda ficaria
+    # presa em Aguardando Cancelamento no Bling com status Aprovado (e fora de
+    # todas as abas). O hold de estoque (status NULL) e o reprovado no clique
+    # (status='Reprovado') NÃO entram aqui.
+    if (
+        new_status == "Aprovado"
+        and str(current_situacao_id or "") == str(SITUACAO_REPROVADO)
+        and (order.status or "") == "Pendente"
+    ):
+        patch_bling = True
 
     if patch_bling and str(current_situacao_id or "") != str(situacao_id):
         client = await _global_bling_client(session)
@@ -1164,6 +1196,11 @@ async def _apply_bling_decision_by_pedido(
         status=new_status,
         aprovado_por=str(actor_id),
         verificado=True,
+        # Espelha a situação no snapshot na hora (simétrico ao UPDATE de
+        # bling_orders acima). Sem isso, Aprovar um pedido auto-segurado
+        # (83955) deixaria o snapshot defasado e a linha sumiria de todas as
+        # abas até o próximo rebuild.
+        situacao=str(situacao_id) if patch_bling else None,
     )
 
 
