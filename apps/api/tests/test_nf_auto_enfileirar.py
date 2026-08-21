@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -25,6 +26,7 @@ from app.models import (
     NfCommand,
     NfFaturador,
     NfFaturamento,
+    NfImpressao,
     Product,
     StoreInfo,
     User,
@@ -36,13 +38,22 @@ from app.security.cipher import encrypt
 from app.services import nf_auto_enfileirar, nf_emissao_gerar, threema
 from app.services.nf_auto_enfileirar import (
     avaliar_restricao_loja,
+    horas_de,
+    loja_emite_agora,
+    pedido_sai_no_sabado,
     run_auto_enfileirar_nf,
+    tags_de,
 )
 
 
 async def _async_return(value: object) -> object:
     """`_bling_client_opt` é async — o monkeypatch devolve a coroutine pronta."""
     return value
+
+
+# Datas de referência (BRT): 24/08/2026 = segunda, 22/08 = sábado, 23/08 = domingo.
+def _BRT(ano: int, mes: int, dia: int, hora: int) -> datetime:
+    return datetime(ano, mes, dia, hora, tzinfo=ZoneInfo("America/Sao_Paulo"))
 
 
 class _FakeBlingSituacao:
@@ -91,6 +102,9 @@ async def _seed_loja(
     db: AsyncSession, admin: User, *, plataforma: str, bling_store_id: str,
     com_faturador: bool = True, excecoes: list[dict] | None = None,
     uf_restrictions: list[str] | None = None, sales_team: int | None = None,
+    impressao: str | None = None, etiqueta_horarios: str | None = None,
+    etiqueta_sabado_horario: str | None = None,
+    etiqueta_sabado_tags: str | None = None,
 ) -> None:
     faturador_id = None
     if com_faturador:
@@ -102,11 +116,21 @@ async def _seed_loja(
         db.add(f)
         await db.flush()
         faturador_id = f.id
+    impressao_id = None
+    if impressao:
+        imp = NfImpressao(tipo=impressao)
+        db.add(imp)
+        await db.flush()
+        impressao_id = imp.id
     db.add(
         StoreInfo(
             user_id=admin.id, platform=plataforma,
             account_name=f"loja {bling_store_id}",
             bling_store_id=bling_store_id, nf_faturador_id=faturador_id,
+            nf_impressao_id=impressao_id,
+            etiqueta_horarios=etiqueta_horarios,
+            etiqueta_sabado_horario=etiqueta_sabado_horario,
+            etiqueta_sabado_tags=etiqueta_sabado_tags,
             excecoes=excecoes, uf_restrictions=uf_restrictions,
             sales_team=sales_team,
         )
@@ -144,6 +168,83 @@ async def _seed_pedido(
             uf_destino=uf_destino,
         )
     )
+
+
+def test_horas_e_tags_leem_o_cadastro_da_loja():
+    """Os dois campos da tela Lojas são texto solto — vazio/NULL é o default
+    (contínuo pros horários, nenhum estoque pras tags)."""
+    assert horas_de("10:00, 14:00") == (10, 14)
+    assert horas_de("08:00") == (8,)
+    assert horas_de("") == ()
+    assert horas_de(None) == ()
+    assert tags_de("pi, ra") == {"pi", "ra"}
+    assert tags_de(None) == set()
+
+
+def test_loja_emite_agora_continuos():
+    """Shopee, TikTok e Amazon não têm regra de horário — emitem sempre,
+    inclusive no domingo."""
+    for plataforma in ("shopee", "tiktok", "amazon"):
+        assert loja_emite_agora(
+            plataforma=plataforma, impressao="agencia",
+            etiqueta_horarios="10:00", sabado_horario=None,
+            agora=_BRT(2026, 8, 23, 3),  # domingo de madrugada
+        )
+
+
+def test_loja_emite_agora_ml_correios_e_continuo():
+    """ML de correios segue contínuo todo dia, sábado e domingo inclusive."""
+    for dia in (22, 23, 24):  # sábado, domingo, segunda
+        assert loja_emite_agora(
+            plataforma="ml", impressao="correios",
+            etiqueta_horarios="10:00, 14:00", sabado_horario=None,
+            agora=_BRT(2026, 8, dia, 12),
+        )
+
+
+def test_loja_emite_agora_ml_agencia_dia_util():
+    """Dia útil: a agência só emite nas horas cadastradas; loja SEM horário
+    cadastrado fica de fora do automático ("as que estao sem horario etiqueta
+    nao faça nada")."""
+    def emite(hora: int, horarios: str | None) -> bool:
+        return loja_emite_agora(
+            plataforma="ml", impressao="agencia",
+            etiqueta_horarios=horarios, sabado_horario=None,
+            agora=_BRT(2026, 8, 24, hora),
+        )
+
+    assert emite(10, "10:00, 14:00")
+    assert emite(14, "10:00, 14:00")
+    assert not emite(12, "10:00, 14:00")
+    assert not emite(12, None)  # sem horário = automático não age
+    assert not emite(12, "")
+
+
+def test_loja_emite_agora_ml_agencia_sabado_e_domingo():
+    """Sábado: uma vez só, na hora cadastrada (NULL = não emite).
+    Domingo: nunca."""
+    def emite(dia: int, hora: int, sabado: str | None) -> bool:
+        return loja_emite_agora(
+            plataforma="ml", impressao="agencia",
+            etiqueta_horarios="10:00, 14:00", sabado_horario=sabado,
+            agora=_BRT(2026, 8, dia, hora),
+        )
+
+    assert emite(22, 8, "08:00")  # sábado na hora marcada
+    assert not emite(22, 10, "08:00")  # nem os horários de dia útil valem
+    assert not emite(22, 8, None)  # sem hora de sábado = não emite
+    assert not emite(23, 8, "08:00")  # domingo nunca
+    assert not emite(23, 10, "08:00")
+
+
+def test_pedido_sai_no_sabado_exige_todos_os_itens_marcados():
+    """No sábado a agência só emite dos estoques marcados; item de estoque
+    fechado trava o pedido inteiro (não adianta faturar o que não despacha)."""
+    assert pedido_sai_no_sabado(["b001.pi"], {"pi", "ra"})
+    assert pedido_sai_no_sabado(["b001.pi", "b002.ra"], {"pi", "ra"})
+    assert not pedido_sai_no_sabado(["b001.pi", "b002.sp"], {"pi", "ra"})
+    assert not pedido_sai_no_sabado(["b001.pi"], set())  # loja sem tag marcada
+    assert not pedido_sai_no_sabado([], {"pi"})
 
 
 @pytest.mark.asyncio
@@ -188,11 +289,16 @@ async def test_sweep_enfileira_com_estoque(db: AsyncSession, admin: User):
 async def test_sweep_ml_amazon_entram_na_janela(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
 ):
-    """Com a flag ligada e nas janelas das 10h/14h BRT, pedidos ML e Amazon
-    'Em aberto' com faturador entram no sweep junto com os contínuos."""
+    """Com a flag ligada, no horário da loja (10h de um dia útil), pedidos ML
+    (agência) e Amazon 'Em aberto' com faturador entram junto com os contínuos."""
     monkeypatch.setattr(get_settings(), "nf_auto_ml_amazon", True, raising=False)
-    monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 10)
-    await _seed_loja(db, admin, plataforma="ml", bling_store_id="930003")
+    monkeypatch.setattr(
+        nf_auto_enfileirar, "_agora_brt", lambda: _BRT(2026, 8, 24, 10)  # segunda
+    )
+    await _seed_loja(
+        db, admin, plataforma="ml", bling_store_id="930003",
+        impressao="agencia", etiqueta_horarios="10:00, 14:00",
+    )
     await _seed_loja(db, admin, plataforma="amazon", bling_store_id="930005")
     await _seed_pedido(db, numero="830003", loja="930003", sku="a3")
     await _seed_pedido(db, numero="830005", loja="930005", sku="a5")
@@ -216,37 +322,48 @@ async def test_sweep_ml_amazon_entram_na_janela(
     assert fats["830005"].status_faturamento == "processando"
 
     # às 14h também entra
-    monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 14)
+    monkeypatch.setattr(
+        nf_auto_enfileirar, "_agora_brt", lambda: _BRT(2026, 8, 24, 14)
+    )
     summary14 = await run_auto_enfileirar_nf()
     assert summary14["candidatos"] == 0  # dedupe: já processados
 
 
 @pytest.mark.asyncio
-async def test_sweep_ml_amazon_fora_da_janela(
+async def test_sweep_ml_agencia_fora_do_horario_da_loja(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
 ):
-    """Fora das 10h/14h BRT (mesmo com a flag ligada), ML e Amazon NÃO
-    entram no sweep (Shopee/TikTok seguem contínuos)."""
+    """12h de um dia útil: o ML de agência tem horário 10h/14h na tela Lojas →
+    fica de fora. Shopee e Amazon são CONTÍNUOS e entram; o ML de correios
+    também é contínuo (não tem regra de horário)."""
     monkeypatch.setattr(get_settings(), "nf_auto_ml_amazon", True, raising=False)
-    monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 12)
-    await _seed_loja(db, admin, plataforma="ml", bling_store_id="930004")
+    monkeypatch.setattr(
+        nf_auto_enfileirar, "_agora_brt", lambda: _BRT(2026, 8, 24, 12)  # segunda
+    )
+    await _seed_loja(
+        db, admin, plataforma="ml", bling_store_id="930004",
+        impressao="agencia", etiqueta_horarios="10:00, 14:00",
+    )
+    await _seed_loja(
+        db, admin, plataforma="ml", bling_store_id="930009",
+        impressao="correios", etiqueta_horarios="10:00, 14:00",
+    )
     await _seed_loja(db, admin, plataforma="amazon", bling_store_id="930006")
     await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
     await _seed_pedido(db, numero="830004", loja="930004", sku="a4")
+    await _seed_pedido(db, numero="830009", loja="930009", sku="a9")
     await _seed_pedido(db, numero="830006", loja="930006", sku="a6")
     await _seed_pedido(db, numero="830001", loja="930001", sku="a1")
-    db.add(Product(user_id=admin.id, sku="a4", name="A4", stock=3))
-    db.add(Product(user_id=admin.id, sku="a6", name="A6", stock=3))
-    db.add(Product(user_id=admin.id, sku="a1", name="A1", stock=3))
+    for sku in ("a4", "a9", "a6", "a1"):
+        db.add(Product(user_id=admin.id, sku=sku, name=sku.upper(), stock=3))
     await db.commit()
 
     summary = await run_auto_enfileirar_nf()
-    assert summary["candidatos"] == 1  # só o shopee
-    assert summary["enfileirados"] == 1
+    assert summary["candidatos"] == 3  # shopee + amazon + ml correios
 
     db.expire_all()
     cmds = (await db.execute(select(NfCommand))).scalars().all()
-    assert sorted(n for c in cmds for n in c.numeros) == ["830001"]
+    assert sorted(n for c in cmds for n in c.numeros) == ["830001", "830006", "830009"]
     fat = (
         await db.execute(
             select(NfFaturamento).where(NfFaturamento.pedido_bling == "830004")
@@ -259,10 +376,12 @@ async def test_sweep_ml_amazon_fora_da_janela(
 async def test_sweep_ml_amazon_flag_desligada_nao_entram(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
 ):
-    """Flag nf_auto_ml_amazon DESLIGADA (default): mesmo dentro da janela
-    das 10h, ML e Amazon ficam de fora — pausa pra testar supervisionado."""
+    """Flag nf_auto_ml_amazon DESLIGADA (default): mesmo no horário da loja,
+    ML e Amazon ficam de fora — pausa pra testar supervisionado."""
     monkeypatch.setattr(get_settings(), "nf_auto_ml_amazon", False, raising=False)
-    monkeypatch.setattr(nf_auto_enfileirar, "_hora_brt", lambda: 10)
+    monkeypatch.setattr(
+        nf_auto_enfileirar, "_agora_brt", lambda: _BRT(2026, 8, 24, 10)
+    )
     await _seed_loja(db, admin, plataforma="ml", bling_store_id="930007")
     await _seed_loja(db, admin, plataforma="amazon", bling_store_id="930008")
     await _seed_loja(db, admin, plataforma="shopee", bling_store_id="930001")
@@ -281,6 +400,46 @@ async def test_sweep_ml_amazon_flag_desligada_nao_entram(
     db.expire_all()
     cmds = (await db.execute(select(NfCommand))).scalars().all()
     assert sorted(n for c in cmds for n in c.numeros) == ["830001"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_sabado_agencia_so_dos_estoques_marcados(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Sábado 08h: a loja ML de agência emite uma vez, às 08:00, e só pros
+    estoques marcados (pi) — o pedido do estoque sp fica pra segunda. O ML de
+    correios segue contínuo no sábado, sem regra de estoque."""
+    monkeypatch.setattr(get_settings(), "nf_auto_ml_amazon", True, raising=False)
+    monkeypatch.setattr(
+        nf_auto_enfileirar, "_agora_brt", lambda: _BRT(2026, 8, 22, 8)  # sábado
+    )
+    await _seed_loja(
+        db, admin, plataforma="ml", bling_store_id="930010",
+        impressao="agencia", etiqueta_horarios="10:00, 14:00",
+        etiqueta_sabado_horario="08:00", etiqueta_sabado_tags="pi",
+    )
+    await _seed_loja(
+        db, admin, plataforma="ml", bling_store_id="930011", impressao="correios",
+    )
+    await _seed_pedido(db, numero="830010", loja="930010", sku="b001.pi")
+    await _seed_pedido(db, numero="830011", loja="930010", sku="b002.sp")
+    await _seed_pedido(db, numero="830012", loja="930011", sku="b003.sp")
+    for sku in ("b001.pi", "b002.sp", "b003.sp"):
+        db.add(Product(user_id=admin.id, sku=sku, name=sku, stock=3))
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 2  # agência/pi + correios (contínuo)
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert sorted(n for c in cmds for n in c.numeros) == ["830010", "830012"]
+    fat = (
+        await db.execute(
+            select(NfFaturamento).where(NfFaturamento.pedido_bling == "830011")
+        )
+    ).scalar_one_or_none()
+    assert fat is None  # estoque sp não sai no sábado — segue pra segunda
 
 
 @pytest.mark.asyncio

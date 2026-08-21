@@ -2,8 +2,9 @@
 
 Faz sozinho o que o botão "Enfileirar" do Painel Faturamento faz: a cada tick
 varre os pedidos com situacao=6 ("Em aberto") de lojas com faturador
-atribuído — Shopee/TikTok contínuos; ML/Amazon SÓ nas janelas das 10h e das
-14h BRT —, confere o ESTOQUE antes de tudo (regra do usuário: kit
+atribuído — Shopee/TikTok/Amazon contínuos; ML segue o HORÁRIO da tela Lojas
+(correios contínuo, agência nos horários da loja, sábado uma vez só e domingo
+nunca — ver `loja_emite_agora`) —, confere o ESTOQUE antes de tudo (kit
 confere o saldo do próprio SKU do kit; saldo virtual negativo = peça não
 existe) e:
 
@@ -44,9 +45,10 @@ from sqlalchemy import func, or_, select, text
 
 from app.config import get_settings
 from app.db import session_scope
-from app.models import BlingOrder, NfCommand, NfFaturamento, StoreInfo
+from app.models import BlingOrder, NfCommand, NfFaturamento, NfImpressao, StoreInfo
 from app.services import nf_emissao_gerar, threema
 from app.services.advisory_lock import SYNC_NAMESPACE
+from app.services.sku_tags import classify_sku_tag
 
 logger = structlog.get_logger()
 
@@ -60,21 +62,90 @@ _SITUACAO_EM_ABERTO = "6"
 # Plataformas que o fluxo automatizado cobre hoje (codes de store_info.platform).
 _PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok", "ml", "amazon")
 
-# ML e Amazon NÃO faturam o tempo todo: só nas janelas das 10h e das 14h de
-# Brasília (decisão do usuário, 15/08: "ao invés de faturar o tempo todo,
-# vamos faturar somente às 10:00 e às 14:00"). Shopee/TikTok seguem
-# contínuos a cada tick. Janela = a HORA cheia (10:00–10:59 / 14:00–14:59):
-# o tick de 2min dá várias passadas com teto de 30, drenando o acumulado.
-# ALÉM da janela, ML/Amazon exigem a flag `nf_auto_ml_amazon` LIGADA
+# ML e Amazon só entram no automático com a flag `nf_auto_ml_amazon` LIGADA
 # (usuário: "nao e para ativar mercado livre ainda... vamos testar de noite").
+# A flag é o interruptor mestre; QUANDO ligar, o horário de cada loja é quem
+# manda (ver `loja_emite_agora`).
 _PLATAFORMAS_JANELA: tuple[str, ...] = ("ml", "amazon")
-_HORAS_JANELA: tuple[int, ...] = (10, 14)
 _TZ_BRT = ZoneInfo("America/Sao_Paulo")
 
+_DIA_SABADO = 5
+_DIA_DOMINGO = 6
 
-def _hora_brt() -> int:
-    """Hora atual em Brasília (função separada pra teste monkeypatchar)."""
-    return datetime.now(_TZ_BRT).hour
+
+def _agora_brt() -> datetime:
+    """Agora em Brasília (função separada pra teste monkeypatchar)."""
+    return datetime.now(_TZ_BRT)
+
+
+def horas_de(txt: str | None) -> tuple[int, ...]:
+    """"10:00, 14:00" → (10, 14). Vazio/NULL → () (= nenhuma hora marcada)."""
+    horas: list[int] = []
+    for parte in (txt or "").split(","):
+        parte = parte.strip()
+        if not parte:
+            continue
+        try:
+            horas.append(int(parte.split(":")[0]))
+        except ValueError:
+            continue
+    return tuple(horas)
+
+
+def loja_emite_agora(
+    *,
+    plataforma: str | None,
+    impressao: str | None,
+    etiqueta_horarios: str | None,
+    sabado_horario: str | None,
+    agora: datetime,
+) -> bool:
+    """A loja emite NESTE instante? (regra da tela Lojas, decidida em 21/08)
+
+    - Shopee, TikTok e Amazon: contínuos ("amazon é continuo").
+    - ML + Impressão **correios**: contínuo todo dia, inclusive sábado e
+      domingo, e sem regra de estoque.
+    - ML + Impressão **agência**: dia útil nos `etiqueta_horarios` da loja;
+      **sábado** só na hora de `etiqueta_sabado_horario` e só pros estoques de
+      `etiqueta_sabado_tags` (filtro à parte, ver `pedido_sai_no_sabado`);
+      **domingo não emite**.
+
+    Horário em branco = o automático NÃO age (usuário, 21/08: "as que estao
+    sem horario etiqueta nao faça nada") — a loja segue no enfileiramento
+    manual. É o INVERSO da leitura da tela Lojas, onde vazio quer dizer
+    "imprime contínuo" (migration 0222): aqui, sem horário não há quando.
+
+    Janela = a HORA cheia (10:00–10:59): o tick de 2min dá várias passadas
+    com teto de 30, drenando o acumulado.
+    """
+    if (plataforma or "").strip().lower() != "ml":
+        return True
+    if (impressao or "").strip().lower() == "correios":
+        return True
+
+    dia = agora.weekday()
+    if dia == _DIA_DOMINGO:
+        return False
+    if dia == _DIA_SABADO:
+        return agora.hour in horas_de(sabado_horario)
+    return agora.hour in horas_de(etiqueta_horarios)
+
+
+def tags_de(txt: str | None) -> set[str]:
+    """"pi, ra" → {"pi", "ra"}. Vazio/NULL → set() (= nenhum estoque)."""
+    return {t.strip().lower() for t in (txt or "").split(",") if t.strip()}
+
+
+def pedido_sai_no_sabado(skus: list[str | None], tags: set[str]) -> bool:
+    """No sábado a agência só emite dos estoques marcados na loja.
+
+    Conservador de propósito: TODO item do pedido tem que sair de um estoque
+    marcado — um item de estoque fechado no sábado trava o pedido inteiro
+    (não adianta emitir NF do que não vai ser despachado).
+    """
+    if not tags or not skus:
+        return False
+    return all(classify_sku_tag(sku) in tags for sku in skus)
 
 # Pedido mais velho que isso não entra sozinho — se ficou pra trás, é caso de
 # olhar no painel e enfileirar à mão (evita o sweep ressuscitar pedido antigo
@@ -625,25 +696,35 @@ async def _candidatos(session) -> list[str]:
     """Pedidos elegíveis pro sweep, já deduplicados contra fila e histórico.
 
     Elegível = "Em aberto" (6), loja ativa COM faturador atribuído, dentro
-    da janela de 7 dias; Shopee/TikTok sempre, ML/Amazon só com a flag
-    nf_auto_ml_amazon ligada E nas horas da janela (10h/14h BRT).
-    `item_index==0` porque
-    bling_orders tem uma linha por item. Dedupe duplo: comando ativo na fila
-    OU qualquer status_faturamento já registrado (tentativa única).
+    da janela de 7 dias, e a LOJA emitindo neste instante (`loja_emite_agora`
+    — horário da tela Lojas). ML/Amazon ainda dependem da flag mestre
+    `nf_auto_ml_amazon`. `item_index==0` porque bling_orders tem uma linha
+    por item. Dedupe duplo: comando ativo na fila OU qualquer
+    status_faturamento já registrado (tentativa única).
     """
     cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
-    # ML/Amazon só entram com a flag nf_auto_ml_amazon LIGADA e dentro das
-    # janelas das 10h e das 14h BRT; fora disso o sweep segue só com
-    # Shopee/TikTok (contínuos).
+    # Flag mestre: com ela desligada o sweep segue só com Shopee/TikTok.
     plataformas = (
         _PLATAFORMAS
-        if get_settings().nf_auto_ml_amazon and _hora_brt() in _HORAS_JANELA
+        if get_settings().nf_auto_ml_amazon
         else tuple(p for p in _PLATAFORMAS if p not in _PLATAFORMAS_JANELA)
     )
-    numeros = (
+    rows = (
         await session.execute(
-            select(BlingOrder.numero)
+            select(
+                BlingOrder.numero,
+                func.lower(StoreInfo.platform),
+                func.lower(func.coalesce(NfImpressao.tipo, "")),
+                StoreInfo.etiqueta_horarios,
+                StoreInfo.etiqueta_sabado_horario,
+                StoreInfo.etiqueta_sabado_tags,
+            )
             .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
+            .join(
+                NfImpressao,
+                NfImpressao.id == StoreInfo.nf_impressao_id,
+                isouter=True,
+            )
             .where(
                 BlingOrder.situacao == _SITUACAO_EM_ABERTO,
                 BlingOrder.item_index == 0,
@@ -657,7 +738,31 @@ async def _candidatos(session) -> list[str]:
             .distinct()
             .order_by(BlingOrder.numero)
         )
-    ).scalars().all()
+    ).all()
+
+    agora = _agora_brt()
+    numeros: list[str] = []
+    # Sábado da agência: guarda os estoques marcados da loja pra filtrar os
+    # itens depois (numero → tags).
+    sabado: dict[str, set[str]] = {}
+    for numero, plataforma, impressao, horarios, sab_hora, sab_tags in rows:
+        if not loja_emite_agora(
+            plataforma=plataforma,
+            impressao=impressao,
+            etiqueta_horarios=horarios,
+            sabado_horario=sab_hora,
+            agora=agora,
+        ):
+            continue
+        numeros.append(numero)
+        if (
+            plataforma == "ml"
+            and impressao != "correios"
+            and agora.weekday() == _DIA_SABADO
+        ):
+            sabado[numero] = tags_de(sab_tags)
+    if sabado:
+        numeros = await _filtra_estoques_do_sabado(session, numeros, sabado)
     if not numeros:
         return []
     ja_tratados = set(
@@ -676,3 +781,29 @@ async def _candidatos(session) -> list[str]:
     return [
         n for n in numeros if n not in ja_tratados and n not in em_fila
     ][:_MAX_POR_TICK]
+
+
+async def _filtra_estoques_do_sabado(
+    session, numeros: list[str], sabado: dict[str, set[str]]
+) -> list[str]:
+    """Tira do sábado da agência os pedidos fora dos estoques marcados.
+
+    `sabado` é numero → tags da loja; pedido que não está no dict (correios,
+    outra plataforma, dia útil) passa direto.
+    """
+    rows = (
+        await session.execute(
+            select(BlingOrder.numero, BlingOrder.item_codigo).where(
+                BlingOrder.numero.in_(list(sabado))
+            )
+        )
+    ).all()
+    skus: dict[str, list[str | None]] = {}
+    for numero, sku in rows:
+        skus.setdefault(numero, []).append(sku)
+    manter: list[str] = []
+    for numero in numeros:
+        tags = sabado.get(numero)
+        if tags is None or pedido_sai_no_sabado(skus.get(numero, []), tags):
+            manter.append(numero)
+    return manter
