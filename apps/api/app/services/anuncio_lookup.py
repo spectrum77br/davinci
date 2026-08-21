@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import Counter
 from typing import Any
 from uuid import UUID
 
@@ -198,8 +199,13 @@ async def lookup_anuncio(
     if not ext:
         return {"encontrado": False, "motivo": "id_vazio", "external_id": ext}
 
-    # 1) O que já existe localmente pra esse ID (serve de atalho pra descobrir
-    #    a conta e pra marcar o que já está vinculado).
+    # 1) O que já existe localmente pra esse ID. CUIDADO (caso 58207423113,
+    #    2026-08-21): podem existir vínculos-fantasma do MESMO anúncio gravados
+    #    em OUTRAS contas (lixo antigo). Um anúncio pertence a UMA loja, então
+    #    a conta dona é resolvida PRIMEIRO e só os vínculos dela contam — antes
+    #    disso, o fantasma desviava a busca pra conta errada ("marketplace não
+    #    respondeu"), roubava o casamento por variação e entrava no sync com
+    #    erro "item_not_found".
     links_locais = list(
         (
             await session.execute(
@@ -211,35 +217,66 @@ async def lookup_anuncio(
         .scalars()
         .all()
     )
-    por_variacao = {(lk.variation_id or ""): lk for lk in links_locais}
 
     platform = plataforma_do_id(ext)
-    if links_locais and integration_id is None:
-        integration_id = links_locais[0].integration_id
+    if links_locais and platform is None:
         platform = links_locais[0].platform
 
-    integracoes = await _integracoes_candidatas(
-        session, user, platform=platform, integration_id=integration_id
-    )
-    integ, linhas = await _procura_conta(session, integracoes, ext)
+    ids_com_link = {lk.integration_id for lk in links_locais}
+
+    async def _sonda_todas(
+        excluir: UUID | None,
+    ) -> tuple[Integration | None, list[dict]]:
+        todas = await _integracoes_candidatas(
+            session, user, platform=platform, integration_id=None
+        )
+        candidatas = [i for i in todas if i.id != excluir]
+        com_link = [i for i in candidatas if i.id in ids_com_link]
+        sem_link = [i for i in candidatas if i.id not in ids_com_link]
+        # Atalho: primeiro as contas que já têm vínculo com esse ID (quase
+        # sempre só uma). Conta errada não reconhece o item, então um vínculo-
+        # fantasma não engana a busca — quem responde é a dona de verdade.
+        integ_, linhas_ = await _procura_conta(session, com_link, ext)
+        if integ_ is None:
+            integ_, linhas_ = await _procura_conta(session, sem_link, ext)
+        return integ_, linhas_
+
+    if integration_id is not None:
+        integracoes = await _integracoes_candidatas(
+            session, user, platform=platform, integration_id=integration_id
+        )
+        integ, linhas = await _procura_conta(session, integracoes, ext)
+        if integ is None:
+            # A conta pedida não reconheceu o anúncio (tela desviada por um
+            # fantasma?): sonda as outras antes de cair no fallback local.
+            integ, linhas = await _sonda_todas(excluir=integration_id)
+    else:
+        integ, linhas = await _sonda_todas(excluir=None)
 
     origem = "marketplace"
     if not linhas and links_locais:
         # Canal não respondeu (ou plataforma sem busca por ID): monta a partir
-        # dos vínculos gravados pra pelo menos permitir o sync.
+        # dos vínculos gravados pra pelo menos permitir o sync — de UMA conta
+        # só (a pedida; senão a que tem mais vínculos deste anúncio).
         origem = "local"
-        integ = await session.get(Integration, links_locais[0].integration_id)
-        linhas = [
-            {
-                "external_id": lk.external_id,
-                "variation_id": lk.variation_id,
-                "sku": lk.external_sku,
-                "title": lk.listing_title,
-                "listing_type": lk.listing_type,
-                "stock": lk.stock,
-            }
-            for lk in links_locais
-        ]
+        alvo_integ = integration_id
+        if alvo_integ is None:
+            contagem = Counter(lk.integration_id for lk in links_locais)
+            alvo_integ = contagem.most_common(1)[0][0]
+        escolhidos = [lk for lk in links_locais if lk.integration_id == alvo_integ]
+        if escolhidos:
+            integ = await session.get(Integration, alvo_integ)
+            linhas = [
+                {
+                    "external_id": lk.external_id,
+                    "variation_id": lk.variation_id,
+                    "sku": lk.external_sku,
+                    "title": lk.listing_title,
+                    "listing_type": lk.listing_type,
+                    "stock": lk.stock,
+                }
+                for lk in escolhidos
+            ]
 
     if not linhas or integ is None:
         return {
@@ -248,6 +285,13 @@ async def lookup_anuncio(
             "external_id": ext,
             "plataforma": platform.value if platform else None,
         }
+
+    # Só os vínculos DA conta dona do anúncio entram no casamento por variação.
+    por_variacao = {
+        (lk.variation_id or ""): lk
+        for lk in links_locais
+        if lk.integration_id == integ.id
+    }
 
     # Só os produtos cujo SKU pode casar com alguma variação deste anúncio —
     # carregar o catálogo inteiro (como o Vincular Automático faz) deixaria uma
@@ -384,7 +428,12 @@ async def vincular_anuncio(
     if not dados.get("encontrado"):
         return {**dados, "criados": 0, "movidos": 0, "movimentos": [], "link_ids": []}
 
-    integ = await session.get(Integration, integration_id)
+    # A conta que RECONHECEU o anúncio manda (pode diferir da pedida quando um
+    # vínculo-fantasma apontou a tela pra conta errada).
+    integ_id = integration_id
+    if dados.get("integration_id"):
+        integ_id = UUID(str(dados["integration_id"]))
+    integ = await session.get(Integration, integ_id)
     if integ is None:
         return {
             "encontrado": False,
@@ -485,11 +534,17 @@ async def vincular_anuncio(
             movimentos=movimentos,
         )
 
+    # Só os vínculos DA conta dona: um fantasma de outra conta não pode entrar
+    # no push de estoque (dava "item_not_found" na loja errada).
     link_ids = list(
         (
             await session.execute(
                 select(ProductLink.id).where(
-                    and_(user_scope(ProductLink, user), ProductLink.external_id == ext)
+                    and_(
+                        user_scope(ProductLink, user),
+                        ProductLink.external_id == ext,
+                        ProductLink.integration_id == integ.id,
+                    )
                 )
             )
         )

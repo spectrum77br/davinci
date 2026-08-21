@@ -311,6 +311,137 @@ async def test_vincular_anuncio_move_link_quando_sku_trocou_no_anuncio(
     assert de_novo["resumo"]["ja_vinculados"] == 2
 
 
+@pytest.mark.asyncio
+async def test_vinculo_fantasma_de_outra_conta_nao_engana_o_lookup(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Reprodução do 58207423113 (2026-08-21): a mega é dona do anúncio, mas
+    existiam vínculos-fantasma do MESMO external_id + MESMOS variation_ids na
+    Vortan (lixo antigo). O fantasma desviava a conta, roubava o casamento por
+    variação (o "trocado" movia o link errado) e entrava no push de estoque
+    com item_not_found. Agora: a conta que RECONHECE o anúncio manda; só os
+    vínculos dela casam por variação e entram no sync."""
+    mega = await _make_integration(db, user, IntegrationPlatform.SHOPEE, Marketplace.SHOPEE)
+    vortan = await _make_integration(db, user, IntegrationPlatform.SHOPEE, Marketplace.SHOPEE)
+    vortan.name = "vortan"
+    vortan.credentials = encrypt_json(
+        {"access_token": "x", "shop_id": 2, "expires_at": 9999999999}
+    )
+    sa = Product(user_id=user.id, sku="i222.sa", name="Macbook SA", stock=40, min_stock=0)
+    sp = Product(user_id=user.id, sku="i222.sp", name="Macbook SP", stock=19, min_stock=0)
+    db.add_all([sa, sp])
+    await db.flush()
+
+    link_mega = ProductLink(
+        user_id=user.id,
+        product_id=sa.id,
+        integration_id=mega.id,
+        store_id=mega.store_id,
+        platform=IntegrationPlatform.SHOPEE,
+        external_id="58207423113",
+        variation_id="m1",
+        external_sku="i222.sa",
+        last_sync_status=LinkSyncStatus.OK,
+    )
+    fantasma = ProductLink(  # mesmo anúncio/variação, conta errada (lixo antigo)
+        user_id=user.id,
+        product_id=sp.id,
+        integration_id=vortan.id,
+        store_id=vortan.store_id,
+        platform=IntegrationPlatform.SHOPEE,
+        external_id="58207423113",
+        variation_id="m1",
+        external_sku="i222.sp",
+        last_sync_status=LinkSyncStatus.OK,
+    )
+    db.add_all([link_mega, fantasma])
+    await db.commit()
+
+    from app.services.marketplaces import shopee as shopee_mod
+
+    async def _fake_por_loja(self, item_ids, status_filter):  # noqa: ANN001
+        # Como na Shopee real: só a loja DONA (shop_id=1, mega) devolve o item.
+        if int(self.creds.get("shop_id") or 0) == 1:
+            yield {"external_id": "58207423113", "variation_id": "m1",
+                   "sku": "i222.sp", "title": "Macbook - Amarelo", "stock": 40}
+
+    monkeypatch.setattr(shopee_mod.ShopeeClient, "_fetch_base_info", _fake_por_loja)
+
+    # Busca sem escolher conta: tem que achar a mega (dona), não a Vortan.
+    dados = await lookup_anuncio(db, user, external_id="58207423113")
+    assert dados["origem"] == "marketplace"
+    assert dados["integration_id"] == str(mega.id)
+    assert dados["resumo"]["total"] == 1
+    m1 = dados["variacoes"][0]
+    assert m1["estado"] == "trocado"  # casou com o link da MEGA, não o fantasma
+    assert m1["sku_anterior"] == "i222.sa"
+    assert m1["link_id"] == str(link_mega.id)
+
+    # Vincular pedindo a conta ERRADA (como a tela desviada fazia): a conta
+    # que reconheceu o anúncio manda mesmo assim.
+    out = await vincular_anuncio(
+        db, user, external_id="58207423113", integration_id=vortan.id
+    )
+    assert out["movidos"] == 1
+    assert out["link_ids"] == [str(link_mega.id)]  # fantasma FORA do sync
+
+    await db.refresh(link_mega)
+    assert link_mega.product_id == sp.id  # o link CERTO moveu
+    assert link_mega.external_sku == "i222.sp"
+    await db.refresh(fantasma)
+    assert fantasma.integration_id == vortan.id  # fantasma intocado
+
+
+@pytest.mark.asyncio
+async def test_fallback_local_usa_so_a_conta_com_mais_vinculos(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Canal fora do ar + vínculos em 2 contas: o painel não pode misturar
+    contas (mostrava 8 linhas "conta Vortan" pro anúncio da mega). Local
+    escolhe UMA conta — a com mais vínculos deste anúncio."""
+    mega = await _make_integration(db, user, IntegrationPlatform.SHOPEE, Marketplace.SHOPEE)
+    vortan = await _make_integration(db, user, IntegrationPlatform.SHOPEE, Marketplace.SHOPEE)
+    p1 = Product(user_id=user.id, sku="p-1", name="p1", stock=1, min_stock=0)
+    p2 = Product(user_id=user.id, sku="p-2", name="p2", stock=2, min_stock=0)
+    db.add_all([p1, p2])
+    await db.flush()
+    db.add_all([
+        ProductLink(
+            user_id=user.id, product_id=p1.id, integration_id=mega.id,
+            store_id=mega.store_id, platform=IntegrationPlatform.SHOPEE,
+            external_id="660001112", variation_id="a", external_sku="p-1",
+            last_sync_status=LinkSyncStatus.OK,
+        ),
+        ProductLink(
+            user_id=user.id, product_id=p2.id, integration_id=mega.id,
+            store_id=mega.store_id, platform=IntegrationPlatform.SHOPEE,
+            external_id="660001112", variation_id="b", external_sku="p-2",
+            last_sync_status=LinkSyncStatus.OK,
+        ),
+        ProductLink(  # fantasma solitário na outra conta
+            user_id=user.id, product_id=p1.id, integration_id=vortan.id,
+            store_id=vortan.store_id, platform=IntegrationPlatform.SHOPEE,
+            external_id="660001112", variation_id="a", external_sku="p-1",
+            last_sync_status=LinkSyncStatus.OK,
+        ),
+    ])
+    await db.commit()
+
+    from app.services.marketplaces import shopee as shopee_mod
+
+    def _explode(self, item_ids, status_filter):  # noqa: ANN001
+        raise RuntimeError("shopee fora do ar")
+
+    monkeypatch.setattr(shopee_mod.ShopeeClient, "_fetch_base_info", _explode)
+
+    dados = await lookup_anuncio(db, user, external_id="660001112")
+    assert dados["encontrado"] is True
+    assert dados["origem"] == "local"
+    assert dados["integration_id"] == str(mega.id)  # a conta com MAIS vínculos
+    assert dados["resumo"]["total"] == 2  # sem misturar o fantasma da outra
+    assert dados["resumo"]["ja_vinculados"] == 2
+
+
 # -------------------------------------------------------------------- ml
 
 
