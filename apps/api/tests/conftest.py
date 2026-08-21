@@ -342,7 +342,6 @@ _CLEANUP_TABLES = (
     "nf_catalogo_mala",
     "nf_faturador",
     "nf_etiqueta",
-    "nf_etiqueta_horario",
     "nf_impressao",
     "automacoes",
     "logistica_status_anexo",

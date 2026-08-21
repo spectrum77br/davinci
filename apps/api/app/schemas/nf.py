@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 
 class NfFaturadorOut(BaseModel):
@@ -110,85 +110,6 @@ class NfEtiquetaPatch(BaseModel):
     ads_power: str | None = None
     observacao: str | None = None
     sort_order: int | None = None
-
-
-ETIQUETA_HORARIO_MODOS = ("continuo", "horario")
-
-
-def _normaliza_horarios(v: list[str] | None) -> list[str]:
-    """Aceita "10:00" / "10h" / "1000" e devolve "HH:MM" único e ordenado."""
-    if not v:
-        return []
-    saida: set[str] = set()
-    for bruto in v:
-        txt = str(bruto).strip().lower().replace("h", ":")
-        if ":" not in txt and txt.isdigit() and len(txt) in (3, 4):
-            txt = f"{txt[:-2]}:{txt[-2:]}"
-        hora, _, minuto = txt.partition(":")
-        minuto = minuto or "0"
-        if not hora.isdigit() or not minuto.isdigit():
-            raise ValueError(f"horário inválido: {bruto}")
-        h, m = int(hora), int(minuto)
-        if not (0 <= h <= 23 and 0 <= m <= 59):
-            raise ValueError(f"horário inválido: {bruto}")
-        saida.add(f"{h:02d}:{m:02d}")
-    return sorted(saida)
-
-
-class NfEtiquetaHorarioOut(BaseModel):
-    id: UUID
-    plataforma: str
-    modo: str
-    horarios: list[str]
-    observacao: str | None = None
-    sort_order: int
-    created_by: UUID | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class NfEtiquetaHorarioCreate(BaseModel):
-    plataforma: str = Field(min_length=1)
-    modo: str = "horario"
-    horarios: list[str] | None = None
-    observacao: str | None = None
-    sort_order: int | None = None
-
-    @field_validator("modo")
-    @classmethod
-    def _modo_valido(cls, v: str) -> str:
-        v = (v or "").strip().lower()
-        if v not in ETIQUETA_HORARIO_MODOS:
-            raise ValueError("modo deve ser 'continuo' ou 'horario'")
-        return v
-
-    @field_validator("horarios")
-    @classmethod
-    def _horarios(cls, v: list[str] | None) -> list[str]:
-        return _normaliza_horarios(v)
-
-
-class NfEtiquetaHorarioPatch(BaseModel):
-    plataforma: str | None = Field(default=None, min_length=1)
-    modo: str | None = None
-    horarios: list[str] | None = None
-    observacao: str | None = None
-    sort_order: int | None = None
-
-    @field_validator("modo")
-    @classmethod
-    def _modo_valido(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        v = v.strip().lower()
-        if v not in ETIQUETA_HORARIO_MODOS:
-            raise ValueError("modo deve ser 'continuo' ou 'horario'")
-        return v
-
-    @field_validator("horarios")
-    @classmethod
-    def _horarios(cls, v: list[str] | None) -> list[str] | None:
-        return None if v is None else _normaliza_horarios(v)
 
 
 class NfImpressaoOut(BaseModel):

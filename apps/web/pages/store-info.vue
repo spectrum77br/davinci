@@ -51,6 +51,7 @@ type StoreInfo = {
   sales_team: number | null
   nf_faturador_id: string | null
   nf_etiqueta_id: string | null
+  etiqueta_horarios: string | null
   nf_impressao_id: string | null
   archived_at: string | null
   created_at: string
@@ -711,6 +712,7 @@ async function copyText(text: string) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Conta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Faturador</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Etiqueta</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]" title="Horários (BRT) em que as etiquetas desta loja são impressas. Vazio = contínuo.">Horário Etiqueta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Impressão</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Equipe</th>
@@ -883,6 +885,27 @@ async function copyText(text: string) {
               </select>
               <span v-else :class="{ 'text-muted-foreground': !row.nf_etiqueta_id }">
                 {{ nfLabel(etiquetas, row.nf_etiqueta_id) }}
+              </span>
+            </td>
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'etiqueta_horarios'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'etiqueta_horarios'),
+              }"
+              @click="!isEditing(row.id, 'etiqueta_horarios') && startEdit(row, 'etiqueta_horarios')"
+            >
+              <input
+                v-if="isEditing(row.id, 'etiqueta_horarios')"
+                :ref="setEditInputRef"
+                v-model="editValue"
+                type="text"
+                placeholder="10:00, 14:00"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+              >
+              <span v-else :class="{ 'text-muted-foreground': !row.etiqueta_horarios }">
+                {{ row.etiqueta_horarios || 'contínuo' }}
               </span>
             </td>
             <td

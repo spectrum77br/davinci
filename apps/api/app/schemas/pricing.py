@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # --------------------------------------------------------------- pricing accounts
 
@@ -377,6 +377,32 @@ class StoreExcecao(BaseModel):
     termos: list[str] | None = None
 
 
+def normaliza_etiqueta_horarios(v: str | None) -> str | None:
+    """"HH:MM" separados por vírgula, ordenados e sem repetir.
+
+    Aceita "10:00" / "10h" / "1000" e devolve None quando vazio (= contínuo:
+    a etiqueta é impressa assim que a NF fecha).
+    """
+    if v is None:
+        return None
+    saida: set[str] = set()
+    for bruto in str(v).replace(";", ",").split(","):
+        txt = bruto.strip().lower().replace("h", ":")
+        if not txt:
+            continue
+        if ":" not in txt and txt.isdigit() and len(txt) in (3, 4):
+            txt = f"{txt[:-2]}:{txt[-2:]}"
+        hora, _, minuto = txt.partition(":")
+        minuto = minuto or "0"
+        if not hora.isdigit() or not minuto.isdigit():
+            raise ValueError(f"horário inválido: {bruto}")
+        h, m = int(hora), int(minuto)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError(f"horário inválido: {bruto}")
+        saida.add(f"{h:02d}:{m:02d}")
+    return ", ".join(sorted(saida)) or None
+
+
 class StoreInfoBase(BaseModel):
     platform: str = Field(min_length=1, max_length=64)
     segment: str | None = None
@@ -406,6 +432,11 @@ class StoreInfoBase(BaseModel):
     nf_faturador_id: UUID | None = None
     nf_etiqueta_id: UUID | None = None
     nf_impressao_id: UUID | None = None
+    # Horários (BRT) em que as etiquetas da loja são impressas (migration
+    # 0222), ex. "10:00, 14:00". Vazio = contínuo.
+    etiqueta_horarios: str | None = None
+
+    _norm_horarios = field_validator("etiqueta_horarios")(normaliza_etiqueta_horarios)
 
 
 class StoreInfoCreate(StoreInfoBase):
@@ -438,6 +469,9 @@ class StoreInfoPatch(BaseModel):
     nf_faturador_id: UUID | None = None
     nf_etiqueta_id: UUID | None = None
     nf_impressao_id: UUID | None = None
+    etiqueta_horarios: str | None = None
+
+    _norm_horarios = field_validator("etiqueta_horarios")(normaliza_etiqueta_horarios)
 
 
 class StoreInfoOut(StoreInfoBase):

@@ -153,67 +153,6 @@ async def test_etiqueta_crud(
 
 
 @pytest.mark.asyncio
-async def test_etiqueta_horario_crud(
-    client: AsyncClient,
-    admin: User,
-    auth_as: Callable[[User | None], None],
-):
-    auth_as(admin)
-
-    # Modo horário: aceita vários formatos, normaliza pra "HH:MM" único e ordenado.
-    r = await client.post(
-        "/api/nf-cadastro/etiqueta-horarios",
-        json={"plataforma": "Mercado Livre", "modo": "horario",
-              "horarios": ["14:00", "10h", "1000"]},
-    )
-    assert r.status_code == 201, r.text
-    hid = r.json()["id"]
-    assert r.json()["modo"] == "horario"
-    assert r.json()["horarios"] == ["10:00", "14:00"]
-
-    # Modo contínuo: horários enviados são descartados (imprime assim que a NF fecha).
-    r = await client.post(
-        "/api/nf-cadastro/etiqueta-horarios",
-        json={"plataforma": "Shopee", "modo": "continuo", "horarios": ["09:00"]},
-    )
-    assert r.status_code == 201, r.text
-    assert r.json()["horarios"] == []
-
-    r = await client.get("/api/nf-cadastro/etiqueta-horarios")
-    assert any(h["id"] == hid for h in r.json())
-
-    r = await client.patch(
-        f"/api/nf-cadastro/etiqueta-horarios/{hid}", json={"horarios": ["18:30"]}
-    )
-    assert r.status_code == 200
-    assert r.json()["horarios"] == ["18:30"]
-
-    # Virar contínuo limpa os horários pendurados.
-    r = await client.patch(
-        f"/api/nf-cadastro/etiqueta-horarios/{hid}", json={"modo": "continuo"}
-    )
-    assert r.status_code == 200
-    assert r.json()["horarios"] == []
-
-    # Modo inválido é rejeitado.
-    r = await client.patch(
-        f"/api/nf-cadastro/etiqueta-horarios/{hid}", json={"modo": "online"}
-    )
-    assert r.status_code == 422
-
-    # Horário inválido é rejeitado.
-    r = await client.patch(
-        f"/api/nf-cadastro/etiqueta-horarios/{hid}", json={"horarios": ["25:00"]}
-    )
-    assert r.status_code == 422
-
-    r = await client.delete(f"/api/nf-cadastro/etiqueta-horarios/{hid}")
-    assert r.status_code == 204
-    r = await client.get("/api/nf-cadastro/etiqueta-horarios")
-    assert not any(h["id"] == hid for h in r.json())
-
-
-@pytest.mark.asyncio
 async def test_impressao_crud(
     client: AsyncClient,
     admin: User,
@@ -297,7 +236,6 @@ async def test_non_admin_forbidden(
     for path in (
         "faturadores",
         "etiquetas",
-        "etiqueta-horarios",
         "impressoes",
         "catalogo-mala",
     ):
@@ -406,13 +344,6 @@ async def test_patch_not_found(
     )
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "nf_etiqueta_not_found"
-
-    r = await client.patch(
-        f"/api/nf-cadastro/etiqueta-horarios/{uuid.uuid4()}",
-        json={"plataforma": "x"},
-    )
-    assert r.status_code == 404
-    assert r.json()["detail"]["code"] == "nf_etiqueta_horario_not_found"
 
     r = await client.patch(
         f"/api/nf-cadastro/impressoes/{uuid.uuid4()}", json={"tipo": "x"}

@@ -334,6 +334,9 @@ class StoreInfo(Base, TimestampMixin):
         ForeignKey("nf_impressao.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Migration 0222: horários (BRT) em que as etiquetas desta loja são
+    # impressas, "HH:MM" separados por vírgula. NULL/vazio = contínuo.
+    etiqueta_horarios: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PricingPushIdempotency(Base):
