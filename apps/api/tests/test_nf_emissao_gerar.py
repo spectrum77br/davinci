@@ -45,7 +45,15 @@ async def admin(db: AsyncSession) -> User:
 
 
 async def _seed_pedido(
-    db: AsyncSession, admin: User, faturador: NfFaturador, *, numero: str, loja: str, itens: list[dict]
+    db: AsyncSession,
+    admin: User,
+    faturador: NfFaturador,
+    *,
+    numero: str,
+    loja: str,
+    itens: list[dict],
+    total: float | None = None,
+    custofrete: float | None = None,
 ) -> None:
     for i, it in enumerate(itens):
         db.add(
@@ -54,6 +62,8 @@ async def _seed_pedido(
                 data=datetime(2026, 6, 23, tzinfo=UTC),
                 loja=loja,
                 situacao="15",
+                total=total,
+                custofrete=custofrete,
                 item_index=i,
                 item_codigo=it["sku"],
                 item_descricao=it["nome"],
@@ -201,6 +211,52 @@ async def test_mala_cheia_usa_catalogo_pela_familia(
     reader = list(csv.reader(io.StringIO(texto), delimiter=";"))
     a = {row[COLUNAS.index("Número pedido")]: row for row in reader[1:]}["820001"]
     assert _col(a, "Valor Total") == "161,00"
+
+
+@pytest.mark.asyncio
+async def test_percentual_rateia_desconto_do_pedido(
+    db: AsyncSession, client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """Caso 291422: Shopee põe o desconto no PEDIDO, não no item — o percentual
+    tem que incidir sobre o que o cliente PAGOU, não sobre o preço de anúncio.
+    Item 600 (anúncio), pago 362,90 → 70% = 254,03 (e não 420,00)."""
+    auth_as(admin)
+    upseller70 = NfFaturador(
+        nome="upseller 70%", modo="upseller", nf_cheia=False,
+        percentual="70", sku_fonte="principal", nome_fonte="produto",
+    )
+    # Mesmo pedido no ML, onde o frete é cobrado À PARTE (pago > soma dos itens):
+    # o fator trava em 1 e a NF continua a de hoje.
+    exclusivo = NfFaturador(
+        nome="bling exclusivo", modo="bling", nf_cheia=False,
+        percentual="10", sku_fonte="principal", nome_fonte="produto",
+    )
+    db.add_all([upseller70, exclusivo])
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="shopee", account_name="poofy",
+                     bling_store_id="940001", nf_faturador_id=upseller70.id))
+    db.add(StoreInfo(user_id=admin.id, platform="ml", account_name="poofy",
+                     bling_store_id="940002", nf_faturador_id=exclusivo.id))
+    await db.flush()
+
+    await _seed_pedido(db, admin, upseller70, numero="840001", loja="940001",
+                       itens=[{"sku": "b041.18.24", "nome": "Kit Mala", "qtd": 1, "unit": 600}],
+                       total=362.90, custofrete=0)
+    await _seed_pedido(db, admin, exclusivo, numero="840002", loja="940002",
+                       itens=[{"sku": "x1", "nome": "Produto X", "qtd": 1, "unit": 1000}],
+                       total=1035.99, custofrete=23.65)
+    await db.commit()
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/gerar-planilha",
+        json={"numeros": ["840001", "840002"]},
+    )
+    assert r.status_code == 200, r.text
+    texto = r.content.decode("utf-8-sig")
+    reader = list(csv.reader(io.StringIO(texto), delimiter=";"))
+    linhas = {row[COLUNAS.index("Número pedido")]: row for row in reader[1:]}
+    assert _col(linhas["840001"], "Valor Total") == "254,03"
+    assert _col(linhas["840002"], "Valor Total") == "100,00"
 
 
 @pytest.mark.asyncio

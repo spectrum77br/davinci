@@ -49,6 +49,8 @@ _ITENS_SQL = text(
         bo.item_descricao      AS nome,
         bo.item_quantidade     AS quantidade,
         bo.itemvalor           AS valor_unitario,
+        bo.total               AS pedido_total,
+        bo.custofrete          AS pedido_frete,
         bo.categoria_nome      AS categoria,
         bo.bling_id            AS bling_id,
         bo.documento_destinatario AS documento,
@@ -233,6 +235,30 @@ def _valor_unitario(
     return _dec(row["valor_unitario"])
 
 
+def _fator_rateio(regra: NfFaturador, rows: list) -> Decimal:
+    """Traz o `itemvalor` (preço de ANÚNCIO) pro valor que o cliente PAGOU.
+
+    Shopee/TikTok põem o desconto no nível do PEDIDO: `item_desconto` vem 0 e o
+    `itemvalor` fica no preço de tabela, então o percentual do faturador incidia
+    sobre uma base inflada (291422: item 600, pago 362,90 → NF saía 420 em vez
+    de 254,03). Rateia `(total − frete) ÷ soma dos itens` em cada linha.
+
+    Nunca passa de 1: quando o pago supera a soma dos itens (ML cobra o frete à
+    parte e o `custofrete` é o custo, não o cobrado), o valor fica o de hoje.
+    NF cheia não rateia — lá o valor vem do catálogo/venda integral.
+    """
+    if regra.nf_cheia:
+        return Decimal(1)
+    soma = sum(
+        (_dec(r["valor_unitario"]) * Decimal(int(r["quantidade"] or 0)) for r in rows),
+        Decimal(0),
+    )
+    pago = _dec(rows[0]["pedido_total"]) - _dec(rows[0]["pedido_frete"])
+    if soma <= 0 or pago <= 0:
+        return Decimal(1)
+    return min(Decimal(1), pago / soma)
+
+
 async def _carregar_faturadores(
     session: AsyncSession, ids: set
 ) -> dict:
@@ -345,6 +371,7 @@ async def _montar_pedidos(
             pulados.append(PedidoPulado(numero, "loja sem faturador atribuído"))
             continue
 
+        fator = _fator_rateio(regra, itens_rows)
         itens = [
             ItemPedido(
                 sku=r["sku"],
@@ -352,7 +379,8 @@ async def _montar_pedidos(
                 quantidade=int(r["quantidade"] or 0),
                 valor_unitario=_valor_unitario(
                     regra, catalogo_mala, modelos_por_base, r
-                ),
+                )
+                * fator,
                 ncm=None,
             )
             for r in itens_rows
