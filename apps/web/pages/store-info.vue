@@ -278,12 +278,10 @@ const openUfRow = computed(() =>
   openUfRowId.value ? items.value.find((r) => r.id === openUfRowId.value) || null : null
 )
 
-// Horário Etiqueta — mesmo padrão do popover de UF. Escolhe de meia em meia
-// hora (BRT); nenhum horário marcado = contínuo (imprime quando a NF fecha).
-const HORARIO_OPTIONS = Array.from({ length: 48 }, (_, i) => {
-  const h = String(Math.floor(i / 2)).padStart(2, '0')
-  return `${h}:${i % 2 ? '30' : '00'}`
-})
+// Horário Etiqueta — mesmo padrão do popover de UF. O horário é escolhido no
+// relógio do `input type=time` (BRT); nenhum horário na lista = contínuo
+// (imprime quando a NF fecha).
+const novoHorario = ref('')
 const openHorRowId = ref<string | null>(null)
 function toggleHorPopover(id: string) {
   openHorRowId.value = openHorRowId.value === id ? null : id
@@ -294,12 +292,17 @@ const openHorRow = computed(() =>
 function horariosDe(row: StoreInfo): string[] {
   return (row.etiqueta_horarios || '').split(',').map((s) => s.trim()).filter(Boolean)
 }
-async function toggleHorario(row: StoreInfo, hhmm: string, checked: boolean) {
-  const atual = new Set(horariosDe(row))
-  if (checked) atual.add(hhmm)
-  else atual.delete(hhmm)
-  const next = Array.from(atual).sort()
+async function setHorarios(row: StoreInfo, lista: string[]) {
+  const next = Array.from(new Set(lista)).sort()
   await updateField(row, 'etiqueta_horarios', next.length ? next.join(', ') : null)
+}
+async function addHorario(row: StoreInfo) {
+  if (!novoHorario.value) return
+  await setHorarios(row, [...horariosDe(row), novoHorario.value])
+  novoHorario.value = ''
+}
+async function removeHorario(row: StoreInfo, hhmm: string) {
+  await setHorarios(row, horariosDe(row).filter((h) => h !== hhmm))
 }
 
 // Exceções popover — mirrors the UF popover pattern (overlay outside the
@@ -1368,14 +1371,14 @@ async function copyText(text: string) {
       </div>
     </div>
 
-    <!-- Horário Etiqueta — escolhe os horários (BRT) numa lista de meia em meia
-         hora. Nenhum marcado = contínuo (imprime quando a NF fecha). -->
+    <!-- Horário Etiqueta — escolhe os horários (BRT) no relógio do input time.
+         Lista vazia = contínuo (imprime quando a NF fecha). -->
     <div
       v-if="openHorRow"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
       @click.self="openHorRowId = null"
     >
-      <div class="bg-background border rounded-lg shadow-xl p-4 w-96">
+      <div class="bg-background border rounded-lg shadow-xl p-4 w-80">
         <div class="flex items-center justify-between mb-1">
           <div class="text-sm font-semibold">
             Horário Etiqueta — {{ openHorRow.platform }} / {{ openHorRow.account_name || '—' }}
@@ -1388,21 +1391,41 @@ async function copyText(text: string) {
           </button>
         </div>
         <p class="text-xs text-muted-foreground mb-2">
-          Nenhum horário marcado = contínuo (imprime assim que a NF fecha).
+          Sem horário na lista = contínuo (imprime assim que a NF fecha).
         </p>
-        <div class="grid grid-cols-6 gap-1 text-xs max-h-72 overflow-y-auto">
-          <label
-            v-for="h in HORARIO_OPTIONS"
+        <div class="flex flex-wrap gap-1 mb-2 text-xs">
+          <span
+            v-for="h in horariosDe(openHorRow)"
             :key="h"
-            class="flex items-center gap-1 cursor-pointer px-1 py-0.5 rounded hover:bg-muted"
+            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border bg-blue-500/15 text-blue-400 border-blue-500/40"
           >
-            <input
-              type="checkbox"
-              :checked="horariosDe(openHorRow).includes(h)"
-              @change="toggleHorario(openHorRow, h, ($event.target as HTMLInputElement).checked)"
-            />
-            <span>{{ h }}</span>
-          </label>
+            {{ h }}
+            <button
+              class="hover:text-foreground"
+              title="remover"
+              @click="removeHorario(openHorRow, h)"
+            >
+              <X class="h-3 w-3" />
+            </button>
+          </span>
+          <span v-if="!horariosDe(openHorRow).length" class="text-muted-foreground">
+            nenhum horário
+          </span>
+        </div>
+        <div class="flex items-center gap-2 text-xs">
+          <input
+            v-model="novoHorario"
+            type="time"
+            class="flex-1 border rounded px-2 py-1 bg-background"
+            @keydown.enter.prevent="addHorario(openHorRow)"
+          >
+          <button
+            class="px-2 py-1 rounded border hover:bg-muted disabled:opacity-40"
+            :disabled="!novoHorario"
+            @click="addHorario(openHorRow)"
+          >
+            adicionar
+          </button>
         </div>
         <div class="mt-3 flex justify-end gap-2 text-xs">
           <button
