@@ -278,6 +278,30 @@ const openUfRow = computed(() =>
   openUfRowId.value ? items.value.find((r) => r.id === openUfRowId.value) || null : null
 )
 
+// Horário Etiqueta — mesmo padrão do popover de UF. Escolhe de meia em meia
+// hora (BRT); nenhum horário marcado = contínuo (imprime quando a NF fecha).
+const HORARIO_OPTIONS = Array.from({ length: 48 }, (_, i) => {
+  const h = String(Math.floor(i / 2)).padStart(2, '0')
+  return `${h}:${i % 2 ? '30' : '00'}`
+})
+const openHorRowId = ref<string | null>(null)
+function toggleHorPopover(id: string) {
+  openHorRowId.value = openHorRowId.value === id ? null : id
+}
+const openHorRow = computed(() =>
+  openHorRowId.value ? items.value.find((r) => r.id === openHorRowId.value) || null : null
+)
+function horariosDe(row: StoreInfo): string[] {
+  return (row.etiqueta_horarios || '').split(',').map((s) => s.trim()).filter(Boolean)
+}
+async function toggleHorario(row: StoreInfo, hhmm: string, checked: boolean) {
+  const atual = new Set(horariosDe(row))
+  if (checked) atual.add(hhmm)
+  else atual.delete(hhmm)
+  const next = Array.from(atual).sort()
+  await updateField(row, 'etiqueta_horarios', next.length ? next.join(', ') : null)
+}
+
 // Exceções popover — mirrors the UF popover pattern (overlay outside the
 // table). Each add/remove PATCHes `excecoes` via updateField.
 const openExcRowId = ref<string | null>(null)
@@ -887,26 +911,22 @@ async function copyText(text: string) {
                 {{ nfLabel(etiquetas, row.nf_etiqueta_id) }}
               </span>
             </td>
+            <!-- Horário Etiqueta — badge com os horários; popover escolhe da lista. -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
-              :class="{
-                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'etiqueta_horarios'),
-                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'etiqueta_horarios'),
-              }"
-              @click="!isEditing(row.id, 'etiqueta_horarios') && startEdit(row, 'etiqueta_horarios')"
+              class="border border-border px-1 py-1 text-center"
+              :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'etiqueta_horarios') }"
             >
-              <input
-                v-if="isEditing(row.id, 'etiqueta_horarios')"
-                :ref="setEditInputRef"
-                v-model="editValue"
-                type="text"
-                placeholder="10:00, 14:00"
-                class="w-full text-xs bg-transparent outline-none"
-                @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
+              <button
+                type="button"
+                :disabled="!canEdit"
+                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
+                :class="row.etiqueta_horarios
+                  ? 'bg-blue-500/15 text-blue-400 border-blue-500/40'
+                  : 'bg-muted/40 text-muted-foreground border-border'"
+                @click="canEdit && toggleHorPopover(row.id)"
               >
-              <span v-else :class="{ 'text-muted-foreground': !row.etiqueta_horarios }">
                 {{ row.etiqueta_horarios || 'contínuo' }}
-              </span>
+              </button>
             </td>
             <td
               class="border border-border px-2 py-1.5 text-xs cursor-pointer"
@@ -1341,6 +1361,59 @@ async function copyText(text: string) {
           <button
             class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
             @click="openUfRowId = null"
+          >
+            fechar
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Horário Etiqueta — escolhe os horários (BRT) numa lista de meia em meia
+         hora. Nenhum marcado = contínuo (imprime quando a NF fecha). -->
+    <div
+      v-if="openHorRow"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      @click.self="openHorRowId = null"
+    >
+      <div class="bg-background border rounded-lg shadow-xl p-4 w-96">
+        <div class="flex items-center justify-between mb-1">
+          <div class="text-sm font-semibold">
+            Horário Etiqueta — {{ openHorRow.platform }} / {{ openHorRow.account_name || '—' }}
+          </div>
+          <button
+            class="text-muted-foreground hover:text-foreground"
+            @click="openHorRowId = null"
+          >
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+        <p class="text-xs text-muted-foreground mb-2">
+          Nenhum horário marcado = contínuo (imprime assim que a NF fecha).
+        </p>
+        <div class="grid grid-cols-6 gap-1 text-xs max-h-72 overflow-y-auto">
+          <label
+            v-for="h in HORARIO_OPTIONS"
+            :key="h"
+            class="flex items-center gap-1 cursor-pointer px-1 py-0.5 rounded hover:bg-muted"
+          >
+            <input
+              type="checkbox"
+              :checked="horariosDe(openHorRow).includes(h)"
+              @change="toggleHorario(openHorRow, h, ($event.target as HTMLInputElement).checked)"
+            />
+            <span>{{ h }}</span>
+          </label>
+        </div>
+        <div class="mt-3 flex justify-end gap-2 text-xs">
+          <button
+            class="px-2 py-1 rounded border hover:bg-muted"
+            @click="updateField(openHorRow, 'etiqueta_horarios', null); openHorRowId = null"
+          >
+            contínuo (limpar)
+          </button>
+          <button
+            class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
+            @click="openHorRowId = null"
           >
             fechar
           </button>
