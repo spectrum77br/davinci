@@ -392,6 +392,9 @@ watch(page, () => {
   load()
 })
 
+// Raio-X do saldo: pedido aberto na janelinha (null = fechada).
+const raioXPedido = ref<string | null>(null)
+
 function brl(v: number | null | undefined) {
   if (v == null) return '—'
   return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
@@ -916,7 +919,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="5">Anúncio</th>
             <th class="px-2 py-1 text-right text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Item</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="canSeeFreteResultado ? 4 : 3">Frete</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="3">Saldo</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="4">Saldo</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-orange-50 dark:bg-orange-900/20" colspan="1">Reembolsos</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-blue-50 dark:bg-blue-900/20" :colspan="isAdmin ? 3 : 2">Margem</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="1">Situação</th>
@@ -940,6 +943,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Plataforma</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-emerald-50 dark:bg-emerald-900/20">Bling</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-emerald-50 dark:bg-emerald-900/20">Efetivo</th>
+            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap bg-emerald-50 dark:bg-emerald-900/20">Raio-X</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-orange-50 dark:bg-orange-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">&nbsp;</th>
             <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] bg-blue-50 dark:bg-blue-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Lucro</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-blue-50 dark:bg-blue-900/20" :class="!isAdmin && 'border-l-[3px] border-gray-400 dark:border-gray-600'">Final</th>
@@ -951,12 +955,12 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="(canSeeFreteResultado ? 22 : 21) + (isAdmin ? 1 : 0)" class="text-center py-8 text-muted-foreground">
+            <td :colspan="(canSeeFreteResultado ? 23 : 22) + (isAdmin ? 1 : 0)" class="text-center py-8 text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="(canSeeFreteResultado ? 22 : 21) + (isAdmin ? 1 : 0)" class="text-center py-8 text-muted-foreground">
+            <td :colspan="(canSeeFreteResultado ? 23 : 22) + (isAdmin ? 1 : 0)" class="text-center py-8 text-muted-foreground">
               <template v-if="tab === 'lookup' && !lookupTerm">
                 digite o numero do pedido acima para buscar
               </template>
@@ -1045,6 +1049,17 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                   <Pencil v-if="canEdit" class="size-3 shrink-0 opacity-50" />
                 </button>
               </div>
+            </td>
+            <td class="px-2 py-1 text-center whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10">
+              <button
+                type="button"
+                class="px-1.5 py-0.5 text-[11px] rounded border bg-background hover:border-primary/50 disabled:opacity-40 disabled:cursor-default"
+                :disabled="!r.pedido_bling"
+                title="Ver de onde vêm o Saldo Plataforma e o Saldo Bling deste pedido"
+                @click="raioXPedido = r.pedido_bling"
+              >
+                Ver saldo
+              </button>
             </td>
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-orange-50/40 dark:bg-orange-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">{{ brl(r.ajustes) }}</td>
             <td
@@ -1153,5 +1168,11 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
         </Button>
       </div>
     </div>
+
+    <MargemSaldoRaioXModal
+      :open="raioXPedido !== null"
+      :pedido="raioXPedido ?? ''"
+      @close="raioXPedido = null"
+    />
   </div>
 </template>

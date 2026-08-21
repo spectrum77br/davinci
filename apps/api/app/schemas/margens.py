@@ -104,4 +104,60 @@ class MargensMarketplaceOut(BaseModel):
     attention_saldo: bool = False
 
 
+class SaldoRaioXItem(BaseModel):
+    """Uma linha-item do pedido no raio-X do saldo (pack rateia por proporção)."""
+
+    sku: str | None = None
+    produto: str | None = None
+    quantidade: int | None = None
+    proporcao: float | None = None
+    bling_valorbase: float | None = None
+    bling_custofrete: float | None = None
+    bling_taxacomissao: float | None = None
+    saldo_bling: float | None = None
+    saldo_plataforma: float | None = None
+
+
+class SaldoRaioXOut(BaseModel):
+    """Raio-X do saldo de um pedido: os componentes que formam o Saldo Bling e
+    o Saldo Plataforma exibidos na aba Margem (mesma fonte da listagem — o
+    snapshot —, então os números batem com a tela)."""
+
+    pedido_bling: str
+    pedido_marketplace: str | None = None
+    plataforma: str | None = None
+    conta: str | None = None
+    data: datetime | None = None
+    situacao: str | None = None
+
+    # Lado Bling: o pedido de venda como está gravado no Bling.
+    bling_valorbase: float | None = None
+    bling_custofrete: float | None = None
+    bling_taxacomissao: float | None = None
+    saldo_bling: float | None = None
+
+    # Lado plataforma: o repasse como o marketplace informou.
+    mp_valor_bruto: float | None = None
+    mp_taxas: float | None = None
+    mp_frete: float | None = None
+    mp_rebate: float | None = None
+    mp_desconto: float | None = None
+    mp_reembolso: float | None = None
+    mp_imposto: float | None = None
+    mp_ajuste: float | None = None
+    mp_liquido: float | None = None
+    mp_atualizado_em: datetime | None = None
+    saldo_plataforma: float | None = None
+
+    # Amazon pré-envio: o líquido real ainda não chegou e o número da tela é
+    # uma projeção (valor base − frete projetado − comissão da conta).
+    projecao_amazon: bool = False
+    proj_frete_projetado: float | None = None
+    proj_comissao_frac: float | None = None
+
+    reembolso_ajustes: float | None = None
+    diferenca: float | None = None
+    itens: list[SaldoRaioXItem] = []
+
+
 MargensMarketplacePage.model_rebuild()

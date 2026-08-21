@@ -169,7 +169,22 @@ async def _setup_schema():
                     pricing_account_listing_type text,
                     pricing_leaf_segment_name text,
                     item_proportion numeric,
-                    saldo_final numeric
+                    saldo_final numeric,
+                    -- Totais por pedido + carimbo do financeiro (raio-X do
+                    -- saldo). Em sincronia com o snapshot real de prod.
+                    bling_valorbase_pedido numeric,
+                    bling_custofrete_pedido numeric,
+                    bling_taxacomissao_pedido numeric,
+                    marketplace_valor_bruto_pedido numeric,
+                    marketplace_taxas_pedido numeric,
+                    marketplace_frete_pedido numeric,
+                    marketplace_rebate_pedido numeric,
+                    marketplace_desconto_pedido numeric,
+                    marketplace_reembolso_pedido numeric,
+                    marketplace_imposto_pedido numeric,
+                    marketplace_ajuste_pedido numeric,
+                    marketplace_liquido_base_margem_pedido numeric,
+                    financeiro_atualizado_em timestamptz
                 )
                 """
             )

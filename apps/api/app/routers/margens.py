@@ -24,6 +24,8 @@ from app.schemas.margens import (
     MargensMarketplacePage,
     MargensOut,
     MargensPatch,
+    SaldoRaioXItem,
+    SaldoRaioXOut,
 )
 from app.security.cipher import decrypt_json
 from app.services.margem_audit import record_margem_audit
@@ -595,6 +597,138 @@ class MarketplaceObsPatch(BaseModel):
 
 class SaldoFinalPatch(BaseModel):
     valor_base: float | None = None
+
+
+@router.get("/marketplace/saldo-detalhe/{pedido_bling}", response_model=SaldoRaioXOut)
+async def saldo_detalhe_marketplace(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("margem", "view"))],
+    pedido_bling: str,
+) -> SaldoRaioXOut:
+    """Raio-X do saldo do pedido: a "foto" que explica os dois números da tela.
+
+    Lado Bling = o pedido de venda como está gravado lá (valor base − frete −
+    taxa de comissão). Lado plataforma = o repasse que o marketplace informou
+    (bruto − taxas − frete ± desconto/reembolso/imposto/ajuste = líquido). Lê
+    SÓ o snapshot (mesma fonte da listagem), então bate com a tela e abre na
+    hora — sem chamada externa. Por item (packs rateiam via item_proportion) e
+    totais do pedido; inclui os componentes da projeção Amazon quando o número
+    exibido é projetado (líquido real ainda não veio)."""
+    sql = f"""
+        SELECT
+            v.pedido_bling,
+            v.pedido_marketplace,
+            COALESCE(v.plataforma_bling, v.plataforma_financeiro) AS plataforma,
+            v.loja_nome AS conta,
+            v.data,
+            v.situacao_nome AS situacao,
+            v.sku, v.produto, v.quantidade, v.item_proportion,
+            v.bling_valorbase_item, v.bling_custofrete_item,
+            v.bling_taxacomissao_item,
+            {_SALDO_BLING_SQL}      AS saldo_bling_item,
+            {_SALDO_PLATAFORMA_SQL} AS saldo_plataforma_item,
+            v.bling_valorbase_pedido, v.bling_custofrete_pedido,
+            v.bling_taxacomissao_pedido,
+            v.marketplace_valor_bruto_pedido, v.marketplace_taxas_pedido,
+            v.marketplace_frete_pedido, v.marketplace_rebate_pedido,
+            v.marketplace_desconto_pedido, v.marketplace_reembolso_pedido,
+            v.marketplace_imposto_pedido, v.marketplace_ajuste_pedido,
+            v.marketplace_liquido_base_margem_pedido,
+            v.financeiro_atualizado_em,
+            v.frete_projetado_item,
+            pa_comm.commission AS pa_commission,
+            v.ajustes
+        FROM {_VERIFICAR_MARGEM_TABLE} v
+        LEFT JOIN {_PRICING_ACCOUNTS_TABLE} pa_comm
+            ON pa_comm.id = v.pricing_account_id
+        WHERE v.pedido_bling = :pedido
+        ORDER BY v.sku NULLS LAST
+    """  # noqa: S608
+    rows = (await session.execute(text(sql), {"pedido": pedido_bling})).mappings().all()
+    if not rows:
+        raise HTTPException(404, detail={"code": "pedido_nao_encontrado"})
+
+    def _f(v: object) -> float | None:
+        return float(v) if v is not None else None  # type: ignore[arg-type]
+
+    head = rows[0]
+    itens = [
+        SaldoRaioXItem(
+            sku=r["sku"],
+            produto=r["produto"],
+            quantidade=r["quantidade"],
+            proporcao=_f(r["item_proportion"]),
+            bling_valorbase=_f(r["bling_valorbase_item"]),
+            bling_custofrete=_f(r["bling_custofrete_item"]),
+            bling_taxacomissao=_f(r["bling_taxacomissao_item"]),
+            saldo_bling=_f(r["saldo_bling_item"]),
+            saldo_plataforma=_f(r["saldo_plataforma_item"]),
+        )
+        for r in rows
+    ]
+
+    # Totais do pedido. Saldo Bling = a mesma conta da tela, no agregado.
+    valorbase = _f(head["bling_valorbase_pedido"])
+    custofrete = _f(head["bling_custofrete_pedido"])
+    taxacomissao = _f(head["bling_taxacomissao_pedido"])
+    saldo_bling = (
+        valorbase - (custofrete or 0) - (taxacomissao or 0)
+        if valorbase is not None
+        else None
+    )
+    # Saldo plataforma do pedido: líquido real quando existe; senão a soma das
+    # projeções por item (Amazon pré-envio); senão None (aguardando saldo).
+    mp_liquido = _f(head["marketplace_liquido_base_margem_pedido"])
+    saldo_plataforma = mp_liquido
+    if saldo_plataforma is None:
+        proj = [i.saldo_plataforma for i in itens if i.saldo_plataforma is not None]
+        saldo_plataforma = sum(proj) if proj else None
+    projecao_amazon = (
+        mp_liquido is None
+        and saldo_plataforma is not None
+        and (head["plataforma"] or "") == "amazon"
+    )
+    proj_frete_vals = [
+        _f(r["frete_projetado_item"])
+        for r in rows
+        if r["frete_projetado_item"] is not None
+    ]
+    ajustes_vals = [_f(r["ajustes"]) for r in rows if r["ajustes"] is not None]
+    return SaldoRaioXOut(
+        pedido_bling=str(head["pedido_bling"]),
+        pedido_marketplace=head["pedido_marketplace"],
+        plataforma=head["plataforma"],
+        conta=head["conta"],
+        data=head["data"],
+        situacao=head["situacao"],
+        bling_valorbase=valorbase,
+        bling_custofrete=custofrete,
+        bling_taxacomissao=taxacomissao,
+        saldo_bling=saldo_bling,
+        mp_valor_bruto=_f(head["marketplace_valor_bruto_pedido"]),
+        mp_taxas=_f(head["marketplace_taxas_pedido"]),
+        mp_frete=_f(head["marketplace_frete_pedido"]),
+        mp_rebate=_f(head["marketplace_rebate_pedido"]),
+        mp_desconto=_f(head["marketplace_desconto_pedido"]),
+        mp_reembolso=_f(head["marketplace_reembolso_pedido"]),
+        mp_imposto=_f(head["marketplace_imposto_pedido"]),
+        mp_ajuste=_f(head["marketplace_ajuste_pedido"]),
+        mp_liquido=mp_liquido,
+        mp_atualizado_em=head["financeiro_atualizado_em"],
+        saldo_plataforma=saldo_plataforma,
+        projecao_amazon=bool(projecao_amazon),
+        proj_frete_projetado=(
+            sum(proj_frete_vals) if projecao_amazon and proj_frete_vals else None
+        ),
+        proj_comissao_frac=_f(head["pa_commission"]) if projecao_amazon else None,
+        reembolso_ajustes=sum(ajustes_vals) if ajustes_vals else None,
+        diferenca=(
+            saldo_bling - saldo_plataforma
+            if saldo_bling is not None and saldo_plataforma is not None
+            else None
+        ),
+        itens=itens,
+    )
 
 
 @router.patch("/marketplace/observacao/{pedido_bling}")
