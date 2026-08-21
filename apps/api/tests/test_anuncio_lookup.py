@@ -149,6 +149,7 @@ async def test_lookup_shopee_agrupa_variacoes_e_classifica(
         "sem_sku": 1,
         "sku_ambiguo": 1,
         "sem_produto": 1,
+        "trocados": 0,
     }
     por_var = {v["variation_id"]: v for v in dados["variacoes"]}
     assert por_var["1"]["estado"] == "pronto"
@@ -210,6 +211,104 @@ async def test_vincular_anuncio_cria_so_o_que_casou(
     assert de_novo["criados"] == 0
     assert de_novo["resumo"]["ja_vinculados"] == 1
     assert len(de_novo["link_ids"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_vincular_anuncio_move_link_quando_sku_trocou_no_anuncio(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Caso real (Eduardo, 2026-08-21): o .sa ficou sem estoque, então ele
+    trocou o seller_sku DENTRO do anúncio Shopee pra .sp. O vínculo antigo
+    (→ produto .sa) tem que SEGUIR o SKU atual: o lookup marca "trocado" e o
+    vincular MOVE o mesmo link pro produto novo. SKU novo que não existe no
+    DaVinci NÃO move (fica "vinculado" como está, sem quebrar o sync)."""
+    integ = await _make_integration(
+        db, user, IntegrationPlatform.SHOPEE, Marketplace.SHOPEE
+    )
+    sa = Product(user_id=user.id, sku="i222.sa", name="Macbook SA", stock=40, min_stock=0)
+    sp = Product(user_id=user.id, sku="i222.sp", name="Macbook SP", stock=19, min_stock=0)
+    db.add_all([sa, sp])
+    await db.flush()
+
+    link_velho = ProductLink(
+        user_id=user.id,
+        product_id=sa.id,
+        integration_id=integ.id,
+        store_id=integ.store_id,
+        platform=IntegrationPlatform.SHOPEE,
+        external_id="58207423113",
+        variation_id="m1",
+        external_sku="i222.sa",
+        last_sync_status=LinkSyncStatus.OK,
+    )
+    link_sem_destino = ProductLink(
+        user_id=user.id,
+        product_id=sa.id,
+        integration_id=integ.id,
+        store_id=integ.store_id,
+        platform=IntegrationPlatform.SHOPEE,
+        external_id="58207423113",
+        variation_id="m2",
+        external_sku="i225.sa",
+        last_sync_status=LinkSyncStatus.OK,
+    )
+    db.add_all([link_velho, link_sem_destino])
+    await db.commit()
+
+    from app.services.marketplaces import shopee as shopee_mod
+
+    monkeypatch.setattr(
+        shopee_mod.ShopeeClient,
+        "_fetch_base_info",
+        _fake_base_info([
+            {"external_id": "58207423113", "variation_id": "m1", "sku": "i222.sp",
+             "title": "Macbook - Amarelo", "stock": 40},
+            {"external_id": "58207423113", "variation_id": "m2", "sku": "i225.xx",
+             "title": "Macbook - Azul", "stock": 37},
+        ]),
+    )
+
+    dados = await lookup_anuncio(
+        db, user, external_id="58207423113", integration_id=integ.id
+    )
+    por_var = {v["variation_id"]: v for v in dados["variacoes"]}
+    m1, m2 = por_var["m1"], por_var["m2"]
+    assert m1["estado"] == "trocado"
+    assert m1["sku_anterior"] == "i222.sa"
+    assert m1["product_id"] == str(sp.id)  # a tela já mostra o produto NOVO
+    assert m1["estoque_bling"] == 19
+    assert m2["estado"] == "vinculado"  # SKU novo sem produto: não há pra onde mover
+    assert m2["sku_anterior"] is None
+    assert dados["resumo"]["trocados"] == 1
+    assert dados["resumo"]["ja_vinculados"] == 1
+
+    out = await vincular_anuncio(
+        db, user, external_id="58207423113", integration_id=integ.id
+    )
+    assert out["criados"] == 0
+    assert out["movidos"] == 1
+    assert out["movimentos"] == [
+        {"variation_id": "m1", "variacao": "Amarelo",
+         "de_sku": "i222.sa", "para_sku": "i222.sp"}
+    ]
+    assert sorted(out["link_ids"]) == sorted(
+        [str(link_velho.id), str(link_sem_destino.id)]
+    )
+
+    await db.refresh(link_velho)
+    assert link_velho.product_id == sp.id  # MOVEU: mesmo registro, produto novo
+    assert link_velho.external_sku == "i222.sp"
+    await db.refresh(link_sem_destino)
+    assert link_sem_destino.product_id == sa.id  # intocado
+    assert link_sem_destino.external_sku == "i225.sa"
+
+    # Rodar de novo: nada mais a mover — o link já segue o SKU do anúncio.
+    de_novo = await vincular_anuncio(
+        db, user, external_id="58207423113", integration_id=integ.id
+    )
+    assert de_novo["movidos"] == 0
+    assert de_novo["resumo"]["trocados"] == 0
+    assert de_novo["resumo"]["ja_vinculados"] == 2
 
 
 # -------------------------------------------------------------------- ml

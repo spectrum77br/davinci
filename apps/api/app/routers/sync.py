@@ -406,6 +406,8 @@ async def anuncio_sync(
     Mesmo motor do sync individual (`SyncOrchestrator`, force + Bling fresco),
     só que o escopo é o anúncio inteiro em vez de um produto — é o que evita
     ter que rodar "Sincronizar Todos" da conta por causa de um anúncio novo.
+    Com `vincular=True` também MOVE vínculos cujo SKU foi trocado dentro do
+    anúncio (o link segue o SKU atual — ver `vincular_anuncio`).
     """
     if body.vincular:
         dados = await vincular_anuncio(
@@ -508,6 +510,8 @@ async def anuncio_sync(
             "conta": dados.get("conta"),
             "plataforma": dados.get("plataforma"),
             "vinculos_criados": dados.get("criados", 0),
+            "vinculos_movidos": dados.get("movidos", 0),
+            "movimentos": dados.get("movimentos", []),
             "variacoes": dados.get("resumo"),
         },
     }

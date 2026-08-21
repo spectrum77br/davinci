@@ -50,7 +50,9 @@ class AnuncioVariacaoOut(BaseModel):
     variation_id: str | None = None
     variacao: str | None = None
     sku: str | None = None
-    # vinculado | pronto | sem_sku | sku_ambiguo | sem_produto
+    # vinculado | pronto | trocado | sem_sku | sku_ambiguo | sem_produto
+    # ("trocado" = já tem vínculo, mas o SKU atual do anúncio casa com OUTRO
+    # produto — o vincular move o link pra ele)
     estado: str
     listing_type: str | None = None
     product_id: UUID | None = None
@@ -58,6 +60,8 @@ class AnuncioVariacaoOut(BaseModel):
     estoque_bling: int | None = None
     estoque_anuncio: int | None = None
     link_id: UUID | None = None
+    # Só no estado "trocado": o SKU antigo que o vínculo ainda carrega.
+    sku_anterior: str | None = None
 
 
 class AnuncioResumoOut(BaseModel):
@@ -67,6 +71,7 @@ class AnuncioResumoOut(BaseModel):
     sem_sku: int = 0
     sku_ambiguo: int = 0
     sem_produto: int = 0
+    trocados: int = 0
 
 
 class AnuncioLookupOut(BaseModel):

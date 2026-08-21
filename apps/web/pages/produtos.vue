@@ -801,7 +801,13 @@ async function syncProduct(id: string, integrationIds?: string[]) {
 // "Buscar anúncio") traz SÓ aquele anúncio, com todas as variações/SKUs
 // agrupados embaixo. Antes, um anúncio novo — ex.: 52 variações na Shopee —
 // obrigava a rodar "Vincular Automático"/"Sincronizar Todos" da conta inteira.
-type AnuncioEstado = 'vinculado' | 'pronto' | 'sem_sku' | 'sku_ambiguo' | 'sem_produto'
+type AnuncioEstado =
+  | 'vinculado'
+  | 'pronto'
+  | 'trocado'
+  | 'sem_sku'
+  | 'sku_ambiguo'
+  | 'sem_produto'
 type AnuncioVariacao = {
   variation_id: string | null
   variacao: string | null
@@ -813,6 +819,8 @@ type AnuncioVariacao = {
   estoque_bling: number | null
   estoque_anuncio: number | null
   link_id: string | null
+  // Só no estado "trocado": o SKU antigo que o vínculo ainda carrega.
+  sku_anterior?: string | null
 }
 type AnuncioLookup = {
   encontrado: boolean
@@ -830,6 +838,7 @@ type AnuncioLookup = {
     sem_sku: number
     sku_ambiguo: number
     sem_produto: number
+    trocados?: number
   }
   variacoes: AnuncioVariacao[]
 }
@@ -837,6 +846,7 @@ type AnuncioLookup = {
 const ESTADO_ANUNCIO: Record<AnuncioEstado, { label: string; cls: string }> = {
   vinculado: { label: 'já vinculado', cls: 'bg-blue-100 text-blue-700' },
   pronto: { label: 'pronto p/ vincular', cls: 'bg-green-100 text-green-700' },
+  trocado: { label: 'SKU trocado — mover vínculo', cls: 'bg-purple-100 text-purple-700' },
   sem_sku: { label: 'sem SKU no anúncio', cls: 'bg-gray-100 text-gray-600' },
   sku_ambiguo: { label: 'SKU em 2+ produtos', cls: 'bg-amber-100 text-amber-700' },
   sem_produto: { label: 'SKU não existe no DaVinci', cls: 'bg-red-100 text-red-700' },
@@ -900,19 +910,27 @@ async function sincronizarAnuncio() {
         errLines.push(`${plat} ${alvo}: ${d.error_code || 'erro'}${d.error_detail ? ': ' + d.error_detail : ''}`)
       }
     }
-    const criados = Number((job?.result as any)?.anuncio?.vinculos_criados || 0)
-    const cabecalho = criados ? `${criados} vínculo(s) novo(s)` : 'sem vínculo novo'
+    const anuncioRes = (job?.result as any)?.anuncio || {}
+    const criados = Number(anuncioRes.vinculos_criados || 0)
+    const movidos = Number(anuncioRes.vinculos_movidos || 0)
+    const partes: string[] = []
+    if (criados) partes.push(`${criados} vínculo(s) novo(s)`)
+    if (movidos) partes.push(`${movidos} vínculo(s) movido(s) p/ o SKU novo`)
+    const cabecalho = partes.length ? partes.join(' · ') : 'sem vínculo novo'
+    const moveLines = ((anuncioRes.movimentos || []) as Array<Record<string, any>>).map(
+      (m) => `🔀 ${m.variacao || m.variation_id || ''}: ${m.de_sku || '?'} → ${m.para_sku || '?'}`,
+    )
     if (errLines.length === 0) {
       pushToast({
         kind: 'success',
         title: `✓ ${a.external_id} sincronizado · ${cabecalho}`,
-        lines: okLines.slice(0, 20),
+        lines: [...moveLines.slice(0, 10), ...okLines.slice(0, 20)],
       })
     } else {
       pushToast({
         kind: okLines.length ? 'warning' : 'error',
         title: `${a.external_id}: ${okLines.length} ok · ${errLines.length} erro(s)`,
-        lines: [...okLines.slice(0, 10), ...errLines.slice(0, 10)],
+        lines: [...moveLines.slice(0, 5), ...okLines.slice(0, 10), ...errLines.slice(0, 10)],
       })
     }
     // Tabela e painel voltam a refletir o que ficou vinculado/empurrado.
@@ -1666,6 +1684,9 @@ onUnmounted(() => {
           <span v-if="anuncio.resumo.prontos" class="rounded px-2 py-0.5 bg-green-100 text-green-700">
             {{ anuncio.resumo.prontos }} pronto(s) p/ vincular
           </span>
+          <span v-if="anuncio.resumo.trocados" class="rounded px-2 py-0.5 bg-purple-100 text-purple-700">
+            {{ anuncio.resumo.trocados }} SKU(s) trocado(s) — o botão move o vínculo
+          </span>
           <span v-if="anuncio.resumo.ja_vinculados" class="rounded px-2 py-0.5 bg-blue-100 text-blue-700">
             {{ anuncio.resumo.ja_vinculados }} já vinculado(s)
           </span>
@@ -1715,7 +1736,12 @@ onUnmounted(() => {
         <tbody>
           <tr v-for="(v, i) in anuncio.variacoes" :key="v.variation_id || `v${i}`">
             <td>{{ v.variacao || '—' }}</td>
-            <td class="font-mono text-xs">{{ v.sku || '—' }}</td>
+            <td class="font-mono text-xs">
+              {{ v.sku || '—' }}
+              <span v-if="v.sku_anterior" class="block text-[10px] text-purple-600">
+                vínculo ainda no {{ v.sku_anterior }}
+              </span>
+            </td>
             <td>{{ v.produto_nome || '—' }}</td>
             <td class="text-center">{{ v.estoque_bling ?? '—' }}</td>
             <td class="text-center">{{ v.estoque_anuncio ?? '—' }}</td>
@@ -1733,6 +1759,8 @@ onUnmounted(() => {
       <div class="border-t px-4 py-2 text-xs text-muted-foreground">
         Sincroniza só as variações deste anúncio — a conta inteira não é varrida.
         Variação sem SKU casado com um produto continua de fora (mesma regra do Vincular Automático).
+        Se você trocou o SKU dentro do anúncio, o botão move o vínculo para o produto do SKU novo
+        antes de sincronizar — o estoque passa a sair do produto certo.
       </div>
     </div>
 

@@ -278,7 +278,7 @@ async def lookup_anuncio(
         titulo = titulo.rsplit(" - ", 1)[0]
 
     variacoes: list[dict[str, Any]] = []
-    prontos = ja_vinculados = sem_sku = ambiguos = sem_produto = 0
+    prontos = ja_vinculados = sem_sku = ambiguos = sem_produto = trocados = 0
     for linha in linhas:
         sku = (linha.get("sku") or "").strip()
         var_id = (linha.get("variation_id") or "").strip() or None
@@ -288,8 +288,22 @@ async def lookup_anuncio(
             produto, motivo = sku_index.resolve(sku)
         estado: str
         if link is not None:
-            estado = "vinculado"
-            ja_vinculados += 1
+            # SKU trocado DENTRO do anúncio (Eduardo, 2026-08-21: i222.sa →
+            # i222.sp): o link ainda aponta pro produto antigo, mas o SKU
+            # atual do anúncio casa com OUTRO produto. Só quando as linhas
+            # vieram frescas do marketplace — no fallback "local" o SKU sai
+            # do próprio link, não dá pra saber se o anúncio mudou. SKU novo
+            # sem produto/ambíguo fica "vinculado" (não há pra onde mover).
+            if (
+                origem == "marketplace"
+                and produto is not None
+                and produto.id != link.product_id
+            ):
+                estado = "trocado"
+                trocados += 1
+            else:
+                estado = "vinculado"
+                ja_vinculados += 1
         elif not sku:
             estado = "sem_sku"
             sem_sku += 1
@@ -318,6 +332,10 @@ async def lookup_anuncio(
                 "estoque_bling": produto.stock if produto is not None else None,
                 "estoque_anuncio": linha.get("stock"),
                 "link_id": str(link.id) if link is not None else None,
+                # Só no estado "trocado": o SKU que o vínculo ainda carrega.
+                "sku_anterior": (
+                    link.external_sku if estado == "trocado" and link is not None else None
+                ),
             }
         )
 
@@ -336,6 +354,7 @@ async def lookup_anuncio(
             "sem_sku": sem_sku,
             "sku_ambiguo": ambiguos,
             "sem_produto": sem_produto,
+            "trocados": trocados,
         },
         "variacoes": variacoes,
     }
@@ -348,10 +367,14 @@ async def vincular_anuncio(
     external_id: str,
     integration_id: UUID,
 ) -> dict[str, Any]:
-    """Cria os `product_links` que faltam para as variações desse anúncio.
+    """Cria os `product_links` que faltam e MOVE os que ficaram pra trás.
 
-    Só cria pro que tem SKU casado com UM produto — SKU vazio, ambíguo ou sem
+    Criar: só pro que tem SKU casado com UM produto — SKU vazio, ambíguo ou sem
     produto no DaVinci continua de fora (mesma regra do Vincular Automático).
+    Mover (estado "trocado"): o operador editou o seller_sku DENTRO do anúncio
+    (i222.sa → i222.sp) e o link ainda aponta pro produto antigo — re-aponta o
+    link pro produto dono do SKU atual, igual ao `link_reconcile` (re-point, não
+    apaga/recria), pra o estoque certo fluir no sync que vem em seguida.
     Retorna o resumo + os ids dos links do anúncio (novos e antigos), que o
     caller usa pra sincronizar só eles.
     """
@@ -359,11 +382,18 @@ async def vincular_anuncio(
         session, user, external_id=external_id, integration_id=integration_id
     )
     if not dados.get("encontrado"):
-        return {**dados, "criados": 0, "link_ids": []}
+        return {**dados, "criados": 0, "movidos": 0, "movimentos": [], "link_ids": []}
 
     integ = await session.get(Integration, integration_id)
     if integ is None:
-        return {"encontrado": False, "motivo": "conta_nao_encontrada", "criados": 0, "link_ids": []}
+        return {
+            "encontrado": False,
+            "motivo": "conta_nao_encontrada",
+            "criados": 0,
+            "movidos": 0,
+            "movimentos": [],
+            "link_ids": [],
+        }
 
     ext = dados["external_id"]
     criados = 0
@@ -388,8 +418,56 @@ async def vincular_anuncio(
                 last_sync_at=_now(),
             )
         )
+    # Vínculos presos no produto antigo: o SKU do anúncio mudou e agora casa
+    # com outro produto — move o MESMO registro (identidade conta+anúncio+
+    # variação intacta, então não briga com o índice único).
+    movidos = 0
+    movimentos: list[dict[str, Any]] = []
+    for v in dados["variacoes"]:
+        if v["estado"] != "trocado" or not v.get("product_id") or not v.get("link_id"):
+            continue
+        link = await session.get(ProductLink, UUID(v["link_id"]))
+        if link is None:
+            continue
+        alvo_id = UUID(v["product_id"])
+        if link.product_id == alvo_id:
+            continue
+        # Defensivo (mesma regra do link_reconcile): se um estado quebrado
+        # deixou um gêmeo já no produto destino, remove antes de mover.
+        vid = link.variation_id or ""
+        excedentes = (
+            await session.execute(
+                select(ProductLink).where(
+                    and_(
+                        ProductLink.product_id == alvo_id,
+                        ProductLink.integration_id == link.integration_id,
+                        ProductLink.platform == link.platform,
+                        ProductLink.external_id == link.external_id,
+                        func.coalesce(ProductLink.variation_id, "") == vid,
+                        ProductLink.id != link.id,
+                    )
+                )
+            )
+        ).scalars().all()
+        for dup in excedentes:
+            await session.delete(dup)
+        if excedentes:
+            await session.flush()
+        movimentos.append(
+            {
+                "variation_id": v.get("variation_id"),
+                "variacao": v.get("variacao"),
+                "de_sku": v.get("sku_anterior"),
+                "para_sku": v.get("sku"),
+            }
+        )
+        link.product_id = alvo_id
+        link.external_sku = v.get("sku")
+        movidos += 1
+
     if novos:
         session.add_all(novos)
+    if novos or movidos:
         try:
             await session.commit()
             criados = len(novos)
@@ -397,6 +475,15 @@ async def vincular_anuncio(
             await session.rollback()
             logger.warning("anuncio_vincular_falhou", external_id=ext, err=str(e)[:200])
             criados = 0
+            movidos = 0
+            movimentos = []
+    if movidos:
+        logger.info(
+            "anuncio_links_movidos",
+            external_id=ext,
+            movidos=movidos,
+            movimentos=movimentos,
+        )
 
     link_ids = list(
         (
@@ -409,4 +496,10 @@ async def vincular_anuncio(
         .scalars()
         .all()
     )
-    return {**dados, "criados": criados, "link_ids": [str(i) for i in link_ids]}
+    return {
+        **dados,
+        "criados": criados,
+        "movidos": movidos,
+        "movimentos": movimentos,
+        "link_ids": [str(i) for i in link_ids],
+    }
