@@ -65,7 +65,9 @@ type PedidoRow = {
   sku: string | null
   produto: string | null
   quantidade: number
-  status: 'enviado' | 'nao_enviado'
+  // 'previsao' = "Em aberto" no Bling (situação 6): NF/etiqueta ainda não
+  // geradas — vai virar envio do dia (badge amarelo p/ separar de manhã).
+  status: 'enviado' | 'nao_enviado' | 'previsao'
   conferido: boolean
   observacao: string | null
   bling_id: number | null
@@ -275,7 +277,7 @@ function pollBlingJob(jobId: string) {
 
 onBeforeUnmount(stopBlingPoll)
 
-const statusFilter = ref<'all' | 'enviado' | 'nao_enviado'>('all')
+const statusFilter = ref<'all' | 'enviado' | 'nao_enviado' | 'previsao'>('all')
 // Filtro por estado da etiqueta (aba Pedidos) — 100% client-side: as
 // linhas já carregam etiqueta_em / etiqueta_impressa_em. "não impressa" =
 // etiqueta JÁ chegou e ninguém imprimiu (a fila de impressão do gerente
@@ -876,6 +878,17 @@ const pedidosNaoEnviadosCount = computed(() =>
       .filter(Boolean),
   ).size,
 )
+// Previsão = "Em aberto" no Bling (vai emitir NF/etiqueta no dia) — o
+// pessoal do envio separa o produto de manhã e cola a etiqueta quando ela
+// liberar (ML solta ~meio-dia). Pedido do Eduardo, 2026-08-24.
+const pedidosPrevisaoCount = computed(() =>
+  new Set(
+    pedidosFiltered.value
+      .filter((p) => p.status === 'previsao')
+      .map((p) => p.pedido_bling)
+      .filter(Boolean),
+  ).size,
+)
 
 // "Atrasado" = pedido com ETIQUETA gerada em dia passado e ainda não
 // confirmado pela agência (situacao=83965 + em_andamento_data < hoje).
@@ -1359,6 +1372,7 @@ async function conferirTodos() {
           <option value="all">todos</option>
           <option value="enviado">enviado</option>
           <option value="nao_enviado">não enviado</option>
+          <option value="previsao">previsão</option>
         </select>
       </label>
       <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
@@ -1528,6 +1542,14 @@ async function conferirTodos() {
       <span class="inline-flex items-center gap-1.5 rounded-md bg-red-600 text-white px-2.5 py-1 font-semibold">
         Não enviados: {{ pedidosNaoEnviadosCount }}
       </span>
+      <!-- Previsão = pedidos "Em aberto" no Bling que vão emitir NF/etiqueta
+           no dia — o pessoal do envio separa de manhã (etiqueta ML ~meio-dia). -->
+      <span
+        class="inline-flex items-center gap-1.5 rounded-md bg-yellow-500 text-white px-2.5 py-1 font-semibold"
+        title="Pedidos em aberto no Bling — NF e etiqueta ainda não geradas; devem sair hoje"
+      >
+        Previsão: {{ pedidosPrevisaoCount }}
+      </span>
       <div v-if="totalPendentesAntigos > 0" class="relative inline-block group">
         <span class="inline-flex items-center gap-1.5 rounded-md bg-amber-500 text-white px-2.5 py-1 font-semibold cursor-help">
           ⚠️ {{ totalPendentesAntigos }} atrasado{{ totalPendentesAntigos !== 1 ? 's' : '' }}
@@ -1694,10 +1716,16 @@ async function conferirTodos() {
                 class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium whitespace-nowrap"
                 :class="row.status === 'enviado'
                   ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-                  : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
-                :title="row.status === 'enviado' && envioHora(row) ? 'Hora que o envio confirmou' : undefined"
+                  : row.status === 'previsao'
+                    ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
+                    : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
+                :title="row.status === 'previsao'
+                  ? 'Em aberto no Bling — NF e etiqueta ainda não geradas; deve sair hoje'
+                  : row.status === 'enviado' && envioHora(row) ? 'Hora que o envio confirmou' : undefined"
               >
-                {{ row.status === 'enviado' ? (envioHora(row) || 'Enviado') : 'Não enviado' }}
+                {{ row.status === 'enviado'
+                  ? (envioHora(row) || 'Enviado')
+                  : row.status === 'previsao' ? 'Previsão' : 'Não enviado' }}
               </span>
             </td>
             <td class="bg-emerald-50/30">
