@@ -3622,7 +3622,7 @@ watch(department, async () => {
             <tr>
               <th
                 class="sticky left-0 bg-background px-2 py-1 text-left z-30"
-                :colspan="department === 'celular' ? 8 : 5"
+                :colspan="department === 'celular' ? 4 + kitCount : 5"
               />
               <th
                 v-for="group in accountGroups"
@@ -3640,7 +3640,7 @@ watch(department, async () => {
             <tr>
               <th
                 class="sticky left-0 bg-background px-2 py-1 text-left z-30 align-bottom"
-                :colspan="department === 'celular' ? 8 : 5"
+                :colspan="department === 'celular' ? 4 + kitCount : 5"
               />
               <th
                 v-for="acc in gridAccounts"
@@ -3682,11 +3682,18 @@ watch(department, async () => {
               <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-green-700 font-bold z-30 min-w-[56px]" :style="{ left: '200px' }">bling</th>
               <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 min-w-[56px]" :style="{ left: '256px' }">7d</th>
               <th class="sticky bg-blue-50 px-1 py-1 text-center text-[10px] text-blue-700 font-bold z-30 min-w-[56px]" :style="{ left: '312px' }">30d</th>
+              <!-- Celular mostra os 8 kits (pedido do Eduardo 2026-08-24;
+                   antes parava no kit 4). Offsets sticky calculados. -->
               <template v-if="department === 'celular'">
-                <th class="sticky bg-background px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }" :title="kitTitulo(1)">kit 1</th>
-                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '424px' }" :title="kitTitulo(2)">kit 2</th>
-                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '480px' }" :title="kitTitulo(3)">kit 3</th>
-                <th class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]" :style="{ left: '536px' }" :title="kitTitulo(4)">kit 4</th>
+                <th
+                  v-for="k in kitCount" :key="`gridkith-${k}`"
+                  class="sticky bg-background px-1 py-1 text-center text-[10px] z-30 min-w-[56px]"
+                  :class="k === 1 ? 'font-bold text-blue-700' : 'text-muted-foreground'"
+                  :style="{ left: `${368 + (k - 1) * 56}px` }"
+                  :title="kitTitulo(k)"
+                >
+                  kit {{ k }}
+                </th>
               </template>
               <template v-else>
                 <th class="sticky bg-background px-1 py-1 text-center text-[10px] font-bold text-blue-700 z-30 min-w-[56px]" :style="{ left: '368px' }">custo</th>
@@ -3761,7 +3768,7 @@ watch(department, async () => {
               <!-- Sticky cost: kits or custo (positions shifted by +112px) -->
               <template v-if="department === 'celular'">
                 <td
-                  v-for="k in 4" :key="`gridkit-${k}`"
+                  v-for="k in kitCount" :key="`gridkit-${k}`"
                   class="sticky bg-background px-1 py-1 text-center text-xs z-10 min-w-[56px] cursor-pointer"
                   :class="[
                     k === 1 ? 'text-blue-700 font-bold' : 'text-muted-foreground',
