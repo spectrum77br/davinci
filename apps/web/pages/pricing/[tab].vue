@@ -669,6 +669,18 @@ function startEditAccount(acc: Account, field: string) {
   focusEditInput()
 }
 
+// Aceita decimal BRASILEIRO nos campos numéricos digitados: "674,50" →
+// 674.5 e "1.234,56" → 1234.56 (com vírgula, pontos são milhar). Number()
+// puro devolvia NaN pra vírgula: o cadastro de produto mandava "NaN" pro
+// backend (422 → banner create_failed, Eduardo 2026-08-24) e as edições
+// inline simplesmente não salvavam.
+function parseDec(raw: unknown): number {
+  const s = String(raw ?? '').trim()
+  if (!s) return NaN
+  const norm = s.includes(',') ? s.replace(/\./g, '').replace(',', '.') : s
+  return Number(norm)
+}
+
 // SSH parity: commit is SYNCHRONOUS. Reads editing.value + editValue.value
 // the moment blur/enter fires, clears them immediately, then dispatches
 // the PATCH fire-and-forget. Keeping this sync (not async) guarantees the
@@ -704,7 +716,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
     if (!raw) {
       payload.commission = null
     } else {
-      const pct = Number(raw)
+      const pct = parseDec(raw)
       if (Number.isNaN(pct)) return
       payload.commission = (pct / 100).toFixed(4)
     }
@@ -712,7 +724,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
     if (!raw || raw === '-' || raw === '—') {
       payload[field] = null
     } else {
-      const pct = Number(raw)
+      const pct = parseDec(raw)
       if (Number.isNaN(pct)) return
       payload[field] = (pct / 100).toFixed(4)
     }
@@ -720,7 +732,7 @@ async function _patchAccount(id: string, field: string, raw: string) {
     if (!raw || raw === '-' || raw === '—') {
       payload[field] = null
     } else {
-      const n = Number(raw)
+      const n = parseDec(raw)
       if (Number.isNaN(n)) return
       payload[field] = n
     }
@@ -809,7 +821,7 @@ async function submitNewAcc() {
       department: department.value,
       kit_number: newAcc.kit_number || 1,
     }
-    if (newAcc.commission) body.commission = (Number(newAcc.commission) / 100).toFixed(4)
+    if (newAcc.commission) body.commission = (parseDec(newAcc.commission) / 100).toFixed(4)
     const created = await api<Account>('/api/pricing/accounts', { method: 'POST', body })
     accounts.value.push(created)
     showAddAcc.value = false
@@ -1141,7 +1153,7 @@ async function _patchProduct(id: string, field: string, raw: string) {
       if (field === 'cost_kit1') payload[field] = '0'
       else payload[field] = null
     } else {
-      const n = Number(raw)
+      const n = parseDec(raw)
       if (Number.isNaN(n)) return
       payload[field] = n.toFixed(2)
     }
@@ -1267,16 +1279,29 @@ async function submitNewProd() {
   if (!newProd.sku.trim() || !newProd.name.trim()) return
   addingProd.value = true
   try {
+    // parseDec: aceita vírgula ("674,50"). Valor ilegível aborta com
+    // mensagem clara em vez de mandar "NaN" pro backend (422).
+    const k1 = parseDec(newProd.cost_kit1 || 0)
+    if (Number.isNaN(k1)) {
+      productsErr.value = `Kit 1: preço inválido ("${newProd.cost_kit1}") — use só números, ex.: 674,50`
+      return
+    }
     const body: Record<string, unknown> = {
       sku: newProd.sku.trim(),
       name: newProd.name.trim(),
       department: department.value,
       product_type: newProd.product_type || 2,
-      cost_kit1: Number(newProd.cost_kit1 || 0).toFixed(2),
+      cost_kit1: k1.toFixed(2),
     }
     for (let k = 2; k <= 8; k++) {
       const v = (newProd as any)[`cost_kit${k}`]
-      if (v) body[`cost_kit${k}`] = Number(v).toFixed(2)
+      if (!v) continue
+      const n = parseDec(v)
+      if (Number.isNaN(n)) {
+        productsErr.value = `Kit ${k}: preço inválido ("${v}") — use só números, ex.: 674,50`
+        return
+      }
+      body[`cost_kit${k}`] = n.toFixed(2)
     }
     if (newProd.ean) body.ean = newProd.ean
     if (newProd.description) body.description = newProd.description
@@ -1521,7 +1546,7 @@ function liveCellLabel(prod: any, acc: Account): string {
     && editing.value.id === prod.id
     && editing.value.field.startsWith('cost_kit')
   ) {
-    const typed = Number(editValue.value)
+    const typed = parseDec(editValue.value)
     if (Number.isFinite(typed)) {
       const fakeProd = { ...prod, [editing.value.field]: typed }
       const p = computePrice(acc, fakeProd as any)
@@ -1605,7 +1630,7 @@ async function saveOverride() {
         body: {
           pricing_product_id: prodId,
           pricing_account_id: accId,
-          price_override: Number(val),
+          price_override: parseDec(val),
           cell_status: 'manual',
         },
       })
@@ -2105,7 +2130,7 @@ async function saveOverrideValue(prodId: string, accId: string, val: string) {
         body: {
           pricing_product_id: prodId,
           pricing_account_id: accId,
-          price_override: Number(val),
+          price_override: parseDec(val),
           cell_status: 'manual',
         },
       })
