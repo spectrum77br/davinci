@@ -121,6 +121,11 @@ _PENDENTE_MAX_AGE_DIAS = 14
 # Pedidos (Eduardo, 2026-08-24): o pessoal do envio separa o produto de
 # manhã e, quando a etiqueta liberar (ML solta ~meio-dia), é só colar.
 # O pedido troca de badge sozinho conforme avança no Bling.
+# SÓ conta como previsão quem é PARA ENVIAR NO DIA (Eduardo, 2026-08-24
+# "previsao somente dos que e para enviar no dia"): marketplace_ship_deadline
+# (o "despachar até" prometido ao marketplace) até hoje BRT. Pedido com
+# corte amanhã/depois fica fora até o dia dele; sem deadline capturado
+# também fica fora (não dá pra afirmar que sai hoje).
 _SITUACAO_EM_ABERTO = "6"
 # Só em-abertos recentes contam como previsão — um "Em aberto" velho é
 # pedido-problema, não previsão de envio do dia.
@@ -504,11 +509,17 @@ async def list_estoque_pedidos(
         BlingOrder.situacao.notin_(_SITUACAO_NAO_ENVIADO),
         BlingOrder.em_andamento_data.isnot(None),
     )
+    # Fim do dia BRT (meia-noite de amanhã) — corte do "é pra enviar HOJE".
+    # Comparação direta timestamptz < literal tz-aware: NULL fica fora.
+    _fim_do_dia_brt = datetime.combine(today_brt + timedelta(days=1), time.min, tzinfo=_BRT)
     previsao_clause = and_(
         # Em aberto recente = previsão do dia (badge amarelo). Sem exigir
         # em_andamento_data (situação 6 é pré-emissão, o campo é nulo).
         BlingOrder.situacao == _SITUACAO_EM_ABERTO,
         cast(BlingOrder.data, Date) >= today_brt - timedelta(days=_PREVISAO_MAX_AGE_DIAS),
+        # …e com corte de despacho ATÉ hoje ("despachar até" do marketplace).
+        # Corte amanhã/depois ou sem deadline capturado → fora da previsão.
+        BlingOrder.marketplace_ship_deadline < _fim_do_dia_brt,
     )
     where: list = [or_(pendente_clause, enviado_clause, previsao_clause)]
     if tags is not None:
