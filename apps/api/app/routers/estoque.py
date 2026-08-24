@@ -550,12 +550,29 @@ async def list_estoque_pedidos(
     # etiqueta já carimba a data provisória). Filtrar por em_andamento_data
     # IS NULL aqui escondia os 83965 com data — operador via 108 no
     # contador mas tabela vazia no filtro "não enviado".
+    # Etiqueta já no sistema (nf_etiqueta_arquivo, por numero)? Um "Em
+    # aberto" estagnado pode JÁ ter etiqueta: o sync da situação roda a
+    # cada ~2h e o Bling anda na frente (caso 291919 — badge "Previsão"
+    # com botão Imprimir do lado, Eduardo 2026-08-24). A etiqueta é prova
+    # de que a fase de previsão acabou → conta como vermelho.
+    tem_etiqueta = (
+        select(NfEtiquetaArquivo.pedido_bling)
+        .where(NfEtiquetaArquivo.pedido_bling == BlingOrder.numero)
+        .exists()
+    )
     if status_filter == "previsao":
-        # Amarelo = Em aberto recente (etiqueta ainda nem existe).
+        # Amarelo = Em aberto AINDA SEM etiqueta.
         where.append(BlingOrder.situacao == _SITUACAO_EM_ABERTO)
+        where.append(~tem_etiqueta)
         order_by = effective_date.desc()
     elif status_filter == "nao_enviado":
-        where.append(BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA)
+        # Vermelho = 83965 OU o 6 estagnado cuja etiqueta já chegou.
+        where.append(
+            or_(
+                BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA,
+                and_(BlingOrder.situacao == _SITUACAO_EM_ABERTO, tem_etiqueta),
+            )
+        )
         order_by = effective_date.desc()
     elif status_filter == "enviado":
         # Verde = enviado confirmado (exclui cancelamento/pré-envio E a
@@ -718,15 +735,20 @@ async def list_estoque_pedidos(
             "produto": o.item_descricao,
             "quantidade": o.item_quantidade or 1,
             # Badge por situacao (não por em_andamento_data), via blocklist:
-            #   - amarelo: 6 (Em aberto recente — previsão do dia, etiqueta
-            #     ainda nem existe).
+            #   - amarelo: 6 (Em aberto — previsão do dia) E SEM etiqueta
+            #     no sistema. Se a etiqueta já chegou, o Bling está na
+            #     frente do sync (~2h) e o pedido cai no vermelho — não
+            #     pode ter "Previsão" com botão Imprimir do lado (291919).
             #   - vermelho: 83965 (etiqueta gerada, agência não confirmou)
             #     e situações de cancelamento/pré-envio (_SITUACAO_NAO_VERDE).
             #   - verde: todo o resto que tem data de envio — inclui
             #     Entregue, Resolvido, Aguardando Devolução, Manutenção,
             #     Problemas, Perdimento (foram enviados no dia).
             "status": "previsao"
-            if o.situacao == _SITUACAO_EM_ABERTO
+            if (
+                o.situacao == _SITUACAO_EM_ABERTO
+                and o.numero not in etiquetas_por_pedido
+            )
             else "nao_enviado"
             if o.situacao in _SITUACAO_NAO_VERDE
             else "enviado",
