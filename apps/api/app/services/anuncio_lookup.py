@@ -40,6 +40,7 @@ from app.services.auto_link import (
     _now,
     _shopee_client_for,
     _SkuIndex,
+    _tiktok_client_for,
 )
 from app.services.marketplaces.ml import _iter_ml_variants
 
@@ -50,6 +51,14 @@ LOOKUP_CONCURRENCY = 6
 
 _ML_ID_RE = re.compile(r"^MLB\d{5,}$", re.IGNORECASE)
 _NUM_ID_RE = re.compile(r"^\d{6,}$")
+
+# ID só de dígitos é Shopee OU TikTok — o comprimento separa com folga:
+# medido em prod (2026-08-24), TODOS os item_id Shopee têm 11 dígitos
+# (9.388 links) e TODOS os product_id TikTok têm 19 (3.088 links). O corte
+# em 15 aguenta os dois lados crescerem. Se um dia a heurística errar, o
+# lookup ainda sonda as plataformas dos vínculos já gravados (ver
+# `lookup_anuncio`), então a conta dona continua sendo achada.
+_TIKTOK_MIN_DIGITS = 15
 
 
 def parece_id_anuncio(raw: str | None) -> bool:
@@ -64,12 +73,15 @@ def _normaliza_id(raw: str) -> str:
 
 
 def plataforma_do_id(external_id: str) -> IntegrationPlatform | None:
-    """MLB123… → ML; só dígitos → Shopee. Outros formatos: None (aí só o
-    caminho local, por vínculos já existentes, consegue resolver)."""
+    """MLB123… → ML; só dígitos → Shopee (curto) ou TikTok (15+ dígitos).
+    Outros formatos: None (aí só o caminho local, por vínculos já
+    existentes, consegue resolver)."""
     s = _normaliza_id(external_id)
     if _ML_ID_RE.match(s):
         return IntegrationPlatform.ML
     if _NUM_ID_RE.match(s):
+        if len(s) >= _TIKTOK_MIN_DIGITS:
+            return IntegrationPlatform.TIKTOK
         return IntegrationPlatform.SHOPEE
     return None
 
@@ -78,7 +90,7 @@ async def _integracoes_candidatas(
     session: AsyncSession,
     user: User,
     *,
-    platform: IntegrationPlatform | None,
+    platforms: set[IntegrationPlatform] | None,
     integration_id: UUID | None,
 ) -> list[Integration]:
     stmt = select(Integration).where(
@@ -86,8 +98,8 @@ async def _integracoes_candidatas(
     )
     if integration_id is not None:
         stmt = stmt.where(Integration.id == integration_id)
-    elif platform is not None:
-        stmt = stmt.where(Integration.platform == platform)
+    elif platforms:
+        stmt = stmt.where(Integration.platform.in_(tuple(platforms)))
     return list((await session.execute(stmt)).scalars().all())
 
 
@@ -115,6 +127,40 @@ async def _linhas_ml(integ: Integration, session: AsyncSession, item_id: str) ->
     return list(_iter_ml_variants(body))
 
 
+async def _linhas_tiktok(integ: Integration, session: AsyncSession, item_id: str) -> list[dict]:
+    """As variações (skus) de um produto TikTok. O GET é escopado na loja
+    (shop_cipher), então produto de outra conta volta None → lista vazia.
+    Estoque = inventory[0].quantity, igual à normalização do
+    `search_products` que alimenta o Vincular Automático."""
+    client = _tiktok_client_for(integ, session)
+    data = await client.get_product(item_id)
+    if not data:
+        return []
+    titulo = (data.get("title") or "").strip()
+    linhas: list[dict] = []
+    for sku in data.get("skus") or []:
+        inv = sku.get("inventory") or []
+        stock = inv[0].get("quantity", 0) if inv else 0
+        # "Roxo Escuro / 24" — vira o rótulo da coluna Variação via o
+        # "Título - Variação" que o _rotulo_variacao espera.
+        attrs = " / ".join(
+            str(a.get("value_name") or "").strip()
+            for a in (sku.get("sales_attributes") or [])
+            if str(a.get("value_name") or "").strip()
+        )
+        linhas.append(
+            {
+                "external_id": str(data.get("id") or item_id),
+                "variation_id": str(sku.get("id") or "") or None,
+                "sku": (sku.get("seller_sku") or "").strip(),
+                "title": f"{titulo} - {attrs}" if attrs else titulo,
+                "listing_type": None,
+                "stock": stock,
+            }
+        )
+    return linhas
+
+
 async def _busca_no_marketplace(
     session: AsyncSession,
     integ: Integration,
@@ -126,6 +172,8 @@ async def _busca_no_marketplace(
             linhas = await _linhas_shopee(integ, session, external_id)
         elif integ.platform == IntegrationPlatform.ML:
             linhas = await _linhas_ml(integ, session, external_id)
+        elif integ.platform == IntegrationPlatform.TIKTOK:
+            linhas = await _linhas_tiktok(integ, session, external_id)
         # Cinto de segurança: só aceita linha do anúncio pedido. Se um dia a
         # API devolver vizinhos (ou o id vier de outro jeito), nada de vincular
         # SKU de outro anúncio.
@@ -222,13 +270,21 @@ async def lookup_anuncio(
     if links_locais and platform is None:
         platform = links_locais[0].platform
 
+    # Sonda a plataforma que o formato do ID sugere E as dos vínculos já
+    # gravados — se a heurística de comprimento errar (ID numérico é Shopee
+    # OU TikTok), a conta dona ainda entra na roda. Conta de plataforma
+    # errada não reconhece o item, então o custo do extra é 1 chamada.
+    plataformas = {lk.platform for lk in links_locais if lk.platform is not None}
+    if platform is not None:
+        plataformas.add(platform)
+
     ids_com_link = {lk.integration_id for lk in links_locais}
 
     async def _sonda_todas(
         excluir: UUID | None,
     ) -> tuple[Integration | None, list[dict]]:
         todas = await _integracoes_candidatas(
-            session, user, platform=platform, integration_id=None
+            session, user, platforms=plataformas or None, integration_id=None
         )
         candidatas = [i for i in todas if i.id != excluir]
         com_link = [i for i in candidatas if i.id in ids_com_link]
@@ -243,7 +299,7 @@ async def lookup_anuncio(
 
     if integration_id is not None:
         integracoes = await _integracoes_candidatas(
-            session, user, platform=platform, integration_id=integration_id
+            session, user, platforms=plataformas or None, integration_id=integration_id
         )
         integ, linhas = await _procura_conta(session, integracoes, ext)
         if integ is None:

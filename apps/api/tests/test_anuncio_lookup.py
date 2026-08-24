@@ -99,6 +99,11 @@ def test_parece_id_e_plataforma():
 
     assert plataforma_do_id("MLB999999") == IntegrationPlatform.ML
     assert plataforma_do_id("223344556") == IntegrationPlatform.SHOPEE
+    # Numérico longo é TikTok (Shopee usa 11 dígitos; TikTok, 19 — medido em
+    # prod 2026-08-24). O corte está em 15.
+    assert plataforma_do_id("55500112233") == IntegrationPlatform.SHOPEE
+    assert plataforma_do_id("1735492803373729494") == IntegrationPlatform.TIKTOK
+    assert parece_id_anuncio("1735492803373729494") is True
     assert plataforma_do_id("abc") is None
 
 
@@ -309,6 +314,87 @@ async def test_vincular_anuncio_move_link_quando_sku_trocou_no_anuncio(
     assert de_novo["movidos"] == 0
     assert de_novo["resumo"]["trocados"] == 0
     assert de_novo["resumo"]["ja_vinculados"] == 2
+
+
+# ---------------------------------------------------------------- tiktok
+
+
+@pytest.mark.asyncio
+async def test_lookup_tiktok_busca_ao_vivo_e_detecta_sku_trocado(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Caso Eduardo 2026-08-24 (anúncio 1735492803373729494, conta Mini): o
+    lookup não tinha ramo TikTok — ID de 19 dígitos caía como "Shopee",
+    nenhuma conta reconhecia o item e a tela mostrava "o marketplace não
+    respondeu" com os vínculos velhos. No fallback local o SKU sai do próprio
+    vínculo, então SKU trocado DENTRO do anúncio nunca era detectado e o
+    "Vincular e sincronizar" não atualizava nada."""
+    integ = await _make_integration(
+        db, user, IntegrationPlatform.TIKTOK, Marketplace.TIKTOK
+    )
+    novo = Product(user_id=user.id, sku="dg054.sp", name="Hotwav Branco", stock=276, min_stock=0)
+    velho = Product(user_id=user.id, sku="dg054.ci", name="Hotwav antigo", stock=9, min_stock=0)
+    db.add_all([novo, velho])
+    await db.flush()
+    link = ProductLink(
+        user_id=user.id,
+        product_id=velho.id,
+        integration_id=integ.id,
+        store_id=integ.store_id,
+        platform=IntegrationPlatform.TIKTOK,
+        external_id="1735492803373729494",
+        variation_id="111",
+        external_sku="dg054.ci",
+        last_sync_status=LinkSyncStatus.OK,
+    )
+    db.add(link)
+    await db.commit()
+
+    from app.services.marketplaces import tiktok as tiktok_mod
+
+    async def _fake_get_product(self, product_id):  # noqa: ANN001
+        assert product_id == "1735492803373729494"
+        return {
+            "id": "1735492803373729494",
+            "title": "Uranyx Hotwav A17",
+            "skus": [
+                {
+                    "id": "111",
+                    "seller_sku": "dg054.sp",
+                    "inventory": [{"quantity": 84}],
+                    "sales_attributes": [{"value_name": "Branco"}],
+                },
+                {
+                    "id": "222",
+                    "seller_sku": "sem-produto",
+                    "inventory": [],
+                    "sales_attributes": [],
+                },
+            ],
+        }
+
+    monkeypatch.setattr(tiktok_mod.TikTokClient, "get_product", _fake_get_product)
+
+    dados = await lookup_anuncio(db, user, external_id="1735492803373729494")
+
+    assert dados["encontrado"] is True
+    assert dados["origem"] == "marketplace"  # veio da API, não do fallback
+    assert dados["plataforma"] == "tiktok"
+    assert dados["integration_id"] == str(integ.id)
+    por_var = {v["variation_id"]: v for v in dados["variacoes"]}
+    assert por_var["111"]["estado"] == "trocado"  # SKU editado no anúncio
+    assert por_var["111"]["variacao"] == "Branco"
+    assert por_var["111"]["sku_anterior"] == "dg054.ci"
+    assert por_var["111"]["estoque_anuncio"] == 84
+    assert por_var["222"]["estado"] == "sem_produto"
+
+    out = await vincular_anuncio(
+        db, user, external_id="1735492803373729494", integration_id=integ.id
+    )
+    assert out["movidos"] == 1
+    await db.refresh(link)
+    assert link.product_id == novo.id  # o link seguiu o SKU atual do anúncio
+    assert link.external_sku == "dg054.sp"
 
 
 @pytest.mark.asyncio

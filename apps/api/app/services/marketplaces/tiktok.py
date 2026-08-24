@@ -834,6 +834,30 @@ class TikTokClient:
             return None
         return {"sku": (chosen.get("seller_sku") or "").strip() or None, "title": title}
 
+    async def get_product(self, product_id: str) -> dict | None:
+        """Detalhe cru de UM produto (title + skus com seller_sku/estoque/
+        atributos) ou None quando não deu pra ler. GET
+        /product/202309/products/{id} é shop-scoped (assinado com o
+        shop_cipher): produto de OUTRA loja volta erro → None, então a sonda
+        de contas do anuncio_lookup não vaza anúncio alheio."""
+        pid = (product_id or "").strip()
+        if not pid:
+            return None
+        try:
+            resp = await self._get(f"/product/202309/products/{pid}")
+        except Exception as e:  # noqa: BLE001
+            logger.info("tiktok_get_product_failed", product_id=pid, err=str(e)[:200])
+            return None
+        if not isinstance(resp, dict) or resp.get("code") != 0:
+            logger.info(
+                "tiktok_get_product_denied",
+                product_id=pid,
+                code=(resp or {}).get("code") if isinstance(resp, dict) else None,
+                message=str((resp or {}).get("message") if isinstance(resp, dict) else "")[:120],
+            )
+            return None
+        return resp.get("data") or {}
+
     async def activate_product(self, product_id: str) -> bool:
         """Activate a deactivated product.
 

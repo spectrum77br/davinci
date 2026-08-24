@@ -651,6 +651,16 @@ def _shopee_client_for(integ: Integration, session: AsyncSession) -> ShopeeClien
     return ShopeeClient(creds, on_token_refresh=_persist_refresh)
 
 
+def _tiktok_client_for(integ: Integration, session: AsyncSession) -> TikTokClient:
+    creds = decrypt_json(integ.credentials) if integ.credentials else {}
+
+    async def _persist_refresh(new_creds: dict) -> None:
+        integ.credentials = encrypt_json(new_creds)
+        await session.commit()
+
+    return TikTokClient(creds, on_token_refresh=_persist_refresh)
+
+
 def _amazon_client_for(integ: Integration, session: AsyncSession) -> AmazonClient:
     creds = decrypt_json(integ.credentials) if integ.credentials else {}
 
