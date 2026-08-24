@@ -1333,12 +1333,21 @@ async function conferirTodos() {
           Até:
           <input v-model="enviosFim" type="date" class="h-7 border rounded px-2 bg-background" />
         </label>
+        <!-- Filtro em default ("todas/todos") fica esmaecido pra diferenciar
+             na hora o que está ativo (pedido do Eduardo, 2026-08-24) — vale
+             pra todos os selects da barra. As opções reais forçam
+             text-foreground porque o Chrome herda a cor do select pra lista
+             aberta; "Ordenar" fica de fora (sempre tem valor real). -->
         <label class="inline-flex items-center gap-1">
           Conferência:
-          <select v-model="conferidoFilter" class="h-7 border rounded px-2 bg-background">
-            <option value="all">todos</option>
-            <option value="conferidos">conferidos</option>
-            <option value="nao_conferidos">não conferidos</option>
+          <select
+            v-model="conferidoFilter"
+            class="h-7 border rounded px-2 bg-background"
+            :class="conferidoFilter === 'all' ? 'text-muted-foreground' : ''"
+          >
+            <option value="all" class="text-muted-foreground">todos</option>
+            <option value="conferidos" class="text-foreground">conferidos</option>
+            <option value="nao_conferidos" class="text-foreground">não conferidos</option>
           </select>
         </label>
       </template>
@@ -1347,9 +1356,18 @@ async function conferirTodos() {
         class="inline-flex items-center gap-1"
       >
         Tag:
-        <select v-model="tagOverride" class="h-7 border rounded px-2 bg-background">
-          <option value="">todas</option>
-          <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">
+        <select
+          v-model="tagOverride"
+          class="h-7 border rounded px-2 bg-background"
+          :class="tagOverride === '' ? 'text-muted-foreground' : ''"
+        >
+          <option value="" class="text-muted-foreground">todas</option>
+          <option
+            v-for="opt in TAG_OPTIONS"
+            :key="opt.slug"
+            :value="opt.slug"
+            class="text-foreground"
+          >
             {{ opt.label }}
           </option>
         </select>
@@ -1360,42 +1378,66 @@ async function conferirTodos() {
            Estoque-only to avoid implying it affects the other tabs. -->
       <label v-if="tab === 'estoque'" class="inline-flex items-center gap-1">
         Estoque:
-        <select v-model="estoqueFilter" class="h-7 border rounded px-2 bg-background">
-          <option value="all">todos</option>
-          <option value="com">com estoque</option>
-          <option value="sem">sem estoque</option>
+        <select
+          v-model="estoqueFilter"
+          class="h-7 border rounded px-2 bg-background"
+          :class="estoqueFilter === 'all' ? 'text-muted-foreground' : ''"
+        >
+          <option value="all" class="text-muted-foreground">todos</option>
+          <option value="com" class="text-foreground">com estoque</option>
+          <option value="sem" class="text-foreground">sem estoque</option>
         </select>
       </label>
       <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
         Status:
-        <select v-model="statusFilter" class="h-7 border rounded px-2 bg-background">
-          <option value="all">todos</option>
-          <option value="enviado">enviado</option>
-          <option value="nao_enviado">não enviado</option>
-          <option value="previsao">previsão</option>
+        <select
+          v-model="statusFilter"
+          class="h-7 border rounded px-2 bg-background"
+          :class="statusFilter === 'all' ? 'text-muted-foreground' : ''"
+        >
+          <option value="all" class="text-muted-foreground">todos</option>
+          <option value="enviado" class="text-foreground">enviado</option>
+          <option value="nao_enviado" class="text-foreground">não enviado</option>
+          <option value="previsao" class="text-foreground">previsão</option>
         </select>
       </label>
       <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
         Etiqueta:
-        <select v-model="etiquetaFilter" class="h-7 border rounded px-2 bg-background">
-          <option value="all">todas</option>
-          <option value="impressa">impressa</option>
-          <option value="nao_impressa">não impressa</option>
-          <option value="sem">sem etiqueta</option>
+        <select
+          v-model="etiquetaFilter"
+          class="h-7 border rounded px-2 bg-background"
+          :class="etiquetaFilter === 'all' ? 'text-muted-foreground' : ''"
+        >
+          <option value="all" class="text-muted-foreground">todas</option>
+          <option value="impressa" class="text-foreground">impressa</option>
+          <option value="nao_impressa" class="text-foreground">não impressa</option>
+          <option value="sem" class="text-foreground">sem etiqueta</option>
         </select>
       </label>
       <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
         Plataforma:
-        <select v-model="plataformaFilter" class="h-7 border rounded px-2 bg-background">
-          <option value="">todas</option>
-          <option v-for="p in plataformaOptions" :key="p" :value="p">{{ p }}</option>
+        <select
+          v-model="plataformaFilter"
+          class="h-7 border rounded px-2 bg-background"
+          :class="plataformaFilter === '' ? 'text-muted-foreground' : ''"
+        >
+          <option value="" class="text-muted-foreground">todas</option>
+          <option v-for="p in plataformaOptions" :key="p" :value="p" class="text-foreground">
+            {{ p }}
+          </option>
         </select>
       </label>
       <label v-if="tab === 'pedidos'" class="inline-flex items-center gap-1">
         Loja:
-        <select v-model="lojaFilter" class="h-7 border rounded px-2 bg-background max-w-[180px]">
-          <option value="">todas</option>
-          <option v-for="l in lojaOptions" :key="l" :value="l">{{ l }}</option>
+        <select
+          v-model="lojaFilter"
+          class="h-7 border rounded px-2 bg-background max-w-[180px]"
+          :class="lojaFilter === '' ? 'text-muted-foreground' : ''"
+        >
+          <option value="" class="text-muted-foreground">todas</option>
+          <option v-for="l in lojaOptions" :key="l" :value="l" class="text-foreground">
+            {{ l }}
+          </option>
         </select>
       </label>
       <!-- Mesma ordenação dos cabeçalhos clicáveis (estado compartilhado):
