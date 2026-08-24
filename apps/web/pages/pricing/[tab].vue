@@ -3687,8 +3687,7 @@ watch(department, async () => {
               <template v-if="department === 'celular'">
                 <th
                   v-for="k in kitCount" :key="`gridkith-${k}`"
-                  class="sticky bg-background px-1 py-1 text-center text-[10px] z-30 min-w-[56px]"
-                  :class="k === 1 ? 'font-bold text-blue-700' : 'text-muted-foreground'"
+                  class="sticky bg-background px-1 py-1 text-center text-[10px] text-muted-foreground z-30 min-w-[56px]"
                   :style="{ left: `${368 + (k - 1) * 56}px` }"
                   :title="kitTitulo(k)"
                 >
@@ -3771,7 +3770,7 @@ watch(department, async () => {
                   v-for="k in kitCount" :key="`gridkit-${k}`"
                   class="sticky bg-background px-1 py-1 text-center text-xs z-10 min-w-[56px] cursor-pointer"
                   :class="[
-                    k === 1 ? 'text-blue-700 font-bold' : 'text-muted-foreground',
+                    'text-muted-foreground',
                     isEditing(prod.id, `cost_kit${k}`) ? 'ring-2 ring-blue-500 ring-inset' : '',
                     isFlashed(prod.id, `cost_kit${k}`) ? 'bg-emerald-50 dark:bg-emerald-900/20' : '',
                   ]"
