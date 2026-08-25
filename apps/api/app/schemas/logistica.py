@@ -212,9 +212,21 @@ class StatusBlingOut(BaseModel):
 
 class RecarregarOut(BaseModel):
     """Confirmação de que a recarga em massa (enriquecer ML + aplicar status no
-    Bling) foi enfileirada em background."""
+    Bling) foi enfileirada em background. `job_id` deixa o front acompanhar o
+    andamento em GET /recarregar/{job_id} e avisar quando terminar."""
 
     enqueued: bool = True
+    job_id: str | None = None
+
+
+class RecarregarStatusOut(BaseModel):
+    """Andamento da recarga em massa: `status` é o estado do job no arq
+    (queued/deferred/in_progress/complete/failed/not_found). Quando complete,
+    `resumo` traz os contadores do serviço (status_refresh, cleanup,
+    enrich_updated, status_aplicados…) pro toast do front."""
+
+    status: str
+    resumo: dict[str, int] | None = None
 
 
 # ---- Sugestão de Status Bling (a partir dos status do Meli) ----

@@ -74,6 +74,10 @@ _INSERT_SQL = text(
       AND (:so_problemas = false OR sb.nome = 'Problemas')
       AND bo.numero IS NOT NULL
       AND bo.situacao IS DISTINCT FROM 'excluido'
+      -- Finalizados nunca entram (o cleanup_finalizados removeria em seguida;
+      -- sem este filtro a linha ia e voltava a cada rodada). Entregue ENTRA —
+      -- fica no painel os 90 dias da janela de reclamação e aí o cleanup tira.
+      AND (sb.nome IS NULL OR sb.nome NOT IN ('Cancelado', 'Resolvido', 'Perdimento'))
       AND NOT EXISTS (
           SELECT 1 FROM davinci.logistica l WHERE l.pedido_bling = bo.numero
       )
@@ -117,6 +121,37 @@ async def refresh_status_bling(session: AsyncSession) -> list[UUID]:
     return mudaram
 
 
+# Pedido do usuário (25/08): situações que encerram o acompanhamento somem da
+# aba sozinhas. Cancelado/Resolvido/Perdimento saem na hora; Entregue segura 90
+# dias (janela de reclamação do comprador no marketplace) e depois sai. Sem
+# data não apaga — melhor sobrar uma linha que sumir cedo demais.
+_CLEANUP_SQL = text(
+    """
+    DELETE FROM davinci.logistica
+     WHERE lower(coalesce(status_bling, '')) IN ('cancelado', 'resolvido', 'perdimento')
+        OR (
+            lower(coalesce(status_bling, '')) = 'entregue'
+            AND data IS NOT NULL
+            AND data < CURRENT_DATE - 90
+        )
+    """
+)
+
+
+async def cleanup_finalizados(session: AsyncSession) -> int:
+    """Apaga da aba Logística os pedidos que não precisam mais de acompanhamento:
+    situação Bling Cancelado, Resolvido ou Perdimento — e Entregue com mais de
+    90 dias. Some SÓ da Logística; o pedido segue intacto em `bling_orders` e
+    nas outras telas. Roda logo depois do `refresh_status_bling` (é o
+    realinhamento que traz a situação fresca) em toda ingestão e no recarregar
+    do painel, então a tabela se mantém enxuta sem faxina manual."""
+    res = await session.execute(_CLEANUP_SQL)
+    removed = res.rowcount or 0
+    await session.commit()
+    logger.info("logistica_cleanup_finalizados", removed=removed)
+    return removed
+
+
 async def _ingest_platform(
     session: AsyncSession, platform: str, dias: int, *, so_problemas: bool = False
 ) -> int:
@@ -157,8 +192,10 @@ async def run_ingest_ml_daily(
     usuário 18/08) + os com situação Bling "Problemas" dos últimos
     `problemas_dias`, e enriquece o status do Meli das linhas ML ainda vazias
     (mais recentes primeiro). Antes de tudo realinha o status_bling de quem já
-    está na tabela (todas as plataformas — o UPDATE é global e barato)."""
+    está na tabela (todas as plataformas — o UPDATE é global e barato) e limpa
+    os finalizados (Cancelado/Resolvido/Perdimento e Entregue +90d)."""
     refreshed = len(await refresh_status_bling(session))
+    removed = await cleanup_finalizados(session)
     inserted = await _ingest_platform(session, "ml", dias)
     problemas = await _ingest_platform(
         session, "ml", problemas_dias, so_problemas=True
@@ -168,6 +205,7 @@ async def run_ingest_ml_daily(
     )
     return {
         "status_refresh": refreshed,
+        "cleanup": removed,
         "inserted": inserted,
         "problemas": problemas,
         **{f"enrich_{k}": v for k, v in enr.items()},
@@ -189,6 +227,7 @@ async def run_ingest_marketplaces_daily(
     Também realinha o status_bling primeiro (idempotente; o cron do ML faz o
     mesmo — tanto faz qual roda antes)."""
     out: dict[str, int] = {"status_refresh": len(await refresh_status_bling(session))}
+    out["cleanup"] = await cleanup_finalizados(session)
     for platform in ("shopee", "tiktok", "amazon"):
         out[platform] = await _ingest_platform(session, platform, dias)
         out[f"{platform}_problemas"] = await _ingest_platform(
@@ -276,10 +315,15 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     Roda em background (arq) porque ainda pode passar dos 100s do Cloudflare.
     """
     mudaram = await refresh_status_bling(session)
+    # Quem acabou de virar Cancelado/Resolvido/Perdimento (ou Entregue velho)
+    # sai daqui mesmo — o _ids_pendentes só considera linhas existentes, então
+    # os ids apagados em `mudaram` não voltam.
+    removed = await cleanup_finalizados(session)
     alvo = await _ids_pendentes(session, extras=mudaram)
     logger.info(
         "logistica_recarregar_inicio",
         status_refresh=len(mudaram),
+        cleanup=removed,
         **{f"alvo_{k}": len(v) for k, v in alvo.items()},
     )
     enr = await logistica_meli.enrich_recent(session, ids=alvo["ml"], only_empty=False)
@@ -305,6 +349,7 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     )
     return {
         "status_refresh": len(mudaram),
+        "cleanup": removed,
         **{f"enrich_{k}": v for k, v in enr.items()},
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},

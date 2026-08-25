@@ -128,19 +128,56 @@ async function recarregar() {
   )
     return
   recarregando.value = true
+  let jobId: string | null = null
   try {
-    await api('/api/logistica/recarregar', { method: 'POST' })
+    const res = await api<{ enqueued: boolean; job_id?: string | null }>(
+      '/api/logistica/recarregar',
+      { method: 'POST' },
+    )
+    jobId = res?.job_id || null
     toasts.info('Recarregando em segundo plano', 'Leva uns 2-3 minutos; a lista atualiza sozinha.')
   } catch (e: any) {
     toasts.error('Não foi possível recarregar', e?.data?.detail?.code || e?.message || 'erro')
     recarregando.value = false
     return
   }
-  // Repuxa periodicamente até o job terminar (~2-3 min com o escopo pendente;
-  // o poll antigo de 30s parava antes e o botão parecia "não fazer nada").
-  for (let i = 0; i < 24; i++) {
+  // Repuxa a lista a cada 10s e acompanha o job pelo job_id até ele REALMENTE
+  // terminar (teto de 10 min). O poll fixo de 4 min de antes parava cedo em
+  // recarga longa e sem nenhum aviso — o botão parecia "não fazer nada". Agora
+  // o spinner dura o job e no fim sai um toast com o resumo (ou o erro).
+  for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 10000))
     await Promise.all([refresh(), refreshStatus()])
+    if (!jobId) {
+      if (i >= 23) break // sem job_id pra acompanhar: mantém o teto antigo de 4 min
+      continue
+    }
+    try {
+      const st = await api<{ status: string; resumo?: Record<string, number> | null }>(
+        `/api/logistica/recarregar/${jobId}`,
+      )
+      if (st.status === 'complete') {
+        const r = st.resumo || {}
+        const atualizados =
+          (r.enrich_updated || 0) +
+          (r.shopee_enrich_updated || 0) +
+          (r.tiktok_enrich_updated || 0) +
+          (r.amazon_enrich_updated || 0)
+        toasts.success('Recarregado', [
+          `${atualizados} pedidos com Status Plataforma atualizado`,
+          `${r.status_aplicados || 0} mudanças de status aplicadas no Bling`,
+          `${r.cleanup || 0} pedidos finalizados removidos da lista`,
+        ])
+        break
+      }
+      if (st.status === 'failed' || st.status === 'not_found') {
+        toasts.error('O recarregar falhou no servidor', 'Tenta de novo; se repetir, me avisa.')
+        break
+      }
+    } catch {
+      // Consulta de andamento falhou (rede etc.) → segue o poll; a lista
+      // continua atualizando de qualquer jeito.
+    }
   }
   recarregando.value = false
 }

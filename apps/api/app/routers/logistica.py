@@ -19,6 +19,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
+from arq.jobs import Job, JobStatus
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +52,7 @@ from app.schemas.logistica import (
     MensagemBlingPreviewOut,
     OpcoesOut,
     RecarregarOut,
+    RecarregarStatusOut,
     StatusBlingOut,
     StatusBlingPreviewOut,
     StatusDetalheOut,
@@ -549,11 +551,42 @@ async def recarregar(
     """Enfileira a recarga em massa (re-enriquece o status do Meli de TODAS as
     linhas ML e aplica no Bling a mudança de situação das que casam uma regra da
     aba Status). Roda em background porque pode passar do timeout do Cloudflare.
-    O front repuxa a lista depois pra ver o resultado."""
+    O front acompanha pelo `job_id` (GET /recarregar/{job_id}) e repuxa a lista
+    enquanto isso."""
     pool = await get_arq_pool()
-    await pool.enqueue_job("logistica_recarregar")
-    logger.info("logistica_recarregar_enqueued")
-    return RecarregarOut(enqueued=True)
+    job = await pool.enqueue_job("logistica_recarregar")
+    job_id = job.job_id if job else None
+    logger.info("logistica_recarregar_enqueued", job_id=job_id)
+    return RecarregarOut(enqueued=True, job_id=job_id)
+
+
+@router.get("/recarregar/{job_id}", response_model=RecarregarStatusOut)
+async def recarregar_status(
+    job_id: str,
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> RecarregarStatusOut:
+    """Andamento da recarga em massa do botão. O front consulta a cada poll pra
+    manter o spinner até o job REALMENTE acabar (antes eram 4 min fixos: recarga
+    mais longa parecia quebrada e a lista parava de atualizar antes do fim) e
+    pra mostrar o resumo no toast. `failed` = o job rodou e estourou; que não
+    aconteça — mas se acontecer o operador fica sabendo em vez de olhar um
+    spinner mudo."""
+    pool = await get_arq_pool()
+    job = Job(job_id, pool)
+    st = await job.status()
+    if st == JobStatus.complete:
+        info = await job.result_info()
+        if info is None:
+            return RecarregarStatusOut(status="not_found")
+        if not info.success:
+            return RecarregarStatusOut(status="failed")
+        resumo = (
+            {k: v for k, v in info.result.items() if isinstance(v, int)}
+            if isinstance(info.result, dict)
+            else None
+        )
+        return RecarregarStatusOut(status="complete", resumo=resumo)
+    return RecarregarStatusOut(status=st.value)
 
 
 @router.post("", response_model=LogisticaOut, status_code=status.HTTP_201_CREATED)

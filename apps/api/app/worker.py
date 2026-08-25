@@ -795,18 +795,19 @@ async def valuation_estoque_snapshot(ctx: dict) -> None:
 
 
 async def logistica_ml_ingest(ctx: dict) -> None:
-    """Diário (~07h BRT, depois do sync do Bling): importa os novos pedidos
-    Mercado Livre pra aba Logística e enriquece o status do Meli. Assim a lista
-    cresce sozinha de hoje pra frente, sem backfill manual."""
+    """De hora em hora (:00 — era 1x/dia; pedido do usuário 25/08): importa os
+    novos pedidos Mercado Livre pra aba Logística, realinha o status Bling,
+    limpa os finalizados (Cancelado/Resolvido/Perdimento e Entregue +90d) e
+    enriquece o status do Meli. Assim a lista cresce e se limpa sozinha."""
     async with session_scope() as s:
         summary = await run_ingest_ml_daily(s)
     logger.info("logistica_ml_ingest_done", **summary)
 
 
 async def logistica_marketplaces_ingest(ctx: dict) -> None:
-    """Diário (~07h BRT, junto do ML): importa os novos pedidos Shopee/TikTok/
-    Amazon pra aba Logística (só ingestão — esses marketplaces ainda não têm
-    enriquecimento de Status Plataforma)."""
+    """De hora em hora (:05, junto do ML): importa os novos pedidos Shopee/
+    TikTok/Amazon pra aba Logística (só ingestão — esses marketplaces ainda não
+    têm enriquecimento de Status Plataforma)."""
     async with session_scope() as s:
         summary = await run_ingest_marketplaces_daily(s)
     logger.info("logistica_marketplaces_ingest_done", **summary)
@@ -1830,11 +1831,12 @@ class WorkerSettings:
         # e atualiza valuation.estoque (total). A aba "Estoque Bling" da
         # página /financeiro/valuation lê dessa tabela.
         cron(valuation_estoque_snapshot, hour=11, minute=0, run_at_startup=False),
-        # 10:00 UTC = 07:00 BRT — depois do sync do Bling; importa os novos
-        # pedidos ML pra Logística e enriquece o status do Meli.
-        cron(logistica_ml_ingest, hour=10, minute=0, run_at_startup=False),
-        # Junto do ML: importa os novos pedidos Shopee/TikTok/Amazon pra Logística.
-        cron(logistica_marketplaces_ingest, hour=10, minute=5, run_at_startup=False),
+        # Toda hora (:00) — era 1x/dia às 07:00 BRT; pedido do usuário 25/08.
+        # Importa os novos pedidos ML pra Logística, realinha status, limpa os
+        # finalizados e enriquece o status do Meli (só linhas ainda vazias).
+        cron(logistica_ml_ingest, minute=0, run_at_startup=False),
+        # Toda hora (:05), junto do ML: novos pedidos Shopee/TikTok/Amazon.
+        cron(logistica_marketplaces_ingest, minute=5, run_at_startup=False),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps
         # 5/5/5/5/4h — sempre abaixo da expiração. minute=45 evita colidir
