@@ -214,6 +214,27 @@ function fmtCnpj(v: string | null) {
   return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`
 }
 
+// Os dois grupos de NF da tabela (colunas idênticas, cor do grupo diferente —
+// mesmo esquema visual da tela de Margem: Frete âmbar, Saldo verde).
+// `head` pinta o cabeçalho do grupo; `tint` pinta as células do corpo (mais suave).
+const LADOS = [
+  {
+    campo: 'nf_embalagem',
+    titulo: 'NF embalagem',
+    head: 'bg-amber-50 dark:bg-amber-900/20',
+    tint: 'bg-amber-50/40 dark:bg-amber-900/10',
+  },
+  {
+    campo: 'nf_produto',
+    titulo: 'NF produto',
+    head: 'bg-emerald-50 dark:bg-emerald-900/20',
+    tint: 'bg-emerald-50/40 dark:bg-emerald-900/10',
+  },
+] as const
+
+// Borda grossa que separa os grupos de colunas (igual à Margem).
+const SEP = 'border-l-[3px] border-gray-400 dark:border-gray-600'
+
 await carregar()
 </script>
 
@@ -276,75 +297,109 @@ await carregar()
       </span>
     </div>
 
-    <!-- Tabela -->
-    <div class="border rounded-md overflow-x-auto">
-      <table class="w-full text-sm min-w-[1400px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
-        <thead class="bg-muted/40 text-left">
-          <tr class="whitespace-nowrap">
-            <th class="px-3 py-2">Data envio</th>
-            <th class="px-3 py-2">Pedido Bling</th>
-            <th class="px-3 py-2">Pedido Marketplace</th>
-            <th class="px-3 py-2">Loja</th>
-            <th class="px-3 py-2">SKU</th>
-            <th class="px-3 py-2">Produto</th>
-            <th class="px-3 py-2">Valor</th>
-            <th class="px-3 py-2">NF embalagem</th>
-            <th class="px-3 py-2">NF produto</th>
+    <!-- Tabela (cabeçalho agrupado em 2 níveis, estilo da tela de Margem) -->
+    <div class="overflow-auto rounded border max-h-[75vh]">
+      <table class="w-full text-xs border-collapse">
+        <thead class="bg-background sticky top-0 z-20">
+          <!-- Nível 1: grupos -->
+          <tr>
+            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="3">Identificação</th>
+            <th :class="['px-2 py-1 text-left text-[11px] font-semibold border-b', SEP]" colspan="4">Anúncio</th>
+            <th
+              v-for="lado in LADOS"
+              :key="lado.campo"
+              :class="['px-2 py-1 text-center text-[11px] font-semibold border-b', SEP, lado.head]"
+              colspan="4"
+            >{{ lado.titulo }}</th>
+          </tr>
+          <!-- Nível 2: colunas -->
+          <tr class="border-b">
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">Data envio</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]">Pedido Bling</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]">Pedido Marketplace</th>
+            <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]', SEP]">Loja</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">SKU</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produto</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]">Valor</th>
+            <template v-for="lado in LADOS" :key="lado.campo">
+              <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px]', SEP, lado.head]">Nome</th>
+              <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]', lado.head]">CNPJ</th>
+              <th :class="['px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[85px]', lado.head]">Valor</th>
+              <th :class="['px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]', lado.head]">XML</th>
+            </template>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading">
-            <td colspan="9" class="py-10 text-center text-muted-foreground">
+            <td colspan="15" class="py-10 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando envios…
             </td>
           </tr>
           <tr v-else-if="!pagedRows.length">
-            <td colspan="9" class="py-10 text-center text-muted-foreground">
+            <td colspan="15" class="py-10 text-center text-muted-foreground">
               {{ rows.length === 0 ? 'nenhum pedido enviado no período' : 'nenhum pedido com esses filtros' }}
             </td>
           </tr>
-          <tr v-for="r in pagedRows" :key="r.pedido_bling" class="border-t align-top hover:bg-muted/20">
-            <td class="px-3 py-2 whitespace-nowrap tabular-nums">{{ fmtEnvio(r) }}</td>
-            <td class="px-3 py-2 whitespace-nowrap font-medium">{{ r.pedido_bling }}</td>
-            <td class="px-3 py-2 whitespace-nowrap font-mono text-xs">{{ r.pedido_marketplace || '—' }}</td>
-            <td class="px-3 py-2 whitespace-nowrap">
+          <tr
+            v-for="r in pagedRows"
+            :key="r.pedido_bling"
+            class="border-t align-top hover:brightness-95 dark:hover:brightness-110"
+          >
+            <td class="px-2 py-1 whitespace-nowrap tabular-nums">{{ fmtEnvio(r) }}</td>
+            <td class="px-2 py-1 whitespace-nowrap font-medium">{{ r.pedido_bling }}</td>
+            <td class="px-2 py-1 whitespace-nowrap font-mono text-[11px]">{{ r.pedido_marketplace || '—' }}</td>
+            <td :class="['px-2 py-1 whitespace-nowrap', SEP]">
               {{ r.loja || '—' }}
-              <span v-if="r.plataforma" class="text-xs text-muted-foreground">· {{ r.plataforma }}</span>
+              <span v-if="r.plataforma" class="text-[10px] text-muted-foreground">· {{ r.plataforma }}</span>
             </td>
-            <td class="px-3 py-2 font-mono text-xs max-w-[160px] break-words">{{ r.sku || '—' }}</td>
-            <td class="px-3 py-2 max-w-[260px]">
+            <td class="px-2 py-1 font-mono text-[11px] max-w-[160px] break-words">{{ r.sku || '—' }}</td>
+            <td class="px-2 py-1 max-w-[260px]">
               <span class="line-clamp-2" :title="r.produto || undefined">{{ r.produto || '—' }}</span>
             </td>
-            <td class="px-3 py-2 whitespace-nowrap text-right tabular-nums">{{ brl(r.valor) }}</td>
-            <td v-for="lado in (['nf_embalagem', 'nf_produto'] as const)" :key="lado" class="px-3 py-2 min-w-[230px]">
-              <template v-if="r[lado]">
-                <div class="font-medium text-xs leading-snug">{{ r[lado]!.emitente || 'conta sem nome' }}</div>
-                <div class="text-xs text-muted-foreground whitespace-nowrap tabular-nums">
-                  {{ fmtCnpj(r[lado]!.cnpj) }}
-                </div>
-                <div class="mt-0.5 flex items-center gap-2 whitespace-nowrap">
-                  <span class="text-xs text-muted-foreground">nº {{ r[lado]!.numero || '—' }}</span>
-                  <span class="tabular-nums text-xs">{{ brl(r[lado]!.valor) }}</span>
-                  <button
-                    class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-50"
-                    :disabled="baixandoXml.has(r[lado]!.nota_id)"
-                    title="Baixar o XML da nota"
-                    @click="baixarXml(r[lado]!)"
-                  >
-                    <Loader2 v-if="baixandoXml.has(r[lado]!.nota_id)" class="size-3 animate-spin" />
-                    <FileDown v-else class="size-3" />
-                    XML
-                  </button>
-                  <span
-                    v-if="r[lado]!.via === 'cpf'"
-                    class="text-[10px] text-amber-600 dark:text-amber-400"
-                    title="Nota casada pelo CPF do destinatário + data (o pedido do marketplace não estava na nota)"
-                  >≈ por CPF</span>
-                </div>
-              </template>
-              <span v-else class="text-muted-foreground">—</span>
-            </td>
+            <td class="px-2 py-1 whitespace-nowrap text-right tabular-nums">{{ brl(r.valor) }}</td>
+            <template v-for="lado in LADOS" :key="lado.campo">
+              <!-- Nome (emitente) + nº da nota -->
+              <td :class="['px-2 py-1', SEP, lado.tint]">
+                <template v-if="r[lado.campo]">
+                  <div class="font-medium leading-snug">{{ r[lado.campo]!.emitente || 'conta sem nome' }}</div>
+                  <div class="text-[10px] text-muted-foreground whitespace-nowrap">
+                    NF {{ r[lado.campo]!.numero || '—' }}
+                    <span
+                      v-if="r[lado.campo]!.via === 'cpf'"
+                      class="text-amber-600 dark:text-amber-400"
+                      title="Nota casada pelo CPF do destinatário + data (o pedido do marketplace não estava na nota)"
+                    >· ≈ por CPF</span>
+                  </div>
+                </template>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <!-- CNPJ -->
+              <td :class="['px-2 py-1 whitespace-nowrap tabular-nums', lado.tint]">
+                <span v-if="r[lado.campo]">{{ fmtCnpj(r[lado.campo]!.cnpj) }}</span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <!-- Valor da nota -->
+              <td :class="['px-2 py-1 whitespace-nowrap text-right tabular-nums', lado.tint]">
+                <span v-if="r[lado.campo]">{{ brl(r[lado.campo]!.valor) }}</span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <!-- XML -->
+              <td :class="['px-2 py-1 text-center whitespace-nowrap', lado.tint]">
+                <button
+                  v-if="r[lado.campo]"
+                  class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-50"
+                  :disabled="baixandoXml.has(r[lado.campo]!.nota_id)"
+                  title="Baixar o XML da nota"
+                  @click="baixarXml(r[lado.campo]!)"
+                >
+                  <Loader2 v-if="baixandoXml.has(r[lado.campo]!.nota_id)" class="size-3 animate-spin" />
+                  <FileDown v-else class="size-3" />
+                  XML
+                </button>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+            </template>
           </tr>
         </tbody>
       </table>
