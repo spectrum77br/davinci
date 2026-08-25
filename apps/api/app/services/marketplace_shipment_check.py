@@ -74,7 +74,13 @@ _SWEEP_LOCK_KEY = 0x73686970  # ascii "ship"
 # confirming.
 _OPEN_SITUACOES: tuple[str, ...] = ("83965", "6")
 _SHIPPED_SITUACAO = 15  # Bling system situacao "Em andamento".
-_CANDIDATE_WINDOW = timedelta(days=7)
+# 30 dias (era 7). Pedido RETIDO no marketplace é postado depois do 7º dia
+# e saía do radar exatamente antes de despachar — 3 casos reais presos em
+# ago/2026 (290463 criado 14/08 e postado 24/08; 290728 criado 16/08 e
+# postado 25/08). Custo medido em prod (25/08): 140 → 141 candidatos, pois
+# pedido normal vira 15 em 1-2 dias e sai do pool sozinho — quem fica além
+# de 7 dias são só os retidos. Lixo antigo (2025, mai/2026) continua fora.
+_CANDIDATE_WINDOW = timedelta(days=30)
 
 # Marketplace status strings that mean "package on the way". Compared
 # case-insensitively (we upper() the response before lookup).

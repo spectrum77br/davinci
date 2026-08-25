@@ -246,6 +246,29 @@ async def test_load_candidates_exclui_fora_da_janela(db: AsyncSession):
     assert all(r.bling_id != 901006 for r in rows)
 
 
+@pytest.mark.asyncio
+async def test_load_candidates_inclui_pedido_retido_20_dias(db: AsyncSession):
+    """Pedido RETIDO — criado 20 dias atrás e ainda em 83965 — ENTRA no
+    pool. Guarda de regressão da janela 7→30 dias (ago/2026): o 290728
+    entrou 16/08 e só foi postado 25/08 (9º dia); com janela de 7 o robô
+    desistia dele na véspera do despacho e o pedido travava pra sempre."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.marketplace_shipment_check import _load_candidates
+
+    o = await _make_candidate(
+        db, bling_id=901007, situacao="83965", em_andamento_data=None,
+    )
+    old_ts = datetime.now(UTC) - timedelta(days=20)
+    await db.execute(
+        update(BlingOrder).where(BlingOrder.bling_id == 901007).values(created_at=old_ts)
+    )
+    await db.commit()
+    await db.refresh(o)
+    rows = await _load_candidates(db)
+    assert any(r.bling_id == 901007 for r in rows)
+
+
 # ─── _operational_ship_date: sem cutoff ──────────────────────────────
 
 
