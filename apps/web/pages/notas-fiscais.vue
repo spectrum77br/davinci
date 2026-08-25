@@ -373,10 +373,13 @@ await carregar()
               {{ rows.length === 0 ? 'nenhum pedido enviado no período' : 'nenhum pedido com esses filtros' }}
             </td>
           </tr>
+          <!-- h-11: TODAS as fileiras com a mesma altura (linhas da grade
+               uniformes); o conteúdo que passaria disso é cortado com "…"
+               e aparece inteiro no tooltip. -->
           <tr
             v-for="r in pagedRows"
             :key="r.pedido_bling"
-            class="border-t align-top hover:brightness-95 dark:hover:brightness-110"
+            class="h-11 border-t align-top hover:brightness-95 dark:hover:brightness-110"
           >
             <td class="px-2 py-1 whitespace-nowrap tabular-nums">{{ fmtEnvio(r) }}</td>
             <td :class="['px-2 py-1 whitespace-nowrap font-medium', SEP_FINA]">{{ r.pedido_bling }}</td>
@@ -385,7 +388,9 @@ await carregar()
               {{ r.loja || '—' }}
               <span v-if="r.plataforma" class="text-[10px] text-muted-foreground">· {{ r.plataforma }}</span>
             </td>
-            <td :class="['px-2 py-1 font-mono text-[11px] max-w-[160px] break-words', SEP_FINA]">{{ r.sku || '—' }}</td>
+            <td :class="['px-2 py-1 font-mono text-[11px] max-w-[160px]', SEP_FINA]">
+              <span class="line-clamp-2 break-words" :title="r.sku || undefined">{{ r.sku || '—' }}</span>
+            </td>
             <td :class="['px-2 py-1 max-w-[260px]', SEP_FINA]">
               <span class="line-clamp-2" :title="r.produto || undefined">{{ r.produto || '—' }}</span>
             </td>
@@ -394,7 +399,10 @@ await carregar()
               <!-- Nome (emitente) + nº da nota -->
               <td :class="['px-2 py-1', SEP, lado.tint]">
                 <template v-if="r[lado.campo]">
-                  <div class="font-medium leading-snug">{{ r[lado.campo]!.emitente || 'conta sem nome' }}</div>
+                  <div
+                    class="font-medium leading-snug line-clamp-1"
+                    :title="r[lado.campo]!.emitente || undefined"
+                  >{{ r[lado.campo]!.emitente || 'conta sem nome' }}</div>
                   <div class="text-[10px] text-muted-foreground whitespace-nowrap">
                     NF {{ r[lado.campo]!.numero || '—' }}
                     <span
