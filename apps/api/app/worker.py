@@ -65,6 +65,7 @@ from app.services.ml_backfill import run_backfill_ml_stock
 from app.services.nf_auto_enfileirar import run_auto_enfileirar_nf
 from app.services.nf_recuperar import run_recuperar_nf
 from app.services.notas_fiscais_export import run_export_notas
+from app.services.pos_vendas import sync_notas_emitidas as run_pos_vendas_sync
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.product_cost_sync import (
@@ -809,6 +810,16 @@ async def logistica_marketplaces_ingest(ctx: dict) -> None:
     async with session_scope() as s:
         summary = await run_ingest_marketplaces_daily(s)
     logger.info("logistica_marketplaces_ingest_done", **summary)
+
+
+async def pos_vendas_notas_sync(ctx: dict) -> None:
+    """A cada 10 min: espelha as NF-e das contas `bling_notas` em
+    `bling_notas_emitidas` (lista da janela + valor via detalhe com teto por
+    rodada + CNPJ/emitente da conta 1x). A página Pós Vendas casa pedido ↔
+    notas só no banco — sem Bling ao vivo na listagem."""
+    async with session_scope() as s:
+        summary = await run_pos_vendas_sync(s)
+    logger.info("pos_vendas_notas_sync_done", **summary)
 
 
 async def logistica_recarregar(ctx: dict) -> None:
@@ -1925,6 +1936,11 @@ class WorkerSettings:
         # lease preso (>45min) e re-encadeamento de 'processando' órfão. Mesma
         # flag NF_AUTO_ENFILEIRAR — inerte enquanto não estiver true no .env.
         cron(nf_recuperar_tick, minute=_FIVE_MIN, run_at_startup=False),
+        # Espelho das NF-e das contas de emissão (página Pós Vendas). As
+        # contas bling_notas são apps OAuth próprios — rate independente do
+        # app principal; o custo por rodada é 1-2 páginas de lista por conta
+        # + até 80 detalhes (teto no service).
+        cron(pos_vendas_notas_sync, minute={4, 14, 24, 34, 44, 54}, run_at_startup=False),
     ]
     # Marketing agent-node crons (Shopee sync + command consumer + schedule
     # reconciler) are NOT registered here — they run ONLY on the dedicated

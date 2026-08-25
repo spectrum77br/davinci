@@ -1,283 +1,200 @@
 <script setup lang="ts">
+// Pós vendas: cada pedido ENVIADO com as duas notas fiscais do envio —
+// NF EMBALAGEM (conta Bling da empresa dona da loja) e NF PRODUTO (nota
+// cheia da conta avulsa). O backend casa pedido ↔ nota pelo espelho local
+// `bling_notas_emitidas` (cron), então a página não consulta o Bling ao
+// vivo; só o botão XML busca o arquivo na hora.
 import {
   AlertCircle,
-  CheckCircle2,
-  Download,
-  FileArchive,
+  ChevronLeft,
+  ChevronRight,
+  FileDown,
   Loader2,
   Search,
-  XCircle,
+  X,
 } from 'lucide-vue-next'
-import { isoToday } from '~/lib/date'
+import { isoDaysAgo, isoToday } from '~/lib/date'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'notas_fiscais', action: 'view' } })
 
-type Conta = { id: string; nome: string }
-
-type NotaRow = {
-  conta: string
-  bling_id: number
+type PosVendaNf = {
+  nota_id: string
+  emitente: string | null
+  cnpj: string | null
   numero: string | null
-  data_emissao: string | null
-  data_operacao: string | null
-  tipo: string | null
-  situacao: string | null
-  cliente: string | null
-  documento: string | null
   valor: number | null
+  data_emissao: string | null
+  via: 'pedido' | 'cpf' | null
 }
 
-type NotasPage = {
-  items: NotaRow[]
-  total: number
-  erros: string[]
+type PosVendaRow = {
+  pedido_bling: string
+  pedido_marketplace: string | null
+  data_envio: string | null
+  envio_com_hora: boolean
+  loja: string | null
+  plataforma: string | null
+  sku: string | null
+  produto: string | null
+  valor: number | null
+  nf_embalagem: PosVendaNf | null
+  nf_produto: PosVendaNf | null
 }
+
+type PosVendasPage = { items: PosVendaRow[]; total: number }
 
 const { api } = useApi()
 
-const contas = ref<Conta[]>([])
-const selected = ref<Set<string>>(new Set())
-const contasLoading = ref(true)
-
-function firstOfMonth(): string {
-  return `${isoToday().slice(0, 8)}01`
-}
-
-const dateFrom = ref(firstOfMonth())
+// ---- carga (server: range de datas do ENVIO; máx. 62 dias) ----
+const dateFrom = ref(isoDaysAgo(7))
 const dateTo = ref(isoToday())
-
-const items = ref<NotaRow[]>([])
-const total = ref(0)
-const erros = ref<string[]>([])
-const searched = ref(false)
+const rows = ref<PosVendaRow[]>([])
 const loading = ref(false)
-const exportingXml = ref(false)
-const exportingXlsx = ref(false)
 const error = ref<string | null>(null)
 
-const allSelected = computed(
-  () => contas.value.length > 0 && selected.value.size === contas.value.length,
-)
-const canQuery = computed(
-  () => selected.value.size > 0 && !!dateFrom.value && !!dateTo.value,
-)
-const busy = computed(() => loading.value || exportingXml.value || exportingXlsx.value)
-
-function detailParts(detail: any, e: any): { code: string | null; message: string } {
-  if (detail && typeof detail === 'object')
-    return { code: detail.code ?? null, message: detail.message || detail.code || e?.message || 'erro' }
-  return { code: null, message: detail || e?.message || 'erro' }
-}
-
 function apiError(e: any) {
-  return detailParts(e?.data?.detail, e).message
+  const detail = e?.data?.detail
+  if (detail && typeof detail === 'object')
+    return detail.message || detail.code || e?.message || 'erro'
+  return detail || e?.message || 'erro'
 }
 
-// Os exports usam responseType 'blob', então o ofetch entrega o corpo do
-// erro como Blob em e.data — precisamos ler/parsear pra achar o detail
-// (e o code, pra distinguir o caso "muitas_notas" → export em background).
-async function parseBlobError(e: any): Promise<{ code: string | null; message: string }> {
-  const data = e?.data
-  if (data instanceof Blob) {
-    try {
-      return detailParts(JSON.parse(await data.text())?.detail, e)
-    } catch {
-      return { code: null, message: e?.message || 'erro' }
-    }
-  }
-  return detailParts(e?.data?.detail, e)
-}
-
-function toggleConta(id: string) {
-  const next = new Set(selected.value)
-  if (next.has(id)) next.delete(id)
-  else next.add(id)
-  selected.value = next
-}
-
-function toggleAll() {
-  selected.value = allSelected.value
-    ? new Set()
-    : new Set(contas.value.map((c) => c.id))
-}
-
-async function loadContas() {
-  contasLoading.value = true
-  try {
-    const res = await api<{ items: Conta[] }>('/api/notas-fiscais/contas')
-    contas.value = res.items
-    selected.value = new Set(res.items.map((c) => c.id))
-  } catch (e: any) {
-    error.value = apiError(e)
-  } finally {
-    contasLoading.value = false
-  }
-}
-
-function buildParams() {
-  const params = new URLSearchParams()
-  params.set('date_from', dateFrom.value)
-  params.set('date_to', dateTo.value)
-  for (const id of selected.value) params.append('conta', id)
-  return params
-}
-
-async function buscar() {
-  if (!canQuery.value || busy.value) return
+async function carregar() {
+  if (!dateFrom.value || !dateTo.value) return
   loading.value = true
   error.value = null
   try {
-    const res = await api<NotasPage>(`/api/notas-fiscais?${buildParams().toString()}`)
-    items.value = res.items
-    total.value = res.total
-    erros.value = res.erros
-    searched.value = true
+    const params = new URLSearchParams()
+    params.set('date_from', dateFrom.value)
+    params.set('date_to', dateTo.value)
+    const res = await api<PosVendasPage>(`/api/notas-fiscais/pos-vendas?${params.toString()}`)
+    rows.value = res.items
   } catch (e: any) {
     error.value = apiError(e)
+    rows.value = []
   } finally {
     loading.value = false
   }
 }
 
-async function downloadBlob(path: string, filename: string) {
-  const blob = await api<Blob>(path, { responseType: 'blob' as any })
-  const href = URL.createObjectURL(blob as any)
-  const a = document.createElement('a')
-  a.href = href
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(href)
+watch([dateFrom, dateTo], carregar)
+
+// ---- filtros client-side (padrão das outras telas) ----
+const search = ref('')
+const lojaFilter = ref('all')
+const nfFilter = ref('all')
+
+const lojas = computed(() =>
+  Array.from(new Set(rows.value.map((r) => r.loja).filter(Boolean) as string[])).sort(),
+)
+
+const filteredRows = computed(() => {
+  const q = search.value.trim().toLowerCase()
+  return rows.value.filter((r) => {
+    if (lojaFilter.value !== 'all' && r.loja !== lojaFilter.value) return false
+    if (nfFilter.value === 'sem_embalagem' && r.nf_embalagem) return false
+    if (nfFilter.value === 'sem_produto' && r.nf_produto) return false
+    if (nfFilter.value === 'sem_nf' && (r.nf_embalagem || r.nf_produto)) return false
+    if (nfFilter.value === 'completas' && (!r.nf_embalagem || !r.nf_produto)) return false
+    if (!q) return true
+    const alvo = [
+      r.pedido_bling,
+      r.pedido_marketplace,
+      r.loja,
+      r.plataforma,
+      r.sku,
+      r.produto,
+      r.nf_embalagem?.numero,
+      r.nf_embalagem?.emitente,
+      r.nf_produto?.numero,
+      r.nf_produto?.emitente,
+    ]
+    return alvo.some((v) => (v || '').toLowerCase().includes(q))
+  })
+})
+
+const filtrosAtivos = computed(
+  () => !!search.value.trim() || lojaFilter.value !== 'all' || nfFilter.value !== 'all',
+)
+
+function limparFiltros() {
+  search.value = ''
+  lojaFilter.value = 'all'
+  nfFilter.value = 'all'
 }
 
-async function exportXml() {
-  if (!canQuery.value || busy.value) return
-  exportingXml.value = true
+// ---- paginação (client-side; muitas linhas travam o DOM) ----
+const PAGE_SIZE = 50
+const page = ref(1)
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / PAGE_SIZE)))
+const pagedRows = computed(() =>
+  filteredRows.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE),
+)
+const pageStart = computed(() =>
+  filteredRows.value.length ? (page.value - 1) * PAGE_SIZE + 1 : 0,
+)
+const pageEnd = computed(() => Math.min(page.value * PAGE_SIZE, filteredRows.value.length))
+function goToPage(p: number) {
+  page.value = Math.min(Math.max(1, p), totalPages.value)
+}
+watch([search, lojaFilter, nfFilter, dateFrom, dateTo], () => {
+  page.value = 1
+})
+watch(totalPages, (tp) => {
+  if (page.value > tp) page.value = tp
+})
+
+// ---- download do XML de UMA nota ----
+const baixandoXml = ref<Set<string>>(new Set())
+
+async function baixarXml(nf: PosVendaNf) {
+  if (baixandoXml.value.has(nf.nota_id)) return
+  baixandoXml.value = new Set(baixandoXml.value).add(nf.nota_id)
   error.value = null
   try {
-    await downloadBlob(
-      `/api/notas-fiscais/export.xml?${buildParams().toString()}`,
-      `notas_fiscais_xml_${dateFrom.value}_${dateTo.value}.zip`,
+    const blob = await api<Blob>(
+      `/api/notas-fiscais/pos-vendas/nota/${nf.nota_id}/xml`,
+      { responseType: 'blob' as any },
     )
+    const href = URL.createObjectURL(blob as any)
+    const a = document.createElement('a')
+    a.href = href
+    a.download = `NF_${nf.numero || nf.nota_id}.xml`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(href)
   } catch (e: any) {
-    const { code, message } = await parseBlobError(e)
-    // >500 notas estouram o download direto — cai pro export em background.
-    if (code === 'muitas_notas') await startExportJob('xml')
-    else error.value = message
-  } finally {
-    exportingXml.value = false
-  }
-}
-
-async function exportXlsx() {
-  if (!canQuery.value || busy.value) return
-  exportingXlsx.value = true
-  error.value = null
-  try {
-    const from = dateFrom.value.replaceAll('-', '')
-    const to = dateTo.value.replaceAll('-', '')
-    await downloadBlob(
-      `/api/notas-fiscais/export.xlsx?${buildParams().toString()}`,
-      `NF-e_Report_excel_${from}_ate_${to}.xlsx`,
-    )
-  } catch (e: any) {
-    const { code, message } = await parseBlobError(e)
-    if (code === 'muitas_notas') await startExportJob('xlsx')
-    else error.value = message
-  } finally {
-    exportingXlsx.value = false
-  }
-}
-
-// ─── export em background (lotes >500 notas, gerado pelo worker) ───────
-
-type ExportJob = {
-  id: string
-  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
-  total: number
-  processed: number
-  result: { filename?: string; notas?: number; avisos?: number; fmt?: string }
-  error: string | null
-}
-
-const exportJob = ref<ExportJob | null>(null)
-const exportJobNote = ref<string | null>(null)
-const downloadingJob = ref(false)
-let exportPoll: ReturnType<typeof setInterval> | null = null
-
-function stopExportPoll() {
-  if (exportPoll) {
-    clearInterval(exportPoll)
-    exportPoll = null
-  }
-}
-
-function pollExportJob(jobId: string) {
-  stopExportPoll()
-  const tick = async () => {
-    try {
-      const j = await api<ExportJob>(`/api/jobs/${jobId}`)
-      exportJob.value = j
-      if (j.status === 'succeeded' || j.status === 'failed' || j.status === 'cancelled') {
-        stopExportPoll()
-        exportJobNote.value = null
-      }
-    } catch {
-      /* mantém o polling — erro transitório */
+    // responseType blob → o corpo do erro chega como Blob; ler pra achar o detail.
+    let msg = e?.message || 'erro ao baixar o XML'
+    const data = e?.data
+    if (data instanceof Blob) {
+      try {
+        const detail = JSON.parse(await data.text())?.detail
+        msg = detail?.message || detail?.code || msg
+      } catch { /* mantém msg */ }
+    } else if (data?.detail) {
+      msg = data.detail.message || data.detail.code || msg
     }
-  }
-  void tick()
-  exportPoll = setInterval(tick, 2000)
-}
-
-async function startExportJob(fmt: 'xlsx' | 'xml') {
-  stopExportPoll()
-  exportJob.value = null
-  error.value = null
-  exportJobNote.value =
-    'O período tem mais de 500 notas — gerando o arquivo em segundo plano. '
-    + 'Pode levar alguns minutos; você pode continuar usando o sistema.'
-  try {
-    const r = await api<{ job_id: string }>('/api/notas-fiscais/export-job', {
-      method: 'POST',
-      body: {
-        fmt,
-        date_from: dateFrom.value,
-        date_to: dateTo.value,
-        conta: Array.from(selected.value),
-      },
-    })
-    pollExportJob(r.job_id)
-  } catch (e: any) {
-    exportJobNote.value = null
-    error.value = apiError(e)
-  }
-}
-
-async function downloadExportJob() {
-  const j = exportJob.value
-  if (!j || j.status !== 'succeeded' || downloadingJob.value) return
-  downloadingJob.value = true
-  try {
-    await downloadBlob(
-      `/api/notas-fiscais/export-job/${j.id}/download`,
-      j.result?.filename || 'notas_fiscais_export',
-    )
-  } catch (e: any) {
-    error.value = (await parseBlobError(e)).message
+    error.value = `XML da nota ${nf.numero || ''}: ${msg}`
   } finally {
-    downloadingJob.value = false
+    const next = new Set(baixandoXml.value)
+    next.delete(nf.nota_id)
+    baixandoXml.value = next
   }
 }
 
-onUnmounted(stopExportPoll)
-
-function fmtDateTime(v: string | null) {
-  if (!v) return '—'
-  const d = new Date(v.replace(' ', 'T'))
-  if (Number.isNaN(d.getTime())) return v
-  return d.toLocaleString('pt-BR', {
+// ---- formatação ----
+function fmtEnvio(r: PosVendaRow): string {
+  if (!r.data_envio) return '—'
+  if (!r.envio_com_hora) {
+    // Só a data (YYYY-MM-DD) — formatar na mão evita o pulo de fuso do new Date().
+    const [y, m, d] = r.data_envio.slice(0, 10).split('-')
+    return `${d}/${m}/${y.slice(2)}`
+  }
+  const dt = new Date(r.data_envio)
+  if (Number.isNaN(dt.getTime())) return r.data_envio
+  return dt.toLocaleString('pt-BR', {
     day: '2-digit',
     month: '2-digit',
     year: '2-digit',
@@ -291,166 +208,164 @@ function brl(v: number | null) {
   return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 }
 
-await loadContas()
+function fmtCnpj(v: string | null) {
+  const d = (v || '').replace(/\D/g, '')
+  if (d.length !== 14) return v || '—'
+  return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`
+}
+
+await carregar()
 </script>
 
 <template>
-  <div class="space-y-5">
+  <div class="space-y-4">
     <PageHeader
-      title="Notas Fiscais"
-      description="Consulta e export de NF-e das contas Bling de emissão (XML e XLSX)."
-    >
-      <template #actions>
-        <Button size="sm" variant="outline" :disabled="!canQuery || busy" @click="exportXml">
-          <FileArchive class="size-4 mr-1.5" :class="{ 'animate-pulse': exportingXml }" />
-          {{ exportingXml ? 'exportando xml…' : 'exportar xml' }}
-        </Button>
-        <Button size="sm" variant="outline" :disabled="!canQuery || busy" @click="exportXlsx">
-          <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exportingXlsx }" />
-          {{ exportingXlsx ? 'exportando…' : 'exportar xlsx' }}
-        </Button>
-      </template>
-    </PageHeader>
+      title="Pós vendas"
+      description="Pedidos enviados com as duas notas fiscais de cada envio: NF embalagem (conta da loja) e NF produto (conta avulsa)."
+    />
 
     <div v-if="error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-      <AlertCircle class="size-4" />
+      <AlertCircle class="size-4 shrink-0" />
       {{ error }}
     </div>
 
-    <div
-      v-if="exportJob || exportJobNote"
-      class="rounded-md border px-3 py-2.5 text-sm"
-      :class="exportJob?.status === 'failed'
-        ? 'border-red-500/40 bg-red-500/10 text-red-400'
-        : exportJob?.status === 'succeeded'
-          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-          : 'border-blue-500/40 bg-blue-500/10 text-blue-600 dark:text-blue-400'"
-    >
-      <div class="flex items-center gap-2">
-        <Loader2 v-if="!exportJob || exportJob.status === 'pending' || exportJob.status === 'running'" class="size-4 animate-spin shrink-0" />
-        <CheckCircle2 v-else-if="exportJob.status === 'succeeded'" class="size-4 shrink-0" />
-        <XCircle v-else class="size-4 shrink-0" />
-
-        <span v-if="!exportJob || exportJob.status === 'pending'">
-          {{ exportJobNote || 'preparando export em segundo plano…' }}
-        </span>
-        <span v-else-if="exportJob.status === 'running'">
-          gerando export… {{ exportJob.processed }}<span v-if="exportJob.total">/{{ exportJob.total }}</span> notas processadas
-        </span>
-        <span v-else-if="exportJob.status === 'succeeded'" class="flex flex-wrap items-center gap-x-2 gap-y-1">
-          export pronto — {{ exportJob.result?.notas ?? 0 }} nota{{ exportJob.result?.notas === 1 ? '' : 's' }}<template v-if="exportJob.result?.avisos">, {{ exportJob.result.avisos }} aviso{{ exportJob.result.avisos === 1 ? '' : 's' }}</template>
-          <Button size="sm" variant="outline" :disabled="downloadingJob" @click="downloadExportJob">
-            <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': downloadingJob }" />
-            baixar
-          </Button>
-        </span>
-        <span v-else>
-          falha ao gerar o export: {{ exportJob.error || 'erro desconhecido' }}
-        </span>
+    <!-- Busca + filtros -->
+    <div class="flex flex-wrap items-center gap-2">
+      <div class="relative">
+        <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+        <input
+          v-model="search"
+          class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
+          placeholder="buscar pedido, loja, sku, produto, nota…"
+        />
       </div>
+      <select v-model="lojaFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
+        <option value="all">todas lojas</option>
+        <option v-for="l in lojas" :key="l" :value="l">{{ l }}</option>
+      </select>
+      <select v-model="nfFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
+        <option value="all">todas NFs</option>
+        <option value="completas">com as duas NFs</option>
+        <option value="sem_embalagem">sem NF embalagem</option>
+        <option value="sem_produto">sem NF produto</option>
+        <option value="sem_nf">sem nenhuma NF</option>
+      </select>
+      <div class="flex items-center gap-1.5 h-9 rounded-md border bg-background px-2" title="Período da data de envio">
+        <span class="text-xs text-muted-foreground">de</span>
+        <input
+          v-model="dateFrom"
+          type="date"
+          :max="dateTo || undefined"
+          title="Data inicial do envio"
+          class="bg-transparent text-sm focus:outline-none"
+        />
+        <span class="text-xs text-muted-foreground">até</span>
+        <input
+          v-model="dateTo"
+          type="date"
+          :min="dateFrom || undefined"
+          title="Data final do envio"
+          class="bg-transparent text-sm focus:outline-none"
+        />
+      </div>
+      <Button v-if="filtrosAtivos" size="sm" variant="ghost" @click="limparFiltros">
+        <X class="size-4 mr-1" /> limpar
+      </Button>
+      <span class="text-xs text-muted-foreground ml-auto">
+        {{ filteredRows.length }} de {{ rows.length }}
+      </span>
     </div>
 
-    <div class="rounded-md border bg-background px-3 py-3 space-y-3">
-      <div class="flex items-center gap-2">
-        <span class="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">Lojas</span>
-        <button
-          class="text-xs text-primary hover:underline disabled:opacity-50"
-          :disabled="contasLoading || !contas.length"
-          @click="toggleAll"
-        >
-          {{ allSelected ? 'desmarcar todas' : 'marcar todas' }}
-        </button>
-        <Loader2 v-if="contasLoading" class="size-4 animate-spin text-muted-foreground" />
-      </div>
-      <div v-if="!contasLoading && !contas.length" class="text-sm text-muted-foreground">
-        nenhuma conta ativa em bling_notas
-      </div>
-      <div class="flex flex-wrap gap-2">
-        <label
-          v-for="c in contas"
-          :key="c.id"
-          class="flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm select-none"
-          :class="selected.has(c.id) ? 'border-primary bg-primary/10' : 'hover:bg-muted'"
-        >
-          <input
-            type="checkbox"
-            class="size-3.5 rounded border accent-primary"
-            :checked="selected.has(c.id)"
-            @change="toggleConta(c.id)"
-          />
-          {{ c.nome }}
-        </label>
-      </div>
-
-      <div class="flex flex-wrap items-end gap-3 pt-1">
-        <label class="space-y-1">
-          <span class="block text-[11px] font-medium text-muted-foreground">De</span>
-          <input v-model="dateFrom" type="date" class="h-9 rounded-md border bg-background px-2 text-sm" />
-        </label>
-        <label class="space-y-1">
-          <span class="block text-[11px] font-medium text-muted-foreground">Até</span>
-          <input v-model="dateTo" type="date" class="h-9 rounded-md border bg-background px-2 text-sm" />
-        </label>
-        <Button size="sm" :disabled="!canQuery || busy" @click="buscar">
-          <Loader2 v-if="loading" class="size-4 mr-1.5 animate-spin" />
-          <Search v-else class="size-4 mr-1.5" />
-          buscar
-        </Button>
-        <span v-if="searched" class="text-xs text-muted-foreground">
-          {{ total }} nota{{ total === 1 ? '' : 's' }} no período
-        </span>
-      </div>
-    </div>
-
-    <div
-      v-if="erros.length"
-      class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400 space-y-0.5"
-    >
-      <div class="flex items-center gap-2 font-medium">
-        <AlertCircle class="size-4" />
-        contas com falha na consulta
-      </div>
-      <div v-for="(e, i) in erros" :key="i" class="pl-6 text-xs">{{ e }}</div>
-    </div>
-
-    <div class="overflow-auto rounded border max-h-[70vh]">
-      <table class="w-full min-w-[980px] text-xs border-collapse">
-        <thead class="sticky top-0 z-10 bg-background">
-          <tr class="border-b">
-            <th class="px-2 py-1.5 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap">Conta</th>
-            <th class="px-2 py-1.5 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap">Número</th>
-            <th class="px-2 py-1.5 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap">Data emissão</th>
-            <th class="px-2 py-1.5 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap">Tipo</th>
-            <th class="px-2 py-1.5 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap">Situação</th>
-            <th class="px-2 py-1.5 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap">Cliente</th>
-            <th class="px-2 py-1.5 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap">Documento</th>
-            <th class="px-2 py-1.5 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap">Valor</th>
+    <!-- Tabela -->
+    <div class="border rounded-md overflow-x-auto">
+      <table class="w-full text-sm min-w-[1400px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
+        <thead class="bg-muted/40 text-left">
+          <tr class="whitespace-nowrap">
+            <th class="px-3 py-2">Data envio</th>
+            <th class="px-3 py-2">Pedido Bling</th>
+            <th class="px-3 py-2">Pedido Marketplace</th>
+            <th class="px-3 py-2">Loja</th>
+            <th class="px-3 py-2">SKU</th>
+            <th class="px-3 py-2">Produto</th>
+            <th class="px-3 py-2">Valor</th>
+            <th class="px-3 py-2">NF embalagem</th>
+            <th class="px-3 py-2">NF produto</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading">
-            <td colspan="8" class="py-8 text-center text-muted-foreground">
+            <td colspan="9" class="py-10 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
-              consultando o Bling…
+              carregando envios…
             </td>
           </tr>
-          <tr v-else-if="!items.length">
-            <td colspan="8" class="py-8 text-center text-muted-foreground">
-              {{ searched ? 'nenhuma nota no período' : 'selecione as lojas e o período e clique em buscar' }}
+          <tr v-else-if="!pagedRows.length">
+            <td colspan="9" class="py-10 text-center text-muted-foreground">
+              {{ rows.length === 0 ? 'nenhum pedido enviado no período' : 'nenhum pedido com esses filtros' }}
             </td>
           </tr>
-          <tr v-for="row in items" :key="`${row.conta}-${row.bling_id}`" class="border-t hover:brightness-95 dark:hover:brightness-110">
-            <td class="px-2 py-1 whitespace-nowrap">{{ row.conta }}</td>
-            <td class="px-2 py-1 font-mono whitespace-nowrap">{{ row.numero || '—' }}</td>
-            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data_emissao) }}</td>
-            <td class="px-2 py-1 whitespace-nowrap">{{ row.tipo || '—' }}</td>
-            <td class="px-2 py-1 whitespace-nowrap">{{ row.situacao || '—' }}</td>
-            <td class="px-2 py-1 whitespace-nowrap max-w-[280px] truncate">{{ row.cliente || '—' }}</td>
-            <td class="px-2 py-1 font-mono whitespace-nowrap text-muted-foreground">{{ row.documento || '—' }}</td>
-            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap">{{ brl(row.valor) }}</td>
+          <tr v-for="r in pagedRows" :key="r.pedido_bling" class="border-t align-top hover:bg-muted/20">
+            <td class="px-3 py-2 whitespace-nowrap tabular-nums">{{ fmtEnvio(r) }}</td>
+            <td class="px-3 py-2 whitespace-nowrap font-medium">{{ r.pedido_bling }}</td>
+            <td class="px-3 py-2 whitespace-nowrap font-mono text-xs">{{ r.pedido_marketplace || '—' }}</td>
+            <td class="px-3 py-2 whitespace-nowrap">
+              {{ r.loja || '—' }}
+              <span v-if="r.plataforma" class="text-xs text-muted-foreground">· {{ r.plataforma }}</span>
+            </td>
+            <td class="px-3 py-2 font-mono text-xs max-w-[160px] break-words">{{ r.sku || '—' }}</td>
+            <td class="px-3 py-2 max-w-[260px]">
+              <span class="line-clamp-2" :title="r.produto || undefined">{{ r.produto || '—' }}</span>
+            </td>
+            <td class="px-3 py-2 whitespace-nowrap text-right tabular-nums">{{ brl(r.valor) }}</td>
+            <td v-for="lado in (['nf_embalagem', 'nf_produto'] as const)" :key="lado" class="px-3 py-2 min-w-[230px]">
+              <template v-if="r[lado]">
+                <div class="font-medium text-xs leading-snug">{{ r[lado]!.emitente || 'conta sem nome' }}</div>
+                <div class="text-xs text-muted-foreground whitespace-nowrap tabular-nums">
+                  {{ fmtCnpj(r[lado]!.cnpj) }}
+                </div>
+                <div class="mt-0.5 flex items-center gap-2 whitespace-nowrap">
+                  <span class="text-xs text-muted-foreground">nº {{ r[lado]!.numero || '—' }}</span>
+                  <span class="tabular-nums text-xs">{{ brl(r[lado]!.valor) }}</span>
+                  <button
+                    class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-50"
+                    :disabled="baixandoXml.has(r[lado]!.nota_id)"
+                    title="Baixar o XML da nota"
+                    @click="baixarXml(r[lado]!)"
+                  >
+                    <Loader2 v-if="baixandoXml.has(r[lado]!.nota_id)" class="size-3 animate-spin" />
+                    <FileDown v-else class="size-3" />
+                    XML
+                  </button>
+                  <span
+                    v-if="r[lado]!.via === 'cpf'"
+                    class="text-[10px] text-amber-600 dark:text-amber-400"
+                    title="Nota casada pelo CPF do destinatário + data (o pedido do marketplace não estava na nota)"
+                  >≈ por CPF</span>
+                </div>
+              </template>
+              <span v-else class="text-muted-foreground">—</span>
+            </td>
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- Paginação -->
+    <div v-if="filteredRows.length > PAGE_SIZE" class="flex items-center justify-between gap-3 pt-1">
+      <span class="text-xs text-muted-foreground">
+        {{ pageStart }}–{{ pageEnd }} de {{ filteredRows.length }}
+      </span>
+      <div class="flex items-center gap-1">
+        <Button size="sm" variant="outline" :disabled="page <= 1" @click="goToPage(page - 1)">
+          <ChevronLeft class="size-4" />
+        </Button>
+        <span class="text-xs text-muted-foreground px-2 whitespace-nowrap">
+          página {{ page }} de {{ totalPages }}
+        </span>
+        <Button size="sm" variant="outline" :disabled="page >= totalPages" @click="goToPage(page + 1)">
+          <ChevronRight class="size-4" />
+        </Button>
+      </div>
     </div>
   </div>
 </template>

@@ -33,12 +33,13 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, literal, select
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -49,10 +50,22 @@ from app.models import (
     BackgroundJobStatus,
     BackgroundJobType,
     BlingNota,
+    BlingNotaEmitida,
+    BlingOrder,
     User,
 )
 from app.models.enums import UserRole
+from app.models.nf import NfEtiquetaArquivo
+from app.models.pricing import StoreInfo
 from app.schemas.products import JobCreatedOut
+from app.services.pos_vendas import (
+    JANELA_ANTES_DIAS,
+    JANELA_DEPOIS_DIAS,
+    Casamento,
+    NotaIn,
+    PedidoIn,
+    match_notas,
+)
 from app.services.bling_notas_token_refresh import (
     _apply_token_payload,
     _post_oauth_token,
@@ -742,4 +755,243 @@ async def download_export_job(
         abs_path,
         media_type=job.result.get("media_type") or "application/octet-stream",
         filename=job.result.get("filename") or abs_path.name,
+    )
+
+
+# ─── Pós Vendas ───────────────────────────────────────────────────────
+#
+# A página /notas-fiscais virou "Pós Vendas": pedidos ENVIADOS no período
+# com as duas notas de cada envio (embalagem × produto). Nada de Bling ao
+# vivo na listagem — o cron `pos_vendas_notas_sync` mantém o espelho
+# `bling_notas_emitidas`; só o download do XML consulta o Bling (o link S3
+# expira, regenerar custa 2 chamadas).
+
+MAX_POS_VENDAS_DAYS = 62
+
+
+class PosVendaNfOut(BaseModel):
+    # id de bling_notas_emitidas — vai no GET /pos-vendas/nota/{id}/xml.
+    nota_id: UUID
+    emitente: str | None = None
+    cnpj: str | None = None
+    numero: str | None = None
+    valor: float | None = None
+    data_emissao: str | None = None
+    # Como a nota foi casada: "pedido" (complemento == numeroloja, exata)
+    # ou "cpf" (CPF + janela de dias) — o front sinaliza a heurística.
+    via: str | None = None
+
+
+class PosVendaRowOut(BaseModel):
+    pedido_bling: str
+    pedido_marketplace: str | None = None
+    # ISO. Com horário quando existe etiqueta gerada (created_at do blob);
+    # senão só a data do envio (em_andamento_data).
+    data_envio: str | None = None
+    envio_com_hora: bool = False
+    loja: str | None = None
+    plataforma: str | None = None
+    sku: str | None = None
+    produto: str | None = None
+    valor: float | None = None
+    nf_embalagem: PosVendaNfOut | None = None
+    nf_produto: PosVendaNfOut | None = None
+
+
+class PosVendasPage(BaseModel):
+    items: list[PosVendaRowOut]
+    total: int
+
+
+@router.get("/pos-vendas", response_model=PosVendasPage)
+async def list_pos_vendas(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM)],
+    date_from: date = Query(...),
+    date_to: date = Query(...),
+) -> PosVendasPage:
+    if date_to < date_from:
+        raise HTTPException(422, detail={"code": "periodo_invalido"})
+    if (date_to - date_from).days > MAX_POS_VENDAS_DAYS:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "periodo_muito_longo",
+                "message": f"período máximo de {MAX_POS_VENDAS_DAYS} dias",
+            },
+        )
+
+    bo = BlingOrder
+    pedidos_rows = (
+        await session.execute(
+            select(
+                bo.numero,
+                func.max(bo.numeroloja).label("numeroloja"),
+                func.max(bo.em_andamento_data).label("envio"),
+                func.max(bo.total).label("total"),
+                func.max(bo.documento_destinatario).label("doc"),
+                func.max(bo.loja).label("loja"),
+                func.string_agg(
+                    bo.item_codigo,
+                    aggregate_order_by(literal(", "), bo.item_index),
+                ).label("skus"),
+                func.string_agg(
+                    bo.item_descricao,
+                    aggregate_order_by(literal(" | "), bo.item_index),
+                ).label("produtos"),
+            )
+            .where(
+                bo.em_andamento_data >= date_from,
+                bo.em_andamento_data <= date_to,
+                bo.numero.is_not(None),
+            )
+            .group_by(bo.numero)
+        )
+    ).all()
+
+    numeros = [r.numero for r in pedidos_rows]
+    etiquetas: dict[str, datetime] = {}
+    if numeros:
+        for ped, created in (
+            await session.execute(
+                select(
+                    NfEtiquetaArquivo.pedido_bling, NfEtiquetaArquivo.created_at
+                ).where(NfEtiquetaArquivo.pedido_bling.in_(numeros))
+            )
+        ).all():
+            etiquetas[ped] = created
+
+    lojas = {r.loja for r in pedidos_rows if r.loja}
+    stores: dict[str, StoreInfo] = {}
+    if lojas:
+        for si in (
+            (
+                await session.execute(
+                    select(StoreInfo).where(StoreInfo.bling_store_id.in_(lojas))
+                )
+            )
+            .scalars()
+            .all()
+        ):
+            if si.bling_store_id:
+                stores[si.bling_store_id] = si
+
+    j1 = datetime.combine(
+        date_from - timedelta(days=JANELA_ANTES_DIAS), datetime.min.time()
+    )
+    j2 = datetime.combine(
+        date_to + timedelta(days=JANELA_DEPOIS_DIAS), datetime.max.time()
+    )
+    notas_rows = (
+        await session.execute(
+            select(BlingNotaEmitida, BlingNota)
+            .join(BlingNota, BlingNota.id == BlingNotaEmitida.conta_id)
+            .where(
+                BlingNotaEmitida.data_emissao.between(j1, j2)
+                | BlingNotaEmitida.data_emissao.is_(None)
+            )
+        )
+    ).all()
+
+    notas_in: list[NotaIn] = []
+    nota_by_key: dict[Any, tuple[BlingNotaEmitida, BlingNota]] = {}
+    for ne, conta in notas_rows:
+        notas_in.append(
+            NotaIn(
+                key=ne.id,
+                conta_cnpj=conta.cnpj,
+                cpf=ne.cpf_dest,
+                complemento=ne.complemento,
+                data_emissao=ne.data_emissao,
+                situacao=ne.situacao,
+            )
+        )
+        nota_by_key[ne.id] = (ne, conta)
+
+    pedidos_in = [
+        PedidoIn(
+            numero=r.numero,
+            numeroloja=r.numeroloja,
+            cpf=r.doc,
+            envio=r.envio,
+            store_cnpj=(stores[r.loja].cnpj if r.loja in stores else None),
+        )
+        for r in pedidos_rows
+    ]
+    casamentos = match_notas(pedidos_in, notas_in)
+
+    def _nf_out(key: Any, via: str | None) -> PosVendaNfOut | None:
+        if key is None:
+            return None
+        ne, conta = nota_by_key[key]
+        return PosVendaNfOut(
+            nota_id=ne.id,
+            emitente=conta.emitente or conta.nome,
+            cnpj=conta.cnpj,
+            numero=ne.numero,
+            valor=float(ne.valor) if ne.valor is not None else None,
+            data_emissao=(
+                ne.data_emissao.isoformat(sep=" ") if ne.data_emissao else None
+            ),
+            via=via,
+        )
+
+    items: list[PosVendaRowOut] = []
+    for r in pedidos_rows:
+        c = casamentos.get(r.numero) or Casamento()
+        etq = etiquetas.get(r.numero)
+        si = stores.get(r.loja) if r.loja else None
+        items.append(
+            PosVendaRowOut(
+                pedido_bling=r.numero,
+                pedido_marketplace=r.numeroloja,
+                data_envio=(
+                    etq.isoformat()
+                    if etq
+                    else (r.envio.isoformat() if r.envio else None)
+                ),
+                envio_com_hora=etq is not None,
+                loja=si.account_name if si else None,
+                plataforma=si.platform if si else None,
+                sku=r.skus,
+                produto=r.produtos,
+                valor=float(r.total) if r.total is not None else None,
+                nf_embalagem=_nf_out(c.embalagem, c.embalagem_via),
+                nf_produto=_nf_out(c.produto, c.produto_via),
+            )
+        )
+    items.sort(key=lambda i: i.data_envio or "", reverse=True)
+    return PosVendasPage(items=items, total=len(items))
+
+
+@router.get("/pos-vendas/nota/{nota_id}/xml")
+async def download_pos_venda_xml(
+    nota_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM)],
+) -> Response:
+    """XML autorizado de UMA nota (botão XML da tabela Pós Vendas)."""
+    ne = await session.get(BlingNotaEmitida, nota_id)
+    if ne is None:
+        raise HTTPException(404, detail={"code": "nota_nao_encontrada"})
+    conta = await session.get(BlingNota, ne.conta_id)
+    if conta is None:
+        raise HTTPException(404, detail={"code": "conta_nao_encontrada"})
+    token = await _ensure_token(session, conta)
+    _, xml_bytes, motivo = await _fetch_nota_xml(
+        token, {"id": ne.bling_id, "situacao": ne.situacao}
+    )
+    if xml_bytes is None:
+        raise HTTPException(
+            502,
+            detail={
+                "code": "xml_indisponivel",
+                "message": motivo or "XML indisponível",
+            },
+        )
+    fname = (ne.chave_acesso or f"nfe_{ne.numero or ne.bling_id}") + ".xml"
+    return Response(
+        content=xml_bytes,
+        media_type="application/xml",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
