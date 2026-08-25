@@ -157,17 +157,21 @@ async function recarregar() {
         `/api/logistica/recarregar/${jobId}`,
       )
       if (st.status === 'complete') {
-        const r = st.resumo || {}
-        const atualizados =
-          (r.enrich_updated || 0) +
-          (r.shopee_enrich_updated || 0) +
-          (r.tiktok_enrich_updated || 0) +
-          (r.amazon_enrich_updated || 0)
-        toasts.success('Recarregado', [
-          `${atualizados} pedidos com Status Plataforma atualizado`,
-          `${r.status_aplicados || 0} mudanças de status aplicadas no Bling`,
-          `${r.cleanup || 0} pedidos finalizados removidos da lista`,
-        ])
+        const r = st.resumo
+        if (r) {
+          const atualizados =
+            (r.enrich_updated || 0) +
+            (r.shopee_enrich_updated || 0) +
+            (r.tiktok_enrich_updated || 0) +
+            (r.amazon_enrich_updated || 0)
+          toasts.success('Recarregado', [
+            `${atualizados} pedidos com Status Plataforma atualizado`,
+            `${r.status_aplicados || 0} mudanças de status aplicadas no Bling`,
+            `${r.cleanup || 0} pedidos finalizados removidos da lista`,
+          ])
+        } else {
+          toasts.success('Recarregado', 'Lista atualizada.')
+        }
         break
       }
       if (st.status === 'failed' || st.status === 'not_found') {

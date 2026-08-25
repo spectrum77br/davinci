@@ -823,14 +823,17 @@ async def pos_vendas_notas_sync(ctx: dict) -> None:
     logger.info("pos_vendas_notas_sync_done", **summary)
 
 
-async def logistica_recarregar(ctx: dict) -> None:
+async def logistica_recarregar(ctx: dict) -> dict[str, int]:
     """Sob demanda (botão "recarregar" das abas de marketplace): re-enriquece o
     Status Plataforma das linhas PENDENTES do painel (ML/Shopee/TikTok/Amazon) e
     aplica no Bling a mudança de situação das que casam uma regra da aba Status.
-    Em background pra não estourar o timeout do Cloudflare na requisição."""
+    Em background pra não estourar o timeout do Cloudflare na requisição.
+    RETORNA o resumo — o arq guarda o result e o GET /recarregar/{job_id} o
+    entrega pro toast do front (sem o return o resumo chegava vazio)."""
     async with session_scope() as s:
         summary = await recarregar_ml(s)
     logger.info("logistica_recarregar_done", **summary)
+    return summary
 
 
 async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_s: int) -> None:
