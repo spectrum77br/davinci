@@ -251,6 +251,12 @@ const LADOS = [
 // Borda grossa que separa os grupos de colunas (igual à Margem).
 const SEP = 'border-l-[3px] border-gray-400 dark:border-gray-600'
 
+// Grupo Etiqueta: azul (pra não confundir com o âmbar/verde das NFs) e uma
+// linha fina interna separando Emissão de Impressão.
+const ETQ_HEAD = 'bg-sky-50 dark:bg-sky-900/20'
+const ETQ_TINT = 'bg-sky-50/40 dark:bg-sky-900/10'
+const SEP_FINA = 'border-l border-gray-300 dark:border-gray-600'
+
 await carregar()
 </script>
 
@@ -327,7 +333,7 @@ await carregar()
               :class="['px-2 py-1 text-center text-[11px] font-semibold border-b', SEP, lado.head]"
               colspan="4"
             >{{ lado.titulo }}</th>
-            <th :class="['px-2 py-1 text-center text-[11px] font-semibold border-b', SEP]" colspan="2">Etiqueta</th>
+            <th :class="['px-2 py-1 text-center text-[11px] font-semibold border-b', SEP, ETQ_HEAD]" colspan="2">Etiqueta</th>
           </tr>
           <!-- Nível 2: colunas -->
           <tr class="border-b">
@@ -345,11 +351,11 @@ await carregar()
               <th :class="['px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]', lado.head]">XML</th>
             </template>
             <th
-              :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[105px]', SEP]"
+              :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[105px]', SEP, ETQ_HEAD]"
               title="Quando a etiqueta ficou pronta e o envio foi liberado pro despacho"
             >Emissão</th>
             <th
-              class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[105px]"
+              :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[105px]', SEP_FINA, ETQ_HEAD]"
               title="Quando a etiqueta foi impressa pela primeira vez"
             >Impressão</th>
           </tr>
@@ -426,8 +432,8 @@ await carregar()
               </td>
             </template>
             <!-- Etiqueta: emissão (liberou pro despacho) e 1ª impressão -->
-            <td :class="['px-2 py-1 whitespace-nowrap tabular-nums', SEP]">{{ fmtDataHora(r.etiqueta_emissao) }}</td>
-            <td class="px-2 py-1 whitespace-nowrap tabular-nums">{{ fmtDataHora(r.etiqueta_impressao) }}</td>
+            <td :class="['px-2 py-1 whitespace-nowrap tabular-nums', SEP, ETQ_TINT]">{{ fmtDataHora(r.etiqueta_emissao) }}</td>
+            <td :class="['px-2 py-1 whitespace-nowrap tabular-nums', SEP_FINA, ETQ_TINT]">{{ fmtDataHora(r.etiqueta_impressao) }}</td>
           </tr>
         </tbody>
       </table>
