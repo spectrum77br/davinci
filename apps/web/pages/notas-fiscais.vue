@@ -251,10 +251,11 @@ const LADOS = [
 // Borda grossa que separa os grupos de colunas (igual à Margem).
 const SEP = 'border-l-[3px] border-gray-400 dark:border-gray-600'
 
-// Grupo Etiqueta: azul (pra não confundir com o âmbar/verde das NFs) e uma
-// linha fina interna separando Emissão de Impressão.
+// Grupo Etiqueta: azul (pra não confundir com o âmbar/verde das NFs).
 const ETQ_HEAD = 'bg-sky-50 dark:bg-sky-900/20'
 const ETQ_TINT = 'bg-sky-50/40 dark:bg-sky-900/10'
+
+// Linha fina entre colunas do MESMO grupo (a grossa SEP separa grupos).
 const SEP_FINA = 'border-l border-gray-300 dark:border-gray-600'
 
 await carregar()
@@ -338,17 +339,17 @@ await carregar()
           <!-- Nível 2: colunas -->
           <tr class="border-b">
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">Data envio</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]">Pedido Bling</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]">Pedido Marketplace</th>
+            <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]', SEP_FINA]">Pedido Bling</th>
+            <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]', SEP_FINA]">Pedido Marketplace</th>
             <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]', SEP]">Loja</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">SKU</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produto</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]">Valor</th>
+            <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]', SEP_FINA]">SKU</th>
+            <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]', SEP_FINA]">Produto</th>
+            <th :class="['px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]', SEP_FINA]">Valor</th>
             <template v-for="lado in LADOS" :key="lado.campo">
               <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px]', SEP, lado.head]">Nome</th>
-              <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]', lado.head]">CNPJ</th>
-              <th :class="['px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[85px]', lado.head]">Valor</th>
-              <th :class="['px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]', lado.head]">XML</th>
+              <th :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]', SEP_FINA, lado.head]">CNPJ</th>
+              <th :class="['px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[85px]', SEP_FINA, lado.head]">Valor</th>
+              <th :class="['px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]', SEP_FINA, lado.head]">XML</th>
             </template>
             <th
               :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[105px]', SEP, ETQ_HEAD]"
@@ -378,17 +379,17 @@ await carregar()
             class="border-t align-top hover:brightness-95 dark:hover:brightness-110"
           >
             <td class="px-2 py-1 whitespace-nowrap tabular-nums">{{ fmtEnvio(r) }}</td>
-            <td class="px-2 py-1 whitespace-nowrap font-medium">{{ r.pedido_bling }}</td>
-            <td class="px-2 py-1 whitespace-nowrap font-mono text-[11px]">{{ r.pedido_marketplace || '—' }}</td>
+            <td :class="['px-2 py-1 whitespace-nowrap font-medium', SEP_FINA]">{{ r.pedido_bling }}</td>
+            <td :class="['px-2 py-1 whitespace-nowrap font-mono text-[11px]', SEP_FINA]">{{ r.pedido_marketplace || '—' }}</td>
             <td :class="['px-2 py-1 whitespace-nowrap', SEP]">
               {{ r.loja || '—' }}
               <span v-if="r.plataforma" class="text-[10px] text-muted-foreground">· {{ r.plataforma }}</span>
             </td>
-            <td class="px-2 py-1 font-mono text-[11px] max-w-[160px] break-words">{{ r.sku || '—' }}</td>
-            <td class="px-2 py-1 max-w-[260px]">
+            <td :class="['px-2 py-1 font-mono text-[11px] max-w-[160px] break-words', SEP_FINA]">{{ r.sku || '—' }}</td>
+            <td :class="['px-2 py-1 max-w-[260px]', SEP_FINA]">
               <span class="line-clamp-2" :title="r.produto || undefined">{{ r.produto || '—' }}</span>
             </td>
-            <td class="px-2 py-1 whitespace-nowrap text-right tabular-nums">{{ brl(r.valor) }}</td>
+            <td :class="['px-2 py-1 whitespace-nowrap text-right tabular-nums', SEP_FINA]">{{ brl(r.valor) }}</td>
             <template v-for="lado in LADOS" :key="lado.campo">
               <!-- Nome (emitente) + nº da nota -->
               <td :class="['px-2 py-1', SEP, lado.tint]">
@@ -406,17 +407,17 @@ await carregar()
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <!-- CNPJ -->
-              <td :class="['px-2 py-1 whitespace-nowrap tabular-nums', lado.tint]">
+              <td :class="['px-2 py-1 whitespace-nowrap tabular-nums', SEP_FINA, lado.tint]">
                 <span v-if="r[lado.campo]">{{ fmtCnpj(r[lado.campo]!.cnpj) }}</span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <!-- Valor da nota -->
-              <td :class="['px-2 py-1 whitespace-nowrap text-right tabular-nums', lado.tint]">
+              <td :class="['px-2 py-1 whitespace-nowrap text-right tabular-nums', SEP_FINA, lado.tint]">
                 <span v-if="r[lado.campo]">{{ brl(r[lado.campo]!.valor) }}</span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <!-- XML -->
-              <td :class="['px-2 py-1 text-center whitespace-nowrap', lado.tint]">
+              <td :class="['px-2 py-1 text-center whitespace-nowrap', SEP_FINA, lado.tint]">
                 <button
                   v-if="r[lado.campo]"
                   class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-50"
