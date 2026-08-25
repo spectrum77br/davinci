@@ -39,6 +39,8 @@ type PosVendaRow = {
   valor: number | null
   nf_embalagem: PosVendaNf | null
   nf_produto: PosVendaNf | null
+  etiqueta_emissao: string | null
+  etiqueta_impressao: string | null
 }
 
 type PosVendasPage = { items: PosVendaRow[]; total: number }
@@ -214,6 +216,20 @@ function fmtCnpj(v: string | null) {
   return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`
 }
 
+// Data+hora das colunas de etiqueta (timestamps ISO vindos do banco).
+function fmtDataHora(iso: string | null): string {
+  if (!iso) return '—'
+  const dt = new Date(iso)
+  if (Number.isNaN(dt.getTime())) return iso
+  return dt.toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 // Os dois grupos de NF da tabela (colunas idênticas, cor do grupo diferente —
 // mesmo esquema visual da tela de Margem: Frete âmbar, Saldo verde).
 // `head` pinta o cabeçalho do grupo; `tint` pinta as células do corpo (mais suave).
@@ -311,6 +327,7 @@ await carregar()
               :class="['px-2 py-1 text-center text-[11px] font-semibold border-b', SEP, lado.head]"
               colspan="4"
             >{{ lado.titulo }}</th>
+            <th :class="['px-2 py-1 text-center text-[11px] font-semibold border-b', SEP]" colspan="2">Etiqueta</th>
           </tr>
           <!-- Nível 2: colunas -->
           <tr class="border-b">
@@ -327,17 +344,25 @@ await carregar()
               <th :class="['px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[85px]', lado.head]">Valor</th>
               <th :class="['px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]', lado.head]">XML</th>
             </template>
+            <th
+              :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[105px]', SEP]"
+              title="Quando a etiqueta ficou pronta e o envio foi liberado pro despacho"
+            >Emissão</th>
+            <th
+              class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[105px]"
+              title="Quando a etiqueta foi impressa pela primeira vez"
+            >Impressão</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading">
-            <td colspan="15" class="py-10 text-center text-muted-foreground">
+            <td colspan="17" class="py-10 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando envios…
             </td>
           </tr>
           <tr v-else-if="!pagedRows.length">
-            <td colspan="15" class="py-10 text-center text-muted-foreground">
+            <td colspan="17" class="py-10 text-center text-muted-foreground">
               {{ rows.length === 0 ? 'nenhum pedido enviado no período' : 'nenhum pedido com esses filtros' }}
             </td>
           </tr>
@@ -400,6 +425,9 @@ await carregar()
                 <span v-else class="text-muted-foreground">—</span>
               </td>
             </template>
+            <!-- Etiqueta: emissão (liberou pro despacho) e 1ª impressão -->
+            <td :class="['px-2 py-1 whitespace-nowrap tabular-nums', SEP]">{{ fmtDataHora(r.etiqueta_emissao) }}</td>
+            <td class="px-2 py-1 whitespace-nowrap tabular-nums">{{ fmtDataHora(r.etiqueta_impressao) }}</td>
           </tr>
         </tbody>
       </table>

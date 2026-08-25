@@ -796,6 +796,11 @@ class PosVendaRowOut(BaseModel):
     valor: float | None = None
     nf_embalagem: PosVendaNfOut | None = None
     nf_produto: PosVendaNfOut | None = None
+    # Etiqueta do envio (nf_etiqueta_arquivo): quando ficou pronta e o envio
+    # foi liberado pro despacho (created_at do blob) e quando saiu da
+    # impressora pela PRIMEIRA vez (impressa_em; reimpressão não conta).
+    etiqueta_emissao: str | None = None
+    etiqueta_impressao: str | None = None
 
 
 class PosVendasPage(BaseModel):
@@ -850,16 +855,19 @@ async def list_pos_vendas(
     ).all()
 
     numeros = [r.numero for r in pedidos_rows]
-    etiquetas: dict[str, datetime] = {}
+    # pedido → (liberada pro despacho, impressa pela 1ª vez)
+    etiquetas: dict[str, tuple[datetime, datetime | None]] = {}
     if numeros:
-        for ped, created in (
+        for ped, created, impressa in (
             await session.execute(
                 select(
-                    NfEtiquetaArquivo.pedido_bling, NfEtiquetaArquivo.created_at
+                    NfEtiquetaArquivo.pedido_bling,
+                    NfEtiquetaArquivo.created_at,
+                    NfEtiquetaArquivo.impressa_em,
                 ).where(NfEtiquetaArquivo.pedido_bling.in_(numeros))
             )
         ).all():
-            etiquetas[ped] = created
+            etiquetas[ped] = (created, impressa)
 
     lojas = {r.loja for r in pedidos_rows if r.loja}
     stores: dict[str, StoreInfo] = {}
@@ -939,18 +947,18 @@ async def list_pos_vendas(
     items: list[PosVendaRowOut] = []
     for r in pedidos_rows:
         c = casamentos.get(r.numero) or Casamento()
-        etq = etiquetas.get(r.numero)
+        etq_emissao, etq_impressa = etiquetas.get(r.numero, (None, None))
         si = stores.get(r.loja) if r.loja else None
         items.append(
             PosVendaRowOut(
                 pedido_bling=r.numero,
                 pedido_marketplace=r.numeroloja,
                 data_envio=(
-                    etq.isoformat()
-                    if etq
+                    etq_emissao.isoformat()
+                    if etq_emissao
                     else (r.envio.isoformat() if r.envio else None)
                 ),
-                envio_com_hora=etq is not None,
+                envio_com_hora=etq_emissao is not None,
                 loja=si.account_name if si else None,
                 plataforma=si.platform if si else None,
                 sku=r.skus,
@@ -958,6 +966,12 @@ async def list_pos_vendas(
                 valor=float(r.total) if r.total is not None else None,
                 nf_embalagem=_nf_out(c.embalagem, c.embalagem_via),
                 nf_produto=_nf_out(c.produto, c.produto_via),
+                etiqueta_emissao=(
+                    etq_emissao.isoformat() if etq_emissao else None
+                ),
+                etiqueta_impressao=(
+                    etq_impressa.isoformat() if etq_impressa else None
+                ),
             )
         )
     items.sort(key=lambda i: i.data_envio or "", reverse=True)
