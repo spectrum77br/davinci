@@ -1410,6 +1410,7 @@ async function aplicarStatusBling(c: Logistica) {
               <th class="px-3 py-2">Pedido Marketplace</th>
               <th class="px-3 py-2">Plataforma</th>
               <th class="px-3 py-2">Produto</th>
+              <th class="px-3 py-2">SKU</th>
               <th class="px-3 py-2">Conta</th>
               <th class="px-3 py-2">Status Plataforma</th>
               <th class="px-3 py-2">Rastreio</th>
@@ -1433,11 +1434,28 @@ async function aplicarStatusBling(c: Logistica) {
               <td class="px-3 py-2 whitespace-nowrap">{{ c.plataforma || '—' }}</td>
               <td class="px-3 py-2 text-xs max-w-[240px]">
                 <template v-if="c.produtos && c.produtos.length">
-                  <div v-for="(p, pi) in c.produtos" :key="pi" :class="pi > 0 ? 'mt-1' : ''">
-                    <div class="truncate" :title="p.nome || ''">
-                      {{ p.nome || '—' }}<span v-if="p.quantidade && p.quantidade > 1"> ×{{ p.quantidade }}</span>
-                    </div>
-                    <div v-if="p.sku" class="text-[10px] font-mono text-muted-foreground truncate" :title="p.sku">{{ p.sku }}</div>
+                  <div
+                    v-for="(p, pi) in c.produtos"
+                    :key="pi"
+                    class="truncate"
+                    :class="pi > 0 ? 'mt-1' : ''"
+                    :title="p.nome || ''"
+                  >
+                    {{ p.nome || '—' }}<span v-if="p.quantidade && p.quantidade > 1"> ×{{ p.quantidade }}</span>
+                  </div>
+                </template>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-3 py-2 text-xs max-w-[140px]">
+                <template v-if="c.produtos && c.produtos.length">
+                  <div
+                    v-for="(p, pi) in c.produtos"
+                    :key="pi"
+                    class="font-mono truncate"
+                    :class="pi > 0 ? 'mt-1' : ''"
+                    :title="p.sku || ''"
+                  >
+                    {{ p.sku || '—' }}
                   </div>
                 </template>
                 <span v-else class="text-muted-foreground">—</span>
@@ -1560,7 +1578,7 @@ async function aplicarStatusBling(c: Logistica) {
               </td>
             </tr>
             <tr v-if="!loading && filteredRows.length === 0">
-              <td colspan="12" class="px-3 py-6 text-center text-muted-foreground">
+              <td colspan="13" class="px-3 py-6 text-center text-muted-foreground">
                 {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
               </td>
             </tr>
