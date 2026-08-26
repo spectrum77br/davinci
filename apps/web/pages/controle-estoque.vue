@@ -925,23 +925,33 @@ function imprimirPrevisoes() {
   const [y, m, d] = dia.value.split('-')
   const dataBR = `${d}/${m}/${y}`
   const hora = _HORA_BRT.format(new Date())
+  // Tabelas com borda e cabeçalho, no MESMO estilo do "Relatório de
+  // pedidos" (imprimirRelatorio) que a equipe já conhece — só que
+  // estreitas, cabendo nos 100 mm da térmica (Eduardo, 2026-08-26:
+  // "no estilo relatorio... só precisa estar organizado").
   const totaisHtml = [...totais.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(
       ([sku, t]) =>
-        `<div class="it"><span class="qtd">${_esc(t.qtd)}×</span><div class="tx"><div class="sku">${_esc(sku)}</div><div class="nome">${_esc(t.produto)}</div></div></div>`,
+        `<tr><td class="qtd">${_esc(t.qtd)}</td><td class="sku">${_esc(sku)}</td><td class="nome">${_esc(t.produto)}</td></tr>`,
     )
     .join('')
+  // Um <tbody> por pedido (não quebra de página no meio); o nº do pedido
+  // ocupa uma célula única (rowspan) com a loja embaixo, como o corte fica
+  // sob a loja no relatório A4.
   const pedidosHtml = [...porPedido.entries()]
-    .map(
-      ([num, itens]) =>
-        `<div class="ped"><div class="ref">#${_esc(num)} · ${_esc(itens[0]?.loja || '—')}</div>${itens
-          .map(
-            (r) =>
-              `<div class="it"><span class="qtd">${_esc(r.quantidade)}×</span><div class="tx"><div class="sku">${_esc(r.sku || '—')}</div><div class="nome">${_esc(r.produto || '')}</div></div></div>`,
-          )
-          .join('')}</div>`,
-    )
+    .map(([num, itens]) => {
+      const rows = itens
+        .map((r, i) => {
+          const pedCell =
+            i === 0
+              ? `<td class="pedcel" rowspan="${itens.length}">${_esc(num)}<div class="loja">${_esc(itens[0]?.loja || '')}</div></td>`
+              : ''
+          return `<tr>${pedCell}<td class="qtd">${_esc(r.quantidade)}</td><td class="sku">${_esc(r.sku || '—')}</td><td class="nome">${_esc(r.produto || '')}</td></tr>`
+        })
+        .join('')
+      return `<tbody>${rows}</tbody>`
+    })
     .join('')
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Previsão ${_esc(dataBR)}</title><style>
     @page { size: 100mm 150mm; margin: 4mm; }
@@ -951,13 +961,18 @@ function imprimirPrevisoes() {
     .cab h1 { font-size: 12pt; letter-spacing: .5px; }
     .cab .sub { font-size: 8pt; margin-top: .5mm; }
     .sec { font-size: 9pt; font-weight: 700; text-transform: uppercase; border-bottom: 1px solid #000; margin: 1mm 0; padding-bottom: .5mm; }
-    .it { display: flex; gap: 2mm; align-items: flex-start; padding: .8mm 0; break-inside: avoid; }
-    .qtd { font-size: 12pt; font-weight: 700; min-width: 9mm; text-align: right; }
-    .tx { min-width: 0; }
-    .sku { font-family: 'Courier New', monospace; font-weight: 700; font-size: 9.5pt; word-break: break-all; }
-    .nome { font-size: 8pt; }
-    .ped { border-bottom: 1px dashed #000; padding: 1mm 0; break-inside: avoid; }
-    .ped .ref { font-size: 8.5pt; font-weight: 700; }
+    table { border-collapse: collapse; width: 100%; table-layout: fixed; margin-top: .5mm; }
+    th, td { border: 1px solid #000; padding: 1mm 1.2mm; vertical-align: top; overflow-wrap: break-word; }
+    th { font-size: 7pt; font-weight: 700; text-transform: uppercase; text-align: center; padding: .6mm 1mm; }
+    td.qtd { font-size: 11pt; font-weight: 700; text-align: center; vertical-align: middle; }
+    td.sku { font-family: 'Courier New', monospace; font-weight: 700; font-size: 8.5pt; word-break: break-all; }
+    td.nome { font-size: 8pt; }
+    td.pedcel { font-weight: 700; font-size: 8.5pt; text-align: center; vertical-align: middle; }
+    td.pedcel .loja { font-weight: 400; font-size: 6.5pt; margin-top: .5mm; }
+    col.c-qtd { width: 9mm; }
+    col.c-sku { width: 30mm; }
+    col.c-ped { width: 17mm; }
+    tr, tbody { break-inside: avoid; }
     .porped { break-before: page; }
   </style></head><body>
     <div class="cab">
@@ -966,10 +981,18 @@ function imprimirPrevisoes() {
       <div class="sub">só informação: separar agora — a etiqueta libera ao longo do dia</div>
     </div>
     <div class="sec">Separar (total por produto)</div>
-    ${totaisHtml}
+    <table>
+      <colgroup><col class="c-qtd"><col class="c-sku"><col></colgroup>
+      <thead><tr><th>Qtd</th><th>Código (SKU)</th><th>Produto</th></tr></thead>
+      <tbody>${totaisHtml}</tbody>
+    </table>
     <div class="porped">
       <div class="sec">Conferência por pedido</div>
-      ${pedidosHtml}
+      <table>
+        <colgroup><col class="c-ped"><col class="c-qtd"><col class="c-sku"><col></colgroup>
+        <thead><tr><th>Pedido</th><th>Qtd</th><th>Código (SKU)</th><th>Produto</th></tr></thead>
+        ${pedidosHtml}
+      </table>
     </div>
   </body></html>`
   // Iframe invisível (não sofre bloqueio de popup): carrega o relatório e
