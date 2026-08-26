@@ -8,8 +8,8 @@ de inchar a tabela com mais uma coluna de texto.
 
 from alembic import op
 
-revision: str = "0224_import_products_duimp"
-down_revision: str | None = "0223_store_info_etiqueta_sabado"
+revision: str = "0225_import_products_duimp"
+down_revision: str | None = "0224_pos_vendas_notas"
 branch_labels = None
 depends_on = None
 
