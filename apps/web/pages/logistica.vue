@@ -49,6 +49,8 @@ type Logistica = {
   pedido_marketplace: string | null
   plataforma: string | null
   conta: string | null
+  // Itens do pedido (nome + SKU) vindos do espelho do Bling — coluna "Produto".
+  produtos?: Array<{ sku: string | null; nome: string | null; quantidade: number | null }>
   meli_status: MeliStatus
   status_plataforma: string
   // Assinatura aberta campo a campo + desde quando cada um está assim (backend).
@@ -247,6 +249,8 @@ const filteredRows = computed(() => {
         c.divergencia,
         c.status_bling,
         c.status_plataforma,
+        // Busca também por produto: nome e SKU dos itens do pedido.
+        ...(c.produtos || []).flatMap((p) => [p.nome, p.sku]),
       ]
         .filter(Boolean)
         .join(' ')
@@ -1357,7 +1361,7 @@ async function aplicarStatusBling(c: Logistica) {
           <input
             v-model="search"
             class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
-            placeholder="buscar pedido, conta, rastreio, chamado…"
+            placeholder="buscar pedido, produto, SKU, conta, rastreio…"
           />
         </div>
         <select v-model="contaFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
@@ -1405,6 +1409,7 @@ async function aplicarStatusBling(c: Logistica) {
               <th class="px-3 py-2">Pedido Bling</th>
               <th class="px-3 py-2">Pedido Marketplace</th>
               <th class="px-3 py-2">Plataforma</th>
+              <th class="px-3 py-2">Produto</th>
               <th class="px-3 py-2">Conta</th>
               <th class="px-3 py-2">Status Plataforma</th>
               <th class="px-3 py-2">Rastreio</th>
@@ -1426,6 +1431,17 @@ async function aplicarStatusBling(c: Logistica) {
               <td class="px-3 py-2 whitespace-nowrap font-medium">{{ c.pedido_bling || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.pedido_marketplace || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.plataforma || '—' }}</td>
+              <td class="px-3 py-2 text-xs max-w-[240px]">
+                <template v-if="c.produtos && c.produtos.length">
+                  <div v-for="(p, pi) in c.produtos" :key="pi" :class="pi > 0 ? 'mt-1' : ''">
+                    <div class="truncate" :title="p.nome || ''">
+                      {{ p.nome || '—' }}<span v-if="p.quantidade && p.quantidade > 1"> ×{{ p.quantidade }}</span>
+                    </div>
+                    <div v-if="p.sku" class="text-[10px] font-mono text-muted-foreground truncate" :title="p.sku">{{ p.sku }}</div>
+                  </div>
+                </template>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.conta || '—' }}</td>
               <td class="px-3 py-2 text-muted-foreground text-xs max-w-[280px] break-words">
                 <div class="flex items-start gap-1.5">
@@ -1544,7 +1560,7 @@ async function aplicarStatusBling(c: Logistica) {
               </td>
             </tr>
             <tr v-if="!loading && filteredRows.length === 0">
-              <td colspan="11" class="px-3 py-6 text-center text-muted-foreground">
+              <td colspan="12" class="px-3 py-6 text-center text-muted-foreground">
                 {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
               </td>
             </tr>
@@ -1565,6 +1581,14 @@ async function aplicarStatusBling(c: Logistica) {
             <div class="flex-1 min-w-0">
               <div class="font-medium truncate">{{ c.pedido_bling || '—' }}</div>
               <div class="text-xs text-muted-foreground truncate">{{ c.plataforma || '—' }} · {{ c.conta || '—' }}</div>
+              <div v-if="c.produtos && c.produtos.length" class="text-xs mt-0.5 space-y-0.5">
+                <div v-for="(p, pi) in c.produtos" :key="pi" class="min-w-0">
+                  <span class="block truncate" :title="p.nome || ''">
+                    {{ p.nome || '—' }}<span v-if="p.quantidade && p.quantidade > 1"> ×{{ p.quantidade }}</span>
+                  </span>
+                  <span v-if="p.sku" class="block truncate text-[10px] font-mono text-muted-foreground">{{ p.sku }}</span>
+                </div>
+              </div>
             </div>
             <span v-if="c.status_bling" class="text-[10px] px-1.5 py-0.5 rounded border border-primary/50 shrink-0">{{ c.status_bling }}</span>
           </div>

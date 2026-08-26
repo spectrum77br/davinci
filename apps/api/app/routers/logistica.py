@@ -45,6 +45,7 @@ from app.schemas.logistica import (
     LogisticaCreate,
     LogisticaOut,
     LogisticaPatch,
+    LogisticaProdutoOut,
     LogisticaStatusCreate,
     LogisticaStatusOut,
     LogisticaStatusPatch,
@@ -107,7 +108,54 @@ def _status_detalhe(c: Logistica) -> list[StatusDetalheOut]:
     return out
 
 
-def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> LogisticaOut:
+async def _produtos_map(
+    session: AsyncSession, numeros: set[str | None]
+) -> dict[str, list[LogisticaProdutoOut]]:
+    """Itens (nome + SKU) de cada pedido, pelo espelho `bling_orders` (uma linha
+    por item, casada pelo `numero` == `pedido_bling` — o mesmo join do escopo de
+    equipe). Em LOTE: a listagem tem milhares de linhas, uma query por linha
+    mataria a página. Dedup por (sku, nome) — o espelho pode repetir o pedido."""
+    limpos = {n for n in numeros if n}
+    if not limpos:
+        return {}
+    res = await session.execute(
+        select(
+            BlingOrder.numero,
+            BlingOrder.item_codigo,
+            BlingOrder.item_descricao,
+            BlingOrder.item_quantidade,
+        )
+        .where(BlingOrder.numero.in_(list(limpos)))
+        .order_by(BlingOrder.numero, BlingOrder.item_index)
+    )
+    out: dict[str, list[LogisticaProdutoOut]] = {}
+    vistos: dict[str, set[tuple[str, str]]] = {}
+    for numero, sku, nome, qtd in res:
+        if not numero or (not sku and not nome):
+            continue
+        chave = (sku or "", nome or "")
+        if chave in vistos.setdefault(numero, set()):
+            continue
+        vistos[numero].add(chave)
+        out.setdefault(numero, []).append(
+            LogisticaProdutoOut(sku=sku, nome=nome, quantidade=qtd)
+        )
+    return out
+
+
+async def _produtos_for(session: AsyncSession, c: Logistica) -> list[LogisticaProdutoOut]:
+    """Itens de UMA linha (endpoints de create/patch/ações por linha)."""
+    if not c.pedido_bling:
+        return []
+    m = await _produtos_map(session, {c.pedido_bling})
+    return m.get(c.pedido_bling, [])
+
+
+def _to_out(
+    c: Logistica,
+    rules: list[LogisticaStatus] | None = None,
+    produtos: list[LogisticaProdutoOut] | None = None,
+) -> LogisticaOut:
     """`rules` = candidatas da aba Status que casam a chave deste pedido (máquina
     de estados). A regra ATIVA (desambiguada pela situação atual do Bling) alimenta
     match/setinha/resumo; o conjunto alimenta monitorar/resolvido."""
@@ -120,6 +168,7 @@ def _to_out(c: Logistica, rules: list[LogisticaStatus] | None = None) -> Logisti
         pedido_marketplace=c.pedido_marketplace,
         plataforma=c.plataforma,
         conta=c.conta,
+        produtos=produtos or [],
         meli_status=c.meli_status or {},
         status_plataforma=logistica_rules.assinatura_para(c.plataforma, c.meli_status or {}),
         status_detalhe=_status_detalhe(c),
@@ -533,13 +582,15 @@ async def list_logistica(
     rows = (await session.execute(stmt)).scalars().all()
     # Casa cada pedido com a regra da aba Status (carrega o índice uma vez).
     status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
+    # Nome + SKU dos itens de todos os pedidos da página, numa query só.
+    produtos_map = await _produtos_map(session, {c.pedido_bling for c in rows})
     out: list[LogisticaOut] = []
     for c in rows:
         assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
         cands = logistica_match.find_matching_rules(
             status_rows, assinatura=assinatura, plataforma=c.plataforma
         )
-        out.append(_to_out(c, cands))
+        out.append(_to_out(c, cands, produtos=produtos_map.get(c.pedido_bling or "")))
     return out
 
 
@@ -617,7 +668,7 @@ async def create_logistica(
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_created", id=str(c.id), pedido_bling=c.pedido_bling)
-    return _to_out(c, await _match_rules(session, c))
+    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
 
 
 @router.post("/{logistica_id}/atualizar-meli", response_model=LogisticaOut)
@@ -647,7 +698,7 @@ async def atualizar_meli(
         logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c))
+    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
 
 
 @router.post("/{logistica_id}/atualizar-shopee", response_model=LogisticaOut)
@@ -676,7 +727,7 @@ async def atualizar_shopee(
         logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c))
+    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
 
 
 @router.post("/{logistica_id}/atualizar-tiktok", response_model=LogisticaOut)
@@ -706,7 +757,7 @@ async def atualizar_tiktok(
         logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c))
+    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
 
 
 @router.post("/{logistica_id}/atualizar-amazon", response_model=LogisticaOut)
@@ -736,7 +787,7 @@ async def atualizar_amazon(
         logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c))
+    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
 
 
 @router.post("/{logistica_id}/enviar-threema", response_model=EnviarThreemaOut)
@@ -841,7 +892,7 @@ async def enviar_chamado(
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_chamado_enviado", id=str(logistica_id), chamado=c.chamado)
-    return _to_out(c, await _match_rules(session, c))
+    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
 
 
 @router.post("/{logistica_id}/mensagem-bling/preview", response_model=MensagemBlingPreviewOut)
@@ -991,7 +1042,7 @@ async def patch_logistica(
 
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c))
+    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
 
 
 @router.delete("/{logistica_id}", status_code=status.HTTP_204_NO_CONTENT)

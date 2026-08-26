@@ -19,6 +19,15 @@ class StatusDetalheOut(BaseModel):
     fonte: str | None = None
 
 
+class LogisticaProdutoOut(BaseModel):
+    """Um item do pedido (espelho bling_orders, uma linha por item): alimenta a
+    coluna "Produto" do painel — nome + SKU. Derivado, só leitura."""
+
+    sku: str | None = None
+    nome: str | None = None
+    quantidade: int | None = None
+
+
 class LogisticaOut(BaseModel):
     id: UUID
     data: date | None = None
@@ -26,6 +35,10 @@ class LogisticaOut(BaseModel):
     pedido_marketplace: str | None = None
     plataforma: str | None = None
     conta: str | None = None
+    # Itens do pedido (nome + SKU), do espelho bling_orders pelo pedido_bling.
+    # Vazio quando a linha não tem pedido_bling ou o espelho não conhece o
+    # pedido. Derivado — o front só renderiza (coluna "Produto").
+    produtos: list[LogisticaProdutoOut] = Field(default_factory=list)
     meli_status: dict[str, str] = Field(default_factory=dict)
     # Assinatura em PT p/ exibir na coluna "Status Plataforma" (derivada de
     # meli_status; vazia quando não há assinatura). O front só renderiza.
