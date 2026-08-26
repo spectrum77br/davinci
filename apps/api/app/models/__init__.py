@@ -7,7 +7,7 @@ from app.models.bling_envio_correcao import BlingEnvioCorrecao
 from app.models.bling_envio_evento import BlingEnvioEvento
 from app.models.bling_kit_component import BlingKitComponent
 from app.models.bling_nota import BlingNota, BlingNotaEmitida
-from app.models.bling_order import BlingOrder
+from app.models.bling_order import BlingOrder, PrevisaoImpressa
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
 from app.models.devolution import Devolution
@@ -135,6 +135,7 @@ __all__ = [
     "BlingEnvioEvento",
     "BlingNota",
     "BlingOrder",
+    "PrevisaoImpressa",
     "Cadastro",
     "CadastroStatus",
     "CadastroStore",

@@ -44,6 +44,7 @@ from app.models import (
     BlingEnvioEvento,
     BlingOrder,
     EstoqueDiaFinalizado,
+    PrevisaoImpressa,
     Product,
     User,
     UserRole,
@@ -697,6 +698,21 @@ async def list_estoque_pedidos(
             r.pedido_bling: r.impressa_em for r in et_rows if r.impressa_em
         }
 
+    # Papel de PREVISÃO já impresso? (previsao_impressa, por numero — o 🖨
+    # da aba carimba via POST /pedidos/previsoes/impressas). A tela mostra a
+    # hora ao lado do selo amarelo: quem já saiu no papel não é separado de
+    # novo (Eduardo, 2026-08-26).
+    previsao_impressa_por_pedido: dict[str, datetime] = {}
+    if numeros:
+        pi_rows = (
+            await session.execute(
+                select(
+                    PrevisaoImpressa.pedido_bling, PrevisaoImpressa.impressa_em
+                ).where(PrevisaoImpressa.pedido_bling.in_(numeros))
+            )
+        ).all()
+        previsao_impressa_por_pedido = {r.pedido_bling: r.impressa_em for r in pi_rows}
+
     # Hora do ENVIO (coluna "Envio" da tela): instante em que o pedido entrou
     # na situação 15 ("em andamento"), lido do ledger bling_envio_evento
     # (trigger de banco — migration 0156). Pedido antigo (pré-ledger) não tem
@@ -797,6 +813,13 @@ async def list_estoque_pedidos(
                 if o.marketplace_ship_deadline
                 else None
             ),
+            # Quando o papel de previsão deste pedido saiu na impressora
+            # (null = nunca). A tela mostra "🖨 HH:MM" sob o selo amarelo.
+            "previsao_impressa_em": (
+                previsao_impressa_por_pedido[o.numero].isoformat()
+                if o.numero and o.numero in previsao_impressa_por_pedido
+                else None
+            ),
         })
 
     # Atrasados (INDEPENDENTE do filtro de data): pedidos com etiqueta
@@ -849,6 +872,41 @@ def _pdf_para_impressao(row: NfEtiquetaArquivo) -> bytes:
     except EtiquetaJuntarError:
         logger.warning("nf_etiqueta_juntar_falhou", pedido_bling=row.pedido_bling)
         return row.blob
+
+
+class PrevisoesImpressasIn(BaseModel):
+    """Pedidos cujo papel de previsão acabou de sair na impressora."""
+
+    pedidos: list[str] = Field(min_length=1)
+
+
+@router.post("/pedidos/previsoes/impressas")
+async def marcar_previsoes_impressas(
+    payload: PrevisoesImpressasIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+) -> dict[str, Any]:
+    """Carimba "papel de previsão impresso" nos pedidos (upsert por numero).
+
+    Chamado pelo front logo depois do 🖨 do relatório de previsões abrir o
+    diálogo de impressão. Reimpressão re-carimba `impressa_em` (a tela mostra
+    sempre a última). Permissão "view" de propósito: quem consegue ver e
+    imprimir o papel pode carimbar — não é edição de dado de negócio.
+    """
+    numeros = sorted({(n or "").strip() for n in payload.pedidos} - {""})
+    if not numeros:
+        return {"marcados": 0}
+    stmt = (
+        pg_insert(PrevisaoImpressa)
+        .values([{"pedido_bling": n} for n in numeros])
+        .on_conflict_do_update(
+            index_elements=["pedido_bling"],
+            set_={"impressa_em": func.now()},
+        )
+    )
+    await session.execute(stmt)
+    await session.commit()
+    return {"marcados": len(numeros)}
 
 
 class EtiquetasLoteIn(BaseModel):

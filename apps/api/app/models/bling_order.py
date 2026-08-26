@@ -106,3 +106,23 @@ class BlingOrder(Base, TimestampMixin):
     bairro_destino: Mapped[str | None] = mapped_column(Text, nullable=True)
     cidade_destino: Mapped[str | None] = mapped_column(Text, nullable=True)
     uf_destino: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PrevisaoImpressa(Base):
+    """Carimbo "o papel de previsão deste pedido já saiu na impressora".
+
+    Gravado pelo POST /estoque/pedidos/previsoes/impressas quando o operador
+    clica no 🖨 da aba Pedidos (relatório 10×15 de separação antecipada). A
+    tela mostra a hora ao lado do selo amarelo pra ninguém separar o mesmo
+    pedido duas vezes (Eduardo, 2026-08-26). Reimpressão re-carimba
+    `impressa_em`. Migration 0227.
+    """
+
+    __tablename__ = "previsao_impressa"
+
+    # bling_orders.numero — grão de PEDIDO (o espelho bling_orders tem uma
+    # linha por ITEM, por isso sem FK).
+    pedido_bling: Mapped[str] = mapped_column(Text, primary_key=True)
+    impressa_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )

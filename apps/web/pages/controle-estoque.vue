@@ -83,6 +83,10 @@ type PedidoRow = {
   // "Despachar até" prometido ao marketplace (horário de corte do pedido),
   // ISO tz-aware vindo da API de cada plataforma. Null = não capturado.
   ship_deadline: string | null
+  // Quando o PAPEL DE PREVISÃO deste pedido saiu na impressora (🖨 do
+  // relatório 10×15). Null = nunca. A tela mostra "🖨 HH:MM" sob o selo
+  // amarelo pra ninguém separar o mesmo pedido duas vezes.
+  previsao_impressa_em: string | null
 }
 type EnvioRow = {
   data: string
@@ -696,6 +700,15 @@ function impressaHora(row: PedidoRow) {
   const dia = isoDateBrt(d)
   return dia === isoToday() ? hora : `${dia.slice(8)}/${dia.slice(5, 7)} ${hora}`
 }
+// Hora em que o papel de PREVISÃO saiu na impressora (mesma convenção das
+// horas de etiqueta: só hora se foi hoje, dd/mm antes quando é de outro dia).
+function previsaoImpressaHora(row: PedidoRow) {
+  if (!row.previsao_impressa_em) return ''
+  const d = new Date(row.previsao_impressa_em)
+  const hora = _HORA_BRT.format(d)
+  const dia = isoDateBrt(d)
+  return dia === isoToday() ? hora : `${dia.slice(8)}/${dia.slice(5, 7)} ${hora}`
+}
 function envioHora(row: PedidoRow) {
   if (!row.enviado_em) return ''
   const d = new Date(row.enviado_em)
@@ -906,12 +919,30 @@ const pedidosPrevisaoCount = computed(() =>
 // e, quando a etiqueta liberar (~meio-dia no ML), já está tudo separadinho.
 // Sai na MESMA impressora térmica das etiquetas: páginas de 100×150 mm.
 // 1ª etiqueta = "Separar" (total por produto — a lista de pegar no estoque);
-// depois, a conferência pedido a pedido. Não muda NADA no Bling nem no
-// banco — é papel de apoio. Pedido do Eduardo, 2026-08-26.
+// depois, a conferência pedido a pedido. No Bling não muda NADA; no banco
+// só carimba previsao_impressa (hora que o papel saiu) pra tela mostrar o
+// 🖨 e ninguém separar duas vezes. Pedido do Eduardo, 2026-08-26.
 function _esc(s: unknown): string {
   return String(s ?? '').replace(/[&<>"']/g, (ch) =>
     ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : ch === '"' ? '&quot;' : '&#39;',
   )
+}
+// Carimba "papel de previsão impresso": otimista na tela (o pessoal segue
+// trabalhando sem esperar rede) + POST pro banco (é o que os outros
+// computadores e o F5 vão ver). Se o POST falhar, o papel já saiu mesmo —
+// o carimbo local fica e o próximo reload mostra a verdade do banco.
+async function marcarPrevisoesImpressas(nums: string[], rows: PedidoRow[]) {
+  if (!nums.length) return
+  const agora = new Date().toISOString()
+  for (const r of rows) r.previsao_impressa_em = agora
+  try {
+    await api('/api/estoque/pedidos/previsoes/impressas', {
+      method: 'POST',
+      body: { pedidos: nums },
+    })
+  } catch {
+    /* sem toast: carimbo é apoio, não trava o fluxo de impressão */
+  }
 }
 function imprimirPrevisoes() {
   const linhas = pedidosFiltered.value.filter((p) => p.status === 'previsao')
@@ -968,7 +999,7 @@ function imprimirPrevisoes() {
         .map((r, i) => {
           const pedCell =
             i === 0
-              ? `<td class="pedcel" rowspan="${itens.length}">${_esc(num)}<div class="loja">${_esc(itens[0]?.loja || '')}</div><div class="dia">${diaTxt}</div></td>`
+              ? `<td class="pedcel" rowspan="${itens.length}">${_esc(num)}<div class="mkt">${_esc(itens[0]?.pedido_marketplace || '')}</div><div class="loja">${_esc(itens[0]?.loja || '')}</div><div class="dia">${diaTxt}</div></td>`
               : ''
           return `<tr>${pedCell}<td class="qtd">${_esc(r.quantidade)}</td><td class="sku">${_esc(r.sku || '—')}</td><td class="nome">${_esc(r.produto || '')}</td></tr>`
         })
@@ -979,23 +1010,27 @@ function imprimirPrevisoes() {
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Previsão ${_esc(dataBR)}</title><style>
     @page { size: 100mm 150mm; margin: 4mm; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 9pt; }
+    body { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 10pt; }
     .cab { text-align: center; border-bottom: 2px solid #000; padding-bottom: 1.5mm; margin-bottom: 1.5mm; }
-    .cab h1 { font-size: 12pt; letter-spacing: .5px; }
-    .cab .sub { font-size: 8pt; margin-top: .5mm; }
-    .sec { font-size: 9pt; font-weight: 700; text-transform: uppercase; border-bottom: 1px solid #000; margin: 1mm 0; padding-bottom: .5mm; }
+    .cab h1 { font-size: 13pt; letter-spacing: .5px; }
+    .cab .sub { font-size: 8.5pt; margin-top: .5mm; }
+    .sec { font-size: 10pt; font-weight: 700; text-transform: uppercase; border-bottom: 1px solid #000; margin: 1mm 0; padding-bottom: .5mm; }
     table { border-collapse: collapse; width: 100%; table-layout: fixed; margin-top: .5mm; }
     th, td { border: 1px solid #000; padding: 1mm 1.2mm; vertical-align: top; overflow-wrap: break-word; }
-    th { font-size: 7pt; font-weight: 700; text-transform: uppercase; text-align: center; padding: .6mm 1mm; }
-    td.qtd { font-size: 11pt; font-weight: 700; text-align: center; vertical-align: middle; }
-    td.sku { font-family: 'Courier New', monospace; font-weight: 700; font-size: 8.5pt; word-break: break-all; }
-    td.nome { font-size: 8pt; }
-    td.pedcel { font-weight: 700; font-size: 8.5pt; text-align: center; vertical-align: middle; }
-    td.pedcel .loja { font-weight: 400; font-size: 6.5pt; margin-top: .5mm; }
-    td.pedcel .dia { font-size: 7pt; margin-top: .5mm; }
-    col.c-qtd { width: 9mm; }
-    col.c-sku { width: 30mm; }
-    col.c-ped { width: 17mm; }
+    th { font-size: 8pt; font-weight: 700; text-transform: uppercase; text-align: center; padding: .6mm 1mm; }
+    td.qtd { font-size: 13pt; font-weight: 700; text-align: center; vertical-align: middle; }
+    td.sku { font-family: 'Courier New', monospace; font-weight: 700; font-size: 10pt; word-break: break-all; }
+    td.nome { font-size: 10pt; }
+    td.pedcel { font-weight: 700; font-size: 10pt; text-align: center; vertical-align: middle; }
+    td.pedcel .mkt { font-family: 'Courier New', monospace; font-weight: 400; font-size: 7pt; word-break: break-all; margin-top: .5mm; }
+    td.pedcel .loja { font-weight: 400; font-size: 7.5pt; margin-top: .5mm; }
+    td.pedcel .dia { font-size: 8.5pt; margin-top: .5mm; }
+    col.c-qtd { width: 11mm; }
+    col.c-sku { width: 32mm; }
+    col.c-ped { width: 20mm; }
+    /* Conferência: a coluna Pedido rouba largura → SKU mais estreito
+       (break-all quebra o que passar) pro nome do produto respirar. */
+    .porped col.c-sku { width: 26mm; }
     tr, tbody { break-inside: avoid; }
     .porped { break-before: page; }
   </style></head><body>
@@ -1029,6 +1064,13 @@ function imprimirPrevisoes() {
     try {
       iframe.contentWindow?.focus()
       iframe.contentWindow?.print()
+      // Diálogo de impressão aberto = papel saindo: carimba "🖨 impressa"
+      // nas linhas (tela + banco). Eduardo, 2026-08-26: "quando a gente
+      // imprimir, ja aparecer no davinci que ja foram impressas".
+      const nums = [...new Set(
+        linhas.map((r) => r.pedido_bling).filter((n): n is string => !!n),
+      )]
+      void marcarPrevisoesImpressas(nums, linhas)
     } finally {
       setTimeout(() => iframe.remove(), 60000)
     }
@@ -1930,6 +1972,15 @@ async function conferirTodos() {
                     ? (previsaoDia(row) === 'amanha' ? 'Previsão · amanhã' : 'Previsão · hoje')
                     : 'Não enviado' }}
               </span>
+              <!-- Papel de previsão já saiu na impressora? Carimbo gravado
+                   no clique do 🖨 do relatório — evita separar duas vezes. -->
+              <div
+                v-if="row.status === 'previsao' && row.previsao_impressa_em"
+                class="text-[9px] text-muted-foreground whitespace-nowrap mt-0.5"
+                :title="'Papel de previsão já impresso (última vez ' + previsaoImpressaHora(row) + ')'"
+              >
+                🖨 {{ previsaoImpressaHora(row) }}
+              </div>
             </td>
             <td class="bg-emerald-50/30">
               <input
