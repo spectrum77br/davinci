@@ -917,7 +917,8 @@ const pedidosPrevisaoCount = computed(() =>
 // Relatório SÓ INFORMATIVO pro pessoal do envio: imprime de manhã a lista
 // do que está em previsão (pedidos "Em aberto" no Bling), separa o produto
 // e, quando a etiqueta liberar (~meio-dia no ML), já está tudo separadinho.
-// Sai na MESMA impressora térmica das etiquetas: páginas de 100×150 mm.
+// Sai na MESMA impressora térmica das etiquetas: etiqueta 10×15 em
+// PAISAGEM (150 mm de largura — retrato espremia as 7 colunas).
 // 1ª etiqueta = "Separar" (total por produto — a lista de pegar no estoque);
 // depois, a conferência pedido a pedido. No Bling não muda NADA; no banco
 // só carimba previsao_impressa (hora que o papel saiu) pra tela mostrar o
@@ -1029,7 +1030,11 @@ function imprimirPrevisoes() {
     </div>`)
   }
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Previsão ${_esc(dataBR)}</title><style>
-    @page { size: 100mm 150mm; margin: 4mm; }
+    /* PAISAGEM na etiqueta 10×15 (Eduardo, 2026-08-27 "fica muito
+       expremido... deixar ela em paisagem"): 150 mm de largura útil —
+       as 7 colunas respiram e nome/SKU saem inteiros. O driver da
+       térmica gira sozinho pelo tamanho declarado. */
+    @page { size: 150mm 100mm; margin: 4mm; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 10pt; }
     .cab { text-align: center; border-bottom: 2px solid #000; padding-bottom: 1.5mm; margin-bottom: 1.5mm; }
@@ -1049,12 +1054,14 @@ function imprimirPrevisoes() {
     td.cli { font-size: 9pt; vertical-align: middle; }
     col.c-qtd { width: 11mm; }
     col.c-sku { width: 32mm; }
-    col.c-ped { width: 12mm; }
-    col.c-mkt { width: 15mm; }
-    col.c-loja { width: 12mm; }
-    col.c-cli { width: 13mm; }
+    /* 142 mm úteis em paisagem: marketplace (16 dígitos) e SKU cabem
+       inteiros numa linha; o resto vai pro nome do produto. */
+    col.c-ped { width: 16mm; }
+    col.c-mkt { width: 28mm; }
+    col.c-loja { width: 15mm; }
+    col.c-cli { width: 20mm; }
     col.c-qtd2 { width: 9mm; }
-    col.c-sku2 { width: 12mm; }
+    col.c-sku2 { width: 23mm; }
     tr, tbody { break-inside: avoid; }
     /* Cada dupla de pedidos da conferência = uma folha própria. */
     .pagped { break-before: page; page-break-before: always; }
