@@ -1065,6 +1065,12 @@ function imprimirPrevisoes() {
     tr, tbody { break-inside: avoid; }
     /* Cada dupla de pedidos da conferência = uma folha própria. */
     .pagped { break-before: page; page-break-before: always; }
+    /* A folha inteira é dos 2 pedidos: a tabela estica até o rodapé
+       (92 mm úteis − título) e a sobra é distribuída entre as linhas —
+       sem faixa branca embaixo (Eduardo, 2026-08-27 "tem que ocupar o
+       espaço em branco certinho"). Texto centralizado na vertical. */
+    .pagped table { height: 84mm; }
+    .pagped td { vertical-align: middle; }
   </style></head><body>
     <div class="cab">
       <h1>PREVISÃO — ${_esc(dataBR)}</h1>
