@@ -413,6 +413,27 @@ def normaliza_hora_sabado(v: str | None) -> str | None:
     return saida
 
 
+def normaliza_faturador_por_tipo(v: dict | None) -> dict[str, str] | None:
+    """Faturador POR TIPO (migration 0228): {"celular": "<uuid>", …}.
+
+    Valores como UUID em string (a coluna é JSONB — UUID objeto quebraria o
+    json.dumps do driver). Chaves vazias/valores vazios caem fora; dict vazio
+    vira None (= regra única, nf_faturador_id).
+    """
+    if not v:
+        return None
+    saida: dict[str, str] = {}
+    for chave, valor in v.items():
+        slug = str(chave or "").strip().lower()
+        if not slug or not valor:
+            continue
+        try:
+            saida[slug] = str(UUID(str(valor)))
+        except ValueError as exc:  # noqa: PERF203
+            raise ValueError(f"faturador inválido para {slug}") from exc
+    return saida or None
+
+
 def normaliza_tags_estoque(v: str | None) -> str | None:
     """Slugs de estoque separados por vírgula, na ordem canônica de STOCK_TAGS.
 
@@ -454,6 +475,9 @@ class StoreInfoBase(BaseModel):
     sales_team: int | None = None
     # NF automáticas (migration 0196): cadastros Faturador/Etiqueta/Impressão.
     nf_faturador_id: UUID | None = None
+    # Faturador POR TIPO (migration 0228) — contas com 2+ tipos na coluna
+    # Tipo: {"celular": "<uuid>", "eletro": "<uuid>"}. None = regra única.
+    nf_faturador_por_tipo: dict[str, str] | None = None
     # Faturador da NF PRODUTO (migration 0226) — coluna "Faturador produto".
     nf_faturador_produto_id: UUID | None = None
     nf_etiqueta_id: UUID | None = None
@@ -469,6 +493,7 @@ class StoreInfoBase(BaseModel):
     _norm_horarios = field_validator("etiqueta_horarios")(normaliza_etiqueta_horarios)
     _norm_sabado_hora = field_validator("etiqueta_sabado_horario")(normaliza_hora_sabado)
     _norm_sabado_tags = field_validator("etiqueta_sabado_tags")(normaliza_tags_estoque)
+    _norm_fat_tipo = field_validator("nf_faturador_por_tipo")(normaliza_faturador_por_tipo)
 
 
 class StoreInfoCreate(StoreInfoBase):
@@ -499,6 +524,7 @@ class StoreInfoPatch(BaseModel):
     excecoes: list[StoreExcecao] | None = None
     sales_team: int | None = None
     nf_faturador_id: UUID | None = None
+    nf_faturador_por_tipo: dict[str, str] | None = None
     nf_faturador_produto_id: UUID | None = None
     nf_etiqueta_id: UUID | None = None
     nf_impressao_id: UUID | None = None
@@ -509,6 +535,7 @@ class StoreInfoPatch(BaseModel):
     _norm_horarios = field_validator("etiqueta_horarios")(normaliza_etiqueta_horarios)
     _norm_sabado_hora = field_validator("etiqueta_sabado_horario")(normaliza_hora_sabado)
     _norm_sabado_tags = field_validator("etiqueta_sabado_tags")(normaliza_tags_estoque)
+    _norm_fat_tipo = field_validator("nf_faturador_por_tipo")(normaliza_faturador_por_tipo)
 
 
 class StoreInfoOut(StoreInfoBase):

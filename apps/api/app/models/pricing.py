@@ -324,6 +324,14 @@ class StoreInfo(Base, TimestampMixin):
         ForeignKey("nf_faturador.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Migration 0228: faturador POR TIPO pra contas que vendem 2+ tipos na
+    # mesma loja (Eduardo, 2026-08-26: "celular e um faturador, eletro que
+    # vende na mesma conta e outra"). Dict {slug do tipo: uuid str do
+    # nf_faturador}, ex. {"celular": "…", "eletro": "…"}; os slugs são os da
+    # coluna Tipo (departments). NULL/{} = regra única (nf_faturador_id
+    # acima, que segue como fallback). Sem FK (JSONB). Só cadastro — a regra
+    # de emissão é programada depois (mesmo estado do Faturador produto).
+    nf_faturador_por_tipo: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Migration 0226: faturador que emite a NF PRODUTO desta loja (coluna
     # "Faturador produto" na tela Lojas; mesma lista de faturadores). NULL =
     # sem cadastro. Só cadastro — a regra de emissão é programada depois.

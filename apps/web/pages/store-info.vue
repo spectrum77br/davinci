@@ -50,6 +50,9 @@ type StoreInfo = {
   excecoes: StoreExcecao[] | null
   sales_team: number | null
   nf_faturador_id: string | null
+  // Faturador POR TIPO (0228): {"celular": "<uuid>", "eletro": "<uuid>"}.
+  // Contas com 2+ tipos escolhem uma regra por tipo; null = regra única.
+  nf_faturador_por_tipo: Record<string, string> | null
   nf_faturador_produto_id: string | null
   nf_etiqueta_id: string | null
   etiqueta_horarios: string | null
@@ -648,13 +651,75 @@ const tipoBusy = ref<Set<string>>(new Set())
 
 function openTipoPopover(rowId: string) {
   if (!canEdit.value) return
+  fatPopoverFor.value = null
   tipoPopoverFor.value = rowId === tipoPopoverFor.value ? null : rowId
 }
 
-// Close the Tipo popover on any click outside the popover/cell.
-const onDocClick = () => { tipoPopoverFor.value = null }
+// Close the Tipo/Faturador popovers on any click outside the popover/cell.
+const onDocClick = () => { tipoPopoverFor.value = null; fatPopoverFor.value = null }
 onMounted(() => document.addEventListener('click', onDocClick))
 onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
+
+// ==================================== faturador por tipo (migration 0228)
+// Eduardo (26/08): "tem contas que tem dois tipos de produtos vendendo nela
+// … celular e um faturador, eletro que vende na mesma conta e outra". Conta
+// com 2+ tipos (coluna Tipo) → a célula Faturador abre um popover com um
+// select POR TIPO (grava o JSONB nf_faturador_por_tipo) + o select "Padrão"
+// (o nf_faturador_id de sempre, fallback pros tipos sem regra). Conta de
+// tipo único segue no select inline de hoje. "Faturador produto" NÃO muda.
+const DEPT_ORDER = ['celular', 'mala', 'eletro', 'catalogo', 'shein']
+
+function fatTipos(row: StoreInfo): string[] {
+  return DEPT_ORDER.filter((d) => row.departments.includes(d) && DEPT_BADGE[d])
+}
+
+function fatMulti(row: StoreInfo): boolean {
+  return fatTipos(row).length >= 2
+}
+
+const fatPopoverFor = ref<string | null>(null)
+const fatBusy = ref<Set<string>>(new Set())
+
+function openFatPopover(rowId: string) {
+  if (!canEdit.value) return
+  tipoPopoverFor.value = null
+  fatPopoverFor.value = rowId === fatPopoverFor.value ? null : rowId
+}
+
+async function patchFaturador(row: StoreInfo, key: string, body: Record<string, unknown>) {
+  if (fatBusy.value.has(key)) return
+  fatBusy.value.add(key)
+  try {
+    const updated = await api<StoreInfo>(`/api/pricing/store-info/${row.id}`, {
+      method: 'PATCH',
+      body,
+    })
+    Object.assign(row, updated)
+    flash(row.id, 'nf_faturador_id')
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    fatBusy.value.delete(key)
+  }
+}
+
+function setFatPorTipo(row: StoreInfo, dept: string, faturadorId: string) {
+  const novo: Record<string, string> = { ...(row.nf_faturador_por_tipo || {}) }
+  if (faturadorId) novo[dept] = faturadorId
+  else delete novo[dept]
+  void patchFaturador(row, `${row.id}:${dept}`, {
+    nf_faturador_por_tipo: Object.keys(novo).length ? novo : null,
+  })
+}
+
+function setFatPadrao(row: StoreInfo, faturadorId: string) {
+  void patchFaturador(row, `${row.id}:padrao`, { nf_faturador_id: faturadorId || null })
+}
+
+// Tipos com regra própria definida (pro display empilhado na célula).
+function fatTiposDefinidos(row: StoreInfo): string[] {
+  return fatTipos(row).filter((d) => row.nf_faturador_por_tipo?.[d])
+}
 
 async function toggleDepartment(row: StoreInfo, slug: string, checked: boolean) {
   const key = `${row.id}:${slug}`
@@ -902,28 +967,93 @@ async function copyText(text: string) {
               </div>
             </td>
             <!-- NF: Faturador / Etiqueta / Impressão (esta última substitui a
-                 antiga coluna "Frete"). Select inline igual ao de plataforma. -->
+                 antiga coluna "Frete"). Select inline igual ao de plataforma;
+                 conta com 2+ tipos abre popover com um select POR TIPO (0228). -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer relative"
               :class="{
-                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'nf_faturador_id'),
+                'ring-2 ring-blue-500 ring-inset bg-background':
+                  isEditing(row.id, 'nf_faturador_id') || fatPopoverFor === row.id,
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'nf_faturador_id'),
               }"
-              @click="!isEditing(row.id, 'nf_faturador_id') && startEdit(row, 'nf_faturador_id')"
+              @click.stop="fatMulti(row)
+                ? openFatPopover(row.id)
+                : (!isEditing(row.id, 'nf_faturador_id') && startEdit(row, 'nf_faturador_id'))"
             >
-              <select
-                v-if="isEditing(row.id, 'nf_faturador_id')"
-                :ref="setEditInputRef"
-                v-model="editValue"
-                class="w-full text-xs bg-transparent outline-none"
-                @blur="commitEdit" @change="commitEdit" @keydown.escape.prevent="cancelEdit"
-              >
-                <option value="">—</option>
-                <option v-for="o in faturadores" :key="o.id" :value="o.id">{{ o.label }}</option>
-              </select>
-              <span v-else :class="{ 'text-muted-foreground': !row.nf_faturador_id }">
-                {{ nfLabel(faturadores, row.nf_faturador_id) }}
-              </span>
+              <template v-if="fatMulti(row)">
+                <div v-if="fatTiposDefinidos(row).length" class="space-y-0.5">
+                  <div
+                    v-for="d in fatTiposDefinidos(row)"
+                    :key="d"
+                    class="whitespace-nowrap text-[11px] leading-tight"
+                  >
+                    <span class="text-muted-foreground">{{ DEPT_BADGE[d]?.label || d }}:</span>
+                    {{ nfLabel(faturadores, row.nf_faturador_por_tipo?.[d] || null) }}
+                  </div>
+                </div>
+                <span v-else :class="{ 'text-muted-foreground': !row.nf_faturador_id }">
+                  {{ nfLabel(faturadores, row.nf_faturador_id) }}
+                </span>
+                <!-- popover: um select por tipo + o Padrão (regra única) -->
+                <div
+                  v-if="fatPopoverFor === row.id"
+                  class="absolute z-20 mt-1 left-1/2 -translate-x-1/2 w-56 rounded-md border bg-popover p-2 shadow-lg text-left space-y-1.5"
+                  @click.stop
+                >
+                  <div v-for="d in fatTipos(row)" :key="d">
+                    <div class="text-[10px] font-semibold text-muted-foreground mb-0.5">
+                      {{ DEPT_BADGE[d]?.label || d }}
+                    </div>
+                    <select
+                      class="w-full text-xs border border-border rounded px-1 py-0.5 bg-background outline-none"
+                      :disabled="fatBusy.has(`${row.id}:${d}`)"
+                      :value="row.nf_faturador_por_tipo?.[d] || ''"
+                      @change="(e) => setFatPorTipo(row, d, (e.target as HTMLSelectElement).value)"
+                    >
+                      <option value="">—</option>
+                      <option v-for="o in faturadores" :key="o.id" :value="o.id">{{ o.label }}</option>
+                    </select>
+                  </div>
+                  <div class="pt-1 border-t border-border">
+                    <div
+                      class="text-[10px] text-muted-foreground mb-0.5"
+                      title="Vale para o que não tiver regra por tipo"
+                    >
+                      Padrão
+                    </div>
+                    <select
+                      class="w-full text-xs border border-border rounded px-1 py-0.5 bg-background outline-none"
+                      :disabled="fatBusy.has(`${row.id}:padrao`)"
+                      :value="row.nf_faturador_id || ''"
+                      @change="(e) => setFatPadrao(row, (e.target as HTMLSelectElement).value)"
+                    >
+                      <option value="">—</option>
+                      <option v-for="o in faturadores" :key="o.id" :value="o.id">{{ o.label }}</option>
+                    </select>
+                  </div>
+                  <button
+                    class="w-full text-center text-[10px] text-muted-foreground hover:text-foreground py-0.5"
+                    @click="fatPopoverFor = null"
+                  >
+                    fechar
+                  </button>
+                </div>
+              </template>
+              <template v-else>
+                <select
+                  v-if="isEditing(row.id, 'nf_faturador_id')"
+                  :ref="setEditInputRef"
+                  v-model="editValue"
+                  class="w-full text-xs bg-transparent outline-none"
+                  @blur="commitEdit" @change="commitEdit" @keydown.escape.prevent="cancelEdit"
+                >
+                  <option value="">—</option>
+                  <option v-for="o in faturadores" :key="o.id" :value="o.id">{{ o.label }}</option>
+                </select>
+                <span v-else :class="{ 'text-muted-foreground': !row.nf_faturador_id }">
+                  {{ nfLabel(faturadores, row.nf_faturador_id) }}
+                </span>
+              </template>
             </td>
             <!-- Faturador produto: quem emite a NF PRODUTO da loja (mesma
                  lista de faturadores; a regra de emissão vem depois). -->
