@@ -14,6 +14,11 @@ class NfFaturadorOut(BaseModel):
     sku_fonte: str | None = None
     nome_fonte: str | None = None
     ncm: str | None = None
+    # NULL/'padrao' = NCM padrão (fixo); 'importacao' = NCM do produto de
+    # importação, com o padrão como reserva (migration 0226).
+    ncm_fonte: str | None = None
+    # Sim/não: a nota leva o número da DUIMP da Importação (migration 0226).
+    observacao_duimp: bool = False
     ads_power: str | None = None
     usuario: str | None = None
     # A senha nunca é devolvida; só sinaliza se está preenchida.
@@ -33,6 +38,8 @@ class NfFaturadorCreate(BaseModel):
     sku_fonte: str | None = None
     nome_fonte: str | None = None
     ncm: str | None = None
+    ncm_fonte: str | None = None
+    observacao_duimp: bool = False
     ads_power: str | None = None
     usuario: str | None = None
     senha: str | None = None
@@ -48,6 +55,8 @@ class NfFaturadorPatch(BaseModel):
     sku_fonte: str | None = None
     nome_fonte: str | None = None
     ncm: str | None = None
+    ncm_fonte: str | None = None
+    observacao_duimp: bool | None = None
     ads_power: str | None = None
     usuario: str | None = None
     # None = não altera; "" = limpa a senha.

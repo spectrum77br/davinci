@@ -50,6 +50,7 @@ type StoreInfo = {
   excecoes: StoreExcecao[] | null
   sales_team: number | null
   nf_faturador_id: string | null
+  nf_faturador_produto_id: string | null
   nf_etiqueta_id: string | null
   etiqueta_horarios: string | null
   etiqueta_sabado_horario: string | null
@@ -769,6 +770,7 @@ async function copyText(text: string) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Plataforma</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Conta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]">Faturador</th>
+            <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]" title="Faturador que emite a NF PRODUTO desta loja (a regra de emissão é programada depois)">Faturador produto</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Etiqueta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]" title="Horários (BRT) em que as etiquetas desta loja são impressas. Vazio = contínuo.">Horário Etiqueta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Impressão</th>
@@ -921,6 +923,30 @@ async function copyText(text: string) {
               </select>
               <span v-else :class="{ 'text-muted-foreground': !row.nf_faturador_id }">
                 {{ nfLabel(faturadores, row.nf_faturador_id) }}
+              </span>
+            </td>
+            <!-- Faturador produto: quem emite a NF PRODUTO da loja (mesma
+                 lista de faturadores; a regra de emissão vem depois). -->
+            <td
+              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              :class="{
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'nf_faturador_produto_id'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'nf_faturador_produto_id'),
+              }"
+              @click="!isEditing(row.id, 'nf_faturador_produto_id') && startEdit(row, 'nf_faturador_produto_id')"
+            >
+              <select
+                v-if="isEditing(row.id, 'nf_faturador_produto_id')"
+                :ref="setEditInputRef"
+                v-model="editValue"
+                class="w-full text-xs bg-transparent outline-none"
+                @blur="commitEdit" @change="commitEdit" @keydown.escape.prevent="cancelEdit"
+              >
+                <option value="">—</option>
+                <option v-for="o in faturadores" :key="o.id" :value="o.id">{{ o.label }}</option>
+              </select>
+              <span v-else :class="{ 'text-muted-foreground': !row.nf_faturador_produto_id }">
+                {{ nfLabel(faturadores, row.nf_faturador_produto_id) }}
               </span>
             </td>
             <td

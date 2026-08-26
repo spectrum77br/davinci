@@ -77,6 +77,10 @@ class ImportProduct(Base, TimestampMixin):
     maior_media_30d: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     # Número da DUIMP do despacho, digitado à mão pelo operador.
     duimp: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Migration 0226: NCM do produto, digitado à mão (coluna depois da DUIMP
+    # na tela Importação). Usado pelo faturador com ncm_fonte='importacao';
+    # NULL = sem NCM próprio (a nota cai no NCM padrão do faturador).
+    ncm: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Bling sync state — NULL = never marked, 'pending' = operator
     # clicked "Enviar pro Bling" (worker enfileirado), 'sent' = produto
     # simples criado no Bling com sucesso, 'error' = última tentativa

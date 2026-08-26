@@ -76,6 +76,9 @@ class ImportProductBase(BaseModel):
     consumo_diario: Decimal | None = None
     maior_media_30d: Decimal | None = None
     duimp: str | None = None
+    # NCM do produto (migration 0226) — usado pelo faturador com
+    # ncm_fonte='importacao'; a regra de emissão é ligada depois.
+    ncm: str | None = None
     # Cotação (aba Cotação do Celular, migration 0119). `valor_brl_previsto`
     # NÃO entra aqui — é calculado em tempo real no frontend.
     valor_usd: Decimal | None = None
@@ -101,6 +104,7 @@ class ImportProductPatch(BaseModel):
     consumo_diario: Decimal | None = None
     maior_media_30d: Decimal | None = None
     duimp: str | None = None
+    ncm: str | None = None
 
 
 class ImportProductOut(ImportProductBase):

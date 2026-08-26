@@ -32,6 +32,8 @@ type Faturador = {
   sku_fonte: string | null
   nome_fonte: string | null
   ncm: string | null
+  ncm_fonte: string | null
+  observacao_duimp: boolean
   ads_power: string | null
   usuario: string | null
   has_senha: boolean
@@ -40,15 +42,22 @@ type Faturador = {
 }
 type FatForm = {
   nome: string; modo: string; nf_cheia: boolean; percentual: string
-  sku_fonte: string; nome_fonte: string; ncm: string; ads_power: string
+  sku_fonte: string; nome_fonte: string; ncm: string; ncm_fonte: string
+  observacao_duimp: boolean; ads_power: string
   usuario: string; senha: string; observacao: string; sort_order: string
 }
 function emptyFat(): FatForm {
-  return { nome: '', modo: 'bling', nf_cheia: false, percentual: '', sku_fonte: '', nome_fonte: '', ncm: '', ads_power: '', usuario: '', senha: '', observacao: '', sort_order: '' }
+  return { nome: '', modo: 'bling', nf_cheia: false, percentual: '', sku_fonte: '', nome_fonte: '', ncm: '', ncm_fonte: '', observacao_duimp: false, ads_power: '', usuario: '', senha: '', observacao: '', sort_order: '' }
 }
 const MODO_OPTIONS = [
   { value: 'bling', label: 'Bling (outra conta)' },
   { value: 'upseller', label: 'Upseller (serviço)' },
+]
+// De onde vem o NCM da nota ('' = padrão fixo). Quando é o da importação e o
+// produto não tem NCM cadastrado, o padrão entra como reserva.
+const NCM_FONTE_OPTIONS = [
+  { value: '', label: 'NCM padrão (fixo)' },
+  { value: 'importacao', label: 'NCM do produto de importação' },
 ]
 const SKU_FONTE_OPTIONS = [
   { value: '', label: '—' },
@@ -93,6 +102,8 @@ function buildFatBody(f: FatForm) {
     sku_fonte: f.sku_fonte || null,
     nome_fonte: f.nome_fonte || null,
     ncm: f.ncm.trim() || null,
+    ncm_fonte: f.ncm_fonte || null,
+    observacao_duimp: f.observacao_duimp,
     ads_power: f.ads_power.trim() || null,
     usuario: f.usuario.trim() || null,
     observacao: f.observacao.trim() || null,
@@ -107,6 +118,7 @@ function openFatEdit(f: Faturador) {
     nome: f.nome, modo: f.modo, nf_cheia: f.nf_cheia,
     percentual: f.percentual != null ? String(f.percentual) : '',
     sku_fonte: f.sku_fonte || '', nome_fonte: f.nome_fonte || '', ncm: f.ncm || '',
+    ncm_fonte: f.ncm_fonte || '', observacao_duimp: !!f.observacao_duimp,
     ads_power: f.ads_power || '', usuario: f.usuario || '', senha: '',
     observacao: f.observacao || '', sort_order: String(f.sort_order ?? 0),
   }
@@ -350,6 +362,7 @@ await loadFaturadores()
               <th class="px-3 py-2">Nome</th>
               <th class="px-3 py-2">Modo</th>
               <th class="px-3 py-2 text-center">NF cheia</th>
+              <th class="px-3 py-2 text-center" title="Sim = a nota leva o número da DUIMP cadastrado na Importação do produto">Obs DUIMP</th>
               <th class="px-3 py-2 text-right">%</th>
               <th class="px-3 py-2">SKU</th>
               <th class="px-3 py-2">Nome produto</th>
@@ -364,10 +377,14 @@ await loadFaturadores()
               <td class="px-3 py-2 whitespace-nowrap font-medium">{{ f.nome }}</td>
               <td class="px-3 py-2 whitespace-nowrap text-muted-foreground">{{ modoLabel(f.modo) }}</td>
               <td class="px-3 py-2 text-center">{{ f.nf_cheia ? 'Sim' : '—' }}</td>
+              <td class="px-3 py-2 text-center">{{ f.observacao_duimp ? 'Sim' : '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap text-right font-mono">{{ fmtPercentual(f.percentual) }}</td>
               <td class="px-3 py-2 whitespace-nowrap text-muted-foreground">{{ f.sku_fonte || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap text-muted-foreground">{{ f.nome_fonte || '—' }}</td>
-              <td class="px-3 py-2 whitespace-nowrap font-mono text-muted-foreground">{{ f.ncm || '—' }}</td>
+              <td class="px-3 py-2 whitespace-nowrap text-muted-foreground" :title="f.ncm_fonte === 'importacao' ? 'NCM do produto de importação; padrão como reserva' : undefined">
+                <template v-if="f.ncm_fonte === 'importacao'">produto importação<span v-if="f.ncm" class="font-mono"> ({{ f.ncm }})</span></template>
+                <span v-else class="font-mono">{{ f.ncm || '—' }}</span>
+              </td>
               <td class="px-3 py-2 whitespace-nowrap text-muted-foreground">{{ f.ads_power || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap text-muted-foreground">{{ f.usuario || '—' }}</td>
               <td class="px-3 py-2 text-center">
@@ -376,7 +393,7 @@ await loadFaturadores()
               </td>
             </tr>
             <tr v-if="!loading && faturadores.length === 0">
-              <td colspan="10" class="px-3 py-6 text-center text-muted-foreground">nenhum faturador</td>
+              <td colspan="11" class="px-3 py-6 text-center text-muted-foreground">nenhum faturador</td>
             </tr>
           </tbody>
         </table>
@@ -393,10 +410,11 @@ await loadFaturadores()
           </div>
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
             <div><span class="text-muted-foreground">NF cheia:</span> {{ f.nf_cheia ? 'Sim' : '—' }}</div>
+            <div><span class="text-muted-foreground">Obs DUIMP:</span> {{ f.observacao_duimp ? 'Sim' : '—' }}</div>
             <div><span class="text-muted-foreground">%:</span> {{ fmtPercentual(f.percentual) }}</div>
             <div><span class="text-muted-foreground">SKU:</span> {{ f.sku_fonte || '—' }}</div>
             <div><span class="text-muted-foreground">Nome:</span> {{ f.nome_fonte || '—' }}</div>
-            <div><span class="text-muted-foreground">NCM:</span> {{ f.ncm || '—' }}</div>
+            <div><span class="text-muted-foreground">NCM:</span> {{ f.ncm_fonte === 'importacao' ? 'produto importação' : (f.ncm || '—') }}</div>
             <div><span class="text-muted-foreground">AdsPower:</span> {{ f.ads_power || '—' }}</div>
           </div>
         </div>
@@ -524,6 +542,7 @@ await loadFaturadores()
             <div><Label>Percentual (%)</Label><Input v-model="fatForm.percentual" inputmode="decimal" placeholder="ex: 2 ou 0,1" /></div>
           </div>
           <label class="flex items-center gap-2 text-sm"><input v-model="fatForm.nf_cheia" type="checkbox" class="size-4" /> NF cheia (valor integral)</label>
+          <label class="flex items-center gap-2 text-sm"><input v-model="fatForm.observacao_duimp" type="checkbox" class="size-4" /> Observação DUIMP (a nota leva o número da DUIMP cadastrado na Importação do produto)</label>
           <div class="grid grid-cols-2 gap-3">
             <div><Label>SKU</Label>
               <select v-model="fatForm.sku_fonte" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm">
@@ -537,7 +556,17 @@ await loadFaturadores()
             </div>
           </div>
           <div class="grid grid-cols-2 gap-3">
-            <div><Label>NCM</Label><Input v-model="fatForm.ncm" placeholder="ex: 4202.12.10" /></div>
+            <div><Label>NCM padrão</Label><Input v-model="fatForm.ncm" placeholder="ex: 4202.12.10" /></div>
+            <div><Label>NCM da nota</Label>
+              <select v-model="fatForm.ncm_fonte" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm">
+                <option v-for="o in NCM_FONTE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+            </div>
+          </div>
+          <p v-if="fatForm.ncm_fonte === 'importacao'" class="text-xs text-muted-foreground -mt-1">
+            usa o NCM cadastrado na Importação do produto; se o produto não tiver NCM, entra o NCM padrão como reserva
+          </p>
+          <div class="grid grid-cols-2 gap-3">
             <div><Label>AdsPower</Label><Input v-model="fatForm.ads_power" placeholder="perfil AdsPower" /></div>
           </div>
           <div class="grid grid-cols-2 gap-3">

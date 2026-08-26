@@ -61,10 +61,21 @@ class NfFaturador(Base, TimestampMixin):
     # 'produto' (nome do produto) | 'embalagem' (nome fixo).
     nome_fonte: Mapped[str | None] = mapped_column(Text, nullable=True)
     ncm: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Migration 0226: de onde vem o NCM da nota. NULL/'padrao' = usa o `ncm`
+    # fixo acima; 'importacao' = usa o NCM cadastrado no produto da tela
+    # Importação (import_products.ncm), com o `ncm` fixo como RESERVA quando
+    # o produto não tem NCM. (Cadastro — a regra de emissão é ligada depois.)
+    ncm_fonte: Mapped[str | None] = mapped_column(Text, nullable=True)
     ads_power: Mapped[str | None] = mapped_column(Text, nullable=True)
     usuario: Mapped[str | None] = mapped_column(Text, nullable=True)
     senha_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Migration 0226: True = a nota deste faturador leva o número da DUIMP
+    # cadastrado na Importação do produto (campo sim/não, igual `nf_cheia`).
+    # (Cadastro — a regra de emissão é ligada depois.)
+    observacao_duimp: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=text("false")
+    )
     sort_order: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )

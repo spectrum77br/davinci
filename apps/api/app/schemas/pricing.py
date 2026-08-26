@@ -454,6 +454,8 @@ class StoreInfoBase(BaseModel):
     sales_team: int | None = None
     # NF automáticas (migration 0196): cadastros Faturador/Etiqueta/Impressão.
     nf_faturador_id: UUID | None = None
+    # Faturador da NF PRODUTO (migration 0226) — coluna "Faturador produto".
+    nf_faturador_produto_id: UUID | None = None
     nf_etiqueta_id: UUID | None = None
     nf_impressao_id: UUID | None = None
     # Horários (BRT) em que as etiquetas da loja são impressas (migration
@@ -497,6 +499,7 @@ class StoreInfoPatch(BaseModel):
     excecoes: list[StoreExcecao] | None = None
     sales_team: int | None = None
     nf_faturador_id: UUID | None = None
+    nf_faturador_produto_id: UUID | None = None
     nf_etiqueta_id: UUID | None = None
     nf_impressao_id: UUID | None = None
     etiqueta_horarios: str | None = None

@@ -132,6 +132,17 @@ def _clean(v: str | None) -> str | None:
     return v or None
 
 
+def _clean_ncm_fonte(v: str | None) -> str | None:
+    """Normaliza a fonte do NCM: NULL/''/'padrao' = NCM padrão (fixo);
+    'importacao' = NCM do produto de importação (padrão como reserva)."""
+    v = _clean(v)
+    if v == "padrao":
+        v = None
+    if v not in (None, "importacao"):
+        raise HTTPException(422, detail={"code": "invalid_ncm_fonte"})
+    return v
+
+
 def _to_out(f: NfFaturador) -> NfFaturadorOut:
     return NfFaturadorOut(
         id=f.id,
@@ -142,6 +153,8 @@ def _to_out(f: NfFaturador) -> NfFaturadorOut:
         sku_fonte=f.sku_fonte,
         nome_fonte=f.nome_fonte,
         ncm=f.ncm,
+        ncm_fonte=f.ncm_fonte,
+        observacao_duimp=f.observacao_duimp,
         ads_power=f.ads_power,
         usuario=f.usuario,
         has_senha=bool(f.senha_enc),
@@ -177,6 +190,8 @@ async def create_faturador(
         sku_fonte=_clean(body.sku_fonte),
         nome_fonte=_clean(body.nome_fonte),
         ncm=_clean(body.ncm),
+        ncm_fonte=_clean_ncm_fonte(body.ncm_fonte),
+        observacao_duimp=body.observacao_duimp,
         ads_power=_clean(body.ads_power),
         usuario=_clean(body.usuario),
         senha_enc=encrypt(body.senha) if body.senha else None,
@@ -219,6 +234,10 @@ async def patch_faturador(
         f.nome_fonte = _clean(data["nome_fonte"])
     if "ncm" in data:
         f.ncm = _clean(data["ncm"])
+    if "ncm_fonte" in data:
+        f.ncm_fonte = _clean_ncm_fonte(data["ncm_fonte"])
+    if "observacao_duimp" in data and data["observacao_duimp"] is not None:
+        f.observacao_duimp = data["observacao_duimp"]
     if "ads_power" in data:
         f.ads_power = _clean(data["ads_power"])
     if "usuario" in data:

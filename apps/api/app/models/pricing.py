@@ -324,6 +324,14 @@ class StoreInfo(Base, TimestampMixin):
         ForeignKey("nf_faturador.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Migration 0226: faturador que emite a NF PRODUTO desta loja (coluna
+    # "Faturador produto" na tela Lojas; mesma lista de faturadores). NULL =
+    # sem cadastro. Só cadastro — a regra de emissão é programada depois.
+    nf_faturador_produto_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("nf_faturador.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     nf_etiqueta_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("nf_etiqueta.id", ondelete="SET NULL"),

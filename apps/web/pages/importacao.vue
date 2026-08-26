@@ -134,6 +134,7 @@ type Product = {
   consumo_diario: string | number | null
   maior_media_30d: string | number | null
   duimp: string | null
+  ncm: string | null
   memoria_consumo: string | number | null
   reposicao_estoque: number | null
   saldo_reposicao: number | null
@@ -990,6 +991,7 @@ const newProduct = reactive({
   custo_bling: '',
   tsa: '' as string | number,
   duimp: '',
+  ncm: '',
 })
 // Dispatch por categoria — espelha generate_product_name do backend.
 // Celular usa só modelo_bling (cor já embutida no nome). Spec do
@@ -1015,6 +1017,7 @@ function openCreateModal() {
   newProduct.custo_bling = ''
   newProduct.tsa = ''
   newProduct.duimp = ''
+  newProduct.ncm = ''
   showCreateModal.value = true
 }
 
@@ -1039,6 +1042,7 @@ async function saveNewProduct() {
         custo_bling: Number(newProduct.custo_bling) || 0,
         tsa: tsaNum && tsaNum >= 1 && tsaNum <= 3 ? tsaNum : null,
         duimp: newProduct.duimp.trim() || null,
+        ncm: newProduct.ncm.trim() || null,
       },
     })
     products.value = [...products.value, row]
@@ -2077,6 +2081,10 @@ onScopeDispose(() => {
                    sticky — é coluna comum, senão o `left` acumulado do
                    `custo realizado` sairia do lugar. -->
               <th :rowspan="isCelular ? 14 : 10" class="col-head text-left" style="min-width: 140px">duimp</th>
+              <!-- NCM por produto (migration 0226): digitado à mão, depois da
+                   DUIMP. Usado pelo faturador com "NCM do produto de
+                   importação" — a regra de emissão é programada depois. -->
+              <th :rowspan="isCelular ? 14 : 10" class="col-head text-left" style="min-width: 110px">ncm</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">lote</td>
                 <td class="lote-value" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
@@ -2375,6 +2383,9 @@ onScopeDispose(() => {
               <td><input class="cell-input" :value="row.duimp ?? ''" :disabled="!canEdit"
                 placeholder="26BR0000000000-0"
                 @input="(e) => scheduleSave(row, 'duimp', (e.target as HTMLInputElement).value)" /></td>
+              <td><input class="cell-input" :value="row.ncm ?? ''" :disabled="!canEdit"
+                placeholder="4202.12.10"
+                @input="(e) => scheduleSave(row, 'ncm', (e.target as HTMLInputElement).value)" /></td>
               <!-- Per-lote cells align directly under the last-row
                    sub-headers. Mala: 2 cells (quant + total). Celular:
                    3 cells (quant + valor USD editável + custo BRL
@@ -2958,9 +2969,13 @@ onScopeDispose(() => {
               <span class="text-xs font-medium text-muted-foreground">TSA (1, 2 ou 3)</span>
               <input v-model="newProduct.tsa" type="number" min="1" max="3" step="1" placeholder="—" class="h-8 border rounded px-2 bg-background text-right" />
             </label>
-            <label class="flex flex-col gap-1 md:col-span-2">
+            <label class="flex flex-col gap-1">
               <span class="text-xs font-medium text-muted-foreground">DUIMP</span>
               <input v-model="newProduct.duimp" type="text" placeholder="26BR0000000000-0" class="h-8 border rounded px-2 bg-background" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted-foreground">NCM</span>
+              <input v-model="newProduct.ncm" type="text" placeholder="4202.12.10" class="h-8 border rounded px-2 bg-background" />
             </label>
           </div>
 
