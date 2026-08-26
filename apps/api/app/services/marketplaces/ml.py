@@ -464,14 +464,24 @@ class MercadoLivreClient:
             return _map_http_error(e, qty_before, "ml_get_item_failed")
 
         listing_status = (item.get("status") or "").lower()
-        # Manual sync (force=True) overrides the closed/paused short-circuit:
-        # the user explicitly asked to push, so let ML reject if it must,
-        # but don't preemptively skip on this side.
-        if not force and listing_status in {"closed", "paused"}:
+        # States ML locks against stock writes: a closed/ended listing, a
+        # seller-inactivated one, or one under review. Pushing here ALWAYS 400s
+        # (`field_not_updatable` / `variations.not_updatable`) and only floods
+        # the sync log — ML won't revive them via a stock PUT (they'd need a
+        # relist). Skip cleanly even under force. `paused` is different: an
+        # out-of-stock pause reactivates when we push positive stock, so a
+        # forced sync IS allowed to push through it.
+        if listing_status in {"closed", "inactive", "under_review"}:
             return SyncResult(
                 status=SyncStatus.SKIPPED,
                 qty_before=qty_before,
                 error_code=f"ml_listing_{listing_status}",
+            )
+        if not force and listing_status == "paused":
+            return SyncResult(
+                status=SyncStatus.SKIPPED,
+                qty_before=qty_before,
+                error_code="ml_listing_paused",
             )
 
         variations = item.get("variations") or []

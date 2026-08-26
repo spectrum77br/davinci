@@ -169,6 +169,82 @@ async def test_b1_pushes_zero_when_source_was_already_zero(
     assert result.qty_after == 0
 
 
+# ------------------------------------------------------ listing-state guard
+
+
+@pytest.mark.asyncio
+async def test_force_still_skips_closed_listing(
+    db: AsyncSession, user: User
+) -> None:
+    """A `closed`/`inactive`/`under_review` listing is locked by ML — a stock
+    PUT always 400s (`field_not_updatable`). Even under force we must skip
+    cleanly and NEVER fire the PUT (this was the vacation-mode error flood)."""
+    _, _, link = await _make_setup(db, user, link_stock=0)
+    client = MercadoLivreClient(_ml_creds())
+
+    with respx.mock(base_url=ML_API_BASE, assert_all_called=False) as router:
+        router.get("/items/MLB123").mock(
+            return_value=httpx.Response(
+                200, json={"id": "MLB123", "status": "closed"}
+            )
+        )
+        put_route = router.put("/items/MLB123")
+        result = await client.update_stock(link, 12, force=True)
+
+    assert result.status == SyncStatus.SKIPPED
+    assert result.error_code == "ml_listing_closed"
+    assert not put_route.called
+
+
+@pytest.mark.asyncio
+async def test_force_pushes_through_paused_listing(
+    db: AsyncSession, user: User
+) -> None:
+    """`paused` is reactivatable: pushing positive stock revives an out-of-stock
+    pause. A forced sync must PUT through it (this is what re-stocking after
+    vacation needs)."""
+    _, _, link = await _make_setup(db, user, link_stock=0)
+    client = MercadoLivreClient(_ml_creds())
+
+    with respx.mock(base_url=ML_API_BASE) as router:
+        router.get("/items/MLB123").mock(
+            return_value=httpx.Response(
+                200, json={"id": "MLB123", "status": "paused"}
+            )
+        )
+        put_route = router.put("/items/MLB123").mock(
+            return_value=httpx.Response(200, json={"id": "MLB123"})
+        )
+        result = await client.update_stock(link, 12, force=True)
+
+    assert result.status == SyncStatus.OK
+    assert result.qty_after == 12
+    assert put_route.called
+
+
+@pytest.mark.asyncio
+async def test_auto_sync_skips_paused_listing(
+    db: AsyncSession, user: User
+) -> None:
+    """Without force, a paused listing is still skipped (cron/automatic sync
+    never reactivates on its own)."""
+    _, _, link = await _make_setup(db, user, link_stock=0)
+    client = MercadoLivreClient(_ml_creds())
+
+    with respx.mock(base_url=ML_API_BASE, assert_all_called=False) as router:
+        router.get("/items/MLB123").mock(
+            return_value=httpx.Response(
+                200, json={"id": "MLB123", "status": "paused"}
+            )
+        )
+        put_route = router.put("/items/MLB123")
+        result = await client.update_stock(link, 12, force=False)
+
+    assert result.status == SyncStatus.SKIPPED
+    assert result.error_code == "ml_listing_paused"
+    assert not put_route.called
+
+
 # ---------------------------------------------------------------- B3 (variation remap)
 
 
