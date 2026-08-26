@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone } from 'lucide-vue-next'
 
 definePageMeta({
@@ -174,8 +174,19 @@ async function recarregar() {
         }
         break
       }
-      if (st.status === 'failed' || st.status === 'not_found') {
+      if (st.status === 'failed') {
         toasts.error('O recarregar falhou no servidor', 'Tenta de novo; se repetir, me avisa.')
+        break
+      }
+      if (st.status === 'not_found') {
+        // O servidor perdeu o registro do job (reinício/atualização do sistema
+        // no meio, por exemplo). Não dá pra afirmar que falhou — só que não dá
+        // mais pra acompanhar. Aviso neutro: a lista continua se atualizando
+        // sozinha (poll de 30s) e, se nada mudar, é só clicar de novo.
+        toasts.info(
+          'Perdi o acompanhamento da recarga',
+          'O servidor reiniciou no meio. A lista continua atualizando sozinha; se nada mudar, clica em Recarregar de novo.',
+        )
         break
       }
     } catch {
@@ -742,10 +753,50 @@ watch(tab, (t) => {
   }
 })
 
+// ---- Atualização automática (30s) ----
+// A recarga e os crons atualizam o BANCO de todo mundo, mas cada navegador só
+// mostrava a foto de quando a página abriu — quem não clicou em Recarregar
+// ficava vendo dado velho. Este timer repuxa a aba ativa a cada 30s pra tela
+// de TODOS ficar sempre atualizada sozinha. Ele NÃO roda o motor (isso segue
+// só no botão Recarregar): apenas relê o que já está no banco. Pula quando a
+// aba do navegador está em segundo plano, quando já tem busca/ação em
+// andamento e quando há modal ou edição aberta, pra não atropelar o que a
+// pessoa está digitando.
+const AUTO_REFRESH_MS = 30000
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
+
+function autoRefreshTick() {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+  if (recarregando.value || modalOpen.value || informarOpen.value) return
+  // Alguma ação por linha em andamento (enviar chamado, aplicar no Bling,
+  // atualizar status, salvar campo da aba Status)? Deixa pro próximo tick.
+  if (
+    refreshingMeli.value.size > 0 ||
+    sendingChamado.value.size > 0 ||
+    aplicandoBling.value.size > 0 ||
+    aplicandoStatus.value.size > 0 ||
+    statusBusy.value.size > 0
+  )
+    return
+  if (tab.value === 'status') {
+    if (statusLoading.value || editing.value || showStatusForm.value) return
+    refreshStatus()
+  } else {
+    if (loading.value) return
+    refresh()
+  }
+}
+
 // Pré-carrega a aba Status pra ela abrir instantânea (o vermelho do painel
 // NÃO depende mais dela: vem pronto do backend em acao_match).
 onMounted(() => {
   if (!statusLoaded) refreshStatus()
+  autoRefreshTimer = setInterval(autoRefreshTick, AUTO_REFRESH_MS)
+})
+
+onBeforeUnmount(() => {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer)
+  autoRefreshTimer = null
 })
 
 function normKey(s: string | null | undefined): string {
