@@ -111,7 +111,8 @@ async function refresh() {
 // re-enriquece o Status Plataforma dos pedidos PENDENTES do painel (as 4 abas
 // de marketplace) e aplica no Bling a mudança de situação dos que já têm regra.
 // Roda em background (pode passar do timeout do Cloudflare) e a lista se
-// atualiza sozinha no poll.
+// atualiza sozinha no poll. O MESMO motor também roda sozinho a cada 5 min no
+// servidor (cron) — o botão vale pra "quero agora, sem esperar o próximo tick".
 const recarregando = ref(false)
 async function recarregar() {
   // O motor (enriquece Status Plataforma + aplica status no Bling) roda pras 4
@@ -158,7 +159,14 @@ async function recarregar() {
       )
       if (st.status === 'complete') {
         const r = st.resumo
-        if (r) {
+        if (r && r.pulado_ja_rodando) {
+          // Já havia uma recarga rodando (o cron dos 5 min ou outro clique) —
+          // este clique pegou carona nela em vez de rodar tudo de novo à toa.
+          toasts.info(
+            'Já tinha uma recarga em andamento',
+            'Aproveitei a que estava rodando — a lista continua atualizando sozinha.',
+          )
+        } else if (r) {
           const atualizados =
             (r.enrich_updated || 0) +
             (r.shopee_enrich_updated || 0) +

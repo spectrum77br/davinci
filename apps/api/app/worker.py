@@ -823,17 +823,48 @@ async def pos_vendas_notas_sync(ctx: dict) -> None:
     logger.info("pos_vendas_notas_sync_done", **summary)
 
 
+# Trava da recarga da Logística (redis): impede duas recargas AO MESMO TEMPO
+# (clique do botão + cron dos 5 min, ou dois cliques). Quem chega segundo pula
+# e devolve `pulado_ja_rodando` no resumo — o front mostra um aviso amigável em
+# vez de rodar de novo à toa. O TTL solta a trava sozinho se o worker morrer no
+# meio (deploy/kill) sem executar o finally; a recarga normal leva ~1,5-2 min.
+_LOGISTICA_RECARREGAR_LOCK_KEY = "davinci:lock:logistica_recarregar"
+_LOGISTICA_RECARREGAR_LOCK_TTL_S = 600
+
+
 async def logistica_recarregar(ctx: dict) -> dict[str, int]:
-    """Sob demanda (botão "recarregar" das abas de marketplace): re-enriquece o
-    Status Plataforma das linhas PENDENTES do painel (ML/Shopee/TikTok/Amazon) e
-    aplica no Bling a mudança de situação das que casam uma regra da aba Status.
-    Em background pra não estourar o timeout do Cloudflare na requisição.
-    RETORNA o resumo — o arq guarda o result e o GET /recarregar/{job_id} o
-    entrega pro toast do front (sem o return o resumo chegava vazio)."""
-    async with session_scope() as s:
-        summary = await recarregar_ml(s)
-    logger.info("logistica_recarregar_done", **summary)
-    return summary
+    """Motor da Logística: re-enriquece o Status Plataforma das linhas PENDENTES
+    do painel (ML/Shopee/TikTok/Amazon) e aplica no Bling a mudança de situação
+    das que casam uma regra da aba Status. Roda de DOIS jeitos — sob demanda
+    (botão "recarregar" das abas de marketplace) e sozinho a cada 5 min (cron;
+    pedido do usuário 26/08: a coluna Status Plataforma tem que refletir a
+    mudança sem ninguém precisar clicar). A trava no redis garante uma recarga
+    por vez; o aplicar em lote já é idempotente (só age quando a transição parte
+    do estado atual), então mesmo um overlap raro não bagunça. RETORNA o resumo
+    — o arq guarda o result e o GET /recarregar/{job_id} o entrega pro toast do
+    front (sem o return o resumo chegava vazio)."""
+    redis = ctx.get("redis")
+    if redis is not None:
+        got = await redis.set(
+            _LOGISTICA_RECARREGAR_LOCK_KEY,
+            "1",
+            nx=True,
+            ex=_LOGISTICA_RECARREGAR_LOCK_TTL_S,
+        )
+        if not got:
+            logger.info("logistica_recarregar_pulado", reason="ja_em_andamento")
+            return {"pulado_ja_rodando": 1}
+    try:
+        async with session_scope() as s:
+            summary = await recarregar_ml(s)
+        logger.info("logistica_recarregar_done", **summary)
+        return summary
+    finally:
+        if redis is not None:
+            try:
+                await redis.delete(_LOGISTICA_RECARREGAR_LOCK_KEY)
+            except Exception:  # noqa: BLE001 — o TTL solta a trava sozinho
+                logger.warning("logistica_recarregar_lock_release_falhou")
 
 
 async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_s: int) -> None:
@@ -1840,6 +1871,19 @@ class WorkerSettings:
         cron(logistica_ml_ingest, minute=0, run_at_startup=False),
         # Toda hora (:05), junto do ML: novos pedidos Shopee/TikTok/Amazon.
         cron(logistica_marketplaces_ingest, minute=5, run_at_startup=False),
+        # Motor da Logística SOZINHO a cada 5 min (:02, :07... — deslocado dos
+        # ingests de :00/:05 pra não estourar rate junto): re-enriquece o Status
+        # Plataforma dos pendentes do painel, aplica no Bling as situações com
+        # regra e limpa finalizados. É o MESMO job do botão "recarregar" — a
+        # trava no redis (dentro do próprio job) impede dois ao mesmo tempo.
+        # Timeout 3h igual ao do botão: recarga longa estourou os 1800s globais
+        # em 12-13/ago. Pedido do usuário 26/08 ("isso precisa ser instantâneo").
+        cron(
+            logistica_recarregar,
+            minute={2, 7, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57},
+            run_at_startup=False,
+            timeout=10800,
+        ),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps
         # 5/5/5/5/4h — sempre abaixo da expiração. minute=45 evita colidir
