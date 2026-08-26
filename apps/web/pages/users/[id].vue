@@ -73,26 +73,34 @@ const form = reactive({
   status: 'pending' as 'pending' | 'active' | 'suspended',
 })
 
-// Opções de equipe = união { equipes já presentes nas lojas } ∪ { equipes
-// do próprio user }. Carregado uma vez ao montar a página. Permite que
-// um admin selecione equipes sem precisar criar a loja antes.
+// Opções de equipe = união { equipes já presentes nas lojas } ∪ { equipes de
+// QUALQUER usuário } ∪ { equipes do próprio user }. Carregado uma vez ao
+// montar a página. Assim, uma equipe nova criada num usuário (ex.: 2.1)
+// aparece na lista de todos os outros mesmo antes de existir loja com ela
+// (pedido Eduardo 26/08 — opção 2).
 const salesTeamOptions = ref<number[]>([])
 
 async function loadSalesTeamOptions() {
-  try {
-    const rows = await api<Array<{ sales_team: number | null }>>(
-      '/api/pricing/store-info',
-    )
-    const set = new Set<number>()
-    for (const r of rows) {
-      if (typeof r.sales_team === 'number' && r.sales_team > 0) set.add(r.sales_team)
-    }
-    // Inclui equipes que o user já tem (caso uma loja tenha sido removida).
-    for (const t of user.value?.sales_teams || []) set.add(t)
-    salesTeamOptions.value = [...set].sort((a, b) => a - b)
-  } catch {
-    salesTeamOptions.value = [...(user.value?.sales_teams || [])].sort((a, b) => a - b)
+  const set = new Set<number>()
+  // Cada fonte é best-effort: se uma falhar, as outras seguem valendo.
+  const [lojas, usuarios] = await Promise.all([
+    api<Array<{ sales_team: number | null }>>('/api/pricing/store-info')
+      .catch(() => [] as Array<{ sales_team: number | null }>),
+    api<{ items: Array<{ sales_teams: number[] | null }> }>(
+      '/api/users?per_page=200',
+    ).catch(() => ({ items: [] as Array<{ sales_teams: number[] | null }> })),
+  ])
+  for (const r of lojas) {
+    if (typeof r.sales_team === 'number' && r.sales_team > 0) set.add(r.sales_team)
   }
+  for (const u of usuarios.items || []) {
+    for (const t of u.sales_teams || []) {
+      if (typeof t === 'number' && t > 0) set.add(t)
+    }
+  }
+  // Inclui equipes que o user já tem (caso as buscas acima falhem).
+  for (const t of user.value?.sales_teams || []) set.add(t)
+  salesTeamOptions.value = [...set].sort((a, b) => a - b)
 }
 
 function resetForm() {
