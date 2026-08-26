@@ -890,6 +890,109 @@ const pedidosPrevisaoCount = computed(() =>
   ).size,
 )
 
+// ── Impressão das previsões (padrão etiqueta térmica, 10×15 cm) ──────
+// Relatório SÓ INFORMATIVO pro pessoal do envio: imprime de manhã a lista
+// do que está em previsão (pedidos "Em aberto" no Bling), separa o produto
+// e, quando a etiqueta liberar (~meio-dia no ML), já está tudo separadinho.
+// Sai na MESMA impressora térmica das etiquetas: páginas de 100×150 mm.
+// 1ª etiqueta = "Separar" (total por produto — a lista de pegar no estoque);
+// depois, a conferência pedido a pedido. Não muda NADA no Bling nem no
+// banco — é papel de apoio. Pedido do Eduardo, 2026-08-26.
+function _esc(s: unknown): string {
+  return String(s ?? '').replace(/[&<>"']/g, (ch) =>
+    ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : ch === '"' ? '&quot;' : '&#39;',
+  )
+}
+function imprimirPrevisoes() {
+  const linhas = pedidosFiltered.value.filter((p) => p.status === 'previsao')
+  if (!linhas.length) return
+  // Itens do mesmo pedido juntos, na ordem em que estão na tabela.
+  const porPedido = new Map<string, PedidoRow[]>()
+  for (const r of linhas) {
+    const k = r.pedido_bling || r.id
+    const arr = porPedido.get(k)
+    if (arr) arr.push(r)
+    else porPedido.set(k, [r])
+  }
+  // Totais por SKU — o que pegar no estoque, somado entre os pedidos.
+  const totais = new Map<string, { produto: string; qtd: number }>()
+  for (const r of linhas) {
+    const k = r.sku || r.produto || '?'
+    const t = totais.get(k)
+    if (t) t.qtd += r.quantidade || 0
+    else totais.set(k, { produto: r.produto || '', qtd: r.quantidade || 0 })
+  }
+  const [y, m, d] = dia.value.split('-')
+  const dataBR = `${d}/${m}/${y}`
+  const hora = _HORA_BRT.format(new Date())
+  const totaisHtml = [...totais.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(
+      ([sku, t]) =>
+        `<div class="it"><span class="qtd">${_esc(t.qtd)}×</span><div class="tx"><div class="sku">${_esc(sku)}</div><div class="nome">${_esc(t.produto)}</div></div></div>`,
+    )
+    .join('')
+  const pedidosHtml = [...porPedido.entries()]
+    .map(
+      ([num, itens]) =>
+        `<div class="ped"><div class="ref">#${_esc(num)} · ${_esc(itens[0]?.loja || '—')}</div>${itens
+          .map(
+            (r) =>
+              `<div class="it"><span class="qtd">${_esc(r.quantidade)}×</span><div class="tx"><div class="sku">${_esc(r.sku || '—')}</div><div class="nome">${_esc(r.produto || '')}</div></div></div>`,
+          )
+          .join('')}</div>`,
+    )
+    .join('')
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Previsão ${_esc(dataBR)}</title><style>
+    @page { size: 100mm 150mm; margin: 4mm; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial, Helvetica, sans-serif; color: #000; font-size: 9pt; }
+    .cab { text-align: center; border-bottom: 2px solid #000; padding-bottom: 1.5mm; margin-bottom: 1.5mm; }
+    .cab h1 { font-size: 12pt; letter-spacing: .5px; }
+    .cab .sub { font-size: 8pt; margin-top: .5mm; }
+    .sec { font-size: 9pt; font-weight: 700; text-transform: uppercase; border-bottom: 1px solid #000; margin: 1mm 0; padding-bottom: .5mm; }
+    .it { display: flex; gap: 2mm; align-items: flex-start; padding: .8mm 0; break-inside: avoid; }
+    .qtd { font-size: 12pt; font-weight: 700; min-width: 9mm; text-align: right; }
+    .tx { min-width: 0; }
+    .sku { font-family: 'Courier New', monospace; font-weight: 700; font-size: 9.5pt; word-break: break-all; }
+    .nome { font-size: 8pt; }
+    .ped { border-bottom: 1px dashed #000; padding: 1mm 0; break-inside: avoid; }
+    .ped .ref { font-size: 8.5pt; font-weight: 700; }
+    .porped { break-before: page; }
+  </style></head><body>
+    <div class="cab">
+      <h1>PREVISÃO — ${_esc(dataBR)}</h1>
+      <div class="sub">${porPedido.size} pedido(s) · ${linhas.length} item(ns) · impresso ${_esc(hora)}</div>
+      <div class="sub">só informação: separar agora — a etiqueta libera ao longo do dia</div>
+    </div>
+    <div class="sec">Separar (total por produto)</div>
+    ${totaisHtml}
+    <div class="porped">
+      <div class="sec">Conferência por pedido</div>
+      ${pedidosHtml}
+    </div>
+  </body></html>`
+  // Iframe invisível (não sofre bloqueio de popup): carrega o relatório e
+  // chama a impressão. Só some 1 min depois pra não matar o diálogo aberto.
+  const iframe = document.createElement('iframe')
+  iframe.style.position = 'fixed'
+  iframe.style.right = '0'
+  iframe.style.bottom = '0'
+  iframe.style.width = '0'
+  iframe.style.height = '0'
+  iframe.style.border = '0'
+  iframe.srcdoc = html
+  iframe.onload = () => {
+    try {
+      iframe.contentWindow?.focus()
+      iframe.contentWindow?.print()
+    } finally {
+      setTimeout(() => iframe.remove(), 60000)
+    }
+  }
+  document.body.appendChild(iframe)
+}
+
 // "Atrasado" = pedido com ETIQUETA gerada em dia passado e ainda não
 // confirmado pela agência (situacao=83965 + em_andamento_data < hoje).
 // Esse dado vem do backend (`atrasados`), porque o effective_date desses
@@ -1592,6 +1695,17 @@ async function conferirTodos() {
       >
         Previsão: {{ pedidosPrevisaoCount }}
       </span>
+      <!-- Relatório das previsões no padrão da etiqueta térmica (10×15):
+           só informação — separa o produto de manhã e cola a etiqueta
+           quando ela liberar (~meio-dia). -->
+      <button
+        v-if="pedidosPrevisaoCount > 0"
+        class="inline-flex items-center gap-1 rounded-md border border-yellow-500 text-yellow-700 dark:text-yellow-400 px-2 py-1 font-semibold hover:bg-yellow-500/10"
+        title="Imprime a lista das previsões na impressora térmica (etiqueta 10×15) — só informação, pra deixar tudo separado antes da etiqueta liberar"
+        @click="imprimirPrevisoes"
+      >
+        <Printer class="size-3.5" /> imprimir
+      </button>
       <div v-if="totalPendentesAntigos > 0" class="relative inline-block group">
         <span class="inline-flex items-center gap-1.5 rounded-md bg-amber-500 text-white px-2.5 py-1 font-semibold cursor-help">
           ⚠️ {{ totalPendentesAntigos }} atrasado{{ totalPendentesAntigos !== 1 ? 's' : '' }}
