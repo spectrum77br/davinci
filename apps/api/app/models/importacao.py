@@ -75,7 +75,8 @@ class ImportProduct(Base, TimestampMixin):
     estoque_bling: Mapped[int | None] = mapped_column(Integer, nullable=True)
     consumo_diario: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     maior_media_30d: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
-    obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Número da DUIMP do despacho, digitado à mão pelo operador.
+    duimp: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Bling sync state — NULL = never marked, 'pending' = operator
     # clicked "Enviar pro Bling" (worker enfileirado), 'sent' = produto
     # simples criado no Bling com sucesso, 'error' = última tentativa

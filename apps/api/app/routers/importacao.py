@@ -258,7 +258,7 @@ async def patch_cotacao_import_product(
         estoque_bling=row.estoque_bling,
         consumo_diario=row.consumo_diario,
         maior_media_30d=row.maior_media_30d,
-        obs=row.obs,
+        duimp=row.duimp,
         valor_usd=row.valor_usd,
         valor_brl_realizado=row.valor_brl_realizado,
         frete_type=row.frete_type,
@@ -573,7 +573,7 @@ async def list_products(
             estoque_bling=eff_estoque,
             consumo_diario=eff_consumo,
             maior_media_30d=eff_media,
-            obs=p.obs,
+            duimp=p.duimp,
             memoria_consumo=memoria,
             reposicao_estoque=reposicao,
             saldo_reposicao=saldo,
@@ -698,7 +698,7 @@ async def create_product(
         fechamento=row.fechamento, tsa=row.tsa, modelo_bling=row.modelo_bling,
         sku=row.sku, cor=row.cor, custo_bling=row.custo_bling,
         estoque_bling=row.estoque_bling, consumo_diario=row.consumo_diario,
-        maior_media_30d=row.maior_media_30d, obs=row.obs,
+        maior_media_30d=row.maior_media_30d, duimp=row.duimp,
         memoria_consumo=None, reposicao_estoque=None, saldo_reposicao=None,
         nome_gerado=generate_product_name(row.categoria, row.modelo_bling, row.sku, row.cor),
         bling_sync_status=row.bling_sync_status,
@@ -742,7 +742,7 @@ async def patch_product(
         fechamento=row.fechamento, tsa=row.tsa, modelo_bling=row.modelo_bling,
         sku=row.sku, cor=row.cor, custo_bling=row.custo_bling,
         estoque_bling=row.estoque_bling, consumo_diario=row.consumo_diario,
-        maior_media_30d=row.maior_media_30d, obs=row.obs,
+        maior_media_30d=row.maior_media_30d, duimp=row.duimp,
         memoria_consumo=None, reposicao_estoque=None, saldo_reposicao=None,
         nome_gerado=generate_product_name(row.categoria, row.modelo_bling, row.sku, row.cor),
         bling_sync_status=row.bling_sync_status,
@@ -818,7 +818,7 @@ async def sync_product_to_bling(
         fechamento=row.fechamento, tsa=row.tsa, modelo_bling=row.modelo_bling,
         sku=row.sku, cor=row.cor, custo_bling=row.custo_bling,
         estoque_bling=row.estoque_bling, consumo_diario=row.consumo_diario,
-        maior_media_30d=row.maior_media_30d, obs=row.obs,
+        maior_media_30d=row.maior_media_30d, duimp=row.duimp,
         memoria_consumo=None, reposicao_estoque=None, saldo_reposicao=None,
         nome_gerado=nome,
         bling_sync_status=row.bling_sync_status,
@@ -1243,6 +1243,10 @@ async def lancar_di_pagamento(
     lote = await _lote_or_404(session, lote_id)
     if (lote.di_pagamento or {}).get("status") == "ok":
         raise HTTPException(422, detail={"code": "di_pagamento_ja_lancado"})
+    # Sem o nº da DI o histórico sai "DI — lote X" e o financeiro não
+    # consegue casar a conta a pagar com o despacho.
+    if not (lote.di_numero or "").strip():
+        raise HTTPException(422, detail={"code": "di_sem_numero"})
 
     from app.services.nf_emissao_gerar import _bling_client_opt
 

@@ -133,7 +133,7 @@ type Product = {
   estoque_bling: number | null
   consumo_diario: string | number | null
   maior_media_30d: string | number | null
-  obs: string | null
+  duimp: string | null
   memoria_consumo: string | number | null
   reposicao_estoque: number | null
   saldo_reposicao: number | null
@@ -612,9 +612,16 @@ async function anexarDi(lote: Lote, ev: Event) {
     if (idx >= 0) lotes.value[idx] = updated
     toasts.success('DI anexada', `PDF da DI anexado ao lote ${lote.nome}.`)
     // Fluxo da spec: ao anexar a DI, pergunta se lança o pagamento no
-    // Bling. Se já foi lançado, não oferece de novo.
-    if (updated.di_pagamento?.status !== 'ok'
-      && confirm(`Inserir o pagamento da DI no Bling (isatrading) para o lote ${lote.nome}?`)) {
+    // Bling. Se já foi lançado, não oferece de novo. Sem o nº da DI o
+    // lançamento sairia sem referência — cobra o número antes.
+    if (updated.di_pagamento?.status === 'ok') {
+      // nada a fazer
+    } else if (!(updated.di_numero || '').trim()) {
+      toasts.warning(
+        'Falta o nº da DI',
+        'Preencha o nº da DI no lote para poder lançar o pagamento no Bling.',
+      )
+    } else if (confirm(`Inserir o pagamento da DI no Bling (isatrading) para o lote ${lote.nome}?`)) {
       openDiPagamento(updated)
     }
   } catch (e: any) {
@@ -709,6 +716,9 @@ async function lancarDiPagamento() {
     const code = e?.data?.detail?.code
     if (code === 'di_pagamento_ja_lancado') {
       toasts.warning('Já lançado', 'O pagamento desta DI já foi lançado no Bling.')
+      diPagModal.open = false
+    } else if (code === 'di_sem_numero') {
+      toasts.warning('Falta o nº da DI', 'Preencha o nº da DI no lote antes de lançar.')
       diPagModal.open = false
     } else if (code === 'bling_sem_integracao') {
       toasts.error('Sem integração Bling', 'Configure a integração do Bling primeiro.')
@@ -979,7 +989,7 @@ const newProduct = reactive({
   cor: '',
   custo_bling: '',
   tsa: '' as string | number,
-  obs: '',
+  duimp: '',
 })
 // Dispatch por categoria — espelha generate_product_name do backend.
 // Celular usa só modelo_bling (cor já embutida no nome). Spec do
@@ -1004,7 +1014,7 @@ function openCreateModal() {
   newProduct.cor = ''
   newProduct.custo_bling = ''
   newProduct.tsa = ''
-  newProduct.obs = ''
+  newProduct.duimp = ''
   showCreateModal.value = true
 }
 
@@ -1028,7 +1038,7 @@ async function saveNewProduct() {
         cor: newProduct.cor.trim() || null,
         custo_bling: Number(newProduct.custo_bling) || 0,
         tsa: tsaNum && tsaNum >= 1 && tsaNum <= 3 ? tsaNum : null,
-        obs: newProduct.obs.trim() || null,
+        duimp: newProduct.duimp.trim() || null,
       },
     })
     products.value = [...products.value, row]
@@ -2053,10 +2063,6 @@ onScopeDispose(() => {
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
                 :style="isCelular ? { left: stickyLeftCelular('saldo_reposicao'), minWidth: '76px' } : { minWidth: '76px' }"
               >saldo reposição</th>
-              <!-- Mala: `obs` fica nas colunas fixas. Celular não usa
-                   obs nesta tabela (operador anotou que é unused no
-                   Excel celular); ficar oculto pra não confundir. -->
-              <th v-if="!isCelular" :rowspan="isCelular ? 14 : 10" class="col-head text-left" style="min-width: 100px">obs</th>
               <!-- Celular: `custo realizado` (coluna J do Excel — "media
                    do custo", editável manualmente). -->
               <th
@@ -2065,6 +2071,12 @@ onScopeDispose(() => {
                 class="col-head text-right sticky bg-background z-30 lote-divider-anchor"
                 :style="{ left: stickyLeftCelular('custo_realizado'), minWidth: '90px' }"
               >custo realizado</th>
+              <!-- DUIMP: número do despacho, digitado à mão por produto
+                   (ocupou o lugar da antiga `obs`, que ninguém usava).
+                   Vale nas três categorias. No Celular vem DEPOIS do bloco
+                   sticky — é coluna comum, senão o `left` acumulado do
+                   `custo realizado` sairia do lugar. -->
+              <th :rowspan="isCelular ? 14 : 10" class="col-head text-left" style="min-width: 140px">duimp</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">lote</td>
                 <td class="lote-value" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
@@ -2141,11 +2153,16 @@ onScopeDispose(() => {
                       title="Pagamento da DI já lançado no Bling"
                     >pago</span>
                     <button
-                      v-else-if="canEdit && lote.tem_di_pdf"
+                      v-else-if="canEdit && lote.tem_di_pdf && (lote.di_numero || '').trim()"
                       class="text-[10px] underline hover:text-primary shrink-0"
                       title="Lançar pagamento da DI no Bling (isatrading)"
                       @click="openDiPagamento(lote)"
                     >$ Bling</button>
+                    <span
+                      v-else-if="canEdit && lote.tem_di_pdf"
+                      class="text-[9px] text-amber-600 shrink-0"
+                      title="Preencha o nº da DI para poder lançar o pagamento no Bling"
+                    >falta nº DI</span>
                   </div>
                 </td>
               </template>
@@ -2343,9 +2360,6 @@ onScopeDispose(() => {
               >
                 {{ row.saldo_reposicao ?? '—' }}
               </td>
-              <!-- obs só aparece em Mala/Eletro. -->
-              <td v-if="!isCelular"><input class="cell-input" :value="row.obs ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'obs', (e.target as HTMLInputElement).value)" /></td>
               <!-- Celular: custo_realizado (read-only, computed pelo
                    backend como média ponderada por qty do custoBRL
                    dos lotes onde o produto aparece). Atualiza quando
@@ -2358,6 +2372,9 @@ onScopeDispose(() => {
               >
                 {{ fmtMoney(row.custo_realizado) }}
               </td>
+              <td><input class="cell-input" :value="row.duimp ?? ''" :disabled="!canEdit"
+                placeholder="26BR0000000000-0"
+                @input="(e) => scheduleSave(row, 'duimp', (e.target as HTMLInputElement).value)" /></td>
               <!-- Per-lote cells align directly under the last-row
                    sub-headers. Mala: 2 cells (quant + total). Celular:
                    3 cells (quant + valor USD editável + custo BRL
@@ -2942,8 +2959,8 @@ onScopeDispose(() => {
               <input v-model="newProduct.tsa" type="number" min="1" max="3" step="1" placeholder="—" class="h-8 border rounded px-2 bg-background text-right" />
             </label>
             <label class="flex flex-col gap-1 md:col-span-2">
-              <span class="text-xs font-medium text-muted-foreground">Observação</span>
-              <textarea v-model="newProduct.obs" rows="2" class="border rounded px-2 py-1 bg-background"></textarea>
+              <span class="text-xs font-medium text-muted-foreground">DUIMP</span>
+              <input v-model="newProduct.duimp" type="text" placeholder="26BR0000000000-0" class="h-8 border rounded px-2 bg-background" />
             </label>
           </div>
 

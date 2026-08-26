@@ -350,7 +350,7 @@ async def test_di_pagamento_semanal_e_dedupe(
     monkeypatch: pytest.MonkeyPatch,
 ):
     auth_as(admin_view)
-    lt = await _seed_lote(db)
+    lt = await _seed_lote(db, di_numero="26/1234567-8")
     fake = _FakeBling()
 
     async def _fake_client(_session):
@@ -383,7 +383,7 @@ async def test_di_pagamento_falha_parcial_persiste_erro(
     monkeypatch: pytest.MonkeyPatch,
 ):
     auth_as(admin_view)
-    lt = await _seed_lote(db)
+    lt = await _seed_lote(db, di_numero="26/1234567-8")
     fake = _FakeBling(falhar_na=2)  # 1ª ok, 2ª explode
 
     async def _fake_client(_session):
@@ -418,7 +418,7 @@ async def test_di_pagamento_sem_integracao_422(
     monkeypatch: pytest.MonkeyPatch,
 ):
     auth_as(admin_view)
-    lt = await _seed_lote(db)
+    lt = await _seed_lote(db, di_numero="26/1234567-8")
 
     async def _sem_client(_session):
         return None
@@ -437,6 +437,39 @@ async def test_di_pagamento_sem_integracao_422(
     )
     assert r.status_code == 422
     assert r.json()["detail"]["code"] == "bling_sem_integracao"
+
+
+@pytest.mark.asyncio
+async def test_di_pagamento_sem_numero_422(
+    db: AsyncSession, client: AsyncClient,
+    auth_as: Callable[[User | None], None], admin_view: User,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Sem o nº da DI o histórico sai sem referência → bloqueia antes do Bling."""
+    auth_as(admin_view)
+    lt = await _seed_lote(db, di_numero="   ")
+    fake = _FakeBling()
+
+    async def _fake_client(_session):
+        return fake
+
+    import app.services.nf_emissao_gerar as gerar
+
+    monkeypatch.setattr(gerar, "_bling_client_opt", _fake_client)
+    r = await client.post(
+        f"/api/importacao/lotes/{lt.id}/di-pagamento",
+        json={
+            "valor_total": "100",
+            "parcelas": 1,
+            "periodo": "mensal",
+            "primeiro_vencimento": "2026-08-10",
+        },
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "di_sem_numero"
+    assert fake.contas == []
+    await db.refresh(lt)
+    assert lt.di_pagamento is None
 
 
 # ── Auth ───────────────────────────────────────────────────────────────

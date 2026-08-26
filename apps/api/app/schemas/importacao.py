@@ -75,7 +75,7 @@ class ImportProductBase(BaseModel):
     estoque_bling: int | None = None
     consumo_diario: Decimal | None = None
     maior_media_30d: Decimal | None = None
-    obs: str | None = None
+    duimp: str | None = None
     # Cotação (aba Cotação do Celular, migration 0119). `valor_brl_previsto`
     # NÃO entra aqui — é calculado em tempo real no frontend.
     valor_usd: Decimal | None = None
@@ -100,7 +100,7 @@ class ImportProductPatch(BaseModel):
     estoque_bling: int | None = None
     consumo_diario: Decimal | None = None
     maior_media_30d: Decimal | None = None
-    obs: str | None = None
+    duimp: str | None = None
 
 
 class ImportProductOut(ImportProductBase):
