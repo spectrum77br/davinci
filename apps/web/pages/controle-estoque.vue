@@ -989,19 +989,17 @@ function imprimirPrevisoes() {
       <tbody>${rows}</tbody>
     </table>`
   }
-  // Conferência: DOIS pedidos por folha 10×15, cada informação na sua
-  // COLUNA (Pedido | Marketplace | Loja | Cliente | Qtd | SKU | Produto) —
-  // Eduardo, 2026-08-27: "uma coluna para cada... no estilo do relatorio
-  // que ja temos no davinci, so que no tamanho da etiqueta... dois para
-  // cada folha". Cada dupla vira uma página própria (break-before) com
-  // cabeçalho repetido; rowspan junta os itens do mesmo pedido. Com só 2
-  // pedidos por folha sobra altura — as colunas estreitas quebram o texto
-  // pra baixo e a letra fica grande.
+  // Conferência: UM pedido por folha 10×15 (Eduardo, 2026-08-26: "ta saindo
+  // dois pedido por etiqueta, tem como deixar só um?" — antes eram 2), cada
+  // informação na sua COLUNA (Pedido | Marketplace | Loja | Cliente | Qtd |
+  // SKU | Produto). Cada pedido vira uma página própria (break-before) com
+  // cabeçalho repetido; rowspan junta os itens do mesmo pedido; a tabela
+  // estica até o rodapé, então o pedido sozinho ocupa a folha inteira.
   const peds = [...porPedido.entries()]
   const paginasConf: string[] = []
-  for (let i = 0; i < peds.length; i += 2) {
+  for (let i = 0; i < peds.length; i += 1) {
     const corpo = peds
-      .slice(i, i + 2)
+      .slice(i, i + 1)
       .map(([num, itens]) => {
         const first = itens[0]
         const diaTxt = first && previsaoDia(first) === 'amanha' ? 'AMANHÃ' : 'HOJE'
