@@ -988,25 +988,46 @@ function imprimirPrevisoes() {
       <tbody>${rows}</tbody>
     </table>`
   }
-  // Um <tbody> por pedido (não quebra de página no meio); o nº do pedido
-  // ocupa uma célula única (rowspan) com a loja e o DIA (hoje/amanhã)
-  // embaixo, como o corte fica sob a loja no relatório A4.
-  const pedidosHtml = [...porPedido.entries()]
-    .map(([num, itens]) => {
-      const diaTxt =
-        itens[0] && previsaoDia(itens[0]) === 'amanha' ? 'AMANHÃ' : 'HOJE'
-      const rows = itens
-        .map((r, i) => {
-          const pedCell =
-            i === 0
-              ? `<td class="pedcel" rowspan="${itens.length}">${_esc(num)}<div class="mkt">${_esc(itens[0]?.pedido_marketplace || '')}</div><div class="loja">${_esc(itens[0]?.loja || '')}</div><div class="dia">${diaTxt}</div></td>`
-              : ''
-          return `<tr>${pedCell}<td class="qtd">${_esc(r.quantidade)}</td><td class="sku">${_esc(r.sku || '—')}</td><td class="nome">${_esc(r.produto || '')}</td></tr>`
-        })
-        .join('')
-      return `<tbody>${rows}</tbody>`
-    })
-    .join('')
+  // Conferência: DOIS pedidos por folha 10×15, cada informação na sua
+  // COLUNA (Pedido | Marketplace | Loja | Cliente | Qtd | SKU | Produto) —
+  // Eduardo, 2026-08-27: "uma coluna para cada... no estilo do relatorio
+  // que ja temos no davinci, so que no tamanho da etiqueta... dois para
+  // cada folha". Cada dupla vira uma página própria (break-before) com
+  // cabeçalho repetido; rowspan junta os itens do mesmo pedido. Com só 2
+  // pedidos por folha sobra altura — as colunas estreitas quebram o texto
+  // pra baixo e a letra fica grande.
+  const peds = [...porPedido.entries()]
+  const paginasConf: string[] = []
+  for (let i = 0; i < peds.length; i += 2) {
+    const corpo = peds
+      .slice(i, i + 2)
+      .map(([num, itens]) => {
+        const first = itens[0]
+        const diaTxt = first && previsaoDia(first) === 'amanha' ? 'AMANHÃ' : 'HOJE'
+        const rows = itens
+          .map((r, j) => {
+            const cab =
+              j === 0
+                ? `<td class="ped" rowspan="${itens.length}">${_esc(num)}<div class="dia">${diaTxt}</div></td>`
+                  + `<td class="mkt" rowspan="${itens.length}">${_esc(first?.pedido_marketplace || '—')}</td>`
+                  + `<td class="loja" rowspan="${itens.length}">${_esc(first?.loja || '—')}</td>`
+                  + `<td class="cli" rowspan="${itens.length}">${_esc(first?.cliente || '—')}</td>`
+                : ''
+            return `<tr>${cab}<td class="qtd">${_esc(r.quantidade)}</td><td class="sku">${_esc(r.sku || '—')}</td><td class="nome">${_esc(r.produto || '')}</td></tr>`
+          })
+          .join('')
+        return `<tbody>${rows}</tbody>`
+      })
+      .join('')
+    paginasConf.push(`<div class="pagped">
+      <div class="sec">Conferência por pedido</div>
+      <table>
+        <colgroup><col class="c-ped"><col class="c-mkt"><col class="c-loja"><col class="c-cli"><col class="c-qtd2"><col class="c-sku2"><col></colgroup>
+        <thead><tr><th>Pedido</th><th>Marketplace</th><th>Loja</th><th>Cliente</th><th>Qtd</th><th>SKU</th><th>Produto</th></tr></thead>
+        ${corpo}
+      </table>
+    </div>`)
+  }
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Previsão ${_esc(dataBR)}</title><style>
     @page { size: 100mm 150mm; margin: 4mm; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1021,18 +1042,22 @@ function imprimirPrevisoes() {
     td.qtd { font-size: 13pt; font-weight: 700; text-align: center; vertical-align: middle; }
     td.sku { font-family: 'Courier New', monospace; font-weight: 700; font-size: 10pt; word-break: break-all; }
     td.nome { font-size: 10pt; }
-    td.pedcel { font-weight: 700; font-size: 10pt; text-align: center; vertical-align: middle; }
-    td.pedcel .mkt { font-family: 'Courier New', monospace; font-weight: 400; font-size: 7pt; word-break: break-all; margin-top: .5mm; }
-    td.pedcel .loja { font-weight: 400; font-size: 7.5pt; margin-top: .5mm; }
-    td.pedcel .dia { font-size: 8.5pt; margin-top: .5mm; }
+    td.ped { font-weight: 700; font-size: 11pt; text-align: center; vertical-align: middle; }
+    td.ped .dia { font-size: 8.5pt; margin-top: 1mm; }
+    td.mkt { font-family: 'Courier New', monospace; font-size: 8.5pt; word-break: break-all; vertical-align: middle; }
+    td.loja { font-size: 9pt; vertical-align: middle; }
+    td.cli { font-size: 9pt; vertical-align: middle; }
     col.c-qtd { width: 11mm; }
     col.c-sku { width: 32mm; }
-    col.c-ped { width: 20mm; }
-    /* Conferência: a coluna Pedido rouba largura → SKU mais estreito
-       (break-all quebra o que passar) pro nome do produto respirar. */
-    .porped col.c-sku { width: 26mm; }
+    col.c-ped { width: 12mm; }
+    col.c-mkt { width: 15mm; }
+    col.c-loja { width: 12mm; }
+    col.c-cli { width: 13mm; }
+    col.c-qtd2 { width: 9mm; }
+    col.c-sku2 { width: 12mm; }
     tr, tbody { break-inside: avoid; }
-    .porped { break-before: page; }
+    /* Cada dupla de pedidos da conferência = uma folha própria. */
+    .pagped { break-before: page; page-break-before: always; }
   </style></head><body>
     <div class="cab">
       <h1>PREVISÃO — ${_esc(dataBR)}</h1>
@@ -1041,14 +1066,7 @@ function imprimirPrevisoes() {
     </div>
     ${hojeItens.length ? `<div class="sec">Separar — para HOJE</div>${tabelaSeparar(hojeItens)}` : ''}
     ${amanhaItens.length ? `<div class="sec">Separar — para AMANHÃ (já adiantar)</div>${tabelaSeparar(amanhaItens)}` : ''}
-    <div class="porped">
-      <div class="sec">Conferência por pedido</div>
-      <table>
-        <colgroup><col class="c-ped"><col class="c-qtd"><col class="c-sku"><col></colgroup>
-        <thead><tr><th>Pedido</th><th>Qtd</th><th>Código (SKU)</th><th>Produto</th></tr></thead>
-        ${pedidosHtml}
-      </table>
-    </div>
+    ${paginasConf.join('')}
   </body></html>`
   // Iframe invisível (não sofre bloqueio de popup): carrega o relatório e
   // chama a impressão. Só some 1 min depois pra não matar o diálogo aberto.
