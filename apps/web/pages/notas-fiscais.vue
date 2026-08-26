@@ -264,7 +264,7 @@ await carregar()
 <template>
   <div class="space-y-4">
     <PageHeader
-      title="Pós vendas"
+      title="Notas fiscais"
       description="Pedidos enviados com as duas notas fiscais de cada envio: NF embalagem (conta da loja) e NF produto (conta avulsa)."
     />
 

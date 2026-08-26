@@ -137,7 +137,7 @@ const sections = computed<Section[]>(() => [
       { to: '/devolucoes', label: 'Devoluções', icon: Undo2, resource: 'devolucoes' },
       { to: '/reembolso', label: 'Reembolso', icon: Receipt, resource: 'reembolso' },
       { to: '/logistica', label: 'Logística', icon: Headset, resource: 'logistica' },
-      { to: '/notas-fiscais', label: 'Pós vendas', icon: FileText, resource: 'notas_fiscais' },
+      { to: '/notas-fiscais', label: 'Notas fiscais', icon: FileText, resource: 'notas_fiscais' },
     ],
   },
   {
