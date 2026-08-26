@@ -121,11 +121,13 @@ _PENDENTE_MAX_AGE_DIAS = 14
 # Pedidos (Eduardo, 2026-08-24): o pessoal do envio separa o produto de
 # manhã e, quando a etiqueta liberar (ML solta ~meio-dia), é só colar.
 # O pedido troca de badge sozinho conforme avança no Bling.
-# SÓ conta como previsão quem é PARA ENVIAR NO DIA (Eduardo, 2026-08-24
-# "previsao somente dos que e para enviar no dia"): marketplace_ship_deadline
-# (o "despachar até" prometido ao marketplace) até hoje BRT. Pedido com
-# corte amanhã/depois fica fora até o dia dele; sem deadline capturado
-# também fica fora (não dá pra afirmar que sai hoje).
+# Conta como previsão quem é para enviar HOJE ou AMANHÃ (Eduardo, 2026-08-24
+# "previsao somente dos que e para enviar no dia"; ampliado em 2026-08-26
+# "aparecer as previsoes do dia de amanha tbm" — o pessoal já separa hoje o
+# que sai amanhã): marketplace_ship_deadline (o "despachar até" prometido ao
+# marketplace) até amanhã BRT. Pedido com corte depois de amanhã fica fora
+# até chegar a vez dele; sem deadline capturado também fica fora (não dá
+# pra afirmar quando sai).
 # ⚠️ A janela é pelo CORTE, não pela data de criação: pedido de
 # terça–sexta com corte segunda (fim de semana rola pro próximo dia
 # útil) é previsão legítima — janela por criação escondia 15 malas
@@ -135,6 +137,12 @@ _SITUACAO_EM_ABERTO = "6"
 # (precisa sair MESMO ASSIM). Mais atrasado que isso = zumbi/problema,
 # some da previsão pra não poluir a aba pra sempre.
 _PREVISAO_CORTE_ATRASO_MAX_DIAS = 2
+# Quantos dias de corte FUTURO entram na previsão: 1 = mostra também os de
+# corte amanhã (Eduardo, 2026-08-26 "aparecer as previsoes do dia de amanha
+# tbm... os de amanha pra ja ir adiantando"). O front marca cada linha com
+# hoje/amanhã pelo ship_deadline, então o pessoal sabe o que sai já e o que
+# é adiantamento. 0 = volta a ser só o dia.
+_PREVISAO_CORTE_FUTURO_MAX_DIAS = 1
 
 
 def _baseline_sku_exclusions(column):
@@ -469,9 +477,10 @@ async def list_estoque_pedidos(
     tag: str | None = Query(None),
 ) -> dict[str, Any]:
     """Lista pedidos da aba via 3 caminhos paralelos:
-      * PREVISÃO: situacao=6 (Em aberto) + criado nos últimos 2 dias →
-        badge amarelo. Ainda sem NF/etiqueta; entra na lista pra equipe
-        separar o produto antes de a etiqueta liberar (ML ~meio-dia).
+      * PREVISÃO: situacao=6 (Em aberto) + corte até AMANHÃ (inclui
+        atrasado recente) → badge amarelo. Ainda sem NF/etiqueta; entra na
+        lista pra equipe separar o produto antes de a etiqueta liberar
+        (ML ~meio-dia); os de corte amanhã são adiantamento.
       * PENDENTE: situacao=83965 (Enviado Etiqueta) + sem em_andamento_data
         + criado nos últimos 14 dias (anti-zumbi) → badge vermelho.
       * ENVIADO:  situacao IN (83965, 15, 83953, 83957, 545902) +
@@ -514,9 +523,14 @@ async def list_estoque_pedidos(
         BlingOrder.situacao.notin_(_SITUACAO_NAO_ENVIADO),
         BlingOrder.em_andamento_data.isnot(None),
     )
-    # Janela do corte em BRT: [hoje - atraso_max 00:00, amanhã 00:00).
+    # Janela do corte em BRT: [hoje - atraso_max 00:00, hoje + 1 + futuro_max
+    # 00:00) — pega atrasado recente, HOJE e AMANHÃ.
     # Comparação direta timestamptz vs literal tz-aware: NULL fica fora.
-    _fim_do_dia_brt = datetime.combine(today_brt + timedelta(days=1), time.min, tzinfo=_BRT)
+    _fim_janela_brt = datetime.combine(
+        today_brt + timedelta(days=1 + _PREVISAO_CORTE_FUTURO_MAX_DIAS),
+        time.min,
+        tzinfo=_BRT,
+    )
     _corte_min_brt = datetime.combine(
         today_brt - timedelta(days=_PREVISAO_CORTE_ATRASO_MAX_DIAS), time.min, tzinfo=_BRT
     )
@@ -524,12 +538,13 @@ async def list_estoque_pedidos(
         # Em aberto = previsão do dia (badge amarelo). Sem exigir
         # em_andamento_data (situação 6 é pré-emissão, o campo é nulo).
         BlingOrder.situacao == _SITUACAO_EM_ABERTO,
-        # Corte de despacho ATÉ hoje ("despachar até" do marketplace) —
-        # inclui atrasado recente; corte amanhã/depois ou sem deadline
-        # capturado → fora. Janela pelo CORTE, não pela criação (pedido
-        # de sexta com corte segunda é previsão legítima).
+        # Corte de despacho até AMANHÃ ("despachar até" do marketplace) —
+        # inclui atrasado recente, hoje e amanhã (adiantamento); corte
+        # depois de amanhã ou sem deadline capturado → fora. Janela pelo
+        # CORTE, não pela criação (pedido de sexta com corte segunda é
+        # previsão legítima).
         BlingOrder.marketplace_ship_deadline >= _corte_min_brt,
-        BlingOrder.marketplace_ship_deadline < _fim_do_dia_brt,
+        BlingOrder.marketplace_ship_deadline < _fim_janela_brt,
     )
     where: list = [or_(pendente_clause, enviado_clause, previsao_clause)]
     if tags is not None:

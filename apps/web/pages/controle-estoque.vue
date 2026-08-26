@@ -744,6 +744,16 @@ function corteInfo(row: PedidoRow): { label: string; cls: string } | null {
   return { label: `corte ${hora}`, cls: 'text-amber-700 dark:text-amber-400' }
 }
 
+// Dia da previsão pelo corte: 'hoje' = corte hoje ou atrasado (sai JÁ);
+// 'amanha' = corte amanhã (dá pra ir adiantando). Eduardo, 2026-08-26:
+// "os de hoje... e os de amanha pra ja ir adiantando". O corte é por
+// pedido (replicado nos itens). Sem deadline não rola em previsão (o
+// backend exige corte na janela), mas na dúvida conta como hoje.
+function previsaoDia(row: PedidoRow): 'hoje' | 'amanha' {
+  if (!row.ship_deadline) return 'hoje'
+  return isoDateBrt(new Date(row.ship_deadline)) > isoToday() ? 'amanha' : 'hoje'
+}
+
 async function toggleEnvio(row: EnvioRow) {
   if (!isAdmin.value) return
   const next = !row.conferido
@@ -914,38 +924,51 @@ function imprimirPrevisoes() {
     if (arr) arr.push(r)
     else porPedido.set(k, [r])
   }
-  // Totais por SKU — o que pegar no estoque, somado entre os pedidos.
-  const totais = new Map<string, { produto: string; qtd: number }>()
-  for (const r of linhas) {
-    const k = r.sku || r.produto || '?'
-    const t = totais.get(k)
-    if (t) t.qtd += r.quantidade || 0
-    else totais.set(k, { produto: r.produto || '', qtd: r.quantidade || 0 })
-  }
   const [y, m, d] = dia.value.split('-')
   const dataBR = `${d}/${m}/${y}`
   const hora = _HORA_BRT.format(new Date())
+  // HOJE × AMANHÃ (Eduardo, 2026-08-26): corte hoje/atrasado sai JÁ; corte
+  // amanhã é adiantamento. Cada grupo ganha sua tabela de separação; na
+  // conferência o dia vai carimbado embaixo do nº do pedido.
+  const hojeItens = linhas.filter((r) => previsaoDia(r) === 'hoje')
+  const amanhaItens = linhas.filter((r) => previsaoDia(r) === 'amanha')
   // Tabelas com borda e cabeçalho, no MESMO estilo do "Relatório de
   // pedidos" (imprimirRelatorio) que a equipe já conhece — só que
   // estreitas, cabendo nos 100 mm da térmica (Eduardo, 2026-08-26:
   // "no estilo relatorio... só precisa estar organizado").
-  const totaisHtml = [...totais.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(
-      ([sku, t]) =>
-        `<tr><td class="qtd">${_esc(t.qtd)}</td><td class="sku">${_esc(sku)}</td><td class="nome">${_esc(t.produto)}</td></tr>`,
-    )
-    .join('')
+  const tabelaSeparar = (itens: PedidoRow[]) => {
+    const tot = new Map<string, { produto: string; qtd: number }>()
+    for (const r of itens) {
+      const k = r.sku || r.produto || '?'
+      const t = tot.get(k)
+      if (t) t.qtd += r.quantidade || 0
+      else tot.set(k, { produto: r.produto || '', qtd: r.quantidade || 0 })
+    }
+    const rows = [...tot.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(
+        ([sku, t]) =>
+          `<tr><td class="qtd">${_esc(t.qtd)}</td><td class="sku">${_esc(sku)}</td><td class="nome">${_esc(t.produto)}</td></tr>`,
+      )
+      .join('')
+    return `<table>
+      <colgroup><col class="c-qtd"><col class="c-sku"><col></colgroup>
+      <thead><tr><th>Qtd</th><th>Código (SKU)</th><th>Produto</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`
+  }
   // Um <tbody> por pedido (não quebra de página no meio); o nº do pedido
-  // ocupa uma célula única (rowspan) com a loja embaixo, como o corte fica
-  // sob a loja no relatório A4.
+  // ocupa uma célula única (rowspan) com a loja e o DIA (hoje/amanhã)
+  // embaixo, como o corte fica sob a loja no relatório A4.
   const pedidosHtml = [...porPedido.entries()]
     .map(([num, itens]) => {
+      const diaTxt =
+        itens[0] && previsaoDia(itens[0]) === 'amanha' ? 'AMANHÃ' : 'HOJE'
       const rows = itens
         .map((r, i) => {
           const pedCell =
             i === 0
-              ? `<td class="pedcel" rowspan="${itens.length}">${_esc(num)}<div class="loja">${_esc(itens[0]?.loja || '')}</div></td>`
+              ? `<td class="pedcel" rowspan="${itens.length}">${_esc(num)}<div class="loja">${_esc(itens[0]?.loja || '')}</div><div class="dia">${diaTxt}</div></td>`
               : ''
           return `<tr>${pedCell}<td class="qtd">${_esc(r.quantidade)}</td><td class="sku">${_esc(r.sku || '—')}</td><td class="nome">${_esc(r.produto || '')}</td></tr>`
         })
@@ -969,6 +992,7 @@ function imprimirPrevisoes() {
     td.nome { font-size: 8pt; }
     td.pedcel { font-weight: 700; font-size: 8.5pt; text-align: center; vertical-align: middle; }
     td.pedcel .loja { font-weight: 400; font-size: 6.5pt; margin-top: .5mm; }
+    td.pedcel .dia { font-size: 7pt; margin-top: .5mm; }
     col.c-qtd { width: 9mm; }
     col.c-sku { width: 30mm; }
     col.c-ped { width: 17mm; }
@@ -977,15 +1001,11 @@ function imprimirPrevisoes() {
   </style></head><body>
     <div class="cab">
       <h1>PREVISÃO — ${_esc(dataBR)}</h1>
-      <div class="sub">${porPedido.size} pedido(s) · ${linhas.length} item(ns) · impresso ${_esc(hora)}</div>
+      <div class="sub">${porPedido.size} pedido(s) · ${linhas.length} item(ns) — ${hojeItens.length} hoje · ${amanhaItens.length} amanhã · impresso ${_esc(hora)}</div>
       <div class="sub">só informação: separar agora — a etiqueta libera ao longo do dia</div>
     </div>
-    <div class="sec">Separar (total por produto)</div>
-    <table>
-      <colgroup><col class="c-qtd"><col class="c-sku"><col></colgroup>
-      <thead><tr><th>Qtd</th><th>Código (SKU)</th><th>Produto</th></tr></thead>
-      <tbody>${totaisHtml}</tbody>
-    </table>
+    ${hojeItens.length ? `<div class="sec">Separar — para HOJE</div>${tabelaSeparar(hojeItens)}` : ''}
+    ${amanhaItens.length ? `<div class="sec">Separar — para AMANHÃ (já adiantar)</div>${tabelaSeparar(amanhaItens)}` : ''}
     <div class="porped">
       <div class="sec">Conferência por pedido</div>
       <table>
@@ -1899,12 +1919,16 @@ async function conferirTodos() {
                     ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
                     : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
                 :title="row.status === 'previsao'
-                  ? 'Em aberto no Bling — NF e etiqueta ainda não geradas; deve sair hoje'
+                  ? (previsaoDia(row) === 'amanha'
+                    ? 'Em aberto no Bling — corte amanhã: dá pra já ir adiantando a separação'
+                    : 'Em aberto no Bling — NF e etiqueta ainda não geradas; deve sair hoje')
                   : row.status === 'enviado' && envioHora(row) ? 'Hora que o envio confirmou' : undefined"
               >
                 {{ row.status === 'enviado'
                   ? (envioHora(row) || 'Enviado')
-                  : row.status === 'previsao' ? 'Previsão' : 'Não enviado' }}
+                  : row.status === 'previsao'
+                    ? (previsaoDia(row) === 'amanha' ? 'Previsão · amanhã' : 'Previsão · hoje')
+                    : 'Não enviado' }}
               </span>
             </td>
             <td class="bg-emerald-50/30">
