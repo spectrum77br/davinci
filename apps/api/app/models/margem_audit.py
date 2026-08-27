@@ -30,7 +30,8 @@ class MargemAudit(Base):
     pedido_bling: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     bling_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     sku: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 'situacao' | 'saldo_final' | 'observacao'
+    # 'situacao' | 'saldo_final' | 'observacao' | 'sku' (troca por
+    # prioridade de estoque — services/prioridade_estoque.py)
     acao: Mapped[str] = mapped_column(Text, nullable=False)
     valor_antigo: Mapped[str | None] = mapped_column(Text, nullable=True)
     valor_novo: Mapped[str | None] = mapped_column(Text, nullable=True)
