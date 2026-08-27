@@ -10,6 +10,7 @@ Loja + Nº do Pedido.
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 from decimal import Decimal
 
 from openpyxl import load_workbook
@@ -85,6 +86,23 @@ def test_xlsx_primeira_linha_traz_destinatario():
     assert _c(ws, 4, "Endereço 1") == "Rua Emídio Beruto"
     assert _c(ws, 4, "Endereço 2") == "Apto 2"
     assert _c(ws, 4, "Nº de Celular") == "31999990000"
+
+
+def test_xlsx_observacao_duimp_em_todas_as_linhas_do_pedido():
+    """A DUIMP do produto importado vai na coluna "Observação" — o Upseller
+    joga esse texto nas Informações Complementares da NF-e. Vai em TODAS as
+    linhas do pedido (o Upseller unifica pelo par loja+pedido)."""
+    info, linhas = _pedido()
+    duimp = "produto importado pela duimp 26BR0001398015-8"
+    info = replace(info, observacao=duimp)
+    ws = load_workbook(io.BytesIO(nf_upseller.montar_xlsx("Loja", [(info, linhas)]))).active
+    assert _c(ws, 4, "Observação") == duimp
+    assert _c(ws, 5, "Observação") == duimp
+
+
+def test_xlsx_sem_observacao_deixa_coluna_vazia():
+    ws = load_workbook(io.BytesIO(nf_upseller.montar_xlsx("Loja", [_pedido()]))).active
+    assert not _c(ws, 4, "Observação")
 
 
 def test_xlsx_itens_seguintes_sem_destinatario():

@@ -104,6 +104,10 @@ class PedidoInfo:
     # Nome da conta de marketplace (store_info.account_name). Só o arquivo do
     # Upseller usa: cada conta é uma Loja registrada lá. O CSV do Bling ignora.
     loja: str | None = None
+    # Texto livre que vai pras Informações Complementares da NF-e (a DUIMP dos
+    # produtos importados). Vazio = nota sem observação. Vai na coluna
+    # "Observações" do CSV do Bling e na "Observação" do .xlsx do Upseller.
+    observacao: str | None = None
 
 
 def _s(v: object) -> str:
@@ -142,6 +146,7 @@ def montar_linhas(pedido: PedidoInfo, linhas: list[NfLinha]) -> list[list[str]]:
     numero_pedido = _s(pedido.numero)
     data = _data_br(pedido.data)
     documento = _s(pedido.documento)
+    observacao = _s(pedido.observacao)
 
     out: list[list[str]] = []
     for l in linhas:
@@ -181,7 +186,7 @@ def montar_linhas(pedido: PedidoInfo, linhas: list[NfLinha]) -> list[list[str]]:
             "",                         # Transportadora
             "",                         # Serviço
             "",                         # Tipo Frete
-            "",                         # Observações
+            observacao,                 # Observações
             _QTD_PARCELA_PADRAO,        # Qtd Parcela
             "",                         # Data Prevista
             "",                         # Vendedor

@@ -217,6 +217,44 @@ async def _modelos_por_base(session: AsyncSession, bases: set[str]) -> dict[str,
     return out
 
 
+# DUIMP por SKU do produto importado, digitada à mão na tela Importação. O
+# campo já guarda a frase inteira ("produto importado pela duimp 26BR..."), e o
+# SKU é gravado COM sufixo (b001.20, uaf001m1.220) — casa direto com o do pedido.
+_DUIMP_SQL = text(
+    f"""
+    SELECT DISTINCT ON (lower(trim(sku)))
+        lower(trim(sku)) AS sku,
+        trim(duimp)      AS duimp
+    FROM "{_SCHEMA}".import_products
+    WHERE lower(trim(sku)) = ANY(:skus)
+      AND duimp IS NOT NULL
+      AND trim(duimp) <> ''
+    ORDER BY lower(trim(sku)), updated_at DESC
+    """
+)
+
+
+async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str]:
+    """Mapa SKU (minúsculo) → texto da DUIMP. SKU sem DUIMP fica de fora."""
+    if not skus:
+        return {}
+    rows = (
+        await session.execute(_DUIMP_SQL, {"skus": sorted(skus)})
+    ).mappings().all()
+    return {r["sku"]: r["duimp"] for r in rows}
+
+
+def _observacao_duimp(duimp_por_sku: dict[str, str], itens_rows: list) -> str | None:
+    """Observação da nota: as DUIMPs dos itens do pedido, sem repetir e na ordem
+    dos itens. Nenhum item importado → None (nota sai sem observação)."""
+    textos: list[str] = []
+    for r in itens_rows:
+        duimp = duimp_por_sku.get((r["sku"] or "").strip().lower())
+        if duimp and duimp not in textos:
+            textos.append(duimp)
+    return " | ".join(textos) or None
+
+
 def _valor_unitario(
     regra: NfFaturador,
     catalogo_mala: list,
@@ -356,6 +394,14 @@ async def _montar_pedidos(
     catalogo_mala = await nf_catalogo.carregar_todos(session)
     modelos_por_base = await _modelos_por_base(session, bases_mala)
 
+    # DUIMP dos produtos importados (mala/airfryer). Só carrega se algum
+    # faturador dos pedidos pedir a observação.
+    duimp_por_sku: dict[str, str] = {}
+    if any(f.observacao_duimp for f in faturadores.values()):
+        duimp_por_sku = await _duimp_por_sku(
+            session, {(r["sku"] or "").strip().lower() for r in rows if r["sku"]}
+        )
+
     # Cliente Bling best-effort pra enriquecer o destinatário (endereço/CEP/UF/
     # tipo de pessoa) que a bling_orders não persiste — obrigatório pra NF-e no
     # Upseller. None se não houver integração: segue com o que já tem.
@@ -405,6 +451,11 @@ async def _montar_pedidos(
             "documento": cab["documento"],
             # Conta de marketplace = Loja no Upseller (o CSV do Bling ignora).
             "loja": _clean(cab["conta"]),
+            "observacao": (
+                _observacao_duimp(duimp_por_sku, itens_rows)
+                if regra.observacao_duimp
+                else None
+            ),
         }
         info = await _montar_info(client, base, cab["bling_id"])
         montados.append(

@@ -15,14 +15,17 @@ import json
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from openpyxl import load_workbook
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     BlingOrder,
+    ImportProduct,
     NfCatalogoMala,
     NfFaturador,
     Product,
@@ -31,6 +34,7 @@ from app.models import (
     UserRole,
     UserStatus,
 )
+from app.services import nf_upseller
 from app.services.nf_relatorio import COLUNAS
 
 
@@ -338,6 +342,108 @@ async def test_gerar_por_faturador_quebra_em_varios_blocos(
     nomes = [b.nome_arquivo for b in res.blocos]
     assert len(set(nomes)) == 2
     assert all(nm.endswith(".csv") for nm in nomes)
+
+
+_DUIMP_MALA = "produto importado pela duimp 26BR0001398015-8"
+_DUIMP_AIRFRYER = "produto importado pela duimp 26BR0000876592-9"
+
+
+def _seed_duimp(db: AsyncSession) -> None:
+    """Produtos importados com DUIMP digitada à mão na tela Importação. O SKU é
+    gravado COM sufixo (b001.20, uaf001m1.220), igual ao do pedido."""
+    db.add_all([
+        ImportProduct(categoria="mala", sku="b001.20", custo_bling=Decimal("0"),
+                      duimp=_DUIMP_MALA),
+        ImportProduct(categoria="eletro", sku="uaf001m1.220", custo_bling=Decimal("0"),
+                      duimp=_DUIMP_AIRFRYER),
+        # produto SEM duimp — não entra na observação
+        ImportProduct(categoria="mala", sku="b026", custo_bling=Decimal("0")),
+    ])
+
+
+@pytest.mark.asyncio
+async def test_duimp_vai_na_observacao_do_upseller(db: AsyncSession, admin: User):
+    """Shopee (faturador upseller) com mala + airfryer: a DUIMP de cada item
+    entra na coluna "Observação" do .xlsx, sem repetir e na ordem dos itens."""
+    from app.services import nf_emissao_gerar as g
+
+    fat = NfFaturador(nome="upseller 2%", modo="upseller", nf_cheia=False,
+                      percentual="2", sku_fonte="principal", nome_fonte="produto",
+                      observacao_duimp=True)
+    db.add(fat)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="shopee", account_name="poofy",
+                     bling_store_id="940001", nf_faturador_id=fat.id))
+    _seed_duimp(db)
+    await db.flush()
+    await _seed_pedido(db, admin, fat, numero="84001", loja="940001", itens=[
+        {"sku": "b001.20", "nome": "Mala Lisa M2 20", "qtd": 1, "unit": 300},
+        {"sku": "uaf001m1.220", "nome": "Air Fryer", "qtd": 1, "unit": 400},
+        {"sku": "b026", "nome": "Mala sem duimp", "qtd": 1, "unit": 100},
+    ])
+    await db.commit()
+
+    res = await g.gerar_por_faturador(db, ["84001"])
+    assert len(res.blocos) == 1
+    bloco = res.blocos[0]
+    assert bloco.nome_arquivo.endswith(".xlsx")
+
+    ws = load_workbook(io.BytesIO(bloco.planilha)).active
+    col = nf_upseller._HEADERS.index("Observação") + 1
+    esperado = f"{_DUIMP_MALA} | {_DUIMP_AIRFRYER}"
+    # dados começam na linha 4; a observação repete em todas as linhas do pedido
+    assert [ws.cell(row=r, column=col).value for r in (4, 5, 6)] == [esperado] * 3
+
+
+@pytest.mark.asyncio
+async def test_duimp_vai_na_coluna_observacoes_do_csv(db: AsyncSession, admin: User):
+    """Mesma regra no caminho Bling (ML): a DUIMP cai na coluna "Observações"
+    do CSV de Importação de Vendas."""
+    from app.services import nf_emissao_gerar as g
+
+    fat = NfFaturador(nome="bling avulso", modo="bling", nf_cheia=True,
+                      sku_fonte="principal", nome_fonte="produto",
+                      observacao_duimp=True)
+    db.add(fat)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="ml", account_name="l1",
+                     bling_store_id="940002", nf_faturador_id=fat.id))
+    _seed_duimp(db)
+    await db.flush()
+    await _seed_pedido(db, admin, fat, numero="84002", loja="940002",
+                       itens=[{"sku": "b001.20", "nome": "Mala", "qtd": 1, "unit": 300}])
+    await db.commit()
+
+    res = await g.gerar_por_faturador(db, ["84002"])
+    linhas = list(csv.reader(
+        io.StringIO(res.blocos[0].planilha.decode("utf-8-sig")), delimiter=";"
+    ))
+    assert _col(linhas[1], "Observações") == _DUIMP_MALA
+
+
+@pytest.mark.asyncio
+async def test_sem_flag_duimp_nota_sai_sem_observacao(db: AsyncSession, admin: User):
+    """Faturador sem `observacao_duimp` não escreve nada, mesmo com DUIMP
+    cadastrada no SKU (a maioria das notas segue assim)."""
+    from app.services import nf_emissao_gerar as g
+
+    fat = NfFaturador(nome="bling avulso", modo="bling", nf_cheia=True,
+                      sku_fonte="principal", nome_fonte="produto")
+    db.add(fat)
+    await db.flush()
+    db.add(StoreInfo(user_id=admin.id, platform="ml", account_name="l1",
+                     bling_store_id="940003", nf_faturador_id=fat.id))
+    _seed_duimp(db)
+    await db.flush()
+    await _seed_pedido(db, admin, fat, numero="84003", loja="940003",
+                       itens=[{"sku": "b001.20", "nome": "Mala", "qtd": 1, "unit": 300}])
+    await db.commit()
+
+    res = await g.gerar_por_faturador(db, ["84003"])
+    linhas = list(csv.reader(
+        io.StringIO(res.blocos[0].planilha.decode("utf-8-sig")), delimiter=";"
+    ))
+    assert _col(linhas[1], "Observações") == ""
 
 
 def test_extrair_destinatario_nome_vem_do_contato_nao_da_etiqueta():

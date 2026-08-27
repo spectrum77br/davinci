@@ -281,6 +281,7 @@ def _linha(
     row: list[object] = [""] * 44
     row[1] = _s(loja_nome)                       # Nome da Loja*
     row[2] = _s(pedido.numero)                   # Nº do Pedido da Loja*
+    row[3] = _s(pedido.observacao)               # Observação (DUIMP)
     row[4] = _NFE_SIM if emitir_nfe else _NFE_NAO  # Necessita Emitir NF-e*
     row[19] = _s(linha.sku)                      # SKU*
     row[20] = int(linha.quantidade)              # Quantidade* (numérico)
