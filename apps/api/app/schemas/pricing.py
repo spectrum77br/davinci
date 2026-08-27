@@ -119,6 +119,28 @@ class PricingAccountOut(PricingAccountBase):
 
 # --------------------------------------------------------------- pricing products
 
+def _norm_prioridade_estoque(v: str | None) -> str | None:
+    """Normaliza a tag de prioridade de estoque: lowercase, vazio→None.
+
+    O conjunto válido é SUFFIX_TAGS (ci/pi/ra/sa/sp/us/cd) de
+    services/sku_tags.py — os sufixos FÍSICOS de SKU (dg053.ci, dg053.sp…).
+    fake/mala/eletro/insumos ficam de fora: são grupos de operador, não
+    sufixos trocáveis num código de produto.
+    """
+    from app.services.sku_tags import SUFFIX_TAGS
+
+    if v is None:
+        return None
+    tag = v.strip().lower().lstrip(".")
+    if not tag:
+        return None
+    if tag not in SUFFIX_TAGS:
+        raise ValueError(
+            f"prioridade_estoque deve ser uma de {', '.join(SUFFIX_TAGS)}"
+        )
+    return tag
+
+
 class PricingProductBase(BaseModel):
     sku: str = Field(min_length=1, max_length=2048)
     name: str = Field(min_length=1, max_length=512)
@@ -146,6 +168,14 @@ class PricingProductBase(BaseModel):
     # Caminho da pasta na conta MEGA (gerido pela sincronização/upload).
     fotos_path: str | None = None
     product_id: UUID | None = None
+    # Tag de estoque prioritária (Eduardo 2026-08-27: "a tag que eu colocar
+    # la, o sku com a tag, ja deve trocar, porque a prioridade e ele").
+    prioridade_estoque: str | None = None
+
+    @field_validator("prioridade_estoque")
+    @classmethod
+    def _valida_prioridade(cls, v: str | None) -> str | None:
+        return _norm_prioridade_estoque(v)
 
 
 class PricingProductCreate(PricingProductBase):
@@ -174,6 +204,12 @@ class PricingProductPatch(BaseModel):
     in_catalog: bool | None = None
     fotos_url: str | None = None
     product_id: UUID | None = None
+    prioridade_estoque: str | None = None
+
+    @field_validator("prioridade_estoque")
+    @classmethod
+    def _valida_prioridade(cls, v: str | None) -> str | None:
+        return _norm_prioridade_estoque(v)
 
 
 class PricingProductOut(PricingProductBase):

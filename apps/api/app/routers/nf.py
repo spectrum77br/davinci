@@ -87,6 +87,7 @@ from app.services.nf_etiqueta_transform import (
     EtiquetaTransformError,
     transformar_etiqueta,
 )
+from app.services.prioridade_estoque import aplicar_prioridade_estoque
 
 # Teto do PDF cru da etiqueta que a marionete sobe pra transformação (item 2).
 _ETIQUETA_MAX_BYTES = 8 * 1024 * 1024
@@ -1361,6 +1362,14 @@ async def enfileirar_importacao(
     Pedido sem estoque (saldo virtual negativo) NÃO entra na fila: vai pra
     Aguardando Cancelamento no Bling e sai como pulado — não faz sentido emitir
     NF/etiqueta de peça que não existe."""
+    # PRIORIDADE de estoque (Tabela de Preços → coluna Prioridade): troca o
+    # SKU pra tag prioritária ANTES do check de estoque — o check abaixo e a
+    # NF já enxergam o SKU novo. Falha aqui nunca trava o enfileiramento.
+    if body.numeros:
+        try:
+            await aplicar_prioridade_estoque(session, body.numeros)
+        except Exception:  # noqa: BLE001
+            logger.exception("enfileirar_prioridade_falhou")
     sem_estoque = await _pedidos_sem_estoque(session, body.numeros)
     pulados_estoque = [
         {

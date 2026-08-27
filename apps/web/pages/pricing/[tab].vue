@@ -432,9 +432,15 @@ type PricingProduct = {
   fotos_url: string | null
   fotos_count: number | null
   videos_count: number | null
+  prioridade_estoque: string | null
   created_at: string
   updated_at: string
 }
+
+// Tags de estoque válidas pra coluna Prioridade (mesmo conjunto dos sufixos
+// de SKU: dg053.ci, dg053.sp…). Eduardo (2026-08-27): "a tag que eu colocar
+// la, o sku com a tag, ja deve trocar, porque a prioridade e ele".
+const TAGS_PRIORIDADE = ['ci', 'pi', 'ra', 'sa', 'sp', 'us', 'cd'] as const
 
 const products = ref<PricingProduct[]>([])
 const productsLoading = ref(false)
@@ -1207,6 +1213,25 @@ async function toggleCatalog(p: PricingProduct) {
     Object.assign(p, updated)
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'toggle_failed'
+  }
+}
+
+// Coluna Prioridade: define a tag de estoque prioritária do produto. O robô
+// troca o SKU do pedido "Em aberto" pra essa tag ANTES da margem/NF, desde
+// que o SKU alvo exista no Bling com saldo suficiente. Vazio = nada muda.
+async function setPrioridade(p: PricingProduct, v: string) {
+  const antes = p.prioridade_estoque
+  p.prioridade_estoque = v || null // otimista
+  try {
+    const updated = await api<PricingProduct>(`/api/pricing/products/${p.id}`, {
+      method: 'PATCH',
+      body: { prioridade_estoque: v || null },
+    })
+    Object.assign(p, updated)
+    flash(p.id, 'prioridade_estoque')
+  } catch (e: any) {
+    p.prioridade_estoque = antes
+    productsErr.value = e?.data?.detail?.code ?? 'save_failed'
   }
 }
 
@@ -2978,17 +3003,21 @@ watch(department, async () => {
               <th class="text-center px-2 py-2 font-medium border-b border-border w-14">Fotos</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-24">Tabela</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-16">Catálogo</th>
+              <th
+                class="text-center px-2 py-2 font-medium border-b border-border w-20"
+                title="Tag de estoque prioritária: venda que sair em outra tag é trocada pra esta ANTES da nota fiscal (só se o SKU com a tag existir no Bling e tiver saldo). Vazio = nada muda."
+              >Prioridade</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="productsLoading && !products.length">
-              <td colSpan="16" class="text-center py-6 text-muted-foreground">
+              <td colSpan="17" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!productsCurrent.length && !showAddProd">
-              <td colSpan="16" class="text-center py-6 text-muted-foreground">
+              <td colSpan="17" class="text-center py-6 text-muted-foreground">
                 Nenhum produto neste departamento.
               </td>
             </tr>
@@ -3044,6 +3073,8 @@ watch(department, async () => {
                   </option>
                 </select>
               </td>
+              <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
+              <!-- Prioridade: define depois, na linha criada. -->
               <td class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1 text-center">
                 <div class="flex gap-0.5 justify-center">
@@ -3251,6 +3282,29 @@ watch(department, async () => {
                   <Star class="h-3.5 w-3.5" :fill="p.in_catalog ? 'currentColor' : 'none'" />
                 </button>
                 <span v-else>{{ p.in_catalog ? 'sim' : '—' }}</span>
+              </td>
+              <!-- Prioridade de estoque: select direto (sem modo edição) —
+                   troca o SKU do pedido pra esta tag antes da NF. -->
+              <td
+                class="border border-border px-1 py-1 text-center"
+                :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'prioridade_estoque') }"
+              >
+                <select
+                  v-if="canEditProdutos"
+                  class="text-xs border rounded px-1 py-0.5 bg-background text-center cursor-pointer"
+                  :class="p.prioridade_estoque ? 'font-semibold text-amber-700 dark:text-amber-400 border-amber-400' : 'text-muted-foreground'"
+                  :value="p.prioridade_estoque || ''"
+                  :title="p.prioridade_estoque
+                    ? `Prioridade ${p.prioridade_estoque.toUpperCase()}: venda em outra tag é trocada pra .${p.prioridade_estoque} antes da NF (se existir no Bling com saldo)`
+                    : 'Sem prioridade — escolha uma tag pra trocar as vendas deste produto pra ela'"
+                  @change="setPrioridade(p, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">—</option>
+                  <option v-for="t in TAGS_PRIORIDADE" :key="t" :value="t">{{ t.toUpperCase() }}</option>
+                </select>
+                <span v-else class="text-xs" :class="p.prioridade_estoque ? 'font-semibold text-amber-700 dark:text-amber-400' : 'text-muted-foreground'">
+                  {{ p.prioridade_estoque ? p.prioridade_estoque.toUpperCase() : '—' }}
+                </span>
               </td>
               <td class="border border-border px-1 py-1 text-center">
                 <button

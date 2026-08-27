@@ -67,6 +67,7 @@ from app.services.nf_recuperar import run_recuperar_nf
 from app.services.notas_fiscais_export import run_export_notas
 from app.services.pos_vendas import sync_notas_emitidas as run_pos_vendas_sync
 from app.services.pricing.batch import run_push_prices_batch
+from app.services.prioridade_estoque import prioridade_estoque_sweep
 from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.product_cost_sync import (
     run_restamp_order_costs,
@@ -1179,6 +1180,24 @@ async def nf_auto_enfileirar_tick(ctx: dict) -> None:
         logger.exception("nf_auto_enfileirar_unhandled")
 
 
+async def prioridade_estoque_tick(ctx: dict) -> None:
+    """Troca SKUs de pedidos "Em aberto" pra tag prioritária (coluna
+    Prioridade da Tabela de Preços → Produtos). Eduardo (2026-08-27): "a tag
+    que eu colocar la, o sku com a tag, ja deve trocar". SEM flag: coluna
+    vazia = no-op barato (1 SELECT). Serializado por advisory xact lock
+    dentro do service; guarda = só troca se o SKU alvo existe no Bling com
+    saldo virtual suficiente.
+    """
+    try:
+        summary = await prioridade_estoque_sweep()
+        if summary.get("trocados") or summary.get("falhas"):
+            logger.info("prioridade_estoque_done", **summary)
+        else:
+            logger.debug("prioridade_estoque_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("prioridade_estoque_unhandled")
+
+
 async def nf_recuperar_tick(ctx: dict) -> None:
     """Recuperador de NF: retry de comando failed (teto 3), destrava de lease
     expirado e re-encadeamento de pedidos 'processando' órfãos (varredura
@@ -1839,6 +1858,7 @@ class WorkerSettings:
         func(logistica_recarregar, timeout=10800),
         nf_auto_enfileirar_tick,
         nf_recuperar_tick,
+        prioridade_estoque_tick,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -1985,6 +2005,12 @@ class WorkerSettings:
         # lease preso (>45min) e re-encadeamento de 'processando' órfão. Mesma
         # flag NF_AUTO_ENFILEIRAR — inerte enquanto não estiver true no .env.
         cron(nf_recuperar_tick, minute=_FIVE_MIN, run_at_startup=False),
+        # Prioridade de estoque (coluna Prioridade da Tabela de Preços):
+        # troca o SKU do pedido "Em aberto" pra tag prioritária logo que ele
+        # cai — antes de margem/NF. :3/:13/... = fora dos picos de :0/:2/:4/:5.
+        # SEM flag (coluna vazia = no-op); os ganchos do enfileirar (auto e
+        # manual) cobrem o mesmo caminho na hora da NF de qualquer jeito.
+        cron(prioridade_estoque_tick, minute={3, 13, 23, 33, 43, 53}, run_at_startup=False),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As
         # contas bling_notas são apps OAuth próprios — rate independente do
         # app principal; o custo por rodada é 1-2 páginas de lista por conta

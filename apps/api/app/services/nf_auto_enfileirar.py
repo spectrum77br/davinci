@@ -48,6 +48,7 @@ from app.db import session_scope
 from app.models import BlingOrder, NfCommand, NfFaturamento, NfImpressao, StoreInfo
 from app.services import nf_emissao_gerar, threema
 from app.services.advisory_lock import SYNC_NAMESPACE
+from app.services.prioridade_estoque import aplicar_prioridade_estoque
 from app.services.sku_tags import classify_sku_tag
 
 logger = structlog.get_logger()
@@ -275,6 +276,17 @@ async def run_auto_enfileirar_nf() -> dict:
                 pedidos={n: motivo for n, motivo in bloqueio.items()},
             )
         numeros = [n for n in numeros if n not in bloqueio]
+
+        # 1c) PRIORIDADE de estoque (Tabela de Preços → coluna Prioridade):
+        #     troca o SKU do pedido pra tag prioritária ANTES do check de
+        #     estoque — espelho atualizado na MESMA sessão, então o
+        #     `_pedidos_sem_estoque` logo abaixo já confere o SKU novo e a
+        #     NF sai com ele. Falha aqui nunca trava o enfileiramento.
+        if numeros:
+            try:
+                await aplicar_prioridade_estoque(session, numeros)
+            except Exception:  # noqa: BLE001
+                logger.exception("nf_auto_enfileirar_prioridade_falhou")
 
         # 1) Estoque primeiro: saldo virtual negativo → Aguardando Cancelamento.
         #    Só os candidatos NOVOS — o backlog já passou no check ao entrar.

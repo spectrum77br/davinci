@@ -198,6 +198,12 @@ class PricingProduct(Base, TimestampMixin):
     # mega-find; NULL = nunca contado). Atualizado no sync/refresh/upload.
     fotos_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     videos_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Tag de estoque prioritária (ci/pi/ra/sa/sp/us/cd). Eduardo (2026-08-27):
+    # "a tag que eu colocar la, o sku com a tag, ja deve trocar, porque a
+    # prioridade e ele" — o robô (services/prioridade_estoque.py) troca o item
+    # do pedido no Bling pra essa tag ANTES da emissão de NF, se o SKU alvo
+    # existir no Bling com saldo virtual suficiente. NULL = sem prioridade.
+    prioridade_estoque: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
 
 class PricingOverride(Base, TimestampMixin):
