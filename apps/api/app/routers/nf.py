@@ -44,6 +44,7 @@ from app.models import (
     NfFaturador,
     NfFaturamento,
     NfImpressao,
+    NfNota,
     Product,
     StoreInfo,
     User,
@@ -79,6 +80,7 @@ from app.services import (
     nf_frete_auto,
     nf_relatorio,
     nf_upseller,
+    nf_xml,
 )
 from app.services.melhor_envio import (
     MelhorEnvioApiError,
@@ -2019,3 +2021,116 @@ async def nf_agent_nf(
     await session.commit()
     logger.info("nf_agent_nf", pedido_bling=pedido_bling, size=len(raw))
     return {"ok": True, "pedido_bling": pedido_bling, "nf_size_bytes": len(raw)}
+
+
+# Janela do casamento nota → pedido. Nota emitida hoje casa com pedido recente;
+# fora disso o risco de pegar um homônimo antigo do mesmo CPF é maior que o ganho.
+_NOTA_JANELA = timedelta(days=30)
+
+
+async def _casar_pedido_da_nota(
+    session: AsyncSession, nota: nf_xml.NotaXml
+) -> str | None:
+    """Acha o pedido do Bling que gerou a nota, pelo CPF/CNPJ do destinatário.
+
+    O XML não traz o número do pedido do Bling (o `<xPed>` é o número interno do
+    Upseller), então a chave é o documento do destinatário. Se o mesmo documento
+    tem mais de um pedido na janela, desempata pelo nome. Continuou ambíguo →
+    devolve None: a nota fica guardada sem pedido e uma passada futura tenta de
+    novo, em vez de casar errado.
+    """
+    if not nota.destinatario_doc:
+        return None
+    cutoff = datetime.now(UTC) - _NOTA_JANELA
+    rows = (
+        await session.execute(
+            select(BlingOrder.numero, BlingOrder.nome_destinatario)
+            .where(
+                BlingOrder.documento_destinatario == nota.destinatario_doc,
+                BlingOrder.numero.is_not(None),
+                BlingOrder.situacao.is_distinct_from("excluido"),
+                BlingOrder.data >= cutoff,
+            )
+            .distinct()
+        )
+    ).all()
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0].numero
+
+    alvo = nf_etiqueta_lote._norm(nota.destinatario_nome or "")
+    if not alvo:
+        return None
+    por_nome = {
+        r.numero
+        for r in rows
+        if r.nome_destinatario and nf_etiqueta_lote._norm(r.nome_destinatario) == alvo
+    }
+    return por_nome.pop() if len(por_nome) == 1 else None
+
+
+@router.post(
+    "/agent/nf-xml",
+    dependencies=[Depends(_require_nf_agent_token)],
+)
+async def nf_agent_nf_xml(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    file: Annotated[UploadFile, File()],
+) -> dict:
+    """Recebe o XML autorizado de uma NF-e e grava a nota no davinci (`nf_nota`).
+
+    O robô da nuvem já baixa esses XMLs; o coletor só os transporta pra cá. A
+    identidade é a chave de acesso (44 dígitos), então re-subir o mesmo arquivo
+    atualiza a linha em vez de duplicar. O pedido é descoberto pelo CPF/CNPJ do
+    destinatário — quando não dá pra ter certeza, a nota entra sem pedido e o
+    casamento é re-tentado depois.
+    """
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, detail={"code": "nf_xml_vazio"})
+    if len(raw) > _ETIQUETA_MAX_BYTES:
+        raise HTTPException(413, detail={"code": "nf_xml_grande"})
+    try:
+        nota = nf_xml.parse_nfe(raw)
+    except nf_xml.NfXmlError as exc:
+        raise HTTPException(422, detail={"code": exc.code}) from exc
+
+    row = (
+        await session.execute(select(NfNota).where(NfNota.chave == nota.chave))
+    ).scalar_one_or_none()
+    if row is None:
+        row = NfNota(chave=nota.chave, numero=nota.numero, xml=raw)
+        session.add(row)
+
+    pedido = await _casar_pedido_da_nota(session, nota)
+    row.numero = nota.numero
+    row.serie = nota.serie
+    row.emitente_cnpj = nota.emitente_cnpj
+    row.emitente_nome = nota.emitente_nome
+    row.destinatario_doc = nota.destinatario_doc
+    row.destinatario_nome = nota.destinatario_nome
+    row.valor = nota.valor
+    row.data_emissao = nota.data_emissao
+    row.protocolo = nota.protocolo
+    row.situacao = nota.situacao
+    row.situacao_motivo = nota.situacao_motivo
+    row.upseller_pedido = nota.upseller_pedido
+    row.xml = raw
+    # Casamento só avança: uma passada que não conseguiu decidir não apaga o
+    # pedido que uma anterior já achou.
+    if pedido:
+        row.pedido_bling = pedido
+    await session.commit()
+    logger.info(
+        "nf_agent_nf_xml",
+        chave=nota.chave,
+        numero=nota.numero,
+        pedido_bling=row.pedido_bling,
+    )
+    return {
+        "ok": True,
+        "chave": nota.chave,
+        "numero": nota.numero,
+        "pedido_bling": row.pedido_bling,
+    }

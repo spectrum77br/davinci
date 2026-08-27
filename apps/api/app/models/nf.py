@@ -178,6 +178,54 @@ class NfFaturamento(Base, TimestampMixin):
     erro_impressao: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class NfNota(Base, TimestampMixin):
+    """A NF-e EMITIDA, lida do XML autorizado pela SEFAZ.
+
+    O robô da nuvem baixa o XML de cada nota que sai (Upseller/Bling) e o
+    coletor sobe pra cá. Guarda o que a nota tem de fato — número, chave,
+    valor, emitente, protocolo — e o XML assinado inteiro (o arquivo é a
+    prova fiscal; guardar só os campos perderia a assinatura).
+
+    Chave natural = `chave` (os 44 dígitos), então subir o mesmo XML duas
+    vezes atualiza a mesma linha em vez de duplicar.
+
+    `pedido_bling` é NULO enquanto a nota não casa com um pedido: o XML traz
+    em `<xPed>` o número INTERNO do Upseller (ex. "UP2NYY224934"), que não é
+    o número do pedido no Bling — o casamento vai pelo CPF/CNPJ do
+    destinatário + nome + data (mesma técnica das etiquetas em lote).
+    """
+
+    __tablename__ = "nf_nota"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    # Chave de acesso da NF-e (44 dígitos) — identidade da nota.
+    chave: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # Número do pedido no Bling (casa com bling_orders.numero). NULL = ainda
+    # não casou; o coletor re-tenta o casamento nas passadas seguintes.
+    pedido_bling: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    numero: Mapped[str] = mapped_column(Text, nullable=False)
+    serie: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emitente_cnpj: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emitente_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # CPF/CNPJ do destinatário, só dígitos — é por ele que a nota acha o pedido.
+    destinatario_doc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    destinatario_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Valor total da nota (vNF). NÃO é o total do pedido: no faturador
+    # percentual a nota sai por uma fração do pedido.
+    valor: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    data_emissao: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Protocolo de autorização da SEFAZ (nProt) + cStat/xMotivo. cStat '100' =
+    # autorizada; sem protocolo = nota ainda não transmitida.
+    protocolo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    situacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    situacao_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # <xPed> do 1º item = número do pedido no Upseller (não serve pro Bling).
+    upseller_pedido: Mapped[str | None] = mapped_column(Text, nullable=True)
+    xml: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
 class NfCommand(Base, TimestampMixin):
     """OUTBOX da importação da planilha avulsa (Fase 3a-4). Um comando =
     UM faturador com o subconjunto de pedidos daquela loja/AdsPower + o CSV

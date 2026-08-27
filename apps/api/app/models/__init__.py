@@ -72,6 +72,7 @@ from app.models.nf import (
     NfFaturador,
     NfFaturamento,
     NfImpressao,
+    NfNota,
 )
 from app.models.marketing import (
     MarketingAccount,
@@ -193,6 +194,7 @@ __all__ = [
     "NfFaturador",
     "NfFaturamento",
     "NfImpressao",
+    "NfNota",
     "OAuthState",
     "PLATFORMS",
     "PricingAccount",
