@@ -764,7 +764,19 @@ function corteInfo(row: PedidoRow): { label: string; cls: string } | null {
 // backend exige corte na janela), mas na dúvida conta como hoje.
 function previsaoDia(row: PedidoRow): 'hoje' | 'amanha' {
   if (!row.ship_deadline) return 'hoje'
-  return isoDateBrt(new Date(row.ship_deadline)) > isoToday() ? 'amanha' : 'hoje'
+  const dl = new Date(row.ship_deadline)
+  const diaCorte = isoDateBrt(dl)
+  if (diaCorte <= isoToday()) return 'hoje'
+  // ML de AGÊNCIA: o SLA do ML vem 23:59 e o backend soma +1 dia no corte
+  // salvo (folga de "posta na manhã seguinte" — vale pro card de atrasados,
+  // ver _ml_corte_agencia). Pra SEPARAÇÃO isso invertia o dia: o ML manda
+  // enviar hoje/24h e a tela dizia "amanhã" (Eduardo, 2026-08-27: "tem dois
+  // com a previsao amanha e esta para enviar hoje, em 24 horas"). Agência
+  // (corte amanhã às 23:59) conta como HOJE; coleta de amanhã (hora real,
+  // ex. 13:30) segue como adiantamento.
+  const ehML = (row.loja || '').trim().toUpperCase().startsWith('ML')
+  if (ehML && diaCorte === isoDaysAgo(-1) && _HORA_BRT.format(dl) === '23:59') return 'hoje'
+  return 'amanha'
 }
 
 async function toggleEnvio(row: EnvioRow) {
