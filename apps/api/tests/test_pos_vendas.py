@@ -51,6 +51,7 @@ def _nota(
     complemento: str | None = "2026082412345678",
     data_emissao: datetime | None = datetime(2026, 8, 19, 10, 0),
     situacao: int | None = 5,
+    pedido: str | None = None,
 ) -> NotaIn:
     return NotaIn(
         key=key,
@@ -59,7 +60,51 @@ def _nota(
         complemento=complemento,
         data_emissao=data_emissao,
         situacao=situacao,
+        pedido=pedido,
     )
+
+
+# ─── passada 0: a nota já traz o número do pedido (XML do coletor) ────
+
+
+def test_match_pelo_pedido_da_nota():
+    """A nota que vem do XML já sabe de que pedido é — casa direto, sem
+    depender de complemento nem de CPF."""
+    r = match_notas(
+        [_pedido()],
+        [
+            _nota(
+                "emb",
+                conta_cnpj=CNPJ_LOJA,
+                cpf=None,
+                complemento=None,
+                pedido="292001",
+            ),
+            _nota(
+                "prod",
+                conta_cnpj=CNPJ_AVULSA,
+                cpf=None,
+                complemento=None,
+                pedido="292001",
+            ),
+        ],
+    )["292001"]
+    assert r.embalagem == "emb"
+    assert r.produto == "prod"
+    assert r.embalagem_via == "xml"
+    assert r.produto_via == "xml"
+
+
+def test_pedido_da_nota_vence_o_complemento():
+    """Quando as duas chaves apontam para pedidos diferentes, o número que a
+    nota já traz é o que vale — é o mais forte dos dois."""
+    r = match_notas(
+        [_pedido(numero="292001"), _pedido(numero="292002", numeroloja=None)],
+        [_nota("prod", conta_cnpj=CNPJ_AVULSA, cpf=None, pedido="292002")],
+    )
+    assert r["292002"].produto == "prod"
+    assert r["292002"].produto_via == "xml"
+    assert r["292001"].produto is None
 
 
 # ─── passada 1: chave exata (complemento == numeroloja) ───────────────

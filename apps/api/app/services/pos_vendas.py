@@ -246,13 +246,17 @@ class NotaIn:
     complemento: str | None
     data_emissao: datetime | None
     situacao: int | None
+    # Número do pedido no Bling, quando a nota JÁ vem com ele resolvido (é o
+    # caso do XML que o coletor sobe pra `nf_nota`). Chave mais forte que
+    # complemento/CPF — não precisa de janela nem de heurística.
+    pedido: str | None = None
 
 
 @dataclass
 class Casamento:
     embalagem: Any | None = None  # NotaIn.key
     produto: Any | None = None
-    embalagem_via: str | None = None  # "pedido" | "cpf"
+    embalagem_via: str | None = None  # "xml" | "pedido" | "cpf"
     produto_via: str | None = None
 
 
@@ -273,15 +277,19 @@ def match_notas(
 ) -> dict[str, Casamento]:
     """Casa cada pedido com (até) uma NF embalagem e uma NF produto.
 
-    Cada nota é usada por no máximo UM pedido. Passada 1 (chave exata por
-    numeroloja) tem prioridade global sobre a passada 2 (CPF + janela);
-    dentro de cada passada, empate resolve pela emissão mais próxima do
-    envio. Notas não emitidas (situação fora de 5/6/7) ficam de fora.
+    Cada nota é usada por no máximo UM pedido. As passadas valem em ordem
+    de força da chave: 0 (a nota já traz o número do pedido) > 1 (chave
+    exata por numeroloja) > 2 (CPF + janela); dentro de cada passada,
+    empate resolve pela emissão mais próxima do envio. Notas não emitidas
+    (situação fora de 5/6/7) ficam de fora.
     """
     cands = [_Cand(n) for n in notas if n.situacao in ISSUED_SITUACOES]
+    por_pedido: dict[str, list[_Cand]] = {}
     por_complemento: dict[str, list[_Cand]] = {}
     por_cpf: dict[str, list[_Cand]] = {}
     for c in cands:
+        if c.nota.pedido:
+            por_pedido.setdefault(c.nota.pedido, []).append(c)
         if c.nota.complemento:
             por_complemento.setdefault(c.nota.complemento, []).append(c)
         if c.nota.cpf:
@@ -313,6 +321,10 @@ def match_notas(
             best = min(prod, key=lambda c: _dist_dias(c.nota, p.envio))
             best.usada = True
             r.produto, r.produto_via = best.nota.key, via
+
+    # Passada 0 — a nota já sabe de que pedido é (XML casado pelo coletor).
+    for p in ordenados:
+        _atribuir(p, por_pedido.get(p.numero, []), "xml")
 
     # Passada 1 — chave exata: complemento da nota == numeroloja.
     for p in ordenados:

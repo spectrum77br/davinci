@@ -55,7 +55,7 @@ from app.models import (
     User,
 )
 from app.models.enums import UserRole
-from app.models.nf import NfEtiquetaArquivo
+from app.models.nf import NfEtiquetaArquivo, NfNota
 from app.models.pricing import StoreInfo
 from app.schemas.products import JobCreatedOut
 from app.services.pos_vendas import (
@@ -777,8 +777,9 @@ class PosVendaNfOut(BaseModel):
     numero: str | None = None
     valor: float | None = None
     data_emissao: str | None = None
-    # Como a nota foi casada: "pedido" (complemento == numeroloja, exata)
-    # ou "cpf" (CPF + janela de dias) — o front sinaliza a heurística.
+    # Como a nota foi casada: "xml" (o coletor já resolveu o pedido),
+    # "pedido" (complemento == numeroloja, exata) ou "cpf" (CPF + janela de
+    # dias) — o front sinaliza a heurística.
     via: str | None = None
 
 
@@ -901,12 +902,29 @@ async def list_pos_vendas(
         )
     ).all()
 
+    # Segunda fonte: as notas que o coletor traz do servidor da nuvem em XML
+    # (`nf_nota`). O Upseller emite com o certificado da própria empresa, fora
+    # do Bling — essas notas NUNCA aparecem no espelho `bling_notas_emitidas`,
+    # e sem isso a tela mostrava "—" no envio inteiro.
+    xml_rows = (
+        await session.execute(
+            select(NfNota).where(
+                NfNota.situacao == "100",  # cStat da SEFAZ: autorizada
+                NfNota.data_emissao.between(j1, j2)
+                | NfNota.data_emissao.is_(None),
+            )
+        )
+    ).scalars().all()
+
     notas_in: list[NotaIn] = []
-    nota_by_key: dict[Any, tuple[BlingNotaEmitida, BlingNota]] = {}
+    # Chave marcada com a origem — as duas tabelas têm UUID próprio.
+    nota_by_key: dict[Any, PosVendaNfOut] = {}
+    chaves_bling: set[str] = set()
     for ne, conta in notas_rows:
+        key = ("bling", ne.id)
         notas_in.append(
             NotaIn(
-                key=ne.id,
+                key=key,
                 conta_cnpj=conta.cnpj,
                 cpf=ne.cpf_dest,
                 complemento=ne.complemento,
@@ -914,7 +932,48 @@ async def list_pos_vendas(
                 situacao=ne.situacao,
             )
         )
-        nota_by_key[ne.id] = (ne, conta)
+        nota_by_key[key] = PosVendaNfOut(
+            nota_id=ne.id,
+            emitente=conta.emitente or conta.nome,
+            cnpj=conta.cnpj,
+            numero=ne.numero,
+            valor=float(ne.valor) if ne.valor is not None else None,
+            data_emissao=(
+                ne.data_emissao.isoformat(sep=" ") if ne.data_emissao else None
+            ),
+        )
+        if ne.chave_acesso:
+            chaves_bling.add(ne.chave_acesso)
+
+    for n in xml_rows:
+        # A mesma nota nos dois lugares (chave de acesso é a identidade) conta
+        # uma vez só — vale a do Bling, que já traz o emitente da conta.
+        if n.chave in chaves_bling:
+            continue
+        key = ("xml", n.id)
+        notas_in.append(
+            NotaIn(
+                key=key,
+                conta_cnpj=n.emitente_cnpj,
+                cpf=n.destinatario_doc,
+                complemento=None,  # o XML não repete o nº do marketplace
+                data_emissao=n.data_emissao,
+                # O casador fala a língua do Bling (5/6/7 = emitida); a nota
+                # do XML só chega aqui já autorizada pela SEFAZ.
+                situacao=6,
+                pedido=n.pedido_bling,
+            )
+        )
+        nota_by_key[key] = PosVendaNfOut(
+            nota_id=n.id,
+            emitente=n.emitente_nome,
+            cnpj=n.emitente_cnpj,
+            numero=n.numero,
+            valor=float(n.valor) if n.valor is not None else None,
+            data_emissao=(
+                n.data_emissao.isoformat(sep=" ") if n.data_emissao else None
+            ),
+        )
 
     pedidos_in = [
         PedidoIn(
@@ -931,18 +990,7 @@ async def list_pos_vendas(
     def _nf_out(key: Any, via: str | None) -> PosVendaNfOut | None:
         if key is None:
             return None
-        ne, conta = nota_by_key[key]
-        return PosVendaNfOut(
-            nota_id=ne.id,
-            emitente=conta.emitente or conta.nome,
-            cnpj=conta.cnpj,
-            numero=ne.numero,
-            valor=float(ne.valor) if ne.valor is not None else None,
-            data_emissao=(
-                ne.data_emissao.isoformat(sep=" ") if ne.data_emissao else None
-            ),
-            via=via,
-        )
+        return nota_by_key[key].model_copy(update={"via": via})
 
     items: list[PosVendaRowOut] = []
     for r in pedidos_rows:
@@ -987,7 +1035,18 @@ async def download_pos_venda_xml(
     """XML autorizado de UMA nota (botão XML da tabela Pós Vendas)."""
     ne = await session.get(BlingNotaEmitida, nota_id)
     if ne is None:
-        raise HTTPException(404, detail={"code": "nota_nao_encontrada"})
+        # Nota vinda do coletor: o XML assinado já está guardado aqui, não
+        # precisa pedir nada ao Bling.
+        n = await session.get(NfNota, nota_id)
+        if n is None:
+            raise HTTPException(404, detail={"code": "nota_nao_encontrada"})
+        return Response(
+            content=n.xml,
+            media_type="application/xml",
+            headers={
+                "Content-Disposition": f'attachment; filename="{n.chave}.xml"'
+            },
+        )
     conta = await session.get(BlingNota, ne.conta_id)
     if conta is None:
         raise HTTPException(404, detail={"code": "conta_nao_encontrada"})
