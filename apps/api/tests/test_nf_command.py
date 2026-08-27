@@ -40,6 +40,9 @@ from app.security.cipher import encrypt
 from app.services import nf_emissao_gerar, nf_relatorio
 
 _TOKEN = "nf-agent-test-token"
+# Testes que não são sobre a divisão de trabalho pedem TODAS as plataformas —
+# sem isso o lease trata a chamada como o consumidor padrão (só Shopee/TikTok).
+_TODAS = ["shopee", "tiktok", "ml", "amazon"]
 
 
 async def _async_return(value: object) -> object:
@@ -279,7 +282,7 @@ async def test_agent_lease_entrega_login_e_planilha(
 
     r = await client.post(
         "/api/nf-cadastro/agent/lease",
-        json={"limit": 5},
+        json={"limit": 5, "plataformas": _TODAS},
         headers={"X-Agent-Token": _TOKEN},
     )
     assert r.status_code == 200, r.text
@@ -309,7 +312,16 @@ async def test_agent_lease_filtra_por_action(
 ):
     """`actions` reivindica só as actions pedidas; `exclude_actions` pula as
     excluídas (loop contínuo vs passe horário de etiquetas)."""
+    from app.routers import nf as nf_router
+
     monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    # Comando sem loja cadastrada é do consumidor PADRÃO (chamada sem
+    # `plataformas`). Fixo o relógio fora das 12h pra a etiqueta não cair na
+    # janela de pausa — este teste é sobre `actions`, não sobre horário.
+    monkeypatch.setattr(
+        nf_router, "_agora_brt",
+        lambda: datetime(2026, 8, 27, 9, 0, tzinfo=nf_router._TZ_BRT),
+    )
     db.add_all([
         NfCommand(action="import_avulsa", numeros=["910001"], planilha=b"x",
                   nome_arquivo="a.csv", status="pending", source="manual"),
@@ -344,6 +356,91 @@ async def test_agent_lease_filtra_por_action(
     assert r.json()["commands"] == []
 
 
+async def _seed_loja_e_comando(
+    db: AsyncSession, admin: User, *, plataforma: str, numero: str, loja: str,
+    action: str = "import_avulsa",
+) -> None:
+    """Uma loja de `plataforma` + um pedido dela + um comando pendente. A
+    plataforma do comando é derivada daí no lease (pedido → loja → store_info)."""
+    db.add(StoreInfo(user_id=admin.id, platform=plataforma,
+                     account_name=f"conta-{plataforma}", bling_store_id=loja))
+    await _seed_pedido(db, numero=numero, loja=loja, sku="x1", nome="Produto X",
+                       unit=10, bling_id=int(numero))
+    db.add(NfCommand(action=action, numeros=[numero], planilha=b"x",
+                     nome_arquivo="a.csv", status="pending", source="auto"))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_lease_divide_trabalho_por_plataforma(
+    db: AsyncSession, client: AsyncClient, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """O robô da nuvem chama o lease SEM plataforma (o código dele não muda) e
+    por isso recebe só Shopee/TikTok; o Mac pede ML/Amazon e recebe só o dele.
+    Sem isso os dois disputariam a mesma fila FIFO."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    await _seed_loja_e_comando(db, admin, plataforma="shopee", numero="940001", loja="940901")
+    await _seed_loja_e_comando(db, admin, plataforma="ml", numero="940002", loja="940902")
+
+    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert [c["numeros"] for c in r.json()["commands"]] == [["940001"]]
+
+    r = await client.post("/api/nf-cadastro/agent/lease",
+                          json={"limit": 5, "plataformas": ["ml", "amazon"]},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert [c["numeros"] for c in r.json()["commands"]] == [["940002"]]
+
+
+@pytest.mark.asyncio
+async def test_lease_plataforma_desconhecida_vai_pro_padrao(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Comando sem plataforma resolvível (pedido avulso, loja não cadastrada) não
+    pode ficar órfão: cai no consumidor padrão."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    db.add(NfCommand(action="import_avulsa", numeros=["940003"], planilha=b"x",
+                     nome_arquivo="a.csv", status="pending", source="manual"))
+    await db.commit()
+
+    r = await client.post("/api/nf-cadastro/agent/lease",
+                          json={"limit": 5, "plataformas": ["ml", "amazon"]},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert r.json()["commands"] == []
+
+    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert [c["numeros"] for c in r.json()["commands"]] == [["940003"]]
+
+
+@pytest.mark.asyncio
+async def test_lease_padrao_nao_imprime_etiqueta_ao_meio_dia(
+    db: AsyncSession, client: AsyncClient, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """Às 12h o Mac imprime o lote do ML no perfil AdsPower 58 — o mesmo que a
+    nuvem usa. Nessa janela o consumidor padrão não pega etiqueta (importação
+    segue normal); fora dela pega."""
+    from app.routers import nf as nf_router
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    await _seed_loja_e_comando(db, admin, plataforma="shopee", numero="940004",
+                               loja="940904", action="imprimir_etiqueta")
+    await _seed_loja_e_comando(db, admin, plataforma="shopee", numero="940005",
+                               loja="940905", action="import_avulsa")
+
+    meio_dia = datetime(2026, 8, 27, 12, 30, tzinfo=nf_router._TZ_BRT)
+    monkeypatch.setattr(nf_router, "_agora_brt", lambda: meio_dia)
+    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert [c["numeros"] for c in r.json()["commands"]] == [["940005"]]
+
+    monkeypatch.setattr(nf_router, "_agora_brt",
+                        lambda: meio_dia.replace(hour=13))
+    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+                          headers={"X-Agent-Token": _TOKEN})
+    assert [c["numeros"] for c in r.json()["commands"]] == [["940004"]]
+
+
 @pytest.mark.asyncio
 async def test_agent_lease_sem_token_401(
     db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
@@ -353,7 +450,7 @@ async def test_agent_lease_sem_token_401(
     r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5})
     assert r.status_code == 401
     # token errado
-    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                           headers={"X-Agent-Token": "errado"})
     assert r.status_code == 401
 
@@ -364,7 +461,7 @@ async def test_agent_lease_token_vazio_fecha(
 ):
     # token não configurado no servidor → endpoint fechado mesmo com header
     monkeypatch.setattr(get_settings(), "nf_agent_token", "")
-    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    r = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                           headers={"X-Agent-Token": "qualquer"})
     assert r.status_code == 401
 
@@ -382,7 +479,7 @@ async def test_agent_result_done_encadeia_emissao_bling(
     await _seed_dois_faturadores(db, admin)
     await client.post("/api/nf-cadastro/faturamento/enfileirar",
                       json={"numeros": ["830001", "830002"]})
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     cmd = lease.json()["commands"][0]
 
@@ -428,7 +525,7 @@ async def test_agent_result_failed_marca_erro(
     await _seed_dois_faturadores(db, admin)
     await client.post("/api/nf-cadastro/faturamento/enfileirar",
                       json={"numeros": ["830001", "830002"]})
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     cmd = lease.json()["commands"][0]
 
@@ -713,7 +810,7 @@ async def _seed_upseller(db: AsyncSession, admin: User, *, numero: str = "850001
 async def _import_done(client: AsyncClient, numeros: list[str]) -> None:
     """Enfileira o faturamento, reivindica e reporta 'done' (dispara o motor)."""
     await client.post("/api/nf-cadastro/faturamento/enfileirar", json={"numeros": numeros})
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     imp = next(c for c in lease.json()["commands"] if c["action"] == "import_avulsa")
     await client.post(f"/api/nf-cadastro/agent/commands/{imp['id']}/result",
@@ -726,7 +823,7 @@ async def _emissao_done(client: AsyncClient, *, status: str = "done") -> None:
     Importar o avulso só põe o pedido na fila "Para Emitir": a etiqueta só fica
     imprimível depois que a NF é emitida, o XML exportado e subido no pedido
     original — por isso a etiqueta nasce daqui, não do import."""
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 20},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 20, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     for cmd in lease.json()["commands"]:
         if cmd["action"] != "emitir_nf_upseller":
@@ -853,7 +950,7 @@ async def test_faturamento_bling_nao_enfileira_etiqueta(
 
 async def _emissao_bling_done(client: AsyncClient, *, status: str = "done") -> None:
     """Reivindica os comandos `emitir_nf_bling` e reporta o resultado."""
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 20},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 20, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     for cmd in lease.json()["commands"]:
         if cmd["action"] != "emitir_nf_bling":
@@ -933,7 +1030,7 @@ async def test_capturar_nf_failed_nao_derruba_faturamento(
     await _import_done(client, ["830001"])
     await _emissao_bling_done(client)
 
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 20},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 20, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     cap = next(c for c in lease.json()["commands"] if c["action"] == "capturar_nf")
     r = await client.post(
@@ -963,7 +1060,7 @@ async def test_lease_entrega_comando_etiqueta(
     await _seed_upseller(db, admin)
     await _ciclo_upseller(client, ["850001"])
 
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     etq = next(c for c in lease.json()["commands"] if c["action"] == "imprimir_etiqueta")
     assert etq["numeros"] == ["850001"]
@@ -989,7 +1086,7 @@ async def test_lease_numero_plataforma_cai_no_proprio_numero(
     await client.post("/api/nf-cadastro/faturamento/enfileirar",
                       json={"numeros": ["830001"]})
 
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     cmd = lease.json()["commands"][0]
     assert cmd["numeros"] == ["830001"]
@@ -1007,7 +1104,7 @@ async def test_result_etiqueta_marca_status_etiqueta(
     auth_as(admin)
     await _seed_upseller(db, admin)
     await _ciclo_upseller(client, ["850001"])
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     etq = next(c for c in lease.json()["commands"] if c["action"] == "imprimir_etiqueta")
 
@@ -1042,7 +1139,7 @@ async def test_result_etiqueta_move_pedido_pra_enviado_etiqueta(
     auth_as(admin)
     await _seed_upseller(db, admin)
     await _ciclo_upseller(client, ["850001"])
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     etq = next(c for c in lease.json()["commands"] if c["action"] == "imprimir_etiqueta")
 
@@ -1074,7 +1171,7 @@ async def test_result_etiqueta_falhou_nao_move_situacao(
     auth_as(admin)
     await _seed_upseller(db, admin)
     await _ciclo_upseller(client, ["850001"])
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     etq = next(c for c in lease.json()["commands"] if c["action"] == "imprimir_etiqueta")
 
@@ -1227,7 +1324,7 @@ async def test_import_etiqueta_done_encadeia_imprimir_etiqueta(
     await _seed_ml_etiqueta(db, admin)
     await _import_done(client, ["860001"])
 
-    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5},
+    lease = await client.post("/api/nf-cadastro/agent/lease", json={"limit": 5, "plataformas": _TODAS},
                               headers={"X-Agent-Token": _TOKEN})
     imp = next(c for c in lease.json()["commands"] if c["action"] == "import_etiqueta")
     assert imp["ads_power"] == "58"

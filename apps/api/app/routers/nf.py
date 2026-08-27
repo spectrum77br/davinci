@@ -13,6 +13,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import (
@@ -28,7 +29,7 @@ from fastapi import (
 )
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import asc, or_, select, text, update
+from sqlalchemy import asc, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -44,6 +45,7 @@ from app.models import (
     NfFaturamento,
     NfImpressao,
     Product,
+    StoreInfo,
     User,
 )
 from app.schemas.nf import (
@@ -1458,6 +1460,27 @@ async def _require_nf_agent_token(
         raise HTTPException(401, detail={"code": "nf_agent_unauthorized"})
 
 
+# Divisão de trabalho entre os dois executores. O robô da NUVEM (Windows) é o
+# consumidor PADRÃO: o código dele não muda, então ele continua chamando o lease
+# sem dizer plataforma nenhuma e recebe só o que é dele. O Mac local pede
+# explicitamente `["ml", "amazon"]`.
+_PLATAFORMAS_PADRAO: tuple[str, ...] = ("shopee", "tiktok")
+
+# Impressão de etiqueta do ML sai do MESMO perfil AdsPower (58) que a nuvem usa
+# pra Shopee/TikTok. Às 12h o Mac imprime o lote do ML; se a nuvem imprimir junto,
+# os dois dirigem o mesmo Firefox e corrompem a sessão. Nessa janela o consumidor
+# padrão não pega etiqueta — só importação, que segue normal.
+_ACOES_ETIQUETA: tuple[str, ...] = ("imprimir_etiqueta", "import_etiqueta")
+_HORA_ETIQUETA_ML = 12
+
+_TZ_BRT = ZoneInfo("America/Sao_Paulo")
+
+
+def _agora_brt() -> datetime:
+    """Agora em Brasília (função separada pra teste monkeypatchar)."""
+    return datetime.now(_TZ_BRT)
+
+
 class NfAgentLeaseIn(BaseModel):
     limit: int = Field(default=5, ge=1, le=50)
     # Filtros opcionais por action: o loop contínuo do executor exclui
@@ -1465,6 +1488,9 @@ class NfAgentLeaseIn(BaseModel):
     # horário pede SÓ `imprimir_etiqueta`. Vazio/None = sem filtro (compat).
     actions: list[str] | None = None
     exclude_actions: list[str] | None = None
+    # Plataformas que ESTE executor atende. Vazio/None = consumidor PADRÃO (o
+    # robô da nuvem, cujo código não muda) → recebe só `_PLATAFORMAS_PADRAO`.
+    plataformas: list[str] | None = None
 
 
 class NfAgentCommandOut(BaseModel):
@@ -1510,6 +1536,33 @@ async def nf_agent_lease(
         stmt = stmt.where(NfCommand.action.in_(body.actions))
     if body.exclude_actions:
         stmt = stmt.where(NfCommand.action.not_in(body.exclude_actions))
+
+    # Plataforma do comando: derivada do 1º pedido (loja do Bling → store_info).
+    # Não precisa de coluna nova porque os geradores agrupam por plataforma — um
+    # comando nunca mistura marketplaces, então o 1º pedido vale por todos.
+    plataforma_do_comando = (
+        select(func.lower(func.trim(StoreInfo.platform)))
+        .select_from(BlingOrder)
+        .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
+        .where(BlingOrder.numero == NfCommand.numeros[0].astext)
+        .limit(1)
+        .scalar_subquery()
+    )
+    pedidas = [p.strip().lower() for p in (body.plataformas or []) if p.strip()]
+    if pedidas:
+        stmt = stmt.where(plataforma_do_comando.in_(pedidas))
+    else:
+        # Consumidor padrão. Comando sem plataforma resolvível (pedido avulso,
+        # loja não cadastrada) cai aqui pra não ficar órfão na fila.
+        stmt = stmt.where(
+            or_(
+                plataforma_do_comando.in_(_PLATAFORMAS_PADRAO),
+                plataforma_do_comando.is_(None),
+            )
+        )
+        if _agora_brt().hour == _HORA_ETIQUETA_ML:
+            stmt = stmt.where(NfCommand.action.not_in(_ACOES_ETIQUETA))
+
     claimed = (await session.execute(stmt)).scalars().all()
 
     out: list[NfAgentCommandOut] = []

@@ -310,6 +310,10 @@ class _PedidoMontado:
     categorias: list = field(default_factory=list)
     # A conta importa no Upseller com o catálogo de mala (m100/m200)?
     catalogo_mala: bool = False
+    # store_info.platform da loja do pedido (shopee/tiktok/ml/amazon). É a chave
+    # que divide o trabalho entre os executores no /agent/lease — por isso entra
+    # no agrupamento: um comando NUNCA mistura plataformas.
+    plataforma: str | None = None
 
 
 def _linhas_upseller(m: _PedidoMontado) -> list:
@@ -412,6 +416,7 @@ async def _montar_pedidos(
                 linhas,
                 [r["categoria"] for r in itens_rows],
                 nf_upseller.usa_catalogo_mala(cab["conta"], cab["plataforma"]),
+                (cab["plataforma"] or "").strip().lower() or None,
             )
         )
 
@@ -501,15 +506,18 @@ async def gerar_por_faturador(
 
     montados, pulados, faturadores = await _montar_pedidos(session, numeros)
 
-    # Agrupa preservando a ordem em que cada faturador apareceu.
-    por_fat: dict[UUID, list[_PedidoMontado]] = {}
+    # Agrupa preservando a ordem em que cada faturador apareceu. A PLATAFORMA
+    # entra na chave porque um mesmo faturador pode servir lojas de marketplaces
+    # diferentes — e o /agent/lease divide o trabalho entre os executores por
+    # plataforma, então um comando não pode misturar duas.
+    por_fat: dict[tuple[UUID, str | None], list[_PedidoMontado]] = {}
     for m in montados:
-        por_fat.setdefault(m.faturador_id, []).append(m)
+        por_fat.setdefault((m.faturador_id, m.plataforma), []).append(m)
 
     ts = datetime.now(_BRT).strftime("%Y%m%d_%H%M%S")
     blocos: list[BlocoFaturador] = []
     seq = 0
-    for fid, grupo in por_fat.items():
+    for (fid, _plat), grupo in por_fat.items():
         regra = faturadores.get(fid)
         modo = regra.modo if regra is not None else None
         # Quebra o faturador em N arquivos que caibam no limite da tela de
@@ -570,7 +578,7 @@ async def gerar_etiqueta_upseller(
 
     # Agrupa por cadastro de Etiqueta preservando a ordem; separa por faturador
     # (o nome da loja avulsa no Upseller vem do faturador).
-    por_etq: dict[tuple[UUID, UUID], list[_PedidoMontado]] = {}
+    por_etq: dict[tuple[UUID, UUID, str | None], list[_PedidoMontado]] = {}
     for m in montados:
         etq = etiquetas.get(m.etiqueta_id) if m.etiqueta_id else None
         fat = faturadores.get(m.faturador_id)
@@ -580,12 +588,12 @@ async def gerar_etiqueta_upseller(
         if fat is not None and fat.modo == "upseller":
             pulados.append(PedidoPulado(m.numero, "faturador upseller já importa"))
             continue
-        por_etq.setdefault((m.etiqueta_id, m.faturador_id), []).append(m)
+        por_etq.setdefault((m.etiqueta_id, m.faturador_id, m.plataforma), []).append(m)
 
     ts = datetime.now(_BRT).strftime("%Y%m%d_%H%M%S")
     blocos: list[BlocoEtiqueta] = []
     seq = 0
-    for (eid, fid), grupo in por_etq.items():
+    for (eid, fid, _plat), grupo in por_etq.items():
         etq = etiquetas[eid]
         for chunk in _chunks_por_limite(grupo, "upseller"):
             pedidos = [(m.info, _linhas_upseller(m)) for m in chunk]
