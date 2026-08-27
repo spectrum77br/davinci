@@ -945,8 +945,36 @@ async function marcarPrevisoesImpressas(nums: string[], rows: PedidoRow[]) {
     /* sem toast: carimbo é apoio, não trava o fluxo de impressão */
   }
 }
+// ── Seleção das previsões pra imprimir ───────────────────────────────
+// Checkbox amarelo nas linhas de previsão (Eduardo, 2026-08-27: "precisa
+// tem um botao para mim selecionar as previsoes que quero imprimir").
+// Seleção por PEDIDO, igual às etiquetas. Com previsões marcadas, o botão
+// "imprimir" sai SÓ com elas; sem nenhuma marcada, imprime todas (como era).
+const previsoesSel = ref<Set<string>>(new Set())
+// Só conta o que está marcado E ainda é previsão na tela (se o pedido já
+// virou etiqueta, a marca dele deixa de valer — o botão não pode mentir).
+const previsoesSelCount = computed(() => {
+  let n = 0
+  const vistos = new Set<string>()
+  for (const p of pedidosFiltered.value) {
+    if (p.status !== 'previsao' || !p.pedido_bling || vistos.has(p.pedido_bling)) continue
+    vistos.add(p.pedido_bling)
+    if (previsoesSel.value.has(p.pedido_bling)) n += 1
+  }
+  return n
+})
+function togglePrevisaoSel(pedido: string | null) {
+  if (!pedido) return
+  const next = new Set(previsoesSel.value)
+  if (next.has(pedido)) next.delete(pedido)
+  else next.add(pedido)
+  previsoesSel.value = next
+}
 function imprimirPrevisoes() {
-  const linhas = pedidosFiltered.value.filter((p) => p.status === 'previsao')
+  const todas = pedidosFiltered.value.filter((p) => p.status === 'previsao')
+  const marcadas = todas.filter((p) => p.pedido_bling && previsoesSel.value.has(p.pedido_bling))
+  // Marcou → sai só o marcado; não marcou nada → sai tudo (como sempre foi).
+  const linhas = marcadas.length ? marcadas : todas
   if (!linhas.length) return
   // Itens do mesmo pedido juntos, na ordem em que estão na tabela.
   const porPedido = new Map<string, PedidoRow[]>()
@@ -1100,6 +1128,8 @@ function imprimirPrevisoes() {
         linhas.map((r) => r.pedido_bling).filter((n): n is string => !!n),
       )]
       void marcarPrevisoesImpressas(nums, linhas)
+      // Papel saiu: desmarca a seleção pra não sair repetido no próximo clique.
+      previsoesSel.value = new Set()
     } finally {
       setTimeout(() => iframe.remove(), 60000)
     }
@@ -1815,10 +1845,13 @@ async function conferirTodos() {
       <button
         v-if="pedidosPrevisaoCount > 0"
         class="inline-flex items-center gap-1 rounded-md border border-yellow-500 text-yellow-700 dark:text-yellow-400 px-2 py-1 font-semibold hover:bg-yellow-500/10"
-        title="Imprime a lista das previsões na impressora térmica (etiqueta 10×15) — só informação, pra deixar tudo separado antes da etiqueta liberar"
+        :title="previsoesSelCount > 0
+          ? 'Imprime SÓ as previsões marcadas na tabela (checkbox amarelo)'
+          : 'Imprime a lista das previsões na impressora térmica (etiqueta 10×15) — pra escolher só algumas, marque os checkboxes amarelos na tabela'"
         @click="imprimirPrevisoes"
       >
-        <Printer class="size-3.5" /> imprimir
+        <Printer class="size-3.5" />
+        {{ previsoesSelCount > 0 ? `imprimir ${previsoesSelCount} marcada${previsoesSelCount !== 1 ? 's' : ''}` : 'imprimir' }}
       </button>
       <div v-if="totalPendentesAntigos > 0" class="relative inline-block group">
         <span class="inline-flex items-center gap-1.5 rounded-md bg-amber-500 text-white px-2.5 py-1 font-semibold cursor-help">
@@ -1941,6 +1974,16 @@ async function conferirTodos() {
                 class="cursor-pointer"
                 :checked="etiquetasSel.has(row.pedido_bling)"
                 @change="toggleEtiquetaSel(row.pedido_bling)"
+              />
+              <!-- Previsão: checkbox amarelo escolhe QUAIS previsões saem no
+                   papel (Eduardo, 2026-08-27). Nada marcado = imprime todas. -->
+              <input
+                v-else-if="row._isFirstOfGroup && row.status === 'previsao' && row.pedido_bling"
+                type="checkbox"
+                class="cursor-pointer accent-yellow-500"
+                :checked="previsoesSel.has(row.pedido_bling)"
+                title="Marcar esta previsão pra imprimir (nada marcado = imprime todas)"
+                @change="togglePrevisaoSel(row.pedido_bling)"
               />
             </td>
             <td class="whitespace-nowrap">
