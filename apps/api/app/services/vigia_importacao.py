@@ -130,9 +130,11 @@ async def _pedidos_pagos_ml(
 
 
 async def _contas_ml(session: AsyncSession) -> list[tuple[Integration, str]]:
-    """Integrações ML ativas + nome amigável (store_info.account_name;
-    fallback integration.name). store_info pode ter mais de uma linha por
-    integração — o primeiro nome não-vazio ganha."""
+    """Integrações ML ativas + rótulo amigável "Mercado Livre <conta>"
+    (conta = store_info.account_name; fallback integration.name). A
+    plataforma vai NA FRENTE do rótulo — pedido do Eduardo (27/08): "tem
+    que ter o nome se é mercado livre se é shopee". store_info pode ter
+    mais de uma linha por integração — o primeiro nome não-vazio ganha."""
     rows = (
         await session.execute(
             select(Integration, StoreInfo.account_name)
@@ -146,10 +148,13 @@ async def _contas_ml(session: AsyncSession) -> list[tuple[Integration, str]]:
     for integration, account_name in rows:
         atual = por_id.get(integration.id)
         if atual is None:
-            por_id[integration.id] = (integration, account_name or integration.name)
-        elif account_name and atual[1] == atual[0].name:
             por_id[integration.id] = (integration, account_name)
-    return list(por_id.values())
+        elif atual[1] is None and account_name:
+            por_id[integration.id] = (integration, account_name)
+    return [
+        (integration, f"Mercado Livre {nome or integration.name}")
+        for integration, nome in por_id.values()
+    ]
 
 
 def _texto_aviso(rows: list[VigiaImportacao]) -> str:
