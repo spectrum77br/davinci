@@ -244,6 +244,12 @@ class Settings(BaseSettings):
     # NF_SEM_ESTOQUE_THREEMA_RECIPIENTS no .env.
     nf_sem_estoque_threema_recipients: str = ""
 
+    # Threema IDs (vírgula) do vigia de importação (pedido PAGO no
+    # marketplace que não caiu no Bling — services/vigia_importacao.py).
+    # Vazio = vigia inteiro desligado (o cron vira no-op). Set via
+    # VIGIA_IMPORTACAO_THREEMA_RECIPIENTS no .env.
+    vigia_importacao_threema_recipients: str = ""
+
     # Auto-hold da Margem (pedido do dono, 21/08): pedido que CAI na aba
     # Pendentes da Margem (margem baixa / saldo divergente) e ainda está
     # "Em aberto" (6) no Bling é movido SOZINHO pra Aguardando Cancelamento

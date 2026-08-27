@@ -78,6 +78,7 @@ from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.sync_orchestrator import SyncOrchestrator
 from app.services.valuation_estoque_snapshot import run_valuation_estoque_snapshot
+from app.services.vigia_importacao import vigia_importacao_sweep
 from app.worker_pool import (
     ARQ_FINANCIALS_QUEUE,
     ARQ_MARKETPLACE_QUEUE,
@@ -1198,6 +1199,24 @@ async def prioridade_estoque_tick(ctx: dict) -> None:
         logger.exception("prioridade_estoque_unhandled")
 
 
+async def vigia_importacao_tick(ctx: dict) -> None:
+    """Vigia de importação: pedido PAGO no marketplace (fase 1: ML) que não
+    caiu no Bling → aviso Threema pra importar manualmente no canal multi
+    loja (Eduardo, 2026-08-27 — a API pública do Bling não expõe essa tela).
+    Desligado enquanto VIGIA_IMPORTACAO_THREEMA_RECIPIENTS estiver vazio.
+    """
+    try:
+        summary = await vigia_importacao_sweep()
+        if summary.get("faltantes") or summary.get("avisados") or summary.get(
+            "contas_falha"
+        ):
+            logger.info("vigia_importacao_done", **summary)
+        else:
+            logger.debug("vigia_importacao_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_importacao_unhandled")
+
+
 async def nf_recuperar_tick(ctx: dict) -> None:
     """Recuperador de NF: retry de comando failed (teto 3), destrava de lease
     expirado e re-encadeamento de pedidos 'processando' órfãos (varredura
@@ -1859,6 +1878,7 @@ class WorkerSettings:
         nf_auto_enfileirar_tick,
         nf_recuperar_tick,
         prioridade_estoque_tick,
+        vigia_importacao_tick,
     ]
     cron_jobs = [
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
@@ -2011,6 +2031,10 @@ class WorkerSettings:
         # SEM flag (coluna vazia = no-op); os ganchos do enfileirar (auto e
         # manual) cobrem o mesmo caminho na hora da NF de qualquer jeito.
         cron(prioridade_estoque_tick, minute={3, 13, 23, 33, 43, 53}, run_at_startup=False),
+        # Vigia de importação (pedido pago no ML que não caiu no Bling →
+        # aviso Threema). 2×/hora em :9/:39 (minutos livres); no-op barato
+        # enquanto VIGIA_IMPORTACAO_THREEMA_RECIPIENTS estiver vazio.
+        cron(vigia_importacao_tick, minute={9, 39}, run_at_startup=False),
         # Espelho das NF-e das contas de emissão (página Pós Vendas). As
         # contas bling_notas são apps OAuth próprios — rate independente do
         # app principal; o custo por rodada é 1-2 páginas de lista por conta
