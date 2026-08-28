@@ -22,7 +22,10 @@ Só pedidos "Em aberto" (situacao 6) são tocados — quem já anda pela esteira
 de NF nunca é alterado. O PUT do Bling revalida a venda inteira (caso
 291676: erro 67); QUALQUER falha no PUT = loga e pula, sem efeito local.
 Toda troca vira linha no margem_audit (acao='sku',
-origem='prioridade_estoque', mudado_por=None = robô). Idempotente: item já
+origem='prioridade_estoque', mudado_por=None = robô) E linha datada nas
+Observações do pedido no Bling ("dd/mm - SKU trocado pela prioridade de
+estoque: antigo -> novo", via compose_observacoes — pedido do Eduardo
+28/08), no MESMO PUT da troca de item. Idempotente: item já
 na tag prioritária é ignorado; espelho local perdido num crash pós-PUT se
 auto-corrige no próximo sync do Bling. Commit fica com o caller (mesmo
 contrato do record_margem_audit) — o sweep próprio comita via session_scope.
@@ -40,7 +43,7 @@ from app.db import session_scope
 from app.models import BlingOrder, PricingProduct
 from app.services import nf_emissao_gerar
 from app.services.advisory_lock import SYNC_NAMESPACE
-from app.services.logistica_bling import build_observacoes_put_body
+from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
 from app.services.sku_tags import SUFFIX_TAGS
 
@@ -283,6 +286,15 @@ async def aplicar_prioridade_estoque(
             if not aplicadas:
                 # Espelho local não bate com o Bling — não arrisca o PUT.
                 continue
+            # Registro humano da troca nas Observações do pedido — pedido do
+            # Eduardo (28/08): "quando alterar, você tem que adicionar no
+            # campo observação". compose_observacoes põe "dd/mm - " na frente
+            # e não duplica a mesma linha no mesmo dia.
+            nota = "; ".join(f"{t['antigo']} -> {t['alvo']}" for t in aplicadas)
+            body["observacoes"] = compose_observacoes(
+                order.get("observacoes"),
+                f"SKU trocado pela prioridade de estoque: {nota}",
+            )
             await client.update_order(int(bling_id), body)
         except Exception as exc:  # noqa: BLE001 — PUT revalida a venda inteira
             summary["falhas"] += 1
