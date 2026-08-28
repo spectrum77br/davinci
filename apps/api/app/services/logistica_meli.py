@@ -28,12 +28,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Collection
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Text, cast, func, select
+from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
@@ -481,6 +481,131 @@ async def enviar_chamado_for_row(session: AsyncSession, row: Logistica, message:
     await client.send_claim_message(claim_id, message, receiver_role="mediator")
     row.chamado = str(claim_id)
     return str(claim_id)
+
+
+_SWEEP_JANELA_DIAS = 45
+# Janela do /orders/search por date_last_updated (1 chamada cobre 50 pedidos).
+_SWEEP_UPDATED_DIAS = 15
+_SWEEP_MAX_PAGINAS = 50
+
+
+async def sweep_pos_venda(session: AsyncSession) -> dict:
+    """Re-olha TODAS as linhas ML da janela — inclusive as resolvidas que o
+    painel esconde — e devolve os ids cuja situação de pós-venda MUDOU.
+
+    Mesmo ponto cego dos sweeps Shopee/TikTok: o recarregar só re-enriquece as
+    pendentes/visíveis; linha escondida (ex. "Pago | Enviado" sem ação) nunca
+    mais era consultada, então entrega tardia ficava invisível pra sempre e a
+    regra "Pago | Entregue → Entregue" não disparava (caso real: pedido
+    2000018057490026 / Bling 291816, 28/08).
+
+    Fonte barata: `/orders/search` do seller por `order.date_last_updated`
+    (janela de 15d, 50 pedidos/página) — devolve `status` e `tags` (incl.
+    "delivered"/"not_delivered") de quem MUDOU. Sinais contra o local:
+      - tag delivered   e ship_status local != delivered;
+      - tag not_delivered e ship_status local != not_delivered;
+      - status do pedido  != order_status local.
+
+    Diferente dos sweeps Shopee/TikTok, NÃO grava meli_status aqui: o search
+    não traz a assinatura completa (substatus, claim, return). Só coleta ids;
+    o recarregar os passa como `extras` — furando o escondimento — e o enrich
+    completo atualiza a linha e aplica a regra no Bling.
+
+    Limite honesto: claim/mediação que não muda status nem tags do pedido não
+    gera sinal (o search não expõe claims); pra isso segue valendo o ⟳ da
+    linha. `pedido_marketplace` pode ser order_id OU pack_id — casa contra os
+    dois índices."""
+    corte = datetime.now(UTC).date() - timedelta(days=_SWEEP_JANELA_DIAS)
+    rows = (
+        await session.execute(
+            select(Logistica).where(
+                func.lower(func.trim(Logistica.plataforma)).in_(tuple(_ML_PLATAFORMAS)),
+                func.coalesce(Logistica.pedido_marketplace, "") != "",
+                or_(Logistica.data.is_(None), Logistica.data >= corte),
+            )
+        )
+    ).scalars().all()
+
+    por_conta: dict[str, list[Logistica]] = {}
+    for r in rows:
+        por_conta.setdefault((r.conta or "").strip(), []).append(r)
+
+    agora = datetime.now(UTC)
+    fmt = "%Y-%m-%dT%H:%M:%S.000-00:00"
+    date_to = agora.strftime(fmt)
+    date_from = (agora - timedelta(days=_SWEEP_UPDATED_DIAS)).strftime(fmt)
+
+    mudados: set[UUID] = set()
+    contas_ok = n_hits = 0
+    for conta, linhas in por_conta.items():
+        integ = await _ml_integration_for_conta(session, conta)
+        if integ is None:
+            continue
+        seller_id = decrypt_json(integ.credentials).get("user_id")
+        if not seller_id:
+            logger.warning("logistica_ml_sweep_sem_user_id", conta=conta)
+            continue
+        client = _build_ml_client(session, integ)
+        contas_ok += 1
+
+        por_id: dict[str, list[dict]] = {}
+        por_pack: dict[str, list[dict]] = {}
+        offset = paginas = 0
+        try:
+            while True:
+                body = await client.search_orders_updated(
+                    seller_id=seller_id, date_from=date_from, date_to=date_to,
+                    limit=50, offset=offset,
+                )
+                results = body.get("results") or []
+                for o in results:
+                    oid = str(o.get("id") or "").strip()
+                    if oid:
+                        por_id.setdefault(oid, []).append(o)
+                    pid = str(o.get("pack_id") or "").strip()
+                    if pid and pid.lower() not in ("none", "null"):
+                        por_pack.setdefault(pid, []).append(o)
+                paging = body.get("paging") or {}
+                offset += len(results)
+                paginas += 1
+                if (
+                    not results
+                    or offset >= int(paging.get("total") or 0)
+                    or paginas >= _SWEEP_MAX_PAGINAS
+                ):
+                    break
+        except Exception as e:  # noqa: BLE001 — best-effort por conta
+            logger.warning(
+                "logistica_ml_sweep_search_falhou", conta=conta, err=str(e)[:200]
+            )
+            continue
+
+        for r in linhas:
+            meli = r.meli_status or {}
+            if not meli:
+                continue  # nunca enriquecida — o backfill normal cuida dela
+            pedido = (r.pedido_marketplace or "").strip()
+            cands = [*(por_id.get(pedido) or []), *(por_pack.get(pedido) or [])]
+            if not cands:
+                continue
+            ship_local = (meli.get("ship_status") or "").strip().lower()
+            order_local = (meli.get("order_status") or "").strip().lower()
+            for o in cands:
+                tags = {str(t).strip().lower() for t in (o.get("tags") or [])}
+                st = str(o.get("status") or "").strip().lower()
+                if (
+                    ("delivered" in tags and ship_local != "delivered")
+                    or ("not_delivered" in tags and ship_local != "not_delivered")
+                    or (st and st != order_local)
+                ):
+                    mudados.add(r.id)
+                    n_hits += 1
+                    break
+
+    await session.commit()  # persiste tokens que refrescarem durante o sweep
+    summary = {"seen": len(rows), "contas": contas_ok, "hits": n_hits}
+    logger.info("logistica_ml_sweep_pos_venda", **summary)
+    return {"ids": list(mudados), **summary}
 
 
 async def enrich_recent(

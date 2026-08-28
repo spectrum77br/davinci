@@ -319,14 +319,17 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     # sai daqui mesmo — o _ids_pendentes só considera linhas existentes, então
     # os ids apagados em `mudaram` não voltam.
     removed = await cleanup_finalizados(session)
-    # Devolução pós-entrega (Shopee/TikTok) não aparece nas pendentes do painel
-    # (a linha "Concluído"/"Em trânsito" fica escondida como resolvida): os
-    # sweeps re-olham as escondidas em lote e devolvem quem mudou de vida —
-    # esses ids entram como extras e furam o escondimento.
+    # Pós-venda que muda DEPOIS da entrega (devolução, entrega tardia) não
+    # aparece nas pendentes do painel (a linha "Concluído"/"Em trânsito" fica
+    # escondida como resolvida): os sweeps Shopee/TikTok/ML re-olham as
+    # escondidas em lote e devolvem quem mudou de vida — esses ids entram como
+    # extras e furam o escondimento.
     sweep = await logistica_shopee.sweep_pos_venda(session)
     sweep_tk = await logistica_tiktok.sweep_pos_venda(session)
+    sweep_ml = await logistica_meli.sweep_pos_venda(session)
     alvo = await _ids_pendentes(
-        session, extras=[*mudaram, *sweep["ids"], *sweep_tk["ids"]]
+        session,
+        extras=[*mudaram, *sweep["ids"], *sweep_tk["ids"], *sweep_ml["ids"]],
     )
     logger.info(
         "logistica_recarregar_inicio",
@@ -334,6 +337,7 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
         cleanup=removed,
         sweep_shopee=len(sweep["ids"]),
         sweep_tiktok=len(sweep_tk["ids"]),
+        sweep_ml=len(sweep_ml["ids"]),
         **{f"alvo_{k}": len(v) for k, v in alvo.items()},
     )
     enr = await logistica_meli.enrich_recent(session, ids=alvo["ml"], only_empty=False)

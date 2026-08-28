@@ -382,6 +382,33 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def search_orders_updated(
+        self,
+        *,
+        seller_id: str | int,
+        date_from: str,
+        date_to: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """Como `search_orders`, mas filtrando por `order.date_last_updated`:
+        pega quem MUDOU na janela (entrega tardia, cancelamento), não quem foi
+        criado nela. Cada resultado traz `status` e `tags` (incl. "delivered"/
+        "not_delivered") — base do sweep de pós-venda da Logística."""
+        r = await self._request(
+            "GET",
+            "/orders/search",
+            params={
+                "seller": seller_id,
+                "order.date_last_updated.from": date_from,
+                "order.date_last_updated.to": date_to,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        r.raise_for_status()
+        return r.json() or {}
+
     async def get_listing_price(self, link: "ProductLink") -> float | None:
         """Read the current price from /items/{id}. ML quotes the item-level
         price even for multi-variation listings, so variation_id is ignored
