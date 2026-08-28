@@ -313,9 +313,29 @@ TIKTOK_STATUS_LABELS_PT: dict[str, str] = {
 }
 
 
+# Situações da returns API do TikTok em que o caso de devolução está ENCERRADO
+# (desistido ou recusado). Qualquer outra (REQUEST_PENDING, AWAITING_BUYER_SHIP,
+# BUYER_SHIPPED_ITEM, ..._COMPLETE, ...) conta como devolução VIVA. As duas
+# grafias de REJECT por segurança (a doc da TikTok oscila).
+_TIKTOK_RETURN_ENCERRADO = {
+    "RETURN_OR_REFUND_REQUEST_CANCEL",
+    "RETURN_OR_REFUND_REQUEST_REJECT",
+    "REFUND_OR_RETURN_REQUEST_REJECT",
+}
+
+
 def assinatura_tiktok(status: dict[str, str] | None) -> str:
     """Assinatura em PT do TikTok = o `order_status` traduzido. Vazio se não
-    houver status."""
+    houver status.
+
+    Exceção: o vocabulário de order_status do TikTok NEM TEM devolução — o
+    pedido segue DELIVERED/COMPLETED enquanto a returns API mostra o caso vivo
+    (real: 585411441781475242 e cia., 28/08). O sweep de pós-venda grava esse
+    sinal em `return_status`; havendo um vivo, a assinatura vira "Devolução
+    solicitada" (mesmo rótulo da Shopee) pra regra da aba Status disparar."""
+    ret = ((status or {}).get("return_status") or "").strip().upper()
+    if ret and ret not in _TIKTOK_RETURN_ENCERRADO:
+        return "Devolução solicitada"
     v = ((status or {}).get("order_status") or "").strip().upper()
     if not v:
         return ""

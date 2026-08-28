@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Collection
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Text, cast, func, select
+from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
@@ -172,9 +172,16 @@ async def enrich_row(
             client_cache[conta] = client
 
     enr = await build_enrichment(client, order_id)
+    meli = enr["meli_status"]
+    # `return_status` vem do sweep de pós-venda (returns API), não do
+    # build_enrichment — preserva no re-enrich, senão a devolução detectada
+    # sumiria da assinatura no tick seguinte e a regra de status regrediria.
+    ret = (row.meli_status or {}).get("return_status")
+    if ret:
+        meli = {**meli, "return_status": ret}
     # Antes de trocar o status: o carimbo compara o valor velho com o novo.
-    row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
-    row.meli_status = enr["meli_status"]
+    row.status_datas = logistica_datas.aplicar(row, meli, enr.get("datas"))
+    row.meli_status = meli
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]
     if enr.get("localizacao"):
@@ -184,6 +191,126 @@ async def enrich_row(
         row.meli_status, row.localizacao
     )
     return True
+
+
+# Janela do sweep de pós-venda: linhas TikTok com `data` (data do pedido) até 45
+# dias atrás — cobre com folga o prazo de devolução. ~750 linhas ≈ 16 chamadas
+# em lote por varredura (medido 28/08). Mesma mecânica do sweep da Shopee.
+_SWEEP_JANELA_DIAS = 45
+# Janela das devoluções (paridade com a Shopee, que limita em 15 dias).
+_RETURNS_JANELA_DIAS = 15
+
+
+async def sweep_pos_venda(session: AsyncSession) -> dict:
+    """Re-olha TODAS as linhas TikTok da janela — inclusive as resolvidas que o
+    painel esconde — e devolve os ids cuja situação de pós-venda MUDOU.
+
+    Espelho do `logistica_shopee.sweep_pos_venda` (mesmo ponto cego: linha
+    escondida nunca mais era re-consultada — 16 pedidos ficaram "Em trânsito"
+    no painel dias depois de entregues, e devolução pós-entrega era invisível;
+    caso real 28/08, pedidos 585411441781475242/585612645547804469/
+    585673041600415018 + 15 pra "Entregue").
+
+    Duas fontes, ambas em lote e por conta:
+    - `get_order_status_map` (50 pedidos/chamada): status vivo mudou
+      (DELIVERED, COMPLETED, ...) → atualiza meli_status + carimbo de data;
+    - `get_return_list` (returns/search): devolução que o order_status do
+      TikTok NEM TEM como mostrar → grava `meli_status["return_status"]`;
+      `assinatura_tiktok` então rende "Devolução solicitada". Havendo mais de
+      um caso pro mesmo pedido, vale o VIVO mais recente.
+
+    Retorna {"ids": [UUID...], **contadores}. O recarregar passa os ids como
+    `extras` do `_ids_pendentes` — extras furam o escondimento — e o fluxo
+    normal re-enriquece a linha e aplica a regra de status no Bling."""
+    corte = datetime.now(UTC).date() - timedelta(days=_SWEEP_JANELA_DIAS)
+    rows = (
+        await session.execute(
+            select(Logistica).where(
+                func.lower(func.trim(Logistica.plataforma)).in_(
+                    tuple(_TIKTOK_PLATAFORMAS)
+                ),
+                func.coalesce(Logistica.pedido_marketplace, "") != "",
+                or_(Logistica.data.is_(None), Logistica.data >= corte),
+            )
+        )
+    ).scalars().all()
+
+    por_conta: dict[str, list[Logistica]] = {}
+    for r in rows:
+        por_conta.setdefault((r.conta or "").strip(), []).append(r)
+
+    mudados: set[UUID] = set()
+    n_status = n_returns = contas_ok = 0
+    agora = int(datetime.now(UTC).timestamp())
+    ret_from = agora - _RETURNS_JANELA_DIAS * 24 * 3600 + 300
+    for conta, linhas in por_conta.items():
+        integ = await _tiktok_integration_for_conta(session, conta)
+        if integ is None:
+            continue
+        client = _build_tiktok_client(session, integ)
+        contas_ok += 1
+
+        # 1) status vivo do pedido, em lotes de 50.
+        oids = [(r.pedido_marketplace or "").strip() for r in linhas]
+        smap = await client.get_order_status_map(oids)
+        for r in linhas:
+            info = smap.get((r.pedido_marketplace or "").strip()) or {}
+            st = (info.get("status") or "").strip().upper()
+            atual = ((r.meli_status or {}).get("order_status") or "").strip().upper()
+            if st and st != atual:
+                meli = dict(r.meli_status or {})
+                meli["order_status"] = st
+                datas: dict[str, dict[str, str]] = {}
+                logistica_datas.propor(
+                    datas, "order_status", info.get("update_time"),
+                    logistica_datas.FONTE_PLATAFORMA,
+                )
+                r.status_datas = logistica_datas.aplicar(r, meli, datas)
+                r.meli_status = meli
+                mudados.add(r.id)
+                n_status += 1
+
+        # 2) devoluções da loja nos últimos 15 dias (por update_time).
+        try:
+            devolucoes = await client.get_return_list(
+                update_time_from=ret_from, update_time_to=agora
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort por conta
+            logger.warning(
+                "logistica_tiktok_sweep_returns_falhou",
+                conta=conta, err=str(e)[:200],
+            )
+            devolucoes = []
+        melhor: dict[str, tuple[bool, int, str]] = {}
+        for d in devolucoes:
+            oid = str(d.get("order_id") or "").strip()
+            st = str(d.get("return_status") or "").strip().upper()
+            if not oid or not st:
+                continue
+            vivo = st not in logistica_rules._TIKTOK_RETURN_ENCERRADO
+            cand = (vivo, int(d.get("update_time") or 0), st)
+            if oid not in melhor or cand[:2] > melhor[oid][:2]:
+                melhor[oid] = cand
+        for r in linhas:
+            got = melhor.get((r.pedido_marketplace or "").strip())
+            if got is None:
+                continue
+            st = got[2]
+            atual = ((r.meli_status or {}).get("return_status") or "").strip().upper()
+            if st != atual:
+                meli = dict(r.meli_status or {})
+                meli["return_status"] = st
+                r.meli_status = meli
+                mudados.add(r.id)
+                n_returns += 1
+
+    await session.commit()
+    summary = {
+        "seen": len(rows), "contas": contas_ok,
+        "order_status": n_status, "returns": n_returns,
+    }
+    logger.info("logistica_tiktok_sweep_pos_venda", **summary)
+    return {"ids": list(mudados), **summary}
 
 
 async def enrich_recent(

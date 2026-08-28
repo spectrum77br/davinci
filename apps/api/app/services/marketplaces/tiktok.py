@@ -564,6 +564,50 @@ class TikTokClient:
                 }
         return out
 
+    async def get_return_list(
+        self, *, update_time_from: int, update_time_to: int, page_size: int = 50
+    ) -> list[dict]:
+        """Devoluções da loja cuja situação MUDOU na janela (epoch UTC).
+
+            POST /return_refund/202309/returns/search
+
+        Formato medido ao vivo (28/08): filtros `update_time_ge`/`update_time_lt`
+        no body, `page_size`/`page_token` na query; itens em
+        `data.return_orders[]` com `order_id`/`return_id`/`return_status`
+        (RETURN_OR_REFUND_REQUEST_PENDING, AWAITING_BUYER_SHIP,
+        BUYER_SHIPPED_ITEM, ..._COMPLETE, ..._CANCEL)/`return_type`
+        (REFUND | RETURN_AND_REFUND | REPLACEMENT)/`update_time`; paginação por
+        `next_page_token`. Best-effort: erro loga e devolve o que já juntou —
+        não derruba o sweep de pós-venda.
+        """
+        path = "/return_refund/202309/returns/search"
+        body = {"update_time_ge": update_time_from, "update_time_lt": update_time_to}
+        out: list[dict] = []
+        token: str | None = None
+        pages = 0
+        while True:
+            extra = {"page_size": str(page_size)}
+            if token:
+                extra["page_token"] = token
+            try:
+                resp = await self._post(path, body, extra)
+            except httpx.HTTPError as e:
+                logger.warning("tiktok_get_return_list_http_error", err=str(e)[:200])
+                break
+            if resp.get("code") not in (0, None):
+                logger.warning(
+                    "tiktok_get_return_list_api_error",
+                    code=resp.get("code"), msg=str(resp.get("message"))[:200],
+                )
+                break
+            data = resp.get("data") or {}
+            out.extend(data.get("return_orders") or [])
+            token = data.get("next_page_token")
+            pages += 1
+            if not token or pages > 50:
+                break
+        return out
+
     async def get_tracking(self, order_id: str) -> dict:
         """Eventos de rastreio de UM pedido (Fulfillment API 202309). Retorna o
         `data` com `tracking` = lista de eventos (`description` em inglês,
