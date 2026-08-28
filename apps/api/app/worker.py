@@ -2027,10 +2027,14 @@ class WorkerSettings:
         cron(nf_recuperar_tick, minute=_FIVE_MIN, run_at_startup=False),
         # Prioridade de estoque (coluna Prioridade da Tabela de Preços):
         # troca o SKU do pedido "Em aberto" pra tag prioritária logo que ele
-        # cai — antes de margem/NF. :3/:13/... = fora dos picos de :0/:2/:4/:5.
-        # SEM flag (coluna vazia = no-op); os ganchos do enfileirar (auto e
-        # manual) cobrem o mesmo caminho na hora da NF de qualquer jeito.
-        cron(prioridade_estoque_tick, minute={3, 13, 23, 33, 43, 53}, run_at_startup=False),
+        # cai — antes de margem/NF. Minutos ÍMPARES = a cada 2 min (Eduardo
+        # 28/08: "nao da pra diminuir esse tempo de 10 min"; o espelho chega
+        # via webhook em segundos, então o cron era o gargalo), fora de fase
+        # dos crons pesados dos minutos pares. Tick sem candidato = 2 SELECTs
+        # leves e ZERO chamadas ao Bling. SEM flag (coluna vazia = no-op); os
+        # ganchos do enfileirar (auto e manual) cobrem a hora da NF de
+        # qualquer jeito.
+        cron(prioridade_estoque_tick, minute=set(range(1, 60, 2)), run_at_startup=False),
         # Vigia de importação (pedido pago no ML que não caiu no Bling →
         # aviso Threema). 2×/hora em :9/:39 (minutos livres); no-op barato
         # enquanto VIGIA_IMPORTACAO_THREEMA_RECIPIENTS estiver vazio.
