@@ -55,6 +55,7 @@ from app.models.nf import NfEtiquetaArquivo
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
 from app.services.estoque_relatorio_pdf import relatorio_pedidos_pdf
+from app.services.nf_etiqueta_armazem import filtrar_por_armazem
 from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
@@ -234,6 +235,19 @@ def _resolve_tags(user: User, override: str | None) -> list[str] | None:
         return [ov]
 
     return allowed
+
+
+def _tags_pedidos(user: User, tag: str | None) -> list[str] | None:
+    """Tags que o chamador enxerga na aba Pedidos (None = todas).
+
+    Gerente de etiquetas não tem cerca aqui (vê o time inteiro), mas o
+    dropdown de tag continua valendo como sub-seleção."""
+    if user.role != UserRole.ADMIN and _pedidos_todas_tags(user):
+        ov = (tag or "").strip().lower()
+        if ov and ov not in _VALID_TAGS:
+            raise HTTPException(400, detail={"code": "invalid_tag"})
+        return [ov] if ov else None
+    return _resolve_tags(user, tag)
 
 
 def _resolve_dates(
@@ -495,17 +509,9 @@ async def list_estoque_pedidos(
     outras situações custom não pertencem ao fluxo. Data de referência:
     ship date se confirmado, senão HOJE (BRT) — pendente e previsão
     "fixam" no dia atual e aparecem todo dia até avançar."""
-    if user.role != UserRole.ADMIN and _pedidos_todas_tags(user):
-        # Gerente de etiquetas: sem cerca de tag AQUI (e só aqui — o
-        # /produtos e o /envios continuam passando por _resolve_tags).
-        # O dropdown de tag segue funcionando: override validado contra a
-        # lista global, espelhando o caminho do admin em _resolve_tags.
-        ov = (tag or "").strip().lower()
-        if ov and ov not in _VALID_TAGS:
-            raise HTTPException(400, detail={"code": "invalid_tag"})
-        tags = [ov] if ov else None
-    else:
-        tags = _resolve_tags(user, tag)
+    # Gerente de etiquetas: sem cerca de tag AQUI (e só aqui — o /produtos
+    # e o /envios continuam passando por _resolve_tags).
+    tags = _tags_pedidos(user, tag)
     data_inicio, data_fim = _resolve_dates(data_inicio, data_fim)
 
     # HOJE em BRT — usado tanto no corte anti-zumbi quanto no "pin" da
@@ -858,20 +864,28 @@ async def list_estoque_pedidos(
     }
 
 
-def _pdf_para_impressao(row: NfEtiquetaArquivo) -> bytes:
+def _pdf_para_impressao(
+    row: NfEtiquetaArquivo, tags: list[str] | None = None
+) -> bytes:
     """PDF final de UM pedido: etiqueta, ou etiqueta + NF quando é correios.
 
     A presença de `nf_pdf` é o sinal do fluxo correios/ML (não aceita declaração
     de conteúdo, vai a NF junto). Falha na junção degrada pra só a etiqueta —
     melhor imprimir a etiqueta sozinha do que travar o despacho.
+
+    `tags` = armazéns de quem está imprimindo. Pedido que se divide entre
+    armazéns tem UMA etiqueta só no banco, listando os itens de todo mundo na
+    Declaração de Conteúdo; aqui ela é recortada pra cada armazém ver só o que
+    ele despacha (no fluxo correios não há declaração e nada muda).
     """
+    blob = filtrar_por_armazem(row.blob, tags) if tags else row.blob
     if not row.nf_pdf:
-        return row.blob
+        return blob
     try:
-        return juntar_etiqueta_nf(row.blob, row.nf_pdf)
+        return juntar_etiqueta_nf(blob, row.nf_pdf)
     except EtiquetaJuntarError:
         logger.warning("nf_etiqueta_juntar_falhou", pedido_bling=row.pedido_bling)
-        return row.blob
+        return blob
 
 
 class PrevisoesImpressasIn(BaseModel):
@@ -916,6 +930,9 @@ class EtiquetasLoteIn(BaseModel):
     # Anexa o relatório de conferência como últimas páginas do PDF
     # (etiquetas em cima, relatório embaixo — um documento só).
     incluir_relatorio: bool = False
+    # Armazém selecionado no dropdown da tela (mesma semântica do GET
+    # /pedidos): recorta a declaração dos pedidos divididos.
+    tag: str | None = None
 
 
 async def _linhas_relatorio(
@@ -998,7 +1015,7 @@ async def _linhas_relatorio(
 async def get_pedidos_etiquetas_lote(
     payload: EtiquetasLoteIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
 ) -> Response:
     """Junta as etiquetas dos pedidos selecionados num PDF só (impressão em lote).
 
@@ -1007,6 +1024,7 @@ async def get_pedidos_etiquetas_lote(
     404 só quando nenhum dos selecionados tem etiqueta. Carimba `impressa_em`
     nos que entraram no PDF, pra tela marcar "Impressa" e evitar duplicidade.
     """
+    tags = _tags_pedidos(user, payload.tag)
     # dict.fromkeys: dedupe preservando a ordem da seleção.
     pedidos = [p for p in dict.fromkeys(payload.pedidos) if p]
     rows = (
@@ -1022,7 +1040,7 @@ async def get_pedidos_etiquetas_lote(
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
 
     try:
-        partes = [_pdf_para_impressao(r) for r in ordenados]
+        partes = [_pdf_para_impressao(r, tags) for r in ordenados]
         if payload.incluir_relatorio:
             impressos = [r.pedido_bling for r in ordenados]
             linhas = await _linhas_relatorio(session, impressos)
@@ -1062,13 +1080,15 @@ async def get_pedidos_etiquetas_lote(
 async def get_pedido_etiqueta(
     pedido_bling: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    tag: str | None = None,
 ) -> Response:
     """Serve a etiqueta transformada do pedido (blob em nf_etiqueta_arquivo).
 
     Autenticado por cookie — o botão "Imprimir Etiqueta" abre a URL numa aba
     nova e o browser manda o cookie sozinho. 404 se ainda não há etiqueta
     (a etapa de visualização da NF automática não rodou pra este pedido)."""
+    tags = _tags_pedidos(user, tag)
     row = (
         await session.execute(
             select(NfEtiquetaArquivo).where(
@@ -1080,7 +1100,7 @@ async def get_pedido_etiqueta(
         # Sem etiqueta ainda (a NF pode ter chegado antes, mas não há o que
         # imprimir sem a etiqueta que cola no volume).
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
-    conteudo = _pdf_para_impressao(row)
+    conteudo = _pdf_para_impressao(row, tags)
     if row.impressa_em is None:
         # Abrir a etiqueta é imprimir — carimba pra tela marcar "Impressa"
         # (mesma regra do lote: só a primeira vez).

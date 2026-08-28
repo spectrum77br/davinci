@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder, User, UserRole, UserStatus
 from app.models.nf import NfEtiquetaArquivo
+from tests.test_nf_etiqueta_armazem import _declaracao
 
 PERM_VIEW = {"controle_estoque": {"view": True, "edit": False, "delete": False}}
 
@@ -337,3 +338,92 @@ async def test_serve_individual_tambem_carimba(
     lista = "/api/estoque/pedidos?data_inicio=2026-05-29&data_fim=2026-05-29"
     rows = {p["pedido_bling"]: p for p in (await client.get(lista)).json()["data"]}
     assert rows["930003"]["etiqueta_impressa_em"]
+
+
+@pytest_asyncio.fixture
+async def pedido_dividido(db: AsyncSession) -> None:
+    """Pedido que sai de dois armazéns (caso do 292860) com UMA etiqueta só.
+
+    A Declaração de Conteúdo lista os dois SKUs; cada armazém só pode ver o que
+    despacha.
+    """
+    d = date(2026, 5, 30)
+    for i, sku in enumerate(("a055.sa", "dg053.ci+a001.ci")):
+        db.add(BlingOrder(
+            bling_id=940001, numero="940001", item_codigo=sku,
+            item_index=i, situacao="15", em_andamento_data=d,
+        ))
+    declaracao = _declaracao([
+        ("a055.sa", "Carregador 20W", 1),
+        ("dg053.ci+a001.ci", "Uranyx Hotwav A17", 1),
+    ])
+    db.add(NfEtiquetaArquivo(
+        pedido_bling="940001",
+        filename="etiqueta_940001.pdf",
+        content_type="application/pdf",
+        size_bytes=len(declaracao),
+        blob=declaracao,
+    ))
+    await db.commit()
+
+
+@pytest_asyncio.fixture
+async def user_sa(db: AsyncSession) -> User:
+    """Operador cercado no armazém SA."""
+    u = User(
+        open_id=f"email:sa-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        email=f"sa-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+        permissions=PERM_VIEW,
+        stock_tags=["sa"],
+    )
+    db.add(u)
+    await db.commit()
+    await db.refresh(u)
+    return u
+
+
+@pytest.mark.asyncio
+async def test_serve_recorta_declaracao_pro_armazem_do_operador(
+    client: AsyncClient, user_sa: User,
+    auth_as: Callable[[User | None], None], pedido_dividido: None,
+):
+    """Quem despacha do SA imprime uma declaração só com o item do SA."""
+    auth_as(user_sa)
+    r = await client.get("/api/estoque/pedidos/940001/etiqueta")
+    assert r.status_code == 200, r.text
+    texto = "\n".join(_paginas_texto(r.content))
+    assert "a055.sa" in texto
+    assert "dg053.ci" not in texto
+
+
+@pytest.mark.asyncio
+async def test_serve_sem_armazem_escolhido_traz_a_etiqueta_inteira(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], pedido_dividido: None,
+):
+    """Admin sem escolher armazém no dropdown continua vendo tudo."""
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/940001/etiqueta")
+    assert r.status_code == 200, r.text
+    texto = "\n".join(_paginas_texto(r.content))
+    assert "a055.sa" in texto
+    assert "dg053.ci+a001.ci" in texto
+
+
+@pytest.mark.asyncio
+async def test_lote_respeita_o_armazem_escolhido(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], pedido_dividido: None,
+):
+    """O armazém do dropdown vale também na impressão em lote."""
+    auth_as(admin_view)
+    r = await client.post(
+        "/api/estoque/pedidos/etiquetas",
+        json={"pedidos": ["940001"], "tag": "ci"},
+    )
+    assert r.status_code == 200, r.text
+    texto = "\n".join(_paginas_texto(r.content))
+    assert "dg053.ci+a001.ci" in texto
+    assert "a055.sa" not in texto

@@ -680,7 +680,15 @@ async function patchPedidoObs(row: PedidoRow, newObs: string) {
 // Etiqueta transformada (landing zone da NF automática). URL relativa → o
 // cookie de sessão vai junto quando o <a> abre numa aba nova.
 function etiquetaUrl(row: PedidoRow) {
-  return `/api/estoque/pedidos/${encodeURIComponent(row.pedido_bling || '')}/etiqueta`
+  const base = `/api/estoque/pedidos/${encodeURIComponent(row.pedido_bling || '')}/etiqueta`
+  // O armazém do dropdown recorta a declaração dos pedidos divididos (quem
+  // despacha só vê o item que está com ele).
+  return tagImpressao() ? `${base}?tag=${tagImpressao()}` : base
+}
+// Armazém a mandar na impressão: só admin/gerente escolhem pelo dropdown —
+// operador comum já é cercado pelas stock_tags dele no backend.
+function tagImpressao() {
+  return (canUseTagFilter.value || isGerenteEtiquetas.value) ? tagOverride.value : ''
 }
 // Hora BRT em que a etiqueta chegou (dd/mm quando não é hoje).
 const _HORA_BRT = new Intl.DateTimeFormat('pt-BR', {
@@ -1309,7 +1317,9 @@ async function imprimirLote(comRelatorio = false) {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pedidos, incluir_relatorio: comRelatorio }),
+      body: JSON.stringify({
+        pedidos, incluir_relatorio: comRelatorio, tag: tagImpressao() || null,
+      }),
     })
     if (!resp.ok) throw new Error(String(resp.status))
     const blob = await resp.blob()
