@@ -2469,7 +2469,10 @@ async function conferirTodos() {
             saem de <span class="font-bold">mais de um armazém</span>.
           </template>
           <div class="mt-2 text-muted-foreground">
-            Parte dos itens da declaração está em outro armazém. Imprimir mesmo assim?
+            Parte dos itens da declaração está em outro armazém.
+          </div>
+          <div class="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 font-medium text-amber-800">
+            Fale com o responsável do outro estoque antes de despachar, para o pedido sair completo.
           </div>
         </div>
         <div class="flex justify-end gap-2 border-t bg-gray-50 px-5 py-3">
