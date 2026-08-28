@@ -685,13 +685,24 @@ async function patchPedidoObs(row: PedidoRow, newObs: string) {
 function etiquetaUrl(row: PedidoRow) {
   return `/api/estoque/pedidos/${encodeURIComponent(row.pedido_bling || '')}/etiqueta`
 }
-// Pedido que sai de 2+ armazéns: avisa antes de imprimir. confirm() SÍNCRONO
-// no @click preserva a user activation do <a> — cancelar dá preventDefault.
+// Pedido que sai de 2+ armazéns: modal de aviso CENTRALIZADO antes de
+// imprimir (confirm() nativo era discreto demais). O <a> individual sempre
+// leva preventDefault; o clique no botão "Imprimir mesmo assim" do modal é
+// uma user activation NOVA → window.open não é bloqueado.
+const avisoCompartilhado = ref<{ pedidos: string[], onOk: () => void } | null>(null)
 function confirmarCompartilhado(row: PedidoRow, e: Event) {
-  if (
-    row.estoque_compartilhado
-    && !confirm(`Atenção: estoque compartilhado — o pedido ${row.pedido_bling} sai de mais de um armazém. Imprimir mesmo assim?`)
-  ) e.preventDefault()
+  if (!row.estoque_compartilhado) return
+  e.preventDefault()
+  const url = etiquetaUrl(row)
+  avisoCompartilhado.value = {
+    pedidos: [row.pedido_bling || ''],
+    onOk: () => { window.open(url, '_blank', 'noopener') },
+  }
+}
+function okCompartilhado() {
+  const aviso = avisoCompartilhado.value
+  avisoCompartilhado.value = null
+  aviso?.onOk()
 }
 // Hora BRT em que a etiqueta chegou (dd/mm quando não é hoje).
 const _HORA_BRT = new Intl.DateTimeFormat('pt-BR', {
@@ -1313,14 +1324,23 @@ async function imprimirLote(comRelatorio = false) {
     `${jaImpressos.length} etiqueta(s) já foram impressas (${jaImpressos.join(', ')}). Imprimir de novo?`,
   )) return
   // Pedido dividido entre armazéns: quem imprime precisa saber que parte dos
-  // itens da declaração está em outro armazém.
+  // itens da declaração está em outro armazém. O modal centralizado segura o
+  // lote; confirmar chama a continuação (download via <a> não precisa de
+  // user activation, então rodar depois do clique do modal é seguro).
   const compartilhados = pedidos.filter(p =>
     pedidosFilteredGrouped.value.some(r => r.pedido_bling === p && r.estoque_compartilhado),
   )
-  if (compartilhados.length && !confirm(
-    `Atenção: estoque compartilhado — pedido(s) ${compartilhados.join(', ')} saem de mais de um armazém. Imprimir mesmo assim?`,
-  )) return
-
+  if (compartilhados.length) {
+    avisoCompartilhado.value = {
+      pedidos: compartilhados,
+      onOk: () => { void executarLote(pedidos, comRelatorio) },
+    }
+    return
+  }
+  await executarLote(pedidos, comRelatorio)
+}
+async function executarLote(pedidos: string[], comRelatorio: boolean) {
+  if (imprimindoLote.value) return
   imprimindoLote.value = comRelatorio ? 'relatorio' : 'etiquetas'
   try {
     // fetch cru (não useApi): a resposta é um PDF binário, não JSON.
@@ -2424,6 +2444,49 @@ async function conferirTodos() {
           </div>
         </div>
       </section>
+    </div>
+
+    <!-- Aviso de estoque compartilhado: pedido que sai de 2+ armazéns -->
+    <div
+      v-if="avisoCompartilhado"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      @click.self="avisoCompartilhado = null"
+    >
+      <div class="w-full max-w-md overflow-hidden rounded-xl border-4 border-amber-500 bg-white shadow-2xl">
+        <div class="flex items-center gap-3 bg-amber-500 px-5 py-4">
+          <AlertTriangle class="size-8 shrink-0 text-white" />
+          <div class="text-lg font-bold uppercase tracking-wide text-white">
+            Atenção: estoque compartilhado
+          </div>
+        </div>
+        <div class="px-5 py-5 text-sm text-gray-800">
+          <template v-if="avisoCompartilhado.pedidos.length === 1">
+            O pedido <span class="font-bold">{{ avisoCompartilhado.pedidos[0] }}</span>
+            sai de <span class="font-bold">mais de um armazém</span>.
+          </template>
+          <template v-else>
+            Os pedidos <span class="font-bold">{{ avisoCompartilhado.pedidos.join(', ') }}</span>
+            saem de <span class="font-bold">mais de um armazém</span>.
+          </template>
+          <div class="mt-2 text-muted-foreground">
+            Parte dos itens da declaração está em outro armazém. Imprimir mesmo assim?
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 border-t bg-gray-50 px-5 py-3">
+          <button
+            class="rounded-md border px-4 py-2 text-sm hover:bg-gray-100"
+            @click="avisoCompartilhado = null"
+          >
+            Cancelar
+          </button>
+          <button
+            class="rounded-md bg-amber-500 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-600"
+            @click="okCompartilhado"
+          >
+            Imprimir mesmo assim
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Modal do botão INFORMAR (admin-only) -->
