@@ -272,9 +272,24 @@ _TIKTOK_PLATAFORMAS = {"tiktok", "tik tok", "tiktok shop"}
 _AMAZON_PLATAFORMAS = {"amazon"}
 
 
+# Situações da returns API em que o caso de devolução está ENCERRADO (desistido
+# ou fechado). Qualquer outra (REQUESTED/PROCESSING/ACCEPTED/JUDGING/
+# REFUND_PAID/SELLER_DISPUTE) conta como devolução VIVA.
+_SHOPEE_RETURN_ENCERRADO = {"CANCELLED", "CLOSED"}
+
+
 def assinatura_shopee(status: dict[str, str] | None) -> str:
     """Assinatura em PT da Shopee = o `order_status` traduzido. Vazio se não
-    houver status."""
+    houver status.
+
+    Exceção: devolução aberta DEPOIS da entrega não aparece no order_status —
+    o pedido segue COMPLETED enquanto a returns API mostra o caso vivo (real:
+    pedido 290580, 27/08). O sweep de pós-venda grava esse sinal em
+    `return_status`; havendo um vivo, a assinatura vira "Devolução solicitada"
+    pra regra da aba Status disparar igual ao TO_RETURN clássico."""
+    ret = ((status or {}).get("return_status") or "").strip().upper()
+    if ret and ret not in _SHOPEE_RETURN_ENCERRADO:
+        return SHOPEE_STATUS_LABELS_PT["TO_RETURN"]
     v = ((status or {}).get("order_status") or "").strip().upper()
     if not v:
         return ""

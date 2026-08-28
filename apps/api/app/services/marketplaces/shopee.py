@@ -342,6 +342,57 @@ class ShopeeClient:
                     }
         return out
 
+    async def get_return_list(
+        self, *, update_time_from: int, update_time_to: int, page_size: int = 100
+    ) -> list[dict]:
+        """Devoluções da loja cuja situação MUDOU na janela (epoch UTC).
+
+        Endpoint: GET /api/v2/returns/get_return_list. Peculiaridades medidas
+        ao vivo (28/08): `page_no` começa em 0 (com 1 a primeira página some),
+        os itens vêm em `response.return[]` com `order_sn`/`return_sn`/
+        `status`/`update_time`, e a janela update_time_from→to não pode passar
+        de 15 dias (a Shopee recusa com erro de parâmetro).
+
+        Best-effort no estilo do get_order_status_map: erro de API loga e
+        devolve o que já juntou — não derruba o sweep de pós-venda.
+        """
+        path = "/api/v2/returns/get_return_list"
+        out: list[dict] = []
+        page_no = 0
+        while True:
+            params = {
+                "page_no": page_no,
+                "page_size": page_size,
+                "update_time_from": update_time_from,
+                "update_time_to": update_time_to,
+            }
+            try:
+                r = await self._request("GET", path, params=params)
+            except httpx.HTTPError as e:
+                logger.warning("shopee_get_return_list_http_error", err=str(e)[:200])
+                break
+            body = r.json() or {}
+            if body.get("error") in _AUTH_CODES:
+                await self.refresh()
+                try:
+                    r = await self._request("GET", path, params=params)
+                except httpx.HTTPError as e:
+                    logger.warning("shopee_get_return_list_retry_failed", err=str(e)[:200])
+                    break
+                body = r.json() or {}
+            if body.get("error"):
+                logger.warning(
+                    "shopee_get_return_list_api_error",
+                    err=body.get("error"), msg=body.get("message"),
+                )
+                break
+            resp = body.get("response") or {}
+            out.extend(resp.get("return") or [])
+            if not resp.get("more") or page_no > 50:
+                break
+            page_no += 1
+        return out
+
     async def get_tracking_number(self, order_sn: str) -> str | None:
         """Número de rastreio de UM pedido.
 

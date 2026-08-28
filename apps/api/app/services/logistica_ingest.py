@@ -319,11 +319,17 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     # sai daqui mesmo — o _ids_pendentes só considera linhas existentes, então
     # os ids apagados em `mudaram` não voltam.
     removed = await cleanup_finalizados(session)
-    alvo = await _ids_pendentes(session, extras=mudaram)
+    # Devolução pós-entrega na Shopee não aparece nas pendentes do painel (a
+    # linha "Concluído" fica escondida como resolvida): o sweep re-olha as
+    # escondidas em lote e devolve quem mudou de vida — esses ids entram como
+    # extras e furam o escondimento.
+    sweep = await logistica_shopee.sweep_pos_venda(session)
+    alvo = await _ids_pendentes(session, extras=[*mudaram, *sweep["ids"]])
     logger.info(
         "logistica_recarregar_inicio",
         status_refresh=len(mudaram),
         cleanup=removed,
+        sweep_shopee=len(sweep["ids"]),
         **{f"alvo_{k}": len(v) for k, v in alvo.items()},
     )
     enr = await logistica_meli.enrich_recent(session, ids=alvo["ml"], only_empty=False)
