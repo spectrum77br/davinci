@@ -22,8 +22,13 @@ from app.models.nf import NfEtiquetaArquivo
 
 PERM_VIEW = {"controle_estoque": {"view": True, "edit": False, "delete": False}}
 
-# PDF mínimo válido (header) — só pra provar que o blob volta byte-a-byte.
+# PDF mínimo (header, sem páginas) — o resize falha e o serve DEGRADA pro blob
+# original byte-a-byte (prova do fail-safe do redimensionamento).
 _PDF_BYTES = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<</Type/Catalog>>endobj\n"
+
+# Tamanho da etiqueta térmica que o serve entrega (104,23 × 152,4 mm em pt).
+_ETQ_W = round(104.23 * 72 / 25.4, 1)  # 295.4
+_ETQ_H = round(152.4 * 72 / 25.4, 1)  # 432.0
 
 
 @pytest_asyncio.fixture
@@ -89,7 +94,8 @@ async def test_serve_etiqueta_blob(
     client: AsyncClient, admin_view: User,
     auth_as: Callable[[User | None], None], dois_pedidos: None,
 ):
-    """O endpoint devolve o blob exato + content-type + inline disposition."""
+    """PDF que o fitz não redimensiona (sem páginas) degrada pro blob exato,
+    com content-type + inline disposition."""
     auth_as(admin_view)
     r = await client.get("/api/estoque/pedidos/920001/etiqueta")
     assert r.status_code == 200, r.text
@@ -150,13 +156,20 @@ def _paginas_texto(pdf_bytes: bytes) -> list[str]:
     return [p.get_text().strip() for p in doc]
 
 
+def _paginas_tamanho(pdf_bytes: bytes) -> list[tuple[float, float]]:
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    return [(round(p.rect.width, 1), round(p.rect.height, 1)) for p in doc]
+
+
 @pytest.mark.asyncio
 async def test_serve_junta_etiqueta_com_nf(
     client: AsyncClient, db: AsyncSession, admin_view: User,
     auth_as: Callable[[User | None], None],
 ):
     """Fluxo correios/ML: quando há nf_pdf, o serve devolve etiqueta + NF juntadas
-    (etiqueta primeiro, NF depois), sem mexer no botão."""
+    (etiqueta primeiro, no tamanho térmico; NF depois, no tamanho original)."""
     db.add(BlingOrder(
         bling_id=920003, numero="920003", item_codigo="sku-c",
         item_index=0, situacao="15", em_andamento_data=date(2026, 5, 28),
@@ -177,6 +190,8 @@ async def test_serve_junta_etiqueta_com_nf(
     assert r.status_code == 200, r.text
     assert r.headers["content-type"].startswith("application/pdf")
     assert _paginas_texto(r.content) == ["ETIQUETA", "NOTA FISCAL"]
+    # etiqueta redimensionada; NF fica no tamanho original (300×442 do fixture)
+    assert _paginas_tamanho(r.content) == [(_ETQ_W, _ETQ_H), (300.0, 442.0)]
 
 
 @pytest.mark.asyncio
@@ -184,7 +199,8 @@ async def test_serve_sem_nf_so_etiqueta(
     client: AsyncClient, db: AsyncSession, admin_view: User,
     auth_as: Callable[[User | None], None],
 ):
-    """Sem nf_pdf (fluxo agência) o serve devolve só a etiqueta, intacta."""
+    """Sem nf_pdf (fluxo agência) o serve devolve só a etiqueta, redimensionada
+    pro tamanho de impressão (104,23×152,4mm)."""
     etq = _pdf("ETIQUETA")
     db.add(BlingOrder(
         bling_id=920004, numero="920004", item_codigo="sku-a",
@@ -202,8 +218,8 @@ async def test_serve_sem_nf_so_etiqueta(
     auth_as(admin_view)
     r = await client.get("/api/estoque/pedidos/920004/etiqueta")
     assert r.status_code == 200, r.text
-    assert r.content == etq
     assert _paginas_texto(r.content) == ["ETIQUETA"]
+    assert _paginas_tamanho(r.content) == [(_ETQ_W, _ETQ_H)]
 
 
 @pytest.mark.asyncio
@@ -273,6 +289,10 @@ async def test_lote_junta_na_ordem_da_selecao(
     assert r.headers["x-etiquetas-total"] == "3"
     assert _paginas_texto(r.content) == [
         "ETIQUETA 3", "ETIQUETA 2", "NOTA 2", "ETIQUETA 1",
+    ]
+    # etiquetas no tamanho térmico; a NF (página 3) fica no tamanho original
+    assert _paginas_tamanho(r.content) == [
+        (_ETQ_W, _ETQ_H), (_ETQ_W, _ETQ_H), (300.0, 442.0), (_ETQ_W, _ETQ_H),
     ]
 
 

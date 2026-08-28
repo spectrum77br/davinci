@@ -19,6 +19,12 @@ class EtiquetaJuntarError(RuntimeError):
     """Falha ao abrir/juntar os PDFs da etiqueta e da NF."""
 
 
+# Tamanho da etiqueta térmica de impressão: 104,23 × 152,4 mm (pedido do
+# usuário, 28/08). Conversão mm → pt: mm × 72 / 25,4.
+ETIQUETA_LARGURA_PT = 104.23 * 72 / 25.4  # ≈ 295,44 pt
+ETIQUETA_ALTURA_PT = 152.4 * 72 / 25.4  # = 432 pt (6")
+
+
 def _abrir(pdf_bytes: bytes, rotulo: str) -> fitz.Document:
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -54,4 +60,19 @@ def juntar_varios(pdfs: list[bytes]) -> bytes:
     saida = _abrir(pdfs[0], "etiqueta")
     for pdf in pdfs[1:]:
         saida.insert_pdf(_abrir(pdf, "etiqueta"))
+    return saida.tobytes()
+
+
+def redimensionar_para_etiqueta(pdf_bytes: bytes) -> bytes:
+    """Redimensiona TODAS as páginas pro tamanho da etiqueta (104,23×152,4mm).
+
+    Cada página original é desenhada numa página nova do tamanho da etiqueta
+    térmica, escalada pra caber mantendo a proporção (show_pdf_page centraliza).
+    Levanta `EtiquetaJuntarError` se o PDF for inválido ou vazio.
+    """
+    src = _abrir(pdf_bytes, "etiqueta")
+    saida = fitz.open()
+    for pno in range(src.page_count):
+        pagina = saida.new_page(width=ETIQUETA_LARGURA_PT, height=ETIQUETA_ALTURA_PT)
+        pagina.show_pdf_page(pagina.rect, src, pno)
     return saida.tobytes()

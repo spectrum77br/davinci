@@ -11,8 +11,11 @@ import fitz  # PyMuPDF
 import pytest
 
 from app.services.nf_etiqueta_juntar import (
+    ETIQUETA_ALTURA_PT,
+    ETIQUETA_LARGURA_PT,
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
+    redimensionar_para_etiqueta,
 )
 
 _PDF_SEM_PAGINAS = (
@@ -72,3 +75,26 @@ def test_nf_vazia_levanta():
     with pytest.raises(EtiquetaJuntarError) as exc:
         juntar_etiqueta_nf(_pdf("ETQ"), _PDF_SEM_PAGINAS)
     assert "nf_vazio" in str(exc.value)
+
+
+def test_redimensiona_todas_as_paginas_pro_tamanho_da_etiqueta():
+    # etiqueta 300×442 + NF A4 (595×842): as duas saem 104,23×152,4mm
+    doc = fitz.open()
+    p1 = doc.new_page(width=300, height=442)
+    p1.insert_text((20, 20), "ETQ", fontsize=10, fontname="helv")
+    p2 = doc.new_page(width=595, height=842)
+    p2.insert_text((20, 20), "NF-A4", fontsize=10, fontname="helv")
+
+    out = redimensionar_para_etiqueta(doc.tobytes())
+    saida = fitz.open(stream=out, filetype="pdf")
+    assert [p.get_text().strip() for p in saida] == ["ETQ", "NF-A4"]
+    for p in saida:
+        assert round(p.rect.width, 1) == round(ETIQUETA_LARGURA_PT, 1)
+        assert round(p.rect.height, 1) == round(ETIQUETA_ALTURA_PT, 1)
+
+
+def test_redimensionar_invalido_ou_vazio_levanta():
+    with pytest.raises(EtiquetaJuntarError):
+        redimensionar_para_etiqueta(b"nao sou pdf")
+    with pytest.raises(EtiquetaJuntarError):
+        redimensionar_para_etiqueta(_PDF_SEM_PAGINAS)

@@ -59,6 +59,7 @@ from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
     juntar_varios,
+    redimensionar_para_etiqueta,
 )
 from app.services.sku_tags import VALID_TAGS as _VALID_TAGS
 from app.services.sku_tags import classify_sku_tag as _classify_sku_tag
@@ -897,15 +898,24 @@ def _pdf_para_impressao(row: NfEtiquetaArquivo) -> bytes:
 
     A presença de `nf_pdf` é o sinal do fluxo correios/ML (não aceita declaração
     de conteúdo, vai a NF junto). Falha na junção degrada pra só a etiqueta —
-    melhor imprimir a etiqueta sozinha do que travar o despacho.
+    melhor imprimir a etiqueta sozinha do que travar o despacho. SÓ a etiqueta é
+    redimensionada pro tamanho térmico (104,23×152,4mm); a NF fica no tamanho
+    original (pedido do usuário, 28/08). Falha no resize degrada pro blob cru.
     """
-    if not row.nf_pdf:
-        return row.blob
     try:
-        return juntar_etiqueta_nf(row.blob, row.nf_pdf)
+        etiqueta = redimensionar_para_etiqueta(row.blob)
+    except EtiquetaJuntarError:
+        logger.warning(
+            "nf_etiqueta_redimensionar_falhou", pedido_bling=row.pedido_bling
+        )
+        etiqueta = row.blob
+    if not row.nf_pdf:
+        return etiqueta
+    try:
+        return juntar_etiqueta_nf(etiqueta, row.nf_pdf)
     except EtiquetaJuntarError:
         logger.warning("nf_etiqueta_juntar_falhou", pedido_bling=row.pedido_bling)
-        return row.blob
+        return etiqueta
 
 
 class PrevisoesImpressasIn(BaseModel):
