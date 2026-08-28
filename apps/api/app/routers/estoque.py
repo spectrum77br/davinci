@@ -55,13 +55,13 @@ from app.models.nf import NfEtiquetaArquivo
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
 from app.services.estoque_relatorio_pdf import relatorio_pedidos_pdf
-from app.services.nf_etiqueta_armazem import filtrar_por_armazem
 from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
     juntar_varios,
 )
 from app.services.sku_tags import VALID_TAGS as _VALID_TAGS
+from app.services.sku_tags import classify_sku_tag as _classify_sku_tag
 from app.services.sku_tags import sql_clause_for_tag as _sql_clause_for_tag
 
 logger = structlog.get_logger()
@@ -719,6 +719,29 @@ async def list_estoque_pedidos(
         ).all()
         previsao_impressa_por_pedido = {r.pedido_bling: r.impressa_em for r in pi_rows}
 
+    # Pedido que sai de 2+ armazéns (itens com tags de armazém diferentes).
+    # A tela avisa "Atenção: estoque compartilhado" ao clicar em imprimir a
+    # etiqueta. Consulta SEM a cerca de tag de propósito: o operador cercado
+    # só vê o próprio item na listagem, mas o aviso precisa considerar o
+    # pedido inteiro.
+    compartilhado_por_pedido: set[str] = set()
+    if numeros:
+        sku_rows = (
+            await session.execute(
+                select(BlingOrder.numero, BlingOrder.item_codigo)
+                .where(BlingOrder.numero.in_(numeros))
+                .distinct()
+            )
+        ).all()
+        tags_por_pedido: dict[str, set[str]] = {}
+        for num, sku in sku_rows:
+            t = _classify_sku_tag(sku)
+            if t:
+                tags_por_pedido.setdefault(num, set()).add(t)
+        compartilhado_por_pedido = {
+            n for n, ts in tags_por_pedido.items() if len(ts) >= 2
+        }
+
     # Hora do ENVIO (coluna "Envio" da tela): instante em que o pedido entrou
     # na situação 15 ("em andamento"), lido do ledger bling_envio_evento
     # (trigger de banco — migration 0156). Pedido antigo (pré-ledger) não tem
@@ -793,6 +816,11 @@ async def list_estoque_pedidos(
             "observacao": check["observacao"],
             "bling_id": o.bling_id,
             "etiqueta_disponivel": bool(o.numero) and o.numero in etiquetas_por_pedido,
+            # Pedido dividido entre armazéns — a tela pede confirmação
+            # ("Atenção: estoque compartilhado") antes de imprimir.
+            "estoque_compartilhado": (
+                bool(o.numero) and o.numero in compartilhado_por_pedido
+            ),
             "etiqueta_em": (
                 etiquetas_por_pedido[o.numero].isoformat()
                 if o.numero in etiquetas_por_pedido
@@ -864,28 +892,20 @@ async def list_estoque_pedidos(
     }
 
 
-def _pdf_para_impressao(
-    row: NfEtiquetaArquivo, tags: list[str] | None = None
-) -> bytes:
+def _pdf_para_impressao(row: NfEtiquetaArquivo) -> bytes:
     """PDF final de UM pedido: etiqueta, ou etiqueta + NF quando é correios.
 
     A presença de `nf_pdf` é o sinal do fluxo correios/ML (não aceita declaração
     de conteúdo, vai a NF junto). Falha na junção degrada pra só a etiqueta —
     melhor imprimir a etiqueta sozinha do que travar o despacho.
-
-    `tags` = armazéns de quem está imprimindo. Pedido que se divide entre
-    armazéns tem UMA etiqueta só no banco, listando os itens de todo mundo na
-    Declaração de Conteúdo; aqui ela é recortada pra cada armazém ver só o que
-    ele despacha (no fluxo correios não há declaração e nada muda).
     """
-    blob = filtrar_por_armazem(row.blob, tags) if tags else row.blob
     if not row.nf_pdf:
-        return blob
+        return row.blob
     try:
-        return juntar_etiqueta_nf(blob, row.nf_pdf)
+        return juntar_etiqueta_nf(row.blob, row.nf_pdf)
     except EtiquetaJuntarError:
         logger.warning("nf_etiqueta_juntar_falhou", pedido_bling=row.pedido_bling)
-        return blob
+        return row.blob
 
 
 class PrevisoesImpressasIn(BaseModel):
@@ -930,9 +950,6 @@ class EtiquetasLoteIn(BaseModel):
     # Anexa o relatório de conferência como últimas páginas do PDF
     # (etiquetas em cima, relatório embaixo — um documento só).
     incluir_relatorio: bool = False
-    # Armazém selecionado no dropdown da tela (mesma semântica do GET
-    # /pedidos): recorta a declaração dos pedidos divididos.
-    tag: str | None = None
 
 
 async def _linhas_relatorio(
@@ -1024,7 +1041,6 @@ async def get_pedidos_etiquetas_lote(
     404 só quando nenhum dos selecionados tem etiqueta. Carimba `impressa_em`
     nos que entraram no PDF, pra tela marcar "Impressa" e evitar duplicidade.
     """
-    tags = _tags_pedidos(user, payload.tag)
     # dict.fromkeys: dedupe preservando a ordem da seleção.
     pedidos = [p for p in dict.fromkeys(payload.pedidos) if p]
     rows = (
@@ -1040,7 +1056,7 @@ async def get_pedidos_etiquetas_lote(
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
 
     try:
-        partes = [_pdf_para_impressao(r, tags) for r in ordenados]
+        partes = [_pdf_para_impressao(r) for r in ordenados]
         if payload.incluir_relatorio:
             impressos = [r.pedido_bling for r in ordenados]
             linhas = await _linhas_relatorio(session, impressos)
@@ -1081,14 +1097,12 @@ async def get_pedido_etiqueta(
     pedido_bling: str,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
-    tag: str | None = None,
 ) -> Response:
     """Serve a etiqueta transformada do pedido (blob em nf_etiqueta_arquivo).
 
     Autenticado por cookie — o botão "Imprimir Etiqueta" abre a URL numa aba
     nova e o browser manda o cookie sozinho. 404 se ainda não há etiqueta
     (a etapa de visualização da NF automática não rodou pra este pedido)."""
-    tags = _tags_pedidos(user, tag)
     row = (
         await session.execute(
             select(NfEtiquetaArquivo).where(
@@ -1100,7 +1114,7 @@ async def get_pedido_etiqueta(
         # Sem etiqueta ainda (a NF pode ter chegado antes, mas não há o que
         # imprimir sem a etiqueta que cola no volume).
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
-    conteudo = _pdf_para_impressao(row, tags)
+    conteudo = _pdf_para_impressao(row)
     if row.impressa_em is None:
         # Abrir a etiqueta é imprimir — carimba pra tela marcar "Impressa"
         # (mesma regra do lote: só a primeira vez).

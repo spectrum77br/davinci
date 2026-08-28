@@ -72,6 +72,9 @@ type PedidoRow = {
   observacao: string | null
   bling_id: number | null
   etiqueta_disponivel: boolean
+  // Pedido que sai de 2+ armazéns (itens com tags diferentes). A tela pede
+  // confirmação "Atenção: estoque compartilhado" antes de imprimir.
+  estoque_compartilhado: boolean
   // Quando a etiqueta chegou (ISO com fuso). Null quando não há etiqueta.
   etiqueta_em: string | null
   // Quando a etiqueta foi impressa pela 1ª vez. Null = nunca impressa.
@@ -680,15 +683,15 @@ async function patchPedidoObs(row: PedidoRow, newObs: string) {
 // Etiqueta transformada (landing zone da NF automática). URL relativa → o
 // cookie de sessão vai junto quando o <a> abre numa aba nova.
 function etiquetaUrl(row: PedidoRow) {
-  const base = `/api/estoque/pedidos/${encodeURIComponent(row.pedido_bling || '')}/etiqueta`
-  // O armazém do dropdown recorta a declaração dos pedidos divididos (quem
-  // despacha só vê o item que está com ele).
-  return tagImpressao() ? `${base}?tag=${tagImpressao()}` : base
+  return `/api/estoque/pedidos/${encodeURIComponent(row.pedido_bling || '')}/etiqueta`
 }
-// Armazém a mandar na impressão: só admin/gerente escolhem pelo dropdown —
-// operador comum já é cercado pelas stock_tags dele no backend.
-function tagImpressao() {
-  return (canUseTagFilter.value || isGerenteEtiquetas.value) ? tagOverride.value : ''
+// Pedido que sai de 2+ armazéns: avisa antes de imprimir. confirm() SÍNCRONO
+// no @click preserva a user activation do <a> — cancelar dá preventDefault.
+function confirmarCompartilhado(row: PedidoRow, e: Event) {
+  if (
+    row.estoque_compartilhado
+    && !confirm(`Atenção: estoque compartilhado — o pedido ${row.pedido_bling} sai de mais de um armazém. Imprimir mesmo assim?`)
+  ) e.preventDefault()
 }
 // Hora BRT em que a etiqueta chegou (dd/mm quando não é hoje).
 const _HORA_BRT = new Intl.DateTimeFormat('pt-BR', {
@@ -1309,6 +1312,14 @@ async function imprimirLote(comRelatorio = false) {
   if (jaImpressos.length && !confirm(
     `${jaImpressos.length} etiqueta(s) já foram impressas (${jaImpressos.join(', ')}). Imprimir de novo?`,
   )) return
+  // Pedido dividido entre armazéns: quem imprime precisa saber que parte dos
+  // itens da declaração está em outro armazém.
+  const compartilhados = pedidos.filter(p =>
+    pedidosFilteredGrouped.value.some(r => r.pedido_bling === p && r.estoque_compartilhado),
+  )
+  if (compartilhados.length && !confirm(
+    `Atenção: estoque compartilhado — pedido(s) ${compartilhados.join(', ')} saem de mais de um armazém. Imprimir mesmo assim?`,
+  )) return
 
   imprimindoLote.value = comRelatorio ? 'relatorio' : 'etiquetas'
   try {
@@ -1318,7 +1329,7 @@ async function imprimirLote(comRelatorio = false) {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        pedidos, incluir_relatorio: comRelatorio, tag: tagImpressao() || null,
+        pedidos, incluir_relatorio: comRelatorio,
       }),
     })
     if (!resp.ok) throw new Error(String(resp.status))
@@ -2090,6 +2101,7 @@ async function conferirTodos() {
                 :href="etiquetaUrl(row)"
                 target="_blank"
                 rel="noopener"
+                @click="confirmarCompartilhado(row, $event)"
                 class="inline-flex items-center gap-1 rounded-md border bg-primary text-primary-foreground px-2 py-1 text-[10px] hover:opacity-90"
                 title="Abrir etiqueta pronta pra impressão"
               >

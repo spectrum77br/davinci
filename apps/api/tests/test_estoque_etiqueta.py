@@ -19,7 +19,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder, User, UserRole, UserStatus
 from app.models.nf import NfEtiquetaArquivo
-from tests.test_nf_etiqueta_armazem import _declaracao
 
 PERM_VIEW = {"controle_estoque": {"view": True, "edit": False, "delete": False}}
 
@@ -342,10 +341,10 @@ async def test_serve_individual_tambem_carimba(
 
 @pytest_asyncio.fixture
 async def pedido_dividido(db: AsyncSession) -> None:
-    """Pedido que sai de dois armazéns (caso do 292860) com UMA etiqueta só.
+    """Pedido que sai de dois armazéns (caso do 292860) + um de armazém único.
 
-    A Declaração de Conteúdo lista os dois SKUs; cada armazém só pode ver o que
-    despacha.
+    A etiqueta é sempre servida INTEIRA — a tela só avisa "estoque
+    compartilhado" antes de imprimir o dividido.
     """
     d = date(2026, 5, 30)
     for i, sku in enumerate(("a055.sa", "dg053.ci+a001.ci")):
@@ -353,16 +352,17 @@ async def pedido_dividido(db: AsyncSession) -> None:
             bling_id=940001, numero="940001", item_codigo=sku,
             item_index=i, situacao="15", em_andamento_data=d,
         ))
-    declaracao = _declaracao([
-        ("a055.sa", "Carregador 20W", 1),
-        ("dg053.ci+a001.ci", "Uranyx Hotwav A17", 1),
-    ])
+    db.add(BlingOrder(
+        bling_id=940002, numero="940002", item_codigo="a060.sa",
+        item_index=0, situacao="15", em_andamento_data=d,
+    ))
+    etiqueta = _pdf("ETIQUETA DIVIDIDA")
     db.add(NfEtiquetaArquivo(
         pedido_bling="940001",
         filename="etiqueta_940001.pdf",
         content_type="application/pdf",
-        size_bytes=len(declaracao),
-        blob=declaracao,
+        size_bytes=len(etiqueta),
+        blob=etiqueta,
     ))
     await db.commit()
 
@@ -385,45 +385,46 @@ async def user_sa(db: AsyncSession) -> User:
 
 
 @pytest.mark.asyncio
-async def test_serve_recorta_declaracao_pro_armazem_do_operador(
+async def test_lista_marca_estoque_compartilhado(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], pedido_dividido: None,
+):
+    """Pedido com itens de 2+ armazéns vem com estoque_compartilhado=True."""
+    auth_as(admin_view)
+    r = await client.get(
+        "/api/estoque/pedidos?data_inicio=2026-05-30&data_fim=2026-05-30"
+    )
+    assert r.status_code == 200, r.text
+    by_numero = {p["pedido_bling"]: p for p in r.json()["data"]}
+    assert by_numero["940001"]["estoque_compartilhado"] is True
+    assert by_numero["940002"]["estoque_compartilhado"] is False
+
+
+@pytest.mark.asyncio
+async def test_flag_compartilhado_ignora_a_cerca_de_tag(
     client: AsyncClient, user_sa: User,
     auth_as: Callable[[User | None], None], pedido_dividido: None,
 ):
-    """Quem despacha do SA imprime uma declaração só com o item do SA."""
+    """O operador cercado só vê o próprio item, mas o aviso considera o pedido
+    inteiro — senão quem despacha do SA nunca saberia da divisão."""
+    auth_as(user_sa)
+    r = await client.get(
+        "/api/estoque/pedidos?data_inicio=2026-05-30&data_fim=2026-05-30"
+    )
+    assert r.status_code == 200, r.text
+    rows = [p for p in r.json()["data"] if p["pedido_bling"] == "940001"]
+    assert rows, "operador do SA deveria ver o item dele"
+    assert all(p["sku"] == "a055.sa" for p in rows)
+    assert all(p["estoque_compartilhado"] is True for p in rows)
+
+
+@pytest.mark.asyncio
+async def test_serve_etiqueta_inteira_mesmo_pro_operador_cercado(
+    client: AsyncClient, user_sa: User,
+    auth_as: Callable[[User | None], None], pedido_dividido: None,
+):
+    """A etiqueta do pedido dividido sai INTEIRA (sem recorte por armazém)."""
     auth_as(user_sa)
     r = await client.get("/api/estoque/pedidos/940001/etiqueta")
     assert r.status_code == 200, r.text
-    texto = "\n".join(_paginas_texto(r.content))
-    assert "a055.sa" in texto
-    assert "dg053.ci" not in texto
-
-
-@pytest.mark.asyncio
-async def test_serve_sem_armazem_escolhido_traz_a_etiqueta_inteira(
-    client: AsyncClient, admin_view: User,
-    auth_as: Callable[[User | None], None], pedido_dividido: None,
-):
-    """Admin sem escolher armazém no dropdown continua vendo tudo."""
-    auth_as(admin_view)
-    r = await client.get("/api/estoque/pedidos/940001/etiqueta")
-    assert r.status_code == 200, r.text
-    texto = "\n".join(_paginas_texto(r.content))
-    assert "a055.sa" in texto
-    assert "dg053.ci+a001.ci" in texto
-
-
-@pytest.mark.asyncio
-async def test_lote_respeita_o_armazem_escolhido(
-    client: AsyncClient, admin_view: User,
-    auth_as: Callable[[User | None], None], pedido_dividido: None,
-):
-    """O armazém do dropdown vale também na impressão em lote."""
-    auth_as(admin_view)
-    r = await client.post(
-        "/api/estoque/pedidos/etiquetas",
-        json={"pedidos": ["940001"], "tag": "ci"},
-    )
-    assert r.status_code == 200, r.text
-    texto = "\n".join(_paginas_texto(r.content))
-    assert "dg053.ci+a001.ci" in texto
-    assert "a055.sa" not in texto
+    assert _paginas_texto(r.content) == ["ETIQUETA DIVIDIDA"]
