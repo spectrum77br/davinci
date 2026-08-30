@@ -53,6 +53,8 @@ class User(Base, TimestampMixin):
     bling_login: Mapped[str | None] = mapped_column(String(255), nullable=True)
     adspower: Mapped[str | None] = mapped_column(String(255), nullable=True)
     duoke: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Threema ID (8 caracteres) da pessoa, usado para enviar mensagens.
+    threema: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     permissions: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")

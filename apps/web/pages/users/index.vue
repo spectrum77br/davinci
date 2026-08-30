@@ -16,6 +16,7 @@ type UserRow = {
   bling_login: string | null
   adspower: string | null
   duoke: string | null
+  threema: string | null
   last_login_at: string | null
   disabled_at: string | null
 }
@@ -55,6 +56,7 @@ const draft = ref({
   bling_login: '',
   adspower: '',
   duoke: '',
+  threema: '',
 })
 const creating = ref(false)
 const createErr = ref<string | null>(null)
@@ -64,12 +66,12 @@ async function createUser() {
   createErr.value = null
   try {
     const body: Record<string, any> = { email: draft.value.email }
-    for (const k of ['name', 'password', 'tuta', 'upseller', 'bling_login', 'adspower', 'duoke'] as const) {
+    for (const k of ['name', 'password', 'tuta', 'upseller', 'bling_login', 'adspower', 'duoke', 'threema'] as const) {
       if (draft.value[k]) body[k] = draft.value[k]
     }
     await api('/api/users', { method: 'POST', body })
     showNew.value = false
-    draft.value = { email: '', name: '', password: '', tuta: '', upseller: '', bling_login: '', adspower: '', duoke: '' }
+    draft.value = { email: '', name: '', password: '', tuta: '', upseller: '', bling_login: '', adspower: '', duoke: '', threema: '' }
     await refresh()
   } catch (e: any) {
     createErr.value = e?.data?.detail?.code || e?.message || 'erro'
@@ -123,6 +125,7 @@ function fmtDate(s: string | null) {
             <th class="px-3 py-2 hidden xl:table-cell">Bling</th>
             <th class="px-3 py-2 hidden xl:table-cell">AdsPower</th>
             <th class="px-3 py-2 hidden xl:table-cell">Duoke</th>
+            <th class="px-3 py-2 hidden xl:table-cell">Threema</th>
             <th class="px-3 py-2">Role</th>
             <th class="px-3 py-2">Status</th>
             <th class="px-3 py-2 hidden lg:table-cell">Último login</th>
@@ -142,6 +145,7 @@ function fmtDate(s: string | null) {
             <td class="px-3 py-2 hidden xl:table-cell">{{ u.bling_login || '—' }}</td>
             <td class="px-3 py-2 hidden xl:table-cell">{{ u.adspower || '—' }}</td>
             <td class="px-3 py-2 hidden xl:table-cell">{{ u.duoke || '—' }}</td>
+            <td class="px-3 py-2 hidden xl:table-cell">{{ u.threema || '—' }}</td>
             <td class="px-3 py-2">
               <span class="text-xs px-2 py-0.5 rounded border" :class="u.role === 'admin' ? 'border-amber-400 text-amber-300' : ''">
                 {{ u.role }}
@@ -163,7 +167,7 @@ function fmtDate(s: string | null) {
             </td>
           </tr>
           <tr v-if="!loading && (list?.items?.length || 0) === 0">
-            <td colspan="11" class="px-3 py-6 text-center text-muted-foreground">nenhum usuário</td>
+            <td colspan="12" class="px-3 py-6 text-center text-muted-foreground">nenhum usuário</td>
           </tr>
         </tbody>
       </table>
@@ -200,6 +204,7 @@ function fmtDate(s: string | null) {
           <div><span class="text-muted-foreground">Bling:</span> {{ u.bling_login || '—' }}</div>
           <div><span class="text-muted-foreground">AdsPower:</span> {{ u.adspower || '—' }}</div>
           <div><span class="text-muted-foreground">Duoke:</span> {{ u.duoke || '—' }}</div>
+          <div><span class="text-muted-foreground">Threema:</span> {{ u.threema || '—' }}</div>
           <div><span class="text-muted-foreground">Último:</span> {{ fmtDate(u.last_login_at) }}</div>
         </div>
         <div class="flex flex-wrap gap-2 pt-1 border-t">
@@ -259,6 +264,10 @@ function fmtDate(s: string | null) {
             <div>
               <Label>Duoke</Label>
               <Input v-model="draft.duoke" />
+            </div>
+            <div>
+              <Label>Threema</Label>
+              <Input v-model="draft.threema" placeholder="ex. CDSA84BZ" />
             </div>
           </div>
         </div>

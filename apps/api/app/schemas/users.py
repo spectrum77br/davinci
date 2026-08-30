@@ -80,6 +80,7 @@ class UserOut(BaseModel):
     bling_login: str | None = None
     adspower: str | None = None
     duoke: str | None = None
+    threema: str | None = None
     stock_tags: list[str] | None = None
     sales_teams: list[int] | None = None
     marketing_teams: list[str] | None = None
@@ -110,6 +111,7 @@ class UserCreate(BaseModel):
     bling_login: str | None = None
     adspower: str | None = None
     duoke: str | None = None
+    threema: str | None = None
     stock_tags: list[str] | None = None
     sales_teams: list[int] | None = None
     marketing_teams: list[str] | None = None
@@ -128,6 +130,7 @@ class UserPatch(BaseModel):
     bling_login: str | None = None
     adspower: str | None = None
     duoke: str | None = None
+    threema: str | None = None
     # Pass a list of slugs (any subset of STOCK_TAGS) or [] / null to
     # clear. Backend dedupes / lowercases / drops unknowns.
     stock_tags: list[str] | None = None

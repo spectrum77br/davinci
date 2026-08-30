@@ -17,6 +17,7 @@ type UserDetail = {
   bling_login: string | null
   adspower: string | null
   duoke: string | null
+  threema: string | null
   stock_tags: string[] | null
   sales_teams: number[] | null
   marketing_teams: string[] | null
@@ -67,6 +68,7 @@ const form = reactive({
   bling_login: '',
   adspower: '',
   duoke: '',
+  threema: '',
   stock_tags: [] as string[],
   sales_teams: [] as number[],
   marketing_teams: [] as string[],
@@ -112,6 +114,7 @@ function resetForm() {
   form.bling_login = user.value.bling_login || ''
   form.adspower = user.value.adspower || ''
   form.duoke = user.value.duoke || ''
+  form.threema = user.value.threema || ''
   form.stock_tags = [...(user.value.stock_tags || [])]
   form.sales_teams = [...(user.value.sales_teams || [])]
   form.marketing_teams = [...(user.value.marketing_teams || [])]
@@ -301,7 +304,7 @@ async function saveCadastral() {
   error.value = null
   try {
     const body: Record<string, any> = {}
-    for (const k of ['name', 'tuta', 'upseller', 'bling_login', 'adspower', 'duoke'] as const) {
+    for (const k of ['name', 'tuta', 'upseller', 'bling_login', 'adspower', 'duoke', 'threema'] as const) {
       body[k] = form[k] || null
     }
     body.email = form.email
@@ -409,6 +412,10 @@ async function removeUser() {
           <div>
             <Label>Duoke</Label>
             <Input v-model="form.duoke" />
+          </div>
+          <div>
+            <Label>Threema</Label>
+            <Input v-model="form.threema" placeholder="ex. CDSA84BZ" />
           </div>
           <div class="md:col-span-2">
             <Label>Tags de Estoque</Label>
