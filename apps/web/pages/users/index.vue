@@ -89,6 +89,30 @@ async function approve(u: UserRow) {
   }
 }
 
+const editingThreema = ref<string | null>(null)
+const threemaDraft = ref('')
+const savingThreema = ref(false)
+
+function startEditThreema(u: UserRow) {
+  editingThreema.value = u.id
+  threemaDraft.value = u.threema || ''
+}
+
+async function saveThreema(u: UserRow) {
+  const v = threemaDraft.value.trim().toUpperCase() || null
+  editingThreema.value = null
+  if (v === (u.threema || null)) return
+  savingThreema.value = true
+  try {
+    await api(`/api/users/${u.id}`, { method: 'PATCH', body: { threema: v } })
+    u.threema = v
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    savingThreema.value = false
+  }
+}
+
 function fmtDate(s: string | null) {
   if (!s) return '—'
   return new Date(s).toLocaleString('pt-BR')
@@ -145,7 +169,27 @@ function fmtDate(s: string | null) {
             <td class="px-3 py-2 hidden xl:table-cell">{{ u.bling_login || '—' }}</td>
             <td class="px-3 py-2 hidden xl:table-cell">{{ u.adspower || '—' }}</td>
             <td class="px-3 py-2 hidden xl:table-cell">{{ u.duoke || '—' }}</td>
-            <td class="px-3 py-2 hidden xl:table-cell">{{ u.threema || '—' }}</td>
+            <td class="px-3 py-2 hidden xl:table-cell">
+              <Input
+                v-if="editingThreema === u.id"
+                v-model="threemaDraft"
+                class="h-7 w-28 text-xs"
+                placeholder="ex. CDSA84BZ"
+                autofocus
+                :disabled="savingThreema"
+                @keydown.enter="saveThreema(u)"
+                @keydown.esc="editingThreema = null"
+                @blur="saveThreema(u)"
+              />
+              <button
+                v-else
+                class="text-left hover:underline decoration-dotted"
+                :title="'clique para editar'"
+                @click="startEditThreema(u)"
+              >
+                {{ u.threema || '—' }}
+              </button>
+            </td>
             <td class="px-3 py-2">
               <span class="text-xs px-2 py-0.5 rounded border" :class="u.role === 'admin' ? 'border-amber-400 text-amber-300' : ''">
                 {{ u.role }}
@@ -204,7 +248,21 @@ function fmtDate(s: string | null) {
           <div><span class="text-muted-foreground">Bling:</span> {{ u.bling_login || '—' }}</div>
           <div><span class="text-muted-foreground">AdsPower:</span> {{ u.adspower || '—' }}</div>
           <div><span class="text-muted-foreground">Duoke:</span> {{ u.duoke || '—' }}</div>
-          <div><span class="text-muted-foreground">Threema:</span> {{ u.threema || '—' }}</div>
+          <div class="col-span-2 flex items-center gap-2">
+            <span class="text-muted-foreground">Threema:</span>
+            <Input
+              v-if="editingThreema === u.id"
+              v-model="threemaDraft"
+              class="h-7 w-28 text-xs"
+              placeholder="ex. CDSA84BZ"
+              :disabled="savingThreema"
+              @keydown.enter="saveThreema(u)"
+              @blur="saveThreema(u)"
+            />
+            <button v-else class="hover:underline decoration-dotted" @click="startEditThreema(u)">
+              {{ u.threema || '—' }}
+            </button>
+          </div>
           <div><span class="text-muted-foreground">Último:</span> {{ fmtDate(u.last_login_at) }}</div>
         </div>
         <div class="flex flex-wrap gap-2 pt-1 border-t">
