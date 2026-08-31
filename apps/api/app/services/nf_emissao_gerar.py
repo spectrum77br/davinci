@@ -53,6 +53,7 @@ _ITENS_SQL = text(
         bo.custofrete          AS pedido_frete,
         bo.categoria_nome      AS categoria,
         bo.bling_id            AS bling_id,
+        bo.numeroloja          AS numeroloja,
         bo.documento_destinatario AS documento,
         bo.nome_destinatario   AS nome_destinatario,
         bo.cep_destino         AS cep_destino,
@@ -254,6 +255,29 @@ def _observacao_duimp(duimp_por_sku: dict[str, str], itens_rows: list) -> str | 
         if duimp and duimp not in textos:
             textos.append(duimp)
     return " | ".join(textos) or None
+
+
+def _observacao_pedido(
+    plataforma: str | None, numeroloja: str | None, duimp: str | None
+) -> str | None:
+    """Observação da venda avulsa = número do pedido do ML + a DUIMP.
+
+    O Bling copia essa coluna pras Informações Complementares da NF-e (`infCpl`)
+    e é DE LÁ que o `nf_upload` lê o pedido do ML pra rotear o XML pro
+    `/shipments/{id}/invoice_data`. Sem isso o XML sai sem o número e a subida
+    em massa não tem como casar a nota com o pedido.
+
+    Só o ML precisa (o `numeroloja` das outras plataformas não é o id que a API
+    do ML espera). Vem PRIMEIRO pra ficar logo após o texto do IBPT no infCpl.
+    """
+    partes: list[str] = []
+    if (plataforma or "").strip().lower() == "ml":
+        numero_ml = (numeroloja or "").strip()
+        if numero_ml:
+            partes.append(f"Pedido {numero_ml}")
+    if duimp:
+        partes.append(duimp)
+    return " ".join(partes) or None
 
 
 def _valor_unitario(
@@ -498,10 +522,12 @@ async def _montar_pedidos(
             "documento": cab["documento"],
             # Conta de marketplace = Loja no Upseller (o CSV do Bling ignora).
             "loja": _clean(cab["conta"]),
-            "observacao": (
+            "observacao": _observacao_pedido(
+                cab["plataforma"],
+                cab["numeroloja"],
                 _observacao_duimp(duimp_por_sku, itens_rows)
                 if regra.observacao_duimp
-                else None
+                else None,
             ),
         }
         info = await _montar_info(client, base, cab["bling_id"])
