@@ -58,6 +58,7 @@ async def _seed_pedido(
     itens: list[dict],
     total: float | None = None,
     custofrete: float | None = None,
+    categoria: str | None = None,
 ) -> None:
     for i, it in enumerate(itens):
         db.add(
@@ -68,6 +69,7 @@ async def _seed_pedido(
                 situacao="15",
                 total=total,
                 custofrete=custofrete,
+                categoria_nome=it.get("categoria", categoria),
                 item_index=i,
                 item_codigo=it["sku"],
                 item_descricao=it["nome"],
@@ -145,6 +147,67 @@ async def test_gera_planilha_avulso_e_exclusivo(
     assert _col(e, "SKU") == "a001"
     assert _col(e, "Produto") == "embalagem"
     assert _col(e, "Valor Total") == "1,00"
+
+
+@pytest.mark.asyncio
+async def test_faturador_por_tipo_manda_eletro_pro_cheio(
+    db: AsyncSession, client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
+):
+    """Conta que vende celular E eletro na mesma loja: a regra por tipo
+    (store_info.nf_faturador_por_tipo) escolhe o faturador pela categoria do
+    item — eletro sai 100% com o SKU real, celular sai 1% como embalagem."""
+    auth_as(admin)
+
+    cheio = NfFaturador(
+        nome="bling 100%", modo="bling", nf_cheia=True,
+        sku_fonte="principal", nome_fonte="produto",
+    )
+    um_por_cento = NfFaturador(
+        nome="bling ex1 1%", modo="bling", nf_cheia=False,
+        percentual="1", sku_fonte="a001", nome_fonte="embalagem",
+    )
+    db.add_all([cheio, um_por_cento])
+    await db.flush()
+
+    db.add(StoreInfo(
+        user_id=admin.id, platform="ml", account_name="aguiar",
+        bling_store_id="950001",
+        nf_faturador_id=um_por_cento.id,
+        nf_faturador_por_tipo={"eletro": str(cheio.id), "celular": str(um_por_cento.id)},
+    ))
+    await db.flush()
+
+    await _seed_pedido(db, admin, cheio, numero="850001", loja="950001", categoria="Eletro",
+                       itens=[{"sku": "uaf001m1.110", "nome": "airfryer vidro", "qtd": 1, "unit": 384.18}])
+    await _seed_pedido(db, admin, um_por_cento, numero="850002", loja="950001", categoria="Celular Kit",
+                       itens=[{"sku": "dg053.ci", "nome": "Capa Celular", "qtd": 1, "unit": 1000}])
+    # Categoria sem regra própria cai no faturador base da loja (1%).
+    await _seed_pedido(db, admin, um_por_cento, numero="850003", loja="950001", categoria="Insumos",
+                       itens=[{"sku": "i9", "nome": "Insumo", "qtd": 1, "unit": 200}])
+    await db.commit()
+
+    r = await client.post(
+        "/api/nf-cadastro/faturamento/gerar-planilha",
+        json={"numeros": ["850001", "850002", "850003"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Pedidos-Ok"] == "3"
+
+    reader = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig")), delimiter=";"))
+    linhas = {row[COLUNAS.index("Número pedido")]: row for row in reader[1:]}
+
+    eletro = linhas["850001"]
+    assert _col(eletro, "SKU") == "uaf001m1.110"
+    assert _col(eletro, "Produto") == "airfryer vidro"
+    assert _col(eletro, "Valor Total") == "384,18"
+
+    celular = linhas["850002"]
+    assert _col(celular, "SKU") == "a001"
+    assert _col(celular, "Valor Total") == "10,00"
+
+    outra = linhas["850003"]
+    assert _col(outra, "SKU") == "a001"
+    assert _col(outra, "Valor Total") == "2,00"
 
 
 @pytest.mark.asyncio

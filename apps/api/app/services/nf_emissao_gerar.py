@@ -63,6 +63,7 @@ _ITENS_SQL = text(
         bo.cidade_destino      AS cidade_destino,
         bo.uf_destino          AS uf_destino,
         si.nf_faturador_id     AS nf_faturador_id,
+        si.nf_faturador_por_tipo AS nf_faturador_por_tipo,
         si.nf_etiqueta_id      AS nf_etiqueta_id,
         si.account_name        AS conta,
         si.platform            AS plataforma
@@ -297,6 +298,48 @@ def _fator_rateio(regra: NfFaturador, rows: list) -> Decimal:
     return min(Decimal(1), pago / soma)
 
 
+# Tipos de produto que a loja pode ter num faturador próprio
+# (store_info.nf_faturador_por_tipo, migration 0228). A categoria do Bling
+# ("Celular Kit", "Mala Usada", "Eletro Kit") casa pelo prefixo.
+_TIPOS_FATURADOR = ("celular", "mala", "eletro")
+
+
+def _uuid(v: object) -> UUID | None:
+    if isinstance(v, UUID):
+        return v
+    try:
+        return UUID(str(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _tipo_do_item(categoria: object) -> str | None:
+    cat = str(categoria or "").strip().lower()
+    for tipo in _TIPOS_FATURADOR:
+        if cat.startswith(tipo):
+            return tipo
+    return None
+
+
+def _faturador_do_pedido(itens_rows: list) -> UUID | None:
+    """Faturador do pedido. A loja pode vender tipos diferentes de produto na
+    MESMA conta com regras diferentes (ex. celular 1% e eletro 100%) — isso vem
+    de `store_info.nf_faturador_por_tipo`. Cai no faturador base da loja quando
+    a categoria não tem regra própria ou quando o pedido mistura tipos com
+    faturadores diferentes (aí não dá pra escolher um só sem errar metade)."""
+    base = _uuid(itens_rows[0]["nf_faturador_id"])
+    por_tipo = itens_rows[0]["nf_faturador_por_tipo"] or {}
+    if not por_tipo:
+        return base
+    escolhidos = {
+        _uuid(por_tipo.get(tipo)) if (tipo := _tipo_do_item(r["categoria"])) else None
+        for r in itens_rows
+    }
+    if len(escolhidos) == 1:
+        return escolhidos.pop() or base
+    return base
+
+
 async def _carregar_faturadores(
     session: AsyncSession, ids: set
 ) -> dict:
@@ -382,6 +425,10 @@ async def _montar_pedidos(
         por_pedido.setdefault(r["numero"], []).append(r)
 
     faturador_ids = {r["nf_faturador_id"] for r in rows if r["nf_faturador_id"]}
+    for r in rows:
+        for valor in (r["nf_faturador_por_tipo"] or {}).values():
+            if (fid := _uuid(valor)) is not None:
+                faturador_ids.add(fid)
     faturadores = await _carregar_faturadores(session, faturador_ids)
 
     # Catálogo de mala: valor CHEIO por (modelo, tamanho). Só interessa às linhas
@@ -415,7 +462,7 @@ async def _montar_pedidos(
         if not itens_rows:
             pulados.append(PedidoPulado(numero, "pedido não encontrado no davinci"))
             continue
-        fid = itens_rows[0]["nf_faturador_id"]
+        fid = _faturador_do_pedido(itens_rows)
         regra = faturadores.get(fid) if fid else None
         if regra is None:
             pulados.append(PedidoPulado(numero, "loja sem faturador atribuído"))
