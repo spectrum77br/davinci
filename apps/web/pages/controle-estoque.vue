@@ -1165,6 +1165,16 @@ async function executarLote(pedidos: string[], comRelatorio: boolean) {
         pedidos, incluir_relatorio: comRelatorio,
       }),
     })
+    if (resp.status === 404) {
+      // Nenhum dos selecionados tem etiqueta salva de verdade (ex.: só a NF
+      // chegou; a etiqueta ainda não foi capturada). Mensagem específica —
+      // o alerta genérico não dizia o que fazer.
+      alert(
+        'Nenhum dos pedidos selecionados tem etiqueta pronta ainda. '
+        + 'A etiqueta chega sozinha em até ~1h; se continuar sem, avise o responsável.',
+      )
+      return
+    }
     if (!resp.ok) throw new Error(String(resp.status))
     const blob = await resp.blob()
     const objUrl = URL.createObjectURL(blob)

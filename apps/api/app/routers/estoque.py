@@ -578,9 +578,16 @@ async def list_estoque_pedidos(
     # cada ~2h e o Bling anda na frente (caso 291919 — badge "Previsão"
     # com botão Imprimir do lado, Eduardo 2026-08-24). A etiqueta é prova
     # de que a fase de previsão acabou → conta como vermelho.
+    # length(blob) > 0: a linha pode existir SÓ com a NF (o /agent/nf cria
+    # placeholder com blob vazio quando a NF chega antes da etiqueta — caso
+    # cairo 2026-08-31, 9 pedidos ML de 29/08). Etiqueta vazia NÃO conta:
+    # sem o filtro a tela promete etiqueta, e o lote/impressão devolve 404.
     tem_etiqueta = (
         select(NfEtiquetaArquivo.pedido_bling)
-        .where(NfEtiquetaArquivo.pedido_bling == BlingOrder.numero)
+        .where(
+            NfEtiquetaArquivo.pedido_bling == BlingOrder.numero,
+            func.length(NfEtiquetaArquivo.blob) > 0,
+        )
         .exists()
     )
     if status_filter == "previsao":
@@ -697,7 +704,13 @@ async def list_estoque_pedidos(
                     NfEtiquetaArquivo.pedido_bling,
                     NfEtiquetaArquivo.created_at,
                     NfEtiquetaArquivo.impressa_em,
-                ).where(NfEtiquetaArquivo.pedido_bling.in_(numeros))
+                ).where(
+                    NfEtiquetaArquivo.pedido_bling.in_(numeros),
+                    # Placeholder só-NF (blob vazio) não é etiqueta: sem esse
+                    # filtro a coluna Etiqueta mostrava hora e o Imprimir
+                    # devolvia 404 ("Não foi possível gerar o lote").
+                    func.length(NfEtiquetaArquivo.blob) > 0,
+                )
             )
         ).all()
         etiquetas_por_pedido = {r.pedido_bling: r.created_at for r in et_rows}
