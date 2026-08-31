@@ -344,7 +344,10 @@ class AmazonClient:
             params={
                 "marketplaceId": self.marketplace_id,
                 "relatedIdentifierName": "ORDER_ID",
-                "relatedIdentifier": order_id,
+                # SP-API espera relatedIdentifierValue (não relatedIdentifier).
+                # Com o nome errado a Amazon devolvia 400 InvalidInput em TODA
+                # chamada — 1.692 financials amazon em error até 2026-08-31.
+                "relatedIdentifierValue": order_id,
             },
         )
         r.raise_for_status()

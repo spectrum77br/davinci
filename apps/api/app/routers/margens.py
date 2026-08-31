@@ -91,6 +91,12 @@ _FRETE_PLATAFORMA_SQL = (
     "WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee' "
     "THEN CASE WHEN v.evento_freight IS NULL THEN NULL "
     "          ELSE GREATEST(v.evento_freight * v.item_proportion, 0::numeric) END "
+    # Amazon MFN: evento_freight vem do breakdown MFNPostageFee (negativo =
+    # débito da etiqueta), gravado em _fetch_amazon. Invertemos o sinal para
+    # exibir como custo; GREATEST corta créditos eventuais, como na Shopee.
+    "WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'amazon' "
+    "THEN CASE WHEN v.evento_freight IS NULL THEN NULL "
+    "          ELSE GREATEST(-v.evento_freight * v.item_proportion, 0::numeric) END "
     "ELSE v.marketplace_frete_real_cobrado_item "
     "END"
 )

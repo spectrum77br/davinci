@@ -1385,6 +1385,21 @@ async def _fetch_amazon(client: AmazonClient, order_id: str) -> FinancialSnapsho
             if isinstance(item, dict):
                 events.extend(_events_from_breakdowns(item.get("breakdowns"), currency))
 
+    # Frete plataforma (Amazon MFN): a etiqueta comprada via Amazon chega nos
+    # breakdowns como MFNPostageFee (valor negativo = débito do seller).
+    # Consolida num evento 'freight' — a view de margens soma
+    # event_type='freight' em evento_freight e a página Margem exibe como
+    # "Frete Plataforma" (mesmo caminho da Shopee, ver _FRETE_PLATAFORMA_SQL).
+    postage = sum(
+        (e.amount for e in events if e.event_type == "MFNPostageFee"),
+        Decimal("0"),
+    )
+    freight_event = _event(
+        "freight", postage, currency=currency, raw={"source": "MFNPostageFee"}
+    )
+    if freight_event is not None:
+        events.append(freight_event)
+
     status = "posted" if transactions else "pending"
     return FinancialSnapshot(
         status=status,
