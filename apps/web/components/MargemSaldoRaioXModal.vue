@@ -249,10 +249,12 @@ const diverge = computed(() => {
               </div>
             </template>
 
-            <!-- Amazon pré-envio: número da tela é projeção. -->
+            <!-- Pré-liquidação (Amazon/TikTok/Shopee/ML): número da tela é
+                 projeção — o campo se chama projecao_amazon por histórico,
+                 mas vale para qualquer marketplace sem líquido real ainda. -->
             <template v-else-if="data.projecao_amazon">
               <p class="inline-block rounded bg-amber-100 dark:bg-amber-900/40 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
-                Projeção — a Amazon ainda não informou o repasse real
+                Projeção — {{ data.plataforma ? data.plataforma.toUpperCase() : 'o marketplace' }} ainda não confirmou o repasse real
               </p>
               <div class="flex justify-between gap-3">
                 <span>Valor base (Bling)</span>

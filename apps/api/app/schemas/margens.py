@@ -79,6 +79,9 @@ class MargensMarketplaceOut(BaseModel):
     reembolso: float | None = None
     resultado_frete: float | None = None
     saldo_plataforma: float | None = None
+    # True = saldo_plataforma é projeção (líquido real ainda não liquidado).
+    # Frontend: mostra "≈" e NÃO trata como divergência (não zera o Efetivo).
+    saldo_projetado: bool = False
     saldo_bling: float | None = None
     saldo_efetivo: float | None = None
 
@@ -149,8 +152,9 @@ class SaldoRaioXOut(BaseModel):
     mp_atualizado_em: datetime | None = None
     saldo_plataforma: float | None = None
 
-    # Amazon pré-envio: o líquido real ainda não chegou e o número da tela é
-    # uma projeção (valor base − frete projetado − comissão da conta).
+    # Pré-liquidação (Amazon/TikTok/Shopee/ML): o líquido real ainda não chegou
+    # e o número da tela é uma projeção (valor base − frete projetado − comissão
+    # da conta). Nome mantido por compatibilidade; não é mais só Amazon.
     projecao_amazon: bool = False
     proj_frete_projetado: float | None = None
     proj_comissao_frac: float | None = None

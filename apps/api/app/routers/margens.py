@@ -202,21 +202,41 @@ _SALDO_BLING_SQL = (
 )
 
 # Saldo Plataforma. Normalmente = líquido reconciliado do marketplace
-# (v.marketplace_liquido_base_margem_item). Na Amazon esse líquido só chega
-# DEPOIS do envio (fica NULL antes), então projetamos o saldo:
+# (v.marketplace_liquido_base_margem_item). Enquanto esse líquido não chega
+# (Amazon: só depois do envio; TikTok: settlement dias após a entrega;
+# Shopee/ML: minutos após o pedido), projetamos o saldo:
 #   valor da venda − frete projetado − comissão projetada da loja
 # onde a comissão projetada = valor da venda × commission (fração 0.19 = 19%)
 # do cadastro da conta na Tabela de Preços (pricing_accounts.commission,
 # join por pricing_account_id → pa_comm). Assim que o líquido real chega,
-# o COALESCE volta a usá-lo (a projeção é só fallback pré-envio). Só Amazon.
+# o COALESCE volta a usá-lo (a projeção é só fallback pré-liquidação).
+#
+# 2026-08-31 (pedido do Eduardo: Saldo Plataforma "—" nos TikTok pendentes):
+# projeção estendida de Amazon para TODOS os marketplaces com financeiro
+# integrado (amazon/tiktok/shopee/ml). Fora da lista ficam interno/presencial/
+# temu/magalu — não existe repasse de plataforma para projetar nesses casos.
+# A flag _SALDO_PROJETADO_SQL marca a linha para o frontend NÃO tratar a
+# projeção como divergência (senão o Saldo Efetivo zeraria de laranja) e para
+# exibir o "≈". Regras internas (alerta de saldo divergente, cópia p/ Bling)
+# continuam lendo o líquido REAL (v.marketplace_liquido_base_margem_item) —
+# projeção nunca aprova pedido nem grava nada no Bling.
 _SALDO_PLATAFORMA_SQL = (
     "COALESCE(v.marketplace_liquido_base_margem_item,"
-    " CASE WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'amazon'"
+    " CASE WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro)"
+    "           IN ('amazon', 'tiktok', 'shopee', 'ml')"
     "           AND v.bling_valorbase_item IS NOT NULL"
     "      THEN (v.bling_valorbase_item"
     "            - COALESCE(v.frete_projetado_item, 0)"
     "            - (v.bling_valorbase_item * COALESCE(pa_comm.commission, 0)))"
     "      ELSE NULL END)"
+)
+
+# True quando o número exibido em Saldo Plataforma é projeção (líquido real
+# ainda não chegou). O frontend usa para: (a) não zerar o Saldo Efetivo por
+# "divergência" contra uma estimativa; (b) prefixar com "≈".
+_SALDO_PROJETADO_SQL = (
+    f"(v.marketplace_liquido_base_margem_item IS NULL"
+    f" AND ({_SALDO_PLATAFORMA_SQL}) IS NOT NULL)"
 )
 
 # Ajuste por item: SÓ o reembolso entra no Saldo Efetivo. O `prejuizo` da tabela
@@ -265,6 +285,7 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             END                                                  AS reembolso,
             {_FRETE_RESULTADO_DISPLAY_SQL}                       AS resultado_frete,
             {_SALDO_PLATAFORMA_SQL}                              AS saldo_plataforma,
+            {_SALDO_PROJETADO_SQL}                               AS saldo_projetado,
             {_SALDO_BLING_SQL}                                   AS saldo_bling,
             -- Saldo Efetivo = saldo realizado do item, ancorado no Bling
             -- (valor_base − frete − taxa), NÃO no líquido do marketplace. É lá
@@ -705,17 +726,15 @@ async def saldo_detalhe_marketplace(
         else None
     )
     # Saldo plataforma do pedido: líquido real quando existe; senão a soma das
-    # projeções por item (Amazon pré-envio); senão None (aguardando saldo).
+    # projeções por item (pré-liquidação — Amazon/TikTok/Shopee/ML); senão None.
     mp_liquido = _f(head["marketplace_liquido_base_margem_pedido"])
     saldo_plataforma = mp_liquido
     if saldo_plataforma is None:
         proj = [i.saldo_plataforma for i in itens if i.saldo_plataforma is not None]
         saldo_plataforma = sum(proj) if proj else None
-    projecao_amazon = (
-        mp_liquido is None
-        and saldo_plataforma is not None
-        and (head["plataforma"] or "") == "amazon"
-    )
+    # Nome mantido por compatibilidade de API; desde 2026-08-31 vale para
+    # qualquer marketplace pré-liquidação, não só Amazon.
+    projecao_amazon = mp_liquido is None and saldo_plataforma is not None
     proj_frete_vals = [
         _f(r["frete_projetado_item"])
         for r in rows

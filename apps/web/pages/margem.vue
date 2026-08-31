@@ -24,6 +24,7 @@ type MarketplaceRow = {
   reembolso: number | null
   resultado_frete: number | null
   saldo_plataforma: number | null
+  saldo_projetado: boolean | null
   saldo_bling: number | null
   saldo_efetivo: number | null
   margem: number | null
@@ -510,10 +511,14 @@ function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
 }
 
 // Divergência de saldo: Bling e Plataforma ambos presentes e diferindo por mais
-// de R$0,01 (qualquer situação).
+// de R$0,01 (qualquer situação). Saldo PROJETADO não conta: é estimativa nossa
+// (não o repasse real do marketplace) — sem esse guard, todo TikTok/Amazon
+// pré-liquidação zeraria o Efetivo de laranja por "divergir" de um número que
+// ainda nem existe de verdade.
 function saldoDivergente(r: MarketplaceRow): boolean {
   return r.saldo_bling != null
     && r.saldo_plataforma != null
+    && !r.saldo_projetado
     && Math.abs(r.saldo_bling - r.saldo_plataforma) > 0.01
 }
 
@@ -1040,7 +1045,16 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             >
               {{ brl(r.resultado_frete) }}
             </td>
-            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">{{ brl(r.saldo_plataforma) }}</td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+              <!-- "≈" = projeção (venda − frete projetado − comissão da conta);
+                   troca sozinho pelo repasse real quando o marketplace liquidar. -->
+              <span
+                v-if="r.saldo_projetado && r.saldo_plataforma != null"
+                class="text-muted-foreground"
+                title="Projeção — o marketplace ainda não confirmou o repasse. Troca sozinho pelo valor real na liquidação."
+              >≈ {{ brl(r.saldo_plataforma) }}</span>
+              <template v-else>{{ brl(r.saldo_plataforma) }}</template>
+            </td>
             <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 text-muted-foreground">{{ brl(r.saldo_bling) }}</td>
             <td class="px-2 py-1 whitespace-nowrap bg-emerald-50/40 dark:bg-emerald-900/10 font-medium">
               <div v-if="editingSaldoEfetivo === r.bling_order_item_id" class="flex items-center justify-end">
