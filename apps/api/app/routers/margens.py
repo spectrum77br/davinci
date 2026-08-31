@@ -118,6 +118,19 @@ _FRETE_ANUNCIO_SQL = "v.evento_frete_anuncio"
 # Positive means the marketplace charged more than the listing/ad quote.
 _FRETE_RESULTADO_SQL = f"(({_FRETE_PLATAFORMA_SQL}) - ({_FRETE_ANUNCIO_SQL}))"
 
+# Versões de EXIBIÇÃO (2026-08-31): pedido do Eduardo — as células de Frete
+# precisam estar SEMPRE populadas, nunca "—". COALESCE(…, 0) só na camada de
+# exibição: R$0,00 = "nada cobrado até agora" e a célula atualiza sozinha
+# quando o financeiro chegar (Amazon: no envio; TikTok: no settlement).
+# As regras internas continuam nas versões estritas com NULL — pedido sem
+# financeiro NÃO dispara motivo de divergência de frete (_ATTENTION_FRETE_SQL)
+# nem grava 0 de custofrete no Bling (apply_saldo, linha ~857).
+_FRETE_PLATAFORMA_DISPLAY_SQL = f"COALESCE({_FRETE_PLATAFORMA_SQL}, 0::numeric)"
+_FRETE_ANUNCIO_DISPLAY_SQL = f"COALESCE({_FRETE_ANUNCIO_SQL}, 0::numeric)"
+_FRETE_RESULTADO_DISPLAY_SQL = (
+    f"(({_FRETE_PLATAFORMA_DISPLAY_SQL}) - ({_FRETE_ANUNCIO_DISPLAY_SQL}))"
+)
+
 # Margem baixa = margem abaixo da mínima configurada. Pedidos em "Aguardando
 # Devolução" (situação 83957) são excluídos: a venda está em processo de
 # devolução, então margem baixa ali não é algo a triar. IS DISTINCT FROM
@@ -242,15 +255,15 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             v.produto,
             v.quantidade,
             v.bling_custo_produtos                               AS custo_produto,
-            {_FRETE_PLATAFORMA_SQL}                              AS frete_plataforma,
-            {_FRETE_ANUNCIO_SQL}                                 AS frete_anuncio,
+            {_FRETE_PLATAFORMA_DISPLAY_SQL}                      AS frete_plataforma,
+            {_FRETE_ANUNCIO_DISPLAY_SQL}                         AS frete_anuncio,
             v.frete_projetado_item                               AS frete_projetado,
             CASE
                 WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'shopee'
                 THEN 0::numeric
                 ELSE (v.marketplace_frete_item - v.marketplace_frete_real_cobrado_item)
             END                                                  AS reembolso,
-            {_FRETE_RESULTADO_SQL}                               AS resultado_frete,
+            {_FRETE_RESULTADO_DISPLAY_SQL}                       AS resultado_frete,
             {_SALDO_PLATAFORMA_SQL}                              AS saldo_plataforma,
             {_SALDO_BLING_SQL}                                   AS saldo_bling,
             -- Saldo Efetivo = saldo realizado do item, ancorado no Bling
