@@ -99,6 +99,13 @@ _FRETE_PLATAFORMA_SQL = (
     # em branco, não R$0,00; o retry preenche quando a etiqueta for cobrada.
     "THEN CASE WHEN v.evento_freight IS NULL OR v.financeiro_status = 'pending' THEN NULL "
     "          ELSE GREATEST(-v.evento_freight * v.item_proportion, 0::numeric) END "
+    # TikTok: evento_freight = shipping_cost_amount do settlement (negativo =
+    # frete líquido pago pelo seller; 0 = TikTok subsidiou tudo — R$0,00 é
+    # informação real, não célula vazia). Settlement só sai dias após a
+    # entrega, então 'pending' fica em branco até o TikTok postar o statement.
+    "WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'tiktok' "
+    "THEN CASE WHEN v.evento_freight IS NULL OR v.financeiro_status = 'pending' THEN NULL "
+    "          ELSE GREATEST(-v.evento_freight * v.item_proportion, 0::numeric) END "
     "ELSE v.marketplace_frete_real_cobrado_item "
     "END"
 )
