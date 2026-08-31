@@ -166,6 +166,27 @@ async def _segment_index(
     return roots_by_id, leaves_by_id, root_id_by_slug
 
 
+async def _default_slot_segments(
+    session: AsyncSession, root_id: UUID
+) -> list[UUID | None]:
+    """Filhos ordenados (sort_order) do segmento-raiz da aba — mapeamento
+    default coluna N ↔ N-ésimo filho. A view de margens
+    (vw_conciliacao_margens_marketplace) SÓ casa o frete projetado quando
+    slot{N}_segment_id está preenchido; conta salva sem vínculo = coluna
+    "Projetado" vazia na página Margem (caso 293416/293418/293422 — 97
+    contas backfilled em 2026-08-31). Preencher o default no create garante
+    que conta nova nunca nasce sem vínculo; o popover da UI continua
+    permitindo remapear depois."""
+    res = await session.execute(
+        select(Segment.id)
+        .where(Segment.parent_id == root_id)
+        .order_by(Segment.sort_order)
+        .limit(5)
+    )
+    kids = list(res.scalars().all())
+    return [kids[i] if i < len(kids) else None for i in range(5)]
+
+
 async def _segment_names_by_id(session: AsyncSession) -> dict[UUID, str]:
     """All segment ids → name, used to resolve slot{N}_segment_id labels for
     PricingAccountOut. Cached per-request by the caller (we expect this to
@@ -287,6 +308,12 @@ async def create_account(
         if sid is None:
             raise HTTPException(400, detail={"code": "invalid_department"})
         data["segment_id"] = sid
+    # Slots default: sem vínculo slot↔segmento a página Margem não consegue
+    # casar o frete projetado (ver _default_slot_segments).
+    if not any(data.get(f"slot{n}_segment_id") for n in (1, 2, 3, 4, 5)):
+        slots = await _default_slot_segments(session, data["segment_id"])
+        for n in (1, 2, 3, 4, 5):
+            data[f"slot{n}_segment_id"] = slots[n - 1]
     row = PricingAccount(user_id=user.id, **data)
     if body.password:
         row.password_enc = encrypt(body.password)
@@ -334,6 +361,18 @@ async def patch_account(
         if sid is None:
             raise HTTPException(400, detail={"code": "invalid_department"})
         data["segment_id"] = sid
+    # Conta mudou de aba sem slots explícitos no body → re-deriva os slots
+    # default da aba nova. Slots da aba velha nunca casam com os leaves da
+    # nova na view de margens e o frete projetado sumiria (ver
+    # _default_slot_segments).
+    if (
+        data.get("segment_id") is not None
+        and data["segment_id"] != row.segment_id
+        and not any(data.get(f"slot{n}_segment_id") for n in (1, 2, 3, 4, 5))
+    ):
+        slots = await _default_slot_segments(session, data["segment_id"])
+        for n in (1, 2, 3, 4, 5):
+            data[f"slot{n}_segment_id"] = slots[n - 1]
     for k, v in data.items():
         setattr(row, k, v)
     await session.commit()
