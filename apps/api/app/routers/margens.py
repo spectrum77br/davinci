@@ -95,7 +95,9 @@ _FRETE_PLATAFORMA_SQL = (
     # débito da etiqueta), gravado em _fetch_amazon. Invertemos o sinal para
     # exibir como custo; GREATEST corta créditos eventuais, como na Shopee.
     "WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro) = 'amazon' "
-    "THEN CASE WHEN v.evento_freight IS NULL THEN NULL "
+    # 'pending' = pedido ainda sem transação na Amazon (não enviado) — célula
+    # em branco, não R$0,00; o retry preenche quando a etiqueta for cobrada.
+    "THEN CASE WHEN v.evento_freight IS NULL OR v.financeiro_status = 'pending' THEN NULL "
     "          ELSE GREATEST(-v.evento_freight * v.item_proportion, 0::numeric) END "
     "ELSE v.marketplace_frete_real_cobrado_item "
     "END"
