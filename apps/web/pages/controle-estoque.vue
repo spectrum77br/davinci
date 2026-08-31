@@ -15,7 +15,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
-  AlertTriangle, Download, Printer, FileText,
+  AlertTriangle, Download, Printer, FileText, FileUp, Upload, Trash2,
   ArrowUp, ArrowDown, Megaphone,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
@@ -103,7 +103,7 @@ type EnvioRow = {
 }
 
 // ── State ─────────────────────────────────────────────────────────────
-type Tab = 'estoque' | 'pedidos' | 'envios'
+type Tab = 'estoque' | 'pedidos' | 'envios' | 'upload-nf'
 const tab = ref<Tab>('estoque')
 
 // Single-day filter for Estoque + Pedidos. Envios uses a 7-day window
@@ -148,7 +148,7 @@ const isGerenteEtiquetas = computed(
 )
 const tagOverride = ref<string>('')
 
-const visibleTabs: readonly Tab[] = ['estoque', 'pedidos', 'envios']
+const visibleTabs: readonly Tab[] = ['estoque', 'pedidos', 'envios', 'upload-nf']
 
 // Filter products by presence of stock. 'all' (default) = no filter,
 // 'com' = Product.stock > 0, 'sem' = stock == 0 OR NULL. Applied to
@@ -413,11 +413,13 @@ async function loadEnvios() {
 function loadCurrentTab() {
   if (tab.value === 'estoque') return loadEstoque()
   if (tab.value === 'pedidos') return loadPedidos()
-  return loadEnvios()
+  if (tab.value === 'envios') return loadEnvios()
 }
 
-watch(tab, () => {
+watch(tab, (newTab) => {
   void loadCurrentTab()
+  // Lojas ML da aba Upload NF: carrega só na primeira vez que ela abre.
+  if (newTab === 'upload-nf' && !nfStores.value.length) void loadNfStores()
   // O bloqueio da aba Envios depende da conferência de hoje — refetch
   // sempre que a tab muda pra refletir alterações feitas em outra aba.
   void refreshConferenciaHoje()
@@ -437,6 +439,87 @@ watch([enviosInicio, enviosFim, conferidoFilter], () => {
 watch(tagOverride, () => {
   if (tab.value === 'envios') void loadCurrentTab()
 })
+
+// ── Aba: Upload NF (XML → ML) ─────────────────────────────────────────
+type NfAttempt = { store: string; success: boolean; error: string | null; shipping_id: string | null }
+type NfResult = {
+  filename: string
+  success: boolean
+  order_id?: string | null
+  store_name?: string | null
+  shipping_id?: string | null
+  error?: string | null
+  attempts_details?: NfAttempt[]
+}
+const nfFiles = ref<File[]>([])
+const nfStores = ref<string[]>([])
+const nfSelectedStores = ref<Set<string>>(new Set())
+const nfProcessing = ref(false)
+const nfCurrentFile = ref<string | null>(null)
+const nfResults = ref<NfResult[]>([])
+const nfFileInputRef = ref<HTMLInputElement | null>(null)
+
+const nfSuccessCount = computed(() => nfResults.value.filter((r) => r.success).length)
+const nfFailCount = computed(() => nfResults.value.filter((r) => !r.success).length)
+
+async function loadNfStores() {
+  try {
+    const r = await api<{ stores: string[] }>('/api/nf/stores')
+    nfStores.value = r.stores || []
+    nfSelectedStores.value = new Set(nfStores.value)
+  } catch (e: any) {
+    console.error('Falha lojas NF:', e)
+  }
+}
+function onNfFileChange(ev: Event) {
+  const inp = ev.target as HTMLInputElement
+  if (!inp.files) return
+  const next = Array.from(inp.files)
+  nfFiles.value = [
+    ...nfFiles.value,
+    ...next.filter((nf) =>
+      !nfFiles.value.some((f) => f.name === nf.name && f.size === nf.size),
+    ),
+  ]
+  inp.value = ''
+}
+function removeNfFile(idx: number) {
+  nfFiles.value.splice(idx, 1)
+}
+function clearNfAll() {
+  nfFiles.value = []
+  nfResults.value = []
+  nfCurrentFile.value = null
+}
+function toggleNfStore(name: string) {
+  const s = new Set(nfSelectedStores.value)
+  if (s.has(name)) s.delete(name); else s.add(name)
+  nfSelectedStores.value = s
+}
+async function processNfFiles() {
+  if (!nfFiles.value.length || !nfSelectedStores.value.size) return
+  nfProcessing.value = true
+  nfResults.value = []
+  for (const file of nfFiles.value) {
+    nfCurrentFile.value = file.name
+    const fd = new FormData()
+    fd.append('file', file)
+    for (const s of nfSelectedStores.value) fd.append('selected_stores', s)
+    try {
+      const r = await api<NfResult>('/api/nf/upload', { method: 'POST', body: fd })
+      nfResults.value.push({ filename: file.name, ...r })
+    } catch (e: any) {
+      nfResults.value.push({
+        filename: file.name,
+        success: false,
+        error: e?.data?.detail?.code || e?.message || 'erro',
+        attempts_details: [],
+      })
+    }
+  }
+  nfCurrentFile.value = null
+  nfProcessing.value = false
+}
 
 onMounted(() => {
   void loadCurrentTab()
@@ -1419,11 +1502,13 @@ async function conferirTodos() {
         >
           <Boxes v-if="t === 'estoque'" class="size-4" />
           <ClipboardList v-else-if="t === 'pedidos'" class="size-4" />
-          <Truck v-else class="size-4" />
+          <Truck v-else-if="t === 'envios'" class="size-4" />
+          <FileUp v-else class="size-4" />
           {{
             t === 'estoque' ? 'Estoque' :
             t === 'pedidos' ? 'Pedidos' :
-            'Envios'
+            t === 'envios' ? 'Envios' :
+            'Upload NF'
           }}
         </button>
       </div>
@@ -2044,6 +2129,120 @@ async function conferirTodos() {
           </tr>
         </tfoot>
       </table>
+    </div>
+
+    <!-- TAB: UPLOAD NF ─────────────────────────────────────────────── -->
+    <div v-if="tab === 'upload-nf'" class="space-y-4">
+      <!-- Stores picker -->
+      <section class="border rounded-md p-3 space-y-2">
+        <div class="flex items-center justify-between">
+          <h3 class="font-semibold text-sm">Lojas ML alvo</h3>
+          <span class="text-xs text-muted-foreground">
+            {{ nfSelectedStores.size }} de {{ nfStores.length }} selecionada(s)
+          </span>
+        </div>
+        <div v-if="!nfStores.length" class="text-xs text-muted-foreground">
+          Nenhuma integração ML ativa encontrada.
+        </div>
+        <div v-else class="flex flex-wrap gap-1.5">
+          <button
+            v-for="s in nfStores"
+            :key="s"
+            type="button"
+            class="rounded-full border px-2.5 py-1 text-xs transition-colors"
+            :class="nfSelectedStores.has(s) ? 'bg-primary text-primary-foreground border-primary' : 'border-muted-foreground/40 hover:bg-muted'"
+            @click="toggleNfStore(s)"
+          >
+            {{ s }}
+          </button>
+        </div>
+      </section>
+
+      <!-- File picker -->
+      <section class="border rounded-md p-3 space-y-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <label class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm cursor-pointer hover:bg-muted">
+            <FileUp class="size-3.5" /> Selecionar XMLs
+            <input ref="nfFileInputRef" type="file" accept=".xml" multiple class="hidden" @change="onNfFileChange" />
+          </label>
+          <span class="text-xs text-muted-foreground">{{ nfFiles.length }} arquivo(s)</span>
+          <button
+            v-if="nfFiles.length"
+            class="ml-auto inline-flex items-center gap-1 rounded-md border border-destructive text-destructive px-2.5 py-1 text-xs hover:bg-destructive/10"
+            @click="clearNfAll"
+          >
+            <Trash2 class="size-3" /> Limpar
+          </button>
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-3 py-1.5 text-sm hover:opacity-90 disabled:opacity-50"
+            :disabled="nfProcessing || !nfFiles.length || !nfSelectedStores.size"
+            @click="processNfFiles"
+          >
+            <Loader2 v-if="nfProcessing" class="size-3.5 animate-spin" />
+            <Upload v-else class="size-3.5" />
+            {{ nfProcessing ? 'Enviando…' : `Enviar (${nfFiles.length})` }}
+          </button>
+        </div>
+        <ul v-if="nfFiles.length" class="text-xs space-y-1 border-t pt-2">
+          <li v-for="(f, idx) in nfFiles" :key="idx" class="flex items-center gap-2">
+            <FileUp class="size-3 text-muted-foreground shrink-0" />
+            <span class="truncate flex-1">{{ f.name }}</span>
+            <span class="text-muted-foreground">{{ (f.size / 1024).toFixed(0) }} KiB</span>
+            <button v-if="!nfProcessing" class="text-muted-foreground hover:text-destructive" @click="removeNfFile(idx)">
+              <Trash2 class="size-3" />
+            </button>
+          </li>
+        </ul>
+      </section>
+
+      <div
+        v-if="nfProcessing && nfCurrentFile"
+        class="rounded border bg-muted/20 px-3 py-2 text-sm flex items-center gap-2"
+      >
+        <Loader2 class="size-3 animate-spin" />
+        Processando: <strong>{{ nfCurrentFile }}</strong>
+        ({{ nfResults.length + 1 }} de {{ nfFiles.length }})
+      </div>
+
+      <!-- Results -->
+      <section v-if="nfResults.length" class="space-y-2">
+        <div class="flex items-center gap-3 text-sm">
+          <h3 class="font-semibold">Resultados</h3>
+          <span class="text-emerald-700">✓ {{ nfSuccessCount }}</span>
+          <span class="text-red-700">✕ {{ nfFailCount }}</span>
+        </div>
+        <div class="border rounded-md divide-y">
+          <div
+            v-for="(r, idx) in nfResults"
+            :key="idx"
+            class="p-3 text-xs"
+            :class="r.success ? 'bg-emerald-50/40' : 'bg-red-50/40'"
+          >
+            <div class="flex items-center gap-2 flex-wrap">
+              <span v-if="r.success" class="text-emerald-700 font-bold">✓</span>
+              <span v-else class="text-red-700 font-bold">✕</span>
+              <strong class="truncate">{{ r.filename }}</strong>
+              <span v-if="r.order_id" class="text-muted-foreground font-mono">pedido {{ r.order_id }}</span>
+              <span v-if="r.success" class="ml-auto text-emerald-800">→ {{ r.store_name }}</span>
+              <span v-else class="ml-auto text-red-700">{{ r.error || 'falha' }}</span>
+            </div>
+            <details v-if="r.attempts_details && r.attempts_details.length" class="mt-1.5">
+              <summary class="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
+                {{ r.attempts_details.length }} tentativa(s)
+              </summary>
+              <ul class="mt-1 pl-4 space-y-0.5 text-[11px]">
+                <li v-for="(a, i) in r.attempts_details" :key="i" class="flex items-center gap-2">
+                  <span v-if="a.success" class="text-emerald-700">✓</span>
+                  <span v-else class="text-red-700">✕</span>
+                  <span class="font-medium">{{ a.store }}</span>
+                  <span v-if="a.shipping_id" class="text-muted-foreground">ship={{ a.shipping_id }}</span>
+                  <span v-if="!a.success" class="text-muted-foreground italic">{{ a.error }}</span>
+                </li>
+              </ul>
+            </details>
+          </div>
+        </div>
+      </section>
     </div>
 
     <!-- Aviso de estoque compartilhado: pedido que sai de 2+ armazéns -->
