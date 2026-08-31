@@ -1097,9 +1097,10 @@ async def refresh_marketplace_mv(
     """Rebuild davinci.verificar_margem on-demand.
 
     Botão manual ('atualizar') chama sem `max_age_s` → sempre reconstrói.
-    O auto-refresh da página passa `max_age_s=300` → o servidor pula se já
-    estiver fresco (throttle autoritativo, cross-usuário) e nunca roda dois
-    rebuilds simultâneos (single-flight via lock Redis).
+    O auto-refresh da página passa `max_age_s=60` (cadência de 1 em 1 min,
+    pedido do Eduardo 2026-08-31) → o servidor pula se já estiver fresco
+    (throttle autoritativo, cross-usuário) e nunca roda dois rebuilds
+    simultâneos (single-flight via lock Redis).
     """
     from app.redis_client import redis
 
@@ -1118,9 +1119,10 @@ async def refresh_marketplace_mv(
     finally:
         await redis.delete(_REFRESH_LOCK_KEY)
 
-    # Marca o snapshot como fresco pela janela do chamador (default 5min para
-    # coalescer rajadas mesmo quando o gatilho foi o botão manual).
-    await redis.set(_REFRESH_FRESH_KEY, "1", ex=max_age_s if max_age_s > 0 else 300)
+    # Marca o snapshot como fresco pela janela do chamador. Default 60s (era
+    # 300): o clique no botão manual não pode travar a cadência de 1 min do
+    # auto-refresh da página por 5 minutos — mas ainda coalesce rajadas.
+    await redis.set(_REFRESH_FRESH_KEY, "1", ex=max_age_s if max_age_s > 0 else 60)
 
     # Snapshot fresco → auto-hold dos pendentes "Em aberto" (Aguardando
     # Cancelamento + Observações no Bling). Import tardio: o serviço lê os

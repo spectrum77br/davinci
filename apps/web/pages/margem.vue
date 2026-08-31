@@ -315,15 +315,18 @@ async function refreshAndLoad() {
   await reloadCurrent()
 }
 
-// Reconstrói o snapshot ao abrir a página e recarrega a lista. A tabela já foi
-// renderizada com o snapshot atual (await load() acima), então NÃO bloqueia: o
-// usuário usa os dados na hora e o banner só sinaliza a atualização em curso.
+// Reconstrói o snapshot ao abrir a página E a cada 1 minuto enquanto ela fica
+// aberta (cadência pedida pelo Eduardo 2026-08-31: "tem que atualizar, de 1 em
+// 1 minuto"). A tabela já foi renderizada com o snapshot atual (await load()
+// acima), então NÃO bloqueia: o usuário usa os dados na hora e o banner só
+// sinaliza a atualização em curso.
 //
-// O throttle é do servidor: passamos max_age_s=300 e o backend pula o rebuild
+// O throttle é do servidor: passamos max_age_s=60 e o backend pula o rebuild
 // (resp.refreshed=false) se o snapshot já estiver fresco — autoritativo entre
-// todos os usuários — e garante single-flight (um rebuild por vez). Por isso a
-// maioria dos loads retorna na hora; só quando está realmente velho roda o
-// rebuild (alguns minutos), e aí a tabela já visível é trocada ao concluir.
+// todos os usuários — e garante single-flight (um rebuild por vez). Aba em
+// segundo plano não dispara (economiza rebuilds); ao voltar para a aba,
+// atualiza na hora. Quando o rebuild roda de fato, a tabela visível é trocada
+// ao concluir — os números "caem frescos" sem o usuário tocar em nada.
 async function autoRefreshSnapshot() {
   if (autoRefreshing.value) return
   autoRefreshing.value = true
@@ -335,7 +338,7 @@ async function autoRefreshSnapshot() {
   }, 250)
   try {
     const res = await api<{ refreshed?: boolean }>(
-      '/api/margens/marketplace/refresh?max_age_s=300',
+      '/api/margens/marketplace/refresh?max_age_s=60',
       { method: 'POST' },
     )
     // Só recarrega/anuncia quando houve rebuild de fato (servidor não pulou).
@@ -352,8 +355,24 @@ async function autoRefreshSnapshot() {
   }
 }
 
+// Timer da cadência de 1 min. Só dispara com a aba visível — aba esquecida em
+// segundo plano não fica reconstruindo o snapshot à toa; o listener de
+// visibilidade cobre a volta (atualiza assim que o usuário retorna à aba).
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
+function onTabVisible() {
+  if (document.visibilityState === 'visible' && shouldAutoRefresh.value) autoRefreshSnapshot()
+}
 onMounted(() => {
-  if (shouldAutoRefresh.value) autoRefreshSnapshot()
+  if (!shouldAutoRefresh.value) return
+  autoRefreshSnapshot()
+  autoRefreshTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') autoRefreshSnapshot()
+  }, 60_000)
+  document.addEventListener('visibilitychange', onTabVisible)
+})
+onBeforeUnmount(() => {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer)
+  document.removeEventListener('visibilitychange', onTabVisible)
 })
 
 // reload on filter change (debounced search) — only in list mode
@@ -724,10 +743,12 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       {{ notice }}
     </div>
 
-    <!-- Auto-refresh do snapshot ao abrir a página (não bloqueia: a tabela
-         abaixo já mostra o snapshot atual). -->
+    <!-- Auto-refresh do snapshot ao abrir a página e a cada 1 min (não
+         bloqueia: a tabela abaixo já mostra o snapshot atual). O guard de
+         1,5s evita piscar o banner nas checagens rápidas em que o servidor
+         responde "já está fresco" — ele só aparece em rebuild de verdade. -->
     <div
-      v-if="autoRefreshing"
+      v-if="autoRefreshing && autoRefreshElapsedMs > 1500"
       class="flex items-center gap-2.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-2 text-sm text-blue-700 dark:text-blue-300"
     >
       <Loader2 class="size-4 shrink-0 animate-spin" />
