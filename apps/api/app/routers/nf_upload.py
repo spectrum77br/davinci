@@ -124,34 +124,50 @@ async def _list_ml_stores(session: AsyncSession) -> list[dict[str, str]]:
 # ─── ML API ───────────────────────────────────────────────────────────
 
 
+_ERR_OUTRA_LOJA = "pedido nao encontrado nesta loja"
+_ERR_SEM_ENVIO = (
+    "pedido encontrado, mas o ML ainda nao liberou o envio "
+    "(buffering / data de envio adiada) — reenviar depois da liberacao"
+)
+_ERR_TOKEN = "token expirado/invalido"
+
+
 async def _resolve_shipping_id(
     access_token: str, order_id: str,
-) -> str | None:
-    """Tries /orders/{id} first, falls back to /packs/{id}. Returns
-    the shipping_id from whichever endpoint matched, or None if
-    neither does (the order doesn't belong to this store)."""
+) -> tuple[str | None, str]:
+    """Tries /orders/{id} first, falls back to /packs/{id}.
+
+    Returns (shipping_id, motivo). `motivo` is "" on success and otherwise
+    says WHY there is no shipping_id — a 200 without `shipping.id` means the
+    store DOES own the order but the ML shipment isn't released yet
+    (buffering), which is very different from the order living elsewhere.
+    """
     headers = {
         "Authorization": f"Bearer {access_token.strip()}",
         "Accept": "application/json",
     }
+    dono = False
+    token_ruim = False
     async with httpx.AsyncClient(timeout=15) as c:
-        try:
-            r = await c.get(f"{_ML_BASE}/orders/{order_id}", headers=headers)
-            if r.status_code == 200:
-                sid = (((r.json() or {}).get("shipping") or {}) or {}).get("id")
-                if sid:
-                    return str(sid)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            r = await c.get(f"{_ML_BASE}/packs/{order_id}", headers=headers)
-            if r.status_code == 200:
-                sid = (((r.json() or {}).get("shipment") or {}) or {}).get("id")
-                if sid:
-                    return str(sid)
-        except Exception:  # noqa: BLE001
-            pass
-    return None
+        for path, chave in (("orders", "shipping"), ("packs", "shipment")):
+            try:
+                r = await c.get(f"{_ML_BASE}/{path}/{order_id}", headers=headers)
+            except Exception:  # noqa: BLE001
+                continue
+            if r.status_code == 401:
+                token_ruim = True
+                continue
+            if r.status_code != 200:
+                continue
+            dono = True
+            sid = (((r.json() or {}).get(chave) or {}) or {}).get("id")
+            if sid:
+                return str(sid), ""
+    if dono:
+        return None, _ERR_SEM_ENVIO
+    if token_ruim:
+        return None, _ERR_TOKEN
+    return None, _ERR_OUTRA_LOJA
 
 
 async def _post_invoice(
@@ -181,6 +197,30 @@ async def _post_invoice(
     return False, f"HTTP {r.status_code}: {r.text[:200]}"
 
 
+def _resumo_falha(attempts: list[dict[str, Any]]) -> str:
+    """Summary line for the UI — says WHY it failed, not just how many
+    stores were tried. The most informative attempt wins: a store that
+    owns the order beats one that simply doesn't have it."""
+    com_envio = [a for a in attempts if a.get("shipping_id")]
+    if com_envio:
+        a = com_envio[0]
+        return f"{a['store']}: {a.get('error') or 'falha ao enviar o XML'}"
+    for erro in (_ERR_SEM_ENVIO, _ERR_TOKEN):
+        a = next((x for x in attempts if x.get("error") == erro), None)
+        if a:
+            return f"{a['store']}: {erro}"
+    outros = [
+        a for a in attempts
+        if a.get("error") not in (None, "", _ERR_OUTRA_LOJA)
+    ]
+    if outros:
+        return f"{outros[0]['store']}: {outros[0]['error']}"
+    return (
+        f"pedido nao encontrado em nenhuma das {len(attempts)} "
+        "loja(s) selecionada(s)"
+    )
+
+
 async def _send_to_first_matching_store(
     order_id: str,
     xml_bytes: bytes,
@@ -192,11 +232,11 @@ async def _send_to_first_matching_store(
     for store in stores:
         name = store["name"]
         at = store["access_token"]
-        shipping_id = await _resolve_shipping_id(at, order_id)
+        shipping_id, motivo = await _resolve_shipping_id(at, order_id)
         if not shipping_id:
             attempts.append({
                 "store": name, "success": False,
-                "error": "pedido nao encontrado nesta loja",
+                "error": motivo,
                 "shipping_id": None,
             })
             continue
@@ -221,7 +261,7 @@ async def _send_to_first_matching_store(
             }
     return {
         "success": False, "order_id": order_id,
-        "error": f"falha em {len(attempts)} tentativa(s)",
+        "error": _resumo_falha(attempts),
         "attempts_details": attempts,
     }
 
