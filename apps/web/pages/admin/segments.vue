@@ -229,7 +229,10 @@ async function remove(seg: Segment, depth: number) {
 const specialFor = ref<Segment | null>(null)
 const sdStart = ref('')
 const sdEnd = ref('')
-const sdMargin = ref('') // percent na UI ("-15" = -15%); vazio = aprova tudo
+// percent na UI ("-15" = -15%); vazio = aprova tudo. O input é type="number",
+// então o v-model do Vue entrega NUMBER quando preenchido (cast automático) e
+// '' quando vazio — daí o tipo união e o String() defensivo no addSpecial.
+const sdMargin = ref<string | number>('')
 const sdSaving = ref(false)
 const sdError = ref<string | null>(null)
 
@@ -266,6 +269,15 @@ function sdRegra(sd: SpecialDate): string {
   return `aprova até margem ${pct}%`
 }
 
+// Erro da API → frase pt-BR (422 do FastAPI vem como LISTA em detail).
+function sdErrMsg(e: any): string {
+  const d = e?.data?.detail
+  if (d?.code === 'segment_not_found') return 'Segmento não encontrado — recarregue a página.'
+  if (d?.code === 'special_date_not_found') return 'Este período já foi removido — recarregue a página.'
+  if (Array.isArray(d)) return 'Dados inválidos — confira as datas e a margem.'
+  return d?.code || e?.message || 'Erro ao salvar — tente de novo.'
+}
+
 async function addSpecial() {
   if (!specialFor.value) return
   sdError.value = null
@@ -281,9 +293,12 @@ async function addSpecial() {
     date_start: sdStart.value,
     date_end: sdEnd.value,
   }
-  const raw = sdMargin.value.trim()
+  // BUG corrigido (01/09, Eduardo: "não está deixando adicionar"): input
+  // type="number" faz o v-model entregar NUMBER, e number.trim() explodia
+  // ANTES do POST — clique morria sem mensagem. String() cobre os dois casos.
+  const raw = String(sdMargin.value ?? '').trim()
   if (raw) {
-    const n = Number(raw)
+    const n = Number(raw.replace(',', '.'))
     if (!Number.isFinite(n)) {
       sdError.value = 'Margem inválida — use um número, ex.: -15.'
       return
@@ -304,7 +319,7 @@ async function addSpecial() {
     sdEnd.value = ''
     sdMargin.value = ''
   } catch (e: any) {
-    sdError.value = e?.data?.detail?.code || e?.message || 'erro'
+    sdError.value = sdErrMsg(e)
   } finally {
     sdSaving.value = false
   }
@@ -321,7 +336,7 @@ async function removeSpecial(sd: SpecialDate) {
     await load()
     specialFor.value = findNode(tree.value, id)
   } catch (e: any) {
-    sdError.value = e?.data?.detail?.code || e?.message || 'erro'
+    sdError.value = sdErrMsg(e)
   }
 }
 </script>
