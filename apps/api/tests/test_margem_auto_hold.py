@@ -87,6 +87,7 @@ async def _seed_pedido(
     saldo_gap: bool = False,
     saldo_aguardando: bool = False,
     frete_estourado: bool = False,
+    plataforma: str = "amazon",
 ) -> None:
     """Uma linha em bling_orders + uma linha-item no snapshot verificar_margem.
 
@@ -94,6 +95,8 @@ async def _seed_pedido(
     saldo_gap → valorbase 100 vs líquido 80 (divergência real > R$0,01).
     saldo_aguardando → valorbase presente e líquido NULL (não reconciliado).
     frete_estourado → frete plataforma 30 > frete anúncio 10.
+    plataforma → 'amazon' por padrão (sujeita à triagem de saldo); use
+    'ml'/'shopee' para exercitar a isenção do motivo saldo.
     """
     # Catálogo id→nome (merge = idempotente entre seeds do mesmo teste): os
     # espelhos de situação também gravam situacao_nome via subselect daqui.
@@ -124,7 +127,7 @@ async def _seed_pedido(
             )
             VALUES (
                 :id, :pedido, :bling_id, :sku,
-                :situacao, :situacao_nome, 'amazon', 1,
+                :situacao, :situacao_nome, :plataforma, 1,
                 :status,
                 :margem, :minima,
                 :valorbase,
@@ -149,6 +152,7 @@ async def _seed_pedido(
             "liquido": 80 if saldo_gap else None,
             "frete_anuncio": 10 if frete_estourado else None,
             "frete_pago": 30 if frete_estourado else None,
+            "plataforma": plataforma,
         },
     )
     await db.commit()
@@ -322,6 +326,31 @@ async def test_motivo_distingue_ramos_do_saldo(db: AsyncSession):
     assert "aguardando" not in obs[401]
     assert "aguardando saldo da plataforma" in obs[402]
     assert "divergente" not in obs[402]
+
+
+async def test_nao_segura_ml_shopee_por_saldo(db: AsyncSession):
+    """ML/Shopee são isentas do motivo saldo (o repasse chega sozinho no mesmo
+    dia e é a fonte da verdade — regra de 01/09 em _ATTENTION_SALDO_SQL, que
+    este módulo herda): nem gap real nem líquido NULL seguram o pedido. Margem
+    baixa continua segurando ML/Shopee normalmente."""
+    await _seed_pedido(
+        db, pedido="501", bling_id=501, margem_baixa=False, saldo_gap=True,
+        plataforma="ml",
+    )
+    await _seed_pedido(
+        db, pedido="502", bling_id=502, margem_baixa=False, saldo_aguardando=True,
+        plataforma="shopee",
+    )
+    await _seed_pedido(
+        db, pedido="503", bling_id=503, margem_baixa=True, plataforma="shopee",
+    )
+    fake = FakeBling()
+
+    res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
+
+    assert res == {"held": 1, "failed": 0}
+    assert fake.situacao_calls == [(503, 83955)]
+    assert "margem abaixo do mínimo" in fake.put_bodies[0][1]["observacoes"]
 
 
 async def test_obs_rejeitada_pelo_bling_ainda_segura_o_pedido(db: AsyncSession):

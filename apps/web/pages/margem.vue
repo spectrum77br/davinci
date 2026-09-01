@@ -510,15 +510,31 @@ function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
   return r.saldo_final != null ? r.saldo_final : r.saldo_efetivo
 }
 
+// ML/Shopee: o repasse da plataforma chega sozinho no mesmo dia e é a fonte da
+// verdade — o backend ancora o Saldo Efetivo no líquido REAL da plataforma
+// (não no Bling) e a linha nunca fica pendente por saldo (_ATTENTION_SALDO_SQL
+// as isenta). Aqui a mesma condição decide: (a) divergência Bling × Plataforma
+// deixa de zerar o Efetivo de laranja (não há o que conciliar — vale a
+// plataforma); (b) o lápis some (editar gravaria no Bling e o número da célula
+// não mudaria — pareceria "não salvou"). Projeção (≈) NÃO conta como âncora:
+// enquanto o líquido real não chega, a linha se comporta como as demais.
+function saldoAncoradoNaPlataforma(r: MarketplaceRow): boolean {
+  return ['ml', 'shopee'].includes(r.plataforma ?? '')
+    && r.saldo_plataforma != null
+    && !r.saldo_projetado
+}
+
 // Divergência de saldo: Bling e Plataforma ambos presentes e diferindo por mais
 // de R$0,01 (qualquer situação). Saldo PROJETADO não conta: é estimativa nossa
 // (não o repasse real do marketplace) — sem esse guard, todo TikTok/Amazon
 // pré-liquidação zeraria o Efetivo de laranja por "divergir" de um número que
-// ainda nem existe de verdade.
+// ainda nem existe de verdade. ML/Shopee tampouco: o Efetivo delas JÁ É o
+// saldo da plataforma, divergência com o Bling não é pendência.
 function saldoDivergente(r: MarketplaceRow): boolean {
   return r.saldo_bling != null
     && r.saldo_plataforma != null
     && !r.saldo_projetado
+    && !saldoAncoradoNaPlataforma(r)
     && Math.abs(r.saldo_bling - r.saldo_plataforma) > 0.01
 }
 
@@ -631,7 +647,9 @@ const editingSaldoEfetivo = ref<string | null>(null)
 const saldoEfetivoDraft = ref('')
 
 function startEditSaldoEfetivo(row: MarketplaceRow) {
-  if (!canEdit.value || !row.pedido_bling) return
+  // ML/Shopee com repasse real: o Efetivo É o valor da plataforma — não há o
+  // que editar (gravaria no Bling sem mudar o número exibido).
+  if (!canEdit.value || !row.pedido_bling || saldoAncoradoNaPlataforma(row)) return
   editingSaldoEfetivo.value = row.bling_order_item_id
   saldoEfetivoDraft.value = row.saldo_efetivo != null ? String(row.saldo_efetivo) : ''
 }
@@ -1073,15 +1091,17 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                 <button
                   type="button"
                   class="flex items-center justify-end gap-1 text-right tabular-nums hover:text-foreground disabled:cursor-default"
-                  :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id)"
-                  :title="saldoZeradoVisual(r)
-                    ? `Saldo Bling × Plataforma divergente — Efetivo exibido como 0 (apenas visual). Valor real: ${brl(saldoEfetivoDisplay(r))}.${canEdit && r.pedido_bling ? ' Clique para editar → grava como final no Bling (zera taxa e frete).' : ''}`
-                    : (canEdit && r.pedido_bling ? `Editar Saldo Efetivo → grava o valor como final no Bling (zera taxa e frete)` : '')"
+                  :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id) || saldoAncoradoNaPlataforma(r)"
+                  :title="saldoAncoradoNaPlataforma(r)
+                    ? `Saldo Efetivo = repasse real da plataforma (${(r.plataforma || '').toUpperCase()}) — valor confirmado, sem conciliação nem edição.`
+                    : saldoZeradoVisual(r)
+                      ? `Saldo Bling × Plataforma divergente — Efetivo exibido como 0 (apenas visual). Valor real: ${brl(saldoEfetivoDisplay(r))}.${canEdit && r.pedido_bling ? ' Clique para editar → grava como final no Bling (zera taxa e frete).' : ''}`
+                      : (canEdit && r.pedido_bling ? `Editar Saldo Efetivo → grava o valor como final no Bling (zera taxa e frete)` : '')"
                   @click="startEditSaldoEfetivo(r)"
                 >
                   <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
                   <span :class="saldoZeradoVisual(r) ? 'text-amber-600 dark:text-amber-400' : ''">{{ brl(saldoEfetivoVisual(r)) }}</span>
-                  <Pencil v-if="canEdit" class="size-3 shrink-0 opacity-50" />
+                  <Pencil v-if="canEdit && !saldoAncoradoNaPlataforma(r)" class="size-3 shrink-0 opacity-50" />
                 </button>
               </div>
             </td>

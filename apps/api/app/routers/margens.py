@@ -143,9 +143,24 @@ _ATTENTION_MARGEM_SQL = (
 _ATTENTION_FRETE_SQL = (
     f"(({_FRETE_ANUNCIO_SQL}) IS NOT NULL AND {_FRETE_RESULTADO_SQL} > 0)"
 )
+# ML e Shopee: o repasse da plataforma chega SOZINHO no mesmo dia (medição
+# 01/09: zero linhas sem líquido em todos os dias anteriores; só o dia corrente
+# tinha linhas aguardando) e é a fonte da verdade do saldo. Pedido do Eduardo
+# (01/09): nessas plataformas o Saldo Efetivo ancora no líquido REAL da
+# plataforma (_SALDO_EFETIVO_SQL) e a linha NUNCA fica pendente por saldo —
+# nem "aguardando saldo" (ruído de poucas horas que chegava a acionar o
+# auto-hold à toa: 4 pedidos segurados por "saldo divergente" só na manhã de
+# 01/09), nem "divergente" (se Bling × plataforma diferem, vale a plataforma).
+# Margem baixa e frete estourado continuam valendo normalmente para ML/Shopee.
+# COALESCE(…, '') preserva o gatilho para linhas com plataforma NULL.
+_PLATAFORMAS_SALDO_CONFIAVEL_IN = "('ml', 'shopee')"
+_SALDO_PLATAFORMA_CONFIAVEL_SQL = (
+    "COALESCE(v.plataforma_bling, v.plataforma_financeiro, '') "
+    f"IN {_PLATAFORMAS_SALDO_CONFIAVEL_IN}"
+)
 # "Saldo divergente" — restrito a pedidos em situação 6 ou 83965 (só esses
-# contam para triagem), com saldo_base do Bling presente, e que satisfaçam UMA
-# das condições:
+# contam para triagem), com saldo_base do Bling presente, FORA de ML/Shopee
+# (isentas — ver bloco acima), e que satisfaçam UMA das condições:
 #   a) Plataforma AINDA NULA (financeiro não reconciliado) → não auto-aprovar
 #      antes de bater o repasse real do marketplace. Marketplaces como TikTok
 #      liquidam ~1-2 semanas após a entrega, então o pedido fica "divergente"
@@ -162,6 +177,7 @@ _ATTENTION_FRETE_SQL = (
 _ATTENTION_SALDO_SQL = (
     f"(v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN}) "
     " AND v.bling_valorbase_item IS NOT NULL "
+    f" AND NOT ({_SALDO_PLATAFORMA_CONFIAVEL_SQL}) "
     " AND ("
     "       v.marketplace_liquido_base_margem_item IS NULL "
     "       OR ABS("
@@ -255,6 +271,26 @@ _SALDO_FINAL_BLING_SQL = (
     f"({_SALDO_BLING_SQL} + COALESCE({_REEMBOLSO_DELTA_SQL}, 0))"
 )
 
+# Saldo Efetivo EXIBIDO/derivado. Regra geral: âncora no Bling (editável — a
+# edição inline grava valorbase e o valor digitado aparece na hora). EXCEÇÃO
+# ML/Shopee (pedido do Eduardo 01/09): quando o líquido REAL da plataforma já
+# chegou, ele É o saldo efetivo — "o saldo efetivo do ML e da Shopee podem ser
+# sempre da plataforma". Enquanto o líquido não chega (poucas horas no dia do
+# pedido), cai na âncora do Bling como as demais. A PROJEÇÃO (≈) nunca entra
+# aqui: é estimativa nossa, não repasse real. O frontend esconde o lápis quando
+# a âncora é a plataforma (editar gravaria no Bling sem mudar o número da
+# célula — pareceria "não salvou").
+_SALDO_EFETIVO_SQL = (
+    f"(CASE WHEN {_SALDO_PLATAFORMA_CONFIAVEL_SQL} "
+    "           AND v.marketplace_liquido_base_margem_item IS NOT NULL "
+    "      THEN v.marketplace_liquido_base_margem_item "
+    f"     ELSE {_SALDO_BLING_SQL} END)"
+)
+# Saldo Final coerente com o Efetivo exibido (mesma âncora) + reembolso.
+_SALDO_FINAL_EFETIVO_SQL = (
+    f"({_SALDO_EFETIVO_SQL} + COALESCE({_REEMBOLSO_DELTA_SQL}, 0))"
+)
+
 
 def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate: bool) -> str:
     """Builds the per-item SELECT against either the snapshot table or the
@@ -287,13 +323,14 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             {_SALDO_PLATAFORMA_SQL}                              AS saldo_plataforma,
             {_SALDO_PROJETADO_SQL}                               AS saldo_projetado,
             {_SALDO_BLING_SQL}                                   AS saldo_bling,
-            -- Saldo Efetivo = saldo realizado do item, ancorado no Bling
-            -- (valor_base − frete − taxa), NÃO no líquido do marketplace. É lá
-            -- que a edição inline grava (POST /sync-saldo-final →
-            -- bling_orders.valorbase, zerando taxa/frete) e onde o snapshot é
-            -- patcheado, então o valor digitado aparece na hora. O líquido do
+            -- Saldo Efetivo = saldo realizado do item. Âncora no Bling
+            -- (valor_base − frete − taxa) — é lá que a edição inline grava
+            -- (POST /sync-saldo-final → bling_orders.valorbase, zerando
+            -- taxa/frete) e onde o snapshot é patcheado, então o valor digitado
+            -- aparece na hora. EXCEÇÃO ML/Shopee com líquido real presente:
+            -- âncora na plataforma (_SALDO_EFETIVO_SQL). O líquido do
             -- marketplace continua na coluna Saldo Plataforma.
-            {_SALDO_BLING_SQL}                                   AS saldo_efetivo,
+            {_SALDO_EFETIVO_SQL}                                 AS saldo_efetivo,
             v.marketplace_margem                                 AS margem,
             -- margem_bling já vem perdimento-aware da view/snapshot
             -- (migration 0142): Perdimento (83956) não desconta o custo de
@@ -301,22 +338,24 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             v.bling_margem_calculado                             AS margem_bling,
             v.margem_minima,
             -- Margem Pós Reembolso = margem recalculada já com o reembolso da
-            -- tabela refunds aplicado, sobre o Saldo Final ancorado no Bling
-            -- (_SALDO_FINAL_BLING_SQL = saldo Bling + reembolso; o prejuizo NÃO
-            -- desconta). Como usa o saldo do Bling, recalcula após a edição
-            -- inline. Quando há reembolso negativo (manutenção/devolução) fica
-            -- abaixo da "Margem" (que ignora o reembolso).
+            -- tabela refunds aplicado, sobre o Saldo Final coerente com o
+            -- Efetivo exibido (_SALDO_FINAL_EFETIVO_SQL = efetivo + reembolso;
+            -- o prejuizo NÃO desconta): âncora Bling em geral, plataforma para
+            -- ML/Shopee com líquido real. Fora de ML/Shopee usa o saldo do
+            -- Bling, então recalcula após a edição inline. Quando há reembolso
+            -- negativo (manutenção/devolução) fica abaixo da "Margem" (que
+            -- ignora o reembolso).
             CASE
                 WHEN COALESCE(v.bling_custo_produtos, 0) > 0
-                     AND {_SALDO_FINAL_BLING_SQL} IS NOT NULL
-                THEN ({_SALDO_FINAL_BLING_SQL} - v.bling_custo_produtos)
+                     AND {_SALDO_FINAL_EFETIVO_SQL} IS NOT NULL
+                THEN ({_SALDO_FINAL_EFETIVO_SQL} - v.bling_custo_produtos)
                      / v.bling_custo_produtos
                 ELSE NULL::numeric
             END                                                  AS margem_pos_reembolso,
             v.situacao                                           AS situacao_id,
             v.situacao_nome                                      AS situacao,
             v.ajustes,
-            {_SALDO_FINAL_BLING_SQL}                             AS saldo_final,
+            {_SALDO_FINAL_EFETIVO_SQL}                           AS saldo_final,
             CASE
                 -- 'Pendente' gravado = hold manual (edição de Saldo Efetivo com
                 -- margem recalculada abaixo da mínima); fixa o pedido como

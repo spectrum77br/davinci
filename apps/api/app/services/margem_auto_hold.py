@@ -16,7 +16,12 @@ Por que só situação 6: é a janela pré-etiqueta — a mesma trava do botão
 Reprovar. Pedido que já andou (Atendido, Enviado Etiqueta, ...) não é
 segurado. E o motivo "frete" fica de fora porque a própria listagem da
 Margem o exclui (NOT _ATTENTION_FRETE_SQL): frete só se conhece depois do
-envio, não há o que segurar.
+envio, não há o que segurar. ML/Shopee nunca entram por saldo (01/09): o
+repasse dessas plataformas chega sozinho no mesmo dia e é a fonte da verdade
+(_ATTENTION_SALDO_SQL as isenta na origem — este módulo herda porque importa
+a mesma regra); antes disso o robô chegou a segurar pedidos saudáveis por
+"saldo divergente" de centavos ou por líquido que ainda nem tinha sincronizado.
+Margem baixa continua segurando ML/Shopee normalmente.
 
 Ordem das escritas por pedido: Observações primeiro (GET → compose → PUT,
 a mesma caneta do fluxo Logística — preserva o texto existente e não duplica

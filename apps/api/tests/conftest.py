@@ -161,6 +161,11 @@ async def _setup_schema():
                     marketplace_margem numeric,
                     evento_freight numeric,
                     evento_frete_anuncio numeric,
+                    -- Carimbo do sync financeiro ('pending' = sem transação
+                    -- ainda). Referenciado por _FRETE_PLATAFORMA_SQL
+                    -- (amazon/tiktok) desde 6efb8ac/ee90ca3 — faltava aqui e
+                    -- TODOS os testes de margem quebravam com UndefinedColumn.
+                    financeiro_status text,
                     frete_projetado_item numeric,
                     margem_minima numeric,
                     ajustes numeric,

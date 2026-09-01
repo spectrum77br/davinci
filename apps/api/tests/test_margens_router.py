@@ -350,6 +350,11 @@ async def test_marketplace_saldo_filter_uses_absolute_cent_threshold(
     divergence on a R$7.000 item (0.85%) showed the marker in the detail but
     was filtered out of the 'saldo divergente' list. A high-value, still-pending
     order with a sub-1% (but >R$0,01) gap must now appear.
+
+    Fixtures destes testes usam 'tiktok' (plataforma ainda sujeita à triagem
+    de saldo) — ML/Shopee são ISENTAS do motivo saldo desde 01/09 (o repasse
+    delas chega sozinho e é a fonte da verdade); ver
+    test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma.
     """
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
@@ -377,7 +382,7 @@ async def test_marketplace_saldo_filter_uses_absolute_cent_threshold(
             )
             VALUES (
                 :id, '123456', 987654, 'sku-1',
-                '6', 'Em aberto', 'ml', 1,
+                '6', 'Em aberto', 'tiktok', 1,
                 6940, 0, 0,
                 7000,
                 NULL
@@ -432,7 +437,7 @@ async def test_marketplace_saldo_filter_ignores_sub_cent_noise(
             )
             VALUES (
                 :id, '123457', 987655, 'sku-2',
-                '6', 'Em aberto', 'ml', 1,
+                '6', 'Em aberto', 'tiktok', 1,
                 100.00, 0, 0,
                 100.01,
                 NULL
@@ -484,7 +489,7 @@ async def test_marketplace_saldo_filter_only_considers_shippable_situacoes(
             )
             VALUES (
                 :id, '123458', 987656, 'sku-3',
-                '9', 'Atendido', 'ml', 1,
+                '9', 'Atendido', 'tiktok', 1,
                 6940, 0, 0,
                 7000,
                 NULL
@@ -534,7 +539,7 @@ async def test_marketplace_saldo_filter_includes_situacao_83965(
             )
             VALUES (
                 :id, '123459', 987657, 'sku-4',
-                '83965', 'Enviado Etiqueta', 'ml', 1,
+                '83965', 'Enviado Etiqueta', 'tiktok', 1,
                 6940, 0, 0,
                 7000,
                 NULL
@@ -553,6 +558,78 @@ async def test_marketplace_saldo_filter_includes_situacao_83965(
     assert body["total"] == 1
     assert body["items"][0]["pedido_bling"] == "123459"
     assert body["items"][0]["attention_saldo"] is True
+
+
+async def test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """ML/Shopee nunca ficam pendentes por saldo (pedido do Eduardo 01/09): o
+    repasse dessas plataformas chega sozinho no mesmo dia e é a fonte da
+    verdade. Divergência real (R$60) no ML e líquido ainda NULL na Shopee →
+    nenhum aparece em Pendente; ambos caem em Aprovado. E o Saldo Efetivo do
+    ML ancora no líquido da plataforma (7000), não no Bling (6940); o da
+    Shopee (sem líquido ainda) permanece na âncora do Bling."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    ml = BlingOrder(
+        bling_id=987658, numero="123460", item_codigo="sku-ml", item_index=0, situacao="6",
+    )
+    shopee = BlingOrder(
+        bling_id=987659, numero="123461", item_codigo="sku-sh", item_index=0, situacao="6",
+    )
+    db.add_all([ml, shopee])
+    await db.commit()
+    await db.refresh(ml)
+    await db.refresh(shopee)
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                situacao, situacao_nome, plataforma_bling, item_proportion,
+                bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
+                marketplace_liquido_base_margem_item,
+                bling_status_margem
+            )
+            VALUES
+                (:ml, '123460', 987658, 'sku-ml',
+                 '6', 'Em aberto', 'ml', 1,
+                 6940, 0, 0,
+                 7000,
+                 NULL),
+                (:sh, '123461', 987659, 'sku-sh',
+                 '6', 'Em aberto', 'shopee', 1,
+                 150, 0, 0,
+                 NULL,
+                 NULL)
+            """
+        ),
+        {"ml": str(ml.id), "sh": str(shopee.id)},
+    )
+    await db.commit()
+
+    # Nem o filtro 'saldo' nem a aba Pendente devem segurá-los.
+    saldo = await client.get(
+        "/api/margens/marketplace?attention_type=saldo&status=Pendente"
+    )
+    assert saldo.status_code == 200
+    assert saldo.json()["total"] == 0
+    pendente = await client.get("/api/margens/marketplace?status=Pendente")
+    assert pendente.status_code == 200
+    assert pendente.json()["total"] == 0
+
+    # Auto-aprovados (nenhum gatilho) e Efetivo ancorado na plataforma p/ o ML.
+    aprovado = await client.get("/api/margens/marketplace?status=Aprovado")
+    assert aprovado.status_code == 200
+    por_pedido = {it["pedido_bling"]: it for it in aprovado.json()["items"]}
+    assert por_pedido["123460"]["attention_saldo"] is False
+    assert por_pedido["123460"]["saldo_efetivo"] == 7000
+    assert por_pedido["123460"]["saldo_final"] == 7000
+    assert por_pedido["123461"]["attention_saldo"] is False
+    assert por_pedido["123461"]["saldo_efetivo"] == 150  # líquido NULL → Bling
 
 
 async def test_marketplace_margem_filter_excludes_aguardando_devolucao(
@@ -617,12 +694,24 @@ async def test_marketplace_margem_filter_excludes_aguardando_devolucao(
     assert "123460" not in pedidos
 
 
-async def test_marketplace_frete_result_uses_full_anuncio_per_item(
+async def test_marketplace_frete_estourado_fica_fora_da_listagem(
     client,
     db: AsyncSession,
     make_user,
     auth_as,
 ):
+    """Frete estourado (real > anúncio) NÃO aparece na aba Margem.
+
+    Desde 77302a7 ("fix(margem): excluir pedidos com diferença de frete da
+    visualização") a listagem inteira carrega `NOT _ATTENTION_FRETE_SQL` no
+    WHERE: frete só se conhece depois do envio, então não há decisão de
+    margem a tomar aqui — a linha some da aba (Pendentes E Aprovados) e a UI
+    nem oferece mais o filtro 'frete' no dropdown. Caso real 278867: frete
+    real 104.175 (proporção 0.5 do item) vs anúncio 78.26 → resultado
+    25.915 > 0 → excluído. Este teste substitui o antigo
+    test_marketplace_frete_result_uses_full_anuncio_per_item, que assertava
+    a presença da linha (comportamento pré-77302a7).
+    """
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
     order = BlingOrder(
@@ -661,18 +750,17 @@ async def test_marketplace_frete_result_uses_full_anuncio_per_item(
     )
     await db.commit()
 
-    response = await client.get(
-        "/api/margens/marketplace?attention_type=frete&status=Pendente"
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["total"] == 1
-    item = body["items"][0]
-    assert item["pedido_bling"] == "278867"
-    assert item["frete_anuncio"] == pytest.approx(78.26)
-    assert item["resultado_frete"] == pytest.approx(25.915)
-    assert item["attention_frete"] is True
+    # Fora da listagem em qualquer recorte: filtro frete, Pendente, Aprovado.
+    for query in (
+        "attention_type=frete&status=Pendente",
+        "status=Pendente",
+        "status=Aprovado",
+    ):
+        response = await client.get(f"/api/margens/marketplace?{query}")
+        assert response.status_code == 200
+        body = response.json()
+        pedidos = {item["pedido_bling"] for item in body["items"]}
+        assert "278867" not in pedidos, query
 
 
 async def test_sync_from_marketplace_updates_snapshot_financials_without_view_refresh(
