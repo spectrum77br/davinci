@@ -365,7 +365,7 @@ async function removeSpecial(sd: SpecialDate) {
           <tr>
             <th class="text-left px-3 py-2 font-medium border-b border-border min-w-[280px]">Nome</th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Margem Mín</th>
-            <th class="text-left px-3 py-2 font-medium border-b border-border min-w-[150px]">Datas Especiais</th>
+            <th class="text-left px-3 py-2 font-medium border-b border-border w-28">Datas Especiais</th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Altura <span class="text-muted-foreground font-normal">(cm)</span></th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Largura <span class="text-muted-foreground font-normal">(cm)</span></th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Comprim. <span class="text-muted-foreground font-normal">(cm)</span></th>

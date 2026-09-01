@@ -72,19 +72,21 @@ function isFlashed(id: string, f: string) { return props.flashed.has(`${id}::${f
 const hasChildren = computed(() => props.node.children.length > 0)
 const open = computed(() => isOpen(props.node.id))
 
-// "01/09–15/09" (ano só quando difere do atual: "28/12/25–05/01/26").
+// "01/09–15/09" (ano só quando difere do atual: "28/12/25–05/01/26");
+// dia único vira uma data só ("01/09") — chip curto p/ coluna padrão w-28.
 function fmtRange(sd: SpecialDate): string {
   const cur = String(new Date().getFullYear())
   const f = (iso: string) => {
     const [y, m, d] = iso.split('-')
     return y === cur ? `${d}/${m}` : `${d}/${m}/${y!.slice(2)}`
   }
+  if (sd.date_start === sd.date_end) return f(sd.date_start)
   return `${f(sd.date_start)}–${f(sd.date_end)}`
 }
 function fmtRegra(sd: SpecialDate): string {
   if (sd.min_margin === null) return 'aprova tudo'
   const pct = (Number(sd.min_margin) * 100).toFixed(2).replace(/\.?0+$/, '')
-  return `≥ ${pct}%`
+  return `≥${pct}%`
 }
 </script>
 
@@ -174,7 +176,7 @@ function fmtRegra(sd: SpecialDate): string {
         <span
           v-for="sd in node.special_dates"
           :key="sd.id"
-          class="inline-flex items-center rounded bg-amber-100 dark:bg-amber-900/40 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-300 whitespace-nowrap"
+          class="inline-flex items-center rounded bg-amber-100 dark:bg-amber-900/40 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-300"
         >
           {{ fmtRange(sd) }} · {{ fmtRegra(sd) }}
         </span>
