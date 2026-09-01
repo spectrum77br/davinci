@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CalendarDays, Check, ChevronDown, ChevronRight, Loader2, Plus, Trash2, X } from 'lucide-vue-next'
+import { Check, ChevronDown, ChevronRight, Loader2, Plus, Trash2, X } from 'lucide-vue-next'
 
 // Data Especial: janela em que a margem baixa não trava pedidos do segmento
 // (nem dos subsegmentos). min_margin em fração (-0.15 = -15%); null = aprova
@@ -178,13 +178,9 @@ function fmtRegra(sd: SpecialDate): string {
         >
           {{ fmtRange(sd) }} · {{ fmtRegra(sd) }}
         </span>
-        <span
-          v-if="!node.special_dates.length"
-          class="inline-flex items-center gap-1 text-muted-foreground"
-        >
-          <template v-if="canEdit"><CalendarDays class="h-3 w-3" /> adicionar</template>
-          <template v-else>—</template>
-        </span>
+        <!-- Vazio: "—" padrão como as outras colunas (pedido do Eduardo,
+             01/09) — o clique na célula continua abrindo o modal. -->
+        <span v-if="!node.special_dates.length" class="text-muted-foreground">—</span>
       </div>
     </td>
 
