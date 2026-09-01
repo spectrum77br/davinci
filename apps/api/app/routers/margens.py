@@ -182,22 +182,27 @@ _ATTENTION_FRETE_SQL = (
     f"(({_FRETE_ANUNCIO_SQL}) IS NOT NULL AND {_FRETE_RESULTADO_SQL} > 0)"
 )
 # ML, Shopee e TikTok: o saldo da PLATAFORMA é a fonte da verdade — pedido do
-# Eduardo em dois tempos (01/09): manhã, "o saldo efetivo do ML e da Shopee
+# Eduardo em três tempos (01/09): manhã, "o saldo efetivo do ML e da Shopee
 # podem ser SEMPRE da plataforma... e daí esses pedidos já somem daqui";
 # tarde, "o TikTok disponibiliza já o saldo da plataforma e o frete, mesma
-# coisa" (Central do Vendedor mostra os valores na hora — conferido no pedido
-# de 31/08, total 732,70 = 723,00 + frete 9,70) e "você aprovou usando o
-# saldo do Bling, [não] o da plataforma" → a âncora do Efetivo NÃO espera o
-# settlement: usa o líquido real quando já chegou e a PROJEÇÃO (≈,
-# _SALDO_PLATAFORMA_SQL) enquanto não chegou (ML/Shopee: horas do mesmo dia;
-# TikTok: settlement dias após a entrega). Nessas plataformas a linha NUNCA
-# fica pendente por saldo — nem "aguardando" (ruído que acionava o auto-hold
-# à toa: 13 pedidos saudáveis segurados só em 01/09), nem "divergente" (se
-# Bling × plataforma diferem, vale a plataforma; quando o settlement real
-# mudar a margem para baixo da mínima, o gatilho de MARGEM pega). Margem
-# baixa e frete estourado continuam valendo normalmente. Amazon fica FORA:
-# liquida dias depois e sem aval do dono. COALESCE(…, '') preserva o gatilho
-# para linhas com plataforma NULL.
+# coisa" e "você aprovou usando o saldo do Bling, [não] o da plataforma";
+# noite, "está aprovando tudo até com margem negativa — o saldo efetivo deixe
+# sempre em branco, retirar a projeção, sempre pegar a da plataforma, e o
+# frete tbm". A projeção ≈ (que preenchia o Efetivo enquanto o líquido real
+# não sincronizava) aprovava às cegas: a margem oficial (v.marketplace_margem,
+# view 0045) só existe com líquido REAL — sem real, nenhum gatilho disparava
+# e a linha caía no default "Aprovado" mesmo com a margem projetada exibida
+# negativa (01/09: 5 TikTok + 1 Shopee "Em aberto" nesse limbo, 2 abaixo da
+# mínima). Regra atual: o Efetivo é o líquido REAL da plataforma ou fica EM
+# BRANCO (nunca projeção, nunca o Bling), e enquanto estiver em branco a
+# linha fica Pendente por "aguardando saldo da plataforma"
+# (_ATTENTION_SALDO_AGUARDANDO_SQL) — SÓ na aba: o robô auto-hold NÃO segura
+# por esse motivo (o ruído dos 13 pedidos saudáveis segurados em 01/09 era
+# isso). Quando o real sincroniza (ML/Shopee: minutos-horas; TikTok:
+# settlement dias após a entrega), a linha aprova sozinha ou cai para "margem
+# baixa". "Divergente" segue não existindo aqui (vale a plataforma). Amazon
+# fica FORA: âncora no Bling e triagem de divergência normais. COALESCE(…,'')
+# preserva os gatilhos para linhas com plataforma NULL.
 _PLATAFORMAS_SALDO_CONFIAVEL_IN = "('ml', 'shopee', 'tiktok')"
 _SALDO_PLATAFORMA_CONFIAVEL_SQL = (
     "COALESCE(v.plataforma_bling, v.plataforma_financeiro, '') "
@@ -235,20 +240,40 @@ _ATTENTION_SALDO_SQL = (
     " ))"
 )
 
-# "Needs attention" flag — rows the user must triage. Three independent triggers:
+# "Aguardando saldo da plataforma" — ML/Shopee/TikTok em situação de triagem
+# (6/83965) cujo líquido REAL ainda não sincronizou. Sem real não existe
+# margem oficial (view 0045: marketplace_margem NULL) e nenhum outro gatilho
+# dispara — sem este, a linha caía em "Aprovado" às cegas (reclamação do
+# Eduardo, 01/09 à noite: "está aprovando tudo até com margem negativa").
+# Segura SÓ na aba (linha Pendente, Efetivo em branco); o robô auto-hold
+# exclui este motivo explicitamente (margem_auto_hold._candidatos_sql) para
+# não repetir os 13 holds à toa de 01/09. bling_valorbase_item presente =
+# linha financeiramente formada (mesma guarda do gatilho de divergência).
+_ATTENTION_SALDO_AGUARDANDO_SQL = (
+    f"(v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN}) "
+    " AND v.bling_valorbase_item IS NOT NULL "
+    f" AND {_SALDO_PLATAFORMA_CONFIAVEL_SQL} "
+    " AND v.marketplace_liquido_base_margem_item IS NULL)"
+)
+
+# "Needs attention" flag — rows the user must triage. Four independent triggers:
 #   1) margin below the configured minimum
 #   2) seller paid more shipping than the listing/ad freight value
 #   3) Bling-computed net diverges from marketplace net by more than R$0,01
+#   4) trusted platform (ML/Shopee/TikTok) still waiting for the real payout
 # Rows that don't trigger any of these are treated as auto-approved in the UI
 # (status filter "Pendente" hides them; "Aprovado" includes them).
 NEEDS_ATTENTION_SQL = (
-    f"({_ATTENTION_MARGEM_SQL} OR {_ATTENTION_FRETE_SQL} OR {_ATTENTION_SALDO_SQL})"
+    f"({_ATTENTION_MARGEM_SQL} OR {_ATTENTION_FRETE_SQL} OR {_ATTENTION_SALDO_SQL}"
+    f" OR {_ATTENTION_SALDO_AGUARDANDO_SQL})"
 )
 
 _ATTENTION_TYPE_MAP = {
     "margem": _ATTENTION_MARGEM_SQL,
     "frete":  _ATTENTION_FRETE_SQL,
-    "saldo":  _ATTENTION_SALDO_SQL,
+    # O filtro de motivo "saldo" cobre divergência (não-confiáveis) E
+    # aguardando saldo (confiáveis) — mesma coluna attention_saldo abaixo.
+    "saldo":  f"({_ATTENTION_SALDO_SQL} OR {_ATTENTION_SALDO_AGUARDANDO_SQL})",
     "all":    NEEDS_ATTENTION_SQL,
 }
 
@@ -263,43 +288,21 @@ _SALDO_BLING_SQL = (
     " - COALESCE(v.bling_taxacomissao_item, 0))"
 )
 
-# Saldo Plataforma. Normalmente = líquido reconciliado do marketplace
-# (v.marketplace_liquido_base_margem_item). Enquanto esse líquido não chega
-# (Amazon: só depois do envio; TikTok: settlement dias após a entrega;
-# Shopee/ML: minutos após o pedido), projetamos o saldo:
-#   valor da venda − frete projetado − comissão projetada da loja
-# onde a comissão projetada = valor da venda × commission (fração 0.19 = 19%)
-# do cadastro da conta na Tabela de Preços (pricing_accounts.commission,
-# join por pricing_account_id → pa_comm). Assim que o líquido real chega,
-# o COALESCE volta a usá-lo (a projeção é só fallback pré-liquidação).
-#
-# 2026-08-31 (pedido do Eduardo: Saldo Plataforma "—" nos TikTok pendentes):
-# projeção estendida de Amazon para TODOS os marketplaces com financeiro
-# integrado (amazon/tiktok/shopee/ml). Fora da lista ficam interno/presencial/
-# temu/magalu — não existe repasse de plataforma para projetar nesses casos.
-# A flag _SALDO_PROJETADO_SQL marca a linha para o frontend NÃO tratar a
-# projeção como divergência (senão o Saldo Efetivo zeraria de laranja) e para
-# exibir o "≈". Regras internas (alerta de saldo divergente, cópia p/ Bling)
-# continuam lendo o líquido REAL (v.marketplace_liquido_base_margem_item) —
-# projeção nunca aprova pedido nem grava nada no Bling.
-_SALDO_PLATAFORMA_SQL = (
-    "COALESCE(v.marketplace_liquido_base_margem_item,"
-    " CASE WHEN COALESCE(v.plataforma_bling, v.plataforma_financeiro)"
-    "           IN ('amazon', 'tiktok', 'shopee', 'ml')"
-    "           AND v.bling_valorbase_item IS NOT NULL"
-    "      THEN (v.bling_valorbase_item"
-    "            - COALESCE(v.frete_projetado_item, 0)"
-    "            - (v.bling_valorbase_item * COALESCE(pa_comm.commission, 0)))"
-    "      ELSE NULL END)"
-)
+# Saldo Plataforma = líquido reconciliado do marketplace, SEM projeção.
+# A projeção ≈ (valor da venda − frete projetado − comissão da conta,
+# adicionada em 31/08 e estendida em 01/09) foi RETIRADA em 01/09 à noite a
+# pedido do Eduardo ("retirar a projeção, sempre pegar a da plataforma"):
+# ela preenchia o Efetivo das plataformas confiáveis e aprovava às cegas —
+# ver o bloco do _PLATAFORMAS_SALDO_CONFIAVEL_IN. Enquanto o líquido real
+# não sincroniza (Amazon: após o envio; TikTok: settlement dias após a
+# entrega; Shopee/ML: minutos-horas), a célula fica EM BRANCO. O Raio-X
+# ("Ver saldo") continua mostrando a matemática projetada como diagnóstico,
+# mas ela não entra em coluna nem em gatilho.
+_SALDO_PLATAFORMA_SQL = "v.marketplace_liquido_base_margem_item"
 
-# True quando o número exibido em Saldo Plataforma é projeção (líquido real
-# ainda não chegou). O frontend usa para: (a) não zerar o Saldo Efetivo por
-# "divergência" contra uma estimativa; (b) prefixar com "≈".
-_SALDO_PROJETADO_SQL = (
-    f"(v.marketplace_liquido_base_margem_item IS NULL"
-    f" AND ({_SALDO_PLATAFORMA_SQL}) IS NOT NULL)"
-)
+# Projeção retirada (01/09 à noite) — flag mantida no payload como FALSE para
+# não quebrar consumidores do shape; o frontend não exibe mais o "≈".
+_SALDO_PROJETADO_SQL = "FALSE"
 
 # Ajuste por item: SÓ o reembolso entra no Saldo Efetivo. O `prejuizo` da tabela
 # refunds é referência visual (base pra abrir o chamado de reembolso) e NUNCA
@@ -321,18 +324,16 @@ _SALDO_FINAL_BLING_SQL = (
 # edição inline grava valorbase e o valor digitado aparece na hora). EXCEÇÃO
 # ML/Shopee/TikTok (pedido do Eduardo 01/09, ver bloco do
 # _PLATAFORMAS_SALDO_CONFIAVEL_IN): o Saldo Efetivo é SEMPRE o da plataforma
-# — o líquido real quando já chegou, senão a projeção ≈ (é o que a Central do
-# Vendedor já mostra; correção da tarde: a 1ª versão só ancorava no real e os
-# pedidos do dia apareciam "aprovados com o saldo do Bling"). O COALESCE de
-# _SALDO_PLATAFORMA_SQL faz exatamente real-senão-projeção; quando ambos
-# faltam (valorbase NULL), cai na âncora do Bling como as demais. O frontend
-# esconde o lápis quando a âncora é a plataforma (editar gravaria no Bling
-# sem mudar o número da célula — pareceria "não salvou") e mantém o ≈ na
-# célula enquanto o valor for projeção.
+# — o líquido REAL quando já sincronizou, senão EM BRANCO. Nunca cai no
+# Bling (tarde: "você aprovou usando o saldo do Bling") e nunca projeta
+# (noite: "o saldo efetivo deixe sempre em branco... retirar a projeção").
+# Com o Efetivo NULL, saldo_final e margem_pos_reembolso ficam NULL — as
+# colunas Lucro/Final da UI ficam em branco até o repasse real chegar. O
+# frontend esconde o lápis nessas plataformas (editar gravaria no Bling sem
+# mudar o número da célula — pareceria "não salvou").
 _SALDO_EFETIVO_SQL = (
     f"(CASE WHEN {_SALDO_PLATAFORMA_CONFIAVEL_SQL} "
-    f"           AND ({_SALDO_PLATAFORMA_SQL}) IS NOT NULL "
-    f"      THEN ({_SALDO_PLATAFORMA_SQL}) "
+    f"      THEN {_SALDO_PLATAFORMA_SQL} "
     f"     ELSE {_SALDO_BLING_SQL} END)"
 )
 # Saldo Final coerente com o Efetivo exibido (mesma âncora) + reembolso.
@@ -422,14 +423,16 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             bo.observacao,
             {_ATTENTION_MARGEM_SQL}                              AS attention_margem,
             {_ATTENTION_FRETE_SQL}                               AS attention_frete,
-            {_ATTENTION_SALDO_SQL}                               AS attention_saldo,
+            -- Motivo "saldo" no payload = divergência (não-confiáveis) OU
+            -- aguardando saldo da plataforma (ML/Shopee/TikTok sem líquido
+            -- real) — espelha o filtro attention_type=saldo.
+            ({_ATTENTION_SALDO_SQL}
+             OR {_ATTENTION_SALDO_AGUARDANDO_SQL})               AS attention_saldo,
             -- Data Especial ativa para o segmento do pedido (badge na UI):
             -- período casa E a margem passa na regra especial. É a mesma
             -- expressão que suspende o gatilho de margem baixa.
             {_MARGEM_DATA_ESPECIAL_SQL}                          AS data_especial
         FROM {source_table} v
-        LEFT JOIN {_PRICING_ACCOUNTS_TABLE} pa_comm
-            ON pa_comm.id = v.pricing_account_id
         LEFT JOIN LATERAL (
             SELECT bo.observacao
             FROM {_BLING_ORDERS_TABLE} bo

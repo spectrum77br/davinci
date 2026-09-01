@@ -338,11 +338,12 @@ async def test_motivo_distingue_ramos_do_saldo(db: AsyncSession):
 
 
 async def test_nao_segura_ml_shopee_tiktok_por_saldo(db: AsyncSession):
-    """ML/Shopee/TikTok são isentas do motivo saldo (o saldo da plataforma é a
-    fonte da verdade, real ou projetado — regra de 01/09 em
-    _ATTENTION_SALDO_SQL, que este módulo herda; TikTok entrou na correção da
-    tarde): nem gap real nem líquido NULL seguram o pedido. Margem baixa
-    continua segurando essas plataformas normalmente."""
+    """ML/Shopee/TikTok nunca são seguradas por saldo (o saldo da plataforma é
+    a fonte da verdade — 01/09): gap real não é divergência
+    (_ATTENTION_SALDO_SQL as exclui) e líquido NULL vira "aguardando saldo da
+    plataforma" SÓ na aba (_ATTENTION_SALDO_AGUARDANDO_SQL, excluído no WHERE
+    de _candidatos_sql — versão da noite: pendente sem hold, para não repetir
+    os 13 holds à toa). Margem baixa continua segurando normalmente."""
     await _seed_pedido(
         db, pedido="501", bling_id=501, margem_baixa=False, saldo_gap=True,
         plataforma="ml",

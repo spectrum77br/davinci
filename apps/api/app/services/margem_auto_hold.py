@@ -17,13 +17,16 @@ Reprovar. Pedido que já andou (Atendido, Enviado Etiqueta, ...) não é
 segurado. E o motivo "frete" fica de fora porque a própria listagem da
 Margem o exclui (NOT _ATTENTION_FRETE_SQL): frete só se conhece depois do
 envio, não há o que segurar. ML/Shopee/TikTok nunca entram por saldo (01/09):
-o saldo da plataforma é a fonte da verdade — real quando já sincronizou,
-projeção enquanto não (a Central do Vendedor já mostra os valores; TikTok
-liquida dias depois, mas exibe saldo e frete na hora). _ATTENTION_SALDO_SQL
-as isenta na origem — este módulo herda porque importa a mesma regra. Antes
-disso o robô chegou a segurar 13 pedidos saudáveis num só dia por "saldo
-divergente" de centavos ou por líquido que ainda nem tinha sincronizado.
-Margem baixa continua segurando ML/Shopee/TikTok normalmente.
+o saldo da plataforma é a fonte da verdade. Enquanto o líquido real não
+sincroniza, a linha fica "aguardando saldo da plataforma" SÓ na aba
+(_ATTENTION_SALDO_AGUARDANDO_SQL, 01/09 à noite — sem margem oficial, nada
+aprova às cegas); o robô NÃO segura por esse motivo: o WHERE de
+_candidatos_sql o exclui explicitamente, como faz com o frete. Antes o robô
+chegou a segurar 13 pedidos saudáveis num só dia por "saldo divergente" de
+centavos ou por líquido que ainda nem tinha sincronizado; a divergência
+segue isenta na origem (_ATTENTION_SALDO_SQL exclui as confiáveis). Margem
+baixa continua segurando ML/Shopee/TikTok normalmente — ela só existe com o
+líquido real presente (nunca vem de projeção).
 
 Ordem das escritas por pedido: Observações primeiro (GET → compose → PUT,
 a mesma caneta do fluxo Logística — preserva o texto existente e não duplica
@@ -102,10 +105,16 @@ def _candidatos_sql() -> str:
     from app.routers.margens import (
         _ATTENTION_FRETE_SQL,
         _ATTENTION_MARGEM_SQL,
+        _ATTENTION_SALDO_AGUARDANDO_SQL,
         _ATTENTION_SALDO_SQL,
         NEEDS_ATTENTION_SQL,
     )
 
+    # NOT _ATTENTION_SALDO_AGUARDANDO_SQL: linha de plataforma confiável
+    # (ML/Shopee/TikTok) só aguardando o líquido real fica na aba, mas NÃO é
+    # motivo de hold (ver docstring). A exclusão é por LINHA: um pedido misto
+    # ainda entra pelas linhas com gatilho real (margem baixa exige líquido
+    # presente, então nunca coexiste com "aguardando" na mesma linha).
     return f"""
         SELECT v.pedido_bling,
                MAX(v.bling_id)                  AS bling_id,
@@ -120,6 +129,7 @@ def _candidatos_sql() -> str:
         WHERE v.situacao = '{SITUACAO_EM_ABERTO}'
           AND v.bling_id IS NOT NULL
           AND NOT {_ATTENTION_FRETE_SQL}
+          AND NOT {_ATTENTION_SALDO_AGUARDANDO_SQL}
           AND (v.bling_status_margem = 'Pendente'
                OR (v.bling_status_margem IS NULL AND {NEEDS_ATTENTION_SQL}))
         GROUP BY v.pedido_bling

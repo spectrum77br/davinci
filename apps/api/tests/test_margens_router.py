@@ -566,18 +566,17 @@ async def test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma
     make_user,
     auth_as,
 ):
-    """ML/Shopee/TikTok nunca ficam pendentes por saldo (pedido do Eduardo
-    01/09, em dois tempos): o saldo da PLATAFORMA é a fonte da verdade — o
-    líquido real quando já sincronizou, senão a projeção ≈ (correção da tarde:
-    "você aprovou usando o saldo do Bling, [não] o da plataforma" — a Central
-    do Vendedor já mostra os valores, TikTok incluso). Três linhas em situação
-    6, nenhuma aparece em Pendente; todas caem em Aprovado:
-      - ML: divergência real de R$60 → Efetivo = líquido da plataforma (7000),
-        não o Bling (6940);
-      - Shopee: líquido NULL + taxa Bling 30 → Efetivo = PROJEÇÃO (150 =
-        valorbase − frete projetado 0 − comissão 0), não o Bling (120);
-      - TikTok: líquido NULL + taxa Bling 40 → Efetivo = projeção (480), não
-        o Bling (440). Antes da correção, TikTok nem era isenta.
+    """ML/Shopee/TikTok: o saldo da PLATAFORMA é a fonte da verdade (Eduardo,
+    01/09 em três tempos; a versão final é a da noite — "está aprovando tudo
+    até com margem negativa: o saldo efetivo deixe sempre em branco, retirar
+    a projeção, sempre pegar a da plataforma"). Três linhas em situação 6:
+      - ML com líquido real (divergência de R$60 com o Bling): SEM pendência
+        de saldo — Efetivo = líquido da plataforma (7000), não o Bling
+        (6940); Aprovado.
+      - Shopee/TikTok com líquido NULL: Efetivo EM BRANCO (nunca a projeção,
+        nunca o Bling) e a linha fica PENDENTE por "aguardando saldo da
+        plataforma" (motivo 'saldo') — sem margem oficial, nada aprova às
+        cegas. saldo_projetado agora é sempre False (projeção retirada).
     """
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
@@ -627,17 +626,8 @@ async def test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma
     )
     await db.commit()
 
-    # Nem o filtro 'saldo' nem a aba Pendente devem segurá-los.
-    saldo = await client.get(
-        "/api/margens/marketplace?attention_type=saldo&status=Pendente"
-    )
-    assert saldo.status_code == 200
-    assert saldo.json()["total"] == 0
-    pendente = await client.get("/api/margens/marketplace?status=Pendente")
-    assert pendente.status_code == 200
-    assert pendente.json()["total"] == 0
-
-    # Auto-aprovados (nenhum gatilho) e Efetivo ancorado na plataforma.
+    # ML (líquido real presente): aprovado, Efetivo = plataforma, sem
+    # divergência apesar dos R$60 de diferença com o Bling.
     aprovado = await client.get("/api/margens/marketplace?status=Aprovado")
     assert aprovado.status_code == 200
     por_pedido = {it["pedido_bling"]: it for it in aprovado.json()["items"]}
@@ -645,12 +635,26 @@ async def test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma
     assert por_pedido["123460"]["saldo_efetivo"] == 7000  # líquido real
     assert por_pedido["123460"]["saldo_final"] == 7000
     assert por_pedido["123460"]["saldo_projetado"] is False
-    assert por_pedido["123461"]["attention_saldo"] is False
-    assert por_pedido["123461"]["saldo_efetivo"] == 150  # projeção, não 120
-    assert por_pedido["123461"]["saldo_projetado"] is True
-    assert por_pedido["123462"]["attention_saldo"] is False
-    assert por_pedido["123462"]["saldo_efetivo"] == 480  # projeção, não 440
-    assert por_pedido["123462"]["saldo_projetado"] is True
+    assert "123461" not in por_pedido
+    assert "123462" not in por_pedido
+
+    # Shopee/TikTok (líquido NULL): pendentes por "aguardando saldo da
+    # plataforma" (motivo 'saldo'), Efetivo/Plataforma em branco, sem ≈.
+    pendente = await client.get(
+        "/api/margens/marketplace?attention_type=saldo&status=Pendente"
+    )
+    assert pendente.status_code == 200
+    body = pendente.json()
+    assert body["total"] == 2
+    por_pedido = {it["pedido_bling"]: it for it in body["items"]}
+    for pedido in ("123461", "123462"):
+        item = por_pedido[pedido]
+        assert item["attention_saldo"] is True
+        assert item["saldo_plataforma"] is None
+        assert item["saldo_efetivo"] is None  # nunca o Bling, nunca projeção
+        assert item["saldo_final"] is None
+        assert item["saldo_projetado"] is False
+        assert item["status"] == "Pendente"
 
 
 async def test_marketplace_margem_filter_excludes_aguardando_devolucao(
