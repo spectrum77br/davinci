@@ -226,6 +226,57 @@ async def test_sweep_erro_em_uma_loja_nao_derruba_a_outra(db, make_user):
     assert by_id["333"] == "estimated"
 
 
+async def test_fast_lane_so_olha_recentes_sem_estimativa(db, make_user):
+    """recent_hours (via expressa de 1min): pedido novo sem estimativa entra;
+    quem já tem estimativa ou é antigo fica para a varredura completa —
+    na prática, custo zero de API na maioria dos minutos."""
+    await _wipe(db)
+    integ = await _tiktok_integration(db, make_user)
+    db.add(_mof(integ))  # novo, sem estimativa → alvo da via expressa
+    db.add(_mof(integ, external_order_id="444",
+                raw={"unsettled_estimate": {"est_settlement_amount": "9.99"}},
+                status="estimated", net_amount=Decimal("9.99")))
+    db.add(_mof(integ, external_order_id="555"))  # ficará "antigo"
+    await db.commit()
+    await db.execute(text(
+        "UPDATE marketplace_order_financials "
+        "SET created_at = now() - interval '2 days' "
+        "WHERE external_order_id = '555'"
+    ))
+    await db.commit()
+
+    fake = _FakeTikTok([_page([_tx(), _tx(order_id="555", est="70.00")])])
+    result = await run_tiktok_unsettled_sweep(
+        db, client_factory=lambda _i: fake, recent_hours=3, window_days=3, max_pages=1
+    )
+
+    # só o pedido novo é candidato; o antigo nem entra (mesmo aparecendo na página)
+    assert result == {"integrations": 1, "candidates": 1, "updated": 1}
+    rows = (await db.execute(
+        text("SELECT external_order_id, status, net_amount FROM marketplace_order_financials")
+    )).mappings().all()
+    by_id = {r["external_order_id"]: r for r in rows}
+    assert Decimal(by_id[ORDER_ID]["net_amount"]) == Decimal("321.25")
+    assert by_id["555"]["status"] == "pending"
+    assert by_id["555"]["net_amount"] is None
+
+
+async def test_fast_lane_sem_candidato_novo_nao_chama_api(db, make_user):
+    await _wipe(db)
+    integ = await _tiktok_integration(db, make_user)
+    db.add(_mof(integ, status="estimated", net_amount=Decimal("321.25"),
+                raw={"unsettled_estimate": {"est_settlement_amount": "321.25"}}))
+    await db.commit()
+
+    chamadas = []
+    result = await run_tiktok_unsettled_sweep(
+        db, client_factory=lambda i: chamadas.append(i) or _FakeTikTok([]),
+        recent_hours=3, window_days=3, max_pages=1,
+    )
+    assert result == {"integrations": 0, "candidates": 0, "updated": 0}
+    assert chamadas == []  # custo zero: nem cliente foi criado
+
+
 async def test_sweep_pula_integracao_inativa(db, make_user):
     await _wipe(db)
     integ = await _tiktok_integration(db, make_user, status="disconnected")

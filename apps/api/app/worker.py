@@ -1006,6 +1006,41 @@ async def tiktok_unsettled_sweep(ctx: dict) -> None:
             logger.warning("tiktok_unsettled_sweep_snapshot_failed", error=str(e)[:200])
 
 
+async def tiktok_unsettled_fast_lane(ctx: dict) -> None:
+    """Via expressa MINUTO A MINUTO da estimativa TikTok (Eduardo, 01/09:
+    "tem que ficar o mais rapido possivel... nao pode mais ficar 10 min" —
+    a aprovação da Margem vai virar automática e cada minuto conta).
+
+    Só age em pedidos criados nas últimas 3h que AINDA não têm estimativa:
+    na maioria dos minutos é 1 SELECT e zero chamadas ao TikTok; quando há
+    pedido novo aguardando, 1 página por loja afetada (o TikTok libera a
+    estimativa ~30-60min após a venda — 293707 medido ao vivo — e o sort
+    DESC a pega na primeira página assim que existir). Passou das 3h sem
+    estimativa (caso raro, ex.: cancelado antes de pagar), sai daqui e fica
+    com a varredura completa de 10min. Achou → snapshot na sequência: valor
+    na aba no MESMO minuto."""
+    from app.services.marketplace_financials import run_tiktok_unsettled_sweep
+    from app.services.verificar_margem import rebuild_all
+
+    async with session_scope() as s:
+        try:
+            result = await run_tiktok_unsettled_sweep(
+                s, recent_hours=3, window_days=3, max_pages=1
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("tiktok_unsettled_fast_lane_failed", error=str(e)[:300])
+            return
+    if not result.get("updated"):
+        return
+    logger.info("tiktok_unsettled_fast_lane_done", **result)
+    async with session_scope() as s:
+        try:
+            n = await rebuild_all(s)
+            logger.info("tiktok_unsettled_fast_lane_snapshot", rebuilt=n)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("tiktok_unsettled_fast_lane_snapshot_failed", error=str(e)[:200])
+
+
 async def shopee_discrepancy_check(ctx: dict) -> None:
     """Compare Shopee stock vs local DB and fix discrepancies.
     Runs every 4h to catch phantom stock issues."""
@@ -1895,6 +1930,7 @@ class WorkerSettings:
         user_relink_run,
         sync_marketplace_financials_for_order_run,
         tiktok_unsettled_sweep,
+        tiktok_unsettled_fast_lane,
         verificar_margem_snapshot,
         check_marketplace_shipped_orders,
         bling_orders_safety_net_tick,
@@ -1981,6 +2017,10 @@ class WorkerSettings:
         # desalinhados do financials_retry (:10/:40) e do snapshot (:15/:45);
         # o job já reconstrói o snapshot sozinho quando acha valor novo.
         cron(tiktok_unsettled_sweep, minute={3, 13, 23, 33, 43, 53}, run_at_startup=False),
+        # Todo minuto (campo minute omitido = wildcard): quase sempre é só um
+        # SELECT local; API do TikTok apenas quando há pedido <3h sem
+        # estimativa — ver a docstring do job.
+        cron(tiktok_unsettled_fast_lane, run_at_startup=False),
         # Daily Frete refund sweep — 06:20 UTC = 03:20 BRT, in the quiet
         # window after the daily sync scheduler. Per-order hook in
         # marketplace_financials handles the realtime case; this cron
@@ -2364,6 +2404,7 @@ __all__ = [
     "ml_token_refresh",
     "marketplace_financials_retry",
     "tiktok_unsettled_sweep",
+    "tiktok_unsettled_fast_lane",
     "refunds_freight_backfill",
     "refresh_bling_stock_run",
     "push_prices_batch_run",

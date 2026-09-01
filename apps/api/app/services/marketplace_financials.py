@@ -280,6 +280,7 @@ async def run_tiktok_unsettled_sweep(
     client_factory=None,
     window_days: int = 60,
     max_pages: int = 10,
+    recent_hours: int | None = None,
 ) -> dict[str, int]:
     """Preenche o líquido TikTok com a estimativa OFICIAL pré-liquidação.
 
@@ -299,19 +300,28 @@ async def run_tiktok_unsettled_sweep(
     guard do _persist_snapshot preserva quando um retry volta vazio. O
     settlement REAL substitui tudo quando postar (posted vence sempre).
     attempts/next_retry_at ficam intocados: são do ciclo do settlement real.
+
+    recent_hours (a via expressa do worker, minuto a minuto — Eduardo 01/09:
+    "tem que ficar o mais rapido possivel... nao pode mais ficar 10 min",
+    a aprovação vai virar automática): considera SÓ candidatos criados nas
+    últimas N horas e AINDA sem estimativa. Sem nenhum, retorna sem tocar a
+    API (custo zero na maioria dos minutos); com algum, 1 página por loja
+    afetada (sort DESC pega os mais novos) resolve. O TikTok libera a
+    estimativa ~30-60min após a venda (medido no 293707) — passada a janela
+    das N horas, o caso raro fica para a varredura completa de 10min.
     """
-    candidatos = (
-        (
-            await session.execute(
-                select(MarketplaceOrderFinancial)
-                .where(MarketplaceOrderFinancial.platform == IntegrationPlatform.TIKTOK)
-                .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
-                .where(MarketplaceOrderFinancial.integration_id.is_not(None))
-            )
-        )
-        .scalars()
-        .all()
+    stmt = (
+        select(MarketplaceOrderFinancial)
+        .where(MarketplaceOrderFinancial.platform == IntegrationPlatform.TIKTOK)
+        .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
+        .where(MarketplaceOrderFinancial.integration_id.is_not(None))
     )
+    if recent_hours is not None:
+        stmt = stmt.where(
+            MarketplaceOrderFinancial.created_at
+            >= datetime.now(UTC) - timedelta(hours=recent_hours)
+        ).where(~MarketplaceOrderFinancial.raw.has_key("unsettled_estimate"))
+    candidatos = (await session.execute(stmt)).scalars().all()
     if not candidatos:
         return {"integrations": 0, "candidates": 0, "updated": 0}
 
