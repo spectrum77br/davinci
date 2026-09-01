@@ -937,9 +937,13 @@ async def patch_devolution(
             await session.commit()
             await session.refresh(row)
 
-    # Extraviado patcha a situação ao virar Extraviado (sem depender do toggle).
+    # Extraviado e Manutenção patcham a situação já na mudança de condição
+    # (sem depender do toggle) — Manutenção precisa refletir no Bling na hora.
+    # Se a API recusar a transição direta, apply_order_situacao desvia por
+    # Aguardando Devolução; se nem o desvio passar, alerta o operador.
     extraviado_now = new_condicao == "Extraviado" and condicao_changed
-    if (extraviado_now or should_stock) and row.pedido_bling:
+    manutencao_now = new_condicao == "Manutenção" and condicao_changed
+    if (extraviado_now or manutencao_now or should_stock) and row.pedido_bling:
         await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
         await session.commit()  # persiste a linha de auditoria de situação
 

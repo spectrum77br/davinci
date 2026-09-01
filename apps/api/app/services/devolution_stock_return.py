@@ -23,6 +23,14 @@ Estoque, por condição efetiva:
 Situação do pedido (valor único no Bling), precedência pior→melhor:
   qualquer Extraviado → 83960; senão qualquer Sucata → 545901; senão qualquer
   Trocado OU todos os itens resolvidos (Novo/Usado) → 545902 (resolvido).
+  "Entregue" e "Não devolvido" (legado) são NEUTROS: não contam no cálculo.
+
+Transições diretas no Bling (API v3) podem ser rejeitadas com 400 (ex.:
+Resolvido→Extraviado, Resolvido→Manutenção). Na recusa o patch faz um DESVIO
+validado (caso real 291700): passa por "Aguardando Devolução" (83957) e
+reaplica o alvo. "Mesma situação" (400 cód. 50) conta como sucesso
+idempotente, sem desvio. Se até o desvio for recusado (4xx), o operador
+recebe um alerta (sino/Telegram) para ajustar a situação manualmente.
 
 Todas as funções públicas de estoque retornam um dict:
   ok: bool, action: str, sku: str|None, bling_product_id: int|None, message: str
@@ -34,13 +42,15 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import structlog
 from sqlalchemy import func, or_, select
 
 from app.config import get_settings
 from app.models import BlingOrder, Devolution, Integration, Product
-from app.models.enums import IntegrationPlatform
+from app.models.enums import AlertSeverity, AlertType, IntegrationPlatform
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.alerts import emit_alert
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
 from app.services.sku_tags import SUFFIX_TAGS as _SKU_SUFFIX_TAGS
@@ -65,6 +75,17 @@ SITUACAO_MANUTENCAO = 84677
 SITUACAO_AGUARDANDO_DEVOLUCAO = 83957
 # 545901 ("Manutenção - Sucata") existe mas o Bling rejeita a transição (400);
 # por isso Sucata resolve para 545902 (resolvido).
+
+# Condições NEUTRAS no cálculo da situação: não contam nem travam o "todos
+# resolvidos". "Entregue" = cliente ficou com o item; "Não devolvido" = legado
+# (não existe mais no seletor do front, mas sobrevive em linhas antigas).
+_NEUTRAL_CONDICOES = {"Entregue", "Não devolvido"}
+
+_SITUACAO_NOMES = {
+    SITUACAO_RESOLVIDO: "Resolvido",
+    SITUACAO_EXTRAVIADO: "Extraviado",
+    SITUACAO_MANUTENCAO: "Manutenção",
+}
 
 # Sufixos regionais válidos — fonte única em app.services.sku_tags.
 _SUFFIX_TAGS = _SKU_SUFFIX_TAGS
@@ -165,10 +186,10 @@ def _order_situacao_target(rows: list[Devolution]) -> int | None:
     força resolvido. Manutenção pendente mantém o pedido "em manutenção" até o
     técnico escolher Novo/Usado/Sucata.
 
-    "Entregue" é neutro (o cliente ficou com o item) — ignorado no cálculo; se
-    TODOS os itens forem Entregue, não há patch.
+    "Entregue" e "Não devolvido" (legado) são neutros — ignorados no cálculo;
+    se TODOS os itens forem neutros, não há patch.
     """
-    rows = [r for r in rows if (r.condicao_produto or "").strip() != "Entregue"]
+    rows = [r for r in rows if (r.condicao_produto or "").strip() not in _NEUTRAL_CONDICOES]
     if not rows:
         return None
     res = [_resolution_of(r) for r in rows]
@@ -182,6 +203,39 @@ def _order_situacao_target(rows: list[Devolution]) -> int | None:
     if all(r == "resolvido" for r in res):
         return SITUACAO_RESOLVIDO
     return None
+
+
+def _is_same_situacao_error(status: int, body: str) -> bool:
+    """Erro 400 código 50 do Bling: "A venda possui a mesma situação".
+    Não é falha — o pedido já está onde queríamos (idempotente)."""
+    return status == 400 and "mesma situa" in (body or "").lower()
+
+
+async def _alert_manual_situacao(
+    session: AsyncSession, actor_id: UUID | None, pedido: str, target: int
+) -> None:
+    """Alerta (sino + Telegram) pedindo ajuste manual da situação no Bling —
+    usado quando a API rejeita a transição (grafo de mão única). Best-effort."""
+    if actor_id is None:
+        return
+    nome = _SITUACAO_NOMES.get(int(target), str(target))
+    try:
+        await emit_alert(
+            session,
+            user_id=actor_id,
+            type=AlertType.GENERIC,
+            severity=AlertSeverity.WARNING,
+            title=f"Pedido {pedido}: mude a situação no Bling para {nome} (manual)",
+            message=(
+                f"O Bling não aceitou a mudança pela API (transição bloqueada). "
+                f"Abra o pedido {pedido} no Bling e altere a situação para "
+                f"{nome} manualmente."
+            ),
+            dedupe_key=f"devolucao_situacao_manual:{pedido}:{int(target)}",
+            payload={"pedido_bling": pedido, "situacao_alvo": int(target)},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("devolution_situacao_alert_failed", pedido_bling=pedido)
 
 
 async def apply_order_situacao(
@@ -206,10 +260,12 @@ async def apply_order_situacao(
     if target is None:
         return None
 
+    # `numero` se repete entre anos — pega o pedido mais recente.
     order_row = (
         await session.execute(
             select(BlingOrder.bling_id, BlingOrder.situacao)
             .where(BlingOrder.numero == pedido, BlingOrder.bling_id.is_not(None))
+            .order_by(BlingOrder.data.desc().nullslast())
             .limit(1)
         )
     ).first()
@@ -225,49 +281,82 @@ async def apply_order_situacao(
     client = await _get_bling_client(session)
     if client is None:
         return _result(False, "no_integration", message="Nenhuma integração Bling encontrada")
+
+    alvo = int(target)
     try:
-        await client.update_order_situacao(int(bling_id), int(target))
-        logger.info(
-            "devolution_situacao_patched",
-            pedido_bling=pedido, bling_id=int(bling_id), situacao=target,
-        )
-    except Exception as exc:  # noqa: BLE001
-        # O Bling recusa certas transições diretas com 400 — caso real: pedido
-        # 291700 estava "Resolvido" (itens Novo adicionados primeiro) e a ida
-        # pra "Problemas" (83960, item Extraviado) foi rejeitada em silêncio.
-        # Desvio: passa por "Aguardando Devolução" e reaplica o alvo.
-        if int(target) == SITUACAO_AGUARDANDO_DEVOLUCAO:
-            logger.error(
-                "devolution_situacao_patch_error",
-                pedido_bling=pedido, situacao=target, error=str(exc),
-            )
-            return _result(False, "situacao_error", message=str(exc))
         try:
-            await client.update_order_situacao(int(bling_id), SITUACAO_AGUARDANDO_DEVOLUCAO)
-            await client.update_order_situacao(int(bling_id), int(target))
+            await client.update_order_situacao(int(bling_id), alvo)
             logger.info(
-                "devolution_situacao_patched_via_desvio",
-                pedido_bling=pedido, bling_id=int(bling_id), situacao=target,
-                erro_direto=str(exc),
+                "devolution_situacao_patched",
+                pedido_bling=pedido, bling_id=int(bling_id), situacao=alvo,
             )
-        except Exception as exc2:  # noqa: BLE001
-            logger.error(
-                "devolution_situacao_patch_error",
-                pedido_bling=pedido, situacao=target,
-                error=f"direto: {exc} | desvio: {exc2}",
-            )
-            return _result(False, "situacao_error", message=str(exc2))
-    await record_margem_audit(
-        session,
-        acao="situacao",
-        pedido_bling=pedido,
-        bling_id=bling_id,
-        valor_antigo=situacao_antiga,
-        valor_novo=target,
-        origem="devolucao",
-        mudado_por=actor_id,
-    )
-    return _result(True, "situacao_patched", message=f"Pedido {pedido} → situação {target}")
+        except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, httpx.HTTPStatusError) and _is_same_situacao_error(
+                exc.response.status_code, exc.response.text or ""
+            ):
+                # 400 cód. 50 "mesma situação": já está no alvo — sucesso
+                # idempotente, sem desvio e sem nova linha de auditoria.
+                logger.info(
+                    "devolution_situacao_unchanged",
+                    pedido_bling=pedido, bling_id=int(bling_id), situacao=alvo,
+                )
+                return _result(
+                    True, "situacao_unchanged",
+                    message=f"Pedido {pedido} já estava na situação {alvo}",
+                )
+            # O Bling recusa certas transições diretas com 400 — caso real:
+            # pedido 291700 estava "Resolvido" (itens Novo entraram antes) e a
+            # ida pra "Problemas" (83960, item Extraviado) foi rejeitada em
+            # silêncio. Desvio validado: passa por "Aguardando Devolução" e
+            # reaplica o alvo (funciona p/ →Extraviado e →Manutenção).
+            if alvo == SITUACAO_AGUARDANDO_DEVOLUCAO:
+                logger.error(
+                    "devolution_situacao_patch_error",
+                    pedido_bling=pedido, situacao=alvo, error=str(exc),
+                )
+                return _result(False, "situacao_error", message=str(exc))
+            try:
+                await client.update_order_situacao(
+                    int(bling_id), SITUACAO_AGUARDANDO_DEVOLUCAO
+                )
+                await client.update_order_situacao(int(bling_id), alvo)
+                logger.info(
+                    "devolution_situacao_patched_via_desvio",
+                    pedido_bling=pedido, bling_id=int(bling_id), situacao=alvo,
+                    erro_direto=str(exc),
+                )
+            except Exception as exc2:  # noqa: BLE001
+                logger.error(
+                    "devolution_situacao_patch_error",
+                    pedido_bling=pedido, situacao=alvo,
+                    error=f"direto: {exc} | desvio: {exc2}",
+                )
+                if (
+                    isinstance(exc2, httpx.HTTPStatusError)
+                    and exc2.response.status_code in (400, 403, 409, 422)
+                ):
+                    # Nem o desvio passou e não é rede/5xx (retry não ajuda):
+                    # avisa o operador p/ ajustar a situação na mão no Bling.
+                    await _alert_manual_situacao(session, actor_id, pedido, alvo)
+                return _result(False, "situacao_error", message=str(exc2))
+        await record_margem_audit(
+            session,
+            acao="situacao",
+            pedido_bling=pedido,
+            bling_id=bling_id,
+            valor_antigo=situacao_antiga,
+            valor_novo=alvo,
+            origem="devolucao",
+            mudado_por=actor_id,
+        )
+        return _result(True, "situacao_patched", message=f"Pedido {pedido} → situação {alvo}")
+    except Exception as exc:  # noqa: BLE001
+        # Cinto de segurança (auditoria/alerta nunca derrubam o caller).
+        logger.error(
+            "devolution_situacao_patch_error",
+            pedido_bling=pedido, situacao=alvo, error=str(exc),
+        )
+        return _result(False, "situacao_error", message=str(exc))
 
 
 # ── Registro / estorno do movimento de estoque ──────────────────────────────
