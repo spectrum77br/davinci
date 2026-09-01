@@ -351,9 +351,9 @@ async def test_marketplace_saldo_filter_uses_absolute_cent_threshold(
     was filtered out of the 'saldo divergente' list. A high-value, still-pending
     order with a sub-1% (but >R$0,01) gap must now appear.
 
-    Fixtures destes testes usam 'tiktok' (plataforma ainda sujeita à triagem
-    de saldo) — ML/Shopee são ISENTAS do motivo saldo desde 01/09 (o repasse
-    delas chega sozinho e é a fonte da verdade); ver
+    Fixtures destes testes usam 'amazon' (plataforma ainda sujeita à triagem
+    de saldo) — ML/Shopee/TikTok são ISENTAS do motivo saldo desde 01/09 (o
+    saldo da plataforma é a fonte da verdade, real ou projetado); ver
     test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma.
     """
     user = await make_user(permissions=_margem_permissions())
@@ -382,7 +382,7 @@ async def test_marketplace_saldo_filter_uses_absolute_cent_threshold(
             )
             VALUES (
                 :id, '123456', 987654, 'sku-1',
-                '6', 'Em aberto', 'tiktok', 1,
+                '6', 'Em aberto', 'amazon', 1,
                 6940, 0, 0,
                 7000,
                 NULL
@@ -437,7 +437,7 @@ async def test_marketplace_saldo_filter_ignores_sub_cent_noise(
             )
             VALUES (
                 :id, '123457', 987655, 'sku-2',
-                '6', 'Em aberto', 'tiktok', 1,
+                '6', 'Em aberto', 'amazon', 1,
                 100.00, 0, 0,
                 100.01,
                 NULL
@@ -489,7 +489,7 @@ async def test_marketplace_saldo_filter_only_considers_shippable_situacoes(
             )
             VALUES (
                 :id, '123458', 987656, 'sku-3',
-                '9', 'Atendido', 'tiktok', 1,
+                '9', 'Atendido', 'amazon', 1,
                 6940, 0, 0,
                 7000,
                 NULL
@@ -539,7 +539,7 @@ async def test_marketplace_saldo_filter_includes_situacao_83965(
             )
             VALUES (
                 :id, '123459', 987657, 'sku-4',
-                '83965', 'Enviado Etiqueta', 'tiktok', 1,
+                '83965', 'Enviado Etiqueta', 'amazon', 1,
                 6940, 0, 0,
                 7000,
                 NULL
@@ -566,12 +566,19 @@ async def test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma
     make_user,
     auth_as,
 ):
-    """ML/Shopee nunca ficam pendentes por saldo (pedido do Eduardo 01/09): o
-    repasse dessas plataformas chega sozinho no mesmo dia e é a fonte da
-    verdade. Divergência real (R$60) no ML e líquido ainda NULL na Shopee →
-    nenhum aparece em Pendente; ambos caem em Aprovado. E o Saldo Efetivo do
-    ML ancora no líquido da plataforma (7000), não no Bling (6940); o da
-    Shopee (sem líquido ainda) permanece na âncora do Bling."""
+    """ML/Shopee/TikTok nunca ficam pendentes por saldo (pedido do Eduardo
+    01/09, em dois tempos): o saldo da PLATAFORMA é a fonte da verdade — o
+    líquido real quando já sincronizou, senão a projeção ≈ (correção da tarde:
+    "você aprovou usando o saldo do Bling, [não] o da plataforma" — a Central
+    do Vendedor já mostra os valores, TikTok incluso). Três linhas em situação
+    6, nenhuma aparece em Pendente; todas caem em Aprovado:
+      - ML: divergência real de R$60 → Efetivo = líquido da plataforma (7000),
+        não o Bling (6940);
+      - Shopee: líquido NULL + taxa Bling 30 → Efetivo = PROJEÇÃO (150 =
+        valorbase − frete projetado 0 − comissão 0), não o Bling (120);
+      - TikTok: líquido NULL + taxa Bling 40 → Efetivo = projeção (480), não
+        o Bling (440). Antes da correção, TikTok nem era isenta.
+    """
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
     ml = BlingOrder(
@@ -580,10 +587,14 @@ async def test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma
     shopee = BlingOrder(
         bling_id=987659, numero="123461", item_codigo="sku-sh", item_index=0, situacao="6",
     )
-    db.add_all([ml, shopee])
+    tiktok = BlingOrder(
+        bling_id=987660, numero="123462", item_codigo="sku-tk", item_index=0, situacao="6",
+    )
+    db.add_all([ml, shopee, tiktok])
     await db.commit()
     await db.refresh(ml)
     await db.refresh(shopee)
+    await db.refresh(tiktok)
     await db.execute(
         text(
             """
@@ -602,12 +613,17 @@ async def test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma
                  NULL),
                 (:sh, '123461', 987659, 'sku-sh',
                  '6', 'Em aberto', 'shopee', 1,
-                 150, 0, 0,
+                 150, 0, 30,
+                 NULL,
+                 NULL),
+                (:tk, '123462', 987660, 'sku-tk',
+                 '6', 'Em aberto', 'tiktok', 1,
+                 480, 0, 40,
                  NULL,
                  NULL)
             """
         ),
-        {"ml": str(ml.id), "sh": str(shopee.id)},
+        {"ml": str(ml.id), "sh": str(shopee.id), "tk": str(tiktok.id)},
     )
     await db.commit()
 
@@ -621,15 +637,20 @@ async def test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma
     assert pendente.status_code == 200
     assert pendente.json()["total"] == 0
 
-    # Auto-aprovados (nenhum gatilho) e Efetivo ancorado na plataforma p/ o ML.
+    # Auto-aprovados (nenhum gatilho) e Efetivo ancorado na plataforma.
     aprovado = await client.get("/api/margens/marketplace?status=Aprovado")
     assert aprovado.status_code == 200
     por_pedido = {it["pedido_bling"]: it for it in aprovado.json()["items"]}
     assert por_pedido["123460"]["attention_saldo"] is False
-    assert por_pedido["123460"]["saldo_efetivo"] == 7000
+    assert por_pedido["123460"]["saldo_efetivo"] == 7000  # líquido real
     assert por_pedido["123460"]["saldo_final"] == 7000
+    assert por_pedido["123460"]["saldo_projetado"] is False
     assert por_pedido["123461"]["attention_saldo"] is False
-    assert por_pedido["123461"]["saldo_efetivo"] == 150  # líquido NULL → Bling
+    assert por_pedido["123461"]["saldo_efetivo"] == 150  # projeção, não 120
+    assert por_pedido["123461"]["saldo_projetado"] is True
+    assert por_pedido["123462"]["attention_saldo"] is False
+    assert por_pedido["123462"]["saldo_efetivo"] == 480  # projeção, não 440
+    assert por_pedido["123462"]["saldo_projetado"] is True
 
 
 async def test_marketplace_margem_filter_excludes_aguardando_devolucao(

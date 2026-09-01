@@ -510,18 +510,20 @@ function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
   return r.saldo_final != null ? r.saldo_final : r.saldo_efetivo
 }
 
-// ML/Shopee: o repasse da plataforma chega sozinho no mesmo dia e é a fonte da
-// verdade — o backend ancora o Saldo Efetivo no líquido REAL da plataforma
-// (não no Bling) e a linha nunca fica pendente por saldo (_ATTENTION_SALDO_SQL
-// as isenta). Aqui a mesma condição decide: (a) divergência Bling × Plataforma
-// deixa de zerar o Efetivo de laranja (não há o que conciliar — vale a
-// plataforma); (b) o lápis some (editar gravaria no Bling e o número da célula
-// não mudaria — pareceria "não salvou"). Projeção (≈) NÃO conta como âncora:
-// enquanto o líquido real não chega, a linha se comporta como as demais.
+// ML/Shopee/TikTok: o saldo da plataforma é a fonte da verdade — o backend
+// ancora o Saldo Efetivo no saldo da plataforma (real OU projeção ≈, nunca no
+// Bling) e a linha nunca fica pendente por saldo (_ATTENTION_SALDO_SQL as
+// isenta). Correção de 01/09 à tarde (Eduardo): a 1ª versão só ancorava no
+// líquido REAL e os pedidos do dia apareciam "aprovados com o saldo do Bling";
+// a Central do Vendedor (TikTok incluso) já mostra saldo e frete na hora,
+// então a projeção conta como âncora até o real sincronizar. Aqui a mesma
+// condição decide: (a) divergência Bling × Plataforma deixa de zerar o
+// Efetivo de laranja (não há o que conciliar — vale a plataforma); (b) o
+// lápis some (editar gravaria no Bling e o número da célula não mudaria —
+// pareceria "não salvou"); (c) o Efetivo herda o ≈ enquanto for projeção.
 function saldoAncoradoNaPlataforma(r: MarketplaceRow): boolean {
-  return ['ml', 'shopee'].includes(r.plataforma ?? '')
+  return ['ml', 'shopee', 'tiktok'].includes(r.plataforma ?? '')
     && r.saldo_plataforma != null
-    && !r.saldo_projetado
 }
 
 // Divergência de saldo: Bling e Plataforma ambos presentes e diferindo por mais
@@ -1093,14 +1095,18 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                   class="flex items-center justify-end gap-1 text-right tabular-nums hover:text-foreground disabled:cursor-default"
                   :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id) || saldoAncoradoNaPlataforma(r)"
                   :title="saldoAncoradoNaPlataforma(r)
-                    ? `Saldo Efetivo = repasse real da plataforma (${(r.plataforma || '').toUpperCase()}) — valor confirmado, sem conciliação nem edição.`
+                    ? (r.saldo_projetado
+                      ? `Saldo Efetivo = saldo da plataforma (${(r.plataforma || '').toUpperCase()}) — projeção (≈) até o repasse liquidar; troca sozinho pelo valor real. Sem conciliação nem edição.`
+                      : `Saldo Efetivo = repasse real da plataforma (${(r.plataforma || '').toUpperCase()}) — valor confirmado, sem conciliação nem edição.`)
                     : saldoZeradoVisual(r)
                       ? `Saldo Bling × Plataforma divergente — Efetivo exibido como 0 (apenas visual). Valor real: ${brl(saldoEfetivoDisplay(r))}.${canEdit && r.pedido_bling ? ' Clique para editar → grava como final no Bling (zera taxa e frete).' : ''}`
                       : (canEdit && r.pedido_bling ? `Editar Saldo Efetivo → grava o valor como final no Bling (zera taxa e frete)` : '')"
                   @click="startEditSaldoEfetivo(r)"
                 >
                   <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
-                  <span :class="saldoZeradoVisual(r) ? 'text-amber-600 dark:text-amber-400' : ''">{{ brl(saldoEfetivoVisual(r)) }}</span>
+                  <!-- ≈ herdado da coluna Plataforma: Efetivo ancorado numa projeção
+                       (ML/Shopee/TikTok pré-liquidação) — troca sozinho pelo real. -->
+                  <span :class="saldoZeradoVisual(r) ? 'text-amber-600 dark:text-amber-400' : ''">{{ saldoAncoradoNaPlataforma(r) && r.saldo_projetado ? '≈ ' : '' }}{{ brl(saldoEfetivoVisual(r)) }}</span>
                   <Pencil v-if="canEdit && !saldoAncoradoNaPlataforma(r)" class="size-3 shrink-0 opacity-50" />
                 </button>
               </div>

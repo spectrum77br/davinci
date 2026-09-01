@@ -328,11 +328,12 @@ async def test_motivo_distingue_ramos_do_saldo(db: AsyncSession):
     assert "divergente" not in obs[402]
 
 
-async def test_nao_segura_ml_shopee_por_saldo(db: AsyncSession):
-    """ML/Shopee são isentas do motivo saldo (o repasse chega sozinho no mesmo
-    dia e é a fonte da verdade — regra de 01/09 em _ATTENTION_SALDO_SQL, que
-    este módulo herda): nem gap real nem líquido NULL seguram o pedido. Margem
-    baixa continua segurando ML/Shopee normalmente."""
+async def test_nao_segura_ml_shopee_tiktok_por_saldo(db: AsyncSession):
+    """ML/Shopee/TikTok são isentas do motivo saldo (o saldo da plataforma é a
+    fonte da verdade, real ou projetado — regra de 01/09 em
+    _ATTENTION_SALDO_SQL, que este módulo herda; TikTok entrou na correção da
+    tarde): nem gap real nem líquido NULL seguram o pedido. Margem baixa
+    continua segurando essas plataformas normalmente."""
     await _seed_pedido(
         db, pedido="501", bling_id=501, margem_baixa=False, saldo_gap=True,
         plataforma="ml",
@@ -340,6 +341,14 @@ async def test_nao_segura_ml_shopee_por_saldo(db: AsyncSession):
     await _seed_pedido(
         db, pedido="502", bling_id=502, margem_baixa=False, saldo_aguardando=True,
         plataforma="shopee",
+    )
+    await _seed_pedido(
+        db, pedido="504", bling_id=504, margem_baixa=False, saldo_gap=True,
+        plataforma="tiktok",
+    )
+    await _seed_pedido(
+        db, pedido="505", bling_id=505, margem_baixa=False, saldo_aguardando=True,
+        plataforma="tiktok",
     )
     await _seed_pedido(
         db, pedido="503", bling_id=503, margem_baixa=True, plataforma="shopee",

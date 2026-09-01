@@ -231,7 +231,13 @@ async def test_saldo_detalhe_aguardando_plataforma(
     client, db: AsyncSession, make_user, auth_as
 ):
     """Sem financeiro do marketplace (e sem projeção): o lado plataforma fica
-    vazio — sem inventar número — e a diferença não é calculada."""
+    vazio — sem inventar número — e a diferença não é calculada.
+
+    Fixture usa 'magalu' (fora da lista de projeção de _SALDO_PLATAFORMA_SQL:
+    não há repasse de plataforma a projetar). Era 'tiktok', mas desde 31/08 a
+    projeção cobre amazon/tiktok/shopee/ml — com tiktok o lado plataforma
+    passou a vir preenchido (≈100) e este teste quebrou; o caminho projetado
+    do raio-X já é coberto pelo teste anterior (amazon)."""
     user = await make_user(permissions=_perms())
     auth_as(user)
     await _seed_item(
@@ -240,7 +246,7 @@ async def test_saldo_detalhe_aguardando_plataforma(
         sku="sku-a",
         quantidade=1,
         item_proportion=1,
-        plataforma_bling="tiktok",
+        plataforma_bling="magalu",
         bling_valorbase_item=100,
         bling_custofrete_item=5,
         bling_taxacomissao_item=10,

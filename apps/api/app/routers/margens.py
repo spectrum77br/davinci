@@ -143,26 +143,34 @@ _ATTENTION_MARGEM_SQL = (
 _ATTENTION_FRETE_SQL = (
     f"(({_FRETE_ANUNCIO_SQL}) IS NOT NULL AND {_FRETE_RESULTADO_SQL} > 0)"
 )
-# ML e Shopee: o repasse da plataforma chega SOZINHO no mesmo dia (medição
-# 01/09: zero linhas sem líquido em todos os dias anteriores; só o dia corrente
-# tinha linhas aguardando) e é a fonte da verdade do saldo. Pedido do Eduardo
-# (01/09): nessas plataformas o Saldo Efetivo ancora no líquido REAL da
-# plataforma (_SALDO_EFETIVO_SQL) e a linha NUNCA fica pendente por saldo —
-# nem "aguardando saldo" (ruído de poucas horas que chegava a acionar o
-# auto-hold à toa: 4 pedidos segurados por "saldo divergente" só na manhã de
-# 01/09), nem "divergente" (se Bling × plataforma diferem, vale a plataforma).
-# Margem baixa e frete estourado continuam valendo normalmente para ML/Shopee.
-# COALESCE(…, '') preserva o gatilho para linhas com plataforma NULL.
-_PLATAFORMAS_SALDO_CONFIAVEL_IN = "('ml', 'shopee')"
+# ML, Shopee e TikTok: o saldo da PLATAFORMA é a fonte da verdade — pedido do
+# Eduardo em dois tempos (01/09): manhã, "o saldo efetivo do ML e da Shopee
+# podem ser SEMPRE da plataforma... e daí esses pedidos já somem daqui";
+# tarde, "o TikTok disponibiliza já o saldo da plataforma e o frete, mesma
+# coisa" (Central do Vendedor mostra os valores na hora — conferido no pedido
+# de 31/08, total 732,70 = 723,00 + frete 9,70) e "você aprovou usando o
+# saldo do Bling, [não] o da plataforma" → a âncora do Efetivo NÃO espera o
+# settlement: usa o líquido real quando já chegou e a PROJEÇÃO (≈,
+# _SALDO_PLATAFORMA_SQL) enquanto não chegou (ML/Shopee: horas do mesmo dia;
+# TikTok: settlement dias após a entrega). Nessas plataformas a linha NUNCA
+# fica pendente por saldo — nem "aguardando" (ruído que acionava o auto-hold
+# à toa: 13 pedidos saudáveis segurados só em 01/09), nem "divergente" (se
+# Bling × plataforma diferem, vale a plataforma; quando o settlement real
+# mudar a margem para baixo da mínima, o gatilho de MARGEM pega). Margem
+# baixa e frete estourado continuam valendo normalmente. Amazon fica FORA:
+# liquida dias depois e sem aval do dono. COALESCE(…, '') preserva o gatilho
+# para linhas com plataforma NULL.
+_PLATAFORMAS_SALDO_CONFIAVEL_IN = "('ml', 'shopee', 'tiktok')"
 _SALDO_PLATAFORMA_CONFIAVEL_SQL = (
     "COALESCE(v.plataforma_bling, v.plataforma_financeiro, '') "
     f"IN {_PLATAFORMAS_SALDO_CONFIAVEL_IN}"
 )
 # "Saldo divergente" — restrito a pedidos em situação 6 ou 83965 (só esses
-# contam para triagem), com saldo_base do Bling presente, FORA de ML/Shopee
-# (isentas — ver bloco acima), e que satisfaçam UMA das condições:
+# contam para triagem), com saldo_base do Bling presente, FORA de
+# ML/Shopee/TikTok (isentas — ver bloco acima), e que satisfaçam UMA das
+# condições:
 #   a) Plataforma AINDA NULA (financeiro não reconciliado) → não auto-aprovar
-#      antes de bater o repasse real do marketplace. Marketplaces como TikTok
+#      antes de bater o repasse real do marketplace. Marketplaces como Amazon
 #      liquidam ~1-2 semanas após a entrega, então o pedido fica "divergente"
 #      (não resolvido) até o settlement chegar — aí vira mismatch (b) ou some.
 #   b) Divergência real: |saldo_bling − saldo_plataforma| > R$0,01.
@@ -273,17 +281,20 @@ _SALDO_FINAL_BLING_SQL = (
 
 # Saldo Efetivo EXIBIDO/derivado. Regra geral: âncora no Bling (editável — a
 # edição inline grava valorbase e o valor digitado aparece na hora). EXCEÇÃO
-# ML/Shopee (pedido do Eduardo 01/09): quando o líquido REAL da plataforma já
-# chegou, ele É o saldo efetivo — "o saldo efetivo do ML e da Shopee podem ser
-# sempre da plataforma". Enquanto o líquido não chega (poucas horas no dia do
-# pedido), cai na âncora do Bling como as demais. A PROJEÇÃO (≈) nunca entra
-# aqui: é estimativa nossa, não repasse real. O frontend esconde o lápis quando
-# a âncora é a plataforma (editar gravaria no Bling sem mudar o número da
-# célula — pareceria "não salvou").
+# ML/Shopee/TikTok (pedido do Eduardo 01/09, ver bloco do
+# _PLATAFORMAS_SALDO_CONFIAVEL_IN): o Saldo Efetivo é SEMPRE o da plataforma
+# — o líquido real quando já chegou, senão a projeção ≈ (é o que a Central do
+# Vendedor já mostra; correção da tarde: a 1ª versão só ancorava no real e os
+# pedidos do dia apareciam "aprovados com o saldo do Bling"). O COALESCE de
+# _SALDO_PLATAFORMA_SQL faz exatamente real-senão-projeção; quando ambos
+# faltam (valorbase NULL), cai na âncora do Bling como as demais. O frontend
+# esconde o lápis quando a âncora é a plataforma (editar gravaria no Bling
+# sem mudar o número da célula — pareceria "não salvou") e mantém o ≈ na
+# célula enquanto o valor for projeção.
 _SALDO_EFETIVO_SQL = (
     f"(CASE WHEN {_SALDO_PLATAFORMA_CONFIAVEL_SQL} "
-    "           AND v.marketplace_liquido_base_margem_item IS NOT NULL "
-    "      THEN v.marketplace_liquido_base_margem_item "
+    f"           AND ({_SALDO_PLATAFORMA_SQL}) IS NOT NULL "
+    f"      THEN ({_SALDO_PLATAFORMA_SQL}) "
     f"     ELSE {_SALDO_BLING_SQL} END)"
 )
 # Saldo Final coerente com o Efetivo exibido (mesma âncora) + reembolso.
