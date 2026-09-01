@@ -976,8 +976,15 @@ async def tiktok_unsettled_sweep(ctx: dict) -> None:
     """Estimativa oficial pré-liquidação do TikTok (a mesma da Central do
     Vendedor) para os financeiros ainda sem settlement real — 1-2 chamadas
     por loja preenchem o Saldo Plataforma da Margem no dia da venda em vez
-    de dias depois. Ver run_tiktok_unsettled_sweep."""
+    de dias depois. Ver run_tiktok_unsettled_sweep.
+
+    Achou valor novo → rebuild do snapshot NA SEQUÊNCIA (Eduardo, 01/09:
+    "precisamos pegar isso estantaneo" — caso 293707: o valor já estava no
+    mof desde o tick :38 e a aba seguia em branco esperando o rebuild de
+    :45/refresh da página). Sem update, sem rebuild: o tick de 10min não
+    paga 20d de rebuild à toa."""
     from app.services.marketplace_financials import run_tiktok_unsettled_sweep
+    from app.services.verificar_margem import rebuild_all
 
     async with session_scope() as s:
         try:
@@ -986,6 +993,17 @@ async def tiktok_unsettled_sweep(ctx: dict) -> None:
             logger.warning("tiktok_unsettled_sweep_failed", error=str(e)[:300])
             return
     logger.info("tiktok_unsettled_sweep_done", **result)
+
+    if not result.get("updated"):
+        return
+    # Sessão própria: mesmo padrão do verificar_margem_snapshot (o rebuild
+    # tem advisory lock e commit interno; não convive com a sessão do sweep).
+    async with session_scope() as s:
+        try:
+            n = await rebuild_all(s)
+            logger.info("tiktok_unsettled_sweep_snapshot", rebuilt=n)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("tiktok_unsettled_sweep_snapshot_failed", error=str(e)[:200])
 
 
 async def shopee_discrepancy_check(ctx: dict) -> None:
@@ -1955,9 +1973,14 @@ class WorkerSettings:
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(tiktok_token_refresh, hour={0, 6, 12, 18}, minute=45, run_at_startup=False),
         cron(marketplace_financials_retry, minute={10, 40}, run_at_startup=False),
-        # :08/:38 — corre ANTES do verificar_margem_snapshot (:15/:45): a
-        # estimativa entra no rebuild seguinte e aparece na aba no mesmo ciclo.
-        cron(tiktok_unsettled_sweep, minute={8, 38}, run_at_startup=False),
+        # A cada 10min ("pegar isso estantaneo", 01/09): o TikTok libera a
+        # estimativa ~30-60min após a venda (caso 293707, medido ao vivo) e o
+        # tick de 30min somava até mais meia hora em cima. 10min × 8 lojas ×
+        # ~2 páginas ≈ 16 chamadas/tick — longe do rate limit compartilhado
+        # (36009002 foi com centenas de chamadas por-pedido). Minutos {3,13,…}
+        # desalinhados do financials_retry (:10/:40) e do snapshot (:15/:45);
+        # o job já reconstrói o snapshot sozinho quando acha valor novo.
+        cron(tiktok_unsettled_sweep, minute={3, 13, 23, 33, 43, 53}, run_at_startup=False),
         # Daily Frete refund sweep — 06:20 UTC = 03:20 BRT, in the quiet
         # window after the daily sync scheduler. Per-order hook in
         # marketplace_financials handles the realtime case; this cron
