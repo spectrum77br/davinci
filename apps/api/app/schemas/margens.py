@@ -105,6 +105,10 @@ class MargensMarketplaceOut(BaseModel):
     attention_margem: bool = False
     attention_frete: bool = False
     attention_saldo: bool = False
+    # True = Data Especial do segmento ativa para este pedido (período casa e a
+    # margem passa na regra especial) — o gatilho de margem baixa fica
+    # suspenso. Frontend: badge "data especial" na coluna Margem Mín.
+    data_especial: bool = False
 
 
 class SaldoRaioXItem(BaseModel):

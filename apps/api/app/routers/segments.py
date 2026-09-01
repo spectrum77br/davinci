@@ -9,11 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Segment, User
+from app.models import Segment, SegmentSpecialDate, User
 from app.schemas.segments import (
     SegmentCreate,
     SegmentOut,
     SegmentPatch,
+    SegmentSpecialDateCreate,
+    SegmentSpecialDateOut,
     SegmentTreeNode,
     _slugify,
 )
@@ -171,4 +173,74 @@ async def delete_segment(
     seg = await _get_or_404(session, segment_id)
     await session.delete(seg)
     await session.commit()
+    return None
+
+
+# ============================================================ Datas Especiais
+# Eduardo (01/09/2026): "vamos colocar um novo campo chamado datas especiais,
+# que é a regra que vamos aprovar, para exceção, por exemplo está com margem
+# negativa, aprova". Janela em que a margem baixa não trava pedidos do
+# segmento (nem dos descendentes). A regra em si é aplicada na triagem da
+# Margem (_MARGEM_DATA_ESPECIAL_SQL em routers/margens.py); aqui é só o CRUD.
+# Sem PATCH de propósito: editar = remover + adicionar (janelas são curtas).
+
+
+@router.post(
+    "/{segment_id}/special-dates",
+    response_model=SegmentSpecialDateOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_special_date(
+    segment_id: UUID,
+    body: SegmentSpecialDateCreate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("segmentos", "edit"))],
+) -> SegmentSpecialDateOut:
+    await _get_or_404(session, segment_id)
+    sd = SegmentSpecialDate(
+        segment_id=segment_id,
+        date_start=body.date_start,
+        date_end=body.date_end,
+        min_margin=body.min_margin,
+    )
+    session.add(sd)
+    await session.commit()
+    await session.refresh(sd)
+    logger.info(
+        "segment_special_date_created",
+        segment_id=str(segment_id),
+        date_start=str(body.date_start),
+        date_end=str(body.date_end),
+        min_margin=None if body.min_margin is None else float(body.min_margin),
+    )
+    return SegmentSpecialDateOut.model_validate(sd)
+
+
+@router.delete(
+    "/{segment_id}/special-dates/{special_date_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_special_date(
+    segment_id: UUID,
+    special_date_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("segmentos", "edit"))],
+) -> None:
+    sd = (
+        await session.execute(
+            select(SegmentSpecialDate).where(
+                SegmentSpecialDate.id == special_date_id,
+                SegmentSpecialDate.segment_id == segment_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if sd is None:
+        raise HTTPException(404, detail={"code": "special_date_not_found"})
+    await session.delete(sd)
+    await session.commit()
+    logger.info(
+        "segment_special_date_deleted",
+        segment_id=str(segment_id),
+        special_date_id=str(special_date_id),
+    )
     return None

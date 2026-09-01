@@ -56,6 +56,8 @@ _BLING_ORDERS_TABLE = _qualified_table("bling_orders")
 _STORES_TABLE = _qualified_table("stores")
 _SITUACAO_BLING_TABLE = _qualified_table("situacao_bling")
 _PRICING_ACCOUNTS_TABLE = _qualified_table("pricing_accounts")
+_SEGMENTS_TABLE = _qualified_table("segments")
+_SEGMENT_SPECIAL_DATES_TABLE = _qualified_table("segment_special_dates")
 
 # Situações que compõem a rentabilidade (Em aberto / Em andamento / Entregue),
 # mesmas da rotina diária `rentabilidade_valuation.py`.
@@ -131,14 +133,50 @@ _FRETE_RESULTADO_DISPLAY_SQL = (
     f"(({_FRETE_PLATAFORMA_DISPLAY_SQL}) - ({_FRETE_ANUNCIO_DISPLAY_SQL}))"
 )
 
+# Datas Especiais (Eduardo, 01/09/2026): "em segmentos ... vamos colocar um
+# novo campo chamado datas especiais, que é a regra que vamos aprovar, para
+# exceção, por exemplo está com margem negativa, aprova". Cada janela
+# (segment_special_dates: de/até inclusivos, em data BRT — mesma convenção
+# dos filtros de período desta página) suspende o gatilho de margem baixa
+# para pedidos do segmento OU de qualquer descendente (regra na raiz vale
+# para a família toda; a CTE expande cada janela para os segmentos filhos —
+# sem correlação com `v`, que só entra no WHERE externo do EXISTS).
+# sd.min_margin NULL = aprova qualquer margem no período; preenchido = piso
+# especial em FRAÇÃO (-0.15 = -15%), comparado direto com
+# v.marketplace_margem (mesma base do gatilho). Pedido sem segmento
+# (pricing_leaf_segment_id NULL) ou sem data nunca casa → sem exceção.
+# Também exposto na listagem como coluna `data_especial` (badge na UI) e no
+# recálculo pós-edição de Saldo Efetivo (clears_minimum). O auto-hold herda
+# por import de _ATTENTION_MARGEM_SQL — o robô não segura no período.
+_MARGEM_DATA_ESPECIAL_SQL = (
+    "EXISTS ("  # noqa: S608 — tabelas de _qualified_table, sem input do usuário
+    " WITH RECURSIVE sd_seg AS ("
+    "     SELECT sd.segment_id AS seg_id, sd.date_start, sd.date_end,"
+    "            sd.min_margin"
+    f"    FROM {_SEGMENT_SPECIAL_DATES_TABLE} sd"
+    "     UNION ALL"
+    "     SELECT s.id, ss.date_start, ss.date_end, ss.min_margin"
+    f"    FROM {_SEGMENTS_TABLE} s"
+    "     JOIN sd_seg ss ON s.parent_id = ss.seg_id"
+    " )"
+    " SELECT 1 FROM sd_seg de"
+    " WHERE de.seg_id = v.pricing_leaf_segment_id"
+    "   AND (v.data AT TIME ZONE 'America/Sao_Paulo')::date"
+    "       BETWEEN de.date_start AND de.date_end"
+    "   AND (de.min_margin IS NULL OR v.marketplace_margem >= de.min_margin)"
+    ")"
+)
+
 # Margem baixa = margem abaixo da mínima configurada. Pedidos em "Aguardando
 # Devolução" (situação 83957) são excluídos: a venda está em processo de
 # devolução, então margem baixa ali não é algo a triar. IS DISTINCT FROM
 # preserva linhas com situacao NULL (continuam contando como margem baixa).
+# Datas Especiais do segmento (bloco acima) suspendem o gatilho no período.
 _ATTENTION_MARGEM_SQL = (
     f"(v.marketplace_margem IS NOT NULL AND v.margem_minima IS NOT NULL "
     f" AND v.marketplace_margem < v.margem_minima "
-    f" AND v.situacao IS DISTINCT FROM '{SITUACAO_AGUARDANDO_DEVOLUCAO}')"
+    f" AND v.situacao IS DISTINCT FROM '{SITUACAO_AGUARDANDO_DEVOLUCAO}' "
+    f" AND NOT {_MARGEM_DATA_ESPECIAL_SQL})"
 )
 _ATTENTION_FRETE_SQL = (
     f"(({_FRETE_ANUNCIO_SQL}) IS NOT NULL AND {_FRETE_RESULTADO_SQL} > 0)"
@@ -384,7 +422,11 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             bo.observacao,
             {_ATTENTION_MARGEM_SQL}                              AS attention_margem,
             {_ATTENTION_FRETE_SQL}                               AS attention_frete,
-            {_ATTENTION_SALDO_SQL}                               AS attention_saldo
+            {_ATTENTION_SALDO_SQL}                               AS attention_saldo,
+            -- Data Especial ativa para o segmento do pedido (badge na UI):
+            -- período casa E a margem passa na regra especial. É a mesma
+            -- expressão que suspende o gatilho de margem baixa.
+            {_MARGEM_DATA_ESPECIAL_SQL}                          AS data_especial
         FROM {source_table} v
         LEFT JOIN {_PRICING_ACCOUNTS_TABLE} pa_comm
             ON pa_comm.id = v.pricing_account_id
@@ -1066,6 +1108,7 @@ async def sync_bling_from_saldo_final(
             f"""
             SELECT
                 v.margem_minima AS margem_minima,
+                {_MARGEM_DATA_ESPECIAL_SQL} AS data_especial,
                 COALESCE(
                     NULLIF(
                         CASE
@@ -1086,13 +1129,17 @@ async def sync_bling_from_saldo_final(
     )).first()
     margem_final = margin_row.margem_final if margin_row is not None else None
     margem_minima = margin_row.margem_minima if margin_row is not None else None
+    data_especial = bool(margin_row.data_especial) if margin_row is not None else False
     # Sem mínima cadastrada ou margem incalculável (sem custo) → não há critério
     # para barrar: mantém o comportamento antigo (aprova). Espelha a triagem, que
-    # só marca "margem baixa" quando margem E mínima existem.
+    # só marca "margem baixa" quando margem E mínima existem. Data Especial do
+    # segmento (mesma expressão da triagem) também libera: se o gatilho não
+    # seguraria o pedido, a edição do Saldo Efetivo não segura.
     clears_minimum = (
         margem_minima is None
         or margem_final is None
         or margem_final >= margem_minima
+        or data_especial
     )
 
     if clears_minimum:

@@ -1001,3 +1001,113 @@ async def test_sync_saldo_final_keeps_pending_when_margin_below_minimum(
     # ...e NÃO cai em Aprovado (regressão do back-door).
     approved = await client.get("/api/margens/marketplace?status=Aprovado")
     assert "500002" not in [it["pedido_bling"] for it in approved.json()["items"]]
+
+
+async def test_marketplace_margem_isenta_por_data_especial(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Datas Especiais do segmento (Eduardo 01/09: "por exemplo está com margem
+    negativa, aprova"): no período, margem abaixo da mínima NÃO trava o pedido.
+
+    Árvore Pai→Filho; janela SEM piso no PAI (01–10/09, desce pra família) e
+    janela COM piso -15% no FILHO (01–10/10). Todas as linhas apontam pro
+    FILHO com mínima 15%:
+      - 05/09, margem -10%  → isenta pela janela do pai (aprova tudo)
+      - 20/09, margem -10%  → fora de qualquer janela → margem baixa
+      - 05/10, margem -10%  → -10% ≥ piso -15% → isenta
+      - 05/10, margem -20%  → -20% < piso -15% → margem baixa
+      - 05/09, margem -10% SEM segmento → margem baixa (exceção não vaza)
+    """
+    from datetime import UTC, datetime
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from app.models import Segment, SegmentSpecialDate
+
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    pai = Segment(name="Pai DE", slug=f"pai-{uuid4().hex[:6]}")
+    db.add(pai)
+    await db.flush()
+    filho = Segment(
+        name="Filho DE",
+        slug=f"filho-{uuid4().hex[:6]}",
+        parent_id=pai.id,
+        min_margin=Decimal("0.15"),
+    )
+    db.add(filho)
+    await db.flush()
+    db.add_all(
+        [
+            SegmentSpecialDate(
+                segment_id=pai.id,
+                date_start=datetime(2026, 9, 1).date(),
+                date_end=datetime(2026, 9, 10).date(),
+                min_margin=None,
+            ),
+            SegmentSpecialDate(
+                segment_id=filho.id,
+                date_start=datetime(2026, 10, 1).date(),
+                date_end=datetime(2026, 10, 10).date(),
+                min_margin=Decimal("-0.15"),
+            ),
+        ]
+    )
+    await db.commit()
+
+    async def seed(pedido: str, dt: datetime, margem: str, leaf) -> None:
+        await db.execute(
+            text(
+                """
+                INSERT INTO verificar_margem (
+                    bling_order_item_id, pedido_bling, sku, data,
+                    situacao, situacao_nome, plataforma_bling, item_proportion,
+                    marketplace_margem, margem_minima, pricing_leaf_segment_id
+                ) VALUES (
+                    :id, :pedido, :sku, :dt,
+                    '15', 'Em andamento', 'ml', 1,
+                    :margem, 0.15, :leaf
+                )
+                """
+            ),
+            {
+                "id": str(uuid4()),
+                "pedido": pedido,
+                "sku": f"sku-{pedido}",
+                "dt": dt,
+                "margem": margem,
+                "leaf": None if leaf is None else str(leaf),
+            },
+        )
+        await db.commit()
+
+    meiodia = {"hour": 12, "tzinfo": UTC}  # 09:00 em SP — longe da virada de dia
+    await seed("601001", datetime(2026, 9, 5, **meiodia), "-0.10", filho.id)
+    await seed("601002", datetime(2026, 9, 20, **meiodia), "-0.10", filho.id)
+    await seed("601003", datetime(2026, 10, 5, **meiodia), "-0.10", filho.id)
+    await seed("601004", datetime(2026, 10, 5, **meiodia), "-0.20", filho.id)
+    await seed("601005", datetime(2026, 9, 5, **meiodia), "-0.10", None)
+
+    resp = await client.get(
+        "/api/margens/marketplace?attention_type=margem&status=Pendente"
+    )
+    assert resp.status_code == 200
+    flagged = {it["pedido_bling"] for it in resp.json()["items"]}
+    assert {"601002", "601004", "601005"} <= flagged
+    assert "601001" not in flagged
+    assert "601003" not in flagged
+
+    # Isentas viram Aprovado (sem outro gatilho ativo) e levam o badge.
+    aprovado = await client.get("/api/margens/marketplace?status=Aprovado")
+    por_pedido = {it["pedido_bling"]: it for it in aprovado.json()["items"]}
+    assert por_pedido["601001"]["data_especial"] is True
+    assert por_pedido["601003"]["data_especial"] is True
+    # Abaixo do piso especial: continua Pendente e SEM badge (a janela não
+    # aprovou esta margem).
+    pendente = await client.get("/api/margens/marketplace?status=Pendente")
+    pend = {it["pedido_bling"]: it for it in pendente.json()["items"]}
+    assert pend["601004"]["data_especial"] is False
+    assert pend["601005"]["data_especial"] is False

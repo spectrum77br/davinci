@@ -44,6 +44,9 @@ type MarketplaceRow = {
   attention_margem: boolean
   attention_frete: boolean
   attention_saldo: boolean
+  // Data Especial do segmento ativa (período casa e a margem passa na regra
+  // especial) — margem baixa não trava este pedido. Badge na coluna Margem Mín.
+  data_especial: boolean
 }
 
 type PageResponse = {
@@ -1136,7 +1139,14 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             >
               {{ pct(margemFinal(r)) }}
             </td>
-            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 text-muted-foreground">{{ pct(r.margem_minima) }}</td>
+            <td class="px-2 py-1 text-right tabular-nums whitespace-nowrap bg-blue-50/40 dark:bg-blue-900/10 text-muted-foreground">
+              {{ pct(r.margem_minima) }}
+              <span
+                v-if="r.data_especial"
+                class="ml-1 inline-block rounded bg-amber-100 dark:bg-amber-900/40 px-1 py-px text-[10px] font-medium text-amber-800 dark:text-amber-300 align-middle"
+                title="Data Especial do segmento ativa: neste período, margem abaixo da mínima não trava o pedido (configurado em Cadastros → Segmentos)"
+              >especial</span>
+            </td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground border-l-[3px] border-gray-400 dark:border-gray-600">{{ r.situacao || '—' }}</td>
             <td class="px-2 py-1 border-l-[3px] border-gray-400 dark:border-gray-600">
               <select

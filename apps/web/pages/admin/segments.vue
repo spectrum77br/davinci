@@ -7,6 +7,18 @@ definePageMeta({
   permission: { resource: 'segmentos', action: 'view' },
 })
 
+// Data Especial: janela (datas BRT, inclusivas) em que pedidos do segmento —
+// e de TODOS os subsegmentos — não são travados por margem baixa na aba
+// Margem (nem pelo robô de auto-hold). min_margin em fração (-0.15 = -15%);
+// null = aprova qualquer margem no período.
+type SpecialDate = {
+  id: string
+  segment_id: string
+  date_start: string
+  date_end: string
+  min_margin: string | null
+}
+
 type Segment = {
   id: string
   user_id: string | null
@@ -20,6 +32,7 @@ type Segment = {
   largura: string | null
   comprimento: string | null
   peso: string | null
+  special_dates: SpecialDate[]
   created_at: string
   updated_at: string
 }
@@ -209,6 +222,108 @@ async function remove(seg: Segment, depth: number) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   }
 }
+
+// =========================================================== datas especiais
+// Modal por segmento: lista as janelas + formulário rotulado De/Até/margem.
+
+const specialFor = ref<Segment | null>(null)
+const sdStart = ref('')
+const sdEnd = ref('')
+const sdMargin = ref('') // percent na UI ("-15" = -15%); vazio = aprova tudo
+const sdSaving = ref(false)
+const sdError = ref<string | null>(null)
+
+function findNode(nodes: TreeNode[], id: string): TreeNode | null {
+  for (const n of nodes) {
+    if (n.id === id) return n
+    const hit = findNode(n.children, id)
+    if (hit) return hit
+  }
+  return null
+}
+
+function openSpecial(seg: Segment) {
+  specialFor.value = findNode(tree.value, seg.id) ?? seg
+  sdStart.value = ''
+  sdEnd.value = ''
+  sdMargin.value = ''
+  sdError.value = null
+}
+
+function closeSpecial() {
+  specialFor.value = null
+  sdError.value = null
+}
+
+function fmtBR(iso: string): string {
+  const [y, m, d] = iso.split('-')
+  return `${d}/${m}/${y}`
+}
+
+function sdRegra(sd: SpecialDate): string {
+  if (sd.min_margin === null) return 'aprova qualquer margem'
+  const pct = (Number(sd.min_margin) * 100).toFixed(2).replace(/\.?0+$/, '')
+  return `aprova até margem ${pct}%`
+}
+
+async function addSpecial() {
+  if (!specialFor.value) return
+  sdError.value = null
+  if (!sdStart.value || !sdEnd.value) {
+    sdError.value = 'Preencha as duas datas (De e Até).'
+    return
+  }
+  if (sdEnd.value < sdStart.value) {
+    sdError.value = 'A data final não pode ser antes da inicial.'
+    return
+  }
+  const body: Record<string, unknown> = {
+    date_start: sdStart.value,
+    date_end: sdEnd.value,
+  }
+  const raw = sdMargin.value.trim()
+  if (raw) {
+    const n = Number(raw)
+    if (!Number.isFinite(n)) {
+      sdError.value = 'Margem inválida — use um número, ex.: -15.'
+      return
+    }
+    // UI em percent (-15 → -0.15), banco guarda fração (igual à Margem Mín).
+    body.min_margin = (n / 100).toFixed(4)
+  }
+  sdSaving.value = true
+  try {
+    await api(`/api/segments/${specialFor.value.id}/special-dates`, {
+      method: 'POST',
+      body,
+    })
+    const id = specialFor.value.id
+    await load()
+    specialFor.value = findNode(tree.value, id)
+    sdStart.value = ''
+    sdEnd.value = ''
+    sdMargin.value = ''
+  } catch (e: any) {
+    sdError.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    sdSaving.value = false
+  }
+}
+
+async function removeSpecial(sd: SpecialDate) {
+  if (!specialFor.value) return
+  sdError.value = null
+  try {
+    await api(`/api/segments/${specialFor.value.id}/special-dates/${sd.id}`, {
+      method: 'DELETE',
+    })
+    const id = specialFor.value.id
+    await load()
+    specialFor.value = findNode(tree.value, id)
+  } catch (e: any) {
+    sdError.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
 </script>
 
 <template>
@@ -235,6 +350,7 @@ async function remove(seg: Segment, depth: number) {
           <tr>
             <th class="text-left px-3 py-2 font-medium border-b border-border min-w-[280px]">Nome</th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Margem Mín</th>
+            <th class="text-left px-3 py-2 font-medium border-b border-border min-w-[150px]">Datas Especiais</th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Altura <span class="text-muted-foreground font-normal">(cm)</span></th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Largura <span class="text-muted-foreground font-normal">(cm)</span></th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Comprim. <span class="text-muted-foreground font-normal">(cm)</span></th>
@@ -245,12 +361,12 @@ async function remove(seg: Segment, depth: number) {
         </thead>
         <tbody>
           <tr v-if="loading && !tree.length">
-            <td colspan="8" class="text-center py-6 text-muted-foreground">
+            <td colspan="9" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!tree.length && addingUnder === undefined">
-            <td colspan="8" class="text-center py-8 text-muted-foreground">Nenhum segmento.</td>
+            <td colspan="9" class="text-center py-8 text-muted-foreground">Nenhum segmento.</td>
           </tr>
 
           <template v-for="node in tree" :key="node.id">
@@ -278,6 +394,7 @@ async function remove(seg: Segment, depth: number) {
               @submit-add="submitAdd"
               @update:new-name="(v: string) => (newName = v)"
               @remove="remove"
+              @open-special="openSpecial"
             />
           </template>
 
@@ -295,6 +412,7 @@ async function remove(seg: Segment, depth: number) {
               />
             </td>
             <td class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
+            <td class="border border-border text-xs text-muted-foreground px-3">—</td>
             <td v-for="f in dimFields" :key="f" class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
             <td class="border border-border text-xs text-muted-foreground px-3 text-center">—</td>
             <td class="border border-border px-1 py-1 text-center">
@@ -311,6 +429,96 @@ async function remove(seg: Segment, depth: number) {
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- Modal Datas Especiais: janelas de exceção da margem do segmento -->
+    <div
+      v-if="specialFor"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      @click.self="closeSpecial"
+    >
+      <div class="w-full max-w-md rounded-lg border border-border bg-background p-4 shadow-xl space-y-3">
+        <div class="flex items-center justify-between">
+          <h3 class="font-semibold text-sm">Datas Especiais — {{ specialFor.name }}</h3>
+          <button class="p-1 hover:bg-muted rounded" title="Fechar" @click="closeSpecial">
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+
+        <p class="text-xs text-muted-foreground leading-relaxed">
+          No período configurado, pedidos deste segmento <strong>e de todos os
+          subsegmentos</strong> não ficam travados por margem baixa na aba
+          Margem (o robô também não segura). Sem margem preenchida, aprova
+          qualquer margem — até negativa.
+        </p>
+
+        <div v-if="sdError" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive flex items-center gap-2">
+          <AlertCircle class="h-3.5 w-3.5 shrink-0" /> {{ sdError }}
+        </div>
+
+        <div v-if="specialFor.special_dates.length" class="space-y-1.5">
+          <div
+            v-for="sd in specialFor.special_dates"
+            :key="sd.id"
+            class="flex items-center justify-between gap-2 rounded border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-900/15 px-2.5 py-1.5 text-sm"
+          >
+            <span>
+              <span class="font-medium tabular-nums">{{ fmtBR(sd.date_start) }} até {{ fmtBR(sd.date_end) }}</span>
+              <span class="text-muted-foreground"> · {{ sdRegra(sd) }}</span>
+            </span>
+            <button
+              v-if="canEdit"
+              class="p-1 text-destructive hover:bg-destructive/10 rounded shrink-0"
+              title="Remover este período"
+              @click="removeSpecial(sd)"
+            >
+              <Trash2 class="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+        <p v-else class="text-sm text-muted-foreground">Nenhuma data especial cadastrada.</p>
+
+        <div v-if="canEdit" class="rounded border border-border p-3 space-y-2.5">
+          <div class="text-xs font-medium">Adicionar período</div>
+          <div class="grid grid-cols-2 gap-2">
+            <label class="block text-xs text-muted-foreground">
+              De
+              <input
+                v-model="sdStart"
+                type="date"
+                class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
+              />
+            </label>
+            <label class="block text-xs text-muted-foreground">
+              Até
+              <input
+                v-model="sdEnd"
+                type="date"
+                class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
+              />
+            </label>
+          </div>
+          <label class="block text-xs text-muted-foreground">
+            Margem mínima especial (%) — opcional
+            <input
+              v-model="sdMargin"
+              type="number"
+              step="0.1"
+              placeholder="ex.: -15"
+              class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
+            />
+          </label>
+          <p class="text-[11px] text-muted-foreground">
+            Vazio = aprova qualquer margem no período. Com valor (ex.: -15),
+            aprova enquanto a margem for maior ou igual a -15%.
+          </p>
+          <Button size="sm" class="w-full" :disabled="sdSaving" @click="addSpecial">
+            <Loader2 v-if="sdSaving" class="size-4 mr-1 animate-spin" />
+            <Plus v-else class="size-4 mr-1" />
+            Adicionar período
+          </Button>
+        </div>
+      </div>
     </div>
   </div>
 </template>

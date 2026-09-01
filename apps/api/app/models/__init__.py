@@ -105,7 +105,7 @@ from app.models.product import (
     ProductLink,
 )
 from app.models.refund import Refund
-from app.models.segment import Segment
+from app.models.segment import Segment, SegmentSpecialDate
 from app.models.situacao_bling import SituacaoBling
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
@@ -207,6 +207,7 @@ __all__ = [
     "ProductLink",
     "Refund",
     "Segment",
+    "SegmentSpecialDate",
     "SituacaoBling",
     "StockCheck",
     "StockMovement",

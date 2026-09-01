@@ -172,6 +172,11 @@ async def _setup_schema():
                     pricing_account_id uuid,
                     pricing_account_name text,
                     pricing_account_listing_type text,
+                    -- Elo pedido→segmento (Datas Especiais, migration 0233):
+                    -- existe em prod desde a view 0058, mas faltava aqui —
+                    -- _MARGEM_DATA_ESPECIAL_SQL referencia a coluna em toda
+                    -- listagem/triagem de margem.
+                    pricing_leaf_segment_id uuid,
                     pricing_leaf_segment_name text,
                     item_proportion numeric,
                     saldo_final numeric,

@@ -1,5 +1,16 @@
 <script setup lang="ts">
-import { Check, ChevronDown, ChevronRight, Loader2, Plus, Trash2, X } from 'lucide-vue-next'
+import { CalendarDays, Check, ChevronDown, ChevronRight, Loader2, Plus, Trash2, X } from 'lucide-vue-next'
+
+// Data Especial: janela em que a margem baixa não trava pedidos do segmento
+// (nem dos subsegmentos). min_margin em fração (-0.15 = -15%); null = aprova
+// qualquer margem no período.
+type SpecialDate = {
+  id: string
+  segment_id: string
+  date_start: string
+  date_end: string
+  min_margin: string | null
+}
 
 type Segment = {
   id: string
@@ -14,6 +25,7 @@ type Segment = {
   largura: string | null
   comprimento: string | null
   peso: string | null
+  special_dates: SpecialDate[]
   created_at: string
   updated_at: string
 }
@@ -51,6 +63,7 @@ const emit = defineEmits<{
   (e: 'submit-add'): void
   (e: 'update:new-name', v: string): void
   (e: 'remove', node: Segment, depth: number): void
+  (e: 'open-special', node: Segment): void
 }>()
 
 function isOpen(id: string) { return props.expanded.has(id) }
@@ -58,6 +71,21 @@ function isEditing(id: string, f: EditField) { return props.editing?.id === id &
 function isFlashed(id: string, f: string) { return props.flashed.has(`${id}::${f}`) }
 const hasChildren = computed(() => props.node.children.length > 0)
 const open = computed(() => isOpen(props.node.id))
+
+// "01/09–15/09" (ano só quando difere do atual: "28/12/25–05/01/26").
+function fmtRange(sd: SpecialDate): string {
+  const cur = String(new Date().getFullYear())
+  const f = (iso: string) => {
+    const [y, m, d] = iso.split('-')
+    return y === cur ? `${d}/${m}` : `${d}/${m}/${y!.slice(2)}`
+  }
+  return `${f(sd.date_start)}–${f(sd.date_end)}`
+}
+function fmtRegra(sd: SpecialDate): string {
+  if (sd.min_margin === null) return 'aprova tudo'
+  const pct = (Number(sd.min_margin) * 100).toFixed(2).replace(/\.?0+$/, '')
+  return `≥ ${pct}%`
+}
 </script>
 
 <template>
@@ -132,6 +160,32 @@ const open = computed(() => isOpen(props.node.id))
       >
         {{ (Number(node.min_margin) * 100).toFixed(2).replace(/\.?0+$/, '') }}%
       </span>
+    </td>
+
+    <!-- Datas Especiais: janelas de exceção da margem (segmento + subsegmentos).
+         Clique abre o modal de gerenciamento na página. -->
+    <td
+      class="border border-border px-2 py-1.5 text-xs"
+      :class="canEdit ? 'cursor-pointer hover:bg-amber-50/60 dark:hover:bg-amber-900/10' : ''"
+      :title="canEdit ? 'Gerenciar datas especiais' : undefined"
+      @click="canEdit && emit('open-special', node)"
+    >
+      <div class="flex flex-wrap items-center gap-1">
+        <span
+          v-for="sd in node.special_dates"
+          :key="sd.id"
+          class="inline-flex items-center rounded bg-amber-100 dark:bg-amber-900/40 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-300 whitespace-nowrap"
+        >
+          {{ fmtRange(sd) }} · {{ fmtRegra(sd) }}
+        </span>
+        <span
+          v-if="!node.special_dates.length"
+          class="inline-flex items-center gap-1 text-muted-foreground"
+        >
+          <template v-if="canEdit"><CalendarDays class="h-3 w-3" /> adicionar</template>
+          <template v-else>—</template>
+        </span>
+      </div>
     </td>
 
     <!-- dimensions: altura, largura, comprimento, peso (subtypes only) -->
@@ -219,6 +273,7 @@ const open = computed(() => isOpen(props.node.id))
       />
     </td>
     <td class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
+    <td class="border border-border text-xs text-muted-foreground px-3">—</td>
     <td v-for="f in dimFields" :key="f" class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
     <td class="border border-border text-xs text-muted-foreground px-3 text-center">—</td>
     <td class="border border-border px-1 py-1 text-center">
@@ -262,6 +317,7 @@ const open = computed(() => isOpen(props.node.id))
       @submit-add="emit('submit-add')"
       @update:new-name="(v: string) => emit('update:new-name', v)"
       @remove="(n: any, d: number) => emit('remove', n, d)"
+      @open-special="(n: any) => emit('open-special', n)"
     />
   </template>
 </template>

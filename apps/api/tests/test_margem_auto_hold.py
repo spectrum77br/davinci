@@ -12,7 +12,7 @@ sumia de todas as abas até o próximo rebuild).
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 
 import httpx
 import pytest
@@ -20,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import BlingOrder, SituacaoBling
+from app.models import BlingOrder, Segment, SegmentSpecialDate, SituacaoBling
 from app.routers import margens as margens_router
 from app.services import margem_auto_hold
 
@@ -88,6 +88,8 @@ async def _seed_pedido(
     saldo_aguardando: bool = False,
     frete_estourado: bool = False,
     plataforma: str = "amazon",
+    data: datetime | None = None,
+    leaf_segment_id: object = None,
 ) -> None:
     """Uma linha em bling_orders + uma linha-item no snapshot verificar_margem.
 
@@ -97,6 +99,7 @@ async def _seed_pedido(
     frete_estourado → frete plataforma 30 > frete anúncio 10.
     plataforma → 'amazon' por padrão (sujeita à triagem de saldo); use
     'ml'/'shopee' para exercitar a isenção do motivo saldo.
+    data/leaf_segment_id → data do pedido e segmento (Datas Especiais).
     """
     # Catálogo id→nome (merge = idempotente entre seeds do mesmo teste): os
     # espelhos de situação também gravam situacao_nome via subselect daqui.
@@ -123,7 +126,8 @@ async def _seed_pedido(
                 marketplace_margem, margem_minima,
                 bling_valorbase_item,
                 marketplace_liquido_base_margem_item,
-                evento_frete_anuncio, marketplace_frete_real_cobrado_item
+                evento_frete_anuncio, marketplace_frete_real_cobrado_item,
+                data, pricing_leaf_segment_id
             )
             VALUES (
                 :id, :pedido, :bling_id, :sku,
@@ -132,7 +136,8 @@ async def _seed_pedido(
                 :margem, :minima,
                 :valorbase,
                 :liquido,
-                :frete_anuncio, :frete_pago
+                :frete_anuncio, :frete_pago,
+                :data, :leaf_segment_id
             )
             """
         ),
@@ -153,6 +158,10 @@ async def _seed_pedido(
             "frete_anuncio": 10 if frete_estourado else None,
             "frete_pago": 30 if frete_estourado else None,
             "plataforma": plataforma,
+            "data": data,
+            "leaf_segment_id": (
+                None if leaf_segment_id is None else str(leaf_segment_id)
+            ),
         },
     )
     await db.commit()
@@ -550,3 +559,46 @@ async def test_aprovar_local_only_num_segurado_ainda_solta_no_bling(
     snap = await _snapshot(db, "291670")
     assert snap["situacao"] == "6"
     assert snap["bling_status_margem"] == "Aprovado"
+
+
+async def test_nao_segura_margem_baixa_em_data_especial(db: AsyncSession):
+    """Datas Especiais do segmento: o robô herda a exceção por import de
+    _ATTENTION_MARGEM_SQL — margem baixa DENTRO da janela não é segurada
+    (Eduardo 01/09: "está com margem negativa, aprova"); fora dela, segura
+    normalmente."""
+    seg = Segment(name="Seg DE", slug=f"seg-de-{uuid.uuid4().hex[:6]}")
+    db.add(seg)
+    await db.flush()
+    db.add(
+        SegmentSpecialDate(
+            segment_id=seg.id,
+            date_start=date(2026, 8, 15),
+            date_end=date(2026, 8, 25),
+            min_margin=None,  # aprova qualquer margem no período
+        )
+    )
+    await db.commit()
+    # Dentro da janela (21/08) → intocado; fora (01/08) → segurado.
+    await _seed_pedido(
+        db,
+        pedido="291690",
+        bling_id=601,
+        data=datetime(2026, 8, 21, 12, tzinfo=UTC),
+        leaf_segment_id=seg.id,
+    )
+    await _seed_pedido(
+        db,
+        pedido="291691",
+        bling_id=602,
+        data=datetime(2026, 8, 1, 12, tzinfo=UTC),
+        leaf_segment_id=seg.id,
+    )
+    fake = FakeBling()
+
+    res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
+
+    assert res == {"held": 1, "failed": 0}
+    assert fake.situacao_calls == [(602, 83955)]
+    snap_isento = await _snapshot(db, "291690")
+    assert snap_isento["situacao"] == "6"
+    assert snap_isento["bling_status_margem"] is None

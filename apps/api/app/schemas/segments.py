@@ -1,9 +1,9 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
 def _slugify(v: str) -> str:
@@ -95,6 +95,34 @@ class SegmentPatch(BaseModel):
         return s
 
 
+class SegmentSpecialDateCreate(BaseModel):
+    """Datas Especiais: janela de exceção da margem (datas BRT, inclusivas).
+
+    `min_margin` em FRAÇÃO (mesma escala de segments.min_margin: -0.15 =
+    -15%); NULL = aprova qualquer margem no período.
+    """
+
+    date_start: date
+    date_end: date
+    min_margin: Decimal | None = None
+
+    @model_validator(mode="after")
+    def _v_range(self) -> "SegmentSpecialDateCreate":
+        if self.date_end < self.date_start:
+            raise ValueError("date_range_invalid")
+        return self
+
+
+class SegmentSpecialDateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    segment_id: UUID
+    date_start: date
+    date_end: date
+    min_margin: Decimal | None = None
+
+
 class SegmentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -110,6 +138,7 @@ class SegmentOut(BaseModel):
     largura: Decimal | None = None
     comprimento: Decimal | None = None
     peso: Decimal | None = None
+    special_dates: list[SegmentSpecialDateOut] = []
     created_at: datetime
     updated_at: datetime
 
@@ -121,4 +150,11 @@ class SegmentTreeNode(SegmentOut):
 SegmentTreeNode.model_rebuild()
 
 
-__all__ = ["SegmentCreate", "SegmentPatch", "SegmentOut", "SegmentTreeNode"]
+__all__ = [
+    "SegmentCreate",
+    "SegmentOut",
+    "SegmentPatch",
+    "SegmentSpecialDateCreate",
+    "SegmentSpecialDateOut",
+    "SegmentTreeNode",
+]
