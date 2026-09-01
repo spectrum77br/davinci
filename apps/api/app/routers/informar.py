@@ -1,6 +1,6 @@
 """Botões INFORMAR (admin-only) — resumo sob demanda via Threema.
 
-Dois contextos:
+Três contextos:
 - `logistica`: manda a lista dos pedidos ACOMPANHADOS no painel Logística
   (mesma regra de visibilidade do painel, incluindo o passe-livre de
   "Problemas"), no formato `pedido marketplace - conta - status plataforma -
@@ -8,6 +8,9 @@ Dois contextos:
 - `controle_estoque`: manda os pedidos movidos pra Aguardando Cancelamento por
   falta de estoque (marca `sem_estoque` na nf_faturamento) que AINDA estão
   nessa situação no Bling.
+- `margem`: manda os pedidos pendentes de análise na aba Pendentes da Margem
+  (mesmo WHERE da listagem com status=Pendente), um por pedido com o motivo —
+  as mesmas palavras do recado que o auto-hold escreve no Bling.
 
 Cada contexto tem seu cadastro de destinatários (`threema_informar_config`),
 editado no modal do botão; o diretório de nomes vem do `.env` (o mesmo do
@@ -19,7 +22,7 @@ from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -37,12 +40,14 @@ from app.routers.nf import _SITUACAO_AGUARDANDO_CANCELAMENTO
 from app.schemas.informar import InformarConfigIn, InformarConfigOut, InformarEnviarOut
 from app.services import informar, threema
 from app.services.logistica_ingest import _ids_pendentes
+from app.services.margem_auto_hold import _motivo as _motivo_margem
+from app.services.verificar_margem import SNAPSHOT_TABLE
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/informar", tags=["informar"])
 
-_CONTEXTOS = ("logistica", "controle_estoque")
+_CONTEXTOS = ("logistica", "controle_estoque", "margem")
 
 
 def _valida_contexto(contexto: str) -> str:
@@ -183,11 +188,77 @@ async def _linhas_estoque(session: AsyncSession) -> list[str]:
     return informar.linhas_estoque(entries)
 
 
+async def _linhas_margem(session: AsyncSession) -> list[str]:
+    """Os pedidos que a aba Pendentes da Margem está MOSTRANDO agora — mesmo
+    WHERE da listagem com status=Pendente (routers/margens.py), agregado por
+    pedido. O motivo por pedido usa as mesmas palavras do recado do auto-hold
+    (`margem_auto_hold._motivo`), com "aguardando saldo da plataforma"
+    cobrindo tanto o líquido nulo das não-confiáveis (Amazon pré-settlement)
+    quanto o das confiáveis (ML/Shopee/TikTok)."""
+    # Import tardio como em margem_auto_hold: a definição canônica de
+    # "Pendente" mora em routers/margens.py — buscar lá garante que o relatório
+    # mostra EXATAMENTE o que a aba mostra (se a regra mudar, muda junto).
+    from app.routers.margens import (
+        _ATTENTION_FRETE_SQL,
+        _ATTENTION_MARGEM_SQL,
+        _ATTENTION_SALDO_AGUARDANDO_SQL,
+        _ATTENTION_SALDO_SQL,
+        NEEDS_ATTENTION_SQL,
+        SITUACAO_REPROVADO,
+    )
+
+    sql = f"""
+        SELECT v.pedido_bling,
+               MAX(COALESCE(v.plataforma_bling, v.plataforma_financeiro))
+                                                AS plataforma,
+               MAX(v.loja_nome)                 AS conta,
+               BOOL_OR({_ATTENTION_MARGEM_SQL}) AS margem_baixa,
+               BOOL_OR({_ATTENTION_SALDO_SQL}
+                       AND v.marketplace_liquido_base_margem_item IS NOT NULL)
+                                                AS saldo_divergente,
+               BOOL_OR(({_ATTENTION_SALDO_SQL}
+                        AND v.marketplace_liquido_base_margem_item IS NULL)
+                       OR {_ATTENTION_SALDO_AGUARDANDO_SQL})
+                                                AS saldo_pendente
+        FROM {SNAPSHOT_TABLE} v
+        WHERE v.situacao_nome != 'Cancelado'
+          AND (v.situacao IS DISTINCT FROM '{SITUACAO_REPROVADO}'
+               OR v.bling_status_margem = 'Pendente')
+          AND NOT {_ATTENTION_FRETE_SQL}
+          AND (v.bling_status_margem = 'Pendente'
+               OR (v.bling_status_margem IS NULL AND {NEEDS_ATTENTION_SQL}))
+        GROUP BY v.pedido_bling
+        ORDER BY v.pedido_bling
+    """  # noqa: S608 — fragmentos fixos vindos da aba, sem input de usuário
+    rows = (await session.execute(text(sql))).mappings().all()
+    entries = [
+        (
+            str(r["pedido_bling"]),
+            " ".join(
+                p
+                for p in (
+                    (r["plataforma"] or "").strip(),
+                    (r["conta"] or "").strip(),
+                )
+                if p
+            ),
+            _motivo_margem(
+                bool(r["margem_baixa"]),
+                bool(r["saldo_divergente"]),
+                bool(r["saldo_pendente"]),
+            ),
+        )
+        for r in rows
+    ]
+    return informar.linhas_margem(entries)
+
+
 _CABECALHOS = {
     "logistica": "DaVinci — Logística: pedidos acompanhados",
     "controle_estoque": (
         "DaVinci — Controle de Estoque: Aguardando Cancelamento por falta de estoque"
     ),
+    "margem": "DaVinci — Margem: pedidos pendentes de análise",
 }
 _VAZIO = {
     "logistica": "DaVinci — Logística: nenhum pedido acompanhado no momento.",
@@ -195,6 +266,13 @@ _VAZIO = {
         "DaVinci — Controle de Estoque: nenhum pedido em Aguardando Cancelamento"
         " por falta de estoque no momento."
     ),
+    "margem": "DaVinci — Margem: nenhum pedido pendente de análise no momento.",
+}
+
+_LINHAS = {
+    "logistica": _linhas_logistica,
+    "controle_estoque": _linhas_estoque,
+    "margem": _linhas_margem,
 }
 
 
@@ -213,11 +291,7 @@ async def enviar(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "sem_destinatarios"},
         )
-    linhas = (
-        await _linhas_logistica(session)
-        if contexto == "logistica"
-        else await _linhas_estoque(session)
-    )
+    linhas = await _LINHAS[contexto](session)
     mensagens = informar.montar_mensagens(
         f"{_CABECALHOS[contexto]} ({len(linhas)})", linhas
     ) or [_VAZIO[contexto]]

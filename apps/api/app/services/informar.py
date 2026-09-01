@@ -6,6 +6,8 @@ Funções PURAS (sem banco) pra dar teste fácil:
   - status bling`.
 - `linhas_estoque`: uma linha por pedido movido pra Aguardando Cancelamento
   por falta de estoque (espelha o aviso automático do sweep de NF).
+- `linhas_margem`: uma linha por pedido pendente de análise na Margem, com o
+  motivo (mesma forma das linhas do Controle de Estoque).
 - `montar_mensagens`: fatia as linhas em mensagens que cabem no limite de
   3500 bytes do Threema Basic (com folga), numerando as partes.
 """
@@ -59,6 +61,12 @@ def linhas_estoque(entries: Iterable[tuple[str, str, str]]) -> list[str]:
             linha += f": {skus.strip()}"
         out.append(linha)
     return out
+
+
+def linhas_margem(entries: Iterable[tuple[str, str, str]]) -> list[str]:
+    """Entradas `(pedido, rótulo plataforma+conta, motivo)` → `Pedido N
+    (loja): motivo` — mesma forma (e ordenação) das linhas do estoque."""
+    return linhas_estoque(entries)
 
 
 def montar_mensagens(

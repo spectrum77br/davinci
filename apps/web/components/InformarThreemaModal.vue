@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Modal do botão INFORMAR (admin-only): cadastro de quem recebe o relatório
 // via Threema + envio sob demanda. Um contexto por uso ('logistica' |
-// 'controle_estoque'); a seleção fica salva no servidor (threema_informar_config).
+// 'controle_estoque' | 'margem'); a seleção fica salva no servidor
+// (threema_informar_config).
 import { Loader2, Send, X } from 'lucide-vue-next'
 
 type Destinatario = { id: string; nome: string }
@@ -10,7 +11,7 @@ type EnviarOut = { pedidos: number; mensagens: number; sent: string[]; failed: s
 
 const props = defineProps<{
   open: boolean
-  contexto: 'logistica' | 'controle_estoque'
+  contexto: 'logistica' | 'controle_estoque' | 'margem'
   // O que este botão informa — aparece como descrição no modal.
   descricao: string
 }>()

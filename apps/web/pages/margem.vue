@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, Check, ChevronLeft, ChevronRight, Download, Loader2, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
+import { AlertCircle, Check, ChevronLeft, ChevronRight, Download, Loader2, Megaphone, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -111,6 +111,9 @@ const shouldAutoRefresh = computed(() => {
 
 // Coluna "Lucro" (R$) restrita a administradores.
 const isAdmin = useIsAdmin()
+
+// Botão INFORMAR (admin-only): manda os pendentes de análise via Threema.
+const informarMargemOpen = ref(false)
 
 const items = ref<MarketplaceRow[]>([])
 const total = ref(0)
@@ -728,6 +731,16 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     <PageHeader title="Margem" description="Margem por pedido — conciliação marketplace (últimos 30 dias).">
       <template #actions>
         <div class="flex flex-wrap items-center gap-2">
+          <Button
+            v-if="isAdmin"
+            size="sm"
+            variant="outline"
+            title="Manda via Threema os pedidos pendentes de análise (só admins)"
+            @click="informarMargemOpen = true"
+          >
+            <Megaphone class="size-4 mr-1.5" />
+            Informar
+          </Button>
           <div v-if="isAdmin" class="flex items-center gap-1.5">
             <input
               v-model="rentInicio"
@@ -1244,6 +1257,14 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       :open="raioXPedido !== null"
       :pedido="raioXPedido ?? ''"
       @close="raioXPedido = null"
+    />
+
+    <!-- Modal do botão INFORMAR (admin-only) -->
+    <InformarThreemaModal
+      :open="informarMargemOpen"
+      contexto="margem"
+      descricao="Manda via Threema os pedidos pendentes de análise na aba Pendentes da Margem, com o motivo de cada um. A seleção de destinatários fica salva."
+      @close="informarMargemOpen = false"
     />
   </div>
 </template>

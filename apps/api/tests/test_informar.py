@@ -91,6 +91,20 @@ def test_linhas_estoque_espelha_aviso_do_sweep():
     ]
 
 
+# ---- linhas_margem ----
+
+
+def test_linhas_margem_mesma_forma_do_estoque():
+    entries = [
+        ("402003", "", "pendente de análise"),
+        ("402001", "ml Loja ML", "margem abaixo do mínimo"),
+    ]
+    assert informar.linhas_margem(entries) == [
+        "Pedido 402001 (ml Loja ML): margem abaixo do mínimo",
+        "Pedido 402003: pendente de análise",
+    ]
+
+
 # ---- montar_mensagens ----
 
 
@@ -157,3 +171,105 @@ async def test_informar_put_salva_so_ids_do_diretorio(
     assert r.status_code == 200
     # Normaliza pra maiúsculas e descarta quem não está no diretório.
     assert r.json()["recipients"] == ["AAAA1111"]
+
+
+# ---- contexto margem (relatório dos pendentes) ----
+
+
+async def _seed_margem(db: AsyncSession, **cols: object) -> None:
+    """Uma linha-item no snapshot verificar_margem; ausentes ficam NULL."""
+    from sqlalchemy import text
+
+    cols.setdefault("bling_order_item_id", str(uuid.uuid4()))
+    names = ", ".join(cols)
+    binds = ", ".join(f":{c}" for c in cols)
+    await db.execute(
+        text(f"INSERT INTO verificar_margem ({names}) VALUES ({binds})"),  # noqa: S608
+        cols,
+    )
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_informar_margem_enviar_lista_pendentes_com_motivo(
+    client: AsyncClient,
+    db: AsyncSession,
+    auth_as,
+    admin: User,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """O relatório da Margem manda EXATAMENTE o que a aba Pendentes mostra,
+    um por pedido (dedup de itens) com o motivo do auto-hold; aprovado fica
+    de fora e 'Pendente' gravado sem gatilho vira "pendente de análise"."""
+    from sqlalchemy import text
+
+    from app.config import get_settings
+    from app.services import threema
+
+    await db.execute(text("DELETE FROM verificar_margem"))
+    await db.commit()
+    # Pendente por margem baixa (2 itens do MESMO pedido → uma linha só).
+    for sku in ("sku-a", "sku-b"):
+        await _seed_margem(
+            db,
+            pedido_bling="402001",
+            sku=sku,
+            plataforma_bling="ml",
+            loja_nome="Loja ML",
+            situacao="6",
+            situacao_nome="Em aberto",
+            marketplace_margem=2,
+            margem_minima=8,
+        )
+    # Sem gatilho nenhum → Aprovado derivado → fora do relatório.
+    await _seed_margem(
+        db,
+        pedido_bling="402002",
+        sku="sku-a",
+        plataforma_bling="shopee",
+        loja_nome="Loja SP",
+        situacao="6",
+        situacao_nome="Em aberto",
+        marketplace_margem=15,
+        margem_minima=8,
+    )
+    # 'Pendente' GRAVADO sem gatilho ativo (hold manual) → entra, motivo padrão.
+    await _seed_margem(
+        db,
+        pedido_bling="402003",
+        sku="sku-a",
+        situacao="6",
+        situacao_nome="Em aberto",
+        bling_status_margem="Pendente",
+    )
+
+    enviados: list[str] = []
+
+    class _FakeThreema:
+        def __init__(self, *a: object, **k: object) -> None: ...
+
+        async def send_to_all(self, msg: str, recipients: list[str]) -> dict:
+            enviados.append(msg)
+            return {"sent": list(recipients), "failed": []}
+
+    monkeypatch.setattr(threema, "ThreemaClient", _FakeThreema)
+    monkeypatch.setattr(
+        get_settings(), "threema_recipient_names", "AAAA1111:Ana", raising=False
+    )
+    monkeypatch.setattr(get_settings(), "threema_recipients", "", raising=False)
+
+    auth_as(admin)
+    r = await client.put("/api/informar/margem", json={"recipients": ["AAAA1111"]})
+    assert r.status_code == 200
+    r = await client.post("/api/informar/margem/enviar")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pedidos"] == 2
+    assert body["sent"] == ["AAAA1111"]
+    assert len(enviados) == 1
+    assert enviados[0].splitlines() == [
+        "DaVinci — Margem: pedidos pendentes de análise (2)",
+        "Pedido 402001 (ml Loja ML): margem abaixo do mínimo",
+        "Pedido 402003: pendente de análise",
+    ]
