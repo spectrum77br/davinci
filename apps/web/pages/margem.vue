@@ -112,7 +112,14 @@ const shouldAutoRefresh = computed(() => {
 // Coluna "Lucro" (R$) restrita a administradores.
 const isAdmin = useIsAdmin()
 
-// Botão INFORMAR (admin-only): manda os pendentes de análise via Threema.
+// Botão INFORMAR (admins + gerente): manda os pendentes de análise via
+// Threema. A lista de e-mails extras espelha _EMAILS_EXTRAS['margem'] no
+// backend (routers/informar.py) — mudou lá, muda aqui.
+const INFORMAR_MARGEM_USERS = ['sa.geral@tutamail.com']
+const canInformar = computed(() => {
+  const email = _auth.user?.email?.toLowerCase()
+  return isAdmin.value || (!!email && INFORMAR_MARGEM_USERS.includes(email))
+})
 const informarMargemOpen = ref(false)
 
 const items = ref<MarketplaceRow[]>([])
@@ -732,10 +739,10 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       <template #actions>
         <div class="flex flex-wrap items-center gap-2">
           <Button
-            v-if="isAdmin"
+            v-if="canInformar"
             size="sm"
             variant="outline"
-            title="Manda via Threema os pedidos pendentes de análise (só admins)"
+            title="Manda via Threema os pedidos pendentes de análise"
             @click="informarMargemOpen = true"
           >
             <Megaphone class="size-4 mr-1.5" />

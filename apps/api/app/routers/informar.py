@@ -14,7 +14,10 @@ Três contextos:
 
 Cada contexto tem seu cadastro de destinatários (`threema_informar_config`),
 editado no modal do botão; o diretório de nomes vem do `.env` (o mesmo do
-seletor da aba Status). Tudo aqui exige admin — botão, cadastro e envio.
+seletor da aba Status). Tudo aqui exige admin — botão, cadastro e envio —
+com UMA exceção: o contexto `margem` também libera o gerente por e-mail
+(_EMAILS_EXTRAS; pedido do Eduardo 01/09: "pro cairo que é gerente pode
+aparecer informar na aba margem").
 """
 from __future__ import annotations
 
@@ -27,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps.auth import require_admin
+from app.deps.auth import require_active_user
 from app.models import (
     BlingOrder,
     Logistica,
@@ -35,6 +38,7 @@ from app.models import (
     StoreInfo,
     ThreemaInformarConfig,
     User,
+    UserRole,
 )
 from app.routers.nf import _SITUACAO_AGUARDANDO_CANCELAMENTO
 from app.schemas.informar import InformarConfigIn, InformarConfigOut, InformarEnviarOut
@@ -49,6 +53,14 @@ router = APIRouter(prefix="/api/informar", tags=["informar"])
 
 _CONTEXTOS = ("logistica", "controle_estoque", "margem")
 
+# Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
+# exceção: o gerente (Cairo) vê e usa o botão de lá; Logística e Controle de
+# Estoque seguem admin-only. Espelho no front: INFORMAR_MARGEM_USERS em
+# pages/margem.vue — mudou aqui, muda lá.
+_EMAILS_EXTRAS: dict[str, frozenset[str]] = {
+    "margem": frozenset({"sa.geral@tutamail.com"}),
+}
+
 
 def _valida_contexto(contexto: str) -> str:
     if contexto not in _CONTEXTOS:
@@ -56,6 +68,16 @@ def _valida_contexto(contexto: str) -> str:
             status.HTTP_404_NOT_FOUND, detail={"code": "contexto_desconhecido"}
         )
     return contexto
+
+
+def _exige_acesso(user: User, contexto: str) -> None:
+    """Admin sempre; não-admin só se o e-mail estiver liberado pro contexto."""
+    if user.role == UserRole.ADMIN:
+        return
+    email = (user.email or "").strip().lower()
+    if email in _EMAILS_EXTRAS.get(contexto, frozenset()):
+        return
+    raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
 
 
 def _diretorio() -> list[dict[str, str]]:
@@ -89,10 +111,11 @@ def _to_config_out(contexto: str, row: ThreemaInformarConfig | None) -> Informar
 async def get_config(
     contexto: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_admin)],
+    user: Annotated[User, Depends(require_active_user)],
 ) -> InformarConfigOut:
     """Cadastro atual + diretório de destinatários (pro modal do botão)."""
     contexto = _valida_contexto(contexto)
+    _exige_acesso(user, contexto)
     return _to_config_out(contexto, await _config_row(session, contexto))
 
 
@@ -101,11 +124,12 @@ async def put_config(
     contexto: str,
     body: InformarConfigIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_admin)],
+    user: Annotated[User, Depends(require_active_user)],
 ) -> InformarConfigOut:
     """Salva quem recebe o relatório deste contexto. Aceita só IDs que existem
     no diretório do `.env` (o modal manda os marcados)."""
     contexto = _valida_contexto(contexto)
+    _exige_acesso(user, contexto)
     validos = {d["id"] for d in _diretorio()}
     escolhidos = [
         rid
@@ -280,10 +304,11 @@ _LINHAS = {
 async def enviar(
     contexto: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_admin)],
+    user: Annotated[User, Depends(require_active_user)],
 ) -> InformarEnviarOut:
     """Monta o relatório do contexto e manda pros destinatários cadastrados."""
     contexto = _valida_contexto(contexto)
+    _exige_acesso(user, contexto)
     row = await _config_row(session, contexto)
     recipients = threema.parse_recipients(row.recipients if row else "")
     if not recipients:

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-// Modal do botão INFORMAR (admin-only): cadastro de quem recebe o relatório
-// via Threema + envio sob demanda. Um contexto por uso ('logistica' |
-// 'controle_estoque' | 'margem'); a seleção fica salva no servidor
-// (threema_informar_config).
+// Modal do botão INFORMAR: cadastro de quem recebe o relatório via Threema +
+// envio sob demanda. Um contexto por uso ('logistica' | 'controle_estoque' |
+// 'margem'); a seleção fica salva no servidor (threema_informar_config).
+// Acesso: admin em todos; 'margem' também libera o gerente (gate no backend,
+// routers/informar.py _EMAILS_EXTRAS).
 import { Loader2, Send, X } from 'lucide-vue-next'
 
 type Destinatario = { id: string; nome: string }

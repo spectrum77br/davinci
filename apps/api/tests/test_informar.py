@@ -173,6 +173,30 @@ async def test_informar_put_salva_so_ids_do_diretorio(
     assert r.json()["recipients"] == ["AAAA1111"]
 
 
+@pytest.mark.asyncio
+async def test_informar_margem_libera_gerente_por_email(
+    client: AsyncClient, db: AsyncSession, auth_as
+):
+    """O gerente (e-mail em _EMAILS_EXTRAS['margem']) usa o Informar da
+    Margem sem ser admin; Logística e Controle de Estoque seguem admin-only
+    até pra ele."""
+    email = "sa.geral@tutamail.com"
+    u = User(
+        open_id=f"email:{email}",
+        email=email,
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+    )
+    db.add(u)
+    await db.commit()
+    await db.refresh(u)
+    auth_as(u)
+
+    assert (await client.get("/api/informar/margem")).status_code == 200
+    assert (await client.get("/api/informar/logistica")).status_code == 403
+    assert (await client.get("/api/informar/controle_estoque")).status_code == 403
+
+
 # ---- contexto margem (relatório dos pendentes) ----
 
 
