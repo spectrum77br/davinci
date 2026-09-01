@@ -972,6 +972,22 @@ async def marketplace_financials_retry(ctx: dict) -> None:
     logger.info("marketplace_financials_retry_done", **result)
 
 
+async def tiktok_unsettled_sweep(ctx: dict) -> None:
+    """Estimativa oficial pré-liquidação do TikTok (a mesma da Central do
+    Vendedor) para os financeiros ainda sem settlement real — 1-2 chamadas
+    por loja preenchem o Saldo Plataforma da Margem no dia da venda em vez
+    de dias depois. Ver run_tiktok_unsettled_sweep."""
+    from app.services.marketplace_financials import run_tiktok_unsettled_sweep
+
+    async with session_scope() as s:
+        try:
+            result = await run_tiktok_unsettled_sweep(s)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("tiktok_unsettled_sweep_failed", error=str(e)[:300])
+            return
+    logger.info("tiktok_unsettled_sweep_done", **result)
+
+
 async def shopee_discrepancy_check(ctx: dict) -> None:
     """Compare Shopee stock vs local DB and fix discrepancies.
     Runs every 4h to catch phantom stock issues."""
@@ -1860,6 +1876,7 @@ class WorkerSettings:
         audit_run,
         user_relink_run,
         sync_marketplace_financials_for_order_run,
+        tiktok_unsettled_sweep,
         verificar_margem_snapshot,
         check_marketplace_shipped_orders,
         bling_orders_safety_net_tick,
@@ -1938,6 +1955,9 @@ class WorkerSettings:
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(tiktok_token_refresh, hour={0, 6, 12, 18}, minute=45, run_at_startup=False),
         cron(marketplace_financials_retry, minute={10, 40}, run_at_startup=False),
+        # :08/:38 — corre ANTES do verificar_margem_snapshot (:15/:45): a
+        # estimativa entra no rebuild seguinte e aparece na aba no mesmo ciclo.
+        cron(tiktok_unsettled_sweep, minute={8, 38}, run_at_startup=False),
         # Daily Frete refund sweep — 06:20 UTC = 03:20 BRT, in the quiet
         # window after the daily sync scheduler. Per-order hook in
         # marketplace_financials handles the realtime case; this cron
@@ -2320,6 +2340,7 @@ __all__ = [
     "ml_backfill_run",
     "ml_token_refresh",
     "marketplace_financials_retry",
+    "tiktok_unsettled_sweep",
     "refunds_freight_backfill",
     "refresh_bling_stock_run",
     "push_prices_batch_run",

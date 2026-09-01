@@ -505,6 +505,40 @@ class TikTokClient:
             f"/finance/202309/orders/{order_id}/statement_transactions"
         )
 
+    async def get_unsettled_orders(
+        self,
+        *,
+        search_time_ge: int,
+        search_time_lt: int,
+        page_size: int = 100,
+        page_token: str | None = None,
+    ) -> dict:
+        """Pedidos AINDA NÃO liquidados, com a estimativa oficial de repasse.
+
+        TikTok Finance API v202507 (validado ao vivo em 01/09/26):
+            GET /finance/202507/orders/unsettled
+
+        É o número que a Central do Vendedor mostra na hora ("to settle"):
+        cada linha traz `order_id`, `est_settlement_amount` (líquido estimado),
+        `est_revenue_amount`, `est_fee_tax_amount`, `est_shipping_cost_amount`,
+        `type` (ORDER | ajuste com `adjustment_id`) e `unsettled_reason`
+        (ex.: WAITING_FOR_PACKAGE_DELIVERY) — disponível já no dia do pedido,
+        muito antes do statement real (que só sai dias após a entrega e é o
+        que `get_order_settlements` consulta). `search_time_*` em epoch (s);
+        paginação via `next_page_token`. `_get` injeta shop_cipher +
+        assinatura + access_token.
+        """
+        params = {
+            "search_time_ge": str(search_time_ge),
+            "search_time_lt": str(search_time_lt),
+            "sort_field": "order_create_time",
+            "sort_order": "DESC",
+            "page_size": str(page_size),
+        }
+        if page_token:
+            params["page_token"] = page_token
+        return await self._get("/finance/202507/orders/unsettled", params)
+
     async def get_order_detail(self, order_id: str) -> dict:
         """Detalhe de UM pedido (Order API 202309). Traz `status`
         (UNPAID/IN_TRANSIT/DELIVERED/COMPLETED/CANCELLED/...), `tracking_number`

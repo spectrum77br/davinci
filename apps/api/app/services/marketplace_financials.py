@@ -240,6 +240,152 @@ async def run_due_marketplace_financial_retries(
     return {"queued": len(rows), "ok": ok, "error": error}
 
 
+def _tiktok_unsettled_order_map(pages: list[dict]) -> dict[str, dict]:
+    """order_id → linha ORDER agregada do unsettled (est_* somados).
+
+    Só linhas do PEDIDO em si (order_id presente, sem adjustment_id) —
+    ajustes avulsos têm dono (`adjustment_order_id`) mas não são o repasse
+    base do pedido. Pedido com mais de uma linha (refund parcial) soma os
+    est_settlement_amount (mesma regra de sinais do settlement real).
+    """
+    out: dict[str, dict] = {}
+    for body in pages:
+        data = body.get("data") if isinstance(body, dict) else None
+        txs = data.get("transactions") if isinstance(data, dict) else None
+        for t in txs if isinstance(txs, list) else []:
+            if not isinstance(t, dict) or t.get("adjustment_id"):
+                continue
+            order_id = str(t.get("order_id") or "").strip()
+            est = _money(t.get("est_settlement_amount"))
+            if not order_id or est is None:
+                continue
+            slot = out.setdefault(
+                order_id,
+                {
+                    "est_settlement_amount": Decimal("0"),
+                    "currency": t.get("currency") or "BRL",
+                    "unsettled_reason": t.get("unsettled_reason"),
+                    "estimated_settlement": t.get("estimated_settlement"),
+                },
+            )
+            slot["est_settlement_amount"] += est
+    for slot in out.values():
+        slot["est_settlement_amount"] = str(slot["est_settlement_amount"])
+    return out
+
+
+async def run_tiktok_unsettled_sweep(
+    session: AsyncSession,
+    *,
+    client_factory=None,
+    window_days: int = 60,
+    max_pages: int = 10,
+) -> dict[str, int]:
+    """Preenche o líquido TikTok com a estimativa OFICIAL pré-liquidação.
+
+    Reclamação do Eduardo (01-02/09): "sempre aparece já o valor do saldo
+    na Central do Vendedor" — mas o statement real
+    (get_order_settlements) só sai dias após a entrega, então a Margem
+    ficava dias com o Saldo Plataforma em branco ("aguardando saldo da
+    plataforma"). O unsettled (GET /finance/202507/orders/unsettled) traz o
+    MESMO número que a Central mostra na hora (est_settlement_amount, por
+    pedido, disponível já no dia da venda).
+
+    Uma varredura paginada POR INTEGRAÇÃO (não por pedido — o endpoint é de
+    janela, e chamada por pedido estouraria o rate limit compartilhado que o
+    TikTok já acusou em 01/09, code 36009002): ~2 páginas cobrem a loja
+    inteira. Grava net_amount + status='estimated' (o MESMO padrão do ML
+    pré-billing, retryable) e o marcador raw.unsettled_estimate — que o
+    guard do _persist_snapshot preserva quando um retry volta vazio. O
+    settlement REAL substitui tudo quando postar (posted vence sempre).
+    attempts/next_retry_at ficam intocados: são do ciclo do settlement real.
+    """
+    candidatos = (
+        (
+            await session.execute(
+                select(MarketplaceOrderFinancial)
+                .where(MarketplaceOrderFinancial.platform == IntegrationPlatform.TIKTOK)
+                .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
+                .where(MarketplaceOrderFinancial.integration_id.is_not(None))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not candidatos:
+        return {"integrations": 0, "candidates": 0, "updated": 0}
+
+    por_integracao: dict[Any, list[MarketplaceOrderFinancial]] = {}
+    for c in candidatos:
+        por_integracao.setdefault(c.integration_id, []).append(c)
+
+    now = datetime.now(UTC)
+    updated = swept = 0
+    for integration_id, rows in por_integracao.items():
+        integ = await session.get(Integration, integration_id)
+        if integ is None or integ.status != "active":
+            continue
+        if client_factory is not None:
+            client = client_factory(integ)
+        else:
+            client = TikTokClient(decrypt_json(integ.credentials))
+
+        pages: list[dict] = []
+        page_token: str | None = None
+        try:
+            for _ in range(max_pages):
+                body = await client.get_unsettled_orders(
+                    search_time_ge=int(now.timestamp()) - window_days * 86400,
+                    search_time_lt=int(now.timestamp()),
+                    page_token=page_token,
+                )
+                code = body.get("code")
+                if code not in (0, "0", None):
+                    raise RuntimeError(
+                        f"TikTok unsettled error: {body.get('message') or code}"
+                    )
+                pages.append(body)
+                page_token = (body.get("data") or {}).get("next_page_token") or None
+                if not page_token:
+                    break
+        except Exception as e:  # noqa: BLE001 — uma loja não derruba as demais
+            logger.warning(
+                "tiktok_unsettled_sweep_integration_failed",
+                integration_id=str(integration_id),
+                error=str(e)[:300],
+            )
+            continue
+
+        swept += 1
+        estimados = _tiktok_unsettled_order_map(pages)
+        for financial in rows:
+            est = estimados.get(str(financial.external_order_id))
+            if est is None:
+                continue
+            net = _money(est.get("est_settlement_amount"))
+            if net is None:
+                continue
+            if financial.status == "estimated" and financial.net_amount == net:
+                continue  # nada novo — não suja updated_at
+            financial.status = "estimated"
+            financial.net_amount = net
+            financial.currency = str(est.get("currency") or financial.currency or "BRL")
+            financial.raw = {
+                **(financial.raw or {}),
+                "unsettled_estimate": {**est, "fetched_at": now.isoformat()},
+            }
+            financial.last_error = None
+            financial.fetched_at = now
+            updated += 1
+
+    await session.commit()
+    return {
+        "integrations": swept,
+        "candidates": len(candidatos),
+        "updated": updated,
+    }
+
+
 async def _resolve_store_and_integration(
     session: AsyncSession,
     order: BlingOrder,
@@ -366,6 +512,20 @@ async def _persist_snapshot(
         session.add(financial)
         await session.flush()
 
+    # Estimativa do unsettled (TikTok, gravada pelo sweep) só cede lugar a
+    # DADO REAL: um retry que voltou sem valor (settlement ainda não postado /
+    # erro transiente) não pode apagar o número que a Margem já está usando —
+    # senão a linha "pisca" (valor → branco → valor) a cada ciclo do retry.
+    # Snapshot com net presente (posted/estimated do próprio fetch) SEMPRE
+    # vence e derruba o marcador.
+    estimate = (financial.raw or {}).get("unsettled_estimate")
+    keep_estimate = (
+        snapshot.net_amount is None
+        and snapshot.status in {"pending", "error"}
+        and isinstance(estimate, dict)
+        and _money(estimate.get("est_settlement_amount")) is not None
+    )
+
     attempts = int(financial.attempts or 0) + 1
     now = datetime.now(UTC)
     financial.store_id = store.id if store else financial.store_id
@@ -387,6 +547,10 @@ async def _persist_snapshot(
     financial.attempts = attempts
     financial.last_error = snapshot.error
     financial.next_retry_at = _next_retry_at(snapshot.status, attempts, now)
+    if keep_estimate:
+        financial.status = "estimated"
+        financial.net_amount = _money(estimate.get("est_settlement_amount"))
+        financial.raw = {**(snapshot.raw or {}), "unsettled_estimate": estimate}
 
     await session.execute(
         delete(MarketplaceFinancialEvent).where(

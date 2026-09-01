@@ -179,9 +179,12 @@ async def test_saldo_detalhe_pack_rateia_por_item(
 async def test_saldo_detalhe_projecao_amazon(
     client, db: AsyncSession, make_user, auth_as
 ):
-    """Amazon pré-envio (líquido real ainda NULL): o saldo exibido é projetado
-    (valor base − frete projetado − comissão da conta) e o raio-X tem que
-    dizer isso e abrir os componentes da projeção."""
+    """Amazon pré-liquidação (líquido real NULL): o lado plataforma fica EM
+    BRANCO mesmo com todos os insumos da antiga projeção presentes (conta
+    pricing com comissão + frete projetado). A projeção ≈ morreu em 01/09
+    ("retirar a projeção... o saldo efetivo deixe sempre em branco"): sem
+    líquido REAL não se exibe nem compara nada — commit 02b9808 trocou
+    _SALDO_PLATAFORMA_SQL por marketplace_liquido_base_margem_item puro."""
     user = await make_user(permissions=_perms())
     auth_as(user)
     seg = Segment(
@@ -218,13 +221,13 @@ async def test_saldo_detalhe_projecao_amazon(
 
     assert response.status_code == 200
     body = response.json()
-    # Projeção: 100 − 20 − 100×0.15 = 65.
     assert body["mp_liquido"] is None
-    assert body["saldo_plataforma"] == pytest.approx(65, abs=0.01)
-    assert body["projecao_amazon"] is True
-    assert body["proj_frete_projetado"] == pytest.approx(20, abs=0.01)
-    assert body["proj_comissao_frac"] == pytest.approx(0.15, abs=0.001)
-    assert body["diferenca"] == pytest.approx(35, abs=0.01)
+    assert body["saldo_plataforma"] is None
+    assert body["projecao_amazon"] is False
+    assert body["proj_frete_projetado"] is None
+    assert body["proj_comissao_frac"] is None
+    assert body["diferenca"] is None
+    assert body["itens"][0]["saldo_plataforma"] is None
 
 
 async def test_saldo_detalhe_aguardando_plataforma(
