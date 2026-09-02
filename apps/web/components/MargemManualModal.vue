@@ -79,7 +79,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
         <section class="space-y-1">
           <h3 class="font-semibold">Botões do topo</h3>
           <ul class="list-disc pl-5 space-y-1 text-muted-foreground">
-            <li><span class="font-medium text-foreground">Informar</span> — manda via Threema os pendentes de análise e configura quem recebe os avisos automáticos do robô.</li>
+            <li><span class="font-medium text-foreground">Informar</span> — escolhe quem recebe no Threema os avisos automáticos do robô (pedido segurado, reprovado automático e margem alta). O envio é sempre do robô.</li>
             <li><span class="font-medium text-foreground">planilha</span> (admins) — baixa a rentabilidade por pedido no período escolhido.</li>
             <li><span class="font-medium text-foreground">atualizar</span> — força a atualização agora. A aba já se atualiza sozinha a cada 1 minuto.</li>
           </ul>

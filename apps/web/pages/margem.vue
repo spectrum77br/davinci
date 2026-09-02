@@ -112,9 +112,11 @@ const shouldAutoRefresh = computed(() => {
 // Coluna "Lucro" (R$) restrita a administradores.
 const isAdmin = useIsAdmin()
 
-// Botão INFORMAR (admins + gerente): manda os pendentes de análise via
-// Threema. A lista de e-mails extras espelha _EMAILS_EXTRAS['margem'] no
-// backend (routers/informar.py) — mudou lá, muda aqui.
+// Botão INFORMAR (admins + gerente): configura quem recebe os avisos
+// automáticos da Margem via Threema (quem envia é o robô — não há mais
+// "Enviar agora" aqui). A lista de e-mails extras espelha
+// _EMAILS_EXTRAS['margem'] no backend (routers/informar.py) — mudou lá,
+// muda aqui.
 const INFORMAR_MARGEM_USERS = ['sa.geral@tutamail.com']
 const canInformar = computed(() => {
   const email = _auth.user?.email?.toLowerCase()
@@ -744,7 +746,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             v-if="canInformar"
             size="sm"
             variant="outline"
-            title="Manda via Threema os pedidos pendentes de análise"
+            title="Quem recebe os avisos automáticos da Margem no Threema"
             @click="informarMargemOpen = true"
           >
             <Megaphone class="size-4 mr-1.5" />
@@ -1281,9 +1283,8 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
     <InformarThreemaModal
       :open="informarMargemOpen"
       contexto="margem"
-      descricao="Manda via Threema os pedidos pendentes de análise na aba Pendentes da Margem — uma mensagem por pedido, com conta, motivo, margem e lucro. A seleção de destinatários fica salva."
+      descricao="Os avisos da Margem são automáticos — o robô manda na hora que segura, reprova ou desconfia de um pedido. Marque aqui quem recebe esses avisos no Threema; a seleção fica salva."
       contexto-auto="margem_auto"
-      descricao-auto="Quando o robô segurar um pedido por margem (Aguardando Cancelamento), manda na hora uma mensagem só pra quem estiver marcado aqui."
       @close="informarMargemOpen = false"
     />
 

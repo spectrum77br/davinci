@@ -2,11 +2,12 @@
 // Modal do botão INFORMAR: cadastro de quem recebe o relatório via Threema +
 // envio sob demanda. Um contexto por uso ('logistica' | 'controle_estoque' |
 // 'margem'); a seleção fica salva no servidor (threema_informar_config).
-// `contextoAuto` (opcional, usado pela Margem com 'margem_auto') acrescenta
-// uma SEGUNDA lista: quem recebe o aviso automático que o robô manda na hora
-// em que segura um pedido — esse cadastro não tem "Enviar agora" (é o robô
-// que envia). Acesso: admin em todos; 'margem' também libera o gerente (gate
-// no backend, routers/informar.py _EMAILS_EXTRAS).
+// `contextoAuto` (usado pela Margem com 'margem_auto') liga o MODO AUTOMÁTICO:
+// UMA lista só — quem está marcado recebe os avisos que o robô manda sozinho.
+// Nesse modo não há "Enviar agora" (quem envia é o robô) e o salvar grava a
+// mesma seleção nos dois cadastros (contexto + contextoAuto), pra tudo que
+// sair da Margem ir pras mesmas pessoas. Acesso: admin em todos; 'margem'
+// também libera o gerente (gate no backend, routers/informar.py).
 import { Loader2, Send, X } from 'lucide-vue-next'
 
 type Destinatario = { id: string; nome: string }
@@ -18,9 +19,8 @@ const props = defineProps<{
   contexto: 'logistica' | 'controle_estoque' | 'margem'
   // O que este botão informa — aparece como descrição no modal.
   descricao: string
-  // Cadastro extra do aviso automático (ex.: 'margem_auto') + sua descrição.
+  // Cadastro do aviso automático (ex.: 'margem_auto') — liga o modo automático.
   contextoAuto?: string
-  descricaoAuto?: string
 }>()
 
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -32,7 +32,6 @@ const salvando = ref(false)
 const enviando = ref(false)
 const destinatarios = ref<Destinatario[]>([])
 const selecionados = ref<Set<string>>(new Set())
-const selecionadosAuto = ref<Set<string>>(new Set())
 const resultado = ref<string | null>(null)
 const erro = ref<string | null>(null)
 
@@ -46,8 +45,10 @@ watch(() => props.open, async (open) => {
     destinatarios.value = cfg.destinatarios
     selecionados.value = new Set(cfg.recipients)
     if (props.contextoAuto) {
+      // Modo automático: a lista única mostra a UNIÃO dos dois cadastros —
+      // ninguém que já recebia fica de fora.
       const auto = await api<ConfigOut>(`/api/informar/${props.contextoAuto}`)
-      selecionadosAuto.value = new Set(auto.recipients)
+      selecionados.value = new Set([...cfg.recipients, ...auto.recipients])
     }
   } catch {
     erro.value = 'Não consegui carregar o cadastro.'
@@ -56,28 +57,21 @@ watch(() => props.open, async (open) => {
   }
 })
 
-// No template os refs chegam desembrulhados, então o alvo vai por nome.
-function toggle(alvo: 'principal' | 'auto', id: string) {
-  const set = alvo === 'auto' ? selecionadosAuto : selecionados
-  const s = new Set(set.value)
+function toggle(id: string) {
+  const s = new Set(selecionados.value)
   if (s.has(id)) s.delete(id)
   else s.add(id)
-  set.value = s
+  selecionados.value = s
 }
 
 async function salvar(): Promise<boolean> {
   salvando.value = true
   erro.value = null
   try {
-    await api<ConfigOut>(`/api/informar/${props.contexto}`, {
-      method: 'PUT',
-      body: { recipients: [...selecionados.value] },
-    })
+    const body = { recipients: [...selecionados.value] }
+    await api<ConfigOut>(`/api/informar/${props.contexto}`, { method: 'PUT', body })
     if (props.contextoAuto) {
-      await api<ConfigOut>(`/api/informar/${props.contextoAuto}`, {
-        method: 'PUT',
-        body: { recipients: [...selecionadosAuto.value] },
-      })
+      await api<ConfigOut>(`/api/informar/${props.contextoAuto}`, { method: 'PUT', body })
     }
     return true
   } catch {
@@ -136,45 +130,21 @@ async function enviar() {
         <div v-if="!destinatarios.length" class="text-sm text-muted-foreground">
           Nenhum destinatário configurado no servidor.
         </div>
-        <template v-else>
-          <div class="space-y-2 max-h-48 overflow-y-auto">
-            <label
-              v-for="d in destinatarios"
-              :key="d.id"
-              class="flex items-center gap-2 text-sm rounded-md border px-3 py-2 cursor-pointer hover:bg-muted/50"
-            >
-              <input
-                type="checkbox"
-                class="size-4"
-                :checked="selecionados.has(d.id)"
-                @change="toggle('principal', d.id)"
-              />
-              {{ d.nome }}
-            </label>
-          </div>
-
-          <div v-if="contextoAuto" class="border-t pt-3 space-y-2">
-            <h3 class="text-sm font-medium">Aviso automático</h3>
-            <p v-if="descricaoAuto" class="text-xs text-muted-foreground">
-              {{ descricaoAuto }}
-            </p>
-            <div class="space-y-2 max-h-48 overflow-y-auto">
-              <label
-                v-for="d in destinatarios"
-                :key="`auto-${d.id}`"
-                class="flex items-center gap-2 text-sm rounded-md border px-3 py-2 cursor-pointer hover:bg-muted/50"
-              >
-                <input
-                  type="checkbox"
-                  class="size-4"
-                  :checked="selecionadosAuto.has(d.id)"
-                  @change="toggle('auto', d.id)"
-                />
-                {{ d.nome }}
-              </label>
-            </div>
-          </div>
-        </template>
+        <div v-else class="space-y-2 max-h-64 overflow-y-auto">
+          <label
+            v-for="d in destinatarios"
+            :key="d.id"
+            class="flex items-center gap-2 text-sm rounded-md border px-3 py-2 cursor-pointer hover:bg-muted/50"
+          >
+            <input
+              type="checkbox"
+              class="size-4"
+              :checked="selecionados.has(d.id)"
+              @change="toggle(d.id)"
+            />
+            {{ d.nome }}
+          </label>
+        </div>
       </template>
 
       <p v-if="resultado" class="text-sm text-emerald-600">{{ resultado }}</p>
@@ -183,13 +153,15 @@ async function enviar() {
       <div class="flex justify-end gap-2">
         <Button variant="ghost" @click="emit('close')">Fechar</Button>
         <Button
-          variant="outline"
+          :variant="contextoAuto ? 'default' : 'outline'"
           :disabled="loading || salvando || enviando"
           @click="salvarFechar"
         >
           {{ salvando ? 'Salvando…' : 'Salvar' }}
         </Button>
+        <!-- Modo automático: quem envia é o robô — não existe "Enviar agora". -->
         <Button
+          v-if="!contextoAuto"
           :disabled="loading || salvando || enviando || !selecionados.size"
           @click="enviar"
         >
