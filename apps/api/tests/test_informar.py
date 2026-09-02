@@ -206,6 +206,72 @@ async def test_informar_put_salva_so_ids_do_diretorio(
 
 
 @pytest.mark.asyncio
+async def test_informar_diretorio_vem_do_cadastro_de_usuarios(
+    client: AsyncClient,
+    db: AsyncSession,
+    auth_as,
+    admin: User,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Eduardo (02/09): "eu vou alimentar os codigos threemas tem que aparecer
+    no para informar das abas que tem" — o campo Threema da tela Usuários vira
+    opção no modal. O `.env` continua valendo só pra ID que ninguém tem no
+    cadastro; desativados e usuários-sistema ficam de fora."""
+    from datetime import UTC, datetime
+
+    from app.config import get_settings
+
+    monkeypatch.setattr(
+        get_settings(), "threema_recipient_names", "LEGA0001:Legado", raising=False
+    )
+    monkeypatch.setattr(get_settings(), "threema_recipients", "", raising=False)
+    db.add_all(
+        [
+            User(
+                open_id="email:zeca@davinci-test.com",
+                email="zeca@davinci-test.com",
+                name="Zeca",
+                role=UserRole.USER,
+                status=UserStatus.ACTIVE,
+                threema="zzzz9999",  # minúsculo de propósito → normaliza
+            ),
+            User(
+                open_id="email:des@davinci-test.com",
+                email="des@davinci-test.com",
+                name="Desativado",
+                role=UserRole.USER,
+                status=UserStatus.ACTIVE,
+                threema="XXXX0000",
+                disabled_at=datetime.now(UTC),
+            ),
+            User(
+                open_id="system:robo-teste",
+                email="robo-teste@hadken.com",
+                name="Robô",
+                role=UserRole.USER,
+                status=UserStatus.ACTIVE,
+                threema="RRRR0000",
+            ),
+        ]
+    )
+    await db.commit()
+    auth_as(admin)
+
+    r = await client.get("/api/informar/margem")
+    assert r.status_code == 200
+    dest = {d["id"]: d["nome"] for d in r.json()["destinatarios"]}
+    assert dest.get("ZZZZ9999") == "Zeca"  # veio do cadastro, normalizado
+    assert dest.get("LEGA0001") == "Legado"  # .env sem dono no cadastro fica
+    assert "XXXX0000" not in dest  # desativado fora
+    assert "RRRR0000" not in dest  # usuário-sistema fora
+
+    # E dá pra salvar o ID cadastrado (vale pro PUT também).
+    r = await client.put("/api/informar/margem", json={"recipients": ["ZZZZ9999"]})
+    assert r.status_code == 200
+    assert r.json()["recipients"] == ["ZZZZ9999"]
+
+
+@pytest.mark.asyncio
 async def test_informar_margem_libera_gerente_por_email(
     client: AsyncClient, db: AsyncSession, auth_as
 ):

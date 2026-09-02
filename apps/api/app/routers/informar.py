@@ -21,8 +21,11 @@ os demais (o modal da Margem edita os dois), mas `/enviar` não existe pra ele
 — quem envia é o robô.
 
 Cada contexto tem seu cadastro de destinatários (`threema_informar_config`),
-editado no modal do botão; o diretório de nomes vem do `.env` (o mesmo do
-seletor da aba Status). Tudo aqui exige admin — botão, cadastro e envio —
+editado no modal do botão. O diretório de opções vem do CADASTRO DE USUÁRIOS
+(campo Threema da tela Usuários — Eduardo 02/09: "eu vou alimentar os
+codigos threemas tem que aparecer no para informar das abas que tem"),
+completado pelas entradas legadas do `.env` cujo ID ninguém tem no cadastro.
+Tudo aqui exige admin — botão, cadastro e envio —
 com UMA exceção: os contextos da Margem também liberam o gerente por e-mail
 (_EMAILS_EXTRAS; pedido do Eduardo 01/09: "pro cairo que é gerente pode
 aparecer informar na aba margem").
@@ -47,6 +50,7 @@ from app.models import (
     ThreemaInformarConfig,
     User,
     UserRole,
+    UserStatus,
 )
 from app.routers.nf import _SITUACAO_AGUARDANDO_CANCELAMENTO
 from app.schemas.informar import InformarConfigIn, InformarConfigOut, InformarEnviarOut
@@ -94,11 +98,43 @@ def _exige_acesso(user: User, contexto: str) -> None:
     raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
 
 
-def _diretorio() -> list[dict[str, str]]:
+async def _diretorio(session: AsyncSession) -> list[dict[str, str]]:
+    """Opções de destinatário `[{id, nome}]` pro seletor do modal.
+
+    Fonte principal: usuários ATIVOS com o campo Threema preenchido na tela
+    Usuários (sem desativados nem usuários-sistema). Completa com as entradas
+    legadas do `.env` cujo ID ninguém tem no cadastro — assim nada some
+    enquanto o Eduardo alimenta os códigos; quando o dono do código ganhar
+    cadastro, a entrada do `.env` dá lugar ao nome real. Ordem alfabética."""
+    rows = (
+        (
+            await session.execute(
+                select(User).where(
+                    User.threema.is_not(None),
+                    func.trim(User.threema) != "",
+                    User.status == UserStatus.ACTIVE,
+                    User.disabled_at.is_(None),
+                    User.open_id.notlike("system:%"),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    por_id: dict[str, str] = {}
+    for u in rows:
+        # parse_recipients normaliza (maiúsculas, separadores) — aceita o
+        # campo como for digitado.
+        for rid in threema.parse_recipients(u.threema):
+            por_id.setdefault(rid, u.name or u.email)
     s = get_settings()
-    return threema.parse_recipient_directory(
+    env = threema.parse_recipient_directory(
         s.threema_recipient_names, s.threema_recipients
     )
+    out = [{"id": rid, "nome": nome} for rid, nome in por_id.items()]
+    out += [d for d in env if d["id"] not in por_id]
+    out.sort(key=lambda d: (d["nome"] or "").lower())
+    return out
 
 
 async def _config_row(
@@ -113,11 +149,15 @@ async def _config_row(
     ).scalar_one_or_none()
 
 
-def _to_config_out(contexto: str, row: ThreemaInformarConfig | None) -> InformarConfigOut:
+def _to_config_out(
+    contexto: str,
+    row: ThreemaInformarConfig | None,
+    destinatarios: list[dict[str, str]],
+) -> InformarConfigOut:
     return InformarConfigOut(
         contexto=contexto,
         recipients=threema.parse_recipients(row.recipients if row else ""),
-        destinatarios=_diretorio(),
+        destinatarios=destinatarios,
     )
 
 
@@ -130,7 +170,9 @@ async def get_config(
     """Cadastro atual + diretório de destinatários (pro modal do botão)."""
     contexto = _valida_contexto(contexto)
     _exige_acesso(user, contexto)
-    return _to_config_out(contexto, await _config_row(session, contexto))
+    return _to_config_out(
+        contexto, await _config_row(session, contexto), await _diretorio(session)
+    )
 
 
 @router.put("/{contexto}", response_model=InformarConfigOut)
@@ -141,10 +183,12 @@ async def put_config(
     user: Annotated[User, Depends(require_active_user)],
 ) -> InformarConfigOut:
     """Salva quem recebe o relatório deste contexto. Aceita só IDs que existem
-    no diretório do `.env` (o modal manda os marcados)."""
+    no diretório (cadastro de usuários + `.env` legado; o modal manda os
+    marcados)."""
     contexto = _valida_contexto(contexto)
     _exige_acesso(user, contexto)
-    validos = {d["id"] for d in _diretorio()}
+    diretorio = await _diretorio(session)
+    validos = {d["id"] for d in diretorio}
     escolhidos = [
         rid
         for rid in threema.parse_recipients(",".join(body.recipients))
@@ -158,7 +202,7 @@ async def put_config(
         row.recipients = ",".join(escolhidos)
     await session.commit()
     logger.info("informar_config_salva", contexto=contexto, recipients=escolhidos)
-    return _to_config_out(contexto, row)
+    return _to_config_out(contexto, row, diretorio)
 
 
 async def _linhas_logistica(session: AsyncSession) -> list[str]:
