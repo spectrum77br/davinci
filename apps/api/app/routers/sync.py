@@ -499,7 +499,16 @@ async def anuncio_sync(
         force=True,
         force_bling_refresh=True,
     )
-    await orch.run(products_to_sync, only_link_ids=[*link_ids, *bling_ids])
+    # run_with_retry, não run (Eduardo, 2026-09-02): estouro de limite do
+    # Bling (429) no refresh marcava o link RETRYABLE e NINGUÉM tentava de
+    # novo — o push era pulado ("local stock stale") e a variação ficava com
+    # estoque velho. Uma rodada extra 30s depois resolve; max_rounds=2 pra
+    # resposta do botão não estourar (~+40s no pior caso).
+    await orch.run_with_retry(
+        [p.id for p in products_to_sync],
+        only_link_ids=[*link_ids, *bling_ids],
+        max_rounds=2,
+    )
 
     # orch.run() sobrescreve job.result — devolve o contexto do anúncio junto.
     job.result = {
@@ -512,6 +521,8 @@ async def anuncio_sync(
             "vinculos_criados": dados.get("criados", 0),
             "vinculos_movidos": dados.get("movidos", 0),
             "movimentos": dados.get("movimentos", []),
+            "vinculos_removidos": dados.get("removidos", 0),
+            "remocoes": dados.get("remocoes", []),
             "variacoes": dados.get("resumo"),
         },
     }

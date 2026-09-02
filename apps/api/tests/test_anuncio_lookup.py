@@ -219,6 +219,101 @@ async def test_vincular_anuncio_cria_so_o_que_casou(
 
 
 @pytest.mark.asyncio
+async def test_vincular_anuncio_apaga_vinculo_de_variacao_extinta(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Caso real (23994153133, 2026-09-02): variações apagadas do anúncio na
+    Shopee deixavam o vínculo pra trás — todo sync empurrava estoque pro model
+    extinto e levava "model ID not exist in sku". Com a lista fresca do canal,
+    o vincular apaga o vínculo morto e o tira do escopo do sync."""
+    integ = await _make_integration(
+        db, user, IntegrationPlatform.SHOPEE, Marketplace.SHOPEE
+    )
+    vivo = Product(user_id=user.id, sku="sku-vivo", name="vivo", stock=5, min_stock=0)
+    morto = Product(user_id=user.id, sku="sku-morto", name="morto", stock=3, min_stock=0)
+    db.add_all([vivo, morto])
+    await db.flush()
+    link_vivo = ProductLink(
+        user_id=user.id, product_id=vivo.id, integration_id=integ.id,
+        store_id=integ.store_id, platform=IntegrationPlatform.SHOPEE,
+        external_id="555003", variation_id="1", external_sku="sku-vivo",
+        last_sync_status=LinkSyncStatus.OK,
+    )
+    zumbi = ProductLink(
+        user_id=user.id, product_id=morto.id, integration_id=integ.id,
+        store_id=integ.store_id, platform=IntegrationPlatform.SHOPEE,
+        external_id="555003", variation_id="99", external_sku="sku-morto",
+        last_sync_status=LinkSyncStatus.REQUIRES_REVIEW,
+    )
+    db.add_all([link_vivo, zumbi])
+    await db.commit()
+    zumbi_id, vivo_id = zumbi.id, link_vivo.id
+
+    from app.services.marketplaces import shopee as shopee_mod
+
+    # O anúncio hoje só tem a variação "1" — a "99" foi apagada na Shopee.
+    monkeypatch.setattr(
+        shopee_mod.ShopeeClient,
+        "_fetch_base_info",
+        _fake_base_info([
+            {"external_id": "555003", "variation_id": "1", "sku": "sku-vivo",
+             "title": "Caneca - P", "stock": 2},
+        ]),
+    )
+
+    out = await vincular_anuncio(
+        db, user, external_id="555003", integration_id=integ.id
+    )
+    assert out["removidos"] == 1
+    assert out["remocoes"] == [{"variation_id": "99", "sku": "sku-morto"}]
+    # O zumbi saiu do banco e do escopo do sync; o vivo ficou intacto.
+    assert out["link_ids"] == [str(vivo_id)]
+    restam = (
+        await db.execute(select(ProductLink).where(ProductLink.external_id == "555003"))
+    ).scalars().all()
+    assert [lk.id for lk in restam] == [vivo_id]
+    assert zumbi_id not in {lk.id for lk in restam}
+
+
+@pytest.mark.asyncio
+async def test_vincular_anuncio_nao_apaga_no_fallback_local(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """Canal fora do ar → origem "local": a lista de variações sai dos próprios
+    vínculos, então NÃO dá pra saber o que morreu — nada de apagar."""
+    integ = await _make_integration(
+        db, user, IntegrationPlatform.SHOPEE, Marketplace.SHOPEE
+    )
+    p = Product(user_id=user.id, sku="p-x", name="px", stock=1, min_stock=0)
+    db.add(p)
+    await db.flush()
+    db.add(ProductLink(
+        user_id=user.id, product_id=p.id, integration_id=integ.id,
+        store_id=integ.store_id, platform=IntegrationPlatform.SHOPEE,
+        external_id="555004", variation_id="7", external_sku="p-x",
+        last_sync_status=LinkSyncStatus.OK,
+    ))
+    await db.commit()
+
+    from app.services.marketplaces import shopee as shopee_mod
+
+    def _explode(self, item_ids, status_filter):  # noqa: ANN001
+        raise RuntimeError("shopee fora do ar")
+
+    monkeypatch.setattr(shopee_mod.ShopeeClient, "_fetch_base_info", _explode)
+
+    out = await vincular_anuncio(
+        db, user, external_id="555004", integration_id=integ.id
+    )
+    assert out["origem"] == "local"
+    assert out["removidos"] == 0
+    restam = (
+        await db.execute(select(ProductLink).where(ProductLink.external_id == "555004"))
+    ).scalars().all()
+    assert len(restam) == 1
+
+
+@pytest.mark.asyncio
 async def test_vincular_anuncio_move_link_quando_sku_trocou_no_anuncio(
     db: AsyncSession, user: User, monkeypatch
 ):

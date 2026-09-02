@@ -467,7 +467,8 @@ async def vincular_anuncio(
     external_id: str,
     integration_id: UUID,
 ) -> dict[str, Any]:
-    """Cria os `product_links` que faltam e MOVE os que ficaram pra trás.
+    """Cria os `product_links` que faltam, MOVE os que ficaram pra trás e
+    APAGA os de variação extinta.
 
     Criar: só pro que tem SKU casado com UM produto — SKU vazio, ambíguo ou sem
     produto no DaVinci continua de fora (mesma regra do Vincular Automático).
@@ -475,6 +476,8 @@ async def vincular_anuncio(
     (i222.sa → i222.sp) e o link ainda aponta pro produto antigo — re-aponta o
     link pro produto dono do SKU atual, igual ao `link_reconcile` (re-point, não
     apaga/recria), pra o estoque certo fluir no sync que vem em seguida.
+    Apagar ("removidos"): vínculo cuja variação NÃO existe mais no anúncio
+    (lista fresca do marketplace manda) — ver o comentário no corpo.
     Retorna o resumo + os ids dos links do anúncio (novos e antigos), que o
     caller usa pra sincronizar só eles.
     """
@@ -570,9 +573,42 @@ async def vincular_anuncio(
         link.external_sku = v.get("sku")
         movidos += 1
 
+    # Vínculos-zumbi (Eduardo, 2026-09-02, anúncio 23994153133): variação
+    # APAGADA do anúncio no marketplace deixava o product_link pra trás — cada
+    # sync ainda empurrava estoque pro model extinto e a Shopee rejeitava
+    # ("model ID not exist in sku"), enchendo o resultado de requires_review.
+    # Quando as linhas vieram FRESCAS do canal (origem "marketplace"), a lista
+    # de variações é a verdade: vínculo desta conta+anúncio cuja variação não
+    # está nela morreu — apaga. No fallback "local" não dá pra saber, não mexe.
+    removidos = 0
+    remocoes: list[dict[str, Any]] = []
+    if dados.get("origem") == "marketplace":
+        vivos = {(v.get("variation_id") or "") for v in dados["variacoes"]}
+        zumbis = [
+            lk
+            for lk in (
+                await session.execute(
+                    select(ProductLink).where(
+                        and_(
+                            user_scope(ProductLink, user),
+                            ProductLink.external_id == ext,
+                            ProductLink.integration_id == integ.id,
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+            if (lk.variation_id or "") not in vivos
+        ]
+        for lk in zumbis:
+            remocoes.append({"variation_id": lk.variation_id, "sku": lk.external_sku})
+            await session.delete(lk)
+        removidos = len(zumbis)
+
     if novos:
         session.add_all(novos)
-    if novos or movidos:
+    if novos or movidos or removidos:
         try:
             await session.commit()
             criados = len(novos)
@@ -582,12 +618,21 @@ async def vincular_anuncio(
             criados = 0
             movidos = 0
             movimentos = []
+            removidos = 0
+            remocoes = []
     if movidos:
         logger.info(
             "anuncio_links_movidos",
             external_id=ext,
             movidos=movidos,
             movimentos=movimentos,
+        )
+    if removidos:
+        logger.info(
+            "anuncio_links_zumbis_removidos",
+            external_id=ext,
+            removidos=removidos,
+            remocoes=remocoes,
         )
 
     # Só os vínculos DA conta dona: um fantasma de outra conta não pode entrar
@@ -612,5 +657,7 @@ async def vincular_anuncio(
         "criados": criados,
         "movidos": movidos,
         "movimentos": movimentos,
+        "removidos": removidos,
+        "remocoes": remocoes,
         "link_ids": [str(i) for i in link_ids],
     }

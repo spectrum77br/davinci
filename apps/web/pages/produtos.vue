@@ -896,10 +896,16 @@ async function sincronizarAnuncio() {
       body: { external_id: a.external_id, integration_id: a.integration_id, vincular: true },
     })
     const details = (job?.details || []) as Array<Record<string, any>>
-    const okLines: string[] = []
-    const errLines: string[] = []
+    // Com o retry do Bling (429) o mesmo link pode aparecer 2× nos detalhes
+    // (a falha e a tentativa que deu certo) — vale a ÚLTIMA de cada um.
+    const porLink = new Map<string, Record<string, any>>()
     for (const d of details) {
       if (d.kind) continue
+      porLink.set(`${d.platform || ''}|${d.sku || ''}|${d.external_id || ''}`, d)
+    }
+    const okLines: string[] = []
+    const errLines: string[] = []
+    for (const d of porLink.values()) {
       const plat = String(d.platform || '').toUpperCase()
       const alvo = d.sku || d.external_id || ''
       if (d.status === 'ok') {
@@ -913,12 +919,20 @@ async function sincronizarAnuncio() {
     const anuncioRes = (job?.result as any)?.anuncio || {}
     const criados = Number(anuncioRes.vinculos_criados || 0)
     const movidos = Number(anuncioRes.vinculos_movidos || 0)
+    const removidos = Number(anuncioRes.vinculos_removidos || 0)
     const partes: string[] = []
     if (criados) partes.push(`${criados} vínculo(s) novo(s)`)
     if (movidos) partes.push(`${movidos} vínculo(s) movido(s) p/ o SKU novo`)
+    if (removidos) partes.push(`${removidos} vínculo(s) de variação extinta limpo(s)`)
     const cabecalho = partes.length ? partes.join(' · ') : 'sem vínculo novo'
     const moveLines = ((anuncioRes.movimentos || []) as Array<Record<string, any>>).map(
       (m) => `🔀 ${m.variacao || m.variation_id || ''}: ${m.de_sku || '?'} → ${m.para_sku || '?'}`,
+    )
+    // Variações apagadas do anúncio no marketplace: o vínculo velho saiu.
+    moveLines.push(
+      ...((anuncioRes.remocoes || []) as Array<Record<string, any>>).map(
+        (m) => `🧹 ${m.sku || m.variation_id || '?'}: variação não existe mais no anúncio — vínculo removido`,
+      ),
     )
     if (errLines.length === 0) {
       pushToast({
