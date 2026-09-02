@@ -50,7 +50,7 @@ from app.models import (
 )
 from app.routers.nf import _SITUACAO_AGUARDANDO_CANCELAMENTO
 from app.schemas.informar import InformarConfigIn, InformarConfigOut, InformarEnviarOut
-from app.services import informar, threema
+from app.services import aprovar_link, informar, threema
 from app.services.logistica_ingest import _ids_pendentes
 from app.services.margem_auto_hold import _motivo as _motivo_margem
 from app.services.verificar_margem import SNAPSHOT_TABLE
@@ -260,10 +260,12 @@ async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
                         AND v.marketplace_liquido_base_margem_item IS NULL)
                        OR {_ATTENTION_SALDO_AGUARDANDO_SQL})
                                                 AS saldo_pendente,
+               -- ×100: o snapshot guarda margens como FRAÇÃO (0.069 = 6,9%);
+               -- a mensagem mostra em % como a aba faz.
                MIN(v.marketplace_margem)
-                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) AS margem,
+                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS margem,
                MAX(v.margem_minima)
-                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) AS minima,
+                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS minima,
                SUM(v.marketplace_lucro)         AS lucro
         FROM {SNAPSHOT_TABLE} v
         WHERE v.situacao_nome != 'Cancelado'
@@ -327,7 +329,13 @@ async def _montar_envio(contexto: str, session: AsyncSession) -> tuple[int, list
     mensagem por pedido; os demais juntam as linhas numa lista fatiada."""
     if contexto == "margem":
         pedidos = await _pedidos_margem(session)
-        return len(pedidos), informar.mensagens_margem(pedidos, _CABECALHOS["margem"])
+        mensagens = informar.mensagens_margem(
+            pedidos,
+            _CABECALHOS["margem"],
+            # Mesmo link do aviso automático: aprovar direto do celular.
+            rodape_pedido=lambda p: f"Aprovar pelo celular: {aprovar_link.url_aprovar(p)}",
+        )
+        return len(pedidos), mensagens
     linhas = await _LINHAS[contexto](session)
     return len(linhas), informar.montar_mensagens(
         f"{_CABECALHOS[contexto]} ({len(linhas)})", linhas

@@ -95,7 +95,8 @@ async def _seed_pedido(
 ) -> None:
     """Uma linha em bling_orders + uma linha-item no snapshot verificar_margem.
 
-    margem_baixa → marketplace_margem 5 < margem_minima 10.
+    margem_baixa → marketplace_margem 0.05 (5%) < margem_minima 0.10 (10%)
+    — o snapshot guarda FRAÇÃO, como em produção.
     saldo_gap → valorbase 100 vs líquido 80 (divergência real > R$0,01).
     saldo_aguardando → valorbase presente e líquido NULL (não reconciliado).
     frete_estourado → frete plataforma 30 > frete anúncio 10.
@@ -153,8 +154,8 @@ async def _seed_pedido(
                 "Aguardando Cancelamento" if situacao == "83955" else "Em aberto"
             ),
             "status": status,
-            "margem": 5 if margem_baixa else 50,
-            "minima": 10,
+            "margem": 0.05 if margem_baixa else 0.5,
+            "minima": 0.10,
             "lucro": lucro,
             "valorbase": 100 if (saldo_gap or saldo_aguardando) else None,
             "liquido": 80 if saldo_gap else None,

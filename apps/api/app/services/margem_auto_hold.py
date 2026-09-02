@@ -135,10 +135,12 @@ def _candidatos_sql() -> str:
                BOOL_OR({_ATTENTION_SALDO_SQL}
                        AND v.marketplace_liquido_base_margem_item IS NULL)
                                                 AS saldo_pendente,
+               -- ×100: o snapshot guarda margens como FRAÇÃO (0.069 = 6,9%);
+               -- a mensagem mostra em % como a aba faz.
                MIN(v.marketplace_margem)
-                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) AS margem,
+                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS margem,
                MAX(v.margem_minima)
-                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) AS minima,
+                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS minima,
                SUM(v.marketplace_lucro)         AS lucro
         FROM {SNAPSHOT_TABLE} v
         WHERE v.situacao = '{SITUACAO_EM_ABERTO}'

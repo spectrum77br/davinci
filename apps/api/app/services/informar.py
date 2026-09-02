@@ -16,7 +16,7 @@ Funções PURAS (sem banco) pra dar teste fácil:
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import NamedTuple
 
 from app.models import Logistica
@@ -84,7 +84,11 @@ class MargemPedido(NamedTuple):
 
 
 def _pct(v: float) -> str:
-    """Percentual em pt-BR: inteiro sem casas (`8%`), senão 1 casa (`-3,2%`)."""
+    """Percentual em pt-BR: inteiro sem casas (`8%`), senão 1 casa (`-3,2%`).
+
+    Arredonda ANTES de decidir — o valor chega de `fração × 100` e a dízima
+    binária faria 7.000000000000001 virar "7,0%" em vez de "7%"."""
+    v = round(v, 1)
     if v == int(v):
         return f"{int(v)}%"
     return f"{v:.1f}%".replace(".", ",")
@@ -122,16 +126,25 @@ def mensagem_margem_pedido(
     return "\n".join(linhas)
 
 
-def mensagens_margem(entries: Iterable[MargemPedido], cabecalho: str) -> list[str]:
+def mensagens_margem(
+    entries: Iterable[MargemPedido],
+    cabecalho: str,
+    *,
+    rodape_pedido: Callable[[str], str] | None = None,
+) -> list[str]:
     """Relatório do botão Informar da Margem: UMA mensagem por pedido, em ordem
     de pedido, com `(i/n)` no cabeçalho quando há mais de um. Sem pendentes →
-    lista vazia (quem chama manda o texto de "nada a informar")."""
+    lista vazia (quem chama manda o texto de "nada a informar").
+
+    `rodape_pedido(pedido)` opcional gera um rodapé por mensagem — o router usa
+    pro link "Aprovar pelo celular" de cada pedido."""
     ordenados = sorted(entries, key=lambda p: p.pedido)
     total = len(ordenados)
     out: list[str] = []
     for i, p in enumerate(ordenados, start=1):
         cab = cabecalho if total == 1 else f"{cabecalho} ({i}/{total})"
-        out.append(mensagem_margem_pedido(p, cabecalho=cab))
+        rodape = rodape_pedido(p.pedido) if rodape_pedido else None
+        out.append(mensagem_margem_pedido(p, cabecalho=cab, rodape=rodape))
     return out
 
 

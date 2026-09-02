@@ -10,7 +10,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Logistica, User, UserRole, UserStatus
-from app.services import informar, logistica_rules
+from app.services import aprovar_link, informar, logistica_rules
 
 
 @pytest_asyncio.fixture
@@ -279,8 +279,9 @@ async def test_informar_margem_enviar_lista_pendentes_com_motivo(
             loja_nome="Loja ML",
             situacao="6",
             situacao_nome="Em aberto",
-            marketplace_margem=2,
-            margem_minima=8,
+            # Fração, como em produção: 0.02 = 2% (a query multiplica por 100).
+            marketplace_margem=0.02,
+            margem_minima=0.08,
             marketplace_lucro=lucro,
         )
     # Sem gatilho nenhum → Aprovado derivado → fora do relatório.
@@ -292,8 +293,8 @@ async def test_informar_margem_enviar_lista_pendentes_com_motivo(
         loja_nome="Loja SP",
         situacao="6",
         situacao_nome="Em aberto",
-        marketplace_margem=15,
-        margem_minima=8,
+        marketplace_margem=0.15,
+        margem_minima=0.08,
     )
     # 'Pendente' GRAVADO sem gatilho ativo (hold manual) → entra, motivo padrão.
     await _seed_margem(
@@ -331,15 +332,26 @@ async def test_informar_margem_enviar_lista_pendentes_com_motivo(
     assert body["mensagens"] == 2
     assert body["sent"] == ["AAAA1111"]
     assert len(enviados) == 2
-    assert enviados[0].splitlines() == [
+    linhas0 = enviados[0].splitlines()
+    assert linhas0[:5] == [
         "DaVinci — Margem: pendente de análise (1/2)",
         "Pedido 402001 — ml Loja ML",
         "Motivo: margem abaixo do mínimo",
         "Margem: 2% (mínimo 8%)",
         "Lucro: R$ -15,00",
     ]
-    assert enviados[1].splitlines() == [
+    # Cada mensagem fecha com o MESMO link do aviso automático, com token
+    # válido apontando pro pedido da mensagem.
+    prefixo = "Aprovar pelo celular: http://localhost:3000/api/aprovar/"
+    assert linhas0[5].startswith(prefixo)
+    assert aprovar_link.validar_token(linhas0[5].removeprefix(prefixo)) == "402001"
+    assert len(linhas0) == 6
+    linhas1 = enviados[1].splitlines()
+    assert linhas1[:3] == [
         "DaVinci — Margem: pendente de análise (2/2)",
         "Pedido 402003",
         "Motivo: pendente de análise",
     ]
+    assert linhas1[3].startswith(prefixo)
+    assert aprovar_link.validar_token(linhas1[3].removeprefix(prefixo)) == "402003"
+    assert len(linhas1) == 4
