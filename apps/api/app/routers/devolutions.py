@@ -15,8 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import BlingOrder, Devolution, Product, Refund, User
+from app.models import BlingOrder, DevolucaoRastreio, Devolution, Product, Refund, User
 from app.schemas.devolutions import (
+    AcompanhamentoItemOut,
+    AcompanhamentoOut,
+    AcompanhamentoRastreioOut,
+    AcompanhamentoRastreioPatch,
     BlingStockResultOut,
     DevolutionCreate,
     DevolutionLookupOut,
@@ -203,6 +207,118 @@ async def list_devolutions(
         total=int(total or 0),
         limit=limit,
         offset=offset,
+    )
+
+
+_SITUACAO_AGUARDANDO_DEVOLUCAO = "83957"
+
+
+@router.get("/acompanhamento", response_model=AcompanhamentoOut)
+async def list_acompanhamento(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+) -> AcompanhamentoOut:
+    """Aba Acompanhamento: TODOS os pedidos hoje em 'Aguardando Devolução'
+    (83957) no Bling — uma linha por item, com nome do cliente, dia em que
+    entrou na situação e rastreio/última localização (manuais). A lista volta
+    inteira (teto de segurança de 2000 linhas); busca e filtros são do front,
+    como na aba Pedidos do Controle de Estoque."""
+    rows = (
+        await session.execute(
+            text(
+                f"""
+                SELECT
+                    v.pedido_bling::text        AS pedido_bling,
+                    v.pedido_marketplace::text  AS pedido_marketplace,
+                    v.data,
+                    bo.aguardando_devolucao_data,
+                    v.plataforma_bling          AS plataforma,
+                    COALESCE(NULLIF(btrim(v.loja_nome), ''),
+                             'Loja ' || v.bling_loja_id, 'Sem loja') AS loja,
+                    v.nome_destinatario         AS cliente,
+                    v.cidade_destino            AS cidade,
+                    v.uf_destino                AS uf,
+                    v.sku,
+                    v.produto,
+                    v.quantidade::int           AS quantidade,
+                    r.rastreio,
+                    r.localizacao,
+                    r.localizacao_data,
+                    EXISTS (
+                        SELECT 1 FROM "{SCHEMA}".devolutions d
+                        WHERE d.pedido_bling = v.pedido_bling::text
+                    ) AS lancada
+                FROM "{SCHEMA}".vw_devolucoes v
+                JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
+                LEFT JOIN "{SCHEMA}".devolucao_rastreio r
+                       ON r.pedido_bling = v.pedido_bling::text
+                WHERE v.situacao = :situacao
+                ORDER BY bo.aguardando_devolucao_data ASC NULLS FIRST,
+                         v.pedido_bling, v.sku
+                LIMIT 2000
+                """  # noqa: S608
+            ),
+            {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO},
+        )
+    ).mappings().all()
+
+    hoje_sp = datetime.now(SAO_PAULO).date()
+    items: list[AcompanhamentoItemOut] = []
+    for r in rows:
+        d = dict(r)
+        entrada = d.get("aguardando_devolucao_data")
+        d["dias_em_devolucao"] = (hoje_sp - entrada).days if entrada else None
+        items.append(AcompanhamentoItemOut.model_validate(d))
+    total_pedidos = len({i.pedido_bling for i in items if i.pedido_bling})
+    return AcompanhamentoOut(items=items, total_pedidos=total_pedidos)
+
+
+@router.patch("/acompanhamento/{pedido_bling}", response_model=AcompanhamentoRastreioOut)
+async def patch_acompanhamento_rastreio(
+    pedido_bling: str,
+    body: AcompanhamentoRastreioPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> AcompanhamentoRastreioOut:
+    """Salva rastreio/última localização de um pedido em devolução (edição
+    inline da aba Acompanhamento). `localizacao_data` é carimbada sozinha
+    quando a localização MUDA — é a data da última movimentação vista."""
+    pedido_bling = pedido_bling.strip()
+    exists = (
+        await session.execute(
+            select(func.count()).select_from(BlingOrder).where(BlingOrder.numero == pedido_bling)
+        )
+    ).scalar_one()
+    if not exists:
+        raise HTTPException(404, detail={"code": "pedido_not_found"})
+
+    row = await session.get(DevolucaoRastreio, pedido_bling)
+    if row is None:
+        row = DevolucaoRastreio(pedido_bling=pedido_bling)
+        session.add(row)
+
+    data = body.model_dump(exclude_unset=True)
+    if "rastreio" in data:
+        row.rastreio = (data["rastreio"] or "").strip() or None
+    if "localizacao" in data:
+        nova = (data["localizacao"] or "").strip() or None
+        if nova != row.localizacao:
+            row.localizacao = nova
+            row.localizacao_data = datetime.now(UTC) if nova else None
+    row.updated_by = user.id
+    await session.commit()
+    await session.refresh(row)
+    logger.info(
+        "devolucao_rastreio_saved",
+        pedido_bling=pedido_bling,
+        rastreio=row.rastreio,
+        localizacao=row.localizacao,
+    )
+    return AcompanhamentoRastreioOut(
+        pedido_bling=row.pedido_bling,
+        rastreio=row.rastreio,
+        localizacao=row.localizacao,
+        localizacao_data=row.localizacao_data,
     )
 
 

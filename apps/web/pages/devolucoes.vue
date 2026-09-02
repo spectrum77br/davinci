@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import {
   AlertCircle,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  ClipboardList,
   Clock,
   Download,
   ExternalLink,
   Loader2,
   PackagePlus,
+  PackageSearch,
   Plus,
   RotateCcw,
   Search,
@@ -622,7 +625,176 @@ async function exportXlsx() {
   }
 }
 
-await load()
+// ── Aba Acompanhamento: pedidos hoje em "Aguardando Devolução" no Bling ──
+// Linha por ITEM do pedido (grão da vw_devolucoes). Rastreio/localização são
+// por PEDIDO e preenchidos à mão: salvar numa linha reflete nas linhas irmãs
+// do mesmo pedido. A data da última movimentação é carimbada pelo backend
+// sozinha quando a localização muda.
+type AcompanhamentoRow = {
+  pedido_bling: string | null
+  pedido_marketplace: string | null
+  data: string | null
+  aguardando_devolucao_data: string | null
+  dias_em_devolucao: number | null
+  plataforma: string | null
+  loja: string | null
+  cliente: string | null
+  cidade: string | null
+  uf: string | null
+  sku: string | null
+  produto: string | null
+  quantidade: number | null
+  rastreio: string | null
+  localizacao: string | null
+  localizacao_data: string | null
+  lancada: boolean
+}
+type AcompanhamentoPage = { items: AcompanhamentoRow[]; total_pedidos: number }
+type RastreioSaved = {
+  pedido_bling: string
+  rastreio: string | null
+  localizacao: string | null
+  localizacao_data: string | null
+}
+
+type Tab = 'acompanhamento' | 'lancamentos'
+// Acompanhamento é a aba inicial (folha do Eduardo, 2026-09-02); a aba
+// Lançamentos guarda TODO o conteúdo antigo da página, intacto.
+const tab = ref<Tab>('acompanhamento')
+
+const acompRows = ref<AcompanhamentoRow[]>([])
+const acompLoading = ref(false)
+const acompError = ref<string | null>(null)
+const acompSearch = ref('')
+const acompPlataformaFilter = ref('all')
+const acompLojaFilter = ref('all')
+const acompParadoFilter = ref<'all' | '7' | '15' | '30'>('all')
+// Chaves "pedido|campo" com PATCH em voo — trava o input e evita corrida.
+const acompSaving = ref<Set<string>>(new Set())
+
+async function loadAcompanhamento() {
+  acompLoading.value = true
+  acompError.value = null
+  try {
+    const res = await api<AcompanhamentoPage>('/api/devolutions/acompanhamento')
+    acompRows.value = res.items
+  } catch (e: any) {
+    acompError.value = apiError(e)
+  } finally {
+    acompLoading.value = false
+  }
+}
+
+// "Atualizar clientes": reaproveita o backfill de endereços da aba Lançamentos
+// (busca no Bling nome/cidade dos pedidos em devolução sem endereço) e
+// recarrega a tabela pra mostrar o resultado.
+async function backfillAcompanhamento() {
+  await backfillAddresses()
+  await loadAcompanhamento()
+}
+
+const acompPlataformas = computed(() => {
+  const s = new Set<string>()
+  for (const r of acompRows.value) if (r.plataforma) s.add(r.plataforma)
+  return [...s].sort()
+})
+const acompLojas = computed(() => {
+  const s = new Set<string>()
+  for (const r of acompRows.value) if (r.loja) s.add(r.loja)
+  return [...s].sort()
+})
+
+const acompFiltered = computed(() => {
+  const term = acompSearch.value.trim().toLowerCase()
+  const minDias = acompParadoFilter.value === 'all' ? null : Number(acompParadoFilter.value)
+  return acompRows.value.filter((r) => {
+    if (acompPlataformaFilter.value !== 'all' && r.plataforma !== acompPlataformaFilter.value) return false
+    if (acompLojaFilter.value !== 'all' && r.loja !== acompLojaFilter.value) return false
+    if (minDias != null && (r.dias_em_devolucao ?? -1) < minDias) return false
+    if (term) {
+      const hay = [
+        r.pedido_bling, r.pedido_marketplace, r.cliente, r.sku, r.produto,
+        r.rastreio, r.localizacao, r.cidade,
+      ].filter(Boolean).join(' ').toLowerCase()
+      if (!hay.includes(term)) return false
+    }
+    return true
+  })
+})
+
+// Chips por PEDIDO (a tabela tem uma linha por item do pedido).
+function pedidosDe(rows: AcompanhamentoRow[]): Set<string> {
+  const s = new Set<string>()
+  for (const r of rows) if (r.pedido_bling) s.add(r.pedido_bling)
+  return s
+}
+const acompTotalPedidos = computed(() => pedidosDe(acompRows.value).size)
+const acompSemRastreio = computed(() => pedidosDe(acompRows.value.filter((r) => !r.rastreio)).size)
+const acompSemLocalizacao = computed(() => pedidosDe(acompRows.value.filter((r) => !r.localizacao)).size)
+const acompParados15 = computed(() => pedidosDe(acompRows.value.filter((r) => (r.dias_em_devolucao ?? 0) >= 15)).size)
+
+// Data pura (YYYY-MM-DD) SEM passar por new Date() — evita o clássico
+// "-1 dia" do fuso (Date interpreta como meia-noite UTC).
+function fmtDateOnly(v: string | null): string {
+  if (!v) return '—'
+  const [y, m, d] = v.split('-')
+  if (!y || !m || !d) return v
+  return `${d}/${m}/${y.slice(2)}`
+}
+function diasBadgeClass(dias: number | null): string {
+  if (dias == null) return 'bg-muted text-muted-foreground'
+  if (dias >= 15) return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+  if (dias >= 7) return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+  return 'bg-muted text-muted-foreground'
+}
+
+function isSavingRastreio(pedido: string | null, field: string): boolean {
+  return !!pedido && acompSaving.value.has(`${pedido}|${field}`)
+}
+
+// Salva no blur (Enter também: só tira o foco do campo). Campo por PEDIDO:
+// espelha a resposta do backend em todas as linhas do mesmo pedido. Só chama
+// a API se o valor realmente mudou; string vazia limpa o campo.
+async function saveRastreio(row: AcompanhamentoRow, field: 'rastreio' | 'localizacao', raw: string) {
+  if (!canEdit.value || !row.pedido_bling) return
+  const value = raw.trim()
+  if ((row[field] ?? '') === value) return
+  const key = `${row.pedido_bling}|${field}`
+  if (acompSaving.value.has(key)) return
+  acompSaving.value = new Set([...acompSaving.value, key])
+  try {
+    const res = await api<RastreioSaved>(
+      `/api/devolutions/acompanhamento/${encodeURIComponent(row.pedido_bling)}`,
+      { method: 'PATCH', body: { [field]: value } },
+    )
+    for (const r of acompRows.value) {
+      if (r.pedido_bling === res.pedido_bling) {
+        r.rastreio = res.rastreio
+        r.localizacao = res.localizacao
+        r.localizacao_data = res.localizacao_data
+      }
+    }
+  } catch (e: any) {
+    pushToast({ kind: 'error', title: 'Erro ao salvar rastreio', lines: [apiError(e)] })
+  } finally {
+    const next = new Set(acompSaving.value)
+    next.delete(key)
+    acompSaving.value = next
+  }
+}
+
+// "Lançar": pula pra aba Lançamentos com o pedido já buscado — mesmo fluxo
+// do botão "adicionar pedido".
+function goLancar(row: AcompanhamentoRow) {
+  if (!row.pedido_bling) return
+  tab.value = 'lancamentos'
+  openAdd()
+  lookupPedido.value = row.pedido_bling
+  void lookupOrder()
+}
+
+// As duas abas carregam juntas (paralelo): trocar de aba é instantâneo.
+await Promise.all([load(), loadAcompanhamento()])
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 watch(search, () => {
@@ -1018,39 +1190,237 @@ async function backfillAddresses() {
 
 <template>
   <div class="space-y-5">
-    <PageHeader title="Devoluções" description="Controle manual de devoluções por pedido.">
+    <PageHeader
+      title="Devoluções"
+      :description="tab === 'acompanhamento'
+        ? 'Pedidos aguardando devolução no Bling — rastreio e última localização do pacote.'
+        : 'Controle manual de devoluções por pedido.'"
+    >
       <template #actions>
-        <Button size="sm" variant="outline" :disabled="loading" @click="load">
-          <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
-          atualizar
-        </Button>
-        <Button size="sm" variant="outline" :disabled="!canEdit || backfilling" @click="backfillAddresses">
-          <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': backfilling }" />
-          atualizar endereços
-        </Button>
-        <Button size="sm" :disabled="!canEdit" @click="openAdd">
-          <Plus class="size-4 mr-1.5" />
-          adicionar pedido
-        </Button>
-        <Button size="sm" variant="outline" :disabled="!canEdit" @click="openCorrecao">
-          <PackagePlus class="size-4 mr-1.5" />
-          correção de estoque
-        </Button>
+        <template v-if="tab === 'acompanhamento'">
+          <Button size="sm" variant="outline" :disabled="acompLoading" @click="loadAcompanhamento">
+            <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': acompLoading }" />
+            atualizar
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            :disabled="!canEdit || backfilling"
+            title="Busca no Bling o nome/cidade dos pedidos em devolução que estão sem esses dados"
+            @click="backfillAcompanhamento"
+          >
+            <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': backfilling }" />
+            atualizar clientes
+          </Button>
+        </template>
+        <template v-else>
+          <Button size="sm" variant="outline" :disabled="loading" @click="load">
+            <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
+            atualizar
+          </Button>
+          <Button size="sm" variant="outline" :disabled="!canEdit || backfilling" @click="backfillAddresses">
+            <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': backfilling }" />
+            atualizar endereços
+          </Button>
+          <Button size="sm" :disabled="!canEdit" @click="openAdd">
+            <Plus class="size-4 mr-1.5" />
+            adicionar pedido
+          </Button>
+          <Button size="sm" variant="outline" :disabled="!canEdit" @click="openCorrecao">
+            <PackagePlus class="size-4 mr-1.5" />
+            correção de estoque
+          </Button>
+        </template>
       </template>
     </PageHeader>
 
-    <div v-if="error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+    <!-- Abas (mesmo estilo do Controle de Estoque) -->
+    <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap">
+      <button
+        class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
+        :class="tab === 'acompanhamento' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+        @click="tab = 'acompanhamento'"
+      >
+        <PackageSearch class="size-4" />
+        Acompanhamento
+        <span class="rounded bg-muted px-1.5 text-[11px] tabular-nums">{{ acompTotalPedidos }}</span>
+      </button>
+      <button
+        class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
+        :class="tab === 'lancamentos' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+        @click="tab = 'lancamentos'"
+      >
+        <ClipboardList class="size-4" />
+        Lançamentos
+      </button>
+    </div>
+
+    <!-- ══ Aba Acompanhamento — pedidos em Aguardando Devolução no Bling ══ -->
+    <template v-if="tab === 'acompanhamento'">
+      <div v-if="acompError" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+        <AlertCircle class="size-4" />
+        {{ acompError }}
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <StatCard label="Pedidos em devolução" :value="acompTotalPedidos" :icon="PackageSearch" />
+        <StatCard label="Sem rastreio" :value="acompSemRastreio" :icon="AlertCircle" tone="warning" />
+        <StatCard label="Sem localização" :value="acompSemLocalizacao" :icon="Clock" tone="warning" />
+        <StatCard label="Parados 15+ dias" :value="acompParados15" :icon="Clock" tone="danger" />
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="relative">
+          <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+          <input
+            v-model="acompSearch"
+            class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
+            placeholder="buscar pedido, cliente, sku, rastreio…"
+          />
+        </div>
+        <select v-model="acompPlataformaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Filtrar por plataforma">
+          <option value="all">todas plataformas</option>
+          <option v-for="p in acompPlataformas" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <select v-model="acompLojaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Filtrar por loja">
+          <option value="all">todas lojas</option>
+          <option v-for="l in acompLojas" :key="l" :value="l">{{ l }}</option>
+        </select>
+        <select v-model="acompParadoFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Só pedidos que estão em devolução há N dias ou mais">
+          <option value="all">qualquer tempo</option>
+          <option value="7">parados 7+ dias</option>
+          <option value="15">parados 15+ dias</option>
+          <option value="30">parados 30+ dias</option>
+        </select>
+        <span class="ml-auto text-xs text-muted-foreground">
+          {{ acompFiltered.length }} de {{ acompRows.length }} itens · rastreio e localização salvam ao sair do campo
+        </span>
+      </div>
+
+      <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
+        <table class="min-w-[2000px] text-xs border-collapse">
+          <thead class="sticky top-0 z-20 bg-background">
+            <tr>
+              <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="12">Pedido aguardando devolução (Bling)</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3">Rastreio (manual)</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Devolução</th>
+            </tr>
+            <tr class="border-b">
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data pedido</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Pedido Bling</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px]">Pedido Marketplace</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px]">Plataforma</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px]">Loja</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px]">Cliente</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px]">Cidade/UF</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]">SKU</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px]">Produto</th>
+              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[45px]">Qtd</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[125px]" title="Dia em que o pedido entrou em Aguardando Devolução">Em devolução desde</th>
+              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]" title="Há quantos dias o pedido está aguardando devolução">Dias</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[160px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Rastreio</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-amber-50 dark:bg-amber-900/20">Última localização</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[135px] bg-amber-50 dark:bg-amber-900/20" title="Preenchida sozinha quando a localização muda">Data últ. movimentação</th>
+              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Lançada</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="acompLoading && !acompRows.length">
+              <td colspan="16" class="py-8 text-center text-muted-foreground">
+                <Loader2 class="size-4 inline animate-spin mr-1.5" />
+                carregando…
+              </td>
+            </tr>
+            <tr v-else-if="!acompFiltered.length">
+              <td colspan="16" class="py-8 text-center text-muted-foreground">nenhum pedido aguardando devolução</td>
+            </tr>
+            <tr
+              v-for="row in acompFiltered"
+              :key="`${row.pedido_bling}-${row.sku}`"
+              class="border-t hover:brightness-95 dark:hover:brightness-110"
+            >
+              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
+              <td class="px-2 py-1 font-mono whitespace-nowrap">{{ row.pedido_bling || '—' }}</td>
+              <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
+              <td class="px-2 py-1 whitespace-nowrap">{{ row.plataforma || '—' }}</td>
+              <td class="px-2 py-1 whitespace-nowrap">{{ row.loja || '—' }}</td>
+              <td class="px-2 py-1">{{ row.cliente || '—' }}</td>
+              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ row.cidade ? `${row.cidade}${row.uf ? ' — ' + row.uf : ''}` : (row.uf || '—') }}</td>
+              <td class="px-2 py-1 font-mono text-xs">{{ row.sku || '—' }}</td>
+              <td class="px-2 py-1 text-muted-foreground">{{ row.produto || '—' }}</td>
+              <td class="px-2 py-1 text-center tabular-nums">{{ row.quantidade ?? '—' }}</td>
+              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateOnly(row.aguardando_devolucao_data) }}</td>
+              <td class="px-2 py-1 text-center">
+                <span
+                  v-if="row.dias_em_devolucao != null"
+                  class="inline-flex rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums"
+                  :class="diasBadgeClass(row.dias_em_devolucao)"
+                >{{ row.dias_em_devolucao }}d</span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+                <input
+                  :value="row.rastreio || ''"
+                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'rastreio')"
+                  :class="sheetInputClass"
+                  placeholder="código de rastreio"
+                  @keydown.enter="(e) => (e.target as HTMLInputElement).blur()"
+                  @blur="(e) => saveRastreio(row, 'rastreio', (e.target as HTMLInputElement).value)"
+                />
+              </td>
+              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
+                <input
+                  :value="row.localizacao || ''"
+                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'localizacao')"
+                  :class="sheetInputClass"
+                  placeholder="onde o pacote está"
+                  @keydown.enter="(e) => (e.target as HTMLInputElement).blur()"
+                  @blur="(e) => saveRastreio(row, 'localizacao', (e.target as HTMLInputElement).value)"
+                />
+              </td>
+              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10" title="Preenchida sozinha quando a localização muda">
+                {{ fmtDateTime(row.localizacao_data) }}
+              </td>
+              <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+                <span
+                  v-if="row.lancada"
+                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                  title="Este pedido já tem devolução lançada na aba Lançamentos"
+                >
+                  <CheckCircle2 class="size-3" />
+                  lançada
+                </span>
+                <Button
+                  v-else
+                  size="sm"
+                  variant="outline"
+                  class="h-6 px-2 text-[11px]"
+                  :disabled="!canEdit"
+                  title="Abrir a aba Lançamentos com este pedido já buscado"
+                  @click="goLancar(row)"
+                >
+                  lançar
+                </Button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+
+    <!-- ══ Aba Lançamentos — conteúdo original da página, intacto ══ -->
+    <div v-if="tab === 'lancamentos' && error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
       <AlertCircle class="size-4" />
       {{ error }}
     </div>
 
-    <div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
+    <div v-show="tab === 'lancamentos'" class="grid grid-cols-2 lg:grid-cols-3 gap-3">
       <StatCard label="Total devoluções" :value="total" :icon="Undo2" />
       <StatCard label="Enviada para Reembolso" :value="totalReembolsadas" :icon="Clock" tone="warning" />
       <StatCard label="Custo manutenção (pág.)" :value="brl(totalCustoManutencao)" tone="danger" />
     </div>
 
-    <div v-if="addOpen" class="rounded-md border bg-background">
+    <div v-if="tab === 'lancamentos' && addOpen" class="rounded-md border bg-background">
       <div class="flex flex-wrap items-end gap-3 border-b px-3 py-3">
         <label class="space-y-1">
           <span class="text-[11px] font-medium text-muted-foreground">Buscar pedido</span>
@@ -1231,7 +1601,7 @@ async function backfillAddresses() {
       </div>
     </div>
 
-    <div class="flex flex-wrap items-center gap-2">
+    <div v-show="tab === 'lancamentos'" class="flex flex-wrap items-center gap-2">
       <div class="relative">
         <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
         <input
@@ -1305,7 +1675,7 @@ async function backfillAddresses() {
       </span>
     </div>
 
-    <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
+    <div v-show="tab === 'lancamentos'" class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
       <table class="min-w-[2075px] text-xs border-collapse">
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
@@ -1533,7 +1903,7 @@ async function backfillAddresses() {
       </table>
     </div>
 
-    <div v-if="total > PAGE_SIZE" class="flex items-center justify-between gap-2">
+    <div v-if="tab === 'lancamentos' && total > PAGE_SIZE" class="flex items-center justify-between gap-2">
       <span class="text-xs text-muted-foreground">
         página {{ page }} de {{ totalPages }} · {{ PAGE_SIZE }}/página
       </span>

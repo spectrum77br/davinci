@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -258,3 +258,48 @@ class DevolutionLookupOut(BaseModel):
     uf_destino: str | None = None
     # True quando já existe devolução lançada para este pedido+sku (front esmaece).
     ja_devolvido: bool = False
+
+
+class AcompanhamentoItemOut(BaseModel):
+    """Linha (por ITEM do pedido) da aba Acompanhamento — pedidos hoje em
+    'Aguardando Devolução' (83957) no Bling, com cliente e rastreio manual."""
+
+    pedido_bling: str | None = None
+    pedido_marketplace: str | None = None
+    data: datetime | None = None
+    # Dia em que o pedido entrou em Aguardando Devolução (carimbo do ingest).
+    aguardando_devolucao_data: date | None = None
+    dias_em_devolucao: int | None = None
+    plataforma: str | None = None
+    loja: str | None = None
+    cliente: str | None = None
+    cidade: str | None = None
+    uf: str | None = None
+    sku: str | None = None
+    produto: str | None = None
+    quantidade: int | None = None
+    rastreio: str | None = None
+    localizacao: str | None = None
+    localizacao_data: datetime | None = None
+    # True quando o pedido já tem devolução LANÇADA na aba de lançamentos.
+    lancada: bool = False
+
+
+class AcompanhamentoOut(BaseModel):
+    items: list[AcompanhamentoItemOut]
+    total_pedidos: int
+
+
+class AcompanhamentoRastreioPatch(BaseModel):
+    """Edição inline de rastreio/localização na aba Acompanhamento. Campos
+    ausentes não são tocados; string vazia limpa o campo."""
+
+    rastreio: str | None = None
+    localizacao: str | None = None
+
+
+class AcompanhamentoRastreioOut(BaseModel):
+    pedido_bling: str
+    rastreio: str | None = None
+    localizacao: str | None = None
+    localizacao_data: datetime | None = None

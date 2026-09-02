@@ -160,6 +160,7 @@ def _row_from_item(
     product_categories_by_id: dict[int, tuple[int | None, str]] | None = None,
     product_categories_by_sku: dict[str, tuple[int | None, str]] | None = None,
     em_andamento_data_final: date | None = None,
+    aguardando_devolucao_data_final: date | None = None,
 ) -> dict[str, Any]:
     """Flatten one (order, item) pair into a `bling_orders` row dict.
 
@@ -281,6 +282,7 @@ def _row_from_item(
         "total": total_val,
         "situacao": situacao_id,
         "em_andamento_data": em_andamento_data,
+        "aguardando_devolucao_data": aguardando_devolucao_data_final,
         "loja": str(loja.get("id")) if loja.get("id") is not None else None,
         "store_id": store_id,
         "itens": raw_order.get("itens"),
@@ -355,6 +357,40 @@ def _next_em_andamento_data(
         return data_existente
     if nova_situacao in _SHIP_STAMP_SITUACOES:
         return _operational_ship_date(agora)
+    return None
+
+
+_SITUACAO_AGUARDANDO_DEVOLUCAO = "83957"
+
+
+def _next_aguardando_devolucao_data(
+    *,
+    nova_situacao: str | None,
+    situacao_antiga: str | None,
+    data_existente: date | None,
+    agora: datetime,
+) -> date | None:
+    """Decide a aguardando_devolucao_data (aba Acompanhamento de Devoluções).
+
+    Mesma forma da `_next_em_andamento_data` (retorno = valor a GRAVAR;
+    None = "não tenho info, não mexe" — nunca significa "limpa"):
+
+    - ENTRADA em 83957 (situação anterior era outra): carimba o dia de HOJE
+      (fuso SP). Re-entrada re-carimba — é uma devolução nova do mesmo pedido.
+    - Qualquer outro caso com data existente: PRESERVA (a data NÃO é limpa
+      quando o pedido sai da situação — trilha histórica).
+    - Já em 83957 sem data (pedido que o backfill da migration 0236 não viu):
+      carimba hoje como aproximação.
+    """
+    if (
+        nova_situacao == _SITUACAO_AGUARDANDO_DEVOLUCAO
+        and situacao_antiga != _SITUACAO_AGUARDANDO_DEVOLUCAO
+    ):
+        return agora.astimezone(_BRT).date()
+    if data_existente is not None:
+        return data_existente
+    if nova_situacao == _SITUACAO_AGUARDANDO_DEVOLUCAO:
+        return agora.astimezone(_BRT).date()
     return None
 
 
@@ -576,7 +612,11 @@ async def upsert_order(
     # 15↔83953 etc. => preserva). data_existente = ship-date já gravado.
     prev_rows = (
         await session.execute(
-            select(BlingOrder.situacao, BlingOrder.em_andamento_data)
+            select(
+                BlingOrder.situacao,
+                BlingOrder.em_andamento_data,
+                BlingOrder.aguardando_devolucao_data,
+            )
             .where(BlingOrder.bling_id == bling_id)
         )
     ).all()
@@ -587,6 +627,15 @@ async def upsert_order(
         nova_situacao=situacao,
         situacao_antiga=situacao_antiga,
         data_existente=data_existente,
+        agora=datetime.now(UTC),
+    )
+    # Data de entrada em Aguardando Devolução (aba Acompanhamento) — mesma
+    # mecânica da em_andamento_data: decidida aqui, repassada aos dois caminhos.
+    dev_data_existente = next((r[2] for r in prev_rows if r[2] is not None), None)
+    nova_data_devolucao = _next_aguardando_devolucao_data(
+        nova_situacao=situacao,
+        situacao_antiga=situacao_antiga,
+        data_existente=dev_data_existente,
         agora=datetime.now(UTC),
     )
 
@@ -602,6 +651,8 @@ async def upsert_order(
             # provisório (dia da etiqueta) pra não flutuar pra hoje no filtro.
             if nova_data is not None:
                 values["em_andamento_data"] = nova_data
+            if nova_data_devolucao is not None:
+                values["aguardando_devolucao_data"] = nova_data_devolucao
             # Backfill address data for orders synced before migrations 0088/0094.
             # Prefer transporte.enderecoEntrega; fall back to contato.endereco
             # (Amazon and some other marketplaces omit transporte address).
@@ -709,6 +760,7 @@ async def upsert_order(
             product_categories_by_id=product_categories_by_id,
             product_categories_by_sku=product_categories_by_sku,
             em_andamento_data_final=nova_data,
+            aguardando_devolucao_data_final=nova_data_devolucao,
         )
         row["preco_custo"] = None
         rows.append(row)
@@ -725,6 +777,7 @@ async def upsert_order(
                 product_categories_by_id=product_categories_by_id,
                 product_categories_by_sku=product_categories_by_sku,
                 em_andamento_data_final=nova_data,
+                aguardando_devolucao_data_final=nova_data_devolucao,
             )
             sku = (row.get("item_codigo") or "").strip() if row.get("item_codigo") else None
             row["preco_custo"] = cost_by_sku.get(sku) if sku else None
@@ -756,7 +809,7 @@ async def upsert_order(
     # Sem este fix: 774 pedidos em prod 22-30/05 tiveram em_andamento_data
     # nullada (situações 83953/83957/545902). Camada redundante com o
     # trigger DB `bling_orders_protect_data` — defesa em profundidade.
-    protected_cols = {"em_andamento_data"}
+    protected_cols = {"em_andamento_data", "aguardando_devolucao_data"}
     stmt = stmt.on_conflict_do_update(
         index_elements=["bling_id", "item_index"],
         set_={

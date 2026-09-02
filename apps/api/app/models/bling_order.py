@@ -73,6 +73,11 @@ class BlingOrder(Base, TimestampMixin):
     categoria_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     categoria_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
     em_andamento_data: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Dia em que o pedido ENTROU em "Aguardando Devolução" (83957), carimbado
+    # pelo ingest (mesmo padrão da em_andamento_data). Alimenta a aba
+    # Acompanhamento de Devoluções ("em devolução há N dias"). Preservada
+    # quando o pedido sai da situação (trilha histórica); re-entrada re-carimba.
+    aguardando_devolucao_data: Mapped[date | None] = mapped_column(Date, nullable=True)
     # "Despachar até" prometido ao marketplace (horário de corte do pedido),
     # capturado pelo sweep de envio direto da API de cada plataforma (Shopee
     # ship_by_date, TikTok rts_sla_time, Amazon LatestShipDate, ML
