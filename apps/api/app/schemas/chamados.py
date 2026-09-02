@@ -195,3 +195,108 @@ class ResolverIn(BaseModel):
     situacao: str | None = None
 
     _clean = field_validator("situacao", mode="before")(_clean_optional_text)
+
+
+# ------------------------------------------------------------------ robô (agent)
+# Contrato do robô de chamados (runner de frete / monitor), autenticado por
+# X-Agent-Token — mesmo token do executor de NF.
+
+StatusEnvio = Literal["enviada", "falhou", "pendente", "registrada"]
+
+
+class AgentRegistrarIn(BaseModel):
+    """O robô abriu (ou tentou abrir) um chamado na plataforma: registra a
+    linha na aba + a mensagem de abertura no histórico. Idempotente por
+    (pedido_bling, origem) enquanto o chamado estiver aberto."""
+
+    pedido_bling: str = Field(min_length=1)
+    origem: Origem = "margem"
+    plataforma: str | None = "ml"
+    conta: str | None = None
+    pedido_marketplace: str | None = None
+    origem_ref: str | None = None
+    chamado: str | None = None
+    chamado_url: str | None = None
+    mensagem: str | None = None
+    status_envio: StatusEnvio = "enviada"
+    erro: str | None = None
+    observacao: str | None = None
+    monitoramento: bool = True
+
+    _clean = field_validator(
+        "pedido_bling",
+        "plataforma",
+        "conta",
+        "pedido_marketplace",
+        "origem_ref",
+        "chamado",
+        "chamado_url",
+        "mensagem",
+        "erro",
+        "observacao",
+        mode="before",
+    )(_clean_optional_text)
+
+
+class AgentRegistrarOut(BaseModel):
+    chamado_id: UUID
+    mensagem_id: UUID | None = None
+    criado: bool
+
+
+class AgentTarefaOut(BaseModel):
+    """Uma réplica pendente pro robô executar. `abrir` = chamado ainda sem
+    protocolo (formulário); `responder` = já tem protocolo (página do caso)."""
+
+    tipo: Literal["abrir", "responder"]
+    mensagem_id: UUID
+    chamado_id: UUID
+    pedido_bling: str | None = None
+    pedido_marketplace: str | None = None
+    conta: str | None = None
+    plataforma: str | None = None
+    chamado: str | None = None
+    chamado_url: str | None = None
+    texto: str
+    anexos: list[UUID] = []
+
+
+class AgentLeaseIn(BaseModel):
+    limite: int = Field(default=10, ge=1, le=100)
+
+
+class AgentLeaseOut(BaseModel):
+    tarefas: list[AgentTarefaOut]
+
+
+class AgentResultadoIn(BaseModel):
+    mensagem_id: UUID
+    ok: bool
+    erro: str | None = None
+    # Protocolo/URL capturados ao abrir (só vêm na tarefa `abrir`).
+    chamado: str | None = None
+    chamado_url: str | None = None
+
+    _clean = field_validator("erro", "chamado", "chamado_url", mode="before")(_clean_optional_text)
+
+
+class AgentRecebidaIn(BaseModel):
+    """O monitor leu uma resposta da plataforma: vai pro histórico como
+    `recebida`. Identifica o chamado por id OU por (pedido_bling, chamado)."""
+
+    chamado_id: UUID | None = None
+    pedido_bling: str | None = None
+    chamado: str | None = None
+    texto: str = Field(min_length=1)
+    resumo: str | None = None
+    resolvido: bool = False
+
+    _clean = field_validator("pedido_bling", "chamado", "resumo", mode="before")(
+        _clean_optional_text
+    )
+
+
+class AgentRecebidaOut(BaseModel):
+    chamado_id: UUID
+    mensagem_id: UUID
+    resolvido: bool

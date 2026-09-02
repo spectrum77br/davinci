@@ -184,6 +184,8 @@ app.include_router(logistica_router.router)
 app.include_router(logistica_track_router.router)
 app.include_router(informar_router.router)
 app.include_router(refunds_router.router)
+# Rotas do robô (/api/chamados/agent/*) ANTES das rotas /{chamado_id} da aba.
+app.include_router(chamados_router.agent_router)
 app.include_router(chamados_router.router)
 app.include_router(devolutions_router.router)
 app.include_router(estoque_router.router)

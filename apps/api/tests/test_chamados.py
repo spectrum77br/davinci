@@ -357,6 +357,168 @@ async def test_replica_automatica_respeita_dias(client, make_user, auth_as, db):
     assert ch.auto_ligada is False
 
 
+_TOKEN = "tok-chamados-teste"  # noqa: S105
+
+
+async def test_agent_fluxo_completo(client, make_user, auth_as, db, monkeypatch):
+    """Robô registra o chamado aberto (protocolo) → operador responde pela aba
+    (canal robô = pendente) → lease entrega a tarefa → resultado marca enviada
+    → monitor grava a resposta e resolve."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+
+    # sem token → 401
+    assert (await client.post("/api/chamados/agent/lease", json={})).status_code == 401
+
+    # 1) robô abriu o chamado de frete e capturou o protocolo
+    r = await client.post(
+        "/api/chamados/agent/registrar",
+        headers=hdr,
+        json={
+            "pedido_bling": "293412",
+            "origem": "margem",
+            "conta": "aguiar",
+            "pedido_marketplace": "2000018202286338",
+            "origem_ref": "refund-1",
+            "chamado": "462456014",
+            "chamado_url": "https://www.mercadolivre.com.br/cases/detail/462456014",
+            "mensagem": "Pedido 2000018202286338: diferença de frete R$ 12,00.",
+            "status_envio": "enviada",
+        },
+    )
+    assert r.status_code == 200, r.text
+    reg = r.json()
+    assert reg["criado"] is True and reg["mensagem_id"]
+    cid = reg["chamado_id"]
+
+    # registrar de novo o mesmo pedido NÃO duplica (atualiza)
+    r2 = await client.post(
+        "/api/chamados/agent/registrar",
+        headers=hdr,
+        json={"pedido_bling": "293412", "origem": "margem", "observacao": "quarentena"},
+    )
+    assert r2.json()["criado"] is False and r2.json()["chamado_id"] == cid
+
+    lst = await client.get("/api/chamados")
+    item = lst.json()["items"][0]
+    assert item["canal"] == "robo" and item["chamado"] == "462456014"
+    assert item["mensagens_total"] == 2  # sistema + abertura
+
+    # 2) operador responde pela aba → fica pendente na fila do robô
+    rep = await client.post(
+        f"/api/chamados/{cid}/mensagens", data={"texto": "Segue o comprovante."}
+    )
+    assert rep.json()["status"] == "pendente"
+    mid = rep.json()["id"]
+
+    # 3) lease entrega a tarefa (responder, pois já tem protocolo) e marca enviando
+    lease = await client.post("/api/chamados/agent/lease", headers=hdr, json={"limite": 10})
+    assert lease.status_code == 200, lease.text
+    tarefas = lease.json()["tarefas"]
+    assert len(tarefas) == 1
+    t = tarefas[0]
+    assert t["tipo"] == "responder" and t["mensagem_id"] == mid and t["chamado"] == "462456014"
+    assert t["texto"] == "Segue o comprovante."
+    # segundo lease não entrega de novo (está enviando)
+    assert (await client.post("/api/chamados/agent/lease", headers=hdr, json={})).json()[
+        "tarefas"
+    ] == []
+
+    # 4) robô guarda um print da evidência e devolve enviada
+    up = await client.post(
+        "/api/chamados/agent/anexo",
+        headers=hdr,
+        data={"chamado_id": cid, "mensagem_id": mid},
+        files={"file": ("print.png", PNG, "image/png")},
+    )
+    assert up.status_code == 201, up.text
+    got = await client.get(f"/api/chamados/agent/anexos/{up.json()['id']}", headers=hdr)
+    assert got.status_code == 200 and got.content == PNG
+
+    res = await client.post(
+        "/api/chamados/agent/resultado", headers=hdr, json={"mensagem_id": mid, "ok": True}
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "enviada" and res.json()["enviada_at"]
+    assert len(res.json()["anexos"]) == 1
+
+    # 5) monitor lê a resposta do ML e fecha
+    rec = await client.post(
+        "/api/chamados/agent/recebida",
+        headers=hdr,
+        json={
+            "pedido_bling": "293412",
+            "chamado": "462456014",
+            "texto": "Analisamos e o reembolso de R$ 12,00 será creditado.",
+            "resumo": "Reembolso aprovado R$ 12,00",
+            "resolvido": True,
+        },
+    )
+    assert rec.status_code == 200, rec.text
+    assert rec.json()["resolvido"] is True
+    hist = await client.get(f"/api/chamados/{cid}/mensagens")
+    direcoes = [(h["direcao"], h["tipo"], h["status"]) for h in hist.json()]
+    assert ("recebida", "resposta", "registrada") in direcoes
+    assert any(h["texto"].startswith("Reembolso aprovado") for h in hist.json())
+    assert (await client.get("/api/chamados")).json()["total"] == 0  # resolvido saiu dos abertos
+
+
+async def test_agent_lease_abrir_e_falha(client, make_user, auth_as, db, monkeypatch):
+    """Chamado criado na aba com canal robô e SEM protocolo → tarefa `abrir`;
+    resultado ok com protocolo grava na linha; falha fica visível."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados", json={"origem": "devolucao", "pedido_bling": "5", "canal": "robo"}
+    )
+    cid = r.json()["id"]
+    m1 = (
+        await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "Abrir chamado"})
+    ).json()
+    lease = (await client.post("/api/chamados/agent/lease", headers=hdr, json={})).json()["tarefas"]
+    assert lease[0]["tipo"] == "abrir" and lease[0]["mensagem_id"] == m1["id"]
+    ok = await client.post(
+        "/api/chamados/agent/resultado",
+        headers=hdr,
+        json={
+            "mensagem_id": m1["id"],
+            "ok": True,
+            "chamado": "999",
+            "chamado_url": "https://x/cases/detail/999",
+        },
+    )
+    assert ok.status_code == 200
+    item = (await client.get("/api/chamados")).json()["items"][0]
+    assert item["chamado"] == "999" and item["chamado_url"].endswith("/999")
+
+    m2 = (await client.post(f"/api/chamados/{cid}/mensagens", data={"texto": "de novo"})).json()
+    lease2 = (await client.post("/api/chamados/agent/lease", headers=hdr, json={})).json()[
+        "tarefas"
+    ]
+    assert lease2[0]["tipo"] == "responder"
+    falha = await client.post(
+        "/api/chamados/agent/resultado",
+        headers=hdr,
+        json={"mensagem_id": m2["id"], "ok": False, "erro": "formulário mudou"},
+    )
+    assert falha.json()["status"] == "falhou" and falha.json()["erro"] == "formulário mudou"
+    assert (
+        await client.post(
+            "/api/chamados/agent/resultado",
+            headers=hdr,
+            json={"mensagem_id": str(uuid4()), "ok": True},
+        )
+    ).status_code == 404
+
+
 async def test_monitoramento_fecha_quando_ml_encerra(client, make_user, auth_as, db, monkeypatch):
     user = await make_user(permissions=_perms())
     auth_as(user)
