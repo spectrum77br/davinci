@@ -60,10 +60,10 @@ const emit = defineEmits<{ (e: 'close'): void }>()
         <section class="space-y-1">
           <h3 class="font-semibold">O que o robô faz sozinho (a cada 30 min)</h3>
           <ul class="list-disc pl-5 space-y-1 text-muted-foreground">
-            <li>Pedido pendente por <span class="font-medium text-foreground">margem baixa</span> → move no Bling pra <span class="font-medium text-foreground">Aguardando Cancelamento</span>, escreve o recado nas Observações da venda e manda aviso no Threema com link de aprovar pelo celular.</li>
+            <li>Pedido pendente por <span class="font-medium text-foreground">margem baixa ou problema de saldo</span> → move no Bling pra <span class="font-medium text-foreground">Aguardando Cancelamento</span>, escreve o recado nas Observações da venda e manda aviso no Threema com link de aprovar pelo celular.</li>
             <li>Margem <span class="font-medium text-foreground">negativa</span> (abaixo de zero e abaixo da mínima) → já grava <span class="font-medium text-foreground">Reprovado</span> direto; o aviso do Threema diz "reprovado automaticamente" e o link desfaz na hora, se quisermos manter a venda.</li>
             <li>Margem <span class="font-medium text-foreground">acima de 60%</span> → só manda um alerta no Threema (geralmente é custo errado no cadastro do produto). Não mexe no pedido e avisa uma única vez.</li>
-            <li>Pedidos aguardando saldo da plataforma ou com divergência de saldo/frete o robô <span class="font-medium text-foreground">não segura</span> — só os de margem.</li>
+            <li>O robô <span class="font-medium text-foreground">não segura</span>: divergência de <span class="font-medium text-foreground">frete</span> e o "aguardando saldo" de <span class="font-medium text-foreground">ML, Shopee e TikTok</span> — esses só esperam o repasse; quando ele chega, o pedido aprova sozinho ou vira pendente de margem.</li>
           </ul>
         </section>
 
