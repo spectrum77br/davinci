@@ -16,7 +16,7 @@ from httpx import AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder, User
+from app.models import BlingOrder, User, UserRole, UserStatus
 from app.routers import margens as margens_router
 from app.services import aprovar_link
 
@@ -182,6 +182,34 @@ async def test_post_aprova_como_na_aba_margem(
         )
     ).one()
     assert tuple(snap) == ("Aprovado", str(margens_router.SITUACAO_APROVADO))
+
+
+async def test_post_conserta_email_antigo_do_usuario_sistema(
+    client: AsyncClient, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+):
+    """Banco que já criou o usuário-sistema com "@davinci.local" (domínio
+    reservado — o EmailStr do UserOut rejeita e o /api/users inteiro dava
+    500): a próxima aprovação pelo link corrige o e-mail sozinha."""
+    await _seed_pedido(db)
+    db.add(
+        User(
+            open_id="system:aprovacao-threema",
+            email="aprovacao-threema@davinci.local",
+            name="Aprovação via Threema",
+            role=UserRole.USER,
+            status=UserStatus.ACTIVE,
+        )
+    )
+    await db.commit()
+    _mock_bling(monkeypatch)
+
+    r = await client.post(f"/api/aprovar/{aprovar_link.gerar_token('291670')}")
+
+    assert r.status_code == 200
+    sistema = (
+        await db.execute(select(User).where(User.open_id == "system:aprovacao-threema"))
+    ).scalar_one()
+    assert sistema.email == "aprovacao-threema@hadken.com"
 
 
 async def test_post_ja_aprovado_e_idempotente(

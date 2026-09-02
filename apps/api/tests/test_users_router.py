@@ -1,6 +1,6 @@
 import pytest
 
-from app.models import UserRole, UserStatus
+from app.models import User, UserRole, UserStatus
 
 
 @pytest.mark.asyncio
@@ -22,6 +22,32 @@ async def test_list_users_admin_ok(client, make_user, auth_as):
     assert r.status_code == 200
     emails = {u["email"] for u in r.json()["items"]}
     assert {"admin1@davinci-test.com", "alice@davinci-test.com", "bob@davinci-test.com"} <= emails
+
+
+@pytest.mark.asyncio
+async def test_list_users_esconde_usuario_sistema(client, make_user, auth_as, db):
+    """Usuário-robô (open_id "system:…") fica fora da listagem e não derruba
+    a tela: o caso real tinha e-mail "@davinci.local", que o EmailStr do
+    UserOut rejeita — a página inteira de Usuários virava 500."""
+    admin = await make_user(role=UserRole.ADMIN, email="admin-sys@davinci-test.com")
+    db.add(
+        User(
+            open_id="system:aprovacao-threema",
+            email="aprovacao-threema@davinci.local",  # inválido pro EmailStr
+            name="Aprovação via Threema",
+            role=UserRole.USER,
+            status=UserStatus.ACTIVE,
+        )
+    )
+    await db.commit()
+    auth_as(admin)
+    r = await client.get("/api/users?per_page=100")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    emails = {u["email"] for u in body["items"]}
+    assert "admin-sys@davinci-test.com" in emails
+    assert not any(e.startswith("aprovacao-threema@") for e in emails)
+    assert body["total"] == len(body["items"])  # o count também filtra
 
 
 @pytest.mark.asyncio

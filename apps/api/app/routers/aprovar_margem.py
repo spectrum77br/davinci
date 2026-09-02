@@ -42,8 +42,10 @@ _SITUACAO_AGUARDANDO = "83955"
 _CODES_FALLBACK_LOCAL = {"bling_patch_failed", "bling_integration_missing"}
 
 # Identidade do usuário-sistema que assina as aprovações feitas pelo link.
+# ATENÇÃO: o domínio precisa ser um e-mail VÁLIDO pro EmailStr do UserOut —
+# "@davinci.local" (reservado) derrubava a listagem /api/users com 500.
 _OPEN_ID_SISTEMA = "system:aprovacao-threema"
-_EMAIL_SISTEMA = "aprovacao-threema@davinci.local"
+_EMAIL_SISTEMA = "aprovacao-threema@hadken.com"
 _NOME_SISTEMA = "Aprovação via Threema"
 
 
@@ -121,6 +123,11 @@ async def _usuario_sistema(session: AsyncSession) -> User:
             status=UserStatus.ACTIVE,
         )
         session.add(u)
+        await session.flush()
+    elif u.email != _EMAIL_SISTEMA:
+        # Auto-conserto: linha antiga com "@davinci.local" quebrava o
+        # /api/users (500) — atualiza pro e-mail válido na passada.
+        u.email = _EMAIL_SISTEMA
         await session.flush()
     return u
 

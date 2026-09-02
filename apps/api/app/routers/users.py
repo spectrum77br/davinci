@@ -95,7 +95,9 @@ async def list_users(
     stmt = select(User)
     count_stmt = select(func.count()).select_from(User)
 
-    filters = []
+    # Usuários-sistema (open_id "system:…", ex.: aprovação via Threema) não
+    # são contas gerenciáveis — ficam fora da tela de Usuários.
+    filters = [User.open_id.notlike("system:%")]
     if not include_disabled:
         filters.append(User.disabled_at.is_(None))
     if q:
