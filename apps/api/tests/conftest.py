@@ -159,6 +159,10 @@ async def _setup_schema():
                     marketplace_frete_real_cobrado_item numeric,
                     marketplace_frete_item numeric,
                     marketplace_margem numeric,
+                    -- Lucro real do item (marketplace): somado por pedido nas
+                    -- mensagens Threema da Margem (Informar + aviso do
+                    -- auto-hold). Existe em prod desde sempre; faltava aqui.
+                    marketplace_lucro numeric,
                     evento_freight numeric,
                     evento_frete_anuncio numeric,
                     -- Carimbo do sync financeiro ('pending' = sem transação
@@ -376,6 +380,7 @@ _CLEANUP_TABLES = (
     "logistica_status_anexo",
     "logistica_status",
     "logistica",
+    "threema_informar_config",
     "user_settings",
     "users",
 )

@@ -91,18 +91,50 @@ def test_linhas_estoque_espelha_aviso_do_sweep():
     ]
 
 
-# ---- linhas_margem ----
+# ---- mensagens da margem (uma por pedido) ----
 
 
-def test_linhas_margem_mesma_forma_do_estoque():
-    entries = [
-        ("402003", "", "pendente de análise"),
-        ("402001", "ml Loja ML", "margem abaixo do mínimo"),
+def test_mensagem_margem_pedido_completa():
+    p = informar.MargemPedido(
+        pedido="402001",
+        loja="ml Loja ML",
+        motivo="margem abaixo do mínimo",
+        margem=-3.2,
+        minima=8,
+        lucro=-1234.5,
+    )
+    msg = informar.mensagem_margem_pedido(p, cabecalho="Cab", rodape="Rod")
+    assert msg.splitlines() == [
+        "Cab",
+        "Pedido 402001 — ml Loja ML",
+        "Motivo: margem abaixo do mínimo",
+        "Margem: -3,2% (mínimo 8%)",
+        "Lucro: R$ -1.234,50",
+        "Rod",
     ]
-    assert informar.linhas_margem(entries) == [
-        "Pedido 402001 (ml Loja ML): margem abaixo do mínimo",
-        "Pedido 402003: pendente de análise",
+
+
+def test_mensagem_margem_pedido_sem_numeros_nem_loja():
+    """Pedido segurado sem gatilho de margem (números NULL) e sem loja: só
+    cabeçalho, pedido e motivo."""
+    p = informar.MargemPedido(pedido="1", loja="", motivo="pendente de análise")
+    assert informar.mensagem_margem_pedido(p, cabecalho="X").splitlines() == [
+        "X",
+        "Pedido 1",
+        "Motivo: pendente de análise",
     ]
+
+
+def test_mensagens_margem_numera_e_ordena_por_pedido():
+    a = informar.MargemPedido(pedido="2", loja="l2", motivo="m")
+    b = informar.MargemPedido(pedido="1", loja="l1", motivo="m")
+    msgs = informar.mensagens_margem([a, b], "Cab")
+    assert len(msgs) == 2
+    assert msgs[0].startswith("Cab (1/2)\nPedido 1")
+    assert msgs[1].startswith("Cab (2/2)\nPedido 2")
+    # Um pedido só → cabeçalho sem numeração.
+    assert informar.mensagens_margem([a], "Cab")[0].startswith("Cab\nPedido 2")
+    assert informar.mensagens_margem([], "Cab") == []
 
 
 # ---- montar_mensagens ----
@@ -193,8 +225,11 @@ async def test_informar_margem_libera_gerente_por_email(
     auth_as(u)
 
     assert (await client.get("/api/informar/margem")).status_code == 200
+    assert (await client.get("/api/informar/margem_auto")).status_code == 200
     assert (await client.get("/api/informar/logistica")).status_code == 403
     assert (await client.get("/api/informar/controle_estoque")).status_code == 403
+    # margem_auto não tem envio manual — quem envia é o robô do auto-hold.
+    assert (await client.post("/api/informar/margem_auto/enviar")).status_code == 404
 
 
 # ---- contexto margem (relatório dos pendentes) ----
@@ -223,8 +258,9 @@ async def test_informar_margem_enviar_lista_pendentes_com_motivo(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """O relatório da Margem manda EXATAMENTE o que a aba Pendentes mostra,
-    um por pedido (dedup de itens) com o motivo do auto-hold; aprovado fica
-    de fora e 'Pendente' gravado sem gatilho vira "pendente de análise"."""
+    UMA MENSAGEM POR PEDIDO (dedup de itens) com conta, motivo, margem vs
+    mínima e lucro somado; aprovado fica de fora e 'Pendente' gravado sem
+    gatilho vira "pendente de análise" sem linhas de número."""
     from sqlalchemy import text
 
     from app.config import get_settings
@@ -232,8 +268,9 @@ async def test_informar_margem_enviar_lista_pendentes_com_motivo(
 
     await db.execute(text("DELETE FROM verificar_margem"))
     await db.commit()
-    # Pendente por margem baixa (2 itens do MESMO pedido → uma linha só).
-    for sku in ("sku-a", "sku-b"):
+    # Pendente por margem baixa (2 itens do MESMO pedido → uma mensagem só,
+    # lucro somado: -10 + -5 = -15).
+    for sku, lucro in (("sku-a", -10), ("sku-b", -5)):
         await _seed_margem(
             db,
             pedido_bling="402001",
@@ -244,6 +281,7 @@ async def test_informar_margem_enviar_lista_pendentes_com_motivo(
             situacao_nome="Em aberto",
             marketplace_margem=2,
             margem_minima=8,
+            marketplace_lucro=lucro,
         )
     # Sem gatilho nenhum → Aprovado derivado → fora do relatório.
     await _seed_margem(
@@ -290,10 +328,18 @@ async def test_informar_margem_enviar_lista_pendentes_com_motivo(
     assert r.status_code == 200
     body = r.json()
     assert body["pedidos"] == 2
+    assert body["mensagens"] == 2
     assert body["sent"] == ["AAAA1111"]
-    assert len(enviados) == 1
+    assert len(enviados) == 2
     assert enviados[0].splitlines() == [
-        "DaVinci — Margem: pedidos pendentes de análise (2)",
-        "Pedido 402001 (ml Loja ML): margem abaixo do mínimo",
-        "Pedido 402003: pendente de análise",
+        "DaVinci — Margem: pendente de análise (1/2)",
+        "Pedido 402001 — ml Loja ML",
+        "Motivo: margem abaixo do mínimo",
+        "Margem: 2% (mínimo 8%)",
+        "Lucro: R$ -15,00",
+    ]
+    assert enviados[1].splitlines() == [
+        "DaVinci — Margem: pendente de análise (2/2)",
+        "Pedido 402003",
+        "Motivo: pendente de análise",
     ]

@@ -6,14 +6,18 @@ Funções PURAS (sem banco) pra dar teste fácil:
   - status bling`.
 - `linhas_estoque`: uma linha por pedido movido pra Aguardando Cancelamento
   por falta de estoque (espelha o aviso automático do sweep de NF).
-- `linhas_margem`: uma linha por pedido pendente de análise na Margem, com o
-  motivo (mesma forma das linhas do Controle de Estoque).
+- `mensagem_margem_pedido`/`mensagens_margem`: UMA mensagem POR PEDIDO da
+  Margem, com conta, motivo, margem vs mínima e lucro em R$ — pedido do
+  Eduardo (02/09): "veio todas as margens que deram negativa juntos, tem que
+  ser separado com o nome da conta, a diferença de valor". Usadas pelo botão
+  Informar da Margem E pelo aviso automático do auto-hold.
 - `montar_mensagens`: fatia as linhas em mensagens que cabem no limite de
   3500 bytes do Threema Basic (com folga), numerando as partes.
 """
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import NamedTuple
 
 from app.models import Logistica
 from app.services import logistica_rules
@@ -63,10 +67,72 @@ def linhas_estoque(entries: Iterable[tuple[str, str, str]]) -> list[str]:
     return out
 
 
-def linhas_margem(entries: Iterable[tuple[str, str, str]]) -> list[str]:
-    """Entradas `(pedido, rótulo plataforma+conta, motivo)` → `Pedido N
-    (loja): motivo` — mesma forma (e ordenação) das linhas do estoque."""
-    return linhas_estoque(entries)
+class MargemPedido(NamedTuple):
+    """Um pedido pendente da Margem, já agregado por pedido (dedup de itens).
+
+    `margem` = a PIOR margem entre os itens que dispararam o gatilho;
+    `minima` = a mínima exigida desses itens; `lucro` = soma do lucro real
+    (marketplace) de todos os itens do pedido. Números None ficam de fora da
+    mensagem (pedido segurado por saldo, por exemplo, não tem margem baixa)."""
+
+    pedido: str
+    loja: str
+    motivo: str
+    margem: float | None = None
+    minima: float | None = None
+    lucro: float | None = None
+
+
+def _pct(v: float) -> str:
+    """Percentual em pt-BR: inteiro sem casas (`8%`), senão 1 casa (`-3,2%`)."""
+    if v == int(v):
+        return f"{int(v)}%"
+    return f"{v:.1f}%".replace(".", ",")
+
+
+def _moeda(v: float) -> str:
+    """`R$ -1.234,56` — 2 casas, vírgula decimal, ponto de milhar."""
+    s = f"{v:,.2f}".replace(",", "\0").replace(".", ",").replace("\0", ".")
+    return f"R$ {s}"
+
+
+def mensagem_margem_pedido(
+    p: MargemPedido, *, cabecalho: str, rodape: str | None = None
+) -> str:
+    """Texto de UM pedido da Margem pro Threema.
+
+    Cabeçalho, `Pedido N — loja`, motivo, margem vs mínima e lucro (linhas de
+    número só quando o dado existe), e um rodapé opcional (o aviso automático
+    usa pra dizer que a situação foi movida)."""
+    linhas = [cabecalho]
+    titulo = f"Pedido {p.pedido}"
+    if (p.loja or "").strip():
+        titulo += f" — {p.loja.strip()}"
+    linhas.append(titulo)
+    linhas.append(f"Motivo: {p.motivo}")
+    if p.margem is not None:
+        margem = f"Margem: {_pct(p.margem)}"
+        if p.minima is not None:
+            margem += f" (mínimo {_pct(p.minima)})"
+        linhas.append(margem)
+    if p.lucro is not None:
+        linhas.append(f"Lucro: {_moeda(p.lucro)}")
+    if rodape:
+        linhas.append(rodape)
+    return "\n".join(linhas)
+
+
+def mensagens_margem(entries: Iterable[MargemPedido], cabecalho: str) -> list[str]:
+    """Relatório do botão Informar da Margem: UMA mensagem por pedido, em ordem
+    de pedido, com `(i/n)` no cabeçalho quando há mais de um. Sem pendentes →
+    lista vazia (quem chama manda o texto de "nada a informar")."""
+    ordenados = sorted(entries, key=lambda p: p.pedido)
+    total = len(ordenados)
+    out: list[str] = []
+    for i, p in enumerate(ordenados, start=1):
+        cab = cabecalho if total == 1 else f"{cabecalho} ({i}/{total})"
+        out.append(mensagem_margem_pedido(p, cabecalho=cab))
+    return out
 
 
 def montar_mensagens(

@@ -52,6 +52,7 @@ marcados).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 
 import httpx
@@ -60,8 +61,14 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import BlingOrder, Integration, IntegrationPlatform
+from app.models import (
+    BlingOrder,
+    Integration,
+    IntegrationPlatform,
+    ThreemaInformarConfig,
+)
 from app.security.cipher import decrypt_json
+from app.services import informar, threema
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
@@ -118,13 +125,21 @@ def _candidatos_sql() -> str:
     return f"""
         SELECT v.pedido_bling,
                MAX(v.bling_id)                  AS bling_id,
+               MAX(COALESCE(v.plataforma_bling, v.plataforma_financeiro))
+                                                AS plataforma,
+               MAX(v.loja_nome)                 AS conta,
                BOOL_OR({_ATTENTION_MARGEM_SQL}) AS margem_baixa,
                BOOL_OR({_ATTENTION_SALDO_SQL}
                        AND v.marketplace_liquido_base_margem_item IS NOT NULL)
                                                 AS saldo_divergente,
                BOOL_OR({_ATTENTION_SALDO_SQL}
                        AND v.marketplace_liquido_base_margem_item IS NULL)
-                                                AS saldo_pendente
+                                                AS saldo_pendente,
+               MIN(v.marketplace_margem)
+                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) AS margem,
+               MAX(v.margem_minima)
+                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) AS minima,
+               SUM(v.marketplace_lucro)         AS lucro
         FROM {SNAPSHOT_TABLE} v
         WHERE v.situacao = '{SITUACAO_EM_ABERTO}'
           AND v.bling_id IS NOT NULL
@@ -219,6 +234,60 @@ async def _hold_one(
     await session.commit()
 
 
+async def _avisar_threema(session: AsyncSession, r: Mapping, motivo: str) -> None:
+    """Aviso Threema NA HORA do hold, pros destinatários do cadastro
+    `margem_auto` (segunda lista do modal Informar da Margem). Uma mensagem
+    por pedido, com conta, motivo, margem vs mínima e lucro — pedido do
+    Eduardo (02/09): avisar na hora pra ele decidir do celular. Best-effort:
+    sem destinatários cadastrados não manda nada; falha de envio é logada e
+    NÃO desfaz nem conta contra o hold (o essencial é segurar o pedido)."""
+    row = (
+        await session.execute(
+            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == "margem_auto")
+        )
+    ).scalar_one_or_none()
+    recipients = threema.parse_recipients(row.recipients if row else "")
+    if not recipients:
+        return
+    loja = " ".join(
+        p
+        for p in (
+            str(r["plataforma"] or "").strip(),
+            str(r["conta"] or "").strip(),
+        )
+        if p
+    )
+    msg = informar.mensagem_margem_pedido(
+        informar.MargemPedido(
+            pedido=str(r["pedido_bling"]),
+            loja=loja,
+            motivo=motivo,
+            margem=None if r["margem"] is None else float(r["margem"]),  # type: ignore[arg-type]
+            minima=None if r["minima"] is None else float(r["minima"]),  # type: ignore[arg-type]
+            lucro=None if r["lucro"] is None else float(r["lucro"]),  # type: ignore[arg-type]
+        ),
+        cabecalho="DaVinci — Margem: pedido segurado para análise",
+        rodape=(
+            "Situação movida para Aguardando Cancelamento. "
+            "Aprovar na aba Margem devolve o pedido ao fluxo."
+        ),
+    )
+    try:
+        result = await threema.ThreemaClient().send_to_all(msg, recipients)
+        logger.info(
+            "margem_auto_hold_threema",
+            pedido_bling=str(r["pedido_bling"]),
+            sent=result.get("sent", []),
+            failed=result.get("failed", []),
+        )
+    except Exception as e:  # noqa: BLE001 — aviso é acessório, hold já feito
+        logger.warning(
+            "margem_auto_hold_threema_falhou",
+            pedido_bling=str(r["pedido_bling"]),
+            erro=str(e)[:200],
+        )
+
+
 async def run(
     session: AsyncSession,
     *,
@@ -261,6 +330,7 @@ async def run(
                 bling_id=int(r["bling_id"]),
                 motivo=motivo,
             )
+            await _avisar_threema(session, r, motivo)
         except Exception as e:  # noqa: BLE001 — um pedido não derruba os demais
             failed += 1
             await session.rollback()

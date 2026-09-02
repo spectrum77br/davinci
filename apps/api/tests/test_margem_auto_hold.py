@@ -88,6 +88,8 @@ async def _seed_pedido(
     saldo_aguardando: bool = False,
     frete_estourado: bool = False,
     plataforma: str = "amazon",
+    loja: str | None = None,
+    lucro: float | None = None,
     data: datetime | None = None,
     leaf_segment_id: object = None,
 ) -> None:
@@ -121,9 +123,9 @@ async def _seed_pedido(
             """
             INSERT INTO verificar_margem (
                 bling_order_item_id, pedido_bling, bling_id, sku,
-                situacao, situacao_nome, plataforma_bling, item_proportion,
-                bling_status_margem,
-                marketplace_margem, margem_minima,
+                situacao, situacao_nome, plataforma_bling, loja_nome,
+                item_proportion, bling_status_margem,
+                marketplace_margem, margem_minima, marketplace_lucro,
                 bling_valorbase_item,
                 marketplace_liquido_base_margem_item,
                 evento_frete_anuncio, marketplace_frete_real_cobrado_item,
@@ -131,9 +133,9 @@ async def _seed_pedido(
             )
             VALUES (
                 :id, :pedido, :bling_id, :sku,
-                :situacao, :situacao_nome, :plataforma, 1,
-                :status,
-                :margem, :minima,
+                :situacao, :situacao_nome, :plataforma, :loja,
+                1, :status,
+                :margem, :minima, :lucro,
                 :valorbase,
                 :liquido,
                 :frete_anuncio, :frete_pago,
@@ -153,11 +155,13 @@ async def _seed_pedido(
             "status": status,
             "margem": 5 if margem_baixa else 50,
             "minima": 10,
+            "lucro": lucro,
             "valorbase": 100 if (saldo_gap or saldo_aguardando) else None,
             "liquido": 80 if saldo_gap else None,
             "frete_anuncio": 10 if frete_estourado else None,
             "frete_pago": 30 if frete_estourado else None,
             "plataforma": plataforma,
+            "loja": loja,
             "data": data,
             "leaf_segment_id": (
                 None if leaf_segment_id is None else str(leaf_segment_id)
@@ -603,3 +607,78 @@ async def test_nao_segura_margem_baixa_em_data_especial(db: AsyncSession):
     snap_isento = await _snapshot(db, "291690")
     assert snap_isento["situacao"] == "6"
     assert snap_isento["bling_status_margem"] is None
+
+
+async def test_hold_avisa_threema_cadastrado(db: AsyncSession, monkeypatch):
+    """Com destinatários no cadastro `margem_auto` (segunda lista do modal
+    Informar da Margem), o hold manda NA HORA uma mensagem por pedido com
+    conta, motivo, margem vs mínima e lucro. Sem cadastro, nada é enviado —
+    coberto pelos demais testes, que rodam sem config e sem fake."""
+    from app.models import ThreemaInformarConfig
+    from app.services import threema
+
+    await _seed_pedido(
+        db,
+        pedido="291670",
+        bling_id=111,
+        plataforma="ml",
+        loja="Loja ML",
+        lucro=-15.5,
+    )
+    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111,BBBB2222"))
+    await db.commit()
+
+    enviados: list[tuple[str, list[str]]] = []
+
+    class _FakeThreema:
+        def __init__(self, *a: object, **k: object) -> None: ...
+
+        async def send_to_all(self, msg: str, recipients: list[str]) -> dict:
+            enviados.append((msg, list(recipients)))
+            return {"sent": list(recipients), "failed": []}
+
+    monkeypatch.setattr(threema, "ThreemaClient", _FakeThreema)
+
+    res = await margem_auto_hold.run(db, client=FakeBling(), hoje=HOJE)
+
+    assert res == {"held": 1, "failed": 0}
+    assert len(enviados) == 1
+    msg, recipients = enviados[0]
+    assert recipients == ["AAAA1111", "BBBB2222"]
+    assert msg.splitlines() == [
+        "DaVinci — Margem: pedido segurado para análise",
+        "Pedido 291670 — ml Loja ML",
+        "Motivo: margem abaixo do mínimo",
+        "Margem: 5% (mínimo 10%)",
+        "Lucro: R$ -15,50",
+        "Situação movida para Aguardando Cancelamento. "
+        "Aprovar na aba Margem devolve o pedido ao fluxo.",
+    ]
+
+
+async def test_hold_falha_no_threema_nao_desfaz_o_hold(
+    db: AsyncSession, monkeypatch
+):
+    """O aviso é acessório: Threema fora do ar não desfaz nem conta contra o
+    hold — o pedido fica segurado e o run reporta sucesso."""
+    from app.models import ThreemaInformarConfig
+    from app.services import threema
+
+    await _seed_pedido(db, pedido="291670", bling_id=111)
+    db.add(ThreemaInformarConfig(contexto="margem_auto", recipients="AAAA1111"))
+    await db.commit()
+
+    class _Boom:
+        def __init__(self, *a: object, **k: object) -> None: ...
+
+        async def send_to_all(self, msg: str, recipients: list[str]) -> dict:
+            raise RuntimeError("threema fora do ar")
+
+    monkeypatch.setattr(threema, "ThreemaClient", _Boom)
+
+    res = await margem_auto_hold.run(db, client=FakeBling(), hoje=HOJE)
+
+    assert res == {"held": 1, "failed": 0}
+    snap = await _snapshot(db, "291670")
+    assert snap["situacao"] == "83955"
+    assert snap["bling_status_margem"] == "Pendente"

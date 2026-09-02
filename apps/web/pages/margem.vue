@@ -1266,11 +1266,13 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       @close="raioXPedido = null"
     />
 
-    <!-- Modal do botão INFORMAR (admin-only) -->
+    <!-- Modal do botão INFORMAR (admins + gerente) -->
     <InformarThreemaModal
       :open="informarMargemOpen"
       contexto="margem"
-      descricao="Manda via Threema os pedidos pendentes de análise na aba Pendentes da Margem, com o motivo de cada um. A seleção de destinatários fica salva."
+      descricao="Manda via Threema os pedidos pendentes de análise na aba Pendentes da Margem — uma mensagem por pedido, com conta, motivo, margem e lucro. A seleção de destinatários fica salva."
+      contexto-auto="margem_auto"
+      descricao-auto="Quando o robô segurar um pedido por margem (Aguardando Cancelamento), manda na hora uma mensagem só pra quem estiver marcado aqui."
       @close="informarMargemOpen = false"
     />
   </div>

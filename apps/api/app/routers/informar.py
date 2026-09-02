@@ -9,13 +9,21 @@ Três contextos:
   falta de estoque (marca `sem_estoque` na nf_faturamento) que AINDA estão
   nessa situação no Bling.
 - `margem`: manda os pedidos pendentes de análise na aba Pendentes da Margem
-  (mesmo WHERE da listagem com status=Pendente), um por pedido com o motivo —
-  as mesmas palavras do recado que o auto-hold escreve no Bling.
+  (mesmo WHERE da listagem com status=Pendente), UMA MENSAGEM POR PEDIDO com
+  conta, motivo, margem vs mínima e lucro — pedido do Eduardo (02/09): "veio
+  todas as margens que deram negativa juntos, tem que ser separado com o nome
+  da conta, a diferença de valor".
+
+Há ainda um quarto cadastro SEM envio manual: `margem_auto` guarda quem
+recebe o aviso automático que o auto-hold manda NA HORA em que segura um
+pedido (services/margem_auto_hold._avisar_threema). Ele aceita GET/PUT como
+os demais (o modal da Margem edita os dois), mas `/enviar` não existe pra ele
+— quem envia é o robô.
 
 Cada contexto tem seu cadastro de destinatários (`threema_informar_config`),
 editado no modal do botão; o diretório de nomes vem do `.env` (o mesmo do
 seletor da aba Status). Tudo aqui exige admin — botão, cadastro e envio —
-com UMA exceção: o contexto `margem` também libera o gerente por e-mail
+com UMA exceção: os contextos da Margem também liberam o gerente por e-mail
 (_EMAILS_EXTRAS; pedido do Eduardo 01/09: "pro cairo que é gerente pode
 aparecer informar na aba margem").
 """
@@ -51,14 +59,20 @@ logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/informar", tags=["informar"])
 
-_CONTEXTOS = ("logistica", "controle_estoque", "margem")
+# Contextos com cadastro (GET/PUT). `margem_auto` NÃO tem envio manual — é a
+# lista do aviso automático do auto-hold (ver docstring do módulo).
+_CONTEXTOS = ("logistica", "controle_estoque", "margem", "margem_auto")
+_CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem")
 
 # Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
-# exceção: o gerente (Cairo) vê e usa o botão de lá; Logística e Controle de
-# Estoque seguem admin-only. Espelho no front: INFORMAR_MARGEM_USERS em
-# pages/margem.vue — mudou aqui, muda lá.
+# exceção: o gerente (Cairo) vê e usa o botão de lá (incluindo o cadastro do
+# aviso automático); Logística e Controle de Estoque seguem admin-only.
+# Espelho no front: INFORMAR_MARGEM_USERS em pages/margem.vue — mudou aqui,
+# muda lá.
+_EMAILS_MARGEM = frozenset({"sa.geral@tutamail.com"})
 _EMAILS_EXTRAS: dict[str, frozenset[str]] = {
-    "margem": frozenset({"sa.geral@tutamail.com"}),
+    "margem": _EMAILS_MARGEM,
+    "margem_auto": _EMAILS_MARGEM,
 }
 
 
@@ -212,13 +226,15 @@ async def _linhas_estoque(session: AsyncSession) -> list[str]:
     return informar.linhas_estoque(entries)
 
 
-async def _linhas_margem(session: AsyncSession) -> list[str]:
+async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
     """Os pedidos que a aba Pendentes da Margem está MOSTRANDO agora — mesmo
     WHERE da listagem com status=Pendente (routers/margens.py), agregado por
     pedido. O motivo por pedido usa as mesmas palavras do recado do auto-hold
     (`margem_auto_hold._motivo`), com "aguardando saldo da plataforma"
     cobrindo tanto o líquido nulo das não-confiáveis (Amazon pré-settlement)
-    quanto o das confiáveis (ML/Shopee/TikTok)."""
+    quanto o das confiáveis (ML/Shopee/TikTok). Os números por pedido: pior
+    margem entre os itens que dispararam o gatilho (e a mínima exigida deles)
+    + soma do lucro real de todos os itens."""
     # Import tardio como em margem_auto_hold: a definição canônica de
     # "Pendente" mora em routers/margens.py — buscar lá garante que o relatório
     # mostra EXATAMENTE o que a aba mostra (se a regra mudar, muda junto).
@@ -243,7 +259,12 @@ async def _linhas_margem(session: AsyncSession) -> list[str]:
                BOOL_OR(({_ATTENTION_SALDO_SQL}
                         AND v.marketplace_liquido_base_margem_item IS NULL)
                        OR {_ATTENTION_SALDO_AGUARDANDO_SQL})
-                                                AS saldo_pendente
+                                                AS saldo_pendente,
+               MIN(v.marketplace_margem)
+                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) AS margem,
+               MAX(v.margem_minima)
+                   FILTER (WHERE {_ATTENTION_MARGEM_SQL}) AS minima,
+               SUM(v.marketplace_lucro)         AS lucro
         FROM {SNAPSHOT_TABLE} v
         WHERE v.situacao_nome != 'Cancelado'
           AND (v.situacao IS DISTINCT FROM '{SITUACAO_REPROVADO}'
@@ -255,10 +276,10 @@ async def _linhas_margem(session: AsyncSession) -> list[str]:
         ORDER BY v.pedido_bling
     """  # noqa: S608 — fragmentos fixos vindos da aba, sem input de usuário
     rows = (await session.execute(text(sql))).mappings().all()
-    entries = [
-        (
-            str(r["pedido_bling"]),
-            " ".join(
+    return [
+        informar.MargemPedido(
+            pedido=str(r["pedido_bling"]),
+            loja=" ".join(
                 p
                 for p in (
                     (r["plataforma"] or "").strip(),
@@ -266,15 +287,17 @@ async def _linhas_margem(session: AsyncSession) -> list[str]:
                 )
                 if p
             ),
-            _motivo_margem(
+            motivo=_motivo_margem(
                 bool(r["margem_baixa"]),
                 bool(r["saldo_divergente"]),
                 bool(r["saldo_pendente"]),
             ),
+            margem=None if r["margem"] is None else float(r["margem"]),
+            minima=None if r["minima"] is None else float(r["minima"]),
+            lucro=None if r["lucro"] is None else float(r["lucro"]),
         )
         for r in rows
     ]
-    return informar.linhas_margem(entries)
 
 
 _CABECALHOS = {
@@ -282,7 +305,7 @@ _CABECALHOS = {
     "controle_estoque": (
         "DaVinci — Controle de Estoque: Aguardando Cancelamento por falta de estoque"
     ),
-    "margem": "DaVinci — Margem: pedidos pendentes de análise",
+    "margem": "DaVinci — Margem: pendente de análise",
 }
 _VAZIO = {
     "logistica": "DaVinci — Logística: nenhum pedido acompanhado no momento.",
@@ -296,8 +319,19 @@ _VAZIO = {
 _LINHAS = {
     "logistica": _linhas_logistica,
     "controle_estoque": _linhas_estoque,
-    "margem": _linhas_margem,
 }
+
+
+async def _montar_envio(contexto: str, session: AsyncSession) -> tuple[int, list[str]]:
+    """(nº de pedidos, mensagens prontas) do contexto. Margem manda UMA
+    mensagem por pedido; os demais juntam as linhas numa lista fatiada."""
+    if contexto == "margem":
+        pedidos = await _pedidos_margem(session)
+        return len(pedidos), informar.mensagens_margem(pedidos, _CABECALHOS["margem"])
+    linhas = await _LINHAS[contexto](session)
+    return len(linhas), informar.montar_mensagens(
+        f"{_CABECALHOS[contexto]} ({len(linhas)})", linhas
+    )
 
 
 @router.post("/{contexto}/enviar", response_model=InformarEnviarOut)
@@ -307,7 +341,10 @@ async def enviar(
     user: Annotated[User, Depends(require_active_user)],
 ) -> InformarEnviarOut:
     """Monta o relatório do contexto e manda pros destinatários cadastrados."""
-    contexto = _valida_contexto(contexto)
+    if contexto not in _CONTEXTOS_ENVIO:  # margem_auto: só o robô envia
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail={"code": "contexto_desconhecido"}
+        )
     _exige_acesso(user, contexto)
     row = await _config_row(session, contexto)
     recipients = threema.parse_recipients(row.recipients if row else "")
@@ -316,10 +353,8 @@ async def enviar(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "sem_destinatarios"},
         )
-    linhas = await _LINHAS[contexto](session)
-    mensagens = informar.montar_mensagens(
-        f"{_CABECALHOS[contexto]} ({len(linhas)})", linhas
-    ) or [_VAZIO[contexto]]
+    total, mensagens = await _montar_envio(contexto, session)
+    mensagens = mensagens or [_VAZIO[contexto]]
     client = threema.ThreemaClient()
     sent_ok: set[str] = set()
     failed: set[str] = set()
@@ -336,13 +371,13 @@ async def enviar(
     logger.info(
         "informar_enviado",
         contexto=contexto,
-        pedidos=len(linhas),
+        pedidos=total,
         mensagens=len(mensagens),
         sent=sorted(sent_ok - failed),
         failed=sorted(failed),
     )
     return InformarEnviarOut(
-        pedidos=len(linhas),
+        pedidos=total,
         mensagens=len(mensagens),
         sent=sorted(sent_ok - failed),
         failed=sorted(failed),
