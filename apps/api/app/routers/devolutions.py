@@ -169,6 +169,18 @@ def _build_where(
     return where
 
 
+def _cliente_scalar_subquery():
+    """Nome do cliente mora em bling_orders (nome_destinatario), não em
+    devolutions — subquery correlacionada pelo número do pedido (grão de
+    bling_orders é ITEM: MAX colapsa e ignora NULLs)."""
+    return (
+        select(func.max(BlingOrder.nome_destinatario))
+        .where(BlingOrder.numero == Devolution.pedido_bling)
+        .correlate(Devolution)
+        .scalar_subquery()
+    )
+
+
 @router.get("", response_model=DevolutionPage)
 async def list_devolutions(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -191,7 +203,7 @@ async def list_devolutions(
     )
 
     stmt = (
-        select(Devolution)
+        select(Devolution, _cliente_scalar_subquery().label("cliente"))
         .where(*where)
         .order_by(desc(Devolution.data).nulls_last(), desc(Devolution.created_at))
         .limit(limit)
@@ -199,11 +211,17 @@ async def list_devolutions(
     )
     count_stmt = select(func.count()).select_from(Devolution).where(*where)
 
-    items = (await session.execute(stmt)).scalars().all()
+    rows = (await session.execute(stmt)).all()
     total = (await session.execute(count_stmt)).scalar_one()
 
+    items: list[DevolutionOut] = []
+    for dev, cliente in rows:
+        out = DevolutionOut.model_validate(dev)
+        out.cliente = cliente
+        items.append(out)
+
     return DevolutionPage(
-        items=[DevolutionOut.model_validate(item) for item in items],
+        items=items,
         total=int(total or 0),
         limit=limit,
         offset=offset,
@@ -337,6 +355,7 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Pedido Bling", "pedido_bling"),
     ("Pedido Marketplace", "pedido_marketplace"),
     ("Conta", "conta"),
+    ("Cliente", "cliente"),
     ("SKU", "sku"),
     ("Tag", "tag"),
     ("Produtos", "produtos"),
@@ -378,21 +397,21 @@ async def export_devolutions(
     )
     rows = (
         await session.execute(
-            select(Devolution)
+            select(Devolution, _cliente_scalar_subquery().label("cliente"))
             .where(*where)
             .order_by(desc(Devolution.data).nulls_last(), desc(Devolution.created_at))
         )
-    ).scalars().all()
+    ).all()
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Devoluções"
     ws.append([label for label, _ in _EXPORT_COLUMNS])
 
-    for r in rows:
+    for r, cliente in rows:
         line = []
         for _, field in _EXPORT_COLUMNS:
-            value = getattr(r, field, None)
+            value = cliente if field == "cliente" else getattr(r, field, None)
             if field in ("data", "created_at", "data_devolvido_estoque", "prazo"):
                 line.append(_fmt_dt_sp(value))
             elif field in ("reembolso", "devolver_estoque", "manutencao"):
@@ -1079,17 +1098,24 @@ async def backfill_addresses(
     NULL nome_destinatario. Calls GET /pedidos/vendas/{bling_id} individually.
     Returns counts of processed / updated / failed records.
     """
+    from app.services.bling_orders import _melhor_nome_destinatario
     from app.services.devolution_stock_return import _get_bling_client
 
     _SITUACOES = ("83957", "83960", "83961", "83966", "84677", "545902")
 
-    # Find orders that need backfill
+    # Find orders that need backfill. nome ILIKE 'amazon%' pega pedidos
+    # gravados antes do fix do nome genérico (transporte.contato.nome era a
+    # CONTA "Amazon DBA"/"Amazon KFA", não o cliente) — o botão "atualizar
+    # clientes" da aba re-busca e conserta esses também.
     rows = (
         await session.execute(
             select(BlingOrder.id, BlingOrder.bling_id, BlingOrder.numero)
             .where(
                 BlingOrder.situacao.in_(_SITUACOES),
-                BlingOrder.nome_destinatario.is_(None),
+                or_(
+                    BlingOrder.nome_destinatario.is_(None),
+                    BlingOrder.nome_destinatario.ilike("amazon%"),
+                ),
                 BlingOrder.bling_id.is_not(None),
             )
             .order_by(desc(BlingOrder.data))
@@ -1121,16 +1147,35 @@ async def backfill_addresses(
             t_contato = t_contato if isinstance(t_contato, dict) else {}
             t_endereco = transporte.get("enderecoEntrega") or {}
             t_endereco = t_endereco if isinstance(t_endereco, dict) else {}
+            # v3 traz o endereço (e o nome real do cliente na Amazon) em
+            # transporte.etiqueta — mesma cadeia do parse principal.
+            t_etiqueta = transporte.get("etiqueta") or {}
+            t_etiqueta = t_etiqueta if isinstance(t_etiqueta, dict) else {}
             buyer = raw.get("contato") or {}
             buyer = buyer if isinstance(buyer, dict) else {}
             buyer_end = buyer.get("endereco") or {}
             buyer_end = buyer_end if isinstance(buyer_end, dict) else {}
 
-            def _v(tp_f: str, buyer_f: str | None = None) -> str | None:
-                return t_endereco.get(tp_f) or buyer_end.get(buyer_f or tp_f) or None
+            def _v(
+                tp_f: str,
+                buyer_f: str | None = None,
+                *,
+                _en: dict = t_endereco,
+                _et: dict = t_etiqueta,
+                _ben: dict = buyer_end,
+            ) -> str | None:
+                # defaults amarram os dicts DESTA iteração (closure em loop).
+                return (
+                    _en.get(tp_f)
+                    or _et.get(tp_f)
+                    or _ben.get(buyer_f or tp_f)
+                    or None
+                )
 
             values: dict = {}
-            nome = t_contato.get("nome") or buyer.get("nome") or None
+            nome = _melhor_nome_destinatario(
+                t_contato.get("nome"), t_etiqueta.get("nome"), buyer.get("nome")
+            )
             if nome:
                 values["nome_destinatario"] = nome
             for col, tp_f in [

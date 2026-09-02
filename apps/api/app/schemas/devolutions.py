@@ -57,6 +57,9 @@ class DevolutionOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     bling_stock_result: BlingStockResultOut | None = None
+    # Nome do cliente (bling_orders.nome_destinatario via número do pedido).
+    # Preenchido só pela listagem — devolutions não guarda o nome.
+    cliente: str | None = None
 
 
 class DevolutionCreate(BaseModel):

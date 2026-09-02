@@ -9,6 +9,7 @@ fetched via `GET /pedidos/vendas/{id}` and split into one row per item.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -148,6 +149,31 @@ async def _bling_client_for_user(
         await session.commit()
 
     return BlingClient(creds, on_token_refresh=_persist, integration_id=integ.id)
+
+
+# Pedidos Amazon chegam com transporte.contato.nome = nome da CONTA
+# ("Amazon DBA", "Amazon KFA", ...), não do cliente. O nome real do
+# destinatário vem em transporte.etiqueta.nome / contato.nome. Não dá pra
+# inverter a precedência geral (nos demais marketplaces transporte.contato
+# é o destinatário correto) — então só quando o nome é genérico da conta
+# caímos pra etiqueta/contato.
+_GENERIC_TRANSPORT_NAME = re.compile(r"^amazon\b", re.IGNORECASE)
+
+
+def _melhor_nome_destinatario(
+    t_contato_nome: str | None,
+    etiqueta_nome: str | None,
+    buyer_nome: str | None,
+) -> str | None:
+    nome = (t_contato_nome or "").strip()
+    if not nome or _GENERIC_TRANSPORT_NAME.match(nome):
+        return (
+            (etiqueta_nome or "").strip()
+            or (buyer_nome or "").strip()
+            or nome
+            or None
+        )
+    return nome
 
 
 def _row_from_item(
@@ -307,7 +333,9 @@ def _row_from_item(
         "item_comissao_valor": _num(comissao.get("valor")),
         "categoria_id": categoria_id,
         "categoria_nome": categoria_nome,
-        "nome_destinatario": _t_contato.get("nome") or _buyer.get("nome") or None,
+        "nome_destinatario": _melhor_nome_destinatario(
+            _t_contato.get("nome"), _t_etiqueta.get("nome"), _buyer.get("nome")
+        ),
         "documento_destinatario": _documento(
             _buyer.get("numeroDocumento") or _t_contato.get("numeroDocumento")
         ),
@@ -679,7 +707,9 @@ async def upsert_order(
                     or None
                 )
 
-            nome = _ct.get("nome") or _buyer.get("nome") or None
+            nome = _melhor_nome_destinatario(
+                _ct.get("nome"), _et.get("nome"), _buyer.get("nome")
+            )
             if nome:
                 values["nome_destinatario"] = nome
             # Backfill do CPF/CNPJ (migration 0215): cada webhook de mudança de
