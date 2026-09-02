@@ -33,6 +33,27 @@ SCHEMA = "davinci"
 
 
 def upgrade() -> None:
+    # A tabela `logistica` NASCEU como `chamados` (0181) e foi renomeada em
+    # 0182 — mas a PK continuou se chamando `pk_chamados`, e o índice da PK
+    # tem o mesmo nome. Criar a tabela nova com a naming convention
+    # (`pk_chamados`) batia em "relation pk_chamados already exists". Renomeia
+    # a PK legada pro nome que ela deveria ter; guardado por EXISTS pra banco
+    # novo (create_all dos testes) não quebrar.
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint c
+                JOIN pg_namespace n ON n.oid = c.connamespace
+                WHERE n.nspname = '{SCHEMA}' AND c.conname = 'pk_chamados'
+                  AND c.conrelid = '{SCHEMA}.logistica'::regclass
+            ) THEN
+                ALTER TABLE {SCHEMA}.logistica RENAME CONSTRAINT pk_chamados TO pk_logistica;
+            END IF;
+        END $$;
+        """
+    )
     op.create_table(
         "chamados",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
