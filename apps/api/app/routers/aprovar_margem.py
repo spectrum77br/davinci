@@ -1,14 +1,17 @@
-"""Aprovar pelo celular — página pública do link que vai no aviso automático.
+"""Aprovar pelo celular — página pública do link dos avisos da Margem.
 
 GET /api/aprovar/{token} mostra a confirmação (pedido, conta, situação) e um
 botão; o POST aprova usando O MESMO fluxo da aba Margem
 (routers/margens._apply_bling_decision_by_pedido: Bling Atendido→Aprovado +
-bling_orders + snapshot). Sem login: o gate é o token assinado de
-services/aprovar_link.py, que só circula no Threema pra quem estiver na
-lista do aviso automático. A aprovação fica atribuída ao usuário-sistema
-"Aprovação via Threema" (não dá pra saber quem tocou no link). Pedido já
-aprovado só informa (idempotente); falha no Bling vira página de erro
-amigável sem mudar nada.
+bling_orders + snapshot), INCLUSIVE o fallback da aba: se o Bling recusar a
+transição de situação (ex.: pedido "Em andamento", que não aceita ir pra
+Atendido), aprova só no DaVinci — espelho do `isBlingPatchError` +
+`call(true)` do margem.vue, "sem pedir confirmação ao usuário". Sem login:
+o gate é o token assinado de services/aprovar_link.py, que só circula no
+Threema pra quem estiver nas listas do Informar. A aprovação fica atribuída
+ao usuário-sistema "Aprovação via Threema" (não dá pra saber quem tocou no
+link). Pedido já aprovado só informa (idempotente); outras falhas viram
+página de erro amigável sem mudar nada.
 """
 
 from __future__ import annotations
@@ -29,6 +32,14 @@ from app.services import aprovar_link
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/aprovar", tags=["aprovar-margem"])
+
+# Situação "Aguardando Cancelamento" (= routers/nf._SITUACAO_AGUARDANDO_
+# CANCELAMENTO): só nela a aprovação de fato move o pedido no Bling.
+_SITUACAO_AGUARDANDO = "83955"
+
+# Mesmos códigos do isBlingPatchError do margem.vue: nesses casos a aba
+# refaz a decisão com local_only=true — o link faz igual.
+_CODES_FALLBACK_LOCAL = {"bling_patch_failed", "bling_integration_missing"}
 
 # Identidade do usuário-sistema que assina as aprovações feitas pelo link.
 _OPEN_ID_SISTEMA = "system:aprovacao-threema"
@@ -89,7 +100,11 @@ async def _dados_pedido(session: AsyncSession, pedido: str) -> dict | None:
     plataforma = (row["plataforma"] if row else "") or ""
     conta = (row["conta"] if row else "") or ""
     loja = " ".join(x for x in (plataforma, conta) if x)
-    return {"status": order.status, "loja": loja}
+    return {
+        "status": order.status,
+        "situacao": str(order.situacao or ""),
+        "loja": loja,
+    }
 
 
 async def _usuario_sistema(session: AsyncSession) -> User:
@@ -134,10 +149,17 @@ async def confirmar_aprovacao(
     quem = f"Pedido {_e(pedido)}" + (f" — {_e(dados['loja'])}" if dados["loja"] else "")
     if dados["status"] == "Aprovado":
         return _pagina("Já aprovado", f"<p class='ok'>{quem} já está aprovado. Nada a fazer.</p>")
+    # Texto honesto por situação: só quem está segurado em Aguardando
+    # Cancelamento "sai" de algum lugar no Bling; os demais são só análise.
+    if dados["situacao"] == _SITUACAO_AGUARDANDO:
+        detalhe = (
+            "Aprovar devolve o pedido ao fluxo normal no Bling (sai de Aguardando Cancelamento)."
+        )
+    else:
+        detalhe = "Aprovar marca o pedido como aprovado na aba Margem do DaVinci."
     corpo = (
         f"<p>{quem}</p>"
-        "<p>Aprovar devolve o pedido ao fluxo normal no Bling"
-        " (sai de Aguardando Cancelamento).</p>"
+        f"<p>{detalhe}</p>"
         f"<form method='post' action='/api/aprovar/{_e(token)}'>"
         "<button type='submit'>Aprovar pedido</button></form>"
     )
@@ -169,28 +191,57 @@ async def aprovar(
         )
 
     usuario = await _usuario_sistema(session)
-    try:
+
+    async def _aprovar(update_bling: bool) -> None:
         await _apply_bling_decision_by_pedido(
             session,
             usuario.id,
             pedido_bling=pedido,
             sku=None,
             new_status="Aprovado",
-            update_bling=True,
+            update_bling=update_bling,
         )
-    except HTTPException as e:  # ex.: 502 bling_patch_failed
-        logger.warning("aprovar_link_falhou", pedido_bling=pedido, detail=e.detail)
-        return _pagina(
-            "Falha ao aprovar",
-            f"<p class='erro'>Não consegui aprovar o pedido {_e(pedido)} agora"
-            " (falha ao atualizar o Bling).</p>"
-            "<p>Tente de novo em instantes ou aprove pela aba Margem.</p>",
-            status_code=502,
-        )
+
+    def _codigo(e: HTTPException) -> str:
+        return e.detail.get("code", "") if isinstance(e.detail, dict) else ""
+
+    bling_ok = True
+    try:
+        await _aprovar(update_bling=True)
+    except HTTPException as e:
+        if _codigo(e) not in _CODES_FALLBACK_LOCAL:
+            logger.warning("aprovar_link_falhou", pedido_bling=pedido, detail=e.detail)
+            return _pagina(
+                "Falha ao aprovar",
+                f"<p class='erro'>Não consegui aprovar o pedido {_e(pedido)}"
+                " agora.</p>"
+                "<p>Tente de novo em instantes ou aprove pela aba Margem.</p>",
+                status_code=502,
+            )
+        # Bling recusou a transição de situação (ex.: "Em andamento" não vai
+        # pra Atendido). Mesmo fallback automático da aba Margem: aprova só
+        # no DaVinci, sem tocar na situação do Bling. O raise acontece antes
+        # de qualquer escrita, então a sessão está limpa pra segunda tentativa.
+        logger.info("aprovar_link_fallback_local", pedido_bling=pedido, detail=e.detail)
+        bling_ok = False
+        try:
+            await _aprovar(update_bling=False)
+        except HTTPException as e2:
+            logger.warning("aprovar_link_falhou", pedido_bling=pedido, detail=e2.detail)
+            return _pagina(
+                "Falha ao aprovar",
+                f"<p class='erro'>Não consegui aprovar o pedido {_e(pedido)}"
+                " agora.</p>"
+                "<p>Tente de novo em instantes ou aprove pela aba Margem.</p>",
+                status_code=502,
+            )
     await session.commit()
-    logger.info("aprovar_link_ok", pedido_bling=pedido)
+    logger.info("aprovar_link_ok", pedido_bling=pedido, bling=bling_ok)
+    if bling_ok and dados["situacao"] == _SITUACAO_AGUARDANDO:
+        depois = "Ele volta ao fluxo normal no Bling."
+    else:
+        depois = "A aprovação ficou registrada na aba Margem do DaVinci."
     return _pagina(
         "Pedido aprovado",
-        f"<p class='ok'>Pedido {_e(pedido)} aprovado ✓</p>"
-        "<p>Ele volta ao fluxo normal no Bling. Pode fechar esta página.</p>",
+        f"<p class='ok'>Pedido {_e(pedido)} aprovado ✓</p><p>{depois} Pode fechar esta página.</p>",
     )
