@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.db import engine
 from app.redis_client import redis
 from app.routers import alerts as alerts_router
+from app.routers import aprovar_margem as aprovar_margem_router
 from app.routers import audit as audit_router
 from app.routers import auth as auth_router
 from app.routers import automacoes as automacoes_router
@@ -174,6 +175,7 @@ app.include_router(discrepancies_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(metrics_router.router)
 app.include_router(margens_router.router)
+app.include_router(aprovar_margem_router.router)
 app.include_router(margem_audit_router.router)
 app.include_router(tarefas_router.router)
 app.include_router(faturas_router.router)

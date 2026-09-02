@@ -68,7 +68,7 @@ from app.models import (
     ThreemaInformarConfig,
 )
 from app.security.cipher import decrypt_json
-from app.services import informar, threema
+from app.services import aprovar_link, informar, threema
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
@@ -268,8 +268,11 @@ async def _avisar_threema(session: AsyncSession, r: Mapping, motivo: str) -> Non
         ),
         cabecalho="DaVinci — Margem: pedido segurado para análise",
         rodape=(
-            "Situação movida para Aguardando Cancelamento. "
-            "Aprovar na aba Margem devolve o pedido ao fluxo."
+            "Situação movida para Aguardando Cancelamento. Aprovar devolve "
+            "o pedido ao fluxo.\n"
+            # Link público assinado — abre a página de confirmação e aprova
+            # sem precisar logar (services/aprovar_link.py).
+            f"Aprovar pelo celular: {aprovar_link.url_aprovar(str(r['pedido_bling']))}"
         ),
     )
     try:

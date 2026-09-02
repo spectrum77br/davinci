@@ -352,6 +352,7 @@ _CLEANUP_TABLES = (
     "product_links",
     "products",
     "product_categories",
+    "margem_audit",
     "margens",
     "chamado_anexo",
     "chamado_mensagem",

@@ -645,15 +645,24 @@ async def test_hold_avisa_threema_cadastrado(db: AsyncSession, monkeypatch):
     assert len(enviados) == 1
     msg, recipients = enviados[0]
     assert recipients == ["AAAA1111", "BBBB2222"]
-    assert msg.splitlines() == [
+    linhas = msg.splitlines()
+    assert linhas[:6] == [
         "DaVinci — Margem: pedido segurado para análise",
         "Pedido 291670 — ml Loja ML",
         "Motivo: margem abaixo do mínimo",
         "Margem: 5% (mínimo 10%)",
         "Lucro: R$ -15,50",
-        "Situação movida para Aguardando Cancelamento. "
-        "Aprovar na aba Margem devolve o pedido ao fluxo.",
+        "Situação movida para Aguardando Cancelamento. Aprovar devolve "
+        "o pedido ao fluxo.",
     ]
+    # Última linha: link público de aprovação com token que valida de volta
+    # pro MESMO pedido (o exp muda a cada run, então não dá pra fixar a URL).
+    from app.services import aprovar_link
+
+    prefixo = "Aprovar pelo celular: http://localhost:3000/api/aprovar/"
+    assert linhas[6].startswith(prefixo)
+    assert aprovar_link.validar_token(linhas[6].removeprefix(prefixo)) == "291670"
+    assert len(linhas) == 7
 
 
 async def test_hold_falha_no_threema_nao_desfaz_o_hold(
