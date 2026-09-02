@@ -38,6 +38,7 @@ from app.services.bling_kit_create import create_bling_kit_for_mark_job
 from app.services.bling_notas_token_refresh import run_refresh_bling_notas_tokens
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
+from app.services.chamados import run_replica_automatica as run_chamados_replica_automatica
 from app.services.email import get_email_sender, render_otp_html
 from app.services.import_lote_bling_stock import push_lote_stock_to_bling_job
 from app.services.import_product_bling_create import sync_import_product_to_bling_job
@@ -813,6 +814,15 @@ async def logistica_marketplaces_ingest(ctx: dict) -> None:
     async with session_scope() as s:
         summary = await run_ingest_marketplaces_daily(s)
     logger.info("logistica_marketplaces_ingest_done", **summary)
+
+
+async def chamados_replica_automatica(ctx: dict) -> None:
+    """De hora em hora (:25): réplica automática dos Chamados (reenvia a
+    mensagem cadastrada a cada N dias enquanto ligada) + monitoramento (fecha
+    sozinho o chamado de API quando o ML encerra o claim)."""
+    async with session_scope() as s:
+        summary = await run_chamados_replica_automatica(s)
+    logger.info("chamados_replica_automatica_done", **summary)
 
 
 async def pos_vendas_notas_sync(ctx: dict) -> None:
@@ -1982,6 +1992,8 @@ class WorkerSettings:
         cron(logistica_ml_ingest, minute=0, run_at_startup=False),
         # Toda hora (:05), junto do ML: novos pedidos Shopee/TikTok/Amazon.
         cron(logistica_marketplaces_ingest, minute=5, run_at_startup=False),
+        # Toda hora (:25): réplica automática + monitoramento dos Chamados.
+        cron(chamados_replica_automatica, minute=25, run_at_startup=False),
         # Motor da Logística SOZINHO a cada 5 min (:02, :07... — deslocado dos
         # ingests de :00/:05 pra não estourar rate junto): re-enriquece o Status
         # Plataforma dos pendentes do painel, aplica no Bling as situações com

@@ -40,6 +40,7 @@ from app.routers import oauth as oauth_router
 from app.routers import pricing as pricing_router
 from app.routers import pricing_mega as pricing_mega_router
 from app.routers import products as products_router
+from app.routers import chamados as chamados_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
 from app.routers import settings as settings_router
@@ -105,6 +106,7 @@ _OPENAPI_TAGS = [
         "description": "Catálogo manual das rotinas/crons do sistema (aba Integrações).",
     },
     {"name": "refunds", "description": "Reembolsos vinculados aos pedidos da conciliação."},
+    {"name": "chamados", "description": "Chamados abertos nas plataformas (Margem/Logística/Devolução) — histórico, réplica manual/automática, status Bling."},
     {"name": "devolutions", "description": "Devoluções por pedido — controle manual de retorno de produto."},
     {"name": "financeiro", "description": "Consórcio, suprimentos (certificações) e simulação de cotações de importação."},
     {"name": "importacao", "description": "Controle de pedidos de importação de malas — SKUs, lotes, resumo financeiro."},
@@ -180,6 +182,7 @@ app.include_router(logistica_router.router)
 app.include_router(logistica_track_router.router)
 app.include_router(informar_router.router)
 app.include_router(refunds_router.router)
+app.include_router(chamados_router.router)
 app.include_router(devolutions_router.router)
 app.include_router(estoque_router.router)
 app.include_router(faturamento_router.router)

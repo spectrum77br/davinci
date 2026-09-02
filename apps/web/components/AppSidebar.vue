@@ -6,7 +6,7 @@ import {
   Receipt, TrendingUp, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
-  ReceiptText,
+  ReceiptText, MessagesSquare,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
@@ -138,6 +138,7 @@ const sections = computed<Section[]>(() => [
       { to: '/reembolso', label: 'Reembolso', icon: Receipt, resource: 'reembolso' },
       { to: '/logistica', label: 'Logística', icon: Headset, resource: 'logistica' },
       { to: '/notas-fiscais', label: 'Notas fiscais', icon: FileText, resource: 'notas_fiscais' },
+      { to: '/chamados', label: 'Chamados', icon: MessagesSquare, resource: 'chamados' },
     ],
   },
   {

@@ -24,6 +24,10 @@ Resource = Literal[
     "logistica",
     # Notas Fiscais — consulta/export de NF-e das contas bling_notas.
     "notas_fiscais",
+    # Chamados — aba de Pós-venda que centraliza os chamados abertos nas
+    # plataformas (origem Margem/Logística/Devolução), com histórico,
+    # réplica manual/automática e alterar status Bling.
+    "chamados",
     # Legacy single-bucket — no longer used by any route after the
     # financeiro_* split below, but kept in the literal so stored
     # permissions JSON containing the old key still validates.

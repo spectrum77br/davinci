@@ -21,6 +21,7 @@ export type Resource =
   | 'reembolso'
   | 'logistica'
   | 'notas_fiscais'
+  | 'chamados'
   | 'sincronizacoes'
   | 'sync_logs'
   | 'integracoes'
@@ -64,7 +65,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     label: 'Pós-venda',
-    resources: ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais'],
+    resources: ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados'],
   },
   {
     // Financeiro = só Consórcio (na tela de Permissões). Valuation é
@@ -123,6 +124,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   reembolso: 'Reembolso',
   logistica: 'Logística',
   notas_fiscais: 'Notas Fiscais',
+  chamados: 'Chamados',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',
   integracoes: 'Integrações',
