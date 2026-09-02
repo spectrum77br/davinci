@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, Check, ChevronLeft, ChevronRight, Download, Loader2, Megaphone, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
+import { AlertCircle, BookOpen, Check, ChevronLeft, ChevronRight, Download, Loader2, Megaphone, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -121,6 +121,8 @@ const canInformar = computed(() => {
   return isAdmin.value || (!!email && INFORMAR_MARGEM_USERS.includes(email))
 })
 const informarMargemOpen = ref(false)
+// Manual prático da aba (janela explicativa — MargemManualModal).
+const manualOpen = ref(false)
 
 const items = ref<MarketplaceRow[]>([])
 const total = ref(0)
@@ -777,6 +779,15 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <RefreshCw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
             atualizar
           </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            title="Como esta aba funciona — manual prático"
+            @click="manualOpen = true"
+          >
+            <BookOpen class="size-4 mr-1.5" />
+            Manual
+          </Button>
         </div>
       </template>
     </PageHeader>
@@ -1275,5 +1286,8 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       descricao-auto="Quando o robô segurar um pedido por margem (Aguardando Cancelamento), manda na hora uma mensagem só pra quem estiver marcado aqui."
       @close="informarMargemOpen = false"
     />
+
+    <!-- Manual prático da aba -->
+    <MargemManualModal :open="manualOpen" @close="manualOpen = false" />
   </div>
 </template>

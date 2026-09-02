@@ -1394,17 +1394,19 @@ async def _apply_bling_decision_by_pedido(
     patch_bling = update_bling
     if new_status == "Reprovado" and str(current_situacao_id or "") != str(SITUACAO_APROVADO):
         patch_bling = False
-    # Pedido segurado pelo auto-hold da Margem (83955 + pino 'Pendente'):
+    # Pedido em 83955 com decisão da Margem gravada — pino 'Pendente' do
+    # auto-hold OU 'Reprovado' (auto-reprovo por margem negativa / clique):
     # Aprovar TEM de soltar no Bling mesmo quando o chamador pediu local-only.
     # A UI manda local_only para pendências de saldo/frete e o sync-saldo-final
     # auto-aprova com update_bling=False — sem esta exceção, a venda ficaria
     # presa em Aguardando Cancelamento no Bling com status Aprovado (e fora de
-    # todas as abas). O hold de estoque (status NULL) e o reprovado no clique
-    # (status='Reprovado') NÃO entram aqui.
+    # todas as abas). Vale igual pro 'Reprovado': quem aprova um reprovado
+    # quer a venda DE VOLTA no fluxo, nunca aprovada-mas-presa. O hold de
+    # estoque (status NULL) segue fora.
     if (
         new_status == "Aprovado"
         and str(current_situacao_id or "") == str(SITUACAO_REPROVADO)
-        and (order.status or "") == "Pendente"
+        and (order.status or "") in ("Pendente", "Reprovado")
     ):
         patch_bling = True
 

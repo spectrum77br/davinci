@@ -48,6 +48,25 @@ verificar_margem): situacao='83955' e bling_status_margem='Pendente'. O
 distingue dos 83955 do controle de estoque (status NULL → seguem fora da
 Margem, e fora do aviso Threema de estoque, que filtra pelos seus próprios
 marcados).
+
+MARGEM NEGATIVA REPROVA DIRETO (Eduardo 02/09: "margem negativa reprovar
+automatico tbm pra poder aprovar pelo threma"): se a pior margem que
+disparou o gatilho é < 0, o pino gravado é 'Reprovado' em vez de 'Pendente'
+— mesmos passos no Bling (recado + 83955), mas a linha SAI da aba Pendentes
+(igual ao Reprovar no clique) e o aviso Threema já diz "reprovado
+automaticamente", com o link de aprovar pelo celular pra desfazer. Margem
+baixa POSITIVA (ex.: 5% < 9%) continua virando 'Pendente' pra análise
+humana. O resgate: link do aviso, ou "Buscar pedido" na aba (o lookup não
+filtra situação) — Aprovar solta o pedido no Bling nos dois caminhos
+(exceção do segurado em routers/margens._apply_bling_decision_by_pedido
+cobre 'Pendente' E 'Reprovado').
+
+MARGEM FORA DO NORMAL (> 60%) SÓ AVISA (Eduardo 02/09): margem alta demais
+costuma ser custo errado no cadastro — o mesmo tick manda UM alerta por
+pedido no Threema (destinatários do margem_auto) e não toca no pedido.
+Dedup pela auditoria (margem_audit, acao='alerta_margem_alta'), gravada só
+depois de pelo menos um envio bem-sucedido — Threema fora do ar → tenta de
+novo no próximo tick.
 """
 
 from __future__ import annotations
@@ -72,17 +91,28 @@ from app.services import aprovar_link, informar, threema
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.bling import BlingClient
-from app.services.verificar_margem import SITUACAO_BLING_TABLE, SNAPSHOT_TABLE
+from app.services.verificar_margem import (
+    SITUACAO_BLING_TABLE,
+    SNAPSHOT_TABLE,
+    qualified_table,
+)
 
 logger = structlog.get_logger()
 
 SITUACAO_EM_ABERTO = 6
 SITUACAO_AGUARDANDO_CANCELAMENTO = 83955
 
+# Margem acima disto é "fora do normal" (provável custo errado no cadastro):
+# alerta no Threema, sem mexer no pedido. Fração, como o snapshot (0.60 = 60%).
+MARGEM_ALTA_LIMIAR = 0.60
 
-def _mensagem(motivo: str) -> str:
+_MARGEM_AUDIT_TABLE = qualified_table("margem_audit")
+
+
+def _mensagem(motivo: str, *, reprovado: bool = False) -> str:
+    acao = "pedido reprovado automaticamente" if reprovado else "pedido segurado para análise"
     return (
-        f"Margem DaVinci: pedido segurado para análise ({motivo}) — "
+        f"Margem DaVinci: {acao} ({motivo}) — "
         "situação movida para Aguardando Cancelamento. "
         "Aprovar na aba Margem devolve o pedido ao fluxo."
     )
@@ -129,6 +159,10 @@ def _candidatos_sql() -> str:
                                                 AS plataforma,
                MAX(v.loja_nome)                 AS conta,
                BOOL_OR({_ATTENTION_MARGEM_SQL}) AS margem_baixa,
+               -- Margem NEGATIVA (entre as linhas que dispararam o gatilho):
+               -- reprova direto em vez de pino 'Pendente' (ver docstring).
+               BOOL_OR({_ATTENTION_MARGEM_SQL}
+                       AND v.marketplace_margem < 0) AS margem_negativa,
                BOOL_OR({_ATTENTION_SALDO_SQL}
                        AND v.marketplace_liquido_base_margem_item IS NOT NULL)
                                                 AS saldo_divergente,
@@ -178,6 +212,7 @@ async def _hold_one(
     bling_id: int,
     motivo: str,
     hoje: date | None,
+    reprovar: bool = False,
 ) -> None:
     # 1) Observações (o recado) — antes da situação: se o PUT falhar por erro
     #    transiente, o pedido continua candidato e o próximo tick refaz os dois
@@ -186,7 +221,7 @@ async def _hold_one(
     #    loga o corpo do erro e segue pro passo essencial (segurar).
     order = await client.get_order(bling_id)
     atual = order.get("observacoes")
-    novo = compose_observacoes(atual, _mensagem(motivo), hoje=hoje)
+    novo = compose_observacoes(atual, _mensagem(motivo, reprovado=reprovar), hoje=hoje)
     if novo != (atual or "").strip():
         try:
             await client.update_order(bling_id, build_observacoes_put_body(order, novo))
@@ -206,21 +241,25 @@ async def _hold_one(
     await client.update_order_situacao(bling_id, SITUACAO_AGUARDANDO_CANCELAMENTO)
 
     # 3) Espelhos locais (todas as linhas-item do pedido) + auditoria.
+    #    Pino 'Reprovado' (margem negativa) tira a linha da aba Pendentes na
+    #    hora — mesmo efeito do Reprovar no clique; 'Pendente' mantém pra
+    #    análise humana (ver docstring).
+    pino = "Reprovado" if reprovar else "Pendente"
     await session.execute(
         update(BlingOrder)
         .where(BlingOrder.bling_id == bling_id)
-        .values(situacao=str(SITUACAO_AGUARDANDO_CANCELAMENTO), status="Pendente")
+        .values(situacao=str(SITUACAO_AGUARDANDO_CANCELAMENTO), status=pino)
     )
     await session.execute(
         text(
             f"UPDATE {SNAPSHOT_TABLE} "
-            "SET situacao = :sit, bling_status_margem = 'Pendente', "
+            "SET situacao = :sit, bling_status_margem = :pino, "
             "    situacao_nome = COALESCE("
             f"       (SELECT s.nome FROM {SITUACAO_BLING_TABLE} s"
             "         WHERE s.id::text = :sit), situacao_nome) "
             "WHERE bling_id = :bling_id"
         ),
-        {"sit": str(SITUACAO_AGUARDANDO_CANCELAMENTO), "bling_id": bling_id},
+        {"sit": str(SITUACAO_AGUARDANDO_CANCELAMENTO), "bling_id": bling_id, "pino": pino},
     )
     await record_margem_audit(
         session,
@@ -233,25 +272,23 @@ async def _hold_one(
         origem="margens_auto",
         mudado_por=None,
     )
+    if reprovar:
+        await record_margem_audit(
+            session,
+            acao="status",
+            pedido_bling=pedido_bling,
+            bling_id=bling_id,
+            sku=None,
+            valor_antigo=None,
+            valor_novo="Reprovado",
+            origem="margens_auto",
+            mudado_por=None,
+        )
     await session.commit()
 
 
-async def _avisar_threema(session: AsyncSession, r: Mapping, motivo: str) -> None:
-    """Aviso Threema NA HORA do hold, pros destinatários do cadastro
-    `margem_auto` (segunda lista do modal Informar da Margem). Uma mensagem
-    por pedido, com conta, motivo, margem vs mínima e lucro — pedido do
-    Eduardo (02/09): avisar na hora pra ele decidir do celular. Best-effort:
-    sem destinatários cadastrados não manda nada; falha de envio é logada e
-    NÃO desfaz nem conta contra o hold (o essencial é segurar o pedido)."""
-    row = (
-        await session.execute(
-            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == "margem_auto")
-        )
-    ).scalar_one_or_none()
-    recipients = threema.parse_recipients(row.recipients if row else "")
-    if not recipients:
-        return
-    loja = " ".join(
+def _loja(r: Mapping) -> str:
+    return " ".join(
         p
         for p in (
             str(r["plataforma"] or "").strip(),
@@ -259,22 +296,56 @@ async def _avisar_threema(session: AsyncSession, r: Mapping, motivo: str) -> Non
         )
         if p
     )
+
+
+async def _recipients_margem_auto(session: AsyncSession) -> list[str]:
+    row = (
+        await session.execute(
+            select(ThreemaInformarConfig).where(ThreemaInformarConfig.contexto == "margem_auto")
+        )
+    ).scalar_one_or_none()
+    return threema.parse_recipients(row.recipients if row else "")
+
+
+async def _avisar_threema(
+    session: AsyncSession, r: Mapping, motivo: str, *, reprovado: bool = False
+) -> None:
+    """Aviso Threema NA HORA do hold, pros destinatários do cadastro
+    `margem_auto` (segunda lista do modal Informar da Margem). Uma mensagem
+    por pedido, com conta, motivo, margem vs mínima e lucro — pedido do
+    Eduardo (02/09): avisar na hora pra ele decidir do celular. `reprovado`
+    troca cabeçalho e rodapé (o pedido já foi reprovado; o link desfaz).
+    Best-effort: sem destinatários cadastrados não manda nada; falha de envio
+    é logada e NÃO desfaz nem conta contra o hold (o essencial é segurar)."""
+    recipients = await _recipients_margem_auto(session)
+    if not recipients:
+        return
+    if reprovado:
+        cabecalho = "DaVinci — Margem: pedido reprovado automaticamente"
+        rodape_acao = (
+            "Reprovado por margem negativa — situação movida para Aguardando "
+            "Cancelamento. Se quiser manter a venda, aprove pelo link.\n"
+        )
+    else:
+        cabecalho = "DaVinci — Margem: pedido segurado para análise"
+        rodape_acao = (
+            "Situação movida para Aguardando Cancelamento. Aprovar devolve o pedido ao fluxo.\n"
+        )
     msg = informar.mensagem_margem_pedido(
         informar.MargemPedido(
             pedido=str(r["pedido_bling"]),
-            loja=loja,
+            loja=_loja(r),
             motivo=motivo,
             margem=None if r["margem"] is None else float(r["margem"]),  # type: ignore[arg-type]
             minima=None if r["minima"] is None else float(r["minima"]),  # type: ignore[arg-type]
             lucro=None if r["lucro"] is None else float(r["lucro"]),  # type: ignore[arg-type]
         ),
-        cabecalho="DaVinci — Margem: pedido segurado para análise",
+        cabecalho=cabecalho,
         rodape=(
-            "Situação movida para Aguardando Cancelamento. Aprovar devolve "
-            "o pedido ao fluxo.\n"
+            rodape_acao
             # Link público assinado — abre a página de confirmação e aprova
             # sem precisar logar (services/aprovar_link.py).
-            f"Aprovar pelo celular: {aprovar_link.url_aprovar(str(r['pedido_bling']))}"
+            + f"Aprovar pelo celular: {aprovar_link.url_aprovar(str(r['pedido_bling']))}"
         ),
     )
     try:
@@ -293,27 +364,117 @@ async def _avisar_threema(session: AsyncSession, r: Mapping, motivo: str) -> Non
         )
 
 
+def _alerta_margem_alta_sql() -> str:
+    # Situação 6 = janela de triagem (mesma do hold): pedido novo, cadastro
+    # ainda corrigível antes de faturar. MAX = a MAIOR margem entre os itens.
+    # NOT EXISTS na auditoria = um alerta por pedido, pra sempre.
+    return f"""
+        SELECT v.pedido_bling,
+               MAX(COALESCE(v.plataforma_bling, v.plataforma_financeiro))
+                                                AS plataforma,
+               MAX(v.loja_nome)                 AS conta,
+               MAX(v.marketplace_margem) * 100  AS margem,
+               SUM(v.marketplace_lucro)         AS lucro
+        FROM {SNAPSHOT_TABLE} v
+        WHERE v.situacao = '{SITUACAO_EM_ABERTO}'
+          AND v.marketplace_margem > {MARGEM_ALTA_LIMIAR}
+          AND NOT EXISTS (
+                SELECT 1 FROM {_MARGEM_AUDIT_TABLE} a
+                 WHERE a.pedido_bling = v.pedido_bling
+                   AND a.acao = 'alerta_margem_alta')
+        GROUP BY v.pedido_bling
+        ORDER BY v.pedido_bling
+    """
+
+
+async def _alertar_margem_alta(session: AsyncSession) -> int:
+    """Margem fora do normal (> 60%): SÓ avisa no Threema — nada muda no
+    pedido (Eduardo 02/09: "margem fora do normal acima de 60% enviar
+    mensagem de alerta"). Margem alta assim costuma ser custo errado no
+    cadastro. A auditoria (acao='alerta_margem_alta') é o dedup: gravada
+    apenas quando pelo menos um destinatário recebeu — Threema fora do ar ou
+    sem cadastro → nada gravado, tenta de novo no próximo tick."""
+    rows = (await session.execute(text(_alerta_margem_alta_sql()))).mappings().all()
+    if not rows:
+        return 0
+    recipients = await _recipients_margem_auto(session)
+    if not recipients:
+        return 0
+    enviados = 0
+    for r in rows:
+        margem = float(r["margem"])
+        msg = informar.mensagem_margem_pedido(
+            informar.MargemPedido(
+                pedido=str(r["pedido_bling"]),
+                loja=_loja(r),
+                motivo="margem fora do normal (acima de 60%)",
+                margem=margem,
+                minima=None,
+                lucro=None if r["lucro"] is None else float(r["lucro"]),  # type: ignore[arg-type]
+            ),
+            cabecalho="DaVinci — Margem: margem fora do normal",
+            rodape=(
+                "Nada foi alterado no pedido — margem alta assim geralmente é "
+                "custo errado. Confira o cadastro do produto."
+            ),
+        )
+        try:
+            result = await threema.ThreemaClient().send_to_all(msg, recipients)
+        except Exception as e:  # noqa: BLE001 — um pedido não derruba os demais
+            logger.warning(
+                "margem_alerta_alta_falhou",
+                pedido_bling=str(r["pedido_bling"]),
+                erro=str(e)[:200],
+            )
+            continue
+        logger.info(
+            "margem_alerta_alta_threema",
+            pedido_bling=str(r["pedido_bling"]),
+            margem=margem,
+            sent=result.get("sent", []),
+            failed=result.get("failed", []),
+        )
+        if not result.get("sent"):
+            continue  # ninguém recebeu → sem dedup, retenta no próximo tick
+        await record_margem_audit(
+            session,
+            acao="alerta_margem_alta",
+            pedido_bling=str(r["pedido_bling"]),
+            bling_id=None,
+            sku=None,
+            valor_antigo=None,
+            valor_novo=f"{margem:.1f}%",
+            origem="margens_auto",
+            mudado_por=None,
+        )
+        await session.commit()
+        enviados += 1
+    return enviados
+
+
 async def run(
     session: AsyncSession,
     *,
     client: BlingClient | None = None,
     hoje: date | None = None,
 ) -> dict:
-    """Segura os pendentes "Em aberto". Retorna contadores p/ log/response."""
+    """Segura/reprova os pendentes "Em aberto" e alerta margens fora do
+    normal. Retorna contadores p/ log/response."""
     if not get_settings().margem_auto_hold:
-        return {"held": 0, "failed": 0, "skipped": "disabled"}
+        return {"held": 0, "reprovados": 0, "failed": 0, "alertas": 0, "skipped": "disabled"}
 
     rows = (await session.execute(text(_candidatos_sql()))).mappings().all()
-    if not rows:
-        return {"held": 0, "failed": 0}
-
-    client = client or await _bling_client(session)
-    if client is None:
-        logger.warning("margem_auto_hold_sem_bling", candidatos=len(rows))
-        return {"held": 0, "failed": len(rows), "skipped": "bling_integration_missing"}
-
-    held = failed = 0
+    held = reprovados = failed = 0
+    skipped: str | None = None
+    if rows:
+        client = client or await _bling_client(session)
+        if client is None:
+            logger.warning("margem_auto_hold_sem_bling", candidatos=len(rows))
+            failed = len(rows)
+            skipped = "bling_integration_missing"
+            rows = []
     for r in rows:
+        reprovar = bool(r["margem_negativa"])
         motivo = _motivo(
             bool(r["margem_baixa"]),
             bool(r["saldo_divergente"]),
@@ -327,15 +488,20 @@ async def run(
                 bling_id=int(r["bling_id"]),
                 motivo=motivo,
                 hoje=hoje,
+                reprovar=reprovar,
             )
-            held += 1
+            if reprovar:
+                reprovados += 1
+            else:
+                held += 1
             logger.info(
                 "margem_auto_hold_pedido",
                 pedido_bling=str(r["pedido_bling"]),
                 bling_id=int(r["bling_id"]),
                 motivo=motivo,
+                reprovado=reprovar,
             )
-            await _avisar_threema(session, r, motivo)
+            await _avisar_threema(session, r, motivo, reprovado=reprovar)
         except Exception as e:  # noqa: BLE001 — um pedido não derruba os demais
             failed += 1
             await session.rollback()
@@ -348,4 +514,10 @@ async def run(
                 pedido_bling=str(r["pedido_bling"]),
                 erro=erro,
             )
-    return {"held": held, "failed": failed}
+    # Alerta de margem fora do normal (> 60%): independe do Bling (não toca
+    # no pedido) — roda mesmo sem candidatos de hold ou sem integração.
+    alertas = await _alertar_margem_alta(session)
+    out: dict = {"held": held, "reprovados": reprovados, "failed": failed, "alertas": alertas}
+    if skipped:
+        out["skipped"] = skipped
+    return out

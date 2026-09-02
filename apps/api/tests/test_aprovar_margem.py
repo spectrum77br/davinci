@@ -251,3 +251,48 @@ async def test_post_segurado_com_bling_fora_nao_aprova_local(
     await db.refresh(order)
     assert order.status == "Pendente"  # nada mudou
     assert order.situacao == "83955"
+
+
+async def test_post_auto_reprovado_aprova_e_solta(
+    client: AsyncClient, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+):
+    """Pedido REPROVADO pelo robô (margem negativa → 83955 + pino Reprovado):
+    o link do aviso tem de desfazer a reprovação por completo — Atendido →
+    Aprovado no Bling, como qualquer segurado."""
+    order = await _seed_pedido(db, status="Reprovado", situacao="83955")
+    fake = _mock_bling(monkeypatch)
+
+    r = await client.post(f"/api/aprovar/{aprovar_link.gerar_token('291670')}")
+
+    assert r.status_code == 200
+    assert "aprovado ✓" in r.text
+    assert fake.calls == [
+        (111, margens_router.SITUACAO_ATENDIDO),
+        (111, margens_router.SITUACAO_APROVADO),
+    ]
+    await db.refresh(order)
+    assert order.status == "Aprovado"
+    assert order.situacao == str(margens_router.SITUACAO_APROVADO)
+
+
+async def test_post_auto_reprovado_com_bling_fora_nao_aprova_local(
+    client: AsyncClient, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+):
+    """Auto-reprovado também NÃO pode cair no fallback local: aprovado só no
+    DaVinci ficaria preso em Aguardando Cancelamento no Bling. A exceção
+    estendida do _apply_bling_decision_by_pedido força o patch nas duas
+    tentativas e a falha vira página de erro."""
+    order = await _seed_pedido(db, status="Reprovado", situacao="83955")
+    fake = _mock_bling(monkeypatch, _FakeBlingRecusa())
+
+    r = await client.post(f"/api/aprovar/{aprovar_link.gerar_token('291670')}")
+
+    assert r.status_code == 502
+    assert "Não consegui aprovar" in r.text
+    assert fake.calls == [
+        (111, margens_router.SITUACAO_ATENDIDO),
+        (111, margens_router.SITUACAO_ATENDIDO),
+    ]
+    await db.refresh(order)
+    assert order.status == "Reprovado"  # nada mudou
+    assert order.situacao == "83955"
