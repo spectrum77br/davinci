@@ -355,13 +355,16 @@ _SALDO_FINAL_BLING_SQL = (
 # (noite: "o saldo efetivo deixe sempre em branco... retirar a projeção").
 # Com o Efetivo NULL, saldo_final e margem_pos_reembolso ficam NULL — as
 # colunas Lucro/Final da UI ficam em branco até o repasse real chegar. O
-# frontend esconde o lápis quando o real JÁ chegou (editar gravaria no Bling
-# sem mudar o número da célula — pareceria "não salvou"); enquanto o real NÃO
-# chegou, o lápis grava o saldo MANUAL (03/09), que preenche o vazio aqui via
-# COALESCE — o real continua vencendo quando sincronizar.
+# Nessas plataformas o lápis grava o saldo MANUAL (03/09) — e o manual VALE
+# POR CIMA do automático (03/09 à tarde, Eduardo: "quando o valor é preenchido
+# automaticamente e tem o valor ali, não deixa usar o lápis… deixar editar a
+# hora que eu quiser sem essa trava" — o repasse sincronizado às vezes vem
+# R$ 0,00/negativo e precisa de correção humana). Apagar o manual devolve o
+# automático. O sync do real continua rodando; ele só não sobrescreve o que
+# um humano digitou de propósito.
 _SALDO_EFETIVO_SQL = (
     f"(CASE WHEN {_SALDO_PLATAFORMA_CONFIAVEL_SQL} "
-    f"      THEN COALESCE({_SALDO_PLATAFORMA_SQL}, {_SALDO_MANUAL_SQL}) "
+    f"      THEN COALESCE({_SALDO_MANUAL_SQL}, {_SALDO_PLATAFORMA_SQL}) "
     f"     ELSE {_SALDO_BLING_SQL} END)"
 )
 # Saldo Final coerente com o Efetivo exibido (mesma âncora) + reembolso.
@@ -1236,17 +1239,20 @@ async def put_saldo_manual(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("margem", "edit"))],
 ) -> dict:
-    """Saldo Efetivo digitado NA MÃO (Eduardo, 03/09) — só ML/Shopee/TikTok
-    enquanto o líquido REAL da plataforma não sincroniza (célula "—").
+    """Saldo Efetivo digitado NA MÃO (Eduardo, 03/09) — só ML/Shopee/TikTok,
+    a qualquer momento: com o líquido REAL ainda em branco ("—") OU já
+    sincronizado (corrigir um repasse que veio R$ 0,00/errado).
 
     NÃO grava nada no Bling (diferente do sync-saldo-final): o valor vai para
     a tabela `margem_saldo_manual` e entra no Efetivo/Lucro/Margem via
-    COALESCE(real, manual) — quando o repasse real chegar, ele VENCE o manual.
-    Igual à edição de Saldo Efetivo das outras plataformas, o save decide o
-    status na hora: margem recalculada ≥ mínima (ou sem critério / Data
-    Especial) → Aprovado; abaixo → fica Pendente para decisão manual.
-    `valor` None apaga o manual e devolve a linha ao automático (em branco +
-    "aguardando saldo da plataforma").
+    COALESCE(manual, real) — o manual VALE POR CIMA do automático (03/09 à
+    tarde: "deixar editar a hora que eu quiser sem essa trava"). Igual à
+    edição de Saldo Efetivo das outras plataformas, o save decide o status na
+    hora: margem recalculada ≥ mínima (ou sem critério / Data Especial) →
+    Aprovado; abaixo → fica Pendente para decisão manual.
+    `valor` None apaga o manual e devolve a linha ao automático: Efetivo volta
+    ao real (ou a "—" + "aguardando saldo" se o real ainda não chegou) e o
+    status gravado é limpo para os gatilhos decidirem de novo.
     """
     row = (await session.execute(
         text(
@@ -1330,10 +1336,9 @@ async def put_saldo_manual(
         # Fora das plataformas ancoradas o caminho é o lápis normal
         # (sync-saldo-final, grava no Bling) — aqui não se aplica.
         raise HTTPException(400, detail={"code": "saldo_manual_nao_aplicavel"})
-    if row.saldo_real is not None:
-        # O repasse real JÁ chegou — ele é a fonte da verdade (01/09), o
-        # manual seria ignorado. O front esconde o lápis nesse caso.
-        raise HTTPException(400, detail={"code": "saldo_plataforma_ja_sincronizado"})
+    # Repasse real já sincronizado NÃO bloqueia (03/09 à tarde): o manual
+    # passa por cima dele — é justamente o caso do R$ 0,00 que precisa de
+    # correção. `row.saldo_real` fica só no audit/log abaixo.
 
     await session.merge(MargemSaldoManual(
         bling_order_item_id=bling_order_item_id,
@@ -1411,6 +1416,8 @@ async def put_saldo_manual(
         bling_order_item_id=str(bling_order_item_id),
         pedido_bling=str(row.pedido_bling),
         valor=str(body.valor),
+        # real sincronizado que o manual está cobrindo (None = ainda em branco)
+        saldo_real=None if row.saldo_real is None else float(row.saldo_real),
         status=result_status,
         margem=None if margem_final is None else float(margem_final),
         margem_minima=None if margem_minima is None else float(margem_minima),

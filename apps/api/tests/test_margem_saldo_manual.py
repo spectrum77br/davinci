@@ -4,7 +4,10 @@
 pra preencher na mao tbm" — em ML/Shopee/TikTok o Efetivo fica "—" até o
 líquido REAL da plataforma sincronizar. O PUT /saldo-manual guarda o valor
 digitado (tabela margem_saldo_manual, NADA vai pro Bling); a listagem o usa
-via COALESCE(real, manual) e o real VENCE quando chega (regra de 01/09).
+via COALESCE(manual, real): o MANUAL vale por cima do automático (03/09 à
+tarde: "deixar editar a hora que eu quiser sem essa trava" — o repasse
+sincronizado às vezes vem R$ 0,00 e precisa de correção). Apagar o manual
+devolve o automático.
 """
 
 from __future__ import annotations
@@ -36,13 +39,15 @@ async def _seed_item(
     custo: float | None = 100.0,
     minima: float | None = 0.10,
     situacao: str = "6",
+    margem: float | None = None,
 ) -> str:
     """Uma linha em bling_orders + uma linha-item no snapshot verificar_margem.
 
     Default = o cenário do print do Eduardo: plataforma confiável (shopee) com
     líquido real NULL → Efetivo em branco, linha Pendente por "aguardando
     saldo da plataforma". marketplace_margem fica NULL de propósito (sem real
-    não existe margem oficial — igual em produção).
+    não existe margem oficial — igual em produção); passe `margem` (fração)
+    junto com `liquido` para simular um repasse já sincronizado.
     """
     item_id = str(uuid.uuid4())
     db.add(
@@ -67,7 +72,7 @@ async def _seed_item(
             ) VALUES (
                 :id, :pedido, :bling_id, :sku,
                 :situacao, 'Em aberto', :plataforma, 'Loja Teste',
-                1, NULL, :minima,
+                1, :margem, :minima,
                 :valorbase, :custo,
                 :liquido, :data
             )
@@ -80,6 +85,7 @@ async def _seed_item(
             "sku": f"sku-{pedido}",
             "situacao": situacao,
             "plataforma": plataforma,
+            "margem": margem,
             "minima": minima,
             "valorbase": valorbase,
             "custo": custo,
@@ -200,9 +206,10 @@ async def test_apagar_saldo_manual_volta_ao_automatico(client, db, make_user, au
     assert linha["status"] == "Pendente"
 
 
-async def test_repasse_real_vence_o_manual(client, db, make_user, auth_as):
-    """Quando o líquido REAL sincroniza, ele manda (regra de 01/09): o
-    Efetivo mostra o real, e o manual fica só de registro no payload."""
+async def test_manual_vence_o_repasse_real(client, db, make_user, auth_as):
+    """Quando o líquido REAL sincroniza DEPOIS do manual, o manual continua
+    valendo (03/09 à tarde — sem trava): o Efetivo mostra o digitado, a
+    coluna Plataforma mostra o real; apagar o manual revela o real."""
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
     item_id = await _seed_item(db, pedido="900104", bling_id=900104)
@@ -222,32 +229,76 @@ async def test_repasse_real_vence_o_manual(client, db, make_user, auth_as):
     await db.commit()
 
     linha = await _listar_linha(client, "900104")
-    assert linha["saldo_plataforma"] == 120.0
-    assert linha["saldo_efetivo"] == 120.0  # real vence
-    assert linha["saldo_manual"] == 150.0  # registro do que foi digitado
+    assert linha["saldo_plataforma"] == 120.0  # coluna Plataforma continua honesta
+    assert linha["saldo_efetivo"] == 150.0  # manual vence
+    assert linha["saldo_final"] == 150.0
+    assert linha["saldo_manual"] == 150.0
+
+    res = await client.put(
+        f"/api/margens/marketplace/{item_id}/saldo-manual", json={"valor": None}
+    )
+    assert res.status_code == 200
+    linha = await _listar_linha(client, "900104")
+    assert linha["saldo_manual"] is None
+    assert linha["saldo_efetivo"] == 120.0  # de volta ao automático
+    assert linha["attention_saldo"] is False  # real presente → não "aguarda"
 
 
-async def test_saldo_manual_recusado_fora_do_caso_certo(client, db, make_user, auth_as):
-    """Guard-rails: plataforma não-ancorada (Amazon) usa o lápis normal
-    (grava no Bling); e com o real JÁ sincronizado o manual seria ignorado."""
+async def test_saldo_manual_corrige_repasse_real_zerado(client, db, make_user, auth_as):
+    """O caso do print (03/09 à tarde): a plataforma sincronizou R$ 0,00
+    (margem -100% → Pendente) e o lápis estava travado. Agora aceita: 150 na
+    mão → margem 50% → Aprovado; apagar volta ao real (0) e à triagem."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    item_id = await _seed_item(
+        db, pedido="900106", bling_id=900106, liquido=0.0, margem=-1.0
+    )
+
+    antes = await _listar_linha(client, "900106")
+    assert antes["saldo_plataforma"] == 0.0
+    assert antes["saldo_efetivo"] == 0.0
+    assert antes["attention_margem"] is True
+    assert antes["status"] == "Pendente"
+
+    res = await client.put(
+        f"/api/margens/marketplace/{item_id}/saldo-manual", json={"valor": 150.0}
+    )
+    assert res.status_code == 200, res.json()
+    assert res.json()["status"] == "Aprovado"
+    assert res.json()["margem"] == pytest.approx(0.5)
+
+    linha = await _listar_linha(client, "900106")
+    assert linha["saldo_plataforma"] == 0.0  # o real continua visível
+    assert linha["saldo_manual"] == 150.0
+    assert linha["saldo_efetivo"] == 150.0
+    assert linha["saldo_final"] == 150.0
+    assert linha["margem_pos_reembolso"] == pytest.approx(0.5)
+    assert linha["status"] == "Aprovado"
+
+    res = await client.put(
+        f"/api/margens/marketplace/{item_id}/saldo-manual", json={"valor": None}
+    )
+    assert res.status_code == 200
+    depois = await _listar_linha(client, "900106")
+    assert depois["saldo_manual"] is None
+    assert depois["saldo_efetivo"] == 0.0
+    assert depois["status"] == "Pendente"  # status gravado limpo → gatilho volta
+
+
+async def test_saldo_manual_recusado_fora_das_plataformas_ancoradas(
+    client, db, make_user, auth_as
+):
+    """Guard-rail que FICA: plataforma não-ancorada (Amazon) usa o lápis normal
+    (grava no Bling) — o saldo manual não se aplica."""
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
     amazon = await _seed_item(db, pedido="900105", bling_id=900105, plataforma="amazon")
-    com_real = await _seed_item(
-        db, pedido="900106", bling_id=900106, liquido=120.0
-    )
 
     res = await client.put(
         f"/api/margens/marketplace/{amazon}/saldo-manual", json={"valor": 150.0}
     )
     assert res.status_code == 400
     assert res.json()["detail"]["code"] == "saldo_manual_nao_aplicavel"
-
-    res = await client.put(
-        f"/api/margens/marketplace/{com_real}/saldo-manual", json={"valor": 150.0}
-    )
-    assert res.status_code == 400
-    assert res.json()["detail"]["code"] == "saldo_plataforma_ja_sincronizado"
 
 
 async def test_saldo_manual_exige_permissao_de_edicao(client, db, make_user, auth_as):
