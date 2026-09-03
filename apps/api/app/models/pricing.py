@@ -180,7 +180,9 @@ class PricingProduct(Base, TimestampMixin):
     cost_kit8: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     description: Mapped[str | None] = mapped_column(String(256), nullable=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    ean: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 1000 chars (Eduardo, 03/09): cabe colar VÁRIOS EANs na mesma linha
+    # (uma linha agrupa as cores i238,i239,... e cada cor tem EAN próprio).
+    ean: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )

@@ -3124,8 +3124,9 @@ watch(department, async () => {
                 <span v-else>{{ p.name }}</span>
               </td>
               <td
-                class="border border-border px-2 py-1.5 text-xs font-mono cursor-pointer"
+                class="border border-border px-2 py-1.5 text-xs font-mono cursor-pointer max-w-[220px]"
                 :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'ean'), 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'ean') }"
+                :title="p.ean || undefined"
                 @click="!isEditing(p.id, 'ean') && startEditProduct(p, 'ean')"
               >
                 <input
@@ -3135,7 +3136,9 @@ watch(department, async () => {
                   class="w-full text-xs bg-transparent outline-none font-mono"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
-                <span v-else>{{ p.ean || '—' }}</span>
+                <!-- EAN aceita até 1000 chars (vários códigos); truncado na célula,
+                     completo no hover e no clique-para-editar. -->
+                <span v-else class="block truncate">{{ p.ean || '—' }}</span>
               </td>
               <template v-if="department === 'mala'">
                 <td

@@ -15,6 +15,7 @@ from app.models import (
     PricingAccount,
     PricingOverride,
     PricingProduct,
+    Segment,
     User,
     UserRole,
     UserStatus,
@@ -198,6 +199,43 @@ async def test_create_product_unique_sku_per_user(
     )
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "sku_exists"
+
+
+@pytest.mark.asyncio
+async def test_ean_aceita_1000_caracteres(
+    db: AsyncSession,
+    client: AsyncClient,
+    user_full: User,
+    auth_as: Callable[[User | None], None],
+):
+    """"aumente o campo ean para caber 1000 caracteres" (Eduardo, 03/09).
+
+    Uma linha da tabela agrupa várias cores (i238,i239,...) e cada cor tem EAN
+    próprio — precisa caber colar todos juntos. O varchar(64) antigo estourava
+    DataError no commit tanto no create quanto no patch inline.
+    """
+    # create_product exige o segmento leaf de (celular, tipo 2) no banco.
+    root = Segment(name="Celular", slug="celular", sort_order=0)
+    db.add(root)
+    await db.commit()
+    await db.refresh(root)
+    db.add(Segment(name="Cel + Fone", slug="cel-fone", parent_id=root.id, sort_order=1))
+    await db.commit()
+
+    auth_as(user_full)
+    varios_eans = ("7908855913700 " * 72)[:1000]  # 1000 chars exatos
+    r = await client.post(
+        "/api/pricing/products",
+        json={"sku": "EAN-1000", "name": "x", "cost_kit1": "10", "ean": varios_eans},
+    )
+    assert r.status_code == 201
+    assert r.json()["ean"] == varios_eans
+
+    pid = r.json()["id"]
+    outros = ("1234567890123," * 77)[:1000]
+    r = await client.patch(f"/api/pricing/products/{pid}", json={"ean": outros})
+    assert r.status_code == 200
+    assert r.json()["ean"] == outros
 
 
 @pytest.mark.asyncio
