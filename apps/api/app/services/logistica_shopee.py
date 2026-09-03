@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import logistica_datas, logistica_enrich, logistica_rules
+from app.services.devolucao_returns import ReturnInfo, epoch_to_dt
 from app.services.marketplaces.shopee import ShopeeClient
 
 logger = structlog.get_logger()
@@ -325,6 +326,142 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
     }
     logger.info("logistica_shopee_sweep_pos_venda", **summary)
     return {"ids": list(mudados), **summary}
+
+
+# Devolução de pedidos ANTIGOS: a returns API só filtra por janela de até 15
+# dias, então `returns_por_pedido` varre fatias por create_time de hoje até a
+# data do pedido mais velho da conta (menos a folga abaixo), com este teto —
+# cobre com sobra o prazo de devolução da Shopee (7 dias após a entrega).
+_RETURNS_TETO_DIAS = 120
+_RETURNS_FOLGA_DIAS = 2
+# Chaves onde a Shopee PODERIA informar a transportadora do retorno (o payload
+# medido em 03/09 não traz nenhuma — carrier fica None na prática).
+_RETURN_CARRIER_KEYS = (
+    "carrier", "carrier_name", "logistics_channel_name", "shipping_carrier",
+    "return_carrier", "return_logistics_channel_name",
+)
+
+
+def _return_carrier(d: dict) -> str | None:
+    for k in _RETURN_CARRIER_KEYS:
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def _return_info(d: dict, status: str) -> ReturnInfo:
+    tracking = d.get("tracking_number")
+    tracking = tracking.strip() if isinstance(tracking, str) else None
+    return_sn = str(d.get("return_sn") or "").strip()
+    return ReturnInfo(
+        fonte="shopee",
+        status=status,
+        tracking=tracking or None,
+        carrier=_return_carrier(d),
+        created_at=epoch_to_dt(d.get("create_time")),
+        updated_at=epoch_to_dt(d.get("update_time")),
+        return_id=return_sn or None,
+    )
+
+
+async def returns_por_pedido(
+    session: AsyncSession, linhas: list[Logistica]
+) -> dict[str, ReturnInfo]:
+    """Devolução (o pacote que VOLTA) de cada linha Shopee: `{pedido_bling:
+    ReturnInfo}`. Pedido sem devolução conhecida fica de fora do dict.
+
+    Por conta: varre `get_return_list` em fatias de 15 dias por create_time,
+    de agora até a `data` mais antiga das linhas da conta (menos folga), com
+    teto de `_RETURNS_TETO_DIAS` — devolução aberta antes disso não é achada.
+    Havendo vários casos pro mesmo pedido vale o VIVO mais recente (mesma
+    regra do sweep_pos_venda), senão o mais recente. Best-effort: conta sem
+    integração ou erro de API loga e pula (nunca levanta).
+
+    Mapeamento do return da Shopee: tracking=tracking_number (vazio → None;
+    `needs_logistics=false` = só reembolso, sem pacote de volta), carrier=None
+    (a Shopee não informa), status cru, created_at=create_time,
+    updated_at=update_time, return_id=return_sn."""
+    por_conta: dict[str, list[Logistica]] = {}
+    for r in linhas:
+        if (r.plataforma or "").strip().lower() not in _SHOPEE_PLATAFORMAS:
+            continue
+        if not (r.pedido_marketplace or "").strip() or not (r.pedido_bling or "").strip():
+            continue
+        por_conta.setdefault((r.conta or "").strip(), []).append(r)
+
+    out: dict[str, ReturnInfo] = {}
+    agora = int(datetime.now(UTC).timestamp())
+    passo = _RETURNS_JANELA_DIAS * 24 * 3600 - 300
+    piso = agora - _RETURNS_TETO_DIAS * 24 * 3600
+    for conta, rows in por_conta.items():
+        try:
+            integ = await _shopee_integration_for_conta(session, conta)
+            if integ is None:
+                logger.warning("logistica_shopee_returns_sem_integracao", conta=conta)
+                continue
+            client = _build_shopee_client(session, integ)
+        except Exception as e:  # noqa: BLE001 — best-effort por conta
+            logger.warning(
+                "logistica_shopee_returns_client_falhou", conta=conta, err=str(e)[:200]
+            )
+            continue
+
+        # Início da varredura: data do pedido mais velho da conta menos folga;
+        # linha sem data não limita (cai no teto).
+        datas = [r.data for r in rows if r.data is not None]
+        inicio = piso
+        if datas and len(datas) == len(rows):
+            mais_velha = datetime.combine(min(datas), datetime.min.time(), tzinfo=UTC)
+            inicio = max(piso, int(mais_velha.timestamp()) - _RETURNS_FOLGA_DIAS * 24 * 3600)
+        # Data no futuro (lixo) não pode zerar a varredura: olha ao menos 1 dia.
+        inicio = min(inicio, agora - 24 * 3600)
+
+        vistos: set[str] = set()
+        melhor: dict[str, tuple[tuple[bool, int, int], dict, str]] = {}
+        ate = agora
+        while ate > inicio:
+            de = max(inicio, ate - passo)
+            try:
+                devolucoes = await client.get_return_list(
+                    create_time_from=de, create_time_to=ate
+                )
+            except Exception as e:  # noqa: BLE001 — best-effort por conta
+                logger.warning(
+                    "logistica_shopee_returns_falhou",
+                    conta=conta, de=de, ate=ate, err=str(e)[:200],
+                )
+                break
+            for d in devolucoes:
+                if not isinstance(d, dict):
+                    continue
+                sn = str(d.get("order_sn") or "").strip()
+                st = str(d.get("status") or "").strip().upper()
+                if not sn or not st:
+                    continue
+                rsn = str(d.get("return_sn") or "").strip()
+                chave = rsn or f"{sn}:{d.get('create_time')}:{st}"
+                if chave in vistos:  # fatias se tocam na borda
+                    continue
+                vistos.add(chave)
+                vivo = st not in logistica_rules._SHOPEE_RETURN_ENCERRADO
+                rank = (vivo, int(d.get("update_time") or 0), int(d.get("create_time") or 0))
+                if sn not in melhor or rank > melhor[sn][0]:
+                    melhor[sn] = (rank, d, st)
+            # Fatias encostadas (a borda repete e é deduplicada acima).
+            ate = de
+
+        for r in rows:
+            got = melhor.get((r.pedido_marketplace or "").strip())
+            if got is None:
+                continue
+            out[(r.pedido_bling or "").strip()] = _return_info(got[1], got[2])
+
+    logger.info(
+        "logistica_shopee_returns_por_pedido",
+        linhas=len(linhas), contas=len(por_conta), encontradas=len(out),
+    )
+    return out
 
 
 async def enrich_recent(

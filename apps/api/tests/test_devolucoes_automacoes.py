@@ -421,6 +421,68 @@ async def test_acompanhamento_mostra_status_da_devolucao_viva(
         await _derruba_view(db)
 
 
+async def test_acompanhamento_usa_rastreio_do_pacote_que_volta(
+    client, db, make_user, auth_as
+):
+    """Eduardo 03/09: "o TikTok não está pegando o número de rastreio correto
+    (291869)" / "em devolução desde todas as datas estão iguais". Com o sync do
+    retorno gravado (devolucao_rastreio.*_auto): o Rastreio é o código do
+    pacote que VOLTA (não o da entrega), a localização é o status da devolução
+    + o último evento do 17track, e "Em devolução desde" é o dia em que o
+    cliente abriu a devolução."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    p1, p2 = f"38{uuid4().hex[:6]}", f"39{uuid4().hex[:6]}"
+    await _monta_acompanhamento(db, p1, p2)
+    db.add(
+        Logistica(
+            pedido_bling=p2,
+            plataforma="TikTok",
+            rastreio="999881795110423",  # entrega original
+            localizacao="Package has been delivered!",
+            meli_status={"order_status": "DELIVERED", "return_status": "BUYER_SHIPPED_ITEM"},
+        )
+    )
+    db.add(
+        DevolucaoRastreio(
+            pedido_bling=p2,
+            rastreio_auto="AP418496864BR",
+            transportadora_auto="Correios",
+            localizacao_auto="Piracicaba/SP — Saiu para entrega",
+            localizacao_auto_data=datetime(2026, 9, 3, 13, 57, tzinfo=UTC),
+            devolucao_status_auto="BUYER_SHIPPED_ITEM",
+            fonte_auto="tiktok",
+            devolucao_criada_em=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+        )
+    )
+    await db.commit()
+
+    try:
+        r = await client.get("/api/devolutions/acompanhamento")
+        assert r.status_code == 200
+        item = {i["pedido_bling"]: i for i in r.json()["items"]}[p2]
+        assert item["rastreio"] == "AP418496864BR"
+        assert item["localizacao"] == (
+            "Cliente enviou o item de volta · Piracicaba/SP — Saiu para entrega"
+        )
+        assert item["entrega_localizacao"] == "Package has been delivered!"
+        assert item["localizacao_data"].startswith("2026-09-03T13:57")
+        assert item["aguardando_devolucao_data"] == "2026-08-24"
+        esperado = (datetime.now(UTC).date() - datetime(2026, 8, 24).date()).days
+        assert item["dias_em_devolucao"] == esperado
+
+        # PATCH só do rastreio manual → resposta mantém status + evento do retorno.
+        r = await client.patch(
+            f"/api/devolutions/acompanhamento/{p2}", json={"rastreio": "MANUAL1"}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["rastreio"] == "MANUAL1"
+        assert body["localizacao"].startswith("Cliente enviou o item de volta")
+    finally:
+        await _derruba_view(db)
+
+
 # ------------------------------- Informar de Devoluções (admin-only, Threema)
 
 

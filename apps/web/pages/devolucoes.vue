@@ -1330,7 +1330,7 @@ async function backfillAddresses() {
           <thead class="sticky top-0 z-20 bg-background">
             <tr>
               <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="12">Pedido aguardando devolução (Bling)</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3" title="Preenchido sozinho com o rastreio/localização do painel Logística; o que você digitar aqui vale mais que o automático">Rastreio</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3" title="Preenchido sozinho: código e status do PACOTE QUE VOLTA (devolução na Shopee/TikTok/ML, atualizado a cada 30 min) — senão o rastreio da entrega original (Logística). O que você digitar aqui vale mais que o automático">Rastreio</th>
               <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Devolução</th>
             </tr>
             <tr class="border-b">

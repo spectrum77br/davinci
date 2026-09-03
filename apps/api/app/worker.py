@@ -816,6 +816,17 @@ async def logistica_marketplaces_ingest(ctx: dict) -> None:
     logger.info("logistica_marketplaces_ingest_done", **summary)
 
 
+async def devolucao_rastreio_sync(ctx: dict) -> None:
+    """A cada 30 min: rastreio/status do pacote que VOLTA nos pedidos em
+    Aguardando Devolução (returns API de TikTok/Shopee/ML → devolucao_rastreio
+    + 17track). Eduardo 03/09: "precisa sempre estar atualizadinho"."""
+    from app.services import devolucao_rastreio_sync as svc  # tardio: módulo pesado
+
+    async with session_scope() as s:
+        summary = await svc.run(s)
+    logger.info("devolucao_rastreio_sync_job_done", **summary)
+
+
 async def chamados_replica_automatica(ctx: dict) -> None:
     """De hora em hora (:25): réplica automática dos Chamados (reenvia a
     mensagem cadastrada a cada N dias enquanto ligada) + monitoramento (fecha
@@ -2007,6 +2018,9 @@ class WorkerSettings:
             run_at_startup=False,
             timeout=10800,
         ),
+        # Rastreio do pacote que VOLTA (Acompanhamento de Devoluções), a cada
+        # 30 min (:10/:40 — fora dos slots dos ingests e do recarregar).
+        cron(devolucao_rastreio_sync, minute={10, 40}, run_at_startup=False, timeout=1500),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps
         # 5/5/5/5/4h — sempre abaixo da expiração. minute=45 evita colidir

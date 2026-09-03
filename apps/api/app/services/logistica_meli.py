@@ -22,6 +22,11 @@ Só se aplica a pedidos de Mercado Livre — as outras plataformas têm status
 próprios e a planilha de referência é do Meli. Tudo best-effort: uma chamada de
 claim que falhe (pedido sem reclamação → 404) só deixa aqueles campos vazios,
 nunca derruba os campos de pedido/envio.
+
+`returns_por_pedido` (aba Acompanhamento de Devoluções) segue o mesmo caminho
+order → mediations → returns do claim, mas devolve o pacote que VOLTA
+(shipment do return: tracking_number/status) no contrato compartilhado
+`devolucao_returns.ReturnInfo`.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 import structlog
@@ -39,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import logistica_datas, logistica_enrich, logistica_rules, logistica_track
+from app.services.devolucao_returns import ReturnInfo, iso_to_dt
 from app.services.marketplaces.ml import MercadoLivreClient
 
 logger = structlog.get_logger()
@@ -162,6 +168,18 @@ async def _fetch_order(client: MercadoLivreClient, order_id: str) -> dict:
     return await client.get_order(str(real_ids[0]))
 
 
+def _mediation_ids(order: dict) -> list[Any]:
+    """Ids das reclamações/mediações do pedido (`order.mediations[].id`, na
+    ordem em que o ML lista; aceita item cru = id). Vazio = nunca abriu caso
+    de pós-venda — o ML só preenche `mediations` quando abriu."""
+    out: list[Any] = []
+    for m in order.get("mediations") or []:
+        cid = m.get("id") if isinstance(m, dict) else m
+        if cid and cid not in out:
+            out.append(cid)
+    return out
+
+
 async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[str, Any]:
     """Puxa do ML tudo que a Logística consome de um pedido: a assinatura de 8
     campos (`meli_status`) + o número de rastreio (`rastreio`, vem do shipment).
@@ -257,13 +275,8 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
             )
 
     # Reclamação/mediação — o id vem em order.mediations[].id (ML só lista
-    # quando abriu um caso de pós-venda).
-    claim_id = None
-    for m in order.get("mediations") or []:
-        cid = m.get("id") if isinstance(m, dict) else m
-        if cid:
-            claim_id = cid
-            break
+    # quando abriu um caso de pós-venda). Aqui vale o primeiro.
+    claim_id = next(iter(_mediation_ids(order)), None)
     if claim_id:
         try:
             claim = await client.get_claim(claim_id)
@@ -666,3 +679,262 @@ async def enrich_recent(
     summary = {"seen": len(rows), "updated": updated, "skipped": skipped, "failed": failed}
     logger.info("logistica_meli_enrich_batch", **summary)
     return summary
+
+
+# ---- devolução: o pacote que VOLTA (aba Acompanhamento de Devoluções) -------
+#
+# Eduardo (03/09): a aba mostrava o rastreio da ENTREGA original. No ML o
+# pacote de volta é o shipment do RETURN do claim (id em
+# `returns.shipments[0].shipment_id`), com tracking_number/status próprios —
+# `GET /shipments/{id}` dele é o que alimenta `devolucao_rastreio.*_auto`.
+
+# Pedidos consultados em paralelo. Cada um custa até 4 chamadas (order →
+# returns do claim → shipment do return [→ claim, só pra datar]); 4 de cada vez
+# fica longe do rate limit do ML e do 6 do enrich (que já roda junto).
+_RETURNS_CONCURRENCY = 4
+# Status (do return em si e do envio de volta) que dizem "esse caso morreu".
+# Só entra na resposta quando o pedido não tem outro caso vivo.
+_RETURN_DEAD = {"cancelled", "canceled", "closed", "rejected", "expired"}
+_DT_MIN = datetime.min.replace(tzinfo=UTC)
+
+
+class _ReturnCand(NamedTuple):
+    """Um return de um claim, já com o que decide a escolha entre vários."""
+
+    claim_id: str
+    shipment_id: str | None
+    shipment_status: str
+    created_at: datetime | None
+    updated_at: datetime | None
+    live: bool
+
+
+def _returns_as_list(rets: Any) -> list[dict]:
+    """Payload de returns do claim (objeto único v2, lista, ou envelope
+    `{results: [...]}`) → lista de returns (só dicts)."""
+    if isinstance(rets, list):
+        return [r for r in rets if isinstance(r, dict)]
+    if not isinstance(rets, dict) or not rets:
+        return []
+    inner = rets.get("results")
+    if isinstance(inner, list) and "shipments" not in rets:
+        return [r for r in inner if isinstance(r, dict)]
+    return [rets]
+
+
+def _return_shipment(ret: dict) -> dict:
+    """Envio de VOLTA de um return: `shipments[0]` (v2; id em `shipment_id`,
+    defesa `id`) ou `shipping` (formato v1). `{}` quando ainda não há envio
+    (devolução aberta sem postagem / só reembolso)."""
+    shipments = ret.get("shipments")
+    if isinstance(shipments, list):
+        for sh in shipments:
+            if isinstance(sh, dict):
+                return sh
+    shp = ret.get("shipping")
+    return shp if isinstance(shp, dict) else {}
+
+
+def _return_candidate(claim_id: str, ret: dict) -> _ReturnCand:
+    sh = _return_shipment(ret)
+    sid = sh.get("shipment_id") or sh.get("id")
+    sh_status = str(sh.get("status") or "").strip()
+    ret_status = str(ret.get("status") or "").strip()
+    live = sh_status.lower() not in _RETURN_DEAD and ret_status.lower() not in _RETURN_DEAD
+    return _ReturnCand(
+        claim_id=claim_id,
+        shipment_id=str(sid) if sid else None,
+        # Sem envio ainda, o status do return em si (ex. opened) é o que há.
+        shipment_status=sh_status or ret_status,
+        created_at=iso_to_dt(ret.get("date_created")) or iso_to_dt(sh.get("date_created")),
+        updated_at=iso_to_dt(ret.get("last_updated")) or iso_to_dt(sh.get("last_updated")),
+        live=live,
+    )
+
+
+def _cand_key(c: _ReturnCand) -> tuple[datetime, int]:
+    """Recência do caso: data de abertura (cai na última mexida); empate
+    (payload sem datas) desempata pelo id do claim — no ML ele só cresce."""
+    try:
+        n = int(c.claim_id)
+    except ValueError:
+        n = 0
+    return (c.created_at or c.updated_at or _DT_MIN, n)
+
+
+async def _orders_do_pedido(client: MercadoLivreClient, pedido: str) -> list[dict]:
+    """Mesma resolução do `_fetch_order` (o número guardado pode ser order id
+    OU pack id), mas devolvendo TODOS os pedidos do pack — a devolução pode
+    estar em qualquer um deles. Levanta só se nem order nem pack existirem."""
+    try:
+        return [await client.get_order(pedido)]
+    except Exception as e:  # noqa: BLE001 — pode ser pack id
+        logger.debug("logistica_meli_order_try_pack", pedido=pedido, err=str(e)[:120])
+    pack = await client.get_pack(pedido)  # levanta se nem pack existir
+    ids = [
+        o.get("id") for o in (pack.get("orders") or []) if isinstance(o, dict) and o.get("id")
+    ]
+    if not ids:
+        return [await client.get_order(pedido)]  # re-levanta o erro original limpo
+    orders: list[dict] = []
+    for oid in ids:
+        try:
+            orders.append(await client.get_order(str(oid)))
+        except Exception as e:  # noqa: BLE001 — best-effort por pedido do pack
+            logger.info(
+                "logistica_meli_pack_order_failed", pedido=pedido, order_id=oid, err=str(e)[:120]
+            )
+    return orders
+
+
+async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> ReturnInfo | None:
+    """`ReturnInfo` do pacote que VOLTA de um pedido ML; None sem devolução.
+
+    order(s) → `mediations[].id` → returns de cada claim (v2) → escolhe o caso
+    (vivo mais recente, senão o mais recente) → `GET /shipments/{id}` do envio
+    de volta (tracking_number/status/tracking_method). Claim sem return (404)
+    e shipment que falhe são tolerados; levanta só se o pedido não existir."""
+    orders = await _orders_do_pedido(client, pedido)
+    claim_ids: list[str] = []
+    for o in orders:
+        for cid in _mediation_ids(o):
+            if str(cid) not in claim_ids:
+                claim_ids.append(str(cid))
+    if not claim_ids:
+        return None
+
+    cands: list[_ReturnCand] = []
+    for cid in claim_ids:
+        try:
+            rets = await client.get_claim_returns(cid)
+        except Exception as e:  # noqa: BLE001 — claim sem devolução → 404
+            logger.info(
+                "logistica_meli_returns_none", pedido=pedido, claim_id=cid, err=str(e)[:120]
+            )
+            continue
+        cands.extend(_return_candidate(cid, ret) for ret in _returns_as_list(rets))
+    if not cands:
+        return None
+
+    vivos = [c for c in cands if c.live]
+    esc = max(vivos or cands, key=_cand_key)
+
+    sh: dict = {}
+    if esc.shipment_id:
+        try:
+            sh = await client.get_shipment(esc.shipment_id) or {}
+        except Exception as e:  # noqa: BLE001 — fica o status do payload de returns
+            logger.warning(
+                "logistica_meli_return_shipment_failed",
+                pedido=pedido, claim_id=esc.claim_id, shipment_id=esc.shipment_id,
+                err=str(e)[:200],
+            )
+            sh = {}
+
+    created_at = esc.created_at
+    if created_at is None:
+        # Return sem data → quando o claim abriu (uma chamada a mais, só aqui).
+        try:
+            claim = await client.get_claim(esc.claim_id) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.info(
+                "logistica_meli_claim_failed", pedido=pedido, claim_id=esc.claim_id,
+                err=str(e)[:120],
+            )
+            claim = {}
+        created_at = iso_to_dt(claim.get("date_created")) or iso_to_dt(sh.get("date_created"))
+
+    updated_at = max(
+        (d for d in (iso_to_dt(sh.get("last_updated")), esc.updated_at) if d is not None),
+        default=None,
+    )
+    status = str(sh.get("status") or "").strip() or esc.shipment_status or None
+    tracking = str(sh.get("tracking_number") or "").strip() or None
+    carrier = str(sh.get("tracking_method") or "").strip() or None
+    return ReturnInfo(
+        fonte="ml",
+        status=status,
+        tracking=tracking,
+        carrier=carrier,
+        created_at=created_at,
+        updated_at=updated_at,
+        return_id=esc.claim_id,
+    )
+
+
+async def returns_por_pedido(
+    session: AsyncSession, linhas: list[Logistica]
+) -> dict[str, ReturnInfo]:
+    """`{pedido_bling: ReturnInfo}` do pacote que VOLTA, pras linhas ML dadas.
+
+    Contrato em `devolucao_returns`: só entra pedido com devolução conhecida
+    (ausente = desconhecido); com vários casos vale o vivo mais recente, senão
+    o mais recente. Best-effort por conta/pedido: conta sem integração ML e
+    pedido cuja API falhe são registrados e pulados — nunca levanta.
+
+    Sem janela de data: cada pedido é resolvido direto (`/orders/{id}` →
+    `mediations` → `/claims/{id}/returns` → `/shipments/{id}`), então pedido
+    antigo funciona igual ao recente. Linhas de outra plataforma, sem
+    `pedido_marketplace` ou sem `pedido_bling` são ignoradas.
+
+    Não faz commit: só o refresh de token toca o banco (flush, serializado
+    pelo lock) — quem chama persiste junto com o que gravar."""
+    alvo: list[Logistica] = []
+    for r in linhas:
+        if (r.plataforma or "").strip().lower() not in _ML_PLATAFORMAS:
+            continue
+        if not (r.pedido_bling or "").strip() or not (r.pedido_marketplace or "").strip():
+            continue
+        alvo.append(r)
+    if not alvo:
+        return {}
+
+    cache: dict[str, MercadoLivreClient] = {}
+    lock = asyncio.Lock()
+    await logistica_enrich.prewarm_clients(
+        session,
+        alvo,
+        cache,
+        resolve=_ml_integration_for_conta,
+        build=lambda s, i: _build_ml_client(s, i, lock=lock),
+    )
+
+    # O mesmo pedido do marketplace pode estar em mais de uma linha: consulta
+    # uma vez e espelha em todos os pedido_bling.
+    por_pedido: dict[tuple[str, str], list[str]] = {}
+    skipped = 0
+    for r in alvo:
+        if r.conta not in cache:
+            skipped += 1
+            continue
+        chave = (str(r.conta), str(r.pedido_marketplace).strip())
+        por_pedido.setdefault(chave, []).append(str(r.pedido_bling).strip())
+    if skipped:
+        logger.info("logistica_meli_returns_sem_integracao", linhas=skipped)
+
+    out: dict[str, ReturnInfo] = {}
+    failed = 0
+    chaves = list(por_pedido)
+    for lote in logistica_enrich.chunked(chaves, _RETURNS_CONCURRENCY):
+        res = await asyncio.gather(
+            *(_return_info_for_pedido(cache[conta], pedido) for conta, pedido in lote),
+            return_exceptions=True,
+        )
+        for (conta, pedido), info in zip(lote, res, strict=True):
+            if isinstance(info, BaseException):
+                failed += 1
+                logger.warning(
+                    "logistica_meli_returns_pedido_failed",
+                    conta=conta, pedido=pedido, err=str(info)[:200],
+                )
+                continue
+            if info is None:
+                continue
+            for pedido_bling in por_pedido[(conta, pedido)]:
+                out[pedido_bling] = info
+    logger.info(
+        "logistica_meli_returns_por_pedido",
+        seen=len(linhas), alvo=len(alvo), pedidos=len(chaves),
+        skipped=skipped, found=len(out), failed=failed,
+    )
+    return out

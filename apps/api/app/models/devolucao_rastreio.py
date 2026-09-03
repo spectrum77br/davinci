@@ -27,6 +27,31 @@ class DevolucaoRastreio(Base, TimestampMixin):
     localizacao_data: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # --- Automático (migration 0241, Eduardo 03/09): o pacote que VOLTA ---
+    # Preenchido pelo job services/devolucao_rastreio_sync a partir da returns
+    # API de TikTok/Shopee/ML (contrato: services/devolucao_returns.ReturnInfo).
+    # O manual acima continua mandando na aba; estes só entram quando o manual
+    # está vazio. `localizacao_auto` vem do 17track (códigos Correios).
+    rastreio_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transportadora_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    localizacao_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    localizacao_auto_data: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    devolucao_status_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    devolucao_id_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fonte_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Quando a devolução foi ABERTA no marketplace → "Em devolução desde" real
+    # (o backfill da 0236 carimbou 02/09 em todo mundo).
+    devolucao_criada_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    devolucao_atualizada_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    auto_sync_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

@@ -18,7 +18,7 @@ sem status (não derruba o lote).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import logistica_datas, logistica_enrich, logistica_rules
+from app.services.devolucao_returns import ReturnInfo, epoch_to_dt
 from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
@@ -311,6 +312,105 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
     }
     logger.info("logistica_tiktok_sweep_pos_venda", **summary)
     return {"ids": list(mudados), **summary}
+
+
+# ---- devolução: o pacote que VOLTA (aba Acompanhamento de Devoluções) --------
+
+
+def _epoch_int(v: object) -> int:
+    """Epoch cru do payload (int/str) → int; 0 se ilegível/ausente."""
+    try:
+        return int(float(v))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _tiktok_return_info(d: dict) -> ReturnInfo:
+    """Caso do returns/search → `ReturnInfo`. Devolução só-reembolso (return_type
+    REFUND) não tem pacote: entra mesmo assim, com tracking None."""
+    return ReturnInfo(
+        fonte="tiktok",
+        status=str(d.get("return_status") or "").strip().upper() or None,
+        tracking=str(d.get("return_tracking_number") or "").strip() or None,
+        carrier=str(d.get("return_provider_name") or "").strip() or None,
+        created_at=epoch_to_dt(d.get("create_time")),
+        updated_at=epoch_to_dt(d.get("update_time")),
+        return_id=str(d.get("return_id") or "").strip() or None,
+    )
+
+
+def _melhor_devolucao_por_pedido(devolucoes: Iterable[dict]) -> dict[str, dict]:
+    """{order_id: caso} — havendo mais de um caso pro mesmo pedido vale o VIVO
+    (fora de `_TIKTOK_RETURN_ENCERRADO`) mais recente; sem vivo, o mais recente.
+    "Recente" = `update_time` (fallback `create_time`). Mesma regra do
+    `sweep_pos_venda`, mas guardando o caso inteiro (rastreio, transportadora)."""
+    melhor: dict[str, tuple[tuple[bool, int], dict]] = {}
+    for d in devolucoes:
+        if not isinstance(d, dict):
+            continue
+        oid = str(d.get("order_id") or "").strip()
+        if not oid:
+            continue
+        st = str(d.get("return_status") or "").strip().upper()
+        vivo = bool(st) and st not in logistica_rules._TIKTOK_RETURN_ENCERRADO
+        quando = _epoch_int(d.get("update_time")) or _epoch_int(d.get("create_time"))
+        chave = (vivo, quando)
+        if oid not in melhor or chave > melhor[oid][0]:
+            melhor[oid] = (chave, d)
+    return {oid: d for oid, (_, d) in melhor.items()}
+
+
+async def returns_por_pedido(
+    session: AsyncSession, linhas: list[Logistica]
+) -> dict[str, ReturnInfo]:
+    """Devolução conhecida no TikTok pra cada linha da Logística recebida:
+    `{pedido_bling: ReturnInfo}` — pedido sem caso de devolução fica FORA do
+    dict (ausente = desconhecido). Contrato em `services/devolucao_returns`.
+
+    Eduardo (03/09): a aba Acompanhamento mostrava o rastreio da ENTREGA; o que
+    interessa é o pacote que VOLTA (`return_tracking_number` +
+    `return_provider_name` do returns/search).
+
+    Busca por `order_ids` (lotes de 50 por conta, sem filtro de tempo) — o
+    sweep só olha `update_time` dos últimos 15 dias e perderia devolução aberta
+    meses atrás e nunca mais mexida. Só linhas TikTok com pedido de marketplace
+    e pedido Bling; mais de um caso → o VIVO mais recente
+    (`_melhor_devolucao_por_pedido`). Best-effort por conta: sem integração ou
+    API caída → loga e pula, nunca levanta."""
+    # conta → order_id → [pedido_bling] (a mesma venda pode ter 2 linhas).
+    por_conta: dict[str, dict[str, list[str]]] = {}
+    for r in linhas:
+        if (r.plataforma or "").strip().lower() not in _TIKTOK_PLATAFORMAS:
+            continue
+        oid = (r.pedido_marketplace or "").strip()
+        pb = (r.pedido_bling or "").strip()
+        if not oid or not pb:
+            continue
+        por_conta.setdefault((r.conta or "").strip(), {}).setdefault(oid, []).append(pb)
+
+    out: dict[str, ReturnInfo] = {}
+    for conta, pedidos in por_conta.items():
+        try:
+            integ = await _tiktok_integration_for_conta(session, conta)
+            if integ is None:
+                logger.warning(
+                    "logistica_tiktok_returns_sem_integracao",
+                    conta=conta, pedidos=len(pedidos),
+                )
+                continue
+            client = _build_tiktok_client(session, integ)
+            devolucoes = await client.get_return_list(order_ids=list(pedidos))
+        except Exception as e:  # noqa: BLE001 — best-effort por conta
+            logger.warning(
+                "logistica_tiktok_returns_por_pedido_falhou",
+                conta=conta, pedidos=len(pedidos), err=str(e)[:200],
+            )
+            continue
+        for oid, d in _melhor_devolucao_por_pedido(devolucoes).items():
+            info = _tiktok_return_info(d)
+            for pb in pedidos.get(oid) or ():
+                out[pb] = info
+    return out
 
 
 async def enrich_recent(

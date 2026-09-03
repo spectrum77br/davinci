@@ -343,29 +343,46 @@ class ShopeeClient:
         return out
 
     async def get_return_list(
-        self, *, update_time_from: int, update_time_to: int, page_size: int = 100
+        self,
+        *,
+        update_time_from: int | None = None,
+        update_time_to: int | None = None,
+        create_time_from: int | None = None,
+        create_time_to: int | None = None,
+        page_size: int = 100,
     ) -> list[dict]:
-        """Devoluções da loja cuja situação MUDOU na janela (epoch UTC).
+        """Devoluções da loja numa janela (epoch UTC) — por `update_time_*`
+        (situação MUDOU na janela) e/ou por `create_time_*` (devolução ABERTA
+        na janela). Pelo menos um par é obrigatório.
 
         Endpoint: GET /api/v2/returns/get_return_list. Peculiaridades medidas
         ao vivo (28/08): `page_no` começa em 0 (com 1 a primeira página some),
         os itens vêm em `response.return[]` com `order_sn`/`return_sn`/
         `status`/`update_time`, e a janela update_time_from→to não pode passar
-        de 15 dias (a Shopee recusa com erro de parâmetro).
+        de 15 dias (a Shopee recusa com erro de parâmetro). A janela por
+        create_time tem o mesmo teto de 15 dias (doc v2.returns.get_return_list)
+        — é o que `logistica_shopee.returns_por_pedido` varre em fatias pra
+        achar a devolução de pedidos antigos.
 
         Best-effort no estilo do get_order_status_map: erro de API loga e
         devolve o que já juntou — não derruba o sweep de pós-venda.
         """
+        janela: dict[str, int] = {}
+        if update_time_from is not None and update_time_to is not None:
+            janela["update_time_from"] = int(update_time_from)
+            janela["update_time_to"] = int(update_time_to)
+        if create_time_from is not None and create_time_to is not None:
+            janela["create_time_from"] = int(create_time_from)
+            janela["create_time_to"] = int(create_time_to)
+        if not janela:
+            raise ValueError(
+                "get_return_list: informe update_time_from/to ou create_time_from/to"
+            )
         path = "/api/v2/returns/get_return_list"
         out: list[dict] = []
         page_no = 0
         while True:
-            params = {
-                "page_no": page_no,
-                "page_size": page_size,
-                "update_time_from": update_time_from,
-                "update_time_to": update_time_to,
-            }
+            params = {"page_no": page_no, "page_size": page_size, **janela}
             try:
                 r = await self._request("GET", path, params=params)
             except httpx.HTTPError as e:

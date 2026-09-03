@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import structlog
@@ -29,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Logistica, User
+from app.models import DevolucaoRastreio, Logistica, User
 from app.redis_client import redis
 from app.services import logistica_rules, logistica_track
 
@@ -87,6 +88,17 @@ async def receive_17track_push(
             row.localizacao = loc
             # Recalcula a divergência ML × físico com o local novo dos Correios.
             row.divergencia = logistica_rules.detectar_divergencia(row.meli_status, loc)
+            applied += 1
+        # Pacote de DEVOLUÇÃO (aba Acompanhamento): o código do retorno é
+        # registrado pelo services/devolucao_rastreio_sync; o push cai aqui.
+        devs = (
+            await session.execute(
+                select(DevolucaoRastreio).where(DevolucaoRastreio.rastreio_auto == number)
+            )
+        ).scalars().all()
+        for dev in devs:
+            dev.localizacao_auto = loc
+            dev.localizacao_auto_data = datetime.now(UTC)
             applied += 1
     await session.commit()
 

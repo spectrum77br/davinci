@@ -284,27 +284,44 @@ _LOGISTICA_ULTIMA_MOVIMENTACAO_SQL = (
 )
 
 
+_FONTE_PLATAFORMA = {"tiktok": "tiktok", "shopee": "shopee", "ml": "mercado livre"}
+
+
 def _com_status_da_devolucao(
     d: dict,
     *,
     localizacao_manual: str | None,
     lg_plataforma: str | None,
     lg_meli_status: dict | None,
+    status_auto: str | None = None,
+    fonte_auto: str | None = None,
+    localizacao_auto: str | None = None,
+    localizacao_auto_data=None,
 ) -> dict:
-    """Devolução VIVA (Shopee/TikTok) → `localizacao` vira o status da devolução
-    e a entrega original vai pra `entrega_localizacao` (Eduardo 03/09: "tem mais
-    um monte de pedido entregue e só vem em acompanhamentos" — a coluna mostrava
-    "Pedido entregue" com a devolução aberta depois). Localização MANUAL
-    continua mandando; sem devolução viva, nada muda."""
+    """Devolução VIVA → `localizacao` vira o status da devolução (+ o último
+    evento do pacote de volta, quando o 17track já mandou) e a entrega original
+    vai pra `entrega_localizacao` (Eduardo 03/09: "tem mais um monte de pedido
+    entregue e só vem em acompanhamentos"). Fontes, em ordem: o status gravado
+    pelo sync do retorno (`devolucao_rastreio.devolucao_status_auto`), senão o
+    `return_status` da Logística. Localização MANUAL continua mandando; sem
+    devolução viva, nada muda."""
     from app.services import logistica_rules  # tardio: evita ciclo router↔services
 
     d.setdefault("entrega_localizacao", None)
     if localizacao_manual:
         return d
-    dev = logistica_rules.devolucao_status_pt(lg_plataforma, lg_meli_status or {})
+    dev = None
+    if status_auto and fonte_auto:
+        dev = logistica_rules.devolucao_status_pt(
+            _FONTE_PLATAFORMA.get(fonte_auto, fonte_auto), {"return_status": status_auto}
+        )
+    if dev is None:
+        dev = logistica_rules.devolucao_status_pt(lg_plataforma, lg_meli_status or {})
     if dev:
         d["entrega_localizacao"] = d.get("localizacao")
-        d["localizacao"] = dev
+        d["localizacao"] = f"{dev} · {localizacao_auto}" if localizacao_auto else dev
+        if localizacao_auto_data is not None:
+            d["localizacao_data"] = localizacao_auto_data
     return d
 
 
@@ -327,7 +344,19 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     v.pedido_bling::text        AS pedido_bling,
                     v.pedido_marketplace::text  AS pedido_marketplace,
                     v.data,
-                    bo.aguardando_devolucao_data,
+                    -- "Em devolução desde": quando o cliente ABRIU a devolução
+                    -- (sync do retorno); senão a entrada em 83957 no Bling
+                    -- (a 0236 carimbou 02/09 em todo mundo — Eduardo 03/09).
+                    COALESCE(
+                        (r.devolucao_criada_em AT TIME ZONE 'America/Sao_Paulo')::date,
+                        bo.aguardando_devolucao_data
+                    )                           AS aguardando_devolucao_data,
+                    r.rastreio_auto,
+                    r.transportadora_auto,
+                    r.localizacao_auto,
+                    r.localizacao_auto_data,
+                    r.devolucao_status_auto,
+                    r.fonte_auto,
                     v.plataforma_bling          AS plataforma,
                     COALESCE(NULLIF(btrim(v.loja_nome), ''),
                              'Loja ' || v.bling_loja_id, 'Sem loja') AS loja,
@@ -337,7 +366,9 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     v.sku,
                     v.produto,
                     v.quantidade::int           AS quantidade,
-                    COALESCE(NULLIF(btrim(r.rastreio), ''), lg.rastreio)
+                    -- Rastreio: manual > código do PACOTE DE VOLTA (sync do
+                    -- retorno) > rastreio da entrega original (Logística).
+                    COALESCE(NULLIF(btrim(r.rastreio), ''), r.rastreio_auto, lg.rastreio)
                         AS rastreio,
                     COALESCE(NULLIF(btrim(r.localizacao), ''), lg.localizacao)
                         AS localizacao,
@@ -391,6 +422,10 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                 localizacao_manual=d.pop("localizacao_manual", None),
                 lg_plataforma=d.pop("lg_plataforma", None),
                 lg_meli_status=d.pop("lg_meli_status", None),
+                status_auto=d.pop("devolucao_status_auto", None),
+                fonte_auto=d.pop("fonte_auto", None),
+                localizacao_auto=d.pop("localizacao_auto", None),
+                localizacao_auto_data=d.pop("localizacao_auto_data", None),
             )
         )
     return out
@@ -492,7 +527,7 @@ async def patch_acompanhamento_rastreio(
     d = _com_status_da_devolucao(
         {
             "pedido_bling": row.pedido_bling,
-            "rastreio": row.rastreio or (lg["rastreio"] if lg else None),
+            "rastreio": row.rastreio or row.rastreio_auto or (lg["rastreio"] if lg else None),
             "localizacao": row.localizacao or (lg["localizacao"] if lg else None),
             "localizacao_data": (
                 row.localizacao_data
@@ -503,6 +538,10 @@ async def patch_acompanhamento_rastreio(
         localizacao_manual=row.localizacao,
         lg_plataforma=lg["lg_plataforma"] if lg else None,
         lg_meli_status=lg["lg_meli_status"] if lg else None,
+        status_auto=row.devolucao_status_auto,
+        fonte_auto=row.fonte_auto,
+        localizacao_auto=row.localizacao_auto,
+        localizacao_auto_data=row.localizacao_auto_data,
     )
     return AcompanhamentoRastreioOut(**d)
 

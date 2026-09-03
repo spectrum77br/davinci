@@ -598,24 +598,63 @@ class TikTokClient:
                 }
         return out
 
+    # Máximo de `order_ids` por chamada do returns/search (mesmo teto de 50 do
+    # `ids` do Order API — a doc do returns/search não fixa outro).
+    _RETURNS_ORDER_IDS_LOTE = 50
+
     async def get_return_list(
-        self, *, update_time_from: int, update_time_to: int, page_size: int = 50
+        self,
+        *,
+        update_time_from: int | None = None,
+        update_time_to: int | None = None,
+        page_size: int = 50,
+        order_ids: list[str] | None = None,
     ) -> list[dict]:
-        """Devoluções da loja cuja situação MUDOU na janela (epoch UTC).
+        """Devoluções da loja (returns/search). Dois modos de busca:
+
+        - janela: `update_time_from`/`update_time_to` (epoch UTC) → casos cuja
+          situação MUDOU na janela (o sweep de pós-venda usa 15 dias);
+        - `order_ids`: casos DESSES pedidos, SEM filtro de tempo — acha a
+          devolução aberta meses atrás e nunca mais mexida, que a janela
+          perderia (aba Acompanhamento de Devoluções). Lotes de até 50 ids por
+          chamada; ids vazios/duplicados são descartados.
 
             POST /return_refund/202309/returns/search
 
-        Formato medido ao vivo (28/08): filtros `update_time_ge`/`update_time_lt`
-        no body, `page_size`/`page_token` na query; itens em
-        `data.return_orders[]` com `order_id`/`return_id`/`return_status`
-        (RETURN_OR_REFUND_REQUEST_PENDING, AWAITING_BUYER_SHIP,
-        BUYER_SHIPPED_ITEM, ..._COMPLETE, ..._CANCEL)/`return_type`
-        (REFUND | RETURN_AND_REFUND | REPLACEMENT)/`update_time`; paginação por
-        `next_page_token`. Best-effort: erro loga e devolve o que já juntou —
-        não derruba o sweep de pós-venda.
+        Formato medido ao vivo (28/08 e 03/09): filtros no body
+        (`update_time_ge`/`update_time_lt` ou `order_ids`), `page_size`/
+        `page_token` na query; itens em `data.return_orders[]` com `order_id`/
+        `return_id`/`return_status` (RETURN_OR_REFUND_REQUEST_PENDING,
+        AWAITING_BUYER_SHIP, BUYER_SHIPPED_ITEM, ..._COMPLETE, ..._CANCEL)/
+        `return_type` (REFUND | RETURN_AND_REFUND | REPLACEMENT)/
+        `return_tracking_number`/`return_provider_name`/`create_time`/
+        `update_time`; paginação por `next_page_token`. Best-effort: erro loga
+        e devolve o que já juntou — não derruba quem chamou.
         """
+        if order_ids is not None:
+            ids = [str(o or "").strip() for o in order_ids]
+            ids = list(dict.fromkeys(i for i in ids if i))  # dedup, mantém a ordem
+            out: list[dict] = []
+            lote = self._RETURNS_ORDER_IDS_LOTE
+            for i in range(0, len(ids), lote):
+                out.extend(
+                    await self._search_returns({"order_ids": ids[i : i + lote]}, page_size)
+                )
+            return out
+        if update_time_from is None or update_time_to is None:
+            raise ValueError(
+                "get_return_list: informe order_ids ou update_time_from/update_time_to"
+            )
+        return await self._search_returns(
+            {"update_time_ge": update_time_from, "update_time_lt": update_time_to},
+            page_size,
+        )
+
+    async def _search_returns(self, body: dict, page_size: int) -> list[dict]:
+        """Uma busca do returns/search com o `body` dado, seguindo o
+        `next_page_token` até acabar (teto de 50 páginas). Erro HTTP/API loga e
+        devolve o que já juntou."""
         path = "/return_refund/202309/returns/search"
-        body = {"update_time_ge": update_time_from, "update_time_lt": update_time_to}
         out: list[dict] = []
         token: str | None = None
         pages = 0
