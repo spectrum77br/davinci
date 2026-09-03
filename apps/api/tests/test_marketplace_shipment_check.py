@@ -18,6 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import BlingOrder
 
 _SHIPPED_SITUACAO = "15"
+# Etiqueta enviada: 21 = Em digitação (canônico desde 03/09/2026); 83965 =
+# Enviado Etiqueta (legado). O sweep trata as duas igual.
+_ETIQUETA = pytest.mark.parametrize(
+    "etiqueta", ["21", "83965"], ids=["21-canonico", "83965-legado"],
+)
 
 
 async def _make_order(
@@ -53,11 +58,12 @@ def _stamp_update(bling_id: int, ship_date: date):
 
 
 @pytest.mark.asyncio
-async def test_preserva_em_andamento_data_ja_preenchida(db: AsyncSession):
+@_ETIQUETA
+async def test_preserva_em_andamento_data_ja_preenchida(db: AsyncSession, etiqueta: str):
     """Marketplace reporta D+1 mas o pedido já tem ship-date correto:
     preserva data, mas atualiza situacao."""
     o = await _make_order(
-        db, bling_id=900001, situacao="83965",
+        db, bling_id=900001, situacao=etiqueta,
         em_andamento_data=date(2026, 5, 30),
     )
     # Marketplace reporta um dia depois (D+1)
@@ -70,8 +76,8 @@ async def test_preserva_em_andamento_data_ja_preenchida(db: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_carimba_quando_em_andamento_data_nula(db: AsyncSession):
-    """Pedido sem ship-date (situacao=6 ou 83965 sem data): carimba com
-    a data real do marketplace E promove situacao."""
+    """Pedido sem ship-date (situacao=6, 21 ou 83965-legado sem data): carimba
+    com a data real do marketplace E promove situacao."""
     o = await _make_order(
         db, bling_id=900002, situacao="6",
         em_andamento_data=None,
@@ -84,14 +90,17 @@ async def test_carimba_quando_em_andamento_data_nula(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_carimba_com_fallback_quando_marketplace_sem_data(db: AsyncSession):
+@_ETIQUETA
+async def test_carimba_com_fallback_quando_marketplace_sem_data(
+    db: AsyncSession, etiqueta: str,
+):
     """Quando marketplace não devolve real_ship_date, o caller passa
     _operational_ship_date(now()) como ship_date. COALESCE preserva
     em_andamento existente do mesmo jeito."""
     fallback = date(2026, 6, 1)
     # cenário (a): data já preenchida — fallback é descartado
     o_a = await _make_order(
-        db, bling_id=900003, situacao="83965",
+        db, bling_id=900003, situacao=etiqueta,
         em_andamento_data=date(2026, 5, 28),
     )
     await db.execute(_stamp_update(900003, fallback))
@@ -102,7 +111,7 @@ async def test_carimba_com_fallback_quando_marketplace_sem_data(db: AsyncSession
 
     # cenário (b): data NULL — fallback aplica
     o_b = await _make_order(
-        db, bling_id=900004, situacao="83965",
+        db, bling_id=900004, situacao=etiqueta,
         em_andamento_data=None,
     )
     await db.execute(_stamp_update(900004, fallback))
@@ -113,12 +122,15 @@ async def test_carimba_com_fallback_quando_marketplace_sem_data(db: AsyncSession
 
 
 @pytest.mark.asyncio
-async def test_situacao_promovida_mesmo_sem_mudanca_de_data(db: AsyncSession):
+@_ETIQUETA
+async def test_situacao_promovida_mesmo_sem_mudanca_de_data(
+    db: AsyncSession, etiqueta: str,
+):
     """Garantia explícita: o serviço NUNCA deixa de promover situacao=15
     por causa do COALESCE. Filtrar `em_andamento.is_(None)` no WHERE
     teria quebrado esse caso — por isso usa COALESCE."""
     o = await _make_order(
-        db, bling_id=900005, situacao="83965",
+        db, bling_id=900005, situacao=etiqueta,
         em_andamento_data=date(2026, 5, 25),
     )
     await db.execute(_stamp_update(900005, date(2026, 6, 1)))
@@ -159,15 +171,16 @@ async def _make_candidate(
 
 
 @pytest.mark.asyncio
-async def test_load_candidates_inclui_83965_com_data(db: AsyncSession):
-    """Regressão guard: pedido em 83965 COM em_andamento_data deve
-    entrar como candidato. Antes o filtro `IS NULL` o bloqueava,
-    e o fix e081e0d carimba data já em 83965 — então TODOS os
-    novos pedidos em 83965 tinham data e nenhum entrava."""
+@_ETIQUETA
+async def test_load_candidates_inclui_etiqueta_com_data(db: AsyncSession, etiqueta: str):
+    """Regressão guard: pedido com etiqueta enviada (21 canônico; 83965
+    legado) COM em_andamento_data deve entrar como candidato. Antes o filtro
+    `IS NULL` o bloqueava, e o fix e081e0d carimba data já na etiqueta —
+    então TODOS os novos pedidos com etiqueta tinham data e nenhum entrava."""
     from app.services.marketplace_shipment_check import _load_candidates
 
     await _make_candidate(
-        db, bling_id=901001, situacao="83965",
+        db, bling_id=901001, situacao=etiqueta,
         em_andamento_data=date(2026, 6, 2),
     )
     rows = await _load_candidates(db)
@@ -175,12 +188,13 @@ async def test_load_candidates_inclui_83965_com_data(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_load_candidates_inclui_83965_sem_data(db: AsyncSession):
+@_ETIQUETA
+async def test_load_candidates_inclui_etiqueta_sem_data(db: AsyncSession, etiqueta: str):
     """Pedidos antigos (pré-e081e0d) sem data continuam entrando."""
     from app.services.marketplace_shipment_check import _load_candidates
 
     await _make_candidate(
-        db, bling_id=901002, situacao="83965", em_andamento_data=None,
+        db, bling_id=901002, situacao=etiqueta, em_andamento_data=None,
     )
     rows = await _load_candidates(db)
     assert any(r.bling_id == 901002 for r in rows)
@@ -188,7 +202,8 @@ async def test_load_candidates_inclui_83965_sem_data(db: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_load_candidates_inclui_6_em_aberto(db: AsyncSession):
-    """Situação 6 (Em aberto) é destinada a virar 83965 + 15 — entra."""
+    """Situação 6 (Em aberto) é destinada a virar 21 (Em digitação; ex-83965)
+    + 15 — entra."""
     from app.services.marketplace_shipment_check import _load_candidates
 
     await _make_candidate(
@@ -247,17 +262,19 @@ async def test_load_candidates_exclui_fora_da_janela(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_load_candidates_inclui_pedido_retido_20_dias(db: AsyncSession):
-    """Pedido RETIDO — criado 20 dias atrás e ainda em 83965 — ENTRA no
-    pool. Guarda de regressão da janela 7→30 dias (ago/2026): o 290728
-    entrou 16/08 e só foi postado 25/08 (9º dia); com janela de 7 o robô
-    desistia dele na véspera do despacho e o pedido travava pra sempre."""
+@_ETIQUETA
+async def test_load_candidates_inclui_pedido_retido_20_dias(db: AsyncSession, etiqueta: str):
+    """Pedido RETIDO — criado 20 dias atrás e ainda na etiqueta (21; 83965
+    legado) — ENTRA no pool. Guarda de regressão da janela 7→30 dias
+    (ago/2026): o 290728 entrou 16/08 e só foi postado 25/08 (9º dia); com
+    janela de 7 o robô desistia dele na véspera do despacho e o pedido
+    travava pra sempre."""
     from datetime import UTC, datetime, timedelta
 
     from app.services.marketplace_shipment_check import _load_candidates
 
     o = await _make_candidate(
-        db, bling_id=901007, situacao="83965", em_andamento_data=None,
+        db, bling_id=901007, situacao=etiqueta, em_andamento_data=None,
     )
     old_ts = datetime.now(UTC) - timedelta(days=20)
     await db.execute(

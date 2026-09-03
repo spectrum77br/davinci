@@ -57,7 +57,8 @@ logger = structlog.get_logger()
 _SWEEP_LOCK_KEY = 0x6E666165  # ascii "nfae"
 
 # Só o "Em aberto" NATIVO do Bling (6) — é onde o pedido cai ao ser importado
-# e onde fica até alguém faturar. O custom 83965 é assunto do shipment_check.
+# e onde fica até alguém faturar. A etiqueta enviada (21 "Em digitação";
+# 83965 "Enviado Etiqueta" legado) é assunto do shipment_check — nunca entra aqui.
 _SITUACAO_EM_ABERTO = "6"
 
 # Plataformas que o fluxo automatizado cobre hoje (codes de store_info.platform).

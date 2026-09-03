@@ -1126,9 +1126,10 @@ async def test_result_etiqueta_move_pedido_pra_enviado_etiqueta(
     db: AsyncSession, client: AsyncClient, admin: User,
     auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
 ):
-    """Etiqueta capturada → o pedido vai pra "Enviado Etiqueta" (83965) no Bling e
-    a situação local espelha, que é o que faz ele aparecer no Controle de Estoque
-    pra ser impresso."""
+    """Etiqueta capturada → o pedido vai pra "Em digitação" (21, canônico desde
+    03/09/2026; 83965 = Enviado Etiqueta, legado) no Bling e a situação local
+    espelha, que é o que faz ele aparecer no Controle de Estoque pra ser
+    impresso."""
     monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
     fake = _FakeBlingSituacao()
 
@@ -1147,11 +1148,11 @@ async def test_result_etiqueta_move_pedido_pra_enviado_etiqueta(
                           json={"status": "done"}, headers={"X-Agent-Token": _TOKEN})
     assert r.status_code == 200, r.text
 
-    assert fake.chamadas == [(700001, 83965)]
+    assert fake.chamadas == [(700001, 21)]
     sit = (await db.execute(
         select(BlingOrder.situacao).where(BlingOrder.numero == "850001")
     )).scalars().all()
-    assert set(sit) == {"83965"}
+    assert set(sit) == {"21"}
 
 
 @pytest.mark.asyncio
@@ -1363,8 +1364,8 @@ async def test_agent_etiqueta_lote_casa_grava_e_processa(
 ):
     """PDF único do lote → fatia por pedido, casa (numeroloja na Shopee; nome+SKU
     na TikTok), transforma+grava, marca status_etiqueta='ok', fecha o comando
-    `imprimir_etiqueta` coberto e move os pedidos pra 83965 no Bling. A fatia
-    sem dono volta em `nao_casadas` (nunca chuta)."""
+    `imprimir_etiqueta` coberto e move os pedidos pra 21 (Em digitação;
+    ex-83965) no Bling. A fatia sem dono volta em `nao_casadas` (nunca chuta)."""
     import fitz
 
     from app.models import NfEtiquetaArquivo
@@ -1468,14 +1469,14 @@ async def test_agent_etiqueta_lote_casa_grava_e_processa(
     assert por_numeros[("890001", "999999")].status == "pending"
     assert por_numeros[("890002",)].status == "done"
 
-    # pedidos movidos pra "Enviado Etiqueta" (83965) no Bling + espelho local
-    assert set(fake.chamadas) == {(920001, 83965), (920002, 83965)}
+    # pedidos movidos pra "Em digitação" (21) no Bling + espelho local
+    assert set(fake.chamadas) == {(920001, 21), (920002, 21)}
     sit = (await db.execute(
         select(BlingOrder.situacao).where(
             BlingOrder.numero.in_(["890001", "890002"])
         )
     )).scalars().all()
-    assert set(sit) == {"83965"}
+    assert set(sit) == {"21"}
 
 
 @pytest.mark.asyncio

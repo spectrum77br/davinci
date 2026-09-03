@@ -343,7 +343,8 @@ class BlingClient:
 
         situação 9 = "Atendido" (NF emitida) — the canonical "faturado"
         signal the aggregator uses as authoritative revenue. Other useful
-        situações: 5 (em andamento), 6 (em digitação), 12 (cancelado).
+        situações: 6 (Em aberto), 15 (Em andamento), 21 (Em digitação),
+        12 (Cancelado).
         Pagination via `pagina` + `limite`; caller iterates pages."""
         params: dict[str, Any] = {"pagina": pagina, "limite": limite}
         if data_inicial:

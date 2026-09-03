@@ -55,7 +55,7 @@ def test_match_prefere_especifica_sobre_geral():
 
 def test_find_matching_rules_devolve_todas_da_chave():
     # Máquina de estados: mesma chave, duas transições distintas.
-    a = _rule(status_plataforma="Pago | Entregue", status_atual="Enviado Etiqueta",
+    a = _rule(status_plataforma="Pago | Entregue", status_atual="Em digitação",
               alterar_status_bling="Em andamento")
     b = _rule(status_plataforma="Pago | Entregue", status_atual="Em andamento",
               alterar_status_bling="Entregue")
@@ -138,13 +138,32 @@ def test_deve_monitorar_qualquer_regra_com_monitoramento():
 
 
 def test_estado_resolvido_no_alvo_final():
-    # Cadeia: Enviado Etiqueta→Em andamento→Entregue. No alvo final "Entregue"
+    # Cadeia: Em digitação→Em andamento→Entregue. No alvo final "Entregue"
     # não há mais transição partindo dele → resolvido.
-    a = _rule(status_atual="Enviado Etiqueta", alterar_status_bling="Em andamento")
+    a = _rule(status_atual="Em digitação", alterar_status_bling="Em andamento")
     b = _rule(status_atual="Em andamento", alterar_status_bling="Entregue")
     assert logistica_match.estado_resolvido([a, b], "Entregue") is True
     # No meio da cadeia (Em andamento é alvo de A mas ainda parte de B) → não.
     assert logistica_match.estado_resolvido([a, b], "Em andamento") is False
+
+
+def test_apelidos_enviado_etiqueta_e_em_digitacao_casam_nos_dois_sentidos():
+    # 21 = Em digitação (canônico desde 03/09/2026); 83965 = Enviado Etiqueta
+    # (legado). A aba Status compara situação por NOME, então regra escrita com
+    # um apelido tem que casar pedido que está no outro — nos dois sentidos —
+    # até os pedidos legados drenarem.
+    nova = _rule(status_atual="Em digitação", alterar_status_bling="Em andamento")
+    legada = _rule(status_atual="Enviado Etiqueta", alterar_status_bling="Em andamento")
+    assert logistica_match.regras_aplicaveis([nova], "Enviado Etiqueta") == [nova]
+    assert logistica_match.regras_aplicaveis([legada], "Em digitação") == [legada]
+    assert logistica_match.regra_ativa([nova], "Enviado Etiqueta") is nova
+    assert logistica_match.regra_ativa([legada], "Em digitação") is legada
+    # Transição pendente a partir do apelido → não resolvido; no alvo → resolvido.
+    assert logistica_match.estado_resolvido([nova], "Enviado Etiqueta") is False
+    assert logistica_match.estado_resolvido([legada], "Em digitação") is False
+    # Alvo escrito com um apelido conta como "já no alvo" quando o Bling diz o outro.
+    para_etiqueta = _rule(status_atual="Em aberto", alterar_status_bling="Enviado Etiqueta")
+    assert logistica_match.estado_resolvido([para_etiqueta], "Em digitação") is True
 
 
 def test_estado_resolvido_curinga_e_casos_negativos():

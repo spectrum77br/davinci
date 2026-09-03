@@ -1,5 +1,6 @@
 """Filtro da aba `/controle-estoque/pedidos`: inclui situacao 83953 (Entregue)
-como verde, mantém 15 verde, 83965 vermelho, esconde 6.
+como verde, mantém 15 verde, 21 (Em digitação = etiqueta enviada, canônico
+desde 03/09/2026) e 83965 (Enviado Etiqueta, legado) vermelhos, esconde 6.
 
 Fix companion: antes 83953 sumia da aba quando o Bling marcava entregue —
 pedido continuava com `em_andamento_data` válido mas não era selecionado.
@@ -38,7 +39,8 @@ async def admin_view(db: AsyncSession) -> User:
 
 @pytest_asyncio.fixture
 async def four_orders(db: AsyncSession) -> dict[str, int]:
-    """4 pedidos no dia 28/05 cobrindo cada situação relevante."""
+    """Pedidos cobrindo cada situação relevante (5 no dia 28/05 + 2 de
+    devolução em 23-25/05)."""
     d = date(2026, 5, 28)
     orders = [
         BlingOrder(
@@ -52,6 +54,10 @@ async def four_orders(db: AsyncSession) -> dict[str, int]:
         BlingOrder(
             bling_id=910003, numero="910003", item_codigo="sku-83965",
             item_index=0, situacao="83965", em_andamento_data=d,
+        ),
+        BlingOrder(
+            bling_id=910007, numero="910007", item_codigo="sku-21",
+            item_index=0, situacao="21", em_andamento_data=d,
         ),
         BlingOrder(
             bling_id=910004, numero="910004", item_codigo="sku-6",
@@ -92,9 +98,13 @@ async def test_aba_inclui_83953_como_enviado(
     assert "910001" in by_numero
     assert by_numero["910001"]["status"] == "enviado"
 
-    # 83965 com data presente + vermelho
+    # 83965 (legado) com data presente + vermelho
     assert "910003" in by_numero
     assert by_numero["910003"]["status"] == "nao_enviado"
+
+    # 21 (Em digitação = etiqueta enviada) com data presente + vermelho
+    assert "910007" in by_numero
+    assert by_numero["910007"]["status"] == "nao_enviado"
 
     # 6 NÃO aparece (não pertence ao fluxo da aba)
     assert "910004" not in by_numero
@@ -126,15 +136,16 @@ async def test_aba_inclui_devolucao_e_resolvido_como_enviado(
 
 
 @pytest.mark.asyncio
-async def test_filtro_status_nao_enviado_inclui_83965_com_data(
+async def test_filtro_status_nao_enviado_inclui_etiqueta_com_data(
     client: AsyncClient, admin_view: User,
     auth_as: Callable[[User | None], None], four_orders: dict[str, int],
 ):
-    """Bug guard: filtro status=nao_enviado deve retornar pedidos
-    situacao=83965 mesmo quando têm em_andamento_data carimbada (o
-    sync de etiqueta carimba data provisória). Antes do fix o filtro
-    usava `em_andamento_data IS NULL` — divergia do classificador do
-    payload (que é por situacao) e zerava a aba mesmo havendo 83965s."""
+    """Bug guard: filtro status=nao_enviado deve retornar pedidos com etiqueta
+    enviada — situacao IN (21, 83965-legado) — mesmo quando têm
+    em_andamento_data carimbada (o sync de etiqueta carimba data provisória).
+    Antes do fix o filtro usava `em_andamento_data IS NULL` — divergia do
+    classificador do payload (que é por situacao) e zerava a aba mesmo
+    havendo etiquetas."""
     auth_as(admin_view)
     r = await client.get(
         "/api/estoque/pedidos?data_inicio=2026-05-28&data_fim=2026-05-28"
@@ -143,8 +154,10 @@ async def test_filtro_status_nao_enviado_inclui_83965_com_data(
     assert r.status_code == 200, r.text
     data = r.json()["data"]
     numeros = {p["pedido_bling"] for p in data}
-    # 83965 com em_andamento_data SET (sku-83965 → 910003) deve aparecer.
+    # 83965 (legado) com em_andamento_data SET (sku-83965 → 910003) deve aparecer.
     assert "910003" in numeros, "83965 com data carimbada deveria estar em 'nao_enviado'"
+    # 21 (canônico) idem (sku-21 → 910007).
+    assert "910007" in numeros, "21 com data carimbada deveria estar em 'nao_enviado'"
     # Todos os retornados são status=nao_enviado.
     assert all(p["status"] == "nao_enviado" for p in data)
     # 15/83953 (enviados) NÃO aparecem.
@@ -153,12 +166,12 @@ async def test_filtro_status_nao_enviado_inclui_83965_com_data(
 
 
 @pytest.mark.asyncio
-async def test_filtro_status_enviado_exclui_83965(
+async def test_filtro_status_enviado_exclui_etiqueta(
     client: AsyncClient, admin_view: User,
     auth_as: Callable[[User | None], None], four_orders: dict[str, int],
 ):
     """Espelho: status=enviado lista 15/83953 (e 83957/545902 se em range),
-    NÃO inclui 83965 mesmo se em_andamento_data setada."""
+    NÃO inclui 21 nem 83965 (legado) mesmo se em_andamento_data setada."""
     auth_as(admin_view)
     r = await client.get(
         "/api/estoque/pedidos?data_inicio=2026-05-28&data_fim=2026-05-28"
@@ -169,5 +182,9 @@ async def test_filtro_status_enviado_exclui_83965(
     numeros = {p["pedido_bling"] for p in data}
     assert "910001" in numeros  # situacao=15
     assert "910002" in numeros  # situacao=83953
-    assert "910003" not in numeros  # situacao=83965 — não é "enviado"
+    assert "910003" not in numeros  # situacao=83965 (legado) — não é "enviado"
+    # 21 é etiqueta provisória, não "enviado": guarda que 21 continue em
+    # _SITUACAO_NAO_VERDE depois de sair de _SITUACAO_NAO_ENVIADO (senão
+    # 21 com data viraria VERDE).
+    assert "910007" not in numeros
     assert all(p["status"] == "enviado" for p in data)

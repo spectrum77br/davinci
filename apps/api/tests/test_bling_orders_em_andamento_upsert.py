@@ -129,10 +129,17 @@ async def test_full_replace_15_para_6_preserva_via_next_data(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_primeira_gravacao_83965_carimba_hoje(db: AsyncSession):
-    """Pedido novo (sem prev_rows): 83965 vai pro full_replace e carimba
-    a data operacional de hoje."""
-    raw = _raw(7003, 83965, [_item("FIRST-SKU", 1)])
+@pytest.mark.parametrize(
+    "situacao_id", [21, 83965], ids=["21-canonico", "83965-legado"],
+)
+async def test_primeira_gravacao_etiqueta_carimba_hoje(
+    db: AsyncSession, situacao_id: int,
+):
+    """Pedido novo (sem prev_rows): etiqueta enviada — 21 (Em digitação,
+    canônico desde 03/09/2026) ou 83965 (Enviado Etiqueta, legado) — vai pro
+    full_replace e carimba a data operacional de hoje. (Payload Bling traz
+    a situação como int; a coluna local é TEXT.)"""
+    raw = _raw(7003, situacao_id, [_item("FIRST-SKU", 1)])
     await upsert_order(db, raw)
     await db.commit()
 
@@ -148,14 +155,17 @@ async def test_primeira_gravacao_83965_carimba_hoje(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_full_replace_transicao_83965_para_15_sobrescreve_com_hoje(
-    db: AsyncSession,
+@pytest.mark.parametrize(
+    "etiqueta", ["21", "83965"], ids=["21-canonico", "83965-legado"],
+)
+async def test_full_replace_transicao_etiqueta_para_15_sobrescreve_com_hoje(
+    db: AsyncSession, etiqueta: str,
 ):
-    """83965→15 é o ÚNICO caso de overwrite legítimo: agência confirmou
-    AGORA, então a data vira o dia da confirmação (hoje), sobrescrevendo
-    o provisório do 83965. Não pode regredir."""
+    """Etiqueta→15 (21→15; 83965→15 legado) é o ÚNICO caso de overwrite
+    legítimo: agência confirmou AGORA, então a data vira o dia da confirmação
+    (hoje), sobrescrevendo o provisório da etiqueta. Não pode regredir."""
     await _seed_order(
-        db, bling_id=7004, situacao="83965",
+        db, bling_id=7004, situacao=etiqueta,
         em_andamento_data=date(2026, 5, 30),
     )
 
@@ -171,6 +181,6 @@ async def test_full_replace_transicao_83965_para_15_sobrescreve_com_hoje(
     today = datetime.now(UTC).date()
     assert rows[0].em_andamento_data is not None
     assert abs((rows[0].em_andamento_data - today).days) <= 1, (
-        "83965→15 deve sobrescrever pra hoje (dia da confirmação), "
+        f"{etiqueta}→15 deve sobrescrever pra hoje (dia da confirmação), "
         "NÃO preservar a data antiga de 30/05"
     )

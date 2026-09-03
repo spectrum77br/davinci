@@ -1225,13 +1225,14 @@ async def sync_lock_safety_release(ctx: dict) -> None:
 
 
 async def check_marketplace_shipped_orders(ctx: dict) -> None:
-    """Sweeps bling_orders rows stuck in custom 'Em aberto' (situacao=83965)
-    against Shopee/ML/Amazon shipment status. When a marketplace reports
+    """Sweeps bling_orders rows stuck in etiqueta-enviada (situacao 21 'Em
+    digitação' — canonical; 83965 'Enviado Etiqueta' — legacy) against
+    Shopee/ML/Amazon shipment status. When a marketplace reports
     SHIPPED/shipped/Shipped, we bump Bling to situacao=15 ('Em andamento')
     via PATCH, then stamp em_andamento_data locally so the order surfaces
     in /controle-estoque's Pedidos and Envios tabs.
 
-    Bling itself never auto-promotes 83965 → 15; carrier scans only update
+    Bling itself never auto-promotes 21/83965 → 15; carrier scans only update
     state on the marketplace side. This cron closes that gap every 5 min.
     See app.services.marketplace_shipment_check for the full strategy.
     """
@@ -1682,7 +1683,7 @@ async def audit_run(
 
 async def bling_orders_safety_net_tick(ctx: dict) -> None:
     """A cada 10 min: pega até 30 pedidos suspeitos de stale (situacao
-    6/83965 sem em_andamento_data, criados ≤14d, sem update há >15min) e
+    6/21/83965 sem em_andamento_data, criados ≤14d, sem update há >15min) e
     força refetch via ingest_bling_order_run. Captura webhooks do Bling
     perdidos. Complementa (não substitui) check_marketplace_shipped_orders.
     Desligável via ENABLE_BLING_ORDERS_SAFETY_NET=false."""
@@ -2208,12 +2209,12 @@ class WorkerSettingsUI:
 
 class WorkerSettingsMarketplace:
     """Worker dedicado pro cron `check_marketplace_shipped_orders`
-    (sweeps de 83965 → 15 quando marketplace confirma envio). Antes
+    (sweeps de 21/83965 → 15 quando marketplace confirma envio). Antes
     rodava no default e disputava com 100+ webhooks/min em pico —
     tick atrasava 15-20 min mesmo configurado a cada 5.
 
-    Sweeps `bling_orders` em 'Em aberto' (83965) contra o estado
-    de envio do marketplace. Marketplace SHIPPED → Bling 15 +
+    Sweeps `bling_orders` em etiqueta enviada (21; 83965 legado) contra
+    o estado de envio do marketplace. Marketplace SHIPPED → Bling 15 +
     stamp em_andamento_data → pedido sai da fila do estoque.
     """
 

@@ -49,12 +49,13 @@ async def test_so_15_e_83953_contam_no_faturamento(monkeypatch):
         _mk(15, 100.0),       # Em andamento → conta
         _mk(15, 100.0),       # Em andamento → conta
         _mk(83953, 200.0),    # Entregue → conta
-        _mk(83965, 150.0),    # Enviado Etiqueta → NÃO conta
+        _mk(83965, 150.0),    # Enviado Etiqueta (83965, legado) → NÃO conta
+        _mk(21, 70.0),        # Em digitação (21 = etiqueta enviada) → NÃO conta
         _mk(12, 50.0),        # Cancelado → NÃO conta
         _mk(83957, 80.0),     # Aguardando Devolução → NÃO conta
         _mk(83963, 60.0),     # Devolvido Estoque → NÃO conta
         _mk(545901, 30.0),    # Sucata → NÃO conta
-        _mk(6, 40.0),         # Em digitação → NÃO conta
+        _mk(6, 40.0),         # Em aberto → NÃO conta
     ]
 
     async def _fake_loja(_session, _integ):
@@ -71,7 +72,7 @@ async def test_so_15_e_83953_contam_no_faturamento(monkeypatch):
         start=date(2026, 6, 1), end=date(2026, 6, 1),
     )
     assert result is not None
-    # 2×100 (15) + 1×200 (83953) = 400 ; os outros 7 ignorados.
+    # 2×100 (15) + 1×200 (83953) = 400 ; os outros 8 ignorados.
     assert result.total == 400.0
     assert result.order_count == 3
     assert result.by_day == {date(2026, 6, 1): 400.0}

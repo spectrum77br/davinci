@@ -34,6 +34,7 @@ from app.models import (
     Store,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 
 # Cutoff operacional (< 10h BRT = dia anterior). Webhooks/sync do Bling
 # que chegam de madrugada são quase sempre re-emissão do despacho da
@@ -52,12 +53,13 @@ from app.worker_pool import (
 # orders shipped late evening BRT would land on the next calendar day.
 _BRT = ZoneInfo("America/Sao_Paulo")
 
-# Situações que significam "despachado": 83965 (Enviado Etiqueta = etiqueta
-# gerada) ou 15 (Atendido = agência confirmou). em_andamento_data é carimbada
-# já no 83965 — é quando o operador despacha. Antes só carimbávamos no 15, então
-# pedidos parados em 83965 ficavam com data NULL e "flutuavam" pra HOJE todo dia
+# Situações que significam "despachado": etiqueta enviada — 21 (Em digitação,
+# canônico desde 03/09/2026) ou 83965 (Enviado Etiqueta, legado) — ou 15
+# (Atendido = agência confirmou). em_andamento_data é carimbada já na etiqueta
+# — é quando o operador despacha. Antes só carimbávamos no 15, então pedidos
+# parados na etiqueta ficavam com data NULL e "flutuavam" pra HOJE todo dia
 # no filtro da aba (effective_date = COALESCE(em_andamento_data, hoje)).
-_SHIP_STAMP_SITUACOES = ("15", "83965")
+_SHIP_STAMP_SITUACOES = ("15", *SITUACOES_ENVIADO_ETIQUETA_STR)
 
 logger = structlog.get_logger()
 
@@ -193,7 +195,7 @@ def _row_from_item(
     `em_andamento_data_final`: data já decidida pelo caller via
     `_next_em_andamento_data` (que conhece a situação ANTERIOR e aplica a
     regra de transição). Este helper só repassa — toda a lógica de
-    transição 83965/15 mora no caller.
+    transição etiqueta (21; 83965 legado) → 15 mora no caller.
     """
     loja = raw_order.get("loja") or {}
     if not isinstance(loja, dict):
@@ -245,7 +247,8 @@ def _row_from_item(
     )
     # em_andamento_data é decidida pelo caller (upsert_order via
     # _next_em_andamento_data) e passada pronta — a regra de transição
-    # 83965->15 mora no caller, que conhece a situação ANTERIOR.
+    # etiqueta (21 / 83965 legado) -> 15 mora no caller, que conhece a
+    # situação ANTERIOR.
     em_andamento_data = em_andamento_data_final
 
     transporte = raw_order.get("transporte") or {}
@@ -366,20 +369,20 @@ def _next_em_andamento_data(
 ) -> date | None:
     """Decide a em_andamento_data (data operacional na planilha de Pedidos).
 
-    - Transição **83965 → 15** (etiqueta confirmada pela agência AGORA):
-      carimba o DIA DA CONFIRMAÇÃO, sobrescrevendo o provisório do 83965.
-      Único caso de overwrite. Operação: etiqueta dia 30 + confirmação dia
-      31 => pedido fica no dia 31.
+    - Transição **etiqueta (21 Em digitação; 83965 legado) → 15** (etiqueta
+      confirmada pela agência AGORA): carimba o DIA DA CONFIRMAÇÃO,
+      sobrescrevendo o provisório da etiqueta. Único caso de overwrite.
+      Operação: etiqueta dia 30 + confirmação dia 31 => pedido fica no dia 31.
     - Qualquer outra transição pra 15 (15↔15 re-disparo de taxa/endereço,
       oscilação 83953→15 do Bling, etc.): PRESERVA a data existente — não
-      empurra pra hoje. A condição estreita `== "83965"` evita o bug em
-      que `!= "15"` (commit 1fe10b6) pegava todas as voltas pra 15 e
-      re-carimbava o dia do sync.
-    - 83965 (Enviado Etiqueta) sem data ainda: provisório = dia da etiqueta,
-      só pra não 'flutuar' pra HOJE no filtro. Badge segue vermelho.
+      empurra pra hoje. A condição estreita `in SITUACOES_ENVIADO_ETIQUETA_STR`
+      evita o bug em que `!= "15"` (commit 1fe10b6) pegava todas as voltas
+      pra 15 e re-carimbava o dia do sync.
+    - 21/83965 (etiqueta enviada) sem data ainda: provisório = dia da
+      etiqueta, só pra não 'flutuar' pra HOJE no filtro. Badge segue vermelho.
     - Demais (6 Em aberto etc.): mantém o que houver (normalmente NULL).
     """
-    if nova_situacao == "15" and situacao_antiga == "83965":
+    if nova_situacao == "15" and situacao_antiga in SITUACOES_ENVIADO_ETIQUETA_STR:
         return _operational_ship_date(agora)
     if data_existente is not None:
         return data_existente
@@ -635,9 +638,10 @@ async def upsert_order(
         itens = []
 
     # Estado anterior do pedido (pra decidir em_andamento_data). situacao_antiga
-    # distingue 83965→15 (etiqueta confirmada agora => carimba dia da confirmação;
-    # único caso de overwrite) de qualquer outra volta pra 15 (oscilação Bling
-    # 15↔83953 etc. => preserva). data_existente = ship-date já gravado.
+    # distingue etiqueta (21; 83965 legado)→15 (etiqueta confirmada agora =>
+    # carimba dia da confirmação; único caso de overwrite) de qualquer outra
+    # volta pra 15 (oscilação Bling 15↔83953 etc. => preserva).
+    # data_existente = ship-date já gravado.
     prev_rows = (
         await session.execute(
             select(
@@ -674,8 +678,8 @@ async def upsert_order(
         if new_sig == old_sig:
             values: dict[str, Any] = {"situacao": situacao}
             # em_andamento_data decidida por _next_em_andamento_data: só a
-            # transição 83965→15 sobrescreve (dia da confirmação); demais
-            # voltas pra 15 (oscilação Bling) preservam; 83965 sem data ganha
+            # transição 21/83965→15 sobrescreve (dia da confirmação); demais
+            # voltas pra 15 (oscilação Bling) preservam; 21/83965 sem data ganha
             # provisório (dia da etiqueta) pra não flutuar pra hoje no filtro.
             if nova_data is not None:
                 values["em_andamento_data"] = nova_data
@@ -832,7 +836,7 @@ async def upsert_order(
     # em_andamento_data usa COALESCE(nova, velha) pra NUNCA sobrescrever
     # valor existente com NULL. `_next_em_andamento_data` é a fonte de
     # verdade: quando devolve uma data, é uma decisão legítima (incluindo
-    # overwrite 83965→15); quando devolve None, NÃO é "limpa a data" e
+    # overwrite 21/83965→15); quando devolve None, NÃO é "limpa a data" e
     # sim "não tenho info, não mexe". Ordem importa — `coalesce(excluded,
     # table)` pega a nova se não-NULL, senão preserva a velha. Inverter
     # quebraria o overwrite legítimo.

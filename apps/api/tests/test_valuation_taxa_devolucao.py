@@ -73,11 +73,12 @@ async def test_taxa_denominador_faturamento_numerador_pedidos(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None],
 ):
-    # Denominador = 4 pedidos de faturamento (situações aplicáveis variadas).
+    # Denominador = 5 pedidos de faturamento (situações aplicáveis variadas).
     await _pedido(db, bling_id=8001, situacao="83953")  # Entregue
     await _pedido(db, bling_id=8002, situacao="6")       # Em aberto
     await _pedido(db, bling_id=8003, situacao="15")      # Em andamento
-    await _pedido(db, bling_id=8004, situacao="83965")   # Enviado Importado
+    await _pedido(db, bling_id=8004, situacao="83965")   # Enviado Etiqueta/Importado (legado)
+    await _pedido(db, bling_id=8006, situacao="21")      # Em digitação (etiqueta enviada)
     # Não faturamento → fora do denominador.
     await _pedido(db, bling_id=8005, situacao="12")      # Cancelado
     # Numerador = PEDIDOS distintos com devolução Novo+Usado: {8001, 8002} = 2.
@@ -92,8 +93,8 @@ async def test_taxa_denominador_faturamento_numerador_pedidos(
     assert r.status_code == 200, r.text
     body = r.json()
     i = _idx_mes_atual(body)
-    # 2 pedidos devolvidos ÷ 4 pedidos de faturamento × 100 = 50.0.
-    assert _taxa_total(body)[i] == 50.0
+    # 2 pedidos devolvidos ÷ 5 pedidos de faturamento × 100 = 40.0.
+    assert _taxa_total(body)[i] == 40.0
 
 
 @pytest.mark.asyncio

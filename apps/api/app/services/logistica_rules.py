@@ -817,7 +817,9 @@ def detectar_divergencia_amazon(
     return None
 
 
-# 223 linhas curadas (campos + status_bling resultante).
+# 223 linhas curadas (campos + status_bling resultante). "Em digitação" (21,
+# nativa do Bling) é o estado "etiqueta enviada" canônico desde 03/09/2026 —
+# a planilha original dizia "Enviado Etiqueta" (83965, hoje legado).
 RULES: list[dict[str, str]] = [
     {"order_status": "cancelled", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "internal", "return_status": "delivered", "claim_stage": "dispute", "claim_status": "closed", "benefited": "complainant", "status_bling": "Aguardando Devolução"},
     {"order_status": "cancelled", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "mediations", "return_status": "delivered", "claim_stage": "claim", "claim_status": "closed", "benefited": "complainant", "status_bling": "Aguardando Devolução"},
@@ -906,7 +908,7 @@ RULES: list[dict[str, str]] = [
     {"order_status": "cancelled", "ship_status": "cancelled", "ship_substatus": "", "cancel_group": "buyer", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Aguardando Cancelamento"},
     {"order_status": "cancelled", "ship_status": "cancelled", "ship_substatus": "", "cancel_group": "buyer", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Cancelado"},
     {"order_status": "cancelled", "ship_status": "cancelled", "ship_substatus": "", "cancel_group": "buyer", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em aberto"},
-    {"order_status": "cancelled", "ship_status": "cancelled (erro de envio)", "ship_substatus": "", "cancel_group": "buyer", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "cancelled", "ship_status": "cancelled (erro de envio)", "ship_substatus": "", "cancel_group": "buyer", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "cancelled", "ship_status": "cancelled", "ship_substatus": "", "cancel_group": "buyer", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Resolvido"},
     {"order_status": "cancelled", "ship_status": "cancelled", "ship_substatus": "", "cancel_group": "buyer", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Verificar Cancelamento"},
     {"order_status": "cancelled", "ship_status": "", "ship_substatus": "", "cancel_group": "buyer", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Cancelado"},
@@ -933,7 +935,7 @@ RULES: list[dict[str, str]] = [
     {"order_status": "cancelled", "ship_status": "not_delivered", "ship_substatus": "returning_to_sender", "cancel_group": "internal", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Problemas"},
     {"order_status": "cancelled", "ship_status": "not_delivered", "ship_substatus": "soon_to_be_returned devolvendo", "cancel_group": "internal", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Aguardando Devolução"},
     {"order_status": "cancelled", "ship_status": "not_delivered", "ship_substatus": "waiting_authority retido", "cancel_group": "internal", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
-    {"order_status": "cancelled", "ship_status": "not_delivered", "ship_substatus": "waiting_authority retido", "cancel_group": "internal", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "cancelled", "ship_status": "not_delivered", "ship_substatus": "waiting_authority retido", "cancel_group": "internal", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "cancelled", "ship_status": "not_delivered", "ship_substatus": "waiting_authority retido", "cancel_group": "internal", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Erro no Envio"},
     {"order_status": "cancelled", "ship_status": "not_delivered", "ship_substatus": "waiting_authority retido", "cancel_group": "internal", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Problemas"},
     {"order_status": "cancelled", "ship_status": "cancelled", "ship_substatus": "", "cancel_group": "internal", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Cancelado"},
@@ -990,12 +992,12 @@ RULES: list[dict[str, str]] = [
     {"order_status": "paid", "ship_status": "pending", "ship_substatus": "buffered ag lib etiqueta, com data programada", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em aberto"},
     {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "delayed atrasado", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "dropped_off", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
-    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "dropped_off", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "dropped_off", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "paid", "ship_status": "not_delivered", "ship_substatus": "fraudulent", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Resolvido"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "in_hub centro distribuiçao", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
-    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "in_hub", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "in_hub", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "in_packing_list (", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
-    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "in_packing_list", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "in_packing_list", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "invoice_pending ag lib etiqueta", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Aguardando Cancelamento"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "invoice_pending", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Atendido"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "invoice_pending", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em aberto"},
@@ -1005,12 +1007,12 @@ RULES: list[dict[str, str]] = [
     {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "not_visited não entregue", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
     {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "out_for_delivery sai entrega", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
     {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "out_for_delivery", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Entregue"},
-    {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "out_for_delivery", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "out_for_delivery", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "picked_up", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
-    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "picked_up", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "picked_up", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "printed", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Aguardando Cancelamento"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "printed", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em aberto"},
-    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "printed", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "printed", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "paid", "ship_status": "ready_to_ship", "ship_substatus": "ready_to_print etiqueta impressa", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em aberto"},
     {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "receiver_absent destinataro ausente", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
     {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "refused_delivery", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Aguardando Devolução"},
@@ -1033,14 +1035,14 @@ RULES: list[dict[str, str]] = [
     {"order_status": "paid", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "dispute", "claim_status": "closed", "benefited": "", "status_bling": "Entregue"},
     {"order_status": "paid", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "dispute", "claim_status": "opened", "benefited": "", "status_bling": "Entregue"},
     {"order_status": "partially_refunded", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Entregue"},
-    {"order_status": "paid", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "paid", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "paid", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Manutenção"},
     {"order_status": "partially_refunded", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Problemas"},
     {"order_status": "paid", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Resolvido"},
     {"order_status": "partially_refunded", "ship_status": "delivered", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Resolvido"},
     {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em andamento"},
     {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Entregue"},
-    {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Enviado Etiqueta"},
+    {"order_status": "paid", "ship_status": "shipped", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Em digitação"},
     {"order_status": "paid", "ship_status": "", "ship_substatus": "", "cancel_group": "", "return_status": "", "claim_stage": "", "claim_status": "", "benefited": "", "status_bling": "Entregue"},
 ]
 

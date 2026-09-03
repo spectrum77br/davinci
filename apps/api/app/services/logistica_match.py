@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app.models import LogisticaStatus
+from app.services.bling_situacoes import NOME_ENVIADO_ETIQUETA, NOME_ENVIADO_ETIQUETA_LEGADO
 
 # Passe-livre do painel: pedido com situação Bling "Problemas" fica visível
 # por este prazo, não importa o que as regras digam (pedido do usuário 18/08).
@@ -24,6 +25,21 @@ PROBLEMA_BLING_DIAS = 360
 
 def _norm(v: str | None) -> str:
     return (v or "").strip().lower()
+
+
+# Nomes de situação que são o MESMO estado lógico ("etiqueta enviada"):
+# 21 = Em digitação (canônico desde 03/09/2026); 83965 = Enviado Etiqueta
+# (legado). Regra escrita com um nome casa pedido que está no outro, nos dois
+# sentidos — as regras da aba Status comparam situação por NOME.
+_SITUACAO_ALIASES: dict[str, str] = {
+    _norm(NOME_ENVIADO_ETIQUETA_LEGADO): _norm(NOME_ENVIADO_ETIQUETA),
+}
+
+
+def _norm_situacao(v: str | None) -> str:
+    """`_norm` + colapsa apelidos da mesma situação lógica (`_SITUACAO_ALIASES`)."""
+    n = _norm(v)
+    return _SITUACAO_ALIASES.get(n, n)
 
 
 def find_matching_rule(
@@ -88,9 +104,13 @@ def regras_aplicaveis(
     `status_atual` (o "DE" da transição) igual à situação atual, depois as
     curingas (sem `status_atual`, valem de qualquer estado). É a máquina de
     estados: regra de OUTRO estado fica de fora — ela só vale quando o pedido
-    chegar lá. Lista vazia = a combinação (chave + estado) não tem regra."""
-    atual = _norm(status_bling)
-    exatas = [r for r in rules if _norm(r.status_atual) and _norm(r.status_atual) == atual]
+    chegar lá. Lista vazia = a combinação (chave + estado) não tem regra.
+    Nomes-apelido da mesma situação (ver `_norm_situacao`) casam entre si."""
+    atual = _norm_situacao(status_bling)
+    exatas = [
+        r for r in rules
+        if _norm(r.status_atual) and _norm_situacao(r.status_atual) == atual
+    ]
     curingas = [r for r in rules if not _norm(r.status_atual)]
     return exatas + curingas
 
@@ -159,7 +179,7 @@ def estado_resolvido(
     combina com `not acao_monitorar`)."""
     if not rules:
         return False
-    atual = _norm(status_bling)
+    atual = _norm_situacao(status_bling)
     # Só pesam as regras APLICÁVEIS ao estado atual do Bling. Uma regra de OUTRO
     # estado (status_atual diferente do atual) não conta agora — máquina de
     # estados: ela vale quando o pedido chegar naquele estado.
@@ -174,7 +194,7 @@ def estado_resolvido(
             return False
     # Transição de status ainda pendente a partir do estado atual → não esconde.
     for r in aplicaveis:
-        alvo = _norm(r.alterar_status_bling)
+        alvo = _norm_situacao(r.alterar_status_bling)
         if alvo and alvo != atual:
             return False
     if aplicaveis:
@@ -184,7 +204,9 @@ def estado_resolvido(
     # Nenhuma regra aplicável ao estado atual (todas são de outros estados). Se
     # nenhuma delas muda status, não há cadeia a cumprir → nada a fazer.
     # Senão, só resolve quando o pedido chegou a algum alvo da cadeia.
-    alvos = {_norm(r.alterar_status_bling) for r in rules if _norm(r.alterar_status_bling)}
+    alvos = {
+        _norm_situacao(r.alterar_status_bling) for r in rules if _norm(r.alterar_status_bling)
+    }
     if not alvos:
         return True
     return bool(atual) and atual in alvos

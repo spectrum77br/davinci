@@ -3,7 +3,7 @@
 O caminho primário para manter `bling_orders` fresco é o webhook
 (`pedido.alteracao.situacao`), mas o Bling V3 perde webhooks com
 frequência. A safety-net (`bling_orders_safety_net`) só cobre as
-situações de envio (`6`, `83965`); transições fora delas — p. ex.
+situações de envio (`6`, `21` e o legado `83965`); transições fora delas — p. ex.
 `15` → devolução (`83957`) — nunca se auto-corrigem quando o webhook
 se perde (caso real do pedido 277234).
 

@@ -35,6 +35,7 @@ from app.schemas.margens import (
     SaldoRaioXOut,
 )
 from app.security.cipher import decrypt_json
+from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 from app.services.margem_audit import record_margem_audit
 from app.services.rentabilidade_xlsx import build_rentabilidade_xlsx
 from app.services.marketplaces.bling import BlingClient
@@ -73,19 +74,21 @@ _RENT_SITUACOES_SQL = "('6', '15', '83953')"
 SITUACAO_APROVADO = 6
 SITUACAO_ATENDIDO = 9
 SITUACAO_REPROVADO = 83955
-SITUACAO_ENVIADO_ETIQUETA = 83965
 SITUACAO_AGUARDANDO_DEVOLUCAO = 83957
 
 # Situações em que uma divergência de saldo é triada (vira "saldo divergente").
-# 6 = "Em aberto" (pré-faturamento) e 83965 = "Enviado Etiqueta" (etiqueta
-# gerada). Mantido como tupla de strings porque bling_orders.situacao é text.
-_SITUACOES_SALDO_DIVERGENTE = (str(SITUACAO_APROVADO), str(SITUACAO_ENVIADO_ETIQUETA))
+# 6 = "Em aberto" (pré-faturamento) + as de etiqueta gerada: 21 = "Em digitação"
+# (canônica desde 03/09/2026) e 83965 = "Enviado Etiqueta" (legado) — fonte
+# única em services/bling_situacoes. Tupla de strings porque
+# bling_orders.situacao é text.
+_SITUACOES_SALDO_DIVERGENTE = (str(SITUACAO_APROVADO), *SITUACOES_ENVIADO_ETIQUETA_STR)
 _SITUACOES_SALDO_DIVERGENTE_IN = ", ".join(f"'{s}'" for s in _SITUACOES_SALDO_DIVERGENTE)
 
 # Situações "em triagem" — o que a aba Margem MOSTRA por padrão (Eduardo,
 # 03/09: "em margem é para aparecer somente os com situação em aberto e
-# enviado etiqueta"). Entregue/Resolvido/Problemas etc. saem da lista: a venda
-# já andou, margem ali não é mais decisão. Exceção: pedido segurado pelo robô
+# enviado etiqueta" — hoje situação 21 Em digitação, ou 83965 legado).
+# Entregue/Resolvido/Problemas etc. saem da lista: a venda já andou, margem
+# ali não é mais decisão. Exceção: pedido segurado pelo robô
 # (83955 com 'Pendente' gravado) continua visível — senão ninguém consegue
 # aprová-lo/reprová-lo. Usado pela listagem (situacao=triagem, o default) e
 # pelo Informar; "Buscar pedido" ignora (acha qualquer situação).
@@ -244,8 +247,8 @@ _SALDO_MANUAL_SQL = (
     f"(SELECT msm.valor FROM {_SALDO_MANUAL_TABLE} msm "  # noqa: S608
     "WHERE msm.bling_order_item_id = v.bling_order_item_id)"
 )
-# "Saldo divergente" — restrito a pedidos em situação 6 ou 83965 (só esses
-# contam para triagem), com saldo_base do Bling presente, FORA de
+# "Saldo divergente" — restrito a pedidos em situação 6, 21 ou 83965 (legado)
+# (só esses contam para triagem), com saldo_base do Bling presente, FORA de
 # ML/Shopee/TikTok (isentas — ver bloco acima), e que satisfaçam UMA das
 # condições:
 #   a) Plataforma AINDA NULA (financeiro não reconciliado) → não auto-aprovar
@@ -253,12 +256,13 @@ _SALDO_MANUAL_SQL = (
 #      liquidam ~1-2 semanas após a entrega, então o pedido fica "divergente"
 #      (não resolvido) até o settlement chegar — aí vira mismatch (b) ou some.
 #   b) Divergência real: |saldo_bling − saldo_plataforma| > R$0,01.
-# O gatilho do botão "→" (copia marketplace→Bling) na UI continua exigindo
-# Plataforma != null (não há o que copiar quando nula): margem.vue
-# [6, 83965].includes(situacao_id) && saldo_plataforma != null &&
-# Math.abs(saldo_plataforma - saldo_bling) > 0.01. Ou seja, linhas (a) entram na
-# lista "saldo divergente" mas sem o botão de cópia (a ação é aguardar o
-# settlement ou editar o Saldo Efetivo manualmente). Limiar absoluto de R$0,01
+# O alerta visual da UI continua exigindo Plataforma != null (não há o que
+# comparar quando nula): margem.vue saldoDivergente() = saldo_bling != null &&
+# saldo_plataforma != null && !ancorado na plataforma &&
+# Math.abs(saldo_bling - saldo_plataforma) > 0.01 (sem olhar situação — quem
+# restringe às situações de triagem é este SQL). Ou seja, linhas (a) entram na
+# lista "saldo divergente" mas sem o alerta (a ação é aguardar o settlement ou
+# editar o Saldo Efetivo manualmente). Limiar absoluto de R$0,01
 # (um relativo de 1% escondia gaps em itens caros, ex.: R$60 num Macbook de
 # R$7.000 = 0,85%, mas ainda é divergência a corrigir).
 _ATTENTION_SALDO_SQL = (
@@ -277,7 +281,7 @@ _ATTENTION_SALDO_SQL = (
 )
 
 # "Aguardando saldo da plataforma" — ML/Shopee/TikTok em situação de triagem
-# (6/83965) cujo líquido REAL ainda não sincronizou. Sem real não existe
+# (6/21/83965) cujo líquido REAL ainda não sincronizou. Sem real não existe
 # margem oficial (view 0045: marketplace_margem NULL) e nenhum outro gatilho
 # dispara — sem este, a linha caía em "Aprovado" às cegas (reclamação do
 # Eduardo, 01/09 à noite: "está aprovando tudo até com margem negativa").
@@ -533,8 +537,9 @@ async def list_margens_marketplace(
     rebuilt by the 'atualizar' UI button. User-facing PATCHes update the
     affected snapshot columns directly so edits appear immediately.
 
-    `situacao`: "triagem" (default) = só Em aberto + Enviado Etiqueta (+ os
-    segurados pelo robô) — pedido do Eduardo (03/09); "all" = todas as
+    `situacao`: "triagem" (default) = só Em aberto + etiqueta enviada (21 Em
+    digitação; 83965 Enviado Etiqueta legado) (+ os segurados pelo robô) —
+    pedido do Eduardo (03/09); "all" = todas as
     situações. O lookup ("Buscar pedido") não usa este filtro.
     """
     if situacao is not None and situacao not in _SITUACAO_FILTERS:
@@ -558,8 +563,8 @@ async def list_margens_marketplace(
         f"NOT {_ATTENTION_FRETE_SQL}",
     ]
     if (situacao or "triagem") == "triagem":
-        # Só o que ainda está em triagem (Em aberto / Enviado Etiqueta / segurado
-        # pelo robô) — ver _SITUACAO_TRIAGEM_SQL.
+        # Só o que ainda está em triagem (Em aberto / Em digitação=etiqueta
+        # enviada, 83965 legado / segurado pelo robô) — ver _SITUACAO_TRIAGEM_SQL.
         where.append(_SITUACAO_TRIAGEM_SQL)
     params: dict = {"limit": limit, "offset": offset}
     if platform:

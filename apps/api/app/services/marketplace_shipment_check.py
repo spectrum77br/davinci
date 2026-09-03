@@ -5,14 +5,15 @@ andamento") in Bling.
 Why this exists:
   Bling does NOT auto-update situacao when a carrier scans a package on
   the marketplace side. The marketplace knows (status becomes SHIPPED /
-  shipped / Shipped), but Bling stays on whatever custom "Em aberto"
-  state the shop configured (83965 in this account). The
+  shipped / Shipped), but Bling stays on the "etiqueta enviada" state:
+  native 21 ("Em digitação", canonical since 2026-09-03) or the legacy
+  custom 83965 ("Enviado Etiqueta", historical orders). The
   /controle-estoque page filters by `em_andamento_data` so these
   shipped-but-not-bumped orders never appear.
 
 Strategy:
-  1. Find candidates: situacao='83965' AND em_andamento_data IS NULL,
-     created within last 7 days. DISTINCT by (bling_id, numeroloja,
+  1. Find candidates: situacao IN (21, 83965-legacy, 6) within the
+     window (see _load_candidates). DISTINCT by (bling_id, numeroloja,
      loja) — bling_orders has one row per item.
   2. Group by Bling store id (the `loja` column).
   3. Per store: resolve Store → Integration → marketplace client.
@@ -46,6 +47,7 @@ from app.db import session_scope
 from app.models import BlingOrder, Integration, IntegrationPlatform
 from app.models.company import Store
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.amazon import AmazonClient
 from app.services.marketplaces.bling import BlingClient
@@ -59,20 +61,17 @@ logger = structlog.get_logger()
 # Chave do advisory lock que serializa o sweep (namespace SYNC compartilhado).
 _SWEEP_LOCK_KEY = 0x73686970  # ascii "ship"
 
-# Candidate "open" situacao to sweep. The shop uses 83965 as their
-# custom "Em aberto" — that's where orders sit between Bling import
-# and marketplace shipment. Other 8xxx custom statuses exist but
-# don't represent a still-shippable state for this account.
-# Pre-shipment states the sweep should consider. The shop's custom
-# "Em aberto" was 83965 — but orders imported directly from Bling
-# arrive in the system at situacao=6 (Bling's stock "Em aberto"),
-# never touch 83965, and were silently skipped before this list
-# expanded. Both states mean "not yet flagged shipped"; the
-# marketplace verification logic downstream is what actually decides
-# to bump to 15 (Em andamento), so adding 6 only widens the candidate
-# pool — it never marks an order shipped without the marketplace
-# confirming.
-_OPEN_SITUACOES: tuple[str, ...] = ("83965", "6")
+# Pre-shipment states the sweep considers: 21 (Bling native "Em digitação"
+# — the etiqueta-enviada state since 2026-09-03), 83965 (legacy custom
+# "Enviado Etiqueta", historical orders still carry it) and 6 (Bling stock
+# "Em aberto" — orders imported directly from Bling never touch the
+# etiqueta state and were silently skipped before 6 joined this list).
+# Other 8xxx custom statuses exist but don't represent a still-shippable
+# state for this account. All three mean "not yet flagged shipped"; the
+# marketplace verification logic downstream is what actually decides to
+# bump to 15 (Em andamento) — it never marks an order shipped without
+# the marketplace confirming.
+_OPEN_SITUACOES: tuple[str, ...] = (*SITUACOES_ENVIADO_ETIQUETA_STR, "6")
 _SHIPPED_SITUACAO = 15  # Bling system situacao "Em andamento".
 # 30 dias (era 7). Pedido RETIDO no marketplace é postado depois do 7º dia
 # e saía do radar exatamente antes de despachar — 3 casos reais presos em
@@ -467,11 +466,12 @@ async def _load_candidates(session: AsyncSession) -> list[BlingOrder]:
     as the canonical row to avoid hitting the marketplace N times for
     one multi-item order.
 
-    Critério: situação em _OPEN_SITUACOES (`83965` etiqueta gerada /
-    `6` em aberto) + dentro da janela temporal. Antes filtrava
-    `em_andamento_data IS NULL` também, mas o fix e081e0d carimba
-    data já em 83965 (provisório = dia da etiqueta), então 100% dos
-    pedidos novos em 83965 têm data — o IS NULL zerava os candidatos.
+    Critério: situação em _OPEN_SITUACOES (`21` etiqueta enviada — Em
+    digitação; `83965` legado; `6` em aberto) + dentro da janela temporal.
+    Antes filtrava `em_andamento_data IS NULL` também, mas o fix e081e0d
+    carimba data já na etiqueta (21/83965, provisório = dia da etiqueta),
+    então 100% dos pedidos novos com etiqueta têm data — o IS NULL zerava
+    os candidatos.
     O COALESCE no UPDATE (commit 4d3e088) garante que a data atual
     não é sobrescrita quando o marketplace responde divergente.
     """

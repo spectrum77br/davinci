@@ -2,7 +2,8 @@
 em "Em andamento" (situacao 15) e re-ingere cada um (idempotente).
 
 Contexto: o Bling V3 perde webhooks. Quando o webhook `15 → Entregue` se
-perde, NADA reconferia a situacao 15 (a safety-net só cobria 6/83965), e
+perde, NADA reconferia a situacao 15 (a safety-net só cobria 6/83965 — hoje
+6, 21 e o legado 83965), e
 o pedido ficava eternamente "em rota" no DB. Como a aba Faturamento conta
 só Entregue (83953), o total ficava ABAIXO do Bling — mais grave nos
 meses recentes. A correção definitiva é a safety-net ampliada (que passa
@@ -39,7 +40,9 @@ from app.models import BlingOrder, Integration, IntegrationPlatform
 from app.services.bling_orders import run_ingest_bling_order
 
 # Situação alvo padrão: "Em andamento". Operador pode ampliar via
-# --situacoes "15,83965,6" se quiser varrer mais estados intermediários.
+# --situacoes "15,21,83965,6" se quiser varrer mais estados intermediários
+# (21 = Em digitação, etiqueta enviada, canônica desde 03/09/2026;
+# 83965 = Enviado Etiqueta, legado).
 _DEFAULT_SITUACOES = ("15",)
 
 
@@ -164,7 +167,8 @@ def main() -> None:
     mode.add_argument("--apply", action="store_true")
     ap.add_argument(
         "--situacoes", default="15",
-        help='Situações alvo separadas por vírgula (default "15").',
+        help='Situações alvo separadas por vírgula (default "15"; '
+        'etiqueta enviada = 21 Em digitação, 83965 legado).',
     )
     ap.add_argument(
         "--min-days", type=int, default=7,

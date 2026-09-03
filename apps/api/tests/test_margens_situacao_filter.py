@@ -4,6 +4,9 @@
 etiqueta" — Entregue/Resolvido/Problemas etc. saem da listagem por padrão
 (`situacao=triagem`); `situacao=all` mostra tudo; o lookup ("Buscar pedido")
 continua achando qualquer situação; o Informar segue a mesma régua da aba.
+
+"Enviado etiqueta" = 21 (Em digitação, canônico desde 03/09/2026) e 83965
+(Enviado Etiqueta, legado — pedidos históricos): os dois ficam na triagem.
 """
 
 from __future__ import annotations
@@ -81,6 +84,7 @@ async def test_listagem_mostra_so_em_aberto_e_enviado_etiqueta(
     auth_as(user)
     await _seed(db, pedido="910001", situacao="6", situacao_nome="Em aberto")
     await _seed(db, pedido="910002", situacao="83965", situacao_nome="Enviado Etiqueta")
+    await _seed(db, pedido="910006", situacao="21", situacao_nome="Em digitação")
     await _seed(db, pedido="910003", situacao="83953", situacao_nome="Entregue")
     await _seed(db, pedido="910004", situacao="545902", situacao_nome="Resolvido")
     # Segurado pelo robô: 83955 com 'Pendente' gravado → tem que continuar
@@ -91,14 +95,14 @@ async def test_listagem_mostra_so_em_aberto_e_enviado_etiqueta(
     )
 
     padrao = await _pedidos_listados(client)
-    assert padrao >= {"910001", "910002", "910005"}
+    assert padrao >= {"910001", "910002", "910006", "910005"}
     assert not padrao & {"910003", "910004"}
 
     explicito = await _pedidos_listados(client, situacao="triagem")
     assert explicito == padrao
 
     tudo = await _pedidos_listados(client, situacao="all")
-    assert tudo >= {"910001", "910002", "910003", "910004", "910005"}
+    assert tudo >= {"910001", "910002", "910006", "910003", "910004", "910005"}
 
     res = await client.get(
         "/api/margens/marketplace", params={"status": "Pendente", "situacao": "xyz"}

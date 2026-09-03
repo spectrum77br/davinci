@@ -461,9 +461,10 @@ async def test_marketplace_saldo_filter_only_considers_shippable_situacoes(
     make_user,
     auth_as,
 ):
-    """Saldo divergence is only triaged for orders in situação 6 ou 83965. A real
-    gap (R$60) on an order in any other situação must NOT appear in the 'saldo'
-    filter, matching the per-row 'corrigir' marker gate in the UI."""
+    """Saldo divergence is only triaged for orders in situação 6, 21 (Em digitação
+    = etiqueta enviada) ou 83965 (legado). A real gap (R$60) on an order in any
+    other situação must NOT appear in the 'saldo' filter, matching the per-row
+    'corrigir' marker gate in the UI."""
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
     order = BlingOrder(
@@ -476,7 +477,7 @@ async def test_marketplace_saldo_filter_only_considers_shippable_situacoes(
     db.add(order)
     await db.commit()
     await db.refresh(order)
-    # Same R$60 gap as the passing test, but situação 9 (not 6/83965) → excluded.
+    # Same R$60 gap as the passing test, but situação 9 (not 6/21/83965) → excluded.
     await db.execute(
         text(
             """
@@ -501,7 +502,7 @@ async def test_marketplace_saldo_filter_only_considers_shippable_situacoes(
     await db.commit()
 
     # situacao=all: prova que é o gatilho de SALDO que exclui a situação 9,
-    # não o filtro padrão da aba (que já esconde tudo fora de 6/83965).
+    # não o filtro padrão da aba (que já esconde tudo fora de 6/21/83965).
     response = await client.get(
         "/api/margens/marketplace?attention_type=saldo&status=Pendente&situacao=all"
     )
@@ -509,14 +510,22 @@ async def test_marketplace_saldo_filter_only_considers_shippable_situacoes(
     assert response.json()["total"] == 0
 
 
-async def test_marketplace_saldo_filter_includes_situacao_83965(
+@pytest.mark.parametrize(
+    ("situacao", "situacao_nome"),
+    [("21", "Em digitação"), ("83965", "Enviado Etiqueta")],
+    ids=["21-canonico", "83965-legado"],
+)
+async def test_marketplace_saldo_filter_includes_situacao_etiqueta(
     client,
     db: AsyncSession,
     make_user,
     auth_as,
+    situacao: str,
+    situacao_nome: str,
 ):
-    """Situação 83965 (Enviado Etiqueta) também conta como saldo-divergente —
-    mesmo gap R$60, mas em 83965 → deve aparecer no filtro 'saldo'."""
+    """Etiqueta enviada — 21 (Em digitação, canônico desde 03/09/2026) e 83965
+    (Enviado Etiqueta, legado) — também conta como saldo-divergente: mesmo gap
+    R$60 → deve aparecer no filtro 'saldo'."""
     user = await make_user(permissions=_margem_permissions())
     auth_as(user)
     order = BlingOrder(
@@ -524,7 +533,7 @@ async def test_marketplace_saldo_filter_includes_situacao_83965(
         numero="123459",
         item_codigo="sku-4",
         item_index=0,
-        situacao="83965",
+        situacao=situacao,
     )
     db.add(order)
     await db.commit()
@@ -541,14 +550,14 @@ async def test_marketplace_saldo_filter_includes_situacao_83965(
             )
             VALUES (
                 :id, '123459', 987657, 'sku-4',
-                '83965', 'Enviado Etiqueta', 'amazon', 1,
+                :situacao, :situacao_nome, 'amazon', 1,
                 6940, 0, 0,
                 7000,
                 NULL
             )
             """
         ),
-        {"id": str(order.id)},
+        {"id": str(order.id), "situacao": situacao, "situacao_nome": situacao_nome},
     )
     await db.commit()
 
@@ -711,7 +720,7 @@ async def test_marketplace_margem_filter_excludes_aguardando_devolucao(
     )
     await db.commit()
 
-    # situacao=all: sem isso o filtro padrão (só 6/83965) esconderia o 83957
+    # situacao=all: sem isso o filtro padrão (só 6/21/83965) esconderia o 83957
     # antes do gatilho de margem ser avaliado e o teste passaria à toa.
     response = await client.get(
         "/api/margens/marketplace?attention_type=margem&status=Pendente&situacao=all"

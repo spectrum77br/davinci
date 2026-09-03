@@ -504,13 +504,16 @@ async def test_status_maquina_de_estados(
     chave = logistica_rules.assinatura_pt(meli)
     db.add_all(
         [
+            # 21 = Em digitação (canônico desde 03/09/2026); 83965 = Enviado
+            # Etiqueta (legado) — apelidos do mesmo estado "etiqueta enviada".
+            SituacaoBling(id=21, nome="Em digitação"),
             SituacaoBling(id=83965, nome="Enviado Etiqueta"),
             SituacaoBling(id=15, nome="Em andamento"),
             SituacaoBling(id=83953, nome="Entregue"),
         ]
     )
-    # Regra A: Enviado Etiqueta -> Em andamento. Regra B: Em andamento -> Entregue.
-    for de, alvo in [("Enviado Etiqueta", "Em andamento"), ("Em andamento", "Entregue")]:
+    # Regra A: Em digitação (21) -> Em andamento. Regra B: Em andamento -> Entregue.
+    for de, alvo in [("Em digitação", "Em andamento"), ("Em andamento", "Entregue")]:
         rs = await client.post(
             "/api/logistica/status",
             json={"status_plataforma": chave, "status_atual": de, "alterar_status_bling": alvo},
@@ -553,6 +556,131 @@ async def test_status_maquina_de_estados(
     assert rp2.status_code == 200, rp2.text
     assert rp2.json()["ja_no_alvo"] is True
     assert rp2.json()["aplicavel"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("nome_regra", "situacao_pedido"),
+    [("Em digitação", 83965), ("Enviado Etiqueta", 21)],
+    ids=["regra-nova-pedido-legado", "regra-legada-pedido-canonico"],
+)
+async def test_status_apelidos_em_digitacao_e_enviado_etiqueta(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+    nome_regra: str,
+    situacao_pedido: int,
+):
+    """21 = Em digitação (canônico desde 03/09/2026) e 83965 = Enviado Etiqueta
+    (legado) são o MESMO estado "etiqueta enviada": regra escrita com um nome
+    casa pedido que está no outro, nos dois sentidos — os pedidos legados
+    seguem a regra nova até drenarem."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=21, nome="Em digitação"),
+            SituacaoBling(id=83965, nome="Enviado Etiqueta"),
+            SituacaoBling(id=15, nome="Em andamento"),
+        ]
+    )
+    rs = await client.post(
+        "/api/logistica/status",
+        json={
+            "status_plataforma": chave,
+            "status_atual": nome_regra,
+            "alterar_status_bling": "Em andamento",
+        },
+    )
+    assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(
+            bling_id=561, numero="99006", item_codigo="sku1", item_index=0,
+            situacao=str(situacao_pedido),
+        )
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99006", "meli_status": meli},
+    )
+    lid = rc.json()["id"]
+    fake = _FakeBling(
+        {"id": 561, "numero": 99006, "situacao": {"id": situacao_pedido, "valor": 0}}
+    )
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    body = rp.json()
+    assert body["situacao_de"] == nome_regra
+    assert body["situacao_alvo"] == "Em andamento"
+    assert body["aplicavel"] is True
+    assert body["ja_no_alvo"] is False
+
+    ra = await client.post(f"/api/logistica/{lid}/alterar-status-bling")
+    assert ra.status_code == 200, ra.text
+    assert fake.situacao_set == 15
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alvo", ["Em digitação", "Enviado Etiqueta"])
+async def test_status_alvo_etiqueta_sempre_move_pra_21(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+    alvo: str,
+):
+    """Quem MOVE o pedido manda sempre pra canônica 21 — mesmo a regra escrita
+    com o apelido legado "Enviado Etiqueta"; o espelho local diz "Em digitação"."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=6, nome="Em aberto"),
+            SituacaoBling(id=21, nome="Em digitação"),
+            SituacaoBling(id=83965, nome="Enviado Etiqueta"),
+        ]
+    )
+    rs = await client.post(
+        "/api/logistica/status",
+        json={
+            "status_plataforma": chave,
+            "status_atual": "Em aberto",
+            "alterar_status_bling": alvo,
+        },
+    )
+    assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(bling_id=562, numero="99007", item_codigo="sku1", item_index=0, situacao="6")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99007", "meli_status": meli},
+    )
+    lid = rc.json()["id"]
+    fake = _FakeBling({"id": 562, "numero": 99007, "situacao": {"id": 6, "valor": 0}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+    ra = await client.post(f"/api/logistica/{lid}/alterar-status-bling")
+    assert ra.status_code == 200, ra.text
+    assert fake.situacao_set == 21  # nunca 83965
+    rl = await client.get("/api/logistica?plataforma=ml")
+    linha = next(x for x in rl.json() if x["id"] == lid)
+    assert linha["status_bling"] == "Em digitação"
 
 
 @pytest.mark.asyncio

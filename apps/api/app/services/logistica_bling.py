@@ -38,6 +38,7 @@ from app.models import (
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import logistica_match, logistica_rules
+from app.services.bling_situacoes import SITUACAO_ENVIADO_ETIQUETA, SITUACOES_ENVIADO_ETIQUETA
 from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
@@ -263,8 +264,19 @@ async def _situacao_id_por_nome(session: AsyncSession, nome: str) -> int:
     return sid
 
 
+def _situacao_canonica(sid: int | None) -> int | None:
+    """Colapsa apelidos da mesma situação lógica num só id. 21 = Em digitação
+    (canônico desde 03/09/2026) e 83965 = Enviado Etiqueta (legado) são o mesmo
+    estado "etiqueta enviada": regra escrita com um casa pedido que está no
+    outro, e quem MOVE o pedido manda sempre pra 21."""
+    if sid is not None and sid in SITUACOES_ENVIADO_ETIQUETA:
+        return SITUACAO_ENVIADO_ETIQUETA
+    return sid
+
+
 async def _situacao_id_por_nome_opt(session: AsyncSession, nome: str) -> int | None:
-    """id da situação por nome (case-insensitive) ou None se não achar."""
+    """id da situação por nome (case-insensitive) ou None se não achar. Apelidos
+    (ver `_situacao_canonica`) voltam já no id canônico."""
     sid = (
         await session.execute(
             select(SituacaoBling.id)
@@ -273,7 +285,7 @@ async def _situacao_id_por_nome_opt(session: AsyncSession, nome: str) -> int | N
             .limit(1)
         )
     ).scalar_one_or_none()
-    return int(sid) if sid is not None else None
+    return _situacao_canonica(int(sid)) if sid is not None else None
 
 
 async def _situacao_nome_por_id(session: AsyncSession, sid: int) -> str | None:
@@ -350,14 +362,19 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
     if atual_nome and (row.status_bling or "") != atual_nome:
         row.status_bling = atual_nome
 
-    exatas = [i for i in infos if i["de_id"] is not None and i["de_id"] == atual_id]
+    # Compara pelo id CANÔNICO: pedido legado em 83965 casa regra "Em digitação"
+    # (21) e vice-versa — mesmo estado lógico "etiqueta enviada".
+    atual_canon = _situacao_canonica(atual_id)
+    exatas = [i for i in infos if i["de_id"] is not None and i["de_id"] == atual_canon]
     curingas = [i for i in infos if i["de_id"] is None]
     chosen = exatas[0] if exatas else (curingas[0] if curingas else None)
-    ja_alvo = next((i for i in infos if i["alvo_id"] is not None and i["alvo_id"] == atual_id), None)
+    ja_alvo = next(
+        (i for i in infos if i["alvo_id"] is not None and i["alvo_id"] == atual_canon), None
+    )
 
     if chosen is not None:
         # Regra aplicável ao estado atual; se o pedido já está no alvo dela, é no-op.
-        if chosen["alvo_id"] == atual_id:
+        if chosen["alvo_id"] == atual_canon:
             display, aplicavel, ja_no_alvo = chosen, False, True
         else:
             display, aplicavel, ja_no_alvo = chosen, True, False
@@ -411,7 +428,9 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
         raise BlingObsError("logistica_status_atual_divergente")
     alvo, alvo_id = r["alvo"], r["alvo_id"]
     await r["client"].update_order_situacao(r["bling_id"], alvo_id)
-    row.status_bling = alvo
+    # Nome do catálogo pro id realmente aplicado (regra escrita com o apelido
+    # legado "Enviado Etiqueta" move pra 21 → espelho local diz "Em digitação").
+    row.status_bling = await _situacao_nome_por_id(session, alvo_id) or alvo
     await session.flush()
     logger.info(
         "logistica_alterar_status_bling_aplicada",

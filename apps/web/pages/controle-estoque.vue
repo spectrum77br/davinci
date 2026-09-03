@@ -8,7 +8,8 @@
 //
 // Tabs are isolated GETs:
 //   * Estoque  → entradas + saídas + saldos for the chosen day.
-//   * Pedidos  → "enviado etiqueta" orders shipped on the chosen day.
+//   * Pedidos  → "etiqueta enviada" orders (Bling situação 21 "Em digitação";
+//                83965 "Enviado Etiqueta" = legado) shipped on the chosen day.
 //   * Envios   → per-day shipment counts (the only tab that benefits
 //                from a wider window, so it auto-widens to last 7 days
 //                on first activation if the user hasn't picked a date).
@@ -1068,7 +1069,8 @@ function imprimirPrevisoes() {
 }
 
 // "Atrasado" = pedido com ETIQUETA gerada em dia passado e ainda não
-// confirmado pela agência (situacao=83965 + em_andamento_data < hoje).
+// confirmado pela agência (situacao IN (21 "Em digitação", 83965 legado)
+// + em_andamento_data < hoje).
 // Esse dado vem do backend (`atrasados`), porque o effective_date desses
 // pedidos é a data da etiqueta (passada) — eles NÃO aparecem no filtro de
 // hoje, então o frontend não conseguiria derivá-los do que está carregado.

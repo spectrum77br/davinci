@@ -366,9 +366,13 @@ async def aplicar_status_bling(session: AsyncSession, ch: Chamado, nome: str) ->
     except logistica_bling.BlingObsError as e:
         raise ChamadoError("chamado_sem_integracao_bling") from e
     await client.update_order_situacao(bling_id, sid)
-    ch.status_bling = nome
-    session.add(registrar_sistema(ch, f"Status Bling alterado para {nome}"))
-    return {"bling_order_id": bling_id, "situacao": nome, "situacao_id": sid}
+    # Nome do catálogo pro id realmente aplicado: regra escrita com o apelido
+    # legado "Enviado Etiqueta" move pra 21 → snapshot/histórico dizem
+    # "Em digitação" (mesmo ajuste de logistica_bling.apply_alterar_status_bling).
+    nome_aplicado = await logistica_bling._situacao_nome_por_id(session, sid) or nome
+    ch.status_bling = nome_aplicado
+    session.add(registrar_sistema(ch, f"Status Bling alterado para {nome_aplicado}"))
+    return {"bling_order_id": bling_id, "situacao": nome_aplicado, "situacao_id": sid}
 
 
 # ---------------------------------------------------------------- resolvido

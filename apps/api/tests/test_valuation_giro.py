@@ -161,8 +161,11 @@ async def test_giro_so_em_aberto_andamento_entregue(
     # Conta: Entregue = 200 de custo.
     await _pedido(db, bling_id=7301, loja="5001", situacao="83953",
                   preco_custo=100.0, qtd=2)
-    # NÃO conta: Enviado Importado (83965) e Enviado Geral SP (84674).
+    # NÃO conta: Em digitação (21 = etiqueta enviada), Enviado Etiqueta/Importado
+    # (83965, legado) e Enviado Geral SP (84674).
     await _pedido(db, bling_id=7302, loja="5001", situacao="83965",
+                  preco_custo=100.0, qtd=9)
+    await _pedido(db, bling_id=7304, loja="5001", situacao="21",
                   preco_custo=100.0, qtd=9)
     await _pedido(db, bling_id=7303, loja="5001", situacao="84674",
                   preco_custo=100.0, qtd=9)

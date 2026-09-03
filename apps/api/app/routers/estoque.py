@@ -3,9 +3,11 @@
 3 tabs on the front-end, each backed by one GET here:
   * /api/estoque/produtos    — Estoque tab: per-SKU summary of the day's
                                movements + current stock + reserve.
-  * /api/estoque/pedidos     — Pedidos tab: bling_orders flagged as
-                               "enviado etiqueta" (situacao=15), filtered
-                               by the operator's stock_tag.
+  * /api/estoque/pedidos     — Pedidos tab: bling_orders em "etiqueta
+                               enviada" (situacao 21 Em digitação —
+                               canônica; 83965 Enviado Etiqueta — legado)
+                               ou já confirmados (15 e pós-envio),
+                               filtered by the operator's stock_tag.
   * /api/estoque/envios      — Envios tab: per-day shipment count for
                                orders whose `em_andamento_data` falls
                                inside the window.
@@ -54,6 +56,9 @@ from app.models.integration import Integration
 from app.models.nf import NfEtiquetaArquivo
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
+from app.services.bling_situacoes import (
+    SITUACOES_ENVIADO_ETIQUETA_STR as _SITUACOES_ENVIADO_ETIQUETA,
+)
 from app.services.estoque_relatorio_pdf import relatorio_pedidos_pdf
 from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
@@ -87,13 +92,12 @@ _BRT = ZoneInfo("America/Sao_Paulo")
 # view because the mala-specific filter only runs when tag=mala.
 _BASELINE_NUMERIC_SKUS = tuple(str(n) for n in range(1, 31))
 
-# Bling situação ID for "enviado etiqueta" — confirmed against prod
-# distinct values: id=15 has 735/928 rows with em_andamento_data set,
-# the highest correspondence rate of any situação. id=12 is cancelado;
-# 83953/83957 are custom statuses for this shop.
-# Situação custom do shop para "Enviado Etiqueta" (etiqueta gerada,
-# esperando marketplace confirmar envio).
-_SITUACAO_ENVIADO_ETIQUETA = "83965"
+# Situações "etiqueta enviada" (etiqueta gerada, esperando a agência/
+# marketplace confirmar o envio) — fonte única em services/bling_situacoes:
+# 21 = Em digitação (nativa Bling, canônica desde 03/09/2026); 83965 =
+# Enviado Etiqueta (custom do shop, legado — pedidos antigos seguem nela).
+# Strings porque bling_orders.situacao é text. id=15 é Em andamento
+# (envio confirmado); id=12 cancelado; 83953/83957 são customs do shop.
 
 # Regra de "enviado" (decidida pelo dono): enviado = em_andamento_data
 # preenchida E situacao NOT IN (cancelamento/pré-envio). Em vez de uma
@@ -101,10 +105,11 @@ _SITUACAO_ENVIADO_ETIQUETA = "83965"
 # situação pós-envio nova — Entregue, Resolvido, Manutenção, Problemas,
 # Perdimento…), usamos uma BLOCKLIST: tudo com data de envio conta, menos
 # o que claramente não saiu. À prova de novas situações pós-envio.
+# 21 (Em digitação) NÃO entra aqui: desde 03/09/2026 é a etiqueta enviada
+# (provisória), não rascunho — fica vermelha via _SITUACAO_NAO_VERDE.
 _SITUACAO_NAO_ENVIADO = (
     "6",      # Em aberto
     "12",     # Cancelado
-    "21",     # Em digitação
     "83955",  # Aguardando Cancelamento
     "83962",  # Verificar Cancelamento
     "83966",  # Erro no Envio
@@ -112,8 +117,9 @@ _SITUACAO_NAO_ENVIADO = (
     "545901", # Sucata
 )
 # Badge VERDE (enviado confirmado) = enviado E não é a etiqueta provisória
-# 83965 (que segue vermelha até a agência confirmar).
-_SITUACAO_NAO_VERDE = _SITUACAO_NAO_ENVIADO + (_SITUACAO_ENVIADO_ETIQUETA,)
+# (21 = Em digitação, canônica; 83965 = Enviado Etiqueta, legado), que
+# segue vermelha até a agência confirmar.
+_SITUACAO_NAO_VERDE = _SITUACAO_NAO_ENVIADO + _SITUACOES_ENVIADO_ETIQUETA
 
 # Pedidos pendentes mais antigos que isso = zumbis (webhook perdido) —
 # ficam escondidos da aba.
@@ -497,15 +503,17 @@ async def list_estoque_pedidos(
         atrasado recente) → badge amarelo. Ainda sem NF/etiqueta; entra na
         lista pra equipe separar o produto antes de a etiqueta liberar
         (ML ~meio-dia); os de corte amanhã são adiantamento.
-      * PENDENTE: situacao=83965 (Enviado Etiqueta) + sem em_andamento_data
-        + criado nos últimos 14 dias (anti-zumbi) → badge vermelho.
-      * ENVIADO:  situacao IN (83965, 15, 83953, 83957, 545902) +
-        em_andamento_data preenchida → badge verde (exceto 83965, que fica
-        vermelho mesmo com data). 83957=Aguardando Devolução e 545902=
-        Resolvido continuam visíveis: pedido já saiu do estoque, fluxo de
-        devolução é tratado em outra aba.
+      * PENDENTE: situacao IN (21, 83965) (Em digitação = etiqueta enviada,
+        canônica; 83965 Enviado Etiqueta = legado custom) + sem
+        em_andamento_data + criado nos últimos 14 dias (anti-zumbi) → badge
+        vermelho.
+      * ENVIADO:  situacao IN (21, 83965, 15, 83953, 83957, 545902) +
+        em_andamento_data preenchida → badge verde (exceto 21/83965, que
+        ficam vermelhos mesmo com data). 83957=Aguardando Devolução e
+        545902=Resolvido continuam visíveis: pedido já saiu do estoque,
+        fluxo de devolução é tratado em outra aba.
     Qualquer outra combinação fica escondida: `15` sem em_andamento_data
-    é anomalia (já atendido, não é "não enviado"); 83965 com >14 dias é
+    é anomalia (já atendido, não é "não enviado"); 21/83965 com >14 dias é
     zumbi de webhook perdido; "Em aberto" com >2 dias é pedido-problema;
     outras situações custom não pertencem ao fluxo. Data de referência:
     ship date se confirmado, senão HOJE (BRT) — pendente e previsão
@@ -521,13 +529,14 @@ async def list_estoque_pedidos(
     today_brt = datetime.now(_BRT).date()
 
     pendente_clause = and_(
-        BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA,
+        BlingOrder.situacao.in_(_SITUACOES_ENVIADO_ETIQUETA),
         BlingOrder.em_andamento_data.is_(None),
         cast(BlingOrder.data, Date) >= today_brt - timedelta(days=_PENDENTE_MAX_AGE_DIAS),
     )
     enviado_clause = and_(
         # Blocklist: visível se tem data de envio e não é cancelamento/
-        # pré-envio. 83965 (etiqueta) segue visível aqui, badge vermelho.
+        # pré-envio. 21/83965 (etiqueta provisória) seguem visíveis aqui,
+        # badge vermelho.
         BlingOrder.situacao.notin_(_SITUACAO_NAO_ENVIADO),
         BlingOrder.em_andamento_data.isnot(None),
     )
@@ -568,10 +577,11 @@ async def list_estoque_pedidos(
 
     # Filtros por status — alinhado com o `status` do payload (que é por
     # situacao, não por em_andamento_data). `nao_enviado` = badge vermelho =
-    # situacao=83965 (Enviado Etiqueta — agência ainda não confirmou),
-    # INDEPENDENTE de ter ou não em_andamento_data carimbada (o sync de
-    # etiqueta já carimba a data provisória). Filtrar por em_andamento_data
-    # IS NULL aqui escondia os 83965 com data — operador via 108 no
+    # situacao IN (21, 83965) (Em digitação = etiqueta enviada; 83965 legado
+    # — agência ainda não confirmou), INDEPENDENTE de ter ou não
+    # em_andamento_data carimbada (o sync de etiqueta já carimba a data
+    # provisória). Filtrar por em_andamento_data IS NULL aqui escondia os
+    # 21/83965 com data — operador via 108 no
     # contador mas tabela vazia no filtro "não enviado".
     # Etiqueta já no sistema (nf_etiqueta_arquivo, por numero)? Um "Em
     # aberto" estagnado pode JÁ ter etiqueta: o sync da situação roda a
@@ -596,17 +606,17 @@ async def list_estoque_pedidos(
         where.append(~tem_etiqueta)
         order_by = effective_date.desc()
     elif status_filter == "nao_enviado":
-        # Vermelho = 83965 OU o 6 estagnado cuja etiqueta já chegou.
+        # Vermelho = 21/83965 OU o 6 estagnado cuja etiqueta já chegou.
         where.append(
             or_(
-                BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA,
+                BlingOrder.situacao.in_(_SITUACOES_ENVIADO_ETIQUETA),
                 and_(BlingOrder.situacao == _SITUACAO_EM_ABERTO, tem_etiqueta),
             )
         )
         order_by = effective_date.desc()
     elif status_filter == "enviado":
         # Verde = enviado confirmado (exclui cancelamento/pré-envio E a
-        # etiqueta provisória 83965).
+        # etiqueta provisória 21/83965).
         where.append(BlingOrder.situacao.notin_(_SITUACAO_NAO_VERDE))
         order_by = BlingOrder.em_andamento_data.desc()
     else:
@@ -813,8 +823,9 @@ async def list_estoque_pedidos(
             #     no sistema. Se a etiqueta já chegou, o Bling está na
             #     frente do sync (~2h) e o pedido cai no vermelho — não
             #     pode ter "Previsão" com botão Imprimir do lado (291919).
-            #   - vermelho: 83965 (etiqueta gerada, agência não confirmou)
-            #     e situações de cancelamento/pré-envio (_SITUACAO_NAO_VERDE).
+            #   - vermelho: 21 (Em digitação = etiqueta gerada, agência não
+            #     confirmou; 83965 = legado) e situações de cancelamento/
+            #     pré-envio (_SITUACAO_NAO_VERDE).
             #   - verde: todo o resto que tem data de envio — inclui
             #     Entregue, Resolvido, Aguardando Devolução, Manutenção,
             #     Problemas, Perdimento (foram enviados no dia).
@@ -872,13 +883,13 @@ async def list_estoque_pedidos(
 
     # Atrasados (INDEPENDENTE do filtro de data): pedidos com etiqueta
     # gerada em dia PASSADO e ainda não confirmados pela agência
-    # (situacao=83965 + em_andamento_data preenchida < hoje). O
+    # (situacao IN (21, 83965) + em_andamento_data preenchida < hoje). O
     # effective_date desses é a própria em_andamento_data (passada), então
     # eles NÃO aparecem no filtro de hoje — por isso a contagem vem à
     # parte. O chip "atrasados" no topo da aba os mostra quando o operador
     # está no dia de hoje. Respeita o filtro de tag (mesma regra da lista).
     atr_where: list = [
-        BlingOrder.situacao == _SITUACAO_ENVIADO_ETIQUETA,
+        BlingOrder.situacao.in_(_SITUACOES_ENVIADO_ETIQUETA),
         BlingOrder.em_andamento_data.isnot(None),
         BlingOrder.em_andamento_data < today_brt,
         BlingOrder.item_index == 0,

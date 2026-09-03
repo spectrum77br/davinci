@@ -355,7 +355,8 @@ async def test_list_refunds_includes_current_bling_situacao(
 
     db.add(SituacaoBling(id=9, nome="Atendido"))
     db.add(BlingOrder(numero="555001", situacao="9"))
-    # Situacao sem entrada no catalogo -> cai no id cru.
+    # Situacao sem entrada no catalogo -> cai no id cru (83965 = Enviado
+    # Etiqueta, legado; sem linha em situacao_bling neste teste).
     db.add(BlingOrder(numero="555002", situacao="83965"))
     await db.commit()
 

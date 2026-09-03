@@ -184,7 +184,8 @@ const statusFilter = ref<StatusFilter>('Pendente')
 const attentionType = ref<AttentionType>('all')
 // Situação do pedido (03/09, Eduardo: "em margem é para aparecer somente os
 // com situação em aberto e enviado etiqueta"). Default = em triagem
-// (Em aberto + Enviado Etiqueta + segurados pelo robô); "all" mostra tudo.
+// (Em aberto + Em digitação [21 = etiqueta enviada; 83965 "Enviado Etiqueta"
+// é o legado] + segurados pelo robô); "all" mostra tudo.
 type SituacaoFilter = 'triagem' | 'all'
 const situacaoFilter = ref<SituacaoFilter>('triagem')
 const page = ref(1)
@@ -973,9 +974,9 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       <select
         v-model="situacaoFilter"
         class="text-sm rounded-md border bg-background px-2 py-1.5"
-        title="Situação do pedido no Bling. Padrão: só o que ainda está em triagem (Em aberto + Enviado Etiqueta, mais os segurados pelo robô)."
+        title="Situação do pedido no Bling. Padrão: só o que ainda está em triagem (Em aberto + Em digitação, mais os segurados pelo robô)."
       >
-        <option value="triagem">em aberto + enviado etiqueta</option>
+        <option value="triagem">em aberto + em digitação</option>
         <option value="all">todas situações</option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">

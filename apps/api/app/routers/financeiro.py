@@ -70,6 +70,7 @@ from app.schemas.financeiro import (
     ValuationUnlockIn,
     ValuationUnlockOut,
 )
+from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/financeiro", tags=["financeiro"])
@@ -707,7 +708,9 @@ _VAL_SIT_APLICAVEIS = [
     "83959",     # Enviado Geral PI
     "83958",     # Enviado Fake (nome real na situacao_bling)
     "84678",     # Enviado Geral SA
-    "83965",     # Enviado Importado
+    # Etiqueta enviada: 21 = Em digitação (canônico desde 03/09/2026);
+    # 83965 = Enviado Etiqueta / Enviado Importado (legado).
+    *SITUACOES_ENVIADO_ETIQUETA_STR,
 ]
 # Situações que entram em RENTABILIDADE / Custo / Margem: Em aberto (6,28) +
 # Em andamento (15,37) + Entregue (83953). Mais amplo que só-Entregue — inclui
@@ -721,7 +724,7 @@ _VAL_SIT_RENTABILIDADE = ["6", "28", "15", "37", "83953"]
 _VAL_SIT_MARGEM = ["15", "37", "83953", "83956", "545902", "83958"]
 _VAL_SIT_LABEL = (
     "Em aberto, Em andamento, Entregue, "
-    "Enviado Geral SP/CI/PI/RA/SA, Enviado Importado"
+    "Enviado Geral SP/CI/PI/RA/SA, Em digitação, Enviado Importado"
 )
 # Quadro "Operacional — 3 meses" (substitui a antiga Eficácia). Linhas diretas
 # de situação (faturamento por mês da data do pedido) + o conjunto que serve de

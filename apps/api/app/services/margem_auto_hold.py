@@ -13,10 +13,11 @@ sempre resolvem — Aprovar devolve o pedido pro fluxo (Atendido → Em aberto),
 Reprovar confirma o cancelamento.
 
 Por que só situação 6: é a janela pré-etiqueta — a mesma trava do botão
-Reprovar. Pedido que já andou (Atendido, Enviado Etiqueta, ...) não é
-segurado. E o motivo "frete" fica de fora porque a própria listagem da
-Margem o exclui (NOT _ATTENTION_FRETE_SQL): frete só se conhece depois do
-envio, não há o que segurar. ML/Shopee/TikTok nunca entram por saldo (01/09):
+Reprovar. Pedido que já andou (Atendido, Em digitação = etiqueta enviada
+[21; 83965 "Enviado Etiqueta" é o legado], ...) não é segurado. E o motivo
+"frete" fica de fora porque a própria listagem da Margem o exclui (NOT
+_ATTENTION_FRETE_SQL): frete só se conhece depois do envio, não há o que
+segurar. ML/Shopee/TikTok nunca entram por saldo (01/09):
 o saldo da plataforma é a fonte da verdade. Enquanto o líquido real não
 sincroniza, a linha fica "aguardando saldo da plataforma" SÓ na aba
 (_ATTENTION_SALDO_AGUARDANDO_SQL, 01/09 à noite — sem margem oficial, nada

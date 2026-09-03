@@ -142,9 +142,15 @@ async def test_trigger_captura_entrada_15(db: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_trigger_captura_transicao_83965_para_15(db: AsyncSession):
-    """83965 (etiqueta) não captura; UPDATE → 15 captura."""
-    o = await _add_order(db, bling_id=930002, situacao="83965")
+@pytest.mark.parametrize(
+    "etiqueta", ["21", "83965"], ids=["21-canonico", "83965-legado"],
+)
+async def test_trigger_captura_transicao_etiqueta_para_15(
+    db: AsyncSession, etiqueta: str,
+):
+    """Etiqueta enviada — 21 (Em digitação, canônico desde 03/09/2026) ou
+    83965 (Enviado Etiqueta, legado) — não captura; UPDATE → 15 captura."""
+    o = await _add_order(db, bling_id=930002, situacao=etiqueta)
     assert await _ledger_count(db, 930002) == 0
     o.situacao = "15"
     await db.commit()
@@ -153,11 +159,14 @@ async def test_trigger_captura_transicao_83965_para_15(db: AsyncSession):
 
 @pytest.mark.asyncio
 async def test_trigger_nao_captura_pre_envio(db: AsyncSession):
-    """Em aberto (6) e etiqueta (83965) não entram no ledger."""
+    """Em aberto (6), etiqueta 21 (Em digitação) e 83965 (legado) não entram
+    no ledger."""
     await _add_order(db, bling_id=930003, situacao="6")
     await _add_order(db, bling_id=930004, situacao="83965")
+    await _add_order(db, bling_id=930008, situacao="21")
     assert await _ledger_count(db, 930003) == 0
     assert await _ledger_count(db, 930004) == 0
+    assert await _ledger_count(db, 930008) == 0
 
 
 @pytest.mark.asyncio
@@ -337,6 +346,23 @@ async def test_correcao_cross_day_recarimba_e_enfileira(db: AsyncSession):
     assert cs[0].dia_anterior == _DIA_ERRADO
     assert cs[0].dia_novo == novo
     assert cs[0].threema_sent_at is None  # pendente p/ a rotina drenar
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "etiqueta", ["21", "83965"], ids=["21-canonico", "83965-legado"],
+)
+async def test_correcao_cross_day_a_partir_da_etiqueta(db: AsyncSession, etiqueta: str):
+    """Etiqueta (21; 83965 legado)→15 também re-carimba: etiqueta é pré-envio,
+    então confirmar num dia diferente do que está no ledger é correção."""
+    o = await _add_order(db, bling_id=950006, situacao=etiqueta)
+    await _seed_evento(db, bling_id=950006, shipping_day=_DIA_ERRADO,
+                       item_codigo="sku-950006")
+    o.situacao = "15"
+    await db.commit()
+    assert await _ledger_dia(db, 950006) != _DIA_ERRADO
+    assert await _ledger_count(db, 950006) == 1
+    assert len(await _correcoes(db, 950006)) == 1
 
 
 @pytest.mark.asyncio

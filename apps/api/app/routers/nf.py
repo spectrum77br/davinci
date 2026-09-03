@@ -82,6 +82,10 @@ from app.services import (
     nf_upseller,
     nf_xml,
 )
+from app.services.bling_situacoes import SITUACAO_ENVIADO_ETIQUETA as _SITUACAO_ENVIADO_ETIQUETA
+from app.services.bling_situacoes import (
+    SITUACOES_ENVIADO_ETIQUETA_STR as _SITUACOES_ENVIADO_ETIQUETA_STR,
+)
 from app.services.melhor_envio import (
     MelhorEnvioApiError,
     MelhorEnvioClient,
@@ -104,12 +108,17 @@ _ETIQUETA_LOTE_MAX_BYTES = 40 * 1024 * 1024
 _ETIQUETA_LOTE_JANELA = timedelta(days=14)
 
 # Pausa entre PATCHes de situação no Bling (rate limit — PATCHes em rajada
-# derrubavam parte dos "Enviado Etiqueta").
+# derrubavam parte dos PATCHes pra Em digitação (21; antes 83965 Enviado
+# Etiqueta)).
 _BLING_PATCH_PAUSA_S = 0.5
 
-# Situação custom do shop no Bling. É ela que faz o pedido aparecer na aba
-# Pedidos do Controle de Estoque pra ser impresso (ver routers/estoque.py).
-_SITUACAO_ENVIADO_ETIQUETA = 83965
+# Situação de "etiqueta enviada" no Bling — importada acima de
+# services/bling_situacoes: _SITUACAO_ENVIADO_ETIQUETA = 21 (Em digitação,
+# nativa; canônica desde 03/09/2026) é pra onde o pedido VAI quando a etiqueta
+# sobe, e é ela que o faz aparecer na aba Pedidos do Controle de Estoque pra
+# ser impresso (ver routers/estoque.py). _SITUACOES_ENVIADO_ETIQUETA_STR
+# também inclui a custom 83965 (Enviado Etiqueta, legado) pra não re-PATCHar
+# pedido antigo que já está lá.
 
 # Pedido sem estoque não vira etiqueta: vai pra Aguardando Cancelamento e sai
 # do fluxo (o humano decide cancelar ou repor). Id da davinci.situacao_bling.
@@ -944,7 +953,9 @@ async def _marcar_etiqueta(
 async def _marcar_enviado_etiqueta(
     session: AsyncSession, numeros: list[str]
 ) -> None:
-    """Move os pedidos pra "Enviado Etiqueta" no Bling depois que a etiqueta foi
+    """Move os pedidos pra "Em digitação" (situação 21, nativa do Bling — decisão
+    do Eduardo 03/09/2026; antes era a custom 83965 "Enviado Etiqueta", que
+    segue válida como legado nos pedidos antigos) depois que a etiqueta foi
     capturada — é o gatilho que faz o pedido aparecer no Controle de Estoque pra
     impressão. Espelha a situação na `bling_orders` local pra a tela refletir na
     hora (sem esperar o próximo sync).
@@ -963,10 +974,12 @@ async def _marcar_enviado_etiqueta(
         )
     ).all()
     # bling_orders tem uma linha por ITEM — o pedido só precisa de um PATCH.
+    # Quem já está em QUALQUER situação de etiqueta enviada (21 ou o legado
+    # 83965) fica como está — não re-PATCHa legado pra 21.
     pendentes = {
         r.numero: r.bling_id
         for r in rows
-        if str(r.situacao or "") != str(_SITUACAO_ENVIADO_ETIQUETA)
+        if str(r.situacao or "") not in _SITUACOES_ENVIADO_ETIQUETA_STR
     }
     if not pendentes:
         return
@@ -1823,7 +1836,7 @@ async def nf_agent_etiqueta_lote(
     marcadas de uma vez), fatia em uma etiqueta por pedido, casa cada fatia com
     o pedido do davinci, transforma (mesma regra do /agent/etiqueta) e grava.
     Pros pedidos gravados: status_etiqueta='ok', fecha os comandos
-    `imprimir_etiqueta` cobertos e move pra "Enviado Etiqueta" no Bling.
+    `imprimir_etiqueta` cobertos e move pra "Em digitação" (21) no Bling.
 
     Casamento em cascata: 1º pelo nº da plataforma impresso na etiqueta
     ("Pedido: X" → bling_orders.numeroloja, Shopee); 2º pelo CPF/CNPJ da

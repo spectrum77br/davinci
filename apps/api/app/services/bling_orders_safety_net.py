@@ -2,21 +2,21 @@
 suspeitos de stale a cada 10 minutos.
 
 Bling V3 perde webhooks com frequência — pedidos ficam num estado
-intermediário no DB (situacao 6 ou 83965 sem em_andamento_data)
+intermediário no DB (situacao 6, 21 ou 83965-legado sem em_andamento_data)
 enquanto no Bling já avançaram. Este módulo lista os candidatos; o
 cron (`bling_orders_safety_net_tick` em worker.py) força o refetch via
 `ingest_bling_order_run`, que é idempotente.
 
 Cobre duas classes de stale:
-  1. Envio (6/83965) sem em_andamento_data — avanço perdido cedo.
+  1. Envio (6 / 21 / 83965 legado) sem em_andamento_data — avanço perdido cedo.
   2. "Em andamento" (15) parado há muito tempo — o webhook 15→Entregue
      se perdeu e NADA mais reconferia a 15, então pedidos já entregues
      ficavam eternamente como "em rota" e o Faturamento (que conta só
      Entregue) ficava ABAIXO do Bling. Esta varredura corrige isso.
 
 Complementa (não substitui) o `check_marketplace_shipped_orders`:
-aquele confronta 83965 contra a API do marketplace; este re-busca o
-estado real direto do Bling, pegando também os 6→83965 perdidos.
+aquele confronta a etiqueta (21; 83965 legado) contra a API do marketplace;
+este re-busca o estado real direto do Bling, pegando também os 6→21 perdidos.
 """
 from __future__ import annotations
 
@@ -28,12 +28,15 @@ from sqlalchemy import Date, and_, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder, Integration, IntegrationPlatform
+from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 
 logger = structlog.get_logger()
 
-# Situações intermediárias do fluxo de envio. Com em_andamento_data NULL
-# são candidatos a estarem stale (webhook do Bling pode ter se perdido).
-_STALE_CANDIDATE_SITUACOES = ("6", "83965")
+# Situações intermediárias do fluxo de envio: 6 (Em aberto) + etiqueta enviada
+# — 21 (Em digitação, canônico desde 03/09/2026) e 83965 (Enviado Etiqueta,
+# legado). Com em_andamento_data NULL são candidatos a estarem stale (webhook
+# do Bling pode ter se perdido).
+_STALE_CANDIDATE_SITUACOES = ("6", *SITUACOES_ENVIADO_ETIQUETA_STR)
 
 # Pedidos travados em "Em andamento" (15): reconferimos os parados entre
 # MIN e MAX dias (pela em_andamento_data). <MIN ainda pode estar em rota
@@ -79,7 +82,7 @@ async def find_stale_order_ids(session: AsyncSession) -> list[tuple[int, UUID]]:
     if integ is None:
         return []
 
-    # Branch 1: envio (6/83965) sem em_andamento_data — avanço perdido.
+    # Branch 1: envio (6 / 21 / 83965 legado) sem em_andamento_data — avanço perdido.
     # Teto de 14d na DATA do pedido (zumbis velhos não valem refetch).
     stale_envio = and_(
         BlingOrder.situacao.in_(_STALE_CANDIDATE_SITUACOES),
