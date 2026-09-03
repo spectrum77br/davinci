@@ -1179,18 +1179,30 @@ function isDeleting(id: string): boolean {
 async function removeRow(row: DevolutionRow) {
   if (!canDelete.value || isDeleting(row.id)) return
   const label = row.sku || row.pedido_bling || 'esta devolução'
-  const stockNote = row.estoque_mov_sku && !row.estoque_mov_revertido_at
-    ? ' O estoque já devolvido no Bling NÃO é estornado — ajuste-o direto no Bling.'
-    : ''
+  // Estoque já devolvido ao Bling: com o movimento registrado, o back dá BAIXA
+  // da mesma quantidade antes de excluir (03/09, Eduardo). Lançamento antigo
+  // sem registro não tem como ser estornado daqui.
+  const estornavel = !!row.estoque_mov_sku && !row.estoque_mov_revertido_at
+  const stockNote = estornavel
+    ? ` O estoque devolvido no Bling (${row.estoque_mov_qty ?? 1} un. de ${row.estoque_mov_sku}) será ESTORNADO automaticamente (saída).`
+    : (row.data_devolvido_estoque
+      ? ' O estoque já devolvido no Bling NÃO será estornado (lançamento antigo, sem registro do movimento) — ajuste-o direto no Bling.'
+      : '')
   if (!confirm(`Remover o lançamento de "${label}"? Esta ação não pode ser desfeita.${stockNote}`)) return
   const next = new Set(deleting.value)
   next.add(row.id)
   deleting.value = next
   error.value = null
   try {
-    await api(`/api/devolutions/${encodeURIComponent(row.id)}`, { method: 'DELETE' })
+    const res = await api<{ ok: boolean; estoque_estornado: boolean; mensagem: string | null }>(
+      `/api/devolutions/${encodeURIComponent(row.id)}`,
+      { method: 'DELETE' },
+    )
     items.value = items.value.filter((i) => i.id !== row.id)
     total.value = Math.max(0, total.value - 1)
+    if (res?.estoque_estornado) {
+      pushToast({ kind: 'success', title: 'Lançamento excluído', lines: [res.mensagem || 'Estoque estornado no Bling.'] })
+    }
   } catch (e: any) {
     error.value = apiError(e)
   } finally {

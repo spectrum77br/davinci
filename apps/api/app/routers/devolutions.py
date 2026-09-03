@@ -1530,18 +1530,52 @@ async def backfill_addresses(
     }
 
 
-@router.delete("/{devolution_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{devolution_id}")
 async def delete_devolution(
     devolution_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("devolucoes", "delete"))],
-) -> None:
+) -> dict:
+    """Exclui o lançamento. Se ele já devolveu estoque ao Bling (movimento
+    registrado em estoque_mov_* e ainda não estornado), dá BAIXA da mesma
+    quantidade no Bling ANTES de excluir — Eduardo 03/09: "quando eu clicar em
+    excluir você lança um estoque de saída e remove o estoque que foi lançado".
+    Se o Bling recusar, NÃO exclui (502) — senão sobraria estoque fantasma.
+    Lançamento antigo sem registro do movimento não tem como ser estornado
+    daqui (o front avisa: ajustar direto no Bling)."""
     row = (
         await session.execute(select(Devolution).where(Devolution.id == devolution_id))
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "devolution_not_found"})
+
+    estorno: dict | None = None
+    if row.estoque_mov_bling_id and row.estoque_mov_revertido_at is None:
+        rev = await reverse_stock_movement(session, row)
+        if rev is not None and not rev.get("ok"):
+            await session.rollback()
+            raise HTTPException(
+                502,
+                detail={
+                    "code": "estoque_estorno_falhou",
+                    "message": (
+                        "Não consegui estornar o estoque devolvido no Bling — o "
+                        f"lançamento NÃO foi excluído. {rev.get('message') or ''}"
+                    ).strip(),
+                },
+            )
+        estorno = rev
+
     await session.delete(row)
     await session.commit()
-    logger.info("devolution_deleted", id=str(devolution_id))
-    return None
+    logger.info(
+        "devolution_deleted",
+        id=str(devolution_id),
+        pedido_bling=row.pedido_bling,
+        estoque_estornado=bool(estorno and estorno.get("ok")),
+    )
+    return {
+        "ok": True,
+        "estoque_estornado": bool(estorno and estorno.get("ok")),
+        "mensagem": (estorno or {}).get("message"),
+    }
