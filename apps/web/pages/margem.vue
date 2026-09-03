@@ -182,6 +182,11 @@ const platform = ref<'all' | string>('all')
 const conta = ref<'all' | string>('all')
 const statusFilter = ref<StatusFilter>('Pendente')
 const attentionType = ref<AttentionType>('all')
+// Situação do pedido (03/09, Eduardo: "em margem é para aparecer somente os
+// com situação em aberto e enviado etiqueta"). Default = em triagem
+// (Em aberto + Enviado Etiqueta + segurados pelo robô); "all" mostra tudo.
+type SituacaoFilter = 'triagem' | 'all'
+const situacaoFilter = ref<SituacaoFilter>('triagem')
 const page = ref(1)
 
 type Tab = 'list' | 'lookup'
@@ -227,6 +232,7 @@ async function load() {
     if (attentionType.value !== 'all') {
       params.set('attention_type', attentionType.value)
     }
+    if (situacaoFilter.value !== 'triagem') params.set('situacao', situacaoFilter.value)
     if (search.value.trim()) params.set('search', search.value.trim())
     const res = await api<PageResponse>(`/api/margens/marketplace?${params.toString()}`)
     items.value = res.items
@@ -419,6 +425,11 @@ watch(conta, () => {
 watch(statusFilter, () => {
   if (tab.value !== 'list') return
   notice.value = null
+  page.value = 1
+  load()
+})
+watch(situacaoFilter, () => {
+  if (tab.value !== 'list') return
   page.value = 1
   load()
 })
@@ -958,6 +969,14 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
         <option v-for="a in ATTENTION_OPTIONS" :key="a" :value="a">
           {{ ATTENTION_LABEL[a] }}
         </option>
+      </select>
+      <select
+        v-model="situacaoFilter"
+        class="text-sm rounded-md border bg-background px-2 py-1.5"
+        title="Situação do pedido no Bling. Padrão: só o que ainda está em triagem (Em aberto + Enviado Etiqueta, mais os segurados pelo robô)."
+      >
+        <option value="triagem">em aberto + enviado etiqueta</option>
+        <option value="all">todas situações</option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ rangeStart }}–{{ rangeEnd }} de {{ total }}

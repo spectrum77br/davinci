@@ -331,6 +331,7 @@ async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
         _ATTENTION_MARGEM_SQL,
         _ATTENTION_SALDO_AGUARDANDO_SQL,
         _ATTENTION_SALDO_SQL,
+        _SITUACAO_TRIAGEM_SQL,
         NEEDS_ATTENTION_SQL,
         SITUACAO_REPROVADO,
     )
@@ -362,6 +363,7 @@ async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
           AND (v.situacao IS DISTINCT FROM '{SITUACAO_REPROVADO}'
                OR v.bling_status_margem = 'Pendente')
           AND NOT {_ATTENTION_FRETE_SQL}
+          AND {_SITUACAO_TRIAGEM_SQL}
           AND (v.bling_status_margem = 'Pendente'
                OR (v.bling_status_margem IS NULL AND {NEEDS_ATTENTION_SQL}))
         GROUP BY v.pedido_bling

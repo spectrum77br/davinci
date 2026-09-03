@@ -500,8 +500,10 @@ async def test_marketplace_saldo_filter_only_considers_shippable_situacoes(
     )
     await db.commit()
 
+    # situacao=all: prova que é o gatilho de SALDO que exclui a situação 9,
+    # não o filtro padrão da aba (que já esconde tudo fora de 6/83965).
     response = await client.get(
-        "/api/margens/marketplace?attention_type=saldo&status=Pendente"
+        "/api/margens/marketplace?attention_type=saldo&status=Pendente&situacao=all"
     )
     assert response.status_code == 200
     assert response.json()["total"] == 0
@@ -701,7 +703,7 @@ async def test_marketplace_margem_filter_excludes_aguardando_devolucao(
                  '83957', 'Aguardando Devolução', 'ml', 1,
                  5, 20, NULL),
                 (:inc, '123461', 987659, 'sku-6',
-                 '15', 'Em andamento', 'ml', 1,
+                 '6', 'Em aberto', 'ml', 1,
                  5, 20, NULL)
             """
         ),
@@ -709,8 +711,10 @@ async def test_marketplace_margem_filter_excludes_aguardando_devolucao(
     )
     await db.commit()
 
+    # situacao=all: sem isso o filtro padrão (só 6/83965) esconderia o 83957
+    # antes do gatilho de margem ser avaliado e o teste passaria à toa.
     response = await client.get(
-        "/api/margens/marketplace?attention_type=margem&status=Pendente"
+        "/api/margens/marketplace?attention_type=margem&status=Pendente&situacao=all"
     )
     assert response.status_code == 200
     body = response.json()
@@ -755,7 +759,7 @@ async def test_marketplace_frete_estourado_fica_fora_da_listagem(
             """
             INSERT INTO verificar_margem (
                 bling_order_item_id, pedido_bling, pedido_marketplace,
-                bling_id, sku, produto, situacao_nome,
+                bling_id, sku, produto, situacao, situacao_nome,
                 plataforma_bling, loja_nome, item_proportion,
                 marketplace_frete_real_cobrado_item,
                 evento_frete_anuncio, frete_projetado_item,
@@ -764,7 +768,7 @@ async def test_marketplace_frete_estourado_fica_fora_da_listagem(
             VALUES (
                 :id, '278867', '2000016712859896',
                 25959686080, 'b008.12.18', 'Kit Malas',
-                'Em aberto', 'ml', 'ML Marquezini', 0.5,
+                '6', 'Em aberto', 'ml', 'ML Marquezini', 0.5,
                 104.175,
                 78.26, 90,
                 NULL
@@ -1072,7 +1076,7 @@ async def test_marketplace_margem_isenta_por_data_especial(
                     marketplace_margem, margem_minima, pricing_leaf_segment_id
                 ) VALUES (
                     :id, :pedido, :sku, :dt,
-                    '15', 'Em andamento', 'ml', 1,
+                    '6', 'Em aberto', 'ml', 1,
                     :margem, 0.15, :leaf
                 )
                 """

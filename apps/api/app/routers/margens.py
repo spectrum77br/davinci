@@ -82,6 +82,19 @@ SITUACAO_AGUARDANDO_DEVOLUCAO = 83957
 _SITUACOES_SALDO_DIVERGENTE = (str(SITUACAO_APROVADO), str(SITUACAO_ENVIADO_ETIQUETA))
 _SITUACOES_SALDO_DIVERGENTE_IN = ", ".join(f"'{s}'" for s in _SITUACOES_SALDO_DIVERGENTE)
 
+# Situações "em triagem" — o que a aba Margem MOSTRA por padrão (Eduardo,
+# 03/09: "em margem é para aparecer somente os com situação em aberto e
+# enviado etiqueta"). Entregue/Resolvido/Problemas etc. saem da lista: a venda
+# já andou, margem ali não é mais decisão. Exceção: pedido segurado pelo robô
+# (83955 com 'Pendente' gravado) continua visível — senão ninguém consegue
+# aprová-lo/reprová-lo. Usado pela listagem (situacao=triagem, o default) e
+# pelo Informar; "Buscar pedido" ignora (acha qualquer situação).
+_SITUACAO_TRIAGEM_SQL = (
+    f"(v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN})"
+    f" OR (v.situacao = '{SITUACAO_REPROVADO}' AND v.bling_status_margem = 'Pendente'))"
+)
+_SITUACAO_FILTERS = ("triagem", "all")
+
 # "Needs attention" flag — rows the user must triage. Three independent triggers:
 #   1) margin below the configured minimum
 #   2) seller paid more shipping than the listing/ad freight value
@@ -511,6 +524,7 @@ async def list_margens_marketplace(
     conta: str | None = Query(None),
     status: str | None = Query(None),
     attention_type: str | None = Query(None),
+    situacao: str | None = Query(None),
 ) -> MargensMarketplacePage:
     """Per-item marketplace conciliation rows (paginated, 20d window).
 
@@ -518,7 +532,13 @@ async def list_margens_marketplace(
     The snapshot is repopulated every 30min by the worker cron, fully
     rebuilt by the 'atualizar' UI button. User-facing PATCHes update the
     affected snapshot columns directly so edits appear immediately.
+
+    `situacao`: "triagem" (default) = só Em aberto + Enviado Etiqueta (+ os
+    segurados pelo robô) — pedido do Eduardo (03/09); "all" = todas as
+    situações. O lookup ("Buscar pedido") não usa este filtro.
     """
+    if situacao is not None and situacao not in _SITUACAO_FILTERS:
+        raise HTTPException(400, detail={"code": "invalid_situacao"})
     # "Cancelado" (12) e "Aguardando Cancelamento" (83955) ficam fora do fluxo de
     # triagem da margem: são pedidos cancelados / em processo de cancelamento e
     # não devem ser aprovados/reprovados. 83955 é justamente o destino de um
@@ -537,6 +557,10 @@ async def list_margens_marketplace(
         " OR v.bling_status_margem = 'Pendente')",
         f"NOT {_ATTENTION_FRETE_SQL}",
     ]
+    if (situacao or "triagem") == "triagem":
+        # Só o que ainda está em triagem (Em aberto / Enviado Etiqueta / segurado
+        # pelo robô) — ver _SITUACAO_TRIAGEM_SQL.
+        where.append(_SITUACAO_TRIAGEM_SQL)
     params: dict = {"limit": limit, "offset": offset}
     if platform:
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
