@@ -246,11 +246,12 @@ async def test_pedido_sem_faturador_vai_pra_pulados(
 
 
 @pytest.mark.asyncio
-async def test_mala_cheia_usa_catalogo_pela_familia(
+async def test_mala_cheia_usa_valor_da_venda_e_nao_o_catalogo(
     db: AsyncSession, client: AsyncClient, admin: User, auth_as: Callable[[User | None], None]
 ):
-    """NF cheia de MALA usa o valor do catálogo pela família do produto (o nome
-    'Mala Lisa M2' → abs), NÃO o valor de venda (itemvalor)."""
+    """NF cheia de MALA sai com o valor da VENDA (itemvalor = unit_price do
+    ML), mesmo com o catálogo cadastrado pra família (regra do usuário 03/09:
+    o ML recusa o XML quando o total da NF difere do valor do pedido)."""
     auth_as(admin)
     avulso = NfFaturador(
         nome="bling avulso", modo="bling", nf_cheia=True,
@@ -264,7 +265,7 @@ async def test_mala_cheia_usa_catalogo_pela_familia(
     db.add(Product(user_id=admin.id, sku="b001.20", name="Mala Lisa M2 tamanho 20 - Roxa"))
     db.add(NfCatalogoMala(modelo="abs", tamanho="20", valor=161))
     await db.flush()
-    # Venda a 50 (promocional); a NF deve sair com o cheio 161.
+    # Venda a 50 (promocional); a NF sai com os 50 da venda, NÃO o catálogo 161.
     await _seed_pedido(db, admin, avulso, numero="820001", loja="920001",
                        itens=[{"sku": "b001.20", "nome": "Mala Lisa M2", "qtd": 1, "unit": 50}])
     await db.commit()
@@ -277,7 +278,7 @@ async def test_mala_cheia_usa_catalogo_pela_familia(
     texto = r.content.decode("utf-8-sig")
     reader = list(csv.reader(io.StringIO(texto), delimiter=";"))
     a = {row[COLUNAS.index("Número pedido")]: row for row in reader[1:]}["820001"]
-    assert _col(a, "Valor Total") == "161,00"
+    assert _col(a, "Valor Total") == "50,00"
 
 
 @pytest.mark.asyncio

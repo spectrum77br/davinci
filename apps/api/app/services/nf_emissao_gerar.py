@@ -286,15 +286,17 @@ def _valor_unitario(
     modelos_por_base: dict[str, str],
     row: object,
 ) -> Decimal:
-    """Valor unitário do item: em NF cheia de MALA que casa o catálogo, usa o
-    valor CHEIO do catálogo (por modelo/tamanho); senão o `itemvalor` (venda)."""
-    if regra.nf_cheia:
-        parsed = nf_catalogo.parse_sku_mala(row["sku"])
-        if parsed is not None:
-            modelo = modelos_por_base.get(parsed[0])
-            do_catalogo = nf_catalogo.valor_para(catalogo_mala, row["sku"], modelo)
-            if do_catalogo is not None:
-                return do_catalogo
+    """Valor unitário do item = `itemvalor` (o preço da VENDA, que no Mercado
+    Livre é o `unit_price` do pedido).
+
+    Até 02/09 a NF cheia de MALA trocava pelo valor do catálogo (por modelo/
+    tamanho). Eduardo (03/09): "nos que é 100% coloque o valor correto, porque
+    na hora de colocar o XML na nota ele fica errado e não deixa pôr" — o ML
+    confere o total da NF-e contra o valor da venda ao anexar o XML, e as
+    malas a 57,40/26,46 (catálogo) contra 109/51 (venda) eram recusadas. O
+    catálogo segue cadastrado (tela NF Faturador) mas não entra mais na NF.
+    `catalogo_mala`/`modelos_por_base` ficam na assinatura pra não mexer nos
+    callers."""
     return _dec(row["valor_unitario"])
 
 
