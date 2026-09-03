@@ -515,18 +515,21 @@ async def test_em_devolucao_desde_estimada_e_manual(client, db, make_user, auth_
     try:
         r = await client.get("/api/devolutions/acompanhamento")
         por_pedido = {i["pedido_bling"]: i for i in r.json()["items"]}
-        # p2: sem devolução no marketplace → carimbo do sinal (22/08)
+        # p2: sem devolução no marketplace → carimbo do sinal (22/08), ESTIMADA
         assert por_pedido[p2]["aguardando_devolucao_data"] == "2026-08-22"
+        assert por_pedido[p2]["aguardando_devolucao_data_estimada"] is True
         assert por_pedido[p2]["dias_em_devolucao"] == (hoje - datetime(2026, 8, 22).date()).days
-        # p1: sem sinal nenhum → entrada no Bling (seed = hoje - 3)
+        # p1: sem sinal nenhum → entrada no Bling (seed = hoje - 3), real
         assert por_pedido[p1]["dias_em_devolucao"] == 3
+        assert por_pedido[p1]["aguardando_devolucao_data_estimada"] is False
 
-        # Corrige na mão → vale a data digitada.
+        # Corrige na mão → vale a data digitada (não é mais estimativa).
         r = await client.patch(
             f"/api/devolutions/acompanhamento/{p2}", json={"em_devolucao_desde": "2026-08-19"}
         )
         assert r.status_code == 200, r.text
         assert r.json()["aguardando_devolucao_data"] == "2026-08-19"
+        assert r.json()["aguardando_devolucao_data_estimada"] is False
         assert r.json()["dias_em_devolucao"] == (hoje - datetime(2026, 8, 19).date()).days
         r = await client.get("/api/devolutions/acompanhamento")
         por_pedido = {i["pedido_bling"]: i for i in r.json()["items"]}

@@ -648,6 +648,8 @@ type AcompanhamentoRow = {
   data: string | null
   aguardando_devolucao_data: string | null
   dias_em_devolucao: number | null
+  // true = data estimada (sinal da Logística / backfill) — mostra "≈".
+  aguardando_devolucao_data_estimada: boolean
   plataforma: string | null
   loja: string | null
   cliente: string | null
@@ -674,6 +676,8 @@ type RastreioSaved = {
   // "Em devolução desde" efetivo + dias, pra espelhar na linha após editar.
   aguardando_devolucao_data: string | null
   dias_em_devolucao: number | null
+  // true = data estimada (sinal da Logística / backfill) — mostra "≈".
+  aguardando_devolucao_data_estimada: boolean
 }
 
 type Tab = 'acompanhamento' | 'lancamentos'
@@ -1394,16 +1398,23 @@ async function backfillAddresses() {
                 <!-- "Em devolução desde": automático (devolução aberta no marketplace /
                      sinal da Logística / entrada no Bling); editável na mão quando o
                      automático não bate (03/09, caso 287144). Vazio = volta ao automático. -->
-                <input
-                  v-if="canEdit"
-                  type="date"
-                  :value="row.aguardando_devolucao_data || ''"
-                  :disabled="isSavingRastreio(row.pedido_bling, 'em_devolucao_desde')"
-                  class="w-[128px] text-xs border rounded px-1.5 py-1 bg-background text-foreground"
-                  title="Dia em que o pedido entrou em devolução (automático). Se estiver errado, escolha a data certa; apagar volta ao automático."
-                  @change="(e) => saveRastreio(row, 'em_devolucao_desde', (e.target as HTMLInputElement).value)"
-                />
-                <span v-else class="text-muted-foreground">{{ fmtDateOnly(row.aguardando_devolucao_data) }}</span>
+                <div v-if="canEdit" class="flex items-center gap-1">
+                  <span
+                    v-if="row.aguardando_devolucao_data_estimada"
+                    class="text-amber-600 dark:text-amber-400 text-xs font-semibold"
+                    title="Data ESTIMADA (pelo último movimento do pacote no marketplace) — o Bling não informa o histórico. Se souber a data certa, corrija ao lado."
+                  >≈</span>
+                  <input
+                    type="date"
+                    :value="row.aguardando_devolucao_data || ''"
+                    :disabled="isSavingRastreio(row.pedido_bling, 'em_devolucao_desde')"
+                    class="w-[128px] text-xs border rounded px-1.5 py-1 bg-background text-foreground"
+                    :class="row.aguardando_devolucao_data_estimada ? 'border-amber-300 dark:border-amber-700' : ''"
+                    title="Dia em que o pedido entrou em devolução (automático). Se estiver errado, escolha a data certa; apagar volta ao automático."
+                    @change="(e) => saveRastreio(row, 'em_devolucao_desde', (e.target as HTMLInputElement).value)"
+                  />
+                </div>
+                <span v-else class="text-muted-foreground">{{ row.aguardando_devolucao_data_estimada ? '≈ ' : '' }}{{ fmtDateOnly(row.aguardando_devolucao_data) }}</span>
               </td>
               <td class="px-2 py-1 text-center">
                 <span

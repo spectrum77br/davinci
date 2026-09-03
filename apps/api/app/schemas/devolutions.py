@@ -278,6 +278,9 @@ class AcompanhamentoItemOut(BaseModel):
     # Dia em que o pedido entrou em Aguardando Devolução (carimbo do ingest).
     aguardando_devolucao_data: date | None = None
     dias_em_devolucao: int | None = None
+    # True = a data acima é ESTIMADA (sinal da Logística / backfill), não a
+    # entrada real — o front mostra "≈" e convida a corrigir na mão.
+    aguardando_devolucao_data_estimada: bool = False
     plataforma: str | None = None
     loja: str | None = None
     cliente: str | None = None
@@ -324,6 +327,9 @@ class AcompanhamentoRastreioOut(BaseModel):
     # espelhar na linha depois de editar.
     aguardando_devolucao_data: date | None = None
     dias_em_devolucao: int | None = None
+    # True = a data acima é ESTIMADA (sinal da Logística / backfill), não a
+    # entrada real — o front mostra "≈" e convida a corrigir na mão.
+    aguardando_devolucao_data_estimada: bool = False
     # Quando há devolução VIVA (Shopee/TikTok), `localizacao` passa a ser o
     # status da devolução e a entrega original ("Pedido entregue") vem aqui
     # (tooltip). None = sem devolução viva (localizacao é a entrega mesmo).

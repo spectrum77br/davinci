@@ -300,27 +300,28 @@ def _data_entrada(
     plataforma: str | None,
     meli_status: dict | None,
     status_datas: dict | None,
-) -> date | None:
-    """"Em devolução desde" efetivo, em ordem: digitado na mão > dia em que o
-    cliente abriu a devolução no marketplace > entrada em 83957 carimbada de
-    verdade pelo sync > carimbo do sinal de retorno na Logística (pacote
-    voltando — logistica_rules.data_entrada_devolucao_estimada) > a data do
-    backfill (último recurso). Caso 287144: entrou em 19/08 pela Viena no
-    Bling, que não expõe o histórico pela API → o operador digita."""
+) -> tuple[date | None, bool]:
+    """"Em devolução desde" efetivo + se é ESTIMADO, em ordem: digitado na mão
+    > dia em que o cliente abriu a devolução no marketplace > entrada em 83957
+    carimbada de verdade pelo sync > carimbo do sinal de retorno na Logística
+    (pacote voltando — logistica_rules.data_entrada_devolucao_estimada; este e
+    o próximo são estimativas) > a data do backfill (último recurso). Caso
+    287144: entrou em 19/08 pela Viena no Bling, que não expõe o histórico
+    pela API → o operador digita."""
     from app.services import logistica_rules  # tardio: evita ciclo router↔services
     from app.services.devolucao_returns import iso_to_dt
 
     if entrada_manual:
-        return entrada_manual
+        return entrada_manual, False
     if devolucao_criada_em:
-        return devolucao_criada_em.astimezone(SAO_PAULO).date()
+        return devolucao_criada_em.astimezone(SAO_PAULO).date(), False
     if entrada_bling and entrada_bling != _BACKFILL_0236:
-        return entrada_bling
+        return entrada_bling, False
     est = logistica_rules.data_entrada_devolucao_estimada(plataforma, meli_status, status_datas)
     dt = iso_to_dt(est) if est else None
     if dt:
-        return dt.astimezone(SAO_PAULO).date()
-    return entrada_bling
+        return dt.astimezone(SAO_PAULO).date(), True
+    return entrada_bling, entrada_bling is not None
 
 
 def _com_status_da_devolucao(
@@ -456,7 +457,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
         d = dict(r)
         lg_plataforma = d.pop("lg_plataforma", None)
         lg_meli_status = d.pop("lg_meli_status", None)
-        d["aguardando_devolucao_data"] = _data_entrada(
+        d["aguardando_devolucao_data"], d["aguardando_devolucao_data_estimada"] = _data_entrada(
             entrada_bling=d.pop("entrada_bling", None),
             entrada_manual=d.pop("entrada_manual", None),
             devolucao_criada_em=d.pop("devolucao_criada_em", None),
@@ -586,7 +587,7 @@ async def patch_acompanhamento_rastreio(
     # da última movimentação e, com devolução viva, o status da devolução no
     # lugar da entrega (_com_status_da_devolucao); "Em devolução desde" pela
     # mesma escada do GET (_data_entrada) + dias.
-    entrada = _data_entrada(
+    entrada, estimada = _data_entrada(
         entrada_bling=entrada_bling,
         entrada_manual=row.entrada_manual,
         devolucao_criada_em=row.devolucao_criada_em,
@@ -606,6 +607,7 @@ async def patch_acompanhamento_rastreio(
                 else (lg["ultima_movimentacao"] if lg else None)
             ),
             "aguardando_devolucao_data": entrada,
+            "aguardando_devolucao_data_estimada": estimada,
             "dias_em_devolucao": (hoje_sp - entrada).days if entrada else None,
         },
         localizacao_manual=row.localizacao,

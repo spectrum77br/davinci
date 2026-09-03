@@ -78,7 +78,12 @@ def test_data_entrada_estimada_pelo_carimbo_do_sinal():
     amz = {"order_status": "Shipped", "easyship_status": "ReturningToSeller"}
     amz_datas = {"easyship_status": {"em": "2026-08-21T20:34:23+00:00", "fonte": "aprox"}}
     assert f("Amazon", amz, amz_datas) == "2026-08-21T20:34:23+00:00"
-    assert f("Amazon", {"order_status": "Shipped", "easyship_status": "Delivered"}, {}) is None
+    # Amazon sem sinal claro (Delivered/PickedUp) mas com carimbo → estimativa
+    # fraca pelo último movimento; sem carimbo → None.
+    entregue = {"order_status": "Shipped", "easyship_status": "Delivered"}
+    entregue_datas = {"easyship_status": {"em": "2026-08-08T15:06:01+00:00", "fonte": "aprox"}}
+    assert f("Amazon", entregue, entregue_datas) == "2026-08-08T15:06:01+00:00"
+    assert f("Amazon", entregue, {}) is None
     assert f("Loja X", ml, datas) is None
 
 

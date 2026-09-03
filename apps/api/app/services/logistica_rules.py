@@ -463,7 +463,18 @@ def data_entrada_devolucao_estimada(
         em = (sd.get(campo) or {}).get("em") if isinstance(sd.get(campo), dict) else None
         if em:
             candidatos.append(str(em))
-    return min(candidatos) if candidatos else None
+    if candidatos:
+        return min(candidatos)
+    # Amazon não expõe devolução nenhuma pela API (Eduardo 03/09: "deixa
+    # outros pra trás que é Amazon"): sem sinal claro, vale o último movimento
+    # do envio (LastUpdateDate — PickedUp/Delivered) como estimativa fraca.
+    # Melhor do que "1 dia": esses pedidos estão parados há semanas.
+    if key == "amazon":
+        easy = sd.get("easyship_status")
+        em = easy.get("em") if isinstance(easy, dict) else None
+        if em and str(ms.get("easyship_status") or "").strip():
+            return str(em)
+    return None
 
 
 # --- Amazon ---------------------------------------------------------------
