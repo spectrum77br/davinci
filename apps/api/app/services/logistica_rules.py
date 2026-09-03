@@ -363,11 +363,22 @@ _TIKTOK_RETURN_LABELS_PT = {
     "RETURN_OR_REFUND_REQUEST_SUCCESS": "Devolução concluída (TikTok)",
     "RETURN_OR_REFUND_REQUEST_COMPLETE": "Devolução concluída (TikTok)",
 }
+# ML: `return_status` = status do ENVIO da devolução (shipment do return do
+# claim — logistica_meli.returns_por_pedido / build_enrichment).
+_ML_RETURN_LABELS_PT = {
+    "PENDING": "Devolução pendente (Mercado Livre)",
+    "READY_TO_SHIP": "Devolução aprovada — aguardando o cliente postar",
+    "HANDLING": "Devolução em preparação (Mercado Livre)",
+    "SHIPPED": "Devolução a caminho (Mercado Envios)",
+    "DELIVERED": "Devolução entregue ao vendedor",
+    "NOT_DELIVERED": "Devolução não entregue — verificar com o Mercado Livre",
+}
+_ML_RETURN_ENCERRADO = {"CANCELLED", "CANCELED", "CLOSED", "EXPIRED", "REJECTED"}
 
 
 def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -> str | None:
-    """Texto em PT da devolução VIVA de Shopee/TikTok, ou None quando não há
-    caso aberto (sem `return_status`, ou encerrado — cancelado/recusado).
+    """Texto em PT da devolução VIVA de Shopee/TikTok/ML, ou None quando não
+    há caso aberto (sem `return_status`, ou encerrado — cancelado/recusado).
     Status vivo sem tradução vira "Devolução: <STATUS>" (nunca esconde)."""
     ret = ((status or {}).get("return_status") or "").strip().upper()
     if not ret:
@@ -381,6 +392,10 @@ def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -
         if ret in _TIKTOK_RETURN_ENCERRADO:
             return None
         return _TIKTOK_RETURN_LABELS_PT.get(ret, f"Devolução: {ret}")
+    if p in _ML_PLATAFORMAS:
+        if ret in _ML_RETURN_ENCERRADO:
+            return None
+        return _ML_RETURN_LABELS_PT.get(ret, f"Devolução: {ret}")
     return None
 
 
