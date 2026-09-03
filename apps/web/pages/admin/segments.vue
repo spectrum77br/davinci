@@ -461,10 +461,12 @@ async function removeSpecial(sd: SpecialDate) {
         </div>
 
         <p class="text-xs text-muted-foreground leading-relaxed">
-          No período configurado, pedidos deste segmento <strong>e de todos os
+          Pedidos <strong>feitos</strong> dentro do período (vale a <strong>data do
+          pedido</strong>, não o dia de hoje) deste segmento <strong>e de todos os
           subsegmentos</strong> não ficam travados por margem baixa na aba
           Margem (o robô também não segura). Sem margem preenchida, aprova
-          qualquer margem — até negativa.
+          qualquer margem — até negativa. Para liberar pedidos antigos que já
+          estão pendentes, comece o período na data do pedido mais antigo.
         </p>
 
         <div v-if="sdError" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive flex items-center gap-2">
@@ -497,7 +499,7 @@ async function removeSpecial(sd: SpecialDate) {
           <div class="text-xs font-medium">Adicionar período</div>
           <div class="grid grid-cols-2 gap-2">
             <label class="block text-xs text-muted-foreground">
-              De
+              De (data do pedido)
               <input
                 v-model="sdStart"
                 type="date"
@@ -505,7 +507,7 @@ async function removeSpecial(sd: SpecialDate) {
               />
             </label>
             <label class="block text-xs text-muted-foreground">
-              Até
+              Até (data do pedido)
               <input
                 v-model="sdEnd"
                 type="date"

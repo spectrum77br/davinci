@@ -1256,7 +1256,7 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
               <span
                 v-if="r.data_especial"
                 class="ml-1 inline-block rounded bg-amber-100 dark:bg-amber-900/40 px-1 py-px text-[10px] font-medium text-amber-800 dark:text-amber-300 align-middle"
-                title="Data Especial do segmento ativa: neste período, margem abaixo da mínima não trava o pedido (configurado em Cadastros → Segmentos)"
+                title="Data Especial do segmento ativa: a DATA DO PEDIDO cai no período cadastrado e a margem passa na regra especial — margem abaixo da mínima não trava (configurado em Cadastros → Segmentos)"
               >especial</span>
             </td>
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground border-l-[3px] border-gray-400 dark:border-gray-600">{{ r.situacao || '—' }}</td>
