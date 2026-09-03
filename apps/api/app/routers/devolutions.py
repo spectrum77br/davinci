@@ -274,6 +274,15 @@ async def list_devolutions(
 
 _SITUACAO_AGUARDANDO_DEVOLUCAO = "83957"
 
+# "Data da última movimentação" AUTOMÁTICA (Eduardo 03/09: "a data da ult
+# movimentação não está aparecendo"): o carimbo mais recente do
+# `logistica.status_datas` (uma data por campo do status da plataforma — ver
+# services/logistica_datas). Alias `l` = a linha da Logística no LATERAL.
+_LOGISTICA_ULTIMA_MOVIMENTACAO_SQL = (
+    "(SELECT MAX((e.v ->> 'em')::timestamptz) "
+    "FROM jsonb_each(COALESCE(l.status_datas, '{}'::jsonb)) AS e(k, v))"
+)
+
 
 async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
     """Linhas da aba Acompanhamento: TODOS os pedidos hoje em 'Aguardando
@@ -310,8 +319,12 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                         AS rastreio,
                     COALESCE(NULLIF(btrim(r.localizacao), ''), lg.localizacao)
                         AS localizacao,
+                    -- Data da última movimentação: a do manual quando a
+                    -- localização é manual; senão a da Logística (carimbo
+                    -- mais recente do status_datas — ver logistica_datas).
                     CASE WHEN NULLIF(btrim(r.localizacao), '') IS NOT NULL
-                         THEN r.localizacao_data END AS localizacao_data,
+                         THEN r.localizacao_data
+                         ELSE lg.ultima_movimentacao END AS localizacao_data,
                     EXISTS (
                         SELECT 1 FROM "{SCHEMA}".devolutions d
                         WHERE d.pedido_bling = v.pedido_bling::text
@@ -322,7 +335,8 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                        ON r.pedido_bling = v.pedido_bling::text
                 LEFT JOIN LATERAL (
                     SELECT NULLIF(btrim(l.rastreio), '')    AS rastreio,
-                           NULLIF(btrim(l.localizacao), '') AS localizacao
+                           NULLIF(btrim(l.localizacao), '') AS localizacao,
+                           {_LOGISTICA_ULTIMA_MOVIMENTACAO_SQL} AS ultima_movimentacao
                     FROM "{SCHEMA}".logistica l
                     WHERE l.pedido_bling = v.pedido_bling::text
                       AND (NULLIF(btrim(l.rastreio), '') IS NOT NULL
@@ -416,7 +430,8 @@ async def patch_acompanhamento_rastreio(
                 text(
                     f"""
                 SELECT NULLIF(btrim(l.rastreio), '')    AS rastreio,
-                       NULLIF(btrim(l.localizacao), '') AS localizacao
+                       NULLIF(btrim(l.localizacao), '') AS localizacao,
+                       {_LOGISTICA_ULTIMA_MOVIMENTACAO_SQL} AS ultima_movimentacao
                 FROM "{SCHEMA}".logistica l
                 WHERE l.pedido_bling = :pedido
                   AND (NULLIF(btrim(l.rastreio), '') IS NOT NULL
@@ -435,7 +450,13 @@ async def patch_acompanhamento_rastreio(
         pedido_bling=row.pedido_bling,
         rastreio=row.rastreio or (lg["rastreio"] if lg else None),
         localizacao=row.localizacao or (lg["localizacao"] if lg else None),
-        localizacao_data=row.localizacao_data if row.localizacao else None,
+        # Mesma regra do GET: data do manual quando a localização é manual;
+        # senão a última movimentação da Logística.
+        localizacao_data=(
+            row.localizacao_data
+            if row.localizacao
+            else (lg["ultima_movimentacao"] if lg else None)
+        ),
     )
 
 

@@ -202,8 +202,12 @@ def registrar_sistema(ch: Chamado, texto: str) -> ChamadoMensagem:
 # chamado sozinho / quando for item faltando … tbm / Não recebido, abrir
 # chamado / danificado a mesma coisa"). Comparação case-insensitive pra
 # aguentar variação de digitação em linhas antigas (motivo é texto livre).
+# "Bloqueado" é o nome novo de "Mudou de ideia" (03/09: "mudou de ideia -
+# bloqueado"; migration 0239 renomeou as linhas antigas) — o legado fica na
+# lista por segurança.
 MOTIVOS_ABREM_CHAMADO = frozenset(
     {
+        "bloqueado",
         "mudou de ideia",
         "golpe",
         "item faltando",

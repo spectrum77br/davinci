@@ -1,6 +1,6 @@
 """Automações de Devoluções pedidas pelo Eduardo (03/09):
 
-- motivo que pede chamado (Golpe, Mudou de ideia, Item faltando, Não recebido,
+- motivo que pede chamado (Golpe, Bloqueado, Item faltando, Não recebido,
   Danificado (Outros)) → chamado aberto SOZINHO no create/PATCH, com dedupe
   por pedido;
 - custo de manutenção + técnico preenchidos → checkbox Reembolso liga sozinho
@@ -110,14 +110,14 @@ async def test_patch_motivo_abre_chamado_so_para_motivos_da_lista(
 
     # Motivo trocado pra um da lista → chamado aberto sozinho.
     r = await client.patch(
-        f"/api/devolutions/{dev_id}", json={"motivo_devolucao": "Mudou de ideia"}
+        f"/api/devolutions/{dev_id}", json={"motivo_devolucao": "Bloqueado"}
     )
     assert r.status_code == 200
     assert await _n_chamados(db, pedido) == 1
 
     # Repetir o PATCH não duplica.
     r = await client.patch(
-        f"/api/devolutions/{dev_id}", json={"motivo_devolucao": "Mudou de ideia"}
+        f"/api/devolutions/{dev_id}", json={"motivo_devolucao": "Bloqueado"}
     )
     assert r.status_code == 200
     assert await _n_chamados(db, pedido) == 1
@@ -295,7 +295,67 @@ async def test_acompanhamento_puxa_rastreio_da_logistica_e_manual_vence(
         body = r.json()
         assert body["rastreio"] == "BR123456789"  # automático continua visível
         assert body["localizacao"] == "Centro de triagem SP"  # caiu no automático
-        assert body["localizacao_data"] is None  # data é só da manual
+        # Sem manual, a data vem da Logística — e a Logística de p1 não tem
+        # carimbo nenhum (status_datas vazio) → fica em branco.
+        assert body["localizacao_data"] is None
+    finally:
+        await _derruba_view(db)
+
+
+async def test_acompanhamento_data_ultima_movimentacao_vem_da_logistica(
+    client, db, make_user, auth_as
+):
+    """Eduardo 03/09: "a data da ult movimentação não está aparecendo". Com a
+    localização automática (Logística), a data também é automática: o
+    carimbo MAIS RECENTE do status_datas da linha (logistica_datas). Manual
+    continua mandando quando existe."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    p1, p2 = f"34{uuid4().hex[:6]}", f"35{uuid4().hex[:6]}"
+    await _monta_acompanhamento(db, p1, p2)
+    # p2: só automático (Amazon sem rastreio, como em produção) com dois
+    # carimbos — a data exibida tem que ser o mais recente.
+    db.add(
+        Logistica(
+            pedido_bling=p2,
+            plataforma="amazon",
+            localizacao="Coletado → Macapá/AP",
+            meli_status={"order_status": "Shipped", "easyship_status": "PickedUp"},
+            status_datas={
+                "order_status": {"em": "2026-08-20T10:00:00+00:00", "fonte": "aprox"},
+                "easyship_status": {"em": "2026-08-25T15:30:00+00:00", "fonte": "aprox"},
+            },
+        )
+    )
+    await db.commit()
+
+    try:
+        r = await client.get("/api/devolutions/acompanhamento")
+        assert r.status_code == 200
+        por_pedido = {i["pedido_bling"]: i for i in r.json()["items"]}
+
+        assert por_pedido[p2]["rastreio"] is None  # Amazon não expõe o código
+        assert por_pedido[p2]["localizacao"] == "Coletado → Macapá/AP"
+        assert por_pedido[p2]["localizacao_data"] is not None
+        assert por_pedido[p2]["localizacao_data"].startswith("2026-08-25T15:30")
+
+        # p1 tem localização MANUAL → data do manual (carimbada agora), não da
+        # Logística.
+        assert por_pedido[p1]["localizacao"] == "Recebido no CD"
+        assert por_pedido[p1]["localizacao_data"].startswith(
+            datetime.now(UTC).strftime("%Y-%m-%d")
+        )
+
+        # PATCH só do rastreio de p2 (localização segue automática) → a
+        # resposta mantém a data da Logística (front espelha a resposta).
+        r = await client.patch(
+            f"/api/devolutions/acompanhamento/{p2}", json={"rastreio": "TBA000"}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["rastreio"] == "TBA000"
+        assert body["localizacao"] == "Coletado → Macapá/AP"
+        assert body["localizacao_data"].startswith("2026-08-25T15:30")
     finally:
         await _derruba_view(db)
 

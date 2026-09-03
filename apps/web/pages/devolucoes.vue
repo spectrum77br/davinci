@@ -144,12 +144,13 @@ const tagLabel = (tag: string | null): string => {
 }
 
 // Lista final pedida pelo Eduardo (03/09): saem Tamanho, Pacote Suspeito e
-// Embalagem Externa Danificada. Linhas antigas com motivo removido continuam
-// aparecendo no select via option de fallback (mesmo esquema da condição).
-// Mudou de ideia / Golpe / Item faltando / Não recebido / Danificado (Outros)
-// abrem chamado sozinhos no back (services/chamados.py).
+// Embalagem Externa Danificada; "Mudou de ideia" virou "Bloqueado" (03/09 à
+// tarde — migration 0239 renomeou as linhas antigas). Linhas antigas com
+// motivo removido continuam aparecendo no select via option de fallback
+// (mesmo esquema da condição). Bloqueado / Golpe / Item faltando / Não
+// recebido / Danificado (Outros) abrem chamado sozinhos (services/chamados.py).
 const MOTIVOS_DEVOLUCAO = [
-  'Mudou de ideia',
+  'Bloqueado',
   'Golpe',
   'Item faltando',
   'Dano funcional / Não funciona',
@@ -1525,7 +1526,7 @@ async function backfillAddresses() {
           <thead class="bg-background">
             <tr>
               <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="6">Identificação</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 8 : 7">Devolução</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 7 : 6">Devolução</th>
             </tr>
             <tr>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Data</th>
@@ -1537,7 +1538,8 @@ async function backfillAddresses() {
               <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
-              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
+              <!-- Reembolso saiu da tela (03/09): liga sozinho por custo+técnico
+                   / Extraviado / Manutenção; segue no filtro, no card e no export. -->
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
               <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
@@ -1567,9 +1569,6 @@ async function backfillAddresses() {
                   :class="linkRequired(d.condicao_produto) && !d.link_abertura ? sheetInputRequiredClass : sheetInputClass"
                   :placeholder="linkRequired(d.condicao_produto) ? 'obrigatório' : ''"
                 />
-              </td>
-              <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model="d.reembolso" type="checkbox" class="size-4 rounded border accent-primary" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <select v-model="d.motivo_devolucao" :class="sheetSelectClass">
@@ -1702,7 +1701,7 @@ async function backfillAddresses() {
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="9">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 11 : 10">Devolução</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 10 : 9">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
             <th v-if="isAdmin" class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-slate-50 dark:bg-slate-800/40" colspan="1">Atualização</th>
           </tr>
@@ -1719,7 +1718,6 @@ async function backfillAddresses() {
             <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
-            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px] bg-amber-50 dark:bg-amber-900/20" title="Chamado mais recente deste pedido na aba Chamados — clique pra abrir">Chamado</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
@@ -1799,15 +1797,6 @@ async function backfillAddresses() {
                   <ExternalLink class="size-3.5" />
                 </a>
               </div>
-            </td>
-            <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-              <input
-                :checked="row.reembolso"
-                :disabled="!canEdit"
-                type="checkbox"
-                class="size-4 rounded border accent-primary disabled:cursor-default disabled:opacity-70"
-                @change="(e) => { setRowReembolso(row, (e.target as HTMLInputElement).checked); saveRow(row) }"
-              />
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <select
