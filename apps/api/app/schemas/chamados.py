@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
@@ -71,6 +72,9 @@ class ChamadoOut(BaseModel):
     resolvido: bool = False
     resolvido_at: datetime | None = None
     observacao: str | None = None
+    # Valor recuperado com o chamado (R$) — coluna "Valor" do Controle
+    # (Eduardo 03/09); None = ainda sem valor.
+    valor_recuperado: Decimal | None = None
     created_at: datetime
     updated_at: datetime
     mensagens_total: int = 0
@@ -138,6 +142,7 @@ class ChamadoPatch(BaseModel):
     auto_dias: int | None = Field(default=None, ge=1, le=365)
     auto_mensagem: str | None = None
     observacao: str | None = None
+    valor_recuperado: Decimal | None = Field(default=None, ge=0)
 
     _clean = field_validator(
         "pedido_bling",

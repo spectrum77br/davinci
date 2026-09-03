@@ -75,6 +75,8 @@ type ChamadoRow = {
   canal: Canal
   alterar_status_bling: string | null
   monitoramento: boolean
+  // Valor recuperado com o chamado (R$) — coluna "Valor" do Controle.
+  valor_recuperado: number | null
   auto_ligada: boolean
   auto_dias: number | null
   auto_mensagem: string | null
@@ -359,6 +361,7 @@ async function saveRow(row: ChamadoRow, extra: Record<string, unknown> = {}): Pr
             alterar_status_bling: row.alterar_status_bling || null,
             monitoramento: row.monitoramento,
             observacao: row.observacao || null,
+            valor_recuperado: row.valor_recuperado ?? null,
             ...extra,
           },
         })
@@ -804,7 +807,7 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3">Chamado</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-sky-50 dark:bg-sky-900/20" colspan="2">Réplica</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Bling</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Controle</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="3">Controle</th>
           </tr>
           <tr class="border-b">
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]">Data</th>
@@ -823,6 +826,7 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Alterar status Bling</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-emerald-50 dark:bg-emerald-900/20">Monitoramento</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Valor recuperado com o chamado (R$)">Valor</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]"></th>
           </tr>
         </thead>
@@ -941,6 +945,21 @@ async function reabrir(row: ChamadoRow) {
                 :disabled="!canEdit"
                 :class="sheetInputClass"
                 @input="(e) => setRowText(row, 'observacao', (e.target as HTMLInputElement).value)"
+                @change="saveRow(row)"
+              />
+            </td>
+            <!-- Valor recuperado com o chamado (R$) — Eduardo 03/09 -->
+            <td class="px-1 py-0.5">
+              <input
+                :value="row.valor_recuperado ?? ''"
+                :disabled="!canEdit"
+                type="number"
+                step="0.01"
+                min="0"
+                placeholder="R$"
+                :class="[sheetInputClass, 'text-right tabular-nums']"
+                title="Valor recuperado com o chamado (R$)"
+                @input="(e) => { const v = (e.target as HTMLInputElement).value; row.valor_recuperado = v === '' ? null : Number(v) }"
                 @change="saveRow(row)"
               />
             </td>

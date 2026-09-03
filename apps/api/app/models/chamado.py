@@ -1,7 +1,18 @@
 from datetime import date, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, LargeBinary, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    Numeric,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -67,6 +78,9 @@ class Chamado(Base, TimestampMixin):
     )
     resolvido_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Valor recuperado com o chamado (R$) — coluna "Valor" do grupo Controle
+    # (Eduardo 03/09, migration 0240). NULL = ainda sem valor.
+    valor_recuperado: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

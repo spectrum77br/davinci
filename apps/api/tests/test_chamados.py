@@ -294,6 +294,32 @@ async def test_alterar_status_bling_e_resolver(client, make_user, auth_as, db, m
     assert (await client.get("/api/chamados", params={"mostrar": "todos"})).json()["total"] == 0
 
 
+async def test_valor_recuperado_grava_e_valida(client, make_user, auth_as):
+    """Coluna "Valor" do Controle (Eduardo 03/09): valor recuperado com o
+    chamado, em R$; negativo não entra; vazio (null) limpa."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados", json={"origem": "margem", "pedido_bling": "8", "canal": "manual"}
+    )
+    cid = r.json()["id"]
+    assert r.json()["valor_recuperado"] is None
+
+    p = await client.patch(f"/api/chamados/{cid}", json={"valor_recuperado": 123.45})
+    assert p.status_code == 200, p.text
+    assert float(p.json()["valor_recuperado"]) == 123.45
+
+    lst = await client.get("/api/chamados", params={"search": "8"})
+    assert float(lst.json()["items"][0]["valor_recuperado"]) == 123.45
+
+    neg = await client.patch(f"/api/chamados/{cid}", json={"valor_recuperado": -1})
+    assert neg.status_code == 422
+
+    p = await client.patch(f"/api/chamados/{cid}", json={"valor_recuperado": None})
+    assert p.status_code == 200
+    assert p.json()["valor_recuperado"] is None
+
+
 async def test_replica_automatica_respeita_dias(client, make_user, auth_as, db):
     user = await make_user(permissions=_perms())
     auth_as(user)
