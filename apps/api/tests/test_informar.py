@@ -91,6 +91,25 @@ def test_linhas_estoque_espelha_aviso_do_sweep():
     ]
 
 
+# ---- linhas_devolucoes (botão Informar de Devoluções) ----
+
+
+def test_linhas_devolucoes_formato_e_ordem_preservada():
+    """Uma linha por pedido aguardando devolução, NA ORDEM RECEBIDA (a aba
+    manda o mais parado primeiro); sem localização → "sem localização";
+    singular/plural de "dia"; loja vazia fica de fora."""
+    entries = [
+        ("310022", "", None, None),
+        ("310021", "shopee Loja SP", 3, "Recebido no CD"),
+        ("310020", "ml Loja ML", 1, ""),
+    ]
+    assert informar.linhas_devolucoes(entries) == [
+        "Pedido 310022 — sem localização",
+        "Pedido 310021 (shopee Loja SP) — 3 dias — Recebido no CD",
+        "Pedido 310020 (ml Loja ML) — 1 dia — sem localização",
+    ]
+
+
 # ---- mensagens da margem (uma por pedido) ----
 
 
@@ -111,6 +130,28 @@ def test_mensagem_margem_pedido_completa():
         "Margem: -3,2% (mínimo 8%)",
         "Lucro: R$ -1.234,50",
         "Rod",
+    ]
+
+
+def test_mensagem_margem_pedido_com_produto():
+    """Eduardo (03/09): "no informar coloque o nome do produto tem que ser bem
+    completinho" — a linha "Produto:" entra logo após o título do pedido."""
+    p = informar.MargemPedido(
+        pedido="402001",
+        loja="ml Loja ML",
+        motivo="margem abaixo do mínimo",
+        margem=-3.2,
+        minima=8,
+        lucro=-10,
+        produto="Uranyx Fossibot F105 - Preto; Fone UFB10",
+    )
+    assert informar.mensagem_margem_pedido(p, cabecalho="Cab").splitlines() == [
+        "Cab",
+        "Pedido 402001 — ml Loja ML",
+        "Produto: Uranyx Fossibot F105 - Preto; Fone UFB10",
+        "Motivo: margem abaixo do mínimo",
+        "Margem: -3,2% (mínimo 8%)",
+        "Lucro: R$ -10,00",
     ]
 
 

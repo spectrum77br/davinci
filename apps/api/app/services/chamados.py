@@ -32,7 +32,7 @@ import structlog
 from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder, Chamado, ChamadoMensagem, SituacaoBling, StoreInfo
+from app.models import BlingOrder, Chamado, ChamadoMensagem, Devolution, SituacaoBling, StoreInfo
 from app.services import logistica_bling, logistica_meli
 from app.services.marketplaces.ml import MercadoLivreClient
 
@@ -193,6 +193,77 @@ def registrar_sistema(ch: Chamado, texto: str) -> ChamadoMensagem:
     return nova_mensagem(
         ch, texto=texto, tipo="sistema", direcao="sistema", autor_nome=AUTOR_SISTEMA
     )
+
+
+# ---------------------------------------------------------------- devolução
+
+# Motivos de devolução que ABREM CHAMADO SOZINHOS na aba Chamados (Eduardo
+# 03/09: "mudou de ideia … tem que abrir chamado sozinho / oque for golpe abre
+# chamado sozinho / quando for item faltando … tbm / Não recebido, abrir
+# chamado / danificado a mesma coisa"). Comparação case-insensitive pra
+# aguentar variação de digitação em linhas antigas (motivo é texto livre).
+MOTIVOS_ABREM_CHAMADO = frozenset(
+    {
+        "mudou de ideia",
+        "golpe",
+        "item faltando",
+        "não recebido",
+        "danificado (outros)",
+    }
+)
+
+
+async def abrir_chamado_devolucao(session: AsyncSession, dev: Devolution) -> Chamado | None:
+    """Abre (registra) automaticamente um chamado de origem `devolucao` quando
+    o motivo da devolução pede chamado. Só REGISTRA na aba Chamados — quem abre
+    o chamado de verdade na plataforma (nº/protocolo) segue sendo o operador,
+    então o canal nasce `manual`.
+
+    Dedupe: UM chamado de devolução por pedido Bling (kit com 3 linhas de
+    devolução não vira 3 chamados); sem pedido Bling, cai pro id da linha
+    (`origem_ref`). NÃO commita — o caller controla a transação. Devolve o
+    chamado criado, ou None quando o motivo não pede/já existe."""
+    motivo = (dev.motivo_devolucao or "").strip()
+    if motivo.lower() not in MOTIVOS_ABREM_CHAMADO:
+        return None
+    conds = [Chamado.origem == "devolucao"]
+    if (dev.pedido_bling or "").strip():
+        conds.append(Chamado.pedido_bling == dev.pedido_bling.strip())
+    else:
+        conds.append(Chamado.origem_ref == str(dev.id))
+    ja_tem = (
+        await session.execute(select(func.count()).select_from(Chamado).where(*conds))
+    ).scalar_one()
+    if ja_tem:
+        return None
+    ch = Chamado(
+        data=datetime.now(SAO_PAULO).date(),
+        pedido_bling=(dev.pedido_bling or "").strip() or None,
+        pedido_marketplace=(dev.pedido_marketplace or "").strip() or None,
+        conta=dev.conta,
+        produto=dev.produtos,
+        sku=dev.sku,
+        origem="devolucao",
+        origem_ref=str(dev.id),
+        canal="manual",
+        observacao=f"Aberto automaticamente pela devolução — motivo: {motivo}",
+    )
+    # Espelho do pedido completa o que a devolução não tem (plataforma/status
+    # Bling/data) sem sobrescrever o que veio dela.
+    await preencher_do_pedido(session, ch)
+    session.add(ch)
+    await session.flush()
+    session.add(
+        registrar_sistema(ch, f"Chamado aberto automaticamente pela devolução (motivo: {motivo})")
+    )
+    logger.info(
+        "chamado_auto_devolucao",
+        chamado_id=str(ch.id),
+        devolution_id=str(dev.id),
+        pedido_bling=ch.pedido_bling,
+        motivo=motivo,
+    )
+    return ch
 
 
 # ---------------------------------------------------------------- envio

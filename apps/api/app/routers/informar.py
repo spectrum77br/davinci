@@ -1,6 +1,6 @@
 """Botões INFORMAR (admin-only) — resumo sob demanda via Threema.
 
-Três contextos:
+Contextos:
 - `logistica`: manda a lista dos pedidos ACOMPANHADOS no painel Logística
   (mesma regra de visibilidade do painel, incluindo o passe-livre de
   "Problemas"), no formato `pedido marketplace - conta - status plataforma -
@@ -10,9 +10,14 @@ Três contextos:
   nessa situação no Bling.
 - `margem`: manda os pedidos pendentes de análise na aba Pendentes da Margem
   (mesmo WHERE da listagem com status=Pendente), UMA MENSAGEM POR PEDIDO com
-  conta, motivo, margem vs mínima e lucro — pedido do Eduardo (02/09): "veio
-  todas as margens que deram negativa juntos, tem que ser separado com o nome
-  da conta, a diferença de valor".
+  conta, produto, motivo, margem vs mínima e lucro — pedido do Eduardo
+  (02/09): "veio todas as margens que deram negativa juntos, tem que ser
+  separado com o nome da conta, a diferença de valor"; nome do produto na
+  mensagem em 03/09 ("tem que ser bem completinho").
+- `devolucoes`: manda os pedidos da aba Acompanhamento de Devoluções (todos em
+  Aguardando Devolução no Bling), uma linha por pedido com tempo parado e
+  última localização — pedido do Eduardo (03/09): "em devoluções criar um
+  botao informar igual, na margem".
 
 Há ainda um quarto cadastro SEM envio manual: `margem_auto` guarda quem
 recebe o aviso automático que o auto-hold manda NA HORA em que segura um
@@ -32,6 +37,7 @@ aparecer informar na aba margem").
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 
 import structlog
@@ -65,8 +71,11 @@ router = APIRouter(prefix="/api/informar", tags=["informar"])
 
 # Contextos com cadastro (GET/PUT). `margem_auto` NÃO tem envio manual — é a
 # lista do aviso automático do auto-hold (ver docstring do módulo).
-_CONTEXTOS = ("logistica", "controle_estoque", "margem", "margem_auto")
-_CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem")
+# `devolucoes` (Eduardo 03/09: "em devoluções criar um botao informar igual,
+# na margem"): manda a aba Acompanhamento — pedidos em Aguardando Devolução,
+# com tempo parado e última localização.
+_CONTEXTOS = ("logistica", "controle_estoque", "margem", "margem_auto", "devolucoes")
+_CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes")
 
 # Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
 # exceção: o gerente (Cairo) vê e usa o botão de lá (incluindo o cadastro do
@@ -270,6 +279,41 @@ async def _linhas_estoque(session: AsyncSession) -> list[str]:
     return informar.linhas_estoque(entries)
 
 
+async def _linhas_devolucoes(session: AsyncSession) -> list[str]:
+    """Os pedidos que a aba Acompanhamento de Devoluções está MOSTRANDO agora
+    (todos em Aguardando Devolução no Bling) — uma linha por PEDIDO com o
+    tempo parado e a última localização (a mesma que a aba mostra, incluindo a
+    automática vinda da Logística). Import tardio: a query canônica mora em
+    routers/devolutions.acompanhamento_rows — buscar lá garante que o
+    relatório mostra EXATAMENTE o que a aba mostra."""
+    from app.routers.devolutions import SAO_PAULO, acompanhamento_rows
+
+    rows = await acompanhamento_rows(session)
+    hoje = datetime.now(SAO_PAULO).date()
+    vistos: set[str] = set()
+    entries: list[tuple[str, str, int | None, str | None]] = []
+    for r in rows:  # grão de ITEM → dedup por pedido, mantendo a ordem da aba
+        pedido = (r.get("pedido_bling") or "").strip()
+        if not pedido or pedido in vistos:
+            continue
+        vistos.add(pedido)
+        entrada = r.get("aguardando_devolucao_data")
+        loja = " ".join(
+            p
+            for p in ((r.get("plataforma") or "").strip(), (r.get("loja") or "").strip())
+            if p
+        )
+        entries.append(
+            (
+                pedido,
+                loja,
+                (hoje - entrada).days if entrada else None,
+                r.get("localizacao"),
+            )
+        )
+    return informar.linhas_devolucoes(entries)
+
+
 async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
     """Os pedidos que a aba Pendentes da Margem está MOSTRANDO agora — mesmo
     WHERE da listagem com status=Pendente (routers/margens.py), agregado por
@@ -310,7 +354,9 @@ async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
                    FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS margem,
                MAX(v.margem_minima)
                    FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS minima,
-               SUM(v.marketplace_lucro)         AS lucro
+               SUM(v.marketplace_lucro)         AS lucro,
+               string_agg(DISTINCT NULLIF(btrim(v.produto), ''), '; ')
+                                                AS produto
         FROM {SNAPSHOT_TABLE} v
         WHERE v.situacao_nome != 'Cancelado'
           AND (v.situacao IS DISTINCT FROM '{SITUACAO_REPROVADO}'
@@ -341,6 +387,7 @@ async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
             margem=None if r["margem"] is None else float(r["margem"]),
             minima=None if r["minima"] is None else float(r["minima"]),
             lucro=None if r["lucro"] is None else float(r["lucro"]),
+            produto=r["produto"],
         )
         for r in rows
     ]
@@ -352,6 +399,7 @@ _CABECALHOS = {
         "DaVinci — Controle de Estoque: Aguardando Cancelamento por falta de estoque"
     ),
     "margem": "DaVinci — Margem: pendente de análise",
+    "devolucoes": "DaVinci — Devoluções: pedidos aguardando devolução",
 }
 _VAZIO = {
     "logistica": "DaVinci — Logística: nenhum pedido acompanhado no momento.",
@@ -360,11 +408,13 @@ _VAZIO = {
         " por falta de estoque no momento."
     ),
     "margem": "DaVinci — Margem: nenhum pedido pendente de análise no momento.",
+    "devolucoes": "DaVinci — Devoluções: nenhum pedido aguardando devolução no momento.",
 }
 
 _LINHAS = {
     "logistica": _linhas_logistica,
     "controle_estoque": _linhas_estoque,
+    "devolucoes": _linhas_devolucoes,
 }
 
 

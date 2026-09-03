@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Modal do botão INFORMAR: cadastro de quem recebe o relatório via Threema +
 // envio sob demanda. Um contexto por uso ('logistica' | 'controle_estoque' |
-// 'margem'); a seleção fica salva no servidor (threema_informar_config).
+// 'margem' | 'devolucoes'); a seleção fica salva no servidor
+// (threema_informar_config).
 // `contextoAuto` (usado pela Margem com 'margem_auto') liga o MODO AUTOMÁTICO:
 // UMA lista só — quem está marcado recebe os avisos que o robô manda sozinho.
 // Nesse modo não há "Enviar agora" (quem envia é o robô) e o salvar grava a
@@ -16,7 +17,7 @@ type EnviarOut = { pedidos: number; mensagens: number; sent: string[]; failed: s
 
 const props = defineProps<{
   open: boolean
-  contexto: 'logistica' | 'controle_estoque' | 'margem'
+  contexto: 'logistica' | 'controle_estoque' | 'margem' | 'devolucoes'
   // O que este botão informa — aparece como descrição no modal.
   descricao: string
   // Cadastro do aviso automático (ex.: 'margem_auto') — liga o modo automático.

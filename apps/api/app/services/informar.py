@@ -67,13 +67,34 @@ def linhas_estoque(entries: Iterable[tuple[str, str, str]]) -> list[str]:
     return out
 
 
+def linhas_devolucoes(
+    entries: Iterable[tuple[str, str, int | None, str | None]],
+) -> list[str]:
+    """Entradas `(pedido, loja, dias em devolução, última localização)` →
+    `Pedido N (loja) — X dias — localização`. Uma linha por PEDIDO aguardando
+    devolução (aba Acompanhamento). Preserva a ordem recebida — a aba já manda
+    o pedido mais parado primeiro. Sem localização → "sem localização"."""
+    out: list[str] = []
+    for pedido, loja, dias, localizacao in entries:
+        linha = f"Pedido {pedido}"
+        if (loja or "").strip():
+            linha += f" ({loja.strip()})"
+        if dias is not None:
+            linha += f" — {dias} dia{'s' if dias != 1 else ''}"
+        linha += f" — {(localizacao or '').strip() or 'sem localização'}"
+        out.append(linha)
+    return out
+
+
 class MargemPedido(NamedTuple):
     """Um pedido pendente da Margem, já agregado por pedido (dedup de itens).
 
     `margem` = a PIOR margem entre os itens que dispararam o gatilho;
     `minima` = a mínima exigida desses itens; `lucro` = soma do lucro real
-    (marketplace) de todos os itens do pedido. Números None ficam de fora da
-    mensagem (pedido segurado por saldo, por exemplo, não tem margem baixa)."""
+    (marketplace) de todos os itens do pedido. `produto` = nome(s) do(s)
+    item(ns), juntados por "; " (Eduardo 03/09: "no informar coloque o nome do
+    produto tem que ser bem completinho a mensagem"). Campos None ficam de
+    fora da mensagem."""
 
     pedido: str
     loja: str
@@ -81,6 +102,7 @@ class MargemPedido(NamedTuple):
     margem: float | None = None
     minima: float | None = None
     lucro: float | None = None
+    produto: str | None = None
 
 
 def _pct(v: float) -> str:
@@ -113,6 +135,8 @@ def mensagem_margem_pedido(
     if (p.loja or "").strip():
         titulo += f" — {p.loja.strip()}"
     linhas.append(titulo)
+    if (p.produto or "").strip():
+        linhas.append(f"Produto: {p.produto.strip()}")
     linhas.append(f"Motivo: {p.motivo}")
     if p.margem is not None:
         margem = f"Margem: {_pct(p.margem)}"

@@ -9,6 +9,7 @@ import {
   Download,
   ExternalLink,
   Loader2,
+  Megaphone,
   PackagePlus,
   PackageSearch,
   Plus,
@@ -67,6 +68,10 @@ type DevolutionRow = {
   created_at: string
   updated_at: string
   bling_stock_result?: BlingStockResult | null
+  // Chamado MAIS RECENTE do pedido (aba Chamados) — preenchido pela listagem.
+  tem_chamado?: boolean
+  chamado_numero?: string | null
+  chamado_resolvido?: boolean | null
 }
 
 // Campos extras coletados pelos modais antes de chamar o estoque/situação Bling.
@@ -138,17 +143,19 @@ const tagLabel = (tag: string | null): string => {
   return TAG_LABELS[tag.replace(/^\./, '').toLowerCase()] ?? tag
 }
 
+// Lista final pedida pelo Eduardo (03/09): saem Tamanho, Pacote Suspeito e
+// Embalagem Externa Danificada. Linhas antigas com motivo removido continuam
+// aparecendo no select via option de fallback (mesmo esquema da condição).
+// Mudou de ideia / Golpe / Item faltando / Não recebido / Danificado (Outros)
+// abrem chamado sozinhos no back (services/chamados.py).
 const MOTIVOS_DEVOLUCAO = [
   'Mudou de ideia',
   'Golpe',
-  'Tamanho',
   'Item faltando',
   'Dano funcional / Não funciona',
   'Item Incorreto',
   'Não recebido',
   'Danificado (Outros)',
-  'Pacote Suspeito',
-  'Embalagem Externa Danificada',
 ] as const
 
 const CONDICOES_PRODUTO = [
@@ -172,6 +179,9 @@ const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
 const canDelete = useCan('devolucoes', 'delete')
 const isAdmin = useIsAdmin()
+
+// Modal do botão Informar (Threema) — só admins veem o botão.
+const informarOpen = ref(false)
 
 // Devolução de estoque é AUTOMÁTICA no insert para todas as condições que
 // disparam estoque (Novo/Usado/Trocado) — sem toggle. A ÚNICA exceção é
@@ -1200,6 +1210,16 @@ async function backfillAddresses() {
     >
       <template #actions>
         <template v-if="tab === 'acompanhamento'">
+          <Button
+            v-if="isAdmin"
+            size="sm"
+            variant="outline"
+            title="Enviar no Threema a lista de pedidos aguardando devolução"
+            @click="informarOpen = true"
+          >
+            <Megaphone class="size-4 mr-1.5" />
+            informar
+          </Button>
           <Button size="sm" variant="outline" :disabled="acompLoading" @click="loadAcompanhamento">
             <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': acompLoading }" />
             atualizar
@@ -1304,7 +1324,7 @@ async function backfillAddresses() {
           <thead class="sticky top-0 z-20 bg-background">
             <tr>
               <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="12">Pedido aguardando devolução (Bling)</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3">Rastreio (manual)</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3" title="Preenchido sozinho com o rastreio/localização do painel Logística; o que você digitar aqui vale mais que o automático">Rastreio</th>
               <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Devolução</th>
             </tr>
             <tr class="border-b">
@@ -1678,11 +1698,11 @@ async function backfillAddresses() {
     </div>
 
     <div v-show="tab === 'lancamentos'" class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
-      <table class="min-w-[2245px] text-xs border-collapse">
+      <table class="min-w-[2360px] text-xs border-collapse">
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="9">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 10 : 9">Devolução</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 11 : 10">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
             <th v-if="isAdmin" class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-slate-50 dark:bg-slate-800/40" colspan="1">Atualização</th>
           </tr>
@@ -1701,6 +1721,7 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
+            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px] bg-amber-50 dark:bg-amber-900/20" title="Chamado mais recente deste pedido na aba Chamados — clique pra abrir">Chamado</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
@@ -1713,13 +1734,13 @@ async function backfillAddresses() {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="(isAdmin ? 21 : 19) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
+            <td :colspan="(isAdmin ? 22 : 20) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="(isAdmin ? 21 : 19) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="(isAdmin ? 22 : 20) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -1802,6 +1823,22 @@ async function backfillAddresses() {
                   :value="row.motivo_devolucao"
                 >{{ row.motivo_devolucao }}</option>
               </select>
+            </td>
+            <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
+              <NuxtLink
+                v-if="row.tem_chamado"
+                :to="{ path: '/chamados', query: row.pedido_bling ? { search: row.pedido_bling } : {} }"
+                class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium hover:brightness-95 dark:hover:brightness-110"
+                :class="row.chamado_resolvido
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                  : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'"
+                :title="row.chamado_resolvido ? 'Chamado resolvido — abrir na aba Chamados' : 'Chamado em aberto — abrir na aba Chamados'"
+              >
+                <CheckCircle2 v-if="row.chamado_resolvido" class="size-3" />
+                <Clock v-else class="size-3" />
+                {{ row.chamado_numero || 'sim' }}
+              </NuxtLink>
+              <span v-else class="text-muted-foreground">—</span>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input
@@ -2115,6 +2152,14 @@ async function backfillAddresses() {
       :full-destino="estoqueModal.fullDestino"
       @confirm="onEstoqueConfirm"
       @cancel="onEstoqueCancel"
+    />
+
+    <!-- Modal do botão INFORMAR (só admins) — lista do Acompanhamento no Threema -->
+    <InformarThreemaModal
+      :open="informarOpen"
+      contexto="devolucoes"
+      descricao="Manda no Threema a lista de pedidos aguardando devolução (a mesma da aba Acompanhamento), com dias parados e última localização de cada um."
+      @close="informarOpen = false"
     />
   </div>
 </template>

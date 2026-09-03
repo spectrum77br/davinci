@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import BlingOrder, DevolucaoRastreio, Devolution, Product, Refund, User
+from app.models import BlingOrder, Chamado, DevolucaoRastreio, Devolution, Product, Refund, User
 from app.schemas.devolutions import (
     AcompanhamentoItemOut,
     AcompanhamentoOut,
@@ -32,6 +32,7 @@ from app.schemas.devolutions import (
     SkuSuffixVariant,
     StockCorrectionIn,
 )
+from app.services import chamados as chamados_svc
 from app.services.devolution_stock_return import (
     _STOCK_TRIGGER_CONDICOES,
     _SUFFIX_TAGS,
@@ -48,6 +49,13 @@ router = APIRouter(prefix="/api/devolutions", tags=["devolutions"])
 
 _REFUND_CONDICOES = {"Extraviado", "Manutenção"}
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
+
+
+def _custo_e_tecnico_preenchidos(row: Devolution) -> bool:
+    """Custo de manutenção (> 0) E técnico preenchidos → a devolução vai direto
+    pro reembolso (Eduardo 03/09: "quando for preenchido custo e tecnico ja vai
+    direto para reebolso"). Só LIGA o checkbox — nunca desliga."""
+    return bool(row.custo_manutencao) and bool((row.tecnico or "").strip())
 
 
 def _maybe_create_refund(session: AsyncSession, row: Devolution, condicao: str) -> None:
@@ -181,6 +189,40 @@ def _cliente_scalar_subquery():
     )
 
 
+async def _chamados_por_pedido(
+    session: AsyncSession, numeros: set[str | None]
+) -> dict[str, Chamado]:
+    """Chamado MAIS RECENTE de cada pedido Bling (qualquer origem) — alimenta a
+    coluna "Chamado" da lista/exportação. Uma query em lote pra página toda."""
+    limpos = {n.strip() for n in numeros if n and n.strip()}
+    if not limpos:
+        return {}
+    rows = (
+        (
+            await session.execute(
+                select(Chamado)
+                .where(Chamado.pedido_bling.in_(list(limpos)))
+                .order_by(Chamado.pedido_bling, desc(Chamado.created_at))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: dict[str, Chamado] = {}
+    for ch in rows:
+        out.setdefault(ch.pedido_bling, ch)
+    return out
+
+
+def _aplica_chamado(out: DevolutionOut, ch: Chamado | None) -> DevolutionOut:
+    if ch is None:
+        return out
+    out.tem_chamado = True
+    out.chamado_numero = ch.chamado
+    out.chamado_resolvido = ch.resolvido
+    return out
+
+
 @router.get("", response_model=DevolutionPage)
 async def list_devolutions(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -214,10 +256,12 @@ async def list_devolutions(
     rows = (await session.execute(stmt)).all()
     total = (await session.execute(count_stmt)).scalar_one()
 
+    chamados = await _chamados_por_pedido(session, {dev.pedido_bling for dev, _ in rows})
     items: list[DevolutionOut] = []
     for dev, cliente in rows:
         out = DevolutionOut.model_validate(dev)
         out.cliente = cliente
+        _aplica_chamado(out, chamados.get((dev.pedido_bling or "").strip()))
         items.append(out)
 
     return DevolutionPage(
@@ -231,20 +275,23 @@ async def list_devolutions(
 _SITUACAO_AGUARDANDO_DEVOLUCAO = "83957"
 
 
-@router.get("/acompanhamento", response_model=AcompanhamentoOut)
-async def list_acompanhamento(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
-) -> AcompanhamentoOut:
-    """Aba Acompanhamento: TODOS os pedidos hoje em 'Aguardando Devolução'
-    (83957) no Bling — uma linha por item, com nome do cliente, dia em que
-    entrou na situação e rastreio/última localização (manuais). A lista volta
-    inteira (teto de segurança de 2000 linhas); busca e filtros são do front,
-    como na aba Pedidos do Controle de Estoque."""
-    rows = (
-        await session.execute(
-            text(
-                f"""
+async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
+    """Linhas da aba Acompanhamento: TODOS os pedidos hoje em 'Aguardando
+    Devolução' (83957) no Bling — uma linha por item, com nome do cliente, dia
+    em que entrou na situação e rastreio/última localização.
+
+    Rastreio/localização são AUTOMÁTICOS: vêm do painel Logística (mesma linha
+    do pedido, onde o time já preenche/acompanha o pacote) e a edição manual da
+    aba (devolucao_rastreio) SOBRESCREVE o automático quando preenchida —
+    Eduardo 03/09: "nao esta puxando o rastreio, isso tem que ser automatico".
+    `localizacao_data` só existe pra localização manual (a Logística não guarda
+    a data da última movimentação). Compartilhada com o botão Informar."""
+    return [
+        dict(r)
+        for r in (
+            await session.execute(
+                text(
+                    f"""
                 SELECT
                     v.pedido_bling::text        AS pedido_bling,
                     v.pedido_marketplace::text  AS pedido_marketplace,
@@ -259,9 +306,12 @@ async def list_acompanhamento(
                     v.sku,
                     v.produto,
                     v.quantidade::int           AS quantidade,
-                    r.rastreio,
-                    r.localizacao,
-                    r.localizacao_data,
+                    COALESCE(NULLIF(btrim(r.rastreio), ''), lg.rastreio)
+                        AS rastreio,
+                    COALESCE(NULLIF(btrim(r.localizacao), ''), lg.localizacao)
+                        AS localizacao,
+                    CASE WHEN NULLIF(btrim(r.localizacao), '') IS NOT NULL
+                         THEN r.localizacao_data END AS localizacao_data,
                     EXISTS (
                         SELECT 1 FROM "{SCHEMA}".devolutions d
                         WHERE d.pedido_bling = v.pedido_bling::text
@@ -270,15 +320,39 @@ async def list_acompanhamento(
                 JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
                 LEFT JOIN "{SCHEMA}".devolucao_rastreio r
                        ON r.pedido_bling = v.pedido_bling::text
+                LEFT JOIN LATERAL (
+                    SELECT NULLIF(btrim(l.rastreio), '')    AS rastreio,
+                           NULLIF(btrim(l.localizacao), '') AS localizacao
+                    FROM "{SCHEMA}".logistica l
+                    WHERE l.pedido_bling = v.pedido_bling::text
+                      AND (NULLIF(btrim(l.rastreio), '') IS NOT NULL
+                           OR NULLIF(btrim(l.localizacao), '') IS NOT NULL)
+                    ORDER BY l.updated_at DESC NULLS LAST
+                    LIMIT 1
+                ) lg ON TRUE
                 WHERE v.situacao = :situacao
                 ORDER BY bo.aguardando_devolucao_data ASC NULLS FIRST,
                          v.pedido_bling, v.sku
                 LIMIT 2000
                 """  # noqa: S608
-            ),
-            {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO},
+                ),
+                {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    ]
+
+
+@router.get("/acompanhamento", response_model=AcompanhamentoOut)
+async def list_acompanhamento(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+) -> AcompanhamentoOut:
+    """Aba Acompanhamento (ver acompanhamento_rows). A lista volta inteira
+    (teto de segurança de 2000 linhas); busca e filtros são do front, como na
+    aba Pedidos do Controle de Estoque."""
+    rows = await acompanhamento_rows(session)
 
     hoje_sp = datetime.now(SAO_PAULO).date()
     items: list[AcompanhamentoItemOut] = []
@@ -332,11 +406,36 @@ async def patch_acompanhamento_rastreio(
         rastreio=row.rastreio,
         localizacao=row.localizacao,
     )
+    # Resposta = valores EFETIVOS (manual → senão o automático da Logística),
+    # a MESMA regra do GET — o front espelha a resposta na linha, então sem o
+    # fallback aqui editar um campo apagaria da tela o automático do outro
+    # (e limpar o manual deve REVELAR o automático de novo, não sumir).
+    lg = (
+        (
+            await session.execute(
+                text(
+                    f"""
+                SELECT NULLIF(btrim(l.rastreio), '')    AS rastreio,
+                       NULLIF(btrim(l.localizacao), '') AS localizacao
+                FROM "{SCHEMA}".logistica l
+                WHERE l.pedido_bling = :pedido
+                  AND (NULLIF(btrim(l.rastreio), '') IS NOT NULL
+                       OR NULLIF(btrim(l.localizacao), '') IS NOT NULL)
+                ORDER BY l.updated_at DESC NULLS LAST
+                LIMIT 1
+                """  # noqa: S608
+                ),
+                {"pedido": pedido_bling},
+            )
+        )
+        .mappings()
+        .first()
+    )
     return AcompanhamentoRastreioOut(
         pedido_bling=row.pedido_bling,
-        rastreio=row.rastreio,
-        localizacao=row.localizacao,
-        localizacao_data=row.localizacao_data,
+        rastreio=row.rastreio or (lg["rastreio"] if lg else None),
+        localizacao=row.localizacao or (lg["localizacao"] if lg else None),
+        localizacao_data=row.localizacao_data if row.localizacao else None,
     )
 
 
@@ -364,6 +463,7 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Link abertura", "link_abertura"),
     ("Reembolso", "reembolso"),
     ("Motivo", "motivo_devolucao"),
+    ("Chamado", "chamado_info"),  # virtual: chamado mais recente do pedido
     ("Custo manutenção", "custo_manutencao"),
     ("Técnico", "tecnico"),
     ("Qtd", "quantidade"),
@@ -408,11 +508,20 @@ async def export_devolutions(
     ws.title = "Devoluções"
     ws.append([label for label, _ in _EXPORT_COLUMNS])
 
+    chamados = await _chamados_por_pedido(session, {r.pedido_bling for r, _ in rows})
     for r, cliente in rows:
+        ch = chamados.get((r.pedido_bling or "").strip())
         line = []
         for _, field in _EXPORT_COLUMNS:
             value = cliente if field == "cliente" else getattr(r, field, None)
-            if field in ("data", "created_at", "data_devolvido_estoque", "prazo"):
+            if field == "chamado_info":
+                # Nº do chamado quando a plataforma já deu um; senão Sim/Não.
+                if ch is None:
+                    line.append("Não")
+                else:
+                    valor = (ch.chamado or "").strip() or "Sim"
+                    line.append(f"{valor} (resolvido)" if ch.resolvido else valor)
+            elif field in ("data", "created_at", "data_devolvido_estoque", "prazo"):
                 line.append(_fmt_dt_sp(value))
             elif field in ("reembolso", "devolver_estoque", "manutencao"):
                 line.append("Sim" if value else "Não")
@@ -910,6 +1019,8 @@ async def create_devolution(
         tag=_sku_tag(body.sku),
         data_devolvido_estoque=datetime.now(UTC) if devolver_no_add else None,
     )
+    if _custo_e_tecnico_preenchidos(row):
+        row.reembolso = True
     session.add(row)
     if body.condicao_produto in _REFUND_CONDICOES:
         _maybe_create_refund(session, row, body.condicao_produto)
@@ -924,6 +1035,11 @@ async def create_devolution(
     # Prazo (30 dias da inserção) só para Manutenção.
     if body.condicao_produto == "Manutenção" and row.prazo is None:
         row.prazo = row.created_at + timedelta(days=30)
+        await session.commit()
+        await session.refresh(row)
+    # Motivo que pede chamado já no lançamento → registra o chamado sozinho
+    # (services/chamados.MOTIVOS_ABREM_CHAMADO; dedupe por pedido lá dentro).
+    if await chamados_svc.abrir_chamado_devolucao(session, row) is not None:
         await session.commit()
         await session.refresh(row)
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
@@ -1021,8 +1137,26 @@ async def patch_devolution(
     elif row.prazo is not None:
         row.prazo = None
 
+    # Custo de manutenção + técnico preenchidos → liga o "Reembolso" sozinho.
+    # Só quando um dos dois foi tocado NESTE request (desmarcar na mão continua
+    # possível: um PATCH que não mexe neles não religa o checkbox).
+    if (
+        ("custo_manutencao" in data or "tecnico" in data)
+        and not row.reembolso
+        and _custo_e_tecnico_preenchidos(row)
+    ):
+        row.reembolso = True
+
     await session.commit()
     await session.refresh(row)
+
+    # Motivo trocado pra um que pede chamado → registra o chamado sozinho
+    # (dedupe por pedido dentro do helper — repetir o PATCH não duplica).
+    if (
+        "motivo_devolucao" in data
+        and await chamados_svc.abrir_chamado_devolucao(session, row) is not None
+    ):
+        await session.commit()
 
     # Variação do custo de manutenção é refletida como débito no reembolso do refund
     # de Manutenção (subtrai a diferença, preservando o que já estava lá).

@@ -175,7 +175,9 @@ def _candidatos_sql() -> str:
                    FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS margem,
                MAX(v.margem_minima)
                    FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS minima,
-               SUM(v.marketplace_lucro)         AS lucro
+               SUM(v.marketplace_lucro)         AS lucro,
+               string_agg(DISTINCT NULLIF(btrim(v.produto), ''), '; ')
+                                                AS produto
         FROM {SNAPSHOT_TABLE} v
         WHERE v.situacao = '{SITUACAO_EM_ABERTO}'
           AND v.bling_id IS NOT NULL
@@ -339,6 +341,7 @@ async def _avisar_threema(
             margem=None if r["margem"] is None else float(r["margem"]),  # type: ignore[arg-type]
             minima=None if r["minima"] is None else float(r["minima"]),  # type: ignore[arg-type]
             lucro=None if r["lucro"] is None else float(r["lucro"]),  # type: ignore[arg-type]
+            produto=r.get("produto"),
         ),
         cabecalho=cabecalho,
         rodape=(
@@ -374,7 +377,9 @@ def _alerta_margem_alta_sql() -> str:
                                                 AS plataforma,
                MAX(v.loja_nome)                 AS conta,
                MAX(v.marketplace_margem) * 100  AS margem,
-               SUM(v.marketplace_lucro)         AS lucro
+               SUM(v.marketplace_lucro)         AS lucro,
+               string_agg(DISTINCT NULLIF(btrim(v.produto), ''), '; ')
+                                                AS produto
         FROM {SNAPSHOT_TABLE} v
         WHERE v.situacao = '{SITUACAO_EM_ABERTO}'
           AND v.marketplace_margem > {MARGEM_ALTA_LIMIAR}
@@ -411,6 +416,7 @@ async def _alertar_margem_alta(session: AsyncSession) -> int:
                 margem=margem,
                 minima=None,
                 lucro=None if r["lucro"] is None else float(r["lucro"]),  # type: ignore[arg-type]
+                produto=r.get("produto"),
             ),
             cabecalho="DaVinci — Margem: margem fora do normal",
             rodape=(

@@ -60,6 +60,11 @@ class DevolutionOut(BaseModel):
     # Nome do cliente (bling_orders.nome_destinatario via número do pedido).
     # Preenchido só pela listagem — devolutions não guarda o nome.
     cliente: str | None = None
+    # Chamado MAIS RECENTE do pedido na aba Chamados (casado por pedido_bling).
+    # Preenchidos só pela listagem/exportação — devolutions não guarda chamado.
+    tem_chamado: bool = False
+    chamado_numero: str | None = None
+    chamado_resolvido: bool | None = None
 
 
 class DevolutionCreate(BaseModel):

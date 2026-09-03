@@ -122,6 +122,15 @@ const origemFilter = ref<'all' | Origem>('all')
 const plataformaFilter = ref<'all' | string>('all')
 const mostrar = ref<'abertos' | 'resolvidos' | 'todos'>('abertos')
 
+// Chegando com ?search=... (link da coluna Chamado em Devoluções): abre já
+// filtrado pelo pedido e mostrando abertos E resolvidos — sem isso um chamado
+// resolvido ficaria escondido pelo filtro padrão "abertos".
+const _searchQuery = useRoute().query.search
+if (typeof _searchQuery === 'string' && _searchQuery.trim()) {
+  search.value = _searchQuery.trim()
+  mostrar.value = 'todos'
+}
+
 const addOpen = ref(false)
 const lookupPedido = ref('')
 const lookupLoading = ref(false)
