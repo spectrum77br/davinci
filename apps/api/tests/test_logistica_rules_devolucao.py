@@ -47,6 +47,41 @@ def test_ml_status_do_envio_da_devolucao():
     assert devolucao_status_pt("ml", {"return_status": "cancelled"}) is None
 
 
+def test_data_entrada_estimada_pelo_carimbo_do_sinal():
+    """Sem caso de devolução no marketplace (recusa/não entrega), o "Em
+    devolução desde" vem do carimbo do campo que sinaliza o retorno."""
+    from app.services.logistica_rules import data_entrada_devolucao_estimada as f
+
+    ml = {
+        "ship_status": "not_delivered", "cancel_group": "shipment",
+        "order_status": "cancelled", "ship_substatus": "returning_to_sender",
+    }
+    datas = {
+        "ship_status": {"em": "2026-08-21T10:00:00+00:00", "fonte": "plataforma"},
+        "ship_substatus": {"em": "2026-08-22T10:00:00+00:00", "fonte": "aprox"},
+        "order_status": {"em": "2026-08-22T12:00:00+00:00", "fonte": "plataforma"},
+    }
+    # o mais antigo entre os campos que SINALIZAM (ship_status não sinaliza)
+    assert f("Mercado Livre", ml, datas) == "2026-08-22T10:00:00+00:00"
+    # sem carimbo nenhum (linha enriquecida antes das datas) → None
+    assert f("Mercado Livre", ml, {}) is None
+    # entregue normal → nada sinaliza
+    assert f("ml", {"order_status": "paid", "ship_status": "delivered"}, datas) is None
+
+    sh = {"order_status": "CANCELLED", "logistics_status": "LOGISTICS_DELIVERY_FAILED"}
+    sd = {
+        "logistics_status": {"em": "2026-08-27T00:00:00+00:00", "fonte": "plataforma"},
+        "order_status": {"em": "2026-08-28T00:00:00+00:00", "fonte": "plataforma"},
+    }
+    assert f("Shopee", sh, sd) == "2026-08-27T00:00:00+00:00"
+
+    amz = {"order_status": "Shipped", "easyship_status": "ReturningToSeller"}
+    amz_datas = {"easyship_status": {"em": "2026-08-21T20:34:23+00:00", "fonte": "aprox"}}
+    assert f("Amazon", amz, amz_datas) == "2026-08-21T20:34:23+00:00"
+    assert f("Amazon", {"order_status": "Shipped", "easyship_status": "Delivered"}, {}) is None
+    assert f("Loja X", ml, datas) is None
+
+
 def test_sem_devolucao_ou_plataforma_desconhecida():
     assert devolucao_status_pt("Shopee", {}) is None
     assert devolucao_status_pt("Shopee", None) is None

@@ -483,6 +483,71 @@ async def test_acompanhamento_usa_rastreio_do_pacote_que_volta(
         await _derruba_view(db)
 
 
+async def test_em_devolucao_desde_estimada_e_manual(client, db, make_user, auth_as):
+    """Eduardo 03/09 (287144): "está aparecendo um dia mas a data está 19/08".
+    Sem caso de devolução no marketplace, a data vem do carimbo do sinal na
+    Logística (pacote voltando); e dá pra corrigir na mão — vazio volta ao
+    automático."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    p1, p2 = f"40{uuid4().hex[:6]}", f"41{uuid4().hex[:6]}"
+    await _monta_acompanhamento(db, p1, p2)
+    db.add(
+        Logistica(
+            pedido_bling=p2,
+            plataforma="Mercado Livre",
+            rastreio="AP123",
+            localizacao="Retornando ao remetente → São João da Barra/RJ",
+            meli_status={
+                "ship_status": "not_delivered", "cancel_group": "shipment",
+                "order_status": "cancelled", "ship_substatus": "returning_to_sender",
+            },
+            status_datas={
+                "ship_status": {"em": "2026-08-21T10:00:00+00:00", "fonte": "plataforma"},
+                "ship_substatus": {"em": "2026-08-22T10:00:00+00:00", "fonte": "aprox"},
+                "order_status": {"em": "2026-08-22T12:00:00+00:00", "fonte": "plataforma"},
+            },
+        )
+    )
+    await db.commit()
+    hoje = datetime.now(UTC).date()
+
+    try:
+        r = await client.get("/api/devolutions/acompanhamento")
+        por_pedido = {i["pedido_bling"]: i for i in r.json()["items"]}
+        # p2: sem devolução no marketplace → carimbo do sinal (22/08)
+        assert por_pedido[p2]["aguardando_devolucao_data"] == "2026-08-22"
+        assert por_pedido[p2]["dias_em_devolucao"] == (hoje - datetime(2026, 8, 22).date()).days
+        # p1: sem sinal nenhum → entrada no Bling (seed = hoje - 3)
+        assert por_pedido[p1]["dias_em_devolucao"] == 3
+
+        # Corrige na mão → vale a data digitada.
+        r = await client.patch(
+            f"/api/devolutions/acompanhamento/{p2}", json={"em_devolucao_desde": "2026-08-19"}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["aguardando_devolucao_data"] == "2026-08-19"
+        assert r.json()["dias_em_devolucao"] == (hoje - datetime(2026, 8, 19).date()).days
+        r = await client.get("/api/devolutions/acompanhamento")
+        por_pedido = {i["pedido_bling"]: i for i in r.json()["items"]}
+        assert por_pedido[p2]["aguardando_devolucao_data"] == "2026-08-19"
+
+        # PATCH de outro campo não mexe na data manual.
+        r = await client.patch(
+            f"/api/devolutions/acompanhamento/{p2}", json={"rastreio": "X1"}
+        )
+        assert r.json()["aguardando_devolucao_data"] == "2026-08-19"
+
+        # null limpa → volta ao automático (22/08).
+        r = await client.patch(
+            f"/api/devolutions/acompanhamento/{p2}", json={"em_devolucao_desde": None}
+        )
+        assert r.status_code == 200
+        assert r.json()["aguardando_devolucao_data"] == "2026-08-22"
+    finally:
+        await _derruba_view(db)
+
+
 # ------------------------------- Informar de Devoluções (admin-only, Threema)
 
 

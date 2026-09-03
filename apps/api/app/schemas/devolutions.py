@@ -303,11 +303,16 @@ class AcompanhamentoOut(BaseModel):
 
 
 class AcompanhamentoRastreioPatch(BaseModel):
-    """Edição inline de rastreio/localização na aba Acompanhamento. Campos
+    """Edição inline de rastreio/localização (e "Em devolução desde") na aba
+    Acompanhamento. `em_devolucao_desde` (data) vale mais que o automático;
+    None/omitido não mexe; "" limpa (volta ao automático). Campos
     ausentes não são tocados; string vazia limpa o campo."""
 
     rastreio: str | None = None
     localizacao: str | None = None
+    # "Em devolução desde" na mão (Eduardo 03/09, caso 287144). Enviado como
+    # null LIMPA (volta ao automático); omitido não mexe.
+    em_devolucao_desde: date | None = None
 
 
 class AcompanhamentoRastreioOut(BaseModel):
@@ -315,6 +320,10 @@ class AcompanhamentoRastreioOut(BaseModel):
     rastreio: str | None = None
     localizacao: str | None = None
     localizacao_data: datetime | None = None
+    # "Em devolução desde" efetivo + dias (mesma conta do GET), pro front
+    # espelhar na linha depois de editar.
+    aguardando_devolucao_data: date | None = None
+    dias_em_devolucao: int | None = None
     # Quando há devolução VIVA (Shopee/TikTok), `localizacao` passa a ser o
     # status da devolução e a entrega original ("Pedido entregue") vem aqui
     # (tooltip). None = sem devolução viva (localizacao é a entrega mesmo).

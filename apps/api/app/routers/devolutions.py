@@ -286,6 +286,42 @@ _LOGISTICA_ULTIMA_MOVIMENTACAO_SQL = (
 
 _FONTE_PLATAFORMA = {"tiktok": "tiktok", "shopee": "shopee", "ml": "mercado livre"}
 
+# Dia do backfill da migration 0236: TODOS os pedidos que já estavam em 83957
+# ganharam esta data (Eduardo 03/09: "em devolução desde todas as datas estão
+# iguais"). Entrada carimbada em outro dia é de verdade (sync viu a transição).
+_BACKFILL_0236 = date(2026, 9, 2)
+
+
+def _data_entrada(
+    *,
+    entrada_bling: date | None,
+    entrada_manual: date | None,
+    devolucao_criada_em: datetime | None,
+    plataforma: str | None,
+    meli_status: dict | None,
+    status_datas: dict | None,
+) -> date | None:
+    """"Em devolução desde" efetivo, em ordem: digitado na mão > dia em que o
+    cliente abriu a devolução no marketplace > entrada em 83957 carimbada de
+    verdade pelo sync > carimbo do sinal de retorno na Logística (pacote
+    voltando — logistica_rules.data_entrada_devolucao_estimada) > a data do
+    backfill (último recurso). Caso 287144: entrou em 19/08 pela Viena no
+    Bling, que não expõe o histórico pela API → o operador digita."""
+    from app.services import logistica_rules  # tardio: evita ciclo router↔services
+    from app.services.devolucao_returns import iso_to_dt
+
+    if entrada_manual:
+        return entrada_manual
+    if devolucao_criada_em:
+        return devolucao_criada_em.astimezone(SAO_PAULO).date()
+    if entrada_bling and entrada_bling != _BACKFILL_0236:
+        return entrada_bling
+    est = logistica_rules.data_entrada_devolucao_estimada(plataforma, meli_status, status_datas)
+    dt = iso_to_dt(est) if est else None
+    if dt:
+        return dt.astimezone(SAO_PAULO).date()
+    return entrada_bling
+
 
 def _com_status_da_devolucao(
     d: dict,
@@ -344,13 +380,14 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     v.pedido_bling::text        AS pedido_bling,
                     v.pedido_marketplace::text  AS pedido_marketplace,
                     v.data,
-                    -- "Em devolução desde": quando o cliente ABRIU a devolução
-                    -- (sync do retorno); senão a entrada em 83957 no Bling
-                    -- (a 0236 carimbou 02/09 em todo mundo — Eduardo 03/09).
-                    COALESCE(
-                        (r.devolucao_criada_em AT TIME ZONE 'America/Sao_Paulo')::date,
-                        bo.aguardando_devolucao_data
-                    )                           AS aguardando_devolucao_data,
+                    -- "Em devolução desde" (decidido em _data_entrada): manual >
+                    -- devolução aberta no marketplace > carimbo do sinal na
+                    -- Logística > entrada em 83957 no Bling (a 0236 carimbou
+                    -- 02/09 em todo mundo — Eduardo 03/09).
+                    bo.aguardando_devolucao_data AS entrada_bling,
+                    r.entrada_manual,
+                    r.devolucao_criada_em,
+                    lg.lg_status_datas,
                     r.rastreio_auto,
                     r.transportadora_auto,
                     r.localizacao_auto,
@@ -396,7 +433,8 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                            NULLIF(btrim(l.localizacao), '') AS localizacao,
                            {_LOGISTICA_ULTIMA_MOVIMENTACAO_SQL} AS ultima_movimentacao,
                            l.plataforma                     AS lg_plataforma,
-                           l.meli_status                    AS lg_meli_status
+                           l.meli_status                    AS lg_meli_status,
+                           l.status_datas                   AS lg_status_datas
                     FROM "{SCHEMA}".logistica l
                     WHERE l.pedido_bling = v.pedido_bling::text
                       AND (NULLIF(btrim(l.rastreio), '') IS NOT NULL
@@ -416,12 +454,22 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
     out: list[dict] = []
     for r in rows:
         d = dict(r)
+        lg_plataforma = d.pop("lg_plataforma", None)
+        lg_meli_status = d.pop("lg_meli_status", None)
+        d["aguardando_devolucao_data"] = _data_entrada(
+            entrada_bling=d.pop("entrada_bling", None),
+            entrada_manual=d.pop("entrada_manual", None),
+            devolucao_criada_em=d.pop("devolucao_criada_em", None),
+            plataforma=lg_plataforma,
+            meli_status=lg_meli_status,
+            status_datas=d.pop("lg_status_datas", None),
+        )
         out.append(
             _com_status_da_devolucao(
                 d,
                 localizacao_manual=d.pop("localizacao_manual", None),
-                lg_plataforma=d.pop("lg_plataforma", None),
-                lg_meli_status=d.pop("lg_meli_status", None),
+                lg_plataforma=lg_plataforma,
+                lg_meli_status=lg_meli_status,
                 status_auto=d.pop("devolucao_status_auto", None),
                 fonte_auto=d.pop("fonte_auto", None),
                 localizacao_auto=d.pop("localizacao_auto", None),
@@ -484,6 +532,9 @@ async def patch_acompanhamento_rastreio(
         if nova != row.localizacao:
             row.localizacao = nova
             row.localizacao_data = datetime.now(UTC) if nova else None
+    if "em_devolucao_desde" in data:
+        # null explícito limpa (volta ao automático); omitido não mexe.
+        row.entrada_manual = data["em_devolucao_desde"]
     row.updated_by = user.id
     await session.commit()
     await session.refresh(row)
@@ -492,7 +543,16 @@ async def patch_acompanhamento_rastreio(
         pedido_bling=pedido_bling,
         rastreio=row.rastreio,
         localizacao=row.localizacao,
+        entrada_manual=str(row.entrada_manual) if row.entrada_manual else None,
     )
+    entrada_bling = (
+        await session.execute(
+            select(BlingOrder.aguardando_devolucao_data)
+            .where(BlingOrder.numero == pedido_bling)
+            .order_by(BlingOrder.aguardando_devolucao_data.desc().nulls_last())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
     # Resposta = valores EFETIVOS (manual → senão o automático da Logística),
     # a MESMA regra do GET — o front espelha a resposta na linha, então sem o
     # fallback aqui editar um campo apagaria da tela o automático do outro
@@ -506,7 +566,8 @@ async def patch_acompanhamento_rastreio(
                        NULLIF(btrim(l.localizacao), '') AS localizacao,
                        {_LOGISTICA_ULTIMA_MOVIMENTACAO_SQL} AS ultima_movimentacao,
                        l.plataforma                     AS lg_plataforma,
-                       l.meli_status                    AS lg_meli_status
+                       l.meli_status                    AS lg_meli_status,
+                       l.status_datas                   AS lg_status_datas
                 FROM "{SCHEMA}".logistica l
                 WHERE l.pedido_bling = :pedido
                   AND (NULLIF(btrim(l.rastreio), '') IS NOT NULL
@@ -523,7 +584,17 @@ async def patch_acompanhamento_rastreio(
     )
     # Mesma regra do GET: manual manda; senão o automático da Logística — data
     # da última movimentação e, com devolução viva, o status da devolução no
-    # lugar da entrega (_com_status_da_devolucao).
+    # lugar da entrega (_com_status_da_devolucao); "Em devolução desde" pela
+    # mesma escada do GET (_data_entrada) + dias.
+    entrada = _data_entrada(
+        entrada_bling=entrada_bling,
+        entrada_manual=row.entrada_manual,
+        devolucao_criada_em=row.devolucao_criada_em,
+        plataforma=lg["lg_plataforma"] if lg else None,
+        meli_status=lg["lg_meli_status"] if lg else None,
+        status_datas=lg["lg_status_datas"] if lg else None,
+    )
+    hoje_sp = datetime.now(SAO_PAULO).date()
     d = _com_status_da_devolucao(
         {
             "pedido_bling": row.pedido_bling,
@@ -534,6 +605,8 @@ async def patch_acompanhamento_rastreio(
                 if row.localizacao
                 else (lg["ultima_movimentacao"] if lg else None)
             ),
+            "aguardando_devolucao_data": entrada,
+            "dias_em_devolucao": (hoje_sp - entrada).days if entrada else None,
         },
         localizacao_manual=row.localizacao,
         lg_plataforma=lg["lg_plataforma"] if lg else None,

@@ -399,6 +399,73 @@ def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -
     return None
 
 
+# Valores dos campos do Status Plataforma que dizem "o pacote está voltando /
+# a venda caiu" — o carimbo (status_datas) desses campos é a melhor estimativa
+# de QUANDO o pedido entrou em devolução quando não há caso de devolução no
+# marketplace (recusa/não entrega) e o Bling não expõe o histórico pela API.
+_SINAL_DEVOLUCAO = {
+    "ml": {
+        "ship_substatus": {
+            "returning_to_sender", "returned_to_hub", "refused_delivery", "refused",
+            "returned_to_sender", "returned", "receiver_absent", "not_delivered",
+        },
+        "order_status": {"cancelled"},
+        "return_status": None,  # qualquer valor
+    },
+    "shopee": {
+        "order_status": {"CANCELLED", "TO_RETURN", "IN_CANCEL"},
+        "logistics_status": {"LOGISTICS_DELIVERY_FAILED", "LOGISTICS_LOST", "LOGISTICS_RETURNED"},
+        "return_status": None,
+    },
+    "tiktok": {
+        "order_status": {"CANCELLED"},
+        "return_status": None,
+    },
+    "amazon": {
+        "easyship_status": {
+            "RETURNINGTOSELLER", "RETURNEDTOSELLER", "REJECTEDBYBUYER", "UNDELIVERABLE",
+            "RETURNING", "RETURNED",
+        },
+        "order_status": {"CANCELED", "CANCELLED"},
+    },
+}
+
+
+def data_entrada_devolucao_estimada(
+    plataforma: str | None,
+    meli_status: dict[str, str] | None,
+    status_datas: dict[str, dict[str, str]] | None,
+) -> str | None:
+    """ISO do carimbo mais ANTIGO entre os campos do Status Plataforma cujo
+    valor atual sinaliza devolução/queda da venda (ver _SINAL_DEVOLUCAO). None
+    quando nada sinaliza ou não há carimbo. Usado pelo Acompanhamento como
+    "Em devolução desde" quando o marketplace não tem caso de devolução."""
+    p = (plataforma or "").strip().lower()
+    if p in _ML_PLATAFORMAS:
+        key = "ml"
+    elif p in _SHOPEE_PLATAFORMAS:
+        key = "shopee"
+    elif p in _TIKTOK_PLATAFORMAS:
+        key = "tiktok"
+    elif p in _AMAZON_PLATAFORMAS:
+        key = "amazon"
+    else:
+        return None
+    ms = meli_status or {}
+    sd = status_datas or {}
+    candidatos: list[str] = []
+    for campo, valores in _SINAL_DEVOLUCAO[key].items():
+        atual = str(ms.get(campo) or "").strip()
+        if not atual:
+            continue
+        if valores is not None and atual.upper() not in {v.upper() for v in valores}:
+            continue
+        em = (sd.get(campo) or {}).get("em") if isinstance(sd.get(campo), dict) else None
+        if em:
+            candidatos.append(str(em))
+    return min(candidatos) if candidatos else None
+
+
 # --- Amazon ---------------------------------------------------------------
 # A Amazon NÃO expõe número de rastreio pelo Orders API (o /shipment dá 403 sem
 # escopo), então a assinatura combina o `order_status` (OrderStatus) com o

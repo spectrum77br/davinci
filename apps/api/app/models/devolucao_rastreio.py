@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Text
+from sqlalchemy import Date, DateTime, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,6 +52,10 @@ class DevolucaoRastreio(Base, TimestampMixin):
     auto_sync_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # "Em devolução desde" digitado na mão (migration 0242) — vale mais que o
+    # automático (devolução aberta no marketplace / carimbo da Logística /
+    # entrada em 83957). Caso 287144: entrou em 19/08 pela Viena no Bling.
+    entrada_manual: Mapped[date | None] = mapped_column(Date, nullable=True)
     updated_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

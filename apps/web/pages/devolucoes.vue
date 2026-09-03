@@ -671,6 +671,9 @@ type RastreioSaved = {
   localizacao_data: string | null
   // Entrega original quando `localizacao` é o status de uma devolução viva.
   entrega_localizacao: string | null
+  // "Em devolução desde" efetivo + dias, pra espelhar na linha após editar.
+  aguardando_devolucao_data: string | null
+  dias_em_devolucao: number | null
 }
 
 type Tab = 'acompanhamento' | 'lancamentos'
@@ -771,17 +774,25 @@ function isSavingRastreio(pedido: string | null, field: string): boolean {
 // Salva no blur (Enter também: só tira o foco do campo). Campo por PEDIDO:
 // espelha a resposta do backend em todas as linhas do mesmo pedido. Só chama
 // a API se o valor realmente mudou; string vazia limpa o campo.
-async function saveRastreio(row: AcompanhamentoRow, field: 'rastreio' | 'localizacao', raw: string) {
+async function saveRastreio(
+  row: AcompanhamentoRow,
+  field: 'rastreio' | 'localizacao' | 'em_devolucao_desde',
+  raw: string,
+) {
   if (!canEdit.value || !row.pedido_bling) return
   const value = raw.trim()
-  if ((row[field] ?? '') === value) return
+  // "Em devolução desde" na mão (03/09, caso 287144): data vale mais que o
+  // automático; vazio = null = volta ao automático.
+  const atual = field === 'em_devolucao_desde' ? (row.aguardando_devolucao_data ?? '') : (row[field] ?? '')
+  if (atual === value) return
   const key = `${row.pedido_bling}|${field}`
   if (acompSaving.value.has(key)) return
   acompSaving.value = new Set([...acompSaving.value, key])
   try {
+    const body = field === 'em_devolucao_desde' ? { em_devolucao_desde: value || null } : { [field]: value }
     const res = await api<RastreioSaved>(
       `/api/devolutions/acompanhamento/${encodeURIComponent(row.pedido_bling)}`,
-      { method: 'PATCH', body: { [field]: value } },
+      { method: 'PATCH', body },
     )
     for (const r of acompRows.value) {
       if (r.pedido_bling === res.pedido_bling) {
@@ -789,6 +800,8 @@ async function saveRastreio(row: AcompanhamentoRow, field: 'rastreio' | 'localiz
         r.localizacao = res.localizacao
         r.localizacao_data = res.localizacao_data
         r.entrega_localizacao = res.entrega_localizacao
+        r.aguardando_devolucao_data = res.aguardando_devolucao_data
+        r.dias_em_devolucao = res.dias_em_devolucao
       }
     }
   } catch (e: any) {
@@ -1377,7 +1390,21 @@ async function backfillAddresses() {
               <td class="px-2 py-1 font-mono text-xs">{{ row.sku || '—' }}</td>
               <td class="px-2 py-1 text-muted-foreground">{{ row.produto || '—' }}</td>
               <td class="px-2 py-1 text-center tabular-nums">{{ row.quantidade ?? '—' }}</td>
-              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateOnly(row.aguardando_devolucao_data) }}</td>
+              <td class="px-1 py-0.5 whitespace-nowrap">
+                <!-- "Em devolução desde": automático (devolução aberta no marketplace /
+                     sinal da Logística / entrada no Bling); editável na mão quando o
+                     automático não bate (03/09, caso 287144). Vazio = volta ao automático. -->
+                <input
+                  v-if="canEdit"
+                  type="date"
+                  :value="row.aguardando_devolucao_data || ''"
+                  :disabled="isSavingRastreio(row.pedido_bling, 'em_devolucao_desde')"
+                  class="w-[128px] text-xs border rounded px-1.5 py-1 bg-background text-foreground"
+                  title="Dia em que o pedido entrou em devolução (automático). Se estiver errado, escolha a data certa; apagar volta ao automático."
+                  @change="(e) => saveRastreio(row, 'em_devolucao_desde', (e.target as HTMLInputElement).value)"
+                />
+                <span v-else class="text-muted-foreground">{{ fmtDateOnly(row.aguardando_devolucao_data) }}</span>
+              </td>
               <td class="px-2 py-1 text-center">
                 <span
                   v-if="row.dias_em_devolucao != null"
