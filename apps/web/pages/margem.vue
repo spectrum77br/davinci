@@ -974,9 +974,9 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       <select
         v-model="situacaoFilter"
         class="text-sm rounded-md border bg-background px-2 py-1.5"
-        title="Situação do pedido no Bling. Padrão: só o que ainda está em triagem (Em aberto + Em digitação, mais os segurados pelo robô)."
+        title="Situação do pedido no Bling. Padrão: só o que ainda está em triagem (Em aberto + Em digitação dos últimos 30 dias, mais os segurados pelo robô). Pedidos antigos nessas situações ficam de fora — use 'todas situações' para vê-los."
       >
-        <option value="triagem">em aberto + em digitação</option>
+        <option value="triagem">em aberto + em digitação (30 dias)</option>
         <option value="all">todas situações</option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">

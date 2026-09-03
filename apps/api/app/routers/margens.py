@@ -92,8 +92,19 @@ _SITUACOES_SALDO_DIVERGENTE_IN = ", ".join(f"'{s}'" for s in _SITUACOES_SALDO_DI
 # (83955 com 'Pendente' gravado) continua visível — senão ninguém consegue
 # aprová-lo/reprová-lo. Usado pela listagem (situacao=triagem, o default) e
 # pelo Informar; "Buscar pedido" ignora (acha qualquer situação).
+#
+# Recorte de idade (Eduardo 03/09 à tarde: "aparece somente os em aberto e
+# os em digitação que virou recente, os antigos não precisam"): com 21 na
+# triagem, rascunhos "Em digitação" de MAIO (quantidade -1, sem conta) voltaram
+# à aba. Pedido em triagem com mais de _TRIAGEM_DIAS de data fica de fora —
+# ninguém vai decidir margem dele. O segurado pelo robô não tem recorte.
+_TRIAGEM_DIAS = 30
+# Sem data (não deveria acontecer) conta como recente — nunca esconder por
+# falta de informação.
 _SITUACAO_TRIAGEM_SQL = (
-    f"(v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN})"
+    f"((v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN})"
+    f"  AND COALESCE((v.data AT TIME ZONE 'America/Sao_Paulo')::date, CURRENT_DATE)"
+    f"      >= CURRENT_DATE - {_TRIAGEM_DIAS})"
     f" OR (v.situacao = '{SITUACAO_REPROVADO}' AND v.bling_status_margem = 'Pendente'))"
 )
 _SITUACAO_FILTERS = ("triagem", "all")

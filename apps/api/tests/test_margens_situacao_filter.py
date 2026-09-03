@@ -12,7 +12,7 @@ continua achando qualquer situação; o Informar segue a mesma régua da aba.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
@@ -34,9 +34,11 @@ async def _seed(
     situacao: str,
     situacao_nome: str,
     status_gravado: str | None = None,
+    data: datetime | None = None,
 ) -> None:
     """Linha-item shopee com margem baixa (6% < mínima 10%) → Pendente por
-    gatilho, em qualquer situação; `status_gravado` simula o pino do robô."""
+    gatilho, em qualquer situação; `status_gravado` simula o pino do robô;
+    `data` = data do pedido (default agora — "recente")."""
     await db.execute(
         text(
             """
@@ -63,7 +65,7 @@ async def _seed(
             "situacao": situacao,
             "situacao_nome": situacao_nome,
             "status_gravado": status_gravado,
-            "data": datetime.now(UTC),
+            "data": data or datetime.now(UTC),
         },
     )
     await db.commit()
@@ -109,6 +111,34 @@ async def test_listagem_mostra_so_em_aberto_e_enviado_etiqueta(
     )
     assert res.status_code == 400
     assert res.json()["detail"]["code"] == "invalid_situacao"
+
+
+async def test_triagem_esconde_pedidos_antigos(client, db, make_user, auth_as):
+    """Eduardo 03/09 à tarde: "aparece somente os em aberto e os em digitação
+    que virou recente, os antigos não precisam" — rascunhos "Em digitação"
+    de maio (e Em aberto velhos) saem da triagem; com `situacao=all` seguem
+    visíveis. Segurado pelo robô não tem recorte de idade."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    velho = datetime.now(UTC) - timedelta(days=45)
+    await _seed(db, pedido="910030", situacao="21", situacao_nome="Em digitação", data=velho)
+    await _seed(db, pedido="910031", situacao="6", situacao_nome="Em aberto", data=velho)
+    await _seed(db, pedido="910032", situacao="21", situacao_nome="Em digitação")  # recente
+    await _seed(
+        db, pedido="910033", situacao="83955", situacao_nome="Aguardando Cancelamento",
+        status_gravado="Pendente", data=velho,
+    )
+
+    padrao = await _pedidos_listados(client)
+    assert "910032" in padrao and "910033" in padrao
+    assert not padrao & {"910030", "910031"}
+
+    tudo = await _pedidos_listados(client, situacao="all")
+    assert tudo >= {"910030", "910031", "910032", "910033"}
+
+    # O Informar segue a aba: os antigos ficam fora do relatório também.
+    pedidos = {p.pedido for p in await _pedidos_margem(db)}
+    assert "910032" in pedidos and "910030" not in pedidos
 
 
 async def test_buscar_pedido_acha_qualquer_situacao(client, db, make_user, auth_as):
