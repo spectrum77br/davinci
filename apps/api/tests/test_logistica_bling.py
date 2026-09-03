@@ -753,6 +753,86 @@ async def test_aplicar_status_em_lote_inclui_shopee(
     assert row.status_bling == "Entregue"
 
 
+class _FalhaFakeBling(_MultiFakeBling):
+    """Como o _MultiFakeBling, mas o PATCH de situação de alguns pedidos
+    devolve erro (o 400 real do Bling quando a transição é proibida)."""
+
+    def __init__(self, orders: dict[int, dict], falham: set[int]):
+        super().__init__(orders)
+        self._falham = falham
+
+    async def update_order_situacao(self, bling_id: int, situacao_id: int) -> None:
+        if bling_id in self._falham:
+            raise RuntimeError("400 Bad Request: transicao de situacao invalida")
+        await super().update_order_situacao(bling_id, situacao_id)
+
+
+@pytest.mark.asyncio
+async def test_aplicar_status_em_lote_sobrevive_a_falha_de_uma_linha(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """Regressão do incidente de 01-02/set: um 400 do Bling numa linha fazia o
+    rollback expirar as instâncias ORM e o lote INTEIRO morria com
+    MissingGreenlet — o cron de 5min nunca mais aplicava nada. Agora a falha é
+    contada, logada e as demais linhas seguem sendo aplicadas."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=15, nome="Em andamento"),
+            SituacaoBling(id=83953, nome="Entregue"),
+        ]
+    )
+    rs = await client.post(
+        "/api/logistica/status",
+        json={"status_plataforma": chave, "alterar_status_bling": "Entregue"},
+    )
+    assert rs.status_code == 201, rs.text
+    db.add_all(
+        [
+            BlingOrder(bling_id=581, numero="99020", item_codigo="s1", item_index=0, situacao="15"),
+            BlingOrder(bling_id=582, numero="99021", item_codigo="s2", item_index=0, situacao="15"),
+        ]
+    )
+    await db.commit()
+    for num in ("99020", "99021"):
+        rc = await client.post(
+            "/api/logistica",
+            json={"plataforma": "Mercado Livre", "pedido_bling": num, "meli_status": meli},
+        )
+        assert rc.status_code == 201, rc.text
+
+    # As duas linhas casam a regra e precisam mudar 15 -> 83953, mas o Bling
+    # recusa a transição do pedido 581.
+    fake = _FalhaFakeBling(
+        {
+            581: {"id": 581, "numero": 99020, "situacao": {"id": 15, "valor": 0}},
+            582: {"id": 582, "numero": 99021, "situacao": {"id": 15, "valor": 0}},
+        },
+        falham={581},
+    )
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    out = await logistica_bling.aplicar_status_em_lote(db)
+
+    # Independente da ordem de processamento: a 581 falha, a 582 é aplicada.
+    assert out == {"aplicados": 1, "pulados": 0, "falhas": 1}
+    assert fake.situacao_sets == [(582, 83953)]
+    row_ok = (
+        await db.execute(select(Logistica).where(Logistica.pedido_bling == "99021"))
+    ).scalar_one()
+    assert row_ok.status_bling == "Entregue"
+
+
 @pytest.mark.asyncio
 async def test_recarregar_enfileira_job(
     client: AsyncClient, admin: User, auth_as: Callable[[User | None], None], monkeypatch

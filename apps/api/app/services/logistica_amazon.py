@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Collection
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Text, cast, func, select
+from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
@@ -248,3 +248,105 @@ async def enrich_recent(
     summary = {"seen": len(rows), "updated": updated, "skipped": skipped, "failed": failed}
     logger.info("logistica_amazon_enrich_batch", **summary)
     return summary
+
+
+_SWEEP_JANELA_DIAS = 45
+
+# Estados FINAIS: quem chegou neles não "muda de vida" mais — o sweep pula pra
+# poupar a cota da SP-API (Orders ~0,5 req/s por conta, a mais apertada das
+# quatro). Vazio/desconhecido conta como NÃO-final (ainda sem sinal → re-olha).
+_EASYSHIP_FINAIS = {
+    "DELIVERED",
+    "RETURNEDTOSELLER",
+    "RETURNED",
+    "DAMAGED",
+    "LOST",
+    "REJECTEDBYBUYER",
+    "UNDELIVERABLE",
+    "LABELCANCELED",
+}
+_ORDER_FINAIS = {"CANCELED", "CANCELLED", "UNFULFILLABLE"}
+
+
+async def sweep_pos_venda(session: AsyncSession) -> dict:
+    """Re-olha as linhas Amazon da janela cujo estado ainda pode mudar —
+    inclusive as resolvidas que o painel esconde — e devolve os ids de quem
+    mudou de assinatura.
+
+    Espelho dos sweeps Shopee/TikTok/ML, com o mesmo ponto cego: o recarregar
+    só re-enriquece as pendentes/visíveis. Na Amazon a ENTREGA só aparece pelo
+    enrich (não há espelho no Bling nem webhook) — então "Enviado | Coletado"
+    já aplicado como Em andamento virava linha resolvida/escondida, nunca mais
+    consultada, e o pedido ficava Em andamento no Bling depois de entregue
+    (caso real 02-03/set: ~28 pedidos 701/702-* presos em PickedUp).
+
+    Diferenças pros outros sweeps: a SP-API não tem consulta em lote barata,
+    então reusa o `enrich_row` (1 GET por pedido, concorrência 2) e SÓ nos
+    estados não-finais (~dezenas de linhas, não centenas). Mudança = a
+    assinatura (order_status + easyship_status) ficou diferente.
+
+    Retorna {"ids": [UUID...], **contadores}. O recarregar passa os ids como
+    `extras` do `_ids_pendentes` — extras furam o escondimento — e o fluxo
+    normal aplica a regra de status no Bling."""
+    corte = datetime.now(UTC).date() - timedelta(days=_SWEEP_JANELA_DIAS)
+    rows = (
+        await session.execute(
+            select(Logistica).where(
+                func.lower(func.trim(Logistica.plataforma)).in_(
+                    tuple(_AMAZON_PLATAFORMAS)
+                ),
+                func.coalesce(Logistica.pedido_marketplace, "") != "",
+                or_(Logistica.data.is_(None), Logistica.data >= corte),
+            )
+        )
+    ).scalars().all()
+
+    def _final(r: Logistica) -> bool:
+        m = r.meli_status or {}
+        easy = (m.get("easyship_status") or "").strip().upper()
+        ost = (m.get("order_status") or "").strip().upper()
+        return easy in _EASYSHIP_FINAIS or ost in _ORDER_FINAIS
+
+    alvo = [r for r in rows if not _final(r)]
+
+    cache: dict[str, AmazonClient] = {}
+    lock = asyncio.Lock()
+    await logistica_enrich.prewarm_clients(
+        session,
+        alvo,
+        cache,
+        resolve=_amazon_integration_for_conta,
+        build=lambda s, i: _build_amazon_client(s, i, lock=lock),
+    )
+    alvo = [r for r in alvo if r.conta in cache]
+
+    mudados: list[UUID] = []
+    failed = 0
+    for lote in logistica_enrich.chunked(alvo, _CONCURRENCY):
+        antes = {
+            r.id: logistica_rules.assinatura_amazon(r.meli_status or {}) for r in lote
+        }
+        res = await asyncio.gather(
+            *(enrich_row(session, r, client_cache=cache) for r in lote),
+            return_exceptions=True,
+        )
+        for row, r in zip(lote, res, strict=True):
+            if isinstance(r, BaseException):
+                failed += 1
+                logger.warning(
+                    "logistica_amazon_sweep_row_falhou",
+                    id=str(row.id), pedido=row.pedido_marketplace, err=str(r)[:200],
+                )
+                continue
+            depois = logistica_rules.assinatura_amazon(row.meli_status or {})
+            if depois != antes[row.id]:
+                mudados.append(row.id)
+    await session.commit()
+    summary = {
+        "seen": len(rows),
+        "checked": len(alvo),
+        "changed": len(mudados),
+        "failed": failed,
+    }
+    logger.info("logistica_amazon_sweep_pos_venda", **summary)
+    return {"ids": mudados, **summary}

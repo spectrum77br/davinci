@@ -115,3 +115,74 @@ def test_divergencia_amazon_sem_easyship():
         is None
     )
     assert logistica_rules.detectar_divergencia_amazon(None) is None
+
+
+# ── sweep_pos_venda ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sweep_pos_venda_re_olha_nao_finais_e_devolve_mudados(db, monkeypatch):
+    """Regressão dos ~28 pedidos 701/702-* presos em "Coletado" (02-03/set):
+    linha escondida como resolvida nunca mais era consultada e a ENTREGA ficava
+    invisível. O sweep re-olha só os estados NÃO-finais (poupa a cota SP-API),
+    atualiza o meli_status e devolve os ids de quem mudou de assinatura."""
+    from datetime import date
+
+    from app.models import Logistica
+
+    hoje = date.today()
+    r_mudou = Logistica(
+        plataforma="Amazon", conta="kfa", pedido_bling="291244",
+        pedido_marketplace="702-0000001-0000001",
+        meli_status={"order_status": "Shipped", "easyship_status": "PickedUp"},
+        status_bling="Em andamento", data=hoje,
+    )
+    r_final = Logistica(
+        plataforma="Amazon", conta="kfa", pedido_bling="291245",
+        pedido_marketplace="702-0000002-0000002",
+        meli_status={"order_status": "Shipped", "easyship_status": "Delivered"},
+        status_bling="Entregue", data=hoje,
+    )
+    r_igual = Logistica(
+        plataforma="Amazon", conta="kfa", pedido_bling="291246",
+        pedido_marketplace="702-0000003-0000003",
+        meli_status={"order_status": "Shipped", "easyship_status": "PickedUp"},
+        status_bling="Em andamento", data=hoje,
+    )
+    db.add_all([r_mudou, r_final, r_igual])
+    await db.commit()
+    ids = {"mudou": r_mudou.id, "final": r_final.id, "igual": r_igual.id}
+
+    consultados: list[str] = []
+
+    class _SpyAmazon(FakeAmazon):
+        async def get_order_status(self, order_id):
+            consultados.append(str(order_id))
+            return await super().get_order_status(order_id)
+
+    fake = _SpyAmazon(
+        {
+            "702-0000001-0000001": {"order_status": "Shipped", "easyship_status": "Delivered"},
+            "702-0000003-0000003": {"order_status": "Shipped", "easyship_status": "PickedUp"},
+        }
+    )
+
+    async def _integ(session, conta):
+        return object()  # qualquer não-None: conta "tem integração"
+
+    def _build(session, integ, *, lock=None):
+        return fake
+
+    monkeypatch.setattr(logistica_amazon, "_amazon_integration_for_conta", _integ)
+    monkeypatch.setattr(logistica_amazon, "_build_amazon_client", _build)
+
+    out = await logistica_amazon.sweep_pos_venda(db)
+
+    # O Delivered (estado final) não gastou chamada de API.
+    assert sorted(consultados) == ["702-0000001-0000001", "702-0000003-0000003"]
+    # Só quem trocou de assinatura volta como "mudado" (vira extra no
+    # recarregar e fura o escondimento).
+    assert out["ids"] == [ids["mudou"]]
+    assert (out["seen"], out["checked"], out["changed"], out["failed"]) == (3, 2, 1, 0)
+    await db.refresh(r_mudou)
+    assert (r_mudou.meli_status or {}).get("easyship_status") == "Delivered"

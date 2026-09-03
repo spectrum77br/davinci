@@ -454,9 +454,25 @@ async def aplicar_status_em_lote(
     alvo = (
         _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS | _TIKTOK_PLATAFORMAS | _AMAZON_PLATAFORMAS
     )
-    rows = [r for r in todos if (r.plataforma or "").strip().lower() in alvo]
+    # Só os IDs (valores planos): `session.rollback()` numa falha expira TODAS
+    # as instâncias ORM da sessão, e tocar atributo expirado fora do greenlet
+    # levanta MissingGreenlet — foi assim que um único 400 do Bling matou o
+    # lote inteiro (e o cron de 5min ficou semanas sem aplicar nada depois do
+    # pedido problemático). Cada iteração re-busca a linha por id.
+    row_ids = [r.id for r in todos if (r.plataforma or "").strip().lower() in alvo]
     aplicados = pulados = falhas = 0
-    for row in rows:
+    rolled_back = False
+    for row_id in row_ids:
+        row = await session.get(Logistica, row_id)
+        if row is None:  # apagada por outro fluxo no meio do lote
+            continue
+        if rolled_back:
+            # O rollback também expirou o catálogo de regras — recarrega.
+            status_rows = list(
+                (await session.execute(select(LogisticaStatus))).scalars().all()
+            )
+            rolled_back = False
+        pedido = row.pedido_bling
         assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
         cands = logistica_match.find_matching_rules(
             status_rows, assinatura=assinatura, plataforma=row.plataforma
@@ -477,8 +493,14 @@ async def aplicar_status_em_lote(
         except Exception as e:  # noqa: BLE001 — best-effort, não derruba o lote
             falhas += 1
             await session.rollback()
+            rolled_back = True
+            # NUNCA tocar `row.*` aqui: pós-rollback a instância está expirada
+            # e o refresh implícito é IO síncrono (MissingGreenlet).
             logger.warning(
-                "logistica_status_lote_falha", id=str(row.id), err=str(e)[:200]
+                "logistica_status_lote_falha",
+                id=str(row_id),
+                pedido=pedido,
+                err=str(e)[:200],
             )
     await session.commit()
     return {"aplicados": aplicados, "pulados": pulados, "falhas": falhas}
