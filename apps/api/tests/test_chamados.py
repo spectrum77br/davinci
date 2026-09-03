@@ -493,6 +493,74 @@ async def test_agent_fluxo_completo(client, make_user, auth_as, db, monkeypatch)
     assert (await client.get("/api/chamados")).json()["total"] == 0  # resolvido saiu dos abertos
 
 
+async def test_agent_recebida_por_protocolo_e_idempotente(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """Monitor do Tuta só conhece o PROTOCOLO (assunto "Serviço ao Cliente
+    [Case: N]"): `recebida` acha o chamado só pelo `chamado`; reler a caixa
+    não duplica a mesma resposta no histórico (e `resolvido` ainda fecha)."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("NF_AGENT_TOKEN", _TOKEN)
+    get_settings.cache_clear()
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados/agent/registrar",
+        headers=hdr,
+        json={
+            "pedido_bling": "293413",
+            "origem": "margem",
+            "conta": "forpaper",
+            "chamado": "479770243",
+            "chamado_url": "https://www.mercadolivre.com.br/cases/detail/479770243",
+            "mensagem": "Diferença de frete R$ 31,50.",
+        },
+    )
+    assert r.status_code == 200, r.text
+    cid = r.json()["chamado_id"]
+
+    # só o protocolo, sem pedido_bling
+    rec = await client.post(
+        "/api/chamados/agent/recebida",
+        headers=hdr,
+        json={"chamado": "479770243", "texto": "Olá! Estamos analisando o seu caso."},
+    )
+    assert rec.status_code == 200, rec.text
+    assert rec.json()["chamado_id"] == cid and rec.json()["resolvido"] is False
+    mid = rec.json()["mensagem_id"]
+
+    # mesma resposta de novo (monitor releu a caixa) → mesma mensagem, sem duplicar
+    rec2 = await client.post(
+        "/api/chamados/agent/recebida",
+        headers=hdr,
+        json={"chamado": "479770243", "texto": "Olá! Estamos analisando o seu caso."},
+    )
+    assert rec2.status_code == 200 and rec2.json()["mensagem_id"] == mid
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    assert sum(1 for h in hist if h["direcao"] == "recebida") == 1
+
+    # resposta nova fecha o chamado
+    rec3 = await client.post(
+        "/api/chamados/agent/recebida",
+        headers=hdr,
+        json={
+            "chamado": "479770243",
+            "texto": "Reembolso de R$ 31,50 creditado.",
+            "resolvido": True,
+        },
+    )
+    assert rec3.status_code == 200 and rec3.json()["resolvido"] is True
+    assert rec3.json()["mensagem_id"] != mid
+
+    # protocolo desconhecido → 404
+    nf = await client.post(
+        "/api/chamados/agent/recebida", headers=hdr, json={"chamado": "000", "texto": "x"}
+    )
+    assert nf.status_code == 404
+
+
 async def test_agent_lease_abrir_e_falha(client, make_user, auth_as, db, monkeypatch):
     """Chamado criado na aba com canal robô e SEM protocolo → tarefa `abrir`;
     resultado ok com protocolo grava na linha; falha fica visível."""

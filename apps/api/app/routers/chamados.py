@@ -761,20 +761,39 @@ async def agent_recebida(
     ch: Chamado | None = None
     if body.chamado_id:
         ch = await _get(session, body.chamado_id)
-    elif body.pedido_bling and body.chamado:
+    elif body.chamado:
+        # O monitor do Tuta só conhece o PROTOCOLO (assunto "Serviço ao Cliente
+        # [Case: 479770243]"); o pedido é opcional e só desempata.
+        q = select(Chamado).where(Chamado.chamado == body.chamado)
+        if body.pedido_bling:
+            q = q.where(Chamado.pedido_bling == body.pedido_bling)
         ch = (
-            await session.execute(
-                select(Chamado)
-                .where(Chamado.pedido_bling == body.pedido_bling, Chamado.chamado == body.chamado)
-                .order_by(Chamado.created_at.desc())
-                .limit(1)
-            )
+            await session.execute(q.order_by(Chamado.created_at.desc()).limit(1))
         ).scalar_one_or_none()
     if ch is None:
         raise HTTPException(404, detail={"code": "chamado_not_found"})
     texto = body.texto.strip()
     if body.resumo:
         texto = f"{body.resumo.strip()}\n\n{texto}"
+    # Idempotente: o monitor relê a caixa a cada rodada — a mesma resposta do
+    # ML (mesmo texto) não entra duas vezes no histórico.
+    dup = (
+        await session.execute(
+            select(ChamadoMensagem)
+            .where(
+                ChamadoMensagem.chamado_id == ch.id,
+                ChamadoMensagem.direcao == "recebida",
+                ChamadoMensagem.texto == texto,
+            )
+            .order_by(ChamadoMensagem.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if dup is not None:
+        if body.resolvido and not ch.resolvido:
+            session.add(svc.marcar_resolvido(ch, True, autor_nome=AUTOR_MONITOR))
+            await session.commit()
+        return AgentRecebidaOut(chamado_id=ch.id, mensagem_id=dup.id, resolvido=ch.resolvido)
     m = svc.nova_mensagem(
         ch,
         texto=texto,
