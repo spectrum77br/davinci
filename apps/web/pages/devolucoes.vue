@@ -659,6 +659,8 @@ type AcompanhamentoRow = {
   rastreio: string | null
   localizacao: string | null
   localizacao_data: string | null
+  // Entrega original quando `localizacao` é o status de uma devolução viva.
+  entrega_localizacao: string | null
   lancada: boolean
 }
 type AcompanhamentoPage = { items: AcompanhamentoRow[]; total_pedidos: number }
@@ -667,6 +669,8 @@ type RastreioSaved = {
   rastreio: string | null
   localizacao: string | null
   localizacao_data: string | null
+  // Entrega original quando `localizacao` é o status de uma devolução viva.
+  entrega_localizacao: string | null
 }
 
 type Tab = 'acompanhamento' | 'lancamentos'
@@ -784,6 +788,7 @@ async function saveRastreio(row: AcompanhamentoRow, field: 'rastreio' | 'localiz
         r.rastreio = res.rastreio
         r.localizacao = res.localizacao
         r.localizacao_data = res.localizacao_data
+        r.entrega_localizacao = res.entrega_localizacao
       }
     }
   } catch (e: any) {
@@ -1394,6 +1399,7 @@ async function backfillAddresses() {
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input
                   :value="row.localizacao || ''"
+                  :title="row.entrega_localizacao ? `Status da devolução (automático). Entrega original: ${row.entrega_localizacao}` : undefined"
                   :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'localizacao')"
                   :class="sheetInputClass"
                   placeholder="onde o pacote está"

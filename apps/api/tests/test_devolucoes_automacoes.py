@@ -360,6 +360,67 @@ async def test_acompanhamento_data_ultima_movimentacao_vem_da_logistica(
         await _derruba_view(db)
 
 
+async def test_acompanhamento_mostra_status_da_devolucao_viva(
+    client, db, make_user, auth_as
+):
+    """Eduardo 03/09: "tem mais um monte de pedido entregue e só vem em
+    acompanhamentos" — a coluna mostrava a ENTREGA ("Pedido entregue") enquanto
+    a devolução, aberta depois, seguia viva. Com devolução viva, a coluna passa
+    a mostrar o status da devolução; a entrega vai pro `entrega_localizacao`.
+    Localização MANUAL continua mandando; devolução encerrada volta à entrega."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    p1, p2 = f"36{uuid4().hex[:6]}", f"37{uuid4().hex[:6]}"
+    await _monta_acompanhamento(db, p1, p2)
+    # p2: Shopee entregue ao cliente + devolução em processamento.
+    db.add(
+        Logistica(
+            pedido_bling=p2,
+            plataforma="Shopee",
+            rastreio="BR999",
+            localizacao="Pedido entregue",
+            meli_status={"order_status": "COMPLETED", "return_status": "PROCESSING"},
+        )
+    )
+    await db.commit()
+
+    try:
+        r = await client.get("/api/devolutions/acompanhamento")
+        assert r.status_code == 200
+        por_pedido = {i["pedido_bling"]: i for i in r.json()["items"]}
+
+        assert por_pedido[p2]["localizacao"] == "Devolução em processamento (Shopee)"
+        assert por_pedido[p2]["entrega_localizacao"] == "Pedido entregue"
+        assert por_pedido[p2]["rastreio"] == "BR999"
+
+        # p1 tem localização MANUAL ("Recebido no CD") → manual manda, e a
+        # Logística de p1 nem tem devolução.
+        assert por_pedido[p1]["localizacao"] == "Recebido no CD"
+        assert por_pedido[p1]["entrega_localizacao"] is None
+
+        # PATCH só do rastreio de p2 → resposta mantém o status da devolução.
+        r = await client.patch(
+            f"/api/devolutions/acompanhamento/{p2}", json={"rastreio": "BR1000"}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["localizacao"] == "Devolução em processamento (Shopee)"
+        assert body["entrega_localizacao"] == "Pedido entregue"
+
+        # Devolução cancelada → volta a mostrar a entrega.
+        lg = (
+            await db.execute(select(Logistica).where(Logistica.pedido_bling == p2))
+        ).scalar_one()
+        lg.meli_status = {"order_status": "COMPLETED", "return_status": "CANCELLED"}
+        await db.commit()
+        r = await client.get("/api/devolutions/acompanhamento")
+        por_pedido = {i["pedido_bling"]: i for i in r.json()["items"]}
+        assert por_pedido[p2]["localizacao"] == "Pedido entregue"
+        assert por_pedido[p2]["entrega_localizacao"] is None
+    finally:
+        await _derruba_view(db)
+
+
 # ------------------------------- Informar de Devoluções (admin-only, Threema)
 
 

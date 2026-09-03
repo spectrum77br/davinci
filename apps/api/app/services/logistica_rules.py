@@ -342,6 +342,48 @@ def assinatura_tiktok(status: dict[str, str] | None) -> str:
     return TIKTOK_STATUS_LABELS_PT.get(v, v.replace("_", " ").title())
 
 
+# --- Devolução (Shopee/TikTok) em PT, pra aba Acompanhamento -----------------
+# Eduardo 03/09: "tem mais um monte de pedido entregue e só vem em
+# acompanhamentos" — a coluna "Última localização" mostrava a ENTREGA original
+# ("Pedido entregue") enquanto a devolução, aberta depois, seguia viva. Aqui o
+# status da devolução vira texto de gente, e a aba o mostra no lugar da entrega
+# quando o caso está vivo (a entrega vai pro tooltip).
+_SHOPEE_RETURN_LABELS_PT = {
+    "REQUESTED": "Devolução solicitada pelo cliente — aguardando análise",
+    "PROCESSING": "Devolução em processamento (Shopee)",
+    "JUDGING": "Devolução em análise pela Shopee",
+    "ACCEPTED": "Devolução aceita",
+    "SELLER_DISPUTE": "Devolução contestada pelo vendedor",
+    "REFUND_PAID": "Reembolso pago pela Shopee",
+}
+_TIKTOK_RETURN_LABELS_PT = {
+    "RETURN_OR_REFUND_REQUEST_PENDING": "Devolução solicitada — aguardando resposta",
+    "AWAITING_BUYER_SHIP": "Devolução aprovada — aguardando o cliente enviar",
+    "BUYER_SHIPPED_ITEM": "Cliente enviou o item de volta",
+    "RETURN_OR_REFUND_REQUEST_SUCCESS": "Devolução concluída (TikTok)",
+    "RETURN_OR_REFUND_REQUEST_COMPLETE": "Devolução concluída (TikTok)",
+}
+
+
+def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -> str | None:
+    """Texto em PT da devolução VIVA de Shopee/TikTok, ou None quando não há
+    caso aberto (sem `return_status`, ou encerrado — cancelado/recusado).
+    Status vivo sem tradução vira "Devolução: <STATUS>" (nunca esconde)."""
+    ret = ((status or {}).get("return_status") or "").strip().upper()
+    if not ret:
+        return None
+    p = (plataforma or "").strip().lower()
+    if p in _SHOPEE_PLATAFORMAS:
+        if ret in _SHOPEE_RETURN_ENCERRADO:
+            return None
+        return _SHOPEE_RETURN_LABELS_PT.get(ret, f"Devolução: {ret}")
+    if p in _TIKTOK_PLATAFORMAS:
+        if ret in _TIKTOK_RETURN_ENCERRADO:
+            return None
+        return _TIKTOK_RETURN_LABELS_PT.get(ret, f"Devolução: {ret}")
+    return None
+
+
 # --- Amazon ---------------------------------------------------------------
 # A Amazon NÃO expõe número de rastreio pelo Orders API (o /shipment dá 403 sem
 # escopo), então a assinatura combina o `order_status` (OrderStatus) com o

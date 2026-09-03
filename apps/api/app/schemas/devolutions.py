@@ -289,6 +289,10 @@ class AcompanhamentoItemOut(BaseModel):
     rastreio: str | None = None
     localizacao: str | None = None
     localizacao_data: datetime | None = None
+    # Quando há devolução VIVA (Shopee/TikTok), `localizacao` passa a ser o
+    # status da devolução e a entrega original ("Pedido entregue") vem aqui
+    # (tooltip). None = sem devolução viva (localizacao é a entrega mesmo).
+    entrega_localizacao: str | None = None
     # True quando o pedido já tem devolução LANÇADA na aba de lançamentos.
     lancada: bool = False
 
@@ -311,3 +315,7 @@ class AcompanhamentoRastreioOut(BaseModel):
     rastreio: str | None = None
     localizacao: str | None = None
     localizacao_data: datetime | None = None
+    # Quando há devolução VIVA (Shopee/TikTok), `localizacao` passa a ser o
+    # status da devolução e a entrega original ("Pedido entregue") vem aqui
+    # (tooltip). None = sem devolução viva (localizacao é a entrega mesmo).
+    entrega_localizacao: str | None = None

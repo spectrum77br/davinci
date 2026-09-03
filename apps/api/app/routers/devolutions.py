@@ -284,6 +284,30 @@ _LOGISTICA_ULTIMA_MOVIMENTACAO_SQL = (
 )
 
 
+def _com_status_da_devolucao(
+    d: dict,
+    *,
+    localizacao_manual: str | None,
+    lg_plataforma: str | None,
+    lg_meli_status: dict | None,
+) -> dict:
+    """Devolução VIVA (Shopee/TikTok) → `localizacao` vira o status da devolução
+    e a entrega original vai pra `entrega_localizacao` (Eduardo 03/09: "tem mais
+    um monte de pedido entregue e só vem em acompanhamentos" — a coluna mostrava
+    "Pedido entregue" com a devolução aberta depois). Localização MANUAL
+    continua mandando; sem devolução viva, nada muda."""
+    from app.services import logistica_rules  # tardio: evita ciclo router↔services
+
+    d.setdefault("entrega_localizacao", None)
+    if localizacao_manual:
+        return d
+    dev = logistica_rules.devolucao_status_pt(lg_plataforma, lg_meli_status or {})
+    if dev:
+        d["entrega_localizacao"] = d.get("localizacao")
+        d["localizacao"] = dev
+    return d
+
+
 async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
     """Linhas da aba Acompanhamento: TODOS os pedidos hoje em 'Aguardando
     Devolução' (83957) no Bling — uma linha por item, com nome do cliente, dia
@@ -295,12 +319,10 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
     Eduardo 03/09: "nao esta puxando o rastreio, isso tem que ser automatico".
     `localizacao_data` só existe pra localização manual (a Logística não guarda
     a data da última movimentação). Compartilhada com o botão Informar."""
-    return [
-        dict(r)
-        for r in (
-            await session.execute(
-                text(
-                    f"""
+    rows = (
+        await session.execute(
+            text(
+                f"""
                 SELECT
                     v.pedido_bling::text        AS pedido_bling,
                     v.pedido_marketplace::text  AS pedido_marketplace,
@@ -325,6 +347,11 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     CASE WHEN NULLIF(btrim(r.localizacao), '') IS NOT NULL
                          THEN r.localizacao_data
                          ELSE lg.ultima_movimentacao END AS localizacao_data,
+                    -- Auxiliares do pós-processamento (status da devolução
+                    -- viva no lugar da entrega — _com_status_da_devolucao):
+                    NULLIF(btrim(r.localizacao), '') AS localizacao_manual,
+                    lg.lg_plataforma,
+                    lg.lg_meli_status,
                     EXISTS (
                         SELECT 1 FROM "{SCHEMA}".devolutions d
                         WHERE d.pedido_bling = v.pedido_bling::text
@@ -336,7 +363,9 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                 LEFT JOIN LATERAL (
                     SELECT NULLIF(btrim(l.rastreio), '')    AS rastreio,
                            NULLIF(btrim(l.localizacao), '') AS localizacao,
-                           {_LOGISTICA_ULTIMA_MOVIMENTACAO_SQL} AS ultima_movimentacao
+                           {_LOGISTICA_ULTIMA_MOVIMENTACAO_SQL} AS ultima_movimentacao,
+                           l.plataforma                     AS lg_plataforma,
+                           l.meli_status                    AS lg_meli_status
                     FROM "{SCHEMA}".logistica l
                     WHERE l.pedido_bling = v.pedido_bling::text
                       AND (NULLIF(btrim(l.rastreio), '') IS NOT NULL
@@ -349,13 +378,22 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                          v.pedido_bling, v.sku
                 LIMIT 2000
                 """  # noqa: S608
-                ),
-                {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO},
+            ),
+            {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO},
+        )
+    ).mappings().all()
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        out.append(
+            _com_status_da_devolucao(
+                d,
+                localizacao_manual=d.pop("localizacao_manual", None),
+                lg_plataforma=d.pop("lg_plataforma", None),
+                lg_meli_status=d.pop("lg_meli_status", None),
             )
         )
-        .mappings()
-        .all()
-    ]
+    return out
 
 
 @router.get("/acompanhamento", response_model=AcompanhamentoOut)
@@ -431,7 +469,9 @@ async def patch_acompanhamento_rastreio(
                     f"""
                 SELECT NULLIF(btrim(l.rastreio), '')    AS rastreio,
                        NULLIF(btrim(l.localizacao), '') AS localizacao,
-                       {_LOGISTICA_ULTIMA_MOVIMENTACAO_SQL} AS ultima_movimentacao
+                       {_LOGISTICA_ULTIMA_MOVIMENTACAO_SQL} AS ultima_movimentacao,
+                       l.plataforma                     AS lg_plataforma,
+                       l.meli_status                    AS lg_meli_status
                 FROM "{SCHEMA}".logistica l
                 WHERE l.pedido_bling = :pedido
                   AND (NULLIF(btrim(l.rastreio), '') IS NOT NULL
@@ -446,18 +486,25 @@ async def patch_acompanhamento_rastreio(
         .mappings()
         .first()
     )
-    return AcompanhamentoRastreioOut(
-        pedido_bling=row.pedido_bling,
-        rastreio=row.rastreio or (lg["rastreio"] if lg else None),
-        localizacao=row.localizacao or (lg["localizacao"] if lg else None),
-        # Mesma regra do GET: data do manual quando a localização é manual;
-        # senão a última movimentação da Logística.
-        localizacao_data=(
-            row.localizacao_data
-            if row.localizacao
-            else (lg["ultima_movimentacao"] if lg else None)
-        ),
+    # Mesma regra do GET: manual manda; senão o automático da Logística — data
+    # da última movimentação e, com devolução viva, o status da devolução no
+    # lugar da entrega (_com_status_da_devolucao).
+    d = _com_status_da_devolucao(
+        {
+            "pedido_bling": row.pedido_bling,
+            "rastreio": row.rastreio or (lg["rastreio"] if lg else None),
+            "localizacao": row.localizacao or (lg["localizacao"] if lg else None),
+            "localizacao_data": (
+                row.localizacao_data
+                if row.localizacao
+                else (lg["ultima_movimentacao"] if lg else None)
+            ),
+        },
+        localizacao_manual=row.localizacao,
+        lg_plataforma=lg["lg_plataforma"] if lg else None,
+        lg_meli_status=lg["lg_meli_status"] if lg else None,
     )
+    return AcompanhamentoRastreioOut(**d)
 
 
 def _fmt_dt_sp(dt: datetime | None) -> str:
