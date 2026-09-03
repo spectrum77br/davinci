@@ -305,6 +305,15 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
             if st != atual:
                 meli = dict(r.meli_status or {})
                 meli["return_status"] = st
+                # Carimba a data da devolução (update_time da Shopee) — é a
+                # "última movimentação" da aba Acompanhamento; sem isso o
+                # carimbo ficava parado no dia da 1ª devolução (caso 291981).
+                datas_ret: dict[str, dict[str, str]] = {}
+                logistica_datas.propor(
+                    datas_ret, "return_status", got[1] or None,
+                    logistica_datas.FONTE_PLATAFORMA,
+                )
+                r.status_datas = logistica_datas.aplicar(r, meli, datas_ret)
                 r.meli_status = meli
                 mudados.add(r.id)
                 n_returns += 1

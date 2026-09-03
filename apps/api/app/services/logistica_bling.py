@@ -24,6 +24,7 @@ from collections.abc import Collection
 from datetime import date
 from uuid import UUID
 
+import httpx
 import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +42,11 @@ from app.services import logistica_match, logistica_rules
 from app.services.marketplaces.bling import BlingClient
 
 logger = structlog.get_logger()
+
+# "Atendido" (9): escala que o Bling aceita quando recusa um pulo direto entre
+# situações (ex.: Aguardando Devolução → Entregue). Mesmo truque de
+# routers/margens._apply_bling_decision_by_pedido.
+SITUACAO_ATENDIDO = 9
 
 _ML_PLATAFORMAS = logistica_rules._ML_PLATAFORMAS
 _SHOPEE_PLATAFORMAS = logistica_rules._SHOPEE_PLATAFORMAS
@@ -410,7 +416,22 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
     if not r["aplicavel"]:
         raise BlingObsError("logistica_status_atual_divergente")
     alvo, alvo_id = r["alvo"], r["alvo_id"]
-    await r["client"].update_order_situacao(r["bling_id"], alvo_id)
+    via_atendido = False
+    try:
+        await r["client"].update_order_situacao(r["bling_id"], alvo_id)
+    except httpx.HTTPStatusError as e:
+        # Bling recusa (400) certos pulos diretos — caso real 291981 (03/09):
+        # devolução Shopee cancelada, regra manda "Aguardando Devolução →
+        # Entregue" e o Bling só aceita passando por "Atendido" (o mesmo
+        # caminho que o operador faz na mão). Tenta a escala uma vez; se o
+        # Bling recusar de novo, propaga como antes (o lote conta como falha).
+        code = e.response.status_code if e.response is not None else 0
+        atual_id = r["atual_id"]
+        if code != 400 or alvo_id == SITUACAO_ATENDIDO or atual_id == SITUACAO_ATENDIDO:
+            raise
+        await r["client"].update_order_situacao(r["bling_id"], SITUACAO_ATENDIDO)
+        await r["client"].update_order_situacao(r["bling_id"], alvo_id)
+        via_atendido = True
     row.status_bling = alvo
     await session.flush()
     logger.info(
@@ -419,6 +440,7 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
         situacao_de=r["de_id"],
         situacao_id=alvo_id,
         pedido=row.pedido_bling,
+        via_atendido=via_atendido,
     )
     return {"bling_order_id": r["bling_id"], "situacao_alvo": alvo, "situacao_alvo_id": alvo_id}
 

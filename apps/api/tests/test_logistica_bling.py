@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Callable
 from datetime import date
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
@@ -831,6 +832,86 @@ async def test_aplicar_status_em_lote_sobrevive_a_falha_de_uma_linha(
         await db.execute(select(Logistica).where(Logistica.pedido_bling == "99021"))
     ).scalar_one()
     assert row_ok.status_bling == "Entregue"
+
+
+class _PuloProibidoFakeBling(_MultiFakeBling):
+    """Bling real: de "Aguardando Devolução" (83957) NÃO dá pra ir direto a
+    "Entregue" (83953) — só passando por "Atendido" (9). Este fake devolve o
+    400 verdadeiro (httpx.HTTPStatusError) nesse pulo e aceita o resto."""
+
+    async def update_order_situacao(self, bling_id: int, situacao_id: int) -> None:
+        atual = int(self._orders[bling_id]["situacao"]["id"])
+        if atual == 83957 and situacao_id == 83953:
+            req = httpx.Request("PATCH", f"https://bling/pedidos/vendas/{bling_id}/situacoes/{situacao_id}")
+            raise httpx.HTTPStatusError(
+                "400 Bad Request", request=req, response=httpx.Response(400, request=req)
+            )
+        await super().update_order_situacao(bling_id, situacao_id)
+
+
+@pytest.mark.asyncio
+async def test_aplicar_status_passa_por_atendido_quando_bling_recusa_o_pulo(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """Caso real 291981 (03/09): devolução Shopee cancelada → regra "Concluído
+    | Aguardando Devolução → Entregue"; o Bling recusava o pulo direto (400) a
+    cada 10 min. Agora o lote passa por "Atendido" e chega em "Entregue"."""
+    auth_as(admin)
+    meli = {
+        "order_status": "COMPLETED",
+        "return_status": "CANCELLED",
+        "logistics_status": "LOGISTICS_DELIVERY_DONE",
+    }
+    chave = logistica_rules.assinatura_para("Shopee", meli)
+    db.add_all(
+        [
+            SituacaoBling(id=9, nome="Atendido"),
+            SituacaoBling(id=83957, nome="Aguardando Devolução"),
+            SituacaoBling(id=83953, nome="Entregue"),
+        ]
+    )
+    rs = await client.post(
+        "/api/logistica/status",
+        json={
+            "plataforma": "Shopee",
+            "status_plataforma": chave,
+            "status_atual": "Aguardando Devolução",
+            "alterar_status_bling": "Entregue",
+        },
+    )
+    assert rs.status_code == 201, rs.text
+    db.add(
+        BlingOrder(bling_id=591, numero="99030", item_codigo="s1", item_index=0, situacao="83957")
+    )
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Shopee", "pedido_bling": "99030", "meli_status": meli},
+    )
+    assert rc.status_code == 201, rc.text
+
+    fake = _PuloProibidoFakeBling(
+        {591: {"id": 591, "numero": 99030, "situacao": {"id": 83957, "valor": 0}}}
+    )
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+
+    out = await logistica_bling.aplicar_status_em_lote(db)
+
+    assert out == {"aplicados": 1, "pulados": 0, "falhas": 0}
+    # Escala: Atendido primeiro, depois Entregue.
+    assert fake.situacao_sets == [(591, 9), (591, 83953)]
+    row = (
+        await db.execute(select(Logistica).where(Logistica.pedido_bling == "99030"))
+    ).scalar_one()
+    assert row.status_bling == "Entregue"
 
 
 @pytest.mark.asyncio
