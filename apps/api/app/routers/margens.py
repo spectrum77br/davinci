@@ -17,7 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_admin, require_permission
-from app.models import BlingOrder, Integration, IntegrationPlatform, Margens, User
+from app.models import (
+    BlingOrder,
+    Integration,
+    IntegrationPlatform,
+    MargemSaldoManual,
+    Margens,
+    User,
+)
 from app.schemas.margens import (
     ALLOWED_STATUS,
     MargensMarketplaceOut,
@@ -208,6 +215,22 @@ _SALDO_PLATAFORMA_CONFIAVEL_SQL = (
     "COALESCE(v.plataforma_bling, v.plataforma_financeiro, '') "
     f"IN {_PLATAFORMAS_SALDO_CONFIAVEL_IN}"
 )
+
+# Saldo MANUAL (Eduardo, 03/09: "coloque a opção de preencher manualmente tbm,
+# esta automatico mas e bom dar pra preencher na mao tbm"). Vale SÓ para
+# ML/Shopee/TikTok enquanto o líquido REAL da plataforma não sincroniza (a
+# célula "—" do print). O valor digitado preenche o vazio; quando o real chega,
+# ele VENCE o manual (COALESCE(real, manual) no _SALDO_EFETIVO_SQL) — a regra
+# de 01/09 ("sempre pegar a da plataforma", sem projeção e sem Bling) continua:
+# manual não é projeção nem Bling, é GENTE digitando de propósito. Subquery
+# escalar (grão de item, PK) em vez de JOIN para funcionar em qualquer query
+# que tenha o alias `v` (listagem, count, triagem, informar, auto-hold).
+_SALDO_MANUAL_TABLE = _qualified_table("margem_saldo_manual")
+_SALDO_MANUAL_SQL = (
+    # tabela de _qualified_table, sem input do usuário
+    f"(SELECT msm.valor FROM {_SALDO_MANUAL_TABLE} msm "  # noqa: S608
+    "WHERE msm.bling_order_item_id = v.bling_order_item_id)"
+)
 # "Saldo divergente" — restrito a pedidos em situação 6 ou 83965 (só esses
 # contam para triagem), com saldo_base do Bling presente, FORA de
 # ML/Shopee/TikTok (isentas — ver bloco acima), e que satisfaçam UMA das
@@ -253,7 +276,10 @@ _ATTENTION_SALDO_AGUARDANDO_SQL = (
     f"(v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN}) "
     " AND v.bling_valorbase_item IS NOT NULL "
     f" AND {_SALDO_PLATAFORMA_CONFIAVEL_SQL} "
-    " AND v.marketplace_liquido_base_margem_item IS NULL)"
+    " AND v.marketplace_liquido_base_margem_item IS NULL "
+    # Saldo digitado na mão preenche o vazio → não está mais "aguardando"
+    # (o endpoint saldo-manual já decidiu o status na hora do save).
+    f" AND ({_SALDO_MANUAL_SQL}) IS NULL)"
 )
 
 # "Needs attention" flag — rows the user must triage. Four independent triggers:
@@ -329,11 +355,13 @@ _SALDO_FINAL_BLING_SQL = (
 # (noite: "o saldo efetivo deixe sempre em branco... retirar a projeção").
 # Com o Efetivo NULL, saldo_final e margem_pos_reembolso ficam NULL — as
 # colunas Lucro/Final da UI ficam em branco até o repasse real chegar. O
-# frontend esconde o lápis nessas plataformas (editar gravaria no Bling sem
-# mudar o número da célula — pareceria "não salvou").
+# frontend esconde o lápis quando o real JÁ chegou (editar gravaria no Bling
+# sem mudar o número da célula — pareceria "não salvou"); enquanto o real NÃO
+# chegou, o lápis grava o saldo MANUAL (03/09), que preenche o vazio aqui via
+# COALESCE — o real continua vencendo quando sincronizar.
 _SALDO_EFETIVO_SQL = (
     f"(CASE WHEN {_SALDO_PLATAFORMA_CONFIAVEL_SQL} "
-    f"      THEN {_SALDO_PLATAFORMA_SQL} "
+    f"      THEN COALESCE({_SALDO_PLATAFORMA_SQL}, {_SALDO_MANUAL_SQL}) "
     f"     ELSE {_SALDO_BLING_SQL} END)"
 )
 # Saldo Final coerente com o Efetivo exibido (mesma âncora) + reembolso.
@@ -373,6 +401,11 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             {_SALDO_PLATAFORMA_SQL}                              AS saldo_plataforma,
             {_SALDO_PROJETADO_SQL}                               AS saldo_projetado,
             {_SALDO_BLING_SQL}                                   AS saldo_bling,
+            -- Saldo digitado na mão (03/09): o front usa pra saber que o valor
+            -- exibido veio de gente (marcador "manual") e pra pré-preencher a
+            -- edição. Quando o real chega, ele vence — mas o manual continua
+            -- aqui pro operador ver o que tinha digitado.
+            {_SALDO_MANUAL_SQL}                                  AS saldo_manual,
             -- Saldo Efetivo = saldo realizado do item. Âncora no Bling
             -- (valor_base − frete − taxa) — é lá que a edição inline grava
             -- (POST /sync-saldo-final → bling_orders.valorbase, zerando
@@ -1184,6 +1217,207 @@ async def sync_bling_from_saldo_final(
         "valorbase": float(valorbase),
         "taxacomissao": 0.0,
         "custofrete": 0.0,
+        "status": result_status,
+        "margem": None if margem_final is None else float(margem_final),
+        "margem_minima": None if margem_minima is None else float(margem_minima),
+    }
+
+
+class SaldoManualPatch(BaseModel):
+    """Body do PUT /saldo-manual. `valor` None = apagar (volta ao automático)."""
+
+    valor: float | None = None
+
+
+@router.put("/marketplace/{bling_order_item_id}/saldo-manual")
+async def put_saldo_manual(
+    bling_order_item_id: UUID,
+    body: SaldoManualPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("margem", "edit"))],
+) -> dict:
+    """Saldo Efetivo digitado NA MÃO (Eduardo, 03/09) — só ML/Shopee/TikTok
+    enquanto o líquido REAL da plataforma não sincroniza (célula "—").
+
+    NÃO grava nada no Bling (diferente do sync-saldo-final): o valor vai para
+    a tabela `margem_saldo_manual` e entra no Efetivo/Lucro/Margem via
+    COALESCE(real, manual) — quando o repasse real chegar, ele VENCE o manual.
+    Igual à edição de Saldo Efetivo das outras plataformas, o save decide o
+    status na hora: margem recalculada ≥ mínima (ou sem critério / Data
+    Especial) → Aprovado; abaixo → fica Pendente para decisão manual.
+    `valor` None apaga o manual e devolve a linha ao automático (em branco +
+    "aguardando saldo da plataforma").
+    """
+    row = (await session.execute(
+        text(
+            f"""
+            SELECT v.pedido_bling, v.sku,
+                   COALESCE(v.plataforma_bling, v.plataforma_financeiro) AS plataforma,
+                   v.marketplace_liquido_base_margem_item AS saldo_real,
+                   ({_SALDO_MANUAL_SQL}) AS saldo_manual
+            FROM {_VERIFICAR_MARGEM_TABLE} v
+            WHERE v.bling_order_item_id = :id
+            LIMIT 1
+            """  # noqa: S608
+        ),
+        {"id": str(bling_order_item_id)},
+    )).first()
+    if row is None:
+        raise HTTPException(404, detail={"code": "row_not_found"})
+
+    manual_antigo = row.saldo_manual
+
+    if body.valor is None:
+        # Apagar: some o manual e a linha VOLTA ao automático — status gravado
+        # é limpo (senão um Aprovado-por-manual continuaria aprovado com a
+        # célula de novo em branco) e o gatilho "aguardando saldo" volta a
+        # segurar a linha como Pendente até o repasse real chegar.
+        if manual_antigo is None:
+            return {"ok": True, "valor": None, "status": None}
+        await session.execute(
+            text(
+                f"DELETE FROM {_SALDO_MANUAL_TABLE} "  # noqa: S608
+                "WHERE bling_order_item_id = :id"
+            ),
+            {"id": str(bling_order_item_id)},
+        )
+        if row.pedido_bling is not None:
+            await session.execute(
+                update(BlingOrder)
+                .where(BlingOrder.numero == str(row.pedido_bling))
+                .values(status=None, verificado=False, aprovado_por=None)
+            )
+            # Snapshot best-effort (igual _mark_pedido_pendente_by_pedido):
+            # bling_orders é a fonte que sobrevive ao rebuild.
+            try:
+                await session.execute(
+                    text(
+                        f"""
+                        UPDATE {_VERIFICAR_MARGEM_TABLE}
+                        SET bling_status_margem = NULL,
+                            verificado = false,
+                            aprovado_por = NULL
+                        WHERE pedido_bling = :pedido_bling
+                        """  # noqa: S608
+                    ),
+                    {"pedido_bling": str(row.pedido_bling)},
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "saldo_manual_clear_snapshot_failed",
+                    pedido_bling=str(row.pedido_bling),
+                    error=str(e)[:200],
+                )
+        await record_margem_audit(
+            session,
+            acao="saldo_manual",
+            pedido_bling=str(row.pedido_bling),
+            sku=row.sku,
+            valor_antigo=f"{float(manual_antigo):.2f}",
+            valor_novo=None,
+            origem="margens",
+            mudado_por=user.id,
+        )
+        await session.commit()
+        logger.info(
+            "saldo_manual_cleared",
+            bling_order_item_id=str(bling_order_item_id),
+            pedido_bling=str(row.pedido_bling),
+        )
+        return {"ok": True, "valor": None, "status": None}
+
+    if (row.plataforma or "") not in ("ml", "shopee", "tiktok"):
+        # Fora das plataformas ancoradas o caminho é o lápis normal
+        # (sync-saldo-final, grava no Bling) — aqui não se aplica.
+        raise HTTPException(400, detail={"code": "saldo_manual_nao_aplicavel"})
+    if row.saldo_real is not None:
+        # O repasse real JÁ chegou — ele é a fonte da verdade (01/09), o
+        # manual seria ignorado. O front esconde o lápis nesse caso.
+        raise HTTPException(400, detail={"code": "saldo_plataforma_ja_sincronizado"})
+
+    await session.merge(MargemSaldoManual(
+        bling_order_item_id=bling_order_item_id,
+        pedido_bling=str(row.pedido_bling) if row.pedido_bling is not None else None,
+        sku=row.sku,
+        valor=body.valor,
+        updated_by=user.id,
+    ))
+    await session.flush()  # o SELECT de margem abaixo precisa ver o valor novo
+    await record_margem_audit(
+        session,
+        acao="saldo_manual",
+        pedido_bling=str(row.pedido_bling),
+        sku=row.sku,
+        valor_antigo=None if manual_antigo is None else f"{float(manual_antigo):.2f}",
+        valor_novo=f"{float(body.valor):.2f}",
+        origem="margens",
+        mudado_por=user.id,
+    )
+
+    # Mesma régua do sync-saldo-final, mas sobre o Efetivo EXIBIDO
+    # (_SALDO_FINAL_EFETIVO_SQL — que agora pega o manual via COALESCE), sem
+    # fallback pra margem do Bling (contradiria a âncora na plataforma).
+    margin_row = (await session.execute(
+        text(
+            f"""
+            SELECT
+                v.margem_minima AS margem_minima,
+                {_MARGEM_DATA_ESPECIAL_SQL} AS data_especial,
+                CASE
+                    WHEN COALESCE(v.bling_custo_produtos, 0) > 0
+                         AND {_SALDO_FINAL_EFETIVO_SQL} IS NOT NULL
+                    THEN ({_SALDO_FINAL_EFETIVO_SQL} - v.bling_custo_produtos)
+                         / v.bling_custo_produtos
+                    ELSE NULL::numeric
+                END AS margem_final
+            FROM {_VERIFICAR_MARGEM_TABLE} v
+            WHERE v.bling_order_item_id = :id
+            LIMIT 1
+            """  # noqa: S608
+        ),
+        {"id": str(bling_order_item_id)},
+    )).first()
+    margem_final = margin_row.margem_final if margin_row is not None else None
+    margem_minima = margin_row.margem_minima if margin_row is not None else None
+    data_especial = bool(margin_row.data_especial) if margin_row is not None else False
+    clears_minimum = (
+        margem_minima is None
+        or margem_final is None
+        or margem_final >= margem_minima
+        or data_especial
+    )
+
+    if clears_minimum:
+        await _apply_bling_decision_by_pedido(
+            session,
+            user.id,
+            pedido_bling=row.pedido_bling,
+            sku=row.sku,
+            new_status="Aprovado",
+            update_bling=False,
+        )
+        result_status = "Aprovado"
+    else:
+        await _mark_pedido_pendente_by_pedido(
+            session,
+            pedido_bling=row.pedido_bling,
+            sku=row.sku,
+        )
+        result_status = "Pendente"
+    await session.commit()
+
+    logger.info(
+        "saldo_manual_saved",
+        bling_order_item_id=str(bling_order_item_id),
+        pedido_bling=str(row.pedido_bling),
+        valor=str(body.valor),
+        status=result_status,
+        margem=None if margem_final is None else float(margem_final),
+        margem_minima=None if margem_minima is None else float(margem_minima),
+    )
+    return {
+        "ok": True,
+        "valor": float(body.valor),
         "status": result_status,
         "margem": None if margem_final is None else float(margem_final),
         "margem_minima": None if margem_minima is None else float(margem_minima),

@@ -64,6 +64,7 @@ from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
 from app.models.logistica import Logistica, LogisticaStatus, LogisticaStatusAnexo
 from app.models.margem_audit import MargemAudit
+from app.models.margem_saldo_manual import MargemSaldoManual
 from app.models.margens import Margens
 from app.models.nf import (
     NfCatalogoMala,
@@ -175,6 +176,7 @@ __all__ = [
     "LogisticaStatusAnexo",
     "MARKETPLACES",
     "MargemAudit",
+    "MargemSaldoManual",
     "Margens",
     "MarketingAccount",
     "MarketingCampaign",

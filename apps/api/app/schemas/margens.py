@@ -83,6 +83,9 @@ class MargensMarketplaceOut(BaseModel):
     # Frontend: mostra "≈" e NÃO trata como divergência (não zera o Efetivo).
     saldo_projetado: bool = False
     saldo_bling: float | None = None
+    # Valor digitado NA MÃO (03/09) — preenche o Efetivo de ML/Shopee/TikTok
+    # enquanto o líquido real não sincroniza; o real vence quando chega.
+    saldo_manual: float | None = None
     saldo_efetivo: float | None = None
 
     margem: float | None = None

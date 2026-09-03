@@ -26,6 +26,9 @@ type MarketplaceRow = {
   saldo_plataforma: number | null
   saldo_projetado: boolean | null
   saldo_bling: number | null
+  // Valor digitado NA MÃO (03/09): preenche o Efetivo de ML/Shopee/TikTok
+  // enquanto o repasse real não chega; o real vence quando sincroniza.
+  saldo_manual: number | null
   saldo_efetivo: number | null
   margem: number | null
   margem_bling: number | null
@@ -494,8 +497,10 @@ function freteProjMissingReason(r: MarketplaceRow): string | null {
 // (pedido sem refund/ajuste), cai na margem do Bling. EXCEÇÃO ML/Shopee/
 // TikTok sem repasse real: Lucro/Final ficam EM BRANCO (01/09 à noite —
 // nada de número do Bling nem projeção enquanto a plataforma não confirma).
+// Saldo digitado NA MÃO (03/09) preenche o vazio: com ele a margem volta a
+// existir (o back já a calcula sobre o manual via COALESCE).
 function margemFinal(r: MarketplaceRow): number | null {
-  if (saldoAncoradoNaPlataforma(r) && r.saldo_plataforma == null) return null
+  if (saldoAncoradoNaPlataforma(r) && r.saldo_plataforma == null && r.saldo_manual == null) return null
   const m = r.margem_pos_reembolso
   return (m == null || m === 0) ? r.margem_bling : m
 }
@@ -543,6 +548,19 @@ function saldoEfetivoDisplay(r: MarketplaceRow): number | null {
 // da célula não mudaria — pareceria "não salvou").
 function saldoAncoradoNaPlataforma(r: MarketplaceRow): boolean {
   return ['ml', 'shopee', 'tiktok'].includes(r.plataforma ?? '')
+}
+
+// Saldo manual (03/09, Eduardo: "coloque a opção de preencher manualmente
+// tbm"). Nas plataformas ancoradas, ENQUANTO o repasse real não chega, o
+// lápis volta — mas grava na tabela de saldo manual (não no Bling). Quando o
+// real sincroniza, ele VENCE o manual e o lápis some de novo (regra 01/09).
+function saldoManualEditavel(r: MarketplaceRow): boolean {
+  return saldoAncoradoNaPlataforma(r) && r.saldo_plataforma == null
+}
+
+// O número mostrado no Efetivo é o digitado na mão (real ainda não chegou).
+function saldoManualEmUso(r: MarketplaceRow): boolean {
+  return saldoManualEditavel(r) && r.saldo_manual != null
 }
 
 // Divergência de saldo: Bling e Plataforma ambos presentes e diferindo por mais
@@ -666,11 +684,15 @@ const editingSaldoEfetivo = ref<string | null>(null)
 const saldoEfetivoDraft = ref('')
 
 function startEditSaldoEfetivo(row: MarketplaceRow) {
-  // ML/Shopee com repasse real: o Efetivo É o valor da plataforma — não há o
-  // que editar (gravaria no Bling sem mudar o número exibido).
-  if (!canEdit.value || !row.pedido_bling || saldoAncoradoNaPlataforma(row)) return
+  // ML/Shopee/TikTok com repasse real: o Efetivo É o valor da plataforma —
+  // não há o que editar (gravaria no Bling sem mudar o número exibido).
+  // SEM repasse real ainda, a edição é liberada e grava o saldo MANUAL.
+  if (!canEdit.value || !row.pedido_bling) return
+  if (saldoAncoradoNaPlataforma(row) && !saldoManualEditavel(row)) return
   editingSaldoEfetivo.value = row.bling_order_item_id
-  saldoEfetivoDraft.value = row.saldo_efetivo != null ? String(row.saldo_efetivo) : ''
+  saldoEfetivoDraft.value = saldoManualEditavel(row)
+    ? (row.saldo_manual != null ? String(row.saldo_manual) : '')
+    : (row.saldo_efetivo != null ? String(row.saldo_efetivo) : '')
 }
 
 function cancelEditSaldoEfetivo() {
@@ -679,7 +701,21 @@ function cancelEditSaldoEfetivo() {
 }
 
 async function saveSaldoEfetivo(row: MarketplaceRow) {
-  const next = parseBrNumber(saldoEfetivoDraft.value)
+  const draft = saldoEfetivoDraft.value
+  const next = parseBrNumber(draft)
+  if (saldoManualEditavel(row)) {
+    // Modo manual (plataforma ainda sem repasse real): campo esvaziado APAGA
+    // o valor digitado (volta ao automático — em branco + Pendente).
+    cancelEditSaldoEfetivo()
+    if (draft.trim() === '') {
+      if (row.saldo_manual != null) await salvarSaldoManual(row, null)
+      return
+    }
+    if (Number.isNaN(next)) return
+    if (row.saldo_manual != null && Math.abs(next - row.saldo_manual) < 0.005) return
+    await salvarSaldoManual(row, next)
+    return
+  }
   if (Number.isNaN(next)) {
     cancelEditSaldoEfetivo()
     return
@@ -690,6 +726,34 @@ async function saveSaldoEfetivo(row: MarketplaceRow) {
   }
   cancelEditSaldoEfetivo()
   await syncFromSaldoFinal(row, next)
+}
+
+// Grava/apaga o saldo digitado na mão (tabela margem_saldo_manual — NADA vai
+// pro Bling). O back decide o status na hora, igual à edição das outras
+// plataformas: margem ≥ mínima aprova; abaixo fica Pendente (aviso na tela).
+async function salvarSaldoManual(row: MarketplaceRow, valor: number | null) {
+  if (!canEdit.value) return
+  const id = row.bling_order_item_id
+  if (syncingSaldoFinal.value.has(id)) return
+  syncingSaldoFinal.value.add(id)
+  notice.value = null
+  try {
+    const res = await api<{ status?: string | null; margem?: number | null; margem_minima?: number | null }>(
+      `/api/margens/marketplace/${encodeURIComponent(id)}/saldo-manual`,
+      { method: 'PUT', body: { valor } },
+    )
+    error.value = null
+    notice.value = res?.status === 'Pendente'
+      ? `Saldo manual gravado. Margem recalculada ${pct(res.margem)} ficou abaixo da mínima ${pct(res.margem_minima)} — pedido mantido como Pendente (sem aprovação automática).`
+      : null
+    await reloadCurrent()
+  } catch (e: any) {
+    error.value = apiError(e)
+  } finally {
+    const next = new Set(syncingSaldoFinal.value)
+    next.delete(id)
+    syncingSaldoFinal.value = next
+  }
 }
 
 // ---------- Edição inline de observação ----------
@@ -1131,19 +1195,26 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
                 <button
                   type="button"
                   class="flex items-center justify-end gap-1 text-right tabular-nums hover:text-foreground disabled:cursor-default"
-                  :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id) || saldoAncoradoNaPlataforma(r)"
+                  :disabled="!canEdit || !r.pedido_bling || isSyncingSaldoFinal(r.bling_order_item_id) || (saldoAncoradoNaPlataforma(r) && !saldoManualEditavel(r))"
                   :title="saldoAncoradoNaPlataforma(r)
                     ? (r.saldo_plataforma != null
                       ? `Saldo Efetivo = repasse real da plataforma (${(r.plataforma || '').toUpperCase()}) — valor confirmado, sem conciliação nem edição.`
-                      : `Em branco até a plataforma (${(r.plataforma || '').toUpperCase()}) confirmar o repasse — preenche sozinho; sem projeção, sem edição. Para liberar antes, use Aprovar.`)
+                      : (canEdit && r.pedido_bling
+                        ? `A plataforma (${(r.plataforma || '').toUpperCase()}) ainda não confirmou o repasse. Clique para preencher o saldo NA MÃO (não mexe no Bling). Quando o repasse real chegar, ele substitui o digitado. Apagar o valor volta ao automático (em branco).`
+                        : `Em branco até a plataforma (${(r.plataforma || '').toUpperCase()}) confirmar o repasse — preenche sozinho; sem projeção.`))
                     : saldoZeradoVisual(r)
                       ? `Saldo Bling × Plataforma divergente — Efetivo exibido como 0 (apenas visual). Valor real: ${brl(saldoEfetivoDisplay(r))}.${canEdit && r.pedido_bling ? ' Clique para editar → grava como final no Bling (zera taxa e frete).' : ''}`
                       : (canEdit && r.pedido_bling ? `Editar Saldo Efetivo → grava o valor como final no Bling (zera taxa e frete)` : '')"
                   @click="startEditSaldoEfetivo(r)"
                 >
                   <Loader2 v-if="isSyncingSaldoFinal(r.bling_order_item_id)" class="h-3 w-3 animate-spin inline" />
-                  <span :class="saldoZeradoVisual(r) ? 'text-amber-600 dark:text-amber-400' : ''">{{ brl(saldoEfetivoVisual(r)) }}</span>
-                  <Pencil v-if="canEdit && !saldoAncoradoNaPlataforma(r)" class="size-3 shrink-0 opacity-50" />
+                  <span
+                    v-if="saldoManualEmUso(r)"
+                    class="text-[10px] font-medium rounded px-1 bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                    title="Valor preenchido na mão — quando o repasse real da plataforma chegar, ele substitui."
+                  >manual</span>
+                  <span :class="saldoZeradoVisual(r) ? 'text-amber-600 dark:text-amber-400' : (saldoManualEmUso(r) ? 'text-sky-700 dark:text-sky-300' : '')">{{ brl(saldoEfetivoVisual(r)) }}</span>
+                  <Pencil v-if="canEdit && (!saldoAncoradoNaPlataforma(r) || saldoManualEditavel(r))" class="size-3 shrink-0 opacity-50" />
                 </button>
               </div>
             </td>
