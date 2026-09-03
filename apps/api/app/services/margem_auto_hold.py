@@ -422,7 +422,10 @@ async def _alertar_margem_alta(session: AsyncSession) -> int:
             cabecalho="DaVinci — Margem: margem fora do normal",
             rodape=(
                 "Nada foi alterado no pedido — margem alta assim geralmente é "
-                "custo errado. Confira o cadastro do produto."
+                "custo errado. Confira o cadastro do produto.\n"
+                # Sem ação de aprovar aqui; o link abre o pedido na aba Margem
+                # (Eduardo 03/09: "o link na mensagem não está chegando").
+                f"Ver no DaVinci: {aprovar_link.url_margem(str(r['pedido_bling']))}"
             ),
         )
         try:

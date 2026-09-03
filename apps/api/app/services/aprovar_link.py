@@ -66,3 +66,12 @@ def validar_token(token: str) -> str | None:
 def url_aprovar(pedido: str) -> str:
     base = get_settings().app_url.rstrip("/")
     return f"{base}/api/aprovar/{gerar_token(pedido)}"
+
+
+def url_margem(pedido: str) -> str:
+    """Link "Ver no DaVinci": abre a aba Margem já em "Buscar pedido" com o
+    pedido (margem.vue lê `?pedido=`). Usado nos avisos do Threema que não
+    têm ação de aprovar — ex.: margem fora do normal (Eduardo 03/09: "o link
+    na mensagem não está chegando"). Exige login; sem token."""
+    base = get_settings().app_url.rstrip("/")
+    return f"{base}/margem?pedido={pedido}"

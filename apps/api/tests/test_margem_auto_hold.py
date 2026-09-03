@@ -869,6 +869,8 @@ async def test_alerta_margem_alta_avisa_uma_vez(db: AsyncSession, monkeypatch):
 
     res = await margem_auto_hold.run(db, client=FakeBling(), hoje=HOJE)
 
+    from app.services import aprovar_link
+
     assert res == {"held": 0, "reprovados": 0, "failed": 0, "alertas": 1}
     assert enviados == [
         "DaVinci — Margem: margem fora do normal\n"
@@ -877,8 +879,11 @@ async def test_alerta_margem_alta_avisa_uma_vez(db: AsyncSession, monkeypatch):
         "Margem: 75%\n"
         "Lucro: R$ 350,00\n"
         "Nada foi alterado no pedido — margem alta assim geralmente é "
-        "custo errado. Confira o cadastro do produto."
+        "custo errado. Confira o cadastro do produto.\n"
+        # Sem ação de aprovar; o link abre o pedido na aba Margem (03/09).
+        f"Ver no DaVinci: {aprovar_link.url_margem('501')}"
     ]
+    assert aprovar_link.url_margem("501").endswith("/margem?pedido=501")
     # Pedido intocado: o alerta é só informação (nem situação, nem status).
     snap = await _snapshot(db, "501")
     assert snap["situacao"] == "6"

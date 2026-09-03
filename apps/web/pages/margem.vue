@@ -391,6 +391,14 @@ function onTabVisible() {
   if (document.visibilityState === 'visible' && shouldAutoRefresh.value) autoRefreshSnapshot()
 }
 onMounted(() => {
+  // Link "Ver no DaVinci" dos avisos do Threema (?pedido=N): abre direto em
+  // "Buscar pedido" com o pedido carregado (03/09, Eduardo).
+  const pedidoUrl = useRoute().query.pedido
+  if (typeof pedidoUrl === 'string' && pedidoUrl.trim()) {
+    tab.value = 'lookup'
+    lookupInput.value = pedidoUrl.trim()
+    void lookup(false)
+  }
   if (!shouldAutoRefresh.value) return
   autoRefreshSnapshot()
   autoRefreshTimer = setInterval(() => {
