@@ -155,7 +155,7 @@ class PricingProduct(Base, TimestampMixin):
         ForeignKey("products.id", ondelete="SET NULL"),
         nullable=True,
     )
-    sku: Mapped[str] = mapped_column(String(4000), nullable=False)
+    sku: Mapped[str] = mapped_column(String(2048), nullable=False)
     name: Mapped[str] = mapped_column(String(512), nullable=False)
     segment_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
