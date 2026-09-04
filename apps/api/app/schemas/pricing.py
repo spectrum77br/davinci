@@ -142,7 +142,7 @@ def _norm_prioridade_estoque(v: str | None) -> str | None:
 
 
 class PricingProductBase(BaseModel):
-    sku: str = Field(min_length=1, max_length=2048)
+    sku: str = Field(min_length=1, max_length=4000)
     name: str = Field(min_length=1, max_length=512)
     # Either `segment_id` (preferred, must be a leaf) or the legacy
     # (`department` + `product_type`) pair. Router resolves to segment_id.
@@ -183,7 +183,7 @@ class PricingProductCreate(PricingProductBase):
 
 
 class PricingProductPatch(BaseModel):
-    sku: str | None = Field(default=None, min_length=1, max_length=2048)
+    sku: str | None = Field(default=None, min_length=1, max_length=4000)
     name: str | None = Field(default=None, min_length=1, max_length=512)
     segment_id: UUID | None = None
     department: str | None = None
@@ -214,7 +214,7 @@ class PricingProductPatch(BaseModel):
 
 class PricingProductOut(PricingProductBase):
     model_config = ConfigDict(from_attributes=True)
-    sku: str = Field(max_length=2048)
+    sku: str = Field(max_length=4000)
     name: str = Field(max_length=512)
     id: UUID
     user_id: UUID

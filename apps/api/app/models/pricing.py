@@ -155,7 +155,7 @@ class PricingProduct(Base, TimestampMixin):
         ForeignKey("products.id", ondelete="SET NULL"),
         nullable=True,
     )
-    sku: Mapped[str] = mapped_column(String(2048), nullable=False)
+    sku: Mapped[str] = mapped_column(String(4000), nullable=False)
     name: Mapped[str] = mapped_column(String(512), nullable=False)
     segment_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -182,7 +182,7 @@ class PricingProduct(Base, TimestampMixin):
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # 1000 chars (Eduardo, 03/09): cabe colar VÁRIOS EANs na mesma linha
     # (uma linha agrupa as cores i238,i239,... e cada cor tem EAN próprio).
-    ean: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    ean: Mapped[str | None] = mapped_column(String(4000), nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
