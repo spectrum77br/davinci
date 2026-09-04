@@ -16,11 +16,18 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app.models import LogisticaStatus
+from app.services import logistica_rules
 from app.services.bling_situacoes import NOME_ENVIADO_ETIQUETA, NOME_ENVIADO_ETIQUETA_LEGADO
 
 # Passe-livre do painel: pedido com situação Bling "Problemas" fica visível
 # por este prazo, não importa o que as regras digam (pedido do usuário 18/08).
 PROBLEMA_BLING_DIAS = 360
+
+# Situações do Bling ANTERIORES a "Aguardando Devolução" na esteira: o pedido
+# ainda está tocando como venda normal. Usadas por `devolucao_travada`.
+SITUACOES_ANTES_DA_DEVOLUCAO = frozenset(
+    {"em aberto", "em digitação", "em andamento", "entregue"}
+)
 
 
 def _norm(v: str | None) -> str:
@@ -131,6 +138,33 @@ def problema_bling_visivel(
     if data is None:
         return True
     return data >= date.today() - timedelta(days=dias)
+
+
+def devolucao_travada(
+    rules: list[LogisticaStatus],
+    *,
+    plataforma: str | None,
+    meli_status: dict[str, str] | None,
+    status_bling: str | None,
+) -> bool:
+    """True quando o marketplace já abriu uma devolução VIVA, o pedido ainda está
+    numa situação de venda normal no Bling e NENHUMA regra parte desse estado.
+
+    É o "buraco na matriz" que trava o pedido em silêncio: a chave existe na aba
+    Status, mas a combinação (chave + situação atual) nunca foi cadastrada, então
+    o robô não tem transição pra executar e `estado_resolvido` chega a esconder a
+    linha do painel (Eduardo 04/09: o 291683 tinha devolução aprovada no ML e
+    seguia "Entregue", sem aparecer em lugar nenhum). Quem chama usa isto pra
+    NÃO esconder — igual ao passe-livre de `problema_bling_visivel`.
+
+    Regra cadastrada pro estado atual (mesmo "não faz nada") = decisão do
+    operador, não buraco: devolve False e o painel segue obedecendo a regra.
+    """
+    if not logistica_rules.devolucao_status_pt(plataforma, meli_status):
+        return False
+    if _norm_situacao(status_bling) not in SITUACOES_ANTES_DA_DEVOLUCAO:
+        return False
+    return not regras_aplicaveis(rules, status_bling)
 
 
 def regra_ativa(

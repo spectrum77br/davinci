@@ -289,6 +289,12 @@ async def _ids_pendentes(
             resolvido
             and not logistica_match.deve_monitorar(cands, r.status_bling)
             and not logistica_match.problema_bling_visivel(r.status_bling, r.data)
+            and not logistica_match.devolucao_travada(
+                cands,
+                plataforma=r.plataforma,
+                meli_status=r.meli_status or {},
+                status_bling=r.status_bling,
+            )
         ):
             continue
         pend[chave].append(r.id)

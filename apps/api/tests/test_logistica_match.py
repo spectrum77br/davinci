@@ -303,6 +303,115 @@ def test_problema_bling_visivel_janela_360():
     assert logistica_match.problema_bling_visivel(None, hoje) is False
 
 
+def test_devolucao_travada_caso_291683():
+    # Caso real 291683 (Eduardo 04/09: "esse pedido nao mudou o status para
+    # aguardando devolução automatico"). ML fechou a reclamação a favor do
+    # comprador e aprovou o retorno (return_status=ready_to_ship), mas a chave
+    # só tinha regra pro estado "Aguardando Devolução" — nenhuma partia de
+    # "Entregue". Sem regra aplicável, `estado_resolvido` ESCONDIA a linha:
+    # o pedido travava sem aparecer no painel.
+    meli = {
+        "order_status": "cancelled",
+        "ship_status": "delivered",
+        "cancel_group": "mediations",
+        "return_status": "ready_to_ship",
+        "claim_stage": "claim",
+        "claim_status": "closed",
+        "benefited": "complainant",
+    }
+    chave = logistica_rules.assinatura_para("Mercado Livre", meli)
+    terminal = _rule(
+        plataforma="Mercado Livre", status_plataforma=chave,
+        status_atual="Aguardando Devolução",
+    )
+    # Antes do cadastro: some do painel (bug) → o radar tem que segurar a linha.
+    assert logistica_match.estado_resolvido([terminal], "Entregue") is True
+    assert (
+        logistica_match.devolucao_travada(
+            [terminal], plataforma="Mercado Livre", meli_status=meli, status_bling="Entregue"
+        )
+        is True
+    )
+    # Depois de cadastrar a transição que faltava, não é mais buraco.
+    transicao = _rule(
+        plataforma="Mercado Livre", status_plataforma=chave,
+        status_atual="Entregue", alterar_status_bling="Aguardando Devolução",
+    )
+    assert (
+        logistica_match.devolucao_travada(
+            [terminal, transicao],
+            plataforma="Mercado Livre", meli_status=meli, status_bling="Entregue",
+        )
+        is False
+    )
+    # E o pedido já movido para Aguardando Devolução também não é buraco.
+    assert (
+        logistica_match.devolucao_travada(
+            [terminal, transicao],
+            plataforma="Mercado Livre", meli_status=meli,
+            status_bling="Aguardando Devolução",
+        )
+        is False
+    )
+
+
+def test_devolucao_travada_respeita_regra_de_nao_fazer_nada():
+    # Devolução já ENTREGUE ao vendedor e disputa ganha por ele: a aba Status tem
+    # regra explícita "Entregue → (nada)". Decisão do operador, não buraco —
+    # o radar não pode ressuscitar essas linhas no painel (pedidos 285872/289958).
+    meli = {
+        "order_status": "paid", "ship_status": "delivered", "return_status": "delivered",
+        "claim_stage": "claim", "claim_status": "closed", "benefited": "respondent",
+    }
+    chave = logistica_rules.assinatura_para("Mercado Livre", meli)
+    sem_acao = _rule(plataforma="Mercado Livre", status_plataforma=chave, status_atual="Entregue")
+    assert (
+        logistica_match.devolucao_travada(
+            [sem_acao], plataforma="Mercado Livre", meli_status=meli, status_bling="Entregue"
+        )
+        is False
+    )
+
+
+def test_devolucao_travada_so_com_devolucao_viva_e_bling_atrasado():
+    vivo = {"return_status": "ready_to_ship"}
+    encerrado = {"return_status": "cancelled"}
+    sem_dev = {"order_status": "paid", "ship_status": "delivered"}
+    kw = {"plataforma": "Mercado Livre", "status_bling": "Entregue"}
+    assert logistica_match.devolucao_travada([], meli_status=vivo, **kw) is True
+    # Devolução encerrada ou inexistente: nada a destravar.
+    assert logistica_match.devolucao_travada([], meli_status=encerrado, **kw) is False
+    assert logistica_match.devolucao_travada([], meli_status=sem_dev, **kw) is False
+    assert logistica_match.devolucao_travada([], meli_status=None, **kw) is False
+    # Bling já adiante na esteira (ou fora dela): não é atraso.
+    for situacao in ("Aguardando Devolução", "Cancelado", "Resolvido", "Problemas", None):
+        assert (
+            logistica_match.devolucao_travada(
+                [], plataforma="Mercado Livre", meli_status=vivo, status_bling=situacao
+            )
+            is False
+        )
+    # "Enviado Etiqueta" é apelido de "Em digitação" — conta como esteira.
+    assert (
+        logistica_match.devolucao_travada(
+            [], plataforma="Mercado Livre", meli_status=vivo, status_bling="Enviado Etiqueta"
+        )
+        is True
+    )
+
+
+def test_devolucao_travada_shopee_e_tiktok():
+    # O sinal de devolução viva vale pros três marketplaces que expõem returns.
+    for plat, status in (("Shopee", "REQUESTED"), ("TikTok", "RETURN_OR_REFUND_REQUEST_PENDING")):
+        assert (
+            logistica_match.devolucao_travada(
+                [], plataforma=plat, meli_status={"return_status": status},
+                status_bling="Em andamento",
+            )
+            is True
+        )
+
+
 # ---- endpoint GET /api/logistica ----
 
 

@@ -183,11 +183,19 @@ def _to_out(
         acao_resumo=logistica_match.resumo_acoes(rule),
         acao_monitorar=logistica_match.deve_monitorar(rules, c.status_bling),
         # "Problemas" no Bling ignora o resolvido das regras por 360 dias —
-        # o painel nunca esconde um pedido com problema por causa de regra.
+        # o painel nunca esconde um pedido com problema por causa de regra. Idem
+        # pra devolução viva sem regra pro estado atual (buraco na matriz): sem
+        # isso o pedido some do painel esperando uma transição que não existe.
         acao_resolvido=logistica_match.estado_resolvido(
             rules, c.status_bling, threema_enviado=c.threema_enviado_at is not None
         )
-        and not logistica_match.problema_bling_visivel(c.status_bling, c.data),
+        and not logistica_match.problema_bling_visivel(c.status_bling, c.data)
+        and not logistica_match.devolucao_travada(
+            rules,
+            plataforma=c.plataforma,
+            meli_status=c.meli_status or {},
+            status_bling=c.status_bling,
+        ),
         created_by=c.created_by,
         created_at=c.created_at,
         updated_at=c.updated_at,
