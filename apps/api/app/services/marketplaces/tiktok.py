@@ -752,6 +752,23 @@ class TikTokClient:
             raise RuntimeError(f"tiktok_upload_image sem uri: {str(resp)[:300]}")
         return d
 
+    async def get_return_records(self, return_id: str, *, locale: str = "pt-BR") -> list[dict]:
+        """Linha do tempo da devolução (GET /return_refund/202309/returns/{id}/records):
+        eventos com `role` (BUYER/SELLER/OPERATOR/SYSTEM), `create_time`, notas e
+        mídias. [] em erro (o acompanhamento é best-effort)."""
+        resp = await self._get(
+            f"/return_refund/202309/returns/{return_id}/records", {"locale": locale}
+        )
+        if resp.get("code") not in (0, None):
+            logger.info(
+                "tiktok_return_records_error",
+                code=resp.get("code"), msg=str(resp.get("message"))[:200],
+            )
+            return []
+        d = resp.get("data") or {}
+        lista = d.get("records") or d.get("return_records") or []
+        return [r for r in lista if isinstance(r, dict)]
+
     async def get_reject_reasons(self, return_id: str, *, locale: str = "pt-BR") -> list[dict]:
         """Motivos de recusa válidos pra ESSA devolução no estado atual
         (GET /return_refund/202309/reject_reasons?return_or_cancel_id=…) →

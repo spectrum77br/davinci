@@ -396,6 +396,7 @@ class _FakeTikTok:
     def __init__(self, *, status: str = "BUYER_SHIPPED_ITEM", quick: bool = False):
         self.status = status
         self.quick = quick
+        self.arb = ""
         self.uploads: list[tuple[str, int, str]] = []
         self.rejects: list[dict] = []
 
@@ -411,6 +412,9 @@ class _FakeTikTok:
                 "update_time": 10,
             }
         ]
+
+    async def get_return_records(self, return_id, *, locale="pt-BR"):
+        return []
 
     async def get_reject_reasons(self, return_id, *, locale="pt-BR"):
         return [
@@ -778,3 +782,170 @@ async def test_shopee_acha_return_sn_varrendo_a_api(client, make_user, auth_as, 
     assert r.json()["chamado_ml_status"] == "enviada", r.json()
     assert fake.disputes[-1]["return_sn"] == "2608310QMDCH65V"
     assert chamadas and all(b - a <= 15 * 86400 for a, b in chamadas)
+
+
+# ---------------------------------------------------------------- acompanhamento (resposta no histórico)
+
+
+async def _recebidas(db, chamado_id):
+    rows = (
+        await db.execute(
+            select(ChamadoMensagem)
+            .where(ChamadoMensagem.chamado_id == chamado_id, ChamadoMensagem.direcao == "recebida")
+            .order_by(ChamadoMensagem.created_at)
+        )
+    ).scalars().all()
+    return [m.texto for m in rows]
+
+
+async def test_sync_tiktok_resposta_no_historico_e_encerra(client, make_user, auth_as, db, ml, monkeypatch):
+    from app.services import chamados_devolucao_sync as sync
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTok()
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_tiktok_client_para", _c)
+    await _seed_pedido(db, user, numero="290850", numeroloja="585585025945338850",
+                       platform="tiktok", conta="injox", loja="77")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "injox", "pedido_bling": "290850", "pedido_marketplace": "585585025945338850",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Golpe"},
+    )
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "290850"))).scalar_one()
+
+    # 1) recusa registrada + comprador contestou (arbitragem) + nota do comprador
+    fake.status = "REJECT_RECEIVE_PACKAGE"
+    fake.arb = "IN_PROGRESS"
+    orig = fake.get_return_list
+
+    async def _lista(*, order_ids=None, **kw):
+        out = await orig(order_ids=order_ids)
+        out[0]["arbitration_status"] = fake.arb
+        return out
+
+    fake.get_return_list = _lista
+
+    async def _records(return_id, *, locale="pt-BR"):
+        return [{"role": "BUYER", "create_time": 1788540000, "note": "Discordo, o produto estava novo"},
+                {"role": "SELLER", "create_time": 1788540001, "note": "nossa nota (ignorada)"}]
+
+    fake.get_return_records = _records
+    s1 = await sync.sync_respostas(db)
+    assert s1["verificados"] == 1 and s1["novos"] == 3 and s1["encerrados"] == 0
+    txts = await _recebidas(db, ch.id)
+    assert any("Recusa do pacote registrada" in t for t in txts)
+    assert any("ARBITRAGEM" in t for t in txts)
+    assert any("Comprador" in t and "Discordo" in t for t in txts)
+    # rodar de novo não duplica
+    s2 = await sync.sync_respostas(db)
+    assert s2["novos"] == 0
+    # 2) decisão a favor do vendedor + devolução cancelada → encerra
+    fake.arb = "SUPPORT_SELLER"
+    fake.status = "RETURN_OR_REFUND_REQUEST_CANCEL"
+    s3 = await sync.sync_respostas(db)
+    assert s3["novos"] == 2 and s3["encerrados"] == 1
+    await db.refresh(ch)
+    assert ch.resolvido is True
+    # resolvido some da varredura
+    assert (await sync.sync_respostas(db))["verificados"] == 0
+
+
+async def test_sync_shopee_prova_extra_e_compensacao(client, make_user, auth_as, db, ml, monkeypatch):
+    from app.models import DevolucaoRastreio
+    from app.services import chamados_devolucao_sync as sync
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopee()
+    estado = {"status": "SELLER_DISPUTE", "proof": "PENDING", "comp": "PENDING_REQUEST"}
+
+    async def _det(return_sn):
+        return {"return_sn": return_sn, "status": estado["status"], "return_solution": 0,
+                "needs_logistics": True,
+                "seller_proof": {"seller_proof_status": estado["proof"], "seller_evidence_deadline": 1788600000},
+                "seller_compensation": {"seller_compensation_status": estado["comp"], "compensation_amount": 786.71}}
+
+    fake.get_return_detail = _det
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="292620", numeroloja="260827SYNC01",
+                       platform="shopee", conta="mega", loja="90")
+    db.add(DevolucaoRastreio(pedido_bling="292620", devolucao_id_auto="2608SYNC01", fonte_auto="shopee"))
+    await db.commit()
+    estado["status"] = "ACCEPTED"
+    estado["proof"] = ""
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mega", "pedido_bling": "292620", "pedido_marketplace": "260827SYNC01",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "292620"))).scalar_one()
+    estado["status"] = "SELLER_DISPUTE"
+    estado["proof"] = "PENDING"
+    s1 = await sync.sync_respostas(db)
+    assert s1["novos"] == 2
+    txts = await _recebidas(db, ch.id)
+    assert any("PROVA ADICIONAL" in t and "prazo até" in t for t in txts)
+    assert any("Disputa registrada" in t for t in txts)
+    estado["proof"] = "UPLOADED"
+    estado["comp"] = "COMPENSATION_APPROVED"
+    estado["status"] = "CLOSED"
+    s2 = await sync.sync_respostas(db)
+    assert s2["encerrados"] == 1
+    txts = await _recebidas(db, ch.id)
+    assert any("APROVOU a compensação" in t and "786.71" in t for t in txts)
+    await db.refresh(ch)
+    assert ch.resolvido is True
+
+
+async def test_sync_ml_mensagens_do_mediador_e_decisao(client, make_user, auth_as, db, ml, monkeypatch):
+    from app.services import chamados_devolucao_sync as sync
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="293120", numeroloja="2000120")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "293120", "pedido_marketplace": "2000120",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "293120"))).scalar_one()
+    fake = ml
+    fake.closed = False
+
+    async def _msgs(claim_id):
+        return [{"sender_role": "mediator", "message": "Precisamos do comprovante de postagem", "date_created": "2026-09-04T12:00:00.000-03:00"},
+                {"sender_role": "respondent", "message": "nossa (ignorada)"}]
+
+    fake.get_claim_messages = _msgs
+    s1 = await sync.sync_respostas(db)
+    assert s1["novos"] == 1 and s1["encerrados"] == 0
+    txts = await _recebidas(db, ch.id)
+    assert txts == ["Mediador do ML 04/09 12:00: Precisamos do comprovante de postagem"]
+    # encerrou a favor do vendedor
+    orig = fake.get_claim
+
+    async def _claim(claim_id):
+        c = await orig(claim_id)
+        c["status"] = "closed"
+        c["resolution"] = {"benefited": "respondent", "reason": "seller_return_failed"}
+        return c
+
+    fake.get_claim = _claim
+    s2 = await sync.sync_respostas(db)
+    assert s2["encerrados"] == 1
+    txts = await _recebidas(db, ch.id)
+    assert any("a favor do VENDEDOR" in t for t in txts)
+    await db.refresh(ch)
+    assert ch.resolvido is True

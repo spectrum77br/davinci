@@ -274,6 +274,21 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_claim_messages(self, claim_id: str | int) -> list[dict]:
+        """Mensagens da reclamação (GET /post-purchase/v1/claims/{id}/messages):
+        `[{sender_role, receiver_role, message, date_created, attachments…}]`.
+        [] quando a API não devolve lista (o acompanhamento é best-effort)."""
+        r = await self._request("GET", f"/post-purchase/v1/claims/{claim_id}/messages")
+        if r.status_code >= 400:
+            return []
+        try:
+            body = r.json()
+        except ValueError:
+            return []
+        if isinstance(body, dict):
+            body = body.get("messages") or body.get("results") or []
+        return [m for m in body if isinstance(m, dict)] if isinstance(body, list) else []
+
     async def open_claim_dispute(self, claim_id: str | int) -> dict:
         """Escala a reclamação pra mediação do Mercado Livre (o "chamado"): o ML
         passa a atuar como mediador e o canal de mensagem com o mediador é

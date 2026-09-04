@@ -38,7 +38,7 @@ from app.services.bling_kit_create import create_bling_kit_for_mark_job
 from app.services.bling_notas_token_refresh import run_refresh_bling_notas_tokens
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
-from app.services import chamados_devolucao
+from app.services import chamados_devolucao, chamados_devolucao_sync
 from app.services.chamados import run_replica_automatica as run_chamados_replica_automatica
 from app.services.email import get_email_sender, render_otp_html
 from app.services.import_lote_bling_stock import push_lote_stock_to_bling_job
@@ -854,6 +854,10 @@ async def chamados_replica_automatica(ctx: dict) -> None:
     async with session_scope() as s:
         pend = await chamados_devolucao.processar_pendentes(s)
     logger.info("chamados_devolucao_pendentes_done", **pend)
+    # Resposta da plataforma (TikTok/Shopee/ML) cai no histórico e fecha o chamado.
+    async with session_scope() as s:
+        resp = await chamados_devolucao_sync.sync_respostas(s)
+    logger.info("chamados_devolucao_sync_done", **resp)
 
 
 async def chamado_devolucao_disparar(ctx: dict, chamado_id: str) -> None:
