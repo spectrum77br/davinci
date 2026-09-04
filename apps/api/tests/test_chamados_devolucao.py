@@ -607,3 +607,36 @@ async def test_amazon_sem_api_fica_registrado(client, make_user, auth_as, db, ml
     msg = await _abertura(db, ch.id)
     assert "SAFE-T" in msg.texto and msg.status == "registrada"
     assert ml.reviews == []
+
+
+async def test_tiktok_usa_unico_motivo_disponivel(client, make_user, auth_as, db, ml, monkeypatch):
+    """Medido ao vivo 04/09 (290845): a TikTok BR só ofereceu o reason_2
+    ("produto usado… inadequado para revenda") — Danificado tem que usar ele."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTok()
+
+    async def _reasons(return_id, *, locale="pt-BR"):
+        return [
+            {"name": "reverse_reject_return_parcel_reason_2",
+             "text": "O produto foi usado e devolvido em uma condição inadequada para revenda"},
+            {"name": "seller_reject_apply_you_have_reached_an_agreement_with_the_buyer",
+             "text": "Você chegou a um acordo com o cliente"},
+        ]
+
+    fake.get_reject_reasons = _reasons
+
+    async def _c(session, conta):
+        return fake
+
+    monkeypatch.setattr(svc, "_tiktok_client_para", _c)
+    await _seed_pedido(db, user, numero="290848", numeroloja="585585025945338894",
+                       platform="tiktok", conta="injox", loja="77")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "injox", "pedido_bling": "290848", "pedido_marketplace": "585585025945338894",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Item faltando"},
+    )
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    assert fake.rejects[-1]["reason"] == "reverse_reject_return_parcel_reason_2"
+    assert svc._tiktok_reason_por_texto(await _reasons("x"), "não recebido") is None

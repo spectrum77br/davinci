@@ -594,14 +594,19 @@ async def _return_tiktok(
 
 
 def _tiktok_reason_por_texto(reasons: list[dict], motivo: str) -> str | None:
-    """Quando o name esperado não está na lista da TikTok, casa pelo texto."""
+    """Quando o name esperado não está na lista da TikTok, casa pelo texto
+    (pt/en) e, em último caso, usa o ÚNICO motivo de pacote recebido que a
+    TikTok oferece — medido ao vivo (04/09, pedido 290845): pra devolução BR a
+    lista veio só com `reverse_reject_return_parcel_reason_2` ("O produto foi
+    usado e devolvido em uma condição inadequada para revenda") + "acordo com
+    o cliente"; recusar com esse é o que o Seller Center também oferece."""
     chaves = {
-        "danificado (outros)": ("damaged", "danific"),
-        "bloqueado": ("damaged or used", "used", "usad"),
-        "mudou de ideia": ("damaged or used", "used", "usad"),
-        "item incorreto": ("not the product", "não é o produto", "diferente"),
-        "golpe": ("missing", "falt"),
-        "item faltando": ("missing", "falt"),
+        "danificado (outros)": ("damaged", "danific", "inadequad", "usado", "used"),
+        "bloqueado": ("damaged or used", "usado", "used", "inadequad"),
+        "mudou de ideia": ("damaged or used", "usado", "used", "inadequad"),
+        "item incorreto": ("not the product", "não é o produto", "diferente", "wrong"),
+        "golpe": ("missing", "falt", "not the product", "diferente"),
+        "item faltando": ("missing", "falt", "incomplet"),
         "não recebido": ("haven't received", "not received", "não receb"),
     }.get(motivo, ())
     for chave in chaves:
@@ -609,6 +614,12 @@ def _tiktok_reason_por_texto(reasons: list[dict], motivo: str) -> str | None:
             txt = str(r.get("text") or r.get("reason_text") or "").lower()
             if chave in txt and r.get("name"):
                 return str(r["name"])
+    de_pacote = [
+        str(r["name"]) for r in reasons
+        if str(r.get("name") or "").startswith(_TT)
+    ]
+    if len(de_pacote) == 1 and motivo != "não recebido":
+        return de_pacote[0]
     return None
 
 
