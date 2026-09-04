@@ -640,3 +640,60 @@ async def test_tiktok_usa_unico_motivo_disponivel(client, make_user, auth_as, db
     assert r.json()["chamado_ml_status"] == "enviada", r.json()
     assert fake.rejects[-1]["reason"] == "reverse_reject_return_parcel_reason_2"
     assert svc._tiktok_reason_por_texto(await _reasons("x"), "não recebido") is None
+
+
+async def test_shopee_so_reembolso_pacote_vazio_usa_id_53(client, make_user, auth_as, db, ml, monkeypatch):
+    """Medido ao vivo 04/09 (292617 / 2608310QMDCH65V): comprador alega pacote
+    vazio, só reembolso, motivos vêm SÓ com id (53/54) + requisito em pt."""
+    from app.models import DevolucaoRastreio
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopee()
+
+    async def _det(return_sn):
+        return {"return_sn": return_sn, "status": "ACCEPTED", "return_solution": 1,
+                "needs_logistics": False, "reason": "SUSPICIOUS_PARCEL",
+                "seller_compensation": {"seller_compensation_status": "PENDING_REQUEST"}}
+
+    async def _reasons(return_sn):
+        return [
+            {"dispute_reason": 53, "dispute_requirement": "Envie imagens dos itens enviados…",
+             "evidence_module_list": [{"module_index": 1, "requirement": "Anexe fotos/vídeos gerados por você no momento da expedição do pedido", "is_required": True}]},
+            {"dispute_reason": 54, "dispute_requirement": "Anexe fotos/vídeos…",
+             "evidence_module_list": [{"module_index": 1, "requirement": "Envie imagens…", "is_required": True}]},
+        ]
+
+    fake.get_return_detail = _det
+    fake.get_return_dispute_reason = _reasons
+
+    async def _c(session, conta):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="292617", numeroloja="260827DBUMDT1W",
+                       platform="shopee", conta="mega", loja="90")
+    db.add(DevolucaoRastreio(pedido_bling="292617", devolucao_id_auto="2608310QMDCH65V", fonte_auto="shopee"))
+    await db.commit()
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mega", "pedido_bling": "292617", "pedido_marketplace": "260827DBUMDT1W",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Golpe"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_erro"] == "devolucao_sem_foto"  # Shopee exige foto
+    up = await client.post(
+        f"/api/devolutions/{r.json()['id']}/anexos",
+        files={"file": ("expedicao.jpg", PNG_1PX, "image/jpeg")},
+    )
+    assert up.json()["chamado_ml_status"] == "enviada", up.json()
+    d = fake.disputes[-1]
+    assert d["return_sn"] == "2608310QMDCH65V" and d["reason"] == 53
+    assert d["image_list"] == [{"module_index": 1,
+                                "requirement": "Anexe fotos/vídeos gerados por você no momento da expedição do pedido",
+                                "image_url": ["https://fileproxy/expedicao.jpg"]}]
+    assert "sem o produto dentro" in d["text"]
+    # já contestada (PENDING_REQUEST → REQUESTED) não manda de novo
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "292617"))).scalar_one()
+    msg = await _abertura(db, ch.id)
+    assert msg.status == "enviada"

@@ -696,14 +696,74 @@ async def _disparar_tiktok(
     return rid, REASON_NOME.get(reason, reason)
 
 
-def _shopee_reason(reasons: list[dict], motivo: str) -> dict | None:
-    chaves = MOTIVO_SHOPEE.get(motivo, ())
-    for chave in chaves:
-        for r in reasons:
-            txt = str(
-                r.get("dispute_reason_text") or r.get("reason_text") or r.get("text") or ""
-            ).lower()
-            if chave in txt:
+# Shopee — ids dos motivos de disputa (V2.0 Data Definition, ReturnDisputeReasonId;
+# três séries com o mesmo significado: 46–56 SEA, 81–89 BR/TW, 1–13 legado). Medido
+# ao vivo 04/09 (return 2608310QMDCH65V, só reembolso): a API devolveu SÓ os ids
+# (53, 54) + `dispute_requirement`, sem texto — por isso a tabela.
+_SHOPEE_ID_SEM = {
+    # devolução COM pacote de volta (recebi com problema)
+    46: "nao_recebi", 81: "nao_recebi",
+    47: "danificado", 82: "danificado",
+    48: "incompleto", 83: "incompleto",
+    49: "produto_errado", 84: "produto_errado",
+    50: "alegacao_incorreta", 86: "alegacao_incorreta",
+    56: "usado", 89: "usado",
+    # só reembolso / alegação do comprador
+    53: "alegacao_incorreta", 42: "enviei_correto", 43: "enviei_bom_estado",
+    41: "enviei_com_prova", 1: "rejeito_nao_recebimento",
+    55: "outras_preocupacoes", 44: "sem_acordo", 54: "valor_errado",
+}
+# motivo da tela → semânticas aceitas, na ordem de preferência
+_SHOPEE_PREF_PACOTE: dict[str, tuple[str, ...]] = {
+    "danificado (outros)": ("danificado", "usado", "alegacao_incorreta"),
+    "item incorreto": ("produto_errado", "alegacao_incorreta"),
+    "golpe": ("incompleto", "produto_errado", "alegacao_incorreta"),
+    "item faltando": ("incompleto", "alegacao_incorreta"),
+    "não recebido": ("nao_recebi",),
+    "bloqueado": ("alegacao_incorreta", "usado"),
+    "mudou de ideia": ("alegacao_incorreta", "usado"),
+}
+_SHOPEE_PREF_REEMBOLSO: dict[str, tuple[str, ...]] = {
+    # comprador alega (pacote vazio / danificado / errado / faltando) e NÃO há
+    # pacote voltando: contesta a alegação com as fotos da expedição
+    "golpe": ("alegacao_incorreta", "enviei_correto", "enviei_bom_estado", "enviei_com_prova"),
+    "danificado (outros)": ("enviei_bom_estado", "alegacao_incorreta"),
+    "item incorreto": ("enviei_correto", "alegacao_incorreta"),
+    "item faltando": ("enviei_correto", "alegacao_incorreta"),
+    "não recebido": ("rejeito_nao_recebimento", "enviei_com_prova", "alegacao_incorreta"),
+    "bloqueado": ("alegacao_incorreta",),
+    "mudou de ideia": ("alegacao_incorreta",),
+}
+_SHOPEE_TEXTO_SEM = (
+    ("did not receive", "nao_recebi"), ("physical damage", "danificado"),
+    ("incomplete", "incompleto"), ("wrong return product", "produto_errado"),
+    ("item is used", "usado"), ("claim is incorrect", "alegacao_incorreta"),
+    ("claim incorrect", "alegacao_incorreta"), ("correct item", "enviei_correto"),
+    ("good working condition", "enviei_bom_estado"), ("proof of shipment", "enviei_com_prova"),
+    ("non-receipt", "rejeito_nao_recebimento"), ("wrong amount", "valor_errado"),
+)
+
+
+def _shopee_semantica(r: dict) -> str | None:
+    rid = _shopee_reason_id(r)
+    if rid in _SHOPEE_ID_SEM:
+        return _SHOPEE_ID_SEM[rid]
+    txt = str(r.get("dispute_reason_text") or r.get("reason_text") or r.get("text") or "").lower()
+    for chave, sem in _SHOPEE_TEXTO_SEM:
+        if chave in txt:
+            return sem
+    return None
+
+
+def _shopee_reason(reasons: list[dict], motivo: str, *, so_reembolso: bool = False) -> dict | None:
+    """Motivo de disputa da Shopee pro motivo da tela: por id (tabela oficial)
+    ou pelo texto, respeitando se o caso tem pacote voltando (devolução) ou é
+    só reembolso (contestar a alegação do comprador)."""
+    prefs = (_SHOPEE_PREF_REEMBOLSO if so_reembolso else _SHOPEE_PREF_PACOTE).get(motivo, ())
+    sem_por_reason = [(r, _shopee_semantica(r)) for r in reasons]
+    for sem in prefs:
+        for r, s in sem_por_reason:
+            if s == sem:
                 return r
     return None
 
@@ -764,10 +824,14 @@ async def _disparar_shopee(
         raise _PendenteError("shopee_aguardando_pacote")
     comp = det.get("seller_compensation") or {}
     comp_status = str(comp.get("seller_compensation_status") or "").upper()
-    if comp_status in ("COMPENSATION_REQUESTED", "COMPENSATION_APPROVED", "COMPENSATION_REJECTED"):
+    # medido ao vivo: vem "PENDING_REQUEST" (sem o prefixo COMPENSATION_ da doc)
+    if comp_status.replace("COMPENSATION_", "") in ("REQUESTED", "APPROVED", "REJECTED"):
         raise chamados_svc.ChamadoError("shopee_ja_contestada")
+    # return_solution 1 / needs_logistics false = só reembolso: não há pacote
+    # voltando — a disputa é contra a alegação do comprador (fotos da expedição).
+    so_reembolso = str(det.get("return_solution")) == "1" or det.get("needs_logistics") is False
     reasons = await client.get_return_dispute_reason(return_sn)
-    escolhido = _shopee_reason(reasons, motivo)
+    escolhido = _shopee_reason(reasons, motivo, so_reembolso=so_reembolso)
     rid = _shopee_reason_id(escolhido) if escolhido else None
     if escolhido is None or rid is None:
         raise chamados_svc.ChamadoError("shopee_motivo_indisponivel")
@@ -808,7 +872,9 @@ async def _disparar_shopee(
         text=texto,
     )
     nome_motivo = str(
-        escolhido.get("dispute_reason_text") or escolhido.get("reason_text") or rid
+        escolhido.get("dispute_reason_text")
+        or escolhido.get("reason_text")
+        or f"{_shopee_semantica(escolhido) or 'motivo'} (id {rid})"
     )
     return return_sn, nome_motivo
 
