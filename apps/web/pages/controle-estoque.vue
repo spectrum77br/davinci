@@ -68,7 +68,7 @@ type PedidoRow = {
   quantidade: number
   // 'previsao' = "Em aberto" no Bling (situação 6): NF/etiqueta ainda não
   // geradas — vai virar envio do dia (badge amarelo p/ separar de manhã).
-  status: 'enviado' | 'aguardando_coleta' | 'nao_enviado' | 'previsao'
+  status: 'enviado' | 'nao_enviado' | 'previsao'
   conferido: boolean
   observacao: string | null
   bling_id: number | null
@@ -271,7 +271,7 @@ function pollBlingJob(jobId: string) {
 
 onBeforeUnmount(stopBlingPoll)
 
-const statusFilter = ref<'all' | 'enviado' | 'aguardando_coleta' | 'nao_enviado' | 'previsao'>('all')
+const statusFilter = ref<'all' | 'enviado' | 'nao_enviado' | 'previsao'>('all')
 // Filtro por estado da etiqueta (aba Pedidos) — 100% client-side: as
 // linhas já carregam etiqueta_em / etiqueta_impressa_em. "não impressa" =
 // etiqueta JÁ chegou e ninguém imprimiu (a fila de impressão do gerente
@@ -858,17 +858,6 @@ const pedidosNaoEnviadosCount = computed(() =>
   new Set(
     pedidosFiltered.value
       .filter((p) => p.status === 'nao_enviado')
-      .map((p) => p.pedido_bling)
-      .filter(Boolean),
-  ).size,
-)
-// Etiqueta gerada esperando a transportadora escanear. Fica fora do
-// "não enviado" porque o pacote já saiu da nossa mão — juntar os dois
-// fazia parecer que o sistema tinha travado (Eduardo, 04/09).
-const pedidosAguardandoColetaCount = computed(() =>
-  new Set(
-    pedidosFiltered.value
-      .filter((p) => p.status === 'aguardando_coleta')
       .map((p) => p.pedido_bling)
       .filter(Boolean),
   ).size,
@@ -1644,7 +1633,6 @@ async function conferirTodos() {
         >
           <option value="all" class="text-muted-foreground">todos</option>
           <option value="enviado" class="text-foreground">enviado</option>
-          <option value="aguardando_coleta" class="text-foreground">aguardando coleta</option>
           <option value="nao_enviado" class="text-foreground">não enviado</option>
           <option value="previsao" class="text-foreground">previsão</option>
         </select>
@@ -1829,18 +1817,7 @@ async function conferirTodos() {
       <span class="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 text-white px-2.5 py-1 font-semibold">
         Enviados: {{ pedidosEnviadosCount }}
       </span>
-      <!-- Etiqueta gerada, transportadora ainda não escaneou. Separado do
-           vermelho: o pacote já saiu daqui, quem falta é a transportadora. -->
-      <span
-        class="inline-flex items-center gap-1.5 rounded-md bg-orange-500 text-white px-2.5 py-1 font-semibold"
-        title="Etiqueta gerada e pacote despachado — o marketplace ainda não registrou a coleta. Vira 'enviado' sozinho quando registrar."
-      >
-        Aguardando coleta: {{ pedidosAguardandoColetaCount }}
-      </span>
-      <span
-        class="inline-flex items-center gap-1.5 rounded-md bg-red-600 text-white px-2.5 py-1 font-semibold"
-        title="Pedidos que não saíram: em aberto com etiqueta já emitida e situações de cancelamento"
-      >
+      <span class="inline-flex items-center gap-1.5 rounded-md bg-red-600 text-white px-2.5 py-1 font-semibold">
         Não enviados: {{ pedidosNaoEnviadosCount }}
       </span>
       <!-- Previsão = pedidos "Em aberto" no Bling que vão emitir NF/etiqueta
@@ -2043,24 +2020,18 @@ async function conferirTodos() {
                   ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
                   : row.status === 'previsao'
                     ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
-                    : row.status === 'aguardando_coleta'
-                      ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300'
-                      : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
+                    : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
                 :title="row.status === 'previsao'
                   ? (previsaoDia(row) === 'amanha'
                     ? 'Em aberto no Bling — corte amanhã: dá pra já ir adiantando a separação'
                     : 'Em aberto no Bling — NF e etiqueta ainda não geradas; deve sair hoje')
-                  : row.status === 'aguardando_coleta'
-                    ? 'Etiqueta gerada e pacote despachado — o marketplace ainda não registrou a coleta. Vira \'Enviado\' sozinho quando registrar.'
-                    : row.status === 'enviado' && envioHora(row) ? 'Hora que o envio confirmou' : undefined"
+                  : row.status === 'enviado' && envioHora(row) ? 'Hora que o envio confirmou' : undefined"
               >
                 {{ row.status === 'enviado'
                   ? (envioHora(row) || 'Enviado')
                   : row.status === 'previsao'
                     ? (previsaoDia(row) === 'amanha' ? 'Previsão · amanhã' : 'Previsão · hoje')
-                    : row.status === 'aguardando_coleta'
-                      ? 'Aguardando coleta'
-                      : 'Não enviado' }}
+                    : 'Não enviado' }}
               </span>
               <!-- Papel de previsão já saiu na impressora? Carimbo gravado
                    no clique do 🖨 do relatório — evita separar duas vezes. -->

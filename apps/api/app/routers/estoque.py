@@ -495,8 +495,7 @@ async def list_estoque_pedidos(
     user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
     data_inicio: date | None = Query(None),
     data_fim: date | None = Query(None),
-    # enviado | nao_enviado | aguardando_coleta | previsao
-    status_filter: str | None = Query(None, alias="status"),
+    status_filter: str | None = Query(None, alias="status"),  # enviado | nao_enviado | previsao
     tag: str | None = Query(None),
 ) -> dict[str, Any]:
     """Lista pedidos da aba via 3 caminhos paralelos:
@@ -608,19 +607,12 @@ async def list_estoque_pedidos(
         order_by = effective_date.desc()
     elif status_filter == "nao_enviado":
         # Vermelho = 21/83965 OU o 6 estagnado cuja etiqueta já chegou.
-        # Mantém as duas famílias juntas de propósito: quem filtra por "não
-        # enviado" quer ver tudo que ainda não saiu de fato, e o badge separa
-        # visualmente o "aguardando coleta" do "parado".
         where.append(
             or_(
                 BlingOrder.situacao.in_(_SITUACOES_ENVIADO_ETIQUETA),
                 and_(BlingOrder.situacao == _SITUACAO_EM_ABERTO, tem_etiqueta),
             )
         )
-        order_by = effective_date.desc()
-    elif status_filter == "aguardando_coleta":
-        # Só a etiqueta gerada esperando a transportadora escanear.
-        where.append(BlingOrder.situacao.in_(_SITUACOES_ENVIADO_ETIQUETA))
         order_by = effective_date.desc()
     elif status_filter == "enviado":
         # Verde = enviado confirmado (exclui cancelamento/pré-envio E a
@@ -831,13 +823,9 @@ async def list_estoque_pedidos(
             #     no sistema. Se a etiqueta já chegou, o Bling está na
             #     frente do sync (~2h) e o pedido cai no vermelho — não
             #     pode ter "Previsão" com botão Imprimir do lado (291919).
-            #   - laranja: 21 (Em digitação = etiqueta gerada; 83965 = legado).
-            #     O pacote saiu da nossa mão, falta a transportadora escanear —
-            #     chamar isso de "não enviado" fazia o operador achar que o
-            #     sistema estava travado (Eduardo, 04/09: "esses pedidos foram
-            #     todos enviado e esta aparecendo como nao enviado ainda").
-            #   - vermelho: o que de fato não saiu — 6 estagnado com etiqueta já
-            #     emitida e as situações de cancelamento/pré-envio.
+            #   - vermelho: 21 (Em digitação = etiqueta gerada, agência não
+            #     confirmou; 83965 = legado) e situações de cancelamento/
+            #     pré-envio (_SITUACAO_NAO_VERDE).
             #   - verde: todo o resto que tem data de envio — inclui
             #     Entregue, Resolvido, Aguardando Devolução, Manutenção,
             #     Problemas, Perdimento (foram enviados no dia).
@@ -846,8 +834,6 @@ async def list_estoque_pedidos(
                 o.situacao == _SITUACAO_EM_ABERTO
                 and o.numero not in etiquetas_por_pedido
             )
-            else "aguardando_coleta"
-            if o.situacao in _SITUACOES_ENVIADO_ETIQUETA
             else "nao_enviado"
             if o.situacao in _SITUACAO_NAO_VERDE
             else "enviado",
