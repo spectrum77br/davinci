@@ -80,6 +80,23 @@ class ChamadoOut(BaseModel):
     mensagens_total: int = 0
     ultima_mensagem_at: datetime | None = None
     anexos_auto: list[ChamadoAnexoOut] = []
+    # Jurídico (migration 0248)
+    juridico_enviado_at: datetime | None = None
+    juridico_enviado_por_nome: str | None = None
+    juridico_obs: str | None = None
+    juridico_link: str | None = None
+    juridico_enviados: list[str] = []  # IDs Threema que receberam (CSV no banco)
+
+
+class JuridicoIn(BaseModel):
+    observacao: str | None = None
+
+
+class JuridicoOut(BaseModel):
+    chamado: "ChamadoOut"
+    sent: list[str]
+    failed: list[str]
+    link: str
 
 
 class ChamadoCreate(BaseModel):

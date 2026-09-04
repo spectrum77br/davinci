@@ -26,6 +26,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import HTMLResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -33,7 +34,7 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Chamado, ChamadoAnexo, ChamadoMensagem, User
+from app.models import Chamado, ChamadoAnexo, ChamadoMensagem, DevolucaoAnexo, Devolution, User
 from app.models.chamado import CANAIS, ORIGENS
 from app.schemas.chamados import (
     AgentLeaseIn,
@@ -53,10 +54,13 @@ from app.schemas.chamados import (
     ChamadoOut,
     ChamadoPage,
     ChamadoPatch,
+    JuridicoIn,
+    JuridicoOut,
     ResolverIn,
     SituacoesOut,
 )
 from app.services import chamados as svc
+from app.services import chamados_juridico
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/chamados", tags=["chamados"])
@@ -130,6 +134,12 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
     ).scalars():
         anexos_auto.setdefault(a.chamado_id, []).append(_anexo_out(a))
 
+    quem_ids = {r.juridico_enviado_por for r in rows if r.juridico_enviado_por}
+    nomes: dict[UUID, str] = {}
+    if quem_ids:
+        for u in (await session.execute(select(User).where(User.id.in_(quem_ids)))).scalars():
+            nomes[u.id] = u.name or u.email
+
     out: list[ChamadoOut] = []
     for r in rows:
         total, ultima = contagem.get(r.id, (0, None))
@@ -139,6 +149,11 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
         o.ultima_mensagem_at = ultima
         o.auto_proximo_envio_at = svc.auto_proximo_envio(r)
         o.anexos_auto = anexos_auto.get(r.id, [])
+        if r.juridico_enviado_por:
+            o.juridico_enviado_por_nome = nomes.get(r.juridico_enviado_por)
+        if r.juridico_token and r.juridico_enviado_at:
+            o.juridico_link = chamados_juridico.link_dossie(r.juridico_token)
+        o.juridico_enviados = [x for x in (r.juridico_destinatarios or "").split(",") if x.strip()]
         out.append(o)
     return out
 
@@ -235,11 +250,15 @@ async def list_chamados(
     origem: str | None = Query(None),
     plataforma: str | None = Query(None),
     mostrar: str = Query("abertos", pattern="^(abertos|resolvidos|todos)$"),
+    juridico: bool | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> ChamadoPage:
     conds = []
-    if mostrar == "abertos":
+    if juridico:
+        # Aba Jurídico: tudo que já foi encaminhado, aberto ou resolvido.
+        conds.append(Chamado.juridico_enviado_at.is_not(None))
+    elif mostrar == "abertos":
         conds.append(Chamado.resolvido.is_(False))
     elif mostrar == "resolvidos":
         conds.append(Chamado.resolvido.is_(True))
@@ -483,6 +502,92 @@ async def upload_anexo_auto(
     await session.commit()
     await session.refresh(a)
     return _anexo_out(a)
+
+
+# ------------------------------------------------------------- jurídico
+
+
+@router.post("/{chamado_id}/juridico", response_model=JuridicoOut)
+async def encaminhar_juridico(
+    chamado_id: UUID,
+    body: JuridicoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> JuridicoOut:
+    """Encaminha o chamado ao jurídico: aviso no Threema (destinatários do
+    Informar `juridico`) com o link do dossiê (histórico + fotos), carimba
+    quem/quando e registra no histórico. Pode repetir (reenvio)."""
+    ch = await _get(session, chamado_id)
+    try:
+        r = await chamados_juridico.encaminhar(session, ch, user, body.observacao)
+    except svc.ChamadoError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    await session.commit()
+    await session.refresh(ch)
+    out = await _one_out(session, ch)
+    return JuridicoOut(chamado=out, sent=r["sent"], failed=r["failed"], link=r["link"])
+
+
+async def _chamado_por_token(session: AsyncSession, token: str) -> Chamado:
+    token = (token or "").strip()
+    if len(token) < 16:
+        raise HTTPException(404, detail={"code": "chamado_not_found"})
+    ch = (
+        await session.execute(select(Chamado).where(Chamado.juridico_token == token))
+    ).scalar_one_or_none()
+    if ch is None or ch.juridico_enviado_at is None:
+        raise HTTPException(404, detail={"code": "chamado_not_found"})
+    return ch
+
+
+@router.get("/juridico/dossie/{token}", response_class=HTMLResponse)
+async def dossie_juridico(
+    token: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> HTMLResponse:
+    """PÚBLICO (por token secreto): dossiê do chamado pro jurídico — cabeçalho,
+    devolução, histórico completo e fotos. É o link que vai no Threema."""
+    ch = await _chamado_por_token(session, token)
+    d = await chamados_juridico.dados_dossie(session, ch)
+    return HTMLResponse(
+        chamados_juridico.render_html(d, link=chamados_juridico.link_dossie(token)),
+        headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
+    )
+
+
+@router.get("/juridico/dossie/{token}/anexo/{tipo}/{anexo_id}")
+async def dossie_juridico_anexo(
+    token: str,
+    tipo: str,
+    anexo_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """Foto/vídeo do dossiê (tipo `c` = anexo do chamado, `d` = da devolução),
+    só se pertencer ao chamado do token."""
+    ch = await _chamado_por_token(session, token)
+    a = None
+    ok = False
+    if tipo == "c":
+        a = await session.get(ChamadoAnexo, anexo_id)
+        ok = a is not None and a.chamado_id == ch.id
+    elif tipo == "d":
+        a = await session.get(DevolucaoAnexo, anexo_id)
+        if a is not None:
+            dev = await session.get(Devolution, a.devolution_id)
+            ok = dev is not None and bool(
+                (ch.pedido_bling and dev.pedido_bling == ch.pedido_bling)
+                or str(dev.id) == (ch.origem_ref or "")
+            )
+    if not ok or a is None:
+        raise HTTPException(404, detail={"code": "chamado_anexo_not_found"})
+    return Response(
+        content=a.blob,
+        media_type=a.content_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{a.filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # ------------------------------------------------------------- botões

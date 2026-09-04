@@ -86,6 +86,20 @@ class Chamado(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Encaminhado ao JURÍDICO (Eduardo 04/09, migration 0248): quem/quando, a
+    # observação digitada ao encaminhar, o token do dossiê público (link no
+    # Threema) e os IDs Threema que receberam. Preenchido = aparece na aba Jurídico.
+    juridico_enviado_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    juridico_enviado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    juridico_obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    juridico_token: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    juridico_destinatarios: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     mensagens: Mapped[list["ChamadoMensagem"]] = relationship(
         back_populates="chamado",

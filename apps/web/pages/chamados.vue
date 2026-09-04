@@ -11,6 +11,7 @@ import {
   MessageSquareReply,
   Plus,
   RotateCcw,
+  Scale,
   Search,
   Send,
   Settings2,
@@ -85,6 +86,11 @@ type ChamadoRow = {
   resolvido: boolean
   resolvido_at: string | null
   observacao: string | null
+  juridico_enviado_at?: string | null
+  juridico_enviado_por_nome?: string | null
+  juridico_obs?: string | null
+  juridico_link?: string | null
+  juridico_enviados?: string[]
   created_at: string
   updated_at: string
   mensagens_total: number
@@ -123,6 +129,8 @@ const search = ref('')
 const origemFilter = ref<'all' | Origem>('all')
 const plataformaFilter = ref<'all' | string>('all')
 const mostrar = ref<'abertos' | 'resolvidos' | 'todos'>('abertos')
+// Aba Jurídico (Eduardo 04/09): tudo que foi encaminhado ao jurídico, aberto ou resolvido.
+const tab = ref<'chamados' | 'juridico'>('chamados')
 
 // Chegando com ?search=... (link da coluna Chamado em Devoluções): abre já
 // filtrado pelo pedido e mostrando abertos E resolvidos — sem isso um chamado
@@ -166,6 +174,9 @@ const ERROS: Record<string, string> = {
   chamado_status_bling_desconhecido: 'situação desconhecida no Bling',
   chamado_sem_integracao_bling: 'sem integração Bling',
   chamado_status_bling_erro: 'o Bling recusou a mudança de situação',
+  sem_destinatarios: 'cadastre os destinatários do jurídico (botão destinatários)',
+  threema_nao_configurado: 'Threema não configurado no servidor',
+  threema_envio_falhou: 'o Threema não entregou pra nenhum destinatário',
   // abertura automática de devolução no ML (services/chamados_devolucao)
   devolucao_sem_foto: 'aguardando foto na tela Devoluções',
   return_review_indisponivel: 'ML ainda não liberou a revisão da devolução (tenta a cada hora)',
@@ -240,7 +251,8 @@ async function load() {
     const params = new URLSearchParams()
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', String((page.value - 1) * PAGE_SIZE))
-    params.set('mostrar', mostrar.value)
+    if (tab.value === 'juridico') { params.set('juridico', 'true'); params.set('mostrar', 'todos') }
+    else params.set('mostrar', mostrar.value)
     if (search.value.trim()) params.set('search', search.value.trim())
     if (origemFilter.value !== 'all') params.set('origem', origemFilter.value)
     if (plataformaFilter.value !== 'all') params.set('plataforma', plataformaFilter.value)
@@ -279,6 +291,55 @@ watch([origemFilter, plataformaFilter, mostrar], () => {
   load()
 })
 watch(page, () => load())
+
+watch(tab, () => { page.value = 1; load() })
+
+// ----------------------------------------------------------------- jurídico
+const juridico = reactive({ open: false, row: null as ChamadoRow | null, obs: '', saving: false, erro: null as string | null, destinatarios: [] as string[], semAcesso: false })
+const juridicoCfgOpen = ref(false)
+async function openJuridico(row: ChamadoRow) {
+  juridico.open = true
+  juridico.row = row
+  juridico.obs = ''
+  juridico.erro = null
+  juridico.destinatarios = []
+  juridico.semAcesso = false
+  try {
+    const cfg = await api<{ recipients: string[]; destinatarios: { id: string; nome: string }[] }>('/api/informar/juridico')
+    juridico.destinatarios = cfg.recipients.map((id) => cfg.destinatarios.find((d) => d.id === id)?.nome || id)
+  } catch {
+    juridico.semAcesso = true // não-admin não vê o cadastro; o envio usa o cadastro do servidor
+  }
+}
+function closeJuridico() {
+  juridico.open = false
+  juridico.row = null
+}
+async function enviarJuridico() {
+  const row = juridico.row
+  if (!row || !canEdit.value) return
+  juridico.saving = true
+  juridico.erro = null
+  try {
+    const r = await api<{ chamado: ChamadoRow; sent: string[]; failed: string[]; link: string }>(`/api/chamados/${row.id}/juridico`, {
+      method: 'POST',
+      body: { observacao: juridico.obs || null },
+    })
+    const idx = items.value.findIndex((i) => i.id === row.id)
+    if (idx >= 0) items.value[idx] = r.chamado
+    if (hist.row?.id === row.id) hist.row = r.chamado
+    toasts.success('Encaminhado ao jurídico', `${r.sent.length} destinatário(s) no Threema${r.failed.length ? ` · ${r.failed.length} falhou` : ''}`)
+    closeJuridico()
+    if (hist.open) await loadMensagens()
+  } catch (e: any) {
+    juridico.erro = apiError(e)
+  } finally {
+    juridico.saving = false
+  }
+}
+async function copiarLink(link: string) {
+  try { await navigator.clipboard.writeText(link); toasts.success('Link do dossiê copiado') } catch { window.prompt('Link do dossiê', link) }
+}
 
 // ----------------------------------------------------------------- novo chamado
 
@@ -701,6 +762,17 @@ async function reabrir(row: ChamadoRow) {
       </template>
     </PageHeader>
 
+    <div class="flex gap-1 border-b">
+      <button type="button" class="px-3 py-2 text-sm border-b-2 -mb-px" :class="tab === 'chamados' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="tab = 'chamados'">Chamados</button>
+      <button type="button" class="px-3 py-2 text-sm border-b-2 -mb-px inline-flex items-center gap-1.5" :class="tab === 'juridico' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="tab = 'juridico'">
+        <Scale class="size-4" /> Jurídico
+      </button>
+      <div v-if="tab === 'juridico'" class="ml-auto flex items-center gap-2 pb-1">
+        <span class="text-xs text-muted-foreground">Tudo que foi encaminhado ao jurídico (abertos e resolvidos).</span>
+        <Button v-if="isAdmin" size="sm" variant="outline" @click="juridicoCfgOpen = true">destinatários</Button>
+      </div>
+    </div>
+
     <div v-if="error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
       <AlertCircle class="size-4" />
       {{ error }}
@@ -827,6 +899,7 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="8">Identificação</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3">Chamado</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-sky-50 dark:bg-sky-900/20" colspan="2">Réplica</th>
+            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-violet-50 dark:bg-violet-900/20" colspan="1">Jurídico</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Bling</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="3">Controle</th>
           </tr>
@@ -843,6 +916,7 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-amber-50 dark:bg-amber-900/20">Chamado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Canal</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-sky-50 dark:bg-sky-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Réplica</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-violet-50 dark:bg-violet-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Encaminhado ao jurídico: quando, por quem, observação e link do dossiê">Jurídico</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-sky-50 dark:bg-sky-900/20">Réplica automática</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Alterar status Bling</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-emerald-50 dark:bg-emerald-900/20">Monitoramento</th>
@@ -913,6 +987,21 @@ async function reabrir(row: ChamadoRow) {
                 </Button>
                 <span v-if="row.ultima_mensagem_at" class="text-[11px] text-muted-foreground whitespace-nowrap">últ. {{ fmtDateTime(row.ultima_mensagem_at) }}</span>
               </div>
+            </td>
+            <td class="px-2 py-1 bg-violet-50/40 dark:bg-violet-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+              <div v-if="row.juridico_enviado_at" class="space-y-0.5 text-[11px]">
+                <div class="whitespace-nowrap"><Scale class="inline size-3 mr-0.5 text-violet-600" />{{ fmtDateTime(row.juridico_enviado_at) }} · {{ row.juridico_enviado_por_nome || '—' }}</div>
+                <div v-if="row.juridico_obs" class="max-w-[220px] truncate text-muted-foreground" :title="row.juridico_obs">{{ row.juridico_obs }}</div>
+                <div class="flex items-center gap-2">
+                  <a v-if="row.juridico_link" :href="row.juridico_link" target="_blank" rel="noopener" class="underline">dossiê</a>
+                  <button v-if="row.juridico_link" type="button" class="underline text-muted-foreground" @click="copiarLink(row.juridico_link!)">copiar link</button>
+                  <button v-if="canEdit" type="button" class="underline text-muted-foreground" @click="openJuridico(row)">reenviar</button>
+                </div>
+              </div>
+              <Button v-else size="sm" variant="outline" class="h-7 px-2" :disabled="!canEdit" title="Encaminhar ao jurídico: aviso no Threema com o histórico e as fotos" @click="openJuridico(row)">
+                <Scale class="size-3.5 mr-1" />
+                jurídico
+              </Button>
             </td>
             <td class="px-2 py-1 bg-sky-50/40 dark:bg-sky-900/10">
               <div class="flex items-center gap-2">
@@ -1036,6 +1125,48 @@ async function reabrir(row: ChamadoRow) {
       </div>
     </div>
 
+    <!-- modal: encaminhar ao jurídico -->
+    <div v-if="juridico.open && juridico.row" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" @click.self="closeJuridico">
+      <div class="w-full max-w-lg rounded-lg border bg-background p-5 shadow-xl space-y-4">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <div class="text-sm font-semibold inline-flex items-center gap-1.5"><Scale class="size-4 text-violet-600" /> Encaminhar ao jurídico</div>
+            <div class="text-xs text-muted-foreground">
+              Chamado {{ juridico.row.chamado || '(sem nº)' }} · pedido {{ juridico.row.pedido_bling || juridico.row.pedido_marketplace }} · {{ (juridico.row.plataforma || '').toUpperCase() }} {{ juridico.row.conta || '' }}
+            </div>
+          </div>
+          <button type="button" class="rounded p-1 hover:bg-muted" @click="closeJuridico"><X class="size-4" /></button>
+        </div>
+        <p class="text-sm text-muted-foreground">
+          Vai pelo Threema (o "Informar") um aviso com os dados do chamado e o <b>link do dossiê</b>: histórico completo e todas as fotos, aberto sem login por link secreto.
+        </p>
+        <div class="text-xs">
+          <span class="text-muted-foreground">Destinatários:</span>
+          <span v-if="juridico.semAcesso"> cadastrados pelo admin (você não vê a lista).</span>
+          <span v-else-if="juridico.destinatarios.length"> {{ juridico.destinatarios.join(', ') }}</span>
+          <span v-else class="text-red-500"> nenhum cadastrado.</span>
+          <button v-if="isAdmin" type="button" class="ml-2 underline" @click="juridicoCfgOpen = true">editar destinatários</button>
+        </div>
+        <div v-if="juridico.row.juridico_enviado_at" class="rounded border border-violet-500/30 bg-violet-500/5 px-2 py-1 text-xs">
+          Já encaminhado em {{ fmtDateTime(juridico.row.juridico_enviado_at) }} por {{ juridico.row.juridico_enviado_por_nome || '—' }}. Enviar de novo manda o mesmo link atualizado.
+        </div>
+        <div>
+          <label class="text-xs text-muted-foreground">Observação pro jurídico (opcional)</label>
+          <textarea v-model="juridico.obs" rows="3" class="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" placeholder="ex.: cliente ameaça processar; já enviamos as provas pela plataforma"></textarea>
+        </div>
+        <p v-if="juridico.erro" class="text-sm text-red-500">{{ juridico.erro }}</p>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" @click="closeJuridico">Cancelar</Button>
+          <Button :disabled="juridico.saving || !canEdit" @click="enviarJuridico">
+            <Loader2 v-if="juridico.saving" class="size-4 mr-1 animate-spin" />
+            <Scale v-else class="size-4 mr-1" />
+            {{ juridico.saving ? 'Enviando…' : 'Enviar ao jurídico' }}
+          </Button>
+        </div>
+      </div>
+    </div>
+    <InformarThreemaModal :open="juridicoCfgOpen" contexto="juridico" somente-cadastro @close="juridicoCfgOpen = false; if (juridico.open && juridico.row) openJuridico(juridico.row)" />
+
     <!-- modal: histórico + réplica -->
     <div v-if="hist.open && hist.row" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="closeHistorico">
       <div class="w-full max-w-3xl max-h-[90vh] flex flex-col rounded-lg border bg-background shadow-xl">
@@ -1049,7 +1180,13 @@ async function reabrir(row: ChamadoRow) {
               <a v-if="hist.row.chamado_url" :href="hist.row.chamado_url" target="_blank" rel="noopener" class="ml-1 underline">abrir na plataforma</a>
             </div>
           </div>
-          <button type="button" class="rounded p-1 hover:bg-muted" @click="closeHistorico"><X class="size-4" /></button>
+          <div class="flex items-center gap-2">
+            <Button size="sm" variant="outline" class="h-7 px-2" :disabled="!canEdit" title="Encaminhar ao jurídico (Threema + dossiê com fotos)" @click="openJuridico(hist.row)">
+              <Scale class="size-3.5 mr-1" />
+              {{ hist.row.juridico_enviado_at ? 'reenviar ao jurídico' : 'encaminhar ao jurídico' }}
+            </Button>
+            <button type="button" class="rounded p-1 hover:bg-muted" @click="closeHistorico"><X class="size-4" /></button>
+          </div>
         </div>
 
         <div class="flex-1 overflow-auto px-4 py-3 space-y-3">

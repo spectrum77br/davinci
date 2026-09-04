@@ -17,7 +17,10 @@ type EnviarOut = { pedidos: number; mensagens: number; sent: string[]; failed: s
 
 const props = defineProps<{
   open: boolean
-  contexto: 'logistica' | 'controle_estoque' | 'margem' | 'devolucoes'
+  contexto: 'logistica' | 'controle_estoque' | 'margem' | 'devolucoes' | 'juridico'
+  // Só cadastro de destinatários (sem 'Enviar agora'): o envio sai de outro lugar
+  // (jurídico: POST /api/chamados/{id}/juridico).
+  somenteCadastro?: boolean
   // O que este botão informa — aparece como descrição no modal.
   descricao: string
   // Cadastro do aviso automático (ex.: 'margem_auto') — liga o modo automático.
@@ -162,7 +165,7 @@ async function enviar() {
         </Button>
         <!-- Modo automático: quem envia é o robô — não existe "Enviar agora". -->
         <Button
-          v-if="!contextoAuto"
+          v-if="!contextoAuto && !somenteCadastro"
           :disabled="loading || salvando || enviando || !selecionados.size"
           @click="enviar"
         >

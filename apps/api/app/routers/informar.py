@@ -74,7 +74,9 @@ router = APIRouter(prefix="/api/informar", tags=["informar"])
 # `devolucoes` (Eduardo 03/09: "em devoluções criar um botao informar igual,
 # na margem"): manda a aba Acompanhamento — pedidos em Aguardando Devolução,
 # com tempo parado e última localização.
-_CONTEXTOS = ("logistica", "controle_estoque", "margem", "margem_auto", "devolucoes")
+# `juridico` (Eduardo 04/09): destinatários do "Encaminhar ao jurídico" da aba
+# Chamados — só cadastro aqui; o envio sai de POST /api/chamados/{id}/juridico.
+_CONTEXTOS = ("logistica", "controle_estoque", "margem", "margem_auto", "devolucoes", "juridico")
 _CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes")
 
 # Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
