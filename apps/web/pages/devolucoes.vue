@@ -57,6 +57,7 @@ type DevolutionRow = {
   reembolso: boolean
   motivo_devolucao: string | null
   video_url: string | null
+  link_envio: string | null
   custo_manutencao: number | null
   tecnico: string | null
   devolver_estoque: boolean
@@ -128,6 +129,7 @@ type DevolutionDraft = LookupRow & {
   reembolso: boolean
   motivo_devolucao: string
   video_url: string
+  link_envio: string
   fotos: File[]
   custo_manutencao: number | null
   tecnico: string
@@ -536,6 +538,23 @@ function linkRequired(condicao: string | null | undefined) {
   return condicao === 'Extraviado' || condicao === 'Manutenção'
 }
 
+// Motivos que abrem chamado automático (espelho de services/chamados.MOTIVOS_ABREM_CHAMADO).
+const MOTIVOS_ABREM_CHAMADO = ['bloqueado', 'mudou de ideia', 'golpe', 'item incorreto', 'item faltando', 'não recebido', 'danificado (outros)']
+// Mala (b<dígito>, bp*, acessórios a006/a015/a073-a076) ou eletro (celular dg*, airfryer/eletro u*) —
+// espelho de services/chamados_devolucao.produto_mala_ou_eletro; o backend é quem trava (422).
+function isMalaOuEletro(sku: string | null | undefined) {
+  const partes = (sku || '').toLowerCase().replace(/,/g, '+').split('+')
+  return partes.some((p) => {
+    const base = p.trim().split('.')[0]
+    if (!base) return false
+    return /^b\d/.test(base) || /^bp\d/.test(base) || ['a006', 'a015', 'a073', 'a074', 'a075', 'a076'].includes(base) || /^(dg|u)/.test(base)
+  })
+}
+// Trava (Eduardo 04/09): "mala e eletro é obrigatória, desde que esteja nos motivos que abrem chamado".
+function linkEnvioRequired(sku: string | null | undefined, motivo: string | null | undefined) {
+  return MOTIVOS_ABREM_CHAMADO.includes((motivo || '').trim().toLowerCase()) && isMalaOuEletro(sku)
+}
+
 function apiError(e: any) {
   const detail = e?.data?.detail
   if (detail && typeof detail === 'object') return detail.message || detail.code || e?.message || 'erro'
@@ -631,7 +650,7 @@ function setRowNumber(row: DevolutionRow, field: 'custo_produto' | 'custo_manute
 
 function setRowText(
   row: DevolutionRow,
-  field: 'condicao_produto' | 'link_abertura' | 'video_url' | 'motivo_devolucao' | 'tecnico' | 'observacao',
+  field: 'condicao_produto' | 'link_abertura' | 'link_envio' | 'video_url' | 'motivo_devolucao' | 'tecnico' | 'observacao',
   value: string,
 ) {
   row[field] = value || null
@@ -1028,6 +1047,7 @@ function selectAllProducts() {
       reembolso: false,
       motivo_devolucao: '',
       video_url: '',
+      link_envio: '',
       fotos: [],
       custo_manutencao: null,
       tecnico: '',
@@ -1068,6 +1088,7 @@ function buildPayload(d: DevolutionDraft) {
     reembolso: d.reembolso,
     motivo_devolucao: d.motivo_devolucao || null,
     video_url: d.video_url || null,
+    link_envio: d.link_envio || null,
     custo_manutencao: d.custo_manutencao,
     tecnico: d.tecnico || null,
     devolver_estoque: d.devolver_estoque,
@@ -1094,6 +1115,10 @@ async function createAllDevolutions() {
     }
     if (linkRequired(d.condicao_produto) && !d.link_abertura) {
       lookupError.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
+      return
+    }
+    if (linkEnvioRequired(d.sku, d.motivo_devolucao) && !d.link_envio) {
+      lookupError.value = 'Link de envio obrigatório: mala/eletro com motivo que abre chamado'
       return
     }
   }
@@ -1159,6 +1184,7 @@ function rowPatchPayload(row: DevolutionRow) {
     reembolso: row.reembolso,
     motivo_devolucao: row.motivo_devolucao || null,
     video_url: row.video_url || null,
+    link_envio: row.link_envio || null,
     custo_manutencao: row.custo_manutencao,
     tecnico: row.tecnico || null,
     devolver_estoque: row.devolver_estoque,
@@ -1234,6 +1260,10 @@ async function saveRow(row: DevolutionRow) {
   if (!canEdit.value || !hasDirty(row.id) || isSaving(row.id)) return
   if (linkRequired(row.condicao_produto) && !row.link_abertura) {
     error.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
+    return
+  }
+  if (linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) {
+    error.value = 'Link de envio obrigatório: mala/eletro com motivo que abre chamado'
     return
   }
   setSaving(row.id, true)
@@ -1728,7 +1758,7 @@ async function backfillAddresses() {
           <thead class="bg-background">
             <tr>
               <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="6">Identificação</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 9 : 8">Devolução</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 10 : 9">Devolução</th>
             </tr>
             <tr>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Data</th>
@@ -1739,6 +1769,7 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produtos</th>
               <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Link das fotos/vídeo feitos na expedição do pedido — prova pra contestar pacote vazio/item errado. Obrigatório pra mala e eletro quando o motivo abre chamado">Link envio</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] bg-amber-50 dark:bg-amber-900/20" title="Fotos da devolução — vão como evidência do chamado automático no Mercado Livre">Foto</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Link do vídeo — entra no texto do chamado (a API do ML não aceita vídeo anexo)">Link vídeo</th>
@@ -1766,6 +1797,13 @@ async function backfillAddresses() {
                   <option value="">—</option>
                   <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
                 </select>
+              </td>
+              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
+                <input
+                  v-model="d.link_envio"
+                  :class="linkEnvioRequired(d.sku, d.motivo_devolucao) && !d.link_envio ? sheetInputRequiredClass : sheetInputClass"
+                  :placeholder="linkEnvioRequired(d.sku, d.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link do envio'"
+                />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input
@@ -1919,7 +1957,7 @@ async function backfillAddresses() {
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="9">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 12 : 11">Devolução</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 13 : 12">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
             <th v-if="isAdmin" class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-slate-50 dark:bg-slate-800/40" colspan="1">Atualização</th>
           </tr>
@@ -1935,6 +1973,7 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produtos</th>
             <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Link das fotos/vídeo feitos na expedição do pedido — prova pra contestar pacote vazio/item errado. Obrigatório pra mala e eletro quando o motivo abre chamado">Link envio</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] bg-amber-50 dark:bg-amber-900/20" title="Fotos e vídeos da devolução — as fotos vão como evidência do chamado automático na plataforma (ML, TikTok, Shopee)">Foto</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Link do vídeo — entra no texto do chamado (a API do ML não aceita vídeo anexo)">Link vídeo</th>
@@ -1952,13 +1991,13 @@ async function backfillAddresses() {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="(isAdmin ? 24 : 22) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
+            <td :colspan="(isAdmin ? 25 : 23) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="(isAdmin ? 24 : 22) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="(isAdmin ? 25 : 23) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -1995,6 +2034,28 @@ async function backfillAddresses() {
                   :value="row.condicao_produto"
                 >{{ row.condicao_produto }}</option>
               </select>
+            </td>
+            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
+              <div class="flex items-center gap-1">
+                <input
+                  :value="row.link_envio || ''"
+                  :disabled="!canEdit"
+                  :class="linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio ? sheetInputRequiredClass : sheetInputClass"
+                  :placeholder="linkEnvioRequired(row.sku, row.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link do envio'"
+                  @input="(e) => setRowText(row, 'link_envio', (e.target as HTMLInputElement).value)"
+                  @blur="saveRow(row)"
+                />
+                <a
+                  v-if="row.link_envio"
+                  :href="normalizeUrl(row.link_envio)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Abrir em nova guia"
+                  class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                >
+                  <ExternalLink class="size-3.5" />
+                </a>
+              </div>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <div class="flex items-center gap-1">

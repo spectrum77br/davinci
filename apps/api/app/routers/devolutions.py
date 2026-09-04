@@ -1306,6 +1306,7 @@ async def create_devolution(
         reembolso=body.reembolso,
         motivo_devolucao=body.motivo_devolucao,
         video_url=body.video_url,
+        link_envio=body.link_envio,
         custo_manutencao=body.custo_manutencao,
         tecnico=body.tecnico,
         devolver_estoque=devolver_no_add,
@@ -1322,6 +1323,7 @@ async def create_devolution(
     )
     if _custo_e_tecnico_preenchidos(row):
         row.reembolso = True
+    _exigir_link_envio(row)
     session.add(row)
     if body.condicao_produto in _REFUND_CONDICOES:
         _maybe_create_refund(session, row, body.condicao_produto)
@@ -1408,6 +1410,8 @@ async def patch_devolution(
         setattr(row, key, value)
     if "sku" in data:
         row.tag = _sku_tag(row.sku)
+    if {"motivo_devolucao", "link_envio", "sku"} & set(data):
+        _exigir_link_envio(row)
 
     new_condicao = row.condicao_produto
     # Ao SAIR de Manutenção: custo de manutenção é obrigatório (registra o reparo)
@@ -1453,7 +1457,7 @@ async def patch_devolution(
     # Motivo trocado pra um que pede chamado (ou link do vídeo informado) →
     # registra o chamado sozinho e abre no ML (dedupe por pedido dentro do
     # helper — repetir o PATCH não duplica).
-    if "motivo_devolucao" in data or "video_url" in data:
+    if "motivo_devolucao" in data or "video_url" in data or "link_envio" in data:
         await _chamado_devolucao_apos_commit(session, row)
 
     # Variação do custo de manutenção é refletida como débito no reembolso do refund
@@ -1518,6 +1522,20 @@ async def patch_devolution(
     if final_sr is not None:
         out.bling_stock_result = BlingStockResultOut(**final_sr)
     return await _completar_out(session, row, out)
+
+
+def _exigir_link_envio(row: Devolution) -> None:
+    """Trava (Eduardo 04/09): mala e eletro com motivo que abre chamado
+    precisam do "Link de envio" (prova da expedição — o que Shopee/TikTok
+    pedem pra contestar pacote vazio/item errado)."""
+    if chamados_devolucao.link_envio_obrigatorio(row) and not (row.link_envio or "").strip():
+        raise HTTPException(
+            422,
+            detail={
+                "code": "link_envio_obrigatorio",
+                "message": "Link de envio obrigatório: mala/eletro com motivo que abre chamado",
+            },
+        )
 
 
 # ------------------------------------------------------------ anexos (fotos/vídeo)

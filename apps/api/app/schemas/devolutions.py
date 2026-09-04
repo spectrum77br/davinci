@@ -48,6 +48,8 @@ class DevolutionOut(BaseModel):
     motivo_devolucao: str | None = None
     # Link do vídeo da devolução (entra no texto do chamado automático no ML).
     video_url: str | None = None
+    # Link da prova da expedição (obrigatório pra mala/eletro com motivo de chamado).
+    link_envio: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool = False
@@ -103,6 +105,7 @@ class DevolutionCreate(BaseModel):
     reembolso: bool = False
     motivo_devolucao: str | None = None
     video_url: str | None = None
+    link_envio: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool = False
@@ -124,6 +127,7 @@ class DevolutionCreate(BaseModel):
         "link_abertura",
         "motivo_devolucao",
         "video_url",
+        "link_envio",
         "tecnico",
         "observacao",
         "troca_sku",
@@ -166,6 +170,7 @@ class DevolutionPatch(BaseModel):
     reembolso: bool | None = None
     motivo_devolucao: str | None = None
     video_url: str | None = None
+    link_envio: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool | None = None
@@ -188,6 +193,7 @@ class DevolutionPatch(BaseModel):
         "link_abertura",
         "motivo_devolucao",
         "video_url",
+        "link_envio",
         "tecnico",
         "observacao",
         "troca_sku",

@@ -6,7 +6,7 @@ lá, vai abrir o chamado automático … vai ter foto sim e vídeo"."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -134,8 +134,19 @@ async def test_danificado_espera_foto_e_abre_ao_anexar(client, make_user, auth_a
               "sku": "b001.26", "produtos": "Mala Listrada tamanho 26",
               "condicao_produto": "Usado", "motivo_devolucao": "Danificado (Outros)"},
     )
+    # mala + motivo de chamado → Link de envio obrigatório (trava do Eduardo)
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["code"] == "link_envio_obrigatorio"
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "293100", "pedido_marketplace": "2000099",
+              "sku": "b001.26", "produtos": "Mala Listrada tamanho 26",
+              "condicao_produto": "Usado", "motivo_devolucao": "Danificado (Outros)",
+              "link_envio": "https://drive.google.com/expedicao"},
+    )
     assert r.status_code == 201, r.text
     body = r.json()
+    assert body["link_envio"] == "https://drive.google.com/expedicao"
     # chamado registrado na aba, canal api, abertura PENDENTE esperando foto
     assert body["tem_chamado"] is True
     assert body["chamado_ml_status"] == "pendente"
@@ -161,6 +172,7 @@ async def test_danificado_espera_foto_e_abre_ao_anexar(client, make_user, auth_a
     ret_id, reason, texto, anexos = ml.reviews[0]
     assert (ret_id, reason, anexos) == ("ret-777", "SRF2", ["ml_1_mala.png"])
     assert "danificado" in texto and "2000099" in texto and "b001.26" in texto
+    assert "Comprovante da expedição (fotos/vídeo do envio): https://drive.google.com/expedicao" in texto
     await db.refresh(ch)
     assert ch.chamado == "777" and ch.monitoramento is True and ch.canal == "api"
     msg = await _abertura(db, ch.id)
@@ -459,7 +471,7 @@ async def test_tiktok_recusa_pacote_com_foto(client, make_user, auth_as, db, ml,
     auth_as(user)
     fake = _FakeTikTok()
 
-    async def _c(session, conta):
+    async def _c(session, *a):
         return fake
 
     monkeypatch.setattr(svc, "_tiktok_client_para", _c)
@@ -498,7 +510,7 @@ async def test_tiktok_aguarda_pacote_e_quick_refund(client, make_user, auth_as, 
     auth_as(user)
     fake = _FakeTikTok(status="AWAITING_BUYER_SHIP")
 
-    async def _c(session, conta):
+    async def _c(session, *a):
         return fake
 
     monkeypatch.setattr(svc, "_tiktok_client_para", _c)
@@ -520,7 +532,7 @@ async def test_tiktok_aguarda_pacote_e_quick_refund(client, make_user, auth_as, 
     # quick refund → falha definitiva
     fake2 = _FakeTikTok(quick=True)
 
-    async def _c2(session, conta):
+    async def _c2(session, *a):
         return fake2
 
     monkeypatch.setattr(svc, "_tiktok_client_para", _c2)
@@ -542,7 +554,7 @@ async def test_shopee_disputa_com_modulos_de_foto(client, make_user, auth_as, db
     auth_as(user)
     fake = _FakeShopee()
 
-    async def _c(session, conta):
+    async def _c(session, *a):
         return fake
 
     monkeypatch.setattr(svc, "_shopee_client_para", _c)
@@ -626,7 +638,7 @@ async def test_tiktok_usa_unico_motivo_disponivel(client, make_user, auth_as, db
 
     fake.get_reject_reasons = _reasons
 
-    async def _c(session, conta):
+    async def _c(session, *a):
         return fake
 
     monkeypatch.setattr(svc, "_tiktok_client_para", _c)
@@ -667,7 +679,7 @@ async def test_shopee_so_reembolso_pacote_vazio_usa_id_53(client, make_user, aut
     fake.get_return_detail = _det
     fake.get_return_dispute_reason = _reasons
 
-    async def _c(session, conta):
+    async def _c(session, *a):
         return fake
 
     monkeypatch.setattr(svc, "_shopee_client_para", _c)
@@ -697,3 +709,41 @@ async def test_shopee_so_reembolso_pacote_vazio_usa_id_53(client, make_user, aut
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "292617"))).scalar_one()
     msg = await _abertura(db, ch.id)
     assert msg.status == "enviada"
+
+
+async def test_link_envio_regra_mala_eletro_e_conta_fallback(client, make_user, auth_as, db, ml):
+    from app.services import chamados_devolucao as cd
+
+    assert cd.produto_mala_ou_eletro("b001.26") is True  # mala
+    assert cd.produto_mala_ou_eletro("a006") is True  # acessório de mala
+    assert cd.produto_mala_ou_eletro("dg048.ra+a003.ra") is True  # celular (kit)
+    assert cd.produto_mala_ou_eletro("uaf001m1.220") is True  # airfryer
+    assert cd.produto_mala_ou_eletro("a003.ra") is False  # fone
+    assert cd.produto_mala_ou_eletro("e3") is False
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    # eletro sem motivo de chamado: link não é exigido
+    await _seed_pedido(db, user, numero="293110", numeroloja="2000110")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "293110", "pedido_marketplace": "2000110",
+              "sku": "dg048.ra", "condicao_produto": "Não devolvido",
+              "motivo_devolucao": "Dano funcional / Não funciona"},
+    )
+    assert r.status_code == 201, r.text
+    # trocar pro motivo de chamado sem link → 422; com link → ok
+    p = await client.patch(f"/api/devolutions/{r.json()['id']}", json={"motivo_devolucao": "Golpe"})
+    assert p.status_code == 422 and p.json()["detail"]["code"] == "link_envio_obrigatorio"
+    p2 = await client.patch(
+        f"/api/devolutions/{r.json()['id']}",
+        json={"motivo_devolucao": "Golpe", "link_envio": "https://x/envio"},
+    )
+    assert p2.status_code == 200, p2.text
+    assert p2.json()["link_envio"] == "https://x/envio"
+    # conta da linha = nome da loja no Bling ("Loja 55") → cai pro store_info do pedido (aguiar)
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "293110"))).scalar_one()
+    dev = await db.get(Devolution, UUID(r.json()["id"]))
+    dev.conta = "Loja 55"
+    ch.conta = "Loja 55"
+    contas = await cd._contas_candidatas(db, ch, dev)
+    assert contas == ["Loja 55", "aguiar"]

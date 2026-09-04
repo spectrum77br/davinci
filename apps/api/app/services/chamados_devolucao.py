@@ -198,6 +198,40 @@ def exige_foto(dev: Devolution) -> bool:
     return _motivo(dev) in MOTIVOS_EXIGEM_FOTO
 
 
+def _base_sku(sku: str | None) -> str:
+    """Primeiro SKU da linha (kit vem "dg048.ra+a003.ra"), sem sufixo regional."""
+    s = (sku or "").strip().lower()
+    if not s:
+        return ""
+    primeiro = s.replace(",", "+").split("+")[0].strip()
+    return primeiro.split(".")[0]
+
+
+def produto_mala_ou_eletro(sku: str | None) -> bool:
+    """Mala (tag mala do sku_tags: b<dígito>, bp*, acessórios a006…) ou eletro
+    (celulares dg*, airfryer/eletro u*). É o que exige o Link de envio."""
+    from app.services.sku_tags import classify_sku_tag
+
+    s = (sku or "").strip().lower()
+    if not s:
+        return False
+    for parte in s.replace(",", "+").split("+"):
+        parte = parte.strip()
+        if not parte:
+            continue
+        if classify_sku_tag(parte) in ("mala", "eletro"):
+            return True
+        if _base_sku(parte).startswith(("dg", "u")):
+            return True
+    return False
+
+
+def link_envio_obrigatorio(dev: Devolution) -> bool:
+    """Trava do Eduardo (04/09): "mala e eletro é obrigatória, desde que esteja
+    nos motivos que abrem chamado"."""
+    return chamados_svc.motivo_pede_chamado(dev) and produto_mala_ou_eletro(dev.sku)
+
+
 # ---------------------------------------------------------------- texto
 
 
@@ -212,7 +246,12 @@ _INTRO: dict[str, str] = {
 
 
 def texto_padrao(
-    dev: Devolution, reason: str | None, *, fotos: int = 0, video_url: str | None = None
+    dev: Devolution,
+    reason: str | None,
+    *,
+    fotos: int = 0,
+    video_url: str | None = None,
+    link_envio: str | None = None,
 ) -> str:
     """Mensagem que vai pra plataforma (o operador não digita nada — é
     automático). `reason` é o motivo do ML (SRF*) — nas outras plataformas o
@@ -243,6 +282,9 @@ def texto_padrao(
     video = (video_url or dev.video_url or "").strip()
     if video:
         linhas.append(f"Vídeo da devolução: {video}")
+    envio = (link_envio or dev.link_envio or "").strip()
+    if envio:
+        linhas.append(f"Comprovante da expedição (fotos/vídeo do envio): {envio}")
     linhas.append("Solicitamos a análise do caso.")
     return "\n".join(linhas)
 
@@ -371,18 +413,52 @@ def _return_id_de(rets: object) -> str | None:
 # ---------------------------------------------------------------- clientes
 
 
-async def _tiktok_client_para(session: AsyncSession, conta: str | None) -> TikTokClient:
-    integ = await logistica_tiktok._tiktok_integration_for_conta(session, conta)
-    if integ is None:
-        raise chamados_svc.ChamadoError("chamado_sem_integracao_tiktok")
-    return logistica_tiktok._build_tiktok_client(session, integ)
+async def _contas_candidatas(session: AsyncSession, ch: Chamado, dev: Devolution) -> list[str]:
+    """A `conta` da devolução vem da busca do pedido = NOME DA LOJA no Bling
+    ("Shopee Marquezini", "Loja 206081922"), que nem sempre é o nome da
+    integração ("mega", "injox"). Tenta, nesta ordem: conta do chamado, conta
+    da linha e a conta do store_info do pedido (espelho bling_orders)."""
+    out: list[str] = []
+    for c in (ch.conta, dev.conta):
+        c = (c or "").strip()
+        if c and c not in out:
+            out.append(c)
+    info = await chamados_svc.lookup_pedido(session, dev.pedido_bling or ch.pedido_bling or "")
+    c = ((info or {}).get("conta") or "").strip()
+    if c and c not in out:
+        out.append(c)
+    return out
 
 
-async def _shopee_client_para(session: AsyncSession, conta: str | None) -> ShopeeClient:
-    integ = await logistica_shopee._shopee_integration_for_conta(session, conta)
-    if integ is None:
-        raise chamados_svc.ChamadoError("chamado_sem_integracao_shopee")
-    return logistica_shopee._build_shopee_client(session, integ)
+async def _ml_client_para(
+    session: AsyncSession, ch: Chamado, dev: Devolution
+) -> MercadoLivreClient:
+    for conta in await _contas_candidatas(session, ch, dev):
+        try:
+            return await chamados_svc._ml_client_para(session, conta)
+        except chamados_svc.ChamadoError:
+            continue
+    raise chamados_svc.ChamadoError("chamado_sem_integracao_ml")
+
+
+async def _tiktok_client_para(
+    session: AsyncSession, ch: Chamado, dev: Devolution
+) -> TikTokClient:
+    for conta in await _contas_candidatas(session, ch, dev):
+        integ = await logistica_tiktok._tiktok_integration_for_conta(session, conta)
+        if integ is not None:
+            return logistica_tiktok._build_tiktok_client(session, integ)
+    raise chamados_svc.ChamadoError("chamado_sem_integracao_tiktok")
+
+
+async def _shopee_client_para(
+    session: AsyncSession, ch: Chamado, dev: Devolution
+) -> ShopeeClient:
+    for conta in await _contas_candidatas(session, ch, dev):
+        integ = await logistica_shopee._shopee_integration_for_conta(session, conta)
+        if integ is not None:
+            return logistica_shopee._build_shopee_client(session, integ)
+    raise chamados_svc.ChamadoError("chamado_sem_integracao_shopee")
 
 
 # ---------------------------------------------------------------- fotos
@@ -556,7 +632,7 @@ async def _disparar_ml(
         fotos = []  # motivo do pacote (SRF7): sem anexo
     if reason in REASONS_EXIGEM_FOTO and not fotos:
         raise _PendenteError("devolucao_sem_foto")
-    client = await chamados_svc._ml_client_para(session, ch.conta or dev.conta)
+    client = await _ml_client_para(session, ch, dev)
     claim_id, return_id = await _resolver_claim_ml(client, ch, dev)
     nomes: list[str] = []
     for a in fotos:
@@ -632,7 +708,7 @@ async def _disparar_tiktok(
         raise _PendenteError("devolucao_motivo_sem_chamado")
     if exige_foto(dev) and not fotos:
         raise _PendenteError("devolucao_sem_foto")
-    client = await _tiktok_client_para(session, ch.conta or dev.conta)
+    client = await _tiktok_client_para(session, ch, dev)
     rastreio = await _rastreio_devolucao(session, dev, PLAT_TIKTOK)
     preferido = (ch.chamado or "").strip() or (
         (rastreio.devolucao_id_auto or "").strip() if rastreio else ""
@@ -809,7 +885,7 @@ async def _disparar_shopee(
     if motivo != "não recebido" and not fotos:
         # a Shopee exige foto em todo motivo "recebi com problema"
         raise _PendenteError("devolucao_sem_foto")
-    client = await _shopee_client_para(session, ch.conta or dev.conta)
+    client = await _shopee_client_para(session, ch, dev)
     return_sn = (ch.chamado or "").strip() or await _return_sn_shopee(session, dev)
     if not return_sn:
         raise _PendenteError("devolucao_sem_return")
@@ -903,11 +979,14 @@ async def disparar(
         fotos = []
     if plat in (PLAT_TIKTOK, PLAT_SHOPEE):
         fotos = [a for a in fotos if (a.content_type or "").lower() in FOTO_TIPOS_IMAGEM]
-    # Link do vídeo pode estar em outra linha do kit.
+    # Link do vídeo / da expedição pode estar em outra linha do kit.
     video = next(
         ((d.video_url or "").strip() for d in linhas if (d.video_url or "").strip()), None
     )
-    msg.texto = texto_padrao(dev, reason, fotos=len(fotos), video_url=video)
+    envio = next(
+        ((d.link_envio or "").strip() for d in linhas if (d.link_envio or "").strip()), None
+    )
+    msg.texto = texto_padrao(dev, reason, fotos=len(fotos), video_url=video, link_envio=envio)
     referencia = detalhe = None
     try:
         if plat == PLAT_ML:
