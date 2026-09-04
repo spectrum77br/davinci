@@ -690,13 +690,22 @@ class TikTokClient:
         files: dict,
         data: dict | None = None,
         extra_params: dict[str, str] | None = None,
+        shop_cipher: bool = True,
         _retried: bool = False,
     ) -> dict:
         """POST multipart/form-data (upload de imagem). Pela regra de assinatura
         da TikTok o corpo multipart NÃO entra na string assinada — só path +
-        query ordenada, como no GET (`_build_get_params`)."""
+        query ordenada, como no GET. `shop_cipher=False` pros endpoints de
+        nível vendedor (Upload Product Image): com o cipher a TikTok responde
+        36009004 "The 'shop_cipher' query parameter is not required"."""
         await self._ensure_fresh_token()
-        params = self._build_get_params(path, extra_params)
+        if shop_cipher:
+            params = self._build_get_params(path, extra_params)
+        else:
+            base: dict[str, str] = {"app_key": self.app_key, "timestamp": str(self._timestamp())}
+            if extra_params:
+                base.update(extra_params)
+            params = {**base, "sign": self._generate_sign(path, base), "access_token": self.access_token}
         # upload pode demorar: timeout próprio (o self._timeout é um httpx.Timeout)
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as c:
             r = await c.post(
@@ -711,7 +720,8 @@ class TikTokClient:
             if self._expired_creds(resp) and not _retried:
                 await self._ensure_fresh_token(force=True)
                 return await self._post_multipart(
-                    path, files=files, data=data, extra_params=extra_params, _retried=True
+                    path, files=files, data=data, extra_params=extra_params,
+                    shop_cipher=shop_cipher, _retried=True,
                 )
             return resp
         return {"code": r.status_code, "message": r.text[:500]}
@@ -731,6 +741,7 @@ class TikTokClient:
             "/product/202309/images/upload",
             files={"data": (filename, content, mime)},
             data={"use_case": use_case},
+            shop_cipher=False,
         )
         if resp.get("code") not in (0, None):
             raise RuntimeError(
