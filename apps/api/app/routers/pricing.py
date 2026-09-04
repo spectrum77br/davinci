@@ -11,7 +11,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -432,7 +432,16 @@ async def list_products(
         stmt = stmt.where(PricingProduct.in_catalog == in_catalog)
     if is_active is not None:
         stmt = stmt.where(PricingProduct.is_active == is_active)
-    stmt = stmt.order_by(PricingProduct.sku)
+    # Acessório avulso (balança, chaveiro, encosto, rodinha, mochila) vai pro
+    # FIM da lista — Eduardo 04/09: "os acessorios balança cheveiro, etc deixe
+    # tudo la em baixo". O que separa é o SKU: produto principal começa com
+    # letra + dígito (b005, b109…); acessório usa outro prefixo (a015, bp003).
+    # Nos departamentos sem esse padrão (celular) todos caem no mesmo grupo e a
+    # ordem por SKU segue igual à de antes.
+    stmt = stmt.order_by(
+        case((PricingProduct.sku.op("~")(r"^b[0-9]"), 0), else_=1),
+        PricingProduct.sku,
+    )
     rows = (await session.execute(stmt)).scalars().all()
     return [_product_out(r, leaves_by_id) for r in rows]
 
