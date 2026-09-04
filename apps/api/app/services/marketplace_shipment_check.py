@@ -86,6 +86,28 @@ _CANDIDATE_WINDOW = timedelta(days=30)
 _SHOPEE_SHIPPED = {"SHIPPED", "TO_RETURN", "COMPLETED"}
 _ML_SHIPPED = {"shipped", "delivered"}
 _AMAZON_SHIPPED = {"Shipped"}
+# EasyShipShipmentStatus que CONFIRMAM que o pacote saiu da mão do vendedor.
+# Lista de INCLUSÃO, igual à do ML e pelo mesmo motivo: o `order_status` da
+# Amazon vira "Shipped" quando a NF é emitida, muito antes de o pacote sair, e
+# quem sabe a verdade é o EasyShip. A checagem antiga só barrava
+# "PendingPickUp" e deixava passar "PendingDropOff" — que é o caso em que NÓS
+# é que temos de levar o pacote ao ponto de entrega, ou seja, ele está parado
+# aqui dentro. Eduardo, 04/09: "ele ta jogando todos os pedidos para em
+# andamento antes de ser enviado realmente". Estado novo/desconhecido conta
+# como NÃO enviado — melhor o pedido esperar do que constar enviado sem ter saído.
+_AMAZON_EASYSHIP_SAIU = {
+    "PickedUp",
+    "DroppedOff",
+    "AtDestinationFC",
+    "OutForDelivery",
+    "Delivered",
+    "RejectedByBuyer",
+    "Undeliverable",
+    "ReturningToSeller",
+    "ReturnedToSeller",
+    "Damaged",
+    "Lost",
+}
 # TikTok Shop (Order API 202309) — vocabulário próprio, mesmo mapa usado em
 # logistica_rules.TIKTOK_STATUS_LABELS_PT. Só entram os estados em que o
 # pacote JÁ saiu da mão do vendedor, mesmo critério do Shopee/Amazon:
@@ -871,11 +893,12 @@ async def _amazon_shipped_for(
     """`(bling_id, data_envio)` quando a Amazon confirma que o pacote saiu.
 
     Amazon vira OrderStatus pra "Shipped" no momento em que a NF é emitida,
-    ANTES da transportadora coletar. Pedidos EasyShip carregam também
-    EasyShipShipmentStatus, que fica em "PendingPickUp" até a coleta ser
-    escaneada. "PendingPickUp" conta como NÃO enviado; qualquer outro estado
-    EasyShip (PickedUp, Delivered, OutForDelivery, …) ou nenhum status
-    EasyShip (pedido fora do EasyShip) significa que saiu de verdade.
+    ANTES de o pacote sair. Quem sabe a verdade é o EasyShipShipmentStatus:
+    só os estados de `_AMAZON_EASYSHIP_SAIU` confirmam que o pacote deixou o
+    galpão. "PendingPickUp" (esperando a transportadora buscar) e
+    "PendingDropOff" (esperando NÓS levarmos ao ponto) contam como não
+    enviado, e estado desconhecido também. Pedido fora do EasyShip não tem
+    esse campo — aí vale o `order_status` sozinho.
     """
     try:
         result = await client.get_order_status(str(o.numeroloja))
@@ -895,6 +918,7 @@ async def _amazon_shipped_for(
             deadlines[int(o.bling_id)] = dl
     if result.get("order_status") not in _AMAZON_SHIPPED:
         return None
-    if result.get("easyship_status") == "PendingPickUp":
+    easy = (result.get("easyship_status") or "").strip()
+    if easy and easy not in _AMAZON_EASYSHIP_SAIU:
         return None
     return int(o.bling_id), _iso_to_brt_date(result.get("last_update_date"))

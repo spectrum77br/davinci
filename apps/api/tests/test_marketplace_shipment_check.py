@@ -654,3 +654,65 @@ async def test_amazon_enviado_tambem_carimba_prazo():
     )
     assert res == (999, date(2026, 8, 6))
     assert deadlines == {999: datetime(2026, 8, 7, 2, 59, 59, tzinfo=UTC)}
+
+
+# ---- Amazon: EasyShip manda mais que o order_status ----
+
+
+def _amazon_cli(order_status: str, easyship: str | None):
+    """Payload da SP-API no formato que `_amazon_shipped_for` consome."""
+    return _FakeAmazonClient({
+        "order_status": order_status,
+        "easyship_status": easyship,
+        "last_update_date": "2026-09-04T13:00:00Z",
+    })
+
+
+@pytest.mark.asyncio
+async def test_amazon_pending_dropoff_nao_conta_como_enviado():
+    """Eduardo 04/09: "ele ta jogando todos os pedidos para em andamento antes
+    de ser enviado realmente". A Amazon marca order_status=Shipped quando a NF
+    sai; em PendingDropOff o pacote ainda está AQUI esperando alguém levar ao
+    ponto de entrega. Eram 3 pedidos marcados como enviados sem ter saído
+    (294343, 294149, 293599) — a checagem antiga só barrava PendingPickUp."""
+    from app.services import marketplace_shipment_check as m
+
+    for parado in ("PendingDropOff", "PendingPickUp", "LabelCanceled"):
+        cli = _amazon_cli("Shipped", parado)
+        assert await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000")) is None, parado
+
+
+@pytest.mark.asyncio
+async def test_amazon_estados_que_confirmam_a_saida():
+    from app.services import marketplace_shipment_check as m
+
+    for saiu in ("PickedUp", "DroppedOff", "OutForDelivery", "Delivered", "RejectedByBuyer"):
+        cli = _amazon_cli("Shipped", saiu)
+        res = await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000"))
+        assert res == (999, date(2026, 9, 4)), saiu
+
+
+@pytest.mark.asyncio
+async def test_amazon_estado_desconhecido_nao_conta_como_enviado():
+    """Lista de INCLUSÃO: estado novo da Amazon não pode virar envio sozinho —
+    melhor o pedido esperar do que constar enviado sem ter saído."""
+    from app.services import marketplace_shipment_check as m
+
+    cli = _amazon_cli("Shipped", "EstadoQueAAmazonInventouAmanha")
+    assert await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000")) is None
+
+
+@pytest.mark.asyncio
+async def test_amazon_sem_easyship_vale_o_order_status():
+    """Pedido fora do EasyShip não tem esse campo — aí o Shipped vale sozinho."""
+    from app.services import marketplace_shipment_check as m
+
+    for vazio in (None, ""):
+        cli = _amazon_cli("Shipped", vazio)
+        assert await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000")) == (
+            999,
+            date(2026, 9, 4),
+        )
+    # E order_status que não é Shipped nunca conta.
+    cli = _amazon_cli("Unshipped", "PickedUp")
+    assert await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000")) is None
