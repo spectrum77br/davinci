@@ -217,11 +217,32 @@ MOTIVOS_ABREM_CHAMADO = frozenset(
 )
 
 
+def motivo_pede_chamado(dev: Devolution) -> bool:
+    return (dev.motivo_devolucao or "").strip().lower() in MOTIVOS_ABREM_CHAMADO
+
+
+async def chamado_da_devolucao(session: AsyncSession, dev: Devolution) -> Chamado | None:
+    """Chamado de origem `devolucao` já registrado pra essa linha: por pedido
+    Bling (kit com 3 linhas = 1 chamado) ou, sem pedido, pelo id da linha
+    (`origem_ref`). O mais recente quando houver mais de um."""
+    conds = [Chamado.origem == "devolucao"]
+    if (dev.pedido_bling or "").strip():
+        conds.append(Chamado.pedido_bling == dev.pedido_bling.strip())
+    else:
+        conds.append(Chamado.origem_ref == str(dev.id))
+    return (
+        await session.execute(
+            select(Chamado).where(*conds).order_by(Chamado.created_at.desc()).limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def abrir_chamado_devolucao(session: AsyncSession, dev: Devolution) -> Chamado | None:
     """Abre (registra) automaticamente um chamado de origem `devolucao` quando
-    o motivo da devolução pede chamado. Só REGISTRA na aba Chamados — quem abre
-    o chamado de verdade na plataforma (nº/protocolo) segue sendo o operador,
-    então o canal nasce `manual`.
+    o motivo da devolução pede chamado. Aqui só REGISTRA na aba Chamados (canal
+    `manual`); quem leva pro Mercado Livre — revisão da devolução com problema,
+    com as fotos da linha — é `services/chamados_devolucao.garantir_chamado`,
+    que troca o canal pra `api` quando a conta é ML.
 
     Dedupe: UM chamado de devolução por pedido Bling (kit com 3 linhas de
     devolução não vira 3 chamados); sem pedido Bling, cai pro id da linha
@@ -230,15 +251,7 @@ async def abrir_chamado_devolucao(session: AsyncSession, dev: Devolution) -> Cha
     motivo = (dev.motivo_devolucao or "").strip()
     if motivo.lower() not in MOTIVOS_ABREM_CHAMADO:
         return None
-    conds = [Chamado.origem == "devolucao"]
-    if (dev.pedido_bling or "").strip():
-        conds.append(Chamado.pedido_bling == dev.pedido_bling.strip())
-    else:
-        conds.append(Chamado.origem_ref == str(dev.id))
-    ja_tem = (
-        await session.execute(select(func.count()).select_from(Chamado).where(*conds))
-    ).scalar_one()
-    if ja_tem:
+    if await chamado_da_devolucao(session, dev) is not None:
         return None
     ch = Chamado(
         data=datetime.now(SAO_PAULO).date(),

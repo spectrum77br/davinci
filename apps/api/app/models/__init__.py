@@ -10,6 +10,7 @@ from app.models.bling_nota import BlingNota, BlingNotaEmitida
 from app.models.bling_order import BlingOrder, PrevisaoImpressa
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
+from app.models.devolucao_anexo import DevolucaoAnexo
 from app.models.devolucao_rastreio import DevolucaoRastreio
 from app.models.devolution import Devolution
 from app.models.enums import (
@@ -155,6 +156,7 @@ __all__ = [
     "DNPConfig",
     "DNPProduto",
     "DevolucaoRastreio",
+    "DevolucaoAnexo",
     "Devolution",
     "EstoqueDiaFinalizado",
     "FinanceiroConsorcio",

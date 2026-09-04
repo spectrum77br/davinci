@@ -6,8 +6,8 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response, StreamingResponse
 from openpyxl import Workbook
 from sqlalchemy import desc, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,13 +15,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import BlingOrder, Chamado, DevolucaoRastreio, Devolution, Product, Refund, User
+from app.models import (
+    BlingOrder,
+    Chamado,
+    ChamadoMensagem,
+    DevolucaoAnexo,
+    DevolucaoRastreio,
+    Devolution,
+    Product,
+    Refund,
+    User,
+)
 from app.schemas.devolutions import (
     AcompanhamentoItemOut,
     AcompanhamentoOut,
     AcompanhamentoRastreioOut,
     AcompanhamentoRastreioPatch,
     BlingStockResultOut,
+    DevolucaoAnexoOut,
     DevolutionCreate,
     DevolutionLookupOut,
     DevolutionOut,
@@ -32,7 +43,7 @@ from app.schemas.devolutions import (
     SkuSuffixVariant,
     StockCorrectionIn,
 )
-from app.services import chamados as chamados_svc
+from app.services import chamados_devolucao
 from app.services.devolution_stock_return import (
     _STOCK_TRIGGER_CONDICOES,
     _SUFFIX_TAGS,
@@ -214,13 +225,115 @@ async def _chamados_por_pedido(
     return out
 
 
-def _aplica_chamado(out: DevolutionOut, ch: Chamado | None) -> DevolutionOut:
+async def _aberturas_por_chamado(
+    session: AsyncSession, chamados: dict[str, Chamado]
+) -> dict[UUID, ChamadoMensagem]:
+    """Mensagem `abertura` (chamado automático no ML) mais recente de cada
+    chamado da página — alimenta o status "ML" da coluna Chamado."""
+    ids = [ch.id for ch in chamados.values()]
+    if not ids:
+        return {}
+    rows = (
+        (
+            await session.execute(
+                select(ChamadoMensagem)
+                .where(
+                    ChamadoMensagem.chamado_id.in_(ids),
+                    ChamadoMensagem.tipo == chamados_devolucao.TIPO_ABERTURA,
+                )
+                .order_by(ChamadoMensagem.chamado_id, desc(ChamadoMensagem.created_at))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: dict[UUID, ChamadoMensagem] = {}
+    for m in rows:
+        out.setdefault(m.chamado_id, m)
+    return out
+
+
+async def _anexos_por_devolucao(
+    session: AsyncSession, ids: list[UUID]
+) -> dict[UUID, list[DevolucaoAnexoOut]]:
+    """Metadados dos anexos (sem o blob) das linhas da página."""
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                DevolucaoAnexo.id,
+                DevolucaoAnexo.devolution_id,
+                DevolucaoAnexo.filename,
+                DevolucaoAnexo.content_type,
+                DevolucaoAnexo.size_bytes,
+                DevolucaoAnexo.ml_file_name,
+                DevolucaoAnexo.created_at,
+            )
+            .where(DevolucaoAnexo.devolution_id.in_(ids))
+            .order_by(DevolucaoAnexo.created_at)
+        )
+    ).all()
+    out: dict[UUID, list[DevolucaoAnexoOut]] = {}
+    for r in rows:
+        out.setdefault(r.devolution_id, []).append(
+            DevolucaoAnexoOut(
+                id=r.id,
+                filename=r.filename,
+                content_type=r.content_type,
+                size_bytes=r.size_bytes,
+                ml_file_name=r.ml_file_name,
+                created_at=r.created_at,
+            )
+        )
+    return out
+
+
+def _aplica_chamado(
+    out: DevolutionOut, ch: Chamado | None, abertura: ChamadoMensagem | None = None
+) -> DevolutionOut:
     if ch is None:
         return out
     out.tem_chamado = True
     out.chamado_numero = ch.chamado
     out.chamado_resolvido = ch.resolvido
+    if abertura is not None:
+        out.chamado_ml_status = abertura.status
+        out.chamado_ml_erro = abertura.erro if abertura.status != "enviada" else None
     return out
+
+
+async def _completar_out(
+    session: AsyncSession, row: Devolution, out: DevolutionOut
+) -> DevolutionOut:
+    """Chamado (+ status da abertura no ML) e anexos de UMA linha — pras
+    respostas de create/patch/anexo, que o front usa pra trocar a linha."""
+    chamados = await _chamados_por_pedido(session, {row.pedido_bling})
+    ch = chamados.get((row.pedido_bling or "").strip())
+    if ch is None:
+        ch = await chamados_devolucao.chamados_svc.chamado_da_devolucao(session, row)
+        if ch is not None:
+            chamados = {ch.pedido_bling or "": ch}
+    aberturas = await _aberturas_por_chamado(session, chamados) if ch is not None else {}
+    _aplica_chamado(out, ch, aberturas.get(ch.id) if ch is not None else None)
+    out.anexos = (await _anexos_por_devolucao(session, [row.id])).get(row.id, [])
+    return out
+
+
+async def _chamado_devolucao_apos_commit(
+    session: AsyncSession, row: Devolution
+) -> None:
+    """Motivo que pede chamado → registra na aba e, se for ML, dispara a
+    abertura (worker; inline sem fila). Chamado por create/patch/anexo DEPOIS
+    do commit da linha."""
+    ch = await chamados_devolucao.garantir_chamado(session, row)
+    # Commita SEMPRE: o registro na aba vale pra qualquer plataforma, mesmo
+    # quando não há disparo pro ML (Shopee/TikTok ficam canal manual).
+    await session.commit()
+    await session.refresh(row)
+    if ch is None:
+        return
+    await chamados_devolucao.agendar_disparo(session, ch, row)
 
 
 @router.get("", response_model=DevolutionPage)
@@ -257,11 +370,15 @@ async def list_devolutions(
     total = (await session.execute(count_stmt)).scalar_one()
 
     chamados = await _chamados_por_pedido(session, {dev.pedido_bling for dev, _ in rows})
+    aberturas = await _aberturas_por_chamado(session, chamados)
+    anexos = await _anexos_por_devolucao(session, [dev.id for dev, _ in rows])
     items: list[DevolutionOut] = []
     for dev, cliente in rows:
         out = DevolutionOut.model_validate(dev)
         out.cliente = cliente
-        _aplica_chamado(out, chamados.get((dev.pedido_bling or "").strip()))
+        ch = chamados.get((dev.pedido_bling or "").strip())
+        _aplica_chamado(out, ch, aberturas.get(ch.id) if ch is not None else None)
+        out.anexos = anexos.get(dev.id, [])
         items.append(out)
 
     return DevolutionPage(
@@ -1187,6 +1304,7 @@ async def create_devolution(
         link_abertura=body.link_abertura,
         reembolso=body.reembolso,
         motivo_devolucao=body.motivo_devolucao,
+        motivo_ml=body.motivo_ml,
         custo_manutencao=body.custo_manutencao,
         tecnico=body.tecnico,
         devolver_estoque=devolver_no_add,
@@ -1219,11 +1337,10 @@ async def create_devolution(
         row.prazo = row.created_at + timedelta(days=30)
         await session.commit()
         await session.refresh(row)
-    # Motivo que pede chamado já no lançamento → registra o chamado sozinho
-    # (services/chamados.MOTIVOS_ABREM_CHAMADO; dedupe por pedido lá dentro).
-    if await chamados_svc.abrir_chamado_devolucao(session, row) is not None:
-        await session.commit()
-        await session.refresh(row)
+    # Motivo que pede chamado já no lançamento → registra o chamado sozinho e,
+    # se for ML, abre no Mercado Livre (services/chamados_devolucao; dedupe por
+    # pedido lá dentro).
+    await _chamado_devolucao_apos_commit(session, row)
     logger.info("devolution_created", id=str(row.id), pedido_bling=row.pedido_bling)
     out = DevolutionOut.model_validate(row)
 
@@ -1263,7 +1380,7 @@ async def create_devolution(
     if (condicao in ("Extraviado", "Manutenção") or should_stock) and row.pedido_bling:
         await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
         await session.commit()  # persiste a linha de auditoria de situação
-    return out
+    return await _completar_out(session, row, out)
 
 
 @router.patch("/{devolution_id}", response_model=DevolutionOut)
@@ -1332,13 +1449,11 @@ async def patch_devolution(
     await session.commit()
     await session.refresh(row)
 
-    # Motivo trocado pra um que pede chamado → registra o chamado sozinho
-    # (dedupe por pedido dentro do helper — repetir o PATCH não duplica).
-    if (
-        "motivo_devolucao" in data
-        and await chamados_svc.abrir_chamado_devolucao(session, row) is not None
-    ):
-        await session.commit()
+    # Motivo trocado pra um que pede chamado (ou sub-motivo de Golpe escolhido)
+    # → registra o chamado sozinho e abre no ML (dedupe por pedido dentro do
+    # helper — repetir o PATCH não duplica).
+    if "motivo_devolucao" in data or "motivo_ml" in data:
+        await _chamado_devolucao_apos_commit(session, row)
 
     # Variação do custo de manutenção é refletida como débito no reembolso do refund
     # de Manutenção (subtrai a diferença, preservando o que já estava lá).
@@ -1401,7 +1516,95 @@ async def patch_devolution(
     out = DevolutionOut.model_validate(row)
     if final_sr is not None:
         out.bling_stock_result = BlingStockResultOut(**final_sr)
-    return out
+    return await _completar_out(session, row, out)
+
+
+# ------------------------------------------------------------ anexos (fotos/vídeo)
+
+# Foto vai pro ML como evidência do chamado de devolução (JPG/PNG/PDF; acima de
+# 5 MB é reduzida antes de subir). Vídeo só fica guardado na linha — a API do
+# ML não aceita vídeo.
+_ANEXO_TIPOS_FOTO = {"image/jpeg", "image/png", "application/pdf"}
+_ANEXO_TIPOS_VIDEO = {"video/mp4", "video/quicktime", "video/webm"}
+_ANEXO_MAX_FOTO = 15 * 1024 * 1024
+_ANEXO_MAX_VIDEO = 80 * 1024 * 1024
+
+
+@router.post(
+    "/{devolution_id}/anexos",
+    response_model=DevolutionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_anexo(
+    devolution_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+    file: Annotated[UploadFile, File(...)],
+) -> DevolutionOut:
+    """Anexa foto/vídeo à linha da devolução. Se o motivo pede chamado e a
+    conta é ML, (re)dispara a abertura automática — é assim que um chamado
+    "aguardando foto" (Danificado / produto diferente) sai."""
+    row = (
+        await session.execute(select(Devolution).where(Devolution.id == devolution_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "devolution_not_found"})
+    ctype = (file.content_type or "").lower()
+    if ctype not in _ANEXO_TIPOS_FOTO | _ANEXO_TIPOS_VIDEO:
+        raise HTTPException(400, detail={"code": "devolucao_anexo_tipo_invalido"})
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, detail={"code": "devolucao_anexo_vazio"})
+    limite = _ANEXO_MAX_VIDEO if ctype in _ANEXO_TIPOS_VIDEO else _ANEXO_MAX_FOTO
+    if len(raw) > limite:
+        raise HTTPException(413, detail={"code": "devolucao_anexo_muito_grande"})
+    session.add(
+        DevolucaoAnexo(
+            devolution_id=row.id,
+            filename=(file.filename or "anexo").strip() or "anexo",
+            content_type=ctype,
+            size_bytes=len(raw),
+            blob=raw,
+            created_by=user.id,
+        )
+    )
+    await session.commit()
+    await session.refresh(row)
+    await _chamado_devolucao_apos_commit(session, row)
+    logger.info(
+        "devolucao_anexo_upload", devolution_id=str(row.id), content_type=ctype, bytes=len(raw)
+    )
+    return await _completar_out(session, row, DevolutionOut.model_validate(row))
+
+
+@router.get("/anexos/{anexo_id}")
+async def get_anexo(
+    anexo_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+) -> Response:
+    a = await session.get(DevolucaoAnexo, anexo_id)
+    if a is None:
+        raise HTTPException(404, detail={"code": "devolucao_anexo_not_found"})
+    return Response(
+        content=a.blob,
+        media_type=a.content_type,
+        headers={"Content-Disposition": f'inline; filename="{a.filename}"'},
+    )
+
+
+@router.delete("/anexos/{anexo_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_anexo(
+    anexo_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> Response:
+    a = await session.get(DevolucaoAnexo, anexo_id)
+    if a is None:
+        raise HTTPException(404, detail={"code": "devolucao_anexo_not_found"})
+    await session.delete(a)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/backfill-addresses", status_code=status.HTTP_200_OK)

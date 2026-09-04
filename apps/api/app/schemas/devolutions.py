@@ -19,6 +19,18 @@ class BlingStockResultOut(BaseModel):
     message: str = ""
 
 
+class DevolucaoAnexoOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    # Nome devolvido pelo upload no ML (foto já enviada como evidência).
+    ml_file_name: str | None = None
+    created_at: datetime
+
+
 class DevolutionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -34,6 +46,8 @@ class DevolutionOut(BaseModel):
     link_abertura: str | None = None
     reembolso: bool
     motivo_devolucao: str | None = None
+    # Sub-motivo do chamado no ML quando o motivo é "Golpe" (SRF4/SRF5/SRF6).
+    motivo_ml: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool = False
@@ -65,6 +79,13 @@ class DevolutionOut(BaseModel):
     tem_chamado: bool = False
     chamado_numero: str | None = None
     chamado_resolvido: bool | None = None
+    # Abertura automática no Mercado Livre (mensagem `abertura` do chamado):
+    # pendente | enviada | falhou; `chamado_ml_erro` = código/erro quando não
+    # está enviada (ex.: devolucao_sem_foto, return_review_indisponivel).
+    chamado_ml_status: str | None = None
+    chamado_ml_erro: str | None = None
+    # Fotos/vídeos anexados à linha (metadados; blob pelo endpoint /anexos/{id}).
+    anexos: list[DevolucaoAnexoOut] = []
 
 
 class DevolutionCreate(BaseModel):
@@ -79,6 +100,7 @@ class DevolutionCreate(BaseModel):
     link_abertura: str | None = None
     reembolso: bool = False
     motivo_devolucao: str | None = None
+    motivo_ml: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool = False
@@ -99,6 +121,7 @@ class DevolutionCreate(BaseModel):
         "condicao_produto",
         "link_abertura",
         "motivo_devolucao",
+        "motivo_ml",
         "tecnico",
         "observacao",
         "troca_sku",
@@ -140,6 +163,7 @@ class DevolutionPatch(BaseModel):
     link_abertura: str | None = None
     reembolso: bool | None = None
     motivo_devolucao: str | None = None
+    motivo_ml: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool | None = None
@@ -161,6 +185,7 @@ class DevolutionPatch(BaseModel):
         "condicao_produto",
         "link_abertura",
         "motivo_devolucao",
+        "motivo_ml",
         "tecnico",
         "observacao",
         "troca_sku",

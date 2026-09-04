@@ -166,6 +166,15 @@ const ERROS: Record<string, string> = {
   chamado_status_bling_desconhecido: 'situação desconhecida no Bling',
   chamado_sem_integracao_bling: 'sem integração Bling',
   chamado_status_bling_erro: 'o Bling recusou a mudança de situação',
+  // abertura automática de devolução no ML (services/chamados_devolucao)
+  devolucao_sem_foto: 'aguardando foto na tela Devoluções',
+  devolucao_sem_tipo_golpe: 'escolha o tipo de golpe na tela Devoluções',
+  return_review_indisponivel: 'ML ainda não liberou a revisão da devolução (tenta a cada hora)',
+  devolucao_sem_claim: 'sem devolução aberta no ML pra esse pedido (tenta a cada hora)',
+  devolucao_sem_return: 'sem devolução aberta no ML pra esse pedido (tenta a cada hora)',
+  devolucao_sem_pedido_marketplace: 'devolução sem nº do pedido do ML',
+  devolucao_prazo_esgotado: 'ficou 45 dias pendente — abrir na mão',
+  devolucao_nao_encontrada: 'lançamento da devolução não encontrado',
 }
 
 function apiError(e: any) {
@@ -1047,7 +1056,7 @@ async function reabrir(row: ChamadoRow) {
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
               <span class="font-mono">{{ fmtDateTime(m.created_at) }}</span>
               <span class="font-medium text-foreground">{{ m.autor_nome || (m.direcao === 'recebida' ? 'plataforma' : '—') }}</span>
-              <span>· {{ m.direcao === 'enviada' ? (m.tipo === 'replica_auto' ? 'réplica automática' : 'réplica') : m.direcao }}</span>
+              <span>· {{ m.direcao === 'enviada' ? (m.tipo === 'replica_auto' ? 'réplica automática' : m.tipo === 'abertura' ? 'abertura no ML (devolução)' : 'réplica') : m.direcao }}</span>
               <span v-if="m.direcao !== 'sistema'" class="rounded px-1.5 py-0.5" :class="statusMensagemClass(m.status)">{{ m.status }}<template v-if="m.erro"> — {{ ERROS[m.erro] || m.erro }}</template></span>
               <span v-if="m.enviada_at" class="font-mono">enviada {{ fmtDateTime(m.enviada_at) }}</span>
             </div>

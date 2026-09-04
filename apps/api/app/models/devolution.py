@@ -28,6 +28,11 @@ class Devolution(Base, TimestampMixin):
     link_abertura: Mapped[str | None] = mapped_column(Text, nullable=True)
     reembolso: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     motivo_devolucao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Sub-motivo pro chamado automático no ML quando o motivo é "Golpe" (o
+    # operador escolhe: SRF4 produto diferente | SRF5 pacote vazio | SRF6
+    # outro). Os demais motivos têm mapeamento fixo em services/chamados_devolucao.
+    # Ver alembic 0243.
+    motivo_ml: Mapped[str | None] = mapped_column(Text, nullable=True)
     custo_manutencao: Mapped[float | None] = mapped_column(Float, nullable=True)
     tecnico: Mapped[str | None] = mapped_column(Text, nullable=True)
     devolver_estoque: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))

@@ -318,6 +318,74 @@ class MercadoLivreClient:
             )
         return r.json() or {}
 
+    async def upload_return_attachment(
+        self,
+        claim_id: str | int,
+        filename: str,
+        content: bytes,
+        content_type: str = "image/jpeg",
+    ) -> str:
+        """Sobe uma evidência (foto) pra devolução de um claim e devolve o
+        `file_name` que entra em `return_review_fail`. Multipart `file`
+        (POST /post-purchase/v1/claims/{id}/returns/attachments) — a API aceita
+        JPG/PNG/PDF/TXT até 5 MB; vídeo não. Levanta com o corpo do erro em 4xx."""
+        if self._expired():
+            await self.refresh()
+        url = f"{ML_API_BASE}/post-purchase/v1/claims/{claim_id}/returns/attachments"
+        for attempt in range(2):
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json",
+            }
+            async with httpx.AsyncClient(timeout=120.0) as c:
+                r = await c.post(
+                    url, headers=headers, files={"file": (filename, content, content_type)}
+                )
+            if r.status_code == 401 and attempt == 0:
+                await self.refresh()
+                continue
+            break
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"ml_return_attachment status={r.status_code} body={r.text[:500]}"
+            )
+        data = r.json() or {}
+        name = str(data.get("file_name") or "").strip()
+        if not name:
+            raise RuntimeError(f"ml_return_attachment sem file_name body={r.text[:300]}")
+        return name
+
+    async def return_review_fail(
+        self,
+        return_id: str | int,
+        reason: str,
+        message: str,
+        *,
+        attachments: list[str] | None = None,
+    ) -> dict:
+        """Revisão da devolução COM PROBLEMA (o "chamado" de devolução do
+        vendedor): POST /post-purchase/v1/returns/{return_id}/return-review com
+        `[{reason, message, attachments}]`. `reason` ∈ SRF2 danificado | SRF3
+        incompleta | SRF4 produto diferente | SRF5 sem produto | SRF6 outro |
+        SRF7 não chegou (esse é do pacote, sem anexo). SRF2/SRF4 exigem
+        `attachments` (nomes do `upload_return_attachment`). Só funciona quando
+        o player seller do claim tem `return_review_fail` em available_actions.
+        Levanta com o corpo do erro em 4xx."""
+        item: dict = {"reason": reason, "message": message}
+        if attachments:
+            item["attachments"] = list(attachments)
+        r = await self._request(
+            "POST", f"/post-purchase/v1/returns/{return_id}/return-review", json=[item]
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"ml_return_review status={r.status_code} body={r.text[:500]}"
+            )
+        try:
+            return r.json() or {}
+        except ValueError:
+            return {}
+
     async def get_billing_order_details(self, order_id: str) -> dict:
         r = await self._request(
             "GET",

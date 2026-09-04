@@ -12,6 +12,7 @@ import {
   Megaphone,
   PackagePlus,
   PackageSearch,
+  Paperclip,
   Plus,
   RotateCcw,
   Search,
@@ -31,6 +32,15 @@ type BlingStockResult = {
   message: string
 }
 
+type DevolucaoAnexo = {
+  id: string
+  filename: string
+  content_type: string
+  size_bytes: number
+  ml_file_name: string | null
+  created_at: string
+}
+
 type DevolutionRow = {
   id: string
   data: string | null
@@ -45,6 +55,7 @@ type DevolutionRow = {
   link_abertura: string | null
   reembolso: boolean
   motivo_devolucao: string | null
+  motivo_ml: string | null
   custo_manutencao: number | null
   tecnico: string | null
   devolver_estoque: boolean
@@ -72,6 +83,10 @@ type DevolutionRow = {
   tem_chamado?: boolean
   chamado_numero?: string | null
   chamado_resolvido?: boolean | null
+  // Abertura automática no Mercado Livre (pendente | enviada | falhou) + motivo.
+  chamado_ml_status?: string | null
+  chamado_ml_erro?: string | null
+  anexos?: DevolucaoAnexo[]
 }
 
 // Campos extras coletados pelos modais antes de chamar o estoque/situação Bling.
@@ -110,6 +125,7 @@ type DevolutionDraft = LookupRow & {
   link_abertura: string
   reembolso: boolean
   motivo_devolucao: string
+  motivo_ml: string
   custo_manutencao: number | null
   tecnico: string
   devolver_estoque: boolean
@@ -158,6 +174,38 @@ const MOTIVOS_DEVOLUCAO = [
   'Não recebido',
   'Danificado (Outros)',
 ] as const
+
+// "Golpe" abre chamado no ML, mas o motivo "depende" — o operador escolhe o tipo.
+const GOLPE_TIPOS = [
+  { value: 'SRF4', label: 'Golpe: produto diferente (foto)' },
+  { value: 'SRF5', label: 'Golpe: pacote vazio' },
+  { value: 'SRF6', label: 'Golpe: outro' },
+] as const
+
+// Abertura automática no ML — o que a linha mostra enquanto não está "enviada".
+const ML_STATUS_ERROS: Record<string, string> = {
+  devolucao_sem_foto: 'aguardando foto — anexe pelo 📎',
+  devolucao_sem_tipo_golpe: 'escolha o tipo de golpe',
+  return_review_indisponivel: 'ML ainda não liberou a revisão (o pacote precisa constar entregue) — tenta de novo a cada hora',
+  devolucao_sem_claim: 'sem devolução aberta no ML pra esse pedido — tenta de novo a cada hora',
+  devolucao_sem_return: 'sem devolução aberta no ML pra esse pedido — tenta de novo a cada hora',
+  devolucao_sem_pedido_marketplace: 'linha sem nº do pedido do ML',
+  devolucao_prazo_esgotado: 'ficou 45 dias pendente — abrir na mão',
+  devolucao_nao_encontrada: 'lançamento não encontrado',
+  chamado_sem_integracao_ml: 'conta sem integração ML no DaVinci',
+}
+function mlStatusLabel(row: DevolutionRow): string {
+  const st = row.chamado_ml_status
+  if (st === 'enviada') return 'ML: aberto'
+  if (st === 'pendente') return `ML: ${ML_STATUS_ERROS[row.chamado_ml_erro || ''] || 'pendente'}`
+  if (st === 'falhou') return `ML: falhou — ${ML_STATUS_ERROS[row.chamado_ml_erro || ''] || row.chamado_ml_erro || ''}`
+  return ''
+}
+function mlStatusClass(st: string | null | undefined): string {
+  if (st === 'enviada') return 'text-emerald-700 dark:text-emerald-300'
+  if (st === 'falhou') return 'text-red-600 dark:text-red-400'
+  return 'text-amber-700 dark:text-amber-300'
+}
 
 const CONDICOES_PRODUTO = [
   'Novo',
@@ -563,7 +611,7 @@ function setRowNumber(row: DevolutionRow, field: 'custo_produto' | 'custo_manute
 
 function setRowText(
   row: DevolutionRow,
-  field: 'condicao_produto' | 'link_abertura' | 'motivo_devolucao' | 'tecnico' | 'observacao',
+  field: 'condicao_produto' | 'link_abertura' | 'motivo_devolucao' | 'motivo_ml' | 'tecnico' | 'observacao',
   value: string,
 ) {
   row[field] = value || null
@@ -959,6 +1007,7 @@ function selectAllProducts() {
       link_abertura: '',
       reembolso: false,
       motivo_devolucao: '',
+      motivo_ml: '',
       custo_manutencao: null,
       tecnico: '',
       devolver_estoque: false,
@@ -997,6 +1046,7 @@ function buildPayload(d: DevolutionDraft) {
     link_abertura: d.link_abertura || null,
     reembolso: d.reembolso,
     motivo_devolucao: d.motivo_devolucao || null,
+    motivo_ml: d.motivo_ml || null,
     custo_manutencao: d.custo_manutencao,
     tecnico: d.tecnico || null,
     devolver_estoque: d.devolver_estoque,
@@ -1076,6 +1126,7 @@ function rowPatchPayload(row: DevolutionRow) {
     link_abertura: row.link_abertura || null,
     reembolso: row.reembolso,
     motivo_devolucao: row.motivo_devolucao || null,
+    motivo_ml: row.motivo_ml || null,
     custo_manutencao: row.custo_manutencao,
     tecnico: row.tecnico || null,
     devolver_estoque: row.devolver_estoque,
@@ -1169,6 +1220,60 @@ async function saveRow(row: DevolutionRow) {
     error.value = apiError(e)
   } finally {
     setSaving(row.id, false)
+  }
+}
+
+// ---- anexos (fotos/vídeos) da devolução — modal por linha
+const anexosRow = ref<DevolutionRow | null>(null)
+const anexoUploading = ref(false)
+function openAnexos(row: DevolutionRow) {
+  anexosRow.value = row
+}
+function closeAnexos() {
+  anexosRow.value = null
+}
+function anexoUrl(id: string) {
+  return `/api/devolutions/anexos/${id}`
+}
+function isVideo(a: DevolucaoAnexo) {
+  return a.content_type.startsWith('video/')
+}
+function replaceRow(row: DevolutionRow, updated: DevolutionRow) {
+  const merged = { ...updated, cliente: updated.cliente ?? row.cliente }
+  const idx = items.value.findIndex((i) => i.id === row.id)
+  if (idx >= 0) items.value[idx] = merged
+  if (anexosRow.value?.id === row.id) anexosRow.value = merged
+}
+async function uploadAnexo(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = ''
+  const row = anexosRow.value
+  if (!row || !files.length) return
+  anexoUploading.value = true
+  error.value = null
+  try {
+    for (const f of files) {
+      const fd = new FormData()
+      fd.append('file', f)
+      const updated = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}/anexos`, { method: 'POST', body: fd })
+      replaceRow(row, updated)
+    }
+  } catch (e: any) {
+    error.value = apiError(e)
+  } finally {
+    anexoUploading.value = false
+  }
+}
+async function removeAnexo(a: DevolucaoAnexo) {
+  const row = anexosRow.value
+  if (!row) return
+  try {
+    await api(`/api/devolutions/anexos/${a.id}`, { method: 'DELETE' })
+    const rest = (row.anexos || []).filter((x) => x.id !== a.id)
+    replaceRow(row, { ...row, anexos: rest })
+  } catch (e: any) {
+    error.value = apiError(e)
   }
 }
 
@@ -1631,6 +1736,10 @@ async function backfillAddresses() {
                   <option value="">—</option>
                   <option v-for="m in MOTIVOS_DEVOLUCAO" :key="m" :value="m">{{ m }}</option>
                 </select>
+                <select v-if="(d.motivo_devolucao || '').toLowerCase() === 'golpe'" v-model="d.motivo_ml" :class="sheetSelectClass" title="Tipo de golpe — define o motivo do chamado no Mercado Livre">
+                  <option value="">tipo de golpe…</option>
+                  <option v-for="g in GOLPE_TIPOS" :key="g.value" :value="g.value">{{ g.label }}</option>
+                </select>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <input v-model.number="d.custo_manutencao" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
@@ -1868,6 +1977,17 @@ async function backfillAddresses() {
                   :value="row.motivo_devolucao"
                 >{{ row.motivo_devolucao }}</option>
               </select>
+              <select
+                v-if="(row.motivo_devolucao || '').toLowerCase() === 'golpe'"
+                :value="row.motivo_ml || ''"
+                :disabled="!canEdit"
+                :class="sheetSelectClass"
+                title="Tipo de golpe — define o motivo do chamado no Mercado Livre"
+                @change="(e) => { setRowText(row, 'motivo_ml', (e.target as HTMLSelectElement).value); saveRow(row) }"
+              >
+                <option value="">tipo de golpe…</option>
+                <option v-for="g in GOLPE_TIPOS" :key="g.value" :value="g.value">{{ g.label }}</option>
+              </select>
             </td>
             <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
               <NuxtLink
@@ -1884,6 +2004,21 @@ async function backfillAddresses() {
                 {{ row.chamado_numero || 'sim' }}
               </NuxtLink>
               <span v-else class="text-muted-foreground">—</span>
+              <div
+                v-if="row.chamado_ml_status"
+                class="mt-0.5 max-w-[140px] whitespace-normal text-[10px] leading-tight"
+                :class="mlStatusClass(row.chamado_ml_status)"
+                :title="mlStatusLabel(row)"
+              >{{ mlStatusLabel(row) }}</div>
+              <button
+                type="button"
+                class="mt-0.5 inline-flex items-center gap-1 rounded border px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
+                title="Fotos e vídeos da devolução — as fotos vão como evidência do chamado no Mercado Livre"
+                @click="openAnexos(row)"
+              >
+                <Paperclip class="size-3" />
+                {{ (row.anexos || []).length || 'foto' }}
+              </button>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input
@@ -2053,6 +2188,69 @@ async function backfillAddresses() {
           </div>
         </div>
       </TransitionGroup>
+    </div>
+
+    <!-- Anexos da devolução: fotos (evidência do chamado no ML) e vídeos (só guardados) -->
+    <div
+      v-if="anexosRow"
+      class="fixed inset-0 bg-black/60 flex items-center justify-center z-40 p-4"
+      @click.self="closeAnexos"
+    >
+      <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-4">
+        <div class="flex items-start">
+          <div>
+            <h2 class="text-lg font-semibold">Fotos e vídeos da devolução</h2>
+            <p class="text-sm text-muted-foreground">
+              Pedido {{ anexosRow.pedido_bling || '—' }} · {{ anexosRow.conta }} · motivo {{ anexosRow.motivo_devolucao || '—' }}.
+              As fotos (JPG/PNG/PDF) vão como evidência do chamado automático no Mercado Livre;
+              vídeo fica só guardado aqui — a API do ML não aceita vídeo.
+            </p>
+          </div>
+          <Button class="ml-auto" size="sm" variant="ghost" @click="closeAnexos">
+            <X class="size-4" />
+          </Button>
+        </div>
+        <div
+          v-if="anexosRow.chamado_ml_status"
+          class="rounded border px-2 py-1 text-xs"
+          :class="mlStatusClass(anexosRow.chamado_ml_status)"
+        >{{ mlStatusLabel(anexosRow) }}</div>
+        <div class="flex flex-wrap gap-3">
+          <div v-for="a in anexosRow.anexos || []" :key="a.id" class="relative">
+            <a :href="anexoUrl(a.id)" target="_blank" rel="noopener" :title="a.filename">
+              <video v-if="isVideo(a)" :src="anexoUrl(a.id)" class="h-24 w-24 rounded border object-cover" muted />
+              <div v-else-if="a.content_type === 'application/pdf'" class="flex h-24 w-24 items-center justify-center rounded border text-xs">PDF</div>
+              <img v-else :src="anexoUrl(a.id)" :alt="a.filename" class="h-24 w-24 rounded border object-cover" />
+            </a>
+            <div class="mt-0.5 w-24 truncate text-[10px] text-muted-foreground" :title="a.filename">
+              <span v-if="a.ml_file_name" class="text-emerald-600" title="já enviada ao ML">✓ </span>{{ a.filename }}
+            </div>
+            <button
+              v-if="canEdit"
+              type="button"
+              class="absolute -right-1.5 -top-1.5 rounded-full border bg-background p-0.5 text-red-500 hover:bg-red-500/10"
+              title="remover"
+              @click="removeAnexo(a)"
+            >
+              <X class="size-3" />
+            </button>
+          </div>
+          <div v-if="!(anexosRow.anexos || []).length" class="text-sm text-muted-foreground">nenhum anexo ainda</div>
+        </div>
+        <label v-if="canEdit" class="inline-flex cursor-pointer items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-muted">
+          <Loader2 v-if="anexoUploading" class="size-3.5 animate-spin" />
+          <Paperclip v-else class="size-3.5" />
+          anexar foto / vídeo
+          <input
+            type="file"
+            multiple
+            accept="image/jpeg,image/png,application/pdf,video/mp4,video/quicktime,video/webm"
+            class="hidden"
+            :disabled="anexoUploading"
+            @change="uploadAnexo"
+          />
+        </label>
+      </div>
     </div>
 
     <!-- Correção de estoque: entrada manual via API, sem criar devolução -->

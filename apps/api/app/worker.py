@@ -38,6 +38,7 @@ from app.services.bling_kit_create import create_bling_kit_for_mark_job
 from app.services.bling_notas_token_refresh import run_refresh_bling_notas_tokens
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
+from app.services import chamados_devolucao
 from app.services.chamados import run_replica_automatica as run_chamados_replica_automatica
 from app.services.email import get_email_sender, render_otp_html
 from app.services.import_lote_bling_stock import push_lote_stock_to_bling_job
@@ -830,10 +831,31 @@ async def devolucao_rastreio_sync(ctx: dict) -> None:
 async def chamados_replica_automatica(ctx: dict) -> None:
     """De hora em hora (:25): réplica automática dos Chamados (reenvia a
     mensagem cadastrada a cada N dias enquanto ligada) + monitoramento (fecha
-    sozinho o chamado de API quando o ML encerra o claim)."""
+    sozinho o chamado de API quando o ML encerra o claim) + retentativa das
+    aberturas automáticas de devolução no ML que ficaram pendentes (ML ainda
+    não liberou a revisão, foto anexada depois, sub-motivo escolhido depois)."""
     async with session_scope() as s:
         summary = await run_chamados_replica_automatica(s)
     logger.info("chamados_replica_automatica_done", **summary)
+    async with session_scope() as s:
+        pend = await chamados_devolucao.processar_pendentes(s)
+    logger.info("chamados_devolucao_pendentes_done", **pend)
+
+
+async def chamado_devolucao_disparar(ctx: dict, chamado_id: str) -> None:
+    """Abre no Mercado Livre o chamado automático de uma devolução (revisão da
+    devolução com problema, com as fotos da linha). Enfileirado pelo router
+    de devoluções ao marcar o motivo / anexar foto; o cron :25 retenta o que
+    ficar pendente."""
+    async with session_scope() as s:
+        msg = await chamados_devolucao.disparar_por_id(s, UUID(chamado_id))
+        await s.commit()
+    logger.info(
+        "chamado_devolucao_disparar_done",
+        chamado_id=chamado_id,
+        status=(msg.status if msg is not None else None),
+        erro=(msg.erro if msg is not None else None),
+    )
 
 
 async def pos_vendas_notas_sync(ctx: dict) -> None:
@@ -1927,6 +1949,7 @@ class WorkerSettings:
         send_otp_email,
         auth_codes_cleanup,
         auto_link_run,
+        chamado_devolucao_disparar,
         # O "Sincronizar Todos" completo (include_all_stock, ~30k links) leva
         # ~25-30 min só de chamadas externas — o job_timeout global de 1800s
         # matava a barra a ~98% (TimeoutError em 2/jul, job 7c1b0d83). 3h de
