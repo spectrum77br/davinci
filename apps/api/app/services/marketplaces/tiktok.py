@@ -697,7 +697,8 @@ class TikTokClient:
         query ordenada, como no GET (`_build_get_params`)."""
         await self._ensure_fresh_token()
         params = self._build_get_params(path, extra_params)
-        async with httpx.AsyncClient(timeout=max(self._timeout, 120.0)) as c:
+        # upload pode demorar: timeout próprio (o self._timeout é um httpx.Timeout)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as c:
             r = await c.post(
                 f"{TIKTOK_BASE_URL}{path}",
                 params=params,
