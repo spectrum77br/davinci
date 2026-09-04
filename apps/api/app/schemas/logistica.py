@@ -48,6 +48,9 @@ class LogisticaOut(BaseModel):
     status_detalhe: list[StatusDetalheOut] = Field(default_factory=list)
     rastreio: str | None = None
     localizacao: str | None = None
+    # Quando a `localizacao` veio dos CORREIOS (push/pull do 17track). Vazio = o
+    # que está na coluna ainda é o proxy do marketplace, não o físico. Só leitura.
+    localizacao_at: datetime | None = None
     # Divergência ML × rastreio físico dos Correios (auto-calculada; só leitura).
     divergencia: str | None = None
     status_bling: str | None = None

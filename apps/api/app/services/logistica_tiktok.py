@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_datas, logistica_enrich, logistica_rules
+from app.services import logistica_datas, logistica_enrich, logistica_rules, logistica_track
 from app.services.devolucao_returns import ReturnInfo, epoch_to_dt
 from app.services.marketplaces.tiktok import TikTokClient
 
@@ -185,7 +185,11 @@ async def enrich_row(
     row.meli_status = meli
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]
-    if enr.get("localizacao"):
+    # Envio por Correios com evento real do 17track (`localizacao_at`) não é
+    # sobrescrito pelo proxy da plataforma — o físico é melhor que a estimativa.
+    if enr.get("localizacao") and not (
+        logistica_track.is_correios(row.rastreio) and row.localizacao_at
+    ):
         row.localizacao = enr["localizacao"]
     # Divergência TikTok: order_status comercial × último evento físico.
     row.divergencia = logistica_rules.detectar_divergencia_tiktok(

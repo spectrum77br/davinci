@@ -86,6 +86,9 @@ async def receive_17track_push(
         ).scalars().all()
         for row in rows:
             row.localizacao = loc
+            # Carimba QUANDO os Correios se moveram — é o que a tela mostra pra
+            # o operador saber que a linha está viva (e não é o proxy do ML).
+            row.localizacao_at = datetime.now(UTC)
             # Recalcula a divergência ML × físico com o local novo dos Correios.
             row.divergencia = logistica_rules.detectar_divergencia(row.meli_status, loc)
             applied += 1
@@ -111,20 +114,28 @@ async def register_correios(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
 ) -> dict[str, Any]:
-    """Registra no 17track os rastreios Correios (`...BR`) das linhas de
-    Logística que ainda não têm localização física real. Idempotente do lado do
-    17track — repetir número não gasta quota extra."""
-    rows = (
-        await session.execute(
-            select(Logistica.rastreio).where(Logistica.rastreio.isnot(None))
-        )
-    ).scalars().all()
-    numbers = sorted(
-        {r.strip() for r in rows if logistica_track.is_correios(r)}
-    )
-    if not numbers:
-        return {"registered": 0, "numbers": 0}
+    """Roda AGORA o que o cron `logistica_track_sync` faz de 15 em 15 min:
+    registra no 17track os rastreios Correios (`...BR`) ainda não registrados e
+    puxa a localização física dos que já estão. Idempotente — repetir número não
+    gasta quota extra. `sem_quota=true` na resposta significa que a conta do
+    17track ficou sem saldo e nada será atualizado até recarregar."""
+    from app.services import logistica_track_sync
 
-    body = await logistica_track.register(numbers)
-    logger.info("logistica_17track_register_batch", numbers=len(numbers))
-    return {"registered": len(numbers), "numbers": len(numbers), "raw": body}
+    resumo = await logistica_track_sync.run(session)
+    logger.info("logistica_17track_register_batch", **resumo)
+    return resumo
+
+
+@router.get("/api/logistica/17track/status")
+async def status_17track(
+    _user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> dict[str, Any]:
+    """A busca dos Correios está parada por falta de saldo no 17track?
+
+    A tela usa isso pra mostrar a faixa de aviso. Sem ela o operador não teria
+    como saber que a Localização inteira parou — o motivo só apareceria num log
+    do servidor (Eduardo, 04/09: passou dias achando que era bug do sistema)."""
+    from app.services import logistica_track_sync
+
+    desde = await logistica_track_sync.sem_quota_desde()
+    return {"sem_quota": bool(desde), "desde": desde}

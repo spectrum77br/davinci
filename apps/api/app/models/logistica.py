@@ -44,6 +44,18 @@ class Logistica(Base, TimestampMixin):
     # Número de rastreio do envio (manual por enquanto).
     rastreio: Mapped[str | None] = mapped_column(Text, nullable=True)
     localizacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Memória do 17track (ver services/logistica_track_sync): QUAL número já foi
+    # registrado lá. Diferente de `rastreio` = código novo/nunca registrado, e o
+    # job registra (sem isso gastaria quota registrando o mesmo número toda hora).
+    rastreio_17track: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rastreio_17track_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Quando a `localizacao` veio dos Correios pela última vez (push ou pull do
+    # 17track). Vazio = a localização exibida ainda é o proxy do marketplace.
+    localizacao_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Explicação da divergência entre o status do ML e o rastreio físico dos
     # Correios (auto-calculada; vazia quando batem). Ver logistica_rules.
     divergencia: Mapped[str | None] = mapped_column(Text, nullable=True)

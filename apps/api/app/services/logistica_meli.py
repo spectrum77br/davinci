@@ -417,9 +417,14 @@ async def enrich_row(
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]
     # Localização: pra Correios (...BR) o físico do 17track manda — não deixa o
-    # proxy do ML sobrescrever uma localização física já existente.
+    # proxy do ML sobrescrever uma localização física já existente. A prova de
+    # que é física é `localizacao_at` (carimbo do push/pull do 17track). Antes
+    # a guarda olhava só "tem alguma localização?", e como o proxy do ML também
+    # preenche essa coluna ele acabava se BLOQUEANDO: a primeira frase que ele
+    # escrevia congelava para sempre. Foi o que travou o 291809 em "Aguardando
+    # NF → Rio de Janeiro/RJ · previsão 25/08" (Eduardo, 04/09).
     new_loc = enr.get("localizacao")
-    if new_loc and not (logistica_track.is_correios(row.rastreio) and row.localizacao):
+    if new_loc and not (logistica_track.is_correios(row.rastreio) and row.localizacao_at):
         row.localizacao = new_loc
     # Divergência ML × físico: só faz sentido pros Correios (onde o 17track dá o
     # local físico real na `localizacao`); nas outras não há como comparar.

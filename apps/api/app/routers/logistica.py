@@ -174,6 +174,7 @@ def _to_out(
         status_detalhe=_status_detalhe(c),
         rastreio=c.rastreio,
         localizacao=c.localizacao,
+        localizacao_at=c.localizacao_at,
         divergencia=c.divergencia,
         status_bling=c.status_bling,
         chamado=c.chamado,

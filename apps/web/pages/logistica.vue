@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -57,6 +57,9 @@ type Logistica = {
   status_detalhe?: StatusDetalhe[]
   rastreio: string | null
   localizacao: string | null
+  // Quando os CORREIOS se moveram (17track). Vazio = a localização exibida
+  // ainda é o proxy do marketplace, não o rastreio físico.
+  localizacao_at?: string | null
   divergencia: string | null
   status_bling: string | null
   chamado: string | null
@@ -115,6 +118,61 @@ async function refresh() {
 // Roda em background (pode passar do timeout do Cloudflare) e a lista se
 // atualiza sozinha no poll. O MESMO motor também roda sozinho a cada 5 min no
 // servidor (cron) — o botão vale pra "quero agora, sem esperar o próximo tick".
+// "rastreio Correios": registra no 17track o que ainda não está e puxa a
+// localização física. O cron faz igual a cada 15 min — o botão é pra não
+// esperar. `sem_quota` = a conta do 17track ficou sem saldo e NADA atualiza até
+// recarregar lá; sem esse aviso o operador ficaria clicando sem entender.
+const atualizandoRastreio = ref(false)
+// Faixa fixa no topo: enquanto o 17track estiver sem saldo NADA de Correios
+// atualiza, e um toast que some não daria conta de explicar isso.
+const correiosSemSaldo = ref(false)
+const SEM_SALDO_TEXTO =
+  'Os Correios pararam de atualizar: a conta do 17track está sem saldo. Enquanto isso a coluna Localização mostra o que o marketplace informa, que costuma atrasar. Para voltar ao normal é preciso comprar créditos em 17track.net (entrar na conta → Quota).'
+
+async function carregarStatusCorreios() {
+  try {
+    const s = await api<{ sem_quota: boolean }>('/api/logistica/17track/status')
+    correiosSemSaldo.value = !!s?.sem_quota
+  } catch {
+    // status é só informativo — falhar aqui não pode atrapalhar a tela.
+  }
+}
+
+async function atualizarRastreio() {
+  if (!canEdit.value || atualizandoRastreio.value) return
+  atualizandoRastreio.value = true
+  try {
+    const res = await api<{
+      linhas: number
+      pendentes: number
+      registrados: number
+      atualizados: number
+      sem_quota: boolean
+    }>('/api/logistica/17track/register', { method: 'POST' })
+    correiosSemSaldo.value = !!res?.sem_quota
+    if (res?.sem_quota) {
+      toasts.error('Correios sem saldo no 17track', SEM_SALDO_TEXTO)
+    } else if (!res?.registrados && !res?.atualizados) {
+      toasts.info('Tudo em dia', 'Nenhum rastreio novo para registrar e nenhuma novidade dos Correios.')
+    } else {
+      toasts.info(
+        'Correios atualizados',
+        `${res?.registrados || 0} rastreio(s) começaram a ser seguidos, ${res?.atualizados || 0} localização(ões) nova(s).`,
+      )
+    }
+    await refresh()
+  } catch (e: any) {
+    // O trabalho roda em lotes com teto; se a resposta demorar demais ele
+    // continua no servidor — dizer "deu erro" seria mentira.
+    toasts.info(
+      'Ainda processando',
+      'A atualização dos Correios continua rodando no servidor. Recarregue a página em alguns minutos.',
+    )
+  } finally {
+    atualizandoRastreio.value = false
+  }
+}
+
 const recarregando = ref(false)
 async function recarregar() {
   // O motor (enriquece Status Plataforma + aplica status no Bling) roda pras 4
@@ -499,6 +557,24 @@ function fmtDataHora(iso: string | null | undefined): string {
   })
 }
 
+// Rastreio dos Correios termina em BR (ex. AD828496989BR) — mesma regra do
+// backend (`logistica_track.is_correios`). Só esses têm leitura física.
+function ehCorreios(rastreio: string | null | undefined): boolean {
+  const r = (rastreio || '').trim().toUpperCase()
+  return r.length >= 4 && r.endsWith('BR')
+}
+
+// Pacote a caminho cuja última leitura dos Correios é de mais de 3 dias atrás é
+// justamente o que trava sem ninguém ver — pinta de âmbar, igual à Divergência.
+const LEITURA_VELHA_DIAS = 3
+function leituraVelha(c: Logistica): boolean {
+  if (!c.localizacao_at) return false
+  const d = new Date(c.localizacao_at)
+  if (Number.isNaN(d.getTime())) return false
+  const dias = (Date.now() - d.getTime()) / 86400000
+  return dias > LEITURA_VELHA_DIAS
+}
+
 // "há 8 dias" / "há 3 h" / "há 12 min" — o que o operador realmente quer saber
 // olhando pra um pedido parado.
 function fmtDesde(iso: string | null | undefined): string {
@@ -803,6 +879,7 @@ function autoRefreshTick() {
 // NÃO depende mais dela: vem pronto do backend em acao_match).
 onMounted(() => {
   if (!statusLoaded) refreshStatus()
+  carregarStatusCorreios()
   autoRefreshTimer = setInterval(autoRefreshTick, AUTO_REFRESH_MS)
 })
 
@@ -1344,9 +1421,37 @@ async function aplicarStatusBling(c: Logistica) {
         >
           <Eye class="size-4 mr-1" /> {{ mostrarTudo ? 'Mostrando tudo' : 'Mostrar tudo' }}
         </Button>
+        <!-- O robô já faz isso de 15 em 15 min; o botão é pra quando o operador
+             não quer esperar (ou acabou de cadastrar um rastreio na mão). -->
+        <Button
+          v-if="canEdit"
+          size="sm"
+          variant="outline"
+          :disabled="atualizandoRastreio"
+          title="Busca agora a posição dos pacotes dos Correios. O sistema já faz isso sozinho a cada 15 minutos."
+          @click="atualizarRastreio"
+        >
+          <MapPin class="size-4 mr-1" :class="atualizandoRastreio ? 'animate-pulse' : ''" />
+          {{ atualizandoRastreio ? 'Buscando…' : 'Atualizar Correios' }}
+        </Button>
         <Button v-if="canEdit" size="sm" class="ml-auto" @click="openNew">
           <Plus class="size-4 mr-1" /> Novo caso
         </Button>
+      </div>
+
+      <!-- Sem saldo no 17track a coluna Localização inteira congela. O aviso
+           fica FIXO (não é toast) porque explica o estado atual do sistema e
+           depende de uma ação fora do DaVinci: comprar créditos. -->
+      <div
+        v-if="correiosSemSaldo"
+        class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200"
+      >
+        <strong>Os Correios pararam de atualizar.</strong>
+        A conta do 17track está sem saldo, então a coluna Localização mostra o que o
+        marketplace informa, que costuma atrasar. Para voltar ao normal é preciso comprar
+        créditos em
+        <a href="https://api.17track.net" target="_blank" rel="noopener" class="underline">17track.net</a>
+        (entrar na conta → Quota).
       </div>
 
       <p class="text-sm text-muted-foreground">
@@ -1523,7 +1628,31 @@ async function aplicarStatusBling(c: Logistica) {
                 </div>
               </td>
               <td class="px-3 py-2 whitespace-nowrap">{{ c.rastreio || '—' }}</td>
-              <td class="px-3 py-2 whitespace-nowrap">{{ c.localizacao || '—' }}</td>
+              <td class="px-3 py-2 whitespace-nowrap">
+                <div class="leading-tight">
+                  <div>{{ c.localizacao || '—' }}</div>
+                  <!-- A segunda linha só aparece pra envio dos CORREIOS: nas
+                       outras (Full, Flex, SPX…) nunca haverá leitura física, e o
+                       selo viraria ruído em milhares de linhas. -->
+                  <template v-if="ehCorreios(c.rastreio)">
+                    <div
+                      v-if="c.localizacao_at"
+                      class="text-[11px]"
+                      :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
+                      :title="`Lido nos Correios em ${fmtDataHora(c.localizacao_at)}`"
+                    >
+                      Correios · lido {{ fmtDesde(c.localizacao_at) }}
+                    </div>
+                    <div
+                      v-else
+                      class="text-[11px] text-muted-foreground"
+                      title="Este pacote ainda não tem leitura dos Correios — o que aparece acima vem do marketplace."
+                    >
+                      sem leitura dos Correios ainda
+                    </div>
+                  </template>
+                </div>
+              </td>
               <td class="px-3 py-2 text-xs max-w-[280px] break-words">
                 <span v-if="c.divergencia" class="text-amber-700 dark:text-amber-400" :title="c.divergencia">{{ c.divergencia }}</span>
                 <span v-else class="text-muted-foreground">—</span>
@@ -1625,7 +1754,21 @@ async function aplicarStatusBling(c: Logistica) {
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
             <div><span class="text-muted-foreground">Data:</span> {{ fmtDate(c.data) }}</div>
             <div><span class="text-muted-foreground">Rastreio:</span> {{ c.rastreio || '—' }}</div>
-            <div><span class="text-muted-foreground">Localização:</span> {{ c.localizacao || '—' }}</div>
+            <div>
+              <span class="text-muted-foreground">Localização:</span> {{ c.localizacao || '—' }}
+              <!-- Mesma informação de origem da tabela: no celular ela é ainda
+                   mais necessária, porque não dá pra passar o mouse e ler o
+                   balãozinho. -->
+              <template v-if="ehCorreios(c.rastreio)">
+                <span
+                  v-if="c.localizacao_at"
+                  :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
+                >
+                  · Correios, lido {{ fmtDesde(c.localizacao_at) }}
+                </span>
+                <span v-else class="text-muted-foreground">· sem leitura dos Correios ainda</span>
+              </template>
+            </div>
             <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || '—' }}</div>
           </div>
           <div

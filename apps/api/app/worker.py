@@ -828,6 +828,20 @@ async def devolucao_rastreio_sync(ctx: dict) -> None:
     logger.info("devolucao_rastreio_sync_job_done", **summary)
 
 
+async def logistica_track_sync(ctx: dict) -> None:
+    """A cada 15 min: registra no 17track o rastreio Correios novo da Logística e
+    puxa a localização física real. Eduardo 04/09: "rastreio e localização de
+    correios não está atualizando... sempre que mudar, precisa atualizar em
+    tempo real". O tempo real é o push do webhook; isto garante que o número
+    esteja registrado (sem registro o 17track nunca empurra nada) e serve de
+    rede de segurança se o push falhar."""
+    from app.services import logistica_track_sync as svc  # tardio: httpx + models
+
+    async with session_scope() as s:
+        summary = await svc.run(s)
+    logger.info("logistica_track_sync_job_done", **summary)
+
+
 async def chamados_replica_automatica(ctx: dict) -> None:
     """De hora em hora (:25): réplica automática dos Chamados (reenvia a
     mensagem cadastrada a cada N dias enquanto ligada) + monitoramento (fecha
@@ -2045,6 +2059,14 @@ class WorkerSettings:
         # Rastreio do pacote que VOLTA (Acompanhamento de Devoluções), a cada
         # 30 min (:10/:40 — fora dos slots dos ingests e do recarregar).
         cron(devolucao_rastreio_sync, minute={10, 40}, run_at_startup=False, timeout=1500),
+        # Rastreio Correios do ENVIO (aba Logística), a cada 15 min (:05/:20/
+        # :35/:50 — fora dos slots do recarregar e do sync de devolução).
+        cron(
+            logistica_track_sync,
+            minute={5, 20, 35, 50},
+            run_at_startup=False,
+            timeout=900,
+        ),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps
         # 5/5/5/5/4h — sempre abaixo da expiração. minute=45 evita colidir
