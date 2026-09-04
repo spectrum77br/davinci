@@ -98,13 +98,15 @@ async def test_aba_inclui_83953_como_enviado(
     assert "910001" in by_numero
     assert by_numero["910001"]["status"] == "enviado"
 
-    # 83965 (legado) com data presente + vermelho
+    # 83965 (legado) com data presente: etiqueta gerada = "aguardando coleta"
+    # (laranja), não "não enviado" — o pacote já saiu da nossa mão, falta a
+    # transportadora escanear (Eduardo, 04/09).
     assert "910003" in by_numero
-    assert by_numero["910003"]["status"] == "nao_enviado"
+    assert by_numero["910003"]["status"] == "aguardando_coleta"
 
-    # 21 (Em digitação = etiqueta enviada) com data presente + vermelho
+    # 21 (Em digitação = etiqueta enviada) com data presente, idem.
     assert "910007" in by_numero
-    assert by_numero["910007"]["status"] == "nao_enviado"
+    assert by_numero["910007"]["status"] == "aguardando_coleta"
 
     # 6 NÃO aparece (não pertence ao fluxo da aba)
     assert "910004" not in by_numero
@@ -158,8 +160,9 @@ async def test_filtro_status_nao_enviado_inclui_etiqueta_com_data(
     assert "910003" in numeros, "83965 com data carimbada deveria estar em 'nao_enviado'"
     # 21 (canônico) idem (sku-21 → 910007).
     assert "910007" in numeros, "21 com data carimbada deveria estar em 'nao_enviado'"
-    # Todos os retornados são status=nao_enviado.
-    assert all(p["status"] == "nao_enviado" for p in data)
+    # O filtro "não enviado" segue trazendo tudo que ainda não saiu; quem separa
+    # "aguardando coleta" de "parado" é o badge.
+    assert all(p["status"] in ("nao_enviado", "aguardando_coleta") for p in data)
     # 15/83953 (enviados) NÃO aparecem.
     assert "910001" not in numeros
     assert "910002" not in numeros
@@ -188,3 +191,27 @@ async def test_filtro_status_enviado_exclui_etiqueta(
     # 21 com data viraria VERDE).
     assert "910007" not in numeros
     assert all(p["status"] == "enviado" for p in data)
+
+
+@pytest.mark.asyncio
+async def test_filtro_aguardando_coleta_traz_so_etiqueta_gerada(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], four_orders: dict[str, int],
+):
+    """Etiqueta gerada (21/83965) tem badge próprio: o pacote saiu da nossa mão
+    e falta a transportadora escanear. Chamar de "não enviado" fez o Eduardo
+    achar que o sistema estava travado (04/09) quando o robô de confirmação é
+    que estava parado."""
+    auth_as(admin_view)
+    r = await client.get(
+        "/api/estoque/pedidos?data_inicio=2026-05-28&data_fim=2026-05-28"
+        "&status=aguardando_coleta"
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    numeros = {p["pedido_bling"] for p in data}
+    assert {"910003", "910007"} <= numeros  # 83965 legado + 21 canônico
+    assert all(p["status"] == "aguardando_coleta" for p in data)
+    # Enviados de verdade e o "Em aberto" ficam de fora.
+    assert "910001" not in numeros and "910002" not in numeros
+    assert "910004" not in numeros
