@@ -454,7 +454,13 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                 )
                 summary["local_updated"] += result.rowcount or 0
 
-    logger.info("shipment_check_done", **summary)
+    # `situacoes` no log denuncia worker com imagem velha. Em 04/09 o
+    # container do cron rodou 20h com o código anterior ao 912a6a6, cujo
+    # _OPEN_SITUACOES era ("83965", "6") — sem o 21, que virou a situação de
+    # etiqueta enviada em 03/09. Nenhum pedido novo entrava na varredura e o
+    # sintoma era só `bling_updated=0`, indistinguível de "nada a enviar".
+    # Com esta linha, um worker defasado aparece como situacoes=83965,6.
+    logger.info("shipment_check_done", situacoes=",".join(_OPEN_SITUACOES), **summary)
     return summary
 
 
