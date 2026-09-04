@@ -220,14 +220,11 @@ async def test_golpe_pacote_vazio_item_incorreto_e_bloqueado(client, make_user, 
     r = await client.post(
         "/api/devolutions",
         json={"conta": "aguiar", "pedido_bling": "293102", "pedido_marketplace": "2000102",
-              "condicao_produto": "Usado", "motivo_devolucao": "Golpe",
-              "video_url": "https://drive.google.com/abc"},
+              "condicao_produto": "Usado", "motivo_devolucao": "Golpe"},
     )
     assert r.status_code == 201, r.text
     assert r.json()["chamado_ml_status"] == "enviada"
-    assert r.json()["video_url"] == "https://drive.google.com/abc"
     assert ml.reviews[-1][1] == "SRF5"
-    assert "Vídeo da devolução: https://drive.google.com/abc" in ml.reviews[-1][2]
 
     # Item Incorreto = produto diferente (SRF4): exige foto → espera
     await _seed_pedido(db, user, numero="293103", numeroloja="2000103")
@@ -268,7 +265,9 @@ async def test_golpe_pacote_vazio_item_incorreto_e_bloqueado(client, make_user, 
               "condicao_produto": "Usado", "motivo_devolucao": "Danificado (Outros)"},
     )
     assert r4.json()["chamado_ml_status"] == "pendente"
-    p = await client.patch(f"/api/devolutions/{r4.json()['id']}", json={"video_url": "https://v.id/1"})
+    p = await client.patch(
+        f"/api/devolutions/{r4.json()['id']}", json={"observacao": "produto trocado"}
+    )
     assert p.status_code == 200, p.text
     assert p.json()["chamado_ml_status"] == "pendente"  # ainda sem foto
     up2 = await client.post(
@@ -276,7 +275,6 @@ async def test_golpe_pacote_vazio_item_incorreto_e_bloqueado(client, make_user, 
         files={"file": ("dano.png", PNG_1PX, "image/png")},
     )
     assert up2.json()["chamado_ml_status"] == "enviada"
-    assert "Vídeo da devolução: https://v.id/1" in ml.reviews[-1][2]
 
 
 async def test_ml_ainda_nao_liberou_revisao_fica_pendente_e_cron_retenta(
@@ -389,7 +387,6 @@ async def test_texto_e_reason():
     assert "Pedido 2000000001" in t and "SKU b001.26" in t and "veio uma mala velha" in t
     assert "foto" not in t
     assert "2 foto(s)" in svc.texto_padrao(dev, "SRF2", fotos=2)
-    assert "Vídeo da devolução: https://x.y/v" in svc.texto_padrao(dev, "SRF2", video_url="https://x.y/v")
 
 
 # ---------------------------------------------------------------- TikTok / Shopee / Amazon
@@ -566,8 +563,7 @@ async def test_shopee_disputa_com_modulos_de_foto(client, make_user, auth_as, db
     r = await client.post(
         "/api/devolutions",
         json={"conta": "atv", "pedido_bling": "294260", "pedido_marketplace": "2609045AM9GKAQ",
-              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)",
-              "video_url": "https://v.id/2"},
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)"},
     )
     assert r.status_code == 201, r.text
     assert r.json()["chamado_plataforma"] == "shopee"
@@ -585,7 +581,6 @@ async def test_shopee_disputa_com_modulos_de_foto(client, make_user, auth_as, db
     assert [m["module_index"] for m in d["image_list"]] == [1, 2]
     assert d["image_list"][0]["image_url"] == ["https://fileproxy/dano.jpg"]
     assert d["image_list"][0]["requirement"] == "Unboxing photo with AWB"
-    assert "Vídeo da devolução: https://v.id/2" in d["text"]
     # não recebido: sem foto obrigatória, motivo "did not receive" (81)
     await _seed_pedido(db, user, numero="294261", numeroloja="2609045AM9GKAR",
                        platform="shopee", conta="atv", loja="88")

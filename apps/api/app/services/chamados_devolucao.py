@@ -250,13 +250,11 @@ def texto_padrao(
     reason: str | None,
     *,
     fotos: int = 0,
-    video_url: str | None = None,
     link_envio: str | None = None,
 ) -> str:
     """Mensagem que vai pra plataforma (o operador não digita nada — é
     automático). `reason` é o motivo do ML (SRF*) — nas outras plataformas o
-    texto é o mesmo, só muda o código enviado. O link do vídeo entra no texto
-    porque nenhuma API aceita vídeo anexo."""
+    texto é o mesmo, só muda o código enviado."""
     motivo = (dev.motivo_devolucao or "").strip()
     if motivo.lower() in ("bloqueado", "mudou de ideia"):
         intro = (
@@ -279,9 +277,6 @@ def texto_padrao(
         linhas.append(f"Observação: {dev.observacao.strip()}")
     if fotos:
         linhas.append(f"Seguem {fotos} foto(s) em anexo como evidência.")
-    video = (video_url or dev.video_url or "").strip()
-    if video:
-        linhas.append(f"Vídeo da devolução: {video}")
     envio = (link_envio or dev.link_envio or "").strip()
     if envio:
         linhas.append(f"Comprovante da expedição (fotos/vídeo do envio): {envio}")
@@ -979,14 +974,11 @@ async def disparar(
         fotos = []
     if plat in (PLAT_TIKTOK, PLAT_SHOPEE):
         fotos = [a for a in fotos if (a.content_type or "").lower() in FOTO_TIPOS_IMAGEM]
-    # Link do vídeo / da expedição pode estar em outra linha do kit.
-    video = next(
-        ((d.video_url or "").strip() for d in linhas if (d.video_url or "").strip()), None
-    )
+    # O link da expedição pode estar em outra linha do kit.
     envio = next(
         ((d.link_envio or "").strip() for d in linhas if (d.link_envio or "").strip()), None
     )
-    msg.texto = texto_padrao(dev, reason, fotos=len(fotos), video_url=video, link_envio=envio)
+    msg.texto = texto_padrao(dev, reason, fotos=len(fotos), link_envio=envio)
     referencia = detalhe = None
     try:
         if plat == PLAT_ML:

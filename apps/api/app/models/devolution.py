@@ -30,7 +30,6 @@ class Devolution(Base, TimestampMixin):
     motivo_devolucao: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Link do vídeo da devolução (a API do ML não aceita vídeo como anexo, então
     # o link vai no texto do chamado automático). Ver alembic 0244.
-    video_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Link da prova da expedição (fotos/vídeo do pacote sendo fechado) — obrigatório
     # pra mala/eletro quando o motivo abre chamado (Eduardo 04/09). Ver alembic 0245.
     link_envio: Mapped[str | None] = mapped_column(Text, nullable=True)
