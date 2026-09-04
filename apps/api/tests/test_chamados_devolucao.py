@@ -742,3 +742,39 @@ async def test_link_envio_regra_mala_eletro_e_conta_fallback(client, make_user, 
     ch.conta = "Loja 55"
     contas = await cd._contas_candidatas(db, ch, dev)
     assert contas == ["Loja 55", "aguiar"]
+
+
+async def test_shopee_acha_return_sn_varrendo_a_api(client, make_user, auth_as, db, ml, monkeypatch):
+    """Sem linha no Acompanhamento, o return_sn vem da returns API (create_time
+    em fatias de 15 dias), com o cliente já resolvido pela loja do pedido."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopee()
+    chamadas = []
+
+    async def _lista(*, create_time_from=None, create_time_to=None, **kw):
+        chamadas.append((create_time_from, create_time_to))
+        return [
+            {"order_sn": "260827OUTRO", "return_sn": "X1", "status": "ACCEPTED", "update_time": 5},
+            {"order_sn": "260827DBUMDT1W", "return_sn": "2608310QMDCH65V", "status": "ACCEPTED", "update_time": 9},
+            {"order_sn": "260827DBUMDT1W", "return_sn": "CANCELADA", "status": "CANCELLED", "update_time": 99},
+        ]
+
+    fake.get_return_list = _lista
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="292618", numeroloja="260827DBUMDT1W",
+                       platform="shopee", conta="mega", loja="90")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "Shopee Marquezini", "pedido_bling": "292618",
+              "pedido_marketplace": "260827DBUMDT1W", "data": "2026-08-26T00:00:00Z",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "enviada", r.json()
+    assert fake.disputes[-1]["return_sn"] == "2608310QMDCH65V"
+    assert chamadas and all(b - a <= 15 * 86400 for a, b in chamadas)

@@ -42,7 +42,6 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from uuid import UUID, uuid5
 
 import structlog
@@ -851,24 +850,40 @@ def _shopee_reason_id(r: dict) -> int | None:
         return None
 
 
-async def _return_sn_shopee(session: AsyncSession, dev: Devolution) -> str | None:
+async def _return_sn_shopee(
+    session: AsyncSession, client: ShopeeClient, dev: Devolution
+) -> str | None:
+    """return_sn da devolução do pedido: o Acompanhamento (sync de 30 min) ou
+    varredura da returns API por create_time em fatias de 15 dias, da data do
+    pedido até hoje (teto 120 dias), com o cliente JÁ resolvido — a `conta` da
+    linha pode ser o nome da loja no Bling e não casar a integração."""
     rastreio = await _rastreio_devolucao(session, dev, PLAT_SHOPEE)
     if rastreio and (rastreio.devolucao_id_auto or "").strip():
         return rastreio.devolucao_id_auto.strip()
     oid = (dev.pedido_marketplace or "").strip()
-    pb = (dev.pedido_bling or "").strip()
-    if not oid or not pb:
+    if not oid:
         raise _PendenteError("devolucao_sem_pedido_marketplace")
-    linha = SimpleNamespace(
-        plataforma="shopee",
-        pedido_marketplace=oid,
-        pedido_bling=pb,
-        conta=dev.conta,
-        data=dev.data.date() if dev.data else None,
-    )
-    achados = await logistica_shopee.returns_por_pedido(session, [linha])  # type: ignore[arg-type]
-    info = achados.get(pb)
-    return (info.return_id or "").strip() if info else None
+    agora = int(datetime.now(UTC).timestamp())
+    piso = agora - 120 * 86400
+    inicio = piso
+    if dev.data is not None:
+        inicio = max(piso, int(dev.data.timestamp()) - 2 * 86400)
+    inicio = min(inicio, agora - 86400)
+    passo = 15 * 86400 - 300
+    casos: list[dict] = []
+    a = inicio
+    while a < agora:
+        b = min(a + passo, agora)
+        casos.extend(
+            r for r in await client.get_return_list(create_time_from=a, create_time_to=b)
+            if isinstance(r, dict) and str(r.get("order_sn") or "") == oid
+        )
+        a = b
+    if not casos:
+        return None
+    vivos = [r for r in casos if str(r.get("status") or "").upper() != "CANCELLED"]
+    esc = max(vivos or casos, key=lambda r: int(r.get("update_time") or r.get("create_time") or 0))
+    return str(esc.get("return_sn") or "").strip() or None
 
 
 async def _disparar_shopee(
@@ -881,7 +896,7 @@ async def _disparar_shopee(
         # a Shopee exige foto em todo motivo "recebi com problema"
         raise _PendenteError("devolucao_sem_foto")
     client = await _shopee_client_para(session, ch, dev)
-    return_sn = (ch.chamado or "").strip() or await _return_sn_shopee(session, dev)
+    return_sn = (ch.chamado or "").strip() or await _return_sn_shopee(session, client, dev)
     if not return_sn:
         raise _PendenteError("devolucao_sem_return")
     ch.chamado = return_sn
