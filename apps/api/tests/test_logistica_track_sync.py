@@ -323,3 +323,43 @@ async def test_sem_quota_marca_aviso_para_a_tela(db: AsyncSession, fake_17track)
     estado["ok"] = None
     await logistica_track_sync.run(db, pedidos=["d1"])
     assert await logistica_track_sync.sem_quota_desde() is None
+
+
+@pytest.mark.asyncio
+async def test_divergencia_usa_a_regra_da_plataforma_da_linha(db: AsyncSession, fake_17track):
+    """Linha Shopee não pode receber a divergência do MERCADO LIVRE.
+
+    A regra do ML lê `ship_status`, chave que só o ML tem — rodá-la numa linha
+    Shopee gera alarme falso ("Mercado Livre: COMPLETED") num pedido normal e
+    apaga a divergência correta que o ingest da Shopee calculou.
+    """
+    _, estado = fake_17track
+    row = Logistica(
+        pedido_bling="e1",
+        plataforma="Shopee",
+        data=date.today(),
+        rastreio="AP344823352BR",
+        rastreio_17track="AP344823352BR",
+        meli_status={"order_status": "COMPLETED", "logistics_status": "LOGISTICS_DELIVERY_DONE"},
+        status_bling="Entregue",
+    )
+    db.add(row)
+    await db.commit()
+    estado["eventos"] = [("AP344823352BR", "Sao Paulo/SP — Objeto entregue ao destinatário")]
+
+    await logistica_track_sync.run(db, pedidos=["e1"])
+    await db.refresh(row)
+    assert row.localizacao == "Sao Paulo/SP — Objeto entregue ao destinatário"
+    assert row.divergencia is None  # pedido Shopee entregue e concluído: sem divergência
+
+
+def test_divergencia_por_plataforma_despacha_certo():
+    from app.services import logistica_rules
+
+    shopee = {"order_status": "COMPLETED", "logistics_status": "LOGISTICS_DELIVERY_DONE"}
+    loc = "Sao Paulo/SP — Objeto entregue ao destinatário"
+    assert logistica_rules.detectar_divergencia_por_plataforma("Shopee", shopee, loc) is None
+    # A regra do ML na MESMA entrada inventaria um alarme — é o bug que isto evita.
+    assert logistica_rules.detectar_divergencia(shopee, loc) is not None
+    # Plataforma que o sistema não conhece não inventa divergência.
+    assert logistica_rules.detectar_divergencia_por_plataforma("Magalu", shopee, loc) is None

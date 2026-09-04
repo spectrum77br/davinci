@@ -89,8 +89,12 @@ async def receive_17track_push(
             # Carimba QUANDO os Correios se moveram — é o que a tela mostra pra
             # o operador saber que a linha está viva (e não é o proxy do ML).
             row.localizacao_at = datetime.now(UTC)
-            # Recalcula a divergência ML × físico com o local novo dos Correios.
-            row.divergencia = logistica_rules.detectar_divergencia(row.meli_status, loc)
+            # Recalcula a divergência marketplace × físico com o local novo.
+            # Pela regra DA PLATAFORMA da linha: usar a do ML numa linha Shopee/
+            # TikTok/Amazon inventaria alarme ("Mercado Livre: COMPLETED").
+            row.divergencia = logistica_rules.detectar_divergencia_por_plataforma(
+                row.plataforma, row.meli_status, loc
+            )
             applied += 1
         # Pacote de DEVOLUÇÃO (aba Acompanhamento): o código do retorno é
         # registrado pelo services/devolucao_rastreio_sync; o push cai aqui.

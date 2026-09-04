@@ -101,6 +101,7 @@ async def _por_de_quarentena(numeros: list[str]) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_track_sync_quarentena_falhou", err=str(e)[:200])
 
+
 # Pedido mais velho que isto não interessa mais pro rastreio físico (e gastaria
 # quota à toa): o pacote ou chegou ou virou caso de devolução, que tem esteira
 # própria (devolucao_rastreio_sync). O 17track também para de atualizar um
@@ -145,6 +146,14 @@ SITUACOES_ENCERRADAS = frozenset(
 
 def _encerrado(status_bling: str | None) -> bool:
     return (status_bling or "").strip().lower() in SITUACOES_ENCERRADAS
+
+
+def _num(rastreio: str | None) -> str:
+    """Número normalizado do jeito que o 17track o devolve — MAIÚSCULAS e sem
+    espaços. `is_correios` já compara assim; sem normalizar aqui também, um
+    rastreio gravado em minúsculas nunca casaria com o `ok` da resposta e o job
+    re-registraria o mesmo número a cada 15 min, para sempre."""
+    return (rastreio or "").strip().upper()
 
 
 def _entregue(row: Logistica) -> bool:
@@ -241,11 +250,7 @@ async def _run(
 
     # --- 1) registrar o que ainda não está no 17track (ou mudou de código) ---
     todos_pendentes = sorted(
-        {
-            (r.rastreio or "").strip()
-            for r in linhas
-            if (r.rastreio or "").strip() != (r.rastreio_17track or "").strip()
-        }
+        {_num(r.rastreio) for r in linhas if _num(r.rastreio) != _num(r.rastreio_17track)}
     )
     presos = await _em_quarentena(todos_pendentes)
     if presos:
@@ -269,12 +274,12 @@ async def _run(
             res = {"ok": [], "sem_quota": False}
         sem_quota = bool(res.get("sem_quota"))
         await marcar_sem_quota(sem_quota)
-        ok = {str(n).strip() for n in (res.get("ok") or [])}
+        ok = {_num(n) for n in (res.get("ok") or [])}
         if ok:
             agora = datetime.now(UTC)
             for r in linhas:
-                if (r.rastreio or "").strip() in ok:
-                    r.rastreio_17track = (r.rastreio or "").strip()
+                if _num(r.rastreio) in ok:
+                    r.rastreio_17track = _num(r.rastreio)
                     r.rastreio_17track_at = agora
                     registrados += 1
             await session.commit()
@@ -289,9 +294,9 @@ async def _run(
         corte = datetime.now(UTC) - timedelta(hours=PULL_APOS_HORAS)
         numeros = sorted(
             {
-                (r.rastreio_17track or "").strip()
+                _num(r.rastreio_17track)
                 for r in linhas
-                if (r.rastreio_17track or "").strip()
+                if _num(r.rastreio_17track)
                 and (r.localizacao_at is None or r.localizacao_at < corte)
             }
         )[:MAX_PUXAR]
@@ -301,15 +306,17 @@ async def _run(
             except Exception as e:  # noqa: BLE001 — idem
                 logger.warning("logistica_track_sync_fetch_falhou", err=str(e)[:200])
                 eventos = []
-            por_numero = dict(eventos)
+            por_numero = {_num(n): loc for n, loc in eventos}
             agora = datetime.now(UTC)
             for r in linhas:
-                loc = por_numero.get((r.rastreio_17track or "").strip())
+                loc = por_numero.get(_num(r.rastreio_17track))
                 if not loc or loc == r.localizacao:
                     continue
                 r.localizacao = loc
                 r.localizacao_at = agora
-                r.divergencia = logistica_rules.detectar_divergencia(r.meli_status, loc)
+                r.divergencia = logistica_rules.detectar_divergencia_por_plataforma(
+                    r.plataforma, r.meli_status, loc
+                )
                 atualizados += 1
             if atualizados:
                 await session.commit()

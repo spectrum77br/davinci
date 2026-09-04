@@ -17,8 +17,8 @@ Estas colunas são a memória do job novo (`logistica_track_sync`): guardam QUAL
 número já foi registrado, pra não gastar quota repetindo, e pra re-registrar
 sozinho quando o marketplace troca o código de rastreio.
 
-Revision ID: 0245_logistica_rastreio_17track
-Revises: 0244_devolucao_video_url
+Revision ID: 0246_logistica_rastreio_17track
+Revises: 0245_devolucao_link_envio
 Create Date: 2026-09-04
 """
 
@@ -28,8 +28,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0245_logistica_rastreio_17track"
-down_revision: str | None = "0244_devolucao_video_url"
+revision: str = "0246_logistica_rastreio_17track"
+down_revision: str | None = "0245_devolucao_link_envio"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

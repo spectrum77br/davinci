@@ -817,6 +817,32 @@ def detectar_divergencia_amazon(
     return None
 
 
+def detectar_divergencia_por_plataforma(
+    plataforma: str | None,
+    meli_status: dict[str, str] | None,
+    localizacao: str | None = None,
+) -> str | None:
+    """Divergência calculada com a regra da PLATAFORMA DA LINHA.
+
+    Cada marketplace tem vocabulário próprio: `detectar_divergencia` (a do ML)
+    lê `ship_status`, chave que só o ML tem — rodá-la numa linha Shopee/TikTok/
+    Amazon marca alarme falso em pedido normal ("Mercado Livre: COMPLETED") e
+    ainda apaga a divergência correta que o ingest da plataforma calculou.
+    Quem escreve localização de fora do ingest (17track: push do webhook e o
+    logistica_track_sync) usa isto. Plataforma desconhecida não inventa nada.
+    """
+    p = (plataforma or "").strip().lower()
+    if p in _SHOPEE_PLATAFORMAS:
+        return detectar_divergencia_shopee(meli_status, localizacao)
+    if p in _TIKTOK_PLATAFORMAS:
+        return detectar_divergencia_tiktok(meli_status, localizacao)
+    if p in _AMAZON_PLATAFORMAS:
+        return detectar_divergencia_amazon(meli_status, localizacao)
+    if p in _ML_PLATAFORMAS:
+        return detectar_divergencia(meli_status, localizacao)
+    return None
+
+
 # 223 linhas curadas (campos + status_bling resultante). "Em digitação" (21,
 # nativa do Bling) é o estado "etiqueta enviada" canônico desde 03/09/2026 —
 # a planilha original dizia "Enviado Etiqueta" (83965, hoje legado).
