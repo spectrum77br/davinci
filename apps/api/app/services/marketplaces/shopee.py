@@ -410,6 +410,128 @@ class ShopeeClient:
             page_no += 1
         return out
 
+    # ---- devolução recebida com problema (disputa) -----------------------
+
+    async def _call(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: Any = None,
+        what: str = "shopee",
+    ) -> dict:
+        """`_request` + tratamento padrão: refresh em token vencido, levanta em
+        `error` não vazio, devolve `response` (dict)."""
+        r = await self._request(method, path, params=params, json=json)
+        body = r.json() or {}
+        if body.get("error") in _AUTH_CODES:
+            await self.refresh()
+            r = await self._request(method, path, params=params, json=json)
+            body = r.json() or {}
+        if body.get("error"):
+            raise RuntimeError(f"{what} {body.get('error')}: {body.get('message')}")
+        resp = body.get("response")
+        return resp if isinstance(resp, dict) else {}
+
+    async def _request_multipart(
+        self, path: str, *, files: dict, data: dict | None = None
+    ) -> httpx.Response:
+        """POST multipart/form-data com a MESMA assinatura do `_request` (a
+        Shopee assina partner_id|path|timestamp|token|shop_id, nunca o corpo)."""
+        if self._expired():
+            await self.refresh()
+        ts = int(time.time())
+        sig, partner_id = self._sign(path, ts)
+        q = {
+            "partner_id": partner_id,
+            "timestamp": ts,
+            "access_token": self.access_token,
+            "shop_id": self.shop_id,
+            "sign": sig,
+        }
+        async with httpx.AsyncClient(timeout=120.0) as c:
+            return await c.post(f"{self._base}{path}", params=q, files=files, data=data or {})
+
+    async def get_return_detail(self, return_sn: str) -> dict:
+        """Detalhe de UMA devolução (GET /api/v2/returns/get_return_detail):
+        status (REQUESTED/PROCESSING/ACCEPTED/JUDGING/SELLER_DISPUTE/CLOSED/
+        CANCELLED), return_solution (0 devolução+reembolso | 1 só reembolso),
+        needs_logistics, validation_type, reverse_logistics_status, tracking_number,
+        seller_compensation{seller_compensation_status, …}, dispute_reason…"""
+        return await self._call(
+            "GET", "/api/v2/returns/get_return_detail",
+            params={"return_sn": return_sn}, what="shopee_return_detail",
+        )
+
+    async def get_return_dispute_reason(self, return_sn: str) -> list[dict]:
+        """Motivos de disputa VÁLIDOS pra essa devolução
+        (GET /api/v2/returns/get_return_dispute_reason) — cada um com o id
+        (`dispute_reason`, int/str), o texto (`dispute_reason_text` /
+        `reason_text`) e `evidence_module_list[] {module_index, requirement,
+        is_required}` (fotos obrigatórias por módulo). A lista muda por
+        devolução/região — casar pelo texto, nunca fixar o id."""
+        resp = await self._call(
+            "GET", "/api/v2/returns/get_return_dispute_reason",
+            params={"return_sn": return_sn}, what="shopee_dispute_reason",
+        )
+        lista = resp.get("dispute_reason") or resp.get("dispute_reason_list") or []
+        return [r for r in lista if isinstance(r, dict)]
+
+    async def convert_image(
+        self, return_sn: str, filename: str, content: bytes, mime: str = "image/jpeg"
+    ) -> str:
+        """Sobe UMA foto de evidência (POST multipart /api/v2/returns/convert_image,
+        campos `return_sn` + `upload_image`) e devolve a URL hospedada pela
+        Shopee que entra em `dispute.image_list[].image_url`. jpg/png ≤ 10 MB,
+        1 imagem por chamada."""
+        r = await self._request_multipart(
+            "/api/v2/returns/convert_image",
+            files={"upload_image": (filename, content, mime)},
+            data={"return_sn": return_sn},
+        )
+        body = r.json() or {}
+        if body.get("error") in _AUTH_CODES:
+            await self.refresh()
+            r = await self._request_multipart(
+                "/api/v2/returns/convert_image",
+                files={"upload_image": (filename, content, mime)},
+                data={"return_sn": return_sn},
+            )
+            body = r.json() or {}
+        if body.get("error"):
+            raise RuntimeError(f"shopee_convert_image {body.get('error')}: {body.get('message')}")
+        resp = body.get("response") or {}
+        url = str(resp.get("url") or "").strip()
+        if not url:
+            raise RuntimeError(f"shopee_convert_image sem url: {str(body)[:300]}")
+        return url
+
+    async def dispute(
+        self,
+        return_sn: str,
+        *,
+        email: str,
+        dispute_reason_id: int | str,
+        image_list: list[dict] | None,
+        text: str,
+    ) -> dict:
+        """Abre a disputa/contestação da devolução (POST /api/v2/returns/dispute).
+        `email` = operador (obrigatório pra Shopee), `dispute_reason_id` de
+        `get_return_dispute_reason`, `image_list` = `[{module_index, requirement,
+        image_url: [até 3 URLs do convert_image]}]` (obrigatório em todo motivo
+        exceto "não recebi"), `text` = dispute_text_reason. Levanta com o erro
+        da API (returnsn.illegal = estado não permite; mandatory module…)."""
+        body: dict = {
+            "return_sn": return_sn,
+            "email": email,
+            "dispute_reason_id": int(dispute_reason_id),
+            "dispute_text_reason": text,
+        }
+        if image_list:
+            body["image_list"] = image_list
+        return await self._call("POST", "/api/v2/returns/dispute", json=body, what="shopee_dispute")
+
     async def get_tracking_number(self, order_sn: str) -> str | None:
         """Número de rastreio de UM pedido.
 

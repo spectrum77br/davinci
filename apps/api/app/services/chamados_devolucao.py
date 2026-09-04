@@ -1,35 +1,49 @@
-"""Devolução → chamado AUTOMÁTICO no Mercado Livre, com fotos.
+"""Devolução → chamado AUTOMÁTICO na plataforma, com fotos (ML, TikTok, Shopee).
 
 Eduardo, 04/09: "Todos esses motivos aí (Bloqueado, Golpe, Item faltando,
 Não recebido, Danificado), se for adicionado lá, vai abrir o chamado
-automático … vai ter foto sim e vídeo". O "chamado" de devolução que o
-vendedor abre no ML é a **revisão da devolução com problema**
-(`POST /post-purchase/v1/returns/{return_id}/return-review`, motivo SRF2–SRF7):
-só existe quando o comprador abriu a devolução (claim com return) e o ML
-liberou `return_review_fail` pro vendedor — normalmente quando o pacote de
-volta consta entregue. Danificado (SRF2) e Produto diferente (SRF4) EXIGEM foto.
+automático … vai ter foto sim e vídeo" / "precisamos fazer isso com todos os
+marketplaces". O "chamado" de devolução que o vendedor abre é a contestação
+da devolução recebida com problema:
+
+- **Mercado Livre**: revisão da devolução com problema
+  (`POST /post-purchase/v1/returns/{return_id}/return-review`, SRF2–SRF7);
+  só quando o ML liberou `return_review_fail` pro vendedor.
+- **TikTok Shop**: recusa do pacote recebido
+  (`POST /return_refund/202309/returns/{return_id}/reject`,
+  decision REJECT_RECEIVED_PACKAGE + reverse_reject_return_parcel_reason_1..5);
+  só com return_status=BUYER_SHIPPED_ITEM, dentro do prazo do vendedor.
+- **Shopee**: disputa (`POST /api/v2/returns/dispute` com motivo de
+  `get_return_dispute_reason` + fotos por módulo de evidência); a partir do
+  pacote entregue/aceito (status ACCEPTED, compensação pendente).
+- **Amazon** (e demais): NÃO tem API — SAFE-T só no Seller Central. Fica
+  registrado na aba com aviso de abrir na mão.
 
 Fluxo:
 1. tela Devoluções marca um motivo da lista → `garantir_chamado` registra o
-   chamado na aba (services/chamados.abrir_chamado_devolucao) e, se a conta é
-   ML, deixa uma mensagem `abertura` PENDENTE e troca o canal pra `api`;
-2. o router enfileira `agendar_disparo` (worker) → `disparar`: resolve
-   claim/return do pedido, sobe as fotos da linha (uma vez cada — `ml_file_name`
-   guarda o nome), manda a revisão. O que não dá pra fazer AINDA (sem foto,
-   Golpe sem sub-motivo, ML ainda não liberou a revisão) fica `pendente` com o
-   código em `erro` — a tela mostra e o cron de hora em hora
-   (`processar_pendentes`) tenta de novo, até 45 dias;
-3. deu certo → `enviada`, chamado ganha o nº do claim, canal `api` e
-   monitoramento ligado (fecha sozinho quando o ML encerrar).
+   chamado na aba (services/chamados.abrir_chamado_devolucao) e, se a
+   plataforma tem API, deixa uma mensagem `abertura` PENDENTE e troca o canal
+   pra `api`;
+2. o router enfileira `agendar_disparo` (worker) → `disparar`: resolve o caso
+   na plataforma, sobe as fotos da linha (uma vez cada — `ml_file_name` guarda
+   a referência), manda a contestação. O que não dá pra fazer AINDA (sem
+   foto, plataforma ainda não liberou) fica `pendente` com o código em `erro`
+   — a tela mostra e o cron de hora em hora (`processar_pendentes`) tenta de
+   novo, até 45 dias;
+3. deu certo → `enviada`, chamado ganha a referência (claim/return) e canal
+   `api` (no ML com monitoramento ligado — fecha sozinho quando encerrar).
 
-Vídeo: a API do ML aceita JPG/PNG/PDF/TXT até 5 MB; o vídeo fica guardado na
-linha (o operador anexa no site se precisar) e não vai pela API.
+Vídeo: nenhuma das APIs aceita vídeo do vendedor; o link do vídeo entra no
+texto e o arquivo fica guardado na linha.
 """
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from types import SimpleNamespace
+from uuid import UUID, uuid5
 
 import structlog
 from sqlalchemy import select
@@ -40,17 +54,29 @@ from app.models import (
     ChamadoAnexo,
     ChamadoMensagem,
     DevolucaoAnexo,
+    DevolucaoRastreio,
     Devolution,
     StoreInfo,
+    User,
+    UserRole,
 )
 from app.services import chamados as chamados_svc
-from app.services import logistica_meli
+from app.services import logistica_meli, logistica_rules, logistica_shopee, logistica_tiktok
 from app.services.marketplaces.ml import MercadoLivreClient
+from app.services.marketplaces.shopee import ShopeeClient
+from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
 
 TIPO_ABERTURA = "abertura"
 ACAO_REVISAO = "return_review_fail"
+
+PLAT_ML = "ml"
+PLAT_TIKTOK = "tiktok"
+PLAT_SHOPEE = "shopee"
+PLAT_AMAZON = "amazon"
+# Plataformas em que a contestação sai pela API.
+COM_API = frozenset({PLAT_ML, PLAT_TIKTOK, PLAT_SHOPEE})
 
 # Motivo da tela (minúsculo) → motivo do ML (Eduardo 04/09: "situação golpe é
 # pacote vazio, produto diferente usa o status item incorreto").
@@ -65,6 +91,30 @@ MOTIVO_ML: dict[str, str] = {
     "bloqueado": "SRF6",
     "mudou de ideia": "SRF6",  # nome antigo de "Bloqueado" (migration 0239)
 }
+# TikTok — reject reasons do pacote recebido (REJECT_RECEIVED_PACKAGE):
+# _1 produto devolvido não é o enviado | _2 não elegível (usado/quebrado) |
+# _3 faltam produtos/partes | _4 não recebi o pacote | _5 danificado ou usado.
+_TT = "reverse_reject_return_parcel_reason_"
+MOTIVO_TIKTOK: dict[str, str] = {
+    "item faltando": _TT + "3",
+    "danificado (outros)": _TT + "5",
+    "item incorreto": _TT + "1",
+    "golpe": _TT + "3",  # pacote vazio = todos os itens faltando
+    "não recebido": _TT + "4",
+    "bloqueado": _TT + "5",  # mala com senha = usada, não revendável
+    "mudou de ideia": _TT + "5",
+}
+# Shopee — o id do motivo muda por devolução/região: casa pelo TEXTO (inglês)
+# devolvido em get_return_dispute_reason, na ordem de preferência.
+MOTIVO_SHOPEE: dict[str, tuple[str, ...]] = {
+    "item faltando": ("incomplete return", "missing"),
+    "danificado (outros)": ("physical damage", "damage"),
+    "item incorreto": ("wrong return product", "wrong"),
+    "golpe": ("incomplete return", "wrong return product", "missing"),
+    "não recebido": ("did not receive", "not receive"),
+    "bloqueado": ("claim incorrect", "item is used", "used"),
+    "mudou de ideia": ("claim incorrect", "item is used", "used"),
+}
 REASONS_EXIGEM_FOTO = frozenset({"SRF2", "SRF4"})
 REASONS_DO_PACOTE = frozenset({"SRF7"})
 REASON_NOME: dict[str, str] = {
@@ -74,14 +124,30 @@ REASON_NOME: dict[str, str] = {
     "SRF5": "produto não estava no pacote",
     "SRF6": "outro problema com o produto",
     "SRF7": "pacote da devolução não chegou",
+    _TT + "1": "produto devolvido não é o enviado",
+    _TT + "2": "não elegível (usado/quebrado)",
+    _TT + "3": "faltam produtos ou partes",
+    _TT + "4": "não recebi o pacote",
+    _TT + "5": "produto danificado ou usado",
 }
+# Motivos da tela em que a foto é obrigatória (ML exige em SRF2/SRF4; TikTok e
+# Shopee pedem evidência em tudo que é "recebi com problema").
+MOTIVOS_EXIGEM_FOTO = frozenset({"danificado (outros)", "item incorreto"})
 
-# O que o ML aceita como evidência pela API (e o teto por arquivo).
+# O que as APIs aceitam como evidência (e o teto por arquivo — ML 5 MB, TikTok
+# e Shopee 10 MB; 5 MB serve pra todos).
 ML_FOTO_TIPOS = frozenset({"image/jpeg", "image/png", "application/pdf"})
+FOTO_TIPOS_IMAGEM = frozenset({"image/jpeg", "image/png"})
 ML_FOTO_MAX_BYTES = 5 * 1024 * 1024
-# Quanto tempo uma abertura fica pendente esperando o ML liberar a revisão /
+TIKTOK_MAX_FOTOS = 6
+SHOPEE_MAX_FOTOS_MODULO = 3
+# Quanto tempo uma abertura fica pendente esperando a plataforma liberar /
 # o operador anexar foto antes de virar `falhou`.
 PRAZO_PENDENTE = timedelta(days=45)
+# Namespace pro idempotency_key do reject da TikTok (mesmo chamado+return →
+# mesma chave → a TikTok não duplica a decisão num retry).
+_NS_TIKTOK = UUID("6f2a9c1e-5b3d-4c8e-9a1f-2d7e8b4c3a10")
+LINK_SAFET_AMAZON = "https://sellercentral.amazon.com.br/safet-claims"
 
 # Em teste o disparo roda inline na mesma sessão (sem Redis).
 ENFILEIRAR = True
@@ -95,11 +161,44 @@ class _PendenteError(Exception):
         super().__init__(code)
 
 
-# ---------------------------------------------------------------- motivo/texto
+# ---------------------------------------------------------------- plataforma
+
+
+def plataforma_de(valor: str | None) -> str | None:
+    """Normaliza `chamado.plataforma` / `store_info.platform` → ml | tiktok |
+    shopee | amazon | (outro, minúsculo) | None."""
+    v = (valor or "").strip().lower()
+    if not v:
+        return None
+    if v in logistica_meli._ML_PLATAFORMAS:
+        return PLAT_ML
+    if v in logistica_rules._TIKTOK_PLATAFORMAS:
+        return PLAT_TIKTOK
+    if v in logistica_rules._SHOPEE_PLATAFORMAS:
+        return PLAT_SHOPEE
+    if v in logistica_rules._AMAZON_PLATAFORMAS:
+        return PLAT_AMAZON
+    return v
+
+
+def _motivo(dev: Devolution) -> str:
+    return (dev.motivo_devolucao or "").strip().lower()
 
 
 def reason_para(dev: Devolution) -> str | None:
-    return MOTIVO_ML.get((dev.motivo_devolucao or "").strip().lower())
+    """Motivo do ML pro motivo da tela (None = não abre chamado)."""
+    return MOTIVO_ML.get(_motivo(dev))
+
+
+def reason_tiktok(dev: Devolution) -> str | None:
+    return MOTIVO_TIKTOK.get(_motivo(dev))
+
+
+def exige_foto(dev: Devolution) -> bool:
+    return _motivo(dev) in MOTIVOS_EXIGEM_FOTO
+
+
+# ---------------------------------------------------------------- texto
 
 
 _INTRO: dict[str, str] = {
@@ -115,8 +214,10 @@ _INTRO: dict[str, str] = {
 def texto_padrao(
     dev: Devolution, reason: str | None, *, fotos: int = 0, video_url: str | None = None
 ) -> str:
-    """Mensagem que vai pro ML (o operador não digita nada — é automático). O
-    link do vídeo entra no texto porque a API do ML não aceita vídeo anexo."""
+    """Mensagem que vai pra plataforma (o operador não digita nada — é
+    automático). `reason` é o motivo do ML (SRF*) — nas outras plataformas o
+    texto é o mesmo, só muda o código enviado. O link do vídeo entra no texto
+    porque nenhuma API aceita vídeo anexo."""
     motivo = (dev.motivo_devolucao or "").strip()
     if motivo.lower() in ("bloqueado", "mudou de ideia"):
         intro = (
@@ -201,6 +302,40 @@ async def anexos_de(session: AsyncSession, devolution_ids: list[UUID]) -> list[D
     )
 
 
+async def _rastreio_devolucao(
+    session: AsyncSession, dev: Devolution, fonte: str
+) -> DevolucaoRastreio | None:
+    """Linha do Acompanhamento de Devoluções do pedido (o sync de 30 min já
+    guarda o id da devolução na plataforma em `devolucao_id_auto`)."""
+    pb = (dev.pedido_bling or "").strip()
+    if not pb:
+        return None
+    row = (
+        await session.execute(
+            select(DevolucaoRastreio).where(DevolucaoRastreio.pedido_bling == pb).limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is None or (row.fonte_auto or "").strip().lower() != fonte:
+        return None
+    return row
+
+
+async def _email_operador(session: AsyncSession) -> str:
+    """E-mail que a Shopee exige no dispute: variável DEVOLUCAO_DISPUTE_EMAIL,
+    senão o primeiro admin do DaVinci, senão qualquer usuário."""
+    env = (os.environ.get("DEVOLUCAO_DISPUTE_EMAIL") or "").strip()
+    if env:
+        return env
+    for cond in (User.role == UserRole.ADMIN, None):
+        q = select(User.email).order_by(User.created_at).limit(1)
+        if cond is not None:
+            q = q.where(cond)
+        email = (await session.execute(q)).scalar_one_or_none()
+        if email:
+            return str(email)
+    return ""
+
+
 def _seller_actions(claim: dict) -> set[str]:
     """Ações liberadas pro VENDEDOR no claim (doc de devoluções: player
     `type=seller`; nos claims de mediação vem como `role=respondent`)."""
@@ -233,7 +368,143 @@ def _return_id_de(rets: object) -> str | None:
     return str(rid) if rid else None
 
 
-async def _resolver_claim(
+# ---------------------------------------------------------------- clientes
+
+
+async def _tiktok_client_para(session: AsyncSession, conta: str | None) -> TikTokClient:
+    integ = await logistica_tiktok._tiktok_integration_for_conta(session, conta)
+    if integ is None:
+        raise chamados_svc.ChamadoError("chamado_sem_integracao_tiktok")
+    return logistica_tiktok._build_tiktok_client(session, integ)
+
+
+async def _shopee_client_para(session: AsyncSession, conta: str | None) -> ShopeeClient:
+    integ = await logistica_shopee._shopee_integration_for_conta(session, conta)
+    if integ is None:
+        raise chamados_svc.ChamadoError("chamado_sem_integracao_shopee")
+    return logistica_shopee._build_shopee_client(session, integ)
+
+
+# ---------------------------------------------------------------- fotos
+
+
+def _extensao_para(ctype: str) -> str:
+    return {"image/jpeg": ".jpg", "image/png": ".png", "application/pdf": ".pdf"}[ctype]
+
+
+def _nome_com_extensao(filename: str, ctype: str) -> str:
+    ext = _extensao_para(ctype)
+    base = (filename or "").strip() or "evidencia"
+    low = base.lower()
+    if ctype == "image/jpeg" and low.endswith((".jpg", ".jpeg")):
+        return base
+    if low.endswith(ext):
+        return base
+    raiz = base.rsplit(".", 1)[0] if "." in base else base
+    return f"{raiz}{ext}"
+
+
+def preparar_foto(anexo: DevolucaoAnexo) -> tuple[str, bytes, str]:
+    """(nome, bytes, content-type) prontos pra plataforma. Imagem acima de 5 MB
+    é reduzida (PyMuPDF, já dependência) até caber; PDF grande não tem redução."""
+    ctype = (anexo.content_type or "").lower()
+    if ctype not in ML_FOTO_TIPOS:
+        raise RuntimeError(f"tipo de anexo não aceito: {ctype}")
+    dados = anexo.blob
+    if len(dados) <= ML_FOTO_MAX_BYTES:
+        return _nome_com_extensao(anexo.filename, ctype), dados, ctype
+    if ctype == "application/pdf":
+        raise RuntimeError("PDF acima de 5 MB — a plataforma não aceita")
+    import fitz  # PyMuPDF
+
+    pix = fitz.Pixmap(dados)
+    if pix.n - pix.alpha >= 4:  # CMYK → RGB
+        pix = fitz.Pixmap(fitz.csRGB, pix)
+    if pix.alpha:
+        pix = fitz.Pixmap(pix, 0)
+    for _ in range(4):
+        pix.shrink(1)
+        out = pix.tobytes("jpeg", jpg_quality=85)
+        if len(out) <= ML_FOTO_MAX_BYTES:
+            return _nome_com_extensao(anexo.filename, "image/jpeg"), out, "image/jpeg"
+    raise RuntimeError("foto acima de 5 MB e não deu pra reduzir")
+
+
+def _ref_foto(anexo: DevolucaoAnexo) -> dict:
+    """Referência guardada em `ml_file_name` (string no ML/Shopee; JSON na TikTok)."""
+    raw = (anexo.ml_file_name or "").strip()
+    if raw.startswith("{"):
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+    return {"ref": raw} if raw else {}
+
+
+# ---------------------------------------------------------------- fluxo
+
+
+async def garantir_chamado(session: AsyncSession, dev: Devolution) -> Chamado | None:
+    """Garante o chamado na aba pra uma devolução cujo motivo pede chamado e,
+    se a plataforma tem API, a mensagem de abertura PENDENTE (canal `api`).
+    Plataforma sem API (Amazon…) ganha uma mensagem `registrada` com o aviso
+    de abrir na mão. Devolve o chamado que precisa de disparo
+    (`agendar_disparo`), ou None quando não há o que disparar. NÃO commita."""
+    if not chamados_svc.motivo_pede_chamado(dev):
+        return None
+    ch = await chamados_svc.abrir_chamado_devolucao(session, dev)
+    if ch is None:
+        ch = await chamados_svc.chamado_da_devolucao(session, dev)
+    if ch is None or ch.resolvido:
+        return None
+    if not (ch.plataforma or "").strip():
+        ch.plataforma = await _plataforma_da_conta(session, dev.conta or ch.conta)
+    plat = plataforma_de(ch.plataforma)
+    msg = await mensagem_abertura(session, ch)
+    if plat not in COM_API:
+        if msg is None:
+            nome = (ch.plataforma or "a plataforma").strip()
+            if plat == PLAT_AMAZON:
+                texto = (
+                    "A Amazon não tem API pra contestar devolução: abrir a reivindicação "
+                    f"SAFE-T no Seller Central ({LINK_SAFET_AMAZON}) com as fotos da linha. "
+                    "Não emitir reembolso antes — reembolso pelo vendedor perde o direito à SAFE-T."
+                )
+            else:
+                texto = f"{nome} não tem API pra contestar devolução: abrir na mão na plataforma."
+            msg = chamados_svc.nova_mensagem(
+                ch,
+                texto=texto,
+                tipo=TIPO_ABERTURA,
+                autor_nome=chamados_svc.AUTOR_SISTEMA,
+                status="registrada",
+            )
+            msg.erro = "plataforma_sem_api"
+            session.add(msg)
+            await session.flush()
+        return None
+    if msg is not None and msg.status == "enviada":
+        return None
+    if ch.canal == "manual":
+        ch.canal = "api"
+    if msg is None:
+        msg = chamados_svc.nova_mensagem(
+            ch,
+            texto=texto_padrao(dev, reason_para(dev)),
+            tipo=TIPO_ABERTURA,
+            autor_nome=chamados_svc.AUTOR_SISTEMA,
+            status="pendente",
+        )
+        msg.canal = "api"
+        session.add(msg)
+        await session.flush()
+    elif msg.status in ("falhou", "registrada"):
+        msg.status = "pendente"
+        msg.canal = "api"
+    return ch
+
+
+async def _resolver_claim_ml(
     client: MercadoLivreClient, ch: Chamado, dev: Devolution
 ) -> tuple[str, str]:
     """(claim_id, return_id) do caso em que o ML já liberou a revisão da
@@ -275,90 +546,260 @@ async def _resolver_claim(
     raise _PendenteError("devolucao_sem_return")
 
 
-# ---------------------------------------------------------------- fotos
+async def _disparar_ml(
+    session: AsyncSession, ch: Chamado, dev: Devolution, fotos: list[DevolucaoAnexo], texto: str
+) -> tuple[str, str]:
+    reason = reason_para(dev)
+    if reason is None:
+        raise _PendenteError("devolucao_motivo_sem_chamado")
+    if reason in REASONS_DO_PACOTE:
+        fotos = []  # motivo do pacote (SRF7): sem anexo
+    if reason in REASONS_EXIGEM_FOTO and not fotos:
+        raise _PendenteError("devolucao_sem_foto")
+    client = await chamados_svc._ml_client_para(session, ch.conta or dev.conta)
+    claim_id, return_id = await _resolver_claim_ml(client, ch, dev)
+    nomes: list[str] = []
+    for a in fotos:
+        if not a.ml_file_name:
+            nome, dados, ctype = preparar_foto(a)
+            a.ml_file_name = await client.upload_return_attachment(claim_id, nome, dados, ctype)
+            await session.flush()
+        nomes.append(a.ml_file_name)
+    await client.return_review_fail(return_id, reason, texto, attachments=nomes or None)
+    return claim_id, REASON_NOME.get(reason, reason)
 
 
-def _extensao_para(ctype: str) -> str:
-    return {"image/jpeg": ".jpg", "image/png": ".png", "application/pdf": ".pdf"}[ctype]
-
-
-def _nome_com_extensao(filename: str, ctype: str) -> str:
-    ext = _extensao_para(ctype)
-    base = (filename or "").strip() or "evidencia"
-    low = base.lower()
-    if ctype == "image/jpeg" and low.endswith((".jpg", ".jpeg")):
-        return base
-    if low.endswith(ext):
-        return base
-    raiz = base.rsplit(".", 1)[0] if "." in base else base
-    return f"{raiz}{ext}"
-
-
-def preparar_foto(anexo: DevolucaoAnexo) -> tuple[str, bytes, str]:
-    """(nome, bytes, content-type) prontos pro ML. Imagem acima de 5 MB é
-    reduzida (PyMuPDF, já dependência) até caber; PDF grande não tem redução."""
-    ctype = (anexo.content_type or "").lower()
-    if ctype not in ML_FOTO_TIPOS:
-        raise RuntimeError(f"tipo de anexo não aceito pelo ML: {ctype}")
-    dados = anexo.blob
-    if len(dados) <= ML_FOTO_MAX_BYTES:
-        return _nome_com_extensao(anexo.filename, ctype), dados, ctype
-    if ctype == "application/pdf":
-        raise RuntimeError("PDF acima de 5 MB — o ML não aceita")
-    import fitz  # PyMuPDF
-
-    pix = fitz.Pixmap(dados)
-    if pix.n - pix.alpha >= 4:  # CMYK → RGB
-        pix = fitz.Pixmap(fitz.csRGB, pix)
-    if pix.alpha:
-        pix = fitz.Pixmap(pix, 0)
-    for _ in range(4):
-        pix.shrink(1)
-        out = pix.tobytes("jpeg", jpg_quality=85)
-        if len(out) <= ML_FOTO_MAX_BYTES:
-            return _nome_com_extensao(anexo.filename, "image/jpeg"), out, "image/jpeg"
-    raise RuntimeError("foto acima de 5 MB e não deu pra reduzir")
-
-
-# ---------------------------------------------------------------- fluxo
-
-
-async def garantir_chamado(session: AsyncSession, dev: Devolution) -> Chamado | None:
-    """Garante o chamado na aba pra uma devolução cujo motivo pede chamado e,
-    se a conta é do Mercado Livre, a mensagem de abertura PENDENTE (canal
-    `api`). Devolve o chamado que precisa de disparo (`agendar_disparo`), ou
-    None quando não há o que fazer (motivo sem chamado, já aberto no ML,
-    resolvido, conta de outra plataforma). NÃO commita."""
-    if not chamados_svc.motivo_pede_chamado(dev):
+async def _return_tiktok(
+    client: TikTokClient, dev: Devolution, preferido: str | None
+) -> dict | None:
+    """Caso de devolução do pedido na TikTok (returns/search por order_id),
+    com status FRESCO. Prefere o id que o Acompanhamento já conhece; senão o
+    vivo mais recente. Só RETURN_AND_REFUND tem pacote."""
+    oid = (dev.pedido_marketplace or "").strip()
+    if not oid:
+        raise _PendenteError("devolucao_sem_pedido_marketplace")
+    casos = [
+        c for c in await client.get_return_list(order_ids=[oid])
+        if isinstance(c, dict)
+        and str(c.get("return_type") or "").upper() in ("", "RETURN_AND_REFUND")
+    ]
+    if not casos:
         return None
-    ch = await chamados_svc.abrir_chamado_devolucao(session, dev)
-    if ch is None:
-        ch = await chamados_svc.chamado_da_devolucao(session, dev)
-    if ch is None or ch.resolvido:
+    if preferido:
+        for c in casos:
+            if str(c.get("return_id") or "") == preferido:
+                return c
+    melhor = logistica_tiktok._melhor_devolucao_por_pedido(casos)
+    return melhor.get(oid) or casos[-1]
+
+
+def _tiktok_reason_por_texto(reasons: list[dict], motivo: str) -> str | None:
+    """Quando o name esperado não está na lista da TikTok, casa pelo texto."""
+    chaves = {
+        "danificado (outros)": ("damaged", "danific"),
+        "bloqueado": ("damaged or used", "used", "usad"),
+        "mudou de ideia": ("damaged or used", "used", "usad"),
+        "item incorreto": ("not the product", "não é o produto", "diferente"),
+        "golpe": ("missing", "falt"),
+        "item faltando": ("missing", "falt"),
+        "não recebido": ("haven't received", "not received", "não receb"),
+    }.get(motivo, ())
+    for chave in chaves:
+        for r in reasons:
+            txt = str(r.get("text") or r.get("reason_text") or "").lower()
+            if chave in txt and r.get("name"):
+                return str(r["name"])
+    return None
+
+
+async def _disparar_tiktok(
+    session: AsyncSession, ch: Chamado, dev: Devolution, fotos: list[DevolucaoAnexo], texto: str
+) -> tuple[str, str]:
+    motivo = _motivo(dev)
+    reason = reason_tiktok(dev)
+    if reason is None:
+        raise _PendenteError("devolucao_motivo_sem_chamado")
+    if exige_foto(dev) and not fotos:
+        raise _PendenteError("devolucao_sem_foto")
+    client = await _tiktok_client_para(session, ch.conta or dev.conta)
+    rastreio = await _rastreio_devolucao(session, dev, PLAT_TIKTOK)
+    preferido = (ch.chamado or "").strip() or (
+        (rastreio.devolucao_id_auto or "").strip() if rastreio else ""
+    )
+    caso = await _return_tiktok(client, dev, preferido or None)
+    if caso is None:
+        raise _PendenteError("devolucao_sem_return")
+    rid = str(caso.get("return_id") or "").strip()
+    if not rid:
+        raise _PendenteError("devolucao_sem_return")
+    ch.chamado = rid
+    status = str(caso.get("return_status") or "").strip().upper()
+    if caso.get("is_quick_refund"):
+        raise chamados_svc.ChamadoError("tiktok_quick_refund")
+    if str(caso.get("arbitration_status") or "").upper() == "IN_PROGRESS":
+        raise _PendenteError("tiktok_arbitragem")
+    if status == "REJECT_RECEIVE_PACKAGE":
+        raise chamados_svc.ChamadoError("tiktok_ja_recusada")
+    acoes = {
+        str(a.get("action") or "").upper()
+        for a in (caso.get("seller_next_action_response") or [])
+        if isinstance(a, dict)
+    }
+    if status != "BUYER_SHIPPED_ITEM" or (acoes and "SELLER_RESPOND_RECEIVE_PACKAGE" not in acoes):
+        raise _PendenteError("tiktok_aguardando_pacote")
+    reasons = await client.get_reject_reasons(rid)
+    names = {str(r.get("name") or "") for r in reasons}
+    if names and reason not in names:
+        alt = _tiktok_reason_por_texto(reasons, motivo)
+        if not alt:
+            raise chamados_svc.ChamadoError("tiktok_motivo_indisponivel")
+        reason = alt
+    images: list[dict] = []
+    for a in fotos[:TIKTOK_MAX_FOTOS]:
+        ref = _ref_foto(a)
+        if not ref.get("uri"):
+            nome, dados, ctype = preparar_foto(a)
+            d = await client.upload_image(nome, dados, ctype)
+            ref = {
+                "uri": d.get("uri"),
+                "width": d.get("width"),
+                "height": d.get("height"),
+                "mime": ctype,
+            }
+            a.ml_file_name = json.dumps(ref)
+            await session.flush()
+        img: dict = {"image_id": ref["uri"], "mime_type": ref.get("mime") or a.content_type}
+        if ref.get("width"):
+            img["width"] = int(ref["width"])
+        if ref.get("height"):
+            img["height"] = int(ref["height"])
+        images.append(img)
+    await client.reject_return(
+        rid,
+        decision="REJECT_RECEIVED_PACKAGE",
+        reject_reason=reason,
+        comment=texto,
+        images=images or None,
+        idempotency_key=str(uuid5(_NS_TIKTOK, f"{ch.id}:{rid}")),
+    )
+    return rid, REASON_NOME.get(reason, reason)
+
+
+def _shopee_reason(reasons: list[dict], motivo: str) -> dict | None:
+    chaves = MOTIVO_SHOPEE.get(motivo, ())
+    for chave in chaves:
+        for r in reasons:
+            txt = str(
+                r.get("dispute_reason_text") or r.get("reason_text") or r.get("text") or ""
+            ).lower()
+            if chave in txt:
+                return r
+    return None
+
+
+def _shopee_reason_id(r: dict) -> int | None:
+    v = r.get("dispute_reason")
+    if v is None:
+        v = r.get("dispute_reason_id")
+    if isinstance(v, list):
+        v = v[0] if v else None
+    try:
+        return int(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
         return None
-    if not (ch.plataforma or "").strip():
-        ch.plataforma = await _plataforma_da_conta(session, dev.conta or ch.conta)
-    if not chamados_svc._eh_ml(ch):
-        return None
-    msg = await mensagem_abertura(session, ch)
-    if msg is not None and msg.status == "enviada":
-        return None
-    if ch.canal == "manual":
-        ch.canal = "api"
-    if msg is None:
-        msg = chamados_svc.nova_mensagem(
-            ch,
-            texto=texto_padrao(dev, reason_para(dev)),
-            tipo=TIPO_ABERTURA,
-            autor_nome=chamados_svc.AUTOR_SISTEMA,
-            status="pendente",
-        )
-        msg.canal = "api"
-        session.add(msg)
-        await session.flush()
-    elif msg.status == "falhou":
-        msg.status = "pendente"
-    return ch
+
+
+async def _return_sn_shopee(session: AsyncSession, dev: Devolution) -> str | None:
+    rastreio = await _rastreio_devolucao(session, dev, PLAT_SHOPEE)
+    if rastreio and (rastreio.devolucao_id_auto or "").strip():
+        return rastreio.devolucao_id_auto.strip()
+    oid = (dev.pedido_marketplace or "").strip()
+    pb = (dev.pedido_bling or "").strip()
+    if not oid or not pb:
+        raise _PendenteError("devolucao_sem_pedido_marketplace")
+    linha = SimpleNamespace(
+        plataforma="shopee",
+        pedido_marketplace=oid,
+        pedido_bling=pb,
+        conta=dev.conta,
+        data=dev.data.date() if dev.data else None,
+    )
+    achados = await logistica_shopee.returns_por_pedido(session, [linha])  # type: ignore[arg-type]
+    info = achados.get(pb)
+    return (info.return_id or "").strip() if info else None
+
+
+async def _disparar_shopee(
+    session: AsyncSession, ch: Chamado, dev: Devolution, fotos: list[DevolucaoAnexo], texto: str
+) -> tuple[str, str]:
+    motivo = _motivo(dev)
+    if motivo not in MOTIVO_SHOPEE:
+        raise _PendenteError("devolucao_motivo_sem_chamado")
+    if motivo != "não recebido" and not fotos:
+        # a Shopee exige foto em todo motivo "recebi com problema"
+        raise _PendenteError("devolucao_sem_foto")
+    client = await _shopee_client_para(session, ch.conta or dev.conta)
+    return_sn = (ch.chamado or "").strip() or await _return_sn_shopee(session, dev)
+    if not return_sn:
+        raise _PendenteError("devolucao_sem_return")
+    ch.chamado = return_sn
+    det = await client.get_return_detail(return_sn)
+    status = str(det.get("status") or "").strip().upper()
+    if status in ("SELLER_DISPUTE", "JUDGING"):
+        raise chamados_svc.ChamadoError("shopee_ja_contestada")
+    if status in ("CLOSED", "CANCELLED"):
+        raise chamados_svc.ChamadoError("shopee_devolucao_encerrada")
+    if status not in ("REQUESTED", "PROCESSING", "ACCEPTED"):
+        raise _PendenteError("shopee_aguardando_pacote")
+    comp = det.get("seller_compensation") or {}
+    comp_status = str(comp.get("seller_compensation_status") or "").upper()
+    if comp_status in ("COMPENSATION_REQUESTED", "COMPENSATION_APPROVED", "COMPENSATION_REJECTED"):
+        raise chamados_svc.ChamadoError("shopee_ja_contestada")
+    reasons = await client.get_return_dispute_reason(return_sn)
+    escolhido = _shopee_reason(reasons, motivo)
+    rid = _shopee_reason_id(escolhido) if escolhido else None
+    if escolhido is None or rid is None:
+        raise chamados_svc.ChamadoError("shopee_motivo_indisponivel")
+    urls: list[str] = []
+    for a in fotos:
+        ref = _ref_foto(a)
+        url = ref.get("ref")
+        if not url:
+            nome, dados, ctype = preparar_foto(a)
+            url = await client.convert_image(return_sn, nome, dados, ctype)
+            a.ml_file_name = url
+            await session.flush()
+        urls.append(url)
+    modulos = [
+        m for m in (escolhido.get("evidence_module_list") or []) if isinstance(m, dict)
+    ]
+    image_list: list[dict] = []
+    if urls:
+        if modulos:
+            for m in modulos:
+                image_list.append(
+                    {
+                        "module_index": m.get("module_index"),
+                        "requirement": m.get("requirement") or "",
+                        "image_url": urls[:SHOPEE_MAX_FOTOS_MODULO],
+                    }
+                )
+        else:
+            image_list.append({"module_index": 1, "requirement": "", "image_url": urls[:3]})
+    email = await _email_operador(session)
+    if not email:
+        raise chamados_svc.ChamadoError("shopee_sem_email")
+    await client.dispute(
+        return_sn,
+        email=email,
+        dispute_reason_id=rid,
+        image_list=image_list or None,
+        text=texto,
+    )
+    nome_motivo = str(
+        escolhido.get("dispute_reason_text") or escolhido.get("reason_text") or rid
+    )
+    return return_sn, nome_motivo
 
 
 async def disparar(
@@ -366,45 +807,40 @@ async def disparar(
     ch: Chamado,
     dev: Devolution,
     *,
-    client: MercadoLivreClient | None = None,
     agora: datetime | None = None,
 ) -> ChamadoMensagem | None:
-    """Tenta abrir no ML agora. Atualiza a mensagem `abertura` do chamado:
-    `enviada` (abriu), `pendente` + código (ainda não dá — repete no cron) ou
-    `falhou` + erro (o ML recusou / conta sem integração). Nunca levanta; NÃO
-    commita."""
+    """Tenta abrir na plataforma agora. Atualiza a mensagem `abertura` do
+    chamado: `enviada` (abriu), `pendente` + código (ainda não dá — repete no
+    cron) ou `falhou` + erro (a plataforma recusou / conta sem integração).
+    Nunca levanta; NÃO commita."""
     agora = agora or datetime.now(UTC)
     msg = await mensagem_abertura(session, ch)
     if msg is None or msg.status == "enviada":
         return msg
+    plat = plataforma_de(ch.plataforma)
     linhas = await _linhas_do_pedido(session, dev)
-    dev_ref = dev
-    reason = reason_para(dev_ref)
+    reason = reason_para(dev)
     anexos = await anexos_de(session, [d.id for d in linhas])
     fotos = [a for a in anexos if (a.content_type or "").lower() in ML_FOTO_TIPOS]
-    if reason in REASONS_DO_PACOTE:
-        fotos = []  # motivo do pacote (SRF7): sem anexo
+    if plat == PLAT_ML and reason in REASONS_DO_PACOTE:
+        fotos = []
+    if plat in (PLAT_TIKTOK, PLAT_SHOPEE):
+        fotos = [a for a in fotos if (a.content_type or "").lower() in FOTO_TIPOS_IMAGEM]
     # Link do vídeo pode estar em outra linha do kit.
-    video = next(((d.video_url or "").strip() for d in linhas if (d.video_url or "").strip()), None)
-    msg.texto = texto_padrao(dev_ref, reason, fotos=len(fotos), video_url=video)
-    claim_id = return_id = None
+    video = next(
+        ((d.video_url or "").strip() for d in linhas if (d.video_url or "").strip()), None
+    )
+    msg.texto = texto_padrao(dev, reason, fotos=len(fotos), video_url=video)
+    referencia = detalhe = None
     try:
-        if reason is None:
-            raise _PendenteError("devolucao_motivo_sem_chamado")
-        if reason in REASONS_EXIGEM_FOTO and not fotos:
-            raise _PendenteError("devolucao_sem_foto")
-        client = client or await chamados_svc._ml_client_para(session, ch.conta or dev.conta)
-        claim_id, return_id = await _resolver_claim(client, ch, dev_ref)
-        nomes: list[str] = []
-        for a in fotos:
-            if not a.ml_file_name:
-                nome, dados, ctype = preparar_foto(a)
-                a.ml_file_name = await client.upload_return_attachment(claim_id, nome, dados, ctype)
-                await session.flush()
-            nomes.append(a.ml_file_name)
-        await client.return_review_fail(
-            return_id, reason, msg.texto, attachments=nomes or None
-        )
+        if plat == PLAT_ML:
+            referencia, detalhe = await _disparar_ml(session, ch, dev, fotos, msg.texto)
+        elif plat == PLAT_TIKTOK:
+            referencia, detalhe = await _disparar_tiktok(session, ch, dev, fotos, msg.texto)
+        elif plat == PLAT_SHOPEE:
+            referencia, detalhe = await _disparar_shopee(session, ch, dev, fotos, msg.texto)
+        else:
+            raise chamados_svc.ChamadoError("plataforma_sem_api")
     except _PendenteError as p:
         msg.status = "pendente"
         msg.erro = p.code
@@ -417,13 +853,14 @@ async def disparar(
         msg.status = "falhou"
         msg.erro = e.code
         return msg
-    except Exception as e:  # noqa: BLE001 — erro cru da API do ML
+    except Exception as e:  # noqa: BLE001 — erro cru da API da plataforma
         msg.status = "falhou"
         msg.erro = str(e)[:300]
         logger.warning(
             "chamado_devolucao_falhou",
             chamado_id=str(ch.id),
             devolution_id=str(dev.id),
+            plataforma=plat,
             err=msg.erro,
         )
         return msg
@@ -432,9 +869,10 @@ async def disparar(
     msg.erro = None
     msg.enviada_at = agora
     msg.canal = "api"
-    ch.chamado = claim_id
+    ch.chamado = referencia
     ch.canal = "api"
-    ch.monitoramento = True
+    if plat == PLAT_ML:
+        ch.monitoramento = True  # o cron fecha quando o ML encerrar o claim
     for a in fotos:
         session.add(
             ChamadoAnexo(
@@ -447,19 +885,22 @@ async def disparar(
                 created_by=a.created_by,
             )
         )
+    nome_plat = {PLAT_ML: "Mercado Livre", PLAT_TIKTOK: "TikTok Shop", PLAT_SHOPEE: "Shopee"}.get(
+        plat, plat or "plataforma"
+    )
     session.add(
         chamados_svc.registrar_sistema(
             ch,
-            f"Chamado aberto no Mercado Livre — revisão da devolução: "
-            f"{REASON_NOME.get(reason, reason)} ({len(fotos)} foto(s)); claim {claim_id}",
+            f"Chamado aberto na {nome_plat} — contestação da devolução: {detalhe} "
+            f"({len(fotos)} foto(s)); referência {referencia}",
         )
     )
     logger.info(
         "chamado_devolucao_aberto",
         chamado_id=str(ch.id),
-        claim_id=claim_id,
-        return_id=return_id,
-        reason=reason,
+        plataforma=plat,
+        referencia=referencia,
+        motivo=detalhe,
         fotos=len(fotos),
     )
     return msg
@@ -486,8 +927,8 @@ async def disparar_por_id(session: AsyncSession, chamado_id: UUID) -> ChamadoMen
 
 async def agendar_disparo(session: AsyncSession, ch: Chamado, dev: Devolution) -> None:
     """Depois do commit do router: manda o disparo pro worker (a conversa com
-    o ML — upload de foto — pode demorar). Sem Redis (teste / fila fora),
-    roda inline na sessão dada e commita."""
+    a plataforma — upload de foto — pode demorar). Sem Redis (teste / fila
+    fora), roda inline na sessão dada e commita."""
     if ENFILEIRAR:
         try:
             from app.worker_pool import get_arq_pool
@@ -506,9 +947,9 @@ async def agendar_disparo(session: AsyncSession, ch: Chamado, dev: Devolution) -
 async def processar_pendentes(
     session: AsyncSession, *, agora: datetime | None = None
 ) -> dict:
-    """Cron (de hora em hora): retenta as aberturas `pendente` (ML ainda não
-    liberou a revisão, foto que chegou depois, sub-motivo escolhido depois).
-    Best-effort por linha; commita no fim."""
+    """Cron (de hora em hora): retenta as aberturas `pendente` (plataforma
+    ainda não liberou, foto que chegou depois). Best-effort por linha; commita
+    no fim."""
     rows = (
         await session.execute(
             select(ChamadoMensagem, Chamado)

@@ -84,6 +84,8 @@ class DevolutionOut(BaseModel):
     # está enviada (ex.: devolucao_sem_foto, return_review_indisponivel).
     chamado_ml_status: str | None = None
     chamado_ml_erro: str | None = None
+    # Plataforma do chamado (ml | tiktok | shopee | amazon…) — rotula o status.
+    chamado_plataforma: str | None = None
     # Fotos/vídeos anexados à linha (metadados; blob pelo endpoint /anexos/{id}).
     anexos: list[DevolucaoAnexoOut] = []
 

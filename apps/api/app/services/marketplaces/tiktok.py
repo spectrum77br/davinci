@@ -681,6 +681,111 @@ class TikTokClient:
                 break
         return out
 
+    # ---- devolução recebida com problema (recusa do pacote) -----------------
+
+    async def _post_multipart(
+        self,
+        path: str,
+        *,
+        files: dict,
+        data: dict | None = None,
+        extra_params: dict[str, str] | None = None,
+        _retried: bool = False,
+    ) -> dict:
+        """POST multipart/form-data (upload de imagem). Pela regra de assinatura
+        da TikTok o corpo multipart NÃO entra na string assinada — só path +
+        query ordenada, como no GET (`_build_get_params`)."""
+        await self._ensure_fresh_token()
+        params = self._build_get_params(path, extra_params)
+        async with httpx.AsyncClient(timeout=max(self._timeout, 120.0)) as c:
+            r = await c.post(
+                f"{TIKTOK_BASE_URL}{path}",
+                params=params,
+                files=files,
+                data=data or {},
+                headers={"x-tts-access-token": self.access_token},
+            )
+        if r.status_code == 200:
+            resp = r.json()
+            if self._expired_creds(resp) and not _retried:
+                await self._ensure_fresh_token(force=True)
+                return await self._post_multipart(
+                    path, files=files, data=data, extra_params=extra_params, _retried=True
+                )
+            return resp
+        return {"code": r.status_code, "message": r.text[:500]}
+
+    async def upload_image(
+        self,
+        filename: str,
+        content: bytes,
+        mime: str = "image/jpeg",
+        *,
+        use_case: str = "DESCRIPTION_IMAGE",
+    ) -> dict:
+        """Sobe uma imagem (evidência da devolução) — POST /product/202309/images/upload,
+        form `data`. Devolve `{uri, url, width, height}`; o `uri` é o `image_id`
+        que entra no `reject_return`. JPG/PNG/WEBP ≤ 10 MB. Levanta com o erro da API."""
+        resp = await self._post_multipart(
+            "/product/202309/images/upload",
+            files={"data": (filename, content, mime)},
+            data={"use_case": use_case},
+        )
+        if resp.get("code") not in (0, None):
+            raise RuntimeError(
+                f"tiktok_upload_image code={resp.get('code')} msg={str(resp.get('message'))[:300]}"
+            )
+        d = resp.get("data") or {}
+        if not d.get("uri"):
+            raise RuntimeError(f"tiktok_upload_image sem uri: {str(resp)[:300]}")
+        return d
+
+    async def get_reject_reasons(self, return_id: str, *, locale: str = "pt-BR") -> list[dict]:
+        """Motivos de recusa válidos pra ESSA devolução no estado atual
+        (GET /return_refund/202309/reject_reasons?return_or_cancel_id=…) →
+        `[{name, text}]`. [] em erro (quem chama decide)."""
+        resp = await self._get(
+            "/return_refund/202309/reject_reasons",
+            {"return_or_cancel_id": str(return_id), "locale": locale},
+        )
+        if resp.get("code") not in (0, None):
+            logger.warning(
+                "tiktok_reject_reasons_error",
+                code=resp.get("code"), msg=str(resp.get("message"))[:200],
+            )
+            return []
+        d = resp.get("data") or {}
+        lista = d.get("reasons") or d.get("reject_reasons") or []
+        return [r for r in lista if isinstance(r, dict)]
+
+    async def reject_return(
+        self,
+        return_id: str,
+        *,
+        decision: str,
+        reject_reason: str,
+        comment: str,
+        images: list[dict] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """Recusa da devolução — POST /return_refund/202309/returns/{return_id}/reject.
+        `decision`: REJECT_RECEIVED_PACKAGE (pacote chegou com problema; exige
+        return_status=BUYER_SHIPPED_ITEM) | REJECT_REFUND | REJECT_RETURN.
+        `reject_reason`: name de `get_reject_reasons` (pacote recebido:
+        reverse_reject_return_parcel_reason_1..5). `images`: até 6
+        `{image_id: uri, mime_type, width, height}` do `upload_image`.
+        Levanta com o erro da API (25011025 quick refund, 25011010 arbitragem…)."""
+        body: dict = {"decision": decision, "reject_reason": reject_reason, "comment": comment}
+        if images:
+            body["images"] = images
+        extra = {"idempotency_key": idempotency_key} if idempotency_key else None
+        resp = await self._post(f"/return_refund/202309/returns/{return_id}/reject", body, extra)
+        if resp.get("code") not in (0, None):
+            raise RuntimeError(
+                f"tiktok_reject_return code={resp.get('code')} msg={str(resp.get('message'))[:300]}"
+            )
+        return resp.get("data") or {}
+
     async def get_tracking(self, order_id: str) -> dict:
         """Eventos de rastreio de UM pedido (Fulfillment API 202309). Retorna o
         `data` com `tracking` = lista de eventos (`description` em inglês,

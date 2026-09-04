@@ -1,4 +1,5 @@
-"""Devolução → chamado AUTOMÁTICO no Mercado Livre com fotos (services/
+# ruff: noqa: E501
+"""Devolução → chamado AUTOMÁTICO na plataforma com fotos (services/
 chamados_devolucao). Eduardo 04/09: "Todos esses motivos aí, se for adicionado
 lá, vai abrir o chamado automático … vai ter foto sim e vídeo"."""
 
@@ -309,22 +310,23 @@ async def test_ml_ainda_nao_liberou_revisao_fica_pendente_e_cron_retenta(
     assert msg2.status == "falhou" and msg2.erro == "devolucao_prazo_esgotado"
 
 
-async def test_conta_shopee_so_registra_na_aba(client, make_user, auth_as, db, ml):
+async def test_plataforma_sem_api_so_registra_na_aba(client, make_user, auth_as, db, ml):
     user = await make_user(permissions=_perms())
     auth_as(user)
-    await _seed_pedido(db, user, numero="293106", numeroloja="2609AAA", platform="shopee",
-                       conta="minas", loja="66")
+    await _seed_pedido(db, user, numero="293106", numeroloja="MG-123", platform="magalu",
+                       conta="magalu x", loja="66")
     r = await client.post(
         "/api/devolutions",
-        json={"conta": "minas", "pedido_bling": "293106", "pedido_marketplace": "2609AAA",
+        json={"conta": "magalu x", "pedido_bling": "293106", "pedido_marketplace": "MG-123",
               "condicao_produto": "Usado", "motivo_devolucao": "Danificado (Outros)"},
     )
     assert r.status_code == 201, r.text
     assert r.json()["tem_chamado"] is True
-    assert r.json()["chamado_ml_status"] is None
+    assert r.json()["chamado_plataforma"] == "magalu"
+    assert r.json()["chamado_ml_status"] == "registrada"
+    assert r.json()["chamado_ml_erro"] == "plataforma_sem_api"
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "293106"))).scalar_one()
     assert ch.canal == "manual"
-    assert await _abertura(db, ch.id) is None
     assert ml.reviews == []
 
 
@@ -376,3 +378,232 @@ async def test_texto_e_reason():
     assert "foto" not in t
     assert "2 foto(s)" in svc.texto_padrao(dev, "SRF2", fotos=2)
     assert "Vídeo da devolução: https://x.y/v" in svc.texto_padrao(dev, "SRF2", video_url="https://x.y/v")
+
+
+# ---------------------------------------------------------------- TikTok / Shopee / Amazon
+
+
+class _FakeTikTok:
+    def __init__(self, *, status: str = "BUYER_SHIPPED_ITEM", quick: bool = False):
+        self.status = status
+        self.quick = quick
+        self.uploads: list[tuple[str, int, str]] = []
+        self.rejects: list[dict] = []
+
+    async def get_return_list(self, *, order_ids=None, **kw):
+        return [
+            {
+                "order_id": order_ids[0], "return_id": "4042116781741081611",
+                "return_type": "RETURN_AND_REFUND", "return_status": self.status,
+                "is_quick_refund": self.quick, "arbitration_status": "",
+                "seller_next_action_response": [
+                    {"action": "SELLER_RESPOND_RECEIVE_PACKAGE", "deadline": 1}
+                ] if self.status == "BUYER_SHIPPED_ITEM" else [],
+                "update_time": 10,
+            }
+        ]
+
+    async def get_reject_reasons(self, return_id, *, locale="pt-BR"):
+        return [
+            {"name": f"reverse_reject_return_parcel_reason_{i}", "text": t}
+            for i, t in enumerate(
+                ["not the product", "not eligible", "missing", "haven't received", "damaged or used"], 1
+            )
+        ]
+
+    async def upload_image(self, filename, content, mime="image/jpeg", *, use_case="DESCRIPTION_IMAGE"):
+        self.uploads.append((filename, len(content), mime))
+        return {"uri": f"tos/{filename}", "url": "https://x/y", "width": 100, "height": 80}
+
+    async def reject_return(self, return_id, *, decision, reject_reason, comment, images=None, idempotency_key=None):
+        self.rejects.append({"return_id": return_id, "decision": decision, "reason": reject_reason,
+                             "comment": comment, "images": images, "idem": idempotency_key})
+        return {}
+
+
+class _FakeShopee:
+    def __init__(self, *, status: str = "ACCEPTED"):
+        self.status = status
+        self.converted: list[tuple[str, str]] = []
+        self.disputes: list[dict] = []
+
+    async def get_return_detail(self, return_sn):
+        return {"return_sn": return_sn, "status": self.status,
+                "seller_compensation": {"seller_compensation_status": "COMPENSATION_PENDING_REQUEST"}}
+
+    async def get_return_dispute_reason(self, return_sn):
+        return [
+            {"dispute_reason": 82, "dispute_reason_text": "Received return products with physical damage",
+             "evidence_module_list": [
+                 {"module_index": 1, "requirement": "Unboxing photo with AWB", "is_required": True},
+                 {"module_index": 2, "requirement": "Photos of the damage", "is_required": True},
+             ]},
+            {"dispute_reason": 84, "dispute_reason_text": "Received wrong return product",
+             "evidence_module_list": [{"module_index": 1, "requirement": "Photos", "is_required": True}]},
+            {"dispute_reason": 81, "dispute_reason_text": "Did not receive the return product",
+             "evidence_module_list": []},
+        ]
+
+    async def convert_image(self, return_sn, filename, content, mime="image/jpeg"):
+        self.converted.append((return_sn, filename))
+        return f"https://fileproxy/{filename}"
+
+    async def dispute(self, return_sn, *, email, dispute_reason_id, image_list, text):
+        self.disputes.append({"return_sn": return_sn, "email": email, "reason": dispute_reason_id,
+                              "image_list": image_list, "text": text})
+        return {}
+
+
+async def test_tiktok_recusa_pacote_com_foto(client, make_user, auth_as, db, ml, monkeypatch):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTok()
+
+    async def _c(session, conta):
+        return fake
+
+    monkeypatch.setattr(svc, "_tiktok_client_para", _c)
+    await _seed_pedido(db, user, numero="290845", numeroloja="585585025945338891",
+                       platform="tiktok", conta="injox", loja="77")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "injox", "pedido_bling": "290845", "pedido_marketplace": "585585025945338891",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_plataforma"] == "tiktok"
+    assert r.json()["chamado_ml_status"] == "pendente"
+    assert r.json()["chamado_ml_erro"] == "devolucao_sem_foto"
+    up = await client.post(
+        f"/api/devolutions/{r.json()['id']}/anexos",
+        files={"file": ("mala.png", PNG_1PX, "image/png")},
+    )
+    assert up.status_code == 201, up.text
+    assert up.json()["chamado_ml_status"] == "enviada", up.json()
+    assert fake.uploads == [("mala.png", len(PNG_1PX), "image/png")]
+    assert len(fake.rejects) == 1
+    rj = fake.rejects[0]
+    assert rj["return_id"] == "4042116781741081611"
+    assert rj["decision"] == "REJECT_RECEIVED_PACKAGE"
+    assert rj["reason"] == "reverse_reject_return_parcel_reason_5"
+    assert rj["images"] == [{"image_id": "tos/mala.png", "mime_type": "image/png", "width": 100, "height": 80}]
+    assert "danificado" in rj["comment"] and rj["idem"]
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "290845"))).scalar_one()
+    assert ch.chamado == "4042116781741081611" and ch.canal == "api" and ch.monitoramento is False
+    assert ml.reviews == []  # nada foi pro ML
+
+
+async def test_tiktok_aguarda_pacote_e_quick_refund(client, make_user, auth_as, db, ml, monkeypatch):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTok(status="AWAITING_BUYER_SHIP")
+
+    async def _c(session, conta):
+        return fake
+
+    monkeypatch.setattr(svc, "_tiktok_client_para", _c)
+    await _seed_pedido(db, user, numero="290846", numeroloja="585585025945338892",
+                       platform="tiktok", conta="injox", loja="77")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "injox", "pedido_bling": "290846", "pedido_marketplace": "585585025945338892",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Golpe"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_erro"] == "tiktok_aguardando_pacote"
+    # pacote chegou → cron abre com motivo "faltam produtos" (pacote vazio)
+    fake.status = "BUYER_SHIPPED_ITEM"
+    s = await svc.processar_pendentes(db)
+    assert s["abertos"] == 1
+    assert fake.rejects[-1]["reason"] == "reverse_reject_return_parcel_reason_3"
+    assert fake.rejects[-1]["images"] is None
+    # quick refund → falha definitiva
+    fake2 = _FakeTikTok(quick=True)
+
+    async def _c2(session, conta):
+        return fake2
+
+    monkeypatch.setattr(svc, "_tiktok_client_para", _c2)
+    await _seed_pedido(db, user, numero="290847", numeroloja="585585025945338893",
+                       platform="tiktok", conta="injox", loja="77")
+    r2 = await client.post(
+        "/api/devolutions",
+        json={"conta": "injox", "pedido_bling": "290847", "pedido_marketplace": "585585025945338893",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Item faltando"},
+    )
+    assert r2.json()["chamado_ml_status"] == "falhou"
+    assert r2.json()["chamado_ml_erro"] == "tiktok_quick_refund"
+
+
+async def test_shopee_disputa_com_modulos_de_foto(client, make_user, auth_as, db, ml, monkeypatch):
+    from app.models import DevolucaoRastreio
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopee()
+
+    async def _c(session, conta):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="294260", numeroloja="2609045AM9GKAQ",
+                       platform="shopee", conta="atv", loja="88")
+    # o Acompanhamento já conhece o return_sn (sync de 30 min)
+    db.add(DevolucaoRastreio(pedido_bling="294260", devolucao_id_auto="2609RSN001", fonte_auto="shopee"))
+    await db.commit()
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "atv", "pedido_bling": "294260", "pedido_marketplace": "2609045AM9GKAQ",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)",
+              "video_url": "https://v.id/2"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_plataforma"] == "shopee"
+    assert r.json()["chamado_ml_erro"] == "devolucao_sem_foto"
+    up = await client.post(
+        f"/api/devolutions/{r.json()['id']}/anexos",
+        files={"file": ("dano.jpg", PNG_1PX, "image/jpeg")},
+    )
+    assert up.status_code == 201, up.text
+    assert up.json()["chamado_ml_status"] == "enviada", up.json()
+    assert fake.converted == [("2609RSN001", "dano.jpg")]
+    d = fake.disputes[0]
+    assert d["return_sn"] == "2609RSN001" and d["reason"] == 82
+    assert d["email"] == user.email
+    assert [m["module_index"] for m in d["image_list"]] == [1, 2]
+    assert d["image_list"][0]["image_url"] == ["https://fileproxy/dano.jpg"]
+    assert d["image_list"][0]["requirement"] == "Unboxing photo with AWB"
+    assert "Vídeo da devolução: https://v.id/2" in d["text"]
+    # não recebido: sem foto obrigatória, motivo "did not receive" (81)
+    await _seed_pedido(db, user, numero="294261", numeroloja="2609045AM9GKAR",
+                       platform="shopee", conta="atv", loja="88")
+    db.add(DevolucaoRastreio(pedido_bling="294261", devolucao_id_auto="2609RSN002", fonte_auto="shopee"))
+    await db.commit()
+    r2 = await client.post(
+        "/api/devolutions",
+        json={"conta": "atv", "pedido_bling": "294261", "pedido_marketplace": "2609045AM9GKAR",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r2.json()["chamado_ml_status"] == "enviada", r2.json()
+    assert fake.disputes[-1]["reason"] == 81 and fake.disputes[-1]["image_list"] is None
+
+
+async def test_amazon_sem_api_fica_registrado(client, make_user, auth_as, db, ml):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="294149", numeroloja="701-9431449-5435416",
+                       platform="amazon", conta="poofy", loja="99")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "poofy", "pedido_bling": "294149", "pedido_marketplace": "701-9431449-5435416",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Danificado (Outros)"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_plataforma"] == "amazon"
+    assert r.json()["chamado_ml_status"] == "registrada"
+    assert r.json()["chamado_ml_erro"] == "plataforma_sem_api"
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "294149"))).scalar_one()
+    assert ch.canal == "manual"
+    msg = await _abertura(db, ch.id)
+    assert "SAFE-T" in msg.texto and msg.status == "registrada"
+    assert ml.reviews == []

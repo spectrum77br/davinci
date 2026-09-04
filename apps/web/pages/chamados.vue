@@ -174,6 +174,19 @@ const ERROS: Record<string, string> = {
   devolucao_sem_pedido_marketplace: 'devolução sem nº do pedido do ML',
   devolucao_prazo_esgotado: 'ficou 45 dias pendente — abrir na mão',
   devolucao_nao_encontrada: 'lançamento da devolução não encontrado',
+  tiktok_aguardando_pacote: 'TikTok ainda não liberou a recusa do pacote (tenta a cada hora)',
+  tiktok_arbitragem: 'em arbitragem na TikTok',
+  tiktok_quick_refund: 'TikTok já reembolsou (quick refund) — só apelação no Seller Center',
+  tiktok_ja_recusada: 'já recusada na TikTok',
+  tiktok_motivo_indisponivel: 'TikTok não aceita esse motivo nesse estado',
+  shopee_aguardando_pacote: 'Shopee ainda não liberou a disputa (tenta a cada hora)',
+  shopee_ja_contestada: 'já contestada na Shopee',
+  shopee_devolucao_encerrada: 'devolução já encerrada na Shopee',
+  shopee_motivo_indisponivel: 'Shopee não oferece esse motivo pra essa devolução',
+  shopee_sem_email: 'sem e-mail do operador pra Shopee (DEVOLUCAO_DISPUTE_EMAIL)',
+  plataforma_sem_api: 'plataforma sem API — abrir na mão',
+  chamado_sem_integracao_tiktok: 'conta sem integração TikTok no DaVinci',
+  chamado_sem_integracao_shopee: 'conta sem integração Shopee no DaVinci',
 }
 
 function apiError(e: any) {
@@ -1055,7 +1068,7 @@ async function reabrir(row: ChamadoRow) {
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
               <span class="font-mono">{{ fmtDateTime(m.created_at) }}</span>
               <span class="font-medium text-foreground">{{ m.autor_nome || (m.direcao === 'recebida' ? 'plataforma' : '—') }}</span>
-              <span>· {{ m.direcao === 'enviada' ? (m.tipo === 'replica_auto' ? 'réplica automática' : m.tipo === 'abertura' ? 'abertura no ML (devolução)' : 'réplica') : m.direcao }}</span>
+              <span>· {{ m.direcao === 'enviada' ? (m.tipo === 'replica_auto' ? 'réplica automática' : m.tipo === 'abertura' ? 'abertura na plataforma (devolução)' : 'réplica') : m.direcao }}</span>
               <span v-if="m.direcao !== 'sistema'" class="rounded px-1.5 py-0.5" :class="statusMensagemClass(m.status)">{{ m.status }}<template v-if="m.erro"> — {{ ERROS[m.erro] || m.erro }}</template></span>
               <span v-if="m.enviada_at" class="font-mono">enviada {{ fmtDateTime(m.enviada_at) }}</span>
             </div>

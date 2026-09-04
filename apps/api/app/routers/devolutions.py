@@ -297,6 +297,7 @@ def _aplica_chamado(
     out.tem_chamado = True
     out.chamado_numero = ch.chamado
     out.chamado_resolvido = ch.resolvido
+    out.chamado_plataforma = chamados_devolucao.plataforma_de(ch.plataforma)
     if abertura is not None:
         out.chamado_ml_status = abertura.status
         out.chamado_ml_erro = abertura.erro if abertura.status != "enviada" else None

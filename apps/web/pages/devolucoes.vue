@@ -87,6 +87,7 @@ type DevolutionRow = {
   // Abertura automática no Mercado Livre (pendente | enviada | falhou) + motivo.
   chamado_ml_status?: string | null
   chamado_ml_erro?: string | null
+  chamado_plataforma?: string | null
   anexos?: DevolucaoAnexo[]
 }
 
@@ -181,27 +182,48 @@ const MOTIVOS_DEVOLUCAO = [
 // Golpe = pacote vazio; Item Incorreto = produto diferente (foto); Danificado (foto);
 // Item faltando; Não recebido; Bloqueado (mala travada por senha).
 
-// Abertura automática no ML — o que a linha mostra enquanto não está "enviada".
+// Abertura automática na plataforma — o que a linha mostra enquanto não está "enviada".
 const ML_STATUS_ERROS: Record<string, string> = {
-  devolucao_sem_foto: 'aguardando foto — anexe pelo 📎',
+  devolucao_sem_foto: 'aguardando foto — anexe pela câmera',
   return_review_indisponivel: 'ML ainda não liberou a revisão (o pacote precisa constar entregue) — tenta de novo a cada hora',
-  devolucao_sem_claim: 'sem devolução aberta no ML pra esse pedido — tenta de novo a cada hora',
-  devolucao_sem_return: 'sem devolução aberta no ML pra esse pedido — tenta de novo a cada hora',
-  devolucao_sem_pedido_marketplace: 'linha sem nº do pedido do ML',
+  devolucao_sem_claim: 'sem devolução aberta na plataforma pra esse pedido — tenta de novo a cada hora',
+  devolucao_sem_return: 'sem devolução aberta na plataforma pra esse pedido — tenta de novo a cada hora',
+  devolucao_sem_pedido_marketplace: 'linha sem nº do pedido da plataforma',
   devolucao_prazo_esgotado: 'ficou 45 dias pendente — abrir na mão',
   devolucao_nao_encontrada: 'lançamento não encontrado',
   chamado_sem_integracao_ml: 'conta sem integração ML no DaVinci',
+  chamado_sem_integracao_tiktok: 'conta sem integração TikTok no DaVinci',
+  chamado_sem_integracao_shopee: 'conta sem integração Shopee no DaVinci',
+  tiktok_aguardando_pacote: 'TikTok ainda não liberou a recusa (pacote precisa constar enviado/entregue) — tenta a cada hora',
+  tiktok_arbitragem: 'em arbitragem na TikTok — aguardando',
+  tiktok_quick_refund: 'TikTok já reembolsou (quick refund) — só apelação no Seller Center',
+  tiktok_ja_recusada: 'já recusada na TikTok',
+  tiktok_motivo_indisponivel: 'TikTok não aceita esse motivo nesse estado',
+  shopee_aguardando_pacote: 'Shopee ainda não liberou a disputa — tenta a cada hora',
+  shopee_ja_contestada: 'já contestada na Shopee',
+  shopee_devolucao_encerrada: 'devolução já encerrada na Shopee',
+  shopee_motivo_indisponivel: 'Shopee não oferece esse motivo pra essa devolução',
+  shopee_sem_email: 'sem e-mail do operador pra Shopee (DEVOLUCAO_DISPUTE_EMAIL)',
+  plataforma_sem_api: 'sem API — abrir na mão na plataforma',
+}
+const PLAT_NOME: Record<string, string> = { ml: 'ML', tiktok: 'TikTok', shopee: 'Shopee', amazon: 'Amazon' }
+function platNome(row: DevolutionRow): string {
+  const p = (row.chamado_plataforma || 'ml').toLowerCase()
+  return PLAT_NOME[p] || p.toUpperCase()
 }
 function mlStatusLabel(row: DevolutionRow): string {
   const st = row.chamado_ml_status
-  if (st === 'enviada') return 'ML: aberto'
-  if (st === 'pendente') return `ML: ${ML_STATUS_ERROS[row.chamado_ml_erro || ''] || 'pendente'}`
-  if (st === 'falhou') return `ML: falhou — ${ML_STATUS_ERROS[row.chamado_ml_erro || ''] || row.chamado_ml_erro || ''}`
+  const plat = platNome(row)
+  if (st === 'enviada') return `${plat}: aberto`
+  if (st === 'pendente') return `${plat}: ${ML_STATUS_ERROS[row.chamado_ml_erro || ''] || 'pendente'}`
+  if (st === 'falhou') return `${plat}: falhou — ${ML_STATUS_ERROS[row.chamado_ml_erro || ''] || row.chamado_ml_erro || ''}`
+  if (st === 'registrada') return plat === 'Amazon' ? 'Amazon: SAFE-T só no Seller Central (sem API) — abrir na mão' : `${plat}: sem API — abrir na mão`
   return ''
 }
 function mlStatusClass(st: string | null | undefined): string {
   if (st === 'enviada') return 'text-emerald-700 dark:text-emerald-300'
   if (st === 'falhou') return 'text-red-600 dark:text-red-400'
+  if (st === 'registrada') return 'text-sky-700 dark:text-sky-300'
   return 'text-amber-700 dark:text-amber-300'
 }
 
@@ -1914,7 +1936,7 @@ async function backfillAddresses() {
             <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
-            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] bg-amber-50 dark:bg-amber-900/20" title="Fotos e vídeos da devolução — as fotos vão como evidência do chamado automático no Mercado Livre">Foto</th>
+            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] bg-amber-50 dark:bg-amber-900/20" title="Fotos e vídeos da devolução — as fotos vão como evidência do chamado automático na plataforma (ML, TikTok, Shopee)">Foto</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Link do vídeo — entra no texto do chamado (a API do ML não aceita vídeo anexo)">Link vídeo</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px] bg-amber-50 dark:bg-amber-900/20" title="Chamado mais recente deste pedido na aba Chamados — clique pra abrir">Chamado</th>
@@ -2249,7 +2271,7 @@ async function backfillAddresses() {
             <h2 class="text-lg font-semibold">Fotos e vídeos da devolução</h2>
             <p class="text-sm text-muted-foreground">
               Pedido {{ anexosRow.pedido_bling || '—' }} · {{ anexosRow.conta }} · motivo {{ anexosRow.motivo_devolucao || '—' }}.
-              As fotos (JPG/PNG/PDF) vão como evidência do chamado automático no Mercado Livre.
+              As fotos (JPG/PNG) vão como evidência do chamado automático na plataforma (ML, TikTok, Shopee; Amazon é manual).
               Vídeo: use o campo "Link vídeo" da linha (o link entra no texto do chamado); arquivo de vídeo fica só guardado aqui — a API do ML não aceita vídeo anexo.
             </p>
           </div>
