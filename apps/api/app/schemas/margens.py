@@ -64,6 +64,10 @@ class MargensMarketplaceOut(BaseModel):
     bling_order_item_id: UUID
     bling_id: int | None = None
     data: datetime | None = None
+    # Hora em que o pedido caiu. O Bling só dá a DATA (`data` é sempre 00:00),
+    # então isto é o instante em que a primeira linha do pedido entrou no
+    # espelho — o webhook chega segundos depois da venda.
+    pedido_entrou_em: datetime | None = None
     pedido_bling: str | None = None
     pedido_marketplace: str | None = None
     plataforma: str | None = None

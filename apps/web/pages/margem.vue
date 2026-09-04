@@ -10,6 +10,8 @@ type MarketplaceRow = {
   bling_order_item_id: string
   bling_id: number | null
   data: string | null
+  // Hora em que o pedido caiu (o Bling só manda a data).
+  pedido_entrou_em?: string | null
   pedido_bling: string | null
   pedido_marketplace: string | null
   plataforma: string | null
@@ -487,6 +489,35 @@ function fmtDate(v: string | null) {
   const [y, m, d] = ymd.split('-')
   if (!y || !m || !d) return v
   return `${d}/${m}/${y}`
+}
+
+// Hora que o pedido caiu, no fuso de Brasília. Vem do instante em que ele
+// entrou no sistema (o Bling só informa a data), então é hora cheia real.
+function fmtHora(v: string | null | undefined) {
+  if (!v) return ''
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return ''
+  return new Intl.DateTimeFormat('pt-BR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'America/Sao_Paulo',
+  }).format(d)
+}
+
+// Balãozinho da hora: mostra dia e hora completos. Importa quando o pedido
+// entrou depois da virada do dia — aí a hora sozinha pareceria de outro dia.
+function fmtHoraTitulo(v: string | null | undefined) {
+  if (!v) return ''
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return ''
+  const q = new Intl.DateTimeFormat('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'America/Sao_Paulo',
+  }).format(d)
+  return `Pedido caiu no sistema em ${q}`
 }
 
 function platformRowBg(platform: string | null): string {
@@ -1167,7 +1198,14 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             class="border-t hover:brightness-95 dark:hover:brightness-110"
             :class="platformRowBg(r.plataforma)"
           >
-            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDate(r.data) }}</td>
+            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">
+              {{ fmtDate(r.data) }}
+              <span
+                v-if="fmtHora(r.pedido_entrou_em)"
+                class="ml-1 text-[11px]"
+                :title="fmtHoraTitulo(r.pedido_entrou_em)"
+              >{{ fmtHora(r.pedido_entrou_em) }}</span>
+            </td>
             <td class="px-2 py-1 tabular-nums font-medium whitespace-nowrap">{{ r.pedido_bling ?? '—' }}</td>
             <td class="px-2 py-1 tabular-nums text-muted-foreground whitespace-nowrap">{{ r.pedido_marketplace ?? '—' }}</td>
             <td class="px-2 py-1 uppercase whitespace-nowrap border-l-[3px] border-gray-400 dark:border-gray-600">{{ r.plataforma || '—' }}</td>

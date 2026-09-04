@@ -412,6 +412,7 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
             v.bling_order_item_id,
             v.bling_id,
             v.data,
+            ent.entrou_em                                        AS pedido_entrou_em,
             v.pedido_bling,
             v.pedido_marketplace,
             COALESCE(v.plataforma_bling, v.plataforma_financeiro) AS plataforma,
@@ -504,6 +505,15 @@ def _build_marketplace_items_sql(source_table: str, where_sql: str, *, paginate:
               AND bo.observacao IS NOT NULL
             LIMIT 1
         ) bo ON TRUE
+        -- Hora em que o pedido CAIU (Eduardo, 04/09). `v.data` vem do Bling e
+        -- é só a data (sempre 00:00), então a hora sai do momento em que a
+        -- primeira linha do pedido entrou no espelho — o webhook do Bling
+        -- chega segundos depois da venda. Índice ix_bling_orders_numero.
+        LEFT JOIN LATERAL (
+            SELECT MIN(bo2.created_at) AS entrou_em
+            FROM {_BLING_ORDERS_TABLE} bo2
+            WHERE bo2.numero = v.pedido_bling
+        ) ent ON TRUE
         WHERE {where_sql}
         ORDER BY v.data DESC NULLS LAST, v.pedido_bling DESC, v.bling_order_item_id
         {limit_clause}
