@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-Origem = Literal["margem", "logistica", "devolucao"]
+Origem = Literal["margem", "logistica", "devolucao", "vendas"]
 Canal = Literal["api", "robo", "manual"]
 
 

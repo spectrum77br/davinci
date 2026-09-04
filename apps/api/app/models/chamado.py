@@ -19,7 +19,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin
 
 # Origem do chamado — de qual aba/fluxo ele nasceu (coluna "origem" da planilha).
-ORIGENS = ("margem", "logistica", "devolucao")
+# `vendas` (Eduardo 04/09: "em origens coloque o status vendas") — chamado aberto
+# a partir de uma venda, sem passar pela Margem/Logística/Devolução.
+ORIGENS = ("margem", "logistica", "devolucao", "vendas")
 # Como a réplica sai: `api` = mediação do Mercado Livre via API (claim já
 # aberto pelo comprador); `robo` = formulário web/protocolo — fica na fila do
 # robô de browser; `manual` = só registra no histórico (operador respondeu

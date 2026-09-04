@@ -27,13 +27,14 @@ definePageMeta({ middleware: ['permission'], permission: { resource: 'chamados',
 // plataforma | produto | sku | conta | status bling | origem | chamado |
 // réplica | réplica automática | alterar status bling | monitoramento.
 
-type Origem = 'margem' | 'logistica' | 'devolucao'
+type Origem = 'margem' | 'logistica' | 'devolucao' | 'vendas'
 type Canal = 'api' | 'robo' | 'manual'
 
 const ORIGENS: { value: Origem; label: string }[] = [
   { value: 'margem', label: 'Margem' },
   { value: 'logistica', label: 'Logística' },
   { value: 'devolucao', label: 'Devolução' },
+  { value: 'vendas', label: 'Vendas' },
 ]
 const CANAIS: { value: Canal; label: string; hint: string }[] = [
   { value: 'manual', label: 'manual', hint: 'só registra no histórico' },
@@ -386,7 +387,7 @@ async function createChamado() {
   const d = draft.value
   if (!d || !canEdit.value) return
   if (!d.origem) {
-    lookupError.value = 'Selecione a origem (Margem / Logística / Devolução).'
+    lookupError.value = 'Selecione a origem (Margem / Logística / Devolução / Vendas).'
     return
   }
   creating.value = true
@@ -749,7 +750,7 @@ async function reabrir(row: ChamadoRow) {
 
 <template>
   <div class="space-y-5">
-    <PageHeader title="Chamados" description="Todos os chamados abertos nas plataformas — Margem, Logística e Devolução — num lugar só.">
+    <PageHeader title="Chamados" description="Todos os chamados abertos nas plataformas — Margem, Logística, Devolução e Vendas — num lugar só.">
       <template #actions>
         <Button size="sm" variant="outline" :disabled="loading" @click="load">
           <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
@@ -951,6 +952,7 @@ async function reabrir(row: ChamadoRow) {
                 'bg-violet-500/15 text-violet-700 dark:text-violet-300': row.origem === 'margem',
                 'bg-sky-500/15 text-sky-700 dark:text-sky-300': row.origem === 'logistica',
                 'bg-orange-500/15 text-orange-700 dark:text-orange-300': row.origem === 'devolucao',
+                'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300': row.origem === 'vendas',
               }">{{ origemLabel(row.origem) }}</span>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
