@@ -168,7 +168,6 @@ const ERROS: Record<string, string> = {
   chamado_status_bling_erro: 'o Bling recusou a mudança de situação',
   // abertura automática de devolução no ML (services/chamados_devolucao)
   devolucao_sem_foto: 'aguardando foto na tela Devoluções',
-  devolucao_sem_tipo_golpe: 'escolha o tipo de golpe na tela Devoluções',
   return_review_indisponivel: 'ML ainda não liberou a revisão da devolução (tenta a cada hora)',
   devolucao_sem_claim: 'sem devolução aberta no ML pra esse pedido (tenta a cada hora)',
   devolucao_sem_return: 'sem devolução aberta no ML pra esse pedido (tenta a cada hora)',

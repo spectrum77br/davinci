@@ -1304,7 +1304,7 @@ async def create_devolution(
         link_abertura=body.link_abertura,
         reembolso=body.reembolso,
         motivo_devolucao=body.motivo_devolucao,
-        motivo_ml=body.motivo_ml,
+        video_url=body.video_url,
         custo_manutencao=body.custo_manutencao,
         tecnico=body.tecnico,
         devolver_estoque=devolver_no_add,
@@ -1449,10 +1449,10 @@ async def patch_devolution(
     await session.commit()
     await session.refresh(row)
 
-    # Motivo trocado pra um que pede chamado (ou sub-motivo de Golpe escolhido)
-    # → registra o chamado sozinho e abre no ML (dedupe por pedido dentro do
+    # Motivo trocado pra um que pede chamado (ou link do vídeo informado) →
+    # registra o chamado sozinho e abre no ML (dedupe por pedido dentro do
     # helper — repetir o PATCH não duplica).
-    if "motivo_devolucao" in data or "motivo_ml" in data:
+    if "motivo_devolucao" in data or "video_url" in data:
         await _chamado_devolucao_apos_commit(session, row)
 
     # Variação do custo de manutenção é refletida como débito no reembolso do refund

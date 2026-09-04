@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Camera,
   ClipboardList,
   Clock,
   Download,
@@ -55,7 +56,7 @@ type DevolutionRow = {
   link_abertura: string | null
   reembolso: boolean
   motivo_devolucao: string | null
-  motivo_ml: string | null
+  video_url: string | null
   custo_manutencao: number | null
   tecnico: string | null
   devolver_estoque: boolean
@@ -125,7 +126,8 @@ type DevolutionDraft = LookupRow & {
   link_abertura: string
   reembolso: boolean
   motivo_devolucao: string
-  motivo_ml: string
+  video_url: string
+  fotos: File[]
   custo_manutencao: number | null
   tecnico: string
   devolver_estoque: boolean
@@ -175,17 +177,13 @@ const MOTIVOS_DEVOLUCAO = [
   'Danificado (Outros)',
 ] as const
 
-// "Golpe" abre chamado no ML, mas o motivo "depende" — o operador escolhe o tipo.
-const GOLPE_TIPOS = [
-  { value: 'SRF4', label: 'Golpe: produto diferente (foto)' },
-  { value: 'SRF5', label: 'Golpe: pacote vazio' },
-  { value: 'SRF6', label: 'Golpe: outro' },
-] as const
+// Motivos que abrem chamado automático no Mercado Livre (services/chamados_devolucao):
+// Golpe = pacote vazio; Item Incorreto = produto diferente (foto); Danificado (foto);
+// Item faltando; Não recebido; Bloqueado (mala travada por senha).
 
 // Abertura automática no ML — o que a linha mostra enquanto não está "enviada".
 const ML_STATUS_ERROS: Record<string, string> = {
   devolucao_sem_foto: 'aguardando foto — anexe pelo 📎',
-  devolucao_sem_tipo_golpe: 'escolha o tipo de golpe',
   return_review_indisponivel: 'ML ainda não liberou a revisão (o pacote precisa constar entregue) — tenta de novo a cada hora',
   devolucao_sem_claim: 'sem devolução aberta no ML pra esse pedido — tenta de novo a cada hora',
   devolucao_sem_return: 'sem devolução aberta no ML pra esse pedido — tenta de novo a cada hora',
@@ -611,7 +609,7 @@ function setRowNumber(row: DevolutionRow, field: 'custo_produto' | 'custo_manute
 
 function setRowText(
   row: DevolutionRow,
-  field: 'condicao_produto' | 'link_abertura' | 'motivo_devolucao' | 'motivo_ml' | 'tecnico' | 'observacao',
+  field: 'condicao_produto' | 'link_abertura' | 'video_url' | 'motivo_devolucao' | 'tecnico' | 'observacao',
   value: string,
 ) {
   row[field] = value || null
@@ -1007,7 +1005,8 @@ function selectAllProducts() {
       link_abertura: '',
       reembolso: false,
       motivo_devolucao: '',
-      motivo_ml: '',
+      video_url: '',
+      fotos: [],
       custo_manutencao: null,
       tecnico: '',
       devolver_estoque: false,
@@ -1046,7 +1045,7 @@ function buildPayload(d: DevolutionDraft) {
     link_abertura: d.link_abertura || null,
     reembolso: d.reembolso,
     motivo_devolucao: d.motivo_devolucao || null,
-    motivo_ml: d.motivo_ml || null,
+    video_url: d.video_url || null,
     custo_manutencao: d.custo_manutencao,
     tecnico: d.tecnico || null,
     devolver_estoque: d.devolver_estoque,
@@ -1099,7 +1098,18 @@ async function createAllDevolutions() {
       const body = buildPayload(d)
       if (extra) Object.assign(body, extra)
       try {
-        const created = await api<DevolutionRow>('/api/devolutions', { method: 'POST', body })
+        let created = await api<DevolutionRow>('/api/devolutions', { method: 'POST', body })
+        // Fotos escolhidas no rascunho sobem agora (a linha precisa existir) —
+        // cada upload já re-dispara o chamado no ML se ele estiver esperando foto.
+        for (const f of d.fotos || []) {
+          const fd = new FormData()
+          fd.append('file', f)
+          try {
+            created = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(created.id)}/anexos`, { method: 'POST', body: fd })
+          } catch (e: any) {
+            lookupError.value = `foto ${f.name}: ${apiError(e)}`
+          }
+        }
         if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
         total.value += 1
         addedThisSession.value = new Set([...addedThisSession.value, `${created.pedido_bling}|${created.sku}`])
@@ -1126,7 +1136,7 @@ function rowPatchPayload(row: DevolutionRow) {
     link_abertura: row.link_abertura || null,
     reembolso: row.reembolso,
     motivo_devolucao: row.motivo_devolucao || null,
-    motivo_ml: row.motivo_ml || null,
+    video_url: row.video_url || null,
     custo_manutencao: row.custo_manutencao,
     tecnico: row.tecnico || null,
     devolver_estoque: row.devolver_estoque,
@@ -1221,6 +1231,15 @@ async function saveRow(row: DevolutionRow) {
   } finally {
     setSaving(row.id, false)
   }
+}
+
+// Fotos escolhidas no RASCUNHO (antes de existir a linha): ficam no draft e
+// sobem logo depois do POST que cria a devolução.
+function pickDraftFotos(d: DevolutionDraft, ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = ''
+  if (files.length) d.fotos = [...(d.fotos || []), ...files]
 }
 
 // ---- anexos (fotos/vídeos) da devolução — modal por linha
@@ -1687,7 +1706,7 @@ async function backfillAddresses() {
           <thead class="bg-background">
             <tr>
               <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="6">Identificação</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 7 : 6">Devolução</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 9 : 8">Devolução</th>
             </tr>
             <tr>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Data</th>
@@ -1699,6 +1718,8 @@ async function backfillAddresses() {
               <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
+              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] bg-amber-50 dark:bg-amber-900/20" title="Fotos da devolução — vão como evidência do chamado automático no Mercado Livre">Foto</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Link do vídeo — entra no texto do chamado (a API do ML não aceita vídeo anexo)">Link vídeo</th>
               <!-- Reembolso saiu da tela (03/09): liga sozinho por custo+técnico
                    / Extraviado / Manutenção; segue no filtro, no card e no export. -->
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
@@ -1731,14 +1752,24 @@ async function backfillAddresses() {
                   :placeholder="linkRequired(d.condicao_produto) ? 'obrigatório' : ''"
                 />
               </td>
+              <td class="px-1 py-0.5 text-center bg-amber-50/40 dark:bg-amber-900/10">
+                <label
+                  class="inline-flex cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted"
+                  :class="d.fotos?.length ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'"
+                  :title="d.fotos?.length ? d.fotos.map((f) => f.name).join(', ') : 'anexar foto (JPG/PNG/PDF) — sobe junto com o lançamento'"
+                >
+                  <Camera class="size-3.5" />
+                  {{ d.fotos?.length || '' }}
+                  <input type="file" multiple accept="image/jpeg,image/png,application/pdf" class="hidden" @change="(e) => pickDraftFotos(d, e)" />
+                </label>
+              </td>
+              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
+                <input v-model="d.video_url" :class="sheetInputClass" placeholder="link do vídeo" />
+              </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
                 <select v-model="d.motivo_devolucao" :class="sheetSelectClass">
                   <option value="">—</option>
                   <option v-for="m in MOTIVOS_DEVOLUCAO" :key="m" :value="m">{{ m }}</option>
-                </select>
-                <select v-if="(d.motivo_devolucao || '').toLowerCase() === 'golpe'" v-model="d.motivo_ml" :class="sheetSelectClass" title="Tipo de golpe — define o motivo do chamado no Mercado Livre">
-                  <option value="">tipo de golpe…</option>
-                  <option v-for="g in GOLPE_TIPOS" :key="g.value" :value="g.value">{{ g.label }}</option>
                 </select>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
@@ -1866,7 +1897,7 @@ async function backfillAddresses() {
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="9">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 10 : 9">Devolução</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 12 : 11">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
             <th v-if="isAdmin" class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-slate-50 dark:bg-slate-800/40" colspan="1">Atualização</th>
           </tr>
@@ -1883,6 +1914,8 @@ async function backfillAddresses() {
             <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
+            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] bg-amber-50 dark:bg-amber-900/20" title="Fotos e vídeos da devolução — as fotos vão como evidência do chamado automático no Mercado Livre">Foto</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Link do vídeo — entra no texto do chamado (a API do ML não aceita vídeo anexo)">Link vídeo</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px] bg-amber-50 dark:bg-amber-900/20" title="Chamado mais recente deste pedido na aba Chamados — clique pra abrir">Chamado</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
@@ -1897,13 +1930,13 @@ async function backfillAddresses() {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="(isAdmin ? 22 : 20) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
+            <td :colspan="(isAdmin ? 24 : 22) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="(isAdmin ? 22 : 20) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="(isAdmin ? 24 : 22) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -1963,6 +1996,40 @@ async function backfillAddresses() {
                 </a>
               </div>
             </td>
+            <td class="px-1 py-0.5 text-center bg-amber-50/40 dark:bg-amber-900/10">
+              <button
+                type="button"
+                class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted"
+                :class="(row.anexos || []).length ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'"
+                title="Fotos e vídeos da devolução — as fotos vão como evidência do chamado no Mercado Livre"
+                @click="openAnexos(row)"
+              >
+                <Camera class="size-3.5" />
+                {{ (row.anexos || []).length || '' }}
+              </button>
+            </td>
+            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
+              <div class="flex items-center gap-1">
+                <input
+                  :value="row.video_url || ''"
+                  :disabled="!canEdit"
+                  :class="sheetInputClass"
+                  placeholder="link do vídeo"
+                  @input="(e) => setRowText(row, 'video_url', (e.target as HTMLInputElement).value)"
+                  @blur="saveRow(row)"
+                />
+                <a
+                  v-if="row.video_url"
+                  :href="normalizeUrl(row.video_url)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Abrir vídeo em nova guia"
+                  class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                >
+                  <ExternalLink class="size-3.5" />
+                </a>
+              </div>
+            </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <select
                 :value="row.motivo_devolucao || ''"
@@ -1976,17 +2043,6 @@ async function backfillAddresses() {
                   v-if="row.motivo_devolucao && !(MOTIVOS_DEVOLUCAO as readonly string[]).includes(row.motivo_devolucao)"
                   :value="row.motivo_devolucao"
                 >{{ row.motivo_devolucao }}</option>
-              </select>
-              <select
-                v-if="(row.motivo_devolucao || '').toLowerCase() === 'golpe'"
-                :value="row.motivo_ml || ''"
-                :disabled="!canEdit"
-                :class="sheetSelectClass"
-                title="Tipo de golpe — define o motivo do chamado no Mercado Livre"
-                @change="(e) => { setRowText(row, 'motivo_ml', (e.target as HTMLSelectElement).value); saveRow(row) }"
-              >
-                <option value="">tipo de golpe…</option>
-                <option v-for="g in GOLPE_TIPOS" :key="g.value" :value="g.value">{{ g.label }}</option>
               </select>
             </td>
             <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
@@ -2010,15 +2066,6 @@ async function backfillAddresses() {
                 :class="mlStatusClass(row.chamado_ml_status)"
                 :title="mlStatusLabel(row)"
               >{{ mlStatusLabel(row) }}</div>
-              <button
-                type="button"
-                class="mt-0.5 inline-flex items-center gap-1 rounded border px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
-                title="Fotos e vídeos da devolução — as fotos vão como evidência do chamado no Mercado Livre"
-                @click="openAnexos(row)"
-              >
-                <Paperclip class="size-3" />
-                {{ (row.anexos || []).length || 'foto' }}
-              </button>
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input
@@ -2202,8 +2249,8 @@ async function backfillAddresses() {
             <h2 class="text-lg font-semibold">Fotos e vídeos da devolução</h2>
             <p class="text-sm text-muted-foreground">
               Pedido {{ anexosRow.pedido_bling || '—' }} · {{ anexosRow.conta }} · motivo {{ anexosRow.motivo_devolucao || '—' }}.
-              As fotos (JPG/PNG/PDF) vão como evidência do chamado automático no Mercado Livre;
-              vídeo fica só guardado aqui — a API do ML não aceita vídeo.
+              As fotos (JPG/PNG/PDF) vão como evidência do chamado automático no Mercado Livre.
+              Vídeo: use o campo "Link vídeo" da linha (o link entra no texto do chamado); arquivo de vídeo fica só guardado aqui — a API do ML não aceita vídeo anexo.
             </p>
           </div>
           <Button class="ml-auto" size="sm" variant="ghost" @click="closeAnexos">

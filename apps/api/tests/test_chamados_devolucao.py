@@ -199,40 +199,71 @@ async def test_nao_recebido_abre_na_hora_sem_foto(client, make_user, auth_as, db
     assert ml.uploads == []
 
 
-async def test_golpe_espera_sub_motivo_e_bloqueado_vai_como_srf6(
-    client, make_user, auth_as, db, ml
-):
+async def test_golpe_pacote_vazio_item_incorreto_e_bloqueado(client, make_user, auth_as, db, ml):
     user = await make_user(permissions=_perms())
     auth_as(user)
+    # Golpe = pacote veio vazio (SRF5): abre na hora, sem foto obrigatória
     await _seed_pedido(db, user, numero="293102", numeroloja="2000102")
     r = await client.post(
         "/api/devolutions",
         json={"conta": "aguiar", "pedido_bling": "293102", "pedido_marketplace": "2000102",
-              "condicao_produto": "Usado", "motivo_devolucao": "Golpe"},
+              "condicao_produto": "Usado", "motivo_devolucao": "Golpe",
+              "video_url": "https://drive.google.com/abc"},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["chamado_ml_status"] == "pendente"
-    assert r.json()["chamado_ml_erro"] == "devolucao_sem_tipo_golpe"
-    dev_id = r.json()["id"]
-
-    # operador escolhe "pacote vazio" (SRF5, sem foto obrigatória) → abre
-    p = await client.patch(f"/api/devolutions/{dev_id}", json={"motivo_ml": "SRF5"})
-    assert p.status_code == 200, p.text
-    assert p.json()["motivo_ml"] == "SRF5"
-    assert p.json()["chamado_ml_status"] == "enviada"
+    assert r.json()["chamado_ml_status"] == "enviada"
+    assert r.json()["video_url"] == "https://drive.google.com/abc"
     assert ml.reviews[-1][1] == "SRF5"
+    assert "Vídeo da devolução: https://drive.google.com/abc" in ml.reviews[-1][2]
 
-    # Bloqueado (mala travada por senha) → SRF6 com o texto explicando
+    # Item Incorreto = produto diferente (SRF4): exige foto → espera
     await _seed_pedido(db, user, numero="293103", numeroloja="2000103")
     r2 = await client.post(
         "/api/devolutions",
         json={"conta": "aguiar", "pedido_bling": "293103", "pedido_marketplace": "2000103",
-              "condicao_produto": "Usado", "motivo_devolucao": "Bloqueado"},
+              "condicao_produto": "Usado", "motivo_devolucao": "Item Incorreto"},
     )
     assert r2.status_code == 201, r2.text
-    assert r2.json()["chamado_ml_status"] == "enviada"
+    assert r2.json()["chamado_ml_status"] == "pendente"
+    assert r2.json()["chamado_ml_erro"] == "devolucao_sem_foto"
+    up = await client.post(
+        f"/api/devolutions/{r2.json()['id']}/anexos",
+        files={"file": ("errado.png", PNG_1PX, "image/png")},
+    )
+    assert up.status_code == 201, up.text
+    assert up.json()["chamado_ml_status"] == "enviada"
+    assert ml.reviews[-1][1] == "SRF4"
+    assert ml.reviews[-1][3] == ["ml_1_errado.png"]
+
+    # Bloqueado (mala travada por senha) → SRF6 com o texto explicando
+    await _seed_pedido(db, user, numero="293108", numeroloja="2000108")
+    r3 = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "293108", "pedido_marketplace": "2000108",
+              "condicao_produto": "Usado", "motivo_devolucao": "Bloqueado"},
+    )
+    assert r3.status_code == 201, r3.text
+    assert r3.json()["chamado_ml_status"] == "enviada"
     assert ml.reviews[-1][1] == "SRF6"
     assert "bloqueado por senha" in ml.reviews[-1][2]
+
+    # link do vídeo informado DEPOIS numa abertura pendente entra no texto
+    await _seed_pedido(db, user, numero="293109", numeroloja="2000109")
+    r4 = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "293109", "pedido_marketplace": "2000109",
+              "condicao_produto": "Usado", "motivo_devolucao": "Danificado (Outros)"},
+    )
+    assert r4.json()["chamado_ml_status"] == "pendente"
+    p = await client.patch(f"/api/devolutions/{r4.json()['id']}", json={"video_url": "https://v.id/1"})
+    assert p.status_code == 200, p.text
+    assert p.json()["chamado_ml_status"] == "pendente"  # ainda sem foto
+    up2 = await client.post(
+        f"/api/devolutions/{r4.json()['id']}/anexos",
+        files={"file": ("dano.png", PNG_1PX, "image/png")},
+    )
+    assert up2.json()["chamado_ml_status"] == "enviada"
+    assert "Vídeo da devolução: https://v.id/1" in ml.reviews[-1][2]
 
 
 async def test_ml_ainda_nao_liberou_revisao_fica_pendente_e_cron_retenta(
@@ -329,13 +360,13 @@ async def test_anexo_valida_tipo_e_video_fica_so_guardado(client, make_user, aut
 
 
 async def test_texto_e_reason():
-    dev = Devolution(conta="aguiar", motivo_devolucao="Golpe", motivo_ml="srf4",
+    dev = Devolution(conta="aguiar", motivo_devolucao="Golpe",
                      pedido_marketplace="2000000001", sku="b001.26", produtos="Mala",
                      observacao="veio uma mala velha")
-    assert svc.reason_para(dev) == "SRF4"
-    dev.motivo_ml = "xyz"
-    assert svc.reason_para(dev) is None
+    assert svc.reason_para(dev) == "SRF5"
     dev.motivo_devolucao = "Item Incorreto"
+    assert svc.reason_para(dev) == "SRF4"
+    dev.motivo_devolucao = "Dano funcional / Não funciona"
     assert svc.reason_para(dev) is None
     dev.motivo_devolucao = "Não recebido"
     assert svc.reason_para(dev) == "SRF7"
@@ -344,3 +375,4 @@ async def test_texto_e_reason():
     assert "Pedido 2000000001" in t and "SKU b001.26" in t and "veio uma mala velha" in t
     assert "foto" not in t
     assert "2 foto(s)" in svc.texto_padrao(dev, "SRF2", fotos=2)
+    assert "Vídeo da devolução: https://x.y/v" in svc.texto_padrao(dev, "SRF2", video_url="https://x.y/v")

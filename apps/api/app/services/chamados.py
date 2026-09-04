@@ -204,12 +204,14 @@ def registrar_sistema(ch: Chamado, texto: str) -> ChamadoMensagem:
 # aguentar variação de digitação em linhas antigas (motivo é texto livre).
 # "Bloqueado" é o nome novo de "Mudou de ideia" (03/09: "mudou de ideia -
 # bloqueado"; migration 0239 renomeou as linhas antigas) — o legado fica na
-# lista por segurança.
+# lista por segurança. "Item Incorreto" entrou 04/09 ("produto diferente usa o
+# status item incorreto") — é a revisão SRF4 do ML.
 MOTIVOS_ABREM_CHAMADO = frozenset(
     {
         "bloqueado",
         "mudou de ideia",
         "golpe",
+        "item incorreto",
         "item faltando",
         "não recebido",
         "danificado (outros)",

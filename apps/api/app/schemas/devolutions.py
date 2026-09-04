@@ -46,8 +46,8 @@ class DevolutionOut(BaseModel):
     link_abertura: str | None = None
     reembolso: bool
     motivo_devolucao: str | None = None
-    # Sub-motivo do chamado no ML quando o motivo é "Golpe" (SRF4/SRF5/SRF6).
-    motivo_ml: str | None = None
+    # Link do vídeo da devolução (entra no texto do chamado automático no ML).
+    video_url: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool = False
@@ -100,7 +100,7 @@ class DevolutionCreate(BaseModel):
     link_abertura: str | None = None
     reembolso: bool = False
     motivo_devolucao: str | None = None
-    motivo_ml: str | None = None
+    video_url: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool = False
@@ -121,7 +121,7 @@ class DevolutionCreate(BaseModel):
         "condicao_produto",
         "link_abertura",
         "motivo_devolucao",
-        "motivo_ml",
+        "video_url",
         "tecnico",
         "observacao",
         "troca_sku",
@@ -163,7 +163,7 @@ class DevolutionPatch(BaseModel):
     link_abertura: str | None = None
     reembolso: bool | None = None
     motivo_devolucao: str | None = None
-    motivo_ml: str | None = None
+    video_url: str | None = None
     custo_manutencao: float | None = None
     tecnico: str | None = None
     devolver_estoque: bool | None = None
@@ -185,7 +185,7 @@ class DevolutionPatch(BaseModel):
         "condicao_produto",
         "link_abertura",
         "motivo_devolucao",
-        "motivo_ml",
+        "video_url",
         "tecnico",
         "observacao",
         "troca_sku",

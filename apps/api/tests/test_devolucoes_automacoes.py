@@ -97,7 +97,7 @@ async def test_patch_motivo_abre_chamado_so_para_motivos_da_lista(
     # Motivo fora da lista → nenhum chamado no create.
     r = await client.post(
         "/api/devolutions",
-        json={"conta": "ml X", "pedido_bling": pedido, "motivo_devolucao": "Item Incorreto"},
+        json={"conta": "ml X", "pedido_bling": pedido, "motivo_devolucao": "Dano funcional / Não funciona"},
     )
     assert r.status_code == 201
     dev_id = r.json()["id"]

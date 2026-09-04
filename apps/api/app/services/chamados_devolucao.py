@@ -52,19 +52,19 @@ logger = structlog.get_logger()
 TIPO_ABERTURA = "abertura"
 ACAO_REVISAO = "return_review_fail"
 
-# Motivo da tela (minúsculo) → motivo do ML. None = depende do sub-motivo que
-# o operador escolhe (`devolutions.motivo_ml`).
-MOTIVO_ML: dict[str, str | None] = {
+# Motivo da tela (minúsculo) → motivo do ML (Eduardo 04/09: "situação golpe é
+# pacote vazio, produto diferente usa o status item incorreto").
+MOTIVO_ML: dict[str, str] = {
     "item faltando": "SRF3",  # devolução incompleta
     "danificado (outros)": "SRF2",  # produto chegou danificado (exige foto)
+    "item incorreto": "SRF4",  # produto diferente do enviado (exige foto)
+    "golpe": "SRF5",  # pacote veio sem o produto
     "não recebido": "SRF7",  # pacote não chegou (motivo do pacote, sem anexo)
     # "Bloqueado" = mala voltou travada por senha (Eduardo 04/09: "produto veio,
     # mas bloqueado por senha abre chamado tbm") → outro problema com o produto.
     "bloqueado": "SRF6",
     "mudou de ideia": "SRF6",  # nome antigo de "Bloqueado" (migration 0239)
-    "golpe": None,  # "depende" → SRF4 | SRF5 | SRF6 escolhido na linha
 }
-GOLPE_TIPOS: tuple[str, ...] = ("SRF4", "SRF5", "SRF6")
 REASONS_EXIGEM_FOTO = frozenset({"SRF2", "SRF4"})
 REASONS_DO_PACOTE = frozenset({"SRF7"})
 REASON_NOME: dict[str, str] = {
@@ -99,14 +99,7 @@ class _PendenteError(Exception):
 
 
 def reason_para(dev: Devolution) -> str | None:
-    motivo = (dev.motivo_devolucao or "").strip().lower()
-    if motivo not in MOTIVO_ML:
-        return None
-    reason = MOTIVO_ML[motivo]
-    if reason is None:
-        escolhido = (dev.motivo_ml or "").strip().upper()
-        return escolhido if escolhido in GOLPE_TIPOS else None
-    return reason
+    return MOTIVO_ML.get((dev.motivo_devolucao or "").strip().lower())
 
 
 _INTRO: dict[str, str] = {
@@ -119,8 +112,11 @@ _INTRO: dict[str, str] = {
 }
 
 
-def texto_padrao(dev: Devolution, reason: str | None, *, fotos: int = 0) -> str:
-    """Mensagem que vai pro ML (o operador não digita nada — é automático)."""
+def texto_padrao(
+    dev: Devolution, reason: str | None, *, fotos: int = 0, video_url: str | None = None
+) -> str:
+    """Mensagem que vai pro ML (o operador não digita nada — é automático). O
+    link do vídeo entra no texto porque a API do ML não aceita vídeo anexo."""
     motivo = (dev.motivo_devolucao or "").strip()
     if motivo.lower() in ("bloqueado", "mudou de ideia"):
         intro = (
@@ -143,6 +139,9 @@ def texto_padrao(dev: Devolution, reason: str | None, *, fotos: int = 0) -> str:
         linhas.append(f"Observação: {dev.observacao.strip()}")
     if fotos:
         linhas.append(f"Seguem {fotos} foto(s) em anexo como evidência.")
+    video = (video_url or dev.video_url or "").strip()
+    if video:
+        linhas.append(f"Vídeo da devolução: {video}")
     linhas.append("Solicitamos a análise do caso.")
     return "\n".join(linhas)
 
@@ -174,7 +173,7 @@ async def mensagem_abertura(session: AsyncSession, ch: Chamado) -> ChamadoMensag
 
 async def _linhas_do_pedido(session: AsyncSession, dev: Devolution) -> list[Devolution]:
     """Todas as linhas da devolução do MESMO pedido (kit = várias linhas, um
-    chamado): as fotos e o sub-motivo de Golpe valem pra qualquer uma."""
+    chamado): as fotos e o link do vídeo valem pra qualquer uma."""
     if not (dev.pedido_bling or "").strip():
         return [dev]
     rows = (
@@ -379,26 +378,19 @@ async def disparar(
     if msg is None or msg.status == "enviada":
         return msg
     linhas = await _linhas_do_pedido(session, dev)
-    # Sub-motivo de Golpe pode ter sido escolhido em outra linha do kit.
     dev_ref = dev
-    if reason_para(dev) is None:
-        for outra in linhas:
-            if reason_para(outra) is not None:
-                dev_ref = outra
-                break
     reason = reason_para(dev_ref)
     anexos = await anexos_de(session, [d.id for d in linhas])
     fotos = [a for a in anexos if (a.content_type or "").lower() in ML_FOTO_TIPOS]
     if reason in REASONS_DO_PACOTE:
         fotos = []  # motivo do pacote (SRF7): sem anexo
-    msg.texto = texto_padrao(dev_ref, reason, fotos=len(fotos))
+    # Link do vídeo pode estar em outra linha do kit.
+    video = next(((d.video_url or "").strip() for d in linhas if (d.video_url or "").strip()), None)
+    msg.texto = texto_padrao(dev_ref, reason, fotos=len(fotos), video_url=video)
     claim_id = return_id = None
     try:
         if reason is None:
-            motivo = (dev_ref.motivo_devolucao or "").strip().lower()
-            raise _PendenteError(
-                "devolucao_sem_tipo_golpe" if motivo == "golpe" else "devolucao_motivo_sem_chamado"
-            )
+            raise _PendenteError("devolucao_motivo_sem_chamado")
         if reason in REASONS_EXIGEM_FOTO and not fotos:
             raise _PendenteError("devolucao_sem_foto")
         client = client or await chamados_svc._ml_client_para(session, ch.conta or dev.conta)
