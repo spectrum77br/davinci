@@ -33,7 +33,20 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+# O trigger que espelha variante escuta UPDATE OF sku, então o Postgres recusa
+# alterar o tipo da coluna enquanto ele existir ("trigger ... depends on column
+# sku"). Derruba e recria igual — a FUNÇÃO pricing_product_variant_sync() não é
+# tocada, só o gatilho.
+_TRIGGER = "trg_pricing_product_variant_sync"
+_CRIA_TRIGGER = f"""
+    CREATE TRIGGER {_TRIGGER}
+    AFTER INSERT OR DELETE OR UPDATE OF sku, segment_id ON davinci.pricing_products
+    FOR EACH ROW EXECUTE FUNCTION pricing_product_variant_sync()
+"""
+
+
 def upgrade() -> None:
+    op.execute(f"DROP TRIGGER IF EXISTS {_TRIGGER} ON davinci.pricing_products")
     op.alter_column(
         "pricing_products",
         "sku",
@@ -50,11 +63,13 @@ def upgrade() -> None:
         existing_nullable=True,
         schema="davinci",
     )
+    op.execute(_CRIA_TRIGGER)
 
 
 def downgrade() -> None:
     # Só volta se nenhum valor tiver passado do limite antigo — encurtar
     # truncaria SKU/EAN de produto real.
+    op.execute(f"DROP TRIGGER IF EXISTS {_TRIGGER} ON davinci.pricing_products")
     op.alter_column(
         "pricing_products",
         "ean",
@@ -71,3 +86,4 @@ def downgrade() -> None:
         existing_nullable=False,
         schema="davinci",
     )
+    op.execute(_CRIA_TRIGGER)
