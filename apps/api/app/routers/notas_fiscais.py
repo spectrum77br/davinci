@@ -930,6 +930,7 @@ async def list_pos_vendas(
                 complemento=ne.complemento,
                 data_emissao=ne.data_emissao,
                 situacao=ne.situacao,
+                valor=float(ne.valor) if ne.valor is not None else None,
             )
         )
         nota_by_key[key] = PosVendaNfOut(
@@ -962,6 +963,7 @@ async def list_pos_vendas(
                 # do XML só chega aqui já autorizada pela SEFAZ.
                 situacao=6,
                 pedido=n.pedido_bling,
+                valor=float(n.valor) if n.valor is not None else None,
             )
         )
         nota_by_key[key] = PosVendaNfOut(
@@ -982,6 +984,7 @@ async def list_pos_vendas(
             cpf=r.doc,
             envio=r.envio,
             store_cnpj=(stores[r.loja].cnpj if r.loja in stores else None),
+            total=float(r.total) if r.total is not None else None,
         )
         for r in pedidos_rows
     ]

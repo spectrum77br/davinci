@@ -34,6 +34,7 @@ def _pedido(
     cpf: str | None = CPF,
     envio: date | None = date(2026, 8, 20),
     store_cnpj: str | None = CNPJ_LOJA,
+    total: float | None = None,
 ) -> PedidoIn:
     return PedidoIn(
         numero=numero,
@@ -41,6 +42,7 @@ def _pedido(
         cpf=cpf,
         envio=envio,
         store_cnpj=store_cnpj,
+        total=total,
     )
 
 
@@ -52,6 +54,7 @@ def _nota(
     data_emissao: datetime | None = datetime(2026, 8, 19, 10, 0),
     situacao: int | None = 5,
     pedido: str | None = None,
+    valor: float | None = None,
 ) -> NotaIn:
     return NotaIn(
         key=key,
@@ -61,7 +64,61 @@ def _nota(
         data_emissao=data_emissao,
         situacao=situacao,
         pedido=pedido,
+        valor=valor,
     )
+
+
+# ─── classificação pelo VALOR (Eduardo 05/09: "3 reais não é 100%") ───────
+
+
+def test_valor_pequeno_e_embalagem_mesmo_com_cnpj_diferente():
+    """kfa/vortan/mega emitem a embalagem por um CNPJ diferente do cadastrado
+    na loja: a nota de R$ 3,44 num pedido de R$ 172,21 é EMBALAGEM, não
+    produto."""
+    r = match_notas(
+        [_pedido(total=172.21)],
+        [_nota("emb", conta_cnpj=CNPJ_AVULSA, pedido="292001", valor=3.44)],
+    )["292001"]
+    assert r.embalagem == "emb"
+    assert r.produto is None
+
+
+def test_valor_cheio_e_produto_mesmo_com_cnpj_da_loja():
+    """Nota de 100% emitida pela própria empresa da loja é PRODUTO."""
+    r = match_notas(
+        [_pedido(total=384.18)],
+        [
+            _nota("cheia", conta_cnpj=CNPJ_LOJA, pedido="292001", valor=384.18),
+            _nota("peq", conta_cnpj=CNPJ_LOJA, pedido="292001", valor=3.84),
+        ],
+    )["292001"]
+    assert r.produto == "cheia"
+    assert r.embalagem == "peq"
+
+
+def test_valor_no_meio_cai_na_regra_do_cnpj():
+    """Entre 30% e 60% do pedido o valor não decide: vale o CNPJ."""
+    r = match_notas(
+        [_pedido(total=100.0)],
+        [
+            _nota("a", conta_cnpj=CNPJ_LOJA, pedido="292001", valor=45.0),
+            _nota("b", conta_cnpj=CNPJ_AVULSA, pedido="292001", valor=45.0),
+        ],
+    )["292001"]
+    assert r.embalagem == "a"
+    assert r.produto == "b"
+
+
+def test_sem_valor_ou_sem_total_mantem_regra_do_cnpj():
+    r = match_notas(
+        [_pedido(total=None)],
+        [
+            _nota("emb", conta_cnpj=CNPJ_LOJA, pedido="292001", valor=3.0),
+            _nota("prod", conta_cnpj=CNPJ_AVULSA, pedido="292001", valor=300.0),
+        ],
+    )["292001"]
+    assert r.embalagem == "emb"
+    assert r.produto == "prod"
 
 
 # ─── passada 0: a nota já traz o número do pedido (XML do coletor) ────

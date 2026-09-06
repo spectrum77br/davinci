@@ -234,6 +234,9 @@ class PedidoIn:
     cpf: str | None  # só dígitos
     envio: date | None
     store_cnpj: str | None  # só dígitos (empresa dona da loja)
+    # Total do pedido — base pra separar embalagem (nota pequena) de produto
+    # (nota cheia) pelo VALOR, ver `_eh_embalagem`.
+    total: float | None = None
 
 
 @dataclass
@@ -250,6 +253,37 @@ class NotaIn:
     # caso do XML que o coletor sobe pra `nf_nota`). Chave mais forte que
     # complemento/CPF — não precisa de janela nem de heurística.
     pedido: str | None = None
+    # Valor total da nota (vNF) — usado junto com `PedidoIn.total`.
+    valor: float | None = None
+
+
+# Fração do total do pedido que separa as duas notas de um envio. Embalagem é
+# nota simbólica (0,1%–2% do pedido: a001/e3 "EMBALAGEM"); produto é a nota
+# cheia (100%, ou 70% nas contas que faturam parcial). No meio (30%–60%) o
+# valor não decide e vale o CNPJ.
+_FRACAO_EMBALAGEM_MAX = 0.30
+_FRACAO_PRODUTO_MIN = 0.60
+
+
+def _eh_embalagem(nota: NotaIn, pedido: PedidoIn) -> bool:
+    """Eduardo (05/09): "3 reais não é 100%". A classificação só por CNPJ
+    errava quando a empresa que emite a embalagem não é o CNPJ cadastrado na
+    loja (kfa, vortan, mega) — a nota de R$ 3 caía em "produto". Regra:
+    1º o VALOR da nota contra o total do pedido (pequena = embalagem, cheia =
+    produto); só quando o valor não decide (faixa do meio, nota ou pedido sem
+    valor) cai no CNPJ: emitente == empresa da loja → embalagem."""
+    if nota.valor is not None and pedido.total:
+        try:
+            frac = float(nota.valor) / float(pedido.total)
+        except (TypeError, ValueError, ZeroDivisionError):
+            frac = None
+        if frac is not None and frac >= 0:
+            if frac <= _FRACAO_EMBALAGEM_MAX:
+                return True
+            if frac >= _FRACAO_PRODUTO_MIN:
+                return False
+    store = _digits(pedido.store_cnpj)
+    return bool(store) and _digits(nota.conta_cnpj) == store
 
 
 @dataclass
@@ -302,17 +336,9 @@ def match_notas(
 
     def _atribuir(p: PedidoIn, disponiveis: list[_Cand], via: str) -> None:
         r = out[p.numero]
-        store = _digits(p.store_cnpj)
-        emb = [
-            c
-            for c in disponiveis
-            if not c.usada and store and _digits(c.nota.conta_cnpj) == store
-        ]
-        prod = [
-            c
-            for c in disponiveis
-            if not c.usada and (not store or _digits(c.nota.conta_cnpj) != store)
-        ]
+        livres = [c for c in disponiveis if not c.usada]
+        emb = [c for c in livres if _eh_embalagem(c.nota, p)]
+        prod = [c for c in livres if not _eh_embalagem(c.nota, p)]
         if r.embalagem is None and emb:
             best = min(emb, key=lambda c: _dist_dias(c.nota, p.envio))
             best.usada = True
