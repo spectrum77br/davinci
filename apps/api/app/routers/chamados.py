@@ -34,7 +34,15 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.models import Chamado, ChamadoAnexo, ChamadoMensagem, DevolucaoAnexo, Devolution, User
+from app.models import (
+    Chamado,
+    ChamadoAnexo,
+    ChamadoMensagem,
+    DevolucaoAnexo,
+    Devolution,
+    Logistica,
+    User,
+)
 from app.models.chamado import CANAIS, ORIGENS
 from app.schemas.chamados import (
     AgentLeaseIn,
@@ -760,21 +768,26 @@ async def agent_lease(
     automáticas) e marca-as `enviando`. Tarefa presa em `enviando` há mais de
     30 min volta pra fila. Chamado resolvido não gera tarefa."""
     limite_stale = datetime.now(UTC) - _LEASE_STALE
+    sem_protocolo = or_(Chamado.chamado.is_(None), func.trim(Chamado.chamado) == "")
+    conds = [
+        ChamadoMensagem.canal == "robo",
+        ChamadoMensagem.direcao == "enviada",
+        Chamado.resolvido.is_(False),
+        or_(
+            ChamadoMensagem.status == "pendente",
+            (ChamadoMensagem.status == "enviando") & (ChamadoMensagem.updated_at < limite_stale),
+        ),
+    ]
+    if body.tipo == "abrir":
+        conds.append(sem_protocolo)
+    elif body.tipo == "responder":
+        conds.append(~sem_protocolo)
     rows = (
         await session.execute(
             select(ChamadoMensagem, Chamado)
             .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
             .options(selectinload(ChamadoMensagem.anexos))
-            .where(
-                ChamadoMensagem.canal == "robo",
-                ChamadoMensagem.direcao == "enviada",
-                Chamado.resolvido.is_(False),
-                or_(
-                    ChamadoMensagem.status == "pendente",
-                    (ChamadoMensagem.status == "enviando")
-                    & (ChamadoMensagem.updated_at < limite_stale),
-                ),
-            )
+            .where(*conds)
             .order_by(ChamadoMensagem.created_at)
             .limit(body.limite)
         )
@@ -845,6 +858,17 @@ async def agent_resultado(
             session.add(
                 svc.registrar_sistema(ch, f"Protocolo {body.chamado} capturado pelo {AUTOR_ROBO}")
             )
+            # Chamado que a Logística encaminhou ao robô do formulário: o
+            # protocolo volta pra linha da Logística (deixa de ser pendência lá).
+            if ch.origem == "logistica" and ch.origem_ref:
+                try:
+                    lrow = await session.get(Logistica, UUID(str(ch.origem_ref)))
+                except ValueError:
+                    lrow = None
+                if lrow is not None and not (lrow.chamado or "").strip():
+                    lrow.chamado = body.chamado
+                    lrow.chamado_auto_at = datetime.now(UTC)
+                    lrow.chamado_auto_erro = None
         elif body.chamado_url and not ch.chamado_url:
             ch.chamado_url = body.chamado_url
     else:

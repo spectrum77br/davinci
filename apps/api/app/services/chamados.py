@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     BlingOrder,
     Chamado,
+    ChamadoAnexo,
     ChamadoMensagem,
     Devolution,
     Logistica,
@@ -312,22 +313,42 @@ async def chamado_da_logistica(session: AsyncSession, row: Logistica) -> Chamado
     ).scalar_one_or_none()
 
 
+async def abertura_do_chamado(session: AsyncSession, ch: Chamado) -> ChamadoMensagem | None:
+    """Mensagem de abertura (tipo `abertura`) do chamado, se já existe."""
+    return (
+        await session.execute(
+            select(ChamadoMensagem)
+            .where(ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.tipo == "abertura")
+            .order_by(ChamadoMensagem.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def abrir_chamado_logistica(
     session: AsyncSession,
     row: Logistica,
     *,
-    claim_id: str,
     mensagem: str,
+    claim_id: str | None = None,
     regra: str | None = None,
     autor_nome: str | None = None,
+    anexos: list | None = None,
 ) -> Chamado:
-    """Registra na aba Chamados o chamado que a Logística acabou de abrir no
-    Mercado Livre (motor do recarregar ou botão da linha) — Eduardo 07/09:
-    "lembra que vai para a aba chamados". Canal `api`, nº = claim_id do ML,
-    monitoramento ligado (o cron fecha sozinho quando o ML encerrar o claim),
-    histórico com o evento do sistema + a abertura `enviada` com o texto que
-    foi ao mediador. Dedupe: se a linha (ou o pedido) já tem chamado de origem
-    `logistica`, só anota o nº/histórico nele. NÃO commita."""
+    """Registra na aba Chamados o chamado da Logística (motor do recarregar ou
+    botão da linha) — Eduardo 07/09: "lembra que vai para a aba chamados" e
+    "se tiver disponível pela venda, faz pela venda; se não, pelo formulário".
+
+    Dois caminhos:
+    - `claim_id` dado → já abriu PELA VENDA (mediação do ML via API): canal
+      `api`, nº = claim_id, monitoramento ligado (o cron fecha quando o ML
+      encerrar), histórico com o evento do sistema + abertura `enviada`.
+    - `claim_id` None → PELO FORMULÁRIO: canal `robo`, abertura `pendente` com
+      o texto da regra (+ as imagens da regra como anexos) → vira tarefa
+      `abrir` no `/agent/lease`; o robô do Mac abre no formulário de ajuda do
+      ML e devolve o protocolo pelo `/agent/resultado`.
+    Dedupe: chamado de origem `logistica` já existente pra linha (ou pedido) é
+    reaproveitado; abertura já pendente/enviando não é duplicada. NÃO commita."""
     ch = await chamado_da_logistica(session, row)
     novo = ch is None
     if ch is None:
@@ -340,7 +361,7 @@ async def abrir_chamado_logistica(
             status_bling=row.status_bling,
             origem="logistica",
             origem_ref=str(row.id),
-            canal="api",
+            canal="api" if claim_id else "robo",
             observacao=(
                 f"Aberto automaticamente pela Logística — regra: {regra}"
                 if regra
@@ -350,30 +371,75 @@ async def abrir_chamado_logistica(
         await preencher_do_pedido(session, ch)
         session.add(ch)
         await session.flush()
-    ch.chamado = str(claim_id)
-    ch.canal = "api"
-    ch.monitoramento = True
     quem = autor_nome or AUTOR_SISTEMA
-    session.add(
-        registrar_sistema(
-            ch,
-            (
-                f"Chamado aberto na mediação do Mercado Livre pela Logística"
-                f"{' (regra: ' + regra + ')' if regra else ''}; referência {claim_id}"
-            ),
+    if claim_id:
+        ch.chamado = str(claim_id)
+        ch.canal = "api"
+        ch.monitoramento = True
+        session.add(
+            registrar_sistema(
+                ch,
+                (
+                    f"Chamado aberto na mediação do Mercado Livre pela Logística"
+                    f"{' (regra: ' + regra + ')' if regra else ''}; referência {claim_id}"
+                ),
+            )
         )
-    )
-    abertura = nova_mensagem(
-        ch, texto=mensagem, tipo="abertura", direcao="enviada", autor_nome=quem, status="enviada"
-    )
-    abertura.enviada_at = datetime.now(UTC)
-    session.add(abertura)
+        abertura = nova_mensagem(
+            ch,
+            texto=mensagem,
+            tipo="abertura",
+            direcao="enviada",
+            autor_nome=quem,
+            status="enviada",
+        )
+        abertura.enviada_at = datetime.now(UTC)
+        session.add(abertura)
+    else:
+        existente = await abertura_do_chamado(session, ch)
+        if existente is not None and existente.status in ("pendente", "enviando", "enviada"):
+            return ch  # robô já está com a tarefa (ou já abriu)
+        ch.canal = "robo"
+        ch.monitoramento = True
+        session.add(
+            registrar_sistema(
+                ch,
+                (
+                    "Pedido sem reclamação aberta pelo comprador — chamado encaminhado ao "
+                    f"robô do formulário de ajuda do Mercado Livre"
+                    f"{' (regra: ' + regra + ')' if regra else ''}"
+                ),
+            )
+        )
+        abertura = nova_mensagem(
+            ch,
+            texto=mensagem,
+            tipo="abertura",
+            direcao="enviada",
+            autor_nome=quem,
+            status="pendente",
+        )
+        abertura.canal = "robo"
+        session.add(abertura)
+        await session.flush()
+        for a in anexos or []:
+            session.add(
+                ChamadoAnexo(
+                    chamado_id=ch.id,
+                    mensagem_id=abertura.id,
+                    filename=a.filename,
+                    content_type=a.content_type,
+                    size_bytes=a.size_bytes,
+                    blob=a.blob,
+                )
+            )
     logger.info(
         "chamado_auto_logistica",
         chamado_id=str(ch.id),
         logistica_id=str(row.id),
         pedido_bling=ch.pedido_bling,
         claim_id=claim_id,
+        canal=ch.canal,
         novo=novo,
     )
     return ch

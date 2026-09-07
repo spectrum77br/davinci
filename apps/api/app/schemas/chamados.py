@@ -285,6 +285,9 @@ class AgentTarefaOut(BaseModel):
 
 class AgentLeaseIn(BaseModel):
     limite: int = Field(default=10, ge=1, le=100)
+    # Só um tipo de tarefa: o robô do formulário pega `abrir` e o do Tuta pega
+    # `responder` — sem isso um lease marcava `enviando` as tarefas do outro.
+    tipo: Literal["abrir", "responder"] | None = None
 
 
 class AgentLeaseOut(BaseModel):

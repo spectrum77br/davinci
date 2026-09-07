@@ -93,7 +93,7 @@ async def test_abrir_chamado_em_lote_abre_e_carimba(db, monkeypatch):
     t0 = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 
     out = await logistica_meli.abrir_chamados_em_lote(db, None, agora=t0)
-    assert out == {"abertos": 1, "falhas": 0, "adiados": 0, "pulados": 0}
+    assert out == {"abertos": 1, "robo": 0, "falhas": 0, "adiados": 0, "pulados": 0}
     assert fake.messages == [(999, "Peço a revisão da decisão", "mediator")]
     await db.refresh(row)
     r = row
@@ -121,7 +121,7 @@ async def test_abrir_chamado_em_lote_abre_e_carimba(db, monkeypatch):
 
     # 2ª passada: já tem chamado → nada (e o ML não é chamado de novo)
     out2 = await logistica_meli.abrir_chamados_em_lote(db, None, agora=t0 + timedelta(minutes=5))
-    assert out2 == {"abertos": 0, "falhas": 0, "adiados": 0, "pulados": 0}
+    assert out2 == {"abertos": 0, "robo": 0, "falhas": 0, "adiados": 0, "pulados": 0}
     assert len(fake.messages) == 1
     assert len((await db.execute(select(Chamado))).scalars().all()) == 1
 
@@ -132,16 +132,23 @@ async def test_abrir_chamado_em_lote_recusa_carimba_e_espera(db, monkeypatch):
     row = _linha(pedido_marketplace="ML2")
     db.add(row)
     await db.commit()
-    fake = _FakeML(order={"mediations": []}, claim={})  # comprador ainda não reclamou
+    class _Fora(_FakeML):  # API do ML fora do ar: erro cru, não é "sem reclamação"
+        async def get_order(self, order_id):
+            raise RuntimeError("ML 503")
+
+        async def get_pack(self, pack_id):
+            raise RuntimeError("ML 503")
+
+    fake = _Fora(order={}, claim={})
     _patch_ml(monkeypatch, fake)
     t0 = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 
     out = await logistica_meli.abrir_chamados_em_lote(db, None, agora=t0)
-    assert out["falhas"] == 1 and out["abertos"] == 0
+    assert out["falhas"] == 1 and out["abertos"] == 0 and out["robo"] == 0
     await db.refresh(row)
     r = row
     assert r.chamado is None
-    assert r.chamado_auto_erro == "logistica_sem_reclamacao" and r.chamado_auto_at == t0
+    assert "ML 503" in (r.chamado_auto_erro or "") and r.chamado_auto_at == t0
 
     # dentro do prazo de retentativa: adia, não bate na API
     out = await logistica_meli.abrir_chamados_em_lote(db, None, agora=t0 + timedelta(hours=1))
@@ -214,3 +221,106 @@ async def test_enviar_threema_em_lote_gateway_falha_nao_carimba(db):
     assert out == {"enviados": 0, "falhas": 1}
     await db.refresh(row)
     assert row.threema_enviado_at is None  # tenta de novo na próxima rodada
+
+
+# ---------------------------------------------------------------- pelo formulário (robô)
+
+
+async def test_abrir_chamado_sem_reclamacao_vai_pro_robo(db, monkeypatch):
+    """Eduardo 07/09: 'se tiver disponível pela venda, faz pela venda; se não,
+    pelo formulário'. Sem reclamação do comprador o ML recusa → a Logística
+    põe o chamado na aba com canal robô + abertura pendente (com as imagens da
+    regra) e NÃO enfileira de novo enquanto o robô não devolve o protocolo."""
+    from app.models import ChamadoAnexo, LogisticaStatusAnexo
+
+    chave = logistica_rules.assinatura_pt(MELI)
+    regra = LogisticaStatus(status_plataforma=chave, abrir_chamado=True,
+                            mensagem_chamado="Poderiam verificar o pedido retido?")
+    db.add(regra)
+    await db.flush()
+    db.add(LogisticaStatusAnexo(status_id=regra.id, filename="prova.png",
+                                content_type="image/png", size_bytes=3, blob=b"png"))
+    row = _linha(pedido_marketplace="ML5")
+    db.add(row)
+    await db.commit()
+    fake = _FakeML(order={"mediations": []}, claim={})
+    _patch_ml(monkeypatch, fake)
+    t0 = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
+
+    out = await logistica_meli.abrir_chamados_em_lote(db, None, agora=t0)
+    assert out["robo"] == 1 and out["falhas"] == 0 and out["abertos"] == 0
+    await db.refresh(row)
+    assert row.chamado is None and row.chamado_auto_erro == "encaminhado_ao_robo"
+    ch = (await db.execute(select(Chamado).where(Chamado.origem == "logistica"))).scalar_one()
+    assert ch.canal == "robo" and ch.chamado is None and ch.origem_ref == str(row.id)
+    msgs = (
+        await db.execute(
+            select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == ch.id)
+            .order_by(ChamadoMensagem.created_at)
+        )
+    ).scalars().all()
+    abertura = [m for m in msgs if m.tipo == "abertura"]
+    assert len(abertura) == 1
+    assert abertura[0].status == "pendente" and abertura[0].canal == "robo"
+    assert abertura[0].texto == "Poderiam verificar o pedido retido?"
+    anexos = (
+        await db.execute(select(ChamadoAnexo).where(ChamadoAnexo.chamado_id == ch.id))
+    ).scalars().all()
+    assert [(a.filename, a.mensagem_id) for a in anexos] == [("prova.png", abertura[0].id)]
+
+    # próxima rodada (mesmo depois do prazo de retentativa): robô ainda não
+    # devolveu → adia, não duplica a abertura nem bate no ML
+    out2 = await logistica_meli.abrir_chamados_em_lote(db, None, agora=t0 + timedelta(hours=7))
+    assert out2["adiados"] == 1 and out2["robo"] == 0
+    n_abert = (
+        await db.execute(
+            select(ChamadoMensagem).where(
+                ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.tipo == "abertura"
+            )
+        )
+    ).scalars().all()
+    assert len(n_abert) == 1
+
+
+async def test_lease_por_tipo_e_resultado_devolve_protocolo_pra_logistica(
+    db, client, monkeypatch
+):
+    from app.config import get_settings
+
+    token = "tok-auto-lote"  # noqa: S105
+    monkeypatch.setattr(get_settings(), "nf_agent_token", token)
+    hdr = {"X-Agent-Token": token}
+
+    chave = logistica_rules.assinatura_pt(MELI)
+    db.add(LogisticaStatus(status_plataforma=chave, abrir_chamado=True, mensagem_chamado="msg"))
+    row = _linha(pedido_marketplace="ML6")
+    db.add(row)
+    await db.commit()
+    _patch_ml(monkeypatch, _FakeML(order={"mediations": []}, claim={}))
+    assert (await logistica_meli.abrir_chamados_em_lote(db, None))["robo"] == 1
+
+    # o robô do Tuta (responder) não vê a tarefa de abrir; o do formulário vê
+    r = await client.post("/api/chamados/agent/lease", headers=hdr, json={"tipo": "responder"})
+    assert r.status_code == 200 and r.json()["tarefas"] == []
+    r = await client.post("/api/chamados/agent/lease", headers=hdr, json={"tipo": "abrir"})
+    assert r.status_code == 200, r.text
+    tarefas = r.json()["tarefas"]
+    assert len(tarefas) == 1 and tarefas[0]["tipo"] == "abrir"
+    assert tarefas[0]["texto"] == "msg" and tarefas[0]["pedido_marketplace"] == "ML6"
+
+    # robô abriu no formulário e devolveu o protocolo → aba + Logística
+    r = await client.post(
+        "/api/chamados/agent/resultado",
+        headers=hdr,
+        json={"mensagem_id": tarefas[0]["mensagem_id"], "ok": True, "chamado": "480000123",
+              "chamado_url": "https://www.mercadolivre.com.br/cases/detail/480000123"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "enviada"
+    await db.refresh(row)
+    assert row.chamado == "480000123" and row.chamado_auto_erro is None
+    ch = (await db.execute(select(Chamado).where(Chamado.origem == "logistica"))).scalar_one()
+    assert ch.chamado == "480000123"
+    # e a linha resolve na Logística (regra deixa de ser pendência)
+    rules = [(await db.execute(select(LogisticaStatus))).scalar_one()]
+    assert logistica_match.estado_resolvido(rules, "Entregue", chamado_aberto=True) is True

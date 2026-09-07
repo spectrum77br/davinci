@@ -63,6 +63,10 @@ type Logistica = {
   divergencia: string | null
   status_bling: string | null
   chamado: string | null
+  // Abertura automática do chamado pelo motor (a cada 5 min): última tentativa
+  // e motivo da recusa do ML (vazio = nunca tentou / abriu). Só leitura.
+  chamado_auto_at: string | null
+  chamado_auto_erro: string | null
   observacao: string | null
   // Casador da aba Status (backend): regra que casa com a chave deste pedido.
   acao_match: boolean
@@ -1225,8 +1229,18 @@ const CHAMADO_ERROS: Record<string, string> = {
   logistica_reclamacao_encerrada: 'Reclamação já encerrada no Mercado Livre.',
   logistica_reclamacao_sem_acao:
     'O Mercado Livre não liberou falar com o mediador neste chamado.',
+  encaminhado_ao_robo:
+    'Sem reclamação do comprador pela venda — encaminhado ao robô do formulário de ajuda (aba Chamados, canal robô); o protocolo volta pra cá quando abrir.',
 }
 const sendingChamado = ref<Set<string>>(new Set())
+// O motor tentou abrir sozinho e o ML recusou: mostra o motivo (mesma tabela
+// de erros do botão) e quando foi — o robô tenta de novo em 6 h.
+function chamadoAutoAviso(c: Logistica): string | null {
+  if (c.chamado || !c.chamado_auto_erro) return null
+  const motivo = CHAMADO_ERROS[c.chamado_auto_erro] || c.chamado_auto_erro
+  const quando = c.chamado_auto_at ? ` (robô tentou ${fmtDataHora(c.chamado_auto_at)})` : ''
+  return `${motivo}${quando}`
+}
 async function enviarChamado(c: Logistica) {
   if (
     !confirm(
@@ -1704,6 +1718,14 @@ async function aplicarStatusBling(c: Logistica) {
                     enviar
                   </button>
                 </div>
+                <div
+                  v-if="chamadoAutoAviso(c)"
+                  class="mt-0.5 max-w-[260px] whitespace-normal text-[11px] leading-tight"
+                  :class="c.chamado_auto_erro === 'encaminhado_ao_robo' ? 'text-amber-700 dark:text-amber-400' : 'text-rose-700 dark:text-rose-400'"
+                  :title="chamadoAutoAviso(c) || undefined"
+                >
+                  {{ chamadoAutoAviso(c) }}
+                </div>
               </td>
             </tr>
             <tr v-if="!loading && filteredRows.length === 0">
@@ -1786,6 +1808,9 @@ async function aplicarStatusBling(c: Logistica) {
             <Send class="size-3" :class="sendingChamado.has(c.id) ? 'animate-pulse' : ''" />
             enviar chamado
           </button>
+          <div v-if="chamadoAutoAviso(c)" class="text-[11px] text-rose-700 dark:text-rose-400">
+            {{ chamadoAutoAviso(c) }}
+          </div>
           <button
             v-if="canEdit && c.pedido_bling && temStatusBlingAcao(c)"
             class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border hover:bg-muted/40 disabled:opacity-50"

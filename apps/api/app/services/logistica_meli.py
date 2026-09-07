@@ -540,6 +540,11 @@ async def enviar_chamado_for_row(session: AsyncSession, row: Logistica, message:
 # comprador ainda, claim encerrado…) só é tentado de novo depois deste prazo —
 # o motor roda a cada 5 min e cada tentativa custa 2 chamadas na API do ML.
 _CHAMADO_AUTO_RETRY = timedelta(hours=6)
+# Recusas do ML que significam "não dá pela venda" (sem reclamação do comprador,
+# claim encerrado ou sem ação pro vendedor) → o chamado vai pelo formulário.
+_CODES_SEM_MEDIACAO = frozenset(
+    {"logistica_sem_reclamacao", "logistica_reclamacao_encerrada", "logistica_reclamacao_sem_acao"}
+)
 
 
 async def abrir_chamados_em_lote(
@@ -564,11 +569,22 @@ async def abrir_chamados_em_lote(
     - pulados: regra pede chamado mas está sem "Mensagem do chamado" — nada a
       mandar; fica carimbado `logistica_sem_mensagem_chamado` pra aparecer.
     Commit por linha (o job pode estourar o timeout no meio)."""
+    from sqlalchemy.orm import selectinload
+
     from app.models import LogisticaStatus
+    from app.services import chamados as chamados_svc
     from app.services import logistica_match
 
     agora = agora or datetime.now(UTC)
-    status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
+    status_rows = list(
+        (
+            await session.execute(
+                select(LogisticaStatus).options(selectinload(LogisticaStatus.anexos))
+            )
+        )
+        .scalars()
+        .all()
+    )
     stmt = select(Logistica)
     if ids is not None:
         stmt = stmt.where(Logistica.id.in_(list(ids)))
@@ -577,7 +593,7 @@ async def abrir_chamados_em_lote(
         for r in (await session.execute(stmt)).scalars().all()
         if (r.plataforma or "").strip().lower() in _ML_PLATAFORMAS
     ]
-    abertos = falhas = adiados = pulados = 0
+    abertos = falhas = adiados = pulados = robo = 0
     for row in rows:
         if (row.chamado or "").strip():
             continue  # já tem chamado (motor ou operador)
@@ -596,6 +612,21 @@ async def abrir_chamados_em_lote(
                 row.chamado_auto_erro = "logistica_sem_mensagem_chamado"
             pulados += 1
             continue
+        # Já tem chamado na aba pra esta linha? Com protocolo (o robô do
+        # formulário devolveu) → sincroniza a linha; com abertura pendente
+        # (robô ainda vai abrir) → não enfileira de novo.
+        existente = await chamados_svc.chamado_da_logistica(session, row)
+        if existente is not None:
+            if (existente.chamado or "").strip():
+                row.chamado = existente.chamado
+                row.chamado_auto_at = agora
+                row.chamado_auto_erro = None
+                await session.commit()
+                continue
+            abertura = await chamados_svc.abertura_do_chamado(session, existente)
+            if abertura is not None and abertura.status in ("pendente", "enviando"):
+                adiados += 1
+                continue
         if row.chamado_auto_at is not None and agora - row.chamado_auto_at < _CHAMADO_AUTO_RETRY:
             adiados += 1
             continue
@@ -603,14 +634,35 @@ async def abrir_chamados_em_lote(
             claim_id = await enviar_chamado_for_row(session, row, mensagem)
         except MeliEnrichError as e:
             row.chamado_auto_at = agora
-            row.chamado_auto_erro = e.code
-            falhas += 1
-            logger.info(
-                "logistica_chamado_auto_recusado",
-                id=str(row.id),
-                pedido=row.pedido_marketplace,
-                code=e.code,
-            )
+            if e.code in _CODES_SEM_MEDIACAO:
+                # Sem reclamação do comprador (ou já encerrada): não dá pela
+                # venda → vai pelo formulário de ajuda, via robô (canal robô na
+                # aba Chamados). Eduardo 07/09: "se tiver disponível pela venda,
+                # faz pela venda; se não, pelo formulário".
+                await chamados_svc.abrir_chamado_logistica(
+                    session,
+                    row,
+                    mensagem=mensagem,
+                    regra=rule.status_plataforma,
+                    anexos=list(rule.anexos or []),
+                )
+                row.chamado_auto_erro = "encaminhado_ao_robo"
+                robo += 1
+                logger.info(
+                    "logistica_chamado_auto_via_robo",
+                    id=str(row.id),
+                    pedido=row.pedido_marketplace,
+                    motivo=e.code,
+                )
+            else:
+                row.chamado_auto_erro = e.code
+                falhas += 1
+                logger.info(
+                    "logistica_chamado_auto_recusado",
+                    id=str(row.id),
+                    pedido=row.pedido_marketplace,
+                    code=e.code,
+                )
         except Exception as e:  # noqa: BLE001 — best-effort, não derruba o lote
             row.chamado_auto_at = agora
             row.chamado_auto_erro = str(e)[:200]
@@ -626,9 +678,7 @@ async def abrir_chamados_em_lote(
             row.chamado_auto_erro = None
             abertos += 1
             # Vai pra aba Chamados também (Eduardo 07/09: "lembra que vai para a
-            # aba chamados") — import local: chamados importa este módulo.
-            from app.services import chamados as chamados_svc
-
+            # aba chamados").
             await chamados_svc.abrir_chamado_logistica(
                 session,
                 row,
@@ -644,7 +694,13 @@ async def abrir_chamados_em_lote(
             )
         await session.commit()
     await session.commit()
-    return {"abertos": abertos, "falhas": falhas, "adiados": adiados, "pulados": pulados}
+    return {
+        "abertos": abertos,
+        "robo": robo,
+        "falhas": falhas,
+        "adiados": adiados,
+        "pulados": pulados,
+    }
 
 
 _SWEEP_JANELA_DIAS = 45
