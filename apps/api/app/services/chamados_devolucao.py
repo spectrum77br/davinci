@@ -928,9 +928,9 @@ async def _disparar_shopee(
     motivo = _motivo(dev)
     if motivo not in MOTIVO_SHOPEE:
         raise _PendenteError("devolucao_motivo_sem_chamado")
-    if motivo != "não recebido" and not fotos:
-        # a Shopee exige foto em todo motivo "recebi com problema"
-        raise _PendenteError("devolucao_sem_foto")
+    # A foto é conferida DEPOIS de consultar a Shopee: se o prazo de contestação
+    # já venceu, o chamado tem que falhar com esse motivo, não ficar "aguardando
+    # foto" pra sempre (289462, 07/09).
     client = await _shopee_client_para(session, ch, dev)
     return_sn = (ch.chamado or "").strip() or await _return_sn_shopee(session, client, dev)
     if not return_sn:
@@ -968,10 +968,12 @@ async def _disparar_shopee(
     modulos = [
         m for m in (escolhido.get("evidence_module_list") or []) if isinstance(m, dict)
     ]
-    # Medido 07/09 (289462): disputa sem `image_list` num motivo com módulo
-    # obrigatório → "Unable to raise dispute as mandatory module index is
-    # missing". Sem foto, fica pendente esperando o operador anexar.
-    if not fotos and any(m.get("is_required", True) for m in modulos):
+    # A Shopee exige foto em todo motivo "recebi com problema"; e disputa sem
+    # `image_list` num motivo com módulo obrigatório é recusada ("Unable to
+    # raise dispute as mandatory module index is missing", 289462 em 07/09).
+    # Sem foto, fica pendente esperando o operador anexar.
+    exige_foto = motivo != "não recebido" or any(m.get("is_required", True) for m in modulos)
+    if not fotos and exige_foto:
         raise _PendenteError("devolucao_sem_foto")
     urls: list[str] = []
     for a in fotos:
