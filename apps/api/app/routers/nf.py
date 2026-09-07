@@ -9,6 +9,7 @@ depois — aqui é só o CRUD do cadastro.
 import asyncio
 import base64
 import json
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -2041,6 +2042,37 @@ async def nf_agent_nf(
 _NOTA_JANELA = timedelta(days=30)
 
 
+async def _pedido_informado(
+    session: AsyncSession, nota: nf_xml.NotaXml, pedido_bling: str | None
+) -> str | None:
+    """Pedido que o remetente do XML já conhece (lote Bling 100%): vale se
+    existe no espelho e, quando os dois lados têm documento, o CPF/CNPJ do
+    destinatário confere — senão ignora e cai na adivinhação normal."""
+    numero = (pedido_bling or "").strip()
+    if not numero:
+        return None
+    docs = (
+        await session.execute(
+            select(BlingOrder.documento_destinatario)
+            .where(
+                BlingOrder.numero == numero,
+                BlingOrder.situacao.is_distinct_from("excluido"),
+            )
+            .distinct()
+        )
+    ).scalars().all()
+    if not docs:
+        return None
+    doc_nota = re.sub(r"\D", "", nota.destinatario_doc or "")
+    docs_pedido = {re.sub(r"\D", "", d or "") for d in docs if d}
+    if doc_nota and docs_pedido and doc_nota not in docs_pedido:
+        logger.warning(
+            "nf_agent_nf_xml_pedido_nao_bate", pedido=numero, chave=nota.chave
+        )
+        return None
+    return numero
+
+
 async def _casar_pedido_da_nota(
     session: AsyncSession, nota: nf_xml.NotaXml
 ) -> str | None:
@@ -2090,6 +2122,7 @@ async def _casar_pedido_da_nota(
 async def nf_agent_nf_xml(
     session: Annotated[AsyncSession, Depends(get_session)],
     file: Annotated[UploadFile, File()],
+    pedido_bling: Annotated[str | None, Form()] = None,
 ) -> dict:
     """Recebe o XML autorizado de uma NF-e e grava a nota no davinci (`nf_nota`).
 
@@ -2097,7 +2130,9 @@ async def nf_agent_nf_xml(
     identidade é a chave de acesso (44 dígitos), então re-subir o mesmo arquivo
     atualiza a linha em vez de duplicar. O pedido é descoberto pelo CPF/CNPJ do
     destinatário — quando não dá pra ter certeza, a nota entra sem pedido e o
-    casamento é re-tentado depois.
+    casamento é re-tentado depois. Quem já sabe o pedido (lote Bling 100% das
+    22:30, que gerou a nota a partir dele) manda `pedido_bling` e pula a
+    adivinhação — só é aceito se o pedido existe no espelho e o CPF/CNPJ bate.
     """
     raw = await file.read()
     if not raw:
@@ -2116,7 +2151,9 @@ async def nf_agent_nf_xml(
         row = NfNota(chave=nota.chave, numero=nota.numero, xml=raw)
         session.add(row)
 
-    pedido = await _casar_pedido_da_nota(session, nota)
+    pedido = await _pedido_informado(session, nota, pedido_bling)
+    if pedido is None:
+        pedido = await _casar_pedido_da_nota(session, nota)
     row.numero = nota.numero
     row.serie = nota.serie
     row.emitente_cnpj = nota.emitente_cnpj

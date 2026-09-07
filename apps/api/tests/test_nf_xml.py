@@ -292,3 +292,48 @@ async def test_nf_xml_vazio_e_invalido(
     r = await _subir(client, b"isso nao e xml")
     assert r.status_code == 422
     assert r.json()["detail"]["code"] == "nf_xml_invalido"
+
+
+@pytest.mark.asyncio
+async def test_nf_xml_pedido_informado_desempata_e_valida_cpf(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Lote Bling 100% (07/09): quem gerou a nota a partir do pedido manda
+    `pedido_bling`. Dois pedidos com o MESMO CPF empatariam (nota sem pedido);
+    com o número informado casa direto. Pedido informado com CPF diferente da
+    nota é ignorado (cai na adivinhação normal)."""
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    await _seed_pedido(db, numero="295021", doc="01197255419", nome="Joel Fernandes Bezerra",
+                       bling_id=900011)
+    await _seed_pedido(db, numero="295099", doc="01197255419", nome="Joel Fernandes Bezerra",
+                       bling_id=900012)
+    await _seed_pedido(db, numero="295777", doc="99988877766", nome="Outra Pessoa",
+                       bling_id=900013)
+
+    # sem informar: ambíguo → sem pedido
+    r = await _subir(client, _xml())
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] is None
+
+    # informando o pedido certo → casa
+    r = await client.post(
+        "/api/nf-cadastro/agent/nf-xml",
+        files={"file": (f"{_CHAVE}.xml", _xml(), "application/xml")},
+        data={"pedido_bling": "295021"},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["pedido_bling"] == "295021"
+    row = (await db.execute(select(NfNota).where(NfNota.chave == _CHAVE))).scalar_one()
+    assert row.pedido_bling == "295021"
+
+    # pedido de OUTRO CPF informado → ignorado (mantém o que já tinha)
+    r = await client.post(
+        "/api/nf-cadastro/agent/nf-xml",
+        files={"file": (f"{_CHAVE}.xml", _xml(), "application/xml")},
+        data={"pedido_bling": "295777"},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    await db.refresh(row)
+    assert row.pedido_bling == "295021"
