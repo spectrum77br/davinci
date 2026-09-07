@@ -138,6 +138,9 @@ MOTIVOS_EXIGEM_FOTO = frozenset({"danificado (outros)", "item incorreto"})
 ML_FOTO_TIPOS = frozenset({"image/jpeg", "image/png", "application/pdf"})
 FOTO_TIPOS_IMAGEM = frozenset({"image/jpeg", "image/png"})
 ML_FOTO_MAX_BYTES = 5 * 1024 * 1024
+# Shopee: a doc fala em 10 MB, mas o nginx do `convert_image` responde 413
+# (HTML → "Expecting value") já com 1,7 MB; 575 KB passou (medido 07/09).
+SHOPEE_FOTO_MAX_BYTES = 900_000
 TIKTOK_MAX_FOTOS = 6
 SHOPEE_MAX_FOTOS_MODULO = 3
 # Quanto tempo uma abertura fica pendente esperando a plataforma liberar /
@@ -474,17 +477,20 @@ def _nome_com_extensao(filename: str, ctype: str) -> str:
     return f"{raiz}{ext}"
 
 
-def preparar_foto(anexo: DevolucaoAnexo) -> tuple[str, bytes, str]:
-    """(nome, bytes, content-type) prontos pra plataforma. Imagem acima de 5 MB
-    é reduzida (PyMuPDF, já dependência) até caber; PDF grande não tem redução."""
+def preparar_foto(
+    anexo: DevolucaoAnexo, *, max_bytes: int = ML_FOTO_MAX_BYTES
+) -> tuple[str, bytes, str]:
+    """(nome, bytes, content-type) prontos pra plataforma. Imagem acima de
+    `max_bytes` (5 MB no ML; 900 KB na Shopee) é reduzida (PyMuPDF, já
+    dependência) até caber; PDF grande não tem redução."""
     ctype = (anexo.content_type or "").lower()
     if ctype not in ML_FOTO_TIPOS:
         raise RuntimeError(f"tipo de anexo não aceito: {ctype}")
     dados = anexo.blob
-    if len(dados) <= ML_FOTO_MAX_BYTES:
+    if len(dados) <= max_bytes:
         return _nome_com_extensao(anexo.filename, ctype), dados, ctype
     if ctype == "application/pdf":
-        raise RuntimeError("PDF acima de 5 MB — a plataforma não aceita")
+        raise RuntimeError(f"PDF acima de {max_bytes // 1000} KB — a plataforma não aceita")
     import fitz  # PyMuPDF
 
     pix = fitz.Pixmap(dados)
@@ -492,12 +498,16 @@ def preparar_foto(anexo: DevolucaoAnexo) -> tuple[str, bytes, str]:
         pix = fitz.Pixmap(fitz.csRGB, pix)
     if pix.alpha:
         pix = fitz.Pixmap(pix, 0)
-    for _ in range(4):
+    # 1º passo: só recomprimir (JPEG 85) sem encolher; depois encolhe pela metade.
+    out = pix.tobytes("jpeg", jpg_quality=85)
+    if len(out) <= max_bytes:
+        return _nome_com_extensao(anexo.filename, "image/jpeg"), out, "image/jpeg"
+    for _ in range(6):
         pix.shrink(1)
         out = pix.tobytes("jpeg", jpg_quality=85)
-        if len(out) <= ML_FOTO_MAX_BYTES:
+        if len(out) <= max_bytes:
             return _nome_com_extensao(anexo.filename, "image/jpeg"), out, "image/jpeg"
-    raise RuntimeError("foto acima de 5 MB e não deu pra reduzir")
+    raise RuntimeError(f"foto acima de {max_bytes // 1000} KB e não deu pra reduzir")
 
 
 def _ref_foto(anexo: DevolucaoAnexo) -> dict:
@@ -886,6 +896,32 @@ async def _return_sn_shopee(
     return str(esc.get("return_sn") or "").strip() or None
 
 
+def _epoch(v: object) -> datetime | None:
+    try:
+        n = int(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return datetime.fromtimestamp(n, tz=UTC) if n > 0 else None
+
+
+async def _subir_foto_shopee(client: ShopeeClient, return_sn: str, a: DevolucaoAnexo) -> str:
+    """convert_image com a foto reduzida pro teto da Shopee; se mesmo assim o
+    nginx responder 413, encolhe mais uma vez e tenta de novo."""
+    limite = SHOPEE_FOTO_MAX_BYTES
+    ultimo: Exception | None = None
+    for _ in range(3):
+        nome, dados, ctype = preparar_foto(a, max_bytes=limite)
+        try:
+            return await client.convert_image(return_sn, nome, dados, ctype)
+        except RuntimeError as e:
+            if "413" not in str(e):
+                raise
+            ultimo = e
+            limite //= 2
+    assert ultimo is not None
+    raise ultimo
+
+
 async def _disparar_shopee(
     session: AsyncSession, ch: Chamado, dev: Devolution, fotos: list[DevolucaoAnexo], texto: str
 ) -> tuple[str, str]:
@@ -917,23 +953,35 @@ async def _disparar_shopee(
     # voltando — a disputa é contra a alegação do comprador (fotos da expedição).
     so_reembolso = str(det.get("return_solution")) == "1" or det.get("needs_logistics") is False
     reasons = await client.get_return_dispute_reason(return_sn)
+    if not reasons:
+        # Medido 07/09: depois do `return_seller_due_date` (prazo de validação do
+        # vendedor, ~3 dias após a entrega do pacote) a lista vem VAZIA — a
+        # Shopee não aceita mais contestação. Antes do prazo, ainda pode liberar.
+        due = _epoch(det.get("return_seller_due_date"))
+        if due is not None and datetime.now(UTC) > due:
+            raise chamados_svc.ChamadoError("shopee_prazo_contestacao_esgotado")
+        raise _PendenteError("shopee_motivo_indisponivel")
     escolhido = _shopee_reason(reasons, motivo, so_reembolso=so_reembolso)
     rid = _shopee_reason_id(escolhido) if escolhido else None
     if escolhido is None or rid is None:
         raise chamados_svc.ChamadoError("shopee_motivo_indisponivel")
+    modulos = [
+        m for m in (escolhido.get("evidence_module_list") or []) if isinstance(m, dict)
+    ]
+    # Medido 07/09 (289462): disputa sem `image_list` num motivo com módulo
+    # obrigatório → "Unable to raise dispute as mandatory module index is
+    # missing". Sem foto, fica pendente esperando o operador anexar.
+    if not fotos and any(m.get("is_required", True) for m in modulos):
+        raise _PendenteError("devolucao_sem_foto")
     urls: list[str] = []
     for a in fotos:
         ref = _ref_foto(a)
         url = ref.get("ref")
         if not url:
-            nome, dados, ctype = preparar_foto(a)
-            url = await client.convert_image(return_sn, nome, dados, ctype)
+            url = await _subir_foto_shopee(client, return_sn, a)
             a.ml_file_name = url
             await session.flush()
         urls.append(url)
-    modulos = [
-        m for m in (escolhido.get("evidence_module_list") or []) if isinstance(m, dict)
-    ]
     image_list: list[dict] = []
     if urls:
         if modulos:
@@ -971,11 +1019,13 @@ async def disparar(
     dev: Devolution,
     *,
     agora: datetime | None = None,
+    texto_override: str | None = None,
 ) -> ChamadoMensagem | None:
     """Tenta abrir na plataforma agora. Atualiza a mensagem `abertura` do
     chamado: `enviada` (abriu), `pendente` + código (ainda não dá — repete no
     cron) ou `falhou` + erro (a plataforma recusou / conta sem integração).
-    Nunca levanta; NÃO commita."""
+    `texto_override` = texto digitado pelo operador na réplica manual (vale no
+    lugar do texto padrão). Nunca levanta; NÃO commita."""
     agora = agora or datetime.now(UTC)
     msg = await mensagem_abertura(session, ch)
     if msg is None or msg.status == "enviada":
@@ -993,7 +1043,9 @@ async def disparar(
     envio = next(
         ((d.link_envio or "").strip() for d in linhas if (d.link_envio or "").strip()), None
     )
-    msg.texto = texto_padrao(dev, reason, fotos=len(fotos), link_envio=envio)
+    msg.texto = (texto_override or "").strip() or texto_padrao(
+        dev, reason, fotos=len(fotos), link_envio=envio
+    )
     referencia = detalhe = None
     try:
         if plat == PLAT_ML:
@@ -1069,6 +1121,43 @@ async def disparar(
     return msg
 
 
+async def replicar_devolucao(
+    session: AsyncSession, ch: Chamado, msg: ChamadoMensagem
+) -> ChamadoMensagem:
+    """Réplica MANUAL num chamado de devolução de Shopee/TikTok (canal api).
+
+    Essas plataformas não têm API de mensagem dentro da disputa (o ML tem, na
+    mediação). Então: se a abertura ainda NÃO saiu (pendente/falhou), a réplica
+    vira uma nova tentativa de abertura com o texto digitado; se a abertura já
+    saiu, a réplica fica só no histórico (`registrada`) e o operador responde
+    pelo Seller Center. Antes (06/09) tudo virava `falhou — chamado_nao_ml`."""
+    abertura = await mensagem_abertura(session, ch)
+    if abertura is not None and abertura.status == "enviada":
+        msg.status = "registrada"
+        msg.erro = "plataforma_sem_api_replica"
+        return msg
+    dev = None
+    if ch.origem_ref:
+        try:
+            dev = await session.get(Devolution, UUID(str(ch.origem_ref)))
+        except ValueError:
+            dev = None
+    if dev is None:
+        msg.status = "falhou"
+        msg.erro = "devolucao_nao_encontrada"
+        return msg
+    r = await disparar(session, ch, dev, texto_override=msg.texto)
+    st = (r.status if r is not None else "falhou") or "falhou"
+    if st == "enviada":
+        msg.status = "enviada"
+        msg.erro = None
+        msg.enviada_at = datetime.now(UTC)
+    else:
+        msg.status = st
+        msg.erro = r.erro if r is not None else "devolucao_nao_encontrada"
+    return msg
+
+
 async def disparar_por_id(session: AsyncSession, chamado_id: UUID) -> ChamadoMensagem | None:
     ch = await session.get(Chamado, chamado_id)
     if ch is None or ch.origem != "devolucao":
@@ -1097,7 +1186,14 @@ async def agendar_disparo(session: AsyncSession, ch: Chamado, dev: Devolution) -
             from app.worker_pool import get_arq_pool
 
             pool = await get_arq_pool()
-            await pool.enqueue_job("chamado_devolucao_disparar", str(ch.id))
+            # _job_id fixo por chamado: create + upload de foto no mesmo segundo
+            # enfileiravam DOIS disparos que corriam em paralelo (visto 07/09:
+            # um "sem foto" e o outro mandou a disputa sem evidência).
+            await pool.enqueue_job(
+                "chamado_devolucao_disparar",
+                str(ch.id),
+                _job_id=f"chamado_devolucao_disparar:{ch.id}",
+            )
             return
         except Exception as e:  # noqa: BLE001 — fila indisponível → inline
             logger.warning(

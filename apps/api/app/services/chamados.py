@@ -332,6 +332,18 @@ async def enviar_mensagem(
     elif ch.canal == "robo":
         # Fila do robô de browser (formulário/protocolo). Ele marca enviada.
         msg.status = "pendente"
+    elif ch.origem == "devolucao" and not _eh_ml(ch):
+        # Shopee/TikTok: sem API de mensagem na disputa — a réplica reabre a
+        # abertura (se ainda não saiu) ou fica só no histórico (Eduardo 07/09:
+        # "todos falharam em chamados, isso não pode").
+        from app.services import chamados_devolucao
+
+        try:
+            await chamados_devolucao.replicar_devolucao(session, ch, msg)
+        except Exception as e:  # noqa: BLE001
+            msg.status = "falhou"
+            msg.erro = str(e)[:300]
+            logger.warning("chamado_replica_devolucao_falhou", chamado_id=str(ch.id), err=msg.erro)
     else:
         try:
             await _enviar_api_ml(session, ch, msg.texto)

@@ -75,6 +75,22 @@ _AUTH_CODES: frozenset[str] = frozenset(
 )
 
 
+def _corpo_json(r: httpx.Response, what: str) -> dict:
+    """Corpo da resposta como dict — ou erro LEGÍVEL quando a Shopee responde
+    fora do JSON (07/09: o nginx do convert_image devolveu 413 em HTML e o
+    `.json()` estourava com "Expecting value: line 1 column 1")."""
+    ctype = (r.headers.get("content-type") or "").lower()
+    if r.status_code >= 400 and "json" not in ctype:
+        raise RuntimeError(f"{what} HTTP {r.status_code}: {r.text[:120].strip()}")
+    try:
+        body = r.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{what} HTTP {r.status_code} resposta não-JSON: {r.text[:120].strip()}"
+        ) from exc
+    return body if isinstance(body, dict) else {}
+
+
 class ShopeeClient:
     def __init__(self, creds: dict, on_token_refresh=None):
         self.creds = dict(creds)
@@ -424,11 +440,11 @@ class ShopeeClient:
         """`_request` + tratamento padrão: refresh em token vencido, levanta em
         `error` não vazio, devolve `response` (dict)."""
         r = await self._request(method, path, params=params, json=json)
-        body = r.json() or {}
+        body = _corpo_json(r, what)
         if body.get("error") in _AUTH_CODES:
             await self.refresh()
             r = await self._request(method, path, params=params, json=json)
-            body = r.json() or {}
+            body = _corpo_json(r, what)
         if body.get("error"):
             raise RuntimeError(f"{what} {body.get('error')}: {body.get('message')}")
         resp = body.get("response")
@@ -490,7 +506,7 @@ class ShopeeClient:
             files={"upload_image": (filename, content, mime)},
             data={"return_sn": return_sn},
         )
-        body = r.json() or {}
+        body = _corpo_json(r, "shopee_convert_image")
         if body.get("error") in _AUTH_CODES:
             await self.refresh()
             r = await self._request_multipart(
@@ -498,7 +514,7 @@ class ShopeeClient:
                 files={"upload_image": (filename, content, mime)},
                 data={"return_sn": return_sn},
             )
-            body = r.json() or {}
+            body = _corpo_json(r, "shopee_convert_image")
         if body.get("error"):
             raise RuntimeError(f"shopee_convert_image {body.get('error')}: {body.get('message')}")
         resp = body.get("response") or {}

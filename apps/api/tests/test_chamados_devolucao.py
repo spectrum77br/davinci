@@ -949,3 +949,144 @@ async def test_sync_ml_mensagens_do_mediador_e_decisao(client, make_user, auth_a
     assert any("a favor do VENDEDOR" in t for t in txts)
     await db.refresh(ch)
     assert ch.resolvido is True
+
+
+# ─── Shopee: prazo vencido, foto grande e réplica manual (07/09) ──────────────
+
+
+class _FakeShopeeVencida(_FakeShopee):
+    """Depois do return_seller_due_date a lista de motivos vem VAZIA (medido
+    07/09 nos returns 2608280G472BFQH / 2608160F36ES2P5)."""
+
+    def __init__(self, *, due_passado: bool = True):
+        super().__init__()
+        self.due_passado = due_passado
+
+    async def get_return_detail(self, return_sn):
+        det = await super().get_return_detail(return_sn)
+        det["seller_compensation"] = {"seller_compensation_status": ""}
+        delta = timedelta(days=-1) if self.due_passado else timedelta(days=2)
+        det["return_seller_due_date"] = int((datetime.now(UTC) + delta).timestamp())
+        return det
+
+    async def get_return_dispute_reason(self, return_sn):
+        return []
+
+
+async def test_shopee_prazo_vencido_falha_com_codigo_claro(client, make_user, auth_as, db, ml, monkeypatch):
+    from app.models import DevolucaoRastreio
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopeeVencida(due_passado=True)
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="291145", numeroloja="260819PCCEKKV5",
+                       platform="shopee", conta="barbosa", loja="88")
+    db.add(DevolucaoRastreio(pedido_bling="291145", devolucao_id_auto="2608280G472BFQH", fonte_auto="shopee"))
+    await db.commit()
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "barbosa", "pedido_bling": "291145", "pedido_marketplace": "260819PCCEKKV5",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "falhou"
+    assert r.json()["chamado_ml_erro"] == "shopee_prazo_contestacao_esgotado"
+    assert fake.disputes == []
+    # antes do prazo a lista vazia é só "ainda não liberou": fica pendente
+    fake.due_passado = False
+    await _seed_pedido(db, user, numero="291146", numeroloja="260819PCCEKKV6",
+                       platform="shopee", conta="barbosa", loja="88")
+    db.add(DevolucaoRastreio(pedido_bling="291146", devolucao_id_auto="2608280G472BFQZ", fonte_auto="shopee"))
+    await db.commit()
+    r2 = await client.post(
+        "/api/devolutions",
+        json={"conta": "barbosa", "pedido_bling": "291146", "pedido_marketplace": "260819PCCEKKV6",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["chamado_ml_status"] == "pendente"
+    assert r2.json()["chamado_ml_erro"] == "shopee_motivo_indisponivel"
+
+
+async def test_shopee_modulo_obrigatorio_sem_foto_fica_pendente(client, make_user, auth_as, db, ml, monkeypatch):
+    """Motivo 'Não recebido' não exige foto na tela, mas se o motivo da Shopee
+    tem módulo obrigatório a disputa sem image_list é recusada ("mandatory
+    module index is missing") — melhor esperar a foto."""
+    from app.models import DevolucaoRastreio
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopee()
+
+    async def _reasons(return_sn):
+        return [{"dispute_reason": 81, "dispute_reason_text": "Did not receive the return product",
+                 "evidence_module_list": [{"module_index": 1, "requirement": "Proof", "is_required": True}]}]
+
+    fake.get_return_dispute_reason = _reasons
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="289462", numeroloja="260809TQ2GYCWY",
+                       platform="shopee", conta="atv", loja="88")
+    db.add(DevolucaoRastreio(pedido_bling="289462", devolucao_id_auto="2608160F36ES2P5", fonte_auto="shopee"))
+    await db.commit()
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "atv", "pedido_bling": "289462", "pedido_marketplace": "260809TQ2GYCWY",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "pendente"
+    assert r.json()["chamado_ml_erro"] == "devolucao_sem_foto"
+    assert fake.disputes == []
+
+
+async def test_shopee_replica_manual_reabre_e_depois_so_registra(client, make_user, auth_as, db, ml, monkeypatch):
+    from app.models import DevolucaoRastreio
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopee(status="")  # estado desconhecido → pendente (aguardando pacote)
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="291835", numeroloja="2608221NWJUKS0",
+                       platform="shopee", conta="barbosa", loja="88")
+    db.add(DevolucaoRastreio(pedido_bling="291835", devolucao_id_auto="2608290KE9Y7XMX", fonte_auto="shopee"))
+    await db.commit()
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "barbosa", "pedido_bling": "291835", "pedido_marketplace": "2608221NWJUKS0",
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+    )
+    assert r.json()["chamado_ml_status"] == "pendente", r.json()
+    assert r.json()["chamado_ml_erro"] == "shopee_aguardando_pacote"
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "291835"))).scalar_one()
+    # a Shopee liberou; o operador responde à mão → reabre com o texto dele
+    fake.status = "ACCEPTED"
+    fake.get_return_detail = _FakeShopee(status="ACCEPTED").get_return_detail
+    rep = await client.post(
+        f"/api/chamados/{ch.id}/mensagens",
+        data={"texto": "Pacote não chegou até hoje, segue rastreio."},
+    )
+    assert rep.status_code == 201, rep.text
+    assert rep.json()["status"] == "enviada", rep.json()
+    assert fake.disputes[-1]["text"] == "Pacote não chegou até hoje, segue rastreio."
+    ab = await _abertura(db, ch.id)
+    await db.refresh(ab)
+    assert ab.status == "enviada" and ab.texto == "Pacote não chegou até hoje, segue rastreio."
+    # abertura já saiu: réplica seguinte só fica no histórico (sem API de resposta)
+    rep2 = await client.post(f"/api/chamados/{ch.id}/mensagens", data={"texto": "mais uma"})
+    assert rep2.status_code == 201, rep2.text
+    assert rep2.json()["status"] == "registrada"
+    assert rep2.json()["erro"] == "plataforma_sem_api_replica"
+    assert len(fake.disputes) == 1
