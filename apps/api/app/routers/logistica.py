@@ -179,6 +179,8 @@ def _to_out(
         status_bling=c.status_bling,
         chamado=c.chamado,
         observacao=c.observacao,
+        chamado_auto_at=c.chamado_auto_at,
+        chamado_auto_erro=c.chamado_auto_erro,
         acao_match=rule is not None,
         acao_status_id=rule.id if rule is not None else None,
         acao_resumo=logistica_match.resumo_acoes(rule),
@@ -188,7 +190,10 @@ def _to_out(
         # pra devolução viva sem regra pro estado atual (buraco na matriz): sem
         # isso o pedido some do painel esperando uma transição que não existe.
         acao_resolvido=logistica_match.estado_resolvido(
-            rules, c.status_bling, threema_enviado=c.threema_enviado_at is not None
+            rules,
+            c.status_bling,
+            threema_enviado=c.threema_enviado_at is not None,
+            chamado_aberto=bool((c.chamado or "").strip()),
         )
         and not logistica_match.problema_bling_visivel(c.status_bling, c.data)
         and not logistica_match.devolucao_travada(

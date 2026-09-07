@@ -536,6 +536,106 @@ async def enviar_chamado_for_row(session: AsyncSession, row: Logistica, message:
     return str(claim_id)
 
 
+# Pedido que a regra manda abrir chamado mas o ML recusou (sem reclamação do
+# comprador ainda, claim encerrado…) só é tentado de novo depois deste prazo —
+# o motor roda a cada 5 min e cada tentativa custa 2 chamadas na API do ML.
+_CHAMADO_AUTO_RETRY = timedelta(hours=6)
+
+
+async def abrir_chamados_em_lote(
+    session: AsyncSession,
+    ids: Collection[UUID] | None = None,
+    *,
+    agora: datetime | None = None,
+) -> dict[str, int]:
+    """Executor AUTOMÁTICO do "Abrir chamado" da aba Status (Eduardo 07/09:
+    "se tá no status e o status da plataforma está batendo... não está abrindo
+    chamado automático"). Pra cada linha ML que casa uma regra APLICÁVEL AO
+    ESTADO ATUAL com `abrir_chamado` e ainda não tem `chamado`, faz o mesmo que
+    o botão: `enviar_chamado_for_row` com a `mensagem_chamado` da regra
+    (escala a mediação e manda o texto ao mediador). Roda no motor do
+    recarregar ANTES da troca de situação no Bling — assim a regra que muda o
+    status ainda está ativa quando o chamado abre.
+
+    - abertos: chamado aberto agora (`chamado` preenchido).
+    - falhas: ML recusou/erro → carimba `chamado_auto_at` + `chamado_auto_erro`
+      e só tenta de novo depois de `_CHAMADO_AUTO_RETRY`.
+    - adiados: dentro do prazo de retentativa (não bateu na API).
+    - pulados: regra pede chamado mas está sem "Mensagem do chamado" — nada a
+      mandar; fica carimbado `logistica_sem_mensagem_chamado` pra aparecer.
+    Commit por linha (o job pode estourar o timeout no meio)."""
+    from app.models import LogisticaStatus
+    from app.services import logistica_match
+
+    agora = agora or datetime.now(UTC)
+    status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
+    stmt = select(Logistica)
+    if ids is not None:
+        stmt = stmt.where(Logistica.id.in_(list(ids)))
+    rows = [
+        r
+        for r in (await session.execute(stmt)).scalars().all()
+        if (r.plataforma or "").strip().lower() in _ML_PLATAFORMAS
+    ]
+    abertos = falhas = adiados = pulados = 0
+    for row in rows:
+        if (row.chamado or "").strip():
+            continue  # já tem chamado (motor ou operador)
+        assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
+        cands = logistica_match.find_matching_rules(
+            status_rows, assinatura=assinatura, plataforma=row.plataforma
+        )
+        aplicaveis = logistica_match.regras_aplicaveis(cands, row.status_bling)
+        rule = next((r for r in aplicaveis if r.abrir_chamado), None)
+        if rule is None:
+            continue
+        mensagem = (rule.mensagem_chamado or "").strip()
+        if not mensagem:
+            if row.chamado_auto_erro != "logistica_sem_mensagem_chamado":
+                row.chamado_auto_at = agora
+                row.chamado_auto_erro = "logistica_sem_mensagem_chamado"
+            pulados += 1
+            continue
+        if row.chamado_auto_at is not None and agora - row.chamado_auto_at < _CHAMADO_AUTO_RETRY:
+            adiados += 1
+            continue
+        try:
+            claim_id = await enviar_chamado_for_row(session, row, mensagem)
+        except MeliEnrichError as e:
+            row.chamado_auto_at = agora
+            row.chamado_auto_erro = e.code
+            falhas += 1
+            logger.info(
+                "logistica_chamado_auto_recusado",
+                id=str(row.id),
+                pedido=row.pedido_marketplace,
+                code=e.code,
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort, não derruba o lote
+            row.chamado_auto_at = agora
+            row.chamado_auto_erro = str(e)[:200]
+            falhas += 1
+            logger.warning(
+                "logistica_chamado_auto_falhou",
+                id=str(row.id),
+                pedido=row.pedido_marketplace,
+                err=str(e)[:200],
+            )
+        else:
+            row.chamado_auto_at = agora
+            row.chamado_auto_erro = None
+            abertos += 1
+            logger.info(
+                "logistica_chamado_auto_aberto",
+                id=str(row.id),
+                pedido=row.pedido_marketplace,
+                chamado=claim_id,
+            )
+        await session.commit()
+    await session.commit()
+    return {"abertos": abertos, "falhas": falhas, "adiados": adiados, "pulados": pulados}
+
+
 _SWEEP_JANELA_DIAS = 45
 # Janela do /orders/search por date_last_updated (1 chamada cobre 50 pedidos).
 _SWEEP_UPDATED_DIAS = 15

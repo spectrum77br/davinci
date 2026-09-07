@@ -70,6 +70,14 @@ class Logistica(Base, TimestampMixin):
     threema_enviado_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Abertura AUTOMÁTICA do chamado pelo motor do recarregar (regra da aba
+    # Status com "Abrir chamado"): quando tentou pela última vez e, se recusou,
+    # o código do motivo (ex. logistica_sem_reclamacao). Sucesso = `chamado`
+    # preenchido + erro NULL. Evita bater na API do ML a cada 5 min.
+    chamado_auto_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    chamado_auto_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

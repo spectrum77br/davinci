@@ -197,6 +197,7 @@ def estado_resolvido(
     status_bling: str | None,
     *,
     threema_enviado: bool = False,
+    chamado_aberto: bool = False,
 ) -> bool:
     """True quando o pedido casa uma regra da aba Status e NÃO há mais nada a
     fazer — o painel esconde esses (`resolvido and not monitorar`).
@@ -206,11 +207,13 @@ def estado_resolvido(
     escondido existe o botão "Mostrar tudo" do painel. ("Problemas" no Bling
     fura tudo isso via `problema_bling_visivel` — aplicado por quem chama.)
 
-    Qualquer ação MANUAL pendente (abrir chamado/reembolso ou mensagem de
+    Qualquer ação pendente (abrir chamado/reembolso ou mensagem de
     chamado/Bling/Threema) mantém a linha visível — ainda há trabalho. A
-    Mensagem Threema deixa de contar quando `threema_enviado` é True (o operador
-    já disparou o aviso da linha → feito). O monitoramento é ortogonal (o front
-    combina com `not acao_monitorar`)."""
+    Mensagem Threema deixa de contar quando `threema_enviado` é True (aviso da
+    linha já disparado, pelo motor ou pelo operador → feito); "Abrir chamado" e
+    "Mensagem do chamado" deixam de contar quando `chamado_aberto` é True (a
+    linha já tem o nº do chamado — o motor abriu, ou o operador). O
+    monitoramento é ortogonal (o front combina com `not acao_monitorar`)."""
     if not rules:
         return False
     atual = _norm_situacao(status_bling)
@@ -218,11 +221,13 @@ def estado_resolvido(
     # estado (status_atual diferente do atual) não conta agora — máquina de
     # estados: ela vale quando o pedido chegar naquele estado.
     aplicaveis = regras_aplicaveis(rules, status_bling)
-    # Ação manual pendente no estado atual → ainda há o que fazer, não esconde.
+    # Ação pendente no estado atual → ainda há o que fazer, não esconde.
     for r in aplicaveis:
-        if r.abrir_chamado or r.abrir_reembolso:
+        if r.abrir_reembolso:
             return False
-        if (r.mensagem_chamado or "").strip() or (r.mensagem_bling or "").strip():
+        if (r.abrir_chamado or (r.mensagem_chamado or "").strip()) and not chamado_aberto:
+            return False
+        if (r.mensagem_bling or "").strip():
             return False
         if (r.mensagem_threema or "").strip() and not threema_enviado:
             return False

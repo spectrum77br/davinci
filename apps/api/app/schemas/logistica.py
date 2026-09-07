@@ -56,6 +56,10 @@ class LogisticaOut(BaseModel):
     status_bling: str | None = None
     chamado: str | None = None
     observacao: str | None = None
+    # Abertura automática do chamado (motor do recarregar): última tentativa e
+    # motivo da recusa (só leitura; vazio = nunca tentou / abriu).
+    chamado_auto_at: datetime | None = None
+    chamado_auto_erro: str | None = None
     # Casador da aba Status: regra que casa com a chave (status_plataforma)
     # deste pedido. `acao_match`=achou regra; `acao_status_id`=id da linha da
     # aba Status que casou; `acao_resumo`=o que o sistema faria (só leitura,

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Collection
-from datetime import date
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 import structlog
@@ -37,7 +37,7 @@ from app.models import (
     SituacaoBling,
 )
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_match, logistica_rules
+from app.services import logistica_match, logistica_rules, threema
 from app.services.bling_situacoes import SITUACAO_ENVIADO_ETIQUETA, SITUACOES_ENVIADO_ETIQUETA
 from app.services.marketplaces.bling import BlingClient
 
@@ -523,3 +523,84 @@ async def aplicar_status_em_lote(
             )
     await session.commit()
     return {"aplicados": aplicados, "pulados": pulados, "falhas": falhas}
+
+
+async def enviar_threema_em_lote(
+    session: AsyncSession, ids: Collection[UUID] | None = None
+) -> dict[str, int]:
+    """Executor AUTOMÁTICO da "Mensagem Threema" da aba Status (ligado 07/09 a
+    pedido do usuário: "não está mandando a mensagem no Threema"). Pra cada
+    linha de marketplace que casa uma regra APLICÁVEL AO ESTADO ATUAL com
+    `mensagem_threema` e ainda não foi avisada (`threema_enviado_at` NULL),
+    manda o texto já com `Pedido X | Loja Y` pros destinatários da regra (👤)
+    ou da lista fixa do `.env` — o mesmo que o botão por linha faz.
+
+    Dedupe pela própria coluna: carimba `threema_enviado_at` ao enviar, então
+    o motor (a cada 5 min) não reenvia; depois disso a Mensagem Threema deixa
+    de contar como pendência e a linha resolve. `ids` restringe às linhas dadas
+    (o recarregar passa as pendentes do painel); sem `ids` varre todas.
+
+    - enviados: avisou ao menos um destinatário e carimbou.
+    - falhas: nenhum destinatário recebeu / erro no gateway (não carimba →
+      tenta de novo no próximo recarregar).
+    Sem gateway configurado (ThreemaConfigError) o lote para na hora, sem
+    marcar nada. Commit por linha."""
+    status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
+    stmt = select(Logistica)
+    if ids is not None:
+        stmt = stmt.where(Logistica.id.in_(list(ids)))
+    alvo = _ML_PLATAFORMAS | _SHOPEE_PLATAFORMAS | _TIKTOK_PLATAFORMAS | _AMAZON_PLATAFORMAS
+    rows = [
+        r
+        for r in (await session.execute(stmt)).scalars().all()
+        if (r.plataforma or "").strip().lower() in alvo and r.threema_enviado_at is None
+    ]
+    client: threema.ThreemaClient | None = None
+    enviados = falhas = 0
+    for row in rows:
+        assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
+        cands = logistica_match.find_matching_rules(
+            status_rows, assinatura=assinatura, plataforma=row.plataforma
+        )
+        rule = next(
+            (
+                r
+                for r in logistica_match.regras_aplicaveis(cands, row.status_bling)
+                if (r.mensagem_threema or "").strip()
+            ),
+            None,
+        )
+        if rule is None:
+            continue
+        texto = threema.compose_texto(
+            (rule.mensagem_threema or "").strip(),
+            pedido=row.pedido_marketplace or row.pedido_bling,
+            loja=row.plataforma,
+        )
+        recipients = threema.parse_recipients(rule.threema_recipients) or None
+        if client is None:
+            client = threema.ThreemaClient()
+        try:
+            result = await client.send_to_all(texto, recipients=recipients)
+        except threema.ThreemaConfigError as e:
+            logger.warning("logistica_threema_lote_sem_config", err=str(e))
+            break
+        except Exception as e:  # noqa: BLE001 — best-effort, não derruba o lote
+            falhas += 1
+            logger.warning("logistica_threema_lote_falha", id=str(row.id), err=str(e)[:200])
+            continue
+        if result["sent"]:
+            row.threema_enviado_at = datetime.now(UTC)
+            enviados += 1
+            logger.info(
+                "logistica_threema_auto_enviado",
+                id=str(row.id),
+                pedido=row.pedido_marketplace or row.pedido_bling,
+                sent=len(result["sent"]),
+                failed=len(result["failed"]),
+            )
+            await session.commit()
+        else:
+            falhas += 1
+    await session.commit()
+    return {"enviados": enviados, "falhas": falhas}

@@ -137,6 +137,17 @@ def test_deve_monitorar_qualquer_regra_com_monitoramento():
     assert logistica_match.deve_monitorar([]) is False
 
 
+def test_estado_resolvido_abrir_chamado_conta_como_feito_com_numero():
+    # Regra pede chamado: pendente enquanto a linha não tem o nº; com o nº
+    # (motor abriu ou operador colou) deixa de segurar a linha no painel.
+    r = _rule(abrir_chamado=True, mensagem_chamado="revisar")
+    assert logistica_match.estado_resolvido([r], "Entregue") is False
+    assert logistica_match.estado_resolvido([r], "Entregue", chamado_aberto=True) is True
+    # Reembolso continua manual → segue pendente mesmo com chamado aberto.
+    rr = _rule(abrir_reembolso=True)
+    assert logistica_match.estado_resolvido([rr], "Entregue", chamado_aberto=True) is False
+
+
 def test_estado_resolvido_no_alvo_final():
     # Cadeia: Em digitação→Em andamento→Entregue. No alvo final "Entregue"
     # não há mais transição partindo dele → resolvido.
