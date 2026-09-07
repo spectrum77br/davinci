@@ -226,7 +226,8 @@ async def test_golpe_pacote_vazio_item_incorreto_e_bloqueado(client, make_user, 
     assert r.json()["chamado_ml_status"] == "enviada"
     assert ml.reviews[-1][1] == "SRF5"
 
-    # Item Incorreto = produto diferente (SRF4): exige foto → espera
+    # Item Incorreto = produto errado enviado por nós: NÃO abre chamado (07/09),
+    # nem depois de anexar foto.
     await _seed_pedido(db, user, numero="293103", numeroloja="2000103")
     r2 = await client.post(
         "/api/devolutions",
@@ -234,16 +235,15 @@ async def test_golpe_pacote_vazio_item_incorreto_e_bloqueado(client, make_user, 
               "condicao_produto": "Usado", "motivo_devolucao": "Item Incorreto"},
     )
     assert r2.status_code == 201, r2.text
-    assert r2.json()["chamado_ml_status"] == "pendente"
-    assert r2.json()["chamado_ml_erro"] == "devolucao_sem_foto"
+    assert r2.json()["chamado_ml_status"] is None
+    reviews_antes = len(ml.reviews)
     up = await client.post(
         f"/api/devolutions/{r2.json()['id']}/anexos",
         files={"file": ("errado.png", PNG_1PX, "image/png")},
     )
     assert up.status_code == 201, up.text
-    assert up.json()["chamado_ml_status"] == "enviada"
-    assert ml.reviews[-1][1] == "SRF4"
-    assert ml.reviews[-1][3] == ["ml_1_errado.png"]
+    assert up.json()["chamado_ml_status"] is None
+    assert len(ml.reviews) == reviews_antes
 
     # Bloqueado (mala travada por senha) → SRF6 com o texto explicando
     await _seed_pedido(db, user, numero="293108", numeroloja="2000108")
@@ -377,7 +377,7 @@ async def test_texto_e_reason():
                      observacao="veio uma mala velha")
     assert svc.reason_para(dev) == "SRF5"
     dev.motivo_devolucao = "Item Incorreto"
-    assert svc.reason_para(dev) == "SRF4"
+    assert svc.reason_para(dev) is None  # não abre chamado (07/09)
     dev.motivo_devolucao = "Dano funcional / Não funciona"
     assert svc.reason_para(dev) is None
     dev.motivo_devolucao = "Não recebido"

@@ -197,6 +197,7 @@ const ERROS: Record<string, string> = {
   shopee_motivo_indisponivel: 'Shopee não oferece esse motivo pra essa devolução',
   shopee_sem_email: 'sem e-mail do operador pra Shopee (DEVOLUCAO_DISPUTE_EMAIL)',
   shopee_prazo_contestacao_esgotado: 'prazo da Shopee pra contestar venceu (validação do vendedor, ~3 dias após receber o pacote)',
+  devolucao_motivo_sem_chamado: 'esse motivo de devolução não abre chamado (Item Incorreto saiu da lista em 07/09)',
   plataforma_sem_api_replica: 'Shopee/TikTok não têm API de resposta na disputa — ficou só no histórico; responda pelo Seller Center',
   plataforma_sem_api: 'plataforma sem API — abrir na mão',
   chamado_sem_integracao_tiktok: 'conta sem integração TikTok no DaVinci',

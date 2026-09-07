@@ -78,11 +78,12 @@ PLAT_AMAZON = "amazon"
 COM_API = frozenset({PLAT_ML, PLAT_TIKTOK, PLAT_SHOPEE})
 
 # Motivo da tela (minúsculo) → motivo do ML (Eduardo 04/09: "situação golpe é
-# pacote vazio, produto diferente usa o status item incorreto").
+# pacote vazio"). "Item incorreto" NÃO abre chamado em plataforma nenhuma
+# (Eduardo 07/09: "para item incorreto, não deve abrir chamado") — é produto
+# errado enviado por nós, não há o que contestar.
 MOTIVO_ML: dict[str, str] = {
     "item faltando": "SRF3",  # devolução incompleta
     "danificado (outros)": "SRF2",  # produto chegou danificado (exige foto)
-    "item incorreto": "SRF4",  # produto diferente do enviado (exige foto)
     "golpe": "SRF5",  # pacote veio sem o produto
     "não recebido": "SRF7",  # pacote não chegou (motivo do pacote, sem anexo)
     # "Bloqueado" = mala voltou travada por senha (Eduardo 04/09: "produto veio,
@@ -97,7 +98,6 @@ _TT = "reverse_reject_return_parcel_reason_"
 MOTIVO_TIKTOK: dict[str, str] = {
     "item faltando": _TT + "3",
     "danificado (outros)": _TT + "5",
-    "item incorreto": _TT + "1",
     "golpe": _TT + "3",  # pacote vazio = todos os itens faltando
     "não recebido": _TT + "4",
     "bloqueado": _TT + "5",  # mala com senha = usada, não revendável
@@ -108,7 +108,6 @@ MOTIVO_TIKTOK: dict[str, str] = {
 MOTIVO_SHOPEE: dict[str, tuple[str, ...]] = {
     "item faltando": ("incomplete return", "missing"),
     "danificado (outros)": ("physical damage", "damage"),
-    "item incorreto": ("wrong return product", "wrong"),
     "golpe": ("incomplete return", "wrong return product", "missing"),
     "não recebido": ("did not receive", "not receive"),
     "bloqueado": ("claim incorrect", "item is used", "used"),
@@ -129,9 +128,9 @@ REASON_NOME: dict[str, str] = {
     _TT + "4": "não recebi o pacote",
     _TT + "5": "produto danificado ou usado",
 }
-# Motivos da tela em que a foto é obrigatória (ML exige em SRF2/SRF4; TikTok e
+# Motivos da tela em que a foto é obrigatória (ML exige em SRF2; TikTok e
 # Shopee pedem evidência em tudo que é "recebi com problema").
-MOTIVOS_EXIGEM_FOTO = frozenset({"danificado (outros)", "item incorreto"})
+MOTIVOS_EXIGEM_FOTO = frozenset({"danificado (outros)"})
 
 # O que as APIs aceitam como evidência (e o teto por arquivo — ML 5 MB, TikTok
 # e Shopee 10 MB; 5 MB serve pra todos).
@@ -684,7 +683,6 @@ def _tiktok_reason_por_texto(reasons: list[dict], motivo: str) -> str | None:
         "danificado (outros)": ("damaged", "danific", "inadequad", "usado", "used"),
         "bloqueado": ("damaged or used", "usado", "used", "inadequad"),
         "mudou de ideia": ("damaged or used", "usado", "used", "inadequad"),
-        "item incorreto": ("not the product", "não é o produto", "diferente", "wrong"),
         "golpe": ("missing", "falt", "not the product", "diferente"),
         "item faltando": ("missing", "falt", "incomplet"),
         "não recebido": ("haven't received", "not received", "não receb"),
@@ -796,7 +794,6 @@ _SHOPEE_ID_SEM = {
 # motivo da tela → semânticas aceitas, na ordem de preferência
 _SHOPEE_PREF_PACOTE: dict[str, tuple[str, ...]] = {
     "danificado (outros)": ("danificado", "usado", "alegacao_incorreta"),
-    "item incorreto": ("produto_errado", "alegacao_incorreta"),
     "golpe": ("incompleto", "produto_errado", "alegacao_incorreta"),
     "item faltando": ("incompleto", "alegacao_incorreta"),
     "não recebido": ("nao_recebi",),
@@ -808,7 +805,6 @@ _SHOPEE_PREF_REEMBOLSO: dict[str, tuple[str, ...]] = {
     # pacote voltando: contesta a alegação com as fotos da expedição
     "golpe": ("alegacao_incorreta", "enviei_correto", "enviei_bom_estado", "enviei_com_prova"),
     "danificado (outros)": ("enviei_bom_estado", "alegacao_incorreta"),
-    "item incorreto": ("enviei_correto", "alegacao_incorreta"),
     "item faltando": ("enviei_correto", "alegacao_incorreta"),
     "não recebido": ("rejeito_nao_recebimento", "enviei_com_prova", "alegacao_incorreta"),
     "bloqueado": ("alegacao_incorreta",),
@@ -1031,6 +1027,12 @@ async def disparar(
     agora = agora or datetime.now(UTC)
     msg = await mensagem_abertura(session, ch)
     if msg is None or msg.status == "enviada":
+        return msg
+    if not chamados_svc.motivo_pede_chamado(dev):
+        # Motivo que deixou de abrir chamado (ex. "item incorreto", 07/09): a
+        # abertura que ficou pendente falha de vez em vez de retentar pra sempre.
+        msg.status = "falhou"
+        msg.erro = "devolucao_motivo_sem_chamado"
         return msg
     plat = plataforma_de(ch.plataforma)
     linhas = await _linhas_do_pedido(session, dev)

@@ -178,13 +178,14 @@ const MOTIVOS_DEVOLUCAO = [
   'Danificado (Outros)',
 ] as const
 
-// Motivos que abrem chamado automático no Mercado Livre (services/chamados_devolucao):
-// Golpe = pacote vazio; Item Incorreto = produto diferente (foto); Danificado (foto);
-// Item faltando; Não recebido; Bloqueado (mala travada por senha).
+// Motivos que abrem chamado automático (services/chamados_devolucao):
+// Golpe = pacote vazio; Danificado (foto); Item faltando; Não recebido;
+// Bloqueado (mala travada por senha). Item Incorreto NÃO abre (07/09).
 
 // Abertura automática na plataforma — o que a linha mostra enquanto não está "enviada".
 const ML_STATUS_ERROS: Record<string, string> = {
   devolucao_sem_foto: 'aguardando foto — anexe pela câmera',
+  devolucao_motivo_sem_chamado: 'esse motivo não abre chamado (Item Incorreto saiu da lista em 07/09)',
   return_review_indisponivel: 'ML ainda não liberou a revisão (o pacote precisa constar entregue) — tenta de novo a cada hora',
   devolucao_sem_claim: 'sem devolução aberta na plataforma pra esse pedido — tenta de novo a cada hora',
   devolucao_sem_return: 'sem devolução aberta na plataforma pra esse pedido — tenta de novo a cada hora',
@@ -537,7 +538,7 @@ function linkRequired(condicao: string | null | undefined) {
 }
 
 // Motivos que abrem chamado automático (espelho de services/chamados.MOTIVOS_ABREM_CHAMADO).
-const MOTIVOS_ABREM_CHAMADO = ['bloqueado', 'mudou de ideia', 'golpe', 'item incorreto', 'item faltando', 'não recebido', 'danificado (outros)']
+const MOTIVOS_ABREM_CHAMADO = ['bloqueado', 'mudou de ideia', 'golpe', 'item faltando', 'não recebido', 'danificado (outros)']
 // Mala (b<dígito>, bp*, acessórios a006/a015/a073-a076) ou eletro (celular dg*, airfryer/eletro u*) —
 // espelho de services/chamados_devolucao.produto_mala_ou_eletro; o backend é quem trava (422).
 function isMalaOuEletro(sku: string | null | undefined) {
