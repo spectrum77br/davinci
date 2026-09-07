@@ -138,28 +138,29 @@ async def test_sem_quota_nao_marca_como_registrado(db: AsyncSession, fake_17trac
 
 
 @pytest.mark.asyncio
-async def test_ignora_nao_correios_encerrados_e_antigos(db: AsyncSession, fake_17track):
+async def test_varredura_so_ml_em_andamento_com_correios(db: AsyncSession, fake_17track):
+    """Eduardo 07/09: cada cadastro custa crédito, e 127 dos 191 primeiros foram
+    com pedido já entregue. A varredura passa a pegar só Mercado Livre em
+    "Em andamento" — o resto não gasta saldo."""
     chamadas, _ = fake_17track
+    ml, and_ = "Mercado Livre", "Em andamento"
     db.add_all(
         [
             # Não é Correios (não termina em BR).
-            Logistica(pedido_bling="a1", data=date.today(), rastreio="42314700000000"),
-            # Caso encerrado: o pacote não interessa mais.
-            Logistica(
-                pedido_bling="a2", data=date.today(), rastreio="DD444444444BR",
-                status_bling="Cancelado",
-            ),
-            # Fora da janela de 90 dias.
-            Logistica(
-                pedido_bling="a3",
-                data=date.today() - timedelta(days=200),
-                rastreio="EE555555555BR",
-            ),
+            Logistica(pedido_bling="a1", plataforma=ml, status_bling=and_,
+                      data=date.today(), rastreio="42314700000000"),
+            # ML, mas já entregue: não gasta crédito.
+            Logistica(pedido_bling="a2", plataforma=ml, status_bling="Entregue",
+                      data=date.today(), rastreio="DD444444444BR"),
+            # Shopee em andamento: outra plataforma, fora.
+            Logistica(pedido_bling="a3", plataforma="Shopee", status_bling=and_,
+                      data=date.today(), rastreio="EE555555555BR"),
+            # ML em andamento, mas fora da janela.
+            Logistica(pedido_bling="a4", plataforma=ml, status_bling=and_,
+                      data=date.today() - timedelta(days=200), rastreio="GG777777777BR"),
             # Este vale.
-            Logistica(
-                pedido_bling="a4", data=date.today(), rastreio="FF666666666BR",
-                status_bling="Entregue",
-            ),
+            Logistica(pedido_bling="a5", plataforma=ml, status_bling=and_,
+                      data=date.today(), rastreio="FF666666666BR"),
         ]
     )
     await db.commit()
@@ -255,26 +256,18 @@ async def _async_none():
 
 
 @pytest.mark.asyncio
-async def test_entrega_velha_sai_do_alvo_mas_busca_pontual_pega(db: AsyncSession, fake_17track):
-    """Entregue há muito tempo não gasta saldo — 344 dos 401 rastreios Correios
-    da base estão entregues, e o 17track para de rastrear ~15 dias depois."""
+async def test_entregue_fica_fora_da_varredura_mas_busca_pontual_pega(
+    db: AsyncSession, fake_17track
+):
+    """Pedido entregue não gasta saldo na varredura (nem o de ontem), mas se o
+    operador for atrás daquele pedido específico, o sistema responde."""
     chamadas, _ = fake_17track
-    antiga = date.today() - timedelta(days=30)
     db.add(
         Logistica(
             pedido_bling="b1",
-            data=antiga,
-            rastreio="HH888888888BR",
-            status_bling="Entregue",
-            meli_status={"ship_status": "delivered"},
-        )
-    )
-    # Entregue ONTEM ainda vale (é onde a divergência ML × físico aparece).
-    db.add(
-        Logistica(
-            pedido_bling="b2",
+            plataforma="Mercado Livre",
             data=date.today() - timedelta(days=1),
-            rastreio="II999999999BR",
+            rastreio="HH888888888BR",
             status_bling="Entregue",
             meli_status={"ship_status": "delivered"},
         )
@@ -282,10 +275,8 @@ async def test_entrega_velha_sai_do_alvo_mas_busca_pontual_pega(db: AsyncSession
     await db.commit()
 
     await logistica_track_sync.run(db)
-    assert chamadas["register"] == [["II999999999BR"]]
+    assert chamadas["register"] == []
 
-    # Mas se o operador for atrás daquele pedido específico, responde.
-    chamadas["register"].clear()
     await logistica_track_sync.run(db, pedidos=["b1"])
     assert chamadas["register"] == [["HH888888888BR"]]
 
@@ -296,7 +287,8 @@ async def test_numero_recusado_entra_em_quarentena(db: AsyncSession, fake_17trac
     à fila a cada 15 min — senão `pendentes` nunca converge."""
     chamadas, estado = fake_17track
     estado["ok"] = []  # o 17track recusou, e não foi por saldo
-    db.add(Logistica(pedido_bling="c1", data=date.today(), rastreio="JJ000000000BR"))
+    db.add(Logistica(pedido_bling="c1", plataforma="Mercado Livre", status_bling="Em andamento",
+                     data=date.today(), rastreio="JJ000000000BR"))
     await db.commit()
 
     await logistica_track_sync.run(db)
@@ -312,7 +304,8 @@ async def test_sem_quota_marca_aviso_para_a_tela(db: AsyncSession, fake_17track)
     _, estado = fake_17track
     estado["ok"] = []
     estado["sem_quota"] = True
-    db.add(Logistica(pedido_bling="d1", data=date.today(), rastreio="KK111111111BR"))
+    db.add(Logistica(pedido_bling="d1", plataforma="Mercado Livre", status_bling="Em andamento",
+                     data=date.today(), rastreio="KK111111111BR"))
     await db.commit()
 
     await logistica_track_sync.run(db)

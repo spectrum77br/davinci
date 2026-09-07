@@ -120,32 +120,21 @@ MAX_PUXAR = 120
 # evento nenhum e os parados há mais de isto entram na fila do pull.
 PULL_APOS_HORAS = 6
 
-# Depois de entregue o pacote não se move mais e o próprio 17track para de
-# rastrear (ele encerra o número após ~15 dias consecutivos como entregue).
-# Seguir entrega velha só queimaria saldo: dos 401 rastreios Correios da base,
-# 344 já estão "Entregue" — sem este corte, 86% do custo seria inútil.
-DIAS_APOS_ENTREGA = 15
-
-# Situações do Bling em que o caso está ENCERRADO — não adianta seguir o pacote.
-# "Entregue" NÃO entra aqui: entrega recente ainda vale (é comparando o
-# "entregue" do marketplace com o físico dos Correios que a divergência
-# aparece); quem tira a entrega velha é `DIAS_APOS_ENTREGA`.
-SITUACOES_ENCERRADAS = frozenset(
-    {
-        "cancelado",
-        "resolvido",
-        "devolvido estoque",
-        "devolvido estoque usado",
-        "sucata",
-        "perdimento",
-        "golpe",
-        "atendido",
-    }
-)
+# Quem entra na varredura automática — decisão do Eduardo (07/09): cada número
+# cadastrado no 17track custa 1 crédito, e dos 191 gastos na primeira semana,
+# 127 foram com pedido já "Entregue" (a regra antiga seguia entrega recente pra
+# cruzar com o físico dos Correios — não valia o custo). Agora só o pacote que
+# ainda está a caminho, e só do Mercado Livre, que é onde a localização real
+# importa. Busca pontual por pedido (botão/consulta) continua livre: se o
+# operador foi atrás daquele número, ele quer a resposta.
+PLATAFORMAS_VARREDURA = frozenset({"mercado livre", "meli", "mercadolivre"})
+SITUACOES_VARREDURA = frozenset({"em andamento"})
 
 
-def _encerrado(status_bling: str | None) -> bool:
-    return (status_bling or "").strip().lower() in SITUACOES_ENCERRADAS
+def _na_varredura(row: Logistica) -> bool:
+    plat = (row.plataforma or "").strip().lower()
+    sit = (row.status_bling or "").strip().lower()
+    return plat in PLATAFORMAS_VARREDURA and sit in SITUACOES_VARREDURA
 
 
 def _num(rastreio: str | None) -> str:
@@ -154,34 +143,6 @@ def _num(rastreio: str | None) -> str:
     rastreio gravado em minúsculas nunca casaria com o `ok` da resposta e o job
     re-registraria o mesmo número a cada 15 min, para sempre."""
     return (rastreio or "").strip().upper()
-
-
-def _entregue(row: Logistica) -> bool:
-    if (row.status_bling or "").strip().lower() == "entregue":
-        return True
-    ship = ((row.meli_status or {}).get("ship_status") or "").strip().lower()
-    return ship == "delivered"
-
-
-def _entrega_velha(row: Logistica, hoje: date) -> bool:
-    """Entregue há mais de `DIAS_APOS_ENTREGA` — sai do alvo.
-
-    Usa o carimbo do `ship_status` (quando o marketplace disse "entregue") e cai
-    na data do pedido quando não há carimbo."""
-    if not _entregue(row):
-        return False
-    carimbo = ((row.status_datas or {}).get("ship_status") or {}).get("em")
-    quando: date | None = None
-    if isinstance(carimbo, str) and carimbo:
-        try:
-            quando = datetime.fromisoformat(carimbo).date()
-        except ValueError:
-            quando = None
-    if quando is None:
-        quando = row.data
-    if quando is None:
-        return False
-    return (hoje - quando).days > DIAS_APOS_ENTREGA
 
 
 async def _alvo(session: AsyncSession, pedidos: list[str] | None) -> list[Logistica]:
@@ -196,10 +157,7 @@ async def _alvo(session: AsyncSession, pedidos: list[str] | None) -> list[Logist
         r
         for r in rows
         if logistica_track.is_correios(r.rastreio)
-        and not _encerrado(r.status_bling)
-        # Busca pontual (botão/pedido específico) ignora o corte de entrega: se
-        # o operador foi atrás daquele pedido, ele quer a resposta.
-        and (bool(pedidos) or not _entrega_velha(r, hoje))
+        and (bool(pedidos) or _na_varredura(r))
     ]
 
 
