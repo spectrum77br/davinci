@@ -17,9 +17,10 @@ isso o painel ficava com a foto do momento da ingestão e um pedido que virava
 """
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection
 from uuid import UUID
 
+import httpx
 import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -182,37 +183,115 @@ _HERDAR_DO_EXCLUIDO_SQL = text(
        AND NOT EXISTS (
            SELECT 1 FROM "{_SCHEMA}".bling_orders bo
             WHERE bo.numero = novo.pedido_bling AND bo.situacao = 'excluido')
+       AND velho.pedido_bling = ANY(:numeros)
        AND (coalesce(velho.observacao, '') <> ''
             OR coalesce(velho.chamado, '') <> ''
             OR coalesce(velho.divergencia, '') <> '')
     """  # noqa: S608
 )
 
+# Candidatos: linhas cujo espelho diz `excluido` (carimbo que SÓ o webhook
+# `pedido.exclusao` do Bling grava — bling_orders.mark_order_excluido).
+_CANDIDATOS_EXCLUIDOS_SQL = text(
+    f"""
+    SELECT DISTINCT l.pedido_bling, bo.bling_id
+      FROM "{_SCHEMA}".logistica l
+      JOIN "{_SCHEMA}".bling_orders bo ON bo.numero = l.pedido_bling
+     WHERE bo.situacao = 'excluido'
+    """  # noqa: S608
+)
+
 _CLEANUP_EXCLUIDOS_SQL = text(
     f"""
     DELETE FROM "{_SCHEMA}".logistica l
-     WHERE EXISTS (
+     WHERE l.pedido_bling = ANY(:numeros)
+       AND EXISTS (
            SELECT 1 FROM "{_SCHEMA}".bling_orders bo
             WHERE bo.numero = l.pedido_bling AND bo.situacao = 'excluido')
     RETURNING l.pedido_bling
     """  # noqa: S608
 )
 
+# (numero, bling_id) → True = confirmado excluído no Bling; False = o pedido
+# está VIVO lá (espelho errado — não apaga); None = não deu pra confirmar
+# (API fora/429/sem id — não apaga, tenta na próxima rodada).
+Confirmador = Callable[[str, int | None], Awaitable[bool | None]]
 
-async def cleanup_excluidos(session: AsyncSession) -> int:
+
+def _confirmador_bling(session: AsyncSession) -> Confirmador:
+    """Pergunta ao Bling AO VIVO se o pedido ainda existe. Só o 404 do
+    GET /pedidos/vendas/{id} confirma a exclusão; qualquer outra resposta ou
+    erro segura a linha. Cliente criado uma vez por rodada (lazy)."""
+    client: object | None = None
+
+    async def confirmar(numero: str, bling_id: int | None) -> bool | None:
+        nonlocal client
+        if not bling_id:
+            logger.warning("logistica_excluido_sem_bling_id", pedido=numero)
+            return None
+        if client is None:
+            try:
+                client = await logistica_bling._bling_client(session)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("logistica_excluido_sem_cliente_bling", err=str(e)[:200])
+                return None
+        try:
+            order = await client.get_order(int(bling_id))  # type: ignore[attr-defined]
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return True
+            logger.warning(
+                "logistica_excluido_bling_http", pedido=numero, status=e.response.status_code
+            )
+            return None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("logistica_excluido_bling_erro", pedido=numero, err=str(e)[:200])
+            return None
+        logger.warning(
+            "logistica_excluido_mas_vivo_no_bling",
+            pedido=numero,
+            situacao=(order.get("situacao") or {}).get("id"),
+        )
+        return False
+
+    return confirmar
+
+
+async def cleanup_excluidos(
+    session: AsyncSession, *, confirmar: Confirmador | None = None
+) -> int:
     """Apaga da aba Logística as linhas cujo pedido foi EXCLUÍDO no Bling
     (herdando antes observação/chamado/divergência pra linha nova da mesma
     venda, se houver). É o que impede a venda reimportada com número novo de
     aparecer duas vezes. Roda em toda ingestão, logo depois do
-    `cleanup_finalizados`."""
-    await session.execute(_HERDAR_DO_EXCLUIDO_SQL)
-    res = await session.execute(_CLEANUP_EXCLUIDOS_SQL)
+    `cleanup_finalizados`.
+
+    À prova de erro (Eduardo 07/09: "para não apagar o pedido certo"): o
+    carimbo `excluido` do espelho é só o CANDIDATO; a linha só sai depois que
+    o Bling confirma ao vivo (404) que o pedido não existe mais. Pedido vivo
+    no Bling ou API indisponível → nada é apagado (fica pra próxima rodada).
+    E mesmo que algo escape, a ingestão recadastra sozinha qualquer pedido
+    vivo dentro da janela — a linha volta, só as anotações se perderiam."""
+    candidatos = (await session.execute(_CANDIDATOS_EXCLUIDOS_SQL)).all()
+    if not candidatos:
+        return 0
+    confirmar = confirmar or _confirmador_bling(session)
+    confirmados: list[str] = []
+    for numero, bling_id in candidatos:
+        if await confirmar(str(numero), bling_id) is True:
+            confirmados.append(str(numero))
+    if not confirmados:
+        return 0
+    await session.execute(_HERDAR_DO_EXCLUIDO_SQL, {"numeros": confirmados})
+    res = await session.execute(_CLEANUP_EXCLUIDOS_SQL, {"numeros": confirmados})
     removidos = [r[0] for r in res.fetchall()]
     await session.commit()
-    if removidos:
-        logger.info(
-            "logistica_cleanup_excluidos", removed=len(removidos), pedidos=removidos[:50]
-        )
+    logger.info(
+        "logistica_cleanup_excluidos",
+        candidatos=len(candidatos),
+        removed=len(removidos),
+        pedidos=removidos[:50],
+    )
     return len(removidos)
 
 
