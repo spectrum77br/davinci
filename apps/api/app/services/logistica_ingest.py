@@ -24,6 +24,7 @@ import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models import Logistica, LogisticaStatus
 from app.services import (
     logistica_amazon,
@@ -152,6 +153,69 @@ async def cleanup_finalizados(session: AsyncSession) -> int:
     return removed
 
 
+# Pedido EXCLUÍDO no Bling (espelho `bling_orders.situacao = 'excluido'`) não
+# tem mais o que acompanhar — e quando o operador exclui e reimporta a venda do
+# marketplace, o Bling gera OUTRO número: a linha velha ficava na aba com o
+# status congelado e a venda aparecia em dobro (Shopee 260901V0YYRXR4 →
+# 293636 excluído + 293657 vivo, 01/09; Eduardo 07/09: "tem que verificar para
+# não acontecer mais isso"). Antes de apagar, o que o operador escreveu na linha
+# velha (observação / chamado / divergência) passa pra linha nova da MESMA venda
+# quando ela ainda está vazia.
+# Schema pela configuração (os testes rodam em `davinci_test`), como faz
+# nf_emissao_gerar — os SQLs mais antigos deste módulo ainda fixam `davinci.`.
+_SCHEMA = get_settings().database_schema
+
+_HERDAR_DO_EXCLUIDO_SQL = text(
+    f"""
+    UPDATE "{_SCHEMA}".logistica novo
+       SET observacao  = COALESCE(NULLIF(novo.observacao, ''), velho.observacao),
+           chamado     = COALESCE(NULLIF(novo.chamado, ''), velho.chamado),
+           divergencia = COALESCE(NULLIF(novo.divergencia, ''), velho.divergencia),
+           updated_at  = now()
+      FROM "{_SCHEMA}".logistica velho
+     WHERE novo.id <> velho.id
+       AND coalesce(trim(velho.pedido_marketplace), '') <> ''
+       AND novo.pedido_marketplace = velho.pedido_marketplace
+       AND EXISTS (
+           SELECT 1 FROM "{_SCHEMA}".bling_orders bo
+            WHERE bo.numero = velho.pedido_bling AND bo.situacao = 'excluido')
+       AND NOT EXISTS (
+           SELECT 1 FROM "{_SCHEMA}".bling_orders bo
+            WHERE bo.numero = novo.pedido_bling AND bo.situacao = 'excluido')
+       AND (coalesce(velho.observacao, '') <> ''
+            OR coalesce(velho.chamado, '') <> ''
+            OR coalesce(velho.divergencia, '') <> '')
+    """  # noqa: S608
+)
+
+_CLEANUP_EXCLUIDOS_SQL = text(
+    f"""
+    DELETE FROM "{_SCHEMA}".logistica l
+     WHERE EXISTS (
+           SELECT 1 FROM "{_SCHEMA}".bling_orders bo
+            WHERE bo.numero = l.pedido_bling AND bo.situacao = 'excluido')
+    RETURNING l.pedido_bling
+    """  # noqa: S608
+)
+
+
+async def cleanup_excluidos(session: AsyncSession) -> int:
+    """Apaga da aba Logística as linhas cujo pedido foi EXCLUÍDO no Bling
+    (herdando antes observação/chamado/divergência pra linha nova da mesma
+    venda, se houver). É o que impede a venda reimportada com número novo de
+    aparecer duas vezes. Roda em toda ingestão, logo depois do
+    `cleanup_finalizados`."""
+    await session.execute(_HERDAR_DO_EXCLUIDO_SQL)
+    res = await session.execute(_CLEANUP_EXCLUIDOS_SQL)
+    removidos = [r[0] for r in res.fetchall()]
+    await session.commit()
+    if removidos:
+        logger.info(
+            "logistica_cleanup_excluidos", removed=len(removidos), pedidos=removidos[:50]
+        )
+    return len(removidos)
+
+
 async def _ingest_platform(
     session: AsyncSession, platform: str, dias: int, *, so_problemas: bool = False
 ) -> int:
@@ -196,6 +260,7 @@ async def run_ingest_ml_daily(
     os finalizados (Cancelado/Resolvido/Perdimento e Entregue +90d)."""
     refreshed = len(await refresh_status_bling(session))
     removed = await cleanup_finalizados(session)
+    excluidos = await cleanup_excluidos(session)
     inserted = await _ingest_platform(session, "ml", dias)
     problemas = await _ingest_platform(
         session, "ml", problemas_dias, so_problemas=True
@@ -206,6 +271,7 @@ async def run_ingest_ml_daily(
     return {
         "status_refresh": refreshed,
         "cleanup": removed,
+        "cleanup_excluidos": excluidos,
         "inserted": inserted,
         "problemas": problemas,
         **{f"enrich_{k}": v for k, v in enr.items()},
@@ -228,6 +294,7 @@ async def run_ingest_marketplaces_daily(
     mesmo — tanto faz qual roda antes)."""
     out: dict[str, int] = {"status_refresh": len(await refresh_status_bling(session))}
     out["cleanup"] = await cleanup_finalizados(session)
+    out["cleanup_excluidos"] = await cleanup_excluidos(session)
     for platform in ("shopee", "tiktok", "amazon"):
         out[platform] = await _ingest_platform(session, platform, dias)
         out[f"{platform}_problemas"] = await _ingest_platform(
