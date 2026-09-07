@@ -625,6 +625,17 @@ async def abrir_chamados_em_lote(
             row.chamado_auto_at = agora
             row.chamado_auto_erro = None
             abertos += 1
+            # Vai pra aba Chamados também (Eduardo 07/09: "lembra que vai para a
+            # aba chamados") — import local: chamados importa este módulo.
+            from app.services import chamados as chamados_svc
+
+            await chamados_svc.abrir_chamado_logistica(
+                session,
+                row,
+                claim_id=claim_id,
+                mensagem=mensagem,
+                regra=rule.status_plataforma,
+            )
             logger.info(
                 "logistica_chamado_auto_aberto",
                 id=str(row.id),

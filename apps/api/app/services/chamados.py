@@ -32,7 +32,15 @@ import structlog
 from sqlalchemy import Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder, Chamado, ChamadoMensagem, Devolution, SituacaoBling, StoreInfo
+from app.models import (
+    BlingOrder,
+    Chamado,
+    ChamadoMensagem,
+    Devolution,
+    Logistica,
+    SituacaoBling,
+    StoreInfo,
+)
 from app.services import logistica_bling, logistica_meli
 from app.services.marketplaces.ml import MercadoLivreClient
 
@@ -281,6 +289,92 @@ async def abrir_chamado_devolucao(session: AsyncSession, dev: Devolution) -> Cha
         devolution_id=str(dev.id),
         pedido_bling=ch.pedido_bling,
         motivo=motivo,
+    )
+    return ch
+
+
+# ---------------------------------------------------------------- logística
+
+
+async def chamado_da_logistica(session: AsyncSession, row: Logistica) -> Chamado | None:
+    """Chamado já registrado pra esta linha da Logística (origem `logistica`):
+    pela referência da linha ou, sem ela, pelo pedido Bling."""
+    conds = [Chamado.origem == "logistica"]
+    numero = (row.pedido_bling or "").strip()
+    if numero:
+        conds.append(or_(Chamado.origem_ref == str(row.id), Chamado.pedido_bling == numero))
+    else:
+        conds.append(Chamado.origem_ref == str(row.id))
+    return (
+        await session.execute(
+            select(Chamado).where(*conds).order_by(Chamado.created_at.desc()).limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def abrir_chamado_logistica(
+    session: AsyncSession,
+    row: Logistica,
+    *,
+    claim_id: str,
+    mensagem: str,
+    regra: str | None = None,
+    autor_nome: str | None = None,
+) -> Chamado:
+    """Registra na aba Chamados o chamado que a Logística acabou de abrir no
+    Mercado Livre (motor do recarregar ou botão da linha) — Eduardo 07/09:
+    "lembra que vai para a aba chamados". Canal `api`, nº = claim_id do ML,
+    monitoramento ligado (o cron fecha sozinho quando o ML encerrar o claim),
+    histórico com o evento do sistema + a abertura `enviada` com o texto que
+    foi ao mediador. Dedupe: se a linha (ou o pedido) já tem chamado de origem
+    `logistica`, só anota o nº/histórico nele. NÃO commita."""
+    ch = await chamado_da_logistica(session, row)
+    novo = ch is None
+    if ch is None:
+        ch = Chamado(
+            data=datetime.now(SAO_PAULO).date(),
+            pedido_bling=(row.pedido_bling or "").strip() or None,
+            pedido_marketplace=(row.pedido_marketplace or "").strip() or None,
+            plataforma=row.plataforma,
+            conta=row.conta,
+            status_bling=row.status_bling,
+            origem="logistica",
+            origem_ref=str(row.id),
+            canal="api",
+            observacao=(
+                f"Aberto automaticamente pela Logística — regra: {regra}"
+                if regra
+                else "Aberto pela Logística"
+            ),
+        )
+        await preencher_do_pedido(session, ch)
+        session.add(ch)
+        await session.flush()
+    ch.chamado = str(claim_id)
+    ch.canal = "api"
+    ch.monitoramento = True
+    quem = autor_nome or AUTOR_SISTEMA
+    session.add(
+        registrar_sistema(
+            ch,
+            (
+                f"Chamado aberto na mediação do Mercado Livre pela Logística"
+                f"{' (regra: ' + regra + ')' if regra else ''}; referência {claim_id}"
+            ),
+        )
+    )
+    abertura = nova_mensagem(
+        ch, texto=mensagem, tipo="abertura", direcao="enviada", autor_nome=quem, status="enviada"
+    )
+    abertura.enviada_at = datetime.now(UTC)
+    session.add(abertura)
+    logger.info(
+        "chamado_auto_logistica",
+        chamado_id=str(ch.id),
+        logistica_id=str(row.id),
+        pedido_bling=ch.pedido_bling,
+        claim_id=claim_id,
+        novo=novo,
     )
     return ch
 

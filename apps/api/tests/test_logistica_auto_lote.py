@@ -12,7 +12,7 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from app.models import Logistica, LogisticaStatus
+from app.models import Chamado, ChamadoMensagem, Logistica, LogisticaStatus
 from app.services import (
     logistica_bling,
     logistica_match,
@@ -104,10 +104,26 @@ async def test_abrir_chamado_em_lote_abre_e_carimba(db, monkeypatch):
     assert logistica_match.estado_resolvido(rules, "Entregue", chamado_aberto=True) is True
     assert logistica_match.estado_resolvido(rules, "Entregue", chamado_aberto=False) is False
 
+    # foi pra aba Chamados: linha de origem logistica, canal api, nº do claim,
+    # monitoramento ligado, histórico com o sistema + a abertura enviada
+    ch = (await db.execute(select(Chamado).where(Chamado.origem == "logistica"))).scalar_one()
+    assert ch.origem_ref == str(row.id) and ch.chamado == "999"
+    assert ch.canal == "api" and ch.monitoramento is True
+    assert ch.plataforma == "Mercado Livre" and ch.pedido_marketplace == "ML1"
+    msgs = (
+        await db.execute(
+            select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == ch.id)
+            .order_by(ChamadoMensagem.created_at)
+        )
+    ).scalars().all()
+    assert [m.tipo for m in msgs] == ["sistema", "abertura"]
+    assert msgs[1].status == "enviada" and msgs[1].texto == "Peço a revisão da decisão"
+
     # 2ª passada: já tem chamado → nada (e o ML não é chamado de novo)
     out2 = await logistica_meli.abrir_chamados_em_lote(db, None, agora=t0 + timedelta(minutes=5))
     assert out2 == {"abertos": 0, "falhas": 0, "adiados": 0, "pulados": 0}
     assert len(fake.messages) == 1
+    assert len((await db.execute(select(Chamado))).scalars().all()) == 1
 
 
 async def test_abrir_chamado_em_lote_recusa_carimba_e_espera(db, monkeypatch):

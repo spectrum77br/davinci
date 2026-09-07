@@ -897,12 +897,20 @@ async def enviar_chamado(
     if not mensagem:
         raise HTTPException(422, detail={"code": "logistica_sem_mensagem_chamado"})
     try:
-        await logistica_meli.enviar_chamado_for_row(session, c, mensagem)
+        claim_id = await logistica_meli.enviar_chamado_for_row(session, c, mensagem)
     except logistica_meli.MeliEnrichError as e:
         raise HTTPException(422, detail={"code": e.code}) from e
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_enviar_chamado_falhou", id=str(logistica_id), err=str(e)[:300])
         raise HTTPException(502, detail={"code": "logistica_chamado_erro", "erro": str(e)[:300]}) from e
+    # Mesmo destino do motor automático: a aba Chamados ganha a linha/histórico.
+    from app.services import chamados as chamados_svc
+
+    await chamados_svc.abrir_chamado_logistica(
+        session, c, claim_id=claim_id, mensagem=mensagem, autor_nome=_user.email
+    )
+    c.chamado_auto_at = datetime.now(UTC)
+    c.chamado_auto_erro = None
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_chamado_enviado", id=str(logistica_id), chamado=c.chamado)
