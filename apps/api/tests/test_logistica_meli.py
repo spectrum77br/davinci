@@ -13,11 +13,25 @@ class FakeML:
     """Client ML mínimo: métodos que build_meli_status chama. `None` num
     recurso => a chamada levanta (simula 404 sem shipment/claim/returns)."""
 
-    def __init__(self, order, shipment=None, claim=None, returns=None, orders_by_id=None, pack=None, lead_time=None):
+    def __init__(
+        self,
+        order,
+        shipment=None,
+        claim=None,
+        returns=None,
+        orders_by_id=None,
+        pack=None,
+        lead_time=None,
+        claims_by_id=None,
+    ):
         self._order = order
         self._shipment = shipment
         self._claim = claim
         self._returns = returns
+        # Quando setado, get_claim resolve por id (id ausente => 404); habilita
+        # o teste de pedido com mais de uma mediação.
+        self._claims_by_id = claims_by_id
+        self.claims_lidos: list = []
         # Quando setado, get_order resolve por id (id ausente => 404); habilita
         # o teste de fallback pack → order.
         self._orders_by_id = orders_by_id
@@ -43,6 +57,11 @@ class FakeML:
         return self._shipment
 
     async def get_claim(self, claim_id):
+        self.claims_lidos.append(claim_id)
+        if self._claims_by_id is not None:
+            if claim_id not in self._claims_by_id:
+                raise RuntimeError("Claim not found")
+            return self._claims_by_id[claim_id]
         if self._claim is None:
             raise RuntimeError("no claim")
         return self._claim
@@ -229,6 +248,81 @@ def test_localizacao_pt_prioriza_substatus():
 
 
 @pytest.mark.asyncio
+async def test_build_meli_status_varias_mediacoes_vale_a_mais_recente():
+    # Caso real 2000018106772396 (07/09): a 1ª mediação (listada primeiro)
+    # fechou a favor do vendedor em 03/09; a 2ª fechou a favor do comprador em
+    # 06/09 com reembolso. Beneficiado tem que refletir a MAIS RECENTE.
+    client = FakeML(
+        order={
+            "status": "partially_refunded",
+            "shipping": {"id": 1},
+            "mediations": [{"id": 5569968766}, {"id": 5571329733}],
+        },
+        shipment={"status": "delivered", "substatus": "delivered"},
+        claims_by_id={
+            5569968766: {
+                "stage": "dispute",
+                "status": "closed",
+                "last_updated": "2026-09-03T12:00:00.000-04:00",
+                "resolution": {
+                    "benefited": ["respondent"],
+                    "date_created": "2026-09-03T12:00:00.000-04:00",
+                },
+            },
+            5571329733: {
+                "stage": "dispute",
+                "status": "closed",
+                "last_updated": "2026-09-06T09:00:00.000-04:00",
+                "resolution": {
+                    "benefited": ["complainant"],
+                    "date_created": "2026-09-06T09:00:00.000-04:00",
+                },
+            },
+        },
+        returns=None,
+    )
+    out = await logistica_meli.build_meli_status(client, "2000018106772396")
+    assert out["benefited"] == "complainant"
+    assert out["claim_status"] == "closed"
+    # Leu as duas — não decidiu pela ordem da lista.
+    assert sorted(client.claims_lidos) == [5569968766, 5571329733]
+
+
+@pytest.mark.asyncio
+async def test_build_meli_status_varias_mediacoes_ordem_invertida():
+    # Mesmo cenário com a mais recente listada PRIMEIRO: resultado idêntico.
+    client = FakeML(
+        order={"status": "paid", "shipping": {"id": 1}, "mediations": [{"id": 2}, {"id": 1}]},
+        shipment={"status": "delivered", "substatus": "delivered"},
+        claims_by_id={
+            1: {
+                "status": "closed",
+                "resolution": {"benefited": ["respondent"], "date_created": "2026-09-01T00:00:00Z"},
+            },
+            2: {
+                "status": "closed",
+                "resolution": {"benefited": ["complainant"], "date_created": "2026-09-06T00:00:00Z"},
+            },
+        },
+    )
+    out = await logistica_meli.build_meli_status(client, "1")
+    assert out["benefited"] == "complainant"
+
+
+@pytest.mark.asyncio
+async def test_build_meli_status_mediacao_com_falha_nao_derruba_as_outras():
+    # Uma das mediações não pôde ser lida (404) — usa a que leu.
+    client = FakeML(
+        order={"status": "paid", "shipping": {"id": 1}, "mediations": [{"id": 404}, {"id": 2}]},
+        shipment={"status": "delivered", "substatus": "delivered"},
+        claims_by_id={2: {"status": "closed", "resolution": {"benefited": ["complainant"]}}},
+    )
+    out = await logistica_meli.build_meli_status(client, "1")
+    assert out["benefited"] == "complainant"
+    assert out["claim_status"] == "closed"
+
+
+@pytest.mark.asyncio
 async def test_build_meli_status_sem_reclamacao():
     # Pedido pago/enviado sem mediação: só pedido + envio; claim/returns fora.
     client = FakeML(
@@ -373,9 +467,10 @@ def test_respondent_actions_extrai_do_player():
 class FakeChamadoML:
     """Client que registra as chamadas de chamado (open-dispute/send-message)."""
 
-    def __init__(self, order, claim):
+    def __init__(self, order, claim, claims_by_id=None):
         self._order = order
         self._claim = claim
+        self._claims_by_id = claims_by_id
         self.disputed: list = []
         self.messages: list = []
 
@@ -386,6 +481,8 @@ class FakeChamadoML:
         raise RuntimeError("no pack")
 
     async def get_claim(self, claim_id):
+        if self._claims_by_id is not None:
+            return self._claims_by_id[claim_id]
         return self._claim
 
     async def open_claim_dispute(self, claim_id):
@@ -446,6 +543,33 @@ async def test_enviar_chamado_ja_em_mediacao_nao_reabre(monkeypatch):
     assert cid == "5"
     assert fake.disputed == []  # já podia falar com o mediador → não reabre
     assert fake.messages == [(5, "msg", "mediator")]
+
+
+@pytest.mark.asyncio
+async def test_enviar_chamado_usa_a_mediacao_mais_recente(monkeypatch):
+    # 1ª mediação (listada primeiro) já fechada; a 2ª, mais nova, está aberta:
+    # a mensagem tem que ir pra 2ª — antes dava "reclamação encerrada".
+    fake = FakeChamadoML(
+        order={"mediations": [{"id": 1}, {"id": 2}]},
+        claim=None,
+        claims_by_id={
+            1: {"status": "closed", "last_updated": "2026-09-03T00:00:00.000-04:00", "players": []},
+            2: {
+                "status": "opened",
+                "last_updated": "2026-09-06T00:00:00.000-04:00",
+                "players": [
+                    {
+                        "role": "respondent",
+                        "available_actions": [{"action": "send_message_to_mediator"}],
+                    }
+                ],
+            },
+        },
+    )
+    _patch_ml(monkeypatch, fake)
+    cid = await logistica_meli.enviar_chamado_for_row(None, _ml_row(), "msg")
+    assert cid == "2"
+    assert fake.messages == [(2, "msg", "mediator")]
 
 
 @pytest.mark.asyncio

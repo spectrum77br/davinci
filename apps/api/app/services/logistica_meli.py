@@ -168,6 +168,47 @@ async def _fetch_order(client: MercadoLivreClient, order_id: str) -> dict:
     return await client.get_order(str(real_ids[0]))
 
 
+def _claim_momento(claim: dict) -> str:
+    """Instante que ordena um claim: a data da RESOLUÇÃO (quando fechou) vale
+    mais que a última mexida, que vale mais que a abertura. Strings ISO do ML
+    comparam bem como texto; vazio fica no fim."""
+    res = claim.get("resolution") or {}
+    momento = res.get("date_created") or claim.get("last_updated") or claim.get("date_created")
+    return str(momento or "")
+
+
+async def _claim_mais_recente(
+    client: MercadoLivreClient, order: dict, order_id: str
+) -> tuple[Any, dict]:
+    """Entre as mediações do pedido, a mais RECENTE (pela resolução/última
+    mexida). Devolve (claim_id, claim); (None, {}) se não há mediação; e
+    (id, {}) se a única não pôde ser lida. Uma falha numa das leituras não
+    derruba as outras — fica sem aquela."""
+    ids = _mediation_ids(order)
+    if not ids:
+        return None, {}
+    lidos: list[tuple[Any, dict]] = []
+    for cid in ids:
+        try:
+            lidos.append((cid, await client.get_claim(cid)))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "logistica_meli_claim_failed", order_id=order_id, claim_id=cid, err=str(e)[:200]
+            )
+    if not lidos:
+        return ids[0], {}
+    cid, claim = max(lidos, key=lambda par: _claim_momento(par[1]))
+    if len(lidos) > 1:
+        logger.info(
+            "logistica_meli_varias_mediacoes",
+            order_id=order_id,
+            total=len(ids),
+            escolhida=cid,
+            benefited=(claim.get("resolution") or {}).get("benefited"),
+        )
+    return cid, claim
+
+
 def _mediation_ids(order: dict) -> list[Any]:
     """Ids das reclamações/mediações do pedido (`order.mediations[].id`, na
     ordem em que o ML lista; aceita item cru = id). Vazio = nunca abriu caso
@@ -274,15 +315,15 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
                 datas, "ship_status", order.get("last_updated"), logistica_datas.FONTE_APROX
             )
 
-    # Reclamação/mediação — o id vem em order.mediations[].id (ML só lista
-    # quando abriu um caso de pós-venda). Aqui vale o primeiro.
-    claim_id = next(iter(_mediation_ids(order)), None)
+    # Reclamação/mediação — os ids vêm em order.mediations[].id (ML só lista
+    # quando abriu caso de pós-venda). Um pedido pode ter MAIS DE UMA: o
+    # 2000018106772396 (Eduardo, 07/09) teve a 1ª fechada a favor do vendedor
+    # em 03/09 e a 2ª a favor do comprador em 06/09, com reembolso — e o
+    # código pegava "o primeiro", mostrando Beneficiado = Vendedor quando o
+    # ML já tinha devolvido R$ 2.152 ao cliente. Vale a mais RECENTE: é o
+    # desfecho que a tela do ML mostra e o que o dinheiro seguiu.
+    claim_id, claim = await _claim_mais_recente(client, order, order_id)
     if claim_id:
-        try:
-            claim = await client.get_claim(claim_id)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("logistica_meli_claim_failed", order_id=order_id, err=str(e)[:200])
-            claim = {}
         # A reclamação só datou ela inteira (last_updated) — vale pros 3 campos
         # que saem dela como estimativa.
         claim_em = claim.get("last_updated") or claim.get("date_created")
@@ -475,18 +516,12 @@ async def enviar_chamado_for_row(session: AsyncSession, row: Logistica, message:
     client = _build_ml_client(session, integ)
 
     order = await _fetch_order(client, order_id)
-    claim_id = next(
-        (
-            m["id"]
-            for m in (order.get("mediations") or [])
-            if isinstance(m, dict) and m.get("id")
-        ),
-        None,
-    )
+    # Mais de uma mediação: fala na mais recente (a 1ª pode já estar fechada).
+    claim_id, claim = await _claim_mais_recente(client, order, order_id)
     if not claim_id:
         raise MeliEnrichError("logistica_sem_reclamacao")
-
-    claim = await client.get_claim(claim_id)
+    if not claim:
+        claim = await client.get_claim(claim_id)  # sobe o erro cru do ML
     actions = _respondent_actions(claim)
     if (claim.get("status") or "").lower() == "closed" or not actions:
         raise MeliEnrichError("logistica_reclamacao_encerrada")
