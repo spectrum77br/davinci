@@ -722,12 +722,15 @@ async def agent_registrar(
             canal="robo",
             monitoramento=body.monitoramento,
             observacao=body.observacao,
+            # Data do chamado = HOJE (quando o robô abriu). Antes ficava vazia e
+            # `preencher_do_pedido` punha a data da VENDA (08/09: chamado novo da
+            # Marquezini com data 10/08 afundava na lista, ordenada por data —
+            # "só não gravou no davinci em chamados").
+            data=datetime.now(svc.SAO_PAULO).date(),
         )
         await svc.preencher_do_pedido(session, ch)
         if ch.alterar_status_bling is None:
             ch.alterar_status_bling = svc.STATUS_ABERTURA_POR_ORIGEM.get(ch.origem)
-        if ch.data is None:
-            ch.data = datetime.now(svc.SAO_PAULO).date()
         session.add(ch)
         await session.flush()
         session.add(
