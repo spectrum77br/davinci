@@ -11,8 +11,9 @@ Dois lados:
     igual ao webhook do 17track). Fala o protocolo MCP "Streamable HTTP"
     (JSON-RPC 2.0 por POST, resposta JSON simples; GET => 405 porque não
     abrimos stream; DELETE => fim de sessão, sem estado aqui). Só o
-    necessário: initialize, ping, tools/list, tools/call. Com freios: corpo
-    até 64 KB, lote até 5 mensagens, 30 chamadas de ferramenta por minuto.
+    necessário: initialize, ping, tools/list, tools/call (criar, listar,
+    concluir). Com freios: corpo até 64 KB, lote até 5 mensagens, 30 chamadas
+    de ferramenta por minuto.
 
 O token não vai pros access logs: `mascarar_token_no_access_log` (main.py)
 troca o segmento por *** e o Caddy tem filtro equivalente.
@@ -56,7 +57,9 @@ PROTOCOLOS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 INSTRUCOES = (
     "Você está conectado ao DaVinci, o sistema interno da empresa. Use `criar_tarefa` "
     "sempre que o usuário pedir para anotar/registrar/criar uma tarefa — inclusive quando "
-    "ele ditar por áudio. Confirme ao usuário o que foi criado com o texto devolvido."
+    "ele ditar por áudio; `listar_tarefas` quando perguntar o que está pendente ou o que "
+    "mandou; `concluir_tarefa` quando disser que terminou algo (confirme qual antes). "
+    "Responda sempre com o texto devolvido pela ferramenta."
 )
 MAX_CORPO_BYTES = 64 * 1024
 MAX_LOTE = 5
@@ -270,8 +273,10 @@ async def _chamar_ferramenta(
 ) -> dict[str, Any]:
     nome = params.get("name")
     args = params.get("arguments") or {}
-    if nome != claude_tarefas.TOOL_CRIAR_TAREFA["name"]:
+    ferramenta = claude_tarefas.FERRAMENTAS.get(str(nome))
+    if ferramenta is None:
         return _rpc_error(id_, -32602, f"ferramenta desconhecida: {nome}")
+    _schema, executar = ferramenta
     if not isinstance(args, dict):
         return _rpc_error(id_, -32602, "`arguments` precisa ser um objeto")
     try:
@@ -291,7 +296,7 @@ async def _chamar_ferramenta(
     except Exception as e:  # noqa: BLE001 — Redis fora do ar não bloqueia o chefe
         logger.warning("claude_mcp_rate_limit_indisponivel", err=str(e)[:120])
     try:
-        texto = await claude_tarefas.criar_tarefa(session, dono=dono, args=args)
+        texto = await executar(session, dono=dono, args=args)
         conector.ultimo_erro = None
         await session.commit()
         return _rpc_result(id_, _texto(texto))
@@ -308,7 +313,7 @@ async def _chamar_ferramenta(
         return _rpc_result(
             id_,
             _texto(
-                "O DaVinci não conseguiu criar a tarefa agora. Tente de novo em instantes.",
+                "O DaVinci não conseguiu atender agora. Tente de novo em instantes.",
                 erro=True,
             ),
         )
@@ -344,7 +349,9 @@ async def _tratar(
     if metodo == "ping":
         return _rpc_result(id_, {})
     if metodo == "tools/list":
-        return _rpc_result(id_, {"tools": [claude_tarefas.TOOL_CRIAR_TAREFA]})
+        return _rpc_result(
+            id_, {"tools": [schema for schema, _fn in claude_tarefas.FERRAMENTAS.values()]}
+        )
     if metodo == "tools/call":
         return await _chamar_ferramenta(session, conector, dono, id_, params)
     if metodo in ("resources/list", "prompts/list"):

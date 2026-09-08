@@ -107,7 +107,7 @@ async def test_handshake_e_lista_de_ferramentas(
 
     r = await client.post(url, json=_rpc(2, "tools/list"))
     tools = r.json()["result"]["tools"]
-    assert [t["name"] for t in tools] == ["criar_tarefa"]
+    assert [t["name"] for t in tools] == ["criar_tarefa", "listar_tarefas", "concluir_tarefa"]
     assert tools[0]["inputSchema"]["required"] == ["descricao"]
     assert tools[0]["annotations"]["destructiveHint"] is False
 
@@ -345,3 +345,94 @@ def test_mascara_token_no_access_log():
     for f in logging.getLogger("uvicorn.access").filters:
         f.filter(rec)
     assert rec.args[2] == "/api/claude-mcp/***/mcp"
+
+
+# ---- listar / concluir ----------------------------------------------------------
+
+
+def _tool(id_, nome, **args):
+    return _rpc(id_, "tools/call", {"name": nome, "arguments": args})
+
+
+@pytest.mark.asyncio
+async def test_lista_pendentes_e_conclui_pelo_codigo(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as, sem_alerta
+):
+    _admin, _dono, token, _ = await _conector(client, db, make_user, auth_as)
+    url = f"/api/claude-mcp/{token}/mcp"
+    for d in ("Ligar para o fornecedor", "Conferir estoque das malas"):
+        assert (await client.post(url, json=_call(1, descricao=d))).json()["result"][
+            "isError"
+        ] is False
+
+    r = await client.post(url, json=_rpc(2, "tools/list"))
+    assert [t["name"] for t in r.json()["result"]["tools"]] == [
+        "criar_tarefa",
+        "listar_tarefas",
+        "concluir_tarefa",
+    ]
+
+    r = await client.post(url, json=_tool(3, "listar_tarefas"))
+    texto = r.json()["result"]["content"][0]["text"]
+    assert texto.startswith("Tarefas pendentes (2)") and "[" in texto and "resp.: Chefe" in texto
+    codigo = texto.split("[")[1].split("]")[0]
+    assert len(codigo) == 8
+
+    r = await client.post(url, json=_tool(4, "concluir_tarefa", codigo=codigo))
+    res = r.json()["result"]
+    assert res["isError"] is False and "Tarefa concluída no DaVinci" in res["content"][0]["text"]
+    pend = (await db.execute(select(Tarefa).where(Tarefa.data_conclusao.is_(None)))).scalars().all()
+    assert len(pend) == 1
+
+    r = await client.post(url, json=_tool(5, "listar_tarefas", filtro="concluidas"))
+    assert "Tarefas concluídas (1)" in r.json()["result"]["content"][0]["text"]
+    r = await client.post(url, json=_tool(6, "listar_tarefas", so_minhas=True))
+    assert "Tarefas pendentes (1)" in r.json()["result"]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_concluir_por_trecho_ambiguo_pergunta(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as, sem_alerta
+):
+    _admin, _dono, token, _ = await _conector(client, db, make_user, auth_as)
+    url = f"/api/claude-mcp/{token}/mcp"
+    for d in ("Pagar boleto da luz", "Pagar boleto da água"):
+        await client.post(url, json=_call(1, descricao=d))
+    r = await client.post(url, json=_tool(2, "concluir_tarefa", descricao="pagar boleto"))
+    res = r.json()["result"]
+    assert res["isError"] is True and "Mais de uma tarefa" in res["content"][0]["text"]
+    r = await client.post(url, json=_tool(3, "concluir_tarefa", descricao="boleto da agua"))
+    assert r.json()["result"]["isError"] is False
+    r = await client.post(url, json=_tool(4, "concluir_tarefa", descricao="nada a ver"))
+    assert r.json()["result"]["isError"] is True
+
+
+@pytest.mark.asyncio
+async def test_usuario_comum_lista_e_conclui_so_as_suas(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as, sem_alerta
+):
+    admin, dono, token, _ = await _conector(client, db, make_user, auth_as, role=UserRole.USER)
+    url = f"/api/claude-mcp/{token}/mcp"
+    # Tarefa de OUTRA pessoa, criada pelo admin.
+    outro = await _usuario(db, make_user, "outro@davinci-test.com", "Outro")
+    from datetime import date
+
+    db.add(
+        Tarefa(
+            responsavel_id=outro.id,
+            data_inicio=date.today(),
+            tarefa="Segredo do outro",
+            created_by=admin.id,
+        )
+    )
+    await db.commit()
+    await client.post(url, json=_call(1, descricao="Minha tarefa"))
+
+    r = await client.post(url, json=_tool(2, "listar_tarefas", filtro="todas"))
+    texto = r.json()["result"]["content"][0]["text"]
+    assert "Minha tarefa" in texto and "Segredo" not in texto
+    r = await client.post(url, json=_tool(3, "concluir_tarefa", descricao="Segredo"))
+    assert r.json()["result"]["isError"] is True
+    assert (
+        await db.execute(select(Tarefa).where(Tarefa.tarefa == "Segredo do outro"))
+    ).scalar_one().data_conclusao is None

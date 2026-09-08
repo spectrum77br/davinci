@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -294,3 +294,202 @@ async def criar_tarefa(session: AsyncSession, *, dono: User, args: dict[str, Any
     else:
         linhas.append(f"A tarefa foi gravada, mas não consegui avisar {quem} agora.")
     return "\n".join(linhas)
+
+
+# ---- listar / concluir (Eduardo, 08/09: "perguntar sobre as tarefas que enviei") -----
+
+TOOL_LISTAR_TAREFAS: dict[str, Any] = {
+    "name": "listar_tarefas",
+    "title": "Listar tarefas do DaVinci",
+    "description": (
+        "Lista tarefas da aba Tarefas do DaVinci. Use quando o usuário perguntar quais "
+        "tarefas existem, o que está pendente, o que ele mandou/criou, ou as tarefas de "
+        "alguém. Por padrão vem só as PENDENTES; `filtro` pode ser 'pendentes', "
+        "'concluidas' ou 'todas'. Cada linha traz um código curto entre colchetes — use "
+        "esse código em `concluir_tarefa`. Administrador vê tudo; usuário comum só as "
+        "próprias."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "filtro": {
+                "type": "string",
+                "enum": ["pendentes", "concluidas", "todas"],
+                "description": "Quais tarefas mostrar (padrão: pendentes).",
+            },
+            "responsavel": {
+                "type": "string",
+                "description": "Nome da pessoa, só se o usuário pediu as tarefas de alguém.",
+            },
+            "so_minhas": {
+                "type": "boolean",
+                "description": (
+                    "true = só as tarefas que o próprio usuário criou (ex.: 'as que eu mandei')."
+                ),
+            },
+            "dias": {
+                "type": "integer",
+                "description": "Só tarefas iniciadas nos últimos N dias (padrão: sem limite).",
+            },
+        },
+    },
+    "annotations": {
+        "title": "Listar tarefas do DaVinci",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+}
+
+TOOL_CONCLUIR_TAREFA: dict[str, Any] = {
+    "name": "concluir_tarefa",
+    "title": "Marcar tarefa como concluída no DaVinci",
+    "description": (
+        "Marca uma tarefa como concluída (data de conclusão = hoje, ou a data informada). "
+        "Passe o código curto que veio em `listar_tarefas` em `codigo`, ou um trecho da "
+        "descrição em `descricao`. Se houver mais de uma tarefa parecida, a resposta lista "
+        "as opções — pergunte ao usuário e chame de novo com o código. Confirme com o "
+        "usuário qual tarefa é antes de concluir; a ação pode ser desfeita na tela."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "codigo": {"type": "string", "description": "Código curto da tarefa (8 letras)."},
+            "descricao": {
+                "type": "string",
+                "description": "Trecho da descrição, quando não se tem o código.",
+            },
+            "data_conclusao": {
+                "type": "string",
+                "description": "Data da conclusão em AAAA-MM-DD (padrão: hoje).",
+            },
+        },
+    },
+    "annotations": {
+        "title": "Concluir tarefa no DaVinci",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+}
+
+MAX_LISTA = 25
+
+
+def _codigo(t: Tarefa) -> str:
+    return str(t.id)[:8]
+
+
+def _linha_tarefa(t: Tarefa, nomes: dict[Any, str]) -> str:
+    quem = nomes.get(t.responsavel_id, "?")
+    partes = [
+        f"[{_codigo(t)}] {t.tarefa}",
+        f"resp.: {quem}",
+        f"início {t.data_inicio.strftime('%d/%m')}",
+    ]
+    if t.data_conclusao:
+        partes.append(f"concluída {t.data_conclusao.strftime('%d/%m')}")
+    obs = (t.observacao or "").replace(" · Criada pelo Claude (áudio/chat)", "").strip(" ·")
+    if obs:
+        partes.append(obs[:120])
+    return " — ".join(partes)
+
+
+async def _nomes_usuarios(session: AsyncSession) -> dict[Any, str]:
+    rows = (await session.execute(select(User))).scalars().all()
+    return {u.id: (u.name or u.email) for u in rows}
+
+
+async def listar_tarefas(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
+    filtro = str(args.get("filtro") or "pendentes").strip().lower()
+    if filtro not in ("pendentes", "concluidas", "todas"):
+        raise TarefaInvalidaError("`filtro` deve ser 'pendentes', 'concluidas' ou 'todas'.")
+    stmt = select(Tarefa)
+    if dono.role != UserRole.ADMIN:
+        stmt = stmt.where(Tarefa.responsavel_id == dono.id)
+    else:
+        alvo = _texto(args.get("responsavel"), "responsavel")
+        if alvo:
+            pessoa = await _resolver_responsavel(session, alvo, dono)
+            stmt = stmt.where(Tarefa.responsavel_id == pessoa.id)
+    if args.get("so_minhas"):
+        stmt = stmt.where(Tarefa.created_by == dono.id)
+    if filtro == "pendentes":
+        stmt = stmt.where(Tarefa.data_conclusao.is_(None))
+    elif filtro == "concluidas":
+        stmt = stmt.where(Tarefa.data_conclusao.is_not(None))
+    dias = args.get("dias")
+    if isinstance(dias, int) and dias > 0:
+        stmt = stmt.where(
+            Tarefa.data_inicio >= datetime.now(SAO_PAULO).date() - timedelta(days=dias)
+        )
+    stmt = stmt.order_by(
+        Tarefa.data_conclusao.is_not(None), Tarefa.data_inicio.desc(), Tarefa.created_at.desc()
+    )
+    rows = list((await session.execute(stmt.limit(MAX_LISTA + 1))).scalars().all())
+    if not rows:
+        return {
+            "pendentes": "Nenhuma tarefa pendente.",
+            "concluidas": "Nenhuma tarefa concluída.",
+            "todas": "Nenhuma tarefa.",
+        }[filtro]
+    nomes = await _nomes_usuarios(session)
+    linhas = [_linha_tarefa(t, nomes) for t in rows[:MAX_LISTA]]
+    cab = {
+        "pendentes": "Tarefas pendentes",
+        "concluidas": "Tarefas concluídas",
+        "todas": "Tarefas",
+    }[filtro]
+    texto = f"{cab} ({min(len(rows), MAX_LISTA)}):\n" + "\n".join(linhas)
+    if len(rows) > MAX_LISTA:
+        texto += "\n… e mais. Peça um filtro (pessoa, período) para ver o resto."
+    return texto
+
+
+async def concluir_tarefa(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
+    codigo = _texto(args.get("codigo"), "codigo").lower()
+    trecho = _texto(args.get("descricao"), "descricao")
+    if not codigo and not trecho:
+        raise TarefaInvalidaError(
+            "Informe o código da tarefa (de `listar_tarefas`) ou um trecho da descrição."
+        )
+    stmt = select(Tarefa).where(Tarefa.data_conclusao.is_(None))
+    if dono.role != UserRole.ADMIN:
+        stmt = stmt.where(Tarefa.responsavel_id == dono.id)
+    pendentes = list((await session.execute(stmt)).scalars().all())
+    if codigo:
+        cands = [t for t in pendentes if str(t.id).lower().startswith(codigo)]
+    else:
+        alvo = _norm(trecho)
+        cands = [t for t in pendentes if alvo in _norm(t.tarefa)]
+    nomes = await _nomes_usuarios(session)
+    if not cands:
+        raise TarefaInvalidaError(
+            "Não achei tarefa pendente com isso. Use `listar_tarefas` e pegue o código "
+            "entre colchetes."
+        )
+    if len(cands) > 1:
+        opcoes = "\n".join(_linha_tarefa(t, nomes) for t in cands[:10])
+        raise TarefaInvalidaError(
+            "Mais de uma tarefa combina — pergunte ao usuário qual e chame de novo com o "
+            f"código:\n{opcoes}"
+        )
+    t = cands[0]
+    quando = _parse_prazo(args.get("data_conclusao")) or datetime.now(SAO_PAULO).date()
+    t.data_conclusao = quando
+    await session.commit()
+    logger.info("tarefa_concluida_via_claude", id=str(t.id), por=str(dono.id))
+    return (
+        f"Tarefa concluída no DaVinci em {quando.strftime('%d/%m/%Y')}: {t.tarefa} "
+        f"(resp.: {nomes.get(t.responsavel_id, '?')})."
+    )
+
+
+# Nome da ferramenta -> (schema anunciado no tools/list, função que executa).
+FERRAMENTAS: dict[str, tuple[dict[str, Any], Any]] = {
+    TOOL_CRIAR_TAREFA["name"]: (TOOL_CRIAR_TAREFA, criar_tarefa),
+    TOOL_LISTAR_TAREFAS["name"]: (TOOL_LISTAR_TAREFAS, listar_tarefas),
+    TOOL_CONCLUIR_TAREFA["name"]: (TOOL_CONCLUIR_TAREFA, concluir_tarefa),
+}
