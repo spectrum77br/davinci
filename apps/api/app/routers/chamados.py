@@ -1088,7 +1088,10 @@ async def agent_analise(
     analise.canal = "robo"
     session.add(analise)
     replica: ChamadoMensagem | None = None
-    reabrir = body.acao == "responder" or (body.acao == "humano" and body.reabrir)
+    # `esperar`+`reabrir`: o monitor antigo fechava o chamado na 1ª leitura —
+    # se o caso ainda está vivo no ML (só a abertura, ou fomos nós que falamos
+    # por último), o cérebro reabre pra aba mostrar que está em andamento.
+    reabrir = body.acao == "responder" or (body.acao in ("humano", "esperar") and body.reabrir)
     if reabrir and ch.resolvido:
         session.add(svc.marcar_resolvido(ch, False, autor_nome=AUTOR_CEREBRO))
     if body.acao == "responder":

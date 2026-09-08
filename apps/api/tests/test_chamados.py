@@ -770,3 +770,17 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
     assert (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()[
         "chamados"
     ] == []
+    # `esperar` + `reabrir`: chamado que o monitor antigo fechou cedo volta a
+    # ficar aberto (o caso segue vivo no ML)
+    re_ = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hdr,
+        json={
+            "chamado_id": cid,
+            "classe": "ja_respondido",
+            "resumo": "monitor fechou cedo",
+            "acao": "esperar",
+            "reabrir": True,
+        },
+    )
+    assert re_.status_code == 200 and re_.json()["resolvido"] is False
