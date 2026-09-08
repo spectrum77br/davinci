@@ -61,7 +61,9 @@ _SKU_MALA_KIT = "m100"
 # equivalentes do catálogo, mantendo o MESMO nº do pedido (unificação). A
 # cadeia começa no catálogo da conta e, se ele esgotar, segue no outro.
 _CADEIA_MALA = [_SKU_MALA, _SKU_MALA_KIT]
-_CADEIA_ELETRO = [_SKU_CELULAR, "e4", "e2", "e5"]
+# Catálogo real do Upseller (tela "Adicionar SKU", 08/09/2026): e3, E4 (maiúsculo),
+# e5, e6, m100, m200 — não existe "e2" nem "e4" minúsculo (o import é case-sensitive).
+_CADEIA_ELETRO = [_SKU_CELULAR, "E4", "e5", "e6"]
 
 # Contas (account_name, platform) cujo catálogo do Upseller é o de MALA.
 _CONTAS_CATALOGO_MALA = {("poofy", "shopee")}
@@ -276,8 +278,11 @@ def _linha(
     emitir_nfe: bool,
 ) -> list[object]:
     """Uma linha (item) do arquivo. Nome da Loja / Nº do Pedido / NF-e / SKU /
-    pagamento repetem em todo item; o bloco do destinatário só vai na 1ª linha
-    do pedido (o Upseller unifica pelo par Loja + Nº do Pedido)."""
+    pagamento repetem em todo item. O bloco do destinatário também repete em
+    TODAS as linhas do pedido: com "Necessita Emitir NF-e = Sim" o Upseller
+    trata os campos do destinatário como obrigatórios por linha (regra 5 do
+    modelo) e rejeita o pedido inteiro quando a 2ª linha vem vazia (08/09/2026,
+    pedidos 294746/294869/294963)."""
     row: list[object] = [""] * 44
     row[1] = _s(loja_nome)                       # Nome da Loja*
     row[2] = _s(pedido.numero)                   # Nº do Pedido da Loja*
@@ -328,13 +333,13 @@ def montar_xlsx(
         # Cada conta de marketplace é uma Loja registrada no Upseller; o arquivo
         # pode misturar lojas (a unificação é pelo par Loja + Nº do Pedido).
         loja_pedido = loja_upseller(pedido.loja) or loja_nome
-        for i, linha in enumerate(linhas):
+        for linha in linhas:
             ws.append(
                 _linha(
                     loja_pedido,
                     pedido,
                     linha,
-                    incluir_destinatario=(i == 0),
+                    incluir_destinatario=True,  # em todas as linhas (ver _linha)
                     emitir_nfe=emitir_nfe,
                 )
             )

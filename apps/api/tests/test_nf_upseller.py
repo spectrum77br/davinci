@@ -105,18 +105,22 @@ def test_xlsx_sem_observacao_deixa_coluna_vazia():
     assert not _c(ws, 4, "Observação")
 
 
-def test_xlsx_itens_seguintes_sem_destinatario():
+def test_xlsx_itens_seguintes_com_destinatario():
     xlsx = nf_upseller.montar_xlsx("Loja Avulsa", [_pedido()])
     ws = load_workbook(io.BytesIO(xlsx)).active
-    # 2ª linha do pedido (linha 5): SKU/qtd/preço presentes, destinatário vazio
+    # 2ª linha do pedido (linha 5): SKU/qtd/preço presentes E o destinatário
+    # repetido — com "Necessita Emitir NF-e = Sim" o Upseller exige os campos do
+    # destinatário em todas as linhas e rejeita o pedido com a 2ª linha vazia
+    # (08/09/2026, pedidos 294746/294869/294963).
     assert _c(ws, 5, "Nome da Loja*") == "Loja Avulsa"
     assert _c(ws, 5, "Nº do Pedido da Loja*") == "830001"
     assert _c(ws, 5, "SKU*") == "a002"
     assert _c(ws, 5, "Quantidade*") == 1
     assert _c(ws, 5, "Preço Unitário* ") == 50.0
-    # o bloco do destinatário só na 1ª linha (o Upseller unifica pelo par loja+pedido)
-    assert not _c(ws, 5, "Nome do Destinatário (Obrigatório para NF-e)")
-    assert not _c(ws, 5, "CEP (Obrigatório para NF-e)")
+    dest = "Nome do Destinatário (Obrigatório para NF-e)"
+    assert _c(ws, 5, dest) == _c(ws, 4, dest)
+    assert _c(ws, 5, "CEP (Obrigatório para NF-e)") == _c(ws, 4, "CEP (Obrigatório para NF-e)")
+    assert _c(ws, 5, "Método de Pagamento") == _c(ws, 4, "Método de Pagamento")
 
 
 def test_xlsx_nfe_nao_para_import_ml():
@@ -157,19 +161,20 @@ def test_sku_generico_por_categoria():
 
 def test_skus_para_itens_nao_repete_no_pedido():
     # O Upseller rejeita SKUs duplicados no mesmo pedido: os itens seguintes
-    # andam na cadeia da conta (e3→e4→e2→e5) e só então na do outro catálogo.
-    assert nf_upseller.skus_para_itens(["Celular", "Celular"]) == ["e3", "e4"]
-    assert nf_upseller.skus_para_itens(["Mala", "Mala"]) == ["e3", "e4"]
+    # andam na cadeia da conta (e3→E4→e5→e6 — catálogo real do Upseller, E4 em
+    # MAIÚSCULO e sem e2) e só então na do outro catálogo.
+    assert nf_upseller.skus_para_itens(["Celular", "Celular"]) == ["e3", "E4"]
+    assert nf_upseller.skus_para_itens(["Mala", "Mala"]) == ["e3", "E4"]
     # 1 item só: mantém o base.
     assert nf_upseller.skus_para_itens(["Celular"]) == ["e3"]
     assert nf_upseller.skus_para_itens([None]) == ["e3"]
-    assert nf_upseller.skus_para_itens(["Celular"] * 4) == ["e3", "e4", "e2", "e5"]
+    assert nf_upseller.skus_para_itens(["Celular"] * 4) == ["e3", "E4", "e5", "e6"]
     # 5º item: esgotada a cadeia da conta, segue na do outro catálogo.
     assert nf_upseller.skus_para_itens(["Celular"] * 6) == [
         "e3",
-        "e4",
-        "e2",
+        "E4",
         "e5",
+        "e6",
         "m200",
         "m100",
     ]
@@ -186,9 +191,9 @@ def test_skus_para_itens_catalogo_mala():
         "m200",
         "m100",
         "e3",
-        "e4",
-        "e2",
+        "E4",
         "e5",
+        "e6",
         "m200",
     ]
 
