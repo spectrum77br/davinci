@@ -101,7 +101,7 @@ async def _setup_schema():
         ),
         "alert_type": (
             "low_stock", "sync_failure", "listing_banned", "requires_review",
-            "daily_sync_completed", "token_expiring", "generic",
+            "daily_sync_completed", "token_expiring", "generic", "tarefa_atribuida",
         ),
         "alert_severity": ("info", "warning", "error", "success"),
         "listing_status": (
@@ -321,6 +321,8 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 
 _CLEANUP_TABLES = (
+    "claude_conectores",  # FK -> users: antes de users
+    "tarefas",  # FK RESTRICT -> users
     "import_kit_marks",
     "import_kit_bases",
     "import_kit_variations",

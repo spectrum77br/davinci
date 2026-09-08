@@ -12,6 +12,7 @@ Telegram message (richer body / custom header) should pass
 
 from __future__ import annotations
 
+import html
 from typing import Any
 from uuid import UUID
 
@@ -106,7 +107,9 @@ async def _push_telegram(
     from app.services.telegram import TelegramClient
 
     prefix = _SEVERITY_PREFIX.get(alert.severity, "")
-    head = f"{prefix} <b>{alert.title}</b>".strip()
-    body = head if not alert.message else f"{head}\n{alert.message}"
+    # O texto pode vir do usuário (tarefa ditada: "caixas < 10 kg"): sem
+    # escapar, o Telegram recusa a mensagem inteira (parse_mode=HTML).
+    head = f"{prefix} <b>{html.escape(alert.title)}</b>".strip()
+    body = head if not alert.message else f"{head}\n{html.escape(alert.message)}"
     tg = TelegramClient()
     await tg.safe_send(body, chat_id=us.telegram_chat_id)

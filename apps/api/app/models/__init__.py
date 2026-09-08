@@ -1,4 +1,5 @@
 from app.models.alert import Alert
+from app.models.claude_conector import ClaudeConector
 from app.models.audit import AuditFinding, AuditRun, AuditUpload
 from app.models.automacao import Automacao
 from app.models.auth_code import AuthCode
@@ -122,6 +123,7 @@ from app.models.vigia_importacao import VigiaImportacao
 
 __all__ = [
     "Alert",
+    "ClaudeConector",
     "AlertSeverity",
     "AlertType",
     "AuditDismissedSku",

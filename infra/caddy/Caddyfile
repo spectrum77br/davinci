@@ -34,7 +34,13 @@
 
 	log {
 		output stdout
-		format console
+		# O conector do Claude leva o token no path: mascara antes de logar.
+		format filter {
+			wrap console
+			fields {
+				request>uri regexp "claude-mcp/[0-9a-f]+" "claude-mcp/***"
+			}
+		}
 	}
 }
 

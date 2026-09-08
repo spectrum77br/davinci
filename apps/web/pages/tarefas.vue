@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { TABS_USUARIOS } from '~/lib/navGroups'
 import { computed, ref } from 'vue'
-import { Plus, RefreshCw, X, Trash2 } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Bot, Copy } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
 const { api } = useApi()
@@ -62,6 +62,96 @@ async function loadUsers() {
     // Non-fatal: the picker will just be empty.
     error.value = e?.data?.detail?.code || e?.message || 'erro ao carregar usuários'
   }
+}
+
+// ---- Conector do Claude (admin): link secreto que liga o chat do Claude de
+// uma pessoa ao DaVinci — ela dita a tarefa por áudio e cai aqui.
+type Conector = {
+  id: string
+  user_id: string
+  user_nome: string | null
+  nome: string
+  url: string | null
+  criado_por: string | null
+  created_at: string
+  last_used_at: string | null
+  revoked_at: string | null
+  ultimo_erro: string | null
+}
+const showConector = ref(false)
+const conectores = ref<Conector[]>([])
+const conectorErr = ref<string | null>(null)
+const conectorBusy = ref(false)
+const conectorDraft = ref({ user_id: '', nome: '' })
+const conectorNovoUrl = ref<string | null>(null)
+const conectorNovoId = ref<string | null>(null)
+const copiado = ref(false)
+
+async function openConector() {
+  showConector.value = true
+  conectorErr.value = null
+  conectorNovoUrl.value = null
+  await loadUsers()
+  await loadConectores()
+}
+
+async function loadConectores() {
+  try {
+    conectores.value = await api<Conector[]>('/api/claude-conector')
+  } catch (e: any) {
+    conectorErr.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
+
+async function criarConector() {
+  if (!conectorDraft.value.user_id || !conectorDraft.value.nome.trim()) return
+  conectorBusy.value = true
+  conectorErr.value = null
+  try {
+    const c = await api<Conector>('/api/claude-conector', {
+      method: 'POST',
+      body: { user_id: conectorDraft.value.user_id, nome: conectorDraft.value.nome.trim() },
+    })
+    conectorNovoUrl.value = c.url
+    conectorNovoId.value = c.id
+    conectorDraft.value = { user_id: '', nome: '' }
+    await loadConectores()
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    conectorErr.value = code === 'user_not_found' ? 'pessoa não encontrada ou inativa' : code || e?.message || 'erro'
+  } finally {
+    conectorBusy.value = false
+  }
+}
+
+async function revogarConector(c: Conector) {
+  if (!confirm(`Revogar o conector "${c.nome}" de ${c.user_nome || ''}? O Claude dessa pessoa para de criar tarefas.`)) return
+  conectorBusy.value = true
+  try {
+    await api(`/api/claude-conector/${c.id}`, { method: 'DELETE' })
+    if (conectorNovoId.value === c.id) conectorNovoUrl.value = null
+    await loadConectores()
+  } catch (e: any) {
+    conectorErr.value = e?.data?.detail?.code || e?.message || 'erro'
+  } finally {
+    conectorBusy.value = false
+  }
+}
+
+async function copiarUrl(url: string) {
+  try {
+    await navigator.clipboard.writeText(url)
+    copiado.value = true
+    setTimeout(() => (copiado.value = false), 2000)
+  } catch {
+    /* sem clipboard: o usuário seleciona o texto */
+  }
+}
+
+function fmtDataHora(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 await refresh()
@@ -212,6 +302,9 @@ function userLabel(u: UserOption) {
         <option value="all">Todos responsáveis</option>
         <option v-for="u in users" :key="u.id" :value="u.id">{{ u.name || u.email }}</option>
       </select>
+      <Button v-if="isAdmin" size="sm" variant="outline" @click="openConector">
+        <Bot class="size-4 mr-1" /> Conector do Claude
+      </Button>
       <Button v-if="isAdmin" size="sm" @click="openNew">
         <Plus class="size-4 mr-1" /> Nova tarefa
       </Button>
@@ -284,6 +377,99 @@ function userLabel(u: UserOption) {
       </div>
       <div v-if="!loading && filteredRows.length === 0" class="text-center text-sm text-muted-foreground py-6 border rounded-md">
         nenhuma tarefa
+      </div>
+    </div>
+
+    <!-- Conector do Claude (admin) -->
+    <div v-if="showConector" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="showConector = false">
+      <div class="bg-background border rounded-lg w-full max-w-2xl p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold flex items-center gap-2"><Bot class="size-5" /> Conector do Claude</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" @click="showConector = false">
+            <X class="size-4" />
+          </Button>
+        </div>
+        <div class="text-sm text-muted-foreground space-y-1">
+          <p>
+            Gera um link secreto que liga o Claude de uma pessoa ao DaVinci: ela dita a tarefa por áudio no
+            chat do Claude e a tarefa entra nesta aba, com ela como responsável (ou com quem ela citar).
+          </p>
+          <p>
+            <b>Como a pessoa ativa (uma vez, pelo computador):</b> claude.ai → <b>Personalizar → Conectores →
+            Adicionar conector personalizado</b> → colar o link → em autenticação escolher <b>"Nenhuma"</b>.
+            No celular o conector aparece sozinho depois; na conversa, ative-o no botão “+” → Conectores.
+            Na primeira tarefa o Claude pede permissão — tocar em <b>"Permitir sempre"</b>.
+            Em conta de empresa (Team/Enterprise), quem adiciona é o administrador da organização.
+          </p>
+          <p>O link aparece <b>uma única vez</b>, ao gerar. Se perder, revogue e gere outro.</p>
+        </div>
+
+        <div class="grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
+          <div>
+            <Label>Pessoa</Label>
+            <select v-model="conectorDraft.user_id" class="w-full h-9 rounded-md border bg-background px-2 text-sm">
+              <option value="">— selecione —</option>
+              <option v-for="u in users" :key="u.id" :value="u.id">{{ userLabel(u) }}</option>
+            </select>
+          </div>
+          <div>
+            <Label>Nome do conector</Label>
+            <Input v-model="conectorDraft.nome" placeholder="ex.: Celular do chefe" />
+          </div>
+          <Button :disabled="conectorBusy || !conectorDraft.user_id || !conectorDraft.nome.trim()" @click="criarConector">
+            Gerar link
+          </Button>
+        </div>
+
+        <div v-if="conectorNovoUrl" class="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 space-y-2">
+          <div class="text-sm font-medium">Link gerado — mande para a pessoa colar no app do Claude:</div>
+          <div class="flex items-center gap-2">
+            <code class="text-xs break-all flex-1 select-all">{{ conectorNovoUrl }}</code>
+            <Button size="sm" variant="outline" @click="copiarUrl(conectorNovoUrl)">
+              <Copy class="size-4 mr-1" /> {{ copiado ? 'copiado!' : 'copiar' }}
+            </Button>
+          </div>
+          <div class="text-xs text-muted-foreground">
+            Quem tiver este link consegue criar tarefas em nome dessa pessoa. Se vazar, revogue abaixo e gere outro.
+          </div>
+        </div>
+
+        <div v-if="conectorErr" class="text-sm text-red-500">erro: {{ conectorErr }}</div>
+
+        <div class="border rounded-md overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-muted/40 text-left">
+              <tr class="whitespace-nowrap">
+                <th class="px-3 py-2">Pessoa</th>
+                <th class="px-3 py-2">Conector</th>
+                <th class="px-3 py-2">Criado</th>
+                <th class="px-3 py-2">Por</th>
+                <th class="px-3 py-2">Último uso</th>
+                <th class="px-3 py-2">Situação</th>
+                <th class="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="c in conectores" :key="c.id" class="border-t" :class="c.revoked_at ? 'opacity-50' : ''">
+                <td class="px-3 py-2">{{ c.user_nome || '—' }}</td>
+                <td class="px-3 py-2">
+                  <div>{{ c.nome }}</div>
+                  <div v-if="c.ultimo_erro && !c.revoked_at" class="text-xs text-amber-600" :title="c.ultimo_erro">última resposta: {{ c.ultimo_erro.length > 80 ? c.ultimo_erro.slice(0, 80) + '…' : c.ultimo_erro }}</div>
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap">{{ fmtDataHora(c.created_at) }}</td>
+                <td class="px-3 py-2 whitespace-nowrap">{{ c.criado_por || '—' }}</td>
+                <td class="px-3 py-2 whitespace-nowrap">{{ fmtDataHora(c.last_used_at) }}</td>
+                <td class="px-3 py-2 whitespace-nowrap">{{ c.revoked_at ? 'revogado' : 'ativo' }}</td>
+                <td class="px-3 py-2 whitespace-nowrap text-right">
+                  <Button v-if="!c.revoked_at" size="sm" variant="ghost" class="text-red-500" :disabled="conectorBusy" @click="revogarConector(c)">revogar</Button>
+                </td>
+              </tr>
+              <tr v-if="conectores.length === 0">
+                <td colspan="7" class="px-3 py-4 text-center text-muted-foreground">nenhum conector ainda</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 

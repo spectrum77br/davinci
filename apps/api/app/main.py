@@ -42,6 +42,7 @@ from app.routers import pricing as pricing_router
 from app.routers import pricing_mega as pricing_mega_router
 from app.routers import products as products_router
 from app.routers import chamados as chamados_router
+from app.routers import claude_conector as claude_conector_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
 from app.routers import settings as settings_router
@@ -166,6 +167,8 @@ app.include_router(sync_router.router)
 app.include_router(webhooks_router.router)
 app.include_router(settings_router.router)
 app.include_router(alerts_router.router)
+app.include_router(claude_conector_router.router)
+claude_conector_router.mascarar_token_no_access_log()  # token do conector fora do access log
 app.include_router(listings_router.router)
 app.include_router(pricing_router.router)
 app.include_router(pricing_mega_router.router)
