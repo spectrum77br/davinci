@@ -641,3 +641,132 @@ async def test_monitoramento_fecha_quando_ml_encerra(client, make_user, auth_as,
     assert ch.resolvido is True
     hist = await client.get(f"/api/chamados/{cid}/mensagens")
     assert any("encerrado na plataforma" in h["texto"] for h in hist.json())
+
+
+async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, db, monkeypatch):
+    """Cérebro dos chamados (08/09): lista chamados robô com resposta do ML
+    ainda não analisada (mesmo já fechados pelo monitor antigo), registra a
+    análise, enfileira a réplica com os prints da abertura, e resolve com o
+    valor recuperado quando o ML devolve o dinheiro."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados/agent/registrar",
+        headers=hdr,
+        json={
+            "pedido_bling": "293413",
+            "origem": "margem",
+            "conta": "forpaper",
+            "pedido_marketplace": "2000013416886045",
+            "chamado": "479765445",
+            "chamado_url": "https://www.mercadolivre.com.br/cases/detail/479765445",
+            "mensagem": "Pedido 2000013416886045: frete anúncio R$ 32,48; frete cobrado R$ 54,08",
+            "status_envio": "enviada",
+        },
+    )
+    assert r.status_code == 200, r.text
+    cid = r.json()["chamado_id"]
+    up = await client.post(
+        "/api/chamados/agent/anexo",
+        headers=hdr,
+        data={"chamado_id": cid, "mensagem_id": r.json()["mensagem_id"]},
+        files={"file": ("venda_frete_cobrado.png", PNG, "image/png")},
+    )
+    assert up.status_code == 201, up.text
+
+    # sem resposta do ML → nada a analisar
+    vazio = await client.post("/api/chamados/agent/analisar", headers=hdr, json={})
+    assert vazio.status_code == 200 and vazio.json()["chamados"] == []
+
+    # monitor antigo grava a resposta e FECHA o chamado (comportamento velho)
+    rec = await client.post(
+        "/api/chamados/agent/recebida",
+        headers=hdr,
+        json={
+            "chamado": "479765445",
+            "texto": "Preciso que informe as medidas da embalagem final usada no envio.",
+            "resolvido": True,
+        },
+    )
+    assert rec.status_code == 200, rec.text
+    lst = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
+    assert len(lst["chamados"]) == 1
+    c = lst["chamados"][0]
+    assert c["chamado"] == "479765445" and c["resolvido"] is True and c["analises"] == 0
+    assert {m["tipo"] for m in c["mensagens"]} >= {"abertura", "resposta", "sistema"}
+    assert len(c["anexos_abertura"]) == 1
+    # outra plataforma não entra
+    outra = await client.post(
+        "/api/chamados/agent/analisar", headers=hdr, json={"plataforma": "shopee"}
+    )
+    assert outra.json()["chamados"] == []
+
+    # cérebro responde com as medidas, reanexando o print → reabre e enfileira pro Tuta
+    an = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hdr,
+        json={
+            "chamado_id": cid,
+            "classe": "pede_medidas",
+            "resumo": "ML pediu as medidas da embalagem",
+            "acao": "responder",
+            "texto_replica": "Medidas da embalagem final: 52×35×23 cm, 7 kg.",
+            "reanexar_abertura": True,
+        },
+    )
+    assert an.status_code == 200, an.text
+    assert an.json()["replica_id"] and an.json()["resolvido"] is False
+    lease = await client.post(
+        "/api/chamados/agent/lease", headers=hdr, json={"tipo": "responder"}
+    )
+    tarefas = lease.json()["tarefas"]
+    assert len(tarefas) == 1
+    assert tarefas[0]["texto"].startswith("Medidas") and len(tarefas[0]["anexos"]) == 1
+    # já analisada: some da lista até chegar resposta nova
+    assert (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()[
+        "chamados"
+    ] == []
+    # `responder` sem texto é recusado
+    ruim = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hdr,
+        json={"chamado_id": cid, "classe": "x", "resumo": "y", "acao": "responder"},
+    )
+    assert ruim.status_code == 422
+
+    # ML devolve o dinheiro → cérebro resolve com valor recuperado
+    await client.post(
+        "/api/chamados/agent/recebida",
+        headers=hdr,
+        json={"chamado": "479765445", "texto": "Te devolvemos R$21,60 pela diferença."},
+    )
+    lst2 = (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()
+    assert len(lst2["chamados"]) == 1
+    assert lst2["chamados"][0]["replicas_robo"] == 1 and lst2["chamados"][0]["analises"] == 1
+    fim = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hdr,
+        json={
+            "chamado_id": cid,
+            "classe": "credito",
+            "resumo": "ML devolveu R$ 21,60",
+            "acao": "resolver",
+            "valor_recuperado": "21.60",
+            "observacao": "crédito confirmado pelo ML",
+        },
+    )
+    assert fim.status_code == 200, fim.text
+    assert fim.json()["resolvido"] is True
+    ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
+    await db.refresh(ch)
+    assert float(ch.valor_recuperado) == 21.6
+    assert "crédito confirmado" in (ch.observacao or "")
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    assert sum(1 for h in hist if h["tipo"] == "analise") == 2
+    assert (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()[
+        "chamados"
+    ] == []

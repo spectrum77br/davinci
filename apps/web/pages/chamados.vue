@@ -1212,7 +1212,7 @@ async function reabrir(row: ChamadoRow) {
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
               <span class="font-mono">{{ fmtDateTime(m.created_at) }}</span>
               <span class="font-medium text-foreground">{{ m.autor_nome || (m.direcao === 'recebida' ? 'plataforma' : '—') }}</span>
-              <span>· {{ m.direcao === 'enviada' ? (m.tipo === 'replica_auto' ? 'réplica automática' : m.tipo === 'abertura' ? 'abertura na plataforma (devolução)' : 'réplica') : m.direcao }}</span>
+              <span>· {{ m.direcao === 'enviada' ? (m.tipo === 'replica_auto' ? 'réplica automática' : m.tipo === 'abertura' ? 'abertura na plataforma (devolução)' : 'réplica') : m.tipo === 'analise' ? 'análise do robô' : m.direcao }}</span>
               <span v-if="m.direcao !== 'sistema'" class="rounded px-1.5 py-0.5" :class="statusMensagemClass(m.status)">{{ m.status }}<template v-if="m.erro"> — {{ ERROS[m.erro] || m.erro }}</template></span>
               <span v-if="m.enviada_at" class="font-mono">enviada {{ fmtDateTime(m.enviada_at) }}</span>
             </div>

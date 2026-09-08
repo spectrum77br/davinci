@@ -45,8 +45,14 @@ from app.models import (
 )
 from app.models.chamado import CANAIS, ORIGENS
 from app.schemas.chamados import (
+    AgentAnalisarIn,
+    AgentAnalisarOut,
+    AgentAnaliseIn,
+    AgentAnaliseOut,
+    AgentChamadoAnaliseOut,
     AgentLeaseIn,
     AgentLeaseOut,
+    AgentMensagemOut,
     AgentRecebidaIn,
     AgentRecebidaOut,
     AgentRegistrarIn,
@@ -938,6 +944,200 @@ async def agent_recebida(
     await session.commit()
     await session.refresh(m)
     return AgentRecebidaOut(chamado_id=ch.id, mensagem_id=m.id, resolvido=ch.resolvido)
+
+
+# ---- cérebro dos chamados (robô do Tuta, 08/09) -----------------------------
+AUTOR_CEREBRO = "cérebro"
+_ACAO_TXT = {
+    "esperar": "aguardar a plataforma",
+    "responder": "réplica enfileirada pro robô",
+    "resolver": "chamado resolvido",
+    "humano": "precisa de humano",
+}
+_PLATAFORMA_ML = ("ml", "mercado livre", "mercadolivre", "meli")
+
+
+async def _anexos_da_abertura(session: AsyncSession, ch: Chamado) -> list[ChamadoAnexo]:
+    abertura_ids = (
+        await session.execute(
+            select(ChamadoMensagem.id).where(
+                ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.tipo == "abertura"
+            )
+        )
+    ).scalars().all()
+    cond = ChamadoAnexo.mensagem_id.is_(None)
+    if abertura_ids:
+        cond = or_(cond, ChamadoAnexo.mensagem_id.in_(abertura_ids))
+    return list(
+        (
+            await session.execute(
+                select(ChamadoAnexo)
+                .where(ChamadoAnexo.chamado_id == ch.id, cond)
+                .order_by(ChamadoAnexo.created_at)
+            )
+        ).scalars().all()
+    )
+
+
+@agent_router.post("/analisar", response_model=AgentAnalisarOut, dependencies=_agent_dep)
+async def agent_analisar(
+    body: AgentAnalisarIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AgentAnalisarOut:
+    """Chamados de canal robô cuja ÚLTIMA resposta da plataforma ainda não
+    passou pelo cérebro (nenhuma mensagem `analise`, ou a última é mais velha
+    que a última `recebida`). Inclui chamados já marcados resolvidos: o
+    monitor antigo fechava na primeira resposta mesmo quando o ML pedia
+    medidas/fotos (479765445, 08/09)."""
+    rec = (
+        select(
+            ChamadoMensagem.chamado_id, func.max(ChamadoMensagem.created_at).label("ult")
+        )
+        .where(ChamadoMensagem.direcao == "recebida")
+        .group_by(ChamadoMensagem.chamado_id)
+        .subquery()
+    )
+    ana = (
+        select(
+            ChamadoMensagem.chamado_id, func.max(ChamadoMensagem.created_at).label("ult")
+        )
+        .where(ChamadoMensagem.tipo == "analise")
+        .group_by(ChamadoMensagem.chamado_id)
+        .subquery()
+    )
+    conds = [Chamado.canal == "robo", or_(ana.c.ult.is_(None), rec.c.ult > ana.c.ult)]
+    if body.plataforma:
+        plat = body.plataforma.strip().lower()
+        aceitas = _PLATAFORMA_ML if plat == "ml" else (plat,)
+        conds.append(func.lower(func.coalesce(Chamado.plataforma, "")).in_(aceitas))
+    rows = (
+        await session.execute(
+            select(Chamado)
+            .join(rec, rec.c.chamado_id == Chamado.id)
+            .outerjoin(ana, ana.c.chamado_id == Chamado.id)
+            .where(*conds)
+            .order_by(rec.c.ult)
+            .limit(body.limite)
+        )
+    ).scalars().all()
+    out: list[AgentChamadoAnaliseOut] = []
+    for ch in rows:
+        msgs = (
+            await session.execute(
+                select(ChamadoMensagem)
+                .where(ChamadoMensagem.chamado_id == ch.id)
+                .order_by(ChamadoMensagem.created_at, ChamadoMensagem.id)
+            )
+        ).scalars().all()
+        anexos = await _anexos_da_abertura(session, ch)
+        out.append(
+            AgentChamadoAnaliseOut(
+                chamado_id=ch.id,
+                chamado=ch.chamado,
+                chamado_url=ch.chamado_url,
+                pedido_bling=ch.pedido_bling,
+                pedido_marketplace=ch.pedido_marketplace,
+                conta=ch.conta,
+                origem=ch.origem,
+                resolvido=ch.resolvido,
+                valor_recuperado=ch.valor_recuperado,
+                observacao=ch.observacao,
+                created_at=ch.created_at,
+                mensagens=[
+                    AgentMensagemOut(
+                        id=m.id,
+                        direcao=m.direcao,
+                        tipo=m.tipo,
+                        status=m.status,
+                        autor_nome=m.autor_nome,
+                        created_at=m.created_at,
+                        texto=m.texto,
+                    )
+                    for m in msgs
+                ],
+                anexos_abertura=[a.id for a in anexos],
+                replicas_robo=sum(
+                    1 for m in msgs if m.direcao == "enviada" and m.autor_nome == AUTOR_CEREBRO
+                ),
+                analises=sum(1 for m in msgs if m.tipo == "analise"),
+            )
+        )
+    return AgentAnalisarOut(chamados=out)
+
+
+@agent_router.post("/analise", response_model=AgentAnaliseOut, dependencies=_agent_dep)
+async def agent_analise(
+    body: AgentAnaliseIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AgentAnaliseOut:
+    """Decisão do cérebro sobre a última resposta: grava a `analise` no
+    histórico (é o marcador de "já vi") e executa a ação. `responder` reabre
+    o chamado se preciso (o lease só entrega réplica de chamado aberto) e
+    enfileira a réplica (canal robô, pendente) — com os prints da abertura
+    copiados quando `reanexar_abertura`. `resolver` fecha e grava o valor
+    recuperado. `humano` só anota (e reabre se `reabrir`)."""
+    ch = await _get(session, body.chamado_id)
+    analise = svc.nova_mensagem(
+        ch,
+        texto=f"Análise do robô [{body.classe}]: {body.resumo} → {_ACAO_TXT[body.acao]}",
+        tipo="analise",
+        direcao="sistema",
+        autor_nome=AUTOR_CEREBRO,
+        status="registrada",
+    )
+    analise.canal = "robo"
+    session.add(analise)
+    replica: ChamadoMensagem | None = None
+    reabrir = body.acao == "responder" or (body.acao == "humano" and body.reabrir)
+    if reabrir and ch.resolvido:
+        session.add(svc.marcar_resolvido(ch, False, autor_nome=AUTOR_CEREBRO))
+    if body.acao == "responder":
+        replica = svc.nova_mensagem(
+            ch,
+            texto=(body.texto_replica or "").strip(),
+            tipo="replica",
+            direcao="enviada",
+            autor_nome=AUTOR_CEREBRO,
+            status="pendente",
+        )
+        replica.canal = "robo"
+        session.add(replica)
+        await session.flush()
+        if body.reanexar_abertura:
+            for a in await _anexos_da_abertura(session, ch):
+                session.add(
+                    ChamadoAnexo(
+                        chamado_id=ch.id,
+                        mensagem_id=replica.id,
+                        filename=a.filename,
+                        content_type=a.content_type,
+                        size_bytes=a.size_bytes,
+                        blob=a.blob,
+                        created_by=a.created_by,
+                    )
+                )
+    if body.valor_recuperado is not None:
+        ch.valor_recuperado = body.valor_recuperado
+    if body.observacao:
+        atual = (ch.observacao or "").strip()
+        ch.observacao = f"{atual}\n{body.observacao}" if atual else body.observacao
+    if body.acao == "resolver" and not ch.resolvido:
+        session.add(svc.marcar_resolvido(ch, True, autor_nome=AUTOR_CEREBRO))
+    await session.commit()
+    await session.refresh(analise)
+    logger.info(
+        "chamado_agent_analise",
+        chamado_id=str(ch.id),
+        classe=body.classe,
+        acao=body.acao,
+        replica=str(replica.id) if replica else None,
+    )
+    return AgentAnaliseOut(
+        chamado_id=ch.id,
+        analise_id=analise.id,
+        replica_id=replica.id if replica else None,
+        resolvido=ch.resolvido,
+    )
 
 
 @agent_router.post(

@@ -325,3 +325,80 @@ class AgentRecebidaOut(BaseModel):
     chamado_id: UUID
     mensagem_id: UUID
     resolvido: bool
+
+
+class AgentAnalisarIn(BaseModel):
+    """Chamados de canal robô com resposta da plataforma ainda não analisada
+    pelo cérebro (última `recebida` mais nova que a última `analise`)."""
+
+    limite: int = Field(default=20, ge=1, le=100)
+    plataforma: str | None = "ml"
+
+
+class AgentMensagemOut(BaseModel):
+    id: UUID
+    direcao: str
+    tipo: str
+    status: str
+    autor_nome: str | None = None
+    created_at: datetime
+    texto: str
+
+
+class AgentChamadoAnaliseOut(BaseModel):
+    chamado_id: UUID
+    chamado: str | None = None
+    chamado_url: str | None = None
+    pedido_bling: str | None = None
+    pedido_marketplace: str | None = None
+    conta: str | None = None
+    origem: str
+    resolvido: bool
+    valor_recuperado: Decimal | None = None
+    observacao: str | None = None
+    created_at: datetime
+    mensagens: list[AgentMensagemOut]
+    # Prints capturados na abertura (e os sem mensagem) — o cérebro pode
+    # reanexá-los na réplica quando o ML pede "os comprovantes" de novo.
+    anexos_abertura: list[UUID] = []
+    replicas_robo: int = 0
+    analises: int = 0
+
+
+class AgentAnalisarOut(BaseModel):
+    chamados: list[AgentChamadoAnaliseOut]
+
+
+AcaoAnalise = Literal["esperar", "responder", "resolver", "humano"]
+
+
+class AgentAnaliseIn(BaseModel):
+    """Decisão do cérebro sobre a última resposta da plataforma: registra a
+    análise no histórico e executa a ação (enfileira réplica pro robô do
+    Tuta, resolve com valor recuperado, ou pede humano)."""
+
+    chamado_id: UUID
+    classe: str = Field(min_length=1, max_length=60)
+    resumo: str = Field(min_length=1, max_length=600)
+    acao: AcaoAnalise
+    texto_replica: str | None = None
+    reanexar_abertura: bool = False
+    valor_recuperado: Decimal | None = Field(default=None, ge=0)
+    observacao: str | None = None
+    # `humano` num chamado que o monitor antigo já tinha fechado: reabre.
+    reabrir: bool = False
+
+    _clean = field_validator("texto_replica", "observacao", mode="before")(_clean_optional_text)
+
+    @model_validator(mode="after")
+    def _replica_precisa_texto(self) -> "AgentAnaliseIn":
+        if self.acao == "responder" and not (self.texto_replica or "").strip():
+            raise ValueError("texto_replica é obrigatório quando acao=responder")
+        return self
+
+
+class AgentAnaliseOut(BaseModel):
+    chamado_id: UUID
+    analise_id: UUID
+    replica_id: UUID | None = None
+    resolvido: bool
