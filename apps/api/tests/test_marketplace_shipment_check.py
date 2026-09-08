@@ -716,3 +716,40 @@ async def test_amazon_sem_easyship_vale_o_order_status():
     # E order_status que não é Shipped nunca conta.
     cli = _amazon_cli("Unshipped", "PickedUp")
     assert await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000")) is None
+
+
+# ---- financeiro Amazon na hora do envio ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_envio_amazon_enfileira_financeiro(monkeypatch):
+    """A Amazon só publica as taxas depois que o pedido sai; quem descobre o
+    envio (este job) já pede o financeiro — senão a Margem espera dias pela
+    esteira de retry (Eduardo 08/09, kia 294149/294343 presos)."""
+    from app import worker_pool
+    from app.services import marketplace_shipment_check as svc
+
+    enfileirados: list[tuple] = []
+
+    class _Pool:
+        async def enqueue_job(self, fn, *args):
+            enfileirados.append((fn, *args))
+
+    async def _pool():
+        return _Pool()
+
+    monkeypatch.setattr(worker_pool, "get_arq_financials_pool", _pool)
+    await svc._enfileirar_financeiro_amazon(26783497989)
+    assert enfileirados == [("sync_marketplace_financials_for_order_run", 26783497989, "shipped")]
+
+
+@pytest.mark.asyncio
+async def test_envio_amazon_fila_fora_do_ar_nao_derruba(monkeypatch):
+    from app import worker_pool
+    from app.services import marketplace_shipment_check as svc
+
+    async def _boom():
+        raise RuntimeError("redis fora do ar")
+
+    monkeypatch.setattr(worker_pool, "get_arq_financials_pool", _boom)
+    await svc._enfileirar_financeiro_amazon(1)  # não levanta

@@ -475,6 +475,8 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
                     )
                 )
                 summary["local_updated"] += result.rowcount or 0
+                if integration.platform == IntegrationPlatform.AMAZON:
+                    await _enfileirar_financeiro_amazon(int(bling_id))
 
     # `situacoes` no log denuncia worker com imagem velha. Em 04/09 o
     # container do cron rodou 20h com o código anterior ao 912a6a6, cujo
@@ -487,6 +489,29 @@ async def run_check_marketplace_shipped_orders() -> dict[str, int]:
 
 
 # ─── candidate loading ─────────────────────────────────────────────
+
+
+async def _enfileirar_financeiro_amazon(bling_id: int) -> None:
+    """A Amazon só publica as taxas do pedido (Finances API) DEPOIS que ele
+    sai; antes disso o financeiro fica "not posted yet". A esteira de retry
+    espaça as tentativas (30min, 6h, 1d, 1d, 3d...) e desiste na 8ª, então a
+    Margem da kia ficava dias sem valor — ou pra sempre, quando o pedido
+    demorava a sair (Eduardo, 08/09: 294149 e 294343 presos com 21 e 10
+    tentativas enquanto a Amazon já tinha as taxas). Como este job é quem
+    descobre que o pedido saiu, ele mesmo pede o financeiro na hora. Falha
+    aqui não pode derrubar a varredura de envio."""
+    try:
+        from app.worker_pool import get_arq_financials_pool  # tardio: evita ciclo
+
+        pool = await get_arq_financials_pool()
+        await pool.enqueue_job(
+            "sync_marketplace_financials_for_order_run", int(bling_id), "shipped"
+        )
+        logger.info("shipment_check_financeiro_enfileirado", bling_id=bling_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "shipment_check_financeiro_enfileirar_falhou", bling_id=bling_id, err=str(e)[:200]
+        )
 
 
 async def _load_candidates(session: AsyncSession) -> list[BlingOrder]:
