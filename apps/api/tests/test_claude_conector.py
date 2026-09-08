@@ -143,7 +143,9 @@ async def test_cria_tarefa_para_si_mesmo(
     assert t.tarefa == "Ligar para o fornecedor da mala P7"
     assert t.observacao.startswith("Prazo: 12/09/2026") and "Claude" in t.observacao
     assert t.data_conclusao is None
-    assert sem_alerta == []  # pra si mesmo: sem aviso
+    # Pra si mesmo TAMBÉM avisa (confirmação de que o áudio virou tarefa).
+    assert len(sem_alerta) == 1 and sem_alerta[0]["user_id"] == dono.id
+    assert "Você foi avisado(a) no DaVinci" in texto
 
 
 @pytest.mark.asyncio

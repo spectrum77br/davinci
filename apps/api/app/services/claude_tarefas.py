@@ -11,8 +11,9 @@ Regras:
     só admin cria) — e nem fica sabendo quem mais existe.
   * data de início = hoje (Brasília). A tabela não tem coluna de prazo — o
     prazo falado vai pra Observação ("Prazo: dd/mm/aaaa").
-  * responsável diferente do criador recebe o mesmo aviso da tela (alerta +
-    Telegram). Tudo numa transação só: se o aviso falhar, a tarefa ainda é
+  * o responsável recebe o mesmo aviso da tela (alerta + Telegram) —
+    SEMPRE, inclusive quando é a própria pessoa (confirmação). Tudo numa
+    transação só: se o aviso falhar, a tarefa ainda é
     gravada e o texto diz que o aviso não saiu — nunca "tente de novo" com a
     tarefa já criada (duplicaria).
 """
@@ -245,9 +246,12 @@ async def criar_tarefa(session: AsyncSession, *, dono: User, args: dict[str, Any
     await session.flush()
 
     # Aviso na MESMA transação da tarefa: se falhar, a tarefa fica (e o texto
-    # avisa), em vez de "tente de novo" com a tarefa já gravada.
+    # avisa), em vez de "tente de novo" com a tarefa já gravada. Diferente da
+    # tela, avisa SEMPRE — inclusive quando é pra própria pessoa: Eduardo
+    # (08/09) testou ditando pra si e estranhou não chegar nada; aqui o aviso é
+    # a confirmação de que o áudio virou tarefa.
     avisou = False
-    if responsavel.id != dono.id:
+    if responsavel is not None:
         try:
             async with session.begin_nested():  # falha no aviso não desfaz a tarefa
                 await emit_alert(
@@ -281,10 +285,12 @@ async def criar_tarefa(session: AsyncSession, *, dono: User, args: dict[str, Any
     linhas.append(f"Início: {hoje.strftime('%d/%m/%Y')}")
     if prazo:
         linhas.append(f"Prazo: {prazo.strftime('%d/%m/%Y')} (na observação)")
-    if responsavel.id != dono.id:
+    if avisou:
         linhas.append(
-            f"{quem} foi avisado(a) no DaVinci."
-            if avisou
-            else f"A tarefa foi gravada, mas não consegui avisar {quem} agora."
+            "Você foi avisado(a) no DaVinci."
+            if responsavel.id == dono.id
+            else f"{quem} foi avisado(a) no DaVinci."
         )
+    else:
+        linhas.append(f"A tarefa foi gravada, mas não consegui avisar {quem} agora.")
     return "\n".join(linhas)
