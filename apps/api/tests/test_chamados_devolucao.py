@@ -70,6 +70,7 @@ class _FakeML:
     def __init__(self, *, acao: bool = True, claims: tuple[str, ...] = ("777",)):
         self.acao = acao
         self.claims = claims
+        self.fechado = False  # claim já encerrado pelo mediador (283344, 08/09)
         self.uploads: list[tuple[str, str, int, str]] = []
         self.reviews: list[tuple[str, str, str, list[str] | None]] = []
 
@@ -77,6 +78,24 @@ class _FakeML:
         return {"id": order_id, "mediations": [{"id": c} for c in self.claims]}
 
     async def get_claim(self, claim_id):
+        if str(claim_id) not in self.claims:
+            raise RuntimeError(f"404 claim {claim_id} not found")
+        if self.fechado:
+            return {
+                "id": claim_id,
+                "status": "closed",
+                "resolution": {
+                    "reason": "coverage_decision",
+                    "date_created": "2026-08-18T05:40:42.000-04:00",
+                    "benefited": ["complainant"],
+                    "closed_by": "mediator",
+                    "applied_coverage": True,
+                },
+                "players": [
+                    {"role": "respondent", "type": "seller", "available_actions": []},
+                    {"role": "complainant", "type": "buyer", "available_actions": []},
+                ],
+            }
         actions = ["return_review_ok", "return_review_fail"] if self.acao else ["return_review_ok"]
         return {
             "id": claim_id,
@@ -397,6 +416,7 @@ class _FakeTikTok:
         self.status = status
         self.quick = quick
         self.arb = ""
+        self.records: list[dict] = []
         self.uploads: list[tuple[str, int, str]] = []
         self.rejects: list[dict] = []
 
@@ -405,16 +425,17 @@ class _FakeTikTok:
             {
                 "order_id": order_ids[0], "return_id": "4042116781741081611",
                 "return_type": "RETURN_AND_REFUND", "return_status": self.status,
-                "is_quick_refund": self.quick, "arbitration_status": "",
+                "is_quick_refund": self.quick, "arbitration_status": self.arb,
                 "seller_next_action_response": [
                     {"action": "SELLER_RESPOND_RECEIVE_PACKAGE", "deadline": 1}
                 ] if self.status == "BUYER_SHIPPED_ITEM" else [],
                 "update_time": 10,
+                "refund_amount": {"currency": "BRL", "refund_total": "598.4"},
             }
         ]
 
     async def get_return_records(self, return_id, *, locale="pt-BR"):
-        return []
+        return list(self.records)
 
     async def get_reject_reasons(self, return_id, *, locale="pt-BR"):
         return [
@@ -958,15 +979,19 @@ class _FakeShopeeVencida(_FakeShopee):
     """Depois do return_seller_due_date a lista de motivos vem VAZIA (medido
     07/09 nos returns 2608280G472BFQH / 2608160F36ES2P5)."""
 
-    def __init__(self, *, due_passado: bool = True):
+    def __init__(self, *, due_passado: bool = True, contestada: bool = False):
         super().__init__()
         self.due_passado = due_passado
+        self.contestada = contestada  # disputa já feita à mão no Seller Center
 
     async def get_return_detail(self, return_sn):
         det = await super().get_return_detail(return_sn)
         det["seller_compensation"] = {"seller_compensation_status": ""}
         delta = timedelta(days=-1) if self.due_passado else timedelta(days=2)
         det["return_seller_due_date"] = int((datetime.now(UTC) + delta).timestamp())
+        if self.contestada:
+            det["dispute_reason"] = ["Received return products with physical damage"]
+            det["dispute_text_reason"] = ["Produto retornou com senha de uso do cliente"]
         return det
 
     async def get_return_dispute_reason(self, return_sn):
@@ -1090,3 +1115,137 @@ async def test_shopee_replica_manual_reabre_e_depois_so_registra(client, make_us
     assert rep2.json()["status"] == "registrada"
     assert rep2.json()["erro"] == "plataforma_sem_api_replica"
     assert len(fake.disputes) == 1
+
+
+async def _sistema(db, chamado_id) -> list[str]:
+    return list(
+        (
+            await db.execute(
+                select(ChamadoMensagem.texto)
+                .where(ChamadoMensagem.chamado_id == chamado_id, ChamadoMensagem.tipo == "sistema")
+                .order_by(ChamadoMensagem.created_at)
+            )
+        ).scalars().all()
+    )
+
+
+async def test_tiktok_caso_ja_encerrado_falha_de_vez_com_desfecho(client, make_user, auth_as, db, ml, monkeypatch):
+    """Medido 08/09 (290160/291050): devolução lançada tarde no DaVinci, o
+    pessoal já tinha recusado o pacote à mão e a TikTok já arbitrou. Antes
+    ficava "aguardando pacote (tenta a cada hora)" pra sempre."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTok(status="RETURN_OR_REFUND_REQUEST_COMPLETE")
+    fake.arb = "SUPPORT_BUYER"
+    fake.records = [
+        {"event": "ORDER_RETURN", "role": "BUYER", "create_time": 1787534019},
+        {"event": "SELLER_REJECT_RECEIVE", "role": "SELLER", "create_time": 1787928536,
+         "images": [{"url": "a"}, {"url": "b"}, {"url": "c"}], "note": "Cliente não sabe a senha"},
+    ]
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_tiktok_client_para", _c)
+    await _seed_pedido(db, user, numero="291050", numeroloja="585602525063710717",
+                       platform="tiktok", conta="barbosa", loja="79")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "barbosa", "pedido_bling": "291050", "pedido_marketplace": "585602525063710717",
+              "condicao_produto": "Novo", "motivo_devolucao": "Bloqueado"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "falhou"
+    assert r.json()["chamado_ml_erro"] == "tiktok_ja_recusada"
+    assert fake.rejects == []
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "291050"))).scalar_one()
+    hist = await _sistema(db, ch.id)
+    assert any(
+        "ENCERRADA na TikTok" in t and "COMPRADOR" in t and "3 foto(s)" in t
+        and "Cliente não sabe a senha" in t and "598.4" in t
+        for t in hist
+    ), hist
+    # cron não insiste: falhou não é pendente
+    s = await svc.processar_pendentes(db)
+    assert s["abertos"] == 0 and fake.rejects == []
+    # sem recusa na linha do tempo → código genérico de encerrada
+    fake2 = _FakeTikTok(status="RETURN_OR_REFUND_REQUEST_SUCCESS")
+
+    async def _c2(session, *a):
+        return fake2
+
+    monkeypatch.setattr(svc, "_tiktok_client_para", _c2)
+    await _seed_pedido(db, user, numero="291051", numeroloja="585602525063710718",
+                       platform="tiktok", conta="barbosa", loja="79")
+    r2 = await client.post(
+        "/api/devolutions",
+        json={"conta": "barbosa", "pedido_bling": "291051", "pedido_marketplace": "585602525063710718",
+              "condicao_produto": "Novo", "motivo_devolucao": "Bloqueado"},
+    )
+    assert r2.json()["chamado_ml_status"] == "falhou"
+    assert r2.json()["chamado_ml_erro"] == "tiktok_devolucao_encerrada"
+
+
+async def test_shopee_ja_contestada_a_mao_nao_e_prazo_vencido(client, make_user, auth_as, db, ml, monkeypatch):
+    """Medido 08/09 (290297/289967): `dispute_reason` preenchido com status
+    ACCEPTED = disputa feita no Seller Center; caía em "prazo venceu"."""
+    from app.models import DevolucaoRastreio
+
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeShopeeVencida(due_passado=True, contestada=True)
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(svc, "_shopee_client_para", _c)
+    await _seed_pedido(db, user, numero="289967", numeroloja="2608114J8V05YV",
+                       platform="shopee", conta="barbosa", loja="88")
+    db.add(DevolucaoRastreio(pedido_bling="289967", devolucao_id_auto="2608150DKSX55S5", fonte_auto="shopee"))
+    await db.commit()
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "barbosa", "pedido_bling": "289967", "pedido_marketplace": "2608114J8V05YV",
+              "condicao_produto": "Novo", "motivo_devolucao": "Bloqueado"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "falhou"
+    assert r.json()["chamado_ml_erro"] == "shopee_ja_contestada"
+    assert fake.disputes == []
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "289967"))).scalar_one()
+    hist = await _sistema(db, ch.id)
+    assert any("physical damage" in t and "senha de uso" in t for t in hist), hist
+
+
+async def test_ml_claim_encerrado_e_texto_manual_no_chamado(client, make_user, auth_as, db, ml):
+    """Medido 08/09 (283344): claim fechado pelo mediador em 18/08 e o campo
+    `chamado` com texto do operador ("aberto manual…") — o texto NÃO é claim id
+    e o encerrado falha de vez, com o desfecho no histórico."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    ml.fechado = True
+    await _seed_pedido(db, user, numero="283344", numeroloja="2000017099328204")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "283344", "pedido_marketplace": "2000017099328204",
+              "condicao_produto": "Novo", "motivo_devolucao": "Bloqueado"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "falhou"
+    assert r.json()["chamado_ml_erro"] == "ml_claim_encerrada"
+    assert ml.reviews == []
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "283344"))).scalar_one()
+    assert ch.chamado == "777"
+    hist = await _sistema(db, ch.id)
+    assert any("777" in t and "ENCERRADA" in t and "COMPRADOR" in t and "18/08" in t for t in hist), hist
+    # operador escreveu no campo chamado: não é claim id → resolve pelo pedido e preserva o texto
+    ch.chamado = "08/09 aberto manual chamado dentro da venda"
+    ml.fechado = False
+    ml.acao = True
+    await db.commit()
+    msg = await svc.disparar_por_id(db, ch.id)
+    await db.commit()
+    assert msg is not None and msg.status == "enviada", (msg.status, msg.erro)
+    assert ml.reviews[-1][0] == "ret-777"
+    await db.refresh(ch)
+    assert ch.chamado == "777"

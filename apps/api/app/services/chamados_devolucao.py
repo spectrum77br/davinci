@@ -583,14 +583,60 @@ async def garantir_chamado(session: AsyncSession, dev: Devolution) -> Chamado | 
     return ch
 
 
+def _fmt_brt(v: object) -> str:
+    """dd/mm HH:MM em São Paulo a partir de epoch (int/str) ou ISO 8601; "" se
+    não der pra ler."""
+    dt: datetime | None = None
+    if isinstance(v, datetime):
+        dt = v
+    elif isinstance(v, int | float) or (isinstance(v, str) and v.strip().isdigit()):
+        dt = _epoch(v)
+    elif isinstance(v, str) and v.strip():
+        try:
+            dt = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+        except ValueError:
+            dt = None
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m %H:%M")
+
+
+_ML_BENEFICIADO = {"complainant": "COMPRADOR", "respondent": "VENDEDOR"}
+
+
+def _texto_ml_encerrada(claim: dict) -> str:
+    res = claim.get("resolution") or {}
+    quem = ", ".join(
+        _ML_BENEFICIADO.get(str(b).lower(), str(b)) for b in (res.get("benefited") or [])
+    )
+    quando = _fmt_brt(res.get("date_created") or claim.get("last_updated"))
+    partes = [f"Reclamação {claim.get('id')} já ENCERRADA no Mercado Livre"]
+    if quando:
+        partes[0] += f" em {quando}"
+    if quem:
+        partes.append(f"decisão a favor do {quem}")
+    if res.get("closed_by"):
+        partes.append(f"fechada por {res['closed_by']}")
+    if res.get("applied_coverage"):
+        partes.append("cobertura do ML aplicada")
+    return " — ".join(partes) + ". Nada mais a abrir pela API."
+
+
 async def _resolver_claim_ml(
-    client: MercadoLivreClient, ch: Chamado, dev: Devolution
+    session: AsyncSession, client: MercadoLivreClient, ch: Chamado, dev: Devolution
 ) -> tuple[str, str]:
     """(claim_id, return_id) do caso em que o ML já liberou a revisão da
     devolução pro vendedor. Guarda o claim achado em `ch.chamado` mesmo quando
     a revisão ainda não está liberada (poupa chamadas na retentativa)."""
-    if (ch.chamado or "").strip():
-        claim_ids = [ch.chamado.strip()]
+    guardado = (ch.chamado or "").strip()
+    # `chamado` pode carregar texto digitado pelo operador ("08/09 aberto manual
+    # chamado dentro da venda", 283344) — só um id numérico serve como claim; o
+    # texto do operador é preservado.
+    pode_gravar = not guardado or guardado.isdigit()
+    if guardado.isdigit():
+        claim_ids = [guardado]
     else:
         pedido = (dev.pedido_marketplace or ch.pedido_marketplace or "").strip()
         if not pedido:
@@ -605,6 +651,7 @@ async def _resolver_claim_ml(
             raise _PendenteError("devolucao_sem_claim")
 
     com_return: tuple[str, str] | None = None
+    fechado: dict | None = None
     for cid in claim_ids:
         claim = await client.get_claim(cid) or {}
         try:
@@ -617,11 +664,22 @@ async def _resolver_claim_ml(
             continue
         if ACAO_REVISAO in _seller_actions(claim):
             return cid, rid
-        if (claim.get("status") or "").lower() != "closed" and com_return is None:
+        if (claim.get("status") or "").lower() == "closed":
+            fechado = dict(claim, id=claim.get("id") or cid)
+        elif com_return is None:
             com_return = (cid, rid)
     if com_return is not None:
-        ch.chamado = com_return[0]
+        if pode_gravar:
+            ch.chamado = com_return[0]
         raise _PendenteError("return_review_indisponivel")
+    if fechado is not None:
+        # Medido 08/09 (283344): reclamação fechada pelo mediador semanas antes
+        # (devolução lançada tarde no DaVinci) — ficar "sem devolução aberta,
+        # tenta a cada hora" era mentira. Falha de vez, com o desfecho no histórico.
+        if pode_gravar:
+            ch.chamado = str(fechado.get("id"))
+        session.add(chamados_svc.registrar_sistema(ch, _texto_ml_encerrada(fechado)))
+        raise chamados_svc.ChamadoError("ml_claim_encerrada")
     raise _PendenteError("devolucao_sem_return")
 
 
@@ -636,7 +694,7 @@ async def _disparar_ml(
     if reason in REASONS_EXIGEM_FOTO and not fotos:
         raise _PendenteError("devolucao_sem_foto")
     client = await _ml_client_para(session, ch, dev)
-    claim_id, return_id = await _resolver_claim_ml(client, ch, dev)
+    claim_id, return_id = await _resolver_claim_ml(session, client, ch, dev)
     nomes: list[str] = []
     for a in fotos:
         if not a.ml_file_name:
@@ -701,6 +759,59 @@ def _tiktok_reason_por_texto(reasons: list[dict], motivo: str) -> str | None:
     return None
 
 
+# Estados FINAIS do caso na TikTok: não há mais o que abrir pela API.
+_TT_ENCERRADOS: dict[str, str] = {
+    "RETURN_OR_REFUND_REQUEST_COMPLETE": "devolução concluída com reembolso ao comprador",
+    "RETURN_OR_REFUND_REQUEST_SUCCESS": "reembolso ao comprador aprovado",
+    "RETURN_OR_REFUND_REQUEST_CANCEL": "devolução cancelada (valor ficou com o vendedor)",
+    "REFUND_OR_RETURN_REQUEST_REJECT": "solicitação de devolução recusada",
+}
+_TT_ARB_ENCERRADA: dict[str, str] = {
+    "SUPPORT_BUYER": "arbitragem da TikTok a favor do COMPRADOR",
+    "SUPPORT_SELLER": "arbitragem da TikTok a favor do VENDEDOR",
+    "CLOSED": "arbitragem encerrada",
+}
+
+
+async def _tiktok_recusa_registrada(client: TikTokClient, rid: str) -> dict | None:
+    """Evento SELLER_REJECT_RECEIVE na linha do tempo do caso = recusa do pacote
+    já feita (à mão, no Seller Center). Best-effort: erro na API → None."""
+    try:
+        records = await client.get_return_records(rid)
+    except Exception as e:  # noqa: BLE001
+        logger.info("chamado_devolucao_tiktok_records_falhou", return_id=rid, err=str(e)[:120])
+        return None
+    for r in records or []:
+        if isinstance(r, dict) and str(r.get("event") or "").upper() == "SELLER_REJECT_RECEIVE":
+            return r
+    return None
+
+
+def _texto_tiktok_encerrada(caso: dict, recusa: dict | None) -> str:
+    status = str(caso.get("return_status") or "").upper()
+    arb = str(caso.get("arbitration_status") or "").upper()
+    partes = ["Devolução já ENCERRADA na TikTok Shop"]
+    if status in _TT_ENCERRADOS:
+        partes.append(_TT_ENCERRADOS[status])
+    if arb in _TT_ARB_ENCERRADA:
+        partes.append(_TT_ARB_ENCERRADA[arb])
+    if recusa is not None:
+        quando = _fmt_brt(recusa.get("create_time"))
+        fotos = len(recusa.get("images") or [])
+        nota = str(recusa.get("note") or "").strip()
+        t = "o vendedor já tinha recusado o pacote"
+        if quando:
+            t += f" em {quando}"
+        t += f" ({fotos} foto(s))"
+        if nota:
+            t += f': "{nota[:200]}"'
+        partes.append(t)
+    valor = (caso.get("refund_amount") or {}).get("refund_total")
+    if valor:
+        partes.append(f"reembolso R$ {valor}")
+    return " — ".join(partes) + ". Nada mais a abrir pela API."
+
+
 async def _disparar_tiktok(
     session: AsyncSession, ch: Chamado, dev: Devolution, fotos: list[DevolucaoAnexo], texto: str
 ) -> tuple[str, str]:
@@ -725,10 +836,21 @@ async def _disparar_tiktok(
     status = str(caso.get("return_status") or "").strip().upper()
     if caso.get("is_quick_refund"):
         raise chamados_svc.ChamadoError("tiktok_quick_refund")
-    if str(caso.get("arbitration_status") or "").upper() == "IN_PROGRESS":
+    arb = str(caso.get("arbitration_status") or "").upper()
+    if arb == "IN_PROGRESS":
         raise _PendenteError("tiktok_arbitragem")
     if status == "REJECT_RECEIVE_PACKAGE":
         raise chamados_svc.ChamadoError("tiktok_ja_recusada")
+    if status in _TT_ENCERRADOS or arb in _TT_ARB_ENCERRADA:
+        # Medido 08/09 (290160/291050): caso já CONCLUÍDO — o pessoal tinha
+        # recusado o pacote à mão no Seller Center semanas antes e a TikTok já
+        # arbitrou (devolução lançada tarde no DaVinci). Retentar "aguardando
+        # pacote" de hora em hora era mentira: falha de vez, desfecho no histórico.
+        recusa = await _tiktok_recusa_registrada(client, rid)
+        session.add(chamados_svc.registrar_sistema(ch, _texto_tiktok_encerrada(caso, recusa)))
+        raise chamados_svc.ChamadoError(
+            "tiktok_ja_recusada" if recusa is not None else "tiktok_devolucao_encerrada"
+        )
     acoes = {
         str(a.get("action") or "").upper()
         for a in (caso.get("seller_next_action_response") or [])
@@ -940,6 +1062,28 @@ async def _disparar_shopee(
         raise chamados_svc.ChamadoError("shopee_devolucao_encerrada")
     if status not in ("REQUESTED", "PROCESSING", "ACCEPTED"):
         raise _PendenteError("shopee_aguardando_pacote")
+    contestacao = det.get("dispute_reason") or []
+    if isinstance(contestacao, str):
+        contestacao = [contestacao]
+    contestacao = [str(x).strip() for x in contestacao if str(x or "").strip()]
+    if contestacao:
+        # Medido 08/09 (290297/289967): disputa já registrada À MÃO no Seller
+        # Center — `dispute_reason`/`dispute_text_reason` preenchidos com o
+        # status ainda ACCEPTED e compensação vazia. Não é "prazo venceu".
+        textos = det.get("dispute_text_reason") or []
+        if isinstance(textos, str):
+            textos = [textos]
+        detalhe = " | ".join(str(t).strip()[:300] for t in textos if str(t or "").strip())
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch,
+                "Disputa já registrada na Shopee (fora do DaVinci): "
+                + "; ".join(contestacao)
+                + (f' — "{detalhe}"' if detalhe else "")
+                + ". Nada mais a abrir pela API.",
+            )
+        )
+        raise chamados_svc.ChamadoError("shopee_ja_contestada")
     comp = det.get("seller_compensation") or {}
     comp_status = str(comp.get("seller_compensation_status") or "").upper()
     # medido ao vivo: vem "PENDING_REQUEST" (sem o prefixo COMPENSATION_ da doc)
