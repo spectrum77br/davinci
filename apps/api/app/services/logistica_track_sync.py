@@ -28,6 +28,7 @@ Sem saldo no 17track nada disso funciona — `sem_quota` no resumo é o aviso.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -264,20 +265,7 @@ async def _run(
             except Exception as e:  # noqa: BLE001 — idem
                 logger.warning("logistica_track_sync_fetch_falhou", err=str(e)[:200])
                 eventos = []
-            por_numero = {_num(n): loc for n, loc in eventos}
-            agora = datetime.now(UTC)
-            for r in linhas:
-                loc = por_numero.get(_num(r.rastreio_17track))
-                if not loc or loc == r.localizacao:
-                    continue
-                r.localizacao = loc
-                r.localizacao_at = agora
-                r.divergencia = logistica_rules.detectar_divergencia_por_plataforma(
-                    r.plataforma, r.meli_status, loc
-                )
-                atualizados += 1
-            if atualizados:
-                await session.commit()
+            atualizados = await _aplicar_localizacoes(session, linhas, eventos)
 
     resumo = {
         "linhas": len(linhas),
@@ -294,3 +282,263 @@ async def _run(
             mensagem="17track sem saldo — a Localização dos Correios não atualiza até recarregar",
         )
     return resumo
+
+
+async def _aplicar_localizacoes(
+    session: AsyncSession, linhas: list[Logistica], eventos: list[tuple[str, str]]
+) -> int:
+    """Grava nas linhas a localização que veio do 17track (só o que mudou),
+    recalculando a divergência ML × físico. Devolve quantas mudaram."""
+    por_numero = {_num(n): loc for n, loc in eventos}
+    agora = datetime.now(UTC)
+    atualizados = 0
+    for r in linhas:
+        loc = por_numero.get(_num(r.rastreio_17track))
+        if not loc or loc == r.localizacao:
+            continue
+        r.localizacao = loc
+        r.localizacao_at = agora
+        r.divergencia = logistica_rules.detectar_divergencia_por_plataforma(
+            r.plataforma, r.meli_status, loc
+        )
+        atualizados += 1
+    if atualizados:
+        await session.commit()
+    return atualizados
+
+
+# ---- reconsulta forçada (07:00 e 16:30) --------------------------------------
+#
+# O 17track só pergunta aos Correios de 6 em 6 a 12 em 12 horas pra pacote em
+# trânsito. O 294036 (Eduardo, 08/09): os Correios mostravam movimento das
+# 06:54, o 17track tinha consultado às 03:36 e a Logística ficou o dia inteiro
+# atrasada. Não é falha nossa (o webhook e o pull de 15 min funcionavam) — é a
+# cadência DELES. Decisão do Eduardo: forçar a reconsulta às 07:00 e às 16:30
+# (Brasília). A API oficial dos Correios não serve: só devolve objeto postado
+# no contrato do próprio consultante (as etiquetas são do contrato do ML).
+#
+# Como forçar (testado em 08/09): "parar + retomar" faz o 17track ir aos
+# Correios na hora e é GRÁTIS, mas vale uma vez por número; depois disso só
+# "apagar + registrar", que custa 1 crédito — e zera a marca, então o gratuito
+# vale de novo na rodada seguinte (~0,5 crédito por reconsulta). Pra não
+# gastar à toa, só entra quem o 17track não consultou nas últimas FRESCO_HORAS
+# e cujo pacote ainda pode se mover. Número que ficou PARADO no 17track
+# (rodada anterior interrompida, ou parado por ele após 30 dias sem evento)
+# entra sempre, pra nunca ficar sem rastreio.
+CHAVE_LOCK_FORCAR = "17track:forcar:lock"
+FRESCO_HORAS = 3
+# Freios de gasto: teto por rodada e por dia (contador no Redis) e reserva de
+# saldo pros registros normais do sync de 15 min. 52 pacotes em trânsito em
+# 08/09 → ~26 pagos por rodada; 120/dia é ~2x isso.
+MAX_FORCAR_PAGOS = 100
+TETO_PAGOS_DIA = 120
+RESERVA_QUOTA = 60
+PREFIXO_GASTO_DIA = "17track:forcar:gasto:"
+# Depois de forçar, o 17track responde em ~30-60s; o push do webhook cobre, mas
+# puxamos também pra não depender dele.
+ESPERA_APOS_FORCAR_S = 90
+
+
+async def _gasto_hoje() -> int:
+    try:
+        v = await redis.get(f"{PREFIXO_GASTO_DIA}{date.today().isoformat()}")
+        return int(v or 0)
+    except Exception:  # noqa: BLE001 — Redis fora do ar: sem contador, vale o teto por rodada
+        return 0
+
+
+async def _somar_gasto(n: int) -> None:
+    if n <= 0:
+        return
+    try:
+        chave = f"{PREFIXO_GASTO_DIA}{date.today().isoformat()}"
+        await redis.incrby(chave, n)
+        await redis.expire(chave, 2 * 24 * 3600)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_track_forcar_gasto_redis_falhou", err=str(e)[:120])
+
+
+async def _desregistrar(session: AsyncSession, numeros: set[str]) -> int:
+    """O 17track não tem mais esse número (apagado sem registrar de volta, ou
+    nunca conheceu): zera `rastreio_17track` pra o sync de 15 min registrar de
+    novo (1 crédito, mas sem isso a Localização congela pra sempre)."""
+    if not numeros:
+        return 0
+    rows = (
+        (await session.execute(select(Logistica).where(Logistica.rastreio_17track.isnot(None))))
+        .scalars()
+        .all()
+    )
+    n = 0
+    for r in rows:
+        if _num(r.rastreio_17track) in numeros:
+            r.rastreio_17track = None
+            r.rastreio_17track_at = None
+            n += 1
+    if n:
+        await session.commit()
+        logger.warning("logistica_track_forcar_desregistrados", numeros=sorted(numeros)[:20], n=n)
+    return n
+
+
+async def forcar_reconsulta(session: AsyncSession) -> dict[str, Any]:
+    """Faz o 17track reconsultar os Correios AGORA pros pacotes em trânsito da
+    varredura (ML, "Em andamento") que ele não consulta há FRESCO_HORAS.
+    Gratuito onde ainda dá (retomar), 1 crédito onde não dá (reregistrar),
+    dentro dos tetos; nunca deixa número parado ou sem registro sem tratar."""
+    resumo: dict[str, Any] = {
+        "alvo": 0,
+        "frescos": 0,
+        "encerrados": 0,
+        "gratis": 0,
+        "pagos": 0,
+        "cortados": 0,
+        "parados_pendentes": 0,
+        "desregistrados": 0,
+        "atualizados": 0,
+        "sem_quota": False,
+    }
+    try:
+        travou = bool(await redis.set(CHAVE_LOCK_FORCAR, "1", nx=True, ex=TTL_LOCK))
+    except Exception:  # noqa: BLE001 — Redis fora do ar não bloqueia o job
+        travou = True
+    if not travou:
+        logger.info("logistica_track_forcar_ja_rodando")
+        return {**resumo, "ja_rodando": True}
+    try:
+        linhas = [
+            r
+            for r in await _alvo(session, None)
+            if _num(r.rastreio_17track) and _num(r.rastreio_17track) == _num(r.rastreio)
+        ]
+        numeros = sorted({_num(r.rastreio_17track) for r in linhas})
+        resumo["alvo"] = len(numeros)
+        if not numeros:
+            logger.info("logistica_track_forcar_done", **resumo)
+            return resumo
+
+        # Sem dados confiáveis não se decide gastar crédito: aborta a rodada.
+        try:
+            det = await logistica_track.fetch_detalhado(numeros)
+            estado = await logistica_track.estado_numeros(numeros)
+        except logistica_track.Track17Error as e:
+            resumo["erro"] = str(e)[:200]
+            logger.warning("logistica_track_forcar_abortado", **resumo)
+            return resumo
+        info = det["info"]
+        desconhecidos = set(det["desconhecidos"]) | {n for n in numeros if n not in estado}
+        resumo["desregistrados"] += await _desregistrar(session, desconhecidos)
+
+        corte = datetime.now(UTC) - timedelta(hours=FRESCO_HORAS)
+        gratis: list[str] = []  # rastreando, nunca retomou: parar + retomar
+        parados_gratis: list[str] = []  # parado no 17track, nunca retomou: só retomar
+        pagos: list[str] = []  # já usou o gratuito: apagar + registrar
+        for n in numeros:
+            if n in desconhecidos:
+                continue
+            st = estado[n]
+            d = info.get(n) or {}
+            parado = st["tracking_status"] == "Stopped"
+            if logistica_track.encerrado(d):
+                resumo["encerrados"] += 1
+                continue
+            if not parado:
+                sync_at = d.get("sync_at")
+                if sync_at is not None and sync_at >= corte:
+                    resumo["frescos"] += 1
+                    continue
+            if st["is_retracked"]:
+                # Etiqueta emitida e nunca postada não vale crédito.
+                if d.get("status") == "NotFound" and not parado:
+                    continue
+                pagos.append(n)
+            elif parado:
+                parados_gratis.append(n)
+            else:
+                gratis.append(n)
+
+        forcados: list[str] = []
+        if gratis:
+            r1 = await logistica_track.parar_e_retomar(gratis)
+            forcados += r1["retomados"]
+            pagos += r1["ja_retomados"]
+            resumo["parados_pendentes"] += len(r1["parados"])
+            resumo["desregistrados"] += await _desregistrar(session, set(r1["nao_registrados"]))
+        if parados_gratis:
+            r2 = await logistica_track.retomar_parados(parados_gratis)
+            forcados += r2["retomados"]
+            pagos += r2["ja_retomados"]
+            resumo["parados_pendentes"] += len(r2["parados"])
+            resumo["desregistrados"] += await _desregistrar(session, set(r2["nao_registrados"]))
+        resumo["gratis"] = len(forcados)
+
+        pagos = sorted(set(pagos))
+        if pagos:
+            teto = MAX_FORCAR_PAGOS
+            if await sem_quota_desde():
+                teto = 0
+            else:
+                teto = min(teto, max(0, TETO_PAGOS_DIA - await _gasto_hoje()))
+                saldo = await logistica_track.quota_restante()
+                if saldo is not None:
+                    teto = min(teto, max(0, saldo - RESERVA_QUOTA))
+            fila, cortados = pagos[:teto], pagos[teto:]
+            resumo["cortados"] = len(cortados)
+            if cortados:
+                logger.warning(
+                    "logistica_track_forcar_teto",
+                    cortados=len(cortados),
+                    teto=teto,
+                    numeros=cortados[:10],
+                )
+            if fila:
+                r3 = await logistica_track.reregistrar(fila)
+                forcados += r3["ok"]
+                resumo["pagos"] = len(r3["ok"])
+                await _somar_gasto(len(r3["ok"]))
+                resumo["sem_quota"] = bool(r3["sem_quota"])
+                await marcar_sem_quota(resumo["sem_quota"])
+                resumo["desregistrados"] += await _desregistrar(
+                    session, set(r3["apagados_sem_registro"])
+                )
+
+        if resumo["parados_pendentes"]:
+            logger.warning(
+                "logistica_track_forcar_parados_pendentes",
+                n=resumo["parados_pendentes"],
+                mensagem="pararam e não retomaram por falha de rede; a próxima rodada retoma",
+            )
+        if forcados:
+            forcado_set = set(forcados)
+            agora = datetime.now(UTC)
+            for r in linhas:
+                if _num(r.rastreio_17track) in forcado_set:
+                    r.rastreio_17track_at = agora
+            await session.commit()
+            await asyncio.sleep(ESPERA_APOS_FORCAR_S)
+            try:
+                eventos = await logistica_track.fetch(forcados)
+            except Exception as e:  # noqa: BLE001 — o push do webhook ainda cobre
+                logger.warning("logistica_track_forcar_fetch_falhou", err=str(e)[:200])
+                eventos = []
+            # Recarrega as linhas: durante a espera o ingest/recarregar pode ter
+            # apagado pedido finalizado (cleanup) — aplicar nas linhas velhas
+            # faria o commit inteiro falhar.
+            session.expire_all()
+            vivas = list(
+                (
+                    await session.execute(
+                        select(Logistica).where(Logistica.rastreio_17track.in_(sorted(forcado_set)))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            resumo["atualizados"] = await _aplicar_localizacoes(session, vivas, eventos)
+        logger.info("logistica_track_forcar_done", **resumo)
+        return resumo
+    finally:
+        try:
+            await redis.delete(CHAVE_LOCK_FORCAR)
+        except Exception as e:  # noqa: BLE001 — a trava expira sozinha
+            logger.warning("logistica_track_forcar_lock_release_falhou", err=str(e)[:120])

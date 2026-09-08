@@ -214,3 +214,219 @@ async def test_register_gated_por_edit(
     auth_as(viewer)
     r = await client.post("/api/logistica/17track/register")
     assert r.status_code == 403
+
+
+def test_sync_at_le_latest_sync_time_dos_providers():
+    """`latest_sync_time` (quando o 17track consultou os Correios) vem em UTC
+    com Z — é o que decide se vale forçar a reconsulta."""
+    from datetime import UTC, datetime
+
+    ti = {"tracking": {"providers": [{"latest_sync_time": "2026-09-08T06:36:53Z"}]}}
+    assert logistica_track._sync_at(ti) == datetime(2026, 9, 8, 6, 36, 53, tzinfo=UTC)
+    assert logistica_track._sync_at({"tracking": {"providers": [{}]}}) is None
+    assert logistica_track._sync_at({}) is None
+
+
+# ---- reconsulta forçada: cliente 17track com respostas simuladas -------------
+
+
+@pytest.fixture
+def fake_chamar(monkeypatch):
+    """Substitui `_chamar` (o único ponto que fala HTTP nas funções novas) por
+    respostas por endpoint. `respostas[endpoint]` = lista de corpos, consumida
+    em ordem; `chamadas` guarda (endpoint, payload)."""
+    chamadas: list[tuple[str, object]] = []
+    respostas: dict[str, list] = {}
+
+    async def _chamar(c, endpoint, payload):
+        chamadas.append((endpoint, payload))
+        fila = respostas.get(endpoint) or []
+        if not fila:
+            raise logistica_track.Track17Error(f"{endpoint}: sem resposta simulada")
+        body = fila.pop(0)
+        if isinstance(body, Exception):
+            raise body
+        return body
+
+    monkeypatch.setattr(logistica_track, "_chamar", _chamar)
+    monkeypatch.setattr(logistica_track, "_PAUSA_ENTRE_LOTES", 0)
+    return chamadas, respostas
+
+
+def _corpo(aceitos=(), recusados=()):
+    return {
+        "code": 0,
+        "data": {
+            "accepted": [{"number": n, "carrier": 2151} for n in aceitos],
+            "rejected": [{"number": n, "error": {"code": code}} for n, code in recusados],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_parar_e_retomar_lote_a_lote_e_classifica_recusas(fake_chamar):
+    """Stoptrack recusado por "já parado" entra no retrack mesmo assim; retrack
+    recusado por "só uma vez" vira `ja_retomados` (caminho pago); número que o
+    17track não conhece vira `nao_registrados`."""
+    chamadas, respostas = fake_chamar
+    respostas["stoptrack"] = [_corpo(["A1BR", "A2BR"], [("A3BR", -18019906), ("A4BR", -18019902)])]
+    respostas["retrack"] = [_corpo(["A1BR", "A3BR"], [("A2BR", -18019905)])]
+
+    out = await logistica_track.parar_e_retomar(["A1BR", "A2BR", "A3BR", "A4BR"])
+
+    assert out == {
+        "retomados": ["A1BR", "A3BR"],
+        "ja_retomados": ["A2BR"],
+        "nao_registrados": ["A4BR"],
+        "parados": [],
+    }
+    assert [e for e, _ in chamadas] == ["stoptrack", "retrack"]
+    assert [p["number"] for p in chamadas[1][1]] == ["A1BR", "A2BR", "A3BR"]
+
+
+@pytest.mark.asyncio
+async def test_parar_e_retomar_falha_no_retrack_marca_parados(fake_chamar):
+    """Parou e a rede caiu antes de retomar: devolve em `parados` (a rodada
+    seguinte retoma direto) em vez de sumir com o número."""
+    _, respostas = fake_chamar
+    respostas["stoptrack"] = [_corpo(["A1BR"])]
+    respostas["retrack"] = [logistica_track.Track17Error("retrack: HTTP 503")]
+
+    out = await logistica_track.parar_e_retomar(["A1BR"])
+
+    assert out["parados"] == ["A1BR"] and out["retomados"] == []
+
+
+@pytest.mark.asyncio
+async def test_reregistrar_lote_a_lote_para_no_sem_quota(fake_chamar, monkeypatch):
+    """Apaga e registra por lote; no primeiro "sem saldo" para de apagar e
+    devolve os apagados-sem-registro pra quem chama desregistrar."""
+    chamadas, respostas = fake_chamar
+    monkeypatch.setattr(logistica_track, "_REGISTER_BATCH", 2)
+    respostas["deletetrack"] = [_corpo(["A1BR", "A2BR"]), _corpo(["A3BR", "A4BR"])]
+    registros = [
+        {"ok": ["A1BR", "A2BR"], "sem_quota": False},
+        {"ok": ["A3BR"], "sem_quota": True},
+    ]
+
+    async def _register(numbers):
+        return registros.pop(0)
+
+    monkeypatch.setattr(logistica_track, "register", _register)
+
+    out = await logistica_track.reregistrar(["A1BR", "A2BR", "A3BR", "A4BR", "A5BR", "A6BR"])
+
+    assert out == {
+        "ok": ["A1BR", "A2BR", "A3BR"],
+        "apagados_sem_registro": ["A4BR"],
+        "sem_quota": True,
+    }
+    # Terceiro lote (A5/A6) NÃO foi apagado: só 2 deletetracks.
+    assert [e for e, _ in chamadas] == ["deletetrack", "deletetrack"]
+
+
+@pytest.mark.asyncio
+async def test_estado_numeros_e_fetch_detalhado(fake_chamar):
+    _, respostas = fake_chamar
+    respostas["gettracklist"] = [
+        {
+            "code": 0,
+            "page": {"data_total": 2, "page_total": 1},
+            "data": {
+                "accepted": [
+                    {"number": "A1BR", "tracking_status": "Tracking", "is_retracked": False},
+                    {
+                        "number": "A2BR",
+                        "tracking_status": "Stopped",
+                        "is_retracked": True,
+                        "stop_track_reason": "ByRequest",
+                    },
+                ]
+            },
+        }
+    ]
+    respostas["gettrackinfo"] = [
+        {
+            "code": 0,
+            "data": {
+                "accepted": [
+                    {
+                        "number": "A1BR",
+                        "track_info": {
+                            "latest_status": {
+                                "status": "InTransit",
+                                "sub_status": "InTransit_Other",
+                            },
+                            "latest_event": {
+                                "description": "Objeto em transferência",
+                                "location": "RS",
+                                "address": {"city": "Passo Fundo"},
+                            },
+                            "tracking": {
+                                "providers": [{"latest_sync_time": "2026-09-08T11:09:30Z"}]
+                            },
+                        },
+                    }
+                ],
+                "rejected": [{"number": "A9BR", "error": {"code": -18019902}}],
+            },
+        }
+    ]
+
+    est = await logistica_track.estado_numeros(["A1BR", "A2BR", "A9BR"])
+    assert est["A1BR"]["tracking_status"] == "Tracking" and est["A2BR"]["is_retracked"] is True
+    assert "A9BR" not in est
+
+    det = await logistica_track.fetch_detalhado(["A1BR", "A9BR"])
+    assert det["desconhecidos"] == ["A9BR"]
+    a1 = det["info"]["A1BR"]
+    assert a1["localizacao"] == "Passo Fundo/RS — Objeto em transferência"
+    assert a1["status"] == "InTransit" and a1["sync_at"].hour == 11
+
+
+@pytest.mark.asyncio
+async def test_chamar_repete_429_e_levanta_no_fim(monkeypatch):
+    """429/5xx/rede: repete com pausa; se persistir, `Track17Error` (quem decide
+    gastar crédito não pode tratar como "sem dados")."""
+    import httpx
+
+    monkeypatch.setattr(logistica_track.asyncio, "sleep", _sem_espera)
+    tentativas = []
+
+    class _Resp:
+        def __init__(self, status, body=None):
+            self.status_code = status
+            self._body = body
+
+        def json(self):
+            if self._body is None:
+                raise ValueError("no json")
+            return self._body
+
+    class _Client:
+        def __init__(self, fila):
+            self.fila = fila
+
+        async def post(self, url, headers=None, json=None):
+            tentativas.append(url.rsplit("/", 1)[-1])
+            r = self.fila.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+    ok = _Resp(200, {"code": 0, "data": {"accepted": [], "rejected": []}})
+    body = await logistica_track._chamar(
+        _Client([_Resp(429), httpx.ConnectError("x"), ok]), "retrack", []
+    )
+    assert body["code"] == 0 and len(tentativas) == 3
+
+    with pytest.raises(logistica_track.Track17Error):
+        await logistica_track._chamar(_Client([_Resp(500), _Resp(500), _Resp(500)]), "retrack", [])
+    with pytest.raises(logistica_track.Track17Error):
+        await logistica_track._chamar(
+            _Client([_Resp(200, {"code": 401, "data": None})]), "retrack", []
+        )
+
+
+async def _sem_espera(_s):
+    return None

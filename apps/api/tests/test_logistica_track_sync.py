@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Logistica
@@ -356,3 +357,368 @@ def test_divergencia_por_plataforma_despacha_certo():
     assert logistica_rules.detectar_divergencia(shopee, loc) is not None
     # Plataforma que o sistema não conhece não inventa divergência.
     assert logistica_rules.detectar_divergencia_por_plataforma("Magalu", shopee, loc) is None
+
+
+# ---- reconsulta forçada (07:00 / 16:30) ---------------------------------------
+
+
+@pytest.fixture
+def fake_forcar(monkeypatch):
+    """Substitui as chamadas de rede da reconsulta forçada e registra o que foi
+    pedido. `info` = gettrackinfo por número; `estado` = gettracklist por
+    número; `retomar_ok`/`reregistrar_ok` = subconjuntos que "funcionam"."""
+    chamadas: dict[str, list] = {
+        "parar_e_retomar": [],
+        "retomar_parados": [],
+        "reregistrar": [],
+        "fetch": [],
+    }
+    estado: dict = {
+        "info": {},
+        "desconhecidos": [],
+        "estado": {},
+        "retomar_ok": None,
+        "ja_retomados": [],
+        "parados": [],
+        "reregistrar_ok": None,
+        "apagados_sem_registro": [],
+        "sem_quota": False,
+        "quota": 5000,
+        "eventos": [],
+        "erro": None,
+    }
+
+    async def _detalhado(numbers):
+        if estado["erro"]:
+            raise logistica_track.Track17Error(estado["erro"])
+        return {
+            "info": {
+                n: {"localizacao": None, **estado["info"][n]}
+                for n in numbers
+                if n in estado["info"]
+            },
+            "desconhecidos": [n for n in numbers if n in estado["desconhecidos"]],
+        }
+
+    async def _estado(numbers):
+        return {n: estado["estado"][n] for n in numbers if n in estado["estado"]}
+
+    def _res_retomar(numbers):
+        ok = (
+            numbers
+            if estado["retomar_ok"] is None
+            else [n for n in numbers if n in estado["retomar_ok"]]
+        )
+        return {
+            "retomados": sorted(ok),
+            "ja_retomados": [n for n in numbers if n in estado["ja_retomados"]],
+            "nao_registrados": [],
+            "parados": [n for n in numbers if n in estado["parados"]],
+        }
+
+    async def _parar_e_retomar(numbers):
+        chamadas["parar_e_retomar"].append(sorted(numbers))
+        return _res_retomar(sorted(numbers))
+
+    async def _retomar_parados(numbers):
+        chamadas["retomar_parados"].append(sorted(numbers))
+        return _res_retomar(sorted(numbers))
+
+    async def _reregistrar(numbers):
+        chamadas["reregistrar"].append(sorted(numbers))
+        if estado["sem_quota"]:
+            return {
+                "ok": [],
+                "apagados_sem_registro": list(estado["apagados_sem_registro"]),
+                "sem_quota": True,
+            }
+        ok = (
+            numbers
+            if estado["reregistrar_ok"] is None
+            else [n for n in numbers if n in estado["reregistrar_ok"]]
+        )
+        return {
+            "ok": sorted(ok),
+            "apagados_sem_registro": list(estado["apagados_sem_registro"]),
+            "sem_quota": False,
+        }
+
+    async def _quota():
+        return estado["quota"]
+
+    async def _fetch(numbers):
+        chamadas["fetch"].append(sorted(numbers))
+        return list(estado["eventos"])
+
+    monkeypatch.setattr(logistica_track, "fetch_detalhado", _detalhado)
+    monkeypatch.setattr(logistica_track, "estado_numeros", _estado)
+    monkeypatch.setattr(logistica_track, "parar_e_retomar", _parar_e_retomar)
+    monkeypatch.setattr(logistica_track, "retomar_parados", _retomar_parados)
+    monkeypatch.setattr(logistica_track, "reregistrar", _reregistrar)
+    monkeypatch.setattr(logistica_track, "quota_restante", _quota)
+    monkeypatch.setattr(logistica_track, "fetch", _fetch)
+    monkeypatch.setattr(logistica_track_sync, "ESPERA_APOS_FORCAR_S", 0)
+    return chamadas, estado
+
+
+def _linha_ml(pedido: str, rastreio: str, **extra) -> Logistica:
+    return Logistica(
+        pedido_bling=pedido,
+        plataforma="Mercado Livre",
+        status_bling="Em andamento",
+        data=date.today(),
+        rastreio=rastreio,
+        rastreio_17track=rastreio,
+        **extra,
+    )
+
+
+VELHO = datetime.now(UTC) - timedelta(hours=8)
+RASTREANDO = {"tracking_status": "Tracking", "is_retracked": False}
+RASTREANDO_JA_RETOMADO = {"tracking_status": "Tracking", "is_retracked": True}
+PARADO = {"tracking_status": "Stopped", "is_retracked": False}
+PARADO_JA_RETOMADO = {"tracking_status": "Stopped", "is_retracked": True}
+
+
+async def _linha(db: AsyncSession, pedido: str) -> Logistica:
+    return (
+        await db.execute(select(Logistica).where(Logistica.pedido_bling == pedido))
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_forcar_gratis_primeiro_e_pago_depois(db: AsyncSession, fake_forcar):
+    """Eduardo 08/09 (294036): o 17track tinha consultado às 03:36 e os Correios
+    já mostravam movimento das 06:54. Quem está velho é forçado: parar+retomar
+    (grátis) pra quem nunca retomou, apagar+registrar (1 crédito) pro resto."""
+    chamadas, estado = fake_forcar
+    db.add_all([_linha_ml("p1", "AA111111111BR"), _linha_ml("p2", "BB222222222BR")])
+    await db.commit()
+    estado["info"] = {
+        "AA111111111BR": {"sync_at": VELHO, "status": "InTransit"},
+        "BB222222222BR": {"sync_at": VELHO, "status": "InTransit"},
+    }
+    estado["estado"] = {"AA111111111BR": RASTREANDO, "BB222222222BR": RASTREANDO_JA_RETOMADO}
+    estado["eventos"] = [("AA111111111BR", "Passo Fundo/RS — Objeto em transferência")]
+
+    out = await logistica_track_sync.forcar_reconsulta(db)
+
+    assert chamadas["parar_e_retomar"] == [["AA111111111BR"]]
+    assert chamadas["reregistrar"] == [["BB222222222BR"]]
+    assert chamadas["fetch"] == [["AA111111111BR", "BB222222222BR"]]
+    assert out["gratis"] == 1 and out["pagos"] == 1 and out["atualizados"] == 1
+    p1 = await _linha(db, "p1")
+    assert p1.localizacao == "Passo Fundo/RS — Objeto em transferência"
+    assert p1.rastreio_17track_at is not None
+    assert await logistica_track_sync._gasto_hoje() == 1
+
+
+@pytest.mark.asyncio
+async def test_forcar_pula_fresco_entregue_e_nao_registrado(db: AsyncSession, fake_forcar):
+    """Não gasta crédito à toa: consultado há pouco, já entregue/expirado/
+    devolvido e número que o 17track nem conhece ficam de fora — este último
+    é desregistrado localmente pra o sync de 15 min registrar de novo."""
+    chamadas, estado = fake_forcar
+    db.add_all(
+        [
+            _linha_ml("f1", "AA111111111BR"),  # consultado há 1h: fresco
+            _linha_ml("f2", "BB222222222BR"),  # entregue
+            _linha_ml("f3", "CC333333333BR"),  # devolvido ao remetente
+            _linha_ml("f4", "DD444444444BR"),  # 17track não conhece
+            _linha_ml("f5", "EE555555555BR"),  # velho e em trânsito: este vale
+            # Rastreio trocou e o novo ainda não foi registrado: fora.
+            Logistica(
+                pedido_bling="f6",
+                plataforma="Mercado Livre",
+                status_bling="Em andamento",
+                data=date.today(),
+                rastreio="FF666666666BR",
+                rastreio_17track="XX000000000BR",
+            ),
+        ]
+    )
+    await db.commit()
+    estado["info"] = {
+        "AA111111111BR": {"sync_at": datetime.now(UTC) - timedelta(hours=1), "status": "InTransit"},
+        "BB222222222BR": {"sync_at": VELHO, "status": "Delivered"},
+        "CC333333333BR": {
+            "sync_at": VELHO,
+            "status": "Exception",
+            "sub_status": "Exception_Returned",
+        },
+        "EE555555555BR": {"sync_at": VELHO, "status": "InTransit"},
+    }
+    estado["desconhecidos"] = ["DD444444444BR"]
+    estado["estado"] = dict.fromkeys(
+        ("AA111111111BR", "BB222222222BR", "CC333333333BR", "EE555555555BR"), RASTREANDO
+    )
+
+    out = await logistica_track_sync.forcar_reconsulta(db)
+
+    assert chamadas["parar_e_retomar"] == [["EE555555555BR"]]
+    assert chamadas["reregistrar"] == []
+    assert out["alvo"] == 5 and out["frescos"] == 1 and out["encerrados"] == 2
+    assert out["gratis"] == 1 and out["pagos"] == 0 and out["desregistrados"] == 1
+    assert (await _linha(db, "f4")).rastreio_17track is None
+
+
+@pytest.mark.asyncio
+async def test_forcar_reativa_numero_parado_mesmo_fresco(db: AsyncSession, fake_forcar):
+    """Número que ficou PARADO no 17track (rodada anterior interrompida, ou o
+    próprio 17track parou após 30 dias) entra sempre: retrack direto se nunca
+    retomou, apagar+registrar se já retomou. Senão fica sem rastreio pra sempre."""
+    chamadas, estado = fake_forcar
+    db.add_all([_linha_ml("s1", "AA111111111BR"), _linha_ml("s2", "BB222222222BR")])
+    await db.commit()
+    agora = datetime.now(UTC)
+    estado["info"] = {
+        "AA111111111BR": {"sync_at": agora, "status": "InTransit"},
+        "BB222222222BR": {"sync_at": agora, "status": "InTransit"},
+    }
+    estado["estado"] = {"AA111111111BR": PARADO, "BB222222222BR": PARADO_JA_RETOMADO}
+
+    out = await logistica_track_sync.forcar_reconsulta(db)
+
+    assert chamadas["retomar_parados"] == [["AA111111111BR"]]
+    assert chamadas["parar_e_retomar"] == []
+    assert chamadas["reregistrar"] == [["BB222222222BR"]]
+    assert out["gratis"] == 1 and out["pagos"] == 1 and out["frescos"] == 0
+
+
+@pytest.mark.asyncio
+async def test_forcar_retomar_recusado_vira_pago_e_parado_fica_pendente(
+    db: AsyncSession, fake_forcar
+):
+    """`retrack` recusado com "só uma vez" (a lista não sabia) cai no caminho
+    pago; parou-e-não-retomou (rede) fica pendente pra próxima rodada."""
+    chamadas, estado = fake_forcar
+    db.add_all(
+        [
+            _linha_ml("r1", "AA111111111BR"),
+            _linha_ml("r2", "BB222222222BR"),
+            _linha_ml("r3", "CC333333333BR"),
+        ]
+    )
+    await db.commit()
+    estado["info"] = {
+        n: {"sync_at": VELHO, "status": "InTransit"}
+        for n in ("AA111111111BR", "BB222222222BR", "CC333333333BR")
+    }
+    estado["estado"] = dict.fromkeys(
+        ("AA111111111BR", "BB222222222BR", "CC333333333BR"), RASTREANDO
+    )
+    estado["retomar_ok"] = ["AA111111111BR"]
+    estado["ja_retomados"] = ["BB222222222BR"]
+    estado["parados"] = ["CC333333333BR"]
+
+    out = await logistica_track_sync.forcar_reconsulta(db)
+
+    assert chamadas["reregistrar"] == [["BB222222222BR"]]
+    assert out["gratis"] == 1 and out["pagos"] == 1 and out["parados_pendentes"] == 1
+    assert chamadas["fetch"] == [["AA111111111BR", "BB222222222BR"]]
+    assert (await _linha(db, "r3")).rastreio_17track_at is None  # não foi forçado
+
+
+@pytest.mark.asyncio
+async def test_forcar_sem_quota_desregistra_apagados_e_marca_aviso(db: AsyncSession, fake_forcar):
+    """Apagou no 17track e não conseguiu registrar de volta (saldo acabou):
+    a linha perde a marca de registrado pra o sync de 15 min tentar de novo
+    quando houver saldo — sem isso a Localização congelaria pra sempre."""
+    chamadas, estado = fake_forcar
+    db.add(_linha_ml("q1", "AA111111111BR"))
+    await db.commit()
+    estado["info"] = {"AA111111111BR": {"sync_at": None, "status": "InTransit"}}
+    estado["estado"] = {"AA111111111BR": RASTREANDO_JA_RETOMADO}
+    estado["sem_quota"] = True
+    estado["apagados_sem_registro"] = ["AA111111111BR"]
+
+    out = await logistica_track_sync.forcar_reconsulta(db)
+
+    assert out["sem_quota"] is True and out["pagos"] == 0 and out["desregistrados"] == 1
+    assert chamadas["fetch"] == []
+    assert (await _linha(db, "q1")).rastreio_17track is None
+    assert await logistica_track_sync.sem_quota_desde() is not None
+
+
+@pytest.mark.asyncio
+async def test_forcar_respeita_teto_diario_e_saldo(db: AsyncSession, fake_forcar):
+    chamadas, estado = fake_forcar
+    nums = [f"A{i:09d}BR" for i in range(1, 6)]
+    db.add_all([_linha_ml(f"t{i}", n) for i, n in enumerate(nums)])
+    await db.commit()
+    estado["info"] = {n: {"sync_at": VELHO, "status": "InTransit"} for n in nums}
+    estado["estado"] = dict.fromkeys(nums, RASTREANDO_JA_RETOMADO)
+    # Já gastou quase o teto do dia: só sobram 2.
+    await logistica_track_sync._somar_gasto(logistica_track_sync.TETO_PAGOS_DIA - 2)
+
+    out = await logistica_track_sync.forcar_reconsulta(db)
+
+    assert chamadas["reregistrar"] == [nums[:2]]
+    assert out["pagos"] == 2 and out["cortados"] == 3
+
+    # Saldo baixo na conta: reserva pros registros normais.
+    chamadas["reregistrar"].clear()
+    await redis.delete(f"{logistica_track_sync.PREFIXO_GASTO_DIA}{date.today().isoformat()}")
+    estado["quota"] = logistica_track_sync.RESERVA_QUOTA + 1
+    out = await logistica_track_sync.forcar_reconsulta(db)
+    assert chamadas["reregistrar"] == [nums[:1]] and out["cortados"] == 4
+
+
+@pytest.mark.asyncio
+async def test_forcar_aborta_sem_dados_confiaveis(db: AsyncSession, fake_forcar):
+    """17track fora do ar (429/5xx/rede): sem dados NÃO se gasta crédito nem se
+    queima o retomar gratuito — a rodada aborta e fica pra próxima."""
+    chamadas, estado = fake_forcar
+    db.add(_linha_ml("e1", "AA111111111BR"))
+    await db.commit()
+    estado["erro"] = "gettrackinfo: HTTP 429"
+
+    out = await logistica_track_sync.forcar_reconsulta(db)
+
+    assert out["erro"].startswith("gettrackinfo")
+    assert chamadas["parar_e_retomar"] == [] and chamadas["reregistrar"] == []
+
+
+@pytest.mark.asyncio
+async def test_forcar_linha_apagada_durante_a_espera_nao_derruba(
+    db: AsyncSession, fake_forcar, monkeypatch
+):
+    """Durante os 90s de espera o ingest pode apagar pedido finalizado da
+    tabela; aplicar nas linhas velhas quebraria o commit inteiro."""
+    chamadas, estado = fake_forcar
+    db.add_all([_linha_ml("w1", "AA111111111BR"), _linha_ml("w2", "BB222222222BR")])
+    await db.commit()
+    estado["info"] = {
+        n: {"sync_at": VELHO, "status": "InTransit"} for n in ("AA111111111BR", "BB222222222BR")
+    }
+    estado["estado"] = dict.fromkeys(("AA111111111BR", "BB222222222BR"), RASTREANDO)
+    estado["eventos"] = [
+        ("AA111111111BR", "Marau/RS — Saiu para entrega"),
+        ("BB222222222BR", "X — y"),
+    ]
+
+    async def _fetch_apagando(numbers):
+        chamadas["fetch"].append(sorted(numbers))
+        await db.execute(delete(Logistica).where(Logistica.pedido_bling == "w2"))
+        await db.commit()
+        return list(estado["eventos"])
+
+    monkeypatch.setattr(logistica_track, "fetch", _fetch_apagando)
+
+    out = await logistica_track_sync.forcar_reconsulta(db)
+
+    assert out["atualizados"] == 1
+    assert (await _linha(db, "w1")).localizacao == "Marau/RS — Saiu para entrega"
+
+
+@pytest.mark.asyncio
+async def test_forcar_nao_roda_em_dobro(db: AsyncSession, fake_forcar):
+    chamadas, _ = fake_forcar
+    db.add(_linha_ml("l1", "AA111111111BR"))
+    await db.commit()
+    await redis.set(logistica_track_sync.CHAVE_LOCK_FORCAR, "1", ex=60)
+
+    out = await logistica_track_sync.forcar_reconsulta(db)
+
+    assert out.get("ja_rodando") is True
+    assert chamadas["parar_e_retomar"] == [] and chamadas["reregistrar"] == []

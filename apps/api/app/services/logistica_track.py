@@ -22,6 +22,7 @@ com `address.city`) OU no v2.4 (`track_info.providers[].events[]` +
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -194,6 +195,321 @@ async def fetch(numbers: list[str]) -> list[tuple[str, str]]:
                 "logistica_17track_fetch", n=len(chunk), status=r.status_code, com_evento=len(out)
             )
     return out
+
+
+class Track17Error(Exception):
+    """O 17track não respondeu direito (rede, 429/5xx, corpo inválido, code != 0).
+    Quem decide gastar crédito NÃO pode tratar isso como "sem dados": abortar a
+    rodada é mais barato do que forçar reconsulta em tudo por engano."""
+
+
+# Códigos que o 17track devolve em `rejected` e que mudam a decisão.
+ERRO_NAO_REGISTRADO = -18019902  # o 17track não conhece o número
+ERRO_RETRACK_SO_PARADO = -18019904  # retrack em número que ainda está rastreando
+ERRO_RETRACK_SO_UMA_VEZ = -18019905  # o "retomar" gratuito já foi usado
+ERRO_JA_PARADO = -18019906  # stoptrack em número que já está parado
+
+_TENTATIVAS = 3
+
+
+async def _chamar(c: httpx.AsyncClient, endpoint: str, payload: Any) -> dict:
+    """POST no 17track com retry curto pra 429/5xx/rede. Levanta `Track17Error`
+    quando, mesmo assim, não veio uma resposta válida (`code == 0`)."""
+    ultimo = ""
+    for tentativa in range(_TENTATIVAS):
+        if tentativa:
+            await asyncio.sleep(1.5 * tentativa)
+        try:
+            r = await c.post(f"{_BASE}/{endpoint}", headers=_headers(), json=payload)
+        except httpx.HTTPError as e:
+            ultimo = f"rede: {str(e)[:120]}"
+            continue
+        if r.status_code == 429 or r.status_code >= 500:
+            ultimo = f"HTTP {r.status_code}"
+            continue
+        try:
+            body = r.json()
+        except ValueError:
+            ultimo = f"HTTP {r.status_code} corpo inválido"
+            continue
+        if r.status_code != 200 or not isinstance(body, dict) or body.get("code", 0) != 0:
+            code = body.get("code") if isinstance(body, dict) else None
+            raise Track17Error(f"{endpoint}: HTTP {r.status_code} code={code}")
+        return body
+    raise Track17Error(f"{endpoint}: {ultimo or 'sem resposta'}")
+
+
+def _aceitos_e_recusados(body: dict) -> tuple[list[str], dict[str, int | None]]:
+    """(números aceitos, {número recusado: código de erro})."""
+    data = body.get("data") if isinstance(body, dict) else None
+    acc = (data or {}).get("accepted") or []
+    rej = (data or {}).get("rejected") or []
+    aceitos = [n for n in (it.get("number") for it in acc if isinstance(it, dict)) if n]
+    recusados = {
+        it["number"]: _erro_code(it) for it in rej if isinstance(it, dict) and it.get("number")
+    }
+    return aceitos, recusados
+
+
+def _sync_at(track_info: dict) -> datetime | None:
+    """Quando o 17track consultou os Correios pela última vez
+    (`tracking.providers[].latest_sync_time`, ISO em UTC)."""
+    for p in ((track_info or {}).get("tracking") or {}).get("providers") or []:
+        raw = (p or {}).get("latest_sync_time") if isinstance(p, dict) else None
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    return None
+
+
+# Pacote que não vai mais se mover: reconsultar não traz nada e custaria crédito.
+STATUS_ENCERRADO = frozenset({"Delivered", "Expired"})
+SUBSTATUS_ENCERRADO = frozenset(
+    {"Exception_Returned", "Exception_Cancel", "Exception_Destroyed", "Exception_Lost"}
+)
+
+
+def encerrado(info: dict | None) -> bool:
+    d = info or {}
+    return d.get("status") in STATUS_ENCERRADO or d.get("sub_status") in SUBSTATUS_ENCERRADO
+
+
+async def fetch_detalhado(numbers: list[str]) -> dict[str, Any]:
+    """Como `fetch`, mas devolve também QUANDO o 17track consultou os Correios
+    (`sync_at`) e o status do pacote. Leitura pura, sem gastar quota.
+
+    Devolve {"info": {número: {localizacao, sync_at, status, sub_status}},
+    "desconhecidos": [números que o 17track diz não conhecer]}. Levanta
+    `Track17Error` se a resposta não for confiável."""
+    nums = sorted({(n or "").strip() for n in numbers if (n or "").strip()})
+    info: dict[str, dict[str, Any]] = {}
+    desconhecidos: list[str] = []
+    if not nums:
+        return {"info": info, "desconhecidos": desconhecidos}
+    async with httpx.AsyncClient(timeout=40.0) as c:
+        for i in range(0, len(nums), _FETCH_BATCH):
+            chunk = nums[i : i + _FETCH_BATCH]
+            if i:
+                await asyncio.sleep(_PAUSA_ENTRE_LOTES)
+            body = await _chamar(
+                c, "gettrackinfo", [{"number": n, "carrier": CORREIOS_CARRIER} for n in chunk]
+            )
+            data = body.get("data") or {}
+            for it in data.get("accepted") or []:
+                if not isinstance(it, dict) or not it.get("number"):
+                    continue
+                ti = it.get("track_info") or {}
+                st = ti.get("latest_status") or {}
+                info[str(it["number"]).strip()] = {
+                    "localizacao": _fmt_from_track_info(ti),
+                    "sync_at": _sync_at(ti),
+                    "status": (st.get("status") or "").strip(),
+                    "sub_status": (st.get("sub_status") or "").strip(),
+                }
+            _acc, rec = _aceitos_e_recusados(body)
+            desconhecidos += [n for n, code in rec.items() if code == ERRO_NAO_REGISTRADO]
+    return {"info": info, "desconhecidos": sorted(set(desconhecidos))}
+
+
+async def estado_numeros(numbers: list[str]) -> dict[str, dict[str, Any]]:
+    """Situação de cada número no 17track via `gettracklist` filtrado por
+    `number` (aceita vários separados por vírgula): `tracking_status`
+    (Tracking/Stopped), `is_retracked` (já usou o retomar gratuito — o 17track
+    só permite UMA vez, -18019905), `stop_reason`, `package_status`. Número que
+    o 17track não conhece simplesmente não vem."""
+    nums = sorted({(n or "").strip() for n in numbers if (n or "").strip()})
+    out: dict[str, dict[str, Any]] = {}
+    if not nums:
+        return out
+    async with httpx.AsyncClient(timeout=40.0) as c:
+        for i in range(0, len(nums), _FETCH_BATCH):
+            chunk = nums[i : i + _FETCH_BATCH]
+            if i:
+                await asyncio.sleep(_PAUSA_ENTRE_LOTES)
+            body = await _chamar(
+                c, "gettracklist", {"number": ",".join(chunk), "page_size": _FETCH_BATCH}
+            )
+            for it in (body.get("data") or {}).get("accepted") or []:
+                if not isinstance(it, dict) or not it.get("number"):
+                    continue
+                out[str(it["number"]).strip()] = {
+                    "tracking_status": (it.get("tracking_status") or "").strip(),
+                    "is_retracked": bool(it.get("is_retracked")),
+                    "stop_reason": it.get("stop_track_reason"),
+                    "package_status": it.get("package_status"),
+                }
+    return out
+
+
+async def parar_e_retomar(numbers: list[str]) -> dict[str, list[str]]:
+    """Força o 17track a consultar os Correios AGORA sem gastar crédito:
+    `stoptrack` + `retrack`, LOTE A LOTE (parar tudo e só depois retomar
+    deixaria dezenas de números parados se a rede falhasse no meio). Testado
+    em 08/09 (AD877240392BR): a consulta veio em menos de 1 min e o push do
+    webhook chegou em seguida.
+
+    Devolve: `retomados`; `ja_retomados` (o gratuito já foi usado — só apagar e
+    registrar de novo força, 1 crédito); `nao_registrados`; `parados` (parou
+    mas não conseguiu retomar por falha de rede — ficam Stopped e a rodada
+    seguinte os pega pelo `estado_numeros`)."""
+    nums = sorted({(n or "").strip() for n in numbers if (n or "").strip()})
+    res: dict[str, list[str]] = {
+        "retomados": [],
+        "ja_retomados": [],
+        "nao_registrados": [],
+        "parados": [],
+    }
+    if not nums:
+        return res
+    async with httpx.AsyncClient(timeout=40.0) as c:
+        for i in range(0, len(nums), _REGISTER_BATCH):
+            chunk = nums[i : i + _REGISTER_BATCH]
+            if i:
+                await asyncio.sleep(_PAUSA_ENTRE_LOTES)
+            try:
+                body = await _chamar(
+                    c, "stoptrack", [{"number": n, "carrier": CORREIOS_CARRIER} for n in chunk]
+                )
+            except Track17Error as e:
+                logger.warning("logistica_17track_stoptrack_falhou", n=len(chunk), err=str(e))
+                continue  # nada parou: o lote fica como estava
+            parados, rec = _aceitos_e_recusados(body)
+            res["nao_registrados"] += [n for n, code in rec.items() if code == ERRO_NAO_REGISTRADO]
+            # Já estava parado (rodada anterior interrompida): retoma junto.
+            parados += [n for n, code in rec.items() if code == ERRO_JA_PARADO]
+            if not parados:
+                continue
+            await asyncio.sleep(_PAUSA_ENTRE_LOTES)
+            try:
+                body = await _chamar(
+                    c, "retrack", [{"number": n, "carrier": CORREIOS_CARRIER} for n in parados]
+                )
+            except Track17Error as e:
+                logger.warning("logistica_17track_retrack_falhou", n=len(parados), err=str(e))
+                res["parados"] += parados
+                continue
+            retomados, rec = _aceitos_e_recusados(body)
+            res["retomados"] += retomados
+            res["ja_retomados"] += [n for n, code in rec.items() if code == ERRO_RETRACK_SO_UMA_VEZ]
+            outros = [
+                n for n in parados if n not in retomados and rec.get(n) != ERRO_RETRACK_SO_UMA_VEZ
+            ]
+            if outros:
+                logger.warning(
+                    "logistica_17track_retrack_recusado", numeros=outros[:10], n=len(outros)
+                )
+                res["parados"] += outros
+    logger.info("logistica_17track_parar_e_retomar", **{k: len(v) for k, v in res.items()})
+    return res
+
+
+async def retomar_parados(numbers: list[str]) -> dict[str, list[str]]:
+    """`retrack` direto pra número que JÁ está parado no 17track (rodada
+    anterior interrompida, ou parado pelo próprio 17track após 30 dias sem
+    evento). Mesmo retorno de `parar_e_retomar`."""
+    nums = sorted({(n or "").strip() for n in numbers if (n or "").strip()})
+    res: dict[str, list[str]] = {
+        "retomados": [],
+        "ja_retomados": [],
+        "nao_registrados": [],
+        "parados": [],
+    }
+    if not nums:
+        return res
+    async with httpx.AsyncClient(timeout=40.0) as c:
+        for i in range(0, len(nums), _REGISTER_BATCH):
+            chunk = nums[i : i + _REGISTER_BATCH]
+            if i:
+                await asyncio.sleep(_PAUSA_ENTRE_LOTES)
+            try:
+                body = await _chamar(
+                    c, "retrack", [{"number": n, "carrier": CORREIOS_CARRIER} for n in chunk]
+                )
+            except Track17Error as e:
+                logger.warning("logistica_17track_retrack_falhou", n=len(chunk), err=str(e))
+                res["parados"] += chunk
+                continue
+            retomados, rec = _aceitos_e_recusados(body)
+            res["retomados"] += retomados
+            res["ja_retomados"] += [n for n, code in rec.items() if code == ERRO_RETRACK_SO_UMA_VEZ]
+            res["nao_registrados"] += [n for n, code in rec.items() if code == ERRO_NAO_REGISTRADO]
+            res["parados"] += [
+                n
+                for n in chunk
+                if n not in retomados
+                and rec.get(n) not in (ERRO_RETRACK_SO_UMA_VEZ, ERRO_NAO_REGISTRADO)
+            ]
+    return res
+
+
+async def reregistrar(numbers: list[str]) -> dict[str, Any]:
+    """Força a consulta pra número que JÁ usou o retomar gratuito: `deletetrack`
+    + `register` (1 crédito por número), LOTE A LOTE — apagar tudo antes de
+    registrar deixaria números sem rastreio se o saldo acabasse no meio.
+    Testado em 08/09 (AP440389505BR): a consulta aos Correios veio em 30s, e
+    o número volta com `is_retracked=False` (o retomar gratuito vale de novo).
+
+    Devolve `ok` (registrados de novo), `apagados_sem_registro` (o 17track
+    apagou e o register falhou — quem chama PRECISA zerar `rastreio_17track`
+    pra o sync de 15 min registrar de novo) e `sem_quota`."""
+    nums = sorted({(n or "").strip() for n in numbers if (n or "").strip()})
+    res: dict[str, Any] = {"ok": [], "apagados_sem_registro": [], "sem_quota": False}
+    if not nums:
+        return res
+    async with httpx.AsyncClient(timeout=40.0) as c:
+        for i in range(0, len(nums), _REGISTER_BATCH):
+            chunk = nums[i : i + _REGISTER_BATCH]
+            if i:
+                await asyncio.sleep(_PAUSA_ENTRE_LOTES)
+            try:
+                body = await _chamar(
+                    c, "deletetrack", [{"number": n, "carrier": CORREIOS_CARRIER} for n in chunk]
+                )
+            except Track17Error as e:
+                logger.warning("logistica_17track_deletetrack_falhou", n=len(chunk), err=str(e))
+                continue  # nada apagado: lote fica como estava
+            apagados, _rec = _aceitos_e_recusados(body)
+            if not apagados:
+                continue
+            await asyncio.sleep(_PAUSA_ENTRE_LOTES)
+            try:
+                reg = await register(apagados)
+            except Exception as e:  # noqa: BLE001 — apagou e não registrou: avisar quem chama
+                logger.warning(
+                    "logistica_17track_reregistrar_register_falhou",
+                    n=len(apagados),
+                    err=str(e)[:200],
+                )
+                res["apagados_sem_registro"] += apagados
+                break
+            ok = set(reg.get("ok") or [])
+            res["ok"] += [n for n in apagados if n in ok]
+            res["apagados_sem_registro"] += [n for n in apagados if n not in ok]
+            if reg.get("sem_quota"):
+                res["sem_quota"] = True
+                break  # não apaga mais nada sem saldo pra registrar de volta
+    logger.info(
+        "logistica_17track_reregistrar",
+        ok=len(res["ok"]),
+        apagados_sem_registro=len(res["apagados_sem_registro"]),
+        sem_quota=res["sem_quota"],
+    )
+    return res
+
+
+async def quota_restante() -> int | None:
+    """Créditos que sobram na conta (`getquota`); None se não deu pra saber."""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as c:
+            body = await _chamar(c, "getquota", {})
+        return int((body.get("data") or {}).get("quota_remain"))
+    except (Track17Error, TypeError, ValueError) as e:
+        logger.warning("logistica_17track_getquota_falhou", err=str(e)[:160])
+        return None
 
 
 def _fmt_from_track_info(track_info: dict) -> str | None:

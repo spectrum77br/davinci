@@ -842,6 +842,19 @@ async def logistica_track_sync(ctx: dict) -> None:
     logger.info("logistica_track_sync_job_done", **summary)
 
 
+async def logistica_track_forcar(ctx: dict) -> None:
+    """07:00 e 16:30 (Brasília): força o 17track a reconsultar os Correios dos
+    pacotes em trânsito. O 17track sozinho só consulta ~1x/dia; Eduardo (08/09,
+    pedido 294036) viu os Correios com movimento das 06:54 e a Logística parada
+    no evento de 4 dias antes. Grátis na 1ª vez por número (retomar), 1 crédito
+    nas seguintes (apagar + registrar)."""
+    from app.services import logistica_track_sync as svc  # tardio: httpx + models
+
+    async with session_scope() as s:
+        summary = await svc.forcar_reconsulta(s)
+    logger.info("logistica_track_forcar_job_done", **summary)
+
+
 async def chamados_replica_automatica(ctx: dict) -> None:
     """De hora em hora (:25): réplica automática dos Chamados (reenvia a
     mensagem cadastrada a cada N dias enquanto ligada) + monitoramento (fecha
@@ -2071,6 +2084,12 @@ class WorkerSettings:
             run_at_startup=False,
             timeout=900,
         ),
+        # Reconsulta FORÇADA nos Correios via 17track, 07:01 e 16:31 de Brasília
+        # (10:01 e 19:31 UTC — o Brasil não tem horário de verão). Horários
+        # escolhidos pelo Eduardo em 08/09 (07:00/16:30); :01 pra não coincidir
+        # com o ingest de :00, que apaga pedido finalizado da tabela.
+        cron(logistica_track_forcar, hour=10, minute=1, run_at_startup=False, timeout=900),
+        cron(logistica_track_forcar, hour=19, minute=31, run_at_startup=False, timeout=900),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps
         # 5/5/5/5/4h — sempre abaixo da expiração. minute=45 evita colidir
