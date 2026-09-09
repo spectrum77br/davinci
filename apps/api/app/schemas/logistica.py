@@ -219,6 +219,9 @@ class StatusBlingPreviewOut(BaseModel):
     situacao_atual_id: int | None = None
     situacao_atual_nome: str | None = None
     ja_no_alvo: bool = False
+    # Robô já aplicou esse alvo com esta assinatura e um humano tirou dali:
+    # não reaplica até a plataforma mudar (09/09).
+    override_humano: bool = False
     aplicavel: bool = True
 
 

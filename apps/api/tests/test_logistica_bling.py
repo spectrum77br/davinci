@@ -375,6 +375,80 @@ async def test_status_preview_e_aplicar(
 
 
 @pytest.mark.asyncio
+async def test_status_override_humano_nao_reaplica(
+    client: AsyncClient,
+    admin: User,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """09/09 (292291): o robô levou o pedido ao alvo; alguém tirou dali (mesma
+    assinatura da plataforma) → o robô NÃO reaplica; só volta a agir quando a
+    assinatura da plataforma mudar."""
+    auth_as(admin)
+    meli = {"order_status": "paid", "ship_status": "delivered"}
+    chave = logistica_rules.assinatura_pt(meli)
+    db.add_all(
+        [
+            SituacaoBling(id=6, nome="Em aberto"),
+            SituacaoBling(id=83957, nome="Aguardando Devolução"),
+        ]
+    )
+    rs = await client.post(
+        "/api/logistica/status",
+        json={"status_plataforma": chave, "status_atual": "Em aberto",
+              "alterar_status_bling": "Aguardando Devolução"},
+    )
+    assert rs.status_code == 201, rs.text
+    db.add(BlingOrder(bling_id=777, numero="99007", item_codigo="sku1", item_index=0, situacao="6"))
+    await db.commit()
+    rc = await client.post(
+        "/api/logistica",
+        json={"plataforma": "Mercado Livre", "pedido_bling": "99007", "meli_status": meli},
+    )
+    assert rc.status_code == 201, rc.text
+    lid = rc.json()["id"]
+    fake = _FakeBling({"id": 777, "numero": 99007, "situacao": {"id": 6, "valor": 0}})
+
+    async def _fake_client(session):
+        return fake
+
+    monkeypatch.setattr(logistica_bling, "_bling_client", _fake_client)
+    # 1ª vez: aplica e memoriza
+    ra = await client.post(f"/api/logistica/{lid}/alterar-status-bling")
+    assert ra.status_code == 200, ra.text
+    assert fake.situacao_set == 83957
+    row = await db.get(Logistica, uuid.UUID(lid))
+    await db.refresh(row)
+    assert row.auto_status["alvo_id"] == 83957 and row.auto_status["assinatura"] == chave
+    # humano volta o pedido pra "Em aberto" no Bling (o GET vivo mostra 6 de novo)
+    fake.situacao_set = None
+    rp = await client.post(f"/api/logistica/{lid}/alterar-status-bling/preview")
+    assert rp.status_code == 200, rp.text
+    assert rp.json()["override_humano"] is True and rp.json()["aplicavel"] is False
+    ra2 = await client.post(f"/api/logistica/{lid}/alterar-status-bling")
+    assert ra2.status_code == 422
+    assert ra2.json()["detail"]["code"] == "logistica_status_override_humano"
+    assert fake.situacao_set is None  # não mexeu
+    # a plataforma MUDOU (assinatura nova que também casa uma regra) → volta a aplicar
+    meli2 = {"order_status": "cancelled", "ship_status": "delivered"}
+    rs2 = await client.post(
+        "/api/logistica/status",
+        json={
+            "status_plataforma": logistica_rules.assinatura_pt(meli2),
+            "status_atual": "Em aberto",
+            "alterar_status_bling": "Aguardando Devolução",
+        },
+    )
+    assert rs2.status_code == 201, rs2.text
+    row.meli_status = meli2
+    await db.commit()
+    ra3 = await client.post(f"/api/logistica/{lid}/alterar-status-bling")
+    assert ra3.status_code == 200, ra3.text
+    assert fake.situacao_set == 83957
+
+
+@pytest.mark.asyncio
 async def test_status_ja_no_alvo(
     client: AsyncClient,
     admin: User,

@@ -376,6 +376,26 @@ _ML_RETURN_LABELS_PT = {
 _ML_RETURN_ENCERRADO = {"CANCELLED", "CANCELED", "CLOSED", "EXPIRED", "REJECTED"}
 
 
+# Substatus do ML em que o pacote está VOLTANDO pro vendedor. Enquanto o envio
+# estiver aqui a linha não pode "descansar": a regra da aba Status já levou o
+# pedido pra "Aguardando Devolução" e o painel a esconde como resolvida, mas o
+# ML ainda vai mudar pra `returned` (chegou) — e é essa data que a tela
+# Devoluções ("lançar") precisa. Caso real: 290327 parado em "Devolvido ao hub"
+# de 16/08 enquanto o ML mostrava "Devolvido no dia 9 de setembro" (Eduardo, 09/09).
+RETORNO_EM_TRANSITO = frozenset(
+    {"returned_to_hub", "returning_to_hub", "returning_to_sender", "soon_to_be_returned"}
+)
+
+
+def retorno_em_transito(plataforma: str | None, status: dict[str, str] | None) -> bool:
+    """True quando é linha do ML e o envio está voltando (ainda não `returned`)."""
+    p = (plataforma or "").strip().lower()
+    if p not in _ML_PLATAFORMAS:
+        return False
+    sub = str((status or {}).get("ship_substatus") or "").strip().lower()
+    return sub in RETORNO_EM_TRANSITO
+
+
 def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -> str | None:
     """Texto em PT da devolução VIVA de Shopee/TikTok/ML, ou None quando não
     há caso aberto (sem `return_status`, ou encerrado — cancelado/recusado).

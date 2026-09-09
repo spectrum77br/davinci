@@ -347,6 +347,19 @@ async def run_ingest_ml_daily(
     enr = await logistica_meli.enrich_recent(
         session, limit=enrich_limit, only_empty=True
     )
+    # Devoluções em trânsito (returned_to_hub/returning_*): re-consulta toda
+    # hora, mesmo já enriquecidas e escondidas, até o ML dizer `returned`.
+    em_transito = [
+        r.id
+        for r in (await session.execute(select(Logistica))).scalars().all()
+        if logistica_rules.retorno_em_transito(r.plataforma, r.meli_status or {})
+    ]
+    if em_transito:
+        enr_ret = await logistica_meli.enrich_recent(
+            session, ids=em_transito, only_empty=False
+        )
+        enr = {**enr, **{f"retorno_{k}": v for k, v in enr_ret.items()}}
+        enr["retorno_em_transito"] = len(em_transito)
     return {
         "status_refresh": refreshed,
         "cleanup": removed,
@@ -422,6 +435,11 @@ async def _ids_pendentes(
         if chave is None:
             continue
         if r.id in forcadas:
+            pend[chave].append(r.id)
+            continue
+        # Pacote voltando (ML): continua "vivo" mesmo escondido/resolvido — o
+        # substatus ainda vai virar `returned` e a tela Devoluções precisa da data.
+        if logistica_rules.retorno_em_transito(r.plataforma, r.meli_status or {}):
             pend[chave].append(r.id)
             continue
         assinatura = logistica_rules.assinatura_para(r.plataforma, r.meli_status or {})

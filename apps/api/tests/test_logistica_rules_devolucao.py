@@ -92,3 +92,16 @@ def test_sem_devolucao_ou_plataforma_desconhecida():
     assert devolucao_status_pt("Shopee", None) is None
     assert devolucao_status_pt("Amazon", {"return_status": "X"}) is None
     assert devolucao_status_pt(None, {"return_status": "PROCESSING"}) is None
+
+
+def test_ml_retorno_em_transito():
+    """09/09 (290327): pacote voltando (returned_to_hub/returning_*) mantém a
+    linha viva pra reconsulta; `returned` (chegou) e outros substatus não."""
+    from app.services import logistica_rules as rules
+
+    assert rules.retorno_em_transito("Mercado Livre", {"ship_substatus": "returned_to_hub"})
+    assert rules.retorno_em_transito("ml", {"ship_substatus": "returning_to_sender"})
+    assert not rules.retorno_em_transito("Mercado Livre", {"ship_substatus": "returned"})
+    assert not rules.retorno_em_transito("Mercado Livre", {"ship_substatus": "delivered"})
+    assert not rules.retorno_em_transito("Shopee", {"ship_substatus": "returned_to_hub"})
+    assert not rules.retorno_em_transito("Mercado Livre", {})

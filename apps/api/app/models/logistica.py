@@ -41,6 +41,11 @@ class Logistica(Base, TimestampMixin):
     status_datas: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
     )
+    # Última transição de situação que o ROBÔ aplicou pela aba Status:
+    # {"alvo_id", "de_id", "assinatura", "em"}. Se depois disso um humano tirar
+    # o pedido do alvo sem a assinatura da plataforma mudar, o robô NÃO reaplica
+    # (Eduardo 09/09: "mudou pra Entregue 3x e o sistema volta pra aguardando").
+    auto_status: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Número de rastreio do envio (manual por enquanto).
     rastreio: Mapped[str | None] = mapped_column(Text, nullable=True)
     localizacao: Mapped[str | None] = mapped_column(Text, nullable=True)

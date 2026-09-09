@@ -372,12 +372,22 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
         (i for i in infos if i["alvo_id"] is not None and i["alvo_id"] == atual_canon), None
     )
 
+    override_humano = False
     if chosen is not None:
         # Regra aplicável ao estado atual; se o pedido já está no alvo dela, é no-op.
         if chosen["alvo_id"] == atual_canon:
             display, aplicavel, ja_no_alvo = chosen, False, True
         else:
             display, aplicavel, ja_no_alvo = chosen, True, False
+            # O robô JÁ levou este pedido a esse alvo com a mesma assinatura da
+            # plataforma e alguém tirou dali (o estado de partida voltou a casar):
+            # decisão humana — não reaplica enquanto a plataforma não mudar.
+            memo = row.auto_status if isinstance(row.auto_status, dict) else {}
+            if (
+                memo.get("alvo_id") == chosen["alvo_id"]
+                and memo.get("assinatura") == assinatura
+            ):
+                aplicavel, override_humano = False, True
     elif ja_alvo is not None:
         # Nenhuma regra parte do estado atual, mas o pedido já está no alvo de
         # alguma regra: chegou ao fim da cadeia, nada a fazer.
@@ -396,6 +406,8 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
         "alvo_id": display["alvo_id"],
         "aplicavel": aplicavel,
         "ja_no_alvo": ja_no_alvo,
+        "override_humano": override_humano,
+        "assinatura": assinatura,
     }
 
 
@@ -414,6 +426,7 @@ async def preview_alterar_status_bling(session: AsyncSession, row: Logistica) ->
         "situacao_atual_id": r["atual_id"],
         "situacao_atual_nome": r["atual_nome"],
         "ja_no_alvo": r["ja_no_alvo"],
+        "override_humano": r.get("override_humano", False),
         "aplicavel": r["aplicavel"],
     }
 
@@ -424,6 +437,14 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
     sincroniza o `status_bling` local. `logistica_status_atual_divergente` se o
     pedido não está no "de" de nenhuma regra."""
     r = await _resolve_status(session, row)
+    if r.get("override_humano"):
+        logger.info(
+            "logistica_status_override_humano",
+            pedido=row.pedido_bling,
+            situacao_atual=r["atual_id"],
+            situacao_alvo=r["alvo_id"],
+        )
+        raise BlingObsError("logistica_status_override_humano")
     if not r["aplicavel"]:
         raise BlingObsError("logistica_status_atual_divergente")
     alvo, alvo_id = r["alvo"], r["alvo_id"]
@@ -431,6 +452,12 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
     # Nome do catálogo pro id realmente aplicado (regra escrita com o apelido
     # legado "Enviado Etiqueta" move pra 21 → espelho local diz "Em digitação").
     row.status_bling = await _situacao_nome_por_id(session, alvo_id) or alvo
+    row.auto_status = {
+        "alvo_id": alvo_id,
+        "de_id": r["de_id"],
+        "assinatura": r["assinatura"],
+        "em": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
     await session.flush()
     logger.info(
         "logistica_alterar_status_bling_aplicada",
