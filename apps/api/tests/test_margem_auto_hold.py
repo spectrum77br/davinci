@@ -12,7 +12,7 @@ sumia de todas as abas até o próximo rebuild).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import pytest
@@ -111,6 +111,7 @@ async def _seed_pedido(
     # Catálogo id→nome (merge = idempotente entre seeds do mesmo teste): os
     # espelhos de situação também gravam situacao_nome via subselect daqui.
     await db.merge(SituacaoBling(id=6, nome="Em aberto"))
+    await db.merge(SituacaoBling(id=12, nome="Cancelado"))
     await db.merge(SituacaoBling(id=83955, nome="Aguardando Cancelamento"))
     db.add(
         BlingOrder(
@@ -154,9 +155,10 @@ async def _seed_pedido(
             "bling_id": bling_id,
             "sku": f"sku-{pedido}",
             "situacao": situacao,
-            "situacao_nome": (
-                "Aguardando Cancelamento" if situacao == "83955" else "Em aberto"
-            ),
+            "situacao_nome": {
+                "83955": "Aguardando Cancelamento",
+                "12": "Cancelado",
+            }.get(situacao, "Em aberto"),
             "status": status,
             "margem": margem if margem is not None else (0.05 if margem_baixa else 0.5),
             "minima": minima,
@@ -764,6 +766,45 @@ async def test_margem_negativa_some_da_listagem_mas_aparece_na_busca(
     response = await client.get("/api/margens/marketplace/lookup?pedido=291670")
     assert response.status_code == 200
     assert [i["pedido_bling"] for i in response.json()["items"]] == ["291670"]
+
+
+async def test_filtro_status_reprovado_mostra_o_que_a_triagem_esconde(
+    client, db: AsyncSession, make_user, auth_as
+):
+    """Eduardo (09/09): "filtro pelo status para ver os reprovados não aparece
+    nada". Reprovar é o que joga o pedido em 83955 → 12 Cancelado, as duas
+    situações que a triagem exclui — então o recorte por situação escondia 100%
+    do que o filtro procura. Com status=Reprovado a situação não filtra: a aba
+    mostra os reprovados dos últimos 30 dias e "todas situações" traz o resto.
+    O default (sem status) continua escondendo tudo isso."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    agora = datetime.now(UTC)
+    await _seed_pedido(db, pedido="500", bling_id=500)  # em aberto, sem decisão
+    await _seed_pedido(db, pedido="501", bling_id=501, situacao="83955", status="Reprovado")
+    await _seed_pedido(db, pedido="502", bling_id=502, situacao="12", status="Reprovado")
+    await _seed_pedido(
+        db,
+        pedido="503",
+        bling_id=503,
+        situacao="12",
+        status="Reprovado",
+        data=agora - timedelta(days=60),
+    )
+
+    async def pedidos(qs: str) -> set[str]:
+        r = await client.get(f"/api/margens/marketplace{qs}")
+        assert r.status_code == 200, r.text
+        return {i["pedido_bling"] for i in r.json()["items"]}
+
+    # Sem filtro de status: a triagem segue escondendo os reprovados.
+    assert await pedidos("") == {"500"}
+    # Com o filtro: aparecem os reprovados recentes, em qualquer situação.
+    assert await pedidos("?status=Reprovado") == {"501", "502"}
+    # "todas situações" tira também o recorte de 30 dias.
+    assert await pedidos("?status=Reprovado&situacao=all") == {"501", "502", "503"}
+    # E o filtro continua sendo por decisão gravada: pendente não entra.
+    assert "500" not in await pedidos("?status=Reprovado&situacao=all")
 
 
 async def test_margem_negativa_acima_da_minima_negativa_nao_reprova(db: AsyncSession):

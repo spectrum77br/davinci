@@ -35,7 +35,10 @@ from app.schemas.margens import (
     SaldoRaioXOut,
 )
 from app.security.cipher import decrypt_json
-from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
+from app.services.bling_situacoes import (
+    SITUACAO_CANCELADO,
+    SITUACOES_ENVIADO_ETIQUETA_STR,
+)
 from app.services.margem_audit import record_margem_audit
 from app.services.rentabilidade_xlsx import build_rentabilidade_xlsx
 from app.services.marketplaces.bling import BlingClient
@@ -101,10 +104,13 @@ _SITUACOES_SALDO_DIVERGENTE_IN = ", ".join(f"'{s}'" for s in _SITUACOES_SALDO_DI
 _TRIAGEM_DIAS = 30
 # Sem data (não deveria acontecer) conta como recente — nunca esconder por
 # falta de informação.
+_RECENTE_SQL = (
+    f"COALESCE((v.data AT TIME ZONE 'America/Sao_Paulo')::date, CURRENT_DATE)"
+    f" >= CURRENT_DATE - {_TRIAGEM_DIAS}"
+)
 _SITUACAO_TRIAGEM_SQL = (
     f"((v.situacao IN ({_SITUACOES_SALDO_DIVERGENTE_IN})"
-    f"  AND COALESCE((v.data AT TIME ZONE 'America/Sao_Paulo')::date, CURRENT_DATE)"
-    f"      >= CURRENT_DATE - {_TRIAGEM_DIAS})"
+    f"  AND {_RECENTE_SQL})"
     f" OR (v.situacao = '{SITUACAO_REPROVADO}' AND v.bling_status_margem = 'Pendente'))"
 )
 _SITUACAO_FILTERS = ("triagem", "all")
@@ -562,6 +568,11 @@ async def list_margens_marketplace(
     digitação; 83965 Enviado Etiqueta legado) (+ os segurados pelo robô) —
     pedido do Eduardo (03/09); "all" = todas as
     situações. O lookup ("Buscar pedido") não usa este filtro.
+
+    `status=Reprovado` é a única saída desse recorte: reprovar move o pedido
+    pra "Aguardando Cancelamento"/"Cancelado", então filtrar situação em cima
+    dele devolvia sempre 0 (Eduardo, 09/09). Nesse filtro a situação não conta:
+    "triagem" = reprovados dos últimos 30 dias, "all" = todos.
     """
     if situacao is not None and situacao not in _SITUACAO_FILTERS:
         raise HTTPException(400, detail={"code": "invalid_situacao"})
@@ -577,16 +588,35 @@ async def list_margens_marketplace(
     # PRECISA continuar visível, senão ninguém consegue analisá-lo (Aprovar/
     # Reprovar). Os 83955 dos outros fluxos seguem fora: reprovado no clique
     # (status='Reprovado') e falta de estoque (status NULL).
-    where = [
-        "v.situacao_nome != 'Cancelado'",
-        f"(v.situacao IS DISTINCT FROM '{SITUACAO_REPROVADO}'"
-        " OR v.bling_status_margem = 'Pendente')",
-        f"NOT {_ATTENTION_FRETE_SQL}",
-    ]
+    # EXCEÇÃO 2 (Eduardo, 09/09: "filtro pelo status para ver os reprovados não
+    # aparece nada"): TODO o recorte por situação acima existe pro fluxo de
+    # TRIAGEM — decidir margem de pedido que ainda está de pé. Quem pediu
+    # status=Reprovado quer justamente o que já foi decidido, e reprovar é o que
+    # move o pedido pra 83955 → 12; ou seja, as cláusulas de situação escondiam
+    # 100% do que esse filtro procura (medido em 09/09: 401 reprovados no banco,
+    # 0 visíveis no padrão da tela, 90 só quem soubesse trocar pra "todas
+    # situações"). Com status=Reprovado a situação deixa de filtrar; o recorte
+    # vira só a idade do pedido, os mesmos 30 dias que a aba promete no título
+    # ("todas situações" tira também o recorte de data e mostra o histórico).
+    so_reprovados = status == "Reprovado"
+    where = []
+    if not so_reprovados:
+        # Frete só se conhece depois do envio: linha com frete divergente sai da
+        # triagem pra não decidir margem com número provisório. Numa linha JÁ
+        # reprovada não há o que decidir, e esconder aqui repetiria o mesmo bug.
+        where.append(f"NOT {_ATTENTION_FRETE_SQL}")
+        where.append("v.situacao_nome != 'Cancelado'")
+        where.append(
+            f"(v.situacao IS DISTINCT FROM '{SITUACAO_REPROVADO}'"
+            " OR v.bling_status_margem = 'Pendente')"
+        )
     if (situacao or "triagem") == "triagem":
-        # Só o que ainda está em triagem (Em aberto / Em digitação=etiqueta
-        # enviada, 83965 legado / segurado pelo robô) — ver _SITUACAO_TRIAGEM_SQL.
-        where.append(_SITUACAO_TRIAGEM_SQL)
+        if so_reprovados:
+            where.append(_RECENTE_SQL)
+        else:
+            # Só o que ainda está em triagem (Em aberto / Em digitação=etiqueta
+            # enviada, 83965 legado / segurado pelo robô) — _SITUACAO_TRIAGEM_SQL.
+            where.append(_SITUACAO_TRIAGEM_SQL)
     params: dict = {"limit": limit, "offset": offset}
     if platform:
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
@@ -1700,6 +1730,15 @@ async def _apply_bling_decision_by_pedido(
         and (order.status or "") in ("Pendente", "Reprovado")
     ):
         patch_bling = True
+
+    # Pedido CANCELADO (12) no Bling é ponto final: aprovar aqui tentaria
+    # ressuscitar a venda (12 → 9 Atendido → 6 Em aberto), mexendo em estoque e
+    # nota de um pedido que não existe mais. A decisão fica só no DaVinci.
+    # Vale desde que a aba passou a listar reprovados (Eduardo, 09/09) — eles
+    # estão quase todos em 12 — e também protege a aba "Buscar pedido", que
+    # nunca teve recorte de situação.
+    if str(current_situacao_id or "") == str(SITUACAO_CANCELADO):
+        patch_bling = False
 
     if patch_bling and str(current_situacao_id or "") != str(situacao_id):
         client = await _global_bling_client(session)

@@ -71,6 +71,13 @@ const STATUS_CLS: Record<string, string> = {
   Reprovado: 'bg-red-500/15 text-red-400 border-red-500/40',
   Aprovado:  'bg-emerald-500/15 text-emerald-400 border-emerald-500/40',
 }
+// Pedido cancelado no Bling (12): entra na lista só pelo filtro Reprovado, e
+// ali é histórico — decidir margem de venda cancelada não faz sentido e o
+// Aprovar tentaria ressuscitar o pedido (o backend também barra).
+function cancelado(r: { situacao?: string | null }): boolean {
+  return (r.situacao || '').trim().toLowerCase() === 'cancelado'
+}
+
 function statusCls(s: string | null | undefined): string {
   return STATUS_CLS[s ?? ''] ?? 'bg-muted text-muted-foreground border-border'
 }
@@ -1013,10 +1020,16 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       <select
         v-model="situacaoFilter"
         class="text-sm rounded-md border bg-background px-2 py-1.5"
-        title="Situação do pedido no Bling. Padrão: só o que ainda está em triagem (Em aberto + Em digitação dos últimos 30 dias, mais os segurados pelo robô). Pedidos antigos nessas situações ficam de fora — use 'todas situações' para vê-los."
+        :title="statusFilter === 'Reprovado'
+          ? 'Reprovado já saiu da triagem (o pedido vai para Aguardando Cancelamento / Cancelado), então aqui a situação não filtra: só escolhe se você vê os últimos 30 dias ou o histórico inteiro.'
+          : `Situação do pedido no Bling. Padrão: só o que ainda está em triagem (Em aberto + Em digitação dos últimos 30 dias, mais os segurados pelo robô). Pedidos antigos nessas situações ficam de fora — use 'todas situações' para vê-los.`"
       >
-        <option value="triagem">em aberto + em digitação (30 dias)</option>
-        <option value="all">todas situações</option>
+        <option value="triagem">
+          {{ statusFilter === 'Reprovado' ? 'reprovados dos últimos 30 dias' : 'em aberto + em digitação (30 dias)' }}
+        </option>
+        <option value="all">
+          {{ statusFilter === 'Reprovado' ? 'todos os reprovados' : 'todas situações' }}
+        </option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">
         {{ rangeStart }}–{{ rangeEnd }} de {{ total }}
@@ -1329,7 +1342,8 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
             <td class="px-2 py-1 border-l-[3px] border-gray-400 dark:border-gray-600">
               <select
                 :value="r.status ?? 'Pendente'"
-                :disabled="!canEdit || !r.pedido_bling"
+                :disabled="!canEdit || !r.pedido_bling || cancelado(r)"
+                :title="cancelado(r) ? 'Pedido cancelado no Bling: a venda não existe mais, não há margem a decidir.' : undefined"
                 class="pill border text-[11px] font-medium px-2 py-1 rounded-md cursor-pointer disabled:cursor-default disabled:opacity-70"
                 :class="statusCls(r.status ?? 'Pendente')"
                 @change="(e) => setStatus(r, (e.target as HTMLSelectElement).value as MargensStatus)"

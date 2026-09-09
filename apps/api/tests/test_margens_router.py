@@ -180,6 +180,35 @@ async def test_patch_margem_reprovado_when_situacao_not_em_aberto_skips_bling(
     assert order.verificado is True
 
 
+async def test_patch_margem_aprovado_nao_ressuscita_pedido_cancelado(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+    monkeypatch,
+):
+    """Pedido Cancelado (12) no Bling é ponto final. Desde 09/09 a aba lista os
+    reprovados (quase todos acabam em 12), então o Aprovar precisa ficar só no
+    DaVinci: empurrar 12 → 9 → 6 devolveria ao fluxo uma venda que não existe
+    mais, mexendo em estoque e nota."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    margem, order = await _create_margem_with_order(db, situacao="12")
+
+    async def fail_if_called(session):
+        raise AssertionError("pedido cancelado não pode ir pro Bling")
+
+    monkeypatch.setattr(margens_router, "_global_bling_client", fail_if_called)
+
+    response = await client.patch(f"/api/margens/{margem.id}", json={"status": "Aprovado"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "Aprovado"
+    await db.refresh(order)
+    assert order.status == "Aprovado"
+    assert order.situacao == "12"
+
+
 async def test_patch_margem_reprovado_from_em_aberto_patches_bling(
     client,
     db: AsyncSession,
