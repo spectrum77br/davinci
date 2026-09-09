@@ -78,9 +78,18 @@ _RE_SHOPEE_SN = re.compile(r"(?<![A-Za-z0-9])\d{6}[A-Z0-9]{8}(?![A-Za-z0-9])")
 _RE_DOC = re.compile(r"(?:CPF|CNPJ)[^:\d]{0,12}:?\s*([\d.\-/]{11,18})", re.IGNORECASE)
 
 
+# Etiqueta ML Flex (Marquezini, 09/09): "Pack ID: 20000 14931988905" — o nº da
+# venda vem partido por um espaço; juntando dá o numeroloja (2000014931988905).
+_RE_PACK_ML = re.compile(r"Pack ID:\s*(\d{5})\s*(\d{11})", re.IGNORECASE)
+
+
 def _numerolojas_do_texto(texto: str) -> list[str]:
     """Candidatos a nº da plataforma, na ordem, sem duplicar."""
-    achados = _RE_PEDIDO.findall(texto) + _RE_SHOPEE_SN.findall(texto)
+    achados = (
+        _RE_PEDIDO.findall(texto)
+        + ["".join(m) for m in _RE_PACK_ML.findall(texto)]
+        + _RE_SHOPEE_SN.findall(texto)
+    )
     return list(dict.fromkeys(achados))
 
 
@@ -98,7 +107,8 @@ def _documentos_do_texto(texto: str) -> list[str]:
         digitos = "".join(c for c in m.group(1) if c.isdigit())
         if len(digitos) not in (11, 14):
             continue
-        alvo = dest if up.rfind("DESTINAT", 0, m.start()) > up.rfind("REMET", 0, m.start()) else outros
+        eh_dest = up.rfind("DESTINAT", 0, m.start()) > up.rfind("REMET", 0, m.start())
+        alvo = dest if eh_dest else outros
         alvo.append(digitos)
     return list(dict.fromkeys(dest + outros))
 

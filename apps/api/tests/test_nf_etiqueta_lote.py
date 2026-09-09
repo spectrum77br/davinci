@@ -264,3 +264,14 @@ def test_casa_por_texto_sku_token_isolado():
         )
         is None
     )
+
+
+def test_numerolojas_pack_id_ml_flex_partido_por_espaco():
+    """Etiqueta ML Flex (Marquezini, 09/09): "Pack ID: 20000 14931988905" — o nº
+    da venda vem partido por um espaço; juntando é o numeroloja do pedido."""
+    texto = (
+        "Marquezini Comercio #1593540211\nEnvio: 4796486 8117\nPack ID: 20000 14931988905\n"
+        "FLEX\nDestinatario: Marketing Florien (FF20250609080235)\n"
+        "DECLARAÇÃO DE CONTEÚDO\nCódigo de Rastreamento: 47964868117\n"
+    )
+    assert nf_etiqueta_lote._numerolojas_do_texto(texto) == ["2000014931988905"]
