@@ -333,3 +333,16 @@ def test_pdf_invalido_levanta():
 def test_pdf_vazio_levanta():
     with pytest.raises(EtiquetaTransformError):
         transformar_etiqueta(_PDF_SEM_PAGINAS)
+
+
+def test_duimp_no_rodape_da_etiqueta():
+    """Eduardo 09/09: a DUIMP dos itens vai impressa na etiqueta (rodapé da 1ª
+    página, fonte pequena). Sem `duimp` nada muda."""
+    raw = _etiqueta_sintetica()
+    sem = transformar_etiqueta(raw, "Fulano De Tal")
+    com = transformar_etiqueta(raw, "Fulano De Tal", duimp="26BR00012345678 | 26BR00098765432")
+    t_sem = fitz.open(stream=sem, filetype="pdf")[0].get_text()
+    t_com = fitz.open(stream=com, filetype="pdf")[0].get_text()
+    assert "DUIMP" not in t_sem
+    assert "DUIMP: 26BR00012345678 | 26BR00098765432" in t_com
+    assert "Fulano De Tal" in t_com  # o nome do destinatário continua no remetente

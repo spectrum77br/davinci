@@ -285,8 +285,13 @@ def _remover_picking(page: fitz.Page) -> None:
     _redigir(page, fitz.Rect(0, top, page.rect.width, page.rect.height), pad=0)
 
 
-def transformar_etiqueta(pdf_bytes: bytes, destinatario_nome: str | None = None) -> bytes:
+def transformar_etiqueta(
+    pdf_bytes: bytes, destinatario_nome: str | None = None, duimp: str | None = None
+) -> bytes:
     """Aplica as 4 regras de visualização e devolve os bytes do PDF transformado.
+
+    `duimp` (Eduardo 09/09: "colocar o número da DUIMP nas etiquetas também"):
+    texto pequeno no rodapé da 1ª página (a etiqueta), depois das redações.
 
     `destinatario_nome` opcional sobrepõe o nome lido da etiqueta (o caller que
     tem o pedido pode passar o nome oficial). Sem ele, lê do bloco DESTINATÁRIO.
@@ -321,5 +326,13 @@ def transformar_etiqueta(pdf_bytes: bytes, destinatario_nome: str | None = None)
     for page, x0, baseline, fs in inserts:
         page.insert_text(
             (x0, baseline), nome, fontsize=fs, fontname="helv", color=(0, 0, 0)
+        )
+    duimp = (duimp or "").strip()
+    if duimp:
+        first = doc[0]
+        r = first.rect
+        first.insert_text(
+            (r.x0 + 6, r.y1 - 4), f"DUIMP: {duimp}"[:120], fontsize=6, fontname="helv",
+            color=(0, 0, 0),
         )
     return doc.tobytes()

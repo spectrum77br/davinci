@@ -1776,6 +1776,32 @@ async def nf_agent_command_result(
     return {"ok": True, "status": new_status}
 
 
+
+async def _duimp_do_pedido(session: AsyncSession, numero: str | None) -> str | None:
+    """DUIMPs dos itens do pedido (mesma fonte da observação da NF 100%:
+    `import_products.duimp` por SKU), sem repetir, na ordem dos itens. Nenhum
+    item importado → None (etiqueta sai sem a linha)."""
+    if not numero:
+        return None
+    rows = (
+        await session.execute(
+            select(BlingOrder.item_codigo)
+            .where(BlingOrder.numero == numero)
+            .order_by(BlingOrder.item_index)
+        )
+    ).scalars().all()
+    skus = [(s or "").strip().lower() for s in rows if (s or "").strip()]
+    if not skus:
+        return None
+    mapa = await nf_emissao_gerar._duimp_por_sku(session, set(skus))
+    textos: list[str] = []
+    for sku in skus:
+        d = mapa.get(sku)
+        if d and d not in textos:
+            textos.append(d)
+    return " | ".join(textos) or None
+
+
 @router.post(
     "/agent/etiqueta",
     dependencies=[Depends(_require_nf_agent_token)],
@@ -1799,7 +1825,11 @@ async def nf_agent_etiqueta(
     if len(raw) > _ETIQUETA_MAX_BYTES:
         raise HTTPException(413, detail={"code": "nf_etiqueta_grande"})
     try:
-        transformado = transformar_etiqueta(raw, (destinatario_nome or "").strip() or None)
+        transformado = transformar_etiqueta(
+            raw,
+            (destinatario_nome or "").strip() or None,
+            duimp=await _duimp_do_pedido(session, pedido_bling),
+        )
     except EtiquetaTransformError as exc:
         raise HTTPException(422, detail={"code": "nf_etiqueta_invalida", "erro": str(exc)}) from exc
 
@@ -1942,7 +1972,9 @@ async def nf_agent_etiqueta_lote(
             continue
         try:
             transformado = transformar_etiqueta(
-                fatia.pdf, (nome or "").strip() or None
+                fatia.pdf,
+                (nome or "").strip() or None,
+                duimp=await _duimp_do_pedido(session, numero),
             )
         except EtiquetaTransformError as exc:
             falhas.append({"numero": numero, "erro": str(exc)})
