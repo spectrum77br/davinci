@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -31,6 +31,19 @@ from app.services.refunds_freight_sync import upsert_freight_refund_for_bling_or
 from app.services.verificar_margem import refresh_silent as _verificar_margem_refresh_silent
 
 logger = structlog.get_logger()
+
+# A Amazon só publica as taxas do pedido DEPOIS do envio — medido na conta kia
+# (09/09/2026): 3 a 4 dias entre o envio e a transação aparecer na Finances API.
+# O backoff comum desiste na 8ª tentativa, e como o contador sobe a cada
+# webhook/reenvio ele estoura antes disso: os pedidos 295311 e 295378 (enviados
+# em 08/09) ficaram com next_retry_at NULL no mesmo dia. Esta mensagem marca
+# "ainda não postou" pra esses ficarem numa esteira lenta e sem teto.
+AMAZON_AGUARDANDO_POSTAGEM = "Amazon finance transaction not posted yet"
+# Até quando insistir num pedido Amazon que nunca posta (cancelado, devolvido):
+# 4x o pior caso observado.
+AMAZON_ESPERA_MAX_DIAS = 45
+# Ritmo da esteira lenta: 2x por dia é de sobra pra um evento que leva dias.
+AMAZON_ESPERA_INTERVALO_HORAS = 12
 
 RETRYABLE_STATUSES = {"pending", "estimated", "error"}
 SUPPORTED_PLATFORMS = {
@@ -212,7 +225,14 @@ async def run_due_marketplace_financial_retries(
             .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
             .where(MarketplaceOrderFinancial.next_retry_at.is_not(None))
             .where(MarketplaceOrderFinancial.next_retry_at <= now)
-            .where(MarketplaceOrderFinancial.attempts < max_attempts)
+            # O teto de tentativas vale pra ERRO. Pedido Amazon só esperando a
+            # transação ser postada continua na fila (ver _next_retry_at).
+            .where(
+                or_(
+                    MarketplaceOrderFinancial.attempts < max_attempts,
+                    MarketplaceOrderFinancial.last_error == AMAZON_AGUARDANDO_POSTAGEM,
+                )
+            )
             .order_by(MarketplaceOrderFinancial.next_retry_at.asc())
             .limit(limit)
         )
@@ -556,7 +576,14 @@ async def _persist_snapshot(
     financial.fetched_at = now
     financial.attempts = attempts
     financial.last_error = snapshot.error
-    financial.next_retry_at = _next_retry_at(snapshot.status, attempts, now)
+    aguardando_amazon = (
+        integration.platform == IntegrationPlatform.AMAZON
+        and snapshot.error == AMAZON_AGUARDANDO_POSTAGEM
+        and (now - (financial.created_at or now)).days < AMAZON_ESPERA_MAX_DIAS
+    )
+    financial.next_retry_at = _next_retry_at(
+        snapshot.status, attempts, now, aguardando_amazon=aguardando_amazon
+    )
     if keep_estimate:
         financial.status = "estimated"
         financial.net_amount = _money(estimate.get("est_settlement_amount"))
@@ -1581,7 +1608,7 @@ async def _fetch_amazon(client: AmazonClient, order_id: str) -> FinancialSnapsho
         net_amount=net if seen_net else None,
         raw={"transactions": body},
         events=events,
-        error=None if transactions else "Amazon finance transaction not posted yet",
+        error=None if transactions else AMAZON_AGUARDANDO_POSTAGEM,
     )
 
 
@@ -1734,9 +1761,16 @@ def _integration_platform(raw: str) -> IntegrationPlatform | None:
         return None
 
 
-def _next_retry_at(status: str, attempts: int, now: datetime) -> datetime | None:
+def _next_retry_at(
+    status: str, attempts: int, now: datetime, *, aguardando_amazon: bool = False
+) -> datetime | None:
     if status not in RETRYABLE_STATUSES:
         return None
+    # Esperar a Amazon postar não é falha: não gasta o teto de tentativas, senão
+    # o pedido morre na fila dias antes de a transação existir (ver
+    # AMAZON_AGUARDANDO_POSTAGEM).
+    if aguardando_amazon:
+        return now + timedelta(hours=AMAZON_ESPERA_INTERVALO_HORAS)
     if attempts >= 8:
         return None
     if attempts <= 1:
