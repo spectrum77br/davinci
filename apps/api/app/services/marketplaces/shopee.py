@@ -548,6 +548,37 @@ class ShopeeClient:
             body["image_list"] = image_list
         return await self._call("POST", "/api/v2/returns/dispute", json=body, what="shopee_dispute")
 
+    async def upload_proof(
+        self,
+        return_sn: str,
+        *,
+        proof_text: list[str] | None = None,
+        proof_image: list[str] | None = None,
+        proof_video: list[str] | None = None,
+    ) -> dict:
+        """Prova ADICIONAL pedida pela Shopee numa disputa já aberta
+        (`seller_proof.seller_proof_status == PENDING` no get_return_detail,
+        com `seller_evidence_deadline`). POST /api/v2/returns/upload_proof:
+        `proof_text` (lista de textos), `proof_image` (URLs do convert_image),
+        `proof_video` (URLs). Levanta com o erro da API."""
+        body: dict = {"return_sn": return_sn}
+        if proof_text:
+            body["proof_text"] = [str(t)[:1000] for t in proof_text if str(t or "").strip()]
+        if proof_image:
+            body["proof_image"] = [str(u) for u in proof_image if u]
+        if proof_video:
+            body["proof_video"] = [str(u) for u in proof_video if u]
+        return await self._call(
+            "POST", "/api/v2/returns/upload_proof", json=body, what="shopee_upload_proof"
+        )
+
+    async def query_proof(self, return_sn: str) -> dict:
+        """O que já foi enviado como prova adicional (GET /api/v2/returns/query_proof)."""
+        return await self._call(
+            "GET", "/api/v2/returns/query_proof",
+            params={"return_sn": return_sn}, what="shopee_query_proof",
+        )
+
     async def get_tracking_number(self, order_sn: str) -> str | None:
         """Número de rastreio de UM pedido.
 

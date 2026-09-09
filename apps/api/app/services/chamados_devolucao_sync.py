@@ -198,10 +198,87 @@ async def _sync_tiktok(session: AsyncSession, ch: Chamado, dev: Devolution | Non
 # ---------------------------------------------------------------- Shopee
 
 
+PROVA_PREFIXO = "Prova adicional enviada à Shopee"
+_SEM_FOTO_TXT = (
+    "A Shopee pediu prova adicional e a devolução não tem foto no DaVinci — anexar as fotos "
+    "na tela Devoluções (o robô envia sozinho na próxima passada) ou subir pelo Seller Center."
+)
+
+
+async def _enviar_prova_shopee(
+    session: AsyncSession, ch: Chamado, dev: Devolution | None, client, det: dict
+) -> bool:
+    """Shopee pediu prova extra (`seller_proof` PENDING): manda as fotos da
+    devolução + o texto da abertura pela API (`upload_proof`), UMA vez por
+    pedido de prova (Eduardo 09/09: o robô toma conta; caso Mega/260827DBUMDT1W
+    venceria sem ninguém subir). Sem foto na devolução, avisa no histórico."""
+    return_sn = (ch.chamado or "").strip()
+    if not return_sn or dev is None:
+        return False
+    msgs = (
+        await session.execute(
+            select(ChamadoMensagem)
+            .where(ChamadoMensagem.chamado_id == ch.id)
+            .order_by(ChamadoMensagem.created_at, ChamadoMensagem.id)
+        )
+    ).scalars().all()
+    ja_enviada = False
+    for m in msgs:
+        if m.direcao == "recebida" and "PROVA ADICIONAL" in (m.texto or ""):
+            ja_enviada = False  # pedido novo de prova reabre o ciclo
+        elif m.direcao == "enviada" and (m.texto or "").startswith(PROVA_PREFIXO):
+            ja_enviada = m.status in ("enviada", "pendente", "enviando")
+    if ja_enviada:
+        return False
+    linhas = await cd._linhas_do_pedido(session, dev)
+    anexos = await cd.anexos_de(session, [d.id for d in linhas] or [dev.id])
+    fotos = [a for a in anexos if (a.content_type or "").lower() in cd.FOTO_TIPOS_IMAGEM]
+    if not fotos:
+        if not any(m.tipo == "sistema" and m.texto == _SEM_FOTO_TXT for m in msgs):
+            session.add(chamados_svc.registrar_sistema(ch, _SEM_FOTO_TXT))
+        return False
+    abertura = await cd.mensagem_abertura(session, ch)
+    texto = (abertura.texto if abertura and abertura.texto else "").strip() or (
+        "Segue evidência adicional da contestação da devolução."
+    )
+    msg = chamados_svc.nova_mensagem(
+        ch,
+        texto=f"{PROVA_PREFIXO} ({len(fotos[:5])} foto(s)): {texto}",
+        tipo="replica",
+        direcao="enviada",
+        autor_nome=AUTOR_ACOMP,
+        status="pendente",
+    )
+    msg.canal = "api"
+    session.add(msg)
+    await session.flush()
+    try:
+        urls: list[str] = []
+        for a in fotos[:5]:
+            url = cd._ref_foto(a).get("ref")
+            if not url:
+                url = await cd._subir_foto_shopee(client, return_sn, a)
+                a.ml_file_name = url
+                await session.flush()
+            urls.append(url)
+        await client.upload_proof(return_sn, proof_text=[texto[:1000]], proof_image=urls)
+    except Exception as e:  # noqa: BLE001
+        msg.status = "falhou"
+        msg.erro = str(e)[:300]
+        logger.warning(
+            "chamado_devolucao_shopee_prova_falhou", chamado_id=str(ch.id), err=str(e)[:200]
+        )
+        return False
+    msg.status = "enviada"
+    msg.enviada_at = datetime.now(UTC)
+    logger.info("chamado_devolucao_shopee_prova_enviada", chamado_id=str(ch.id), fotos=len(urls))
+    return True
+
+
 async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | None) -> int:
-    dev = dev or Devolution(conta=ch.conta or "", pedido_bling=ch.pedido_bling,
-                            pedido_marketplace=ch.pedido_marketplace)
-    client = await cd._shopee_client_para(session, ch, dev)
+    dev_q = dev or Devolution(conta=ch.conta or "", pedido_bling=ch.pedido_bling,
+                              pedido_marketplace=ch.pedido_marketplace)
+    client = await cd._shopee_client_para(session, ch, dev_q)
     det = await client.get_return_detail((ch.chamado or "").strip())
     novos = 0
     status = str(det.get("status") or "").strip().upper()
@@ -214,6 +291,9 @@ async def _sync_shopee(session: AsyncSession, ch: Chamado, dev: Devolution | Non
             + (f" — prazo até {prazo}" if prazo else "")
             + ". Anexar pelo Seller Center (Devolução e Reembolso).",
         )
+        await session.flush()
+        if await _enviar_prova_shopee(session, ch, dev, client, det):
+            novos += 1
     comp = det.get("seller_compensation") or {}
     comp_status = (
         str(comp.get("seller_compensation_status") or "").upper().replace("COMPENSATION_", "")

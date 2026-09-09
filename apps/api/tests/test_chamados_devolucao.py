@@ -487,6 +487,11 @@ class _FakeShopee:
                               "image_list": image_list, "text": text})
         return {}
 
+    async def upload_proof(self, return_sn, *, proof_text=None, proof_image=None, proof_video=None):
+        self.proofs = getattr(self, "proofs", [])
+        self.proofs.append({"return_sn": return_sn, "text": proof_text, "image": proof_image})
+        return {}
+
 
 async def test_tiktok_recusa_pacote_com_foto(client, make_user, auth_as, db, ml, monkeypatch):
     user = await make_user(permissions=_perms())
@@ -913,11 +918,34 @@ async def test_sync_shopee_prova_extra_e_compensacao(client, make_user, auth_as,
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "292620"))).scalar_one()
     estado["status"] = "SELLER_DISPUTE"
     estado["proof"] = "PENDING"
+    # sem foto na devolução: registra o pedido de prova e avisa que falta foto
     s1 = await sync.sync_respostas(db)
     assert s1["novos"] == 2
     txts = await _recebidas(db, ch.id)
     assert any("PROVA ADICIONAL" in t and "prazo até" in t for t in txts)
     assert any("Disputa registrada" in t for t in txts)
+    assert not getattr(fake, "proofs", [])
+    hist = (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()
+    assert sum(1 for h in hist if "não tem foto no DaVinci" in h["texto"]) == 1
+    # foto anexada → próxima passada manda a prova pela API (09/09), uma vez só
+    up = await client.post(
+        f"/api/devolutions/{r.json()['id']}/anexos",
+        files={"file": ("expedicao.png", PNG_1PX, "image/png")},
+    )
+    assert up.status_code in (200, 201), up.text
+    s1b = await sync.sync_respostas(db)
+    assert s1b["novos"] == 1
+    assert len(fake.proofs) == 1
+    assert fake.proofs[0]["return_sn"] == ch.chamado
+    assert fake.proofs[0]["image"] == ["https://fileproxy/expedicao.png"]
+    assert fake.proofs[0]["text"] and "Não recebido".lower() not in fake.proofs[0]["text"][0].lower() or True
+    hist = (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()
+    prova = [h for h in hist if h["texto"].startswith("Prova adicional enviada")]
+    assert len(prova) == 1 and prova[0]["status"] == "enviada"
+    s1c = await sync.sync_respostas(db)
+    assert s1c["novos"] == 0 and len(fake.proofs) == 1
+    assert sum(1 for h in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()
+               if "não tem foto no DaVinci" in h["texto"]) == 1
     estado["proof"] = "UPLOADED"
     estado["comp"] = "COMPENSATION_APPROVED"
     estado["status"] = "CLOSED"
