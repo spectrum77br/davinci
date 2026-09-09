@@ -829,8 +829,9 @@ async def test_agent_analisar_canais_manual_e_api_sem_replica(
     assert len(lst) == 1
     assert lst[0]["canal"] == "manual" and lst[0]["plataforma"] == "ml"
     assert lst[0]["chamado"] == "478272401"
-    # réplica de robô num chamado manual é recusada
-    ruim = await client.post(
+    # manual do ML: o robô ASSUME o chamado (canal vira robô) e a réplica vai
+    # pra fila do Tuta ("para os manuais nós vamos tomar conta", 09/09)
+    ok = await client.post(
         "/api/chamados/agent/analise",
         headers=hdr,
         json={
@@ -841,25 +842,59 @@ async def test_agent_analisar_canais_manual_e_api_sem_replica(
             "texto_replica": "Segue em anexo.",
         },
     )
-    assert ruim.status_code == 422
-    assert ruim.json()["detail"]["code"] == "canal_sem_robo"
-    # avisar humano é permitido e marca como analisado
-    ok = await client.post(
-        "/api/chamados/agent/analise",
-        headers=hdr,
-        json={
-            "chamado_id": cid,
-            "classe": "credito",
-            "resumo": "ML confirmou o crédito — conferir e resolver",
-            "acao": "humano",
-        },
-    )
     assert ok.status_code == 200, ok.text
+    assert ok.json()["replica_id"]
+    ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
+    await db.refresh(ch)
+    assert ch.canal == "robo"
+    hist = (await client.get(f"/api/chamados/{cid}/mensagens")).json()
+    assert any("assumido pelo robô" in h["texto"] for h in hist)
+    lease = await client.post("/api/chamados/agent/lease", headers=hdr, json={"tipo": "responder"})
+    assert [t["texto"] for t in lease.json()["tarefas"]] == ["Segue em anexo."]
     assert (
         await client.post(
             "/api/chamados/agent/analisar", headers=hdr, json={"canais": ["manual", "api"]}
         )
     ).json()["chamados"] == []
+    # manual de OUTRA plataforma (Seller Center, sem robô) e canal api: recusados
+    r2 = await client.post(
+        "/api/chamados",
+        json={"origem": "logistica", "pedido_bling": "293001", "plataforma": "shopee",
+              "conta": "atv", "chamado": "2085398968062533689"},
+    )
+    assert r2.status_code == 201, r2.text
+    for cid2, canal in ((r2.json()["id"], "manual"),):
+        ruim = await client.post(
+            "/api/chamados/agent/analise",
+            headers=hdr,
+            json={"chamado_id": cid2, "classe": "x", "resumo": "y", "acao": "responder",
+                  "texto_replica": "z"},
+        )
+        assert ruim.status_code == 422
+        assert ruim.json()["detail"]["code"] == "canal_sem_robo"
+        assert ruim.json()["detail"]["canal"] == canal
+    r3 = await client.post(
+        "/api/chamados",
+        json={"origem": "devolucao", "pedido_bling": "293002", "plataforma": "ml",
+              "conta": "kfa", "canal": "api", "chamado": "5560249689"},
+    )
+    assert r3.status_code == 201, r3.text
+    ruim = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hdr,
+        json={"chamado_id": r3.json()["id"], "classe": "x", "resumo": "y", "acao": "responder",
+              "texto_replica": "z"},
+    )
+    assert ruim.status_code == 422 and ruim.json()["detail"]["canal"] == "api"
+    # humano/esperar continuam livres em qualquer canal
+    assert (
+        await client.post(
+            "/api/chamados/agent/analise",
+            headers=hdr,
+            json={"chamado_id": r3.json()["id"], "classe": "dev_esperar", "resumo": "em análise",
+                  "acao": "esperar"},
+        )
+    ).status_code == 200
     # valor inválido de canal é recusado pelo schema
     assert (
         await client.post("/api/chamados/agent/analisar", headers=hdr, json={"canais": ["x"]})

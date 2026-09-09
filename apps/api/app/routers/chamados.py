@@ -1082,11 +1082,30 @@ async def agent_analise(
     copiados quando `reanexar_abertura`. `resolver` fecha e grava o valor
     recuperado. `humano` só anota (e reabre se `reabrir`)."""
     ch = await _get(session, body.chamado_id)
-    # Réplica de robô só existe no canal robô: chamado `api` (devolução) não
-    # tem por onde responder e `manual` é de pessoa — o cérebro só avisa
-    # ("nunca responder em cima de humano", 08/09).
+    assumido: ChamadoMensagem | None = None
     if body.acao == "responder" and ch.canal != "robo":
-        raise HTTPException(422, detail={"code": "canal_sem_robo", "canal": ch.canal})
+        # Réplica de robô só sai pelo e-mail do Tuta (caso do ML). Chamado `api`
+        # (devolução) não tem por onde responder; manual de outra plataforma
+        # (Shopee/TikTok/Amazon = Seller Center) também não, até existir o
+        # robô de browser. Manual do ML: o robô ASSUME o chamado (Eduardo
+        # 09/09: "para os manuais nós vamos tomar conta") — canal vira robô.
+        e_ml = (ch.plataforma or "").strip().lower() in _PLATAFORMA_ML
+        if ch.canal != "manual" or not e_ml:
+            raise HTTPException(
+                422,
+                detail={"code": "canal_sem_robo", "canal": ch.canal, "plataforma": ch.plataforma},
+            )
+        ch.canal = "robo"
+        assumido = svc.nova_mensagem(
+            ch,
+            texto="Chamado assumido pelo robô: as réplicas passam a sair pelo e-mail (Tuta)",
+            tipo="sistema",
+            direcao="sistema",
+            autor_nome=AUTOR_CEREBRO,
+            status="registrada",
+        )
+        assumido.canal = "robo"
+        session.add(assumido)
     analise = svc.nova_mensagem(
         ch,
         texto=f"Análise do robô [{body.classe}]: {body.resumo} → {_ACAO_TXT[body.acao]}",
