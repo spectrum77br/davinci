@@ -53,6 +53,7 @@ from app.models import (
 )
 from app.models.company import Store
 from app.models.integration import Integration
+from app.models.logistica import Logistica
 from app.models.nf import NfEtiquetaArquivo
 from app.models.stock_check import StockCheck
 from app.models.stock_movement import StockMovement
@@ -1131,6 +1132,14 @@ async def get_pedido_etiqueta(
     pedido_bling: str,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    carimbar: bool = Query(
+        True,
+        description=(
+            "false = só consultar (não marca como impressa). A aba Notas "
+            "Fiscais é auditoria de pedido JÁ enviado: abrir de lá não pode "
+            "carimbar 'primeira impressão' na coluna ao lado."
+        ),
+    ),
 ) -> Response:
     """Serve a etiqueta transformada do pedido (blob em nf_etiqueta_arquivo).
 
@@ -1149,7 +1158,7 @@ async def get_pedido_etiqueta(
         # imprimir sem a etiqueta que cola no volume).
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
     conteudo = _pdf_para_impressao(row)
-    if row.impressa_em is None:
+    if row.impressa_em is None and carimbar:
         # Abrir a etiqueta é imprimir — carimba pra tela marcar "Impressa"
         # (mesma regra do lote: só a primeira vez).
         row.impressa_em = datetime.now(UTC)
@@ -1164,6 +1173,130 @@ async def get_pedido_etiqueta(
             "Cache-Control": "no-store, must-revalidate",
         },
     )
+
+
+# Texto que o robô digita no formulário de ajuda do Mercado Livre quando a
+# equipe aperta "Abrir chamado" num pedido parado na aba Pedidos (Eduardo,
+# 09/09/2026: "um botão de abrir chamado para os pedidos atrasados"). Fala do
+# que o vendedor precisa: a coleta/postagem que não andou. O nº do pedido na
+# plataforma entra no lugar do {pedido}.
+def _eh_ml_plataforma(valor: str | None) -> bool:
+    """A linha da Logística guarda o nome da plataforma como texto livre
+    ("Mercado Livre", "ml"). Mesma lista que o motor da Logística usa."""
+    from app.services.logistica_meli import _ML_PLATAFORMAS
+
+    return (valor or "").strip().lower() in _ML_PLATAFORMAS
+
+
+TEXTO_CHAMADO_ATRASO = (
+    "Olá! O pedido {pedido} está com o prazo de envio vencido e a movimentação "
+    "não avançou: a etiqueta já foi gerada, mas a coleta/postagem não foi "
+    "confirmada. Por favor, verifiquem o que houve com esse envio e orientem "
+    "como proceder para não prejudicar o comprador. Obrigado."
+)
+
+
+@router.post("/pedidos/{pedido_bling}/abrir-chamado")
+async def abrir_chamado_pedido(
+    pedido_bling: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    _pode_chamado: Annotated[User, Depends(require_permission("chamados", "edit"))] = None,
+) -> dict[str, Any]:
+    """Abre chamado no Mercado Livre pro pedido que empacou, direto da aba
+    Pedidos — a pessoa escolhe a linha e clica (Eduardo, 09/09/2026).
+
+    DUAS permissões: `controle_estoque` view (está nessa tela) e `chamados`
+    edit (é quem responde pelo que a empresa fala no marketplace).
+    `controle_estoque` edit sozinho não serve — é a permissão de ticar
+    conferido no galpão, e 13 pessoas a têm.
+
+    Mesmo caminho do botão da aba Logística SEM reclamação do comprador: o
+    chamado nasce na aba Chamados com a abertura `pendente` no canal `robo` e
+    o robô do formulário de ajuda do ML a executa. Sem claim do comprador a
+    API do ML não deixa abrir nada, então é o formulário ou nada.
+
+    Só ML: as outras plataformas não têm como abrir chamado por fora de uma
+    reclamação do comprador — nelas o botão devolve o motivo em vez de criar
+    uma linha que ninguém vai enviar."""
+    pedido = (pedido_bling or "").strip()
+    itens = list(
+        (
+            await session.execute(select(BlingOrder).where(BlingOrder.numero == pedido))
+        )
+        .scalars()
+        .all()
+    )
+    if not itens:
+        raise HTTPException(404, detail={"code": "pedido_nao_encontrado"})
+    # Mesma cerca de tag da listagem: quem só enxerga a própria operação não
+    # abre chamado de pedido de outro time só por saber o número.
+    tags = _tags_pedidos(user, None)
+    if tags is not None and not any(
+        _classify_sku_tag(i.item_codigo) in tags for i in itens
+    ):
+        raise HTTPException(403, detail={"code": "pedido_fora_da_sua_tag"})
+    # O texto AFIRMA duas coisas ao Mercado Livre — "prazo vencido" e
+    # "etiqueta já gerada". Afirmar isso sem conferir seria mentir em nome da
+    # empresa: pedido em Previsão (situação 6, sem etiqueta, corte amanhã)
+    # aparece na mesma tela e estaria a um clique. Então o endpoint prova as
+    # duas antes de montar a mensagem.
+    cabeca = itens[0]
+    if cabeca.em_andamento_data is not None:
+        raise HTTPException(422, detail={"code": "pedido_ja_enviado"})
+    if cabeca.situacao not in _SITUACOES_ENVIADO_ETIQUETA:
+        raise HTTPException(422, detail={"code": "pedido_sem_etiqueta"})
+    prazo = cabeca.marketplace_ship_deadline
+    if prazo is None or prazo > datetime.now(UTC):
+        raise HTTPException(422, detail={"code": "pedido_no_prazo"})
+
+    row = (
+        await session.execute(
+            select(Logistica)
+            .where(Logistica.pedido_bling == pedido)
+            .order_by(Logistica.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        # Sem linha na Logística o pedido ainda não tem etiqueta/rastreio —
+        # não há envio pra cobrar, e o robô precisa do pedido da plataforma.
+        raise HTTPException(422, detail={"code": "pedido_sem_logistica"})
+    if not _eh_ml_plataforma(row.plataforma):
+        raise HTTPException(422, detail={"code": "pedido_nao_ml"})
+    if not (row.pedido_marketplace or "").strip():
+        raise HTTPException(422, detail={"code": "pedido_sem_numero_marketplace"})
+
+    from app.services import chamados as chamados_svc
+
+    # Chamado que já tem protocolo (aberto na mão, ou já respondido) NÃO pode
+    # ser reaproveitado: o robô leria a tarefa como "responder dentro do
+    # protocolo" em vez de abrir um novo, e o protocolo pode até ser texto
+    # livre digitado por alguém. Nesses casos a conversa segue na aba Chamados.
+    existente = await chamados_svc.chamado_da_logistica(session, row)
+    if existente is not None and (existente.chamado or "").strip():
+        raise HTTPException(
+            422,
+            detail={"code": "pedido_ja_tem_chamado", "chamado": existente.chamado},
+        )
+
+    texto = TEXTO_CHAMADO_ATRASO.format(pedido=row.pedido_marketplace)
+    ch = await chamados_svc.abrir_chamado_logistica(
+        session,
+        row,
+        mensagem=texto,
+        claim_id=None,
+        regra="pedido parado (Controle de Estoque)",
+        autor_nome=user.email,
+    )
+    await session.commit()
+    logger.info(
+        "estoque_chamado_aberto",
+        pedido_bling=pedido,
+        chamado_id=str(ch.id),
+        por=user.email,
+    )
+    return {"chamado_id": str(ch.id), "chamado": ch.chamado, "canal": ch.canal}
 
 
 # ─── SEÇÃO 3: ENVIOS ─────────────────────────────────────────────────────

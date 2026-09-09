@@ -15,6 +15,7 @@ from datetime import date
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder, User, UserRole, UserStatus
@@ -448,3 +449,28 @@ async def test_serve_etiqueta_inteira_mesmo_pro_operador_cercado(
     r = await client.get("/api/estoque/pedidos/940001/etiqueta")
     assert r.status_code == 200, r.text
     assert _paginas_texto(r.content) == ["ETIQUETA DIVIDIDA"]
+
+
+@pytest.mark.asyncio
+async def test_consulta_nao_carimba_primeira_impressao(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], dois_pedidos: None, db: AsyncSession,
+):
+    """A aba Notas Fiscais abre a etiqueta só pra conferir (?carimbar=false):
+    não pode marcar "primeira impressão" e fazer a coluna ao lado mentir. Pelo
+    Controle de Estoque, onde a pessoa imprime de verdade, continua carimbando."""
+    auth_as(admin_view)
+
+    r = await client.get("/api/estoque/pedidos/920001/etiqueta?carimbar=false")
+    assert r.status_code == 200
+    row = (
+        await db.execute(
+            select(NfEtiquetaArquivo).where(NfEtiquetaArquivo.pedido_bling == "920001")
+        )
+    ).scalar_one()
+    await db.refresh(row)
+    assert row.impressa_em is None
+
+    assert (await client.get("/api/estoque/pedidos/920001/etiqueta")).status_code == 200
+    await db.refresh(row)
+    assert row.impressa_em is not None

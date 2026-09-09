@@ -10,6 +10,7 @@ import {
   ChevronRight,
   FileDown,
   Loader2,
+  Printer,
   Search,
   X,
 } from 'lucide-vue-next'
@@ -334,7 +335,7 @@ await carregar()
               :class="['px-2 py-1 text-center text-[11px] font-semibold border-b', SEP, lado.head]"
               colspan="4"
             >{{ lado.titulo }}</th>
-            <th :class="['px-2 py-1 text-center text-[11px] font-semibold border-b', SEP, ETQ_HEAD]" colspan="2">Etiqueta</th>
+            <th :class="['px-2 py-1 text-center text-[11px] font-semibold border-b', SEP, ETQ_HEAD]" colspan="3">Etiqueta</th>
           </tr>
           <!-- Nível 2: colunas -->
           <tr class="border-b">
@@ -359,17 +360,21 @@ await carregar()
               :class="['px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[105px]', SEP_FINA, ETQ_HEAD]"
               title="Quando a etiqueta foi impressa pela primeira vez"
             >Impressão</th>
+            <th
+              :class="['px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]', SEP_FINA, ETQ_HEAD]"
+              title="Abre a etiqueta já pronta deste pedido para imprimir"
+            >Imprimir</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading">
-            <td colspan="17" class="py-10 text-center text-muted-foreground">
+            <td colspan="18" class="py-10 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando envios…
             </td>
           </tr>
           <tr v-else-if="!pagedRows.length">
-            <td colspan="17" class="py-10 text-center text-muted-foreground">
+            <td colspan="18" class="py-10 text-center text-muted-foreground">
               {{ rows.length === 0 ? 'nenhum pedido enviado no período' : 'nenhum pedido com esses filtros' }}
             </td>
           </tr>
@@ -443,6 +448,20 @@ await carregar()
             <!-- Etiqueta: emissão (liberou pro despacho) e 1ª impressão -->
             <td :class="['px-2 py-1 whitespace-nowrap tabular-nums', SEP, ETQ_TINT]">{{ fmtDataHora(r.etiqueta_emissao) }}</td>
             <td :class="['px-2 py-1 whitespace-nowrap tabular-nums', SEP_FINA, ETQ_TINT]">{{ fmtDataHora(r.etiqueta_impressao) }}</td>
+            <td :class="['px-2 py-1 text-center whitespace-nowrap', SEP_FINA, ETQ_TINT]">
+              <a
+                v-if="r.etiqueta_emissao && r.pedido_bling"
+                :href="`/api/estoque/pedidos/${encodeURIComponent(r.pedido_bling)}/etiqueta?carimbar=false`"
+                target="_blank"
+                rel="noopener"
+                class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted"
+                title="Abrir a etiqueta pronta para impressão"
+              >
+                <Printer class="size-3" />
+                Imprimir
+              </a>
+              <span v-else class="text-muted-foreground">—</span>
+            </td>
           </tr>
         </tbody>
       </table>

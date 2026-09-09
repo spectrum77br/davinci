@@ -17,7 +17,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, Download, Printer, FileText, FileUp, Upload, Trash2,
-  ArrowUp, ArrowDown, Megaphone,
+  ArrowUp, ArrowDown, Megaphone, Check, LifeBuoy,
 } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
 
@@ -1206,6 +1206,59 @@ const pedidosFilteredGrouped = computed<PedidoRowWithGroup[]>(() => {
   return out
 })
 
+// ── Abrir chamado do pedido parado (Eduardo, 09/09: "um botão de abrir
+// chamado para os pedidos atrasados"; ele escolhe a linha e clica) ────────
+// O chamado nasce na aba Chamados e vai pro Mercado Livre pelo robô do
+// formulário de ajuda — o mesmo caminho do botão da aba Logística.
+const chamadoEnviando = ref<Set<string>>(new Set())
+const chamadoAberto = ref<Set<string>>(new Set())
+const CHAMADO_ERROS: Record<string, string> = {
+  pedido_nao_encontrado: 'Pedido não encontrado no espelho do Bling.',
+  pedido_sem_logistica: 'Esse pedido ainda não está na aba Logística (sem etiqueta/rastreio), então não há envio para cobrar.',
+  pedido_nao_ml: 'Só dá para abrir chamado automático no Mercado Livre. Nas outras plataformas é preciso abrir na mão.',
+  pedido_sem_numero_marketplace: 'O pedido está sem o número da plataforma, que o formulário do Mercado Livre exige.',
+  pedido_sem_etiqueta: 'A etiqueta desse pedido ainda não foi gerada, então não há envio parado para cobrar.',
+  pedido_no_prazo: 'Esse pedido ainda está dentro do prazo de envio.',
+  pedido_ja_enviado: 'Esse pedido já foi enviado.',
+  pedido_ja_tem_chamado: 'Já existe chamado aberto para esse pedido. Continue por ele na aba Chamados.',
+  pedido_fora_da_sua_tag: 'Esse pedido é de outra operação, fora das suas tags.',
+  no_stock_tag: 'Seu usuário não tem tag de estoque definida. Peça para um administrador configurar.',
+}
+// Prazo de envio já vencido: pinta o botão de vermelho (é o caso que o
+// Eduardo quer cobrar). Reaproveita a mesma data do "corte" da tela.
+function corteVencido(row: PedidoRow): boolean {
+  if (!row.ship_deadline || row.status === 'enviado') return false
+  return new Date(row.ship_deadline).getTime() < Date.now()
+}
+// O chamado AFIRMA ao Mercado Livre que o prazo venceu e que a etiqueta já
+// saiu. Só oferece o botão onde isso é verdade — pedido de previsão (amarelo,
+// sem etiqueta) aparece na mesma lista e o texto seria mentira.
+function podeChamado(row: PedidoRow): boolean {
+  return row.status === 'nao_enviado' && corteVencido(row)
+}
+async function abrirChamado(row: PedidoRow) {
+  const pedido = row.pedido_bling
+  if (!pedido || chamadoEnviando.value.has(pedido) || chamadoAberto.value.has(pedido)) return
+  if (!confirm(
+    `Abrir chamado no Mercado Livre para o pedido ${pedido}?\n\n`
+    + 'A mensagem vai para o formulário de ajuda do Mercado Livre e não tem como desfazer.',
+  )) return
+  chamadoEnviando.value = new Set(chamadoEnviando.value).add(pedido)
+  try {
+    await api(`/api/estoque/pedidos/${encodeURIComponent(pedido)}/abrir-chamado`, { method: 'POST' })
+    chamadoAberto.value = new Set(chamadoAberto.value).add(pedido)
+  }
+  catch (e: any) {
+    const code = e?.data?.detail?.code || e?.data?.code || ''
+    alert(CHAMADO_ERROS[code] || 'Não deu para abrir o chamado agora. Tente de novo em instantes.')
+  }
+  finally {
+    const next = new Set(chamadoEnviando.value)
+    next.delete(pedido)
+    chamadoEnviando.value = next
+  }
+}
+
 // ── Impressão de etiquetas em LOTE ───────────────────────────────────
 // A seleção é por PEDIDO (não por linha): um pedido com N itens rende N
 // linhas na tabela, mas UMA etiqueta só.
@@ -1942,11 +1995,12 @@ async function conferirTodos() {
             </th>
             <th class="text-left bg-emerald-50/40">Obs</th>
             <th class="text-center">Imprimir Etiqueta</th>
+            <th class="text-center" title="Abre chamado no Mercado Livre pelo formulário de ajuda, para o pedido que empacou. Só Mercado Livre.">Chamado</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="pedidosFiltered.length === 0">
-            <td colspan="14" class="py-6 text-center text-muted-foreground">
+            <td colspan="15" class="py-6 text-center text-muted-foreground">
               Nenhum pedido para esse dia.
             </td>
           </tr>
@@ -2069,6 +2123,21 @@ async function conferirTodos() {
                    aqui. O aviso de reimpressão em lote continua (usa
                    etiqueta_impressa_em direto). -->
               <span v-if="!row.etiqueta_disponivel" class="text-[10px] text-muted-foreground/50">—</span>
+            </td>
+            <td class="text-center">
+              <button
+                v-if="row._isFirstOfGroup && row.pedido_bling && podeChamado(row)"
+                :disabled="chamadoEnviando.has(row.pedido_bling) || chamadoAberto.has(row.pedido_bling)"
+                class="inline-flex items-center gap-1 rounded-md border border-red-400 px-2 py-1 text-[10px] text-red-600 hover:bg-muted disabled:opacity-60 dark:text-red-400"
+                :title="chamadoAberto.has(row.pedido_bling) ? 'Chamado já aberto agora' : 'Abrir chamado no Mercado Livre para este pedido'"
+                @click="abrirChamado(row)"
+              >
+                <Loader2 v-if="chamadoEnviando.has(row.pedido_bling)" class="size-3 animate-spin" />
+                <Check v-else-if="chamadoAberto.has(row.pedido_bling)" class="size-3" />
+                <LifeBuoy v-else class="size-3" />
+                {{ chamadoAberto.has(row.pedido_bling) ? 'Aberto' : 'Chamado' }}
+              </button>
+              <span v-else class="text-[10px] text-muted-foreground/50">—</span>
             </td>
           </tr>
         </tbody>
