@@ -1914,7 +1914,6 @@ async function aplicarStatusBling(c: Logistica) {
               <th class="px-3 py-2">Alterar Status Bling</th>
               <th class="px-3 py-2">Monitoramento</th>
               <th class="px-3 py-2">Abrir Chamado</th>
-              <th class="px-3 py-2">Abrir Reembolso</th>
               <th class="px-3 py-2">Mensagem do Chamado</th>
               <th class="px-3 py-2">Mensagem Bling</th>
               <th class="px-3 py-2">Mensagem Threema</th>
@@ -2012,19 +2011,6 @@ async function aplicarStatusBling(c: Logistica) {
                     @change="toggleStatusBool(s, 'abrir_chamado')"
                   />
                   <span :class="s.abrir_chamado ? 'text-emerald-500' : 'text-muted-foreground'">{{ s.abrir_chamado ? 'Sim' : 'Não' }}</span>
-                </label>
-              </td>
-              <!-- Abrir Reembolso (toggle direto) -->
-              <td class="px-3 py-1 whitespace-nowrap align-top">
-                <label class="inline-flex items-center gap-1.5" :class="canEdit ? 'cursor-pointer' : ''">
-                  <input
-                    type="checkbox"
-                    :checked="s.abrir_reembolso"
-                    :disabled="!canEdit || statusBusy.has(s.id)"
-                    class="size-4"
-                    @change="toggleStatusBool(s, 'abrir_reembolso')"
-                  />
-                  <span :class="s.abrir_reembolso ? 'text-emerald-500' : 'text-muted-foreground'">{{ s.abrir_reembolso ? 'Sim' : 'Não' }}</span>
                 </label>
               </td>
               <!-- Mensagem do Chamado (textarea inline) -->
@@ -2126,7 +2112,7 @@ async function aplicarStatusBling(c: Logistica) {
               </td>
             </tr>
             <tr v-if="!statusLoading && statusRowsFiltradas.length === 0">
-              <td :colspan="canEdit ? 11 : 10" class="px-3 py-6 text-center text-muted-foreground">
+              <td :colspan="canEdit ? 10 : 9" class="px-3 py-6 text-center text-muted-foreground">
                 {{ statusRows.length ? 'nenhum status bate com o filtro' : 'nenhum status' }}
               </td>
             </tr>
@@ -2199,10 +2185,6 @@ async function aplicarStatusBling(c: Logistica) {
             <label class="flex items-center gap-2 text-sm">
               <input type="checkbox" :checked="s.abrir_chamado" :disabled="!canEdit || statusBusy.has(s.id)" class="size-4" @change="toggleStatusBool(s, 'abrir_chamado')" />
               Abrir chamado
-            </label>
-            <label class="flex items-center gap-2 text-sm">
-              <input type="checkbox" :checked="s.abrir_reembolso" :disabled="!canEdit || statusBusy.has(s.id)" class="size-4" @change="toggleStatusBool(s, 'abrir_reembolso')" />
-              Abrir reembolso
             </label>
           </div>
           <div>
@@ -2333,10 +2315,6 @@ async function aplicarStatusBling(c: Logistica) {
           <label class="flex items-center gap-2 text-sm">
             <input v-model="statusForm.abrir_chamado" type="checkbox" class="size-4" />
             Abrir chamado
-          </label>
-          <label class="flex items-center gap-2 text-sm">
-            <input v-model="statusForm.abrir_reembolso" type="checkbox" class="size-4" />
-            Abrir reembolso
           </label>
         </div>
         <div>
