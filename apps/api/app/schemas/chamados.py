@@ -333,6 +333,10 @@ class AgentAnalisarIn(BaseModel):
 
     limite: int = Field(default=20, ge=1, le=100)
     plataforma: str | None = "ml"
+    # 09/09: o cérebro passou a olhar TODOS os chamados da aba — `robo` (frete
+    # ML, pode responder), `api` (devolução Shopee/TikTok/ML, só decide/avisa)
+    # e `manual` (aberto por pessoa: só avisa, nunca age em cima de humano).
+    canais: list[Literal["robo", "api", "manual"]] = Field(default=["robo"], min_length=1)
 
 
 class AgentMensagemOut(BaseModel):
@@ -352,6 +356,8 @@ class AgentChamadoAnaliseOut(BaseModel):
     pedido_bling: str | None = None
     pedido_marketplace: str | None = None
     conta: str | None = None
+    plataforma: str | None = None
+    canal: str
     origem: str
     resolvido: bool
     valor_recuperado: Decimal | None = None

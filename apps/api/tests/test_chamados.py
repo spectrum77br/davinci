@@ -784,3 +784,83 @@ async def test_agent_analisar_e_analise_do_cerebro(client, make_user, auth_as, d
         },
     )
     assert re_.status_code == 200 and re_.json()["resolvido"] is False
+
+
+async def test_agent_analisar_canais_manual_e_api_sem_replica(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """09/09: o cérebro olha também os chamados `manual` (aberto por pessoa) e
+    `api` (devolução) — só pra decidir/avisar. `responder` (réplica do robô do
+    Tuta) continua exclusivo do canal robô."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    hdr = {"X-Agent-Token": _TOKEN}
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    r = await client.post(
+        "/api/chamados",
+        json={
+            "origem": "logistica",
+            "pedido_bling": "293000",
+            "plataforma": "ml",
+            "conta": "kfa2",
+            "chamado": "478272401",
+        },
+    )
+    assert r.status_code == 201, r.text
+    cid = r.json()["id"]
+    assert r.json()["canal"] == "manual"
+    rec = await client.post(
+        "/api/chamados/agent/recebida",
+        headers=hdr,
+        json={"chamado": "478272401", "texto": "Já processamos a devolução do valor."},
+    )
+    assert rec.status_code == 200, rec.text
+    # padrão (canal robô) não lista o manual
+    assert (await client.post("/api/chamados/agent/analisar", headers=hdr, json={})).json()[
+        "chamados"
+    ] == []
+    lst = (
+        await client.post(
+            "/api/chamados/agent/analisar", headers=hdr, json={"canais": ["manual", "api"]}
+        )
+    ).json()["chamados"]
+    assert len(lst) == 1
+    assert lst[0]["canal"] == "manual" and lst[0]["plataforma"] == "ml"
+    assert lst[0]["chamado"] == "478272401"
+    # réplica de robô num chamado manual é recusada
+    ruim = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hdr,
+        json={
+            "chamado_id": cid,
+            "classe": "pede_fotos",
+            "resumo": "ML pediu fotos",
+            "acao": "responder",
+            "texto_replica": "Segue em anexo.",
+        },
+    )
+    assert ruim.status_code == 422
+    assert ruim.json()["detail"]["code"] == "canal_sem_robo"
+    # avisar humano é permitido e marca como analisado
+    ok = await client.post(
+        "/api/chamados/agent/analise",
+        headers=hdr,
+        json={
+            "chamado_id": cid,
+            "classe": "credito",
+            "resumo": "ML confirmou o crédito — conferir e resolver",
+            "acao": "humano",
+        },
+    )
+    assert ok.status_code == 200, ok.text
+    assert (
+        await client.post(
+            "/api/chamados/agent/analisar", headers=hdr, json={"canais": ["manual", "api"]}
+        )
+    ).json()["chamados"] == []
+    # valor inválido de canal é recusado pelo schema
+    assert (
+        await client.post("/api/chamados/agent/analisar", headers=hdr, json={"canais": ["x"]})
+    ).status_code == 422

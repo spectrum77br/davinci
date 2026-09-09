@@ -1008,7 +1008,7 @@ async def agent_analisar(
         .group_by(ChamadoMensagem.chamado_id)
         .subquery()
     )
-    conds = [Chamado.canal == "robo", or_(ana.c.ult.is_(None), rec.c.ult > ana.c.ult)]
+    conds = [Chamado.canal.in_(body.canais), or_(ana.c.ult.is_(None), rec.c.ult > ana.c.ult)]
     if body.plataforma:
         plat = body.plataforma.strip().lower()
         aceitas = _PLATAFORMA_ML if plat == "ml" else (plat,)
@@ -1041,6 +1041,8 @@ async def agent_analisar(
                 pedido_bling=ch.pedido_bling,
                 pedido_marketplace=ch.pedido_marketplace,
                 conta=ch.conta,
+                plataforma=ch.plataforma,
+                canal=ch.canal,
                 origem=ch.origem,
                 resolvido=ch.resolvido,
                 valor_recuperado=ch.valor_recuperado,
@@ -1080,6 +1082,11 @@ async def agent_analise(
     copiados quando `reanexar_abertura`. `resolver` fecha e grava o valor
     recuperado. `humano` só anota (e reabre se `reabrir`)."""
     ch = await _get(session, body.chamado_id)
+    # Réplica de robô só existe no canal robô: chamado `api` (devolução) não
+    # tem por onde responder e `manual` é de pessoa — o cérebro só avisa
+    # ("nunca responder em cima de humano", 08/09).
+    if body.acao == "responder" and ch.canal != "robo":
+        raise HTTPException(422, detail={"code": "canal_sem_robo", "canal": ch.canal})
     analise = svc.nova_mensagem(
         ch,
         texto=f"Análise do robô [{body.classe}]: {body.resumo} → {_ACAO_TXT[body.acao]}",
