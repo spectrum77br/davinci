@@ -67,6 +67,20 @@ class Devolution(Base, TimestampMixin):
     # Prazo = created_at + 30 dias. Só para Manutenção (NULL nas demais).
     # Preenchido no create/patch quando a condição é Manutenção. Ver alembic 0130.
     prazo: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Prazo da PLATAFORMA pra contestar a devolução recebida (Shopee
+    # `return_seller_due_date`; TikTok `seller_next_action_response.deadline`).
+    # Eduardo 09/09: o 291835 perdeu a contestação porque o motivo foi
+    # preenchido 3 dias depois de o pacote voltar. `_at` = quando consultou;
+    # `aviso_prazo_at` = quando o Threema avisou (uma vez só).
+    prazo_contestacao: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    prazo_contestacao_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    aviso_prazo_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Movimento de estoque efetivamente lançado no Bling (ver alembic 0115).
     # Guardado pra poder ESTORNAR (dar baixa "S") quando o toggle "devolver
     # estoque" é desligado depois — ex.: Usado que vira Sucata. `*_action`

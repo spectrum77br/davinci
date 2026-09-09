@@ -63,6 +63,8 @@ class DevolutionOut(BaseModel):
     tag: str | None = None
     data_devolvido_estoque: datetime | None = None
     prazo: datetime | None = None
+    prazo_contestacao: datetime | None = None
+    aviso_prazo_at: datetime | None = None
     estoque_mov_sku: str | None = None
     estoque_mov_bling_id: int | None = None
     estoque_mov_action: str | None = None

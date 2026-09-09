@@ -409,17 +409,21 @@ def _return_id_de(rets: object) -> str | None:
 # ---------------------------------------------------------------- clientes
 
 
-async def _contas_candidatas(session: AsyncSession, ch: Chamado, dev: Devolution) -> list[str]:
+async def _contas_candidatas(
+    session: AsyncSession, ch: Chamado | None, dev: Devolution
+) -> list[str]:
     """A `conta` da devolução vem da busca do pedido = NOME DA LOJA no Bling
     ("Shopee Marquezini", "Loja 206081922"), que nem sempre é o nome da
     integração ("mega", "injox"). Tenta, nesta ordem: conta do chamado, conta
     da linha e a conta do store_info do pedido (espelho bling_orders)."""
     out: list[str] = []
-    for c in (ch.conta, dev.conta):
+    for c in ((ch.conta if ch else None), dev.conta):
         c = (c or "").strip()
         if c and c not in out:
             out.append(c)
-    info = await chamados_svc.lookup_pedido(session, dev.pedido_bling or ch.pedido_bling or "")
+    info = await chamados_svc.lookup_pedido(
+        session, dev.pedido_bling or (ch.pedido_bling if ch else None) or ""
+    )
     c = ((info or {}).get("conta") or "").strip()
     if c and c not in out:
         out.append(c)
@@ -427,7 +431,7 @@ async def _contas_candidatas(session: AsyncSession, ch: Chamado, dev: Devolution
 
 
 async def _ml_client_para(
-    session: AsyncSession, ch: Chamado, dev: Devolution
+    session: AsyncSession, ch: Chamado | None, dev: Devolution
 ) -> MercadoLivreClient:
     for conta in await _contas_candidatas(session, ch, dev):
         try:
@@ -438,7 +442,7 @@ async def _ml_client_para(
 
 
 async def _tiktok_client_para(
-    session: AsyncSession, ch: Chamado, dev: Devolution
+    session: AsyncSession, ch: Chamado | None, dev: Devolution
 ) -> TikTokClient:
     for conta in await _contas_candidatas(session, ch, dev):
         integ = await logistica_tiktok._tiktok_integration_for_conta(session, conta)
@@ -448,7 +452,7 @@ async def _tiktok_client_para(
 
 
 async def _shopee_client_para(
-    session: AsyncSession, ch: Chamado, dev: Devolution
+    session: AsyncSession, ch: Chamado | None, dev: Devolution
 ) -> ShopeeClient:
     for conta in await _contas_candidatas(session, ch, dev):
         integ = await logistica_shopee._shopee_integration_for_conta(session, conta)

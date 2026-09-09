@@ -72,6 +72,7 @@ type DevolutionRow = {
   tag: string | null
   data_devolvido_estoque: string | null
   prazo: string | null
+  prazo_contestacao: string | null
   estoque_mov_sku: string | null
   estoque_mov_bling_id: number | null
   estoque_mov_action: string | null
@@ -606,6 +607,20 @@ function prazoOverdue(v: string | null): boolean {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   return d.getTime() < today.getTime()
+}
+// Prazo de contestação da plataforma (Shopee/TikTok): urgente = vencido ou < 24 h.
+function contestacaoUrgente(v: string | null): boolean {
+  if (!v) return false
+  return new Date(v).getTime() - Date.now() < 24 * 3600 * 1000
+}
+function contestacaoLabel(v: string | null): string {
+  if (!v) return ''
+  const ms = new Date(v).getTime() - Date.now()
+  if (ms < 0) return 'vencido'
+  const h = Math.floor(ms / 3600000)
+  if (h < 24) return `faltam ${h} h`
+  const d = Math.floor(h / 24)
+  return `faltam ${d} dia${d === 1 ? '' : 's'}`
 }
 // Dias restantes até o prazo (negativo = vencido). Compara só a data.
 function prazoDiasLabel(v: string | null): string {
@@ -1951,7 +1966,7 @@ async function backfillAddresses() {
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="9">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 12 : 11">Devolução</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 13 : 12">Devolução</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
             <th v-if="isAdmin" class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-slate-50 dark:bg-slate-800/40" colspan="1">Atualização</th>
           </tr>
@@ -1977,6 +1992,7 @@ async function backfillAddresses() {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Data devolvido estoque</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prazo</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20" title="Até quando a plataforma aceita contestar a devolução recebida (Shopee/TikTok). Vermelho = menos de 24 h ou vencido.">Prazo contest.</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
             <th v-if="isAdmin" class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-slate-50 dark:bg-slate-800/40 border-l-[3px] border-gray-400 dark:border-gray-600">Atualizado</th>
             <th v-if="canDelete" class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[50px]"></th>
@@ -1984,13 +2000,13 @@ async function backfillAddresses() {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="(isAdmin ? 23 : 21) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
+            <td :colspan="(isAdmin ? 24 : 22) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="(isAdmin ? 23 : 21) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="(isAdmin ? 24 : 22) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -2195,6 +2211,13 @@ async function backfillAddresses() {
               >
                 <span :class="prazoOverdue(row.prazo) ? 'font-medium text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ fmtDate(row.prazo) }}</span>
                 <span class="text-[10px]" :class="prazoOverdue(row.prazo) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ prazoDiasLabel(row.prazo) }}</span>
+              </div>
+              <span v-else class="text-muted-foreground">—</span>
+            </td>
+            <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">
+              <div v-if="row.prazo_contestacao" class="flex flex-col gap-0.5" :title="'Prazo da plataforma para contestar a devolução'">
+                <span :class="contestacaoUrgente(row.prazo_contestacao) ? 'font-medium text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ fmtDateTime(row.prazo_contestacao) }}</span>
+                <span class="text-[10px]" :class="contestacaoUrgente(row.prazo_contestacao) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ contestacaoLabel(row.prazo_contestacao) }}</span>
               </div>
               <span v-else class="text-muted-foreground">—</span>
             </td>

@@ -763,6 +763,7 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Link abertura", "link_abertura"),
     ("Reembolso", "reembolso"),
     ("Motivo", "motivo_devolucao"),
+    ("Prazo contestação", "prazo_contestacao"),
     ("Chamado", "chamado_info"),  # virtual: chamado mais recente do pedido
     ("Custo manutenção", "custo_manutencao"),
     ("Técnico", "tecnico"),
@@ -821,7 +822,13 @@ async def export_devolutions(
                 else:
                     valor = (ch.chamado or "").strip() or "Sim"
                     line.append(f"{valor} (resolvido)" if ch.resolvido else valor)
-            elif field in ("data", "created_at", "data_devolvido_estoque", "prazo"):
+            elif field in (
+                "data",
+                "created_at",
+                "data_devolvido_estoque",
+                "prazo",
+                "prazo_contestacao",
+            ):
                 line.append(_fmt_dt_sp(value))
             elif field in ("reembolso", "devolver_estoque", "manutencao"):
                 line.append("Sim" if value else "Não")

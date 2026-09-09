@@ -842,6 +842,17 @@ async def logistica_track_sync(ctx: dict) -> None:
     logger.info("logistica_track_sync_job_done", **summary)
 
 
+async def devolucao_prazo_sync(ctx: dict) -> None:
+    """A cada 30 min: pergunta à Shopee/TikTok até quando dá pra contestar cada
+    devolução recente e avisa no Threema quando o motivo ainda está vazio a
+    menos de 24 h do prazo (Eduardo 09/09, caso 291835)."""
+    from app.services import devolucao_prazo as svc  # tardio: httpx + models
+
+    async with session_scope() as s:
+        summary = await svc.run(s)
+    logger.info("devolucao_prazo_sync_job_done", **summary)
+
+
 async def logistica_track_forcar(ctx: dict) -> None:
     """07:00 e 16:30 (Brasília): força o 17track a reconsultar os Correios dos
     pacotes em trânsito. O 17track sozinho só consulta ~1x/dia; Eduardo (08/09,
@@ -2076,6 +2087,9 @@ class WorkerSettings:
         # Rastreio do pacote que VOLTA (Acompanhamento de Devoluções), a cada
         # 30 min (:10/:40 — fora dos slots dos ingests e do recarregar).
         cron(devolucao_rastreio_sync, minute={10, 40}, run_at_startup=False, timeout=1500),
+        # Prazo de contestação das devoluções (Shopee/TikTok) + aviso Threema,
+        # a cada 30 min (:20/:50 — fora dos slots do rastreio de devolução).
+        cron(devolucao_prazo_sync, minute={20, 50}, run_at_startup=False, timeout=900),
         # Rastreio Correios do ENVIO (aba Logística), a cada 15 min (:05/:20/
         # :35/:50 — fora dos slots do recarregar e do sync de devolução).
         cron(
