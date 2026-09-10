@@ -204,6 +204,10 @@ def test_loja_upseller_renomeia_victor_mei():
     assert nf_upseller.loja_upseller("victor mei") == "rodrigues (victor mei)"
     assert nf_upseller.loja_upseller(" Victor Mei ") == "rodrigues (victor mei)"
     # Conta sem renome passa direto.
+    # Kia: no Upseller a loja chama "kia/fiore" (Eduardo 10/09) — sem isso a
+    # importação do pedido é recusada pela lista suspensa.
+    assert nf_upseller.loja_upseller("kia") == "kia/fiore"
+    assert nf_upseller.loja_upseller(" Kia ") == "kia/fiore"
     assert nf_upseller.loja_upseller("poofy") == "poofy"
     assert nf_upseller.loja_upseller(None) == ""
 
