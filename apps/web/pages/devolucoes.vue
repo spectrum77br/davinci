@@ -1810,6 +1810,10 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
+              <!-- Observação já no lançamento (10/09): antes só dava pra
+                   preencher na listagem, depois de criar. Mesma coluna
+                   verde da tabela de baixo; o payload já mandava o campo. -->
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
             </tr>
           </thead>
           <tbody>
@@ -1889,6 +1893,9 @@ async function backfillAddresses() {
                   />
                 </button>
                 <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+                <input v-model="d.observacao" :class="sheetInputClass" placeholder="observação" />
               </td>
             </tr>
           </tbody>
