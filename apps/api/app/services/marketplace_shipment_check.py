@@ -148,6 +148,66 @@ _BRT = ZoneInfo("America/Sao_Paulo")
 # fazia N requests em fila indiana — com o cron a cada 1 min isso não cabe
 # na janela. 6 é conservador pro rate limit dos dois (ML ~ centenas/min,
 # Amazon getOrder 0,5 req/s sustentado com burst 30).
+# ── Loja muda (Eduardo, 10/09/2026) ──────────────────────────────────────
+# A Shopee Vortan ficou 14 h sem responder NADA (partner key vencida, 403 a
+# cada minuto) e ninguém soube: o resumo do job seguia com errors=0 e a
+# integração seguia "active", porque "não achei o pedido" e "a loja não me
+# respondeu" chegavam aqui do mesmo jeito — 32 pedidos parados e o dono
+# descobriu olhando a tela. Agora, loja que devolve ZERO pedido de um lote
+# inteiro é considerada MUDA e, se ficar assim, avisa no Threema.
+#
+# Só vale pra Shopee e TikTok: as duas perguntam o lote inteiro numa
+# chamada só e dizem quantos pedidos voltaram. No ML e na Amazon a consulta
+# é pedido a pedido e "não voltou" se confunde com "não é meu" (que é normal
+# e já tem backoff próprio), então lá o sinal seria falso.
+_MUDA_TICKS_PRA_AVISAR = 30  # o job roda de minuto em minuto → ~30 min mudo
+# integration_id → ticks seguidos sem resposta (some no restart do worker,
+# e tudo bem: o pior caso é o aviso sair 30 min depois).
+_lojas_mudas: dict[Any, int] = {}
+
+
+async def _registrar_resposta_da_loja(
+    integration: Integration, *, pedidos: int, responderam: int
+) -> None:
+    """Conta lote vazio por loja e avisa uma vez quando ela emudece."""
+    if pedidos <= 0:
+        return
+    if responderam > 0:
+        if _lojas_mudas.pop(integration.id, 0) >= _MUDA_TICKS_PRA_AVISAR:
+            await _avisar_threema(
+                f"✅ {integration.name} ({integration.platform.value}) voltou a "
+                f"responder a consulta de envio."
+            )
+        return
+    ticks = _lojas_mudas.get(integration.id, 0) + 1
+    _lojas_mudas[integration.id] = ticks
+    logger.warning(
+        "shipment_check_loja_muda",
+        integracao=str(integration.id), loja=integration.name,
+        plataforma=integration.platform.value, pedidos=pedidos, ticks=ticks,
+    )
+    if ticks == _MUDA_TICKS_PRA_AVISAR:
+        await _avisar_threema(
+            f"⚠️ {integration.name} ({integration.platform.value}) está há "
+            f"{ticks} minutos sem responder nada sobre envio — {pedidos} "
+            f"pedido(s) parados sem saber se saíram. Costuma ser credencial "
+            f"vencida: confira a integração."
+        )
+
+
+async def _avisar_threema(texto: str) -> None:
+    """Melhor esforço: aviso não pode derrubar a varredura."""
+    try:
+        from app.config import get_settings
+        from app.services import threema
+
+        destinos = threema.parse_recipients(get_settings().threema_recipients)
+        if destinos:
+            await threema.ThreemaClient().send_to_all(texto, destinos)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("shipment_check_aviso_falhou", err=str(e)[:200])
+
+
 _PER_ORDER_CONCURRENCY = 6
 
 # Pedidos que o marketplace responde 404 ("não é meu") ficam nos candidatos
@@ -679,6 +739,9 @@ async def _check_marketplace_shipped(
             orders=len(orders), found_in_response=len(status_map),
             shipped=len(shipped),
         )
+        await _registrar_resposta_da_loja(
+            integration, pedidos=len(order_sns), responderam=len(status_map)
+        )
 
     elif platform == IntegrationPlatform.TIKTOK:
         client = TikTokClient(creds, on_token_refresh=_persist)
@@ -699,6 +762,9 @@ async def _check_marketplace_shipped(
             "shipment_check_tiktok",
             orders=len(orders), found_in_response=len(status_map),
             shipped=len(shipped),
+        )
+        await _registrar_resposta_da_loja(
+            integration, pedidos=len(order_ids), responderam=len(status_map)
         )
 
     elif platform == IntegrationPlatform.ML:
