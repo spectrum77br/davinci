@@ -14,6 +14,11 @@ Resource = Literal[
     "tabela_precos_contas",
     "tabela_precos_produtos",
     "tabela_precos_concorrencia",
+    # Solta a cerca de EQUIPE só dentro da Tabela de Preços (Eduardo, 10/09:
+    # o israel é da equipe 2 e precisa ver todas as contas ali, e só ali).
+    # Lida em routers/pricing.py:_escopo_precos; as outras abas seguem
+    # cercadas por sales_teams.
+    "tabela_precos_todas_contas",
     "margem",
     "faturamento",
     "controle_estoque",
