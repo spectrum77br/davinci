@@ -11,11 +11,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from app.routers.devolutions import _chegou_em, _com_status_da_devolucao
 from app.services.logistica_shopee import _entregue_em_do_detalhe
 
 # 09/09/2026 09:42 BRT, o instante real do caso 291516.
 ENTREGUE = datetime(2026, 9, 9, 12, 42, 37, tzinfo=UTC)
+
+pytestmark = pytest.mark.asyncio
 
 
 def test_le_a_entrega_da_perna_reversa_da_shopee():
@@ -167,3 +171,73 @@ def test_correios_entregue_no_push_do_17track():
         }
     }
     assert parse_push_entregues(push) == {"AP1BR"}
+
+
+async def test_pull_carimba_entrega_que_o_push_perdeu(db, monkeypatch):
+    """O push é evento: entrega ocorrida ANTES de o sistema passar a escutar
+    nunca seria carimbada (caso 293437, entregue 09/09 e sem "Chegou em").
+    Agora o sync também pergunta o estado dos códigos já registrados."""
+    from app.models import DevolucaoRastreio
+    from app.services import devolucao_rastreio_sync as svc
+
+    db.add_all([
+        DevolucaoRastreio(pedido_bling="293437", rastreio_auto="AP444879986BR"),
+        DevolucaoRastreio(pedido_bling="900001", rastreio_auto="AP111111111BR"),
+        # SPX da Shopee: não é Correios, nem entra na consulta.
+        DevolucaoRastreio(pedido_bling="900002", rastreio_auto="BR2668727206243"),
+    ])
+    await db.commit()
+
+    perguntados: list[list[str]] = []
+
+    async def fake_fetch(numbers):
+        perguntados.append(sorted(numbers))
+        return {
+            "info": {
+                "AP444879986BR": {
+                    "localizacao": "Piracicaba/SP — Objeto entregue ao destinatário",
+                    "status": "Delivered",
+                    "sync_at": ENTREGUE,
+                },
+                "AP111111111BR": {
+                    "localizacao": "Bauru/SP — Objeto em transferência",
+                    "status": "InTransit",
+                    "sync_at": ENTREGUE,
+                },
+            },
+            "desconhecidos": [],
+        }
+
+    monkeypatch.setattr(svc.logistica_track, "fetch_detalhado", fake_fetch)
+
+    resumo = await svc._puxar_correios(db)
+
+    assert perguntados == [["AP111111111BR", "AP444879986BR"]]  # SPX ficou fora
+    assert resumo == {"consultados": 2, "entregues": 1, "localizacoes": 2}
+    entregue = await db.get(DevolucaoRastreio, "293437")
+    a_caminho = await db.get(DevolucaoRastreio, "900001")
+    await db.refresh(entregue)
+    await db.refresh(a_caminho)
+    assert entregue.pacote_entregue_em == ENTREGUE
+    assert "entregue ao destinatário" in (entregue.localizacao_auto or "")
+    assert a_caminho.pacote_entregue_em is None
+
+
+async def test_pull_nao_reconsulta_quem_ja_chegou(db, monkeypatch):
+    from sqlalchemy import delete
+
+    from app.models import DevolucaoRastreio
+    from app.services import devolucao_rastreio_sync as svc
+
+    await db.execute(delete(DevolucaoRastreio))  # isola das linhas do teste anterior
+    db.add(DevolucaoRastreio(
+        pedido_bling="900003", rastreio_auto="AP222222222BR", pacote_entregue_em=ENTREGUE,
+    ))
+    await db.commit()
+
+    async def nunca(numbers):  # pragma: no cover - não deve ser chamado
+        raise AssertionError("não devia perguntar de novo")
+
+    monkeypatch.setattr(svc.logistica_track, "fetch_detalhado", nunca)
+
+    assert (await svc._puxar_correios(db))["consultados"] == 0

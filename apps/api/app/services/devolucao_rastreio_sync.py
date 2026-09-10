@@ -119,6 +119,59 @@ async def _linhas_logistica(
     return por_pedido
 
 
+async def _puxar_correios(session: AsyncSession) -> dict[str, int]:
+    """Rede de segurança do rastreio do pacote de VOLTA.
+
+    Até aqui a localização física só entrava pelo PUSH do 17track. Push é
+    evento: se ele acontece antes de a gente passar a escutar (ou se perde),
+    a linha fica parada pra sempre — foi o caso do 293437, entregue pelos
+    Correios em 09/09 e ainda sem "Chegou em" (Eduardo, 10/09). Agora o sync
+    também PERGUNTA o estado dos códigos já registrados. Consulta é grátis no
+    17track (crédito só se gasta ao registrar), então roda a cada rodada.
+    """
+    linhas = list(
+        (
+            await session.execute(
+                select(DevolucaoRastreio).where(
+                    DevolucaoRastreio.rastreio_auto.is_not(None),
+                    DevolucaoRastreio.pacote_entregue_em.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    por_codigo = {
+        (r.rastreio_auto or "").strip(): r
+        for r in linhas
+        if logistica_track.is_correios(r.rastreio_auto or "")
+    }
+    resumo = {"consultados": len(por_codigo), "entregues": 0, "localizacoes": 0}
+    if not por_codigo:
+        return resumo
+    try:
+        got = await logistica_track.fetch_detalhado(sorted(por_codigo))
+    except Exception as e:  # noqa: BLE001 — 17track fora do ar não derruba o sync
+        logger.warning("devolucao_rastreio_pull_falhou", err=str(e)[:200])
+        return resumo
+    agora = datetime.now(UTC)
+    for numero, dados in (got.get("info") or {}).items():
+        row = por_codigo.get(numero)
+        if row is None:
+            continue
+        loc = (dados.get("localizacao") or "").strip()
+        if loc and loc != (row.localizacao_auto or ""):
+            row.localizacao_auto = loc
+            row.localizacao_auto_data = dados.get("sync_at") or agora
+            resumo["localizacoes"] += 1
+        if str(dados.get("status") or "").strip() == "Delivered":
+            row.pacote_entregue_em = dados.get("sync_at") or agora
+            resumo["entregues"] += 1
+    if resumo["entregues"] or resumo["localizacoes"]:
+        await session.commit()
+    return resumo
+
+
 async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) -> dict[str, int]:
     """Sincroniza o rastreio automático das devoluções. `pedidos` restringe
     (o recarregar de um pedido); sem ele, todos os 83957."""
@@ -194,6 +247,8 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
     # (TikTok/Shopee/ML) só dá flush — sem commit o token rotacionado se perde.
     await session.commit()
 
+    pull = await _puxar_correios(session)
+
     registrados = 0
     if novos_codigos:
         try:
@@ -208,6 +263,9 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
         "devolucoes": len(infos),
         "gravados": gravados,
         "codigos_17track": registrados,
+        "correios_consultados": pull["consultados"],
+        "correios_entregues": pull["entregues"],
+        "correios_localizacoes": pull["localizacoes"],
     }
     logger.info("devolucao_rastreio_sync_done", **summary)
     return summary
