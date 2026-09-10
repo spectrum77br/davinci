@@ -803,8 +803,8 @@ const acompSearch = ref('')
 const acompPlataformaFilter = ref('all')
 const acompLojaFilter = ref('all')
 const acompParadoFilter = ref<'all' | '7' | '15' | '30'>('all')
-// Chegada do pacote de volta (10/09): 'chegou' = "Chegou em" preenchido
-// (a plataforma confirmou); 'pendente' = sem confirmação ainda.
+// Status de devolução do pacote (10/09): 'chegou' = Devolvido ("Chegou em"
+// preenchido, a plataforma confirmou); 'pendente' = Não Devolvido.
 const acompChegadaFilter = ref<'all' | 'chegou' | 'pendente'>('all')
 // Chaves "pedido|campo" com PATCH em voo — trava o input e evita corrida.
 const acompSaving = ref<Set<string>>(new Set())
@@ -1554,10 +1554,10 @@ async function backfillAddresses() {
           <option value="15">parados 15+ dias</option>
           <option value="30">parados 30+ dias</option>
         </select>
-        <select v-model="acompChegadaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Pela coluna Chegou em: a plataforma confirmou que o pacote de volta chegou aqui (Shopee/TikTok/ML). Sem confirmação não quer dizer que ainda está a caminho.">
-          <option value="all">qualquer chegada</option>
-          <option value="chegou">chegou</option>
-          <option value="pendente">não chegou</option>
+        <select v-model="acompChegadaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Devolvido = a plataforma confirmou que o pacote de volta chegou aqui (coluna Chegou em). Não Devolvido = sem confirmação ainda, não quer dizer que está a caminho.">
+          <option value="all">Todos Status</option>
+          <option value="chegou">Devolvido</option>
+          <option value="pendente">Não Devolvido</option>
         </select>
         <span class="ml-auto text-xs text-muted-foreground">
           {{ acompFiltered.length }} de {{ acompRows.length }} itens · rastreio, localização e observação salvam ao sair do campo
