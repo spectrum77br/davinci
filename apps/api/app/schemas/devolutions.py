@@ -331,6 +331,9 @@ class AcompanhamentoItemOut(BaseModel):
     entrega_localizacao: str | None = None
     # True quando o pedido já tem devolução LANÇADA na aba de lançamentos.
     lancada: bool = False
+    # Observação livre por PEDIDO (10/09): recado pra quem acompanha o pacote;
+    # existe antes de a devolução ser lançada.
+    observacao: str | None = None
 
 
 class AcompanhamentoOut(BaseModel):
@@ -349,10 +352,14 @@ class AcompanhamentoRastreioPatch(BaseModel):
     # "Em devolução desde" na mão (Eduardo 03/09, caso 287144). Enviado como
     # null LIMPA (volta ao automático); omitido não mexe.
     em_devolucao_desde: date | None = None
+    # Observação livre (10/09): "" limpa; omitido não mexe.
+    observacao: str | None = None
 
 
 class AcompanhamentoRastreioOut(BaseModel):
     pedido_bling: str
+    # Observação livre por PEDIDO (espelhada na linha depois de editar).
+    observacao: str | None = None
     rastreio: str | None = None
     localizacao: str | None = None
     localizacao_data: datetime | None = None

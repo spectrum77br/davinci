@@ -276,6 +276,46 @@ async def test_patch_rastreio_upsert_e_carimbo_de_movimentacao(
     assert r5.json()["localizacao_data"] is None
 
 
+async def test_patch_observacao_salva_limpa_e_aparece_na_lista(
+    client, db: AsyncSession, make_user, auth_as
+):
+    """Observação livre da aba Acompanhamento (10/09): salva por PEDIDO,
+    espaços nas pontas caem, editar outro campo não mexe nela, o GET devolve o
+    texto em todas as linhas do pedido e "" limpa."""
+    user = await make_user(permissions=_perm())
+    auth_as(user)
+    schema = get_settings().database_schema
+    await _seed_acompanhamento(db, schema)
+    try:
+        r1 = await client.patch(
+            "/api/devolutions/acompanhamento/555001",
+            json={"observacao": "  cliente pediu pra segurar até sexta  "},
+        )
+        assert r1.status_code == 200
+        assert r1.json()["observacao"] == "cliente pediu pra segurar até sexta"
+
+        r2 = await client.patch(
+            "/api/devolutions/acompanhamento/555001", json={"rastreio": "BR123"}
+        )
+        assert r2.status_code == 200
+        assert r2.json()["rastreio"] == "BR123"
+        assert r2.json()["observacao"] == "cliente pediu pra segurar até sexta"
+
+        lista = await client.get("/api/devolutions/acompanhamento")
+        assert lista.status_code == 200
+        itens = [i for i in lista.json()["items"] if i["pedido_bling"] == "555001"]
+        assert len(itens) == 2
+        assert {i["observacao"] for i in itens} == {"cliente pediu pra segurar até sexta"}
+
+        r3 = await client.patch(
+            "/api/devolutions/acompanhamento/555001", json={"observacao": ""}
+        )
+        assert r3.status_code == 200
+        assert r3.json()["observacao"] is None
+    finally:
+        await _drop_view(db, schema)
+
+
 async def test_patch_rastreio_pedido_inexistente_404(client, make_user, auth_as):
     user = await make_user(permissions=_perm())
     auth_as(user)

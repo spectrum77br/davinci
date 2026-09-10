@@ -62,6 +62,11 @@ class DevolucaoRastreio(Base, TimestampMixin):
     # automático (devolução aberta no marketplace / carimbo da Logística /
     # entrada em 83957). Caso 287144: entrou em 19/08 pela Viena no Bling.
     entrada_manual: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Observação livre da aba Acompanhamento (migration 0255, 10/09): recado
+    # pra quem acompanha o pacote — por PEDIDO, independente de a devolução já
+    # estar lançada (a Observação da aba Lançamentos só existe após o
+    # lançamento). Editada inline, salva ao sair do campo.
+    observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

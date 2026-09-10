@@ -595,6 +595,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     r.devolucao_status_auto,
                     r.pacote_entregue_em,
                     r.fonte_auto,
+                    r.observacao,
                     v.plataforma_bling          AS plataforma,
                     COALESCE(NULLIF(btrim(v.loja_nome), ''),
                              'Loja ' || v.bling_loja_id, 'Sem loja') AS loja,
@@ -733,9 +734,9 @@ async def patch_acompanhamento_rastreio(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
 ) -> AcompanhamentoRastreioOut:
-    """Salva rastreio/última localização de um pedido em devolução (edição
-    inline da aba Acompanhamento). `localizacao_data` é carimbada sozinha
-    quando a localização MUDA — é a data da última movimentação vista."""
+    """Salva rastreio/última localização/observação de um pedido em devolução
+    (edição inline da aba Acompanhamento). `localizacao_data` é carimbada
+    sozinha quando a localização MUDA — é a data da última movimentação vista."""
     pedido_bling = pedido_bling.strip()
     exists = (
         await session.execute(
@@ -761,6 +762,9 @@ async def patch_acompanhamento_rastreio(
     if "em_devolucao_desde" in data:
         # null explícito limpa (volta ao automático); omitido não mexe.
         row.entrada_manual = data["em_devolucao_desde"]
+    if "observacao" in data:
+        # Recado livre pra quem acompanha (10/09): "" limpa; omitido não mexe.
+        row.observacao = (data["observacao"] or "").strip() or None
     row.updated_by = user.id
     await session.commit()
     await session.refresh(row)
@@ -824,6 +828,7 @@ async def patch_acompanhamento_rastreio(
     d = _com_status_da_devolucao(
         {
             "pedido_bling": row.pedido_bling,
+            "observacao": row.observacao,
             "rastreio": row.rastreio or row.rastreio_auto or (lg["rastreio"] if lg else None),
             "localizacao": row.localizacao or (lg["localizacao"] if lg else None),
             "localizacao_data": _ultima_movimentacao(

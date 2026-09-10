@@ -770,6 +770,8 @@ type AcompanhamentoRow = {
   // Entrega original quando `localizacao` é o status de uma devolução viva.
   entrega_localizacao: string | null
   lancada: boolean
+  // Observação livre por PEDIDO: recado pra quem acompanha o pacote.
+  observacao: string | null
 }
 type AcompanhamentoPage = { items: AcompanhamentoRow[]; total_pedidos: number }
 type RastreioSaved = {
@@ -786,6 +788,7 @@ type RastreioSaved = {
   aguardando_devolucao_data_estimada: boolean
   // Dia em que o pacote de volta chegou aqui (coluna "Chegou em").
   devolucao_chegou_em: string | null
+  observacao: string | null
 }
 
 type Tab = 'acompanhamento' | 'lancamentos'
@@ -845,7 +848,7 @@ const acompFiltered = computed(() => {
     if (term) {
       const hay = [
         r.pedido_bling, r.pedido_marketplace, r.cliente, r.sku, r.produto,
-        r.rastreio, r.localizacao, r.cidade,
+        r.rastreio, r.localizacao, r.cidade, r.observacao,
       ].filter(Boolean).join(' ').toLowerCase()
       if (!hay.includes(term)) return false
     }
@@ -888,7 +891,7 @@ function isSavingRastreio(pedido: string | null, field: string): boolean {
 // a API se o valor realmente mudou; string vazia limpa o campo.
 async function saveRastreio(
   row: AcompanhamentoRow,
-  field: 'rastreio' | 'localizacao' | 'em_devolucao_desde',
+  field: 'rastreio' | 'localizacao' | 'em_devolucao_desde' | 'observacao',
   raw: string,
 ) {
   if (!canEdit.value || !row.pedido_bling) return
@@ -916,6 +919,7 @@ async function saveRastreio(
         r.dias_em_devolucao = res.dias_em_devolucao
         r.aguardando_devolucao_data_estimada = res.aguardando_devolucao_data_estimada
         r.devolucao_chegou_em = res.devolucao_chegou_em
+        r.observacao = res.observacao
       }
     }
   } catch (e: any) {
@@ -1546,7 +1550,7 @@ async function backfillAddresses() {
           <option value="30">parados 30+ dias</option>
         </select>
         <span class="ml-auto text-xs text-muted-foreground">
-          {{ acompFiltered.length }} de {{ acompRows.length }} itens · rastreio e localização salvam ao sair do campo
+          {{ acompFiltered.length }} de {{ acompRows.length }} itens · rastreio, localização e observação salvam ao sair do campo
         </span>
       </div>
 
@@ -1556,7 +1560,7 @@ async function backfillAddresses() {
             <tr>
               <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="12">Pedido aguardando devolução (Bling)</th>
               <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3" title="Preenchido sozinho: código e status do PACOTE QUE VOLTA (devolução na Shopee/TikTok/ML, atualizado a cada 30 min) — senão o rastreio da entrega original (Logística). O que você digitar aqui vale mais que o automático">Rastreio</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Devolução</th>
+              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Devolução</th>
             </tr>
             <tr class="border-b">
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data pedido</th>
@@ -1575,7 +1579,10 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[160px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Rastreio</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-amber-50 dark:bg-amber-900/20">Última localização</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[135px] bg-amber-50 dark:bg-amber-900/20" title="Preenchida sozinha quando a localização muda">Data últ. movimentação</th>
-              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Lançada</th>
+              <!-- Observação (10/09): recado livre por pedido pra quem acompanha o
+                   pacote — salva ao sair do campo, como rastreio/localização. -->
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Recado livre pra quem acompanha este pacote — salva ao sair do campo">Observação</th>
+              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] bg-emerald-50 dark:bg-emerald-900/20">Lançada</th>
             </tr>
           </thead>
           <tbody>
@@ -1668,7 +1675,17 @@ async function backfillAddresses() {
               <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10" title="Preenchida sozinha quando a localização muda">
                 {{ fmtDateTime(row.localizacao_data) }}
               </td>
-              <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+              <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+                <input
+                  :value="row.observacao || ''"
+                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'observacao')"
+                  :class="sheetInputClass"
+                  placeholder="recado pra quem acompanha"
+                  @keydown.enter="(e) => (e.target as HTMLInputElement).blur()"
+                  @blur="(e) => saveRastreio(row, 'observacao', (e.target as HTMLInputElement).value)"
+                />
+              </td>
+              <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10">
                 <span
                   v-if="row.lancada"
                   class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
