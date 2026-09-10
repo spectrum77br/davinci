@@ -914,6 +914,9 @@ class _ReturnCand(NamedTuple):
     created_at: datetime | None
     updated_at: datetime | None
     live: bool
+    # Payload cru do return: é dele que sai a perna do vendedor (a que prova
+    # que o pacote chegou em NÓS, e não no galpão do ML).
+    raw: dict = {}
 
 
 def _returns_as_list(rets: Any) -> list[dict]:
@@ -929,17 +932,50 @@ def _returns_as_list(rets: Any) -> list[dict]:
     return [rets]
 
 
+def _destino_do_shipment(sh: dict) -> str:
+    return str(((sh or {}).get("destination") or {}).get("name") or "").strip().lower()
+
+
 def _return_shipment(ret: dict) -> dict:
-    """Envio de VOLTA de um return: `shipments[0]` (v2; id em `shipment_id`,
-    defesa `id`) ou `shipping` (formato v1). `{}` quando ainda não há envio
-    (devolução aberta sem postagem / só reembolso)."""
+    """Envio de VOLTA de um return, priorizando a perna que vai PRO VENDEDOR.
+
+    O ML parte a devolução em duas: o comprador posta pro galpão dele
+    (`destination.name = warehouse`, em Cajamar) e, depois da triagem, o ML
+    reenvia pro vendedor (`destination.name = seller_address`). Pegar
+    `shipments[0]` misturava as duas — e a ordem da lista NÃO é estável (três
+    GETs seguidos no mesmo claim vieram em ordens diferentes), então o
+    rastreio e o status da tela variavam a cada rodada. Pior: "entregue" na
+    perna do galpão significa que chegou no MERCADO LIVRE, não no vendedor.
+    Quando não há perna do vendedor ainda, vale a primeira (o pacote está no
+    caminho do galpão). Formato v1 continua caindo em `shipping`."""
     shipments = ret.get("shipments")
     if isinstance(shipments, list):
-        for sh in shipments:
-            if isinstance(sh, dict):
+        validos = [sh for sh in shipments if isinstance(sh, dict)]
+        for sh in validos:
+            if _destino_do_shipment(sh) == "seller_address":
                 return sh
+        if validos:
+            return validos[0]
     shp = ret.get("shipping")
     return shp if isinstance(shp, dict) else {}
+
+
+def _entregue_ao_vendedor(ret: dict, detalhe: dict | None = None) -> datetime | None:
+    """Quando o pacote de volta chegou AO VENDEDOR (não ao galpão do ML).
+
+    Só conta a perna `seller_address` com `status=delivered`; a data exata sai
+    do `status_history.date_delivered` do shipment, que o fluxo já busca."""
+    sh = _return_shipment(ret)
+    if _destino_do_shipment(sh) != "seller_address":
+        return None
+    if str(sh.get("status") or "").strip().lower() != "delivered":
+        return None
+    hist = ((detalhe or {}).get("status_history") or {})
+    return (
+        iso_to_dt(hist.get("date_delivered"))
+        or iso_to_dt((detalhe or {}).get("date_delivered"))
+        or iso_to_dt(ret.get("last_updated"))
+    )
 
 
 def _return_candidate(claim_id: str, ret: dict) -> _ReturnCand:
@@ -949,6 +985,7 @@ def _return_candidate(claim_id: str, ret: dict) -> _ReturnCand:
     ret_status = str(ret.get("status") or "").strip()
     live = sh_status.lower() not in _RETURN_DEAD and ret_status.lower() not in _RETURN_DEAD
     return _ReturnCand(
+        raw=ret,
         claim_id=claim_id,
         shipment_id=str(sid) if sid else None,
         # Sem envio ainda, o status do return em si (ex. opened) é o que há.
@@ -1066,6 +1103,7 @@ async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> Re
         created_at=created_at,
         updated_at=updated_at,
         return_id=esc.claim_id,
+        entregue_em=_entregue_ao_vendedor(esc.raw, sh),
     )
 
 

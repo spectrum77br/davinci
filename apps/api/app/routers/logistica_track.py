@@ -77,6 +77,7 @@ async def receive_17track_push(
     )
 
     updates = logistica_track.parse_push(parsed)
+    entregues = logistica_track.parse_push_entregues(parsed)
     applied = 0
     for number, loc in updates:
         rows = (
@@ -106,6 +107,12 @@ async def receive_17track_push(
         for dev in devs:
             dev.localizacao_auto = loc
             dev.localizacao_auto_data = datetime.now(UTC)
+            # Correios dizendo ENTREGUE é a prova mais direta de que o pacote
+            # de volta chegou — vale pra qualquer plataforma cujo retorno vá
+            # pelos Correios (todo o TikTok, parte da Shopee). Nunca apaga um
+            # carimbo já existente.
+            if number in entregues and dev.pacote_entregue_em is None:
+                dev.pacote_entregue_em = datetime.now(UTC)
             applied += 1
     await session.commit()
 

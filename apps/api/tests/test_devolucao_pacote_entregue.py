@@ -110,3 +110,60 @@ def test_localizacao_manual_continua_mandando_em_tudo():
         pacote_entregue_em=ENTREGUE,
     )
     assert d["localizacao"] == "escrito na mão"
+
+
+def test_ml_so_conta_a_perna_que_vai_pro_vendedor():
+    """O ML parte a devolução em duas: o comprador posta pro galpão dele
+    (Cajamar) e depois o ML reenvia pro vendedor. "Entregue" na primeira NÃO
+    é o pacote na nossa mão — e a ordem da lista não é estável, então pegar
+    o primeiro dava resultado diferente a cada rodada."""
+    from app.services.logistica_meli import _entregue_ao_vendedor, _return_shipment
+
+    galpao = {
+        "shipment_id": 1,
+        "type": "return",
+        "destination": {"name": "warehouse"},
+        "status": "delivered",
+        "tracking_number": "MEL-GALPAO",
+    }
+    vendedor = {
+        "shipment_id": 2,
+        "type": "return_from_triage",
+        "destination": {"name": "seller_address"},
+        "status": "delivered",
+        "tracking_number": "MEL-VENDEDOR",
+    }
+
+    # Em qualquer ordem, vale a perna do vendedor.
+    assert _return_shipment({"shipments": [galpao, vendedor]})["tracking_number"] == "MEL-VENDEDOR"
+    assert _return_shipment({"shipments": [vendedor, galpao]})["tracking_number"] == "MEL-VENDEDOR"
+
+    detalhe = {"status_history": {"date_delivered": "2026-09-09T10:00:00-03:00"}}
+    assert _entregue_ao_vendedor({"shipments": [galpao, vendedor]}, detalhe) is not None
+    # Só o galpão: chegou no Mercado Livre, não em nós.
+    assert _entregue_ao_vendedor({"shipments": [galpao]}, detalhe) is None
+    # Perna do vendedor ainda a caminho.
+    a_caminho = {**vendedor, "status": "shipped"}
+    assert _entregue_ao_vendedor({"shipments": [a_caminho]}, detalhe) is None
+
+
+def test_correios_entregue_no_push_do_17track():
+    """Onde o retorno vai pelos Correios (todo o TikTok), o evento físico é a
+    prova de chegada."""
+    from app.services.logistica_track import entregue_no_push, parse_push_entregues
+
+    assert entregue_no_push({"latest_status": {"status": "Delivered"}}) is True
+    assert entregue_no_push({"latest_status": {"status": "InTransit"}}) is False
+    # "Expired" encerra o rastreio, mas não é entrega.
+    assert entregue_no_push({"latest_status": {"status": "Expired"}}) is False
+    assert entregue_no_push({}) is False
+
+    push = {
+        "data": {
+            "accepted": [
+                {"number": "AP1BR", "track_info": {"latest_status": {"status": "Delivered"}}},
+                {"number": "AP2BR", "track_info": {"latest_status": {"status": "InTransit"}}},
+            ]
+        }
+    }
+    assert parse_push_entregues(push) == {"AP1BR"}

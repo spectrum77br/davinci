@@ -552,6 +552,41 @@ def _compose(city: str, uf: str, descr: str) -> str | None:
     return where or d or None
 
 
+def entregue_no_push(track_info: dict | None) -> bool:
+    """O push do 17track diz ENTREGUE? Só o estado final de entrega conta —
+    "Expired" e os outros encerramentos do `encerrado()` não são entrega.
+
+    Usado pra carimbar a chegada do pacote de DEVOLUÇÃO (Eduardo, 10/09):
+    onde o retorno vai pelos Correios (100% do TikTok, parte da Shopee), o
+    evento físico é a prova mais direta de que o pacote chegou no vendedor."""
+    ti = track_info or {}
+    status = str(
+        (ti.get("latest_status") or {}).get("status") or ti.get("status") or ""
+    ).strip()
+    return status == "Delivered"
+
+
+def parse_push_entregues(payload: dict) -> set[str]:
+    """Números do push cujo estado é ENTREGUE (mesmo desempacotamento do
+    `parse_push`, sem mexer no contrato dele)."""
+    data = payload.get("data")
+    if isinstance(data, dict):
+        acc = data.get("accepted")
+        items = acc if isinstance(acc, list) else [data]
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = []
+    out: set[str] = set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        number = (it.get("number") or "").strip()
+        if number and entregue_no_push(it.get("track_info") or {}):
+            out.add(number)
+    return out
+
+
 def parse_push(payload: dict) -> list[tuple[str, str]]:
     """Extrai [(number, localizacao)] de um push do 17track. Aceita o `data`
     como `{accepted:[...]}` ou como item único. Ignora itens sem localização."""
