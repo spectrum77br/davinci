@@ -134,6 +134,18 @@ async def test_cliente_reembolso_is_clamped_to_non_positive(client, make_user, a
     assert other.json()["reembolso"] == 5.0
 
 
+async def test_refund_tipo_sucata_aceito(client, make_user, auth_as):
+    """Sucata (10/09): tipo de reembolso novo, mesmo padrão do Extraviado."""
+    user = await make_user(permissions=_refund_permissions())
+    auth_as(user)
+    r = await client.post(
+        "/api/refunds",
+        json={"pedido_bling": "C-4", "conta": "Loja X", "tipo": "Sucata", "prejuizo": 120.0},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["tipo"] == "Sucata"
+
+
 async def test_lookup_refund_order_reads_recent_conciliation_view(
     client,
     db: AsyncSession,

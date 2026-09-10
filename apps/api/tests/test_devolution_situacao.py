@@ -51,6 +51,15 @@ def test_target_extraviado_tem_precedencia():
     assert _order_situacao_target(rows) == SITUACAO_EXTRAVIADO
 
 
+def test_target_sucata_condicao_segue_extraviado():
+    """Sucata como CONDIÇÃO (10/09) = mesmo padrão do Extraviado → 83960; não
+    confundir com Manutenção→destino Sucata (modal), que resolve o pedido."""
+    rows = [_row("Sucata"), _row("Novo"), _row("Não devolvido")]
+    assert _order_situacao_target(rows) == SITUACAO_EXTRAVIADO
+    destino_sucata = [_row("Manutenção", "Sucata"), _row("Novo")]
+    assert _order_situacao_target(destino_sucata) == SITUACAO_RESOLVIDO
+
+
 def test_target_manutencao_pendente():
     rows = [_row("Manutenção"), _row("Novo")]
     assert _order_situacao_target(rows) == SITUACAO_MANUTENCAO

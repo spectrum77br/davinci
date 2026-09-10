@@ -236,6 +236,9 @@ const CONDICOES_PRODUTO = [
   'Usado',
   'Manutenção',
   'Extraviado',
+  // Sucata (10/09): mesmo padrão do Extraviado em todas as regras (link de
+  // abertura obrigatório, reembolso automático, sem estoque, situação no add).
+  'Sucata',
   'Trocado',
   'Não devolvido',
 ] as const
@@ -537,7 +540,7 @@ const sheetInputRequiredClass = `${sheetInputClass} ring-1 ring-red-400`
 const sheetSelectRequiredClass = `${sheetSelectClass} ring-1 ring-red-400`
 
 function linkRequired(condicao: string | null | undefined) {
-  return condicao === 'Extraviado' || condicao === 'Manutenção'
+  return condicao === 'Extraviado' || condicao === 'Sucata' || condicao === 'Manutenção'
 }
 
 // Motivos que abrem chamado automático (espelho de services/chamados.MOTIVOS_ABREM_CHAMADO).
@@ -1144,7 +1147,7 @@ async function createAllDevolutions() {
       return
     }
     if (linkRequired(d.condicao_produto) && !d.link_abertura) {
-      lookupError.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
+      lookupError.value = 'Link de abertura obrigatório para Extraviado / Sucata / Manutenção'
       return
     }
     if (linkEnvioRequired(d.sku, d.motivo_devolucao) && !d.link_envio) {
@@ -1161,7 +1164,7 @@ async function createAllDevolutions() {
       // No ADD: Novo/Usado/Trocado SEMPRE processam estoque (automático, sem
       // toggle). Manutenção só processa se o operador ligou o toggle (continua
       // manual); senão pode ser devolvida ao estoque depois, pela linha salva.
-      // Extraviado e demais condições não mexem no estoque.
+      // Extraviado, Sucata e demais condições não mexem no estoque.
       const processAtAdd =
         ['Novo', 'Usado', 'Trocado'].includes(d.condicao_produto) ||
         (d.condicao_produto === 'Manutenção' && d.devolver_estoque)
@@ -1267,7 +1270,7 @@ async function changeRowCondicao(row: DevolutionRow, value: string) {
     setRowText(row, 'condicao_produto', prev ?? '')
     return
   }
-  if (value === 'Extraviado' || value === 'Manutenção') setRowReembolso(row, true)
+  if (value === 'Extraviado' || value === 'Sucata' || value === 'Manutenção') setRowReembolso(row, true)
   // Novo/Usado/Trocado: estoque é automático — ao mudar a condição já abre o
   // modal (quando precisa) e devolve ao estoque, sem depender do toggle.
   // Manutenção: continua manual (só processa se o toggle já estiver ligado).
@@ -1288,7 +1291,7 @@ async function changeRowCondicao(row: DevolutionRow, value: string) {
 async function saveRow(row: DevolutionRow) {
   if (!canEdit.value || !hasDirty(row.id) || isSaving(row.id)) return
   if (linkRequired(row.condicao_produto) && !row.link_abertura) {
-    error.value = 'Link de abertura obrigatório para Extraviado / Manutenção'
+    error.value = 'Link de abertura obrigatório para Extraviado / Sucata / Manutenção'
     return
   }
   if (linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) {
@@ -1832,7 +1835,7 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] bg-amber-50 dark:bg-amber-900/20" title="Fotos da devolução — vão como evidência do chamado automático no Mercado Livre">Foto</th>
               <!-- Reembolso saiu da tela (03/09): liga sozinho por custo+técnico
-                   / Extraviado / Manutenção; segue no filtro, no card e no export. -->
+                   / Extraviado / Sucata / Manutenção; segue no filtro, no card e no export. -->
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
               <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
@@ -1855,7 +1858,7 @@ async function backfillAddresses() {
                 <input v-model.number="d.custo_produto" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="d.condicao_produto" :class="d.condicao_produto ? sheetSelectClass : sheetSelectRequiredClass" @change="(e) => { if ((e.target as HTMLSelectElement).value === 'Extraviado' || (e.target as HTMLSelectElement).value === 'Manutenção') d.reembolso = true }">
+                <select v-model="d.condicao_produto" :class="d.condicao_produto ? sheetSelectClass : sheetSelectRequiredClass" @change="(e) => { if (['Extraviado', 'Sucata', 'Manutenção'].includes((e.target as HTMLSelectElement).value)) d.reembolso = true }">
                   <option value="">—</option>
                   <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
                 </select>

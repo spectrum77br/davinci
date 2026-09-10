@@ -18,11 +18,14 @@ Estoque, por condição efetiva:
   Manutenção    → `manutencao_destino` escolhido no modal:
                     * Novo/Usado → mesma lógica de estoque;
                     * Sucata     → não mexe no estoque (patch sucata no pedido).
-  Extraviado / outros → não mexe no estoque.
+  Extraviado / Sucata (condição) / outros → não mexe no estoque.
 
 Situação do pedido (valor único no Bling), precedência pior→melhor:
-  qualquer Extraviado → 83960; senão qualquer Sucata → 545901; senão qualquer
-  Trocado OU todos os itens resolvidos (Novo/Usado) → 545902 (resolvido).
+  qualquer Extraviado ou Sucata (CONDIÇÃO, 10/09: "segue o mesmo padrão do
+  Extraviado") → 83960; senão Manutenção pendente → 84677; senão qualquer
+  Trocado OU todos os itens resolvidos (Novo/Usado/Manutenção→Sucata) → 545902.
+  Obs.: Manutenção com destino Sucata (modal) continua RESOLVIDO (545902) —
+  o Bling rejeita a transição pra 545901 "Manutenção - Sucata".
   "Entregue" e "Não devolvido" (legado) são NEUTROS: não contam no cálculo.
 
 Transições diretas no Bling (API v3) podem ser rejeitadas com 400 (ex.:
@@ -166,7 +169,9 @@ def _resolution_of(row: Devolution) -> str:
     Manutenção→Sucata resolve como 'resolvido' (o pedido vai para 545902 —
     o Bling rejeita a situação 545901 "Sucata" na transição)."""
     c = (row.condicao_produto or "").strip()
-    if c == "Extraviado":
+    # Sucata como CONDIÇÃO (10/09) = mesmo padrão do Extraviado (83960). Não
+    # confundir com Manutenção→destino Sucata (modal), que resolve o pedido.
+    if c in ("Extraviado", "Sucata"):
         return "extraviado"
     if c == "Manutenção":
         d = (row.manutencao_destino or "").strip()

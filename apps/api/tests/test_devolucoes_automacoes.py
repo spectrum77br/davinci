@@ -22,7 +22,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import Chamado, DevolucaoRastreio, Logistica
+from app.models import Chamado, DevolucaoRastreio, Logistica, Refund
 
 pytestmark = pytest.mark.asyncio
 
@@ -37,6 +37,41 @@ async def _n_chamados(db: AsyncSession, pedido: str) -> int:
             select(func.count()).select_from(Chamado).where(Chamado.pedido_bling == pedido)
         )
     ).scalar_one()
+
+
+# ------------------------------------------------- condição Sucata (10/09)
+
+
+async def test_condicao_sucata_segue_extraviado(client, db, make_user, auth_as):
+    """Sucata (10/09): "hoje o pessoal lança os itens que foram pra sucata como
+    Extraviado" — virou condição própria com as MESMAS regras: link de
+    abertura obrigatório (422 sem), reembolso automático com prejuízo = custo
+    do produto (tipo "Sucata") e nada de estoque."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    pedido = f"32{uuid4().hex[:6]}"
+    base = {
+        "conta": "Shopee Jlas",
+        "pedido_bling": pedido,
+        "sku": "b025.12",
+        "produtos": "Mala Chanfrada M3 tamanho 12",
+        "condicao_produto": "Sucata",
+        "custo_produto": 180.0,
+    }
+
+    sem_link = await client.post("/api/devolutions", json=base)
+    assert sem_link.status_code == 422
+
+    r = await client.post("/api/devolutions", json={**base, "link_abertura": "http://x"})
+    assert r.status_code == 201, r.text
+    assert r.json()["condicao_produto"] == "Sucata"
+    assert r.json()["devolver_estoque"] is False
+
+    refund = (
+        await db.execute(select(Refund).where(Refund.pedido_bling == pedido))
+    ).scalar_one()
+    assert refund.tipo == "Sucata"
+    assert refund.prejuizo == 180.0
 
 
 # ------------------------------------------------- auto-chamado por motivo

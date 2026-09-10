@@ -14,8 +14,10 @@ import { isoToday } from '~/lib/date'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'reembolso', action: 'view' } })
 
-type RefundTipo = 'Logistica' | 'Cliente' | 'Manutenção' | 'Extraviado' | 'Frete'
-const TIPO_OPTIONS: RefundTipo[] = ['Logistica', 'Cliente', 'Manutenção', 'Extraviado', 'Frete']
+// Sucata (10/09): reembolso automático da devolução em condição Sucata — mesma
+// regra do Extraviado (prejuízo = custo do produto).
+type RefundTipo = 'Logistica' | 'Cliente' | 'Manutenção' | 'Extraviado' | 'Sucata' | 'Frete'
+const TIPO_OPTIONS: RefundTipo[] = ['Logistica', 'Cliente', 'Manutenção', 'Extraviado', 'Sucata', 'Frete']
 
 type RefundRow = {
   id: string
@@ -207,9 +209,9 @@ async function setRowTipo(row: RefundRow, value: string) {
   const next = (value || null) as RefundTipo | null
   row.tipo = next
   if (next === 'Cliente') clampReembolsoForCliente(row)
-  if (next === 'Extraviado') {
+  if (next === 'Extraviado' || next === 'Sucata') {
     const cost = await fetchOrderCost(row.pedido_bling, row.conta)
-    if (cost != null && row.tipo === 'Extraviado') {
+    if (cost != null && row.tipo === next) {
       row.prejuizo = cost
     }
   }
@@ -218,7 +220,7 @@ async function setRowTipo(row: RefundRow, value: string) {
 
 function onDraftTipoChange() {
   if (!draft.value) return
-  if (draft.value.tipo === 'Extraviado' && draft.value.custo_produto != null) {
+  if ((draft.value.tipo === 'Extraviado' || draft.value.tipo === 'Sucata') && draft.value.custo_produto != null) {
     draft.value.prejuizo = draft.value.custo_produto
   }
   if (draft.value.tipo === 'Manutenção' && draft.value.custo_manutencao != null) {

@@ -4,7 +4,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-RefundTipo = Literal["Logistica", "Cliente", "Manutenção", "Extraviado", "Frete"]
+# "Sucata" (10/09): reembolso automático da devolução em condição Sucata — mesmo
+# padrão do Extraviado (prejuízo = custo do produto).
+RefundTipo = Literal["Logistica", "Cliente", "Manutenção", "Extraviado", "Sucata", "Frete"]
 
 
 def _clean_optional_text(value: str | None) -> str | None:

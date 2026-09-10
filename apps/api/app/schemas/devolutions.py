@@ -150,8 +150,9 @@ class DevolutionCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_link_required(self) -> "DevolutionCreate":
-        if self.condicao_produto in ("Extraviado", "Manutenção") and not self.link_abertura:
-            raise ValueError("link_abertura obrigatório para Extraviado / Manutenção")
+        exige_link = self.condicao_produto in ("Extraviado", "Sucata", "Manutenção")
+        if exige_link and not self.link_abertura:
+            raise ValueError("link_abertura obrigatório para Extraviado / Sucata / Manutenção")
         return self
 
 

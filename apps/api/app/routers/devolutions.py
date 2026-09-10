@@ -58,7 +58,10 @@ from app.services.devolution_stock_return import (
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/devolutions", tags=["devolutions"])
 
-_REFUND_CONDICOES = {"Extraviado", "Manutenção"}
+# Sucata (10/09) segue o padrão do Extraviado em TODAS as regras: reembolso
+# automático com prejuízo = custo do produto, link de abertura obrigatório,
+# não mexe no estoque e patcha a situação do pedido já no add.
+_REFUND_CONDICOES = {"Extraviado", "Sucata", "Manutenção"}
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 
@@ -72,7 +75,7 @@ def _custo_e_tecnico_preenchidos(row: Devolution) -> bool:
 def _maybe_create_refund(session: AsyncSession, row: Devolution, condicao: str) -> None:
     prejuizo = (
         row.custo_produto or 0
-        if condicao == "Extraviado"
+        if condicao in ("Extraviado", "Sucata")
         else row.custo_manutencao or 0
     )
     refund = Refund(
@@ -1414,7 +1417,7 @@ async def create_devolution(
 ) -> DevolutionOut:
     # Estoque no ADD: Novo/Usado/Trocado sempre processam (automático). Manutenção
     # só processa se o operador ligou o toggle no rascunho (já decidiu Novo/Usado/
-    # Sucata no modal). Extraviado nunca devolve estoque.
+    # Sucata no modal). Extraviado e Sucata (condição) nunca devolvem estoque.
     devolver_no_add = bool(body.devolver_estoque) and body.condicao_produto in (
         "Novo",
         "Usado",
@@ -1475,7 +1478,7 @@ async def create_devolution(
     out = DevolutionOut.model_validate(row)
 
     # Gatilho no ADD: Novo/Usado/Trocado processam estoque sempre. Manutenção só
-    # quando o toggle veio ligado (devolver_no_add). Extraviado não mexe no estoque.
+    # quando o toggle veio ligado (devolver_no_add). Extraviado/Sucata não mexem no estoque.
     condicao = body.condicao_produto
     should_stock = condicao in ("Novo", "Usado", "Trocado") or (
         condicao == "Manutenção" and devolver_no_add
@@ -1505,9 +1508,9 @@ async def create_devolution(
             await session.refresh(row)
             out = DevolutionOut.model_validate(row)
             out.bling_stock_result = BlingStockResultOut(**sr)
-    # Situação do pedido: Extraviado e Manutenção patcham já no add; Novo/Usado/
-    # Trocado quando processam o estoque.
-    if (condicao in ("Extraviado", "Manutenção") or should_stock) and row.pedido_bling:
+    # Situação do pedido: Extraviado, Sucata e Manutenção patcham já no add;
+    # Novo/Usado/Trocado quando processam o estoque.
+    if (condicao in ("Extraviado", "Sucata", "Manutenção") or should_stock) and row.pedido_bling:
         await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
         await session.commit()  # persiste a linha de auditoria de situação
     return await _completar_out(session, row, out)
@@ -1635,11 +1638,11 @@ async def patch_devolution(
             await session.commit()
             await session.refresh(row)
 
-    # Extraviado e Manutenção patcham a situação já na mudança de condição
-    # (sem depender do toggle) — Manutenção precisa refletir no Bling na hora.
-    # Se a API recusar a transição direta, apply_order_situacao desvia por
-    # Aguardando Devolução; se nem o desvio passar, alerta o operador.
-    extraviado_now = new_condicao == "Extraviado" and condicao_changed
+    # Extraviado, Sucata e Manutenção patcham a situação já na mudança de
+    # condição (sem depender do toggle) — Manutenção precisa refletir no Bling
+    # na hora. Se a API recusar a transição direta, apply_order_situacao desvia
+    # por Aguardando Devolução; se nem o desvio passar, alerta o operador.
+    extraviado_now = new_condicao in ("Extraviado", "Sucata") and condicao_changed
     manutencao_now = new_condicao == "Manutenção" and condicao_changed
     if (extraviado_now or manutencao_now or should_stock) and row.pedido_bling:
         await apply_order_situacao(session, row.pedido_bling, actor_id=user.id)
