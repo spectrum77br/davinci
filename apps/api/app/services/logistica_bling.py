@@ -431,6 +431,60 @@ async def preview_alterar_status_bling(session: AsyncSession, row: Logistica) ->
     }
 
 
+# ── Trava: regra não marca como enviado o que ainda está no galpão ────────
+# Eduardo, 10/09/2026: "ela fica mudando para em andamento, antes de ser
+# enviado". A causa era uma REGRA da aba Status (Amazon "Enviado |
+# PendingDropOff" → Em andamento): PendingDropOff é justamente o estado em que
+# NÓS ainda temos de levar o pacote ao ponto de entrega. O motor de envio já
+# sabia disso desde 04/09 (marketplace_shipment_check._AMAZON_EASYSHIP_SAIU),
+# mas a regra passava por fora dele.
+#
+# Agora, promover para "Em andamento" (15) exige que a plataforma NÃO esteja
+# dizendo o contrário. Só barra quando o sinal é POSITIVO de que o pacote
+# segue com o vendedor — estado ausente/desconhecido continua passando, pra
+# não travar plataforma que a gente não lê bem.
+_SITUACAO_EM_ANDAMENTO_ID = 15
+
+
+def pacote_ainda_com_o_vendedor(plataforma: str | None, meli_status: dict | None) -> bool:
+    """A plataforma afirma que o pacote NÃO saiu? Usa as mesmas listas do motor
+    de envio — fonte única de verdade."""
+    from app.services.marketplace_shipment_check import (
+        _AMAZON_EASYSHIP_SAIU,
+        _AMAZON_SHIPPED,
+        _ML_CONFIRMED_SHIPPED_SUBSTATUS,
+        _ML_SHIPPED,
+        _SHOPEE_SHIPPED,
+        _TIKTOK_SHIPPED,
+    )
+
+    m = meli_status or {}
+    p = (plataforma or "").strip().lower()
+    if p in _AMAZON_PLATAFORMAS:
+        ordem = str(m.get("order_status") or "").strip()
+        easy = str(m.get("easyship_status") or "").strip()
+        if not ordem:
+            return False
+        if ordem not in _AMAZON_SHIPPED:
+            return True
+        # "Shipped" da Amazon vira verdade quando a NF sai, muito antes do
+        # pacote: quem sabe mesmo é o EasyShip.
+        return bool(easy) and easy not in _AMAZON_EASYSHIP_SAIU
+    if p in _SHOPEE_PLATAFORMAS:
+        ordem = str(m.get("order_status") or "").strip().upper()
+        return bool(ordem) and ordem not in _SHOPEE_SHIPPED
+    if p in _TIKTOK_PLATAFORMAS:
+        ordem = str(m.get("order_status") or "").strip().upper()
+        return bool(ordem) and ordem not in _TIKTOK_SHIPPED
+    if p in _ML_PLATAFORMAS:
+        ship = str(m.get("ship_status") or "").strip().lower()
+        sub = str(m.get("ship_substatus") or "").strip().lower()
+        if ship in _ML_SHIPPED:
+            return False
+        return bool(sub) and sub not in _ML_CONFIRMED_SHIPPED_SUBSTATUS
+    return False
+
+
 async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> dict:
     """Aplica de verdade: só muda quando uma regra se aplica ao estado atual
     (guarda contra regressão/pulo de etapa), então PATCH da situação no Bling e
@@ -448,6 +502,17 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
     if not r["aplicavel"]:
         raise BlingObsError("logistica_status_atual_divergente")
     alvo, alvo_id = r["alvo"], r["alvo_id"]
+    if alvo_id == _SITUACAO_EM_ANDAMENTO_ID and pacote_ainda_com_o_vendedor(
+        row.plataforma, row.meli_status or {}
+    ):
+        logger.info(
+            "logistica_status_promocao_barrada",
+            pedido=row.pedido_bling,
+            plataforma=row.plataforma,
+            assinatura=r["assinatura"],
+            motivo="plataforma diz que o pacote ainda nao saiu",
+        )
+        raise BlingObsError("logistica_promocao_sem_envio_confirmado")
     await r["client"].update_order_situacao(r["bling_id"], alvo_id)
     # Nome do catálogo pro id realmente aplicado (regra escrita com o apelido
     # legado "Enviado Etiqueta" move pra 21 → espelho local diz "Em digitação").
