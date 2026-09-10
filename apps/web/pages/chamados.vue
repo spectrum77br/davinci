@@ -222,6 +222,51 @@ function fmtDate(v: string | null) {
   return y && m && d ? `${d}/${m}/${y.slice(2)}` : v
 }
 
+// ─────────────────────────────────────────────────────────── conversa (chat)
+// Eduardo 10/09: "coloque organizado, para ficar de fácil entendimento como se
+// fosse um whatsapp". O texto que o monitor grava traz a THREAD INTEIRA colada
+// (o ML repete todo o histórico a cada e-mail), então uma única mensagem virava
+// um paredão ilegível. Aqui a thread é quebrada de volta em falas e cada uma
+// vira um balão; falas repetidas em mensagens seguintes aparecem uma vez só.
+type Bolha = {
+  chave: string
+  lado: 'nos' | 'eles' | 'sistema'
+  autor: string
+  quando: string
+  texto: string
+  meta: string
+  status: string | null
+  erro: string | null
+  anexos: Anexo[]
+}
+
+// "Mercado Livre" / "Você" seguido da data, do jeito que o ML escreve na página
+// do caso e no corpo do e-mail.
+const RE_FALA = /^[ \t]*(Você|Mercado Livre|Mercado Pago)[ \t]*\n[ \t]*(\d{1,2} de [a-zç]+(?: de \d{4})?)[ \t]*$/gim
+
+function partirThread(texto: string): { quem: string; quando: string; corpo: string }[] {
+  const t = (texto || '').replace(/\r/g, '')
+  const marcas = [...t.matchAll(RE_FALA)]
+  if (marcas.length < 2) return []
+  const out: { quem: string; quando: string; corpo: string }[] = []
+  marcas.forEach((m, i) => {
+    const ini = (m.index ?? 0) + m[0].length
+    const fim = i + 1 < marcas.length ? (marcas[i + 1].index ?? t.length) : t.length
+    const corpo = t.slice(ini, fim).trim()
+    if (corpo) out.push({ quem: m[1], quando: m[2], corpo })
+  })
+  return out
+}
+
+function rotuloTipo(m: Mensagem): string {
+  if (m.direcao === 'sistema') return 'sistema'
+  if (m.direcao === 'recebida') return m.tipo === 'analise' ? 'análise do robô' : 'plataforma'
+  if (m.tipo === 'replica_auto') return 'réplica automática'
+  if (m.tipo === 'abertura') return 'abertura na plataforma'
+  return 'réplica'
+}
+
+
 function fmtDateTime(v: string | null) {
   if (!v) return '—'
   const d = new Date(v)
@@ -513,6 +558,50 @@ const hist = reactive({
   files: [] as File[],
   sending: false,
   erro: null as string | null,
+})
+
+const bolhas = computed<Bolha[]>(() => {
+  const out: Bolha[] = []
+  const vistas = new Set<string>()
+  for (const m of hist.mensagens) {
+    if (m.direcao === 'sistema') {
+      out.push({
+        chave: m.id, lado: 'sistema', autor: m.autor_nome || 'sistema',
+        quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'sistema',
+        status: null, erro: null, anexos: m.anexos,
+      })
+      continue
+    }
+    const falas = partirThread(m.texto)
+    if (!falas.length) {
+      out.push({
+        chave: m.id,
+        lado: m.direcao === 'recebida' ? 'eles' : 'nos',
+        autor: m.autor_nome || (m.direcao === 'recebida' ? 'plataforma' : 'nós'),
+        quando: fmtDateTime(m.enviada_at || m.created_at),
+        texto: m.texto, meta: rotuloTipo(m), status: m.status, erro: m.erro, anexos: m.anexos,
+      })
+      continue
+    }
+    falas.forEach((f, i) => {
+      // O ML reenvia a thread toda a cada resposta: mostra a fala uma vez só.
+      const chave = `${f.quem}|${f.quando}|${f.corpo.slice(0, 120)}`
+      if (vistas.has(chave)) return
+      vistas.add(chave)
+      out.push({
+        chave: `${m.id}-${i}`,
+        lado: f.quem === 'Você' ? 'nos' : 'eles',
+        autor: f.quem === 'Você' ? 'nós' : 'Mercado Livre',
+        quando: f.quando,
+        texto: f.corpo,
+        meta: '',
+        status: i === falas.length - 1 ? m.status : null,
+        erro: i === falas.length - 1 ? m.erro : null,
+        anexos: i === falas.length - 1 ? m.anexos : [],
+      })
+    })
+  }
+  return out
 })
 
 async function openHistorico(row: ChamadoRow, focoReplica = false) {
@@ -1199,28 +1288,43 @@ async function reabrir(row: ChamadoRow) {
         <div class="flex-1 overflow-auto px-4 py-3 space-y-3">
           <div v-if="hist.loading" class="text-sm text-muted-foreground"><Loader2 class="size-4 inline animate-spin mr-1.5" />carregando histórico…</div>
           <div v-else-if="!hist.mensagens.length" class="text-sm text-muted-foreground">sem mensagens ainda</div>
+          <!-- Conversa em balões (Eduardo 10/09: "como se fosse um whatsapp"):
+               nossas falas à direita, plataforma à esquerda, sistema no meio. -->
           <div
-            v-for="m in hist.mensagens"
-            :key="m.id"
-            class="rounded-md border px-3 py-2"
+            v-for="b in bolhas"
+            :key="b.chave"
+            class="flex"
             :class="{
-              'bg-muted/40': m.direcao === 'sistema',
-              'border-sky-500/30': m.direcao === 'enviada',
-              'border-orange-500/30 bg-orange-500/5': m.direcao === 'recebida',
+              'justify-end': b.lado === 'nos',
+              'justify-start': b.lado === 'eles',
+              'justify-center': b.lado === 'sistema',
             }"
           >
-            <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-              <span class="font-mono">{{ fmtDateTime(m.created_at) }}</span>
-              <span class="font-medium text-foreground">{{ m.autor_nome || (m.direcao === 'recebida' ? 'plataforma' : '—') }}</span>
-              <span>· {{ m.direcao === 'enviada' ? (m.tipo === 'replica_auto' ? 'réplica automática' : m.tipo === 'abertura' ? 'abertura na plataforma (devolução)' : 'réplica') : m.tipo === 'analise' ? 'análise do robô' : m.direcao }}</span>
-              <span v-if="m.direcao !== 'sistema'" class="rounded px-1.5 py-0.5" :class="statusMensagemClass(m.status)">{{ m.status }}<template v-if="m.erro"> — {{ ERROS[m.erro] || m.erro }}</template></span>
-              <span v-if="m.enviada_at" class="font-mono">enviada {{ fmtDateTime(m.enviada_at) }}</span>
-            </div>
-            <div class="mt-1 whitespace-pre-wrap text-sm" :class="{ 'text-muted-foreground italic': m.direcao === 'sistema' }">{{ m.texto }}</div>
-            <div v-if="m.anexos.length" class="mt-2 flex flex-wrap gap-2">
-              <a v-for="a in m.anexos" :key="a.id" :href="anexoUrl(a.id)" target="_blank" rel="noopener" :title="a.filename">
-                <img :src="anexoUrl(a.id)" :alt="a.filename" class="h-20 w-20 rounded border object-cover" />
-              </a>
+            <div
+              v-if="b.lado === 'sistema'"
+              class="rounded-full bg-muted px-3 py-1 text-[11px] italic text-muted-foreground"
+              :title="b.quando"
+            >{{ b.texto }}</div>
+
+            <div
+              v-else
+              class="max-w-[78%] rounded-2xl px-3 py-2 shadow-sm"
+              :class="b.lado === 'nos'
+                ? 'rounded-br-sm bg-emerald-50 dark:bg-emerald-900/25 border border-emerald-200/70 dark:border-emerald-800/60'
+                : 'rounded-bl-sm bg-background border'"
+            >
+              <div class="flex flex-wrap items-center gap-x-2 text-[11px]">
+                <span class="font-medium" :class="b.lado === 'nos' ? 'text-emerald-700 dark:text-emerald-300' : 'text-orange-600 dark:text-orange-400'">{{ b.autor }}</span>
+                <span v-if="b.meta" class="text-muted-foreground">· {{ b.meta }}</span>
+                <span v-if="b.status" class="rounded px-1.5 py-0.5" :class="statusMensagemClass(b.status)">{{ b.status }}<template v-if="b.erro"> — {{ ERROS[b.erro] || b.erro }}</template></span>
+              </div>
+              <div class="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed">{{ b.texto }}</div>
+              <div v-if="b.anexos.length" class="mt-2 flex flex-wrap gap-2">
+                <a v-for="a in b.anexos" :key="a.id" :href="anexoUrl(a.id)" target="_blank" rel="noopener" :title="a.filename">
+                  <img :src="anexoUrl(a.id)" :alt="a.filename" class="h-20 w-20 rounded border object-cover" />
+                </a>
+              </div>
+              <div class="mt-1 text-right text-[10px] text-muted-foreground">{{ b.quando }}</div>
             </div>
           </div>
         </div>
