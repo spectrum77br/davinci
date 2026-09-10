@@ -57,10 +57,16 @@ def _plataforma_key(plataforma: str | None) -> str | None:
 
 
 async def _fetch_por_marketplace(
-    session: AsyncSession, key: str, linhas: list[Logistica]
+    session: AsyncSession,
+    key: str,
+    linhas: list[Logistica],
+    ja_entregues: set[str] | None = None,
 ) -> dict[str, ReturnInfo]:
     """Chama o `returns_por_pedido` do módulo do marketplace. Import tardio e
-    tolerante: módulo sem a função (ainda) ou erro → dict vazio + log."""
+    tolerante: módulo sem a função (ainda) ou erro → dict vazio + log.
+
+    `ja_entregues` poupa a consulta extra do detalhe nas devoluções que já
+    constam entregues (só a Shopee aceita o parâmetro hoje)."""
     try:
         if key == "tiktok":
             from app.services import logistica_tiktok as mod
@@ -72,7 +78,10 @@ async def _fetch_por_marketplace(
         if fn is None:
             logger.warning("devolucao_rastreio_sync_sem_fetcher", marketplace=key)
             return {}
-        out = await fn(session, linhas)
+        try:
+            out = await fn(session, linhas, ja_entregues=ja_entregues or set())
+        except TypeError:
+            out = await fn(session, linhas)  # marketplace que ainda não aceita
         return dict(out or {})
     except Exception as e:  # noqa: BLE001 — um marketplace não derruba os outros
         logger.warning("devolucao_rastreio_sync_fetch_falhou", marketplace=key, err=str(e)[:300])
@@ -121,9 +130,23 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
         if k:
             por_mk.setdefault(k, []).append(linha)
 
+    # Devolução já marcada como entregue não precisa da consulta extra de
+    # detalhe a cada rodada — o dado não volta atrás.
+    ja_entregues = set(
+        (
+            await session.execute(
+                select(DevolucaoRastreio.pedido_bling).where(
+                    DevolucaoRastreio.pacote_entregue_em.is_not(None)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
     infos: dict[str, ReturnInfo] = {}
     for key, ls in por_mk.items():
-        got = await _fetch_por_marketplace(session, key, ls)
+        got = await _fetch_por_marketplace(session, key, ls, ja_entregues)
         for pedido, info in got.items():
             if isinstance(info, ReturnInfo) and pedido:
                 infos[str(pedido)] = info
@@ -161,6 +184,10 @@ async def run(session: AsyncSession, *, pedidos: Collection[str] | None = None) 
                 row.devolucao_criada_em = info.created_at
             if info.updated_at:
                 row.devolucao_atualizada_em = info.updated_at
+            # Só carimba a chegada; nunca apaga (a plataforma pode parar de
+            # informar numa rodada e a data não pode sumir da tela).
+            if info.entregue_em and row.pacote_entregue_em is None:
+                row.pacote_entregue_em = info.entregue_em
             row.auto_sync_at = agora
             gravados += 1
     # Commit SEMPRE (mesmo sem devolução nova): o refresh de token dos clients

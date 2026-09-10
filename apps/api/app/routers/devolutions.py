@@ -459,15 +459,22 @@ def _chegou_em(
     devolucao_status_auto: str | None,
     fonte_auto: str | None,
     devolucao_atualizada_em: datetime | None,
+    pacote_entregue_em: datetime | None = None,
 ) -> date | None:
     """Coluna "Chegou em" (Eduardo 10/09, escolha dele: manter "Em devolução
     desde" no INÍCIO e mostrar a chegada ao lado): dia em que o marketplace
     confirmou que o pacote de volta chegou no vendedor. None enquanto ele não
-    confirmar — Shopee nunca preenche (o status dela fala do caso, não do
-    pacote), então a coluna fica vazia em vez de mentir."""
+    confirmar — a coluna fica vazia em vez de mentir.
+
+    A Shopee informa sim, mas só no DETALHE da devolução
+    (`reverse_logistics_status = LOGISTICS_DELIVERY_DONE`): o sync grava esse
+    instante em `pacote_entregue_em` e ele manda aqui, por ser a fonte mais
+    direta (Eduardo, 10/09, pedido 291516)."""
     from app.services import logistica_rules  # tardio: evita ciclo router↔services
     from app.services.devolucao_returns import iso_to_dt
 
+    if pacote_entregue_em is not None:
+        return pacote_entregue_em.astimezone(SAO_PAULO).date()
     iso = logistica_rules.data_retorno_concluido(plataforma, meli_status, status_datas)
     dt = iso_to_dt(iso) if iso else None
     if dt is None and devolucao_atualizada_em is not None:
@@ -522,6 +529,7 @@ def _com_status_da_devolucao(
     status_auto: str | None = None,
     fonte_auto: str | None = None,
     localizacao_auto: str | None = None,
+    pacote_entregue_em: datetime | None = None,
 ) -> dict:
     """Devolução VIVA → `localizacao` vira o status da devolução (+ o último
     evento do pacote de volta, quando o 17track já mandou) e a entrega original
@@ -544,7 +552,12 @@ def _com_status_da_devolucao(
         dev = logistica_rules.devolucao_status_pt(lg_plataforma, lg_meli_status or {})
     if dev:
         d["entrega_localizacao"] = d.get("localizacao")
-        d["localizacao"] = f"{dev} · {localizacao_auto}" if localizacao_auto else dev
+        # O pacote de volta CHEGOU: isso vale mais que o status do caso, que
+        # segue "em processamento" por dias depois da entrega.
+        if pacote_entregue_em is not None and not localizacao_auto:
+            d["localizacao"] = f"Pacote entregue ao vendedor · {dev}"
+        else:
+            d["localizacao"] = f"{dev} · {localizacao_auto}" if localizacao_auto else dev
     return d
 
 
@@ -580,6 +593,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                     r.localizacao_auto,
                     r.localizacao_auto_data,
                     r.devolucao_status_auto,
+                    r.pacote_entregue_em,
                     r.fonte_auto,
                     v.plataforma_bling          AS plataforma,
                     COALESCE(NULLIF(btrim(v.loja_nome), ''),
@@ -665,6 +679,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
             localizacao_auto_data=d.get("localizacao_auto_data"),
             devolucao_atualizada_em=devolucao_atualizada_em,
         )
+        pacote_entregue_em = d.pop("pacote_entregue_em", None)
         d["devolucao_chegou_em"] = _chegou_em(
             plataforma=lg_plataforma,
             meli_status=lg_meli_status,
@@ -672,6 +687,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
             devolucao_status_auto=status_auto,
             fonte_auto=fonte_auto,
             devolucao_atualizada_em=devolucao_atualizada_em,
+            pacote_entregue_em=pacote_entregue_em,
         )
         out.append(
             _com_status_da_devolucao(
@@ -682,6 +698,7 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                 status_auto=status_auto,
                 fonte_auto=fonte_auto,
                 localizacao_auto=d.pop("localizacao_auto", None),
+                pacote_entregue_em=pacote_entregue_em,
             )
         )
         d.pop("localizacao_auto_data", None)

@@ -354,6 +354,25 @@ def _return_carrier(d: dict) -> str | None:
     return None
 
 
+# Perna reversa concluída: a Shopee usa o mesmo vocabulário do envio de ida.
+_SHOPEE_REVERSA_ENTREGUE = {"LOGISTICS_DELIVERY_DONE"}
+
+
+def _entregue_em_do_detalhe(det: dict | None) -> datetime | None:
+    """Quando a Shopee confirma que o pacote de VOLTA chegou ao vendedor.
+
+    Só existe no DETALHE (`get_return_detail`): a lista devolve
+    `logistics_status`/`reverse_logistics_status` nulos. Sem isso a aba
+    Acompanhamento ficava parada no status do CASO (Eduardo, 10/09, pedido
+    291516: pacote entregue e a tela dizendo "Devolução em processamento")."""
+    d = det or {}
+    reversa = str(d.get("reverse_logistics_status") or "").strip().upper()
+    geral = str(d.get("logistics_status") or "").strip().upper()
+    if reversa in _SHOPEE_REVERSA_ENTREGUE or geral in _SHOPEE_REVERSA_ENTREGUE:
+        return epoch_to_dt(d.get("update_time"))
+    return None
+
+
 def _return_info(d: dict, status: str) -> ReturnInfo:
     tracking = d.get("tracking_number")
     tracking = tracking.strip() if isinstance(tracking, str) else None
@@ -370,7 +389,10 @@ def _return_info(d: dict, status: str) -> ReturnInfo:
 
 
 async def returns_por_pedido(
-    session: AsyncSession, linhas: list[Logistica]
+    session: AsyncSession,
+    linhas: list[Logistica],
+    *,
+    ja_entregues: set[str] | None = None,
 ) -> dict[str, ReturnInfo]:
     """Devolução (o pacote que VOLTA) de cada linha Shopee: `{pedido_bling:
     ReturnInfo}`. Pedido sem devolução conhecida fica de fora do dict.
@@ -459,7 +481,24 @@ async def returns_por_pedido(
             got = melhor.get((r.pedido_marketplace or "").strip())
             if got is None:
                 continue
-            out[(r.pedido_bling or "").strip()] = _return_info(got[1], got[2])
+            pedido = (r.pedido_bling or "").strip()
+            info = _return_info(got[1], got[2])
+            # Uma chamada a mais por devolução AINDA NÃO entregue, pra saber se
+            # o pacote de volta chegou — a lista não traz esse campo, só o
+            # detalhe. Quem já está marcado como entregue não é reconsultado.
+            if info.return_id and pedido not in (ja_entregues or set()):
+                try:
+                    det = await client.get_return_detail(info.return_id)
+                    entregue = _entregue_em_do_detalhe(det)
+                except Exception as e:  # noqa: BLE001 — detalhe é extra, não derruba
+                    logger.warning(
+                        "logistica_shopee_return_detail_falhou",
+                        pedido=pedido, return_sn=info.return_id, err=str(e)[:200],
+                    )
+                    entregue = None
+                if entregue is not None:
+                    info = info._replace(entregue_em=entregue)
+            out[pedido] = info
 
     logger.info(
         "logistica_shopee_returns_por_pedido",

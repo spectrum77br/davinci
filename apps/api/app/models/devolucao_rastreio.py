@@ -49,6 +49,12 @@ class DevolucaoRastreio(Base, TimestampMixin):
     devolucao_atualizada_em: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Perna REVERSA entregue: dia/hora em que o marketplace confirmou que o
+    # pacote de volta chegou ao vendedor (Shopee: reverse_logistics_status =
+    # LOGISTICS_DELIVERY_DONE, só no detalhe da devolução).
+    pacote_entregue_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     auto_sync_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

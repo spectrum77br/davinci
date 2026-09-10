@@ -34,6 +34,12 @@ class ReturnInfo(NamedTuple):
     created_at: datetime | None  # quando a devolução foi ABERTA (UTC)
     updated_at: datetime | None  # última mexida na devolução (UTC)
     return_id: str | None = None  # id do caso (return_id / return_sn / claim_id)
+    # Quando o MARKETPLACE confirmou que o pacote de volta chegou ao vendedor
+    # (perna reversa entregue). None = ainda não chegou ou a plataforma não diz.
+    # Eduardo, 10/09: a coluna Última localização ficava parada em "Devolução em
+    # processamento" mesmo com o pacote já entregue — a Shopee sabia e ninguém
+    # perguntava (o dado só existe no DETALHE da devolução, não na lista).
+    entregue_em: datetime | None = None
 
 
 def epoch_to_dt(v: Any) -> datetime | None:
