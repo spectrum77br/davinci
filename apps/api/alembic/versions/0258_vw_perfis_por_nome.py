@@ -26,8 +26,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0255_vw_perfis_por_nome"
-down_revision: str | None = "0254_devolucao_pacote_entregue"
+revision: str = "0258_vw_perfis_por_nome"
+down_revision: str | None = "0257_segment_sku_contem"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
