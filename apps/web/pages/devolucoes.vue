@@ -803,6 +803,9 @@ const acompSearch = ref('')
 const acompPlataformaFilter = ref('all')
 const acompLojaFilter = ref('all')
 const acompParadoFilter = ref<'all' | '7' | '15' | '30'>('all')
+// Chegada do pacote de volta (10/09): 'chegou' = "Chegou em" preenchido
+// (a plataforma confirmou); 'pendente' = sem confirmação ainda.
+const acompChegadaFilter = ref<'all' | 'chegou' | 'pendente'>('all')
 // Chaves "pedido|campo" com PATCH em voo — trava o input e evita corrida.
 const acompSaving = ref<Set<string>>(new Set())
 
@@ -845,6 +848,8 @@ const acompFiltered = computed(() => {
     if (acompPlataformaFilter.value !== 'all' && r.plataforma !== acompPlataformaFilter.value) return false
     if (acompLojaFilter.value !== 'all' && r.loja !== acompLojaFilter.value) return false
     if (minDias != null && (r.dias_em_devolucao ?? -1) < minDias) return false
+    if (acompChegadaFilter.value === 'chegou' && !r.devolucao_chegou_em) return false
+    if (acompChegadaFilter.value === 'pendente' && r.devolucao_chegou_em) return false
     if (term) {
       const hay = [
         r.pedido_bling, r.pedido_marketplace, r.cliente, r.sku, r.produto,
@@ -1548,6 +1553,11 @@ async function backfillAddresses() {
           <option value="7">parados 7+ dias</option>
           <option value="15">parados 15+ dias</option>
           <option value="30">parados 30+ dias</option>
+        </select>
+        <select v-model="acompChegadaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Pela coluna Chegou em: a plataforma confirmou que o pacote de volta chegou aqui (Shopee/TikTok/ML). Sem confirmação não quer dizer que ainda está a caminho.">
+          <option value="all">qualquer chegada</option>
+          <option value="chegou">chegou</option>
+          <option value="pendente">não chegou</option>
         </select>
         <span class="ml-auto text-xs text-muted-foreground">
           {{ acompFiltered.length }} de {{ acompRows.length }} itens · rastreio, localização e observação salvam ao sair do campo
