@@ -416,6 +416,60 @@ async def test_acompanhamento_data_ultima_movimentacao_pega_a_mais_recente(
         await _derruba_view(db)
 
 
+async def test_acompanhamento_chegou_em_so_quando_o_marketplace_confirma(
+    client, db, make_user, auth_as
+):
+    """Eduardo 10/09 (290327): "porque continua dia 16 ainda?". "Em devolução
+    desde" segue sendo o INÍCIO (o ML datou o não-entregue em 16/08) e a
+    chegada do pacote ganha coluna própria — `date_returned` do ML, que o
+    enriquecimento grava no carimbo de `ship_substatus`. Shopee fica vazia: o
+    status dela fala do CASO, não do pacote."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    p1, p2 = f"40{uuid4().hex[:6]}", f"41{uuid4().hex[:6]}"
+    await _monta_acompanhamento(db, p1, p2)
+    db.add(
+        Logistica(
+            pedido_bling=p2,
+            plataforma="Mercado Livre",
+            rastreio="12110502082201",
+            localizacao="Devolvido → Querência/MT",
+            meli_status={
+                "ship_status": "not_delivered",
+                "ship_substatus": "returned",
+                "order_status": "cancelled",
+            },
+            status_datas={
+                "ship_status": {"em": "2026-08-16T04:05:10+00:00", "fonte": "plataforma"},
+                "order_status": {"em": "2026-08-16T04:05:20+00:00", "fonte": "plataforma"},
+                "ship_substatus": {"em": "2026-09-09T17:30:15+00:00", "fonte": "plataforma"},
+            },
+        )
+    )
+    await db.commit()
+
+    try:
+        r = await client.get("/api/devolutions/acompanhamento")
+        assert r.status_code == 200
+        por_pedido = {i["pedido_bling"]: i for i in r.json()["items"]}
+
+        item = por_pedido[p2]
+        assert item["aguardando_devolucao_data"] == "2026-08-16"  # início, não muda
+        assert item["devolucao_chegou_em"] == "2026-09-09"  # chegou aqui
+
+        # p1 é Shopee sem sinal de pacote recebido → coluna vazia, não inventa.
+        assert por_pedido[p1]["devolucao_chegou_em"] is None
+
+        # PATCH espelha a mesma conta (o front reflete a resposta na linha).
+        r = await client.patch(
+            f"/api/devolutions/acompanhamento/{p2}", json={"rastreio": "BR888"}
+        )
+        assert r.status_code == 200
+        assert r.json()["devolucao_chegou_em"] == "2026-09-09"
+    finally:
+        await _derruba_view(db)
+
+
 async def test_acompanhamento_mostra_status_da_devolucao_viva(
     client, db, make_user, auth_as
 ):

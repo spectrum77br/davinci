@@ -753,6 +753,9 @@ type AcompanhamentoRow = {
   dias_em_devolucao: number | null
   // true = data estimada (sinal da Logística / backfill) — mostra "≈".
   aguardando_devolucao_data_estimada: boolean
+  // Dia em que o marketplace confirmou que o pacote de volta CHEGOU aqui
+  // (coluna "Chegou em"); null = ainda não confirmou.
+  devolucao_chegou_em: string | null
   plataforma: string | null
   loja: string | null
   cliente: string | null
@@ -781,6 +784,8 @@ type RastreioSaved = {
   dias_em_devolucao: number | null
   // true = data estimada (sinal da Logística / backfill) — mostra "≈".
   aguardando_devolucao_data_estimada: boolean
+  // Dia em que o pacote de volta chegou aqui (coluna "Chegou em").
+  devolucao_chegou_em: string | null
 }
 
 type Tab = 'acompanhamento' | 'lancamentos'
@@ -909,6 +914,8 @@ async function saveRastreio(
         r.entrega_localizacao = res.entrega_localizacao
         r.aguardando_devolucao_data = res.aguardando_devolucao_data
         r.dias_em_devolucao = res.dias_em_devolucao
+        r.aguardando_devolucao_data_estimada = res.aguardando_devolucao_data_estimada
+        r.devolucao_chegou_em = res.devolucao_chegou_em
       }
     }
   } catch (e: any) {
@@ -1564,6 +1571,7 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[45px]">Qtd</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[125px]" title="Dia em que o pedido entrou em Aguardando Devolução">Em devolução desde</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]" title="Há quantos dias o pedido está aguardando devolução">Dias</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Dia em que o marketplace confirmou que o pacote de volta chegou aqui. Vazio = ainda não chegou (ou a plataforma não informa).">Chegou em</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[160px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Rastreio</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-amber-50 dark:bg-amber-900/20">Última localização</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[135px] bg-amber-50 dark:bg-amber-900/20" title="Preenchida sozinha quando a localização muda">Data últ. movimentação</th>
@@ -1572,13 +1580,13 @@ async function backfillAddresses() {
           </thead>
           <tbody>
             <tr v-if="acompLoading && !acompRows.length">
-              <td colspan="16" class="py-8 text-center text-muted-foreground">
+              <td colspan="17" class="py-8 text-center text-muted-foreground">
                 <Loader2 class="size-4 inline animate-spin mr-1.5" />
                 carregando…
               </td>
             </tr>
             <tr v-else-if="!acompFiltered.length">
-              <td colspan="16" class="py-8 text-center text-muted-foreground">nenhum pedido aguardando devolução</td>
+              <td colspan="17" class="py-8 text-center text-muted-foreground">nenhum pedido aguardando devolução</td>
             </tr>
             <tr
               v-for="row in acompFiltered"
@@ -1623,6 +1631,17 @@ async function backfillAddresses() {
                   class="inline-flex rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums"
                   :class="diasBadgeClass(row.dias_em_devolucao)"
                 >{{ row.dias_em_devolucao }}d</span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
+              <td class="px-2 py-1 whitespace-nowrap">
+                <span
+                  v-if="row.devolucao_chegou_em"
+                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                  title="O marketplace já confirmou que o pacote voltou pra você"
+                >
+                  <CheckCircle2 class="size-3" />
+                  {{ fmtDateOnly(row.devolucao_chegou_em) }}
+                </span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">

@@ -396,6 +396,56 @@ def retorno_em_transito(plataforma: str | None, status: dict[str, str] | None) -
     return sub in RETORNO_EM_TRANSITO
 
 
+# Sinais de que o pacote JÁ CHEGOU de volta no vendedor (Eduardo 10/09: o
+# 290327 voltou dia 09/09 e a aba continuava contando "25d" como se estivesse
+# na rua). Dois caminhos, porque a devolução do ML tem dois formatos: o envio
+# ORIGINAL que volta (`ship_substatus = returned`, caso do 290327) e o envio da
+# DEVOLUÇÃO do claim (`return_status = DELIVERED`). No TikTok o caso fechado já
+# significa item recebido. A Shopee fica DE FORA de propósito: o vocabulário
+# dela (PROCESSING/JUDGING/ACCEPTED/REFUND_PAID) fala do CASO, não do pacote —
+# melhor a coluna vazia que uma data inventada.
+_SHIP_SUBSTATUS_CHEGOU = frozenset({"returned"})
+_RETURN_STATUS_CHEGOU: dict[str, frozenset[str]] = {
+    "ml": frozenset({"DELIVERED"}),
+    "tiktok": frozenset(
+        {"RETURN_OR_REFUND_REQUEST_SUCCESS", "RETURN_OR_REFUND_REQUEST_COMPLETE"}
+    ),
+}
+
+
+def data_retorno_concluido(
+    plataforma: str | None,
+    status: dict[str, str] | None,
+    status_datas: dict[str, dict[str, str]] | None,
+) -> str | None:
+    """ISO do dia em que o pacote de volta CHEGOU no vendedor, ou None enquanto
+    o marketplace não confirmar (ver _SHIP_SUBSTATUS_CHEGOU/_RETURN_STATUS_CHEGOU).
+    A data é o carimbo do campo que sinalizou — pro ML é o `date_returned` do
+    shipment, que o enriquecimento grava em `status_datas`."""
+    p = (plataforma or "").strip().lower()
+    if p in _ML_PLATAFORMAS:
+        chave = "ml"
+    elif p in _TIKTOK_PLATAFORMAS:
+        chave = "tiktok"
+    else:
+        return None
+    ms = status or {}
+    sd = status_datas or {}
+
+    def _carimbo(campo: str) -> str | None:
+        em = sd.get(campo)
+        return str(em.get("em")) if isinstance(em, dict) and em.get("em") else None
+
+    if chave == "ml":
+        sub = str(ms.get("ship_substatus") or "").strip().lower()
+        if sub in _SHIP_SUBSTATUS_CHEGOU:
+            return _carimbo("ship_substatus")
+    ret = str(ms.get("return_status") or "").strip().upper()
+    if ret and ret in _RETURN_STATUS_CHEGOU[chave]:
+        return _carimbo("return_status")
+    return None
+
+
 def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -> str | None:
     """Texto em PT da devolução VIVA de Shopee/TikTok/ML, ou None quando não
     há caso aberto (sem `return_status`, ou encerrado — cancelado/recusado).

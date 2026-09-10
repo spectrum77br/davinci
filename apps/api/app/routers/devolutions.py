@@ -442,6 +442,46 @@ def _data_entrada(
     return entrada_bling, entrada_bling is not None
 
 
+# Status da devolução (devolucao_rastreio.devolucao_status_auto) que já
+# significam "o pacote chegou aqui" — o outro caminho da mesma pergunta, pra
+# quando o sinal veio da returns API e não do envio da Logística.
+_STATUS_AUTO_CHEGOU = {
+    "ml": {"DELIVERED"},
+    "tiktok": {"RETURN_OR_REFUND_REQUEST_SUCCESS", "RETURN_OR_REFUND_REQUEST_COMPLETE"},
+}
+
+
+def _chegou_em(
+    *,
+    plataforma: str | None,
+    meli_status: dict | None,
+    status_datas: dict | None,
+    devolucao_status_auto: str | None,
+    fonte_auto: str | None,
+    devolucao_atualizada_em: datetime | None,
+) -> date | None:
+    """Coluna "Chegou em" (Eduardo 10/09, escolha dele: manter "Em devolução
+    desde" no INÍCIO e mostrar a chegada ao lado): dia em que o marketplace
+    confirmou que o pacote de volta chegou no vendedor. None enquanto ele não
+    confirmar — Shopee nunca preenche (o status dela fala do caso, não do
+    pacote), então a coluna fica vazia em vez de mentir."""
+    from app.services import logistica_rules  # tardio: evita ciclo router↔services
+    from app.services.devolucao_returns import iso_to_dt
+
+    iso = logistica_rules.data_retorno_concluido(plataforma, meli_status, status_datas)
+    dt = iso_to_dt(iso) if iso else None
+    if dt is None and devolucao_atualizada_em is not None:
+        chave = (fonte_auto or "").strip().lower()
+        atual = (devolucao_status_auto or "").strip().upper()
+        if atual and atual in _STATUS_AUTO_CHEGOU.get(chave, set()):
+            dt = devolucao_atualizada_em
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(SAO_PAULO).date()
+
+
 def _ultima_movimentacao(
     *,
     localizacao_manual: str | None,
@@ -605,13 +645,17 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
         d = dict(r)
         lg_plataforma = d.pop("lg_plataforma", None)
         lg_meli_status = d.pop("lg_meli_status", None)
+        lg_status_datas = d.pop("lg_status_datas", None)
+        status_auto = d.pop("devolucao_status_auto", None)
+        fonte_auto = d.pop("fonte_auto", None)
+        devolucao_atualizada_em = d.pop("devolucao_atualizada_em", None)
         d["aguardando_devolucao_data"], d["aguardando_devolucao_data_estimada"] = _data_entrada(
             entrada_bling=d.pop("entrada_bling", None),
             entrada_manual=d.pop("entrada_manual", None),
             devolucao_criada_em=d.pop("devolucao_criada_em", None),
             plataforma=lg_plataforma,
             meli_status=lg_meli_status,
-            status_datas=d.pop("lg_status_datas", None),
+            status_datas=lg_status_datas,
         )
         localizacao_manual = d.pop("localizacao_manual", None)
         d["localizacao_data"] = _ultima_movimentacao(
@@ -619,7 +663,15 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
             localizacao_manual_data=d.pop("localizacao_data_manual", None),
             ultima_movimentacao_logistica=d.pop("lg_ultima_movimentacao", None),
             localizacao_auto_data=d.get("localizacao_auto_data"),
-            devolucao_atualizada_em=d.pop("devolucao_atualizada_em", None),
+            devolucao_atualizada_em=devolucao_atualizada_em,
+        )
+        d["devolucao_chegou_em"] = _chegou_em(
+            plataforma=lg_plataforma,
+            meli_status=lg_meli_status,
+            status_datas=lg_status_datas,
+            devolucao_status_auto=status_auto,
+            fonte_auto=fonte_auto,
+            devolucao_atualizada_em=devolucao_atualizada_em,
         )
         out.append(
             _com_status_da_devolucao(
@@ -627,8 +679,8 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                 localizacao_manual=localizacao_manual,
                 lg_plataforma=lg_plataforma,
                 lg_meli_status=lg_meli_status,
-                status_auto=d.pop("devolucao_status_auto", None),
-                fonte_auto=d.pop("fonte_auto", None),
+                status_auto=status_auto,
+                fonte_auto=fonte_auto,
                 localizacao_auto=d.pop("localizacao_auto", None),
             )
         )
@@ -767,6 +819,14 @@ async def patch_acompanhamento_rastreio(
             "aguardando_devolucao_data": entrada,
             "aguardando_devolucao_data_estimada": estimada,
             "dias_em_devolucao": (hoje_sp - entrada).days if entrada else None,
+            "devolucao_chegou_em": _chegou_em(
+                plataforma=lg["lg_plataforma"] if lg else None,
+                meli_status=lg["lg_meli_status"] if lg else None,
+                status_datas=lg["lg_status_datas"] if lg else None,
+                devolucao_status_auto=row.devolucao_status_auto,
+                fonte_auto=row.fonte_auto,
+                devolucao_atualizada_em=row.devolucao_atualizada_em,
+            ),
         },
         localizacao_manual=row.localizacao,
         lg_plataforma=lg["lg_plataforma"] if lg else None,

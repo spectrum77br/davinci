@@ -310,6 +310,10 @@ class AcompanhamentoItemOut(BaseModel):
     # True = a data acima é ESTIMADA (sinal da Logística / backfill), não a
     # entrada real — o front mostra "≈" e convida a corrigir na mão.
     aguardando_devolucao_data_estimada: bool = False
+    # "Chegou em": dia em que o marketplace confirmou que o pacote de volta
+    # chegou no vendedor (Eduardo 10/09). None = ainda não confirmou — a
+    # Shopee nunca preenche, o status dela fala do caso e não do pacote.
+    devolucao_chegou_em: date | None = None
     plataforma: str | None = None
     loja: str | None = None
     cliente: str | None = None
@@ -359,6 +363,8 @@ class AcompanhamentoRastreioOut(BaseModel):
     # True = a data acima é ESTIMADA (sinal da Logística / backfill), não a
     # entrada real — o front mostra "≈" e convida a corrigir na mão.
     aguardando_devolucao_data_estimada: bool = False
+    # Dia em que o pacote de volta chegou no vendedor (mesma conta do GET).
+    devolucao_chegou_em: date | None = None
     # Quando há devolução VIVA (Shopee/TikTok), `localizacao` passa a ser o
     # status da devolução e a entrega original ("Pedido entregue") vem aqui
     # (tooltip). None = sem devolução viva (localizacao é a entrega mesmo).
