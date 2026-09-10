@@ -241,3 +241,47 @@ async def test_pull_nao_reconsulta_quem_ja_chegou(db, monkeypatch):
     monkeypatch.setattr(svc.logistica_track, "fetch_detalhado", nunca)
 
     assert (await svc._puxar_correios(db))["consultados"] == 0
+
+
+def test_texto_dos_correios_prova_a_chegada():
+    """O 17track APAGA o número depois da entrega — o texto que ele empurrou na
+    época vira a única cópia. Numa devolução, "destinatário" somos nós."""
+    from app.services.devolucao_rastreio_sync import _texto_diz_entregue
+
+    assert _texto_diz_entregue("Piracicaba/SP — Objeto entregue ao destinatário") is True
+    assert _texto_diz_entregue("OBJETO ENTREGUE AO DESTINATARIO") is True  # sem acento
+    # Voltou pro comprador, não pra nós.
+    assert _texto_diz_entregue("Objeto entregue ao remetente") is False
+    assert _texto_diz_entregue("Bauru/SP — Objeto em transferência") is False
+    assert _texto_diz_entregue("Objeto postado") is False
+    assert _texto_diz_entregue(None) is False
+
+
+async def test_carimba_entrega_ja_guardada_mesmo_sem_o_17track(db, monkeypatch):
+    """Caso 293437: entregue 09/09, texto salvo, campo vazio — e o 17track já
+    não conhece mais o número."""
+    from sqlalchemy import delete
+
+    from app.models import DevolucaoRastreio
+    from app.services import devolucao_rastreio_sync as svc
+
+    await db.execute(delete(DevolucaoRastreio))
+    db.add(DevolucaoRastreio(
+        pedido_bling="293437",
+        rastreio_auto="AP444879986BR",
+        localizacao_auto="Piracicaba/SP — Objeto entregue ao destinatário",
+        localizacao_auto_data=ENTREGUE,
+    ))
+    await db.commit()
+
+    async def esqueceu(numbers):
+        return {"info": {}, "desconhecidos": list(numbers)}
+
+    monkeypatch.setattr(svc.logistica_track, "fetch_detalhado", esqueceu)
+
+    resumo = await svc._puxar_correios(db)
+
+    assert resumo["entregues"] == 1
+    row = await db.get(DevolucaoRastreio, "293437")
+    await db.refresh(row)
+    assert row.pacote_entregue_em == ENTREGUE

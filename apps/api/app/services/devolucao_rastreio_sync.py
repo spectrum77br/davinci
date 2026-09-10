@@ -24,6 +24,7 @@ outros; um pedido sem devolução conhecida fica como está.
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Collection
 from datetime import UTC, datetime
 
@@ -119,6 +120,20 @@ async def _linhas_logistica(
     return por_pedido
 
 
+# "Objeto entregue ao destinatário" no pacote de VOLTA = chegou em NÓS (numa
+# devolução, o destinatário é o vendedor). "Entregue ao remetente" fica de
+# fora de propósito: aí o pacote voltou pro comprador, não pra gente.
+_TEXTO_ENTREGUE = "entregue ao destinat"
+
+
+def _texto_diz_entregue(localizacao: str | None) -> bool:
+    txt = unicodedata.normalize("NFKD", (localizacao or "").casefold())
+    txt = "".join(c for c in txt if not unicodedata.combining(c))
+    alvo = unicodedata.normalize("NFKD", _TEXTO_ENTREGUE)
+    alvo = "".join(c for c in alvo if not unicodedata.combining(c))
+    return alvo in txt
+
+
 async def _puxar_correios(session: AsyncSession) -> dict[str, int]:
     """Rede de segurança do rastreio do pacote de VOLTA.
 
@@ -147,7 +162,20 @@ async def _puxar_correios(session: AsyncSession) -> dict[str, int]:
         if logistica_track.is_correios(r.rastreio_auto or "")
     }
     resumo = {"consultados": len(por_codigo), "entregues": 0, "localizacoes": 0}
+
+    # Antes de perguntar: a prova pode já estar guardada aqui. O 17track APAGA
+    # o número depois da entrega (consultar AP444879986BR hoje devolve "não
+    # conhece"), então o evento que ele empurrou na época é a única cópia que
+    # sobrou — e ela está em `localizacao_auto`. Foi o caso do 293437, que o
+    # Eduardo apontou: entregue em 09/09, texto salvo, campo vazio.
+    for row in linhas:
+        if _texto_diz_entregue(row.localizacao_auto) and row.pacote_entregue_em is None:
+            row.pacote_entregue_em = row.localizacao_auto_data or datetime.now(UTC)
+            resumo["entregues"] += 1
+
     if not por_codigo:
+        if resumo["entregues"]:
+            await session.commit()
         return resumo
     try:
         got = await logistica_track.fetch_detalhado(sorted(por_codigo))
