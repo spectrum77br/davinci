@@ -242,6 +242,8 @@ const sdSku = ref('')
 const sdMargin = ref<string | number>('')
 const sdSaving = ref(false)
 const sdError = ref<string | null>(null)
+// Confirmação após adicionar (cadastro em série de SKUs, 10/09).
+const sdOk = ref<string | null>(null)
 
 function findNode(nodes: TreeNode[], id: string): TreeNode | null {
   for (const n of nodes) {
@@ -260,11 +262,13 @@ function openSpecial(seg: Segment) {
   sdSku.value = ''
   sdMargin.value = ''
   sdError.value = null
+  sdOk.value = null
 }
 
 function closeSpecial() {
   specialFor.value = null
   sdError.value = null
+  sdOk.value = null
 }
 
 function fmtBR(iso: string): string {
@@ -310,6 +314,7 @@ function sdErrMsg(e: any): string {
 async function addSpecial() {
   if (!specialFor.value) return
   sdError.value = null
+  sdOk.value = null
   const nome = sdNome.value.trim()
   const sku = sdSku.value.trim()
   const temPeriodo = !!(sdStart.value || sdEnd.value)
@@ -354,11 +359,14 @@ async function addSpecial() {
     const id = specialFor.value.id
     await load()
     specialFor.value = findNode(tree.value, id)
-    sdStart.value = ''
-    sdEnd.value = ''
+    // Cadastro em série (10/09: dezenas de SKUs com o mesmo período e a
+    // mesma margem): período e margem ficam preenchidos; limpa só nome/SKU.
+    const manteve = temPeriodo || !!raw
     sdNome.value = ''
     sdSku.value = ''
-    sdMargin.value = ''
+    sdOk.value = manteve
+      ? 'Condição adicionada — período e margem ficaram preenchidos para a próxima.'
+      : 'Condição adicionada.'
   } catch (e: any) {
     sdError.value = sdErrMsg(e)
   } finally {
@@ -369,6 +377,7 @@ async function addSpecial() {
 async function removeSpecial(sd: SpecialDate) {
   if (!specialFor.value) return
   sdError.value = null
+  sdOk.value = null
   try {
     await api(`/api/segments/${specialFor.value.id}/special-dates/${sd.id}`, {
       method: 'DELETE',
@@ -493,7 +502,9 @@ async function removeSpecial(sd: SpecialDate) {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
       @click.self="closeSpecial"
     >
-      <div class="w-full max-w-md rounded-lg border border-border bg-background p-4 shadow-xl space-y-3">
+      <!-- max-h + overflow (10/09): com dezenas de condições o modal passava
+           da tela e o botão ficava inalcançável. -->
+      <div class="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-lg border border-border bg-background p-4 shadow-xl space-y-3">
         <div class="flex items-center justify-between">
           <h3 class="font-semibold text-sm">Condição Especial — {{ specialFor.name }}</h3>
           <button class="p-1 hover:bg-muted rounded" title="Fechar" @click="closeSpecial">
@@ -502,43 +513,24 @@ async function removeSpecial(sd: SpecialDate) {
         </div>
 
         <p class="text-xs text-muted-foreground leading-relaxed">
-          Pedidos deste segmento <strong>e de todos os subsegmentos</strong> que
-          casam com a condição não ficam travados por margem baixa na aba
-          Margem (o robô também não segura). A condição pode ser por
-          <strong>período</strong> (vale a <strong>data do pedido</strong>, não o
-          dia de hoje), por <strong>nome do anúncio</strong> (contém o texto) e/ou
-          por <strong>SKU</strong> (contém o texto, inclusive dentro de kit);
-          o que estiver preenchido precisa casar junto. Sem margem preenchida,
-          aprova qualquer margem — até negativa. Período que já terminou some
-          daqui no dia seguinte e é apagado sozinho 30 dias depois.
+          Pedidos deste segmento <strong>e dos subsegmentos</strong> que casam com
+          a condição não ficam travados por margem baixa na Margem (nem pelo
+          robô). Condição por <strong>período</strong> (data do pedido), por
+          <strong>nome do anúncio</strong> (contém) e/ou por <strong>SKU</strong>
+          (contém, inclusive em kit); o que estiver preenchido casa junto. Sem
+          margem, aprova qualquer margem. Período encerrado some no dia seguinte
+          e é apagado sozinho em 30 dias.
         </p>
 
         <div v-if="sdError" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive flex items-center gap-2">
           <AlertCircle class="h-3.5 w-3.5 shrink-0" /> {{ sdError }}
         </div>
-
-        <div v-if="condicoesVigentes.length" class="space-y-1.5">
-          <div
-            v-for="sd in condicoesVigentes"
-            :key="sd.id"
-            class="flex items-center justify-between gap-2 rounded border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-900/15 px-2.5 py-1.5 text-sm"
-          >
-            <span>
-              <span class="font-medium tabular-nums">{{ sdCondicoes(sd) }}</span>
-              <span class="text-muted-foreground"> · {{ sdRegra(sd) }}</span>
-            </span>
-            <button
-              v-if="canEdit"
-              class="p-1 text-destructive hover:bg-destructive/10 rounded shrink-0"
-              title="Remover esta condição"
-              @click="removeSpecial(sd)"
-            >
-              <Trash2 class="h-3.5 w-3.5" />
-            </button>
-          </div>
+        <div v-else-if="sdOk" class="rounded border border-emerald-300/60 bg-emerald-50 dark:bg-emerald-900/15 px-3 py-2 text-xs text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+          <Check class="h-3.5 w-3.5 shrink-0" /> {{ sdOk }}
         </div>
-        <p v-else class="text-sm text-muted-foreground">Nenhuma condição especial vigente.</p>
 
+        <!-- Formulário ANTES da lista (10/09): com dezenas de condições a
+             lista empurrava o botão pra fora da tela. -->
         <div v-if="canEdit" class="rounded border border-border p-3 space-y-2.5">
           <div class="text-xs font-medium">Adicionar condição</div>
           <div class="grid grid-cols-2 gap-2">
@@ -603,6 +595,32 @@ async function removeSpecial(sd: SpecialDate) {
             Adicionar condição
           </Button>
         </div>
+
+        <div class="text-xs font-medium">
+          {{ condicoesVigentes.length }} {{ condicoesVigentes.length === 1 ? 'condição vigente' : 'condições vigentes' }}
+        </div>
+        <!-- Lista rolável: o formulário fica sempre à mão. -->
+        <div v-if="condicoesVigentes.length" class="max-h-64 overflow-y-auto space-y-1.5 pr-1">
+          <div
+            v-for="sd in condicoesVigentes"
+            :key="sd.id"
+            class="flex items-center justify-between gap-2 rounded border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-900/15 px-2.5 py-1.5 text-sm"
+          >
+            <span>
+              <span class="font-medium tabular-nums">{{ sdCondicoes(sd) }}</span>
+              <span class="text-muted-foreground"> · {{ sdRegra(sd) }}</span>
+            </span>
+            <button
+              v-if="canEdit"
+              class="p-1 text-destructive hover:bg-destructive/10 rounded shrink-0"
+              title="Remover esta condição"
+              @click="removeSpecial(sd)"
+            >
+              <Trash2 class="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+        <p v-else class="text-sm text-muted-foreground">Nenhuma condição especial vigente.</p>
       </div>
     </div>
   </div>

@@ -108,6 +108,12 @@ function vigente(sd: SpecialDate): boolean {
   const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
   return sd.date_end >= hoje
 }
+function vigentes(n: Segment): SpecialDate[] {
+  return n.special_dates.filter(vigente)
+}
+// Até 2 condições: chips; acima disso, um chip só com a contagem (10/09:
+// dezenas de SKUs por segmento viravam uma coluna de rolagem na tabela).
+const MAX_CHIPS = 2
 </script>
 
 <template>
@@ -193,16 +199,25 @@ function vigente(sd: SpecialDate): boolean {
       @click="canEdit && emit('open-special', node)"
     >
       <div class="flex flex-wrap items-center gap-1">
+        <template v-if="vigentes(node).length <= MAX_CHIPS">
+          <span
+            v-for="sd in vigentes(node)"
+            :key="sd.id"
+            class="inline-flex items-center rounded bg-amber-100 dark:bg-amber-900/40 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-300"
+          >
+            {{ fmtCond(sd) }} · {{ fmtRegra(sd) }}
+          </span>
+        </template>
         <span
-          v-for="sd in node.special_dates.filter(vigente)"
-          :key="sd.id"
+          v-else
           class="inline-flex items-center rounded bg-amber-100 dark:bg-amber-900/40 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-300"
+          :title="vigentes(node).slice(0, 8).map((sd) => `${fmtCond(sd)} · ${fmtRegra(sd)}`).join('\n') + (vigentes(node).length > 8 ? '\n…' : '')"
         >
-          {{ fmtCond(sd) }} · {{ fmtRegra(sd) }}
+          {{ vigentes(node).length }} condições
         </span>
         <!-- Vazio: "—" padrão como as outras colunas (pedido do Eduardo,
              01/09) — o clique na célula continua abrindo o modal. -->
-        <span v-if="!node.special_dates.some(vigente)" class="text-muted-foreground">—</span>
+        <span v-if="!vigentes(node).length" class="text-muted-foreground">—</span>
       </div>
     </td>
 
