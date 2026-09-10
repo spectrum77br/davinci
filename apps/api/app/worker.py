@@ -2112,11 +2112,23 @@ class WorkerSettings:
             run_at_startup=False,
             timeout=900,
         ),
-        # Reconsulta FORÇADA nos Correios via 17track, 07:01 e 16:31 de Brasília
-        # (10:01 e 19:31 UTC — o Brasil não tem horário de verão). Horários
-        # escolhidos pelo Eduardo em 08/09 (07:00/16:30); :01 pra não coincidir
-        # com o ingest de :00, que apaga pedido finalizado da tabela.
-        cron(logistica_track_forcar, hour=10, minute=1, run_at_startup=False, timeout=900),
+        # Reconsulta FORÇADA nos Correios via 17track. Começou em 08/09 com
+        # 07:00 e 16:30 (escolha do Eduardo); em 10/09 virou DE 3 EM 3 HORAS,
+        # depois do pedido 295070: os Correios publicaram "objeto apreendido
+        # pela Secretaria da Fazenda" às 10h10, o 17track leu às 10h40 e trouxe
+        # informação velha — só a releitura forçada trouxe o evento. Eduardo:
+        # "pode ser mais nessas forçadas, precisa sempre estar atualizado".
+        # 04/07/10/13/19/22 BRT (07/10/13/16/22/01 UTC) + o 16:31 BRT original.
+        # O intervalo de 3 h casa com FRESCO_HORAS=3 do próprio job: quem o
+        # 17track já leu nas últimas 3 h é pulado, então rodar mais vezes não
+        # multiplica gasto — e o teto diário de re-registros pagos continua.
+        cron(
+            logistica_track_forcar,
+            hour={1, 7, 10, 13, 16, 22},
+            minute=1,
+            run_at_startup=False,
+            timeout=900,
+        ),
         cron(logistica_track_forcar, hour=19, minute=31, run_at_startup=False, timeout=900),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps

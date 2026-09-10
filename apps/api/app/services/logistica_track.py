@@ -566,6 +566,44 @@ def entregue_no_push(track_info: dict | None) -> bool:
     return status == "Delivered"
 
 
+# ── Evento grave no rastreio (Eduardo, 10/09/2026) ───────────────────────
+# O pedido 295070 foi APREENDIDO pela Secretaria da Fazenda e isso ficou só
+# na tela, esperando alguém olhar. Evento assim não pode depender de alguém
+# reparar: vira aviso. Sem acento e sem caixa na comparação.
+EVENTOS_GRAVES: tuple[str, ...] = (
+    "apreendid",
+    "extraviad",
+    "roubo",
+    "roubad",
+    "furtad",
+    "avaria",
+    "danificad",
+    "sinistro",
+    "devolvido ao remetente",
+    "devolucao ao remetente",
+    "nao entregue",
+    "endereco incorreto",
+    "recusad",
+)
+
+
+def _sem_acento(txt: str | None) -> str:
+    import unicodedata
+
+    base = unicodedata.normalize("NFKD", (txt or "").casefold())
+    return "".join(c for c in base if not unicodedata.combining(c))
+
+
+def evento_grave(localizacao: str | None) -> str | None:
+    """Palavra que torna o evento grave, ou None. Usado pra avisar no Threema
+    em vez de deixar o problema parado numa coluna."""
+    txt = _sem_acento(localizacao)
+    for chave in EVENTOS_GRAVES:
+        if _sem_acento(chave) in txt:
+            return chave
+    return None
+
+
 def parse_push_entregues(payload: dict) -> set[str]:
     """Números do push cujo estado é ENTREGUE (mesmo desempacotamento do
     `parse_push`, sem mexer no contrato dele)."""

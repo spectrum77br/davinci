@@ -756,3 +756,71 @@ async def test_carimba_a_consulta_mesmo_sem_evento_novo(db: AsyncSession, fake_1
     assert row.localizacao_at == parado  # o carimbo do MOVIMENTO não mente
     assert row.rastreio_lido_em is not None  # mas a CONSULTA de hoje aparece
     assert row.rastreio_lido_em > parado
+
+
+@pytest.mark.asyncio
+async def test_evento_grave_vira_aviso(db: AsyncSession, fake_17track, monkeypatch):
+    """Eduardo (10/09): o 295070 foi APREENDIDO pela Secretaria da Fazenda e o
+    aviso ficou só numa coluna da tela. Agora sai no Threema."""
+    _chamadas, estado = fake_17track
+    avisos: list[str] = []
+
+    async def fake_aviso(graves):
+        avisos.append(graves)
+
+    monkeypatch.setattr(logistica_track_sync, "_avisar_graves", fake_aviso)
+
+    row = Logistica(
+        pedido_bling="295070",
+        plataforma="Mercado Livre",
+        conta="jlas2",
+        data=date.today(),
+        rastreio="AD890179823BR",
+        rastreio_17track="AD890179823BR",
+        localizacao="Sao Paulo/SP — Objeto em transferência - por favor aguarde",
+        localizacao_at=datetime(2026, 9, 9, 19, 31, tzinfo=UTC),
+        status_bling="Em andamento",
+    )
+    db.add(row)
+    await db.commit()
+    estado["eventos"] = [
+        (
+            "AD890179823BR",
+            "Varzea Grande/MT — Objeto apreendido por: Secretaria Estadual da Fazenda",
+        )
+    ]
+
+    await logistica_track_sync.run(db, pedidos=["295070"])
+
+    assert len(avisos) == 1
+    assert avisos[0][0][0] == "295070"
+    assert "apreendido" in avisos[0][0][2].lower()
+
+
+@pytest.mark.asyncio
+async def test_evento_normal_nao_gera_aviso(db: AsyncSession, fake_17track, monkeypatch):
+    """Aviso que toca à toa deixa de ser lido — só ocorrência grave dispara."""
+    _chamadas, estado = fake_17track
+    avisos: list = []
+
+    async def fake_aviso(graves):
+        avisos.append(graves)
+
+    monkeypatch.setattr(logistica_track_sync, "_avisar_graves", fake_aviso)
+
+    row = Logistica(
+        pedido_bling="295071",
+        plataforma="Mercado Livre",
+        data=date.today(),
+        rastreio="AD890179824BR",
+        rastreio_17track="AD890179824BR",
+        localizacao="Objeto postado",
+        status_bling="Em andamento",
+    )
+    db.add(row)
+    await db.commit()
+    estado["eventos"] = [("AD890179824BR", "Bauru/SP — Objeto em transferência")]
+
+    await logistica_track_sync.run(db, pedidos=["295071"])
+
+    assert avisos == []

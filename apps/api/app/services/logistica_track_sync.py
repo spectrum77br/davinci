@@ -292,6 +292,24 @@ async def _run(
     return resumo
 
 
+async def _avisar_graves(graves: list[tuple[str, str, str]]) -> None:
+    """Melhor esforço: aviso não pode derrubar a varredura."""
+    linhas = [f"• Pedido {p} ({conta}) — {loc}" for p, conta, loc in graves[:15]]
+    texto = (
+        "⚠️ Rastreio dos Correios com ocorrência GRAVE "
+        f"({len(graves)} pedido(s)):\n" + "\n".join(linhas)
+    )
+    try:
+        from app.config import get_settings
+        from app.services import threema
+
+        destinos = threema.parse_recipients(get_settings().threema_recipients)
+        if destinos:
+            await threema.ThreemaClient().send_to_all(texto, destinos)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_track_aviso_grave_falhou", err=str(e)[:200])
+
+
 async def _aplicar_localizacoes(
     session: AsyncSession, linhas: list[Logistica], eventos: list[tuple[str, str]]
 ) -> int:
@@ -300,10 +318,16 @@ async def _aplicar_localizacoes(
     por_numero = {_num(n): loc for n, loc in eventos}
     agora = datetime.now(UTC)
     atualizados = 0
+    graves: list[tuple[str, str, str]] = []
     for r in linhas:
         loc = por_numero.get(_num(r.rastreio_17track))
         if not loc or loc == r.localizacao:
             continue
+        # Evento grave (apreensão, extravio, roubo…) não pode ficar esperando
+        # alguém olhar a tela — vira aviso no Threema (Eduardo, 10/09,
+        # pedido 295070 apreendido pela Secretaria da Fazenda).
+        if logistica_track.evento_grave(loc) and not logistica_track.evento_grave(r.localizacao):
+            graves.append((r.pedido_bling or "?", r.conta or "?", loc))
         r.localizacao = loc
         r.localizacao_at = agora
         r.divergencia = logistica_rules.detectar_divergencia_por_plataforma(
@@ -312,6 +336,8 @@ async def _aplicar_localizacoes(
         atualizados += 1
     if atualizados:
         await session.commit()
+    if graves:
+        await _avisar_graves(graves)
     return atualizados
 
 
