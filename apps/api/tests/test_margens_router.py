@@ -1049,6 +1049,95 @@ async def test_sync_saldo_final_keeps_pending_when_margin_below_minimum(
     assert "500002" not in [it["pedido_bling"] for it in approved.json()["items"]]
 
 
+async def test_marketplace_margem_isenta_por_condicao_especial_nome_e_sku(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Condição Especial por produto (10/09): "todo anúncio com M3 no nome
+    aprova até 6%" e "todo SKU a001 aprova" — sem período. Folha com mínima
+    15%; todas as linhas abaixo da mínima:
+      - "Mala Chanfrada M3", margem 8%           → nome casa (sem caixa), 8% ≥ 6% → isenta
+      - "Mala Chanfrada M3", margem 3%           → nome casa, 3% < 6% → margem baixa
+      - "Mala Listrada M1",  margem 8%           → nenhuma condição casa → margem baixa
+      - sku dg053.sp+a001.sp, margem -50%        → componente do kit começa com a001,
+                                                   aprova tudo → isenta
+      - sku xa001.sp, margem 8%                  → não COMEÇA com a001 → margem baixa
+      - "Mala M3" SEM segmento, margem 8%        → exceção não vaza → margem baixa
+    """
+    from datetime import UTC, datetime
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from app.models import Segment, SegmentSpecialDate
+
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    folha = Segment(
+        name="Folha CE", slug=f"folha-{uuid4().hex[:6]}", min_margin=Decimal("0.15")
+    )
+    db.add(folha)
+    await db.flush()
+    db.add_all(
+        [
+            SegmentSpecialDate(segment_id=folha.id, nome_contem="m3", min_margin=Decimal("0.06")),
+            SegmentSpecialDate(segment_id=folha.id, sku_prefixo="a001", min_margin=None),
+        ]
+    )
+    await db.commit()
+
+    async def seed(pedido: str, sku: str, produto: str, margem: str, leaf) -> None:
+        await db.execute(
+            text(
+                """
+                INSERT INTO verificar_margem (
+                    bling_order_item_id, pedido_bling, sku, produto, data,
+                    situacao, situacao_nome, plataforma_bling, item_proportion,
+                    marketplace_margem, margem_minima, pricing_leaf_segment_id
+                ) VALUES (
+                    :id, :pedido, :sku, :produto, :dt,
+                    '6', 'Em aberto', 'ml', 1,
+                    :margem, 0.15, :leaf
+                )
+                """
+            ),
+            {
+                "id": str(uuid4()),
+                "pedido": pedido,
+                "sku": sku,
+                "produto": produto,
+                "dt": datetime(2026, 9, 5, 12, tzinfo=UTC),
+                "margem": margem,
+                "leaf": None if leaf is None else str(leaf),
+            },
+        )
+        await db.commit()
+
+    await seed("602001", "b025.12", "Mala Chanfrada M3 tamanho 12 - Preto", "0.08", folha.id)
+    await seed("602002", "b025.12", "Mala Chanfrada M3 tamanho 12 - Preto", "0.03", folha.id)
+    await seed("602003", "b005.12", "Mala Listrada M1 tamanho 12 - Preto", "0.08", folha.id)
+    await seed("602004", "dg053.sp+a001.sp", "Hotwav A17 + Fone", "-0.50", folha.id)
+    await seed("602005", "xa001.sp", "Fone", "0.08", folha.id)
+    await seed("602006", "b025.12", "Mala Chanfrada M3 tamanho 12", "0.08", None)
+
+    resp = await client.get("/api/margens/marketplace?attention_type=margem&status=Pendente")
+    assert resp.status_code == 200
+    flagged = {it["pedido_bling"] for it in resp.json()["items"]}
+    assert {"602002", "602003", "602005", "602006"} <= flagged
+    assert "602001" not in flagged
+    assert "602004" not in flagged
+
+    aprovado = await client.get("/api/margens/marketplace?status=Aprovado")
+    por_pedido = {it["pedido_bling"]: it for it in aprovado.json()["items"]}
+    assert por_pedido["602001"]["data_especial"] is True
+    assert por_pedido["602004"]["data_especial"] is True
+    pendente = await client.get("/api/margens/marketplace?status=Pendente")
+    pend = {it["pedido_bling"]: it for it in pendente.json()["items"]}
+    assert pend["602002"]["data_especial"] is False
+    assert pend["602006"]["data_especial"] is False
+
+
 async def test_marketplace_margem_isenta_por_data_especial(
     client,
     db: AsyncSession,

@@ -176,7 +176,9 @@ async def delete_segment(
     return None
 
 
-# ============================================================ Datas Especiais
+# ==================================== Condição Especial (ex-"Datas Especiais")
+# 10/09/2026: além do período, condição por nome do produto e/ou SKU (ver
+# schemas.SegmentSpecialDateCreate). Endpoint e tabela mantêm o nome antigo.
 # Eduardo (01/09/2026): "vamos colocar um novo campo chamado datas especiais,
 # que é a regra que vamos aprovar, para exceção, por exemplo está com margem
 # negativa, aprova". Janela em que a margem baixa não trava pedidos do
@@ -201,6 +203,8 @@ async def create_special_date(
         segment_id=segment_id,
         date_start=body.date_start,
         date_end=body.date_end,
+        nome_contem=body.nome_contem,
+        sku_prefixo=body.sku_prefixo,
         min_margin=body.min_margin,
     )
     session.add(sd)
@@ -211,6 +215,8 @@ async def create_special_date(
         segment_id=str(segment_id),
         date_start=str(body.date_start),
         date_end=str(body.date_end),
+        nome_contem=body.nome_contem,
+        sku_prefixo=body.sku_prefixo,
         min_margin=None if body.min_margin is None else float(body.min_margin),
     )
     return SegmentSpecialDateOut.model_validate(sd)

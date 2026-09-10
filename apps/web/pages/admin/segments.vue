@@ -7,15 +7,19 @@ definePageMeta({
   permission: { resource: 'segmentos', action: 'view' },
 })
 
-// Data Especial: janela (datas BRT, inclusivas) em que pedidos do segmento —
-// e de TODOS os subsegmentos — não são travados por margem baixa na aba
-// Margem (nem pelo robô de auto-hold). min_margin em fração (-0.15 = -15%);
-// null = aprova qualquer margem no período.
+// Condição Especial (ex-"Datas Especiais", 10/09): exceção em que pedidos do
+// segmento — e de TODOS os subsegmentos — não são travados por margem baixa
+// na aba Margem (nem pelo robô de auto-hold). Condições opcionais em E:
+// período (datas BRT, inclusivas, pela data do pedido), nome do produto
+// contém, SKU começa com (ou componente de kit). Pelo menos uma.
+// min_margin em fração (-0.15 = -15%); null = aprova qualquer margem.
 type SpecialDate = {
   id: string
   segment_id: string
-  date_start: string
-  date_end: string
+  date_start: string | null
+  date_end: string | null
+  nome_contem: string | null
+  sku_prefixo: string | null
   min_margin: string | null
 }
 
@@ -223,12 +227,15 @@ async function remove(seg: Segment, depth: number) {
   }
 }
 
-// =========================================================== datas especiais
-// Modal por segmento: lista as janelas + formulário rotulado De/Até/margem.
+// ========================================================= condição especial
+// Modal por segmento: lista as condições vigentes + formulário (período
+// opcional, nome contém, SKU começa com, margem).
 
 const specialFor = ref<Segment | null>(null)
 const sdStart = ref('')
 const sdEnd = ref('')
+const sdNome = ref('')
+const sdSku = ref('')
 // percent na UI ("-15" = -15%); vazio = aprova tudo. O input é type="number",
 // então o v-model do Vue entrega NUMBER quando preenchido (cast automático) e
 // '' quando vazio — daí o tipo união e o String() defensivo no addSpecial.
@@ -249,6 +256,8 @@ function openSpecial(seg: Segment) {
   specialFor.value = findNode(tree.value, seg.id) ?? seg
   sdStart.value = ''
   sdEnd.value = ''
+  sdNome.value = ''
+  sdSku.value = ''
   sdMargin.value = ''
   sdError.value = null
 }
@@ -269,30 +278,60 @@ function sdRegra(sd: SpecialDate): string {
   return `aprova até margem ${pct}%`
 }
 
+// Hoje em São Paulo (YYYY-MM-DD) — a regra usa a data do pedido no fuso SP.
+function hojeSP(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+}
+// Período encerrado some do painel no dia seguinte (pedido de 10/09: "não
+// precisa deixar lá parada"); o worker apaga de vez 30 dias depois
+// (services/condicao_especial) — pedido feito dentro do período ainda pode
+// estar em triagem. Sem período (só nome/SKU) nunca expira.
+function condicaoVigente(sd: SpecialDate): boolean {
+  return !sd.date_end || sd.date_end >= hojeSP()
+}
+function sdCondicoes(sd: SpecialDate): string {
+  const partes: string[] = []
+  if (sd.date_start && sd.date_end) partes.push(`${fmtBR(sd.date_start)} até ${fmtBR(sd.date_end)}`)
+  if (sd.nome_contem) partes.push(`nome contém “${sd.nome_contem}”`)
+  if (sd.sku_prefixo) partes.push(`SKU começa com “${sd.sku_prefixo}”`)
+  return partes.join(' · ')
+}
+const condicoesVigentes = computed(() => (specialFor.value?.special_dates ?? []).filter(condicaoVigente))
+
 // Erro da API → frase pt-BR (422 do FastAPI vem como LISTA em detail).
 function sdErrMsg(e: any): string {
   const d = e?.data?.detail
   if (d?.code === 'segment_not_found') return 'Segmento não encontrado — recarregue a página.'
-  if (d?.code === 'special_date_not_found') return 'Este período já foi removido — recarregue a página.'
-  if (Array.isArray(d)) return 'Dados inválidos — confira as datas e a margem.'
+  if (d?.code === 'special_date_not_found') return 'Esta condição já foi removida — recarregue a página.'
+  if (Array.isArray(d)) return 'Dados inválidos — confira período, nome/SKU e margem.'
   return d?.code || e?.message || 'Erro ao salvar — tente de novo.'
 }
 
 async function addSpecial() {
   if (!specialFor.value) return
   sdError.value = null
-  if (!sdStart.value || !sdEnd.value) {
-    sdError.value = 'Preencha as duas datas (De e Até).'
+  const nome = sdNome.value.trim()
+  const sku = sdSku.value.trim()
+  const temPeriodo = !!(sdStart.value || sdEnd.value)
+  if (temPeriodo && (!sdStart.value || !sdEnd.value)) {
+    sdError.value = 'Período incompleto: preencha De e Até, ou deixe os dois vazios.'
     return
   }
-  if (sdEnd.value < sdStart.value) {
+  if (temPeriodo && sdEnd.value < sdStart.value) {
     sdError.value = 'A data final não pode ser antes da inicial.'
     return
   }
-  const body: Record<string, unknown> = {
-    date_start: sdStart.value,
-    date_end: sdEnd.value,
+  if (!temPeriodo && !nome && !sku) {
+    sdError.value = 'Preencha pelo menos uma condição: período, nome ou SKU.'
+    return
   }
+  const body: Record<string, unknown> = {}
+  if (temPeriodo) {
+    body.date_start = sdStart.value
+    body.date_end = sdEnd.value
+  }
+  if (nome) body.nome_contem = nome
+  if (sku) body.sku_prefixo = sku
   // BUG corrigido (01/09, Eduardo: "não está deixando adicionar"): input
   // type="number" faz o v-model entregar NUMBER, e number.trim() explodia
   // ANTES do POST — clique morria sem mensagem. String() cobre os dois casos.
@@ -317,6 +356,8 @@ async function addSpecial() {
     specialFor.value = findNode(tree.value, id)
     sdStart.value = ''
     sdEnd.value = ''
+    sdNome.value = ''
+    sdSku.value = ''
     sdMargin.value = ''
   } catch (e: any) {
     sdError.value = sdErrMsg(e)
@@ -365,7 +406,7 @@ async function removeSpecial(sd: SpecialDate) {
           <tr>
             <th class="text-left px-3 py-2 font-medium border-b border-border min-w-[280px]">Nome</th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Margem Mín</th>
-            <th class="text-left px-3 py-2 font-medium border-b border-border w-28">Datas Especiais</th>
+            <th class="text-left px-3 py-2 font-medium border-b border-border w-28">Condição Especial</th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Altura <span class="text-muted-foreground font-normal">(cm)</span></th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Largura <span class="text-muted-foreground font-normal">(cm)</span></th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Comprim. <span class="text-muted-foreground font-normal">(cm)</span></th>
@@ -446,7 +487,7 @@ async function removeSpecial(sd: SpecialDate) {
       </table>
     </div>
 
-    <!-- Modal Datas Especiais: janelas de exceção da margem do segmento -->
+    <!-- Modal Condição Especial: exceções da margem do segmento (período, nome, SKU) -->
     <div
       v-if="specialFor"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -454,52 +495,55 @@ async function removeSpecial(sd: SpecialDate) {
     >
       <div class="w-full max-w-md rounded-lg border border-border bg-background p-4 shadow-xl space-y-3">
         <div class="flex items-center justify-between">
-          <h3 class="font-semibold text-sm">Datas Especiais — {{ specialFor.name }}</h3>
+          <h3 class="font-semibold text-sm">Condição Especial — {{ specialFor.name }}</h3>
           <button class="p-1 hover:bg-muted rounded" title="Fechar" @click="closeSpecial">
             <X class="h-4 w-4" />
           </button>
         </div>
 
         <p class="text-xs text-muted-foreground leading-relaxed">
-          Pedidos <strong>feitos</strong> dentro do período (vale a <strong>data do
-          pedido</strong>, não o dia de hoje) deste segmento <strong>e de todos os
-          subsegmentos</strong> não ficam travados por margem baixa na aba
-          Margem (o robô também não segura). Sem margem preenchida, aprova
-          qualquer margem — até negativa. Para liberar pedidos antigos que já
-          estão pendentes, comece o período na data do pedido mais antigo.
+          Pedidos deste segmento <strong>e de todos os subsegmentos</strong> que
+          casam com a condição não ficam travados por margem baixa na aba
+          Margem (o robô também não segura). A condição pode ser por
+          <strong>período</strong> (vale a <strong>data do pedido</strong>, não o
+          dia de hoje), por <strong>nome do anúncio</strong> (contém o texto) e/ou
+          por <strong>SKU</strong> (começa com o texto, inclusive dentro de kit);
+          o que estiver preenchido precisa casar junto. Sem margem preenchida,
+          aprova qualquer margem — até negativa. Período que já terminou some
+          daqui no dia seguinte e é apagado sozinho 30 dias depois.
         </p>
 
         <div v-if="sdError" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive flex items-center gap-2">
           <AlertCircle class="h-3.5 w-3.5 shrink-0" /> {{ sdError }}
         </div>
 
-        <div v-if="specialFor.special_dates.length" class="space-y-1.5">
+        <div v-if="condicoesVigentes.length" class="space-y-1.5">
           <div
-            v-for="sd in specialFor.special_dates"
+            v-for="sd in condicoesVigentes"
             :key="sd.id"
             class="flex items-center justify-between gap-2 rounded border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-900/15 px-2.5 py-1.5 text-sm"
           >
             <span>
-              <span class="font-medium tabular-nums">{{ fmtBR(sd.date_start) }} até {{ fmtBR(sd.date_end) }}</span>
+              <span class="font-medium tabular-nums">{{ sdCondicoes(sd) }}</span>
               <span class="text-muted-foreground"> · {{ sdRegra(sd) }}</span>
             </span>
             <button
               v-if="canEdit"
               class="p-1 text-destructive hover:bg-destructive/10 rounded shrink-0"
-              title="Remover este período"
+              title="Remover esta condição"
               @click="removeSpecial(sd)"
             >
               <Trash2 class="h-3.5 w-3.5" />
             </button>
           </div>
         </div>
-        <p v-else class="text-sm text-muted-foreground">Nenhuma data especial cadastrada.</p>
+        <p v-else class="text-sm text-muted-foreground">Nenhuma condição especial vigente.</p>
 
         <div v-if="canEdit" class="rounded border border-border p-3 space-y-2.5">
-          <div class="text-xs font-medium">Adicionar período</div>
+          <div class="text-xs font-medium">Adicionar condição</div>
           <div class="grid grid-cols-2 gap-2">
             <label class="block text-xs text-muted-foreground">
-              De (data do pedido)
+              De (data do pedido) — opcional
               <input
                 v-model="sdStart"
                 type="date"
@@ -507,11 +551,33 @@ async function removeSpecial(sd: SpecialDate) {
               />
             </label>
             <label class="block text-xs text-muted-foreground">
-              Até (data do pedido)
+              Até (data do pedido) — opcional
               <input
                 v-model="sdEnd"
                 type="date"
                 class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
+              />
+            </label>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <label class="block text-xs text-muted-foreground">
+              Nome do anúncio contém — opcional
+              <input
+                v-model="sdNome"
+                type="text"
+                maxlength="120"
+                placeholder="ex.: M3"
+                class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground"
+              />
+            </label>
+            <label class="block text-xs text-muted-foreground">
+              SKU começa com — opcional
+              <input
+                v-model="sdSku"
+                type="text"
+                maxlength="120"
+                placeholder="ex.: a001"
+                class="mt-1 w-full text-sm border rounded px-2 py-1 bg-background text-foreground font-mono"
               />
             </label>
           </div>
@@ -526,13 +592,15 @@ async function removeSpecial(sd: SpecialDate) {
             />
           </label>
           <p class="text-[11px] text-muted-foreground">
-            Vazio = aprova qualquer margem no período. Com valor (ex.: -15),
-            aprova enquanto a margem for maior ou igual a -15%.
+            Preencha pelo menos uma condição. Margem vazia = aprova qualquer
+            margem quando a condição casa. Com valor (ex.: 6), aprova enquanto a
+            margem for maior ou igual a 6%. SKU "a001" também pega kits como
+            "dg053.sp+a001.sp".
           </p>
           <Button size="sm" class="w-full" :disabled="sdSaving" @click="addSpecial">
             <Loader2 v-if="sdSaving" class="size-4 mr-1 animate-spin" />
             <Plus v-else class="size-4 mr-1" />
-            Adicionar período
+            Adicionar condição
           </Button>
         </div>
       </div>

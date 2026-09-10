@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { Check, ChevronDown, ChevronRight, Loader2, Plus, Trash2, X } from 'lucide-vue-next'
 
-// Data Especial: janela em que a margem baixa não trava pedidos do segmento
-// (nem dos subsegmentos). min_margin em fração (-0.15 = -15%); null = aprova
-// qualquer margem no período.
+// Condição Especial (ex-"Datas Especiais"): exceção em que a margem baixa não
+// trava pedidos do segmento (nem dos subsegmentos) — por período (data do
+// pedido), nome do produto contém e/ou SKU começa com. min_margin em fração
+// (-0.15 = -15%); null = aprova qualquer margem.
 type SpecialDate = {
   id: string
   segment_id: string
-  date_start: string
-  date_end: string
+  date_start: string | null
+  date_end: string | null
+  nome_contem: string | null
+  sku_prefixo: string | null
   min_margin: string | null
 }
 
@@ -75,6 +78,7 @@ const open = computed(() => isOpen(props.node.id))
 // "01/09–15/09" (ano só quando difere do atual: "28/12/25–05/01/26");
 // dia único vira uma data só ("01/09") — chip curto p/ coluna padrão w-28.
 function fmtRange(sd: SpecialDate): string {
+  if (!sd.date_start || !sd.date_end) return ''
   const cur = String(new Date().getFullYear())
   const f = (iso: string) => {
     const [y, m, d] = iso.split('-')
@@ -83,10 +87,26 @@ function fmtRange(sd: SpecialDate): string {
   if (sd.date_start === sd.date_end) return f(sd.date_start)
   return `${f(sd.date_start)}–${f(sd.date_end)}`
 }
+// Chip curto: "01/09–15/09 · nome:M3 · sku:a001 · ≥6%".
+function fmtCond(sd: SpecialDate): string {
+  const partes: string[] = []
+  const r = fmtRange(sd)
+  if (r) partes.push(r)
+  if (sd.nome_contem) partes.push(`nome:${sd.nome_contem}`)
+  if (sd.sku_prefixo) partes.push(`sku:${sd.sku_prefixo}`)
+  return partes.join(' · ')
+}
 function fmtRegra(sd: SpecialDate): string {
   if (sd.min_margin === null) return 'aprova tudo'
   const pct = (Number(sd.min_margin) * 100).toFixed(2).replace(/\.?0+$/, '')
   return `≥${pct}%`
+}
+// Período encerrado some do painel no dia seguinte (10/09); o worker apaga
+// de vez 30 dias depois. Sem período nunca expira.
+function vigente(sd: SpecialDate): boolean {
+  if (!sd.date_end) return true
+  const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+  return sd.date_end >= hoje
 }
 </script>
 
@@ -164,25 +184,25 @@ function fmtRegra(sd: SpecialDate): string {
       </span>
     </td>
 
-    <!-- Datas Especiais: janelas de exceção da margem (segmento + subsegmentos).
-         Clique abre o modal de gerenciamento na página. -->
+    <!-- Condição Especial: exceções da margem (segmento + subsegmentos) por
+         período, nome e/ou SKU. Clique abre o modal de gerenciamento na página. -->
     <td
       class="border border-border px-2 py-1.5 text-xs"
       :class="canEdit ? 'cursor-pointer hover:bg-amber-50/60 dark:hover:bg-amber-900/10' : ''"
-      :title="canEdit ? 'Gerenciar datas especiais' : undefined"
+      :title="canEdit ? 'Gerenciar condições especiais' : undefined"
       @click="canEdit && emit('open-special', node)"
     >
       <div class="flex flex-wrap items-center gap-1">
         <span
-          v-for="sd in node.special_dates"
+          v-for="sd in node.special_dates.filter(vigente)"
           :key="sd.id"
           class="inline-flex items-center rounded bg-amber-100 dark:bg-amber-900/40 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 dark:text-amber-300"
         >
-          {{ fmtRange(sd) }} · {{ fmtRegra(sd) }}
+          {{ fmtCond(sd) }} · {{ fmtRegra(sd) }}
         </span>
         <!-- Vazio: "—" padrão como as outras colunas (pedido do Eduardo,
              01/09) — o clique na célula continua abrindo o modal. -->
-        <span v-if="!node.special_dates.length" class="text-muted-foreground">—</span>
+        <span v-if="!node.special_dates.some(vigente)" class="text-muted-foreground">—</span>
       </div>
     </td>
 

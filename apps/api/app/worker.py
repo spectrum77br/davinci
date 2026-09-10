@@ -1237,6 +1237,19 @@ async def alerts_cleanup(ctx: dict) -> None:
         logger.info("alerts_cleanup_done", deleted=result.rowcount or 0)
 
 
+async def condicao_especial_gc(ctx: dict) -> None:
+    """Apaga Condições Especiais de segmento cujo período terminou há mais de
+    30 dias (pedido de 10/09: "quando acabar essa data pode excluir"). O painel
+    já esconde no dia seguinte; a carência protege pedido feito dentro do
+    período que ainda está em triagem. Ver services/condicao_especial."""
+    from app.services.condicao_especial import limpar_encerradas
+
+    hoje_sp = datetime.now(SP_TZ).date()
+    async with session_scope() as s:
+        n = await limpar_encerradas(s, hoje_sp=hoje_sp)
+    logger.info("condicao_especial_gc_done", deleted=n)
+
+
 async def verificar_margem_snapshot(ctx: dict) -> None:
     """Rebuild COMPLETO do snapshot davinci.verificar_margem (janela 20d) como
     backstop periódico (cron 30min).
@@ -2007,6 +2020,7 @@ class WorkerSettings:
         sync_import_product_to_bling_job,
         push_lote_stock_to_bling_job,
         alerts_cleanup,
+        condicao_especial_gc,
         low_stock_polling,
         import_listings_run,
         auto_import_link,
@@ -2141,6 +2155,8 @@ class WorkerSettings:
         cron(sync_logs_partition_gc, day=15, hour=3, minute=0, run_at_startup=False),
         # Stubs — registered so wiring later doesn't need a worker redeploy.
         cron(alerts_cleanup, hour=6, minute=0, run_at_startup=False),  # 03:00 BRT
+        # Condição Especial de segmento encerrada há 30d (services/condicao_especial).
+        cron(condicao_especial_gc, hour=6, minute=10, run_at_startup=False),  # 03:10 BRT
         cron(failed_jobs_alert_scan, minute=_TWO_MIN, run_at_startup=False),
         cron(webhook_signature_alert_scan, minute={5, 35}, run_at_startup=False),
         cron(low_stock_polling, minute=_TWO_MIN, run_at_startup=False),
@@ -2496,6 +2512,7 @@ __all__ = [
     "auto_import_link",
     "auto_link_run",
     "alerts_cleanup",
+    "condicao_especial_gc",
     "background_jobs_gc",
     "bling_notas_token_refresh",
     "bling_orders_safety_net_tick",

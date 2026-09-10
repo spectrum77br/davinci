@@ -96,20 +96,43 @@ class SegmentPatch(BaseModel):
 
 
 class SegmentSpecialDateCreate(BaseModel):
-    """Datas Especiais: janela de exceção da margem (datas BRT, inclusivas).
+    """Condição Especial (ex-"Datas Especiais"): exceção da margem do segmento.
 
+    Condições opcionais, combinadas em E — pelo menos UMA é obrigatória:
+      • período `date_start`..`date_end` (data do pedido, BRT, inclusivo; as
+        duas datas juntas ou nenhuma);
+      • `nome_contem`: nome do produto contém o texto (sem caixa);
+      • `sku_prefixo`: SKU — ou componente de kit ("a+b") — começa com o texto.
     `min_margin` em FRAÇÃO (mesma escala de segments.min_margin: -0.15 =
-    -15%); NULL = aprova qualquer margem no período.
+    -15%); NULL = aprova qualquer margem quando a condição casa.
     """
 
-    date_start: date
-    date_end: date
+    date_start: date | None = None
+    date_end: date | None = None
+    nome_contem: str | None = None
+    sku_prefixo: str | None = None
     min_margin: Decimal | None = None
 
+    @field_validator("nome_contem", "sku_prefixo", mode="before")
+    @classmethod
+    def _v_texto(cls, v: object) -> str | None:
+        if v is None:
+            return None
+        texto = str(v).strip()
+        if not texto:
+            return None
+        if len(texto) > 120:
+            raise ValueError("texto_muito_longo")
+        return texto
+
     @model_validator(mode="after")
-    def _v_range(self) -> "SegmentSpecialDateCreate":
-        if self.date_end < self.date_start:
+    def _v_condicao(self) -> "SegmentSpecialDateCreate":
+        if (self.date_start is None) != (self.date_end is None):
+            raise ValueError("date_range_incomplete")
+        if self.date_start and self.date_end and self.date_end < self.date_start:
             raise ValueError("date_range_invalid")
+        if self.date_start is None and not self.nome_contem and not self.sku_prefixo:
+            raise ValueError("condicao_vazia")
         return self
 
 
@@ -118,8 +141,10 @@ class SegmentSpecialDateOut(BaseModel):
 
     id: UUID
     segment_id: UUID
-    date_start: date
-    date_end: date
+    date_start: date | None = None
+    date_end: date | None = None
+    nome_contem: str | None = None
+    sku_prefixo: str | None = None
     min_margin: Decimal | None = None
 
 

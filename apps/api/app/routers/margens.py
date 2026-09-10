@@ -188,21 +188,35 @@ _FRETE_RESULTADO_DISPLAY_SQL = (
 # Também exposto na listagem como coluna `data_especial` (badge na UI) e no
 # recálculo pós-edição de Saldo Efetivo (clears_minimum). O auto-hold herda
 # por import de _ATTENTION_MARGEM_SQL — o robô não segura no período.
+# Condição Especial (10/09, ex-"Datas Especiais"): além do período, a regra
+# pode ser por NOME do produto (contém) e/ou por SKU (começa com — o SKU
+# inteiro ou qualquer componente de kit, 'a+b'). Partes preenchidas se
+# combinam em E; regras diferentes do mesmo segmento, em OU (EXISTS).
+# Texto digitado passa por escape de curinga do ILIKE ('_' e '%') pra casar
+# literal; backslash é o escape padrão.
+_ILIKE_ESC = "replace(replace({col}, '_', '\\_'), '%', '\\%')"
 _MARGEM_DATA_ESPECIAL_SQL = (
     "EXISTS ("  # noqa: S608 — tabelas de _qualified_table, sem input do usuário
     " WITH RECURSIVE sd_seg AS ("
     "     SELECT sd.segment_id AS seg_id, sd.date_start, sd.date_end,"
-    "            sd.min_margin"
+    "            sd.min_margin, sd.nome_contem, sd.sku_prefixo"
     f"    FROM {_SEGMENT_SPECIAL_DATES_TABLE} sd"
     "     UNION ALL"
-    "     SELECT s.id, ss.date_start, ss.date_end, ss.min_margin"
+    "     SELECT s.id, ss.date_start, ss.date_end, ss.min_margin,"
+    "            ss.nome_contem, ss.sku_prefixo"
     f"    FROM {_SEGMENTS_TABLE} s"
     "     JOIN sd_seg ss ON s.parent_id = ss.seg_id"
     " )"
     " SELECT 1 FROM sd_seg de"
     " WHERE de.seg_id = v.pricing_leaf_segment_id"
-    "   AND (v.data AT TIME ZONE 'America/Sao_Paulo')::date"
-    "       BETWEEN de.date_start AND de.date_end"
+    "   AND (de.date_start IS NULL"
+    "        OR (v.data AT TIME ZONE 'America/Sao_Paulo')::date"
+    "           BETWEEN de.date_start AND de.date_end)"
+    "   AND (de.nome_contem IS NULL"
+    f"        OR v.produto ILIKE '%' || {_ILIKE_ESC.format(col='de.nome_contem')} || '%')"
+    "   AND (de.sku_prefixo IS NULL"
+    "        OR EXISTS (SELECT 1 FROM unnest(string_to_array(v.sku, '+')) AS comp"
+    f"                  WHERE btrim(comp) ILIKE {_ILIKE_ESC.format(col='de.sku_prefixo')} || '%'))"
     "   AND (de.min_margin IS NULL OR v.marketplace_margem >= de.min_margin)"
     ")"
 )

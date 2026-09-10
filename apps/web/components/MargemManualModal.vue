@@ -53,7 +53,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
             <li>Do <span class="font-medium text-foreground">cadastro do produto</span> na Precificação (segmento).</li>
             <li>SKU começando com <span class="font-medium text-foreground">"z"</span> sem cadastro = queima de estoque → usa a mínima do segmento <span class="font-medium text-foreground">Queima de estoque</span> (hoje −15%).</li>
             <li>Sem cadastro nenhum → padrão de <span class="font-medium text-foreground">9%</span>.</li>
-            <li><span class="font-medium text-foreground">Data Especial</span> ativa e margem dentro da regra especial → margem baixa não trava o pedido (aparece o selo na coluna Margem Mín.).</li>
+            <li><span class="font-medium text-foreground">Condição Especial</span> do segmento ativa (período pela data do pedido, nome do anúncio ou SKU) e margem dentro da regra especial → margem baixa não trava o pedido (aparece o selo na coluna Margem Mín.).</li>
           </ul>
         </section>
 

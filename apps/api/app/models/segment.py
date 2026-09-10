@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -62,7 +63,12 @@ class Segment(Base, TimestampMixin):
 
 
 class SegmentSpecialDate(Base, TimestampMixin):
-    """Datas Especiais — janela de exceção da triagem de margem por segmento.
+    """Condição Especial (ex-"Datas Especiais") — exceção da triagem de margem por segmento.
+
+    Desde a migration 0256 (10/09/2026) a condição pode ser por período, por
+    nome do produto (`nome_contem`) e/ou por SKU (`sku_prefixo`), combinados
+    em E; pelo menos uma das três é obrigatória. O texto abaixo descreve o
+    período, que continua igual.
 
     Pedido do Eduardo (01/09/2026): "em segmentos, que as margens que
     utilizamos em margens, vamos colocar um novo campo chamado datas
@@ -87,6 +93,14 @@ class SegmentSpecialDate(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    date_start: Mapped[date] = mapped_column(Date, nullable=False)
-    date_end: Mapped[date] = mapped_column(Date, nullable=False)
+    # Período pela DATA DO PEDIDO (fuso SP, inclusivo) — opcional desde a
+    # 0256; as duas datas vêm juntas ou nenhuma (CHECK no banco).
+    date_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    date_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     min_margin: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    # Condição por produto (10/09): "todo anúncio com M3 no nome" / "todo SKU
+    # a001". `nome_contem` casa por ILIKE '%x%' no nome do produto;
+    # `sku_prefixo` casa se o SKU — ou qualquer componente de kit ('a+b') —
+    # COMEÇA com o texto. Consumidos por _MARGEM_DATA_ESPECIAL_SQL.
+    nome_contem: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sku_prefixo: Mapped[str | None] = mapped_column(Text, nullable=True)
