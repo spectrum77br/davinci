@@ -360,6 +360,62 @@ async def test_acompanhamento_data_ultima_movimentacao_vem_da_logistica(
         await _derruba_view(db)
 
 
+async def test_acompanhamento_data_ultima_movimentacao_pega_a_mais_recente(
+    client, db, make_user, auth_as
+):
+    """Eduardo 10/09 (290327 e as devoluções Shopee/TikTok paradas): "isso
+    sempre tem que estar atualizado". O caso de devolução no marketplace anda
+    SEM o status da entrega mexer — a data da última movimentação é a mais
+    recente entre o carimbo da Logística, o evento do 17track do retorno e a
+    última mudança do caso (devolucao_atualizada_em)."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    p1, p2 = f"36{uuid4().hex[:6]}", f"37{uuid4().hex[:6]}"
+    await _monta_acompanhamento(db, p1, p2)
+    db.add(
+        Logistica(
+            pedido_bling=p2,
+            plataforma="shopee",
+            localizacao="Objeto entregue ao destinatário",
+            meli_status={"order_status": "COMPLETED"},
+            status_datas={"order_status": {"em": "2026-08-28T12:31:00+00:00", "fonte": "aprox"}},
+        )
+    )
+    db.add(
+        DevolucaoRastreio(
+            pedido_bling=p2,
+            devolucao_status_auto="PROCESSING",
+            fonte_auto="shopee",
+            devolucao_criada_em=datetime(2026, 8, 27, 1, 11, tzinfo=UTC),
+            devolucao_atualizada_em=datetime(2026, 9, 9, 3, 22, tzinfo=UTC),
+        )
+    )
+    await db.commit()
+
+    try:
+        r = await client.get("/api/devolutions/acompanhamento")
+        assert r.status_code == 200
+        item = {i["pedido_bling"]: i for i in r.json()["items"]}[p2]
+        # 09/09 (caso da devolução) e não 28/08 (status da entrega).
+        assert item["localizacao_data"].startswith("2026-09-09T03:22")
+
+        # PATCH só do rastreio → a resposta mantém a mesma data efetiva.
+        r = await client.patch(
+            f"/api/devolutions/acompanhamento/{p2}", json={"rastreio": "BR999"}
+        )
+        assert r.status_code == 200
+        assert r.json()["localizacao_data"].startswith("2026-09-09T03:22")
+
+        # Localização MANUAL continua mandando (data de quem digitou).
+        r = await client.patch(
+            f"/api/devolutions/acompanhamento/{p2}", json={"localizacao": "Recebido no CD"}
+        )
+        assert r.status_code == 200
+        assert r.json()["localizacao_data"].startswith(datetime.now(UTC).strftime("%Y-%m-%d"))
+    finally:
+        await _derruba_view(db)
+
+
 async def test_acompanhamento_mostra_status_da_devolucao_viva(
     client, db, make_user, auth_as
 ):

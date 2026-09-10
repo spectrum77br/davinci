@@ -442,6 +442,37 @@ def _data_entrada(
     return entrada_bling, entrada_bling is not None
 
 
+def _ultima_movimentacao(
+    *,
+    localizacao_manual: str | None,
+    localizacao_manual_data: datetime | None,
+    ultima_movimentacao_logistica: datetime | None,
+    localizacao_auto_data: datetime | None,
+    devolucao_atualizada_em: datetime | None,
+) -> datetime | None:
+    """"Data últ. movimentação" = o carimbo MAIS RECENTE entre TODAS as fontes
+    que mexem no pacote de volta (Eduardo 10/09: "isso sempre tem que estar
+    atualizado"): o último evento do 17track do retorno, a última mudança do
+    CASO de devolução no marketplace (devolucao_atualizada_em — a Shopee/TikTok
+    mexem no caso sem mexer no status da entrega) e o carimbo do status da
+    entrega na Logística. Localização MANUAL continua mandando: quem digitou
+    fixou o que viu, e a data é a dele."""
+    if localizacao_manual:
+        return localizacao_manual_data
+    candidatos = [
+        d
+        for d in (
+            ultima_movimentacao_logistica,
+            localizacao_auto_data,
+            devolucao_atualizada_em,
+        )
+        if d is not None
+    ]
+    if not candidatos:
+        return None
+    return max(d if d.tzinfo else d.replace(tzinfo=UTC) for d in candidatos)
+
+
 def _com_status_da_devolucao(
     d: dict,
     *,
@@ -451,7 +482,6 @@ def _com_status_da_devolucao(
     status_auto: str | None = None,
     fonte_auto: str | None = None,
     localizacao_auto: str | None = None,
-    localizacao_auto_data=None,
 ) -> dict:
     """Devolução VIVA → `localizacao` vira o status da devolução (+ o último
     evento do pacote de volta, quando o 17track já mandou) e a entrega original
@@ -475,8 +505,6 @@ def _com_status_da_devolucao(
     if dev:
         d["entrega_localizacao"] = d.get("localizacao")
         d["localizacao"] = f"{dev} · {localizacao_auto}" if localizacao_auto else dev
-        if localizacao_auto_data is not None:
-            d["localizacao_data"] = localizacao_auto_data
     return d
 
 
@@ -489,8 +517,8 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
     do pedido, onde o time já preenche/acompanha o pacote) e a edição manual da
     aba (devolucao_rastreio) SOBRESCREVE o automático quando preenchida —
     Eduardo 03/09: "nao esta puxando o rastreio, isso tem que ser automatico".
-    `localizacao_data` só existe pra localização manual (a Logística não guarda
-    a data da última movimentação). Compartilhada com o botão Informar."""
+    `localizacao_data` é a última movimentação vista (ver
+    _ultima_movimentacao). Compartilhada com o botão Informar."""
     rows = (
         await session.execute(
             text(
@@ -528,12 +556,14 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
                         AS rastreio,
                     COALESCE(NULLIF(btrim(r.localizacao), ''), lg.localizacao)
                         AS localizacao,
-                    -- Data da última movimentação: a do manual quando a
-                    -- localização é manual; senão a da Logística (carimbo
-                    -- mais recente do status_datas — ver logistica_datas).
-                    CASE WHEN NULLIF(btrim(r.localizacao), '') IS NOT NULL
-                         THEN r.localizacao_data
-                         ELSE lg.ultima_movimentacao END AS localizacao_data,
+                    -- Data da última movimentação (decidida em
+                    -- _ultima_movimentacao): a do manual quando a localização é
+                    -- manual; senão a MAIS RECENTE entre o carimbo da Logística
+                    -- (status_datas), o evento do 17track do retorno e a última
+                    -- mudança do caso de devolução no marketplace.
+                    r.localizacao_data          AS localizacao_data_manual,
+                    lg.ultima_movimentacao      AS lg_ultima_movimentacao,
+                    r.devolucao_atualizada_em,
                     -- Auxiliares do pós-processamento (status da devolução
                     -- viva no lugar da entrega — _com_status_da_devolucao):
                     NULLIF(btrim(r.localizacao), '') AS localizacao_manual,
@@ -583,18 +613,26 @@ async def acompanhamento_rows(session: AsyncSession) -> list[dict]:
             meli_status=lg_meli_status,
             status_datas=d.pop("lg_status_datas", None),
         )
+        localizacao_manual = d.pop("localizacao_manual", None)
+        d["localizacao_data"] = _ultima_movimentacao(
+            localizacao_manual=localizacao_manual,
+            localizacao_manual_data=d.pop("localizacao_data_manual", None),
+            ultima_movimentacao_logistica=d.pop("lg_ultima_movimentacao", None),
+            localizacao_auto_data=d.get("localizacao_auto_data"),
+            devolucao_atualizada_em=d.pop("devolucao_atualizada_em", None),
+        )
         out.append(
             _com_status_da_devolucao(
                 d,
-                localizacao_manual=d.pop("localizacao_manual", None),
+                localizacao_manual=localizacao_manual,
                 lg_plataforma=lg_plataforma,
                 lg_meli_status=lg_meli_status,
                 status_auto=d.pop("devolucao_status_auto", None),
                 fonte_auto=d.pop("fonte_auto", None),
                 localizacao_auto=d.pop("localizacao_auto", None),
-                localizacao_auto_data=d.pop("localizacao_auto_data", None),
             )
         )
+        d.pop("localizacao_auto_data", None)
     return out
 
 
@@ -719,10 +757,12 @@ async def patch_acompanhamento_rastreio(
             "pedido_bling": row.pedido_bling,
             "rastreio": row.rastreio or row.rastreio_auto or (lg["rastreio"] if lg else None),
             "localizacao": row.localizacao or (lg["localizacao"] if lg else None),
-            "localizacao_data": (
-                row.localizacao_data
-                if row.localizacao
-                else (lg["ultima_movimentacao"] if lg else None)
+            "localizacao_data": _ultima_movimentacao(
+                localizacao_manual=row.localizacao,
+                localizacao_manual_data=row.localizacao_data,
+                ultima_movimentacao_logistica=lg["ultima_movimentacao"] if lg else None,
+                localizacao_auto_data=row.localizacao_auto_data,
+                devolucao_atualizada_em=row.devolucao_atualizada_em,
             ),
             "aguardando_devolucao_data": entrada,
             "aguardando_devolucao_data_estimada": estimada,
@@ -734,7 +774,6 @@ async def patch_acompanhamento_rastreio(
         status_auto=row.devolucao_status_auto,
         fonte_auto=row.fonte_auto,
         localizacao_auto=row.localizacao_auto,
-        localizacao_auto_data=row.localizacao_auto_data,
     )
     return AcompanhamentoRastreioOut(**d)
 
