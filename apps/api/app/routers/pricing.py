@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
-from app.deps.team_scope import resolve_team_scope
+from app.deps.team_scope import TeamScope, resolve_team_scope
 from app.models import (
     AuditDismissedSku,
     BackgroundJob,
@@ -246,6 +246,23 @@ def _exclude_archived_accounts(stmt):
     )
 
 
+async def _escopo_precos(session: AsyncSession, user: User) -> TeamScope:
+    """Escopo de equipe da Tabela de Preços, com uma saída própria.
+
+    Eduardo, 10/09/2026: "para o usuário israel, em tabela de preços, pode
+    fazer aparecer todas as contas somente na tabela de preços para ele".
+    A cerca normal é por EQUIPE (user.sales_teams → lojas da equipe), e ela
+    vale pro sistema inteiro; quem precisa ver todas as contas SÓ aqui ganha
+    a permissão `tabela_precos_todas_contas` (view) na tela de Usuários —
+    mesma ideia do "gerente de etiquetas" no Controle de Estoque. Nenhuma
+    outra aba muda: fora da Tabela de Preços a equipe continua cercando.
+    """
+    perms = (user.permissions or {}).get("tabela_precos_todas_contas") or {}
+    if isinstance(perms, dict) and perms.get("view"):
+        return TeamScope(unrestricted=True)
+    return await resolve_team_scope(session, user)
+
+
 def _team_scope_accounts(stmt, scope):
     """Restringe as contas da Tabela de Preço às lojas da equipe do usuário
     (não-admin com equipe). A conta casa por `store_info_id` OU por
@@ -280,7 +297,7 @@ async def list_accounts(
     if platform:
         stmt = stmt.where(PricingAccount.platform == _coerce_platform(platform))
     stmt = _exclude_archived_accounts(stmt)
-    stmt = _team_scope_accounts(stmt, await resolve_team_scope(session, user))
+    stmt = _team_scope_accounts(stmt, await _escopo_precos(session, user))
     stmt = stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
     rows = (await session.execute(stmt)).scalars().all()
     names_by_id = await _segment_names_by_id(session)
@@ -1067,7 +1084,7 @@ async def get_grid(
     # Mesmo escopo por equipe do `/accounts`: as colunas do grid não podem
     # mostrar contas de lojas fora da equipe do usuário.
     accounts_stmt = _team_scope_accounts(
-        accounts_stmt, await resolve_team_scope(session, user)
+        accounts_stmt, await _escopo_precos(session, user)
     )
     accounts = (
         await session.execute(
