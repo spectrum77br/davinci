@@ -109,22 +109,22 @@ async def test_condicao_especial_por_nome_e_sku_sem_periodo(client, db, make_use
     )
     assert r1.status_code == 201, r1.text
     assert r1.json()["nome_contem"] == "M3"
-    assert r1.json()["sku_prefixo"] is None
+    assert r1.json()["sku_contem"] is None
     assert r1.json()["date_start"] is None and r1.json()["date_end"] is None
 
     r2 = await client.post(
         f"/api/segments/{seg.id}/special-dates",
-        json={"sku_prefixo": "a001", "date_start": "2026-09-01", "date_end": "2026-09-30"},
+        json={"sku_contem": "a001", "date_start": "2026-09-01", "date_end": "2026-09-30"},
     )
     assert r2.status_code == 201, r2.text
-    assert r2.json()["sku_prefixo"] == "a001"
+    assert r2.json()["sku_contem"] == "a001"
     assert r2.json()["min_margin"] is None
 
     tree = await client.get("/api/segments/tree")
     assert tree.status_code == 200
     no = next(n for n in tree.json() if n["id"] == str(seg.id))
     regras = {
-        (sd["nome_contem"], sd["sku_prefixo"], sd["date_start"]) for sd in no["special_dates"]
+        (sd["nome_contem"], sd["sku_contem"], sd["date_start"]) for sd in no["special_dates"]
     }
     assert regras == {("M3", None, None), (None, "a001", "2026-09-01")}
 
@@ -139,7 +139,7 @@ async def test_condicao_especial_vazia_ou_periodo_incompleto_rejeitada(
     vazia = await client.post(f"/api/segments/{seg.id}/special-dates", json={"min_margin": "0.06"})
     assert vazia.status_code == 422
     so_espacos = await client.post(
-        f"/api/segments/{seg.id}/special-dates", json={"nome_contem": "   ", "sku_prefixo": ""}
+        f"/api/segments/{seg.id}/special-dates", json={"nome_contem": "   ", "sku_contem": ""}
     )
     assert so_espacos.status_code == 422
     incompleto = await client.post(

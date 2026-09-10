@@ -102,7 +102,7 @@ class SegmentSpecialDateCreate(BaseModel):
       • período `date_start`..`date_end` (data do pedido, BRT, inclusivo; as
         duas datas juntas ou nenhuma);
       • `nome_contem`: nome do produto contém o texto (sem caixa);
-      • `sku_prefixo`: SKU — ou componente de kit ("a+b") — começa com o texto.
+      • `sku_contem`: SKU contém o texto (kit "a+b" entra, o texto está dentro).
     `min_margin` em FRAÇÃO (mesma escala de segments.min_margin: -0.15 =
     -15%); NULL = aprova qualquer margem quando a condição casa.
     """
@@ -110,10 +110,10 @@ class SegmentSpecialDateCreate(BaseModel):
     date_start: date | None = None
     date_end: date | None = None
     nome_contem: str | None = None
-    sku_prefixo: str | None = None
+    sku_contem: str | None = None
     min_margin: Decimal | None = None
 
-    @field_validator("nome_contem", "sku_prefixo", mode="before")
+    @field_validator("nome_contem", "sku_contem", mode="before")
     @classmethod
     def _v_texto(cls, v: object) -> str | None:
         if v is None:
@@ -131,7 +131,7 @@ class SegmentSpecialDateCreate(BaseModel):
             raise ValueError("date_range_incomplete")
         if self.date_start and self.date_end and self.date_end < self.date_start:
             raise ValueError("date_range_invalid")
-        if self.date_start is None and not self.nome_contem and not self.sku_prefixo:
+        if self.date_start is None and not self.nome_contem and not self.sku_contem:
             raise ValueError("condicao_vazia")
         return self
 
@@ -144,7 +144,7 @@ class SegmentSpecialDateOut(BaseModel):
     date_start: date | None = None
     date_end: date | None = None
     nome_contem: str | None = None
-    sku_prefixo: str | None = None
+    sku_contem: str | None = None
     min_margin: Decimal | None = None
 
 

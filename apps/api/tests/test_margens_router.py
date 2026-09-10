@@ -1056,14 +1056,13 @@ async def test_marketplace_margem_isenta_por_condicao_especial_nome_e_sku(
     auth_as,
 ):
     """Condição Especial por produto (10/09): "todo anúncio com M3 no nome
-    aprova até 6%" e "todo SKU a001 aprova" — sem período. Folha com mínima
-    15%; todas as linhas abaixo da mínima:
-      - "Mala Chanfrada M3", margem 8%           → nome casa (sem caixa), 8% ≥ 6% → isenta
+    aprova até 6%" e "todo SKU a001 aprova" — sem período. Nome e SKU casam
+    por CONTÉM (sem caixa). Folha com mínima 15%; todas as linhas abaixo dela:
+      - "Mala Chanfrada M3", margem 8%           → nome casa, 8% ≥ 6% → isenta
       - "Mala Chanfrada M3", margem 3%           → nome casa, 3% < 6% → margem baixa
       - "Mala Listrada M1",  margem 8%           → nenhuma condição casa → margem baixa
-      - sku dg053.sp+a001.sp, margem -50%        → componente do kit começa com a001,
-                                                   aprova tudo → isenta
-      - sku xa001.sp, margem 8%                  → não COMEÇA com a001 → margem baixa
+      - sku dg053.sp+a001.sp, margem -50%        → kit contém a001, aprova tudo → isenta
+      - sku x018.sp, margem 8%                   → não contém a001 → margem baixa
       - "Mala M3" SEM segmento, margem 8%        → exceção não vaza → margem baixa
     """
     from datetime import UTC, datetime
@@ -1082,7 +1081,7 @@ async def test_marketplace_margem_isenta_por_condicao_especial_nome_e_sku(
     db.add_all(
         [
             SegmentSpecialDate(segment_id=folha.id, nome_contem="m3", min_margin=Decimal("0.06")),
-            SegmentSpecialDate(segment_id=folha.id, sku_prefixo="a001", min_margin=None),
+            SegmentSpecialDate(segment_id=folha.id, sku_contem="a001", min_margin=None),
         ]
     )
     await db.commit()
@@ -1118,7 +1117,7 @@ async def test_marketplace_margem_isenta_por_condicao_especial_nome_e_sku(
     await seed("602002", "b025.12", "Mala Chanfrada M3 tamanho 12 - Preto", "0.03", folha.id)
     await seed("602003", "b005.12", "Mala Listrada M1 tamanho 12 - Preto", "0.08", folha.id)
     await seed("602004", "dg053.sp+a001.sp", "Hotwav A17 + Fone", "-0.50", folha.id)
-    await seed("602005", "xa001.sp", "Fone", "0.08", folha.id)
+    await seed("602005", "x018.sp", "Fone", "0.08", folha.id)
     await seed("602006", "b025.12", "Mala Chanfrada M3 tamanho 12", "0.08", None)
 
     resp = await client.get("/api/margens/marketplace?attention_type=margem&status=Pendente")

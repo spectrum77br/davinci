@@ -66,7 +66,7 @@ class SegmentSpecialDate(Base, TimestampMixin):
     """Condição Especial (ex-"Datas Especiais") — exceção da triagem de margem por segmento.
 
     Desde a migration 0256 (10/09/2026) a condição pode ser por período, por
-    nome do produto (`nome_contem`) e/ou por SKU (`sku_prefixo`), combinados
+    nome do produto (`nome_contem`) e/ou por SKU (`sku_contem`), combinados
     em E; pelo menos uma das três é obrigatória. O texto abaixo descreve o
     período, que continua igual.
 
@@ -100,7 +100,9 @@ class SegmentSpecialDate(Base, TimestampMixin):
     min_margin: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
     # Condição por produto (10/09): "todo anúncio com M3 no nome" / "todo SKU
     # a001". `nome_contem` casa por ILIKE '%x%' no nome do produto;
-    # `sku_prefixo` casa se o SKU — ou qualquer componente de kit ('a+b') —
-    # COMEÇA com o texto. Consumidos por _MARGEM_DATA_ESPECIAL_SQL.
+    # `sku_contem` casa se o SKU CONTÉM o texto (ILIKE '%x%'); kit 'a+b'
+    # entra porque o texto está dentro. Decisão de 10/09 ("pode ser o
+    # contém"), ciente de que 'a001' também casa 'ha001'. Consumidos por
+    # _MARGEM_DATA_ESPECIAL_SQL.
     nome_contem: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sku_prefixo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sku_contem: Mapped[str | None] = mapped_column(Text, nullable=True)

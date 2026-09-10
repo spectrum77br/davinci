@@ -11,7 +11,7 @@ definePageMeta({
 // segmento — e de TODOS os subsegmentos — não são travados por margem baixa
 // na aba Margem (nem pelo robô de auto-hold). Condições opcionais em E:
 // período (datas BRT, inclusivas, pela data do pedido), nome do produto
-// contém, SKU começa com (ou componente de kit). Pelo menos uma.
+// contém, SKU contém (kit entra, o texto está dentro). Pelo menos uma.
 // min_margin em fração (-0.15 = -15%); null = aprova qualquer margem.
 type SpecialDate = {
   id: string
@@ -19,7 +19,7 @@ type SpecialDate = {
   date_start: string | null
   date_end: string | null
   nome_contem: string | null
-  sku_prefixo: string | null
+  sku_contem: string | null
   min_margin: string | null
 }
 
@@ -229,7 +229,7 @@ async function remove(seg: Segment, depth: number) {
 
 // ========================================================= condição especial
 // Modal por segmento: lista as condições vigentes + formulário (período
-// opcional, nome contém, SKU começa com, margem).
+// opcional, nome contém, SKU contém, margem).
 
 const specialFor = ref<Segment | null>(null)
 const sdStart = ref('')
@@ -293,7 +293,7 @@ function sdCondicoes(sd: SpecialDate): string {
   const partes: string[] = []
   if (sd.date_start && sd.date_end) partes.push(`${fmtBR(sd.date_start)} até ${fmtBR(sd.date_end)}`)
   if (sd.nome_contem) partes.push(`nome contém “${sd.nome_contem}”`)
-  if (sd.sku_prefixo) partes.push(`SKU começa com “${sd.sku_prefixo}”`)
+  if (sd.sku_contem) partes.push(`SKU contém “${sd.sku_contem}”`)
   return partes.join(' · ')
 }
 const condicoesVigentes = computed(() => (specialFor.value?.special_dates ?? []).filter(condicaoVigente))
@@ -331,7 +331,7 @@ async function addSpecial() {
     body.date_end = sdEnd.value
   }
   if (nome) body.nome_contem = nome
-  if (sku) body.sku_prefixo = sku
+  if (sku) body.sku_contem = sku
   // BUG corrigido (01/09, Eduardo: "não está deixando adicionar"): input
   // type="number" faz o v-model entregar NUMBER, e number.trim() explodia
   // ANTES do POST — clique morria sem mensagem. String() cobre os dois casos.
@@ -507,7 +507,7 @@ async function removeSpecial(sd: SpecialDate) {
           Margem (o robô também não segura). A condição pode ser por
           <strong>período</strong> (vale a <strong>data do pedido</strong>, não o
           dia de hoje), por <strong>nome do anúncio</strong> (contém o texto) e/ou
-          por <strong>SKU</strong> (começa com o texto, inclusive dentro de kit);
+          por <strong>SKU</strong> (contém o texto, inclusive dentro de kit);
           o que estiver preenchido precisa casar junto. Sem margem preenchida,
           aprova qualquer margem — até negativa. Período que já terminou some
           daqui no dia seguinte e é apagado sozinho 30 dias depois.
@@ -571,7 +571,7 @@ async function removeSpecial(sd: SpecialDate) {
               />
             </label>
             <label class="block text-xs text-muted-foreground">
-              SKU começa com — opcional
+              SKU contém — opcional
               <input
                 v-model="sdSku"
                 type="text"

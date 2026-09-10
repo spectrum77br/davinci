@@ -204,7 +204,7 @@ async def create_special_date(
         date_start=body.date_start,
         date_end=body.date_end,
         nome_contem=body.nome_contem,
-        sku_prefixo=body.sku_prefixo,
+        sku_contem=body.sku_contem,
         min_margin=body.min_margin,
     )
     session.add(sd)
@@ -216,7 +216,7 @@ async def create_special_date(
         date_start=str(body.date_start),
         date_end=str(body.date_end),
         nome_contem=body.nome_contem,
-        sku_prefixo=body.sku_prefixo,
+        sku_contem=body.sku_contem,
         min_margin=None if body.min_margin is None else float(body.min_margin),
     )
     return SegmentSpecialDateOut.model_validate(sd)

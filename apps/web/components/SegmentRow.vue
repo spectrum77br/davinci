@@ -3,7 +3,7 @@ import { Check, ChevronDown, ChevronRight, Loader2, Plus, Trash2, X } from 'luci
 
 // Condição Especial (ex-"Datas Especiais"): exceção em que a margem baixa não
 // trava pedidos do segmento (nem dos subsegmentos) — por período (data do
-// pedido), nome do produto contém e/ou SKU começa com. min_margin em fração
+// pedido), nome do produto contém e/ou SKU contém. min_margin em fração
 // (-0.15 = -15%); null = aprova qualquer margem.
 type SpecialDate = {
   id: string
@@ -11,7 +11,7 @@ type SpecialDate = {
   date_start: string | null
   date_end: string | null
   nome_contem: string | null
-  sku_prefixo: string | null
+  sku_contem: string | null
   min_margin: string | null
 }
 
@@ -93,7 +93,7 @@ function fmtCond(sd: SpecialDate): string {
   const r = fmtRange(sd)
   if (r) partes.push(r)
   if (sd.nome_contem) partes.push(`nome:${sd.nome_contem}`)
-  if (sd.sku_prefixo) partes.push(`sku:${sd.sku_prefixo}`)
+  if (sd.sku_contem) partes.push(`sku:${sd.sku_contem}`)
   return partes.join(' · ')
 }
 function fmtRegra(sd: SpecialDate): string {
