@@ -21,9 +21,10 @@ Estoque, por condição efetiva:
   Extraviado / Sucata (condição) / outros → não mexe no estoque.
 
 Situação do pedido (valor único no Bling), precedência pior→melhor:
-  qualquer Extraviado ou Sucata (CONDIÇÃO, 10/09: "segue o mesmo padrão do
-  Extraviado") → 83960; senão Manutenção pendente → 84677; senão qualquer
-  Trocado OU todos os itens resolvidos (Novo/Usado/Manutenção→Sucata) → 545902.
+  qualquer Extraviado → 83960; senão qualquer Sucata (CONDIÇÃO, 10/09: "não é
+  resolvido nem extraviado, é perdimento") → 83956 Perdimento; senão
+  Manutenção pendente → 84677; senão qualquer Trocado OU todos os itens
+  resolvidos (Novo/Usado/Manutenção→Sucata) → 545902.
   Obs.: Manutenção com destino Sucata (modal) continua RESOLVIDO (545902) —
   o Bling rejeita a transição pra 545901 "Manutenção - Sucata".
   "Entregue" e "Não devolvido" (legado) são NEUTROS: não contam no cálculo.
@@ -74,6 +75,9 @@ _STOCK_TRIGGER_CONDICOES = _STOCK_CONDICOES | {"Trocado", "Manutenção"}
 # Situações do pedido no Bling (idSituacao).
 SITUACAO_RESOLVIDO = 545902
 SITUACAO_EXTRAVIADO = 83960
+# Condição Sucata (10/09) → Perdimento (mesmo id que o Financeiro usa na Taxa
+# de Perdimento, routers/financeiro._VAL_SIT_PERDIMENTO).
+SITUACAO_PERDIMENTO = 83956
 SITUACAO_MANUTENCAO = 84677
 SITUACAO_AGUARDANDO_DEVOLUCAO = 83957
 # 545901 ("Manutenção - Sucata") existe mas o Bling rejeita a transição (400);
@@ -87,6 +91,7 @@ _NEUTRAL_CONDICOES = {"Entregue", "Não devolvido"}
 _SITUACAO_NOMES = {
     SITUACAO_RESOLVIDO: "Resolvido",
     SITUACAO_EXTRAVIADO: "Extraviado",
+    SITUACAO_PERDIMENTO: "Perdimento",
     SITUACAO_MANUTENCAO: "Manutenção",
 }
 
@@ -164,15 +169,17 @@ async def _get_bling_client(session: AsyncSession) -> BlingClient | None:
 
 def _resolution_of(row: Devolution) -> str:
     """Classifica a 'resolução' do item:
-    extraviado | manutencao (pendente) | resolvido | unresolved.
+    extraviado | perdimento | manutencao (pendente) | resolvido | unresolved.
 
     Manutenção→Sucata resolve como 'resolvido' (o pedido vai para 545902 —
     o Bling rejeita a situação 545901 "Sucata" na transição)."""
     c = (row.condicao_produto or "").strip()
-    # Sucata como CONDIÇÃO (10/09) = mesmo padrão do Extraviado (83960). Não
-    # confundir com Manutenção→destino Sucata (modal), que resolve o pedido.
-    if c in ("Extraviado", "Sucata"):
+    if c == "Extraviado":
         return "extraviado"
+    # Sucata como CONDIÇÃO (10/09) → Perdimento. Não confundir com
+    # Manutenção→destino Sucata (modal), que resolve o pedido.
+    if c == "Sucata":
+        return "perdimento"
     if c == "Manutenção":
         d = (row.manutencao_destino or "").strip()
         if d in _STOCK_CONDICOES or d == "Sucata":
@@ -186,7 +193,7 @@ def _resolution_of(row: Devolution) -> str:
 def _order_situacao_target(rows: list[Devolution]) -> int | None:
     """Situação única do pedido pela precedência pior→melhor.
 
-    Extraviado > Manutenção(pendente) > Trocado/Resolvido. "Resolvido" por
+    Extraviado > Perdimento (Sucata) > Manutenção(pendente) > Trocado/Resolvido. "Resolvido" por
     Novo/Usado/Sucata só quando TODOS os itens estão resolvidos; um Trocado
     força resolvido. Manutenção pendente mantém o pedido "em manutenção" até o
     técnico escolher Novo/Usado/Sucata.
@@ -201,6 +208,8 @@ def _order_situacao_target(rows: list[Devolution]) -> int | None:
     conds = [(r.condicao_produto or "").strip() for r in rows]
     if "extraviado" in res:
         return SITUACAO_EXTRAVIADO
+    if "perdimento" in res:
+        return SITUACAO_PERDIMENTO
     if "manutencao" in res:
         return SITUACAO_MANUTENCAO
     if "Trocado" in conds:

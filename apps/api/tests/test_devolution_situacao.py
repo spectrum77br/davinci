@@ -22,6 +22,7 @@ from app.services.devolution_stock_return import (
     SITUACAO_AGUARDANDO_DEVOLUCAO,
     SITUACAO_EXTRAVIADO,
     SITUACAO_MANUTENCAO,
+    SITUACAO_PERDIMENTO,
     SITUACAO_RESOLVIDO,
     _is_same_situacao_error,
     _order_situacao_target,
@@ -51,11 +52,15 @@ def test_target_extraviado_tem_precedencia():
     assert _order_situacao_target(rows) == SITUACAO_EXTRAVIADO
 
 
-def test_target_sucata_condicao_segue_extraviado():
-    """Sucata como CONDIÇÃO (10/09) = mesmo padrão do Extraviado → 83960; não
-    confundir com Manutenção→destino Sucata (modal), que resolve o pedido."""
+def test_target_sucata_condicao_vira_perdimento():
+    """Sucata como CONDIÇÃO (10/09: "não é resolvido nem extraviado, é
+    perdimento") → 83956. Extraviado ainda tem precedência; Manutenção
+    pendente perde pra Sucata. Não confundir com Manutenção→destino Sucata
+    (modal), que resolve o pedido."""
     rows = [_row("Sucata"), _row("Novo"), _row("Não devolvido")]
-    assert _order_situacao_target(rows) == SITUACAO_EXTRAVIADO
+    assert _order_situacao_target(rows) == SITUACAO_PERDIMENTO
+    assert _order_situacao_target([_row("Extraviado"), _row("Sucata")]) == SITUACAO_EXTRAVIADO
+    assert _order_situacao_target([_row("Sucata"), _row("Manutenção")]) == SITUACAO_PERDIMENTO
     destino_sucata = [_row("Manutenção", "Sucata"), _row("Novo")]
     assert _order_situacao_target(destino_sucata) == SITUACAO_RESOLVIDO
 

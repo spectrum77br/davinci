@@ -58,9 +58,10 @@ from app.services.devolution_stock_return import (
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/devolutions", tags=["devolutions"])
 
-# Sucata (10/09) segue o padrão do Extraviado em TODAS as regras: reembolso
-# automático com prejuízo = custo do produto, link de abertura obrigatório,
-# não mexe no estoque e patcha a situação do pedido já no add.
+# Sucata (10/09) segue o padrão do Extraviado: reembolso automático com
+# prejuízo = custo do produto, link de abertura obrigatório, não mexe no
+# estoque e patcha a situação do pedido já no add — só que pra PERDIMENTO
+# (83956), não pra Extraviado (services/devolution_stock_return).
 _REFUND_CONDICOES = {"Extraviado", "Sucata", "Manutenção"}
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
