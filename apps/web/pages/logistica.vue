@@ -60,6 +60,9 @@ type Logistica = {
   // Quando os CORREIOS se moveram (17track). Vazio = a localização exibida
   // ainda é o proxy do marketplace, não o rastreio físico.
   localizacao_at?: string | null
+  // Quando PERGUNTAMOS os Correios (mesmo sem evento novo) — é isto que
+  // prova que o robô está vivo enquanto o pacote está parado.
+  rastreio_lido_em?: string | null
   divergencia: string | null
   status_bling: string | null
   chamado: string | null
@@ -1655,7 +1658,7 @@ async function aplicarStatusBling(c: Logistica) {
                       :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
                       :title="`Lido nos Correios em ${fmtDataHora(c.localizacao_at)}`"
                     >
-                      Correios · lido {{ fmtDesde(c.localizacao_at) }}
+                      Correios · lido {{ fmtDesde(c.rastreio_lido_em || c.localizacao_at) }}
                     </div>
                     <div
                       v-else

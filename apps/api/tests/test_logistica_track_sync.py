@@ -722,3 +722,37 @@ async def test_forcar_nao_roda_em_dobro(db: AsyncSession, fake_forcar):
 
     assert out.get("ja_rodando") is True
     assert chamadas["parar_e_retomar"] == [] and chamadas["reregistrar"] == []
+
+
+@pytest.mark.asyncio
+async def test_carimba_a_consulta_mesmo_sem_evento_novo(db: AsyncSession, fake_17track):
+    """Eduardo (10/09): "parou de atualizar o rastreamento dos correios?". Não
+    tinha parado — o pacote é que estava parado. A tela dizia "lido há 22 h"
+    usando `localizacao_at`, que só muda quando o pacote se move. Agora a
+    consulta tem carimbo próprio, e ele avança mesmo sem evento novo."""
+    _chamadas, estado = fake_17track
+    parado = datetime(2026, 9, 9, 19, 31, tzinfo=UTC)
+    row = Logistica(
+        pedido_bling="295070",
+        plataforma="Mercado Livre",
+        data=date.today(),
+        rastreio="AD890179823BR",
+        rastreio_17track="AD890179823BR",
+        localizacao="Sao Paulo/SP — Objeto em transferência - por favor aguarde",
+        localizacao_at=parado,
+        status_bling="Em andamento",
+    )
+    db.add(row)
+    await db.commit()
+    # O 17track responde a MESMA localização de ontem: nada se moveu.
+    estado["eventos"] = [
+        ("AD890179823BR", "Sao Paulo/SP — Objeto em transferência - por favor aguarde")
+    ]
+
+    out = await logistica_track_sync.run(db, pedidos=["295070"])
+
+    await db.refresh(row)
+    assert out["atualizados"] == 0  # nada mudou, e está certo
+    assert row.localizacao_at == parado  # o carimbo do MOVIMENTO não mente
+    assert row.rastreio_lido_em is not None  # mas a CONSULTA de hoje aparece
+    assert row.rastreio_lido_em > parado

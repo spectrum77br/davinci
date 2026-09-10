@@ -61,6 +61,13 @@ class Logistica(Base, TimestampMixin):
     localizacao_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Quando PERGUNTAMOS o rastreio (mesmo sem evento novo). Diferente de
+    # `localizacao_at`, que só muda quando o pacote se move — era ele que a
+    # tela mostrava como "lido há X h", fazendo parecer que o sistema tinha
+    # parado quando o pacote é que estava parado (Eduardo, 10/09).
+    rastreio_lido_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Explicação da divergência entre o status do ML e o rastreio físico dos
     # Correios (auto-calculada; vazia quando batem). Ver logistica_rules.
     divergencia: Mapped[str | None] = mapped_column(Text, nullable=True)

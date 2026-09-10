@@ -266,6 +266,14 @@ async def _run(
                 logger.warning("logistica_track_sync_fetch_falhou", err=str(e)[:200])
                 eventos = []
             atualizados = await _aplicar_localizacoes(session, linhas, eventos)
+            # Carimba a CONSULTA em todos que perguntamos, tenha mudado ou não:
+            # é isso que a tela precisa mostrar pra provar que o robô está vivo.
+            consultados = set(numeros)
+            agora_leitura = datetime.now(UTC)
+            for r in linhas:
+                if _num(r.rastreio_17track) in consultados:
+                    r.rastreio_lido_em = agora_leitura
+            await session.commit()
 
     resumo = {
         "linhas": len(linhas),

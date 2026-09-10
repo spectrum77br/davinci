@@ -51,6 +51,7 @@ class LogisticaOut(BaseModel):
     # Quando a `localizacao` veio dos CORREIOS (push/pull do 17track). Vazio = o
     # que está na coluna ainda é o proxy do marketplace, não o físico. Só leitura.
     localizacao_at: datetime | None = None
+    rastreio_lido_em: datetime | None = None
     # Divergência ML × rastreio físico dos Correios (auto-calculada; só leitura).
     divergencia: str | None = None
     status_bling: str | None = None
