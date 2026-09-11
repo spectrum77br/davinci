@@ -1,14 +1,6 @@
-"""Página Valuation — bloco Comercial em abas (empresa → membros).
+"""Comercial agrupa Equipe 1/2 independentemente dos códigos de acesso.
 
-Hoje há UMA empresa: cada `store_info.sales_team` vira um membro dela, rotulado
-"1.<rank>". A saída tem: `total_*` (Total geral), e `empresas[]` com o subtotal
-da empresa + `membros[]`. Duas métricas por mês: `aguardando_devolucao` (R$ dos
-pedidos em Aguardando Devolução) e `taxa_devolucao` (%). Cobre:
-  * agrupamento empresa → membros com rótulo "1.1"/"1.2";
-  * taxa por membro (PEDIDOS devolvidos Novo+Usado, distinct pedido_bling ÷
-    pedidos do faturamento do membro — um kit ramificado conta 1);
-  * Total geral somando todos os membros;
-  * aguardando devolução (R$) por membro.
+Taxas usam pedidos distintos, inclusive kits, e preservam o total ponderado.
 """
 from __future__ import annotations
 
@@ -42,10 +34,13 @@ def _headers() -> dict[str, str]:
     return {"X-Valuation-Token": token}
 
 
-async def _loja(db: AsyncSession, owner: User, *, loja: str, team: int) -> None:
+async def _loja(
+    db: AsyncSession, owner: User, *, loja: str, team: int, commercial_team: int = 1,
+) -> None:
     db.add(StoreInfo(
         user_id=owner.id, platform="ml",
-        account_name=f"loja-{loja}", bling_store_id=loja, sales_team=team,
+        account_name=f"loja-{loja}", bling_store_id=loja,
+        sales_team=team, commercial_team=commercial_team,
     ))
     await db.commit()
 
@@ -75,7 +70,7 @@ def _idx_mes_atual(body: dict) -> int:
 
 
 @pytest.mark.asyncio
-async def test_comercial_agrupa_empresa_membros(
+async def test_comercial_agrupa_equipes_sem_expor_membros(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None],
 ):
@@ -104,36 +99,28 @@ async def test_comercial_agrupa_empresa_membros(
     com = r.json()["comercial"]
     i = _idx_mes_atual(r.json())
 
-    # Uma empresa, dois membros rotulados 1.1 / 1.2.
-    assert len(com["empresas"]) == 1
-    emp = com["empresas"][0]
-    assert emp["label"] == "Empresa 1"
-    membros = {m["label"]: m for m in emp["membros"]}
-    assert set(membros) == {"1.1", "1.2"}
-
-    # Taxa por membro (pedidos distintos devolvidos ÷ pedidos faturamento).
-    assert membros["1.1"]["taxa_devolucao"][i] == 50.0   # 1 pedido ÷ 2 × 100
-    assert membros["1.2"]["taxa_devolucao"][i] == 25.0   # 1 pedido ÷ 4 × 100
-    # Aguardando Devolução (R$) no membro 1.1.
-    assert membros["1.1"]["aguardando_devolucao"][i] == 500.0
-    assert membros["1.2"]["aguardando_devolucao"][i] == 0.0
-
-    # Total geral = 2 pedidos devolvidos ({9101, 9201}) ÷ 6 pedidos × 100 =
-    # 33.33; subtotal da empresa idem.
-    assert com["total_taxa_devolucao"][i] == 33.33
-    assert emp["taxa_devolucao"][i] == 33.33
+    assert [e["label"] for e in com["empresas"]] == ["Equipe 1", "Equipe 2"]
+    emp, vazia = com["empresas"]
+    assert emp["membros"] == vazia["membros"] == []
+    # Dois grupos de acesso somados na Equipe 1: taxa ponderada 2/6,
+    # sem calcular a média incorreta das taxas 50% e 25%.
+    assert emp["aguardando_devolucao"][i] == 500.0
+    assert com["total_aguardando_devolucao"][i] == 500.0
+    assert emp["taxa_devolucao"][i] == com["total_taxa_devolucao"][i] == 33.33
+    assert vazia["aguardando_devolucao"][i] == 0.0
+    assert vazia["taxa_devolucao"][i] is None
 
 
 @pytest.mark.asyncio
-async def test_comercial_multiplas_empresas(
+async def test_comercial_organizacao_independe_dos_codigos_de_acesso(
     db: AsyncSession, client: AsyncClient,
     auth_as: Callable[[User | None], None],
 ):
     admin = await _admin(db)
-    # Empresa 1: membro 1.1 (101). Empresa 2: membros 2.1 (201) e 2.2 (202).
+    # Códigos de acesso distintos não determinam a organização comercial.
     await _loja(db, admin, loja="8001", team=101)
-    await _loja(db, admin, loja="8002", team=201)
-    await _loja(db, admin, loja="8003", team=202)
+    await _loja(db, admin, loja="8002", team=201, commercial_team=1)
+    await _loja(db, admin, loja="8003", team=101, commercial_team=2)
     for bid, loja in ((8101, "8001"), (8201, "8002"), (8202, "8003")):
         await _pedido(db, bling_id=bid, loja=loja, situacao="83953")
     auth_as(admin)
@@ -143,12 +130,20 @@ async def test_comercial_multiplas_empresas(
     com = r.json()["comercial"]
 
     labels = {e["label"]: e for e in com["empresas"]}
-    assert "Empresa 1" in labels and "Empresa 2" in labels
-    assert {e["empresa"] for e in com["empresas"] if e["empresa"] is not None} == {1, 2}
-    m1 = {m["label"] for m in labels["Empresa 1"]["membros"]}
-    m2 = {m["label"] for m in labels["Empresa 2"]["membros"]}
-    assert m1 == {"1.1"}
-    assert m2 == {"2.1", "2.2"}
+    assert set(labels) == {"Equipe 1", "Equipe 2"}
+    assert {e["empresa"] for e in com["empresas"]} == {1, 2}
+    assert all(e["membros"] == [] for e in com["empresas"])
+    # Pedido aguardando devolução comprova qual agrupamento recebeu a loja.
+    await _pedido(db, bling_id=8301, loja="8002", situacao="83957", total=150)
+    await _pedido(db, bling_id=8302, loja="8003", situacao="83957", total=350)
+    r = await client.get("/api/financeiro/valuation", headers=_headers())
+    assert r.status_code == 200, r.text
+    i = _idx_mes_atual(r.json())
+    com = r.json()["comercial"]
+    labels = {e["label"]: e for e in com["empresas"]}
+    assert labels["Equipe 1"]["aguardando_devolucao"][i] == 150
+    assert labels["Equipe 2"]["aguardando_devolucao"][i] == 350
+    assert com["total_aguardando_devolucao"][i] == 500
 
 
 @pytest.mark.asyncio
@@ -168,9 +163,9 @@ async def test_comercial_sem_equipe_vira_aba_sem_membros(
     com = r.json()["comercial"]
     i = _idx_mes_atual(r.json())
 
-    # Sem nenhum sales_team → não há "Empresa 1"; só "Sem equipe" (sem membros).
+    # Equipes vazias continuam visíveis e órfãos mantêm o total geral.
     labels = {e["label"]: e for e in com["empresas"]}
-    assert "Sem equipe" in labels
+    assert set(labels) == {"Equipe 1", "Equipe 2", "Sem equipe"}
     assert labels["Sem equipe"]["membros"] == []
     # Total = 1 ÷ 2 × 100 = 50.
     assert com["total_taxa_devolucao"][i] == 50.0

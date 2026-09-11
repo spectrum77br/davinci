@@ -19,6 +19,7 @@ type UserDetail = {
   duoke: string | null
   threema: string | null
   stock_tags: string[] | null
+  commercial_team: 1 | 2 | null
   sales_teams: number[] | null
   marketing_teams: string[] | null
   permissions: Partial<Record<Resource, Partial<ResourcePerm>>>
@@ -57,6 +58,7 @@ const deleting = ref(false)
 async function load() {
   user.value = await api<UserDetail>(`/api/users/${userId}`)
   resetForm()
+  resetAccountAccess()
   resetPerms()
 }
 
@@ -70,40 +72,10 @@ const form = reactive({
   duoke: '',
   threema: '',
   stock_tags: [] as string[],
-  sales_teams: [] as number[],
+  commercial_team: null as 1 | 2 | null,
   marketing_teams: [] as string[],
   status: 'pending' as 'pending' | 'active' | 'suspended',
 })
-
-// Opções de equipe = união { equipes já presentes nas lojas } ∪ { equipes de
-// QUALQUER usuário } ∪ { equipes do próprio user }. Carregado uma vez ao
-// montar a página. Assim, uma equipe nova criada num usuário (ex.: 2.1)
-// aparece na lista de todos os outros mesmo antes de existir loja com ela
-// (pedido Eduardo 26/08 — opção 2).
-const salesTeamOptions = ref<number[]>([])
-
-async function loadSalesTeamOptions() {
-  const set = new Set<number>()
-  // Cada fonte é best-effort: se uma falhar, as outras seguem valendo.
-  const [lojas, usuarios] = await Promise.all([
-    api<Array<{ sales_team: number | null }>>('/api/pricing/store-info')
-      .catch(() => [] as Array<{ sales_team: number | null }>),
-    api<{ items: Array<{ sales_teams: number[] | null }> }>(
-      '/api/users?per_page=200',
-    ).catch(() => ({ items: [] as Array<{ sales_teams: number[] | null }> })),
-  ])
-  for (const r of lojas) {
-    if (typeof r.sales_team === 'number' && r.sales_team > 0) set.add(r.sales_team)
-  }
-  for (const u of usuarios.items || []) {
-    for (const t of u.sales_teams || []) {
-      if (typeof t === 'number' && t > 0) set.add(t)
-    }
-  }
-  // Inclui equipes que o user já tem (caso as buscas acima falhem).
-  for (const t of user.value?.sales_teams || []) set.add(t)
-  salesTeamOptions.value = [...set].sort((a, b) => a - b)
-}
 
 function resetForm() {
   if (!user.value) return
@@ -116,7 +88,7 @@ function resetForm() {
   form.duoke = user.value.duoke || ''
   form.threema = user.value.threema || ''
   form.stock_tags = [...(user.value.stock_tags || [])]
-  form.sales_teams = [...(user.value.sales_teams || [])]
+  form.commercial_team = user.value.commercial_team ?? null
   form.marketing_teams = [...(user.value.marketing_teams || [])]
   form.status = user.value.status
 }
@@ -127,55 +99,105 @@ function toggleStockTag(slug: string) {
   else form.stock_tags.push(slug)
 }
 
-function toggleSalesTeam(n: number) {
-  const i = form.sales_teams.indexOf(n)
-  if (i >= 0) form.sales_teams.splice(i, 1)
-  else form.sales_teams.push(n)
+// Os vínculos de acesso são independentes da organização comercial.
+// Só esta seção grava sales_teams, mediante ação explícita do administrador.
+type AccountAccessStore = {
+  sales_team: number | null
+  account_name: string | null
+  platform: string
 }
-
-// Converte o texto "empresa.membro" (ex.: "2.1") no int codificado
-// E*100+M (2.1 → 201). Retorna null se o formato for inválido.
-function parseTeam(raw: unknown): number | null {
-  const s = String(raw ?? '').trim()
-  const m = s.match(/^(\d+)\.(\d+)$/)
-  if (!m) return null
-  const e = parseInt(m[1], 10)
-  const mem = parseInt(m[2], 10)
-  if (e < 1 || mem < 1 || mem > 99) return null
-  return e * 100 + mem
-}
-
-// Input do "+ adicionar equipe" — formato "empresa.membro" (ex.: 2.1).
-// Guarda o int codificado (E*100+M) em form.sales_teams (dedup) e nas opções.
-const newSalesTeam = ref<string>('')
-function addSalesTeam() {
-  const n = parseTeam(newSalesTeam.value)
-  if (n == null) return
-  if (!form.sales_teams.includes(n)) form.sales_teams.push(n)
-  if (!salesTeamOptions.value.includes(n)) {
-    salesTeamOptions.value = [...salesTeamOptions.value, n].sort((a, b) => a - b)
+const selectedAccountAccess = ref<number[]>([])
+const accountAccessStores = ref<AccountAccessStore[]>([])
+const knownAccountAccessCodes = ref<number[]>([])
+const loadingAccountAccess = ref(false)
+const savingAccountAccess = ref(false)
+const accountAccessLoaded = ref(false)
+const accountAccessError = ref<string | null>(null)
+const accountAccessMessage = ref<string | null>(null)
+const accountAccessOptions = computed(() => {
+  const codes = new Set([
+    ...knownAccountAccessCodes.value,
+    ...(user.value?.sales_teams || []),
+    ...selectedAccountAccess.value,
+  ])
+  const storeLabels = new Map<number, Set<string>>()
+  for (const store of accountAccessStores.value) {
+    if (store.sales_team == null || store.sales_team <= 0) continue
+    codes.add(store.sales_team)
+    const labels = storeLabels.get(store.sales_team) || new Set<string>()
+    if (store.account_name) labels.add(`${store.account_name} (${store.platform})`)
+    storeLabels.set(store.sales_team, labels)
   }
-  newSalesTeam.value = ''
+  return [...codes].sort((a, b) => a - b).map((code) => {
+    const labels = [...(storeLabels.get(code) || [])].sort((a, b) => a.localeCompare(b))
+    return { code, label: labels.length ? labels.join(' · ') : `Vínculo de acesso ${code}` }
+  })
+})
+const accountAccessDirty = computed(() => {
+  const selected = [...selectedAccountAccess.value].sort((a, b) => a - b)
+  const saved = [...(user.value?.sales_teams || [])].sort((a, b) => a - b)
+  return JSON.stringify(selected) !== JSON.stringify(saved)
+})
+
+function resetAccountAccess() {
+  selectedAccountAccess.value = [...(user.value?.sales_teams || [])]
 }
 
-// Rótulo estilo Valuation: o int codificado E*100+M vira "empresa.membro"
-// (201 → "2.1"). O número cru segue sendo a chave gravada no banco
-// (sales_team) — só o display muda.
-function teamLabel(n: number) {
-  return `${Math.floor(n / 100)}.${n % 100}`
+async function loadAccountAccessOptions() {
+  if (loadingAccountAccess.value) return
+  loadingAccountAccess.value = true
+  accountAccessError.value = null
+  try {
+    const [stores, archivedStores, users] = await Promise.all([
+      api<AccountAccessStore[]>('/api/pricing/store-info'),
+      api<AccountAccessStore[]>('/api/pricing/store-info?archived=true'),
+      api<{ items: Array<{ sales_teams: number[] | null }> }>('/api/users?per_page=200'),
+    ])
+    accountAccessStores.value = [...stores, ...archivedStores]
+    knownAccountAccessCodes.value = users.items.flatMap((item) => item.sales_teams || [])
+    accountAccessLoaded.value = true
+  } catch (e: any) {
+    accountAccessError.value = 'Não foi possível carregar as contas. Tente novamente para editar os acessos.'
+  } finally {
+    loadingAccountAccess.value = false
+  }
 }
 
-// Remove a equipe das opções visíveis E da seleção do user. Some da lista
-// (o número não é apagado de outros usuários/lojas — só sai daqui).
-function removeSalesTeamOption(n: number) {
-  salesTeamOptions.value = salesTeamOptions.value.filter((x) => x !== n)
-  const i = form.sales_teams.indexOf(n)
-  if (i >= 0) form.sales_teams.splice(i, 1)
+function onAccountAccessToggle(event: Event) {
+  if ((event.target as HTMLDetailsElement).open && !accountAccessLoaded.value) {
+    loadAccountAccessOptions()
+  }
 }
 
-// ---- Equipe de Marketing — espelho das Equipes de Vendas, mas com
-// ---- nomes livres (strings). Opções = equipes já usadas (endpoint
-// ---- /equipes dos Criativos) ∪ equipes do próprio user.
+function toggleAccountAccess(code: number) {
+  accountAccessMessage.value = null
+  const index = selectedAccountAccess.value.indexOf(code)
+  if (index >= 0) selectedAccountAccess.value.splice(index, 1)
+  else selectedAccountAccess.value.push(code)
+}
+
+async function saveAccountAccess() {
+  if (savingAccountAccess.value || !accountAccessLoaded.value || !accountAccessDirty.value) return
+  savingAccountAccess.value = true
+  accountAccessError.value = null
+  accountAccessMessage.value = null
+  try {
+    const updated = await api<UserDetail>(`/api/users/${userId}`, {
+      method: 'PATCH',
+      body: { sales_teams: [...selectedAccountAccess.value] },
+    })
+    // Não substitui rascunhos de cadastro ou de permissões ao salvar os acessos.
+    if (user.value) user.value.sales_teams = updated.sales_teams
+    resetAccountAccess()
+    accountAccessMessage.value = 'Acesso às contas salvo.'
+  } catch (e: any) {
+    accountAccessError.value = e?.data?.detail?.code || e?.message || 'Erro ao salvar os acessos.'
+  } finally {
+    savingAccountAccess.value = false
+  }
+}
+
+// Equipes de Marketing mantêm nomes livres, com opções já usadas e do usuário.
 const marketingTeamOptions = ref<string[]>([])
 
 async function loadMarketingTeamOptions() {
@@ -234,7 +256,6 @@ function resetPerms() {
 }
 
 await load()
-await loadSalesTeamOptions()
 await loadMarketingTeamOptions()
 
 // Cascade rules: delete → edit → view
@@ -312,8 +333,8 @@ async function saveCadastral() {
     // Operator-of-stock tags — empty array clears (backend treats []
     // and null identically).
     body.stock_tags = [...form.stock_tags]
-    // Equipes de Vendas (mesma semântica de stock_tags).
-    body.sales_teams = [...form.sales_teams]
+    // Organização comercial; preserva os vínculos individuais de acesso às lojas.
+    body.commercial_team = form.commercial_team
     // Equipe de Marketing (nomes livres — mesma semântica).
     body.marketing_teams = [...form.marketing_teams]
     user.value = await api<UserDetail>(`/api/users/${userId}`, { method: 'PATCH', body })
@@ -442,56 +463,18 @@ async function removeUser() {
             </p>
           </div>
           <div class="md:col-span-2">
-            <Label>Equipes de Vendas</Label>
-            <div
-              v-if="salesTeamOptions.length"
-              class="grid grid-cols-2 md:grid-cols-6 gap-1.5 mt-1 border rounded-md p-2 bg-background"
+            <Label for="commercial-team">Equipe</Label>
+            <select
+              id="commercial-team"
+              v-model="form.commercial_team"
+              class="w-full h-9 rounded-md border bg-background px-3 text-sm mt-1"
             >
-              <div
-                v-for="n in salesTeamOptions"
-                :key="n"
-                class="group inline-flex items-center gap-1.5 text-sm rounded px-1.5 py-0.5 hover:bg-muted/50"
-              >
-                <label class="inline-flex items-center gap-1.5 cursor-pointer flex-1">
-                  <input
-                    type="checkbox"
-                    :checked="form.sales_teams.includes(n)"
-                    @change="toggleSalesTeam(n)"
-                  />
-                  <span>{{ teamLabel(n) }}</span>
-                </label>
-                <button
-                  type="button"
-                  title="Excluir equipe"
-                  class="text-muted-foreground/50 hover:text-destructive opacity-0 group-hover:opacity-100 transition"
-                  @click="removeSalesTeamOption(n)"
-                >
-                  <X class="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-            <p v-else class="text-[11px] text-muted-foreground mt-1 italic">
-              Nenhuma equipe cadastrada ainda. Use o campo abaixo pra adicionar.
-            </p>
-            <div class="flex items-center gap-2 mt-2">
-              <Input
-                v-model="newSalesTeam"
-                type="text"
-                placeholder="+ adicionar equipe (ex: 2.1)"
-                class="w-48"
-                @keydown.enter.prevent="addSalesTeam"
-              />
-              <Button type="button" variant="outline" size="sm" @click="addSalesTeam">
-                Adicionar
-              </Button>
-            </div>
+              <option :value="null">Sem equipe</option>
+              <option :value="1">Equipe 1</option>
+              <option :value="2">Equipe 2</option>
+            </select>
             <p class="text-[11px] text-muted-foreground mt-1">
-              Multi-select de equipes de vendas no formato empresa.membro (ex.: 1.1, 2.1).
-              A loja é vinculada à equipe na página Lojas; aqui você seleciona quais
-              equipes esse usuário pertence.
-              <span v-if="form.sales_teams.length">
-                Selecionadas: <code>{{ form.sales_teams.map(teamLabel).join(', ') }}</code>
-              </span>
+              Organiza o usuário por equipe e mantém seus acessos individuais às lojas.
             </p>
           </div>
           <div class="md:col-span-2">
@@ -563,6 +546,63 @@ async function removeUser() {
         </div>
       </CardContent>
     </Card>
+
+    <details class="rounded-lg border bg-card text-card-foreground" @toggle="onAccountAccessToggle">
+      <summary class="cursor-pointer px-6 py-4 font-semibold">Acesso às contas</summary>
+      <div class="px-6 pb-6 space-y-3">
+        <p class="text-sm text-muted-foreground">
+          Selecione os vínculos de contas permitidos para este usuário. Contas no mesmo vínculo
+          são liberadas juntas. Esta seleção é independente da Equipe 1 ou Equipe 2.
+        </p>
+        <p class="text-sm font-medium">
+          Sem nenhuma seleção, o usuário terá acesso a todas as contas, respeitando as permissões dos módulos.
+        </p>
+        <p v-if="isAdminUser" class="text-sm text-muted-foreground">
+          Administradores continuam com acesso a todas as contas, independentemente desta seleção.
+        </p>
+        <p v-if="loadingAccountAccess" class="text-sm text-muted-foreground">Carregando contas…</p>
+        <p v-if="accountAccessError" class="text-sm text-destructive" role="alert">{{ accountAccessError }}</p>
+        <Button
+          v-if="!accountAccessLoaded && !loadingAccountAccess"
+          type="button" variant="outline" size="sm" @click="loadAccountAccessOptions"
+        >
+          Carregar contas
+        </Button>
+        <fieldset :disabled="!accountAccessLoaded || savingAccountAccess" class="space-y-2 disabled:opacity-60">
+          <legend class="sr-only">Vínculos de acesso às contas</legend>
+          <label
+            v-for="option in accountAccessOptions"
+            :key="option.code"
+            class="flex items-start gap-2 rounded border px-3 py-2 text-sm cursor-pointer hover:bg-muted/50"
+          >
+            <input
+              type="checkbox"
+              class="mt-0.5"
+              :checked="selectedAccountAccess.includes(option.code)"
+              @change="toggleAccountAccess(option.code)"
+            />
+            <span>{{ option.label }}</span>
+          </label>
+          <p v-if="accountAccessLoaded && !accountAccessOptions.length" class="text-sm text-muted-foreground">
+            Nenhum vínculo de acesso cadastrado nas contas.
+          </p>
+        </fieldset>
+        <p class="text-sm" aria-live="polite">
+          {{ selectedAccountAccess.length ? `${selectedAccountAccess.length} vínculo(s) selecionado(s).` : 'Seleção atual: todas as contas.' }}
+        </p>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <p class="text-sm text-muted-foreground">{{ accountAccessMessage || 'Use o botão abaixo para salvar somente os acessos às contas.' }}</p>
+          <Button
+            type="button"
+            :disabled="savingAccountAccess || loadingAccountAccess || !accountAccessLoaded || !accountAccessDirty"
+            @click="saveAccountAccess"
+          >
+            <Save class="size-4 mr-1" />
+            {{ savingAccountAccess ? 'Salvando…' : 'Salvar acesso às contas' }}
+          </Button>
+        </div>
+      </div>
+    </details>
 
     <!-- Senha -->
     <Card>

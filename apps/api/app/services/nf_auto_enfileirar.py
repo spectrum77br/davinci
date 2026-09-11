@@ -440,7 +440,7 @@ async def _notificar_sem_estoque(
                         BlingOrder.numero,
                         func.max(func.lower(StoreInfo.platform)),
                         func.max(StoreInfo.account_name),
-                        func.max(StoreInfo.sales_team),
+                        func.max(StoreInfo.commercial_team),
                     )
                     .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
                     .where(BlingOrder.numero.in_(list(sem_estoque)))

@@ -18,6 +18,7 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -73,11 +74,11 @@ async def _seed_lojas(db: AsyncSession, owner: User) -> dict[str, dict]:
             user_id=owner.id, platform=plat,
             account_name=account,
             bling_store_id=str(bling_id),
-            sales_team=team,
+            sales_team=team, commercial_team=team,
         )
         db.add(si)
         await db.flush()
-        out[key] = {"store_id": str(s.id), "bling_store_id": bling_id, "team": team}
+        out[key] = {"store_id": str(si.id), "bling_store_id": bling_id, "team": team}
     await db.commit()
     return out
 
@@ -88,12 +89,13 @@ async def _seed_pedido(
 ) -> None:
     """Cria 1 pedido com `n_itens` linhas em bling_orders (uma por item).
     `total` se repete em cada linha — espelha o cenário de prod."""
+    loja = await db.get(StoreInfo, uuid.UUID(store_id))
     for i in range(n_itens):
         db.add(BlingOrder(
             bling_id=bling_id, numero=str(bling_id),
             item_codigo=f"sku-{bling_id}-{i}", item_index=i,
             situacao=situacao, total=total, data=data,
-            store_id=store_id,
+            loja=loja.bling_store_id,
         ))
     await db.commit()
 
@@ -234,3 +236,32 @@ async def test_ignora_outras_situacoes_e_fora_do_periodo(
     body = r.json()
     assert body["total_pedidos"] == 3
     assert Decimal(str(body["total_faturamento"])) == Decimal("600.00")
+
+
+@pytest.mark.asyncio
+async def test_mesma_equipe_comercial_preserva_contas_individuais(
+    db, client, auth_as, owner,
+):
+    lojas = await _seed_lojas(db, owner)
+    await db.execute(update(StoreInfo).values(commercial_team=1))
+    user = await _seed_user(db, role=UserRole.USER, sales_teams=[1])
+    user.commercial_team = 1
+    await db.commit()
+    auth_as(user)
+    for filtro in (None, 1):
+        params = {"start": _PERIODO[0], "end": _PERIODO[1]}
+        if filtro is not None:
+            params["team"] = filtro
+        response = await client.get("/api/faturamento", params=params)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["teams"] == [1]
+        assert {row["store_id"] for row in body["itens"]} == {lojas["ml"]["store_id"]}
+    response = await client.get("/api/faturamento", params={"team": 2})
+    assert response.status_code == 403
+    # Alterar apenas a equipe organizacional do usuário não muda o acesso.
+    user.commercial_team = 2
+    await db.commit()
+    response = await client.get("/api/faturamento", params={"team": 1})
+    assert response.status_code == 200, response.text
+    assert {row["store_id"] for row in response.json()["itens"]} == {lojas["ml"]["store_id"]}

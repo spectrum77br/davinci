@@ -261,7 +261,7 @@ async def _linhas_estoque(session: AsyncSession) -> list[str]:
                     BlingOrder.numero,
                     func.max(func.lower(StoreInfo.platform)),
                     func.max(StoreInfo.account_name),
-                    func.max(StoreInfo.sales_team),
+                    func.max(StoreInfo.commercial_team),
                 )
                 .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja)
                 .where(BlingOrder.numero.in_(numeros))

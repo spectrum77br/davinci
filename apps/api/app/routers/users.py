@@ -49,6 +49,7 @@ def _to_out(u: User) -> UserOut:
         threema=u.threema,
         stock_tags=u.stock_tags or None,
         sales_teams=u.sales_teams or None,
+        commercial_team=u.commercial_team,
         marketing_teams=u.marketing_teams or None,
         permissions=u.permissions or {},
         has_password=u.password_hash is not None,
@@ -181,6 +182,7 @@ async def create_user(
         threema=body.threema,
         stock_tags=_normalize_stock_tags(body.stock_tags),
         sales_teams=_normalize_sales_teams(body.sales_teams),
+        commercial_team=body.commercial_team,
         marketing_teams=_normalize_marketing_teams(body.marketing_teams),
         role=UserRole.USER,
         status=UserStatus.PENDING,
@@ -238,6 +240,10 @@ async def patch_user(
     # sorts/drops non-positives; lista vazia → null.
     if "sales_teams" in data:
         u.sales_teams = _normalize_sales_teams(data["sales_teams"])
+
+    # Metadado organizacional: não altera códigos de acesso ou permissões.
+    if "commercial_team" in data:
+        u.commercial_team = data["commercial_team"]
 
     # marketing_teams: nomes livres de equipe. Mesma semântica.
     if "marketing_teams" in data:

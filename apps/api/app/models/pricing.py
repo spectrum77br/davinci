@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -278,9 +279,14 @@ class StoreInfo(Base, TimestampMixin):
     segment: Mapped[str | None] = mapped_column(String(128), nullable=True)
     freight: Mapped[str | None] = mapped_column(String(128), nullable=True)
     cpf_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    # Equipe de Vendas (número inteiro). Uma loja pertence a no máximo
-    # uma equipe; NULL = sem equipe atribuída. Migration 0136.
+    # Código interno de acesso à loja. Preserva o escopo individual
+    # existente e não representa a organização comercial.
     sales_team: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    commercial_team: Mapped[int | None] = mapped_column(
+        Integer,
+        CheckConstraint("commercial_team IN (1, 2)", name="commercial_team_valid"),
+        nullable=True,
+    )
     account_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     server: Mapped[str | None] = mapped_column(String(64), nullable=True)
     cnpj: Mapped[str | None] = mapped_column(String(32), nullable=True)

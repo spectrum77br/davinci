@@ -287,10 +287,11 @@ class ComercialMembroOut(BaseModel):
 
 
 class ComercialEmpresaOut(BaseModel):
-    """Uma empresa = uma aba do bloco Comercial. `label` = "Empresa 1" /
-    "Sem equipe". As séries são o subtotal da empresa (o que aparece na aba
-    "Geral"); `membros` são as linhas mostradas ao abrir a aba da empresa
-    ("Sem equipe" não tem membros)."""
+    """Resumo de uma equipe comercial (Equipe 1 / Equipe 2 / Sem equipe).
+
+    `empresa` e `membros` mantêm o formato anterior da API; `empresa` agora
+    identifica a equipe comercial e `membros` fica vazio.
+    """
 
     empresa: int | None = None
     label: str
@@ -300,11 +301,10 @@ class ComercialEmpresaOut(BaseModel):
 
 
 class ComercialSecaoOut(BaseModel):
-    """Bloco Comercial em abas: uma aba "Geral" (Total geral + subtotal por
-    empresa) e uma aba por empresa (com os membros). Duas métricas por mês:
-    Aguardando Devolução (R$) e Taxa de Devolução (%). Hoje há 1 empresa — os
-    `store_info.sales_team` viram membros 1.1/1.2/… dela; a ramificação real
-    (loja → empresa) virá depois."""
+    """Total geral e resumos por equipe comercial, sem divisão por membro.
+
+    `empresas` mantém o nome anterior da API para compatibilidade.
+    """
 
     meses: list[date]
     total_aguardando_devolucao: list[float | None]

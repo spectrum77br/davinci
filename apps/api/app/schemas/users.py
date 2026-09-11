@@ -1,8 +1,12 @@
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import BaseModel, EmailStr, Field
 
 from app.schemas.permissions import Permissions
+
+# Organização comercial; os códigos históricos de acesso continuam separados.
+CommercialTeam = Annotated[int, Field(strict=True, ge=1, le=2)]
 
 
 # Single source of truth for the valid operator-of-stock tags. The UI
@@ -83,6 +87,7 @@ class UserOut(BaseModel):
     threema: str | None = None
     stock_tags: list[str] | None = None
     sales_teams: list[int] | None = None
+    commercial_team: CommercialTeam | None = None
     marketing_teams: list[str] | None = None
     permissions: dict
     # Apenas indica se há senha definida — o hash nunca sai da API.
@@ -114,6 +119,7 @@ class UserCreate(BaseModel):
     threema: str | None = None
     stock_tags: list[str] | None = None
     sales_teams: list[int] | None = None
+    commercial_team: CommercialTeam | None = None
     marketing_teams: list[str] | None = None
     permissions: Permissions | None = None
 
@@ -137,6 +143,7 @@ class UserPatch(BaseModel):
     # Pass a list of positive integers or [] / null to clear. Backend
     # dedupes/sorts/drops non-positives.
     sales_teams: list[int] | None = None
+    commercial_team: CommercialTeam | None = None
     marketing_teams: list[str] | None = None
     status: str | None = Field(default=None, pattern="^(pending|active|suspended)$")
 

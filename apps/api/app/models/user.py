@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, Enum, String, text
+from sqlalchemy import CheckConstraint, DateTime, Enum, Integer, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -71,11 +71,16 @@ class User(Base, TimestampMixin):
     # ... actually in routers/estoque.py (TAG_PATTERNS).
     stock_tags: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
 
-    # Equipes de Vendas (multi). Lista de números inteiros que identificam
-    # equipes — espelha o padrão de stock_tags, trocando "lista de slugs"
-    # por "lista de inteiros". O número é a etiqueta da equipe; o vínculo
-    # loja↔equipe vive em StoreInfo.sales_team (migration 0136).
+    # Códigos internos de acesso às lojas (multi). Preservam o escopo
+    # individual existente; o vínculo vive em StoreInfo.sales_team.
     sales_teams: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True)
+
+    # Organização comercial, independente dos códigos de acesso acima.
+    commercial_team: Mapped[int | None] = mapped_column(
+        Integer,
+        CheckConstraint("commercial_team IN (1, 2)", name="commercial_team_valid"),
+        nullable=True,
+    )
 
     # Equipes de Marketing (multi). Lista de NOMES livres de equipe —
     # espelha sales_teams trocando ints por strings. Usuário não-admin

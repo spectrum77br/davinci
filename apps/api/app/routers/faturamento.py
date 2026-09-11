@@ -63,24 +63,16 @@ async def list_faturamento(
     if start is None:
         start = end - timedelta(days=90)
 
-    # Equipes que ESTE usuário pode filtrar. Admin → todas as equipes com
-    # loja cadastrada em store_info. Não-admin → suas próprias sales_teams
-    # (mesma base do user_scope, que já restringe as linhas visíveis).
-    if user.role == UserRole.ADMIN:
-        teams_avail = (
-            (
-                await session.execute(
-                    select(StoreInfo.sales_team)
-                    .where(StoreInfo.sales_team.isnot(None))
-                    .distinct()
-                    .order_by(StoreInfo.sales_team)
-                )
-            )
-            .scalars()
-            .all()
+    # Equipes comerciais entre as lojas que o usuário já pode consultar.
+    # A organização não concede acesso às contas de outros membros.
+    teams_avail = (
+        await session.execute(
+            select(StoreInfo.commercial_team)
+            .where(StoreInfo.commercial_team.isnot(None), user_scope(StoreInfo, user))
+            .distinct()
+            .order_by(StoreInfo.commercial_team)
         )
-    else:
-        teams_avail = sorted(user.sales_teams or [])
+    ).scalars().all()
 
     # Filtro explícito de equipe: só vale se o usuário tem acesso a ela.
     if team is not None and team not in teams_avail:
@@ -89,7 +81,7 @@ async def list_faturamento(
     # user_scope já restringe ao escopo do usuário; `team` afunila mais.
     scope_clauses = [user_scope(StoreInfo, user)]
     if team is not None:
-        scope_clauses.append(StoreInfo.sales_team == team)
+        scope_clauses.append(StoreInfo.commercial_team == team)
 
     # ETAPA 1 — pedidos do período: dedup por bling_id (bling_orders tem uma
     # linha por item, `total` repete) e agrega por loja Bling (pedidos +

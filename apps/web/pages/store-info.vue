@@ -48,7 +48,7 @@ type StoreInfo = {
   duoker: boolean | null
   uf_restrictions: string[] | null
   excecoes: StoreExcecao[] | null
-  sales_team: number | null
+  commercial_team: 1 | 2 | null
   nf_faturador_id: string | null
   // Faturador POR TIPO (0228): {"celular": "<uuid>", "eletro": "<uuid>"}.
   // Contas com 2+ tipos escolhem uma regra por tipo; null = regra única.
@@ -450,21 +450,6 @@ function flash(id: string, field: string) {
   setTimeout(() => flashed.value.delete(k), 1200)
 }
 
-// Equipe no formato empresa.membro: o int codificado E*100+M vira "2.1"
-// (display) e "2.1" digitado vira 201 (gravado). O número cru é a chave.
-function teamLabel(n: number) {
-  return `${Math.floor(n / 100)}.${n % 100}`
-}
-function parseTeam(raw: unknown): number | null {
-  const s = String(raw ?? '').trim()
-  const m = s.match(/^(\d+)\.(\d+)$/)
-  if (!m) return null
-  const e = parseInt(m[1], 10)
-  const mem = parseInt(m[2], 10)
-  if (e < 1 || mem < 1 || mem > 99) return null
-  return e * 100 + mem
-}
-
 async function startEdit(row: StoreInfo, field: string) {
   if (!canEdit.value) return
   editing.value = { id: row.id, field }
@@ -481,9 +466,6 @@ async function startEdit(row: StoreInfo, field: string) {
       } catch { /* mantém vazio se falhar */ }
     }
     initial = revealedPasswords.value.get(row.id) ?? ''
-  } else if (field === 'sales_team') {
-    // Edita no formato "empresa.membro" (ex.: 2.1), não o int cru.
-    initial = row.sales_team == null ? '' : teamLabel(row.sales_team)
   } else {
     const raw = (row as any)[field]
     initial = raw == null ? '' : String(raw)
@@ -524,15 +506,9 @@ async function commitEdit() {
     const n = parseInt(raw)
     if (Number.isNaN(n)) return cancelEdit()
     payload.sort_order = n
-  } else if (field === 'sales_team') {
-    // Vazio limpa a equipe; senão exige "empresa.membro" (ex.: 2.1).
-    if (!raw) {
-      payload.sales_team = null
-    } else {
-      const n = parseTeam(raw)
-      if (n == null) return cancelEdit()
-      payload.sales_team = n
-    }
+  } else if (field === 'commercial_team') {
+    if (raw !== '' && raw !== '1' && raw !== '2') return cancelEdit()
+    payload.commercial_team = raw ? Number(raw) : null
   } else if (field === 'password') {
     payload.password = raw || null
   } else {
@@ -840,7 +816,7 @@ async function copyText(text: string) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]" title="Horários (BRT) em que as etiquetas desta loja são impressas. Vazio = contínuo.">Horário Etiqueta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Impressão</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Equipe</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[110px]">Equipe</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Servidor</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">CNPJ</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">E-mail</th>
@@ -1165,25 +1141,29 @@ async function copyText(text: string) {
                 </span>
               </td>
             </template>
-            <!-- Equipe de Vendas: inteiro positivo ou vazio (sem equipe).
-                 Mesma UX de edição inline; type=number no input. -->
+            <!-- Organização comercial, independente dos acessos individuais. -->
             <td
               class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
               :class="{
-                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'sales_team'),
-                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'sales_team'),
+                'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'commercial_team'),
+                'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'commercial_team'),
               }"
-              @click="!isEditing(row.id, 'sales_team') && startEdit(row, 'sales_team')"
+              @click="!isEditing(row.id, 'commercial_team') && startEdit(row, 'commercial_team')"
             >
-              <input
-                v-if="isEditing(row.id, 'sales_team')"
+              <select
+                v-if="isEditing(row.id, 'commercial_team')"
                 :ref="setEditInputRef"
-                v-model="editValue" type="text" placeholder="2.1"
-                class="w-full text-xs bg-transparent outline-none text-center"
+                v-model="editValue"
+                aria-label="Equipe da loja"
+                class="w-full text-xs bg-background outline-none text-center"
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
-              />
-              <span v-else :class="{ 'text-muted-foreground': row.sales_team == null }">
-                {{ row.sales_team == null ? '—' : teamLabel(row.sales_team) }}
+              >
+                <option value="">Sem equipe</option>
+                <option value="1">Equipe 1</option>
+                <option value="2">Equipe 2</option>
+              </select>
+              <span v-else :class="{ 'text-muted-foreground': row.commercial_team == null }">
+                {{ row.commercial_team == null ? 'Sem equipe' : `Equipe ${row.commercial_team}` }}
               </span>
             </td>
             <!-- text fields: server / cnpj / email / phone -->

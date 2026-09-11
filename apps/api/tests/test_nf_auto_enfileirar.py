@@ -102,6 +102,7 @@ async def _seed_loja(
     db: AsyncSession, admin: User, *, plataforma: str, bling_store_id: str,
     com_faturador: bool = True, excecoes: list[dict] | None = None,
     uf_restrictions: list[str] | None = None, sales_team: int | None = None,
+    commercial_team: int | None = None,
     impressao: str | None = None, etiqueta_horarios: str | None = None,
     etiqueta_sabado_horario: str | None = None,
     etiqueta_sabado_tags: str | None = None,
@@ -132,7 +133,7 @@ async def _seed_loja(
             etiqueta_sabado_horario=etiqueta_sabado_horario,
             etiqueta_sabado_tags=etiqueta_sabado_tags,
             excecoes=excecoes, uf_restrictions=uf_restrictions,
-            sales_team=sales_team,
+            sales_team=sales_team, commercial_team=commercial_team,
         )
     )
     await db.flush()
@@ -568,7 +569,7 @@ async def test_sweep_sem_estoque_avisa_threema(
     """Movido pra Aguardando Cancelamento automaticamente → UMA mensagem
     Threema com pedido, loja e SKUs pros IDs configurados."""
     await _seed_loja(
-        db, admin, plataforma="shopee", bling_store_id="930001", sales_team=2
+        db, admin, plataforma="shopee", bling_store_id="930001", sales_team=101, commercial_team=2
     )
     await _seed_pedido(db, numero="830001", loja="930001", sku="x1", bling_id=700009)
     db.add(Product(user_id=admin.id, sku="x1", name="X1", stock=-2))

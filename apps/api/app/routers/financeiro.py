@@ -42,7 +42,6 @@ from app.models import (
 )
 from app.schemas.financeiro import (
     ComercialEmpresaOut,
-    ComercialMembroOut,
     ComercialSecaoOut,
     ConsorcioOut,
     ConsorcioPatch,
@@ -776,7 +775,7 @@ _COM_DESCRICOES = {
     "aguardando_devolucao": (
         "Soma do valor base dos pedidos na situação 'Aguardando Devolução', "
         "pelo mês da data do pedido. Nos quadros por equipe, apenas as lojas da "
-        "equipe (loja do Bling → equipe de vendas em store_info.sales_team)."
+        "equipe (loja do Bling → equipe de vendas em store_info.commercial_team)."
     ),
     "taxa_devolucao": (
         "Quantidade de PEDIDOS devolvidos (com devolução condição Novo ou Usado, "
@@ -1305,14 +1304,14 @@ async def valuation_report(
     )
 
     # 3b. Bloco "Comercial — 3 meses", quebrado por EQUIPE de vendas. Mesma
-    #     janela/helpers (_mes/_janela). Equipe da loja = store_info.sales_team
+    #     janela/helpers (_mes/_janela). Equipe da loja = store_info.commercial_team
     #     (mapeada por bling_store_id = bling_orders.loja). Métricas por
     #     (mês × equipe); os quadros (Total / Equipe N / Sem equipe) são
     #     montados somando os baldes de equipe em Python.
     #       • Aguardando Devolução/Cancelamento = SUM(valor base) por situação,
     #         pela data do pedido (1 valor por pedido, MAX);
-    #       • Taxa de Devolução = qtd de PRODUTOS devolvidos (SUM(quantidade),
-    #         condição Novo+Usado, por created_at) ÷ qtd de pedidos do
+    #       • Taxa de Devolução = pedidos distintos devolvidos (condição
+    #         Novo+Usado, por created_at) ÷ qtd de pedidos do
     #         faturamento (situações aplicáveis, por data do pedido), em %. A
     #         equipe da devolução vem do pedido de origem (pedido_bling → loja →
     #         equipe).
@@ -1332,12 +1331,12 @@ async def valuation_report(
               AND COALESCE(bo.loja, '') <> ALL(:ignored_stores)
             GROUP BY bo.numero, mes
         )
-        SELECT pp.mes, si.sales_team AS equipe,
+        SELECT pp.mes, si.commercial_team AS equipe,
                SUM(pp.valorbase) FILTER (WHERE pp.situacao = :s_dev) AS aguardando_devolucao,
                COUNT(*)          FILTER (WHERE pp.situacao = ANY(:sit_fat)) AS faturamento_qtd
         FROM por_pedido pp
         LEFT JOIN {_qt("store_info")} si ON si.bling_store_id = pp.loja
-        GROUP BY pp.mes, si.sales_team
+        GROUP BY pp.mes, si.commercial_team
     """)
     com_dev_sql = text(f"""
         WITH dev AS (
@@ -1346,7 +1345,7 @@ async def valuation_report(
             WHERE {_janela('d.created_at')}
               AND d.condicao_produto IN ('Novo', 'Usado')
         )
-        SELECT dev.mes, si.sales_team AS equipe,
+        SELECT dev.mes, si.commercial_team AS equipe,
                COUNT(DISTINCT dev.pedido_bling) AS devolucoes
         FROM dev
         LEFT JOIN LATERAL (
@@ -1355,7 +1354,7 @@ async def valuation_report(
         ) bo ON true
         LEFT JOIN {_qt("store_info")} si ON si.bling_store_id = bo.loja
         WHERE COALESCE(bo.loja, '') <> ALL(:ignored_stores)
-        GROUP BY dev.mes, si.sales_team
+        GROUP BY dev.mes, si.commercial_team
     """)
 
     com_bo_rows = (await session.execute(com_bo_sql, {
@@ -1366,11 +1365,6 @@ async def valuation_report(
     com_dev_rows = (await session.execute(com_dev_sql, {
         "ignored_stores": _VAL_IGNORED_STORES,
     })).mappings().all()
-    teams = list((await session.execute(text(
-        f"SELECT DISTINCT sales_team FROM {_qt('store_info')} "
-        "WHERE sales_team IS NOT NULL ORDER BY sales_team"
-    ))).scalars().all())
-
     # Índices (mês, equipe) → métricas. equipe = None quando a loja não tem
     # equipe (lojas internas / não mapeadas) — vira o quadro "Sem equipe".
     bo_idx = {(r["mes"], r["equipe"]): r for r in com_bo_rows}
@@ -1404,35 +1398,15 @@ async def valuation_report(
         return any(mes in months and pred(team) and c
                    for (mes, team), c in dev_idx.items())
 
-    # Cada `sales_team` codifica empresa.membro no int E*100+M (ex.: 101 = 1.1,
-    # 201 = 2.1). A empresa vem de team // 100 e o membro de team % 100 — os
-    # membros são agrupados por empresa (uma aba por empresa).
-    _teams = sorted(
-        set(teams)
-        | {t for (_m, t) in bo_idx if t is not None}
-        | {t for (_m, t) in dev_idx if t is not None}
-    )
-
+    # Organização comercial independente dos códigos que restringem o acesso.
+    # As duas equipes permanecem visíveis mesmo enquanto a Equipe 2 está vazia.
     total_aguard, total_taxa = _com_series(lambda t: True)
-
-    _by_empresa: dict[int, list[int]] = {}
-    for team in _teams:
-        _by_empresa.setdefault(team // 100, []).append(team)
-
     empresas: list[ComercialEmpresaOut] = []
-    for emp in sorted(_by_empresa):
-        emp_teams = _by_empresa[emp]
-        membros = []
-        for team in emp_teams:
-            a, t = _com_series(lambda x, team=team: x == team)
-            membros.append(ComercialMembroOut(
-                label=f"{emp}.{team % 100}", aguardando_devolucao=a, taxa_devolucao=t,
-            ))
-        team_set = set(emp_teams)
-        a, t = _com_series(lambda x, s=team_set: x in s)
+    for team in (1, 2):
+        a, t = _com_series(lambda x, team=team: x == team)
         empresas.append(ComercialEmpresaOut(
-            empresa=emp, label=f"Empresa {emp}",
-            aguardando_devolucao=a, taxa_devolucao=t, membros=membros,
+            empresa=team, label=f"Equipe {team}",
+            aguardando_devolucao=a, taxa_devolucao=t, membros=[],
         ))
     # "Sem equipe" só aparece quando houver dados não atribuídos a equipe.
     if _tem_dados(lambda t: t is None):

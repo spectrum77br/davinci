@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.schemas.users import STOCK_TAGS
+from app.schemas.users import STOCK_TAGS, CommercialTeam
 
 # --------------------------------------------------------------- pricing accounts
 
@@ -507,8 +507,9 @@ class StoreInfoBase(BaseModel):
     uf_restrictions: list[str] | None = None
     # Exceções de envio por loja (migration 0216) — ver StoreExcecao.
     excecoes: list[StoreExcecao] | None = None
-    # Equipe de Vendas (migration 0136). Número inteiro; NULL = sem equipe.
+    # Código interno de acesso (migration 0136), independente da equipe comercial.
     sales_team: int | None = None
+    commercial_team: CommercialTeam | None = None
     # NF automáticas (migration 0196): cadastros Faturador/Etiqueta/Impressão.
     nf_faturador_id: UUID | None = None
     # Faturador POR TIPO (migration 0228) — contas com 2+ tipos na coluna
@@ -559,6 +560,7 @@ class StoreInfoPatch(BaseModel):
     uf_restrictions: list[str] | None = None
     excecoes: list[StoreExcecao] | None = None
     sales_team: int | None = None
+    commercial_team: CommercialTeam | None = None
     nf_faturador_id: UUID | None = None
     nf_faturador_por_tipo: dict[str, str] | None = None
     nf_faturador_produto_id: UUID | None = None
