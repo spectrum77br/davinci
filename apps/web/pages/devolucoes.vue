@@ -105,6 +105,10 @@ type StockModalFields = {
 type DevolutionPage = {
   items: DevolutionRow[]
   total: number
+  // Pedidos distintos entre as linhas filtradas (linha sem pedido conta 1).
+  total_pedidos: number
+  reembolso_itens: number
+  reembolso_pedidos: number
   limit: number
   offset: number
 }
@@ -310,7 +314,13 @@ function showStockToast(sr: BlingStockResult) {
 }
 
 const items = ref<DevolutionRow[]>([])
+// Contadores dos cards (API, mesmos filtros da listagem). O grão da tabela é
+// ITEM (uma linha por SKU), então `total` conta linhas e `totalPedidos` conta
+// pedidos distintos — o card mostra pedidos e as linhas como apoio.
 const total = ref(0)
+const totalPedidos = ref(0)
+const reembolsoItens = ref(0)
+const reembolsoPedidos = ref(0)
 const page = ref(1)
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -532,7 +542,10 @@ const selectableLookupCount = computed(
 const rangeStart = computed(() => total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1)
 const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
 const totalCustoManutencao = computed(() => items.value.reduce((a, r) => a + (r.custo_manutencao ?? 0), 0))
-const totalReembolsadas = computed(() => items.value.filter((r) => r.reembolso).length)
+// "35 pedidos" / "1 pedido" — valor e apoio dos cards da aba Lançamentos.
+function qtd(n: number, singular: string, plural: string): string {
+  return `${n} ${n === 1 ? singular : plural}`
+}
 
 const sheetInputClass = 'h-7 w-full rounded-none border-0 bg-transparent px-1 text-xs focus:bg-background focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-70'
 const sheetSelectClass = `${sheetInputClass} cursor-pointer`
@@ -687,30 +700,54 @@ function setRowReembolso(row: DevolutionRow, value: boolean) {
   markDirty(row.id)
 }
 
+// Query string da listagem com os filtros atuais (load e refreshTotals).
+function listParams(limit: number, offset: number): URLSearchParams {
+  const params = new URLSearchParams()
+  params.set('limit', String(limit))
+  params.set('offset', String(offset))
+  if (search.value.trim()) params.set('search', search.value.trim())
+  if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
+  if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
+  if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
+  if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
+  if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
+  if (manutencaoFilter.value) params.set('manutencao', 'true')
+  if (isAdmin.value && prazoDiasFilter.value === 'vencidas') params.set('prazo_vencido', 'true')
+  else if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
+  return params
+}
+
+type ListTotals = Pick<DevolutionPage, 'total' | 'total_pedidos' | 'reembolso_itens' | 'reembolso_pedidos'>
+function applyTotals(res: ListTotals) {
+  total.value = res.total
+  totalPedidos.value = res.total_pedidos
+  reembolsoItens.value = res.reembolso_itens
+  reembolsoPedidos.value = res.reembolso_pedidos
+}
+
 async function load() {
   loading.value = true
   error.value = null
   try {
-    const params = new URLSearchParams()
-    params.set('limit', String(PAGE_SIZE))
-    params.set('offset', String((page.value - 1) * PAGE_SIZE))
-    if (search.value.trim()) params.set('search', search.value.trim())
-    if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
-    if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
-    if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
-    if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
-    if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
-    if (manutencaoFilter.value) params.set('manutencao', 'true')
-    if (isAdmin.value && prazoDiasFilter.value === 'vencidas') params.set('prazo_vencido', 'true')
-    else if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
+    const params = listParams(PAGE_SIZE, (page.value - 1) * PAGE_SIZE)
     const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
     items.value = res.items
-    total.value = res.total
+    applyTotals(res)
     dirtyRows.value = new Set()
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
     loading.value = false
+  }
+}
+
+// Só os contadores dos cards (mesmos filtros), depois de criar, salvar ou
+// excluir uma linha — sem recarregar a tabela nem perder edições pendentes.
+async function refreshTotals() {
+  try {
+    applyTotals(await api<DevolutionPage>(`/api/devolutions?${listParams(1, 0).toString()}`))
+  } catch {
+    // Mantém o valor otimista; o próximo load() corrige.
   }
 }
 
@@ -1204,6 +1241,7 @@ async function createAllDevolutions() {
     drafts.value = remaining
     if (added > 0) {
       pushToast({ kind: 'success', title: 'Devoluções adicionadas', lines: [`${added} produto${added === 1 ? '' : 's'}`] })
+      void refreshTotals()
     }
   } finally {
     creating.value = false
@@ -1310,6 +1348,8 @@ async function saveRow(row: DevolutionRow) {
     // PATCH não devolve `cliente` (só a listagem preenche) — preserva o da linha.
     if (idx >= 0) items.value[idx] = { ...updated, cliente: updated.cliente ?? row.cliente }
     clearDirty(row.id)
+    // Reembolso/condição podem mudar quais linhas entram nos filtros e cards.
+    void refreshTotals()
     if (updated.bling_stock_result) showStockToast(updated.bling_stock_result)
   } catch (e: any) {
     error.value = apiError(e)
@@ -1409,6 +1449,7 @@ async function removeRow(row: DevolutionRow) {
     )
     items.value = items.value.filter((i) => i.id !== row.id)
     total.value = Math.max(0, total.value - 1)
+    void refreshTotals()
     if (res?.estoque_estornado) {
       pushToast({ kind: 'success', title: 'Lançamento excluído', lines: [res.mensagem || 'Estoque estornado no Bling.'] })
     }
@@ -1733,8 +1774,8 @@ async function backfillAddresses() {
     </div>
 
     <div v-show="tab === 'lancamentos'" class="grid grid-cols-2 lg:grid-cols-3 gap-3">
-      <StatCard label="Total devoluções" :value="total" :icon="Undo2" />
-      <StatCard label="Enviada para Reembolso" :value="totalReembolsadas" :icon="Clock" tone="warning" />
+      <StatCard label="Total devoluções" :value="qtd(totalPedidos, 'pedido', 'pedidos')" :hint="qtd(total, 'item', 'itens')" :icon="Undo2" />
+      <StatCard label="Enviada para Reembolso" :value="qtd(reembolsoPedidos, 'pedido', 'pedidos')" :hint="qtd(reembolsoItens, 'item', 'itens')" :icon="Clock" tone="warning" />
       <StatCard label="Custo manutenção (pág.)" :value="brl(totalCustoManutencao)" tone="danger" />
     </div>
 
@@ -2014,7 +2055,7 @@ async function backfillAddresses() {
         exportar xlsx
       </Button>
       <span class="ml-auto text-xs text-muted-foreground">
-        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · enviada p/ reembolso {{ totalReembolsadas }} · manutenção {{ brl(totalCustoManutencao) }}
+        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · enviada p/ reembolso {{ reembolsoItens }} · manutenção {{ brl(totalCustoManutencao) }}
       </span>
     </div>
 

@@ -250,7 +250,13 @@ class StockCorrectionIn(BaseModel):
 
 class DevolutionPage(BaseModel):
     items: list[DevolutionOut]
+    # `total` conta LINHAS (uma por SKU do pedido); `total_pedidos` conta
+    # pedidos distintos (linha sem número de pedido conta 1). Mesmo par para
+    # reembolso. Todos com os filtros da listagem, não só da página.
     total: int
+    total_pedidos: int
+    reembolso_itens: int
+    reembolso_pedidos: int
     limit: int
     offset: int
 

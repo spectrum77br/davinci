@@ -369,10 +369,31 @@ async def list_devolutions(
         .limit(limit)
         .offset(offset)
     )
-    count_stmt = select(func.count()).select_from(Devolution).where(*where)
+    # Contadores dos cards, sempre com os MESMOS filtros da listagem. O grão da
+    # tabela é ITEM (uma linha por SKU do pedido), então `total` conta linhas e
+    # `total_pedidos` conta pedidos distintos — linha sem número de pedido
+    # conta como 1 pedido próprio. Idem para o par de reembolso.
+    pedido_norm = func.nullif(func.btrim(Devolution.pedido_bling), "")
+    sem_pedido = pedido_norm.is_(None)
+    reembolsada = Devolution.reembolso.is_(True)
+    count_stmt = (
+        select(
+            func.count().label("total"),
+            (func.count(pedido_norm.distinct()) + func.count().filter(sem_pedido)).label(
+                "total_pedidos"
+            ),
+            func.count().filter(reembolsada).label("reembolso_itens"),
+            (
+                func.count(pedido_norm.distinct()).filter(reembolsada)
+                + func.count().filter(sem_pedido, reembolsada)
+            ).label("reembolso_pedidos"),
+        )
+        .select_from(Devolution)
+        .where(*where)
+    )
 
     rows = (await session.execute(stmt)).all()
-    total = (await session.execute(count_stmt)).scalar_one()
+    totais = (await session.execute(count_stmt)).one()
 
     chamados = await _chamados_por_pedido(session, {dev.pedido_bling for dev, _ in rows})
     aberturas = await _aberturas_por_chamado(session, chamados)
@@ -388,7 +409,10 @@ async def list_devolutions(
 
     return DevolutionPage(
         items=items,
-        total=int(total or 0),
+        total=int(totais.total or 0),
+        total_pedidos=int(totais.total_pedidos or 0),
+        reembolso_itens=int(totais.reembolso_itens or 0),
+        reembolso_pedidos=int(totais.reembolso_pedidos or 0),
         limit=limit,
         offset=offset,
     )
