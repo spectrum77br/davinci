@@ -50,17 +50,20 @@ distingue dos 83955 do controle de estoque (status NULL → seguem fora da
 Margem, e fora do aviso Threema de estoque, que filtra pelos seus próprios
 marcados).
 
-MARGEM NEGATIVA REPROVA DIRETO (Eduardo 02/09: "margem negativa reprovar
-automatico tbm pra poder aprovar pelo threma"): se a pior margem que
-disparou o gatilho é < 0, o pino gravado é 'Reprovado' em vez de 'Pendente'
-— mesmos passos no Bling (recado + 83955), mas a linha SAI da aba Pendentes
-(igual ao Reprovar no clique) e o aviso Threema já diz "reprovado
-automaticamente", com o link de aprovar pelo celular pra desfazer. Margem
-baixa POSITIVA (ex.: 5% < 9%) continua virando 'Pendente' pra análise
-humana. O resgate: link do aviso, ou "Buscar pedido" na aba (o lookup não
-filtra situação) — Aprovar solta o pedido no Bling nos dois caminhos
-(exceção do segurado em routers/margens._apply_bling_decision_by_pedido
-cobre 'Pendente' E 'Reprovado').
+MARGEM ABAIXO DA MÍNIMA REPROVA DIRETO (11/09/2026: "margem 16 e mínimo
+18, nesse caso ele teria que reprovar o pedido automático" — antes, desde
+02/09, só a margem NEGATIVA reprovava e a baixa positiva virava 'Pendente'
+pra análise humana): toda linha com o gatilho de margem baixa ativo
+(marketplace_margem < margem_minima, sem Condição Especial) grava o pino
+'Reprovado' em vez de 'Pendente' — mesmos passos no Bling (recado + 83955),
+mas a linha SAI da aba Pendentes (igual ao Reprovar no clique) e o aviso
+Threema já diz "reprovado automaticamente", com o link de aprovar pelo
+celular pra desfazer. O pino 'Pendente' (segurar sem reprovar) fica só pros
+outros gatilhos: saldo divergente e 'Pendente' gravado na mão. O resgate:
+link do aviso, ou "Buscar pedido" na aba (o lookup não filtra situação) —
+Aprovar solta o pedido no Bling nos dois caminhos (exceção do segurado em
+routers/margens._apply_bling_decision_by_pedido cobre 'Pendente' E
+'Reprovado').
 
 MARGEM FORA DO NORMAL (> 60%) SÓ AVISA (Eduardo 02/09): margem alta demais
 costuma ser custo errado no cadastro — o mesmo tick manda UM alerta por
@@ -159,11 +162,9 @@ def _candidatos_sql() -> str:
                MAX(COALESCE(v.plataforma_bling, v.plataforma_financeiro))
                                                 AS plataforma,
                MAX(v.loja_nome)                 AS conta,
+               -- Margem baixa reprova direto em vez de pino 'Pendente'
+               -- (11/09, ver docstring).
                BOOL_OR({_ATTENTION_MARGEM_SQL}) AS margem_baixa,
-               -- Margem NEGATIVA (entre as linhas que dispararam o gatilho):
-               -- reprova direto em vez de pino 'Pendente' (ver docstring).
-               BOOL_OR({_ATTENTION_MARGEM_SQL}
-                       AND v.marketplace_margem < 0) AS margem_negativa,
                BOOL_OR({_ATTENTION_SALDO_SQL}
                        AND v.marketplace_liquido_base_margem_item IS NOT NULL)
                                                 AS saldo_divergente,
@@ -244,7 +245,7 @@ async def _hold_one(
     await client.update_order_situacao(bling_id, SITUACAO_AGUARDANDO_CANCELAMENTO)
 
     # 3) Espelhos locais (todas as linhas-item do pedido) + auditoria.
-    #    Pino 'Reprovado' (margem negativa) tira a linha da aba Pendentes na
+    #    Pino 'Reprovado' (margem abaixo da mínima) tira a linha da aba Pendentes na
     #    hora — mesmo efeito do Reprovar no clique; 'Pendente' mantém pra
     #    análise humana (ver docstring).
     pino = "Reprovado" if reprovar else "Pendente"
@@ -326,7 +327,7 @@ async def _avisar_threema(
     if reprovado:
         cabecalho = "DaVinci — Margem: pedido reprovado automaticamente"
         rodape_acao = (
-            "Reprovado por margem negativa — situação movida para Aguardando "
+            "Reprovado por margem abaixo do mínimo — situação movida para Aguardando "
             "Cancelamento. Se quiser manter a venda, aprove pelo link.\n"
         )
     else:
@@ -484,7 +485,9 @@ async def run(
             skipped = "bling_integration_missing"
             rows = []
     for r in rows:
-        reprovar = bool(r["margem_negativa"])
+        # Margem abaixo da mínima → reprova direto (11/09). Saldo divergente
+        # / 'Pendente' gravado na mão → só segura.
+        reprovar = bool(r["margem_baixa"])
         motivo = _motivo(
             bool(r["margem_baixa"]),
             bool(r["saldo_divergente"]),

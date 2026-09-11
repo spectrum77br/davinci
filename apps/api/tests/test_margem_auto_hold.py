@@ -209,34 +209,37 @@ async def _audits(db: AsyncSession, pedido: str) -> list[dict]:
     ]
 
 
-async def test_segura_pendente_em_aberto(db: AsyncSession):
+async def test_reprova_pendente_em_aberto_por_margem_baixa(db: AsyncSession):
+    """Margem baixa POSITIVA (5% < 10%) reprova direto (11/09): recado no
+    Bling, 83955 e pino 'Reprovado' — o segurar-sem-reprovar ('Pendente') fica
+    só pro saldo divergente e pro 'Pendente' gravado na mão."""
     await _seed_pedido(db, pedido="291670", bling_id=111)
     fake = FakeBling(observacoes="obs antiga do pedido")
 
     res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
 
-    assert res == {"held": 1, "reprovados": 0, "failed": 0, "alertas": 0}
+    assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
     # Bling: recado datado NO TOPO preservando o texto antigo, depois situação.
     assert fake.get_calls == [111]
     assert len(fake.put_bodies) == 1
     obs = fake.put_bodies[0][1]["observacoes"]
-    assert obs.startswith("21/08 - Margem DaVinci: pedido segurado")
+    assert obs.startswith("21/08 - Margem DaVinci: pedido reprovado automaticamente")
     assert "margem abaixo do mínimo" in obs
     assert obs.endswith("\nobs antiga do pedido")
     assert fake.situacao_calls == [(111, 83955)]
-    # Espelhos locais: bling_orders + snapshot com o pino 'Pendente'.
+    # Espelhos locais: bling_orders + snapshot com o pino 'Reprovado'.
     order = (
         await db.execute(
             text("SELECT situacao, status FROM bling_orders WHERE bling_id = 111")
         )
     ).one()
-    assert tuple(order) == ("83955", "Pendente")
+    assert tuple(order) == ("83955", "Reprovado")
     snap = await _snapshot(db, "291670")
     assert snap["situacao"] == "83955"
     assert snap["situacao_nome"] == "Aguardando Cancelamento"
-    assert snap["bling_status_margem"] == "Pendente"
-    # Auditoria: ação do robô (mudado_por NULL, origem própria).
-    audits = await _audits(db, "291670")
+    assert snap["bling_status_margem"] == "Reprovado"
+    # Auditoria: situação E status como ação do robô (mudado_por NULL).
+    audits = sorted(await _audits(db, "291670"), key=lambda a: a["acao"])
     assert audits == [
         {
             "acao": "situacao",
@@ -244,7 +247,14 @@ async def test_segura_pendente_em_aberto(db: AsyncSession):
             "valor_novo": "83955",
             "origem": "margens_auto",
             "mudado_por": None,
-        }
+        },
+        {
+            "acao": "status",
+            "valor_antigo": None,
+            "valor_novo": "Reprovado",
+            "origem": "margens_auto",
+            "mudado_por": None,
+        },
     ]
 
 
@@ -264,12 +274,14 @@ async def test_segundo_tick_nao_repete(db: AsyncSession):
 async def test_observacao_ja_escrita_hoje_nao_duplica(db: AsyncSession):
     """PUT de ontem OK mas situação falhou → retry do dia só refaz a situação."""
     await _seed_pedido(db, pedido="291670", bling_id=111)
-    linha = f"{HOJE:%d/%m} - " + margem_auto_hold._mensagem("margem abaixo do mínimo")
+    linha = f"{HOJE:%d/%m} - " + margem_auto_hold._mensagem(
+        "margem abaixo do mínimo", reprovado=True
+    )
     fake = FakeBling(observacoes=linha)
 
     res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
 
-    assert res == {"held": 1, "reprovados": 0, "failed": 0, "alertas": 0}
+    assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
     assert fake.put_bodies == []  # compose idempotente: nada a reescrever
     assert fake.situacao_calls == [(111, 83955)]
 
@@ -354,7 +366,7 @@ async def test_nao_segura_ml_shopee_tiktok_por_saldo(db: AsyncSession):
     (_ATTENTION_SALDO_SQL as exclui) e líquido NULL vira "aguardando saldo da
     plataforma" SÓ na aba (_ATTENTION_SALDO_AGUARDANDO_SQL, excluído no WHERE
     de _candidatos_sql — versão da noite: pendente sem hold, para não repetir
-    os 13 holds à toa). Margem baixa continua segurando normalmente."""
+    os 13 holds à toa). Margem baixa continua entrando (e reprova direto, 11/09)."""
     await _seed_pedido(
         db, pedido="501", bling_id=501, margem_baixa=False, saldo_gap=True,
         plataforma="ml",
@@ -378,7 +390,7 @@ async def test_nao_segura_ml_shopee_tiktok_por_saldo(db: AsyncSession):
 
     res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
 
-    assert res == {"held": 1, "reprovados": 0, "failed": 0, "alertas": 0}
+    assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
     assert fake.situacao_calls == [(503, 83955)]
     assert "margem abaixo do mínimo" in fake.put_bodies[0][1]["observacoes"]
 
@@ -393,13 +405,13 @@ async def test_obs_rejeitada_pelo_bling_ainda_segura_o_pedido(db: AsyncSession):
 
     res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
 
-    assert res == {"held": 1, "reprovados": 0, "failed": 0, "alertas": 0}
+    assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
     assert fake.put_bodies == []  # recado rejeitado
     assert fake.situacao_calls == [(444, 83955)]
     snap = await _snapshot(db, "291676")
     assert snap["situacao"] == "83955"
-    assert snap["bling_status_margem"] == "Pendente"
-    assert len(await _audits(db, "291676")) == 1
+    assert snap["bling_status_margem"] == "Reprovado"
+    assert len(await _audits(db, "291676")) == 2  # situação + status
 
 
 async def test_obs_erro_transiente_nao_segura_e_deixa_pro_retry(db: AsyncSession):
@@ -436,7 +448,7 @@ async def test_falha_num_pedido_nao_derruba_os_demais(db: AsyncSession):
 
     res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
 
-    assert res == {"held": 1, "reprovados": 0, "failed": 1, "alertas": 0}
+    assert res == {"held": 0, "reprovados": 1, "failed": 1, "alertas": 0}
     assert fake.situacao_calls == [(222, 83955)]
     # O que falhou ficou como estava (rollback) e continua candidato.
     snap_fail = await _snapshot(db, "100")
@@ -446,7 +458,7 @@ async def test_falha_num_pedido_nao_derruba_os_demais(db: AsyncSession):
     # O que deu certo foi espelhado + auditado.
     snap_ok = await _snapshot(db, "200")
     assert snap_ok["situacao"] == "83955"
-    assert len(await _audits(db, "200")) == 1
+    assert len(await _audits(db, "200")) == 2  # situação + status (reprovado)
 
 
 def _margem_permissions() -> dict:
@@ -609,17 +621,18 @@ async def test_nao_segura_margem_baixa_em_data_especial(db: AsyncSession):
 
     res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
 
-    assert res == {"held": 1, "reprovados": 0, "failed": 0, "alertas": 0}
+    assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
     assert fake.situacao_calls == [(602, 83955)]
     snap_isento = await _snapshot(db, "291690")
     assert snap_isento["situacao"] == "6"
     assert snap_isento["bling_status_margem"] is None
 
 
-async def test_hold_avisa_threema_cadastrado(db: AsyncSession, monkeypatch):
+async def test_reprovo_avisa_threema_cadastrado(db: AsyncSession, monkeypatch):
     """Com destinatários no cadastro `margem_auto` (segunda lista do modal
-    Informar da Margem), o hold manda NA HORA uma mensagem por pedido com
-    conta, motivo, margem vs mínima e lucro. Sem cadastro, nada é enviado —
+    Informar da Margem), o robô manda NA HORA uma mensagem por pedido com
+    conta, motivo, margem vs mínima e lucro — margem baixa positiva já sai
+    como "reprovado automaticamente" (11/09). Sem cadastro, nada é enviado —
     coberto pelos demais testes, que rodam sem config e sem fake."""
     from app.models import ThreemaInformarConfig
     from app.services import threema
@@ -648,19 +661,19 @@ async def test_hold_avisa_threema_cadastrado(db: AsyncSession, monkeypatch):
 
     res = await margem_auto_hold.run(db, client=FakeBling(), hoje=HOJE)
 
-    assert res == {"held": 1, "reprovados": 0, "failed": 0, "alertas": 0}
+    assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
     assert len(enviados) == 1
     msg, recipients = enviados[0]
     assert recipients == ["AAAA1111", "BBBB2222"]
     linhas = msg.splitlines()
     assert linhas[:6] == [
-        "DaVinci — Margem: pedido segurado para análise",
+        "DaVinci — Margem: pedido reprovado automaticamente",
         "Pedido 291670 — ml Loja ML",
         "Motivo: margem abaixo do mínimo",
         "Margem: 5% (mínimo 10%)",
         "Lucro: R$ -15,50",
-        "Situação movida para Aguardando Cancelamento. Aprovar devolve "
-        "o pedido ao fluxo.",
+        "Reprovado por margem abaixo do mínimo — situação movida para Aguardando "
+        "Cancelamento. Se quiser manter a venda, aprove pelo link.",
     ]
     # Última linha: link público de aprovação com token que valida de volta
     # pro MESMO pedido (o exp muda a cada run, então não dá pra fixar a URL).
@@ -694,13 +707,14 @@ async def test_hold_falha_no_threema_nao_desfaz_o_hold(
 
     res = await margem_auto_hold.run(db, client=FakeBling(), hoje=HOJE)
 
-    assert res == {"held": 1, "reprovados": 0, "failed": 0, "alertas": 0}
+    assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
     snap = await _snapshot(db, "291670")
     assert snap["situacao"] == "83955"
-    assert snap["bling_status_margem"] == "Pendente"
+    assert snap["bling_status_margem"] == "Reprovado"
 
 
-# ---- margem negativa reprova direto (Eduardo 02/09) ----
+# ---- margem negativa reprova direto (Eduardo 02/09; desde 11/09 toda margem
+# abaixo da mínima reprova — os testes abaixo seguem valendo) ----
 
 
 async def test_margem_negativa_reprova_automatico(db: AsyncSession):
@@ -862,7 +876,7 @@ async def test_margem_negativa_avisa_threema_reprovado(db: AsyncSession, monkeyp
         "Motivo: margem abaixo do mínimo",
         "Margem: -5% (mínimo 10%)",
         "Lucro: R$ -61,60",
-        "Reprovado por margem negativa — situação movida para Aguardando "
+        "Reprovado por margem abaixo do mínimo — situação movida para Aguardando "
         "Cancelamento. Se quiser manter a venda, aprove pelo link.",
     ]
     from app.services import aprovar_link
