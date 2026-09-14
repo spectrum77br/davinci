@@ -79,7 +79,10 @@ from app.services.product_cost_sync import (
 from app.services.refresh_bling_stock import run_refresh_bling_stock
 from app.services.refunds_freight_sync import backfill_freight_refunds
 from app.services.sync_orchestrator import SyncOrchestrator
-from app.services.valuation_estoque_snapshot import run_valuation_estoque_snapshot
+from app.services.valuation_estoque_snapshot import (
+    repor_snapshot_se_faltar,
+    run_valuation_estoque_snapshot,
+)
 from app.services.vigia_importacao import vigia_importacao_sweep
 from app.worker_pool import (
     ARQ_FINANCIALS_QUEUE,
@@ -796,6 +799,16 @@ async def valuation_estoque_snapshot(ctx: dict) -> None:
     async with session_scope() as s:
         summary = await run_valuation_estoque_snapshot(s)
     logger.info("valuation_estoque_snapshot_done", **summary)
+
+
+async def valuation_estoque_catchup(ctx: dict) -> None:
+    """Toda hora (:20) + no startup do worker: repõe o snapshot de estoque do
+    dia se o cron das 08:00 BRT foi perdido (worker reiniciado por deploy na
+    janela — 02/09, 11/09 e 14/09 ficaram sem linha). Quando a linha já
+    existe, ou ainda não deu 08:00, é só um SELECT."""
+    async with session_scope() as s:
+        summary = await repor_snapshot_se_faltar(s)
+    logger.info("valuation_estoque_catchup_done", **summary)
 
 
 async def logistica_ml_ingest(ctx: dict) -> None:
@@ -2041,6 +2054,7 @@ class WorkerSettings:
         bling_notas_token_refresh,
         kit_components_sync,
         valuation_estoque_snapshot,
+        valuation_estoque_catchup,
         logistica_ml_ingest,
         logistica_marketplaces_ingest,
         # Escopo normal (pendentes do painel) termina em minutos, mas se a fila
@@ -2077,6 +2091,11 @@ class WorkerSettings:
         # e atualiza valuation.estoque (total). A aba "Estoque Bling" da
         # página /financeiro/valuation lê dessa tabela.
         cron(valuation_estoque_snapshot, hour=11, minute=0, run_at_startup=False),
+        # Rede de segurança do snapshot acima: toda hora (:20) e a cada
+        # restart do worker, refaz o crawl SÓ se o dia (SP) ainda não tem
+        # linha e já passou das 08:00 BRT. Sem isso, um deploy na janela das
+        # 08:00 deixava o dia sem Estoque (02/09, 11/09, 14/09).
+        cron(valuation_estoque_catchup, minute=20, run_at_startup=True),
         # Toda hora (:00) — era 1x/dia às 07:00 BRT; pedido do usuário 25/08.
         # Importa os novos pedidos ML pra Logística, realinha status, limpa os
         # finalizados e enriquece o status do Meli (só linhas ainda vazias).

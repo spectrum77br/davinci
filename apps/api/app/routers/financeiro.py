@@ -1068,9 +1068,15 @@ async def valuation_report(
     months = _val_window_months()
 
     # 1. Valuation por mês:
-    #    • SALDOS (caixa/estoque/receber) = snapshot do último dia do mês,
-    #      lidos da tabela `valuation` — posições de um instante, não dá p/
-    #      recomputar do bling_orders.
+    #    • SALDOS (caixa/estoque/receber) = último valor PREENCHIDO do mês,
+    #      campo a campo, lidos da tabela `valuation` — posições de um
+    #      instante, não dá p/ recomputar do bling_orders. Não é "a última
+    #      linha": quatro robôs gravam a linha do dia em horários diferentes
+    #      (caixa 08:00, receber ~08:08, estoque 08:00/08:15 BRT), então entre
+    #      uma gravação e outra a linha de hoje é parcial e a última linha
+    #      mostrava "—" em Estoque/A Receber com o valor de ontem no banco
+    #      (Eduardo, 14/09 08:02). Zero conta como vazio: é o placeholder que
+    #      o run_all.py da VPS grava em caixa/estoque ao criar a linha.
     #    • RENTABILIDADE = ao vivo: somada do mesmo _agg_sql que alimenta as
     #      seções "Por Marketplace"/"Por Categoria" abaixo (Em aberto + Em
     #      andamento + Entregue; base − custo − frete − comissão, rateada por
@@ -1078,13 +1084,27 @@ async def valuation_report(
     #      `valuation.rentabilidade` carimbada pela rotina diária, que ficava
     #      congelada e já sofreu corrupção por embaralhamento de datas.
     val_saldos_sql = text(f"""
-        SELECT DISTINCT ON (date_trunc('month', data))
-               date_trunc('month', data)::date AS mes,
-               caixa, estoque, receber, data AS data_snapshot
-        FROM {_qt("valuation")}
-        WHERE data >= date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - INTERVAL '2 months')::date
-          AND data <  date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) + INTERVAL '1 month')::date
-        ORDER BY date_trunc('month', data), data DESC
+        WITH v AS (
+            SELECT date_trunc('month', data)::date AS mes, data, id,
+                   NULLIF(caixa, 0)   AS caixa,
+                   NULLIF(estoque, 0) AS estoque,
+                   NULLIF(receber, 0) AS receber
+            FROM {_qt("valuation")}
+            WHERE data >= date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - INTERVAL '2 months')::date
+              AND data <  date_trunc('month', ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date) + INTERVAL '1 month')::date
+        )
+        SELECT mes,
+               (array_agg(caixa   ORDER BY data DESC, id DESC) FILTER (WHERE caixa   IS NOT NULL))[1] AS caixa,
+               (array_agg(estoque ORDER BY data DESC, id DESC) FILTER (WHERE estoque IS NOT NULL))[1] AS estoque,
+               (array_agg(receber ORDER BY data DESC, id DESC) FILTER (WHERE receber IS NOT NULL))[1] AS receber,
+               max(data) FILTER (WHERE caixa   IS NOT NULL) AS caixa_em,
+               max(data) FILTER (WHERE estoque IS NOT NULL) AS estoque_em,
+               max(data) FILTER (WHERE receber IS NOT NULL) AS receber_em,
+               max(data) FILTER (
+                   WHERE caixa IS NOT NULL OR estoque IS NOT NULL OR receber IS NOT NULL
+               ) AS data_snapshot
+        FROM v
+        GROUP BY mes
     """)
     val_by_mes: dict = {}
     for r in (await session.execute(val_saldos_sql)).mappings().all():
@@ -1163,6 +1183,8 @@ async def valuation_report(
             mes=mes, caixa=_r2(caixa), estoque=_r2(estoque), receber=_r2(receber),
             total=_r2(total), rentabilidade=_r2(rent_by_mes.get(mes)),
             data_snapshot=md.get("data_snapshot"),
+            caixa_em=md.get("caixa_em"), estoque_em=md.get("estoque_em"),
+            receber_em=md.get("receber_em"),
         ))
 
     # 2. Quadro "Operacional — 3 meses" (substitui a Eficácia). Tudo ao vivo,

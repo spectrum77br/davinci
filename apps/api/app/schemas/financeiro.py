@@ -242,8 +242,10 @@ class DNPProdutoPatch(BaseModel):
 
 
 class ValuationMesOut(BaseModel):
-    """Saldos = snapshot do último dia disponível do mês; rentabilidade =
-    SUM do mês (fluxo). `data_snapshot` = data do saldo usado. Valores em
+    """Saldos = último valor preenchido do mês, campo a campo (cada robô
+    grava num horário; a linha do dia fica parcial entre eles); rentabilidade
+    = SUM do mês (fluxo). `data_snapshot` = data mais recente com algum saldo;
+    `*_em` = data da leitura de cada saldo (tooltip da célula). Valores em
     float (arredondados) p/ o front consumir como número direto no JSON."""
 
     mes: date
@@ -253,6 +255,9 @@ class ValuationMesOut(BaseModel):
     total: float | None = None
     rentabilidade: float | None = None
     data_snapshot: date | None = None
+    caixa_em: date | None = None
+    receber_em: date | None = None
+    estoque_em: date | None = None
 
 
 class OperacionalLinhaOut(BaseModel):

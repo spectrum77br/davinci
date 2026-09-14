@@ -237,3 +237,38 @@ async def run_valuation_estoque_snapshot(session: AsyncSession) -> dict:
 def _jsonb_dumps(obj: dict) -> str:
     import json
     return json.dumps(obj)
+
+
+# Hora (SP) do cron oficial (11:00 UTC = 08:00 BRT). Antes disso o snapshot
+# do dia ainda não "devia existir" — não há o que repor.
+HORA_SNAPSHOT_SP = 8
+
+
+async def snapshot_existe(session: AsyncSession, dia: date) -> bool:
+    row = (
+        await session.execute(
+            text(f"SELECT 1 FROM {_SCHEMA}.valuation_estoque_bling_diario WHERE data = :d"),
+            {"d": dia},
+        )
+    ).first()
+    return row is not None
+
+
+async def repor_snapshot_se_faltar(
+    session: AsyncSession, *, agora: datetime | None = None
+) -> dict:
+    """Catch-up do snapshot diário.
+
+    O cron das 08:00 BRT some quando o worker é reiniciado por deploy naquela
+    janela — 02/09, 11/09 e 14/09 ficaram sem linha em
+    valuation_estoque_bling_diario (e a Valuation ficou sem Estoque do dia).
+    Chamado toda hora e no startup do worker: se já passou das 08:00 (SP) e o
+    dia ainda não tem linha, faz o crawl; senão custa um SELECT."""
+    agora_sp = (agora or datetime.now(UTC)).astimezone(_SP)
+    hoje = agora_sp.date()
+    if agora_sp.hour < HORA_SNAPSHOT_SP:
+        return {"status": "cedo", "data": hoje.isoformat()}
+    if await snapshot_existe(session, hoje):
+        return {"status": "ja_tem", "data": hoje.isoformat()}
+    logger.warning("valuation_estoque_snapshot_faltando", data=hoje.isoformat())
+    return await run_valuation_estoque_snapshot(session)

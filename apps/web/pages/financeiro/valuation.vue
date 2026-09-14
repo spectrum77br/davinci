@@ -23,6 +23,9 @@ type ValuationMes = {
   total: number | null
   rentabilidade: number | null
   data_snapshot: string | null
+  caixa_em: string | null
+  receber_em: string | null
+  estoque_em: string | null
 }
 type OperacionalLinha = {
   chave: string
@@ -397,6 +400,16 @@ function diaLabel(iso: string | null): string {
   const [y, m, d] = iso.split('-').map(Number)
   return new Date(y, m - 1, d).toLocaleDateString('pt-BR')
 }
+// Tooltip das células de saldo: cada campo vem da última leitura preenchida
+// do mês (podem ser dias diferentes — caixa de hoje, estoque de ontem).
+function leituraDe(iso: string | null): string {
+  return iso ? `Leitura de ${diaLabel(iso)}` : ''
+}
+// Leitura de um dia diferente do "(até dd/mm)" do cabeçalho → mostra a data
+// embaixo do valor (visível sem hover; Eduardo prefere informação à vista).
+function leituraDefasada(iso: string | null, m: ValuationMes): boolean {
+  return !!iso && !!m.data_snapshot && iso !== m.data_snapshot
+}
 
 const valMeses = computed(() => resumo.value?.valuation_meses ?? [])
 const geradoEm = computed(() =>
@@ -570,20 +583,23 @@ const loading = computed(() =>
               <tbody>
                 <tr class="border-t hover:brightness-95 dark:hover:brightness-110">
                   <td class="px-2 py-1 border font-medium">Caixa</td>
-                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border" :class="mesBand(mi).sep">
+                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border" :class="mesBand(mi).sep" :title="leituraDe(m.caixa_em)">
                     {{ fmtBRL(m.caixa) }}
+                    <span v-if="leituraDefasada(m.caixa_em, m)" class="block text-[10px] font-normal text-muted-foreground">leitura de {{ diaCurto(m.caixa_em) }}</span>
                   </td>
                 </tr>
                 <tr class="border-t bg-muted/20 hover:brightness-95 dark:hover:brightness-110">
                   <td class="px-2 py-1 border font-medium">A Receber</td>
-                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border" :class="mesBand(mi).sep">
+                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border" :class="mesBand(mi).sep" :title="leituraDe(m.receber_em)">
                     {{ fmtBRL(m.receber) }}
+                    <span v-if="leituraDefasada(m.receber_em, m)" class="block text-[10px] font-normal text-muted-foreground">leitura de {{ diaCurto(m.receber_em) }}</span>
                   </td>
                 </tr>
                 <tr class="border-t hover:brightness-95 dark:hover:brightness-110">
                   <td class="px-2 py-1 border font-medium">Estoque</td>
-                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border" :class="mesBand(mi).sep">
+                  <td v-for="(m, mi) in valMeses" :key="m.mes" class="px-2 py-1 text-right tabular-nums border" :class="mesBand(mi).sep" :title="leituraDe(m.estoque_em)">
                     {{ fmtBRL(m.estoque) }}
+                    <span v-if="leituraDefasada(m.estoque_em, m)" class="block text-[10px] font-normal text-muted-foreground">leitura de {{ diaCurto(m.estoque_em) }}</span>
                   </td>
                 </tr>
                 <tr class="bg-muted/40 font-semibold">
