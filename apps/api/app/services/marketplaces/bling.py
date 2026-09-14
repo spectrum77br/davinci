@@ -460,6 +460,18 @@ class BlingClient:
         r.raise_for_status()
         return r.json().get("data") or {}
 
+    async def estornar_estoque_pedido(self, bling_order_id: int) -> httpx.Response:
+        """POST /pedidos/vendas/{id}/estornar-estoque — desfaz a reserva/baixa de
+        estoque que o pedido lançou (a mesma ação de Estoque → Estornar na tela
+        do pedido). Devolve a resposta crua: 4xx aqui pode ser só "estoque não
+        lançado", que o chamador decide tolerar."""
+        return await self._request("POST", f"/pedidos/vendas/{bling_order_id}/estornar-estoque")
+
+    async def lancar_estoque_pedido(self, bling_order_id: int) -> httpx.Response:
+        """POST /pedidos/vendas/{id}/lancar-estoque — lança o estoque do pedido
+        com os itens ATUAIS (Estoque → Lançar na tela do pedido)."""
+        return await self._request("POST", f"/pedidos/vendas/{bling_order_id}/lancar-estoque")
+
     async def get_default_deposit_id(self) -> int | None:
         """idDeposito do depósito padrão (padrao=True, senão o primeiro ativo).
         Cacheado por integração — o Bling exige idDeposito no POST /estoques."""

@@ -21,6 +21,14 @@ Onde roda (sempre ANTES do check de estoque / emissão de NF):
 Só pedidos "Em aberto" (situacao 6) são tocados — quem já anda pela esteira
 de NF nunca é alterado. O PUT do Bling revalida a venda inteira (caso
 291676: erro 67); QUALQUER falha no PUT = loga e pula, sem efeito local.
+Depois do PUT, o robô ESTORNA e RELANÇA o estoque do pedido no Bling
+(Eduardo, 14/09: "ele está mudando mas continua tirando estoque do saldo de
+ra ao invés de tirar do f105 de sp"): o Bling reserva o estoque dos itens
+quando o pedido entra e NÃO move a reserva quando o item é trocado — a
+unidade ficava presa no .ra e o .sp intacto. Estornar libera os itens
+antigos; lançar reserva os atuais. Se o estorno responder que não havia
+estoque lançado, segue direto pro lançar; se o lançar falhar, loga e conta
+em `relancar_falhas` (a emissão da NF lança de novo com os itens atuais).
 Toda troca vira linha no margem_audit (acao='sku',
 origem='prioridade_estoque', mudado_por=None = robô) E linha datada nas
 Observações do pedido no Bling ("dd/mm - SKU trocado pela prioridade de
@@ -164,6 +172,8 @@ async def aplicar_prioridade_estoque(
         "sem_produto_alvo": 0,
         "sem_saldo_alvo": 0,
         "falhas": 0,
+        "relancados": 0,
+        "relancar_falhas": 0,
     }
     if numeros is not None and not numeros:
         return summary
@@ -305,6 +315,12 @@ async def aplicar_prioridade_estoque(
             )
             continue
 
+        # Move a reserva de estoque pros itens novos (o PUT não faz isso).
+        if await relancar_estoque_pedido(client, int(bling_id), numero):
+            summary["relancados"] += 1
+        else:
+            summary["relancar_falhas"] += 1
+
         for t in aplicadas:
             valores: dict = {
                 "item_codigo": t["alvo"],
@@ -341,6 +357,40 @@ async def aplicar_prioridade_estoque(
             )
 
     return summary
+
+
+async def relancar_estoque_pedido(client, bling_id: int, numero: str) -> bool:
+    """Estorna e relança o estoque do pedido no Bling depois da troca de SKU.
+
+    Estorno com 4xx é tolerado (pedido sem estoque lançado — ex.: conta que
+    lança só na NF): segue pro lançar, que reserva os itens atuais. Falha no
+    lançar = False (loga; a NF lança de novo com os itens atuais). Nunca
+    levanta."""
+    try:
+        r = await client.estornar_estoque_pedido(bling_id)
+        estornou = r.status_code < 300
+        if not estornou:
+            logger.info(
+                "prioridade_estoque_estorno_ignorado",
+                pedido=numero,
+                status=r.status_code,
+                body=(r.text or "")[:200],
+            )
+        r = await client.lancar_estoque_pedido(bling_id)
+        if r.status_code >= 300:
+            logger.warning(
+                "prioridade_estoque_relancar_falhou",
+                pedido=numero,
+                estornou=estornou,
+                status=r.status_code,
+                body=(r.text or "")[:200],
+            )
+            return False
+        logger.info("prioridade_estoque_relancado", pedido=numero, estornou=estornou)
+        return True
+    except Exception as exc:  # noqa: BLE001 — nunca derruba o sweep
+        logger.warning("prioridade_estoque_relancar_erro", pedido=numero, erro=str(exc))
+        return False
 
 
 async def prioridade_estoque_sweep() -> dict:
