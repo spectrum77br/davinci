@@ -300,10 +300,8 @@ watch(() => route.path, (p) => openSectionOf(p))
     :class="props.collapsed ? 'w-[68px]' : 'w-[248px]'"
   >
     <div class="h-14 flex items-center gap-2 px-4 border-b">
-      <div class="size-7 rounded-md bg-primary text-primary-foreground grid place-items-center font-bold text-[13px]">
-        D
-      </div>
-      <strong v-if="!props.collapsed" class="text-[15px] tracking-tight">DaVinci</strong>
+      <LogoMark class="size-7 shrink-0" />
+      <strong v-if="!props.collapsed" class="text-[15px] font-extrabold tracking-tight">DaVinci</strong>
       <button
         class="ml-auto rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted"
         @click="emit('toggle')"

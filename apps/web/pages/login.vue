@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Mail, ShieldCheck, Loader2, Lock } from 'lucide-vue-next'
+import { ShieldCheck, Loader2, Lock } from 'lucide-vue-next'
 
 definePageMeta({ layout: false })
 
@@ -143,10 +143,8 @@ const errorLabel = computed(() => {
     <Card class="w-full max-w-md">
       <CardHeader class="space-y-1">
         <div class="flex items-center gap-2 mb-2">
-          <div class="size-9 rounded-md bg-primary text-primary-foreground flex items-center justify-center">
-            <Mail class="size-5" />
-          </div>
-          <span class="text-lg font-semibold">DaVinci</span>
+          <LogoMark class="size-9 shrink-0" />
+          <span class="text-lg font-extrabold tracking-tight">DaVinci</span>
         </div>
         <CardTitle v-if="step === 'password'" class="text-xl">Entrar</CardTitle>
         <CardTitle v-else-if="step === 'otp-email'" class="text-xl">Entrar por código</CardTitle>
