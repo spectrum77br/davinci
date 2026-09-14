@@ -540,7 +540,7 @@ async def _pedido_completo(db: AsyncSession) -> None:
     await db.execute(sql(
         "INSERT INTO verificar_margem (bling_order_item_id, pedido_bling, sku, "
         "bling_status_margem, bling_margem_calculado, bling_lucro_calculado, financeiro_status) "
-        "VALUES (:id, '295070', 'SKU1', 'Aprovado', 12.5, 200, 'pending')"
+        "VALUES (:id, '295070', 'SKU1', 'Aprovado', 0.125, 200, 'pending')"
     ).bindparams(id=uuid4()))
     await db.commit()
 
@@ -651,7 +651,7 @@ async def test_consultar_pedido_ramos_vazios_vencido_cancelado_e_rastreio_sem_la
                    resolvido=True))
     await db.execute(sql(
         "INSERT INTO verificar_margem (bling_order_item_id, pedido_bling, sku, "
-        "marketplace_margem, marketplace_lucro) VALUES (:id, '295073', 'SKU4', 8.25, 90)"
+        "marketplace_margem, marketplace_lucro) VALUES (:id, '295073', 'SKU4', 0.0825, 90)"
     ).bindparams(id=uuid4()))
     await db.commit()
 

@@ -810,14 +810,16 @@ async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str,
                 else "sem decisão manual (ver status na aba Margem)"
             )
             partes = [f"Margem SKU {m['sku'] or '?'}", status]
+            # As margens vêm como fração (lucro ÷ custo, ex.: 0.165) — a tela
+            # multiplica por 100 na hora de mostrar; aqui idem.
             if m["bling_margem_calculado"] is not None:
                 partes.append(
-                    f"Bling {float(m['bling_margem_calculado']):.1f}% "
+                    f"Bling {float(m['bling_margem_calculado']) * 100:.1f}% "
                     f"(lucro {_brl(m['bling_lucro_calculado'])})"
                 )
             if m["marketplace_margem"] is not None:
                 partes.append(
-                    f"plataforma {float(m['marketplace_margem']):.1f}% "
+                    f"plataforma {float(m['marketplace_margem']) * 100:.1f}% "
                     f"(lucro {_brl(m['marketplace_lucro'])})"
                 )
             if m["financeiro_status"]:
