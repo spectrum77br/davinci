@@ -68,6 +68,17 @@ async def test_build_enrichment_sem_easyship_nem_endereco():
 
 
 @pytest.mark.asyncio
+async def test_build_enrichment_preserva_afn_para_confirmacao_sem_mudar_assinatura():
+    from app.services.logistica_bling import pacote_ainda_com_o_vendedor
+
+    client = FakeAmazon({"X": {"order_status": "Shipped", "fulfillment_channel": "AFN"}})
+    enr = await logistica_amazon.build_enrichment(client, "X")
+    assert enr["meli_status"]["fulfillment_channel"] == "AFN"
+    assert logistica_rules.assinatura_amazon(enr["meli_status"]) == "Enviado"
+    assert pacote_ainda_com_o_vendedor("Amazon", enr["meli_status"]) is False
+
+
+@pytest.mark.asyncio
 async def test_build_enrichment_pedido_ausente_fica_vazio():
     client = FakeAmazon({})
     enr = await logistica_amazon.build_enrichment(client, "000")

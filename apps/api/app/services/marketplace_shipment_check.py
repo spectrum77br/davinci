@@ -47,6 +47,12 @@ from app.db import session_scope
 from app.models import BlingOrder, Integration, IntegrationPlatform
 from app.models.company import Store
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.advisory_lock import SYNC_NAMESPACE
+from app.services.amazon_shipment_status import (
+    AMAZON_EASYSHIP_SAIU,
+    AMAZON_SHIPPED,
+    amazon_shipment_confirmed,
+)
 from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 from app.services.margem_audit import record_margem_audit
 from app.services.marketplaces.amazon import AmazonClient
@@ -54,7 +60,6 @@ from app.services.marketplaces.bling import BlingClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
 from app.services.marketplaces.tiktok import TikTokClient
-from app.services.advisory_lock import SYNC_NAMESPACE
 
 logger = structlog.get_logger()
 
@@ -85,29 +90,10 @@ _CANDIDATE_WINDOW = timedelta(days=30)
 # case-insensitively (we upper() the response before lookup).
 _SHOPEE_SHIPPED = {"SHIPPED", "TO_RETURN", "COMPLETED"}
 _ML_SHIPPED = {"shipped", "delivered"}
-_AMAZON_SHIPPED = {"Shipped"}
-# EasyShipShipmentStatus que CONFIRMAM que o pacote saiu da mão do vendedor.
-# Lista de INCLUSÃO, igual à do ML e pelo mesmo motivo: o `order_status` da
-# Amazon vira "Shipped" quando a NF é emitida, muito antes de o pacote sair, e
-# quem sabe a verdade é o EasyShip. A checagem antiga só barrava
-# "PendingPickUp" e deixava passar "PendingDropOff" — que é o caso em que NÓS
-# é que temos de levar o pacote ao ponto de entrega, ou seja, ele está parado
-# aqui dentro. Eduardo, 04/09: "ele ta jogando todos os pedidos para em
-# andamento antes de ser enviado realmente". Estado novo/desconhecido conta
-# como NÃO enviado — melhor o pedido esperar do que constar enviado sem ter saído.
-_AMAZON_EASYSHIP_SAIU = {
-    "PickedUp",
-    "DroppedOff",
-    "AtDestinationFC",
-    "OutForDelivery",
-    "Delivered",
-    "RejectedByBuyer",
-    "Undeliverable",
-    "ReturningToSeller",
-    "ReturnedToSeller",
-    "Damaged",
-    "Lost",
-}
+# Constantes Amazon reexportadas para os consumidores existentes;
+# confirmação física fica em amazon_shipment_status, inclusive no ingest.
+_AMAZON_SHIPPED = AMAZON_SHIPPED
+_AMAZON_EASYSHIP_SAIU = AMAZON_EASYSHIP_SAIU
 # TikTok Shop (Order API 202309) — vocabulário próprio, mesmo mapa usado em
 # logistica_rules.TIKTOK_STATUS_LABELS_PT. Só entram os estados em que o
 # pacote JÁ saiu da mão do vendedor, mesmo critério do Shopee/Amazon:
@@ -988,8 +974,8 @@ async def _amazon_shipped_for(
     só os estados de `_AMAZON_EASYSHIP_SAIU` confirmam que o pacote deixou o
     galpão. "PendingPickUp" (esperando a transportadora buscar) e
     "PendingDropOff" (esperando NÓS levarmos ao ponto) contam como não
-    enviado, e estado desconhecido também. Pedido fora do EasyShip não tem
-    esse campo — aí vale o `order_status` sozinho.
+    enviado, e estado desconhecido também. Sem EasyShip, só AFN explícito
+    (expedição pela Amazon/FBA) permite confirmar pelo `order_status`.
     """
     try:
         result = await client.get_order_status(str(o.numeroloja))
@@ -1007,9 +993,6 @@ async def _amazon_shipped_for(
         dl = _iso_to_utc_dt(result.get("latest_ship_date"))
         if dl is not None:
             deadlines[int(o.bling_id)] = dl
-    if result.get("order_status") not in _AMAZON_SHIPPED:
-        return None
-    easy = (result.get("easyship_status") or "").strip()
-    if easy and easy not in _AMAZON_EASYSHIP_SAIU:
+    if not amazon_shipment_confirmed(result):
         return None
     return int(o.bling_id), _iso_to_brt_date(result.get("last_update_date"))

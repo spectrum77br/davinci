@@ -38,6 +38,7 @@ from app.models import (
 )
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import logistica_match, logistica_rules, threema
+from app.services.amazon_shipment_status import amazon_shipment_confirmed
 from app.services.bling_situacoes import SITUACAO_ENVIADO_ETIQUETA, SITUACOES_ENVIADO_ETIQUETA
 from app.services.marketplaces.bling import BlingClient
 
@@ -439,19 +440,15 @@ async def preview_alterar_status_bling(session: AsyncSession, row: Logistica) ->
 # sabia disso desde 04/09 (marketplace_shipment_check._AMAZON_EASYSHIP_SAIU),
 # mas a regra passava por fora dele.
 #
-# Agora, promover para "Em andamento" (15) exige que a plataforma NÃO esteja
-# dizendo o contrário. Só barra quando o sinal é POSITIVO de que o pacote
-# segue com o vendedor — estado ausente/desconhecido continua passando, pra
-# não travar plataforma que a gente não lê bem.
+# Amazon exige confirmação física positiva para promover a 15: ausência do
+# EasyShip não comprova envio (caso 296762, 14/09). Nas demais plataformas,
+# preserva a trava contra um sinal explícito de que o pacote não saiu.
 _SITUACAO_EM_ANDAMENTO_ID = 15
 
 
 def pacote_ainda_com_o_vendedor(plataforma: str | None, meli_status: dict | None) -> bool:
-    """A plataforma afirma que o pacote NÃO saiu? Usa as mesmas listas do motor
-    de envio — fonte única de verdade."""
+    """Barra saída contrariada pela plataforma ou não confirmada na Amazon."""
     from app.services.marketplace_shipment_check import (
-        _AMAZON_EASYSHIP_SAIU,
-        _AMAZON_SHIPPED,
         _ML_CONFIRMED_SHIPPED_SUBSTATUS,
         _ML_SHIPPED,
         _SHOPEE_SHIPPED,
@@ -461,15 +458,7 @@ def pacote_ainda_com_o_vendedor(plataforma: str | None, meli_status: dict | None
     m = meli_status or {}
     p = (plataforma or "").strip().lower()
     if p in _AMAZON_PLATAFORMAS:
-        ordem = str(m.get("order_status") or "").strip()
-        easy = str(m.get("easyship_status") or "").strip()
-        if not ordem:
-            return False
-        if ordem not in _AMAZON_SHIPPED:
-            return True
-        # "Shipped" da Amazon vira verdade quando a NF sai, muito antes do
-        # pacote: quem sabe mesmo é o EasyShip.
-        return bool(easy) and easy not in _AMAZON_EASYSHIP_SAIU
+        return not amazon_shipment_confirmed(m)
     if p in _SHOPEE_PLATAFORMAS:
         ordem = str(m.get("order_status") or "").strip().upper()
         return bool(ordem) and ordem not in _SHOPEE_SHIPPED
@@ -510,7 +499,7 @@ async def apply_alterar_status_bling(session: AsyncSession, row: Logistica) -> d
             pedido=row.pedido_bling,
             plataforma=row.plataforma,
             assinatura=r["assinatura"],
-            motivo="plataforma diz que o pacote ainda nao saiu",
+            motivo="envio nao confirmado pela plataforma",
         )
         raise BlingObsError("logistica_promocao_sem_envio_confirmado")
     await r["client"].update_order_situacao(r["bling_id"], alvo_id)

@@ -119,6 +119,28 @@ async def _setup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("canal", ["AFN", "MFN", None])
+async def test_get_order_status_preserva_canal_sem_inferir_fba(canal):
+    client = AmazonClient(_amz_creds())
+    payload = {
+        "OrderStatus": "Shipped",
+        "EasyShipShipmentStatus": None,
+        "LastUpdateDate": "2026-09-14T11:13:00Z",
+    }
+    if canal is not None:
+        payload["FulfillmentChannel"] = canal
+    with respx.mock(base_url=SP_API_BASE_NA) as router:
+        route = router.get("/orders/v0/orders/701-3967231-6921832").mock(
+            return_value=httpx.Response(200, json={"payload": payload})
+        )
+        result = await client.get_order_status("701-3967231-6921832")
+    assert route.called
+    assert result["order_status"] == "Shipped"
+    assert result["easyship_status"] is None
+    assert result["fulfillment_channel"] == canal
+
+
+@pytest.mark.asyncio
 async def test_update_stock_ok(db: AsyncSession, user: User) -> None:
     _, _, link = await _setup(db, user)
     client = AmazonClient(_amz_creds())

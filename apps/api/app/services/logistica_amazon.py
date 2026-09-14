@@ -78,6 +78,10 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
         logistica_datas.propor(
             datas, "easyship_status", atualizado_em, logistica_datas.FONTE_APROX
         )
+    # A trava de envio precisa distinguir AFN (Amazon/FBA) de um pedido do
+    # vendedor sem EasyShip. A assinatura exibida continua só com os status.
+    if st.get("fulfillment_channel"):
+        meli["fulfillment_channel"] = str(st["fulfillment_channel"])
 
     # Rastreio EasyShip (best-effort; 403 sem o papel de shipping → None).
     rastreio = await client.get_easyship_tracking(order_id)

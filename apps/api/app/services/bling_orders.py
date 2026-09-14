@@ -34,6 +34,7 @@ from app.models import (
     Store,
 )
 from app.security.cipher import decrypt_json, encrypt_json
+from app.services.amazon_bling_shipment import amazon_bling_dispatch_blocked
 from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 
 # Cutoff operacional (< 10h BRT = dia anterior). Webhooks/sync do Bling
@@ -648,6 +649,7 @@ async def upsert_order(
                 BlingOrder.situacao,
                 BlingOrder.em_andamento_data,
                 BlingOrder.aguardando_devolucao_data,
+                BlingOrder.loja,
             )
             .where(BlingOrder.bling_id == bling_id)
         )
@@ -655,12 +657,43 @@ async def upsert_order(
     existing_count = len(prev_rows)
     situacao_antiga = prev_rows[0][0] if prev_rows else None
     data_existente = next((r[1] for r in prev_rows if r[1] is not None), None)
+    # Bling can send 15 immediately after Amazon invoicing, before collection.
+    # Check both insert and update paths before computing the shipment date or
+    # letting the database's entry-15 trigger create an envio. Existing shipped
+    # history is preserved; this guard concerns new/pre-shipment transitions.
+    envio_bloqueado = False
+    if situacao == "15" and (situacao_antiga is None or situacao_antiga in {
+        "6", "12", "21", "83965", "83955", "83962", "83966", "84686", "545901",
+    }):
+        loja_raw = raw_order.get("loja") or {}
+        loja_id = loja_raw.get("id") if isinstance(loja_raw, dict) else None
+        loja_id = str(loja_id) if loja_id is not None else (prev_rows[0][3] if prev_rows else None)
+        envio_bloqueado = await amazon_bling_dispatch_blocked(
+            session, loja=loja_id, order_id=raw_order.get("numeroLoja"),
+        )
+        if envio_bloqueado:
+            # 21 is the existing pending-dispatch state in Controle de Estoque.
+            # Copy instead of changing the source payload used by other jobs.
+            raw_order = {**raw_order, "situacao": {"id": 21}}
+            situacao = "21"
+            logger.info("bling_amazon_envio_bloqueado", bling_id=bling_id)
+            from app.services.margem_audit import record_margem_audit
+
+            await record_margem_audit(
+                session, acao="situacao", pedido_bling=str(raw_order.get("numero") or ""),
+                bling_id=bling_id, valor_antigo=situacao_antiga, valor_novo="21",
+                origem="amazon_envio_validacao", mudado_por=None,
+            )
     nova_data = _next_em_andamento_data(
         nova_situacao=situacao,
         situacao_antiga=situacao_antiga,
         data_existente=data_existente,
         agora=datetime.now(UTC),
     )
+    if envio_bloqueado:
+        # No new dispatch (or label) happened. Pending orders without a date
+        # stay on today's list instead of acquiring a false historical stamp.
+        nova_data = data_existente
     # Data de entrada em Aguardando Devolução (aba Acompanhamento) — mesma
     # mecânica da em_andamento_data: decidida aqui, repassada aos dois caminhos.
     dev_data_existente = next((r[2] for r in prev_rows if r[2] is not None), None)

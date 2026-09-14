@@ -173,6 +173,8 @@ class AmazonClient:
                                 bump Bling to "Em andamento" while the
                                 package is still sitting on the seller's
                                 shelf.
+          * `fulfillment_channel` — AFN (Amazon/FBA) or MFN (seller).
+                                Missing EasyShip alone does not identify FBA.
           * `last_update_date`— LastUpdateDate (ISO). When the sweep marks
                                 an order shipped, this is the moment the
                                 state actually changed — used as
@@ -203,6 +205,7 @@ class AmazonClient:
         return {
             "order_status": str(status),
             "easyship_status": payload.get("EasyShipShipmentStatus"),
+            "fulfillment_channel": payload.get("FulfillmentChannel"),
             "last_update_date": payload.get("LastUpdateDate"),
             # "Despachar até" (ISO) — horário de corte do pedido na aba Pedidos.
             "latest_ship_date": payload.get("LatestShipDate"),

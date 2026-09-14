@@ -644,7 +644,7 @@ async def test_amazon_enviado_tambem_carimba_prazo():
 
     client = _FakeAmazonClient({
         "order_status": "Shipped",
-        "easyship_status": None,
+        "easyship_status": "PickedUp",
         "last_update_date": "2026-08-06T12:00:00Z",
         "latest_ship_date": "2026-08-07T02:59:59Z",
     })
@@ -703,17 +703,43 @@ async def test_amazon_estado_desconhecido_nao_conta_como_enviado():
 
 
 @pytest.mark.asyncio
-async def test_amazon_sem_easyship_vale_o_order_status():
-    """Pedido fora do EasyShip não tem esse campo — aí o Shipped vale sozinho."""
+@pytest.mark.parametrize("vazio", [None, "", "   "])
+@pytest.mark.parametrize("canal", [None, "", "MFN", "UNKNOWN"])
+async def test_amazon_sem_easyship_nao_confirma_envio(vazio, canal):
+    """296762: Shipped sem EasyShip não provava que o pacote tinha saído."""
     from app.services import marketplace_shipment_check as m
 
-    for vazio in (None, ""):
-        cli = _amazon_cli("Shipped", vazio)
-        assert await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000")) == (
-            999,
-            date(2026, 9, 4),
-        )
-    # E order_status que não é Shipped nunca conta.
+    cli = _amazon_cli("Shipped", vazio)
+    cli.payload["fulfillment_channel"] = canal
+    assert await m._amazon_shipped_for(cli, _fake_order("701-3967231-6921832")) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("easyship", [None, "", "PickedUp"])
+async def test_amazon_afn_explicito_confirma_envio(easyship):
+    from app.services import marketplace_shipment_check as m
+
+    cli = _amazon_cli("Shipped", easyship)
+    cli.payload["fulfillment_channel"] = "AFN"
+    assert await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000")) == (
+        999, date(2026, 9, 4),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("easyship", ["PendingDropOff", "PendingPickUp", "UNKNOWN"])
+async def test_amazon_afn_nao_ignora_easyship_contraditorio(easyship):
+    from app.services import marketplace_shipment_check as m
+
+    cli = _amazon_cli("Shipped", easyship)
+    cli.payload["fulfillment_channel"] = "AFN"
+    assert await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000")) is None
+
+
+@pytest.mark.asyncio
+async def test_amazon_unshipped_nao_confirma_envio():
+    from app.services import marketplace_shipment_check as m
+
     cli = _amazon_cli("Unshipped", "PickedUp")
     assert await m._amazon_shipped_for(cli, _fake_order("701-0000000-0000000")) is None
 
