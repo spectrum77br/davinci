@@ -17,15 +17,18 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import aiofiles
+import fitz
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import undefer
 
 from app.config import get_settings
 from app.db import get_session
@@ -156,21 +159,117 @@ async def delete_consorcio(
 # ── Suprimentos ────────────────────────────────────────────────────────
 
 
+_SUPRIMENTOS_PDF_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _suprimentos_query():
+    return select(FinanceiroSuprimentos).order_by(
+        FinanceiroSuprimentos.produto.asc().nulls_last(),
+        FinanceiroSuprimentos.modelo.asc().nulls_last(),
+        FinanceiroSuprimentos.created_at.asc(),
+    )
+
+
+def _certificacao_pdf_nome(filename: str | None) -> str:
+    # Não aceitar caminho, controles ou caracteres de cabeçalho no nome salvo.
+    name = (filename or "certificado.pdf").replace("\\", "/").rsplit("/", 1)[-1]
+    name = re.sub(r'[\x00-\x1f\x7f"<>:|?*]', "", name).strip(" .")
+    if not name.lower().endswith(".pdf"):
+        raise HTTPException(400, detail={"code": "invalid_pdf"})
+    return name[:-4][:176] + ".pdf" if name[:-4] else "certificado.pdf"
+
+
+def _validate_certificacao_pdf(data: bytes) -> None:
+    try:
+        with fitz.open(stream=data, filetype="pdf") as document:
+            if document.is_encrypted or document.needs_pass:
+                raise HTTPException(400, detail={"code": "pdf_encrypted"})
+            if not document.is_pdf or document.page_count < 1:
+                raise HTTPException(400, detail={"code": "invalid_pdf"})
+    except HTTPException:
+        raise
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(400, detail={"code": "invalid_pdf"}) from exc
+
+
 @router.get("/suprimentos", response_model=list[SuprimentosOut])
 async def list_suprimentos(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "view"))],
 ) -> list[SuprimentosOut]:
-    rows = (
-        await session.execute(
-            select(FinanceiroSuprimentos).order_by(
-                FinanceiroSuprimentos.produto.asc().nulls_last(),
-                FinanceiroSuprimentos.modelo.asc().nulls_last(),
-                FinanceiroSuprimentos.created_at.asc(),
-            )
-        )
-    ).scalars().all()
+    rows = (await session.execute(_suprimentos_query())).scalars().all()
     return [SuprimentosOut.model_validate(r, from_attributes=True) for r in rows]
+
+
+@router.get("/suprimentos/pdf")
+async def export_suprimentos_pdf(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "view"))],
+) -> Response:
+    from app.services.certificacoes_pdf import montar_pdf
+
+    rows = (await session.execute(_suprimentos_query())).scalars().all()
+    # PyMuPDF não suporta execução concorrente em threads; mesmo padrão da simulação.
+    pdf = montar_pdf(rows)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="certificacoes.pdf"'},
+    )
+
+
+@router.post("/suprimentos/{row_id}/pdf", response_model=SuprimentosOut)
+async def upload_suprimentos_pdf(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
+    file: UploadFile = File(...),
+) -> SuprimentosOut:
+    row = await session.get(FinanceiroSuprimentos, row_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "suprimentos_not_found"})
+    try:
+        data = await file.read(_SUPRIMENTOS_PDF_MAX_BYTES + 1)
+        if len(data) > _SUPRIMENTOS_PDF_MAX_BYTES:
+            raise HTTPException(413, detail={"code": "pdf_too_large"})
+        filename = _certificacao_pdf_nome(file.filename)
+        _validate_certificacao_pdf(data)
+    finally:
+        await file.close()
+    # Só substituir o anexo anterior depois de validar completamente o novo.
+    row.pdf_nome = filename
+    row.pdf_arquivo = data
+    await session.commit()
+    await session.refresh(row)
+    return SuprimentosOut.model_validate(row, from_attributes=True)
+
+
+@router.get("/suprimentos/{row_id}/pdf")
+async def download_suprimentos_pdf(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "view"))],
+) -> Response:
+    row = (
+        await session.execute(
+            select(FinanceiroSuprimentos)
+            .where(FinanceiroSuprimentos.id == row_id)
+            .options(undefer(FinanceiroSuprimentos.pdf_arquivo))
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "suprimentos_not_found"})
+    if not row.pdf_arquivo or not row.pdf_nome:
+        raise HTTPException(404, detail={"code": "suprimentos_pdf_not_found"})
+    filename = quote(row.pdf_nome, safe="")
+    return Response(
+        content=row.pdf_arquivo,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("/suprimentos", response_model=SuprimentosOut, status_code=status.HTTP_201_CREATED)

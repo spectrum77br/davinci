@@ -54,6 +54,8 @@ class SuprimentosOut(BaseModel):
     valor: Decimal | None = None
     inicio: date | None = None
     fim: date | None = None
+    pdf_nome: str | None = None
+    tem_pdf: bool = False
     created_at: datetime
     updated_at: datetime
 

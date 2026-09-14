@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, Text, func
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, LargeBinary, Numeric, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -39,6 +39,13 @@ class FinanceiroSuprimentos(Base, TimestampMixin):
     valor: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     inicio: Mapped[date | None] = mapped_column(Date, nullable=True)
     fim: Mapped[date | None] = mapped_column(Date, nullable=True)
+    pdf_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A listagem e a exportação usam só os metadados, sem carregar os anexos.
+    pdf_arquivo: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
+
+    @property
+    def tem_pdf(self) -> bool:
+        return bool(self.pdf_nome)
 
 
 class FinanceiroSimulacao(Base, TimestampMixin):
