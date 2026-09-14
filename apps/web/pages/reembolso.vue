@@ -753,9 +753,9 @@ async function saveRow(row: RefundRow): Promise<void> {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[145px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Tipo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prejuízo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px] bg-amber-50 dark:bg-amber-900/20" title="Quando o valor do Reembolso foi lançado no DaVinci">Reembolso em</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px] bg-amber-50 dark:bg-amber-900/20">Chamado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px] bg-amber-50 dark:bg-amber-900/20">Operação</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px] bg-amber-50 dark:bg-amber-900/20" title="Quando o valor do Reembolso foi lançado no DaVinci">Reembolso em</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Finalizado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[260px] bg-emerald-50 dark:bg-emerald-900/20">Observação</th>
           </tr>
@@ -803,9 +803,6 @@ async function saveRow(row: RefundRow): Promise<void> {
                 @change="saveRow(row)"
               />
             </td>
-            <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10 text-muted-foreground">
-              {{ fmtDateTime(row.reembolso_at) }}
-            </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input
                 :value="row.chamado || ''"
@@ -823,6 +820,9 @@ async function saveRow(row: RefundRow): Promise<void> {
                 @input="(e) => setRowText(row, 'operacao', (e.target as HTMLInputElement).value)"
                 @change="saveRow(row)"
               />
+            </td>
+            <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10 text-muted-foreground">
+              {{ fmtDateTime(row.reembolso_at) }}
             </td>
             <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
               <input
