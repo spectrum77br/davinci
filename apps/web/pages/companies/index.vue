@@ -334,25 +334,46 @@ const newAccountForm = reactive({ phoneId: '', emailId: '', serverId: '' })
 const availablePhones = ref<CadastroLite[]>([])
 const availableEmails = ref<CadastroLite[]>([])
 const availableServers = ref<CadastroLite[]>([])
+const availableCadastrosLoading = ref(false)
+const availableCadastrosLoaded = ref(false)
+const availableCadastrosError = ref<string | null>(null)
+let availableCadastrosRequest = 0
 const newAccountSaving = ref(false)
 const newAccountErr = ref<string | null>(null)
 const newAccountResult = ref<string | null>(null)
 
 async function loadAvailableCadastros(mk: Marketplace) {
+  const target = newAccountFor.value
+  if (!target || target.mk !== mk || newAccountSaving.value) return
+  const request = ++availableCadastrosRequest
+  const isCurrentRequest = () => (
+    request === availableCadastrosRequest && newAccountFor.value === target && target.mk === mk
+  )
+  availableCadastrosLoading.value = true
+  availableCadastrosLoaded.value = false
+  availableCadastrosError.value = null
+  availablePhones.value = []
+  availableEmails.value = []
+  availableServers.value = []
+  newAccountForm.phoneId = ''
+  newAccountForm.emailId = ''
+  newAccountForm.serverId = ''
   try {
     const [phones, emails, servers] = await Promise.all([
       api<CadastroLite[]>(`/api/cadastros/available?tipo=fone&marketplace=${mk}`),
       api<CadastroLite[]>(`/api/cadastros/available?tipo=email&marketplace=${mk}`),
       api<CadastroLite[]>(`/api/cadastros/available?tipo=servidor&marketplace=${mk}`),
     ])
+    if (!isCurrentRequest()) return
     availablePhones.value = phones
     availableEmails.value = emails
     availableServers.value = servers
+    availableCadastrosLoaded.value = true
   } catch (e: any) {
-    newAccountErr.value = e?.data?.detail?.code || e?.message || 'erro ao carregar cadastros'
-    availablePhones.value = []
-    availableEmails.value = []
-    availableServers.value = []
+    if (!isCurrentRequest()) return
+    availableCadastrosError.value = e?.data?.detail?.code || e?.message || 'erro ao carregar cadastros'
+  } finally {
+    if (isCurrentRequest()) availableCadastrosLoading.value = false
   }
 }
 
@@ -369,12 +390,15 @@ async function openNewAccount(row: GridRow, mk: Marketplace) {
 
 function closeNewAccount() {
   if (newAccountSaving.value) return
+  availableCadastrosRequest++
+  availableCadastrosLoading.value = false
   newAccountFor.value = null
 }
 
 async function submitNewAccount() {
-  if (!newAccountFor.value) return
-  const { company, mk } = newAccountFor.value
+  if (!newAccountFor.value || newAccountSaving.value || newAccountResult.value || availableCadastrosLoading.value || !availableCadastrosLoaded.value) return
+  const target = newAccountFor.value
+  const { company, mk } = target
   const phoneCad = availablePhones.value.find((c) => c.id === newAccountForm.phoneId)
   const emailCad = availableEmails.value.find((c) => c.id === newAccountForm.emailId)
   const serverCad = availableServers.value.find((c) => c.id === newAccountForm.serverId)
@@ -385,53 +409,41 @@ async function submitNewAccount() {
   newAccountSaving.value = true
   newAccountErr.value = null
   try {
-    // 1. Create the Store cell (gated by enabled_marketplaces server-side).
-    const store = await api<{ id: string }>('/api/stores', {
+    // A API reserva os cadastros e cria todos os vínculos na mesma transação.
+    await api('/api/stores/account', {
       method: 'POST',
-      body: { company_id: company.id, marketplace: mk, status: 'active' },
+      body: {
+        company_id: company.id,
+        marketplace: mk,
+        phone_id: phoneCad.id,
+        email_id: emailCad.id,
+        server_id: serverCad.id,
+      },
     })
-
-    // 2. Mirror to store_info so the data shows up on the Lojas page.
-    try {
-      await api('/api/pricing/store-info', {
-        method: 'POST',
-        body: {
-          platform: mk,
-          account_name: company.apelido,
-          phone: phoneCad.codigo,
-          email: emailCad.codigo,
-          server: serverCad.codigo,
-        },
-      })
-    } catch (e: any) {
-      error.value = `Loja criada, mas store_info falhou: ${e?.data?.detail?.code || e?.message || 'erro'}`
-    }
-
-    // 3. Link the chosen fone/email/servidor Cadastros to the new Store so
-    //    they show up as "in use" on this marketplace and disappear from
-    //    future dropdowns. Each is non-fatal — if the link fails the loja
-    //    still exists and the operator can wire it up manually in /cadastros.
-    for (const cad of [phoneCad, emailCad, serverCad]) {
-      try {
-        await api(`/api/cadastros/${cad.id}/stores`, {
-          method: 'POST',
-          body: { store_id: store.id, alias: company.apelido },
-        })
-      } catch (e: any) {
-        error.value = `Loja criada, mas link Cadastros falhou para ${cad.codigo}: ${e?.data?.detail?.code || e?.message || 'erro'}`
-      }
-    }
 
     newAccountResult.value =
       `Conta criada: ${company.apelido} · ${MARKETPLACE_SHORT[mk]} — ` +
       `Fone ${phoneCad.codigo} · Email ${emailCad.codigo} · Servidor ${serverCad.codigo}`
     await refresh()
     // Keep modal open briefly so user sees the result toast, then close.
-    setTimeout(() => closeNewAccount(), 1500)
+    setTimeout(() => {
+      if (newAccountFor.value === target) closeNewAccount()
+    }, 1500)
   } catch (e: any) {
-    newAccountErr.value = e?.data?.detail?.code || e?.message || 'erro'
+    const code = e?.data?.detail?.code
+    if (code === 'cadastro_unavailable') {
+      newAccountErr.value = 'Um dos cadastros já está em uso nesta plataforma. A lista foi atualizada; selecione novamente.'
+      newAccountSaving.value = false
+      await loadAvailableCadastros(mk)
+    } else if (code === 'store_already_exists') {
+      newAccountErr.value = 'Esta empresa já tem uma conta nesta plataforma. Recarregue a lista de empresas.'
+    } else if (code === 'forbidden') {
+      newAccountErr.value = 'Para criar a conta, você precisa de permissão para editar Empresas, Cadastros e Lojas.'
+    } else {
+      newAccountErr.value = code || e?.message || 'Não foi possível criar a conta.'
+    }
   } finally {
-    newAccountSaving.value = false
+    if (newAccountFor.value === target) newAccountSaving.value = false
   }
 }
 
@@ -849,11 +861,14 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
           </Button>
         </div>
         <div class="space-y-3">
+          <p v-if="availableCadastrosLoading" role="status" class="text-sm text-muted-foreground">
+            Carregando cadastros disponíveis…
+          </p>
           <div>
             <Label>Fone <span class="text-red-500">*</span></Label>
             <select
               v-model="newAccountForm.phoneId"
-              :disabled="newAccountSaving"
+              :disabled="newAccountSaving || availableCadastrosLoading || !availableCadastrosLoaded"
               class="w-full border rounded px-2 py-1 bg-background text-sm"
             >
               <option value="">— selecione um fone disponível —</option>
@@ -861,7 +876,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 {{ c.codigo }}{{ c.label ? ` · ${c.label}` : '' }}
               </option>
             </select>
-            <p v-if="!availablePhones.length" class="text-xs text-amber-600 mt-1">
+            <p v-if="availableCadastrosLoaded && !availablePhones.length" class="text-xs text-amber-600 mt-1">
               Sem fones disponíveis para esta plataforma. Cadastre um em /cadastros.
             </p>
           </div>
@@ -869,7 +884,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <Label>E-mail <span class="text-red-500">*</span></Label>
             <select
               v-model="newAccountForm.emailId"
-              :disabled="newAccountSaving"
+              :disabled="newAccountSaving || availableCadastrosLoading || !availableCadastrosLoaded"
               class="w-full border rounded px-2 py-1 bg-background text-sm"
             >
               <option value="">— selecione um e-mail disponível —</option>
@@ -877,7 +892,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 {{ c.codigo }}{{ c.label ? ` · ${c.label}` : '' }}
               </option>
             </select>
-            <p v-if="!availableEmails.length" class="text-xs text-amber-600 mt-1">
+            <p v-if="availableCadastrosLoaded && !availableEmails.length" class="text-xs text-amber-600 mt-1">
               Sem e-mails disponíveis para esta plataforma. Cadastre um em /cadastros.
             </p>
           </div>
@@ -885,7 +900,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
             <Label>Servidor <span class="text-red-500">*</span></Label>
             <select
               v-model="newAccountForm.serverId"
-              :disabled="newAccountSaving"
+              :disabled="newAccountSaving || availableCadastrosLoading || !availableCadastrosLoaded"
               class="w-full border rounded px-2 py-1 bg-background text-sm"
             >
               <option value="">— selecione um servidor disponível —</option>
@@ -893,14 +908,20 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 {{ c.codigo }}{{ c.label ? ` · ${c.label}` : '' }}
               </option>
             </select>
-            <p v-if="!availableServers.length" class="text-xs text-amber-600 mt-1">
+            <p v-if="availableCadastrosLoaded && !availableServers.length" class="text-xs text-amber-600 mt-1">
               Sem servidores disponíveis para esta plataforma. Cadastre um em /cadastros.
             </p>
           </div>
           <p class="text-xs text-muted-foreground">
-            Apenas códigos sem vínculo nesta plataforma aparecem nos selects. Ao criar, fone, e-mail
-            e servidor ficam marcados como "em uso" na tabela Cadastros.
+            Apenas cadastros livres no {{ MARKETPLACE_SHORT[newAccountFor.mk] }} aparecem aqui.
+            Cadastros usados somente em outras plataformas continuam disponíveis.
           </p>
+        </div>
+        <div v-if="availableCadastrosError" role="alert" class="space-y-2">
+          <p class="text-sm text-red-500">Não foi possível carregar os cadastros: {{ availableCadastrosError }}</p>
+          <Button variant="outline" size="sm" @click="loadAvailableCadastros(newAccountFor.mk)">
+            Tentar novamente
+          </Button>
         </div>
         <div v-if="newAccountErr" class="text-sm text-red-500">erro: {{ newAccountErr }}</div>
         <div v-if="newAccountResult" class="text-sm rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 px-3 py-2">
@@ -909,7 +930,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         <div class="flex justify-end gap-2">
           <Button variant="ghost" :disabled="newAccountSaving" @click="closeNewAccount">cancelar</Button>
           <Button
-            :disabled="newAccountSaving || !newAccountForm.phoneId || !newAccountForm.emailId || !newAccountForm.serverId"
+            :disabled="newAccountSaving || !!newAccountResult || availableCadastrosLoading || !availableCadastrosLoaded || !newAccountForm.phoneId || !newAccountForm.emailId || !newAccountForm.serverId"
             @click="submitNewAccount"
           >
             {{ newAccountSaving ? 'criando…' : 'Criar conta' }}

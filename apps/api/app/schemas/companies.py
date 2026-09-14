@@ -137,6 +137,14 @@ class StoreCreate(BaseModel):
     bling_store_id: int | None = None
 
 
+class StoreAccountCreate(BaseModel):
+    company_id: UUID
+    marketplace: str
+    phone_id: UUID
+    email_id: UUID
+    server_id: UUID
+
+
 class StorePatch(BaseModel):
     apelido_override: str | None = None
     status: str | None = None
