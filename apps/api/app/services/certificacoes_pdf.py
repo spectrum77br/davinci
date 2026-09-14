@@ -22,31 +22,40 @@ table { width: 100%; border-collapse: collapse; }
 th, td { border: 0.5px solid #d3dedb; padding: 4px 5px; vertical-align: top;
          text-align: left; }
 th { color: #ffffff; background-color: #075e48; font-size: 8px; font-weight: bold; }
-.alternada { background-color: #f3f7f5; }
 .valor { text-align: right; white-space: nowrap; }
 .data { white-space: nowrap; }
 .vazia { padding: 18px; text-align: center; color: #64748b; }
 """
 _COLUNAS = (
-    ("produto", "Produto", "", "78px"),
-    ("modelo", "Modelo", "", "52px"),
-    ("nome_comercial", "Nome comercial", "", "185px"),
-    ("certificado", "Certificado", "", "60px"),
-    ("numero", "Número", "", "88px"),
+    ("produto", "Produto", "", "72px"),
+    ("modelo", "Modelo", "", "50px"),
+    ("nome_comercial", "Nome comercial", "", "130px"),
+    ("certificado", "Certificado", "", "48px"),
+    ("numero", "Número", "", "80px"),
     ("valor", "Valor", "valor", "108px"),
-    ("inicio", "Início", "data", "60px"),
-    ("fim", "Fim", "data", "60px"),
+    ("inicio", "Início", "data", "54px"),
+    ("fim", "Fim", "data", "54px"),
+    ("situacao_anatel", "Situação na Anatel", "", "90px"),
 )
 _LIMITES_TEXTO = {
-    "produto": (160, 78),
-    "modelo": (80, 52),
-    "nome_comercial": (500, 185),
-    "certificado": (100, 60),
-    "numero": (160, 88),
+    "produto": (160, 72),
+    "modelo": (80, 50),
+    "nome_comercial": (350, 130),
+    "certificado": (100, 48),
+    "numero": (160, 80),
+    "situacao_anatel": (160, 90),
 }
 
 
 def _texto(row: object, campo: str) -> str:
+    if campo == "situacao_anatel":
+        if not getattr(row, "anatel_numero", None):
+            return "Manual - sem confirmação automática"
+        dados = getattr(row, "anatel_dados", None) or {}
+        situacao = dados.get("situacao_requerimento") or "Não informada na fonte"
+        if getattr(row, "anatel_encontrado", None) is False:
+            return f"Não localizado na última consulta. Última situação: {situacao}"
+        return situacao
     valor = getattr(row, campo, None)
     if valor is None or valor == "":
         return "-"
@@ -101,6 +110,36 @@ def _linhas_html(rows: Sequence[object]) -> str:
     return "".join(linhas)
 
 
+def _copiar_cabecalho(origem: fitz.Page, destino: fitz.Page, area: fitz.Rect) -> None:
+    """Recria só a faixa visível, sem importar os desenhos das linhas de dados."""
+    # As células do Story são retângulos preenchidos. Recortamos sua geometria,
+    # em vez de copiar a página toda: redactions podem deixar fundos fora do clip.
+    for desenho in origem.get_drawings():
+        if desenho["fill"] is None:
+            continue
+        for item in desenho["items"]:
+            if item[0] == "re":
+                retangulo = fitz.Rect(item[1]) & area
+                if not retangulo.is_empty:
+                    destino.draw_rect(retangulo, color=None, fill=desenho["fill"])
+    fontes = {}
+    for xref, *_ in origem.get_fonts():
+        conteudo = origem.parent.extract_font(xref)[3]
+        if conteudo:
+            fonte = fitz.Font(fontbuffer=conteudo)
+            fontes[re.sub(r"\W", "", fonte.name).lower()] = fonte
+    texto = fitz.TextWriter(destino.rect)
+    for bloco in origem.get_text("dict", clip=area)["blocks"]:
+        for linha in bloco.get("lines", []):
+            for trecho in linha["spans"]:
+                texto.append(
+                    trecho["origin"], trecho["text"],
+                    font=fontes[re.sub(r"\W", "", trecho["font"]).lower()],
+                    fontsize=trecho["size"],
+                )
+    texto.write_text(destino, color=(1, 1, 1))
+
+
 def montar_pdf(rows: Sequence[object]) -> bytes:
     """Exporta todas as linhas, preservando textos completos e a ordem recebida."""
     cabecalho = "".join(
@@ -108,7 +147,7 @@ def montar_pdf(rows: Sequence[object]) -> bytes:
     )
     corpo = _linhas_html(rows)
     if not rows:
-        corpo = '<tr><td colspan="8" class="vazia">Nenhuma certificação cadastrada.</td></tr>'
+        corpo = '<tr><td colspan="9" class="vazia">Nenhuma certificação cadastrada.</td></tr>'
     story = fitz.Story(
         html=(
             f'<table><thead><tr id="cabecalho">{cabecalho}</tr></thead>'
@@ -144,13 +183,8 @@ def montar_pdf(rows: Sequence[object]) -> bytes:
     with fitz.open(stream=saida.getvalue(), filetype="pdf") as documento:
         with fitz.open() as header:
             if len(documento) > 1 and cabecalho_rect is not None:
-                header.insert_pdf(documento, from_page=0, to_page=0)
-                # Retira os dados antes de reutilizar a faixa do cabeçalho. Assim,
-                # copiar/buscar texto no PDF não encontra linhas fora do recorte.
-                header[0].add_redact_annot(
-                    fitz.Rect(0, cabecalho_rect.y1, _PAGINA.width, _PAGINA.height)
-                )
-                header[0].apply_redactions(images=0, graphics=2)
+                pagina_header = header.new_page(width=_PAGINA.width, height=_PAGINA.height)
+                _copiar_cabecalho(documento[0], pagina_header, cabecalho_rect)
             for i, pagina in enumerate(documento):
                 if i and cabecalho_rect is not None:
                     pagina.show_pdf_page(cabecalho_rect, header, 0, clip=cabecalho_rect)

@@ -3,7 +3,7 @@
 // de validade: linha âmbar quando faltam < 30 dias, vermelha quando já
 // venceu. Auto-save inline, mesmo padrão da página Consórcio.
 import { computed, onBeforeUnmount, reactive, ref } from 'vue'
-import { Download, FileDown, Paperclip, Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
+import { Download, ExternalLink, FileDown, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
 import { createCertificacoesAutosave } from '~/utils/certificacoesAutosave'
 
 definePageMeta({
@@ -16,13 +16,49 @@ const auth = useAuthStore()
 const canEdit = computed(() => {
   if (auth.isAdmin) return true
   const p = auth.user?.permissions?.financeiro_suprimentos
-  return Boolean(p?.edit || p?.delete)
+  return Boolean(p?.edit)
 })
 const canDelete = computed(() => {
   if (auth.isAdmin) return true
   return Boolean(auth.user?.permissions?.financeiro_suprimentos?.delete)
 })
 
+type AnatelRecord = {
+  numero: string
+  cnpj: string
+  nome_empresa: string
+  produto: string | null
+  modelos: string[]
+  nomes_comerciais: string[]
+  tipos_produto: string[]
+  fabricantes: string[]
+  certificados: string[]
+  inicio: string | null
+  fim: string | null
+  situacao_certificado: string | null
+  situacao_requerimento: string | null
+  alertas: string[]
+}
+type AnatelStatus = {
+  cnpj: string
+  nome_empresa: string
+  automatico: boolean
+  periodicidade: string
+  ultimo_sucesso_em: string | null
+  ultima_tentativa_em: string | null
+  proxima_tentativa_em: string | null
+  erro: string | null
+  source_updated_at: string | null
+  fonte_url: string
+}
+type SyncResult = {
+  status: 'ok' | 'busy' | 'error'
+  criados: number
+  atualizados: number
+  nao_localizados: number
+  conflitos: number
+  erro?: string | null
+}
 type Row = {
   id: string
   produto: string | null
@@ -35,6 +71,10 @@ type Row = {
   fim: string | null
   tem_pdf: boolean
   pdf_nome: string | null
+  anatel_numero: string | null
+  anatel_dados: AnatelRecord | null
+  anatel_consultado_em: string | null
+  anatel_encontrado: boolean | null
 }
 
 const rows = ref<Row[]>([])
@@ -42,26 +82,56 @@ const loading = ref(false)
 const errorText = ref<string | null>(null)
 const exporting = ref(false)
 const adding = ref(false)
+const synchronizing = ref(false)
+const anatelStatus = ref<AnatelStatus | null>(null)
+const statusError = ref<string | null>(null)
+const syncMessage = ref<string | null>(null)
+const selectedRow = ref<Row | null>(null)
+const detailsDialog = ref<HTMLDialogElement | null>(null)
 const rowBusy = reactive<Record<string, boolean>>({})
-const busy = computed(() => loading.value || exporting.value || adding.value)
+const busy = computed(() => loading.value || exporting.value || adding.value || synchronizing.value)
 const hasBusyRow = computed(() => Object.values(rowBusy).some(Boolean))
 const canAttach = computed(() => auth.isAdmin || Boolean(auth.user?.permissions?.financeiro_suprimentos?.edit))
 const autosave = createCertificacoesAutosave(
   (id, patch) => api(`/api/financeiro/suprimentos/${id}`, { method: 'PATCH', body: patch }),
-  () => { errorText.value = 'Não foi possível salvar as alterações. Tente novamente antes de baixar o PDF.' },
+  () => { errorText.value = 'Não foi possível salvar as alterações. Tente novamente antes de atualizar ou baixar o PDF.' },
 )
 onBeforeUnmount(() => { void autosave.flush().catch(() => {}) })
 
 const CERT_OPTIONS = ['', 'anatel', 'inmetro', 'isento']
+const ANATEL_SOURCE_URL = 'https://www.anatel.gov.br/dadosabertos/paineis_de_dados/certificacao_de_produtos/produtos_certificados.zip'
+const OFFICIAL_FIELDS = new Set<keyof Row>(['modelo', 'nome_comercial', 'certificado', 'numero', 'inicio', 'fim'])
+
+async function loadAnatelStatus() {
+  try {
+    anatelStatus.value = await api<AnatelStatus>('/api/financeiro/suprimentos/anatel/status')
+    statusError.value = null
+  } catch {
+    statusError.value = 'Não foi possível consultar a atualização automática. Tente recarregar em instantes.'
+  }
+}
+
+async function reloadData() {
+  const [result] = await Promise.allSettled([
+    api<Row[]>('/api/financeiro/suprimentos'),
+    loadAnatelStatus(),
+  ])
+  if (result.status === 'fulfilled') {
+    rows.value = result.value
+  } else {
+    errorText.value = 'Não foi possível recarregar as certificações. Os dados exibidos foram preservados. Tente novamente.'
+  }
+}
 
 async function load() {
+  if (busy.value || hasBusyRow.value) return
   loading.value = true
   errorText.value = null
   try {
     await autosave.flush()
-    rows.value = await api<Row[]>('/api/financeiro/suprimentos')
-  } catch (e: any) {
-    errorText.value = e?.data?.detail?.code || e?.message || 'erro'
+    await reloadData()
+  } catch {
+    errorText.value = 'Não foi possível salvar as alterações. Tente recarregar novamente.'
   } finally {
     loading.value = false
   }
@@ -69,8 +139,82 @@ async function load() {
 await load()
 
 function scheduleSave(row: Row, field: keyof Row, value: any) {
+  if (!canEdit.value || busy.value || rowBusy[row.id] || (isLinked(row) && OFFICIAL_FIELDS.has(field))) return
   ;(row as any)[field] = value
   autosave.schedule(row.id, field, value)
+}
+
+async function syncAnatel() {
+  if (!canAttach.value || busy.value || hasBusyRow.value) return
+  synchronizing.value = true
+  errorText.value = null
+  syncMessage.value = null
+  try {
+    try {
+      await autosave.flush()
+    } catch {
+      errorText.value = 'As alterações não foram salvas. Tente atualizar novamente para preservar suas edições.'
+      return
+    }
+    const result = await api<SyncResult>('/api/financeiro/suprimentos/anatel/sincronizar', { method: 'POST' })
+    if (result.status === 'ok') {
+      syncMessage.value = `Consulta concluída: ${result.criados} novos registros e ${result.atualizados} atualizados.`
+      if (result.nao_localizados) syncMessage.value += ` ${result.nao_localizados} não localizados na última consulta; dados anteriores preservados.`
+      if (result.conflitos) syncMessage.value += ` ${result.conflitos} registros precisam de conferência antes do vínculo automático.`
+      await reloadData()
+    } else if (result.status === 'busy') {
+      syncMessage.value = 'Uma consulta à Anatel já está em andamento. Recarregue em instantes para ver o resultado.'
+      await loadAnatelStatus()
+    } else {
+      errorText.value = 'Não foi possível concluir a consulta à Anatel. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.'
+      await loadAnatelStatus()
+    }
+  } catch {
+    errorText.value = 'Não foi possível concluir a consulta à Anatel. Os dados anteriores foram preservados. Tente atualizar novamente em instantes.'
+    await loadAnatelStatus()
+  } finally {
+    synchronizing.value = false
+  }
+}
+
+function isLinked(row: Row) {
+  return Boolean(row.anatel_numero)
+}
+
+function officialSituation(row: Row) {
+  if (!isLinked(row)) return 'Manual · sem confirmação automática'
+  return row.anatel_dados?.situacao_requerimento || 'Situação não informada na fonte'
+}
+
+function officialSituationClass(row: Row) {
+  if (!isLinked(row) || row.anatel_encontrado === false) return 'text-muted-foreground'
+  const situation = row.anatel_dados?.situacao_requerimento?.toLocaleLowerCase('pt-BR') || ''
+  if (situation === 'homologação emitida') return 'text-emerald-700 dark:text-emerald-400'
+  if (situation.includes('análise')) return 'text-amber-700 dark:text-amber-400'
+  return 'text-muted-foreground'
+}
+
+function formatTimestamp(value: string | null | undefined) {
+  if (!value) return 'Ainda não realizada'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Data não informada'
+  return date.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Sao_Paulo' })
+}
+
+function formatDate(value: string | null | undefined) {
+  if (!value) return 'Não informada'
+  const parts = value.split('-')
+  return parts.length === 3 ? parts.reverse().join('/') : value
+}
+
+function formatCnpj(value: string | null | undefined) {
+  const digits = value?.replace(/\D/g, '') || ''
+  return digits.length === 14 ? digits.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5') : value || 'Não informado'
+}
+
+function openDetails(row: Row) {
+  selectedRow.value = row
+  detailsDialog.value?.showModal()
 }
 
 async function addRow() {
@@ -89,7 +233,7 @@ async function addRow() {
   }
 }
 async function removeRow(row: Row) {
-  if (busy.value || rowBusy[row.id]) return
+  if (!canDelete.value || isLinked(row) || busy.value || rowBusy[row.id]) return
   if (!confirm('Excluir esta certificação?')) return
   rowBusy[row.id] = true
   try {
@@ -235,6 +379,26 @@ const totalRows = computed(() => rows.value.length)
       </button>
     </div>
 
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
+      <div class="space-y-1">
+        <p class="font-medium">Anatel · Makisa Trading LTDA · Atualização diária</p>
+        <p class="text-muted-foreground">
+          Última consulta bem-sucedida: {{ formatTimestamp(anatelStatus?.ultimo_sucesso_em) }}
+          <span v-if="anatelStatus?.source_updated_at"> · Base publicada em {{ formatTimestamp(anatelStatus.source_updated_at) }}</span>
+        </p>
+        <p class="text-muted-foreground">Inmetro e demais certificados continuam com cadastro manual.</p>
+      </div>
+      <button v-if="canAttach" class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
+        :disabled="busy || hasBusyRow" @click="syncAnatel">
+        <RefreshCw class="size-3.5" :class="{ 'animate-spin': synchronizing }" />
+        {{ synchronizing ? 'Consultando Anatel...' : 'Atualizar agora' }}
+      </button>
+    </div>
+
+    <p v-if="statusError || anatelStatus?.erro" role="status" class="text-xs text-amber-700 dark:text-amber-400">
+      {{ statusError || 'A última tentativa de consulta à Anatel falhou. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.' }}
+    </p>
+    <p v-if="syncMessage" role="status" class="text-xs text-muted-foreground">{{ syncMessage }}</p>
     <div v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</div>
 
     <div class="border overflow-x-auto">
@@ -249,13 +413,14 @@ const totalRows = computed(() => rows.value.length)
             <th class="text-right">Valor</th>
             <th class="text-left">Início</th>
             <th class="text-left">Fim</th>
+            <th class="text-left">Situação na Anatel</th>
             <th class="text-left">PDF do certificado</th>
             <th v-if="canDelete" class="w-8"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!loading && rows.length === 0">
-            <td :colspan="canDelete ? 10 : 9" class="py-6 text-center text-muted-foreground">
+            <td :colspan="canDelete ? 11 : 10" class="py-6 text-center text-muted-foreground">
               Nenhuma certificação. Clique em "Nova certificação" para começar.
             </td>
           </tr>
@@ -268,20 +433,23 @@ const totalRows = computed(() => rows.value.length)
             </td>
             <td>
               <input class="cell-input" :value="row.modelo ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
+                :readonly="isLinked(row)" :title="row.modelo || ''"
                 @input="(e) => scheduleSave(row, 'modelo', (e.target as HTMLInputElement).value)" />
             </td>
             <td>
               <input class="cell-input" :value="row.nome_comercial ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
+                :readonly="isLinked(row)" :title="row.nome_comercial || ''"
                 @input="(e) => scheduleSave(row, 'nome_comercial', (e.target as HTMLInputElement).value)" />
             </td>
             <td>
-              <select class="cell-input" :value="row.certificado ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
+              <select class="cell-input" :value="row.certificado ?? ''" :disabled="!canEdit || busy || rowBusy[row.id] || isLinked(row)"
                 @change="(e) => scheduleSave(row, 'certificado', (e.target as HTMLSelectElement).value)">
                 <option v-for="o in CERT_OPTIONS" :key="o" :value="o">{{ o || '—' }}</option>
               </select>
             </td>
             <td>
               <input class="cell-input" :value="row.numero ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
+                :readonly="isLinked(row)" :title="isLinked(row) ? 'Número atualizado pela Anatel' : ''"
                 @input="(e) => scheduleSave(row, 'numero', (e.target as HTMLInputElement).value)" />
             </td>
             <td>
@@ -291,11 +459,26 @@ const totalRows = computed(() => rows.value.length)
             </td>
             <td>
               <input type="date" class="cell-input" :value="row.inicio ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
+                :readonly="isLinked(row)"
                 @input="(e) => scheduleSave(row, 'inicio', (e.target as HTMLInputElement).value || null)" />
             </td>
             <td>
               <input type="date" class="cell-input" :value="row.fim ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
+                :readonly="isLinked(row)"
                 @input="(e) => scheduleSave(row, 'fim', (e.target as HTMLInputElement).value || null)" />
+            </td>
+            <td class="official-status-cell">
+              <div class="flex items-center gap-2">
+                <span :class="officialSituationClass(row)">{{ officialSituation(row) }}</span>
+                <button v-if="isLinked(row)" class="shrink-0 text-primary hover:underline" @click="openDetails(row)"
+                  :aria-label="`Ver dados da Anatel de ${row.produto || row.anatel_numero}`">Ver</button>
+              </div>
+              <span v-if="row.anatel_encontrado === false" class="block text-[10px] text-amber-700 dark:text-amber-400">
+                Não localizado na última consulta · dados anteriores
+              </span>
+              <span v-else-if="row.anatel_dados?.alertas?.length" class="block text-[10px] text-amber-700 dark:text-amber-400">
+                Confira as observações da fonte em “Ver”
+              </span>
             </td>
             <td>
               <div class="flex items-center gap-2">
@@ -317,15 +500,58 @@ const totalRows = computed(() => rows.value.length)
               </div>
             </td>
             <td v-if="canDelete" class="text-center">
-              <button class="text-muted-foreground hover:text-destructive disabled:opacity-50" :disabled="busy || rowBusy[row.id]"
+              <button v-if="!isLinked(row)" class="text-muted-foreground hover:text-destructive disabled:opacity-50" :disabled="busy || rowBusy[row.id]"
                 aria-label="Excluir certificação" @click="removeRow(row)">
                 <Trash2 class="size-3.5" />
               </button>
+              <span v-else class="text-muted-foreground" title="Dados atualizados pela Anatel">—</span>
             </td>
           </tr>
         </tbody>
       </table>
     </div>
+
+    <dialog ref="detailsDialog" class="certification-dialog rounded-lg border bg-background p-0 text-foreground shadow-xl"
+      aria-labelledby="certification-details-title" @close="selectedRow = null"
+      @click="($event.target === $event.currentTarget) && detailsDialog?.close()">
+      <div v-if="selectedRow" class="space-y-4 p-5">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 id="certification-details-title" class="text-lg font-semibold">Dados da Anatel</h2>
+            <p class="text-sm text-muted-foreground">{{ selectedRow.produto || selectedRow.anatel_dados?.produto || 'Certificação' }} · {{ selectedRow.anatel_numero }}</p>
+          </div>
+          <button class="rounded p-1 hover:bg-muted" aria-label="Fechar dados da Anatel" @click="detailsDialog?.close()"><X class="size-4" /></button>
+        </div>
+        <p v-if="selectedRow.anatel_encontrado === false" class="rounded bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+          Este registro não foi localizado na última consulta. Os dados abaixo são da consulta anterior; isso não confirma cancelamento ou irregularidade.
+        </p>
+        <dl class="details-grid grid grid-cols-1 gap-x-5 gap-y-3 text-sm sm:grid-cols-2">
+          <div><dt>Empresa</dt><dd>{{ selectedRow.anatel_dados?.nome_empresa || anatelStatus?.nome_empresa || 'Makisa Trading LTDA' }}</dd></div>
+          <div><dt>CNPJ</dt><dd>{{ formatCnpj(selectedRow.anatel_dados?.cnpj || anatelStatus?.cnpj) }}</dd></div>
+          <div><dt>Situação do requerimento</dt><dd>{{ selectedRow.anatel_dados?.situacao_requerimento || 'Não informada na fonte' }}</dd></div>
+          <div><dt>Situação do certificado</dt><dd>{{ selectedRow.anatel_dados?.situacao_certificado || 'Não informada na fonte' }}</dd></div>
+          <div><dt>Início do certificado</dt><dd>{{ formatDate(selectedRow.anatel_dados?.inicio) }}</dd></div>
+          <div><dt>Validade do certificado</dt><dd>{{ formatDate(selectedRow.anatel_dados?.fim) }}</dd></div>
+          <div class="sm:col-span-2"><dt>Produto na fonte</dt><dd>{{ selectedRow.anatel_dados?.produto || 'Não informado' }}</dd></div>
+          <div><dt>Modelos</dt><dd>{{ selectedRow.anatel_dados?.modelos?.join(', ') || 'Não informados' }}</dd></div>
+          <div><dt>Nomes comerciais</dt><dd>{{ selectedRow.anatel_dados?.nomes_comerciais?.join(', ') || 'Não informados' }}</dd></div>
+          <div><dt>Tipos de produto</dt><dd>{{ selectedRow.anatel_dados?.tipos_produto?.join(', ') || 'Não informados' }}</dd></div>
+          <div><dt>Fabricantes</dt><dd>{{ selectedRow.anatel_dados?.fabricantes?.join(', ') || 'Não informados' }}</dd></div>
+          <div class="sm:col-span-2"><dt>Certificados</dt><dd>{{ selectedRow.anatel_dados?.certificados?.join(', ') || 'Não informados' }}</dd></div>
+          <div><dt>Consulta deste registro</dt><dd>{{ formatTimestamp(selectedRow.anatel_consultado_em) }}</dd></div>
+        </dl>
+        <div v-if="selectedRow.anatel_dados?.alertas?.length" class="rounded border border-amber-300/60 p-3 text-sm">
+          <p class="mb-1 font-medium">Observações da fonte</p>
+          <ul class="list-disc space-y-1 pl-4"><li v-for="(alerta, index) in selectedRow.anatel_dados.alertas" :key="index">{{ alerta }}</li></ul>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-3 border-t pt-3 text-xs text-muted-foreground">
+          <span>A validade por data é independente da situação informada pela Anatel.</span>
+          <a :href="ANATEL_SOURCE_URL" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-primary hover:underline">
+            Base oficial da Anatel <ExternalLink class="size-3" />
+          </a>
+        </div>
+      </div>
+    </dialog>
   </div>
 </template>
 
@@ -361,5 +587,27 @@ const totalRows = computed(() => rows.value.length)
   cursor: not-allowed;
   opacity: 0.7;
   background: transparent;
+}
+.cell-input:read-only {
+  background: transparent;
+}
+.grid-table .official-status-cell {
+  min-width: 170px;
+  max-width: 270px;
+  white-space: normal;
+}
+.certification-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+}
+.certification-dialog::backdrop {
+  background: rgb(0 0 0 / 0.45);
+}
+.details-grid dt {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+.details-grid dd {
+  overflow-wrap: anywhere;
 }
 </style>

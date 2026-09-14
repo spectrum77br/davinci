@@ -1996,6 +1996,16 @@ async def ingest_orders_retry_sweep(ctx: dict) -> None:
 # ---------------------------------------------------------------- lifecycle
 
 
+async def certificacoes_anatel_sync(ctx: dict) -> dict:
+    """Consulta diária da Makisa, com recuperação após reinício e nova tentativa após erro."""
+    from app.services.certificacoes_sync import sincronizar_certificacoes
+
+    async with session_scope() as session:
+        result = await sincronizar_certificacoes(session)
+    logger.info("certificacoes_anatel_sync", **result)
+    return result
+
+
 async def startup(ctx: dict) -> None:
     from app.services.sentry import init_sentry
     init_sentry(component="worker")
@@ -2014,6 +2024,7 @@ _TEN_MIN = {0, 10, 20, 30, 40, 50}
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
     functions = [
+        certificacoes_anatel_sync,
         send_otp_email,
         auth_codes_cleanup,
         auto_link_run,
@@ -2067,6 +2078,9 @@ class WorkerSettings:
         vigia_importacao_tick,
     ]
     cron_jobs = [
+        # A consulta bem-sucedida agenda a próxima em 24h; falhas tentam de novo em 1h.
+        # Tick horário e startup recuperam consultas perdidas durante reinícios.
+        cron(certificacoes_anatel_sync, minute=35, run_at_startup=True, timeout=240),
         cron(auth_codes_cleanup, hour=6, minute=15, run_at_startup=False),
         # 06:00 UTC = 03:00 BRT — quiet window, also the daily-sync mass enqueue trigger.
         cron(daily_sync_scheduler, minute=_FIVE_MIN, run_at_startup=False),

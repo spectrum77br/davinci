@@ -56,6 +56,10 @@ class SuprimentosOut(BaseModel):
     fim: date | None = None
     pdf_nome: str | None = None
     tem_pdf: bool = False
+    anatel_numero: str | None = None
+    anatel_dados: dict | None = None
+    anatel_consultado_em: datetime | None = None
+    anatel_encontrado: bool | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -69,6 +73,28 @@ class SuprimentosPatch(BaseModel):
     valor: Decimal | None = None
     inicio: date | None = None
     fim: date | None = None
+
+
+class CertificacoesAnatelStatusOut(BaseModel):
+    cnpj: str
+    nome_empresa: str
+    automatico: bool = True
+    periodicidade: str = "diaria"
+    ultimo_sucesso_em: datetime | None = None
+    ultima_tentativa_em: datetime | None = None
+    proxima_tentativa_em: datetime | None = None
+    erro: str | None = None
+    source_updated_at: datetime | None = None
+    fonte_url: str
+    resumo: dict | None = None
+
+
+class CertificacoesHistoricoOut(BaseModel):
+    id: UUID
+    ocorrido_em: datetime
+    evento: str
+    antes: dict | None = None
+    depois: dict
 
 
 # ── Simulação ──────────────────────────────────────────────────────────

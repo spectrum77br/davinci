@@ -90,3 +90,39 @@ def test_certificacoes_pdf_empty_state():
         assert len(doc) == 1
         assert "Nenhuma certificação cadastrada." in _texto(doc[0])
         assert "0 certificações" in _texto(doc[0])
+
+
+def test_certificacoes_pdf_preserves_official_situation_and_missing_source_warning():
+    rows = [
+        SimpleNamespace(produto="Manual"),
+        SimpleNamespace(
+            produto="Smartphone", anatel_numero="082162518234", anatel_encontrado=True,
+            anatel_dados={"situacao_requerimento": "Em Análise - RE"},
+        ),
+        SimpleNamespace(
+            produto="Última base", anatel_numero="071972618234", anatel_encontrado=False,
+            anatel_dados={"situacao_requerimento": "Homologação Emitida"},
+        ),
+    ]
+    with fitz.open(stream=montar_pdf(rows), filetype="pdf") as doc:
+        text = " ".join(_texto(page) for page in doc)
+        assert "Situação na Anatel" in text
+        assert "Manual - sem confirmação automática" in text
+        assert "Em Análise - RE" in text
+        assert "Não localizado na última consulta." in text
+        assert "Última situação: Homologação Emitida" in text
+
+
+def test_certificacoes_pdf_leaves_unused_area_blank_on_later_pages():
+    rows = [SimpleNamespace(produto=f"PRODUTO{i:04d}", nome_comercial="M1, M2") for i in range(32)]
+    with fitz.open(stream=montar_pdf(rows), filetype="pdf") as doc:
+        assert len(doc) > 1
+        page = doc[-1]
+        body_words = [
+            word for word in page.get_text("words") if 90 < word[1] < page.rect.height - 35
+        ]
+        end_of_table = max(word[3] for word in body_words) + 12
+        empty_area = fitz.Rect(28, end_of_table, page.rect.width - 28, page.rect.height - 35)
+        assert empty_area.height > 20
+        image = page.get_pixmap(clip=empty_area, alpha=False)
+        assert set(image.samples) == {255}, "unused area must not repeat previous backgrounds"

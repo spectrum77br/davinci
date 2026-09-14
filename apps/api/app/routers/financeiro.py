@@ -44,6 +44,8 @@ from app.models import (
     User,
 )
 from app.schemas.financeiro import (
+    CertificacoesAnatelStatusOut,
+    CertificacoesHistoricoOut,
     ComercialEmpresaOut,
     ComercialSecaoOut,
     ConsorcioOut,
@@ -160,6 +162,57 @@ async def delete_consorcio(
 
 
 _SUPRIMENTOS_PDF_MAX_BYTES = 8 * 1024 * 1024
+_CAMPOS_OFICIAIS_ANATEL = {"modelo", "nome_comercial", "certificado", "numero", "inicio", "fim"}
+
+
+@router.get("/suprimentos/anatel/status", response_model=CertificacoesAnatelStatusOut)
+async def status_certificacoes_anatel(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "view"))],
+) -> CertificacoesAnatelStatusOut:
+    from app.models.financeiro import CertificacoesSyncState
+    from app.services.anatel_certificacoes import MAKISA_CNPJ, SOURCE_URL
+
+    state = await session.get(CertificacoesSyncState, "anatel_makisa")
+    values = {}
+    if state:
+        values = {name: getattr(state, name) for name in (
+            "ultimo_sucesso_em", "ultima_tentativa_em", "proxima_tentativa_em",
+            "erro", "source_updated_at", "resumo",
+        )}
+    return CertificacoesAnatelStatusOut(
+        cnpj=MAKISA_CNPJ, nome_empresa="Makisa Trading LTDA", fonte_url=SOURCE_URL, **values
+    )
+
+
+@router.post("/suprimentos/anatel/sincronizar")
+async def sincronizar_certificacoes_anatel(
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
+) -> dict:
+    from app.db import session_scope
+    from app.services.certificacoes_sync import sincronizar_certificacoes
+
+    async with session_scope() as session:
+        return await sincronizar_certificacoes(session, force=True)
+
+
+@router.get("/suprimentos/{row_id}/historico", response_model=list[CertificacoesHistoricoOut])
+async def historico_certificacoes_anatel(
+    row_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "view"))],
+) -> list[CertificacoesHistoricoOut]:
+    from app.models.financeiro import CertificacoesSyncHistorico
+
+    if await session.get(FinanceiroSuprimentos, row_id) is None:
+        raise HTTPException(404, detail={"code": "suprimentos_not_found"})
+    rows = (await session.execute(
+        select(CertificacoesSyncHistorico)
+        .where(CertificacoesSyncHistorico.suprimento_id == row_id)
+        .order_by(CertificacoesSyncHistorico.ocorrido_em.desc())
+        .limit(30)
+    )).scalars().all()
+    return [CertificacoesHistoricoOut.model_validate(row, from_attributes=True) for row in rows]
 
 
 def _suprimentos_query():
@@ -294,11 +347,14 @@ async def patch_suprimentos(
 ) -> SuprimentosOut:
     row = (
         await session.execute(
-            select(FinanceiroSuprimentos).where(FinanceiroSuprimentos.id == row_id)
+            select(FinanceiroSuprimentos)
+            .where(FinanceiroSuprimentos.id == row_id).with_for_update()
         )
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "suprimentos_not_found"})
+    if row.anatel_numero and body.model_fields_set & _CAMPOS_OFICIAIS_ANATEL:
+        raise HTTPException(409, detail={"code": "certificacao_automatica"})
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(row, k, v)
     await session.commit()
@@ -314,11 +370,14 @@ async def delete_suprimentos(
 ) -> None:
     row = (
         await session.execute(
-            select(FinanceiroSuprimentos).where(FinanceiroSuprimentos.id == row_id)
+            select(FinanceiroSuprimentos)
+            .where(FinanceiroSuprimentos.id == row_id).with_for_update()
         )
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "suprimentos_not_found"})
+    if row.anatel_numero:
+        raise HTTPException(409, detail={"code": "certificacao_automatica"})
     await session.delete(row)
     await session.commit()
     return None

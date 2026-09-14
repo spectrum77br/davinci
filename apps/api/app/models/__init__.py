@@ -42,6 +42,8 @@ from app.models.estoque_dia_finalizado import EstoqueDiaFinalizado
 from app.models.financeiro import (
     DNPConfig,
     DNPProduto,
+    CertificacoesSyncHistorico,
+    CertificacoesSyncState,
     FinanceiroConsorcio,
     FinanceiroSimulacao,
     FinanceiroSuprimentos,
@@ -164,6 +166,8 @@ __all__ = [
     "FinanceiroConsorcio",
     "FinanceiroSimulacao",
     "FinanceiroSuprimentos",
+    "CertificacoesSyncHistorico",
+    "CertificacoesSyncState",
     "ImportCotacaoParams",
     "ImportKitBase",
     "ImportKitMark",

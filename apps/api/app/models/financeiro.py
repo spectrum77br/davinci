@@ -2,7 +2,18 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, LargeBinary, Numeric, Text, func
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    Numeric,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -42,10 +53,48 @@ class FinanceiroSuprimentos(Base, TimestampMixin):
     pdf_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
     # A listagem e a exportação usam só os metadados, sem carregar os anexos.
     pdf_arquivo: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
+    anatel_numero: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
+    anatel_dados: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    anatel_consultado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    anatel_encontrado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     @property
     def tem_pdf(self) -> bool:
         return bool(self.pdf_nome)
+
+
+class CertificacoesSyncState(Base):
+    __tablename__ = "certificacoes_sync_state"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    ultima_tentativa_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ultimo_sucesso_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proxima_tentativa_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    erro: Mapped[str | None] = mapped_column(Text)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_sha256: Mapped[str | None] = mapped_column(Text)
+    resumo: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class CertificacoesSyncHistorico(Base):
+    __tablename__ = "certificacoes_sync_historico"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    suprimento_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("financeiro_suprimentos.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    anatel_numero: Mapped[str] = mapped_column(Text, nullable=False)
+    ocorrido_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    evento: Mapped[str] = mapped_column(Text, nullable=False)
+    antes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    depois: Mapped[dict] = mapped_column(JSONB, nullable=False)
 
 
 class FinanceiroSimulacao(Base, TimestampMixin):
