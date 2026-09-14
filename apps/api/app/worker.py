@@ -70,6 +70,7 @@ from app.services.notas_fiscais_export import run_export_notas
 from app.services.pos_vendas import sync_notas_emitidas as run_pos_vendas_sync
 from app.services.pricing.batch import run_push_prices_batch
 from app.services.prioridade_estoque import prioridade_estoque_sweep
+from app.services.prioridade_estoque_movimentos import manutencao_movimentos_sweep
 from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.product_cost_sync import (
     run_restamp_order_costs,
@@ -1380,6 +1381,19 @@ async def prioridade_estoque_tick(ctx: dict) -> None:
         logger.exception("prioridade_estoque_unhandled")
 
 
+async def prioridade_estoque_estorno_tick(ctx: dict) -> None:
+    """2×/hora: manutenção das compensações de estoque dos kits trocados
+    pela prioridade — retenta lançamentos que o Bling recusou, estorna os de
+    pedidos cancelados/excluídos que nunca saíram e avisa (Threema) os que
+    ficaram incertos. No-op barato quando não há nada."""
+    try:
+        summary = await manutencao_movimentos_sweep()
+        if any(summary.values()):
+            logger.info("prioridade_estoque_manutencao_done", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("prioridade_estoque_manutencao_unhandled")
+
+
 async def vigia_importacao_tick(ctx: dict) -> None:
     """Vigia de importação: pedido PAGO no marketplace (fase 1: ML) que não
     caiu no Bling → aviso Threema pra importar manualmente no canal multi
@@ -2086,6 +2100,7 @@ class WorkerSettings:
         nf_auto_enfileirar_tick,
         nf_recuperar_tick,
         prioridade_estoque_tick,
+        prioridade_estoque_estorno_tick,
         vigia_importacao_tick,
     ]
     cron_jobs = [
@@ -2300,6 +2315,9 @@ class WorkerSettings:
         # ganchos do enfileirar (auto e manual) cobrem a hora da NF de
         # qualquer jeito.
         cron(prioridade_estoque_tick, minute=set(range(1, 60, 2)), run_at_startup=False),
+        # Manutenção das compensações de kit (retry, estorno de cancelado,
+        # aviso): 2×/hora em :16/:46, minutos livres. Sem pendência = SELECTs.
+        cron(prioridade_estoque_estorno_tick, minute={16, 46}, run_at_startup=False),
         # Vigia de importação (pedido pago no ML que não caiu no Bling →
         # aviso Threema). 2×/hora em :9/:39 (minutos livres); no-op barato
         # enquanto VIGIA_IMPORTACAO_THREEMA_RECIPIENTS estiver vazio.

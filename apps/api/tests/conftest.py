@@ -355,6 +355,7 @@ _CLEANUP_TABLES = (
     "products",
     "product_categories",
     "margem_audit",
+    "prioridade_estoque_movimentos",
     "margens",
     "chamado_anexo",
     "chamado_mensagem",

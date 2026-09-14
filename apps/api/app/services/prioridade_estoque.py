@@ -21,6 +21,16 @@ Onde roda (sempre ANTES do check de estoque / emissão de NF):
 Só pedidos "Em aberto" (situacao 6) são tocados — quem já anda pela esteira
 de NF nunca é alterado. O PUT do Bling revalida a venda inteira (caso
 291676: erro 67); QUALQUER falha no PUT = loga e pula, sem efeito local.
+KITS (Eduardo, 14/09: "continua tirando estoque do saldo de ra ao invés
+de tirar do f105 de sp"): o Bling aceita a troca do item, mas na baixa da NF
+continua descontando a composição ANTIGA do kit — comprovado no extrato de
+estoque (dia 13: 18 trocas de kit dg053 → 30 baixas em dg053.ci e 6 em .sp);
+produto simples ele baixa certo. Então, pra kit, o robô compensa na hora da
+troca com POST /estoques (mesmo mecanismo da correção de estoque das
+Devoluções): ENTRADA em cada componente antigo e SAÍDA em cada componente
+novo — ver services/prioridade_estoque_movimentos.py (registro em
+transação própria, retry, estorno em cancelamento, aviso Threema). Produto
+simples: nenhum movimento.
 Toda troca vira linha no margem_audit (acao='sku',
 origem='prioridade_estoque', mudado_por=None = robô) E linha datada nas
 Observações do pedido no Bling ("dd/mm - SKU trocado pela prioridade de
@@ -45,6 +55,7 @@ from app.services import nf_emissao_gerar
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.logistica_bling import build_observacoes_put_body, compose_observacoes
 from app.services.margem_audit import record_margem_audit
+from app.services.prioridade_estoque_movimentos import compensar_estoque_kits
 from app.services.sku_tags import SUFFIX_TAGS
 
 logger = structlog.get_logger()
@@ -164,6 +175,8 @@ async def aplicar_prioridade_estoque(
         "sem_produto_alvo": 0,
         "sem_saldo_alvo": 0,
         "falhas": 0,
+        "estoque_movimentos": 0,
+        "estoque_falhas": 0,
     }
     if numeros is not None and not numeros:
         return summary
@@ -304,6 +317,15 @@ async def aplicar_prioridade_estoque(
                 erro=str(exc),
             )
             continue
+
+        kits = [(t["antigo"], t["alvo"], int(t["qtd"])) for t in aplicadas if "+" in t["antigo"]]
+        if kits:
+            # Um plano por pedido: kits que compartilham componente somam.
+            mov = await compensar_estoque_kits(
+                client, numero=numero, bling_id=int(bling_id), trocas=kits, cache=alvo_cache,
+            )
+            summary["estoque_movimentos"] += mov["ok"]
+            summary["estoque_falhas"] += mov["falhas"]
 
         for t in aplicadas:
             valores: dict = {
