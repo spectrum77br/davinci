@@ -9,6 +9,9 @@ export function useApi() {
   const base = (import.meta.server
     ? (config as any).apiUrlInternal
     : '') as string
+  // Capture the current request while setup still has Nuxt context. API calls
+  // may happen after an await, when request composables are no longer available.
+  const requestHeaders = import.meta.server ? useRequestHeaders(['cookie']) : undefined
 
   function url(path: string) {
     return `${base}${path.startsWith('/') ? path : `/${path}`}`
@@ -17,7 +20,7 @@ export function useApi() {
   function api<T>(path: string, opts: any = {}) {
     return $fetch<T>(url(path), {
       credentials: 'include',
-      headers: import.meta.server ? useRequestHeaders(['cookie']) : undefined,
+      headers: requestHeaders,
       ...opts,
     })
   }

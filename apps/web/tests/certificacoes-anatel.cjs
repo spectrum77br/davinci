@@ -80,6 +80,24 @@ async function render(state) {
 
 async function run() {
   {
+    const { state: s, calls } = page()
+    const current = row()
+    s.rows.value = [current]
+    s.scheduleSave(current, 'produto', 'Nome salvo antes de recarregar')
+    const loading = s.load()
+    assert.equal(calls.length, 1, 'loading must await pending autosave before reading either endpoint')
+    assert.equal(calls[0].options.method, 'PATCH')
+    calls[0].resolve()
+    await settle()
+    assert.equal(calls.length, 3)
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([current])
+    calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    await loading
+    assert.equal(s.rows.value[0].produto, 'Nome salvo antes de recarregar')
+    assert.equal(s.errorText.value, null)
+    assert.equal(s.loading.value, false)
+  }
+  {
     const { state: s, calls, downloads } = page()
     const current = row()
     s.rows.value = [current]
@@ -231,6 +249,6 @@ async function run() {
     assert.match(details, /isso não confirma cancelamento ou irregularidade/)
     assert.match(details, /Base oficial da Anatel/)
   }
-  console.log('PASS: nine Anatel synchronization, permissions, data preservation and rendered UI scenarios')
+  console.log('PASS: ten Anatel synchronization, permissions, data preservation and rendered UI scenarios')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })
