@@ -329,10 +329,16 @@ def transformar_etiqueta(
         )
     duimp = (duimp or "").strip()
     if duimp:
+        # 14/09 (Eduardo): "tá um pouco pequena — um pouco maior e em negrito".
+        # Uma linha por DUIMP (o caller junta várias com " | "), empilhadas de
+        # baixo pra cima no rodapé da etiqueta, Helvetica-Bold 9 pt.
         first = doc[0]
         r = first.rect
-        first.insert_text(
-            (r.x0 + 6, r.y1 - 4), f"DUIMP: {duimp}"[:120], fontsize=6, fontname="helv",
-            color=(0, 0, 0),
-        )
+        linhas = [t.strip() for t in duimp.split(" | ") if t.strip()][:3] or [duimp]
+        fs = 9.0
+        for i, txt in enumerate(reversed(linhas)):
+            first.insert_text(
+                (r.x0 + 6, r.y1 - 4 - i * (fs + 2)), f"DUIMP: {txt}"[:80],
+                fontsize=fs, fontname="hebo", color=(0, 0, 0),
+            )
     return doc.tobytes()
