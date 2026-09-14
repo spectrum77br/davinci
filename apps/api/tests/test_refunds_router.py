@@ -491,3 +491,51 @@ async def test_export_refunds_xlsx_requires_view_permission(client, make_user, a
     response = await client.get("/api/refunds/export.xlsx")
 
     assert response.status_code == 403
+
+
+async def test_reembolso_at_carimba_quando_o_valor_e_lancado(client, make_user, auth_as):
+    """"Reembolso em" (Eduardo, 14/09): a data em que o valor foi lançado no
+    DaVinci. Nasce vazio quando o refund é criado sem valor, é carimbado quando
+    o valor entra, não muda ao editar outros campos, muda quando o valor muda
+    e some quando o valor é apagado."""
+    user = await make_user(permissions=_refund_permissions())
+    auth_as(user)
+
+    r = await client.post(
+        "/api/refunds",
+        json={"pedido_bling": "777001", "conta": "Loja Teste", "tipo": "Logistica",
+              "prejuizo": 6.49},
+    )
+    assert r.status_code == 201, r.text
+    row = r.json()
+    assert row["reembolso"] is None and row["reembolso_at"] is None
+    rid = row["id"]
+
+    r = await client.patch(f"/api/refunds/{rid}", json={"observacao": "evidência pedida"})
+    assert r.status_code == 200 and r.json()["reembolso_at"] is None
+
+    r = await client.patch(f"/api/refunds/{rid}", json={"reembolso": 6.49})
+    assert r.status_code == 200
+    primeiro = r.json()["reembolso_at"]
+    assert primeiro is not None
+
+    r = await client.patch(f"/api/refunds/{rid}", json={"chamado": "12345"})
+    assert r.json()["reembolso_at"] == primeiro
+
+    # Mesmo valor de novo = não é lançamento novo.
+    r = await client.patch(f"/api/refunds/{rid}", json={"reembolso": 6.49})
+    assert r.json()["reembolso_at"] == primeiro
+
+    r = await client.patch(f"/api/refunds/{rid}", json={"reembolso": 7.0})
+    assert r.json()["reembolso_at"] is not None and r.json()["reembolso_at"] >= primeiro
+
+    r = await client.patch(f"/api/refunds/{rid}", json={"reembolso": None})
+    assert r.json()["reembolso"] is None and r.json()["reembolso_at"] is None
+
+    # Criado já com valor: carimbo na criação.
+    r = await client.post(
+        "/api/refunds",
+        json={"pedido_bling": "777002", "conta": "Loja Teste", "tipo": "Cliente",
+              "reembolso": -10.0},
+    )
+    assert r.status_code == 201 and r.json()["reembolso_at"] is not None

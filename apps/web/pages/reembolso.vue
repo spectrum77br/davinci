@@ -29,6 +29,8 @@ type RefundRow = {
   tipo: RefundTipo | null
   prejuizo: number | null
   reembolso: number | null
+  // Quando o valor do Reembolso foi lançado no DaVinci (carimbo do backend).
+  reembolso_at: string | null
   chamado: string | null
   operacao: string | null
   conferido: boolean
@@ -463,10 +465,12 @@ async function saveRow(row: RefundRow): Promise<void> {
     .catch(() => undefined)
     .then(async () => {
       try {
-        await api(`/api/refunds/${encodeURIComponent(id)}`, {
+        const saved = await api<RefundRow>(`/api/refunds/${encodeURIComponent(id)}`, {
           method: 'PATCH',
           body: rowPatchPayload(row),
         })
+        // O carimbo "Reembolso em" nasce no backend: reflete sem recarregar.
+        row.reembolso_at = saved.reembolso_at
         error.value = null
       } catch (e: any) {
         error.value = apiError(e)
@@ -736,7 +740,7 @@ async function saveRow(row: RefundRow): Promise<void> {
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" :colspan="canSeeSituacaoBling ? 6 : 5">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="5">Reembolso</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="6">Reembolso</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Conferência</th>
           </tr>
           <tr class="border-b">
@@ -749,6 +753,7 @@ async function saveRow(row: RefundRow): Promise<void> {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[145px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Tipo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prejuízo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px] bg-amber-50 dark:bg-amber-900/20" title="Quando o valor do Reembolso foi lançado no DaVinci">Reembolso em</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px] bg-amber-50 dark:bg-amber-900/20">Chamado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px] bg-amber-50 dark:bg-amber-900/20">Operação</th>
             <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Finalizado</th>
@@ -757,13 +762,13 @@ async function saveRow(row: RefundRow): Promise<void> {
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="canSeeSituacaoBling ? 13 : 12" class="py-8 text-center text-muted-foreground">
+            <td :colspan="canSeeSituacaoBling ? 14 : 13" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="canSeeSituacaoBling ? 13 : 12" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="canSeeSituacaoBling ? 14 : 13" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -797,6 +802,9 @@ async function saveRow(row: RefundRow): Promise<void> {
                 @input="(e) => setRowReembolso(row, (e.target as HTMLInputElement).value)"
                 @change="saveRow(row)"
               />
+            </td>
+            <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10 text-muted-foreground">
+              {{ fmtDateTime(row.reembolso_at) }}
             </td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input

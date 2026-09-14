@@ -121,6 +121,7 @@ async def _sync_manutencao_to_refund(
     if refund is None:
         return
     refund.reembolso = (refund.reembolso or 0) - delta
+    refund.reembolso_at = datetime.now(UTC)  # "Reembolso em" na tela de Reembolso
     logger.info(
         "refund_reembolso_synced",
         refund_id=str(refund.id),

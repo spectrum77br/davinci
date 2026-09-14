@@ -139,6 +139,10 @@ async def _refresh_margem_snapshot(
         await _refresh_verificar_margem_for_pedido(session, pedido)
     except Exception:  # noqa: BLE001
         logger.warning("refund_margem_snapshot_refresh_failed", pedido_bling=pedido)
+        # A falha deixa a transação da sessão abortada; sem este rollback o
+        # `session.refresh(row)` seguinte estoura e o save (já commitado)
+        # volta como erro 500 pra tela.
+        await session.rollback()
 
 
 def _build_where(
@@ -256,6 +260,7 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Tipo", "tipo"),
     ("Prejuízo", "prejuizo"),
     ("Reembolso", "reembolso"),
+    ("Reembolso em", "reembolso_at"),
     ("Chamado", "chamado"),
     ("Link chamado", "chamado_url"),
     ("Chamado resolvido", "chamado_resolvido"),
@@ -302,7 +307,7 @@ async def export_refunds(
         for _, field in _EXPORT_COLUMNS:
             if field == "situacao_bling":
                 line.append(situacoes.get(r.pedido_bling or "", ""))
-            elif field in ("data", "created_at"):
+            elif field in ("data", "created_at", "reembolso_at"):
                 line.append(_fmt_dt_sp(getattr(r, field, None)))
             elif field in ("conferido", "chamado_resolvido"):
                 line.append("Sim" if getattr(r, field, False) else "Não")
@@ -505,6 +510,8 @@ async def create_refund(
         tipo=body.tipo,
         prejuizo=body.prejuizo,
         reembolso=body.reembolso,
+        # Valor já lançado na criação = carimbo agora ("Reembolso em").
+        reembolso_at=datetime.now(UTC) if body.reembolso is not None else None,
         chamado=body.chamado,
         chamado_url=body.chamado_url,
         chamado_resolvido=body.chamado_resolvido,
@@ -515,9 +522,10 @@ async def create_refund(
     )
     session.add(row)
     await session.flush()
-    await _sync_reembolso_to_bling_orders(session, row.pedido_bling)
+    pedido = row.pedido_bling  # lido antes do commit: o rollback do refresh expira o objeto
+    await _sync_reembolso_to_bling_orders(session, pedido)
     await session.commit()
-    await _refresh_margem_snapshot(session, row.pedido_bling)
+    await _refresh_margem_snapshot(session, pedido)
     await session.refresh(row)
     logger.info(
         "refund_created",
@@ -541,6 +549,7 @@ async def patch_refund(
 
     prev_pedido_bling = row.pedido_bling
     was_conferido = row.conferido
+    prev_reembolso = row.reembolso
 
     data = body.model_dump(exclude_unset=True)
     if data.get("conta") is None and "conta" in data:
@@ -558,6 +567,11 @@ async def patch_refund(
     # reembolso may have come from either the patch or the existing row).
     row.reembolso = _clamp_cliente_reembolso(row.tipo, row.reembolso)
 
+    # "Reembolso em": carimba quando o VALOR muda (lançado/alterado); limpar o
+    # valor limpa a data. Mexer em outros campos não toca no carimbo.
+    if "reembolso" in data and row.reembolso != prev_reembolso:
+        row.reembolso_at = datetime.now(UTC) if row.reembolso is not None else None
+
     await session.flush()
     # Ressincroniza o pedido atual; se o patch mudou o pedido, ressincroniza o
     # antigo também (perdeu este refund) antes de gravar.
@@ -565,9 +579,10 @@ async def patch_refund(
     if prev_pedido_bling and prev_pedido_bling != row.pedido_bling:
         await _sync_reembolso_to_bling_orders(session, prev_pedido_bling)
 
+    pedido = row.pedido_bling  # lido antes do commit: o rollback do refresh expira o objeto
     await session.commit()
-    await _refresh_margem_snapshot(session, row.pedido_bling)
-    if prev_pedido_bling and prev_pedido_bling != row.pedido_bling:
+    await _refresh_margem_snapshot(session, pedido)
+    if prev_pedido_bling and prev_pedido_bling != pedido:
         await _refresh_margem_snapshot(session, prev_pedido_bling)
     await session.refresh(row)
     return RefundOut.model_validate(row)
