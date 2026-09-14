@@ -39,6 +39,22 @@ type AnatelRecord = {
   situacao_requerimento: string | null
   alertas: string[]
 }
+type InmetroRecord = {
+  chave: string
+  cnpj: string
+  nome_empresa: string
+  certificador: string | null
+  numero: string
+  modelo: string
+  marca: string | null
+  descricao: string | null
+  produto: string | null
+  inicio: string | null
+  fim: string | null
+  situacao_certificado: string | null
+  alertas: string[]
+  campos_confirmados: string[]
+}
 type AnatelStatus = {
   cnpj: string
   nome_empresa: string
@@ -75,6 +91,10 @@ type Row = {
   anatel_dados: AnatelRecord | null
   anatel_consultado_em: string | null
   anatel_encontrado: boolean | null
+  inmetro_chave: string | null
+  inmetro_dados: InmetroRecord | null
+  inmetro_consultado_em: string | null
+  inmetro_encontrado: boolean | null
 }
 
 const rows = ref<Row[]>([])
@@ -86,10 +106,15 @@ const synchronizing = ref(false)
 const anatelStatus = ref<AnatelStatus | null>(null)
 const statusError = ref<string | null>(null)
 const syncMessage = ref<string | null>(null)
+const synchronizingInmetro = ref(false)
+const inmetroStatus = ref<AnatelStatus | null>(null)
+const inmetroStatusError = ref<string | null>(null)
+const inmetroSyncMessage = ref<string | null>(null)
+const inmetroSyncError = ref<string | null>(null)
 const selectedRow = ref<Row | null>(null)
 const detailsDialog = ref<HTMLDialogElement | null>(null)
 const rowBusy = reactive<Record<string, boolean>>({})
-const busy = computed(() => loading.value || exporting.value || adding.value || synchronizing.value)
+const busy = computed(() => loading.value || exporting.value || adding.value || synchronizing.value || synchronizingInmetro.value)
 const hasBusyRow = computed(() => Object.values(rowBusy).some(Boolean))
 const canAttach = computed(() => auth.isAdmin || Boolean(auth.user?.permissions?.financeiro_suprimentos?.edit))
 const autosave = createCertificacoesAutosave(
@@ -100,21 +125,33 @@ onBeforeUnmount(() => { void autosave.flush().catch(() => {}) })
 
 const CERT_OPTIONS = ['', 'anatel', 'inmetro', 'isento']
 const ANATEL_SOURCE_URL = 'https://www.anatel.gov.br/dadosabertos/paineis_de_dados/certificacao_de_produtos/produtos_certificados.zip'
+const INMETRO_SOURCE_URL = 'http://www.inmetro.gov.br/prodcert/'
 const OFFICIAL_FIELDS = new Set<keyof Row>(['modelo', 'nome_comercial', 'certificado', 'numero', 'inicio', 'fim'])
+const INMETRO_IDENTITY_FIELDS = new Set<keyof Row>(['modelo', 'certificado', 'numero'])
 
 async function loadAnatelStatus() {
   try {
     anatelStatus.value = await api<AnatelStatus>('/api/financeiro/suprimentos/anatel/status')
     statusError.value = null
   } catch {
-    statusError.value = 'Não foi possível consultar a atualização automática. Tente recarregar em instantes.'
+    statusError.value = 'Não foi possível consultar a atualização automática da Anatel. Tente recarregar em instantes.'
   }
 }
 
-async function reloadData() {
+async function loadInmetroStatus() {
+  try {
+    inmetroStatus.value = await api<AnatelStatus>('/api/financeiro/suprimentos/inmetro/status')
+    inmetroStatusError.value = null
+  } catch {
+    inmetroStatusError.value = 'Não foi possível consultar a atualização automática do Inmetro. Tente recarregar em instantes.'
+  }
+}
+
+async function reloadData(source?: 'anatel' | 'inmetro') {
   const [result] = await Promise.allSettled([
     api<Row[]>('/api/financeiro/suprimentos'),
-    loadAnatelStatus(),
+    ...(!source || source === 'anatel' ? [loadAnatelStatus()] : []),
+    ...(!source || source === 'inmetro' ? [loadInmetroStatus()] : []),
   ])
   if (result.status === 'fulfilled') {
     rows.value = result.value
@@ -139,7 +176,7 @@ async function load() {
 await load()
 
 function scheduleSave(row: Row, field: keyof Row, value: any) {
-  if (!canEdit.value || busy.value || rowBusy[row.id] || (isLinked(row) && OFFICIAL_FIELDS.has(field))) return
+  if (!canEdit.value || busy.value || rowBusy[row.id] || isOfficialField(row, field)) return
   ;(row as any)[field] = value
   autosave.schedule(row.id, field, value)
 }
@@ -161,7 +198,7 @@ async function syncAnatel() {
       syncMessage.value = `Consulta concluída: ${result.criados} novos registros e ${result.atualizados} atualizados.`
       if (result.nao_localizados) syncMessage.value += ` ${result.nao_localizados} não localizados na última consulta; dados anteriores preservados.`
       if (result.conflitos) syncMessage.value += ` ${result.conflitos} registros precisam de conferência antes do vínculo automático.`
-      await reloadData()
+      await reloadData('anatel')
     } else if (result.status === 'busy') {
       syncMessage.value = 'Uma consulta à Anatel já está em andamento. Recarregue em instantes para ver o resultado.'
       await loadAnatelStatus()
@@ -178,20 +215,89 @@ async function syncAnatel() {
 }
 
 function isLinked(row: Row) {
-  return Boolean(row.anatel_numero)
+  return Boolean(row.anatel_numero || row.inmetro_chave)
+}
+
+function isOfficialField(row: Row, field: keyof Row) {
+  if (row.anatel_numero) return OFFICIAL_FIELDS.has(field)
+  if (!row.inmetro_chave) return false
+  if (INMETRO_IDENTITY_FIELDS.has(field)) return true
+  return Boolean((field === 'inicio' || field === 'fim') && row.inmetro_dados?.campos_confirmados?.includes(field) && row.inmetro_dados[field])
+}
+
+function officialSource(row: Row) {
+  return row.anatel_numero ? 'Anatel' : row.inmetro_chave ? 'Inmetro' : ''
+}
+
+function officialData(row: Row) {
+  return row.anatel_numero ? row.anatel_dados : row.inmetro_dados
+}
+
+function isMissingSource(row: Row) {
+  return row.anatel_numero ? row.anatel_encontrado === false : Boolean(row.inmetro_chave && row.inmetro_encontrado === false)
+}
+
+function officialAlerts(row: Row) {
+  return officialData(row)?.alertas || []
+}
+
+function fieldSourceTitle(row: Row, field: keyof Row) {
+  if (isOfficialField(row, field)) return `Atualizado automaticamente por ${officialSource(row)}`
+  if (row.inmetro_chave && (field === 'inicio' || field === 'fim')) return 'Data preenchida manualmente; não informada pelo ProdCert.'
+  return ''
 }
 
 function officialSituation(row: Row) {
   if (!isLinked(row)) return 'Manual · sem confirmação automática'
-  return row.anatel_dados?.situacao_requerimento || 'Situação não informada na fonte'
+  const situation = row.anatel_numero ? row.anatel_dados?.situacao_requerimento : row.inmetro_dados?.situacao_certificado
+  return `${officialSource(row)} · ${situation || 'Situação não informada na fonte'}`
 }
 
 function officialSituationClass(row: Row) {
-  if (!isLinked(row) || row.anatel_encontrado === false) return 'text-muted-foreground'
+  if (!isLinked(row) || isMissingSource(row)) return 'text-muted-foreground'
+  if (row.inmetro_chave && !row.anatel_numero) {
+    const situation = row.inmetro_dados?.situacao_certificado?.toLocaleLowerCase('pt-BR') || ''
+    if (situation === 'ativo') return 'text-emerald-700 dark:text-emerald-400'
+    if (situation === 'suspenso') return 'text-amber-700 dark:text-amber-400'
+    return 'text-muted-foreground'
+  }
   const situation = row.anatel_dados?.situacao_requerimento?.toLocaleLowerCase('pt-BR') || ''
   if (situation === 'homologação emitida') return 'text-emerald-700 dark:text-emerald-400'
   if (situation.includes('análise')) return 'text-amber-700 dark:text-amber-400'
   return 'text-muted-foreground'
+}
+
+async function syncInmetro() {
+  if (!canAttach.value || busy.value || hasBusyRow.value) return
+  synchronizingInmetro.value = true
+  inmetroSyncError.value = null
+  inmetroSyncMessage.value = null
+  try {
+    try {
+      await autosave.flush()
+    } catch {
+      inmetroSyncError.value = 'As alterações não foram salvas. Tente atualizar o Inmetro novamente para preservar suas edições.'
+      return
+    }
+    const result = await api<SyncResult>('/api/financeiro/suprimentos/inmetro/sincronizar', { method: 'POST' })
+    if (result.status === 'ok') {
+      inmetroSyncMessage.value = `Consulta ao Inmetro concluída: ${result.criados} novos registros e ${result.atualizados} atualizados.`
+      if (result.nao_localizados) inmetroSyncMessage.value += ` ${result.nao_localizados} não localizados na última consulta; dados anteriores preservados.`
+      if (result.conflitos) inmetroSyncMessage.value += ` ${result.conflitos} registros precisam de conferência antes do vínculo automático.`
+      await reloadData('inmetro')
+    } else if (result.status === 'busy') {
+      inmetroSyncMessage.value = 'Uma consulta ao Inmetro já está em andamento. Recarregue em instantes para ver o resultado.'
+      await loadInmetroStatus()
+    } else {
+      inmetroSyncError.value = 'Não foi possível concluir a consulta ao Inmetro. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.'
+      await loadInmetroStatus()
+    }
+  } catch {
+    inmetroSyncError.value = 'Não foi possível concluir a consulta ao Inmetro. Os dados anteriores foram preservados. Tente atualizar novamente em instantes.'
+    await loadInmetroStatus()
+  } finally {
+    synchronizingInmetro.value = false
+  }
 }
 
 function formatTimestamp(value: string | null | undefined) {
@@ -386,7 +492,6 @@ const totalRows = computed(() => rows.value.length)
           Última consulta bem-sucedida: {{ formatTimestamp(anatelStatus?.ultimo_sucesso_em) }}
           <span v-if="anatelStatus?.source_updated_at"> · Base publicada em {{ formatTimestamp(anatelStatus.source_updated_at) }}</span>
         </p>
-        <p class="text-muted-foreground">Inmetro e demais certificados continuam com cadastro manual.</p>
       </div>
       <button v-if="canAttach" class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
         :disabled="busy || hasBusyRow" @click="syncAnatel">
@@ -399,6 +504,24 @@ const totalRows = computed(() => rows.value.length)
       {{ statusError || 'A última tentativa de consulta à Anatel falhou. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.' }}
     </p>
     <p v-if="syncMessage" role="status" class="text-xs text-muted-foreground">{{ syncMessage }}</p>
+
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border bg-muted/20 px-3 py-2 text-xs">
+      <div class="space-y-1">
+        <p class="font-medium">Inmetro · Makisa Trading LTDA · Atualização diária</p>
+        <p class="text-muted-foreground">Última consulta bem-sucedida: {{ formatTimestamp(inmetroStatus?.ultimo_sucesso_em) }}</p>
+        <p class="text-muted-foreground">Fonte: ProdCert. Datas não informadas na fonte podem ser preenchidas manualmente.</p>
+      </div>
+      <button v-if="canAttach" class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
+        :disabled="busy || hasBusyRow" @click="syncInmetro">
+        <RefreshCw class="size-3.5" :class="{ 'animate-spin': synchronizingInmetro }" />
+        {{ synchronizingInmetro ? 'Consultando Inmetro...' : 'Atualizar Inmetro' }}
+      </button>
+    </div>
+    <p v-if="inmetroStatusError || inmetroStatus?.erro" role="status" class="text-xs text-amber-700 dark:text-amber-400">
+      {{ inmetroStatusError || 'A última tentativa de consulta ao Inmetro falhou. Os dados anteriores foram preservados; o sistema tentará novamente automaticamente.' }}
+    </p>
+    <p v-if="inmetroSyncMessage" role="status" class="text-xs text-muted-foreground">{{ inmetroSyncMessage }}</p>
+    <p v-if="inmetroSyncError" role="alert" class="text-sm text-destructive">{{ inmetroSyncError }}</p>
     <div v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</div>
 
     <div class="border overflow-x-auto">
@@ -413,7 +536,7 @@ const totalRows = computed(() => rows.value.length)
             <th class="text-right">Valor</th>
             <th class="text-left">Início</th>
             <th class="text-left">Fim</th>
-            <th class="text-left">Situação na Anatel</th>
+            <th class="text-left">Situação oficial</th>
             <th class="text-left">PDF do certificado</th>
             <th v-if="canDelete" class="w-8"></th>
           </tr>
@@ -433,23 +556,23 @@ const totalRows = computed(() => rows.value.length)
             </td>
             <td>
               <input class="cell-input" :value="row.modelo ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isLinked(row)" :title="row.modelo || ''"
+                :readonly="isOfficialField(row, 'modelo')" :title="row.modelo || ''"
                 @input="(e) => scheduleSave(row, 'modelo', (e.target as HTMLInputElement).value)" />
             </td>
             <td>
               <input class="cell-input" :value="row.nome_comercial ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isLinked(row)" :title="row.nome_comercial || ''"
+                :readonly="isOfficialField(row, 'nome_comercial')" :title="row.nome_comercial || ''"
                 @input="(e) => scheduleSave(row, 'nome_comercial', (e.target as HTMLInputElement).value)" />
             </td>
             <td>
-              <select class="cell-input" :value="row.certificado ?? ''" :disabled="!canEdit || busy || rowBusy[row.id] || isLinked(row)"
+              <select class="cell-input" :value="row.certificado ?? ''" :disabled="!canEdit || busy || rowBusy[row.id] || isOfficialField(row, 'certificado')"
                 @change="(e) => scheduleSave(row, 'certificado', (e.target as HTMLSelectElement).value)">
                 <option v-for="o in CERT_OPTIONS" :key="o" :value="o">{{ o || '—' }}</option>
               </select>
             </td>
             <td>
               <input class="cell-input" :value="row.numero ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isLinked(row)" :title="isLinked(row) ? 'Número atualizado pela Anatel' : ''"
+                :readonly="isOfficialField(row, 'numero')" :title="fieldSourceTitle(row, 'numero')"
                 @input="(e) => scheduleSave(row, 'numero', (e.target as HTMLInputElement).value)" />
             </td>
             <td>
@@ -459,24 +582,24 @@ const totalRows = computed(() => rows.value.length)
             </td>
             <td>
               <input type="date" class="cell-input" :value="row.inicio ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isLinked(row)"
+                :readonly="isOfficialField(row, 'inicio')" :title="fieldSourceTitle(row, 'inicio')"
                 @input="(e) => scheduleSave(row, 'inicio', (e.target as HTMLInputElement).value || null)" />
             </td>
             <td>
               <input type="date" class="cell-input" :value="row.fim ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isLinked(row)"
+                :readonly="isOfficialField(row, 'fim')" :title="fieldSourceTitle(row, 'fim')"
                 @input="(e) => scheduleSave(row, 'fim', (e.target as HTMLInputElement).value || null)" />
             </td>
             <td class="official-status-cell">
               <div class="flex items-center gap-2">
                 <span :class="officialSituationClass(row)">{{ officialSituation(row) }}</span>
                 <button v-if="isLinked(row)" class="shrink-0 text-primary hover:underline" @click="openDetails(row)"
-                  :aria-label="`Ver dados da Anatel de ${row.produto || row.anatel_numero}`">Ver</button>
+                  :aria-label="`Ver dados de ${officialSource(row)} de ${row.produto || row.numero}`">Ver</button>
               </div>
-              <span v-if="row.anatel_encontrado === false" class="block text-[10px] text-amber-700 dark:text-amber-400">
+              <span v-if="isMissingSource(row)" class="block text-[10px] text-amber-700 dark:text-amber-400">
                 Não localizado na última consulta · dados anteriores
               </span>
-              <span v-else-if="row.anatel_dados?.alertas?.length" class="block text-[10px] text-amber-700 dark:text-amber-400">
+              <span v-else-if="officialAlerts(row).length" class="block text-[10px] text-amber-700 dark:text-amber-400">
                 Confira as observações da fonte em “Ver”
               </span>
             </td>
@@ -504,7 +627,7 @@ const totalRows = computed(() => rows.value.length)
                 aria-label="Excluir certificação" @click="removeRow(row)">
                 <Trash2 class="size-3.5" />
               </button>
-              <span v-else class="text-muted-foreground" title="Dados atualizados pela Anatel">—</span>
+              <span v-else class="text-muted-foreground" :title="`Dados atualizados automaticamente por ${officialSource(row)}`">—</span>
             </td>
           </tr>
         </tbody>
@@ -517,15 +640,15 @@ const totalRows = computed(() => rows.value.length)
       <div v-if="selectedRow" class="space-y-4 p-5">
         <div class="flex items-start justify-between gap-4">
           <div>
-            <h2 id="certification-details-title" class="text-lg font-semibold">Dados da Anatel</h2>
-            <p class="text-sm text-muted-foreground">{{ selectedRow.produto || selectedRow.anatel_dados?.produto || 'Certificação' }} · {{ selectedRow.anatel_numero }}</p>
+            <h2 id="certification-details-title" class="text-lg font-semibold">Dados oficiais · {{ officialSource(selectedRow) }}</h2>
+            <p class="text-sm text-muted-foreground">{{ selectedRow.produto || officialData(selectedRow)?.produto || 'Certificação' }} · {{ selectedRow.numero }}</p>
           </div>
-          <button class="rounded p-1 hover:bg-muted" aria-label="Fechar dados da Anatel" @click="detailsDialog?.close()"><X class="size-4" /></button>
+          <button class="rounded p-1 hover:bg-muted" aria-label="Fechar dados oficiais" @click="detailsDialog?.close()"><X class="size-4" /></button>
         </div>
-        <p v-if="selectedRow.anatel_encontrado === false" class="rounded bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+        <p v-if="isMissingSource(selectedRow)" class="rounded bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
           Este registro não foi localizado na última consulta. Os dados abaixo são da consulta anterior; isso não confirma cancelamento ou irregularidade.
         </p>
-        <dl class="details-grid grid grid-cols-1 gap-x-5 gap-y-3 text-sm sm:grid-cols-2">
+        <dl v-if="selectedRow.anatel_numero" class="details-grid grid grid-cols-1 gap-x-5 gap-y-3 text-sm sm:grid-cols-2">
           <div><dt>Empresa</dt><dd>{{ selectedRow.anatel_dados?.nome_empresa || anatelStatus?.nome_empresa || 'Makisa Trading LTDA' }}</dd></div>
           <div><dt>CNPJ</dt><dd>{{ formatCnpj(selectedRow.anatel_dados?.cnpj || anatelStatus?.cnpj) }}</dd></div>
           <div><dt>Situação do requerimento</dt><dd>{{ selectedRow.anatel_dados?.situacao_requerimento || 'Não informada na fonte' }}</dd></div>
@@ -540,14 +663,28 @@ const totalRows = computed(() => rows.value.length)
           <div class="sm:col-span-2"><dt>Certificados</dt><dd>{{ selectedRow.anatel_dados?.certificados?.join(', ') || 'Não informados' }}</dd></div>
           <div><dt>Consulta deste registro</dt><dd>{{ formatTimestamp(selectedRow.anatel_consultado_em) }}</dd></div>
         </dl>
-        <div v-if="selectedRow.anatel_dados?.alertas?.length" class="rounded border border-amber-300/60 p-3 text-sm">
+        <dl v-else class="details-grid grid grid-cols-1 gap-x-5 gap-y-3 text-sm sm:grid-cols-2">
+          <div><dt>Empresa</dt><dd>{{ selectedRow.inmetro_dados?.nome_empresa || inmetroStatus?.nome_empresa || 'Makisa Trading LTDA' }}</dd></div>
+          <div><dt>CNPJ</dt><dd>{{ formatCnpj(selectedRow.inmetro_dados?.cnpj || inmetroStatus?.cnpj) }}</dd></div>
+          <div><dt>Organismo certificador</dt><dd>{{ selectedRow.inmetro_dados?.certificador || 'Não informado na fonte' }}</dd></div>
+          <div><dt>Situação do certificado</dt><dd>{{ selectedRow.inmetro_dados?.situacao_certificado || 'Não informada na fonte' }}</dd></div>
+          <div><dt>Número do certificado</dt><dd>{{ selectedRow.inmetro_dados?.numero || 'Não informado na fonte' }}</dd></div>
+          <div><dt>Modelo</dt><dd>{{ selectedRow.inmetro_dados?.modelo || 'Não informado na fonte' }}</dd></div>
+          <div><dt>Marca</dt><dd>{{ selectedRow.inmetro_dados?.marca || 'Não informada na fonte' }}</dd></div>
+          <div><dt>Produto na fonte</dt><dd>{{ selectedRow.inmetro_dados?.produto || 'Não informado na fonte' }}</dd></div>
+          <div><dt>Emissão do certificado</dt><dd>{{ selectedRow.inmetro_dados?.inicio ? formatDate(selectedRow.inmetro_dados.inicio) : 'Não informada pelo ProdCert' }}</dd></div>
+          <div><dt>Validade do certificado</dt><dd>{{ selectedRow.inmetro_dados?.fim ? formatDate(selectedRow.inmetro_dados.fim) : 'Não informada pelo ProdCert' }}</dd></div>
+          <div class="sm:col-span-2"><dt>Descrição na fonte</dt><dd>{{ selectedRow.inmetro_dados?.descricao || 'Não informada na fonte' }}</dd></div>
+          <div><dt>Consulta deste registro</dt><dd>{{ formatTimestamp(selectedRow.inmetro_consultado_em) }}</dd></div>
+        </dl>
+        <div v-if="officialAlerts(selectedRow).length" class="rounded border border-amber-300/60 p-3 text-sm">
           <p class="mb-1 font-medium">Observações da fonte</p>
-          <ul class="list-disc space-y-1 pl-4"><li v-for="(alerta, index) in selectedRow.anatel_dados.alertas" :key="index">{{ alerta }}</li></ul>
+          <ul class="list-disc space-y-1 pl-4"><li v-for="(alerta, index) in officialAlerts(selectedRow)" :key="index">{{ alerta }}</li></ul>
         </div>
         <div class="flex flex-wrap items-center justify-between gap-3 border-t pt-3 text-xs text-muted-foreground">
-          <span>A validade por data é independente da situação informada pela Anatel.</span>
-          <a :href="ANATEL_SOURCE_URL" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-primary hover:underline">
-            Base oficial da Anatel <ExternalLink class="size-3" />
+          <span>A validade por data é independente da situação informada pela fonte.</span>
+          <a :href="selectedRow.anatel_numero ? ANATEL_SOURCE_URL : INMETRO_SOURCE_URL" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-primary hover:underline">
+            {{ selectedRow.anatel_numero ? 'Base oficial da Anatel' : 'Consulta oficial do Inmetro · ProdCert' }} <ExternalLink class="size-3" />
           </a>
         </div>
       </div>

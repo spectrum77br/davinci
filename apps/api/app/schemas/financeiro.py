@@ -60,6 +60,10 @@ class SuprimentosOut(BaseModel):
     anatel_dados: dict | None = None
     anatel_consultado_em: datetime | None = None
     anatel_encontrado: bool | None = None
+    inmetro_chave: str | None = None
+    inmetro_dados: dict | None = None
+    inmetro_consultado_em: datetime | None = None
+    inmetro_encontrado: bool | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -75,7 +79,7 @@ class SuprimentosPatch(BaseModel):
     fim: date | None = None
 
 
-class CertificacoesAnatelStatusOut(BaseModel):
+class CertificacoesFonteStatusOut(BaseModel):
     cnpj: str
     nome_empresa: str
     automatico: bool = True
@@ -89,10 +93,16 @@ class CertificacoesAnatelStatusOut(BaseModel):
     resumo: dict | None = None
 
 
+class CertificacoesAnatelStatusOut(CertificacoesFonteStatusOut):
+    pass
+
+
 class CertificacoesHistoricoOut(BaseModel):
     id: UUID
     ocorrido_em: datetime
     evento: str
+    fonte: str = "anatel"
+    chave_fonte: str | None = None
     antes: dict | None = None
     depois: dict
 

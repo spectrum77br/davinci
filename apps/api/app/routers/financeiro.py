@@ -45,6 +45,7 @@ from app.models import (
 )
 from app.schemas.financeiro import (
     CertificacoesAnatelStatusOut,
+    CertificacoesFonteStatusOut,
     CertificacoesHistoricoOut,
     ComercialEmpresaOut,
     ComercialSecaoOut,
@@ -191,6 +192,37 @@ async def sincronizar_certificacoes_anatel(
 ) -> dict:
     from app.db import session_scope
     from app.services.certificacoes_sync import sincronizar_certificacoes
+
+    async with session_scope() as session:
+        return await sincronizar_certificacoes(session, force=True)
+
+
+@router.get("/suprimentos/inmetro/status", response_model=CertificacoesFonteStatusOut)
+async def status_certificacoes_inmetro(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "view"))],
+) -> CertificacoesFonteStatusOut:
+    from app.models.financeiro import CertificacoesSyncState
+    from app.services.inmetro_certificacoes import MAKISA_CNPJ, SOURCE_URL
+
+    state = await session.get(CertificacoesSyncState, "inmetro_makisa")
+    values = {}
+    if state:
+        values = {name: getattr(state, name) for name in (
+            "ultimo_sucesso_em", "ultima_tentativa_em", "proxima_tentativa_em",
+            "erro", "source_updated_at", "resumo",
+        )}
+    return CertificacoesFonteStatusOut(
+        cnpj=MAKISA_CNPJ, nome_empresa="Makisa Trading LTDA", fonte_url=SOURCE_URL, **values
+    )
+
+
+@router.post("/suprimentos/inmetro/sincronizar")
+async def sincronizar_certificacoes_inmetro(
+    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
+) -> dict:
+    from app.db import session_scope
+    from app.services.certificacoes_inmetro_sync import sincronizar_certificacoes
 
     async with session_scope() as session:
         return await sincronizar_certificacoes(session, force=True)
@@ -355,6 +387,11 @@ async def patch_suprimentos(
         raise HTTPException(404, detail={"code": "suprimentos_not_found"})
     if row.anatel_numero and body.model_fields_set & _CAMPOS_OFICIAIS_ANATEL:
         raise HTTPException(409, detail={"code": "certificacao_automatica"})
+    if row.inmetro_chave:
+        from app.services.certificacoes_inmetro_sync import campos_oficiais_inmetro
+
+        if body.model_fields_set & campos_oficiais_inmetro(row):
+            raise HTTPException(409, detail={"code": "certificacao_automatica"})
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(row, k, v)
     await session.commit()
@@ -376,7 +413,7 @@ async def delete_suprimentos(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "suprimentos_not_found"})
-    if row.anatel_numero:
+    if row.anatel_numero or row.inmetro_chave:
         raise HTTPException(409, detail={"code": "certificacao_automatica"})
     await session.delete(row)
     await session.commit()

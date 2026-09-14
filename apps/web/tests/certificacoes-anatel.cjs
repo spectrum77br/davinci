@@ -21,9 +21,12 @@ const pageScript = descriptor.scriptSetup.content.replace(/^import .*$/gm, '').r
 const exportsForTest = `return {
   rows, loading, errorText, statusError, syncMessage, exporting, adding, synchronizing,
   anatelStatus, selectedRow, detailsDialog, rowBusy, busy, hasBusyRow, canEdit, canDelete, canAttach,
-  CERT_OPTIONS, ANATEL_SOURCE_URL, totalRows, scheduleSave, syncAnatel, exportTable, load,
+  inmetroStatus, inmetroStatusError, inmetroSyncMessage, inmetroSyncError, synchronizingInmetro,
+  CERT_OPTIONS, ANATEL_SOURCE_URL, INMETRO_SOURCE_URL, totalRows, scheduleSave, syncAnatel, syncInmetro,
+  exportTable, load, loadAnatelStatus, loadInmetroStatus,
   attachPdf, addRow, removeRow, downloadCertificate, rowStatusClass, officialSituation,
-  officialSituationClass, isLinked, openDetails, formatTimestamp, formatDate, formatCnpj
+  officialSituationClass, isLinked, isOfficialField, officialSource, officialData,
+  isMissingSource, officialAlerts, fieldSourceTitle, openDetails, formatTimestamp, formatDate, formatCnpj
 }`
 
 function page(auth = { isAdmin: true }) {
@@ -54,6 +57,7 @@ const row = (values = {}) => ({
   certificado: 'anatel', numero: '07197-26-18234', valor: 53000,
   inicio: '2026-07-30', fim: '2028-07-30', tem_pdf: true, pdf_nome: 'certificado.pdf',
   anatel_numero: null, anatel_dados: null, anatel_consultado_em: null, anatel_encontrado: null,
+  inmetro_chave: null, inmetro_dados: null, inmetro_consultado_em: null, inmetro_encontrado: null,
   ...values,
 })
 const source = (values = {}) => ({
@@ -89,9 +93,10 @@ async function run() {
     assert.equal(calls[0].options.method, 'PATCH')
     calls[0].resolve()
     await settle()
-    assert.equal(calls.length, 3)
+    assert.equal(calls.length, 4)
     calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([current])
     calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
     await loading
     assert.equal(s.rows.value[0].produto, 'Nome salvo antes de recarregar')
     assert.equal(s.errorText.value, null)
@@ -175,6 +180,7 @@ async function run() {
     await settle()
     calls.find(c => c.url === '/api/financeiro/suprimentos').reject(new Error('offline'))
     calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
     await loading
     assert.equal(s.rows.value.length, 1, 'failed reload must retain visible data')
     assert.match(s.errorText.value, /dados exibidos foram preservados/)
@@ -251,4 +257,5 @@ async function run() {
   }
   console.log('PASS: ten Anatel synchronization, permissions, data preservation and rendered UI scenarios')
 }
-run().catch(error => { console.error(error); process.exitCode = 1 })
+module.exports = { page, row, source, status, render, settle }
+if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1 })

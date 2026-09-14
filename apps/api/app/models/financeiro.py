@@ -59,6 +59,12 @@ class FinanceiroSuprimentos(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True,
     )
     anatel_encontrado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    inmetro_chave: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
+    inmetro_dados: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    inmetro_consultado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    inmetro_encontrado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     @property
     def tem_pdf(self) -> bool:
@@ -88,7 +94,11 @@ class CertificacoesSyncHistorico(Base):
         nullable=True,
         index=True,
     )
-    anatel_numero: Mapped[str] = mapped_column(Text, nullable=False)
+    anatel_numero: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fonte: Mapped[str] = mapped_column(
+        Text, nullable=False, default="anatel", server_default="anatel",
+    )
+    chave_fonte: Mapped[str | None] = mapped_column(Text, nullable=True)
     ocorrido_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),
     )

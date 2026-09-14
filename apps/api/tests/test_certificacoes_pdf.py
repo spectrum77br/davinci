@@ -57,6 +57,7 @@ def test_certificacoes_pdf_repeats_headers_without_duplicating_data():
                 "Valor",
                 "Início",
                 "Fim",
+                "Situação oficial",
             ):
                 assert coluna in texto
             assert f"Página {i + 1} de {len(doc)}" in texto
@@ -106,11 +107,44 @@ def test_certificacoes_pdf_preserves_official_situation_and_missing_source_warni
     ]
     with fitz.open(stream=montar_pdf(rows), filetype="pdf") as doc:
         text = " ".join(_texto(page) for page in doc)
-        assert "Situação na Anatel" in text
+        assert "Situação oficial" in text
         assert "Manual - sem confirmação automática" in text
         assert "Em Análise - RE" in text
         assert "Não localizado na última consulta." in text
         assert "Última situação: Homologação Emitida" in text
+
+
+def test_certificacoes_pdf_distinguishes_inmetro_source_and_manual_dates():
+    rows = [
+        SimpleNamespace(
+            produto="Airfryer", modelo="UAF001-M1", nome_comercial="NOME MANUAL",
+            certificado="inmetro", numero="MODERNA-0069/25", inicio="2025-03-08",
+            fim="2030-03-08", inmetro_chave="makisa-airfryer", inmetro_encontrado=True,
+            inmetro_dados={"situacao_certificado": "Ativo", "inicio": None, "fim": None},
+        ),
+        SimpleNamespace(
+            produto="Cafeteira", inmetro_chave="makisa-cafeteira", inmetro_encontrado=False,
+            inmetro_dados={"situacao_certificado": "Suspenso", "inicio": None, "fim": None},
+        ),
+        SimpleNamespace(
+            produto="Telefone", anatel_numero="071972618234", anatel_encontrado=True,
+            anatel_dados={"situacao_requerimento": "Homologação Emitida"},
+        ),
+    ]
+    with fitz.open(stream=montar_pdf(rows), filetype="pdf") as doc:
+        texto = " ".join(_texto(page) for page in doc)
+        assert "Situação oficial" in texto
+        assert "Inmetro - Ativo" in texto
+        assert "Anatel - Homologação Emitida" in texto
+        assert "Inmetro - Não localizado na última consulta." in texto
+        assert "Última situação: Suspenso" in texto
+        assert "Emissão não informada pelo ProdCert." in texto
+        assert "Validade não informada pelo ProdCert." in texto
+        assert "Emissão da tabela: manual." in texto
+        assert "Validade da tabela: manual." in texto
+        assert "08/03/2025" in texto and "08/03/2030" in texto
+        assert "UAF001-M1" in texto
+        assert "NOME MANUAL" in texto
 
 
 def test_certificacoes_pdf_leaves_unused_area_blank_on_later_pages():

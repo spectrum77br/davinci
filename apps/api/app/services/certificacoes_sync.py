@@ -133,7 +133,7 @@ def _contadores(status: str) -> dict:
 async def _aplicar(session: AsyncSession, records: list[dict], now: datetime) -> dict:
     result = _contadores("ok")
     rows = (await session.scalars(
-        select(FinanceiroSuprimentos).with_for_update()
+        select(FinanceiroSuprimentos).order_by(FinanceiroSuprimentos.id).with_for_update()
     )).all()
     linked = {row.anatel_numero: row for row in rows if row.anatel_numero}
     manual = defaultdict(list)

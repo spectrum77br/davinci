@@ -35,7 +35,7 @@ _COLUNAS = (
     ("valor", "Valor", "valor", "108px"),
     ("inicio", "Início", "data", "54px"),
     ("fim", "Fim", "data", "54px"),
-    ("situacao_anatel", "Situação na Anatel", "", "90px"),
+    ("situacao_oficial", "Situação oficial", "", "90px"),
 )
 _LIMITES_TEXTO = {
     "produto": (160, 72),
@@ -43,19 +43,35 @@ _LIMITES_TEXTO = {
     "nome_comercial": (350, 130),
     "certificado": (100, 48),
     "numero": (160, 80),
-    "situacao_anatel": (160, 90),
+    "situacao_oficial": (200, 90),
 }
 
 
 def _texto(row: object, campo: str) -> str:
-    if campo == "situacao_anatel":
-        if not getattr(row, "anatel_numero", None):
+    if campo == "situacao_oficial":
+        if getattr(row, "anatel_numero", None):
+            fonte = "Anatel"
+            dados = getattr(row, "anatel_dados", None) or {}
+            situacao = dados.get("situacao_requerimento")
+            encontrado = getattr(row, "anatel_encontrado", None)
+        elif getattr(row, "inmetro_chave", None):
+            fonte = "Inmetro"
+            dados = getattr(row, "inmetro_dados", None) or {}
+            situacao = dados.get("situacao_certificado")
+            encontrado = getattr(row, "inmetro_encontrado", None)
+        else:
             return "Manual - sem confirmação automática"
-        dados = getattr(row, "anatel_dados", None) or {}
-        situacao = dados.get("situacao_requerimento") or "Não informada na fonte"
-        if getattr(row, "anatel_encontrado", None) is False:
-            return f"Não localizado na última consulta. Última situação: {situacao}"
-        return situacao
+        situacao = situacao or "Não informada na fonte"
+        texto = f"{fonte} - {situacao}"
+        if encontrado is False:
+            texto = f"{fonte} - Não localizado na última consulta. Última situação: {situacao}"
+        if fonte == "Inmetro":
+            for field, label in (("inicio", "Emissão"), ("fim", "Validade")):
+                if not dados.get(field):
+                    texto += f" {label} não informada pelo ProdCert."
+                    if getattr(row, field, None):
+                        texto += f" {label} da tabela: manual."
+        return texto
     valor = getattr(row, campo, None)
     if valor is None or valor == "":
         return "-"
