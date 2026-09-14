@@ -1,5 +1,10 @@
 """O que o Claude (chat do chefe) consegue fazer no DaVinci via conector:
-por enquanto só CRIAR tarefa (Eduardo, 08/09: "só criar por enquanto").
+criar / listar / concluir tarefa e consultar um pedido (somente leitura).
+
+Eduardo, 14/09: briefing matinal às 07:00 no Claude com as tarefas dele e uma
+solução proposta pra cada — a rotina do Claude chama `listar_tarefas` e,
+quando a tarefa cita um pedido, `consultar_pedido`. Por isso a linha da
+tarefa traz quem passou, há quantos dias está aberta e o prazo (atrasada?).
 
 Regras:
   * responsável = quem o Claude disser (nome ou e-mail de usuário do DaVinci);
@@ -22,17 +27,31 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Tarefa, User, UserRole, UserStatus
+from app.config import get_settings
+from app.models import (
+    BlingOrder,
+    Chamado,
+    ChamadoMensagem,
+    DevolucaoRastreio,
+    Devolution,
+    Logistica,
+    Tarefa,
+    User,
+    UserRole,
+    UserStatus,
+)
 from app.models.enums import AlertSeverity, AlertType
 from app.services.alerts import emit_alert
+from app.services.bling_situacoes import SITUACAO_CANCELADO
+from app.services.chamados import lookup_pedido
 
 logger = structlog.get_logger()
 
@@ -376,24 +395,64 @@ TOOL_CONCLUIR_TAREFA: dict[str, Any] = {
 }
 
 MAX_LISTA = 25
+MAX_OBS_NA_LINHA = 400
+_TAG_CLAUDE = "Criada pelo Claude (áudio/chat)"
+# "Prazo: dd/mm/aaaa" é como `criar_tarefa` guarda o prazo na observação
+# (a tabela não tem coluna de prazo).
+_RX_PRAZO = re.compile(r"prazo:\s*(\d{1,2})/(\d{1,2})/(\d{4})", re.IGNORECASE)
 
 
 def _codigo(t: Tarefa) -> str:
     return str(t.id)[:8]
 
 
-def _linha_tarefa(t: Tarefa, nomes: dict[Any, str]) -> str:
+def prazo_da_observacao(obs: str | None) -> date | None:
+    m = _RX_PRAZO.search(obs or "")
+    if not m:
+        return None
+    try:
+        return date(int(m[3]), int(m[2]), int(m[1]))
+    except ValueError:
+        return None
+
+
+def _dias(n: int) -> str:
+    return f"{n} dia" if n == 1 else f"{n} dias"
+
+
+def _linha_tarefa(t: Tarefa, nomes: dict[Any, str], *, hoje: date | None = None) -> str:
+    """Uma linha por tarefa, do jeito que o briefing precisa: quem é o
+    responsável, quem passou (se foi outra pessoa), há quantos dias está
+    aberta e o prazo — com ATRASADA em caixa alta pra o Claude não deixar
+    passar."""
+    hoje = hoje or datetime.now(SAO_PAULO).date()
     quem = nomes.get(t.responsavel_id, "?")
-    partes = [
-        f"[{_codigo(t)}] {t.tarefa}",
-        f"resp.: {quem}",
-        f"início {t.data_inicio.strftime('%d/%m')}",
-    ]
+    partes = [f"[{_codigo(t)}] {t.tarefa}", f"resp.: {quem}"]
+    criador = nomes.get(t.created_by) if t.created_by else None
+    if criador and t.created_by != t.responsavel_id:
+        partes.append(f"de: {criador}")
     if t.data_conclusao:
+        partes.append(f"início {t.data_inicio.strftime('%d/%m')}")
         partes.append(f"concluída {t.data_conclusao.strftime('%d/%m')}")
-    obs = (t.observacao or "").replace(" · Criada pelo Claude (áudio/chat)", "").strip(" ·")
+    else:
+        aberta = (hoje - t.data_inicio).days
+        desde = "hoje" if aberta <= 0 else f"há {_dias(aberta)}"
+        partes.append(f"início {t.data_inicio.strftime('%d/%m')} ({desde})")
+        prazo = prazo_da_observacao(t.observacao)
+        if prazo:
+            falta = (prazo - hoje).days
+            if falta < 0:
+                partes.append(f"PRAZO {prazo.strftime('%d/%m')} — ATRASADA {_dias(-falta)}")
+            elif falta == 0:
+                partes.append(f"PRAZO {prazo.strftime('%d/%m')} — vence HOJE")
+            else:
+                partes.append(f"prazo {prazo.strftime('%d/%m')} (em {_dias(falta)})")
+    # A observação entra sem a etiqueta do Claude e sem o "Prazo: …" (já
+    # virou o rótulo acima — não repetir a data na mesma linha).
+    obs = _RX_PRAZO.sub("", (t.observacao or "").replace(_TAG_CLAUDE, ""))
+    obs = re.sub(r"(\s*·\s*)+", " · ", obs).strip(" ·\n")
     if obs:
-        partes.append(obs[:120])
+        partes.append(obs[:MAX_OBS_NA_LINHA])
     return " — ".join(partes)
 
 
@@ -487,9 +546,292 @@ async def concluir_tarefa(session: AsyncSession, *, dono: User, args: dict[str, 
     )
 
 
+# ---- consultar pedido (Eduardo, 14/09: "pode olhar os dados também") ----------
+
+TOOL_CONSULTAR_PEDIDO: dict[str, Any] = {
+    "name": "consultar_pedido",
+    "title": "Consultar pedido no DaVinci",
+    "description": (
+        "Resumo de um pedido no DaVinci, somente leitura: dados do pedido (Bling), "
+        "situação, loja/plataforma, itens, destinatário, logística (status na plataforma, "
+        "rastreio e última localização), chamados, devolução e margem/financeiro. Use quando "
+        "uma tarefa, pergunta ou mensagem citar um número de pedido — número Bling "
+        "(ex.: 295070) ou código do pedido no marketplace. Só administradores."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "pedido": {
+                "type": "string",
+                "description": "Número do pedido no Bling ou código do pedido no marketplace.",
+            },
+        },
+        "required": ["pedido"],
+    },
+    "annotations": {
+        "title": "Consultar pedido no DaVinci",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+}
+
+# Só o que bate com a aba Margem: `marketplace_margem` é a coluna "Margem",
+# `bling_margem_calculado` a "Margem Bling". O `saldo_final` cru do snapshot
+# desconta prejuízo e NÃO é o Saldo Final da tela (que é o saldo efetivo +
+# ajustes) — por isso fica de fora. O status gravado só existe quando alguém
+# decidiu (Aprovado/Reprovado/Pendente); sem isso a tela deriva Aprovado ou
+# Pendente pelas regras de atenção, que não repetimos aqui.
+_MARGEM_SQL = """
+    SELECT sku, bling_status_margem, bling_margem_calculado, bling_lucro_calculado,
+           marketplace_margem, marketplace_lucro, financeiro_status
+    FROM {schema}.verificar_margem
+    WHERE pedido_bling = :n
+    ORDER BY sku
+    LIMIT 6
+"""
+_DECISOES_MARGEM = ("Aprovado", "Reprovado", "Pendente")
+
+
+def _d(v: date | datetime | None) -> str:
+    if v is None:
+        return "?"
+    if isinstance(v, datetime):
+        return v.astimezone(SAO_PAULO).strftime("%d/%m %H:%M")
+    return v.strftime("%d/%m/%Y")
+
+
+def _brl(v: Any) -> str:
+    try:
+        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _resumo_status_plataforma(meli: dict | None) -> str:
+    """Os campos que importam da assinatura de status (ML tem 8; as outras
+    plataformas guardam poucos). Só os preenchidos."""
+    if not meli:
+        return "sem status"
+    chaves = (
+        "order_status", "ship_status", "ship_substatus", "cancel_group",
+        "return_status", "claim_stage", "claim_status",
+    )
+    partes = [f"{k}={meli[k]}" for k in chaves if meli.get(k)]
+    return ", ".join(partes) or "sem status"
+
+
+async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
+    if dono.role != UserRole.ADMIN:
+        raise TarefaInvalidaError(
+            "Consultar pedidos pelo Claude é só para administradores do DaVinci."
+        )
+    pedido = _texto(args.get("pedido"), "pedido")
+    if not pedido:
+        raise TarefaInvalidaError("Informe o número do pedido (Bling ou marketplace).")
+    info = await lookup_pedido(session, pedido)
+    if info is None:
+        return (
+            f"Pedido '{pedido}' não encontrado no DaVinci (nem como número Bling, nem como "
+            "código de marketplace). Confira o número com o usuário."
+        )
+    num = info["pedido_bling"]
+    mkt = info.get("pedido_marketplace")
+    linhas = [
+        f"Pedido Bling {num}" + (f" · marketplace {mkt}" if mkt else ""),
+        f"Data {_d(info.get('data'))} · situação Bling: {info.get('status_bling') or '?'} · "
+        f"plataforma: {info.get('plataforma') or '?'} · conta: {info.get('conta') or '?'}",
+        f"Itens: {info.get('produto') or '?'} (SKU {info.get('sku') or '?'})",
+    ]
+    bo = (
+        await session.execute(
+            select(BlingOrder)
+            .where(BlingOrder.numero == num)
+            .order_by(BlingOrder.item_index)
+            .limit(1)
+        )
+    ).scalars().first()
+    if bo is not None:
+        destino = ", ".join(x for x in (bo.cidade_destino, bo.uf_destino) if x)
+        extras = [f"total {_brl(bo.total)}"]
+        if bo.nome_destinatario:
+            extras.append(f"cliente {bo.nome_destinatario}" + (f" ({destino})" if destino else ""))
+        if bo.em_andamento_data:
+            extras.append(f"enviado (Em andamento) em {_d(bo.em_andamento_data)}")
+        elif bo.marketplace_ship_deadline:
+            # Cancelado nunca ganha em_andamento_data: sem o guard todo pedido
+            # cancelado sairia como "VENCIDO" e o Claude proporia despachar.
+            cancelado = str(bo.situacao or "") == str(SITUACAO_CANCELADO)
+            vencido = bo.marketplace_ship_deadline < datetime.now(UTC) and not cancelado
+            extras.append(
+                f"despachar até {_d(bo.marketplace_ship_deadline)}"
+                + (" — PRAZO DE ENVIO VENCIDO, sem despacho registrado" if vencido else "")
+            )
+        if bo.aguardando_devolucao_data:
+            extras.append(f"em Aguardando Devolução desde {_d(bo.aguardando_devolucao_data)}")
+        linhas.append("Pedido: " + " · ".join(extras))
+
+    lg = (
+        await session.execute(
+            select(Logistica)
+            .where(Logistica.pedido_bling == num)
+            .order_by(Logistica.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if lg is not None:
+        partes = [f"status plataforma: {_resumo_status_plataforma(lg.meli_status)}"]
+        if lg.rastreio:
+            partes.append(f"rastreio {lg.rastreio}")
+        if lg.localizacao:
+            quando = lg.localizacao_at or lg.updated_at
+            partes.append(f"última localização: {lg.localizacao} ({_d(quando)})")
+        if lg.rastreio_lido_em:
+            partes.append(f"rastreio lido {_d(lg.rastreio_lido_em)}")
+        if lg.status_bling:
+            partes.append(f"classificação: {lg.status_bling}")
+        if lg.divergencia:
+            partes.append(f"divergência: {lg.divergencia}")
+        if lg.chamado:
+            partes.append(f"chamado {lg.chamado}")
+        if lg.observacao:
+            partes.append(f"obs: {lg.observacao[:200]}")
+        linhas.append("Logística: " + " · ".join(partes))
+    else:
+        linhas.append("Logística: pedido não está no painel de Logística.")
+
+    cond = [Chamado.pedido_bling == num]
+    if mkt:
+        cond.append(Chamado.pedido_marketplace == mkt)
+    chamados = list(
+        (
+            await session.execute(
+                select(Chamado).where(or_(*cond)).order_by(Chamado.created_at.desc()).limit(5)
+            )
+        ).scalars().all()
+    )
+    if chamados:
+        for ch in chamados:
+            ultima = (
+                await session.execute(
+                    select(ChamadoMensagem)
+                    .where(ChamadoMensagem.chamado_id == ch.id)
+                    .order_by(ChamadoMensagem.created_at.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            partes = [
+                f"Chamado {_d(ch.data)}",
+                "RESOLVIDO" if ch.resolvido else "ABERTO",
+                f"origem {ch.origem}",
+                f"canal {ch.canal}",
+            ]
+            if ch.chamado:
+                partes.append(f"nº {ch.chamado}")
+            if ultima is not None:
+                partes.append(
+                    f"última mensagem ({ultima.direcao}, {_d(ultima.created_at)}): "
+                    f"{ultima.texto[:200]}"
+                )
+            if ch.observacao:
+                partes.append(f"obs: {ch.observacao[:200]}")
+            linhas.append(" · ".join(partes))
+    else:
+        linhas.append("Chamados: nenhum.")
+
+    cond = [Devolution.pedido_bling == num]
+    if mkt:
+        cond.append(Devolution.pedido_marketplace == mkt)
+    devs = list(
+        (
+            await session.execute(
+                select(Devolution).where(or_(*cond)).order_by(Devolution.created_at.desc()).limit(3)
+            )
+        ).scalars().all()
+    )
+    # O rastreio reverso é por PEDIDO e existe antes de a devolução ser
+    # lançada (job devolucao_rastreio_sync / aba Acompanhamento) — buscar
+    # sempre, senão "Devolução: nenhuma" esconde um pacote voltando.
+    rastreio = (
+        await session.execute(
+            select(DevolucaoRastreio).where(DevolucaoRastreio.pedido_bling == num)
+        )
+    ).scalar_one_or_none()
+    if devs:
+        for dv in devs:
+            partes = [f"Devolução {_d(dv.data)}", f"conta {dv.conta}"]
+            if dv.motivo_devolucao:
+                partes.append(f"motivo: {dv.motivo_devolucao[:200]}")
+            if dv.condicao_produto:
+                partes.append(f"condição: {dv.condicao_produto}")
+            partes.append("reembolso: sim" if dv.reembolso else "reembolso: não")
+            if dv.prazo_contestacao:
+                partes.append(f"prazo p/ contestar {_d(dv.prazo_contestacao)}")
+            if dv.data_devolvido_estoque:
+                partes.append(f"devolvido ao estoque em {_d(dv.data_devolvido_estoque)}")
+            if dv.manutencao:
+                partes.append("em manutenção")
+            if dv.observacao:
+                partes.append(f"obs: {dv.observacao[:200]}")
+            linhas.append(" · ".join(partes))
+    elif bo is not None and bo.aguardando_devolucao_data:
+        linhas.append(
+            "Devolução: ainda não lançada na aba Devoluções (pedido em Aguardando "
+            f"Devolução desde {_d(bo.aguardando_devolucao_data)})."
+        )
+    elif rastreio is None:
+        linhas.append("Devolução: nenhuma.")
+    if rastreio is not None:
+        loc = rastreio.localizacao or rastreio.localizacao_auto
+        quando = rastreio.localizacao_data or rastreio.localizacao_auto_data
+        partes = []
+        if rastreio.rastreio or rastreio.rastreio_auto:
+            partes.append(f"rastreio {rastreio.rastreio or rastreio.rastreio_auto}")
+        if loc:
+            partes.append(f"última localização: {loc} ({_d(quando)})")
+        if rastreio.pacote_entregue_em:
+            partes.append(f"pacote entregue ao vendedor em {_d(rastreio.pacote_entregue_em)}")
+        if rastreio.devolucao_status_auto:
+            partes.append(f"status da devolução: {rastreio.devolucao_status_auto}")
+        if partes:
+            linhas.append("Rastreio da devolução: " + " · ".join(partes))
+
+    schema = get_settings().database_schema
+    margens = (
+        await session.execute(text(_MARGEM_SQL.format(schema=schema)), {"n": num})
+    ).mappings().all()
+    if margens:
+        for m in margens:
+            decisao = m["bling_status_margem"]
+            status = (
+                f"status {decisao} (decisão manual)"
+                if decisao in _DECISOES_MARGEM
+                else "sem decisão manual (ver status na aba Margem)"
+            )
+            partes = [f"Margem SKU {m['sku'] or '?'}", status]
+            if m["bling_margem_calculado"] is not None:
+                partes.append(
+                    f"Bling {float(m['bling_margem_calculado']):.1f}% "
+                    f"(lucro {_brl(m['bling_lucro_calculado'])})"
+                )
+            if m["marketplace_margem"] is not None:
+                partes.append(
+                    f"plataforma {float(m['marketplace_margem']):.1f}% "
+                    f"(lucro {_brl(m['marketplace_lucro'])})"
+                )
+            if m["financeiro_status"]:
+                partes.append(f"financeiro: {m['financeiro_status']}")
+            linhas.append(" · ".join(partes))
+    else:
+        linhas.append("Margem: pedido não está na tela de Margem.")
+    return "\n".join(linhas)
+
+
 # Nome da ferramenta -> (schema anunciado no tools/list, função que executa).
 FERRAMENTAS: dict[str, tuple[dict[str, Any], Any]] = {
     TOOL_CRIAR_TAREFA["name"]: (TOOL_CRIAR_TAREFA, criar_tarefa),
     TOOL_LISTAR_TAREFAS["name"]: (TOOL_LISTAR_TAREFAS, listar_tarefas),
     TOOL_CONCLUIR_TAREFA["name"]: (TOOL_CONCLUIR_TAREFA, concluir_tarefa),
+    TOOL_CONSULTAR_PEDIDO["name"]: (TOOL_CONSULTAR_PEDIDO, consultar_pedido),
 }

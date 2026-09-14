@@ -12,7 +12,7 @@ Dois lados:
     (JSON-RPC 2.0 por POST, resposta JSON simples; GET => 405 porque não
     abrimos stream; DELETE => fim de sessão, sem estado aqui). Só o
     necessário: initialize, ping, tools/list, tools/call (criar, listar,
-    concluir). Com freios: corpo até 64 KB, lote até 5 mensagens, 30 chamadas
+    concluir, consultar pedido). Com freios: corpo até 64 KB, lote até 5 mensagens, 30 chamadas
     de ferramenta por minuto.
 
 O token não vai pros access logs: `mascarar_token_no_access_log` (main.py)
@@ -58,8 +58,9 @@ INSTRUCOES = (
     "Você está conectado ao DaVinci, o sistema interno da empresa. Use `criar_tarefa` "
     "sempre que o usuário pedir para anotar/registrar/criar uma tarefa — inclusive quando "
     "ele ditar por áudio; `listar_tarefas` quando perguntar o que está pendente ou o que "
-    "mandou; `concluir_tarefa` quando disser que terminou algo (confirme qual antes). "
-    "Responda sempre com o texto devolvido pela ferramenta."
+    "mandou; `concluir_tarefa` quando disser que terminou algo (confirme qual antes); "
+    "`consultar_pedido` quando uma tarefa ou pergunta citar um número de pedido (somente "
+    "leitura). Responda sempre com o texto devolvido pela ferramenta."
 )
 MAX_CORPO_BYTES = 64 * 1024
 MAX_LOTE = 5

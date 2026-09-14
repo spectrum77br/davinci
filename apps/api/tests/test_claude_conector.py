@@ -107,7 +107,12 @@ async def test_handshake_e_lista_de_ferramentas(
 
     r = await client.post(url, json=_rpc(2, "tools/list"))
     tools = r.json()["result"]["tools"]
-    assert [t["name"] for t in tools] == ["criar_tarefa", "listar_tarefas", "concluir_tarefa"]
+    assert [t["name"] for t in tools] == [
+        "criar_tarefa",
+        "listar_tarefas",
+        "concluir_tarefa",
+        "consultar_pedido",
+    ]
     assert tools[0]["inputSchema"]["required"] == ["descricao"]
     assert tools[0]["annotations"]["destructiveHint"] is False
 
@@ -370,6 +375,7 @@ async def test_lista_pendentes_e_conclui_pelo_codigo(
         "criar_tarefa",
         "listar_tarefas",
         "concluir_tarefa",
+        "consultar_pedido",
     ]
 
     r = await client.post(url, json=_tool(3, "listar_tarefas"))
@@ -436,3 +442,241 @@ async def test_usuario_comum_lista_e_conclui_so_as_suas(
     assert (
         await db.execute(select(Tarefa).where(Tarefa.tarefa == "Segredo do outro"))
     ).scalar_one().data_conclusao is None
+
+
+# ---- briefing matinal (Eduardo, 14/09): linha rica + consultar_pedido ----------
+
+
+def test_linha_tarefa_mostra_quem_passou_dias_e_prazo():
+    from datetime import date
+    from uuid import uuid4
+
+    from app.models import Tarefa
+
+    chefe, ana = uuid4(), uuid4()
+    nomes = {chefe: "Chefe", ana: "Ana"}
+    hoje = date(2026, 9, 14)
+    t = Tarefa(
+        id=uuid4(), responsavel_id=ana, created_by=chefe, data_inicio=date(2026, 9, 11),
+        tarefa="Ligar para o fornecedor",
+        observacao="Prazo: 12/09/2026 · Ver preço · Criada pelo Claude (áudio/chat)",
+    )
+    linha = claude_tarefas._linha_tarefa(t, nomes, hoje=hoje)
+    assert "resp.: Ana" in linha and "de: Chefe" in linha
+    assert "início 11/09 (há 3 dias)" in linha
+    assert "PRAZO 12/09 — ATRASADA 2 dias" in linha
+    # A etiqueta "Criada pelo Claude" e o "Prazo: …" saem; o resto da observação fica.
+    assert "Ver preço" in linha and "Criada pelo Claude" not in linha
+    assert "Prazo: 12/09/2026" not in linha and linha.count("12/09") == 1
+
+    t.observacao = "Prazo: 14/09/2026"
+    assert "vence HOJE" in claude_tarefas._linha_tarefa(t, nomes, hoje=hoje)
+    t.observacao = "Prazo: 20/09/2026"
+    t.data_inicio = hoje
+    linha = claude_tarefas._linha_tarefa(t, nomes, hoje=hoje)
+    assert "prazo 20/09 (em 6 dias)" in linha and "(hoje)" in linha
+    # Tarefa que a própria pessoa criou: sem "de:".
+    t.created_by = ana
+    assert "de:" not in claude_tarefas._linha_tarefa(t, nomes, hoje=hoje)
+    # Concluída: sem "há N dias" nem prazo.
+    t.data_conclusao = hoje
+    linha = claude_tarefas._linha_tarefa(t, nomes, hoje=hoje)
+    assert "concluída 14/09" in linha and "prazo" not in linha.lower()
+
+
+async def _pedido_completo(db: AsyncSession) -> None:
+    """Pedido 295070 com tudo ligado: logística, chamado + mensagem, devolução,
+    margem — o que `consultar_pedido` junta numa resposta só."""
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from sqlalchemy import text as sql
+
+    from app.models import (
+        BlingOrder,
+        Chamado,
+        ChamadoMensagem,
+        DevolucaoRastreio,
+        Devolution,
+        Logistica,
+        SituacaoBling,
+    )
+
+    agora = datetime.now(UTC)
+    ja_tem = (
+        await db.execute(select(SituacaoBling).where(SituacaoBling.id == 15))
+    ).scalar_one_or_none()
+    if ja_tem is None:
+        db.add(SituacaoBling(id=15, nome="Em andamento"))
+    db.add(BlingOrder(
+        bling_id=1, numero="295070", numeroloja="2000012345", situacao="15", loja="5001",
+        data=agora, item_index=0, item_codigo="SKU1", item_descricao="Celular X",
+        item_quantidade=1, total=1800, nome_destinatario="Maria", cidade_destino="Curitiba",
+        uf_destino="PR", em_andamento_data=agora.date(),
+    ))
+    db.add(Logistica(
+        pedido_bling="295070", plataforma="Mercado Livre", rastreio="AD890179823BR",
+        localizacao="Objeto apreendido pela Secretaria da Fazenda", localizacao_at=agora,
+        meli_status={"order_status": "paid", "ship_status": "shipped"}, status_bling="Retido",
+    ))
+    ch = Chamado(
+        pedido_bling="295070", origem="manual", canal="manual", data=agora.date(),
+        resolvido=False, chamado="12345",
+    )
+    db.add(ch)
+    await db.flush()
+    db.add(ChamadoMensagem(
+        chamado_id=ch.id, direcao="enviada", tipo="texto", texto="Olá, pedido retido",
+        canal="manual", status="enviada",
+    ))
+    db.add(Devolution(
+        pedido_bling="295070", conta="kia", data=agora, motivo_devolucao="Defeito",
+        reembolso=True, prazo_contestacao=agora + timedelta(days=1),
+    ))
+    db.add(DevolucaoRastreio(
+        pedido_bling="295070", rastreio="QB1BR", localizacao="Em trânsito",
+        pacote_entregue_em=agora,
+    ))
+    await db.execute(sql(
+        "INSERT INTO verificar_margem (bling_order_item_id, pedido_bling, sku, "
+        "bling_status_margem, bling_margem_calculado, bling_lucro_calculado, financeiro_status) "
+        "VALUES (:id, '295070', 'SKU1', 'Aprovado', 12.5, 200, 'pending')"
+    ).bindparams(id=uuid4()))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_consultar_pedido_junta_tudo(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as, sem_alerta
+):
+    _admin, _dono, token, _ = await _conector(client, db, make_user, auth_as)
+    url = f"/api/claude-mcp/{token}/mcp"
+    await _pedido_completo(db)
+
+    r = await client.post(url, json=_tool(1, "consultar_pedido", pedido="295070"))
+    res = r.json()["result"]
+    assert res["isError"] is False, res
+    texto = res["content"][0]["text"]
+    assert texto.startswith("Pedido Bling 295070 · marketplace 2000012345")
+    assert "situação Bling: Em andamento" in texto
+    assert "Celular X" in texto and "SKU SKU1" in texto
+    assert "cliente Maria (Curitiba, PR)" in texto and "enviado (Em andamento) em" in texto
+    assert "rastreio AD890179823BR" in texto and "Objeto apreendido" in texto
+    assert "order_status=paid, ship_status=shipped" in texto and "classificação: Retido" in texto
+    assert "Chamado" in texto and "ABERTO" in texto and "nº 12345" in texto
+    assert "última mensagem (enviada" in texto and "Olá, pedido retido" in texto
+    assert "Devolução" in texto and "motivo: Defeito" in texto and "reembolso: sim" in texto
+    assert "prazo p/ contestar" in texto
+    assert "Rastreio da devolução: rastreio QB1BR" in texto
+    assert "pacote entregue ao vendedor" in texto
+    assert (
+        "Margem SKU SKU1 · status Aprovado (decisão manual) · Bling 12.5% (lucro R$ 200,00)"
+        in texto
+    )
+    assert "saldo final" not in texto
+    assert "financeiro: pending" in texto
+
+    # Pelo código do marketplace acha o mesmo pedido.
+    r = await client.post(url, json=_tool(2, "consultar_pedido", pedido="2000012345"))
+    assert r.json()["result"]["content"][0]["text"].startswith("Pedido Bling 295070")
+
+
+@pytest.mark.asyncio
+async def test_consultar_pedido_nao_encontrado_e_so_admin(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as, sem_alerta
+):
+    _admin, _dono, token, _ = await _conector(client, db, make_user, auth_as)
+    url = f"/api/claude-mcp/{token}/mcp"
+    r = await client.post(url, json=_tool(1, "consultar_pedido", pedido="999999"))
+    res = r.json()["result"]
+    assert res["isError"] is False and "não encontrado" in res["content"][0]["text"]
+    r = await client.post(url, json=_tool(2, "consultar_pedido", pedido=""))
+    assert r.json()["result"]["isError"] is True
+
+    # Usuário comum: a ferramenta aparece, mas recusa (dados de pedido cruzam equipes).
+    comum = await make_user(role=UserRole.USER, email="comum@davinci-test.com")
+    auth_as(_admin)
+    r = await client.post(
+        "/api/claude-conector", json={"user_id": str(comum.id), "nome": "Celular do comum"}
+    )
+    assert r.status_code == 201, r.text
+    token2 = r.json()["url"].split("/api/claude-mcp/")[1].split("/")[0]
+    auth_as(None)
+    r = await client.post(
+        f"/api/claude-mcp/{token2}/mcp", json=_tool(3, "consultar_pedido", pedido="295070")
+    )
+    res = r.json()["result"]
+    assert res["isError"] is True and "administradores" in res["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_consultar_pedido_ramos_vazios_vencido_cancelado_e_rastreio_sem_lancamento(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as, sem_alerta
+):
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from sqlalchemy import text as sql
+
+    from app.models import BlingOrder, Chamado, DevolucaoRastreio, SituacaoBling
+
+    _admin, _dono, token, _ = await _conector(client, db, make_user, auth_as)
+    url = f"/api/claude-mcp/{token}/mcp"
+    agora = datetime.now(UTC)
+    db.add(SituacaoBling(id=21, nome="Em digitação"))
+    db.add(SituacaoBling(id=12, nome="Cancelado"))
+    # 295071: só o pedido, etiqueta emitida e prazo de envio vencido há 2h.
+    db.add(BlingOrder(
+        bling_id=2, numero="295071", situacao="21", loja="5001", data=agora, item_index=0,
+        item_codigo="SKU2", item_descricao="Mala Y",
+        marketplace_ship_deadline=agora - timedelta(hours=2),
+    ))
+    # 295072: cancelado com o mesmo prazo vencido → NÃO pode sair como "VENCIDO".
+    db.add(BlingOrder(
+        bling_id=3, numero="295072", situacao="12", loja="5001", data=agora, item_index=0,
+        item_codigo="SKU3", item_descricao="Mala Z",
+        marketplace_ship_deadline=agora - timedelta(hours=2),
+    ))
+    # 295073: em Aguardando Devolução, rastreio reverso já andando, devolução ainda não lançada;
+    # chamado resolvido; margem sem decisão manual.
+    db.add(BlingOrder(
+        bling_id=4, numero="295073", situacao="21", loja="5001", data=agora, item_index=0,
+        item_codigo="SKU4", item_descricao="Celular W", aguardando_devolucao_data=agora.date(),
+    ))
+    db.add(DevolucaoRastreio(
+        pedido_bling="295073", rastreio_auto="QB2BR", localizacao_auto="Objeto em trânsito",
+        localizacao_auto_data=agora, devolucao_status_auto="A caminho do vendedor",
+    ))
+    db.add(Chamado(pedido_bling="295073", origem="manual", canal="manual", data=agora.date(),
+                   resolvido=True))
+    await db.execute(sql(
+        "INSERT INTO verificar_margem (bling_order_item_id, pedido_bling, sku, "
+        "marketplace_margem, marketplace_lucro) VALUES (:id, '295073', 'SKU4', 8.25, 90)"
+    ).bindparams(id=uuid4()))
+    await db.commit()
+
+    r = await client.post(url, json=_tool(1, "consultar_pedido", pedido="295071"))
+    texto = r.json()["result"]["content"][0]["text"]
+    assert "Pedido Bling 295071" in texto and "situação Bling: Em digitação" in texto
+    assert "despachar até" in texto and "PRAZO DE ENVIO VENCIDO, sem despacho registrado" in texto
+    assert "Logística: pedido não está no painel de Logística." in texto
+    assert "Chamados: nenhum." in texto and "Devolução: nenhuma." in texto
+    assert "Margem: pedido não está na tela de Margem." in texto
+
+    r = await client.post(url, json=_tool(2, "consultar_pedido", pedido="295072"))
+    texto = r.json()["result"]["content"][0]["text"]
+    assert "situação Bling: Cancelado" in texto and "despachar até" in texto
+    assert "VENCIDO" not in texto
+
+    r = await client.post(url, json=_tool(3, "consultar_pedido", pedido="295073"))
+    texto = r.json()["result"]["content"][0]["text"]
+    assert "em Aguardando Devolução desde" in texto
+    assert "Devolução: ainda não lançada na aba Devoluções" in texto
+    assert "Devolução: nenhuma." not in texto
+    assert "Rastreio da devolução: rastreio QB2BR · última localização: Objeto em trânsito" in texto
+    assert "status da devolução: A caminho do vendedor" in texto
+    assert "RESOLVIDO" in texto and "ABERTO" not in texto
+    assert (
+        "Margem SKU SKU4 · sem decisão manual (ver status na aba Margem) · "
+        "plataforma 8.2% (lucro R$ 90,00)"
+    ) in texto
