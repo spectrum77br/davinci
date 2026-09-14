@@ -236,14 +236,46 @@ _DUIMP_SQL = text(
 )
 
 
+# 14/09 (Eduardo: "a DUIMP tem que ir para todas as etiquetas"): o pedido traz
+# o SKU do KIT ("b002.12.18", "b036.10.12.20.24") ou sem tamanho ("b006"), mas a
+# tela Importação cadastra a DUIMP por tamanho ("b002.12", "b002.18") — o casamento
+# exato falhava e a etiqueta/observação saía sem DUIMP. Fallback: mesmo CÓDIGO-BASE
+# (antes do 1º ponto) com DUIMP cadastrada, a mais recente.
+_DUIMP_BASE_SQL = text(
+    f"""
+    SELECT DISTINCT ON (split_part(lower(trim(sku)), '.', 1))
+        split_part(lower(trim(sku)), '.', 1) AS base,
+        trim(duimp)                          AS duimp
+    FROM "{_SCHEMA}".import_products
+    WHERE split_part(lower(trim(sku)), '.', 1) = ANY(:bases)
+      AND duimp IS NOT NULL
+      AND trim(duimp) <> ''
+    ORDER BY split_part(lower(trim(sku)), '.', 1), updated_at DESC
+    """
+)
+
+
 async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str]:
-    """Mapa SKU (minúsculo) → texto da DUIMP. SKU sem DUIMP fica de fora."""
+    """Mapa SKU (minúsculo) → texto da DUIMP. Casa pelo SKU exato e, pra quem
+    sobrar, pelo código-base (kit/sem tamanho). SKU sem DUIMP fica de fora."""
     if not skus:
         return {}
     rows = (
         await session.execute(_DUIMP_SQL, {"skus": sorted(skus)})
     ).mappings().all()
-    return {r["sku"]: r["duimp"] for r in rows}
+    mapa = {r["sku"]: r["duimp"] for r in rows}
+    faltam = {s for s in skus if s not in mapa}
+    bases = sorted({s.split(".", 1)[0] for s in faltam if s.split(".", 1)[0]})
+    if bases:
+        rows_b = (
+            await session.execute(_DUIMP_BASE_SQL, {"bases": bases})
+        ).mappings().all()
+        por_base = {r["base"]: r["duimp"] for r in rows_b}
+        for s in faltam:
+            d = por_base.get(s.split(".", 1)[0])
+            if d:
+                mapa[s] = d
+    return mapa
 
 
 def _observacao_duimp(duimp_por_sku: dict[str, str], itens_rows: list) -> str | None:
