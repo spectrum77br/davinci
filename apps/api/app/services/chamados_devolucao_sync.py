@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Chamado, ChamadoMensagem, Devolution
@@ -383,6 +383,24 @@ async def sync_respostas(session: AsyncSession) -> dict:
             .order_by(Chamado.created_at)
         )
     ).all()
+    # 14/09 (Eduardo, "agente tem que cobrir todos os chamados da aba"): reclamação
+    # do Mercado Livre aberta FORA da devolução (origem logística/manual, canal API,
+    # nº do claim de 10 dígitos) também é acompanhada pela API — `_sync_ml` já
+    # funciona sem Devolution. Antes ficava "fora" da cobertura (2 casos em 14/09).
+    extras = (
+        await session.execute(
+            select(Chamado).where(
+                Chamado.canal == "api",
+                Chamado.resolvido.is_(False),
+                Chamado.origem != "devolucao",
+                Chamado.chamado.op("~")(r"^\d{10}$"),
+                func.lower(func.coalesce(Chamado.plataforma, "")).in_(
+                    ("ml", "mercado livre", "mercadolivre", "meli")
+                ),
+            )
+        )
+    ).scalars().all()
+    rows = list(rows) + [(ch, None) for ch in extras]
     vistos: set[UUID] = set()
     verificados = novos = encerrados = falhas = 0
     for ch, _msg in rows:
