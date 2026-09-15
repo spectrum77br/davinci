@@ -58,6 +58,21 @@ class MensagemTemplateIn(BaseModel):
     ativo: bool = True
 
 
+class MensagemTesteIn(BaseModel):
+    """Teste do texto de um evento: vai pra um e-mail SEU (nunca pro cliente),
+    montado com o pedido Bling dado ou com um exemplo."""
+
+    email: str
+    pedido_bling: str | None = None
+
+
+class MensagemTesteOut(BaseModel):
+    ok: bool = True
+    assunto: str
+    corpo: str
+    pedido: str = ""
+
+
 class MensagensClienteConfigOut(BaseModel):
     """Estado do envio ao cliente: a chave global (.env) + os textos + os campos
     que o texto pode usar entre chaves."""

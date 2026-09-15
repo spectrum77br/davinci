@@ -270,6 +270,82 @@ class Sender(Protocol):
     async def send(self, *, to: str, subject: str, html: str, text: str) -> None: ...
 
 
+def _linha_exemplo() -> Logistica:
+    """Pedido fictício pra ver o texto montado quando não há pedido escolhido."""
+    return Logistica(
+        pedido_bling="000000",
+        pedido_marketplace="701-0000000-0000000",
+        plataforma="Amazon",
+        conta="exemplo",
+        amazon_canal=logistica_amazon_canal.CANAL_PROPRIO,
+        servico_envio="SEDEX",
+        rastreio="AA123456789BR",
+        localizacao="São Paulo/SP — Objeto em trânsito",
+        cliente_nome="Cliente Exemplo",
+        postagem_data=date(2026, 9, 14),
+        previsao_correios=date(2026, 9, 23),
+        prazo_entrega_amazon=date(2026, 10, 8),
+        entregue_em=datetime(2026, 9, 23, 18, 0, tzinfo=UTC),
+        problema_correios="Objeto extraviado — em análise",
+        problema_correios_em=datetime(2026, 9, 20, 10, 0, tzinfo=UTC),
+    )
+
+
+async def enviar_teste(
+    session: AsyncSession,
+    evento: str,
+    *,
+    email: str,
+    pedido_bling: str | None = None,
+    sender: Sender | None = None,
+) -> dict[str, str]:
+    """Manda o texto de um evento, montado com os dados de um pedido real (ou
+    do exemplo), pra um e-mail SEU — pra ver na caixa de entrada o que o
+    cliente receberia. Nunca pra endereço de retransmissão da Amazon (isso
+    seria uma mensagem de verdade pro comprador). Ignora a chave global e o
+    `ativo` do evento: é teste."""
+    if evento not in EVENTOS:
+        raise TemplateInvalidoError("evento_desconhecido")
+    email = (email or "").strip().lower()
+    if "@" not in email or "." not in email.split("@", 1)[1]:
+        raise TemplateInvalidoError("email_invalido")
+    if logistica_amazon_canal.eh_email_relay_amazon(email):
+        raise TemplateInvalidoError("teste_nao_vai_para_cliente")
+    row: Logistica | None = None
+    if (pedido_bling or "").strip():
+        row = (
+            await session.execute(
+                select(Logistica).where(
+                    func.lower(func.trim(Logistica.plataforma)).in_(
+                        tuple(logistica_rules._AMAZON_PLATAFORMAS)
+                    ),
+                    Logistica.pedido_bling == pedido_bling.strip(),
+                )
+            )
+        ).scalars().first()
+        if row is None:
+            raise TemplateInvalidoError("pedido_nao_encontrado")
+    else:
+        row = _linha_exemplo()
+    templates = await carregar_templates(session)
+    assunto, corpo = renderizar(templates[evento], row)
+    assunto = f"[TESTE] {assunto}"
+    corpo = (
+        corpo
+        + "\n\n— Este é um teste do DaVinci: o cliente NÃO recebeu esta mensagem. "
+        + f"Pedido usado: {row.pedido_bling}."
+    )
+    if sender is None:
+        from app.services.email import get_email_sender
+
+        sender = get_email_sender()
+    await sender.send(to=email, subject=assunto, html="", text=corpo)
+    logger.info(
+        "logistica_cliente_mensagem_teste", evento=evento, para=email, pedido=row.pedido_bling
+    )
+    return {"assunto": assunto, "corpo": corpo, "pedido": row.pedido_bling or ""}
+
+
 async def _historico(
     session: AsyncSession, rows: list[Logistica]
 ) -> dict[tuple[Any, str], LogisticaMensagemCliente]:

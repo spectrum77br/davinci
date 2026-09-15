@@ -183,3 +183,31 @@ async def test_run_falha_registra_erro_e_retenta_ate_o_teto(db: AsyncSession, li
     # Estourou o teto: não tenta mais.
     out = await msgs.run(db, sender=ruim, hoje=HOJE)
     assert out["devidas"] == 0
+
+
+@pytest.mark.asyncio
+async def test_enviar_teste_vai_para_meu_email_nunca_para_o_cliente(db: AsyncSession):
+    db.add(_linha())
+    await db.commit()
+    sender = FakeSender()
+    res = await msgs.enviar_teste(
+        db, "entregue", email="Eu@Empresa.com.br", pedido_bling="296762", sender=sender
+    )
+    assert res["assunto"].startswith("[TESTE] Pedido 701-3967231-6921832")
+    assert "Rosana" in res["corpo"] and "o cliente NÃO recebeu" in res["corpo"]
+    assert sender.enviados[0]["to"] == "eu@empresa.com.br" and sender.enviados[0]["html"] == ""
+    # Sem pedido: usa o exemplo.
+    res2 = await msgs.enviar_teste(
+        db, "problema_correios", email="eu@empresa.com.br", sender=sender
+    )
+    assert res2["pedido"] == "000000" and "Objeto extraviado" in res2["corpo"]
+    # Endereço de retransmissão da Amazon é recusado (seria mensagem real).
+    with pytest.raises(msgs.TemplateInvalidoError) as e:
+        await msgs.enviar_teste(
+            db, "entregue", email="x@marketplace.amazon.com.br", sender=sender
+        )
+    assert e.value.code == "teste_nao_vai_para_cliente"
+    with pytest.raises(msgs.TemplateInvalidoError):
+        await msgs.enviar_teste(
+            db, "entregue", email="eu@empresa.com.br", pedido_bling="999", sender=sender
+        )

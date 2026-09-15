@@ -57,6 +57,8 @@ from app.schemas.logistica import (
     MensagemClienteOut,
     MensagemTemplateIn,
     MensagemTemplateOut,
+    MensagemTesteIn,
+    MensagemTesteOut,
     MensagensClienteConfigOut,
     OpcoesOut,
     RecarregarOut,
@@ -702,6 +704,31 @@ async def list_logistica(
             )
         )
     return out
+
+
+@router.post("/mensagens-cliente/{evento}/teste", response_model=MensagemTesteOut)
+async def testar_mensagem_cliente(
+    evento: str,
+    body: MensagemTesteIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> MensagemTesteOut:
+    """Manda o texto do evento pra um e-mail seu, montado com um pedido real
+    (ou exemplo) — pra ver o que o cliente receberia. Nunca vai pro cliente."""
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
+    try:
+        res = await logistica_cliente_mensagens.enviar_teste(
+            session, evento, email=body.email, pedido_bling=body.pedido_bling
+        )
+    except logistica_cliente_mensagens.TemplateInvalidoError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": e.code}
+        ) from e
+    except Exception as e:  # noqa: BLE001 — Mailjet fora do ar
+        logger.warning("logistica_cliente_mensagem_teste_falhou", err=str(e)[:200])
+        raise HTTPException(502, detail={"code": "email_falhou"}) from e
+    return MensagemTesteOut(**res)
 
 
 # ---- Robô da Logística (executor local): suspender entrega no Melhor Envio ----

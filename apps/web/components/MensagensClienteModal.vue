@@ -38,7 +38,17 @@ const salvando = ref<string | null>(null)
 const erro = ref<string | null>(null)
 const ok = ref<string | null>(null)
 
+// Teste: manda os textos montados com um pedido real pra um e-mail SEU.
+const testeEmail = ref('')
+const testePedido = ref('')
+const testando = ref(false)
+const testeResultado = ref<string | null>(null)
+
 const ERROS: Record<string, string> = {
+  email_invalido: 'Digite um e-mail válido para receber o teste.',
+  teste_nao_vai_para_cliente: 'O teste não pode ir para o endereço do cliente na Amazon. Use um e-mail seu.',
+  pedido_nao_encontrado: 'Não achei esse pedido Bling na aba Amazon. Deixe em branco para usar o exemplo.',
+  email_falhou: 'O servidor de e-mail não respondeu. Tente de novo em instantes.',
   mensagem_com_link: 'A Amazon não aceita links na mensagem. Tire o endereço (http, www) do texto.',
   mensagem_com_email: 'A Amazon não aceita e-mails na mensagem. Tire o endereço de e-mail do texto.',
   mensagem_com_html: 'A mensagem tem que ser texto puro, sem tags HTML.',
@@ -63,6 +73,30 @@ watch(
     }
   },
 )
+
+async function enviarTeste() {
+  if (!cfg.value) return
+  testando.value = true
+  erro.value = null
+  testeResultado.value = null
+  const enviados: string[] = []
+  try {
+    for (const t of cfg.value.templates) {
+      await api(`/api/logistica/mensagens-cliente/${t.evento}/teste`, {
+        method: 'POST',
+        body: { email: testeEmail.value.trim(), pedido_bling: testePedido.value.trim() || null },
+      })
+      enviados.push(t.label)
+    }
+    testeResultado.value = `Enviado para ${testeEmail.value.trim()}: ${enviados.join(', ')}. Confira a caixa de entrada (e o spam).`
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || ''
+    erro.value = ERROS[code] || 'Não consegui enviar o teste. Tente de novo.'
+    if (enviados.length) testeResultado.value = `Foram enviados antes do erro: ${enviados.join(', ')}.`
+  } finally {
+    testando.value = false
+  }
+}
 
 async function salvar(t: Template) {
   salvando.value = t.evento
@@ -169,6 +203,32 @@ async function salvar(t: Template) {
           </div>
         </div>
       </template>
+
+      <div v-if="cfg && podeEditar" class="rounded-md border border-dashed p-3 space-y-2">
+        <div class="font-medium text-sm">Testar os textos</div>
+        <p class="text-xs text-muted-foreground">
+          Manda os três textos para um e-mail seu, montados com os dados de um pedido de Envio
+          próprio (ou com um exemplo, se deixar o pedido em branco). Nada vai para o cliente.
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <input
+            v-model="testeEmail"
+            type="email"
+            class="h-9 flex-1 min-w-[200px] rounded-md border bg-background px-2 text-sm"
+            placeholder="seu e-mail"
+          />
+          <input
+            v-model="testePedido"
+            class="h-9 w-40 rounded-md border bg-background px-2 text-sm"
+            placeholder="pedido Bling (opcional)"
+          />
+          <Button size="sm" :disabled="testando || !testeEmail.trim()" @click="enviarTeste">
+            <Loader2 v-if="testando" class="size-4 mr-1 animate-spin" />
+            Enviar teste
+          </Button>
+        </div>
+        <p v-if="testeResultado" class="text-sm text-emerald-600">{{ testeResultado }}</p>
+      </div>
 
       <p v-if="ok" class="text-sm text-emerald-600">{{ ok }}</p>
       <p v-if="erro" class="text-sm text-red-500">{{ erro }}</p>
