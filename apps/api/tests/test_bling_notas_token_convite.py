@@ -37,7 +37,7 @@ async def _conta(db, nome: str, *, rt: str | None, code: str | None) -> BlingNot
         basic_auth_b64="Y2lkOnNlY3JldA==",
         refresh_token=rt,
         authorization_code=code,
-        access_token="antigo",
+        access_token="antigo",  # noqa: S106
         status="active",
     )
     db.add(nota)
@@ -67,7 +67,7 @@ async def test_refresh_morto_com_convite_novo_troca_pelo_codigo(db, monkeypatch)
     assert resumo["failed"] == 0
 
     nota = (await db.execute(select(BlingNota))).scalars().one()
-    assert nota.access_token == "novo"
+    assert nota.access_token == "novo"  # noqa: S105
     # Código é de uso único: some depois do sucesso.
     assert nota.authorization_code is None
 
