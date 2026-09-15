@@ -312,6 +312,10 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                 mudados.add(r.id)
                 n_returns += 1
 
+        # Salva por conta (mesma razão do sweep Shopee): deploy no meio da
+        # varredura não joga fora o que já foi lido.
+        await session.commit()
+
     await session.commit()
     summary = {
         "seen": len(rows), "contas": contas_ok,

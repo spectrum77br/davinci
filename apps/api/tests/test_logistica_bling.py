@@ -1356,13 +1356,19 @@ async def test_vigia_avisa_so_quando_passa_do_limite(db: AsyncSession, make_user
 
     agora = datetime.now(UTC)
     carimbos: dict[str, str] = {}
+    vistos: dict[str, str] = {}
 
     class _FakeRedis:
-        async def hget(self, _key, job):
-            return carimbos.get(job)
+        def _tabela(self, key):
+            from app import worker as _w
 
-        async def hset(self, _key, job, val):
-            carimbos[job] = val
+            return carimbos if key == _w._LOGISTICA_OK_KEY else vistos
+
+        async def hget(self, key, job):
+            return self._tabela(key).get(job)
+
+        async def hset(self, key, job, val):
+            self._tabela(key)[job] = val
             return 1
 
     enviados: list[str] = []
@@ -1383,12 +1389,25 @@ async def test_vigia_avisa_so_quando_passa_do_limite(db: AsyncSession, make_user
     monkeypatch.setattr(w, "emit_alert", _emit)
 
     ctx = {"redis": _FakeRedis()}
-    # 1ª passada: sem carimbo nenhum → carência, sem aviso.
+    # 1ª passada: nenhum job rodou ainda → só marca a carência (NÃO finge
+    # sucesso: carimbo de sucesso continua vazio).
     out = await w.logistica_vigia(ctx)
     assert out == {"ok": len(w._LOGISTICA_VIGIA_LIMITES_MIN)} and not enviados
-    assert set(carimbos) == set(w._LOGISTICA_VIGIA_LIMITES_MIN)
+    assert carimbos == {} and set(vistos) == set(w._LOGISTICA_VIGIA_LIMITES_MIN)
 
-    # 2ª passada: tudo recente → nada.
+    # 2ª passada logo em seguida: ainda dentro da carência → nada.
+    out = await w.logistica_vigia(ctx)
+    assert out["ok"] and not enviados
+
+    # Job que NUNCA concluiu, visto há mais tempo que o limite → avisa.
+    vistos["recarregar"] = str(int((agora - timedelta(minutes=45)).timestamp()))
+    out = await w.logistica_vigia(ctx)
+    assert out["atrasados"] == 1 and "NUNCA concluiu" in enviados[-1]
+    enviados.clear()
+    alertas.clear()
+
+    # Depois que roda, passa a valer o carimbo de sucesso.
+    carimbos["recarregar"] = str(int(agora.timestamp()))
     out = await w.logistica_vigia(ctx)
     assert out["ok"] and not enviados
 

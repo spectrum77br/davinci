@@ -326,6 +326,12 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                 mudados.add(r.id)
                 n_returns += 1
 
+        # Salva o que já foi lido ANTES de ir pra próxima conta: o deploy
+        # recria o worker ~25×/dia e a varredura leva ~5 min — sem isto, um
+        # kill no meio jogava fora tudo (15/09: a passada das :09 morreu aos
+        # 368s e nada foi gravado).
+        await session.commit()
+
     await session.commit()
     summary = {
         "seen": len(rows), "contas": contas_ok,

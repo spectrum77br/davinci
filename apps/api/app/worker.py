@@ -983,6 +983,11 @@ _LOCK_TTL_S = 180
 _LOCK_HEARTBEAT_S = 60
 # Carimbo do último sucesso de cada job da Logística (vigia lê daqui).
 _LOGISTICA_OK_KEY = "davinci:logistica:ultimo_ok"
+# Primeira vez que o vigia viu cada job (carência). Fica SEPARADO do carimbo
+# de sucesso: gravar "agora" no carimbo de sucesso faria um job que NUNCA
+# rodou parecer saudável — foi o que aconteceu às 14:13 de 15/09, quando as 4
+# varreduras apareceram "com sucesso há 1 min" sem nenhuma ter terminado.
+_LOGISTICA_VISTO_KEY = "davinci:logistica:primeira_observacao"
 
 
 @asynccontextmanager
@@ -1128,7 +1133,20 @@ async def logistica_vigia(ctx: dict) -> dict[str, int]:
             logger.warning("logistica_vigia_redis_falhou", job=job)
             return {"erro_redis": 1}
         if bruto is None:
-            await _marcar_ok(redis, job)  # carência: só avalia do próximo ciclo
+            # Nunca teve sucesso: conta o atraso desde a PRIMEIRA vez que o
+            # vigia viu o job (carência), não desde agora.
+            visto = await redis.hget(_LOGISTICA_VISTO_KEY, job)
+            if visto is None:
+                await redis.hset(
+                    _LOGISTICA_VISTO_KEY, job, str(int(agora.timestamp()))
+                )
+                continue
+            ts = datetime.fromtimestamp(int(visto), tz=UTC)
+            atraso_min = int((agora - ts).total_seconds() // 60)
+            if atraso_min > limite_min:
+                atrasados.append(
+                    f"{job}: NUNCA concluiu (visto há {atraso_min} min, limite {limite_min})"
+                )
             continue
         ts = datetime.fromtimestamp(int(bruto), tz=UTC)
         atraso_min = int((agora - ts).total_seconds() // 60)

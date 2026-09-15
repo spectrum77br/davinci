@@ -823,6 +823,10 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                     n_hits += 1
                     break
 
+        # Salva por conta: o token renovado no meio da varredura não se perde
+        # se o deploy matar o worker antes do fim (mesma razão do sweep Shopee).
+        await session.commit()
+
     await session.commit()  # persiste tokens que refrescarem durante o sweep
     summary = {"seen": len(rows), "contas": contas_ok, "hits": n_hits}
     logger.info("logistica_ml_sweep_pos_venda", **summary)
