@@ -27,7 +27,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import HTMLResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -454,7 +454,11 @@ async def _mensagens_do_caso(session: AsyncSession, ch: Chamado, *, com_anexos: 
     q = select(ChamadoMensagem).where(ChamadoMensagem.chamado_id.in_(ids))
     if com_anexos:
         q = q.options(selectinload(ChamadoMensagem.anexos))
-    rows = (await session.execute(q.order_by(ChamadoMensagem.created_at, ChamadoMensagem.id))).scalars().all()
+    # 15/09 (Eduardo: "colocar a mensagem e depois caso encerrado"): a fala e o evento
+    # "Chamado marcado como resolvido" nascem na MESMA transação (mesmo created_at) — o
+    # desempate pelo id (uuid aleatório) punha o encerrado antes da mensagem. Empate: sistema por último.
+    ordem_sistema = case((ChamadoMensagem.direcao == "sistema", 1), else_=0)
+    rows = (await session.execute(q.order_by(ChamadoMensagem.created_at, ordem_sistema, ChamadoMensagem.id))).scalars().all()
     if len(ids) == 1:
         return list(rows)
     vistos: dict[tuple, object] = {}
