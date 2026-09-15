@@ -477,7 +477,28 @@ async def _enviar_api_ml(session: AsyncSession, ch: Chamado, texto: str) -> None
         raise ChamadoError("chamado_sem_numero")
     if not _eh_ml(ch):
         raise ChamadoError("chamado_nao_ml")
-    client = await _ml_client_para(session, ch.conta)
+    try:
+        client = await _ml_client_para(session, ch.conta)
+    except ChamadoError:
+        # 15/09: chamado de devolução guarda a conta como NOME DA LOJA ("ML Aguiar"),
+        # que não é o nome da integração ("aguiar") — a réplica manual falhava com
+        # chamado_sem_integracao_ml. Mesmo resolvedor do sync (contas candidatas).
+        from uuid import UUID
+
+        from app.models import Devolution
+        from app.services import chamados_devolucao as cd  # lazy: cd importa este módulo
+
+        dev = None
+        if ch.origem_ref:
+            try:
+                dev = await session.get(Devolution, UUID(str(ch.origem_ref)))
+            except ValueError:
+                dev = None
+        dev = dev or Devolution(
+            conta=ch.conta or "", pedido_bling=ch.pedido_bling,
+            pedido_marketplace=ch.pedido_marketplace,
+        )
+        client = await cd._ml_client_para(session, ch, dev)
     claim = await client.get_claim(ch.chamado.strip())
     if (claim.get("status") or "").lower() == "closed":
         raise ChamadoError("chamado_encerrado")
