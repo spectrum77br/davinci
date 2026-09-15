@@ -94,7 +94,13 @@ async def pagamento_da_venda(session: AsyncSession, pedido_bling: str, clientes:
     estorno_valor = sum(_num(e.get("amount")) or 0 for e in estornos) or _num(col.get("transaction_amount_refunded"))
     estorno_em = min((d for d in (_dt(e.get("date_created")) for e in estornos) if d), default=None)
     fontes = {((e.get("source") or {}).get("type") or "").lower() for e in estornos}
-    pelo_ml = col.get("status_detail") == "bpp_covered" or (bool(estornos) and fontes == {"bpp"})
+    # 15/09 tarde: só `bpp_covered` é estorno pago pelo ML sem mexer na loja (285250, flow
+    # shipment_stale; o ML confirmou "o valor não saiu da sua conta"). `bpp_refunded`
+    # (flows return/mediation: 283344, 284610, 278858, 289984) é a VENDA CANCELADA com o
+    # dinheiro devolvido ao comprador — no 283344 o ML mandou o resumo: "Cancelamento do
+    # produto -R$ 930,95, total líquido R$ 0,00". A fonte `bpp` aparece nos dois.
+    pelo_ml = col.get("status_detail") == "bpp_covered"
+    venda_cancelada = col.get("status_detail") == "bpp_refunded"
 
     envio_status = envio_sub = None
     sid = (order.get("shipping") or {}).get("id")
@@ -124,8 +130,9 @@ async def pagamento_da_venda(session: AsyncSession, pedido_bling: str, clientes:
         partes.append(f"pagamento não aprovado (status {col.get('status') or '?'})")
     if estornos or col.get("status") in ("refunded", "partially_refunded"):
         quem = ("pago pelo programa de proteção do Mercado Livre — NÃO saiu da conta da loja" if loja_ficou
-                else "registrado pelo programa de proteção do Mercado Livre (não dá pra afirmar que o valor ficou com a loja)" if pelo_ml
-                else f"sem cobertura do programa de proteção do ML (fonte: {', '.join(sorted(f for f in fontes if f)) or '?'})")
+                else "registrado como coberto pelo ML, mas sem prova de que o valor ficou com a loja" if pelo_ml
+                else "com a venda CANCELADA — o valor da venda foi devolvido ao comprador e NÃO ficou com a loja" if venda_cancelada
+                else f"detalhe do estorno: {col.get('status_detail') or '?'} (não dá pra afirmar se o valor ficou com a loja)")
         partes.append(f"estorno ao comprador de {_moeda(estorno_valor)} em {_data(estorno_em)}, {quem}")
     else:
         partes.append("sem estorno registrado")
