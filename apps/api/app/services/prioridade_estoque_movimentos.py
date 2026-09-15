@@ -442,10 +442,16 @@ async def resolver_incertos_pelo_extrato(session: AsyncSession) -> int:
         )).scalars().all()
         if len(movs) <= len(ok_na_janela):
             continue  # todos os movimentos já têm dono
+        # Carimba o PRIMEIRO movimento sem dono, não o último da janela: `movs`
+        # vem em ordem de data e os `len(ok_na_janela)` primeiros já pertencem a
+        # linhas confirmadas. Usar o último gravava uma hora que era de outro
+        # pedido — e esse carimbo é o que as próximas conciliações contam como
+        # "movimento já atribuído".
+        lancado = movs[len(ok_na_janela)]
         await _gravar(
-            m.id, status="ok", lancado_at=movs[-1],
+            m.id, status="ok", lancado_at=lancado,
             erro=(
-                f"conciliado pelo extrato do Bling ({movs[-1]:%d/%m %H:%M}); antes: {m.erro}"
+                f"conciliado pelo extrato do Bling ({lancado:%d/%m %H:%M}); antes: {m.erro}"
             )[:300],
         )
         resolvidos += 1

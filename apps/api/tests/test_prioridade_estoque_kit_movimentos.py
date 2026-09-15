@@ -482,3 +482,47 @@ async def test_orfao_concilia_pela_hora_da_tentativa_nao_pela_do_aviso(db: Async
     r = await db.get(PrioridadeEstoqueMovimento, linha_id)
     assert r.status == "ok"
     assert "conciliado" in (r.erro or "")
+
+
+@pytest.mark.asyncio
+async def test_concilia_carimbando_o_movimento_sem_dono(db: AsyncSession):
+    """O carimbo é o que as próximas conciliações contam como "movimento já
+    atribuído". Usar o último da janela gravava a hora de OUTRO pedido: no
+    pedido 297415 a linha ficou com 16:22, hora do 297440, quando o movimento
+    dela era 15:27."""
+    agora = datetime.now(UTC)
+    cedo = agora - timedelta(minutes=50)
+    tarde = agora - timedelta(minutes=5)
+
+    # Uma linha JÁ confirmada, dona do movimento mais antigo.
+    dona = PrioridadeEstoqueMovimento(
+        pedido_bling="297440", sku="a001.ci", bling_product_id=401,
+        operacao="E", quantidade=1, status="ok", lancado_at=cedo,
+    )
+    # A nossa, interrompida.
+    nossa = PrioridadeEstoqueMovimento(
+        pedido_bling="297415", sku="a001.ci", bling_product_id=401,
+        operacao="E", quantidade=1, status="incerto", erro="processo interrompido",
+    )
+    db.add_all([dona, nossa])
+    await db.flush()
+    nossa_id = nossa.id
+    await db.commit()
+    # A tentativa da nossa linha foi lá atrás; só agora ela virou `incerto`.
+    await db.execute(update(PrioridadeEstoqueMovimento).where(
+        PrioridadeEstoqueMovimento.id == nossa_id
+    ).values(created_at=agora - timedelta(minutes=60)))
+    await db.commit()
+
+    db.add_all([
+        StockMovement(bling_product_id=401, sku="a001.ci", date=cedo, tipo="E", quantidade=1),
+        StockMovement(bling_product_id=401, sku="a001.ci", date=tarde, tipo="E", quantidade=1),
+    ])
+    await db.commit()
+
+    assert await mov.resolver_incertos_pelo_extrato(db) == 1
+    db.expire_all()
+    r = await db.get(PrioridadeEstoqueMovimento, nossa_id)
+    assert r.status == "ok"
+    # Fica com o movimento SEM dono (o mais recente), não com o do 297440.
+    assert abs((r.lancado_at - tarde).total_seconds()) < 2
