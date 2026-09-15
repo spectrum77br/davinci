@@ -63,7 +63,6 @@ class ChamadoOut(BaseModel):
     chamado_url: str | None = None
     canal: str
     alterar_status_bling: str | None = None
-    monitoramento: bool = False
     auto_ligada: bool = False
     auto_dias: int | None = None
     auto_mensagem: str | None = None
@@ -72,8 +71,8 @@ class ChamadoOut(BaseModel):
     resolvido: bool = False
     resolvido_at: datetime | None = None
     observacao: str | None = None
-    # Valor recuperado com o chamado (R$) — coluna "Valor" do Controle
-    # (Eduardo 03/09); None = ainda sem valor.
+    # Resultado do chamado em R$ — coluna "Valor" do Controle (Eduardo 03/09):
+    # positivo = lucro, negativo = prejuízo (15/09); None = ainda sem valor.
     valor_recuperado: Decimal | None = None
     created_at: datetime
     updated_at: datetime
@@ -114,7 +113,6 @@ class ChamadoCreate(BaseModel):
     chamado_url: str | None = None
     canal: Canal = "manual"
     alterar_status_bling: str | None = None
-    monitoramento: bool = False
     observacao: str | None = None
 
     _clean = field_validator(
@@ -154,12 +152,12 @@ class ChamadoPatch(BaseModel):
     chamado_url: str | None = None
     canal: Canal | None = None
     alterar_status_bling: str | None = None
-    monitoramento: bool | None = None
     auto_ligada: bool | None = None
     auto_dias: int | None = Field(default=None, ge=1, le=365)
     auto_mensagem: str | None = None
     observacao: str | None = None
-    valor_recuperado: Decimal | None = Field(default=None, ge=0)
+    # Resultado do chamado: positivo = lucro, negativo = prejuízo (Eduardo 15/09).
+    valor_recuperado: Decimal | None = None
 
     _clean = field_validator(
         "pedido_bling",
@@ -184,6 +182,9 @@ class ChamadoPage(BaseModel):
     limit: int
     offset: int
     plataformas: list[str]
+    # Contas pro filtro (Eduardo 15/09: "filtrar por conta, ex. ML Aguiar 2") —
+    # restritas à plataforma filtrada, quando há uma.
+    contas: list[str] = Field(default_factory=list)
 
 
 class ChamadoLookupOut(BaseModel):
@@ -215,6 +216,10 @@ class ResolverIn(BaseModel):
     resolvido: bool = True
     # Opcional: situação Bling a aplicar junto (ex. Resolvido / Perdimento).
     situacao: str | None = None
+    # Resultado do chamado em R$ (positivo = lucro, negativo = prejuízo).
+    # OBRIGATÓRIO ao resolver (Eduardo 15/09) — o router devolve 422
+    # `chamado_valor_obrigatorio` sem ele; ignorado ao reabrir.
+    valor_recuperado: Decimal | None = None
 
     _clean = field_validator("situacao", mode="before")(_clean_optional_text)
 
@@ -243,7 +248,6 @@ class AgentRegistrarIn(BaseModel):
     status_envio: StatusEnvio = "enviada"
     erro: str | None = None
     observacao: str | None = None
-    monitoramento: bool = True
 
     _clean = field_validator(
         "pedido_bling",

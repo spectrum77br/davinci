@@ -33,7 +33,10 @@ class Chamado(Base, TimestampMixin):
     """Um chamado aberto na plataforma, no formato da aba `Chamados`:
     Data | pedido bling | pedido marketplace | plataforma | produto | sku |
     conta | status bling | origem | chamado | réplica | réplica automática |
-    alterar status bling | monitoramento.
+    alterar status bling | observação | valor (lucro/prejuízo).
+
+    O antigo sim/não "monitoramento" saiu (migration 0269): o cron acompanha
+    TODO chamado de canal API do ML e fecha sozinho quando o claim encerra.
 
     Os dados do pedido são espelho do `bling_orders` no momento da criação;
     `status_bling` é o snapshot — a listagem mostra o ATUAL (lookup vivo).
@@ -62,9 +65,6 @@ class Chamado(Base, TimestampMixin):
     )
     # Nome da situação do Bling a aplicar (dropdown de situacao_bling.nome).
     alterar_status_bling: Mapped[str | None] = mapped_column(Text, nullable=True)
-    monitoramento: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="false"
-    )
     # Réplica automática: reenvia `auto_mensagem` (+ anexos sem mensagem_id) a
     # cada `auto_dias` enquanto ligada e o chamado não estiver resolvido.
     auto_ligada: Mapped[bool] = mapped_column(
@@ -80,8 +80,9 @@ class Chamado(Base, TimestampMixin):
     )
     resolvido_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Valor recuperado com o chamado (R$) — coluna "Valor" do grupo Controle
-    # (Eduardo 03/09, migration 0240). NULL = ainda sem valor.
+    # Resultado do chamado em R$ — coluna "Valor" do grupo Controle (Eduardo
+    # 03/09, migration 0240). Positivo = lucro ("100 reais ganhamos"), negativo
+    # = prejuízo (Eduardo 15/09); obrigatório ao resolver pela aba. NULL = sem valor.
     valor_recuperado: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),

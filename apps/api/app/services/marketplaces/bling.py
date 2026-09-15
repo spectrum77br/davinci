@@ -320,6 +320,21 @@ class BlingClient:
         r.raise_for_status()
         return r.json().get("data") or {}
 
+    async def list_situacoes_modulos(self) -> list[dict]:
+        """Módulos do Bling que têm situações (GET /situacoes/modulos):
+        `{id, nome, criarSituacoes}`. O dos pedidos de venda chama-se "Vendas".
+        Usado pelo sync do catálogo `situacao_bling`."""
+        r = await self._request("GET", "/situacoes/modulos")
+        r.raise_for_status()
+        return r.json().get("data", []) or []
+
+    async def list_situacoes_modulo(self, id_modulo: int) -> list[dict]:
+        """Situações de um módulo (GET /situacoes/modulos/{idModulo}):
+        `{id, nome, idHerdado, cor}`. Sem paginação — o Bling devolve todas."""
+        r = await self._request("GET", f"/situacoes/modulos/{id_modulo}")
+        r.raise_for_status()
+        return r.json().get("data", []) or []
+
     async def list_pedidos_vendas(
         self,
         *,

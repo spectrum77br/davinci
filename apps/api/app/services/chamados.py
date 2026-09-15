@@ -14,8 +14,9 @@ uma Devolução. Este módulo concentra o que não é CRUD:
 - `aplicar_status_bling`: muda a situação do pedido no Bling (mesmo PATCH
   dedicado da Logística) e carimba o histórico.
 - `run_replica_automatica`: cron — reenvia a mensagem automática a cada N dias
-  enquanto ligada, e fecha sozinho os chamados de API com monitoramento quando
-  o ML encerra o claim.
+  enquanto ligada, e fecha sozinho TODO chamado de API do ML quando o ML
+  encerra o claim (Eduardo 15/09: "o robô precisa acompanhar todos os
+  chamados" — o antigo sim/não "monitoramento" saiu da aba e do banco).
 
 Regra combinada com o usuário (planilha, célula "alterar status bling"):
 Logística → "Problemas" ao abrir e "Resolvido"/"Perdimento" ao fechar; Margem
@@ -25,6 +26,7 @@ não altera; Devolução ficou em branco (sem padrão).
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -72,8 +74,19 @@ class ChamadoError(Exception):
 
 
 async def situacoes_nomes(session: AsyncSession) -> list[str]:
+    """Nomes das situações de pedido que EXISTEM no Bling hoje (catálogo
+    `situacao_bling`, só `ativo`). As que o Bling apagou ficam no catálogo
+    (pedidos antigos ainda apontam pra elas) mas somem dos dropdowns —
+    Eduardo 15/09: "tem situação ali que nem existe mais, ex. Enviado Geral CI"."""
     nomes = (
-        (await session.execute(select(SituacaoBling.nome).distinct().order_by(SituacaoBling.nome)))
+        (
+            await session.execute(
+                select(SituacaoBling.nome)
+                .where(SituacaoBling.ativo.is_(True))
+                .distinct()
+                .order_by(SituacaoBling.nome)
+            )
+        )
         .scalars()
         .all()
     )
@@ -341,8 +354,8 @@ async def abrir_chamado_logistica(
 
     Dois caminhos:
     - `claim_id` dado → já abriu PELA VENDA (mediação do ML via API): canal
-      `api`, nº = claim_id, monitoramento ligado (o cron fecha quando o ML
-      encerrar), histórico com o evento do sistema + abertura `enviada`.
+      `api`, nº = claim_id (o cron fecha quando o ML encerrar), histórico com
+      o evento do sistema + abertura `enviada`.
     - `claim_id` None → PELO FORMULÁRIO: canal `robo`, abertura `pendente` com
       o texto da regra (+ as imagens da regra como anexos) → vira tarefa
       `abrir` no `/agent/lease`; o robô do Mac abre no formulário de ajuda do
@@ -375,7 +388,6 @@ async def abrir_chamado_logistica(
     if claim_id:
         ch.chamado = str(claim_id)
         ch.canal = "api"
-        ch.monitoramento = True
         session.add(
             registrar_sistema(
                 ch,
@@ -400,7 +412,6 @@ async def abrir_chamado_logistica(
         if existente is not None and existente.status in ("pendente", "enviando", "enviada"):
             return ch  # robô já está com a tarefa (ou já abriu)
         ch.canal = "robo"
-        ch.monitoramento = True
         session.add(
             registrar_sistema(
                 ch,
@@ -565,17 +576,42 @@ async def aplicar_status_bling(session: AsyncSession, ch: Chamado, nome: str) ->
 # ---------------------------------------------------------------- resolvido
 
 
+def resultado_texto(valor: Decimal | None) -> str:
+    """Texto do resultado financeiro do chamado (coluna "Valor" do Controle):
+    positivo = lucro, negativo = prejuízo, zero = empate. None = sem valor."""
+    if valor is None:
+        return ""
+    v = Decimal(valor)
+    moeda = f"R$ {abs(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    if v > 0:
+        return f"lucro de {moeda}"
+    if v < 0:
+        return f"prejuízo de {moeda}"
+    return "sem lucro nem prejuízo (R$ 0,00)"
+
+
 def marcar_resolvido(
-    ch: Chamado, resolvido: bool, *, autor_nome: str | None = None
+    ch: Chamado,
+    resolvido: bool,
+    *,
+    autor_nome: str | None = None,
+    valor: Decimal | None = None,
 ) -> ChamadoMensagem:
+    """Fecha (ou reabre) o chamado e devolve o evento do histórico. `valor` é
+    o resultado do chamado (lucro/prejuízo em R$) — Eduardo 15/09: obrigatório
+    ao resolver pela aba; opcional pro robô e pro cron."""
     agora = datetime.now(UTC)
     ch.resolvido = resolvido
     ch.resolvido_at = agora if resolvido else None
     if resolvido:
         # Réplica automática não faz sentido em chamado fechado.
         ch.auto_ligada = False
+        if valor is not None:
+            ch.valor_recuperado = valor
         quem = f" por {autor_nome}" if autor_nome else ""
-        return registrar_sistema(ch, f"Chamado marcado como resolvido{quem}")
+        resultado = resultado_texto(valor)
+        sufixo = f" — {resultado}" if resultado else ""
+        return registrar_sistema(ch, f"Chamado marcado como resolvido{quem}{sufixo}")
     return registrar_sistema(ch, f"Chamado reaberto{(' por ' + autor_nome) if autor_nome else ''}")
 
 
@@ -599,8 +635,9 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
     1. réplica automática ligada + vencida → cria a mensagem no histórico e
        despacha pelo canal; carimba `auto_ultimo_envio_at` (mesmo se falhou —
        a próxima tentativa é dali a N dias, sem spammar o histórico);
-    2. monitoramento em chamado de API → se o ML já encerrou o claim, marca
-       resolvido sozinho.
+    2. TODO chamado aberto de canal API do ML (com nº do claim) → se o ML já
+       encerrou o claim, marca resolvido sozinho. Não depende de flag nenhuma
+       (Eduardo 15/09: o robô acompanha todos).
     Best-effort por linha: falha de uma não derruba as outras."""
     agora = agora or datetime.now(UTC)
     rows = list(
@@ -608,7 +645,7 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
             await session.execute(
                 select(Chamado).where(
                     Chamado.resolvido.is_(False),
-                    or_(Chamado.auto_ligada.is_(True), Chamado.monitoramento.is_(True)),
+                    or_(Chamado.auto_ligada.is_(True), Chamado.canal == "api"),
                 )
             )
         )
@@ -628,7 +665,7 @@ async def run_replica_automatica(session: AsyncSession, *, agora: datetime | Non
                 enviados += 1
                 if msg.status == "falhou":
                     falhas += 1
-        if ch.monitoramento and ch.canal == "api" and (ch.chamado or "").strip() and _eh_ml(ch):
+        if ch.canal == "api" and (ch.chamado or "").strip() and _eh_ml(ch):
             try:
                 client = await _ml_client_para(session, ch.conta)
                 claim = await client.get_claim(ch.chamado.strip())

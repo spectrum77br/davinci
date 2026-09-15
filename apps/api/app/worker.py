@@ -39,6 +39,7 @@ from app.services.bling_notas_token_refresh import run_refresh_bling_notas_token
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
 from app.services import chamados_devolucao, chamados_devolucao_sync
+from app.services.bling_situacoes_sync import sync_situacoes_bling
 from app.services.chamados import run_replica_automatica as run_chamados_replica_automatica
 from app.services.email import get_email_sender, render_otp_html
 from app.services.import_lote_bling_stock import push_lote_stock_to_bling_job
@@ -896,6 +897,21 @@ async def chamados_replica_automatica(ctx: dict) -> None:
     async with session_scope() as s:
         resp = await chamados_devolucao_sync.sync_respostas(s)
     logger.info("chamados_devolucao_sync_done", **resp)
+
+
+async def bling_situacoes_sync(ctx: dict) -> None:
+    """1x/dia (08:50 UTC = 05:50 BRT) e no startup do worker: catálogo
+    `situacao_bling` igual ao módulo Vendas do Bling — situação nova entra,
+    apagada vira inativa e some dos dropdowns dos Chamados/Logística (Eduardo
+    15/09: "tem situação ali que nem existe mais, ex. Enviado Geral CI").
+    Best-effort: sem integração Bling ou API fora, só loga."""
+    try:
+        async with session_scope() as s:
+            summary = await sync_situacoes_bling(s)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("bling_situacoes_sync_failed", err=str(e)[:300])
+        return
+    logger.info("bling_situacoes_sync_done", **summary)
 
 
 async def chamado_devolucao_disparar(ctx: dict, chamado_id: str) -> None:
@@ -2054,6 +2070,7 @@ class WorkerSettings:
         auth_codes_cleanup,
         auto_link_run,
         chamado_devolucao_disparar,
+        bling_situacoes_sync,
         # O "Sincronizar Todos" completo (include_all_stock, ~30k links) leva
         # ~25-30 min só de chamadas externas — o job_timeout global de 1800s
         # matava a barra a ~98% (TimeoutError em 2/jul, job 7c1b0d83). 3h de
@@ -2143,8 +2160,11 @@ class WorkerSettings:
         cron(logistica_ml_ingest, minute=0, run_at_startup=False),
         # Toda hora (:05), junto do ML: novos pedidos Shopee/TikTok/Amazon.
         cron(logistica_marketplaces_ingest, minute=5, run_at_startup=False),
-        # Toda hora (:25): réplica automática + monitoramento dos Chamados.
+        # Toda hora (:25): réplica automática + acompanhamento dos Chamados
+        # (todo chamado de API do ML fecha sozinho quando o claim encerra).
         cron(chamados_replica_automatica, minute=25, run_at_startup=False),
+        # 1x/dia (05:50 BRT) e no startup: catálogo de situações = Bling (2 GETs).
+        cron(bling_situacoes_sync, hour=8, minute=50, run_at_startup=True, timeout=120),
         # Motor da Logística SOZINHO a cada 5 min (:02, :07... — deslocado dos
         # ingests de :00/:05 pra não estourar rate junto): re-enriquece o Status
         # Plataforma dos pendentes do painel, aplica no Bling as situações com

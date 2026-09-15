@@ -31,7 +31,7 @@ Fluxo:
    — a tela mostra e o cron de hora em hora (`processar_pendentes`) tenta de
    novo, até 45 dias;
 3. deu certo → `enviada`, chamado ganha a referência (claim/return) e canal
-   `api` (no ML com monitoramento ligado — fecha sozinho quando encerrar).
+   `api` (no ML o cron fecha sozinho quando o claim encerrar).
 
 Vídeo: nenhuma das APIs aceita vídeo do vendedor; o link do vídeo entra no
 texto e o arquivo fica guardado na linha.
@@ -1237,9 +1237,7 @@ async def disparar(
     msg.enviada_at = agora
     msg.canal = "api"
     ch.chamado = referencia
-    ch.canal = "api"
-    if plat == PLAT_ML:
-        ch.monitoramento = True  # o cron fecha quando o ML encerrar o claim
+    ch.canal = "api"  # no ML, o cron fecha sozinho quando o claim encerrar
     for a in fotos:
         session.add(
             ChamadoAnexo(

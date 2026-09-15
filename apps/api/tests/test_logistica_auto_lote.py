@@ -104,11 +104,12 @@ async def test_abrir_chamado_em_lote_abre_e_carimba(db, monkeypatch):
     assert logistica_match.estado_resolvido(rules, "Entregue", chamado_aberto=True) is True
     assert logistica_match.estado_resolvido(rules, "Entregue", chamado_aberto=False) is False
 
-    # foi pra aba Chamados: linha de origem logistica, canal api, nº do claim,
-    # monitoramento ligado, histórico com o sistema + a abertura enviada
+    # foi pra aba Chamados: linha de origem logistica, canal api, nº do claim
+    # (o cron acompanha todo chamado de API do ML — sem flag), histórico com
+    # o sistema + a abertura enviada
     ch = (await db.execute(select(Chamado).where(Chamado.origem == "logistica"))).scalar_one()
     assert ch.origem_ref == str(row.id) and ch.chamado == "999"
-    assert ch.canal == "api" and ch.monitoramento is True
+    assert ch.canal == "api"
     assert ch.plataforma == "Mercado Livre" and ch.pedido_marketplace == "ML1"
     msgs = (
         await db.execute(

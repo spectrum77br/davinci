@@ -274,9 +274,13 @@ async def opcoes(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("logistica", "view"))],
 ) -> OpcoesOut:
+    # Só situações que existem no Bling hoje (`ativo` — sync diário do catálogo).
     nomes = (
         await session.execute(
-            select(SituacaoBling.nome).distinct().order_by(SituacaoBling.nome)
+            select(SituacaoBling.nome)
+            .where(SituacaoBling.ativo.is_(True))
+            .distinct()
+            .order_by(SituacaoBling.nome)
         )
     ).scalars().all()
     return OpcoesOut(

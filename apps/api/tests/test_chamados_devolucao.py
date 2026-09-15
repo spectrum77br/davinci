@@ -193,7 +193,7 @@ async def test_danificado_espera_foto_e_abre_ao_anexar(client, make_user, auth_a
     assert "danificado" in texto and "2000099" in texto and "b001.26" in texto
     assert "Comprovante da expedição (fotos/vídeo do envio): https://drive.google.com/expedicao" in texto
     await db.refresh(ch)
-    assert ch.chamado == "777" and ch.monitoramento is True and ch.canal == "api"
+    assert ch.chamado == "777" and ch.canal == "api"
     msg = await _abertura(db, ch.id)
     assert msg.status == "enviada" and msg.enviada_at is not None and msg.canal == "api"
     # foto copiada pro histórico do chamado
@@ -528,7 +528,7 @@ async def test_tiktok_recusa_pacote_com_foto(client, make_user, auth_as, db, ml,
     assert rj["images"] == [{"image_id": "tos/mala.png", "mime_type": "image/png", "width": 100, "height": 80}]
     assert "danificado" in rj["comment"] and rj["idem"]
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "290845"))).scalar_one()
-    assert ch.chamado == "4042116781741081611" and ch.canal == "api" and ch.monitoramento is False
+    assert ch.chamado == "4042116781741081611" and ch.canal == "api"
     assert ml.reviews == []  # nada foi pro ML
 
 

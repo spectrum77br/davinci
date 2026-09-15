@@ -25,7 +25,9 @@ definePageMeta({ middleware: ['permission'], permission: { resource: 'chamados',
 // Aba "Chamados" (Pós-venda): centraliza os chamados abertos nas plataformas,
 // no formato da planilha — Data | pedido bling | pedido marketplace |
 // plataforma | produto | sku | conta | status bling | origem | chamado |
-// réplica | réplica automática | alterar status bling | monitoramento.
+// réplica | réplica automática | alterar status bling | observação | valor.
+// O sim/não "monitoramento" saiu em 15/09 (Eduardo): o robô acompanha TODO
+// chamado de API do ML e fecha sozinho quando o claim encerra — nada a marcar.
 
 type Origem = 'margem' | 'logistica' | 'devolucao' | 'vendas'
 type Canal = 'api' | 'robo' | 'manual'
@@ -76,8 +78,8 @@ type ChamadoRow = {
   chamado_url: string | null
   canal: Canal
   alterar_status_bling: string | null
-  monitoramento: boolean
-  // Valor recuperado com o chamado (R$) — coluna "Valor" do Controle.
+  // Resultado do chamado em R$ — coluna "Valor" do Controle: positivo = lucro,
+  // negativo = prejuízo (Eduardo 15/09). Obrigatório ao resolver.
   valor_recuperado: number | null
   auto_ligada: boolean
   auto_dias: number | null
@@ -98,7 +100,7 @@ type ChamadoRow = {
   ultima_mensagem_at: string | null
   anexos_auto: Anexo[]
 }
-type Page = { items: ChamadoRow[]; total: number; limit: number; offset: number; plataformas: string[] }
+type Page = { items: ChamadoRow[]; total: number; limit: number; offset: number; plataformas: string[]; contas: string[] }
 type Lookup = {
   data: string | null
   pedido_bling: string | null
@@ -121,6 +123,7 @@ const canDelete = useCan('chamados', 'delete')
 const items = ref<ChamadoRow[]>([])
 const total = ref(0)
 const plataformas = ref<string[]>([])
+const contas = ref<string[]>([])
 const situacoes = ref<string[]>([])
 const page = ref(1)
 const loading = ref(false)
@@ -129,6 +132,8 @@ const error = ref<string | null>(null)
 const search = ref('')
 const origemFilter = ref<'all' | Origem>('all')
 const plataformaFilter = ref<'all' | string>('all')
+// Filtro por conta (Eduardo 15/09: "ex. ML Aguiar 2") — a lista segue a plataforma.
+const contaFilter = ref<'all' | string>('all')
 const mostrar = ref<'abertos' | 'resolvidos' | 'todos'>('abertos')
 // Aba Jurídico (Eduardo 04/09): tudo que foi encaminhado ao jurídico, aberto ou resolvido.
 const tab = ref<'chamados' | 'juridico'>('chamados')
@@ -175,6 +180,7 @@ const ERROS: Record<string, string> = {
   chamado_status_bling_desconhecido: 'situação desconhecida no Bling',
   chamado_sem_integracao_bling: 'sem integração Bling',
   chamado_status_bling_erro: 'o Bling recusou a mudança de situação',
+  chamado_valor_obrigatorio: 'informe o valor do chamado (lucro ou prejuízo) antes de resolver',
   sem_destinatarios: 'cadastre os destinatários do jurídico (botão destinatários)',
   threema_nao_configurado: 'Threema não configurado no servidor',
   threema_envio_falhou: 'o Threema não entregou pra nenhum destinatário',
@@ -220,6 +226,23 @@ function fmtDate(v: string | null) {
   if (!v) return '—'
   const [y, m, d] = v.split('-')
   return y && m && d ? `${d}/${m}/${y.slice(2)}` : v
+}
+
+function fmtBRL(v: number | string | null | undefined) {
+  if (v === null || v === undefined || v === '') return '—'
+  const n = Number(v)
+  if (Number.isNaN(n)) return '—'
+  return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+}
+
+// Coluna "Valor": positivo = lucro, negativo = prejuízo (Eduardo 15/09).
+function resultadoTexto(v: number | string | null | undefined) {
+  if (v === null || v === undefined || v === '') return ''
+  const n = Number(v)
+  if (Number.isNaN(n)) return ''
+  if (n > 0) return `lucro de ${fmtBRL(n)}`
+  if (n < 0) return `prejuízo de ${fmtBRL(Math.abs(n))}`
+  return 'sem lucro nem prejuízo (R$ 0,00)'
 }
 
 // ─────────────────────────────────────────────────────────── conversa (chat)
@@ -307,10 +330,12 @@ async function load() {
     if (search.value.trim()) params.set('search', search.value.trim())
     if (origemFilter.value !== 'all') params.set('origem', origemFilter.value)
     if (plataformaFilter.value !== 'all') params.set('plataforma', plataformaFilter.value)
+    if (contaFilter.value !== 'all') params.set('conta', contaFilter.value)
     const res = await api<Page>(`/api/chamados?${params.toString()}`)
     items.value = res.items
     total.value = res.total
     plataformas.value = res.plataformas
+    contas.value = res.contas || []
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -337,7 +362,10 @@ watch(search, () => {
     load()
   }, 300)
 })
-watch([origemFilter, plataformaFilter, mostrar], () => {
+// Trocou a plataforma → a lista de contas muda; volta pra "todas contas".
+// Registrado ANTES do watch geral pra rodar primeiro no mesmo flush (um load só).
+watch(plataformaFilter, () => { contaFilter.value = 'all' })
+watch([origemFilter, plataformaFilter, contaFilter, mostrar], () => {
   page.value = 1
   load()
 })
@@ -381,7 +409,8 @@ async function enviarJuridico() {
     if (hist.row?.id === row.id) hist.row = r.chamado
     toasts.success('Encaminhado ao jurídico', `${r.sent.length} destinatário(s) no Threema${r.failed.length ? ` · ${r.failed.length} falhou` : ''}`)
     closeJuridico()
-    if (hist.open) await loadMensagens()
+    // Histórico aberto atrás do modal: recarrega pra mostrar o evento do envio.
+    if (hist.open && hist.row) hist.mensagens = await api<Mensagem[]>(`/api/chamados/${hist.row.id}/mensagens`)
   } catch (e: any) {
     juridico.erro = apiError(e)
   } finally {
@@ -492,7 +521,6 @@ async function saveRow(row: ChamadoRow, extra: Record<string, unknown> = {}): Pr
             chamado: row.chamado || null,
             canal: row.canal,
             alterar_status_bling: row.alterar_status_bling || null,
-            monitoramento: row.monitoramento,
             observacao: row.observacao || null,
             valor_recuperado: row.valor_recuperado ?? null,
             ...extra,
@@ -778,9 +806,22 @@ const resolver = reactive({
   open: false,
   row: null as ChamadoRow | null,
   situacao: '' as string,
+  // Valor OBRIGATÓRIO ao resolver (Eduardo 15/09): lucro ou prejuízo + quanto.
+  tipo: 'lucro' as 'lucro' | 'prejuizo',
+  valor: '' as string,
   saving: false,
   erro: null as string | null,
 })
+
+// Valor assinado que vai pra API (negativo = prejuízo); null = inválido/vazio.
+const resolverValor = computed<number | null>(() => {
+  const raw = String(resolver.valor ?? '').trim().replace(',', '.')
+  if (!raw) return null
+  const n = Number(raw)
+  if (Number.isNaN(n) || n < 0) return null
+  return resolver.tipo === 'prejuizo' ? -n : n
+})
+const resolverValorOk = computed(() => resolverValor.value !== null)
 
 function opcoesFechamento(row: ChamadoRow): string[] {
   return FECHAMENTO[row.origem] || []
@@ -791,6 +832,11 @@ function openResolver(row: ChamadoRow) {
   resolver.row = row
   resolver.situacao = ''
   resolver.erro = null
+  // Pré-preenche com o que já está na coluna Valor (negativo = prejuízo).
+  const atual = row.valor_recuperado === null || row.valor_recuperado === undefined ? NaN : Number(row.valor_recuperado)
+  resolver.tipo = !Number.isNaN(atual) && atual < 0 ? 'prejuizo' : 'lucro'
+  resolver.valor = Number.isNaN(atual) ? '' : String(Math.abs(atual))
+  nextTick(() => (document.getElementById('resolver-valor') as HTMLInputElement | null)?.focus())
 }
 
 function closeResolver() {
@@ -801,12 +847,17 @@ function closeResolver() {
 async function confirmarResolver() {
   const row = resolver.row
   if (!row || !canEdit.value) return
+  const valor = resolverValor.value
+  if (valor === null) {
+    resolver.erro = ERROS.chamado_valor_obrigatorio
+    return
+  }
   resolver.saving = true
   resolver.erro = null
   try {
     const updated = await api<ChamadoRow>(`/api/chamados/${row.id}/resolver`, {
       method: 'POST',
-      body: { resolvido: true, situacao: resolver.situacao || null },
+      body: { resolvido: true, situacao: resolver.situacao || null, valor_recuperado: valor },
     })
     if (mostrar.value === 'abertos') {
       items.value = items.value.filter((r) => r.id !== row.id)
@@ -814,7 +865,10 @@ async function confirmarResolver() {
     } else {
       replaceRow(updated)
     }
-    toasts.success('Chamado resolvido', resolver.situacao ? `Bling → ${resolver.situacao}` : '')
+    toasts.success(
+      'Chamado resolvido',
+      [resultadoTexto(valor), resolver.situacao ? `Bling → ${resolver.situacao}` : ''].filter(Boolean).join(' · '),
+    )
     closeResolver()
   } catch (e: any) {
     resolver.erro = apiError(e)
@@ -978,6 +1032,10 @@ async function reabrir(row: ChamadoRow) {
         <option value="all">todas plataformas</option>
         <option v-for="p in plataformas" :key="p" :value="p">{{ p }}</option>
       </select>
+      <select v-model="contaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="filtrar por conta (ex. ML Aguiar 2)">
+        <option value="all">todas contas</option>
+        <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
+      </select>
       <select v-model="mostrar" class="h-9 rounded-md border bg-background px-2 text-sm">
         <option value="abertos">abertos</option>
         <option value="resolvidos">resolvidos</option>
@@ -988,14 +1046,14 @@ async function reabrir(row: ChamadoRow) {
 
     <!-- planilha -->
     <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
-      <table class="min-w-[2100px] text-xs border-collapse">
+      <table class="min-w-[2000px] text-xs border-collapse">
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="8">Identificação</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3">Chamado</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-sky-50 dark:bg-sky-900/20" colspan="2">Réplica</th>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-violet-50 dark:bg-violet-900/20" colspan="1">Jurídico</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Bling</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Bling</th>
             <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="3">Controle</th>
           </tr>
           <tr class="border-b">
@@ -1014,21 +1072,20 @@ async function reabrir(row: ChamadoRow) {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-sky-50 dark:bg-sky-900/20">Réplica automática</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-violet-50 dark:bg-violet-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Encaminhado ao jurídico: quando, por quem, observação e link do dossiê">Jurídico</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Alterar status Bling</th>
-            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-emerald-50 dark:bg-emerald-900/20">Monitoramento</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Valor recuperado com o chamado (R$)">Valor</th>
+            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Resultado do chamado (R$): positivo = lucro, negativo = prejuízo">Valor</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td colspan="17" class="py-8 text-center text-muted-foreground">
+            <td colspan="16" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td colspan="17" class="py-8 text-center text-muted-foreground">sem chamados</td>
+            <td colspan="16" class="py-8 text-center text-muted-foreground">sem chamados</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110" :class="{ 'opacity-60': row.resolvido }">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDate(row.data) }}</td>
@@ -1135,16 +1192,6 @@ async function reabrir(row: ChamadoRow) {
                 </button>
               </div>
             </td>
-            <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10">
-              <input
-                :checked="row.monitoramento"
-                :disabled="!canEdit"
-                type="checkbox"
-                class="size-4 rounded border accent-primary disabled:cursor-default disabled:opacity-70"
-                title="sim/não — acompanhar até resolver (canal API fecha sozinho quando o ML encerra)"
-                @change="(e) => { row.monitoramento = (e.target as HTMLInputElement).checked; saveRow(row) }"
-              />
-            </td>
             <td class="px-1 py-0.5 border-l-[3px] border-gray-400 dark:border-gray-600">
               <input
                 :value="row.observacao || ''"
@@ -1154,17 +1201,20 @@ async function reabrir(row: ChamadoRow) {
                 @change="saveRow(row)"
               />
             </td>
-            <!-- Valor recuperado com o chamado (R$) — Eduardo 03/09 -->
+            <!-- Resultado do chamado (R$): positivo = lucro, negativo = prejuízo — Eduardo 03/09 e 15/09 -->
             <td class="px-1 py-0.5">
               <input
                 :value="row.valor_recuperado ?? ''"
                 :disabled="!canEdit"
                 type="number"
                 step="0.01"
-                min="0"
                 placeholder="R$"
-                :class="[sheetInputClass, 'text-right tabular-nums']"
-                title="Valor recuperado com o chamado (R$)"
+                :class="[
+                  sheetInputClass,
+                  'text-right tabular-nums font-medium',
+                  Number(row.valor_recuperado) > 0 ? 'text-emerald-700 dark:text-emerald-300' : Number(row.valor_recuperado) < 0 ? 'text-red-600 dark:text-red-400' : '',
+                ]"
+                :title="resultadoTexto(row.valor_recuperado) || 'Resultado do chamado (R$): positivo = lucro, negativo = prejuízo'"
                 @input="(e) => { const v = (e.target as HTMLInputElement).value; row.valor_recuperado = v === '' ? null : Number(v) }"
                 @change="saveRow(row)"
               />
@@ -1431,11 +1481,52 @@ async function reabrir(row: ChamadoRow) {
             </select>
             <span class="text-[11px] text-muted-foreground">Logística → Resolvido ou Perdimento · Margem → não altera · Devolução → sem padrão</span>
           </label>
+          <!-- Valor obrigatório (Eduardo 15/09): "encerrou com prejuízo ou com lucro? ex. 100 reais ganhamos" -->
+          <div class="space-y-1">
+            <span class="block text-xs font-medium">
+              Valor <span class="text-red-500">*</span>
+              <span class="font-normal text-muted-foreground">— o chamado encerrou com lucro ou prejuízo?</span>
+            </span>
+            <div class="flex items-center gap-2">
+              <div class="inline-flex shrink-0 overflow-hidden rounded-md border">
+                <button
+                  type="button"
+                  class="px-3 py-1.5 text-xs"
+                  :class="resolver.tipo === 'lucro' ? 'bg-emerald-600 text-white' : 'hover:bg-muted'"
+                  @click="resolver.tipo = 'lucro'"
+                >lucro</button>
+                <button
+                  type="button"
+                  class="border-l px-3 py-1.5 text-xs"
+                  :class="resolver.tipo === 'prejuizo' ? 'bg-red-600 text-white' : 'hover:bg-muted'"
+                  @click="resolver.tipo = 'prejuizo'"
+                >prejuízo</button>
+              </div>
+              <div class="relative flex-1">
+                <span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">R$</span>
+                <input
+                  id="resolver-valor"
+                  v-model="resolver.valor"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  inputmode="decimal"
+                  placeholder="0,00"
+                  class="h-9 w-full rounded-md border bg-background pl-8 pr-2 text-right text-sm tabular-nums"
+                  :class="resolverValorOk ? '' : 'ring-1 ring-red-500/60'"
+                  @keydown.enter.prevent="confirmarResolver"
+                />
+              </div>
+            </div>
+            <span class="text-[11px] text-muted-foreground">
+              Obrigatório. Ganhamos R$ 100 → <b>lucro</b> 100,00 · perdemos R$ 50 → <b>prejuízo</b> 50,00. Vai pra coluna Valor (prejuízo fica negativo).
+            </span>
+          </div>
           <div v-if="resolver.erro" class="text-xs text-red-500">{{ resolver.erro }}</div>
         </div>
         <div class="flex items-center justify-end gap-2 border-t px-4 py-3">
           <Button size="sm" variant="ghost" @click="closeResolver">cancelar</Button>
-          <Button size="sm" :disabled="!canEdit || resolver.saving" @click="confirmarResolver">
+          <Button size="sm" :disabled="!canEdit || resolver.saving || !resolverValorOk" @click="confirmarResolver">
             <Loader2 v-if="resolver.saving" class="size-4 mr-1.5 animate-spin" />
             <CheckCircle2 v-else class="size-4 mr-1.5" />
             resolver

@@ -1,5 +1,5 @@
 """Chamados — aba de Pós-venda (CRUD, histórico/réplica, anexos, status Bling,
-réplica automática + monitoramento do cron)."""
+réplica automática + acompanhamento do cron, valor ao resolver, filtro por conta)."""
 
 from __future__ import annotations
 
@@ -28,6 +28,9 @@ async def _seed_pedido(db, user, *, numero: str = "293000", situacao: str = "839
             SituacaoBling(id=83960, nome="Problemas"),
             SituacaoBling(id=545902, nome="Resolvido"),
             SituacaoBling(id=83956, nome="Perdimento"),
+            # Apagada no Bling (sync marcou inativa): fica no catálogo pros
+            # pedidos antigos, mas NÃO aparece nos dropdowns.
+            SituacaoBling(id=99001, nome="Enviado Geral CI", ativo=False),
         ]
     )
     db.add(
@@ -144,6 +147,17 @@ async def test_create_preenche_do_pedido_e_lista_status_atual(client, make_user,
     por_pedido = {i["pedido_bling"]: i for i in body["items"]}
     assert por_pedido["293000"]["status_bling_atual"] == "Problemas"
     assert body["plataformas"] == ["ml"]
+    assert body["contas"] == ["aguiar"]
+
+    # filtro por conta (Eduardo 15/09: "ex. ML Aguiar 2") — sem caixa
+    assert (await client.get("/api/chamados", params={"conta": "aguiar"})).json()["total"] == 1
+    assert (await client.get("/api/chamados", params={"conta": "AGUIAR"})).json()["total"] == 1
+    assert (await client.get("/api/chamados", params={"conta": "outra"})).json()["total"] == 0
+    # as contas do dropdown seguem a plataforma filtrada
+    por_plat = await client.get("/api/chamados", params={"plataforma": "ml"})
+    assert por_plat.json()["contas"] == ["aguiar"]
+    por_plat = await client.get("/api/chamados", params={"plataforma": "shopee"})
+    assert por_plat.json()["contas"] == []
 
     # pedido obrigatório
     assert (await client.post("/api/chamados", json={"origem": "margem"})).status_code == 422
@@ -153,6 +167,7 @@ async def test_create_preenche_do_pedido_e_lista_status_atual(client, make_user,
     assert (
         await client.get("/api/chamados/pedido-lookup", params={"pedido": "nope"})
     ).status_code == 404
+    # só situações que existem no Bling (a "Enviado Geral CI" inativa fica fora)
     sit = await client.get("/api/chamados/situacoes")
     assert sit.json()["nomes"] == ["Perdimento", "Problemas", "Resolvido"]
 
@@ -265,21 +280,32 @@ async def test_alterar_status_bling_e_resolver(client, make_user, auth_as, db, m
     assert desconhecida.status_code == 422
     assert desconhecida.json()["detail"]["code"] == "chamado_status_bling_desconhecido"
 
-    # resolver aplicando Perdimento junto
-    res = await client.post(
+    # resolver SEM o valor (lucro/prejuízo) é recusado antes de tocar no Bling
+    # — Eduardo 15/09: "deixar como campo obrigatório antes de aceitar o resolver"
+    sem_valor = await client.post(
         f"/api/chamados/{cid}/resolver", json={"resolvido": True, "situacao": "Perdimento"}
+    )
+    assert sem_valor.status_code == 422
+    assert sem_valor.json()["detail"]["code"] == "chamado_valor_obrigatorio"
+    assert fake.situacao_set == [(123456, 83960)]
+
+    # resolver aplicando Perdimento junto, com prejuízo de R$ 150,50
+    res = await client.post(
+        f"/api/chamados/{cid}/resolver",
+        json={"resolvido": True, "situacao": "Perdimento", "valor_recuperado": -150.5},
     )
     assert res.status_code == 200, res.text
     assert res.json()["resolvido"] is True
     assert res.json()["resolvido_at"]
     assert res.json()["status_bling"] == "Perdimento"
+    assert float(res.json()["valor_recuperado"]) == -150.5
     assert fake.situacao_set[-1] == (123456, 83956)
 
     hist = await client.get(f"/api/chamados/{cid}/mensagens")
     textos = [h["texto"] for h in hist.json() if h["tipo"] == "sistema"]
     assert any("Status Bling alterado para Problemas" in t for t in textos)
     assert any("Perdimento" in t for t in textos)
-    assert any("resolvido" in t for t in textos)
+    assert any("resolvido" in t and "prejuízo de R$ 150,50" in t for t in textos)
 
     # some de "abertos", aparece em "resolvidos"
     assert (await client.get("/api/chamados")).json()["total"] == 0
@@ -295,8 +321,8 @@ async def test_alterar_status_bling_e_resolver(client, make_user, auth_as, db, m
 
 
 async def test_valor_recuperado_grava_e_valida(client, make_user, auth_as):
-    """Coluna "Valor" do Controle (Eduardo 03/09): valor recuperado com o
-    chamado, em R$; negativo não entra; vazio (null) limpa."""
+    """Coluna "Valor" do Controle (Eduardo 03/09): resultado do chamado em R$;
+    negativo = prejuízo (Eduardo 15/09); vazio (null) limpa."""
     user = await make_user(permissions=_perms())
     auth_as(user)
     r = await client.post(
@@ -313,7 +339,8 @@ async def test_valor_recuperado_grava_e_valida(client, make_user, auth_as):
     assert float(lst.json()["items"][0]["valor_recuperado"]) == 123.45
 
     neg = await client.patch(f"/api/chamados/{cid}", json={"valor_recuperado": -1})
-    assert neg.status_code == 422
+    assert neg.status_code == 200, neg.text
+    assert float(neg.json()["valor_recuperado"]) == -1
 
     p = await client.patch(f"/api/chamados/{cid}", json={"valor_recuperado": None})
     assert p.status_code == 200
@@ -375,8 +402,11 @@ async def test_replica_automatica_respeita_dias(client, make_user, auth_as, db):
     out = await svc.run_replica_automatica(db, agora=ligado_em + timedelta(days=2, minutes=2))
     assert out["enviados"] == 0
 
-    # resolvido → desliga e para
-    await client.post(f"/api/chamados/{cid}/resolver", json={"resolvido": True})
+    # resolvido → desliga e para (valor é obrigatório ao resolver — 15/09)
+    fechado = await client.post(
+        f"/api/chamados/{cid}/resolver", json={"resolvido": True, "valor_recuperado": 0}
+    )
+    assert fechado.status_code == 200, fechado.text
     out = await svc.run_replica_automatica(db, agora=ligado_em + timedelta(days=10))
     assert out["enviados"] == 0
     await db.refresh(ch)
@@ -613,7 +643,12 @@ async def test_agent_lease_abrir_e_falha(client, make_user, auth_as, db, monkeyp
     ).status_code == 404
 
 
-async def test_monitoramento_fecha_quando_ml_encerra(client, make_user, auth_as, db, monkeypatch):
+async def test_chamado_api_ml_fecha_sozinho_quando_ml_encerra(
+    client, make_user, auth_as, db, monkeypatch
+):
+    """Eduardo 15/09: o robô acompanha TODOS os chamados — sem flag. Todo
+    chamado aberto de canal API do ML com nº de claim é consultado; canal
+    manual não é (não tem API), mesmo com nº."""
     user = await make_user(permissions=_perms())
     auth_as(user)
     fake = _FakeML(closed=True)
@@ -622,23 +657,21 @@ async def test_monitoramento_fecha_quando_ml_encerra(client, make_user, auth_as,
         return fake
 
     monkeypatch.setattr(svc, "_ml_client_para", _fake_client)
+    base = {"origem": "logistica", "plataforma": "ml", "conta": "aguiar"}
     r = await client.post(
-        "/api/chamados",
-        json={
-            "origem": "logistica",
-            "pedido_bling": "8",
-            "plataforma": "ml",
-            "conta": "aguiar",
-            "canal": "api",
-            "chamado": "777",
-            "monitoramento": True,
-        },
+        "/api/chamados", json={**base, "pedido_bling": "8", "canal": "api", "chamado": "777"}
     )
     cid = r.json()["id"]
+    r2 = await client.post(
+        "/api/chamados", json={**base, "pedido_bling": "9", "canal": "manual", "chamado": "778"}
+    )
+    cid_manual = r2.json()["id"]
     out = await svc.run_replica_automatica(db)
     assert out["resolvidos"] == 1
     ch = (await db.execute(select(Chamado).where(Chamado.id == cid))).scalar_one()
     assert ch.resolvido is True
+    manual = (await db.execute(select(Chamado).where(Chamado.id == cid_manual))).scalar_one()
+    assert manual.resolvido is False
     hist = await client.get(f"/api/chamados/{cid}/mensagens")
     assert any("encerrado na plataforma" in h["texto"] for h in hist.json())
 

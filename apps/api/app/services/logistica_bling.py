@@ -277,12 +277,13 @@ def _situacao_canonica(sid: int | None) -> int | None:
 
 async def _situacao_id_por_nome_opt(session: AsyncSession, nome: str) -> int | None:
     """id da situação por nome (case-insensitive) ou None se não achar. Apelidos
-    (ver `_situacao_canonica`) voltam já no id canônico."""
+    (ver `_situacao_canonica`) voltam já no id canônico. Nome repetido no
+    catálogo: prefere a situação que ainda existe no Bling (`ativo`)."""
     sid = (
         await session.execute(
             select(SituacaoBling.id)
             .where(func.lower(func.trim(SituacaoBling.nome)) == nome.strip().lower())
-            .order_by(SituacaoBling.id)
+            .order_by(SituacaoBling.ativo.desc(), SituacaoBling.id)
             .limit(1)
         )
     ).scalar_one_or_none()

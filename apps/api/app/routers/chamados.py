@@ -2,7 +2,7 @@
 plataformas (origem Margem / Logística / Devolução). Formato da aba
 `Chamados` da planilha: Data | pedido bling | pedido marketplace | plataforma
 | produto | sku | conta | status bling | origem | chamado | réplica | réplica
-automática | alterar status bling | monitoramento.
+automática | alterar status bling | observação | valor.
 
 Recurso de permissão: `chamados` (view/edit/delete). As regras/ações vivem em
 app.services.chamados; aqui é CRUD + histórico + anexos + os botões.
@@ -263,6 +263,7 @@ async def list_chamados(
     search: str | None = Query(None),
     origem: str | None = Query(None),
     plataforma: str | None = Query(None),
+    conta: str | None = Query(None),
     mostrar: str = Query("abertos", pattern="^(abertos|resolvidos|todos)$"),
     juridico: bool | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
@@ -278,10 +279,15 @@ async def list_chamados(
         conds.append(Chamado.resolvido.is_(True))
     if origem and origem in ORIGENS:
         conds.append(Chamado.origem == origem)
+    cond_plataforma = None
     if plataforma:
-        conds.append(
+        cond_plataforma = (
             func.lower(func.coalesce(Chamado.plataforma, "")) == plataforma.strip().lower()
         )
+        conds.append(cond_plataforma)
+    if conta and conta.strip():
+        # Filtro por conta (Eduardo 15/09: "ex. ML Aguiar 2").
+        conds.append(func.lower(func.coalesce(Chamado.conta, "")) == conta.strip().lower())
     if search and search.strip():
         q = f"%{search.strip()}%"
         conds.append(
@@ -321,12 +327,24 @@ async def list_chamados(
         ).scalars()
         if p
     ]
+    # Contas do dropdown: só as da plataforma filtrada (quando há uma), uma
+    # por nome ignorando caixa, na grafia que aparece na linha.
+    q_contas = (
+        select(func.min(Chamado.conta))
+        .where(func.coalesce(Chamado.conta, "") != "")
+        .group_by(func.lower(Chamado.conta))
+        .order_by(func.lower(func.min(Chamado.conta)))
+    )
+    if cond_plataforma is not None:
+        q_contas = q_contas.where(cond_plataforma)
+    contas = [c for c in (await session.execute(q_contas)).scalars() if c]
     return ChamadoPage(
         items=await _to_out(session, rows),
         total=total,
         limit=limit,
         offset=offset,
         plataformas=plataformas,
+        contas=contas,
     )
 
 
@@ -351,7 +369,6 @@ async def create_chamado(
         chamado_url=body.chamado_url,
         canal=body.canal,
         alterar_status_bling=body.alterar_status_bling,
-        monitoramento=body.monitoramento,
         observacao=body.observacao,
         created_by=user.id,
     )
@@ -637,8 +654,12 @@ async def resolver(
     user: Annotated[User, Depends(require_permission("chamados", "edit"))],
 ) -> ChamadoOut:
     """Marca resolvido (ou reabre). Com `situacao`, aplica junto a situação de
-    fechamento no Bling (Resolvido / Perdimento na origem Logística)."""
+    fechamento no Bling (Resolvido / Perdimento na origem Logística). Ao
+    resolver, `valor_recuperado` (lucro/prejuízo em R$) é OBRIGATÓRIO —
+    Eduardo 15/09: "deixar como campo obrigatório antes de aceitar o resolver"."""
     ch = await _get(session, chamado_id)
+    if body.resolvido and body.valor_recuperado is None:
+        raise HTTPException(422, detail={"code": "chamado_valor_obrigatorio"})
     if body.situacao:
         try:
             await svc.aplicar_status_bling(session, ch, body.situacao)
@@ -649,7 +670,14 @@ async def resolver(
                 502, detail={"code": "chamado_status_bling_erro", "erro": str(e)[:300]}
             ) from e
         ch.alterar_status_bling = body.situacao
-    session.add(svc.marcar_resolvido(ch, body.resolvido, autor_nome=_autor(user)))
+    session.add(
+        svc.marcar_resolvido(
+            ch,
+            body.resolvido,
+            autor_nome=_autor(user),
+            valor=body.valor_recuperado if body.resolvido else None,
+        )
+    )
     await session.commit()
     await session.refresh(ch)
     return await _one_out(session, ch)
@@ -720,7 +748,6 @@ async def agent_registrar(
             origem=body.origem,
             origem_ref=body.origem_ref,
             canal="robo",
-            monitoramento=body.monitoramento,
             observacao=body.observacao,
             # Data do chamado = HOJE (quando o robô abriu). Antes ficava vazia e
             # `preencher_do_pedido` punha a data da VENDA (08/09: chamado novo da
