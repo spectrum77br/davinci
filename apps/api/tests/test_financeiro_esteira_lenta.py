@@ -582,3 +582,35 @@ def test_motivo_da_espera_do_tiktok_e_reconhecido_como_transitorio():
     from app.services.marketplace_financials import TIKTOK_AGUARDANDO_SETTLEMENT
 
     assert falha_transitoria(TIKTOK_AGUARDANDO_SETTLEMENT) is True
+
+
+async def test_contador_envenenado_do_modelo_antigo_nao_mata_no_primeiro_erro(db, make_user):
+    """No modelo antigo o contador subia a cada sincronização: 14.220 linhas
+    estão em "posted" com 8 ou mais, uma delas com 4.595. Sem desarmar isso, a
+    primeira falha depois de um sucesso somaria em cima e o pedido morreria na
+    fila no primeiro soluço da API."""
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user)
+    db.add(
+        MarketplaceOrderFinancial(
+            platform=IntegrationPlatform.SHOPEE,
+            integration_id=integ.id,
+            external_order_id="ENVENENADO",
+            bling_id=27300000001,
+            status="posted",
+            attempts=4595,
+            next_retry_at=None,
+            last_error=None,
+            fetched_at=datetime.now(UTC) - timedelta(days=1),
+        )
+    )
+    await db.commit()
+
+    linha = await _persistir(
+        db, integ, external_order_id="ENVENENADO", bling_id=27300000001,
+        erro="Client error '400 Bad Request' for url 'x'",
+    )
+    await db.commit()
+
+    assert linha.attempts == 1
+    assert linha.next_retry_at is not None

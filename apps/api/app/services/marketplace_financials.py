@@ -767,10 +767,19 @@ async def _persist_snapshot(
     # webhook é comum) chegava no teto sem nunca ter falhado, e morria na fila
     # no primeiro erro. Sucesso zera; falha da API não conta; erro de verdade
     # soma 1.
+    # `financial.status` ainda é o valor ANTIGO aqui — só é reescrito adiante.
+    vinha_de_sucesso = financial.status == "posted"
     if snapshot.status not in RETRYABLE_STATUSES:
         attempts = 0
     elif transitoria:
         attempts = int(financial.attempts or 0)
+    elif vinha_de_sucesso:
+        # Desarma o contador envenenado do modelo antigo sem precisar de UPDATE
+        # no banco: 14.220 linhas hoje estão em "posted" com attempts >= 8 (uma
+        # delas com 4.595) porque o contador subia a cada sincronização. Se a
+        # primeira falha depois de um sucesso somasse em cima disso, o pedido
+        # morreria na fila no primeiro soluço da API.
+        attempts = 1
     else:
         attempts = int(financial.attempts or 0) + 1
 
@@ -780,7 +789,7 @@ async def _persist_snapshot(
     # R$ 23,87 por R$ 0,00. Não é "não preencheu": era dado bom destruído.
     # Só vale quando já havia leitura anterior; pedido novo segue como antes.
     busca_vazia = (
-        snapshot.status == "error"
+        snapshot.status in {"error", "unsupported"}
         and not snapshot.events
         and all(getattr(snapshot, campo) is None for campo in _CAMPOS_DINHEIRO)
     )
