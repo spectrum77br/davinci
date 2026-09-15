@@ -460,7 +460,13 @@ async def _mensagens_do_caso(session: AsyncSession, ch: Chamado, *, com_anexos: 
     # 15/09 (Eduardo: "colocar a mensagem e depois caso encerrado"): a fala e o evento
     # "Chamado marcado como resolvido" nascem na MESMA transação (mesmo created_at) — o
     # desempate pelo id (uuid aleatório) punha o encerrado antes da mensagem. Empate: sistema por último.
-    ordem_sistema = case((ChamadoMensagem.direcao == "sistema", 1), else_=0)
+    # e entre os eventos de sistema do mesmo instante, a análise vem antes do
+    # "Chamado marcado como resolvido/reaberto" (tipo sistema).
+    ordem_sistema = case(
+        ((ChamadoMensagem.direcao == "sistema") & (ChamadoMensagem.tipo == "sistema"), 2),
+        (ChamadoMensagem.direcao == "sistema", 1),
+        else_=0,
+    )
     rows = (await session.execute(q.order_by(ChamadoMensagem.created_at, ordem_sistema, ChamadoMensagem.id))).scalars().all()
     if len(ids) == 1:
         return list(rows)
