@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -38,7 +40,7 @@ from app.services.bling_kit_create import create_bling_kit_for_mark_job
 from app.services.bling_notas_token_refresh import run_refresh_bling_notas_tokens
 from app.services.bling_orders import run_ingest_bling_order
 from app.services.bling_product_create import run_auto_create_product_from_bling
-from app.services import chamados_devolucao, chamados_devolucao_sync
+from app.services import chamados_devolucao, chamados_devolucao_sync, threema
 from app.services.bling_situacoes_sync import sync_situacoes_bling
 from app.services.chamados import run_replica_automatica as run_chamados_replica_automatica
 from app.services.email import get_email_sender, render_otp_html
@@ -972,7 +974,61 @@ async def pos_vendas_notas_sync(ctx: dict) -> None:
 # vez de rodar de novo à toa. O TTL solta a trava sozinho se o worker morrer no
 # meio (deploy/kill) sem executar o finally; a recarga normal leva ~1,5-2 min.
 _LOGISTICA_RECARREGAR_LOCK_KEY = "davinci:lock:logistica_recarregar"
-_LOGISTICA_RECARREGAR_LOCK_TTL_S = 600
+# TTL curto + RENOVAÇÃO enquanto o job vive (`_trava_com_heartbeat`): o worker
+# é recriado ~25×/dia por deploy e antes a trava órfã (TTL 600s/3600s) barrava
+# as rodadas seguintes por até 10 min — motor parado justamente depois de
+# publicar. Agora um worker morto solta a trava em ≤3 min (Eduardo, 15/09:
+# "precisamos que sempre rode isso automaticamente").
+_LOCK_TTL_S = 180
+_LOCK_HEARTBEAT_S = 60
+# Carimbo do último sucesso de cada job da Logística (vigia lê daqui).
+_LOGISTICA_OK_KEY = "davinci:logistica:ultimo_ok"
+
+
+@asynccontextmanager
+async def _trava_com_heartbeat(redis, key: str, *, nome: str):
+    """Trava no redis que se renova sozinha enquanto o job roda.
+
+    Cede `True` quando pegou a trava e `False` quando outro job já está com
+    ela. Sem redis (testes), roda sem trava. A renovação evita os dois
+    extremos: TTL longo deixa trava órfã depois de um kill; TTL curto deixaria
+    duas rodadas em paralelo num job lento."""
+    if redis is None:
+        yield True
+        return
+    got = await redis.set(key, "1", nx=True, ex=_LOCK_TTL_S)
+    if not got:
+        yield False
+        return
+
+    async def _renovar() -> None:
+        while True:
+            await asyncio.sleep(_LOCK_HEARTBEAT_S)
+            try:
+                await redis.expire(key, _LOCK_TTL_S)
+            except Exception:  # noqa: BLE001 — perder a renovação só encurta a trava
+                logger.warning("logistica_lock_heartbeat_falhou", job=nome)
+                return
+
+    tarefa = asyncio.create_task(_renovar())
+    try:
+        yield True
+    finally:
+        tarefa.cancel()
+        try:
+            await redis.delete(key)
+        except Exception:  # noqa: BLE001 — o TTL solta a trava sozinho
+            logger.warning("logistica_lock_release_falhou", job=nome)
+
+
+async def _marcar_ok(redis, job: str) -> None:
+    """Carimba o último sucesso do job (o vigia avisa quando envelhece)."""
+    if redis is None:
+        return
+    try:
+        await redis.hset(_LOGISTICA_OK_KEY, job, str(int(datetime.now(UTC).timestamp())))
+    except Exception:  # noqa: BLE001 — carimbo é acessório
+        logger.warning("logistica_carimbo_ok_falhou", job=job)
 
 
 async def logistica_recarregar(ctx: dict) -> dict[str, int]:
@@ -987,57 +1043,125 @@ async def logistica_recarregar(ctx: dict) -> dict[str, int]:
     — o arq guarda o result e o GET /recarregar/{job_id} o entrega pro toast do
     front (sem o return o resumo chegava vazio)."""
     redis = ctx.get("redis")
-    if redis is not None:
-        got = await redis.set(
-            _LOGISTICA_RECARREGAR_LOCK_KEY,
-            "1",
-            nx=True,
-            ex=_LOGISTICA_RECARREGAR_LOCK_TTL_S,
-        )
-        if not got:
+    async with _trava_com_heartbeat(
+        redis, _LOGISTICA_RECARREGAR_LOCK_KEY, nome="recarregar"
+    ) as livre:
+        if not livre:
             logger.info("logistica_recarregar_pulado", reason="ja_em_andamento")
             return {"pulado_ja_rodando": 1}
-    try:
         async with session_scope() as s:
             summary = await recarregar_ml(s)
+        await _marcar_ok(redis, "recarregar")
         logger.info("logistica_recarregar_done", **summary)
         return summary
-    finally:
-        if redis is not None:
-            try:
-                await redis.delete(_LOGISTICA_RECARREGAR_LOCK_KEY)
-            except Exception:  # noqa: BLE001 — o TTL solta a trava sozinho
-                logger.warning("logistica_recarregar_lock_release_falhou")
 
 
 _LOGISTICA_SWEEPS_LOCK_KEY = "davinci:lock:logistica_sweeps"
-_LOGISTICA_SWEEPS_LOCK_TTL_S = 3600
 
 
-async def logistica_sweeps_pos_venda(ctx: dict) -> dict[str, int]:
-    """Varreduras de pós-venda (Shopee/TikTok/ML/Amazon, janela de 45 dias):
-    quem mudou de vida depois de escondido volta pro motor. Era parte do
-    `logistica_recarregar` e o deixava lento demais (dezenas de minutos a
-    cada 5 min); desde 15/09 roda sozinho, 2×/hora, no worker default."""
+async def _sweep_de(ctx: dict, plataforma: str) -> dict[str, int]:
+    """Varredura de pós-venda de UMA plataforma (janela de 45 dias): quem
+    mudou de vida depois de escondido volta pro motor.
+
+    Uma plataforma por vez, em horários diferentes: junto (as 4 numa rodada
+    só) a passada levava minutos e morria em todo deploy — em 15/09 a rodada
+    das :39 foi morta pela publicação das 13:41 sem terminar nenhuma. Separado,
+    cada varredura termina rápido e a morte de uma não leva as outras."""
     redis = ctx.get("redis")
-    if redis is not None:
-        got = await redis.set(
-            _LOGISTICA_SWEEPS_LOCK_KEY, "1", nx=True, ex=_LOGISTICA_SWEEPS_LOCK_TTL_S
-        )
-        if not got:
-            logger.info("logistica_sweeps_pulado", reason="ja_em_andamento")
+    async with _trava_com_heartbeat(
+        redis, f"{_LOGISTICA_SWEEPS_LOCK_KEY}:{plataforma}", nome=f"sweep:{plataforma}"
+    ) as livre:
+        if not livre:
+            logger.info("logistica_sweep_pulado", plataforma=plataforma)
             return {"pulado_ja_rodando": 1}
-    try:
         async with session_scope() as s:
-            summary = await sweeps_pos_venda(s)
-        logger.info("logistica_sweeps_done", **summary)
+            summary = await sweeps_pos_venda(s, apenas=plataforma)
+        await _marcar_ok(redis, f"sweep:{plataforma}")
+        logger.info("logistica_sweep_done", plataforma=plataforma, **summary)
         return summary
-    finally:
-        if redis is not None:
-            try:
-                await redis.delete(_LOGISTICA_SWEEPS_LOCK_KEY)
-            except Exception:  # noqa: BLE001 — o TTL solta a trava sozinho
-                logger.warning("logistica_sweeps_lock_release_falhou")
+
+
+async def logistica_sweep_shopee(ctx: dict) -> dict[str, int]:
+    return await _sweep_de(ctx, "shopee")
+
+
+async def logistica_sweep_tiktok(ctx: dict) -> dict[str, int]:
+    return await _sweep_de(ctx, "tiktok")
+
+
+async def logistica_sweep_ml(ctx: dict) -> dict[str, int]:
+    return await _sweep_de(ctx, "ml")
+
+
+async def logistica_sweep_amazon(ctx: dict) -> dict[str, int]:
+    return await _sweep_de(ctx, "amazon")
+
+
+# Quanto tempo sem sucesso antes de avisar, por job. Motor: 5 min de cron +
+# folga pra uma rodada longa e um deploy no meio. Varreduras: 1×/h cada.
+_LOGISTICA_VIGIA_LIMITES_MIN = {
+    "recarregar": 20,
+    "sweep:shopee": 150,
+    "sweep:tiktok": 150,
+    "sweep:ml": 150,
+    "sweep:amazon": 150,
+}
+
+
+async def logistica_vigia(ctx: dict) -> dict[str, int]:
+    """Vigia da automação da Logística (Eduardo, 15/09: "precisamos que sempre
+    rode isso automaticamente"): compara o carimbo do último sucesso de cada
+    job com o limite e avisa no Threema + sino quando passa. Sem isso, um
+    motor parado só aparecia quando alguém estranhava a tela velha.
+
+    Carimbo ausente (redis reiniciado, primeira subida) NÃO alerta: marca a
+    hora atual e espera o próximo ciclo."""
+    redis = ctx.get("redis")
+    if redis is None:
+        return {"sem_redis": 1}
+    agora = datetime.now(UTC)
+    atrasados: list[str] = []
+    for job, limite_min in _LOGISTICA_VIGIA_LIMITES_MIN.items():
+        try:
+            bruto = await redis.hget(_LOGISTICA_OK_KEY, job)
+        except Exception:  # noqa: BLE001
+            logger.warning("logistica_vigia_redis_falhou", job=job)
+            return {"erro_redis": 1}
+        if bruto is None:
+            await _marcar_ok(redis, job)  # carência: só avalia do próximo ciclo
+            continue
+        ts = datetime.fromtimestamp(int(bruto), tz=UTC)
+        atraso_min = int((agora - ts).total_seconds() // 60)
+        if atraso_min > limite_min:
+            atrasados.append(f"{job}: último sucesso há {atraso_min} min (limite {limite_min})")
+    if not atrasados:
+        return {"ok": len(_LOGISTICA_VIGIA_LIMITES_MIN)}
+    texto = "Logística — automação parada:\n" + "\n".join(atrasados)
+    logger.warning("logistica_vigia_atrasado", atrasados=atrasados)
+    destinos = threema.parse_recipients(get_settings().nf_sem_estoque_threema_recipients)
+    if destinos:
+        try:
+            await threema.ThreemaClient().send_to_all(texto, destinos)
+        except Exception as exc:  # noqa: BLE001 — aviso é best-effort
+            logger.warning("logistica_vigia_threema_falhou", erro=str(exc)[:200])
+    async with session_scope() as s:
+        # Sino pros admins, com dedupe por HORA: um aviso por hora, não a cada
+        # tick (o vigia roda 2×/hora).
+        admin_ids = (
+            await s.execute(select(User.id).where(User.role == UserRole.ADMIN))
+        ).scalars().all()
+        for uid in admin_ids:
+            await emit_alert(
+                s,
+                user_id=uid,
+                type=AlertType.SYNC_FAILURE,
+                severity=AlertSeverity.WARNING,
+                title="Logística: automação parada",
+                message=texto,
+                dedupe_key=f"logistica_vigia:{uid}:{agora:%Y%m%d%H}",
+                notify_telegram=False,  # o aviso já foi pelo Threema
+            )
+    return {"atrasados": len(atrasados), "admins": len(admin_ids)}
 
 
 async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_s: int) -> None:
@@ -2169,7 +2293,11 @@ class WorkerSettings:
         # Escopo normal (pendentes do painel) termina em minutos, mas se a fila
         # de pendências crescer o 1800s global mataria o job de novo — foi
         # exatamente o que aconteceu em 12-13/ago com o escopo antigo.
-        func(logistica_sweeps_pos_venda, timeout=3600),
+        func(logistica_sweep_shopee, timeout=1800),
+        func(logistica_sweep_tiktok, timeout=1800),
+        func(logistica_sweep_ml, timeout=1800),
+        func(logistica_sweep_amazon, timeout=1800),
+        logistica_vigia,
         nf_auto_enfileirar_tick,
         nf_recuperar_tick,
         prioridade_estoque_tick,
@@ -2226,11 +2354,16 @@ class WorkerSettings:
         # Plataforma dos pendentes do painel, aplica no Bling as situações com
         # regra e limpa finalizados. É o MESMO job do botão "recarregar" — a
         # trava no redis (dentro do próprio job) impede dois ao mesmo tempo.
-        # Varreduras de pós-venda (todas as linhas de 45 dias, em lote): 2×/hora
-        # em :09/:39. Eram parte do motor de 5 min e o deixavam com dezenas de
-        # minutos por rodada (15/09). O motor rápido agora vive no worker de
-        # marketplace (WorkerSettingsMarketplace).
-        cron(logistica_sweeps_pos_venda, minute={9, 39}, run_at_startup=False, timeout=3600),
+        # Varreduras de pós-venda (linhas escondidas da janela de 45 dias): UMA
+        # PLATAFORMA POR VEZ, 1×/hora cada, em minutos diferentes — juntas
+        # levavam minutos e morriam inteiras em qualquer deploy (15/09). O
+        # motor rápido (pendentes do painel) vive no worker de marketplace.
+        cron(logistica_sweep_shopee, minute={9}, run_at_startup=False, timeout=1800),
+        cron(logistica_sweep_tiktok, minute={19}, run_at_startup=False, timeout=1800),
+        cron(logistica_sweep_ml, minute={29}, run_at_startup=False, timeout=1800),
+        cron(logistica_sweep_amazon, minute={49}, run_at_startup=False, timeout=1800),
+        # Vigia da automação: avisa (Threema + sino) se algum desses jobs parar.
+        cron(logistica_vigia, minute={13, 43}, run_at_startup=False, timeout=120),
         # Rastreio do pacote que VOLTA (Acompanhamento de Devoluções), a cada
         # 30 min (:10/:40 — fora dos slots dos ingests e do recarregar).
         cron(devolucao_rastreio_sync, minute={10, 40}, run_at_startup=False, timeout=1500),
@@ -2486,10 +2619,13 @@ class WorkerSettingsMarketplace:
         func(logistica_recarregar, timeout=900),
     ]
     cron_jobs = [
+        # `run_at_startup=True`: o worker é recriado a cada deploy (~25×/dia) e
+        # sem isso a tela ficava até 5 min sem atualizar depois de publicar.
+        # A trava no redis impede dois motores ao mesmo tempo.
         cron(
             logistica_recarregar,
             minute={2, 7, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57},
-            run_at_startup=False,
+            run_at_startup=True,
             timeout=900,
         ),
         # A CADA MINUTO (era a cada 5). O operador reclamava que o pedido

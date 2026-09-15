@@ -1235,3 +1235,167 @@ async def test_sweeps_pos_venda_so_enriquece_quem_mudou(db: AsyncSession, monkey
     visto.clear()
     out = await logistica_ingest.sweeps_pos_venda(db)
     assert visto == {} and "enrich_seen" not in out
+
+
+# ── automação sempre de pé (Eduardo, 15/09) ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sweeps_apenas_uma_plataforma(db: AsyncSession, monkeypatch):
+    """Cada varredura roda sozinha (um cron por plataforma): as outras três
+    não são nem consultadas."""
+    from uuid import uuid4
+
+    from app.services import (
+        logistica_amazon,
+        logistica_ingest,
+        logistica_meli,
+        logistica_shopee,
+        logistica_tiktok,
+    )
+
+    chamadas: list[str] = []
+    alvo_shopee = uuid4()
+
+    def _sweep(nome, ids):
+        async def _f(session):
+            chamadas.append(nome)
+            return {"ids": list(ids)}
+        return _f
+
+    monkeypatch.setattr(logistica_shopee, "sweep_pos_venda", _sweep("shopee", [alvo_shopee]))
+    monkeypatch.setattr(logistica_tiktok, "sweep_pos_venda", _sweep("tiktok", []))
+    monkeypatch.setattr(logistica_meli, "sweep_pos_venda", _sweep("ml", []))
+    monkeypatch.setattr(logistica_amazon, "sweep_pos_venda", _sweep("amazon", []))
+
+    vistos: dict[str, list] = {}
+
+    def _enrich(nome):
+        async def _f(session, *, ids, only_empty=False):
+            vistos[nome] = list(ids)
+            return {"seen": len(ids), "updated": 0, "skipped": 0, "failed": 0}
+        return _f
+
+    for nome, mod in (("ml", logistica_meli), ("shopee", logistica_shopee),
+                      ("tiktok", logistica_tiktok), ("amazon", logistica_amazon)):
+        monkeypatch.setattr(mod, "enrich_recent", _enrich(nome))
+
+    async def _vazio(session, ids):
+        return {}
+
+    async def _aplicar(session, ids):
+        return {"aplicados": 0, "pulados": 0, "falhas": 0}
+
+    async def _nada(session):
+        return {}
+
+    monkeypatch.setattr(logistica_meli, "abrir_chamados_em_lote", _vazio)
+    monkeypatch.setattr(logistica_bling, "enviar_threema_em_lote", _vazio)
+    monkeypatch.setattr(logistica_bling, "aplicar_status_em_lote", _aplicar)
+    monkeypatch.setattr(logistica_ingest, "_amazon_bling_best_effort", _nada)
+
+    out = await logistica_ingest.sweeps_pos_venda(db, apenas="shopee")
+    assert chamadas == ["shopee"]
+    assert out["sweep_shopee"] == 1 and out["sweep_ml"] == 0
+    assert vistos["shopee"] == [alvo_shopee] and vistos["ml"] == []
+
+    with pytest.raises(ValueError):
+        await logistica_ingest.sweeps_pos_venda(db, apenas="magalu")
+
+
+@pytest.mark.asyncio
+async def test_trava_com_heartbeat_solta_no_fim_e_barra_concorrente():
+    """A trava vive pouco (TTL curto) mas se renova enquanto o job roda — worker
+    morto em deploy não deixa a trava órfã barrando as rodadas seguintes."""
+    from app import worker as w
+
+    class _FakeRedis:
+        def __init__(self):
+            self.keys: dict[str, int] = {}
+            self.expires: list[tuple[str, int]] = []
+
+        async def set(self, key, val, *, nx=False, ex=None):
+            if nx and key in self.keys:
+                return None
+            self.keys[key] = ex
+            return True
+
+        async def expire(self, key, ttl):
+            self.expires.append((key, ttl))
+            return True
+
+        async def delete(self, key):
+            self.keys.pop(key, None)
+            return 1
+
+    redis = _FakeRedis()
+    async with w._trava_com_heartbeat(redis, "k", nome="t") as livre:
+        assert livre is True
+        assert redis.keys["k"] == w._LOCK_TTL_S
+        # Segundo job no mesmo instante não entra.
+        async with w._trava_com_heartbeat(redis, "k", nome="t2") as livre2:
+            assert livre2 is False
+    assert "k" not in redis.keys  # soltou no fim
+
+    # Sem redis (testes/local) roda sem trava.
+    async with w._trava_com_heartbeat(None, "k", nome="t") as livre:
+        assert livre is True
+
+
+@pytest.mark.asyncio
+async def test_vigia_avisa_so_quando_passa_do_limite(db: AsyncSession, make_user, monkeypatch):
+    """O vigia compara o carimbo do último sucesso com o limite; carimbo
+    ausente ganha carência (marca a hora e não alerta). O sino vai pros
+    admins (o Threema já saiu antes)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app import worker as w
+    from app.models import UserRole
+
+    await make_user(role=UserRole.ADMIN, email="vigia-admin@davinci-test.com")
+
+    agora = datetime.now(UTC)
+    carimbos: dict[str, str] = {}
+
+    class _FakeRedis:
+        async def hget(self, _key, job):
+            return carimbos.get(job)
+
+        async def hset(self, _key, job, val):
+            carimbos[job] = val
+            return 1
+
+    enviados: list[str] = []
+
+    class _Th:
+        async def send_to_all(self, texto, destinos):
+            enviados.append(texto)
+            return {"sent": destinos, "failed": []}
+
+    alertas: list[dict] = []
+
+    async def _emit(session, **kw):
+        alertas.append(kw)
+        return None
+
+    monkeypatch.setattr(w.threema, "ThreemaClient", _Th)
+    monkeypatch.setattr(w.threema, "parse_recipients", lambda s: ["ABCDEFGH"])
+    monkeypatch.setattr(w, "emit_alert", _emit)
+
+    ctx = {"redis": _FakeRedis()}
+    # 1ª passada: sem carimbo nenhum → carência, sem aviso.
+    out = await w.logistica_vigia(ctx)
+    assert out == {"ok": len(w._LOGISTICA_VIGIA_LIMITES_MIN)} and not enviados
+    assert set(carimbos) == set(w._LOGISTICA_VIGIA_LIMITES_MIN)
+
+    # 2ª passada: tudo recente → nada.
+    out = await w.logistica_vigia(ctx)
+    assert out["ok"] and not enviados
+
+    # Motor parado há 40 min (limite 20) → avisa uma vez.
+    carimbos["recarregar"] = str(int((agora - timedelta(minutes=40)).timestamp()))
+    out = await w.logistica_vigia(ctx)
+    assert out["atrasados"] == 1
+    assert enviados and "recarregar" in enviados[0] and "Logística" in enviados[0]
+    assert alertas and alertas[0]["dedupe_key"].startswith("logistica_vigia:")
+    assert all(a["user_id"] is not None for a in alertas)

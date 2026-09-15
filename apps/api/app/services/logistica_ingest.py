@@ -559,7 +559,9 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     return {"status_refresh": len(mudaram), "cleanup": removed, **resumo}
 
 
-async def sweeps_pos_venda(session: AsyncSession) -> dict[str, int]:
+async def sweeps_pos_venda(
+    session: AsyncSession, *, apenas: str | None = None
+) -> dict[str, int]:
     """Job irmão do motor (cron de 30 min): pós-venda que muda DEPOIS da
     entrega (devolução, entrega tardia) não aparece nas pendentes do painel —
     a linha "Concluído"/"Em trânsito" fica escondida como resolvida. Os sweeps
@@ -567,17 +569,24 @@ async def sweeps_pos_venda(session: AsyncSession) -> dict[str, int]:
     e devolvem quem mudou de vida; só essas linhas são re-enriquecidas e
     passam pelos executores da aba Status. (Na Amazon o cego era a própria
     ENTREGA: "Enviado | Coletado" resolvido como Em andamento nunca mais era
-    consultado e o pedido não virava Entregue no Bling.)"""
-    sweep = await logistica_shopee.sweep_pos_venda(session)
-    sweep_tk = await logistica_tiktok.sweep_pos_venda(session)
-    sweep_ml = await logistica_meli.sweep_pos_venda(session)
-    sweep_amz = await logistica_amazon.sweep_pos_venda(session)
-    alvo: dict[str, list[UUID]] = {
-        "shopee": list(sweep["ids"]),
-        "tiktok": list(sweep_tk["ids"]),
-        "ml": list(sweep_ml["ids"]),
-        "amazon": list(sweep_amz["ids"]),
+    consultado e o pedido não virava Entregue no Bling.)
+
+    `apenas` restringe a UMA plataforma — é assim que o worker roda (um cron
+    por plataforma, em horários diferentes): as 4 juntas levavam minutos e
+    morriam inteiras em qualquer deploy."""
+    varreduras = {
+        "shopee": logistica_shopee.sweep_pos_venda,
+        "tiktok": logistica_tiktok.sweep_pos_venda,
+        "ml": logistica_meli.sweep_pos_venda,
+        "amazon": logistica_amazon.sweep_pos_venda,
     }
+    if apenas is not None:
+        if apenas not in varreduras:
+            raise ValueError(f"plataforma desconhecida: {apenas}")
+        varreduras = {apenas: varreduras[apenas]}
+    alvo: dict[str, list[UUID]] = {k: [] for k in ("ml", "shopee", "tiktok", "amazon")}
+    for nome, sweep in varreduras.items():
+        alvo[nome] = list((await sweep(session))["ids"])
     logger.info(
         "logistica_sweeps_inicio",
         **{f"sweep_{k}": len(v) for k, v in alvo.items()},
