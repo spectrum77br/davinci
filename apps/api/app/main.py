@@ -20,6 +20,8 @@ from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
 from app.routers import devolutions as devolutions_router
 from app.routers import discrepancies as discrepancies_router
+from app.routers import email_assinaturas as email_assinaturas_router
+from app.routers import email_padroes as email_padroes_router
 from app.routers import estoque as estoque_router
 from app.routers import faturamento as faturamento_router
 from app.routers import faturas as faturas_router
@@ -32,6 +34,7 @@ from app.routers import listings as listings_router
 from app.routers import logistica as logistica_router
 from app.routers import logistica_track as logistica_track_router
 from app.routers import margem_audit as margem_audit_router
+from app.routers import marcas as marcas_router
 from app.routers import margens as margens_router
 from app.routers import metrics as metrics_router
 from app.routers import nf as nf_router
@@ -43,6 +46,7 @@ from app.routers import pricing_mega as pricing_mega_router
 from app.routers import products as products_router
 from app.routers import chamados as chamados_router
 from app.routers import claude_conector as claude_conector_router
+from app.routers import redes_sociais as redes_sociais_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
 from app.routers import settings as settings_router
@@ -173,6 +177,10 @@ app.include_router(listings_router.router)
 app.include_router(pricing_router.router)
 app.include_router(pricing_mega_router.router)
 app.include_router(segments_router.router)
+app.include_router(marcas_router.router)
+app.include_router(redes_sociais_router.router)
+app.include_router(email_padroes_router.router)
+app.include_router(email_assinaturas_router.router)
 app.include_router(audit_router.router)
 app.include_router(discrepancies_router.router)
 app.include_router(dashboard_router.router)

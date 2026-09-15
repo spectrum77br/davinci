@@ -62,6 +62,14 @@ Resource = Literal[
     "nf_faturador",
     "nf_faturamento",
     "segmentos",
+    # Cadastros › Marcas e Redes Sociais (15/09/2026): marcas da operação
+    # (INPI, domínio, login) e as contas por plataforma — que mais tarde
+    # recebem a auto-postagem de vídeos. Mesmos nomes no useCan.ts.
+    "marcas",
+    "redes_sociais",
+    # Cadastros › E-mails: padrões de e-mail por marca e canal (logo,
+    # assinatura, prévia e envio de teste).
+    "email_padroes",
     "usuarios",
     "permissoes",
     "configuracoes",

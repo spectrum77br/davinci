@@ -44,6 +44,13 @@ export const TABS_CADASTROS: RouteTab[] = [
   { to: '/cadastros', label: 'Cadastros', resource: 'cadastro' },
   { to: '/store-info', label: 'Lojas', resource: 'lojas_info' },
   { to: '/admin/segments', label: 'Segmentos', resource: 'segmentos' },
+  // Marcas e Redes Sociais (Eduardo, 15/09/2026): cadastro das marcas da
+  // operação (INPI, domínio) e das contas por plataforma — que depois recebem
+  // o envio automático de vídeos.
+  { to: '/marcas', label: 'Marcas', resource: 'marcas' },
+  { to: '/redes-sociais', label: 'Redes Sociais', resource: 'redes_sociais' },
+  // Padrões de e-mail por marca e canal (logo, assinatura, prévia, teste).
+  { to: '/email-padroes', label: 'E-mails', resource: 'email_padroes' },
 ]
 
 export const TABS_NF: RouteTab[] = [

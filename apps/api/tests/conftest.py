@@ -322,6 +322,10 @@ async def db() -> AsyncIterator[AsyncSession]:
 
 _CLEANUP_TABLES = (
     "claude_conectores",  # FK -> users: antes de users
+    "redes_sociais",  # FK CASCADE -> marcas: antes de marcas
+    "marca_email_padroes",
+    "marca_email_assinaturas",
+    "marcas",
     "tarefas",  # FK RESTRICT -> users
     "import_kit_marks",
     "import_kit_bases",

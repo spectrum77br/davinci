@@ -191,3 +191,76 @@ class AuditFindingStatus(StrEnum):
     MISSING = "missing"
     PAUSED = "paused"
     EXTRA = "extra"
+
+
+class MarcaInpiStatus(StrEnum):
+    """Situação do registro da marca no INPI (Cadastros › Marcas, 15/09/2026).
+
+    Vocabulário do processo: sem pedido → depositado/em exame (aguardando) →
+    registrado (vale 10 anos, renovável) | indeferido; registro vencido =
+    expirado. A planilha do Eduardo só usava 'ok' e 'aguardando'
+    ('ok' → registrado na importação). Coluna String no banco (sem PG enum):
+    valor novo entra sem migration.
+    """
+
+    NAO_REGISTRADO = "nao_registrado"
+    AGUARDANDO = "aguardando"
+    REGISTRADO = "registrado"
+    INDEFERIDO = "indeferido"
+    EXPIRADO = "expirado"
+
+
+MARCA_INPI_STATUS: tuple[str, ...] = tuple(s.value for s in MarcaInpiStatus)
+
+
+class RedeSocialPlataforma(StrEnum):
+    """Plataformas da aba Redes Sociais (Cadastros) — as 5 da planilha do
+    Eduardo, na ordem dela ("seguir bem a planilha", 15/09/2026). Chave
+    estável por plataforma — a futura auto-postagem de vídeos escolhe o
+    cliente de API por este valor. Coluna String no banco (sem PG enum):
+    plataforma nova é só acrescentar aqui e no lib/redesSociais.ts do web."""
+
+    INSTAGRAM = "instagram"
+    FACEBOOK = "facebook"
+    TWITTER = "twitter"
+    TIKTOK = "tiktok"
+    YOUTUBE = "youtube"
+
+
+REDES_SOCIAIS_PLATAFORMAS: tuple[str, ...] = tuple(p.value for p in RedeSocialPlataforma)
+
+
+class VerificacaoStatus(StrEnum):
+    """Andamento do selo de verificado (Meta Verified) de uma conta social ou
+    do WhatsApp da marca. O DaVinci só REGISTRA o andamento — o pedido em si
+    é feito no app da plataforma, pela equipe (2FA, documento, assinatura)."""
+
+    NAO_SOLICITADO = "nao_solicitado"
+    EM_ANDAMENTO = "em_andamento"
+    VERIFICADO = "verificado"
+    RECUSADO = "recusado"
+
+
+VERIFICACAO_STATUS: tuple[str, ...] = tuple(s.value for s in VerificacaoStatus)
+
+
+class EmailContexto(StrEnum):
+    """Canal/contexto de um padrão de e-mail da marca (Cadastros › E-mails):
+    "o padrão pro SAC, o padrão pro Mercado Livre…" (Eduardo, 15/09/2026).
+    Os marketplaces usam os MESMOS valores do enum Marketplace ('ml' etc.),
+    pra um chamado com `plataforma='ml'` achar o padrão pela chave."""
+
+    SAC = "sac"
+    ML = "ml"
+    SHOPEE = "shopee"
+    AMAZON = "amazon"
+    ALIEXPRESS = "aliexpress"
+    TEMU = "temu"
+    TIKTOK = "tiktok"
+    SHEIN = "shein"
+    MAGALU = "magalu"
+    SITE = "site"
+    GERAL = "geral"
+
+
+EMAIL_CONTEXTOS: tuple[str, ...] = tuple(c.value for c in EmailContexto)

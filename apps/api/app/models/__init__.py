@@ -15,8 +15,12 @@ from app.models.devolucao_anexo import DevolucaoAnexo
 from app.models.devolucao_rastreio import DevolucaoRastreio
 from app.models.devolution import Devolution
 from app.models.enums import (
+    EMAIL_CONTEXTOS,
+    MARCA_INPI_STATUS,
     MARKETPLACES,
     PLATFORMS,
+    REDES_SOCIAIS_PLATAFORMAS,
+    VERIFICACAO_STATUS,
     AlertSeverity,
     AlertType,
     AuditFindingStatus,
@@ -27,16 +31,20 @@ from app.models.enums import (
     CadastroTipo,
     CellStatus,
     Department,
+    EmailContexto,
     IntegrationPlatform,
     LinkSyncStatus,
     ListingRequestStatus,
+    MarcaInpiStatus,
     ListingStatus,
     Marketplace,
     PricingPlatform,
+    RedeSocialPlataforma,
     StoreStatus,
     SyncLogAction,
     UserRole,
     UserStatus,
+    VerificacaoStatus,
 )
 from app.models.estoque_dia_finalizado import EstoqueDiaFinalizado
 from app.models.financeiro import (
@@ -77,6 +85,7 @@ from app.models.logistica import (
 from app.models.margem_audit import MargemAudit
 from app.models.prioridade_estoque_movimento import PrioridadeEstoqueMovimento
 from app.models.margem_saldo_manual import MargemSaldoManual
+from app.models.marca import Marca, MarcaEmailAssinatura, MarcaEmailPadrao, RedeSocial
 from app.models.margens import Margens
 from app.models.nf import (
     NfCatalogoMala,
@@ -168,6 +177,8 @@ __all__ = [
     "DNPConfig",
     "DNPProduto",
     "DevolucaoRastreio",
+    "EMAIL_CONTEXTOS",
+    "EmailContexto",
     "DevolucaoAnexo",
     "Devolution",
     "EstoqueDiaFinalizado",
@@ -193,7 +204,12 @@ __all__ = [
     "LogisticaRoboComando",
     "LogisticaStatus",
     "LogisticaStatusAnexo",
+    "MARCA_INPI_STATUS",
     "MARKETPLACES",
+    "Marca",
+    "MarcaEmailAssinatura",
+    "MarcaEmailPadrao",
+    "MarcaInpiStatus",
     "MargemAudit",
     "PrioridadeEstoqueMovimento",
     "MargemSaldoManual",
@@ -222,6 +238,9 @@ __all__ = [
     "NfNota",
     "OAuthState",
     "PLATFORMS",
+    "REDES_SOCIAIS_PLATAFORMAS",
+    "RedeSocial",
+    "RedeSocialPlataforma",
     "PricingAccount",
     "PricingOverride",
     "PricingPlatform",
@@ -252,5 +271,7 @@ __all__ = [
     "UserRole",
     "UserSettings",
     "UserStatus",
+    "VERIFICACAO_STATUS",
+    "VerificacaoStatus",
     "VigiaImportacao",
 ]

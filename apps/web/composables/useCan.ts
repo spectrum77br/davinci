@@ -33,6 +33,9 @@ export type Resource =
   | 'nf_faturador'
   | 'nf_faturamento'
   | 'segmentos'
+  | 'marcas'
+  | 'redes_sociais'
+  | 'email_padroes'
   | 'usuarios'
   | 'permissoes'
   | 'configuracoes'
@@ -93,7 +96,11 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     label: 'Cadastros',
-    resources: ['empresa', 'cadastro', 'lojas_info', 'nf_faturador', 'nf_faturamento', 'segmentos'],
+    resources: [
+      'empresa', 'cadastro', 'lojas_info', 'nf_faturador', 'nf_faturamento', 'segmentos',
+      // Marcas e Redes Sociais (15/09/2026) — abas novas do grupo Cadastros.
+      'marcas', 'redes_sociais', 'email_padroes',
+    ],
   },
   {
     label: 'Admin',
@@ -138,6 +145,9 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   nf_faturador: 'NF (Faturador)',
   nf_faturamento: 'Faturamento NF',
   segmentos: 'Segmentos',
+  marcas: 'Marcas',
+  redes_sociais: 'Redes Sociais',
+  email_padroes: 'E-mails (padrões)',
   usuarios: 'Usuários',
   permissoes: 'Permissões',
   configuracoes: 'Configurações',

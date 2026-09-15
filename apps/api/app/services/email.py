@@ -25,30 +25,82 @@ def render_otp_html(*, prefix: str, code: str, ttl_minutes: int) -> str:
     )
 
 
+# Imagens inline (assinatura das marcas): {content_id: (mime, bytes)} — no
+# HTML referencia-se `cid:<content_id>`. Vazio/None = e-mail sem imagem.
+InlineImages = dict[str, tuple[str, bytes]]
+
+
 class EmailSender(Protocol):
-    async def send(self, *, to: str, subject: str, html: str, text: str) -> None: ...
+    async def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        html: str,
+        text: str,
+        from_email: str | None = None,
+        from_name: str | None = None,
+        reply_to: tuple[str, str] | None = None,
+        inline_images: InlineImages | None = None,
+    ) -> None: ...
 
 
 class ConsoleEmailSender:
-    """Dev fallback. Logs full email payload to stdout."""
+    """Dev fallback. Logs the email envelope to stdout (never the HTML: os
+    padrões de e-mail das marcas podem carregar dados de cliente)."""
 
-    async def send(self, *, to: str, subject: str, html: str, text: str) -> None:
+    name = "console"
+
+    async def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        text: str,
+        html: str = "",
+        from_email: str | None = None,
+        from_name: str | None = None,
+        reply_to: tuple[str, str] | None = None,
+        inline_images: InlineImages | None = None,
+    ) -> None:
         logger.info(
             "email_console_send",
             to=to,
             subject=subject,
             text=text,
+            from_email=from_email,
+            from_name=from_name,
+            reply_to=reply_to,
+            inline_images=sorted((inline_images or {}).keys()),
             note="Mailjet keys missing — printing instead.",
         )
 
 
 class MailjetEmailSender:
     URL = "https://api.mailjet.com/v3.1/send"
+    name = "mailjet"
 
-    async def send(self, *, to: str, subject: str, html: str, text: str) -> None:
-        from_addr, from_name = _parse_from(_settings.email_from, _settings.email_from_name)
+    async def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        html: str,
+        text: str,
+        from_email: str | None = None,
+        from_name: str | None = None,
+        reply_to: tuple[str, str] | None = None,
+        inline_images: InlineImages | None = None,
+    ) -> None:
+        default_addr, default_name = _parse_from(_settings.email_from, _settings.email_from_name)
+        # Remetente explícito por marca (sac@marca): o endereço/domínio precisa
+        # estar validado na conta Mailjet, senão a API recusa (o caller mostra
+        # o erro). O padrão é sair do EMAIL_FROM com o NOME da marca e
+        # Reply-To no e-mail do SAC — funciona sem validar domínio nenhum.
+        from_addr = (from_email or "").strip() or default_addr
+        from_name_final = (from_name or "").strip() or default_name
         message: dict = {
-            "From": {"Email": from_addr, "Name": from_name},
+            "From": {"Email": from_addr, "Name": from_name_final},
             "To": [{"Email": to}],
             "Subject": subject,
             "TextPart": text,
@@ -57,6 +109,18 @@ class MailjetEmailSender:
         # HTML): sem html, o e-mail sai só com TextPart.
         if html:
             message["HTMLPart"] = html
+        if reply_to and reply_to[0]:
+            message["ReplyTo"] = {"Email": reply_to[0], "Name": reply_to[1] or from_name_final}
+        if inline_images:
+            message["InlinedAttachments"] = [
+                {
+                    "ContentType": mime,
+                    "Filename": f"{cid}.{_ext(mime)}",
+                    "ContentID": cid,
+                    "Base64Content": b64encode(data).decode(),
+                }
+                for cid, (mime, data) in inline_images.items()
+            ]
         payload = {"Messages": [message]}
         auth_raw = f"{_settings.mailjet_api_key}:{_settings.mailjet_secret_key}".encode()
         headers = {
@@ -67,6 +131,12 @@ class MailjetEmailSender:
             r = await client.post(self.URL, json=payload, headers=headers)
             r.raise_for_status()
         logger.info("email_mailjet_sent", to=to, subject=subject)
+
+
+def _ext(mime: str) -> str:
+    return {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}.get(
+        mime, "bin"
+    )
 
 
 def _parse_from(raw: str, default_name: str) -> tuple[str, str]:

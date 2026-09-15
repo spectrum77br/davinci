@@ -40,3 +40,15 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
 async def get_session() -> AsyncIterator[AsyncSession]:
     async with SessionLocal() as session:
         yield session
+
+
+def is_unique_violation(e: Exception) -> bool:
+    """True se a IntegrityError veio de índice/constraint ÚNICO (SQLSTATE 23505).
+
+    Os routers traduzem IntegrityError em 409 "já existe"; sem este filtro um
+    NOT NULL (23502) ou FK (23503) viraria 409 com código de conflito errado.
+    Com asyncpg a exceção real fica em `e.orig.__cause__`.
+    """
+    orig = getattr(e, "orig", None)
+    cause = getattr(orig, "__cause__", None) or orig
+    return getattr(cause, "sqlstate", None) == "23505"
