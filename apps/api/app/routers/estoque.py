@@ -788,6 +788,12 @@ async def list_estoque_pedidos(
         ).all()
         enviado_em_por_bling_id = {r.bling_id: r.occurred_at for r in ev_rows}
 
+    # Chamado de atraso na postagem (lote) por pedido — coluna "Chamado".
+    from app.services import chamados_atraso as _chamados_atraso
+
+    chamado_atraso_por_pedido = await _chamados_atraso.chamados_por_pedido(
+        session, [o.numero for o in orders if o.numero]
+    )
     result: list[dict[str, Any]] = []
     for o in orders:
         check = checks_map.get(str(o.id), {"conferido": False, "observacao": None})
@@ -868,6 +874,9 @@ async def list_estoque_pedidos(
             # pedido), capturado pelo sweep de envio direto da API de cada
             # plataforma. ISO tz-aware (UTC) ou null. A tela só mostra
             # quando status != enviado.
+            # Chamado de atraso na postagem aberto em lote pela própria aba
+            # (services/chamados_atraso): nº/protocolo, canal e status da abertura.
+            "chamado_atraso": chamado_atraso_por_pedido.get(o.numero) if o.numero else None,
             "ship_deadline": (
                 o.marketplace_ship_deadline.isoformat()
                 if o.marketplace_ship_deadline
@@ -1297,6 +1306,80 @@ async def abrir_chamado_pedido(
         por=user.email,
     )
     return {"chamado_id": str(ch.id), "chamado": ch.chamado, "canal": ch.canal}
+
+
+# ──────────────────────── chamados de ATRASO NA POSTAGEM em lote (15/09) ────
+# Eduardo: "um botão onde eu vou selecionar todos os pedidos e o sistema abre
+# um chamado em cada loja — pode juntar: todos ML Aguiar num único chamado".
+# Regras, textos e a ligação pedido→chamado ficam em services/chamados_atraso.
+
+
+class ChamadosAtrasoPreviewIn(BaseModel):
+    pedidos: list[str] = Field(min_length=1, max_length=500)
+    # Escolha manual da tela (pedido → fila | energia) — vence o cálculo.
+    motivos: dict[str, str] = Field(default_factory=dict)
+
+
+class ChamadoAtrasoPedidoIn(BaseModel):
+    pedido_bling: str = Field(min_length=1)
+    motivo: str | None = None
+
+
+class ChamadoAtrasoGrupoIn(BaseModel):
+    chave: str
+    texto: str | None = None
+    pedidos: list[ChamadoAtrasoPedidoIn] = Field(min_length=1, max_length=500)
+
+
+class ChamadosAtrasoAbrirIn(BaseModel):
+    grupos: list[ChamadoAtrasoGrupoIn] = Field(min_length=1, max_length=50)
+
+
+@router.post("/pedidos/chamados-atraso/preview")
+async def chamados_atraso_preview(
+    body: ChamadosAtrasoPreviewIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    _pode_chamado: Annotated[User, Depends(require_permission("chamados", "edit"))] = None,
+) -> dict[str, Any]:
+    """Conferência antes de abrir: por loja, os pedidos selecionados com o
+    atraso calculado, o motivo (fila até 60 min depois do corte, senão queda
+    de energia) e o texto pronto; e o que ficou de fora, com o porquê. Não
+    grava nada. Mesmas DUAS permissões do botão de pedido parado."""
+    from app.services import chamados_atraso
+
+    return await chamados_atraso.montar(
+        session, body.pedidos, tags=_tags_pedidos(user, None), motivos=body.motivos
+    )
+
+
+@router.post("/pedidos/chamados-atraso")
+async def chamados_atraso_abrir(
+    body: ChamadosAtrasoAbrirIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("controle_estoque", "view"))],
+    _pode_chamado: Annotated[User, Depends(require_permission("chamados", "edit"))] = None,
+) -> dict[str, Any]:
+    """Abre UM chamado por loja com os pedidos conferidos na tela (texto
+    editável). Mercado Livre: canal robô — o robô do formulário de ajuda abre
+    e devolve o protocolo. Shopee/TikTok/Amazon: canal manual com o texto
+    pronto pra abrir no Seller Center. Cada pedido fica ligado ao chamado."""
+    from app.services import chamados_atraso
+
+    abertos = await chamados_atraso.abrir(
+        session,
+        [g.model_dump() for g in body.grupos],
+        user=user,
+        tags=_tags_pedidos(user, None),
+    )
+    await session.commit()
+    logger.info(
+        "estoque_chamados_atraso",
+        por=user.email,
+        grupos=len(body.grupos),
+        abertos=sum(1 for a in abertos if a.get("chamado_id")),
+    )
+    return {"abertos": abertos}
 
 
 # ─── SEÇÃO 3: ENVIOS ─────────────────────────────────────────────────────

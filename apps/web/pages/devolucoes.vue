@@ -2464,7 +2464,7 @@ async function backfillAddresses() {
         <div
           v-if="anexosRow.chamado_ml_status"
           class="rounded border px-2 py-1 text-xs"
-          :class="mlStatusClass(anexosRow.chamado_ml_status)"
+          :class="mlStatusClass(anexosRow)"
         >{{ mlStatusLabel(anexosRow) }}</div>
         <div class="flex flex-wrap gap-3">
           <div v-for="a in anexosRow.anexos || []" :key="a.id" class="relative">

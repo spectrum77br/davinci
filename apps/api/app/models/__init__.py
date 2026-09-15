@@ -118,7 +118,7 @@ from app.models.product import (
     ProductCategory,
     ProductLink,
 )
-from app.models.chamado import Chamado, ChamadoAnexo, ChamadoMensagem
+from app.models.chamado import Chamado, ChamadoAnexo, ChamadoMensagem, ChamadoPedido
 from app.models.refund import Refund
 from app.models.segment import Segment, SegmentSpecialDate
 from app.models.situacao_bling import SituacaoBling
@@ -233,6 +233,7 @@ __all__ = [
     "Chamado",
     "ChamadoAnexo",
     "ChamadoMensagem",
+    "ChamadoPedido",
     "Refund",
     "Segment",
     "SegmentSpecialDate",

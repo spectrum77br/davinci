@@ -12,6 +12,7 @@ from sqlalchemy import (
     LargeBinary,
     Numeric,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -188,3 +189,31 @@ class ChamadoAnexo(Base, TimestampMixin):
 
     chamado: Mapped["Chamado"] = relationship(back_populates="anexos")
     mensagem: Mapped["ChamadoMensagem | None"] = relationship(back_populates="anexos")
+
+
+class ChamadoPedido(Base, TimestampMixin):
+    """Pedidos cobertos por um chamado em LOTE — Eduardo 15/09: "não precisa
+    ser um chamado para cada pedido, pode juntar: todos ML Aguiar num único
+    chamado". O chamado guarda só o 1º pedido em `pedido_bling`; aqui ficam
+    todos, com o motivo do atraso de cada um (`fila` = poucos minutos depois
+    do corte, `energia` = horas depois, no mesmo dia), pra aba Pedidos do
+    Controle de Estoque mostrar o chamado em cada linha e não abrir duas vezes.
+    Ver migration 0272 e services/chamados_atraso."""
+
+    __tablename__ = "chamado_pedidos"
+    __table_args__ = (
+        UniqueConstraint("chamado_id", "pedido_bling", name="uq_chamado_pedidos_chamado_pedido"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    chamado_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("chamados.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    pedido_bling: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    pedido_marketplace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corte_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    postagem_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
