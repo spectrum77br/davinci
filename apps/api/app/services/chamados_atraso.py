@@ -5,17 +5,23 @@ sistema abre um chamado em cada loja — não precisa ser um chamado para cada
 pedido, pode juntar: todos ML Aguiar num único chamado. Informando que tivemos
 um problema de atraso: não conseguimos postar devido a fila, se for poucos
 minutos; se for depois de muito tempo do corte, dentro do mesmo dia, é
-problema de falta de energia."
+problema de falta de energia." Mais tarde: "colocar mais um motivo, antes de
+postar: problema para emitir etiqueta" e "abre uma opção para eles escrever o
+motivo que eles querem" (texto livre).
 
 Regras (combinadas 15/09):
 - atraso = postagem confirmada (ledger `bling_envio_evento`) − "despachar até"
   do marketplace (`bling_orders.marketplace_ship_deadline`);
-- até `LIMITE_FILA_MIN` (60) minutos depois do corte → `fila`; mais que isso,
-  no MESMO dia (BRT) → `energia`. Postado no dia seguinte, ainda não postado,
-  sem corte ou no prazo fica FORA (o botão antigo de "pedido parado" continua
-  valendo pro que não foi postado);
-- um chamado por LOJA (conta do marketplace). Loja com os dois motivos no
-  mesmo dia recebe UM chamado só, com cada pedido no seu bloco;
+- postado até `LIMITE_FILA_MIN` (60) min depois do corte → `fila`; mais que
+  isso, no MESMO dia (BRT) → `energia`. Entram marcados;
+- NÃO postado, SEM etiqueta gerada, com corte hoje ou já vencido → `etiqueta`
+  (problema na emissão da etiqueta — abre antes do corte). Entra marcado.
+  Com etiqueta já gerada NÃO recebe esse motivo ("trava", Eduardo);
+- o resto (postado no prazo, postado em outro dia, corte só amanhã, sem corte,
+  não postado com etiqueta gerada) aparece DESMARCADO com a explicação; se a
+  pessoa marcar, o motivo é `outro` (texto livre, por loja) ou outro permitido;
+- um chamado por LOJA (conta do marketplace), com todos os motivos no mesmo
+  chamado, cada um no seu bloco;
 - Mercado Livre: canal `robo` — a abertura fica `pendente` e o robô do
   formulário de ajuda do ML abre e devolve o protocolo. Shopee/TikTok/Amazon:
   não têm API nem robô pra chamado de suporte — o chamado nasce `manual` com
@@ -49,7 +55,9 @@ from app.models import (
 )
 from app.models.company import Store
 from app.models.integration import Integration
+from app.models.nf import NfEtiquetaArquivo
 from app.services import chamados as chamados_svc
+from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
 from app.services.logistica_rules import _ML_PLATAFORMAS
 from app.services.sku_tags import classify_sku_tag
 
@@ -60,11 +68,25 @@ BRT = ZoneInfo("America/Sao_Paulo")
 LIMITE_FILA_MIN = 60
 MOTIVO_FILA = "fila"
 MOTIVO_ENERGIA = "energia"
-MOTIVOS = (MOTIVO_FILA, MOTIVO_ENERGIA)
-MOTIVO_LABEL = {MOTIVO_FILA: "fila na postagem", MOTIVO_ENERGIA: "queda de energia"}
+MOTIVO_ETIQUETA = "etiqueta"
+MOTIVO_OUTRO = "outro"
+MOTIVOS = (MOTIVO_FILA, MOTIVO_ENERGIA, MOTIVO_ETIQUETA, MOTIVO_OUTRO)
+MOTIVO_LABEL = {
+    MOTIVO_FILA: "fila na postagem",
+    MOTIVO_ENERGIA: "queda de energia",
+    MOTIVO_ETIQUETA: "problema na emissão da etiqueta",
+    MOTIVO_OUTRO: "outro motivo",
+}
+# Situações que a regra conclui e que entram DESMARCADAS (a pessoa decide).
+SITUACAO_LABEL = {
+    "no_prazo": "postado dentro do prazo",
+    "dia_seguinte": "postado em outro dia",
+    "corte_futuro": "corte só amanhã ou depois",
+    "sem_corte": "sem horário de corte capturado",
+    "etiqueta_gerada": "não postado, mas a etiqueta já foi gerada",
+}
 
 ORIGEM = "logistica"
-REGRA = "atraso na postagem (Controle de Estoque)"
 
 TEXTO_FILA = (
     "Olá, equipe. Entramos em contato sobre {n} pedido(s) desta conta com despacho "
@@ -93,32 +115,85 @@ TEXTO_ENERGIA = (
     "Obrigado pela atenção."
 )
 
-TEXTO_MISTO = (
-    "Olá, equipe. Entramos em contato sobre {n} pedidos desta conta com despacho "
-    "previsto para {data}, que tiveram a postagem confirmada depois do horário de "
-    "corte.\n\n"
-    "Parte deles ficou poucos minutos além do corte por causa da fila na agência no "
-    "momento da entrega dos pacotes. Os demais atrasaram mais porque tivemos uma queda "
-    "de energia elétrica na operação, que interrompeu a impressão de etiquetas e a "
-    "expedição por algumas horas. Assim que o fornecimento voltou, tudo foi postado "
-    "ainda no mesmo dia.\n\n"
-    "Em todos os casos as etiquetas já estavam geradas e os pacotes foram entregues à "
-    "transportadora no próprio dia. Pedimos que esses atrasos não sejam considerados "
-    "nos indicadores de reputação da loja.\n\n"
-    "Fila na postagem:\n{linhas_fila}\n\n"
-    "Queda de energia:\n{linhas_energia}\n\n"
+TEXTO_ETIQUETA = (
+    "Olá, equipe. Entramos em contato sobre {n} pedido(s) desta conta com despacho "
+    "previsto para {data}, listados abaixo.\n\n"
+    "Estamos com um problema na emissão das etiquetas de envio, que está atrasando a "
+    "impressão e a expedição dos pacotes. Nossa equipe já está trabalhando para "
+    "normalizar, e os pedidos serão postados assim que as etiquetas forem liberadas.\n\n"
+    "Avisamos com antecedência para que o atraso na postagem, causado por essa falha, "
+    "não seja considerado nos indicadores de reputação da loja.\n\n"
+    "Pedidos:\n{linhas}\n\n"
     "Obrigado pela atenção."
 )
+
+TEXTO_OUTRO = (
+    "Olá, equipe. Entramos em contato sobre {n} pedido(s) desta conta com despacho "
+    "previsto para {data}, listados abaixo.\n\n"
+    "{motivo}\n\n"
+    "Pedimos que o atraso na postagem não seja considerado nos indicadores de "
+    "reputação da loja.\n\n"
+    "Pedidos:\n{linhas}\n\n"
+    "Obrigado pela atenção."
+)
+
+# Chamado com mais de um motivo: um parágrafo por motivo + um bloco por motivo.
+MISTO_INTRO = (
+    "Olá, equipe. Entramos em contato sobre {n} pedidos desta conta com despacho "
+    "previsto para {data}, listados abaixo por situação."
+)
+MISTO_PARAGRAFO = {
+    MOTIVO_FILA: (
+        "Parte deles teve a postagem confirmada poucos minutos depois do horário de corte "
+        "por causa da fila na agência no momento da entrega dos pacotes; os volumes "
+        "seguiram no mesmo dia."
+    ),
+    MOTIVO_ENERGIA: (
+        "Outros atrasaram mais porque tivemos uma queda de energia elétrica na operação, "
+        "que interrompeu a impressão de etiquetas e a expedição por algumas horas; assim "
+        "que o fornecimento voltou, foram postados ainda no mesmo dia."
+    ),
+    MOTIVO_ETIQUETA: (
+        "Há também pedidos ainda não postados por um problema na emissão das etiquetas de "
+        "envio; nossa equipe já está trabalhando para normalizar e eles serão postados "
+        "assim que as etiquetas forem liberadas."
+    ),
+}
+MISTO_BLOCO = {
+    MOTIVO_FILA: "Fila na postagem:",
+    MOTIVO_ENERGIA: "Queda de energia:",
+    MOTIVO_ETIQUETA: "Problema na emissão da etiqueta (ainda não postados):",
+    MOTIVO_OUTRO: "Outro motivo:",
+}
+MISTO_FECHO = (
+    "Pedimos que esses atrasos não sejam considerados nos indicadores de reputação da "
+    "loja.\n\n{blocos}\n\nObrigado pela atenção."
+)
+
+
+class AtrasoError(Exception):
+    """Falha de negócio ao abrir (código legível pro endpoint → 422)."""
+
+    def __init__(self, code: str, chave: str | None = None):
+        self.code = code
+        self.chave = chave
+        super().__init__(code)
 
 
 @dataclass
 class PedidoAtraso:
     pedido_bling: str
     pedido_marketplace: str | None
-    corte: str  # ISO (UTC)
-    postagem: str  # ISO (UTC)
-    atraso_min: int
-    motivo: str
+    corte: str | None  # ISO (UTC); None = sem corte capturado
+    postagem: str | None  # ISO (UTC); None = ainda não postado
+    etiqueta_em: str | None  # ISO; quando a etiqueta chegou (None = sem hora)
+    etiqueta_gerada: bool
+    atraso_min: int | None
+    situacao: (
+        str  # fila|energia|etiqueta|no_prazo|dia_seguinte|corte_futuro|sem_corte|etiqueta_gerada
+    )
+    incluir: bool
+    motivo: str  # fila|energia|etiqueta|outro
 
 
 @dataclass
@@ -137,6 +212,7 @@ class Grupo:
     conta: str | None
     canal: str  # robo (ML) | manual (demais)
     pedidos: list[PedidoAtraso]
+    motivo_outro: str
     texto: str
 
 
@@ -146,6 +222,17 @@ def eh_ml(plataforma: str | None) -> bool:
 
 def motivo_por_atraso(atraso_min: int) -> str:
     return MOTIVO_FILA if atraso_min <= LIMITE_FILA_MIN else MOTIVO_ENERGIA
+
+
+def motivos_permitidos(p: PedidoAtraso) -> tuple[str, ...]:
+    """O que a tela pode escolher pra esse pedido. Postado: fila/energia/outro.
+    Não postado sem etiqueta: etiqueta/outro. Não postado com etiqueta gerada:
+    só outro (Eduardo: "com etiqueta gerada não deixa, trava")."""
+    if p.postagem is not None:
+        return (MOTIVO_FILA, MOTIVO_ENERGIA, MOTIVO_OUTRO)
+    if p.etiqueta_gerada:
+        return (MOTIVO_OUTRO,)
+    return (MOTIVO_ETIQUETA, MOTIVO_OUTRO)
 
 
 def _hora(dt: datetime) -> str:
@@ -161,30 +248,47 @@ def _iso(v: str) -> datetime:
 
 
 def linha_pedido(p: PedidoAtraso) -> str:
-    return (
-        f"• {p.pedido_marketplace or p.pedido_bling} — despachar até {_hora(_iso(p.corte))}, "
-        f"postagem confirmada às {_hora(_iso(p.postagem))}"
-    )
+    n = p.pedido_marketplace or p.pedido_bling
+    corte = f"despachar até {_hora(_iso(p.corte))}" if p.corte else ""
+    if p.postagem:
+        post = f"postagem confirmada às {_hora(_iso(p.postagem))}"
+        return f"• {n} — {corte}, {post}" if corte else f"• {n} — {post}"
+    return f"• {n} — {corte} (ainda não postado)" if corte else f"• {n} (ainda não postado)"
 
 
-def render_texto(pedidos: list[PedidoAtraso]) -> str:
-    """Texto do chamado pelo(s) motivo(s) dos pedidos: fila, energia ou misto."""
+def render_texto(pedidos: list[PedidoAtraso], motivo_outro: str | None = None) -> str:
+    """Texto do chamado pelos motivos dos pedidos INCLUÍDOS: um só motivo usa o
+    texto aprovado dele; mais de um vira o texto misto, um bloco por motivo."""
+    pedidos = [p for p in pedidos if p.incluir]
     if not pedidos:
         return ""
-    datas = sorted({_data(_iso(p.corte)) for p in pedidos}, key=lambda d: d[6:] + d[3:5] + d[:2])
-    data = " e ".join(datas) if len(datas) <= 2 else ", ".join(datas)
-    motivos = {p.motivo for p in pedidos}
-    fila = [linha_pedido(p) for p in pedidos if p.motivo == MOTIVO_FILA]
-    energia = [linha_pedido(p) for p in pedidos if p.motivo == MOTIVO_ENERGIA]
-    if motivos == {MOTIVO_FILA}:
-        return TEXTO_FILA.format(n=len(pedidos), data=data, linhas="\n".join(fila))
-    if motivos == {MOTIVO_ENERGIA}:
-        return TEXTO_ENERGIA.format(n=len(pedidos), data=data, linhas="\n".join(energia))
-    return TEXTO_MISTO.format(
-        n=len(pedidos),
-        data=data,
-        linhas_fila="\n".join(fila),
-        linhas_energia="\n".join(energia),
+    datas = sorted(
+        {_data(_iso(p.corte)) for p in pedidos if p.corte},
+        key=lambda d: d[6:] + d[3:5] + d[:2],
+    )
+    data = (" e ".join(datas) if len(datas) <= 2 else ", ".join(datas)) or "hoje"
+    livre = (motivo_outro or "").strip()
+    por_motivo = {m: [linha_pedido(p) for p in pedidos if p.motivo == m] for m in MOTIVOS}
+    presentes = [m for m in MOTIVOS if por_motivo[m]]
+    n = len(pedidos)
+    if len(presentes) == 1:
+        m = presentes[0]
+        linhas = "\n".join(por_motivo[m])
+        if m == MOTIVO_FILA:
+            return TEXTO_FILA.format(n=n, data=data, linhas=linhas)
+        if m == MOTIVO_ENERGIA:
+            return TEXTO_ENERGIA.format(n=n, data=data, linhas=linhas)
+        if m == MOTIVO_ETIQUETA:
+            return TEXTO_ETIQUETA.format(n=n, data=data, linhas=linhas)
+        return TEXTO_OUTRO.format(n=n, data=data, motivo=livre, linhas=linhas)
+    paragrafos = [MISTO_PARAGRAFO[m] if m != MOTIVO_OUTRO else livre for m in presentes]
+    blocos = "\n\n".join(f"{MISTO_BLOCO[m]}\n" + "\n".join(por_motivo[m]) for m in presentes)
+    return (
+        MISTO_INTRO.format(n=n, data=data)
+        + "\n\n"
+        + "\n\n".join(x for x in paragrafos if x)
+        + "\n\n"
+        + MISTO_FECHO.format(blocos=blocos)
     )
 
 
@@ -248,22 +352,72 @@ async def _com_chamado_aberto(session: AsyncSession, numeros: list[str]) -> dict
     return {r.pedido_bling: (r.chamado or str(r.id)[:8]) for r in rows}
 
 
+async def _etiquetas(session: AsyncSession, numeros: list[str]) -> dict[str, datetime]:
+    """pedido → quando a etiqueta chegou (nf_etiqueta_arquivo com blob), a
+    mesma fonte da coluna Etiqueta da aba Pedidos."""
+    if not numeros:
+        return {}
+    rows = (
+        await session.execute(
+            select(NfEtiquetaArquivo.pedido_bling, NfEtiquetaArquivo.created_at).where(
+                NfEtiquetaArquivo.pedido_bling.in_(numeros),
+                func.length(NfEtiquetaArquivo.blob) > 0,
+            )
+        )
+    ).all()
+    return {r.pedido_bling: r.created_at for r in rows}
+
+
+def classificar(
+    *,
+    corte: datetime | None,
+    postagem: datetime | None,
+    etiqueta_gerada: bool,
+    hoje: datetime,
+) -> tuple[str, bool, str, int | None]:
+    """(situação, entra marcado?, motivo padrão, atraso em minutos)."""
+    if postagem is not None:
+        if corte is None:
+            return "sem_corte", False, MOTIVO_OUTRO, None
+        atraso = int((postagem - corte).total_seconds() // 60)
+        if atraso <= 0:
+            return "no_prazo", False, MOTIVO_OUTRO, atraso
+        if postagem.astimezone(BRT).date() != corte.astimezone(BRT).date():
+            return "dia_seguinte", False, MOTIVO_OUTRO, atraso
+        m = motivo_por_atraso(atraso)
+        return m, True, m, atraso
+    if corte is None:
+        return "sem_corte", False, MOTIVO_OUTRO, None
+    if corte.astimezone(BRT).date() > hoje.astimezone(BRT).date():
+        return "corte_futuro", False, MOTIVO_OUTRO, None
+    if etiqueta_gerada:
+        return "etiqueta_gerada", False, MOTIVO_OUTRO, None
+    return MOTIVO_ETIQUETA, True, MOTIVO_ETIQUETA, None
+
+
 async def montar(
     session: AsyncSession,
     numeros: list[str],
     *,
     tags: list[str] | None,
     motivos: dict[str, str] | None = None,
+    incluir: dict[str, bool] | None = None,
+    motivo_outro: dict[str, str] | None = None,
+    agora: datetime | None = None,
 ) -> dict:
     """Conferência: classifica cada pedido selecionado e monta um grupo por
-    loja com o texto pronto. `motivos` = escolha manual da tela (pedido →
-    fila|energia), que vence o cálculo. Não grava nada."""
+    loja com o texto pronto. `motivos`/`incluir` = escolhas da tela (pedido →
+    motivo | marcado), que vencem o cálculo quando permitidas; `motivo_outro`
+    = texto livre por loja (chave). Não grava nada."""
+    agora = agora or datetime.now(BRT)
     limpos: list[str] = []
     for n in numeros:
         n = (n or "").strip()
         if n and n not in limpos:
             limpos.append(n)
     motivos = {str(k).strip(): v for k, v in (motivos or {}).items() if v in MOTIVOS}
+    incluir = {str(k).strip(): bool(v) for k, v in (incluir or {}).items()}
+    motivo_outro = {str(k): str(v or "") for k, v in (motivo_outro or {}).items()}
     excluidos: list[Excluido] = []
     if not limpos:
         return {"grupos": [], "excluidos": []}
@@ -300,6 +454,7 @@ async def montar(
         session, {str(rows[0].loja) for rows in por_numero.values() if rows[0].loja}
     )
     ja_abertos = await _com_chamado_aberto(session, limpos)
+    etiquetas = await _etiquetas(session, limpos)
 
     grupos: dict[str, Grupo] = {}
     for numero in limpos:
@@ -332,23 +487,29 @@ async def montar(
             )
             continue
         corte = cabeca.marketplace_ship_deadline
-        if corte is None:
-            excluidos.append(Excluido(numero, mk, "sem_corte", "sem horário de corte capturado"))
-            continue
         postagem = postagem_por_bling.get(int(cabeca.bling_id)) if cabeca.bling_id else None
-        if postagem is None:
-            excluidos.append(Excluido(numero, mk, "nao_postado", "postagem ainda não confirmada"))
-            continue
-        atraso_min = int((postagem - corte).total_seconds() // 60)
-        if atraso_min <= 0:
-            excluidos.append(Excluido(numero, mk, "no_prazo", "postado dentro do prazo"))
-            continue
-        if postagem.astimezone(BRT).date() != corte.astimezone(BRT).date():
-            excluidos.append(
-                Excluido(numero, mk, "dia_seguinte", "postado em outro dia (fora da regra)")
-            )
-            continue
-        motivo = motivos.get(numero) or motivo_por_atraso(atraso_min)
+        etiqueta_em = etiquetas.get(numero)
+        etiqueta_gerada = etiqueta_em is not None or (
+            (cabeca.situacao or "") in SITUACOES_ENVIADO_ETIQUETA_STR
+        )
+        situacao, marcado, motivo, atraso_min = classificar(
+            corte=corte, postagem=postagem, etiqueta_gerada=etiqueta_gerada, hoje=agora
+        )
+        p = PedidoAtraso(
+            pedido_bling=numero,
+            pedido_marketplace=mk,
+            corte=corte.isoformat() if corte else None,
+            postagem=postagem.isoformat() if postagem else None,
+            etiqueta_em=etiqueta_em.isoformat() if etiqueta_em else None,
+            etiqueta_gerada=etiqueta_gerada,
+            atraso_min=atraso_min,
+            situacao=situacao,
+            incluir=incluir.get(numero, marcado),
+            motivo=motivo,
+        )
+        escolhido = motivos.get(numero)
+        if escolhido in motivos_permitidos(p):
+            p.motivo = escolhido
         chave = str(cabeca.loja or "")
         info = lojas.get(chave, {})
         plataforma = info.get("plataforma")
@@ -365,22 +526,14 @@ async def montar(
                 conta=info.get("conta"),
                 canal="robo" if eh_ml(plataforma) else "manual",
                 pedidos=[],
+                motivo_outro=motivo_outro.get(chave, ""),
                 texto="",
             )
-        grupos[chave].pedidos.append(
-            PedidoAtraso(
-                pedido_bling=numero,
-                pedido_marketplace=mk,
-                corte=corte.isoformat(),
-                postagem=postagem.isoformat(),
-                atraso_min=atraso_min,
-                motivo=motivo,
-            )
-        )
+        grupos[chave].pedidos.append(p)
     saida = []
     for g in grupos.values():
-        g.pedidos.sort(key=lambda p: p.postagem)
-        g.texto = render_texto(g.pedidos)
+        g.pedidos.sort(key=lambda p: (not p.incluir, p.postagem or "", p.corte or ""))
+        g.texto = render_texto(g.pedidos, g.motivo_outro)
         saida.append(asdict(g))
     saida.sort(key=lambda g: g["loja"].lower())
     return {"grupos": saida, "excluidos": [asdict(e) for e in excluidos]}
@@ -395,25 +548,39 @@ async def abrir(
 ) -> list[dict]:
     """Abre os chamados conferidos na tela: reclassifica os pedidos (a regra
     vale de novo — pedido que ganhou chamado nesse meio-tempo fica fora), usa
-    o texto editado na tela quando veio, senão o texto padrão. NÃO commita."""
+    o texto editado na tela quando veio, senão o texto padrão. Só os pedidos
+    marcados entram. NÃO commita."""
     abertos: list[dict] = []
     for gin in grupos_in:
-        pedidos_in = gin.get("pedidos") or []
+        chave_in = str(gin.get("chave") or "")
+        pedidos_in = [p for p in (gin.get("pedidos") or []) if p.get("incluir", True)]
         numeros = [str(p.get("pedido_bling") or "").strip() for p in pedidos_in]
         motivos = {
             str(p.get("pedido_bling") or "").strip(): p.get("motivo")
             for p in pedidos_in
             if p.get("motivo") in MOTIVOS
         }
-        conferido = await montar(session, numeros, tags=tags, motivos=motivos)
+        livre = (gin.get("motivo_outro") or "").strip()
+        conferido = await montar(
+            session,
+            numeros,
+            tags=tags,
+            motivos=motivos,
+            incluir=dict.fromkeys(numeros, True),
+            motivo_outro={chave_in: livre},
+        )
         texto_tela = (gin.get("texto") or "").strip()
         for g in conferido["grupos"]:
-            pedidos = [PedidoAtraso(**p) for p in g["pedidos"]]
+            pedidos = [PedidoAtraso(**p) for p in g["pedidos"] if p["incluir"]]
+            if not pedidos:
+                continue
+            if any(p.motivo == MOTIVO_OUTRO for p in pedidos) and not livre:
+                raise AtrasoError("motivo_outro_obrigatorio", g["chave"])
             # Texto da tela só vale pro grupo que a tela mostrou (mesma loja).
             texto = (
                 texto_tela
-                if texto_tela and g["chave"] == str(gin.get("chave") or "")
-                else render_texto(pedidos)
+                if texto_tela and g["chave"] == chave_in
+                else render_texto(pedidos, livre)
             )
             ch = await _abrir_grupo(session, g, pedidos, texto, user=user)
             abertos.append(
@@ -426,7 +593,7 @@ async def abrir(
                 }
             )
         for e in conferido["excluidos"]:
-            abertos.append({"chave": str(gin.get("chave") or ""), "excluido": e})
+            abertos.append({"chave": chave_in, "excluido": e})
     return abertos
 
 
@@ -436,7 +603,7 @@ async def _abrir_grupo(
     primeiro = pedidos[0]
     robo = g["canal"] == "robo"
     nums = ", ".join(p.pedido_marketplace or p.pedido_bling for p in pedidos)
-    datas = sorted({_data(_iso(p.corte)) for p in pedidos})
+    datas = sorted({_data(_iso(p.corte)) for p in pedidos if p.corte}) or ["hoje"]
     resumo = ", ".join(
         f"{sum(1 for p in pedidos if p.motivo == m)} {MOTIVO_LABEL[m]}"
         for m in MOTIVOS
@@ -488,8 +655,8 @@ async def _abrir_grupo(
                 pedido_bling=p.pedido_bling,
                 pedido_marketplace=p.pedido_marketplace,
                 motivo=p.motivo,
-                corte_at=_iso(p.corte),
-                postagem_at=_iso(p.postagem),
+                corte_at=_iso(p.corte) if p.corte else None,
+                postagem_at=_iso(p.postagem) if p.postagem else None,
             )
         )
     logger.info(
@@ -528,7 +695,8 @@ async def chamados_por_pedido(session: AsyncSession, numeros: list[str]) -> dict
             await session.execute(
                 select(ChamadoMensagem.chamado_id, ChamadoMensagem.status)
                 .where(
-                    ChamadoMensagem.chamado_id.in_(list(ids)), ChamadoMensagem.tipo == "abertura"
+                    ChamadoMensagem.chamado_id.in_(list(ids)),
+                    ChamadoMensagem.tipo == "abertura",
                 )
                 .order_by(ChamadoMensagem.created_at.desc())
             )

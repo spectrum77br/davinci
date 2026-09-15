@@ -1212,10 +1212,11 @@ const pedidosFilteredGrouped = computed<PedidoRowWithGroup[]>(() => {
 // ── Chamados de ATRASO NA POSTAGEM em lote (Eduardo, 15/09) ─────────────
 // "Selecionar todos os pedidos e o sistema abre um chamado em cada loja —
 // pode juntar: todos ML Aguiar num único chamado". Mesmas caixinhas da
-// impressão → conferência por loja (atraso, motivo fila/energia, texto
-// editável) → um chamado por loja. ML sai pelo robô do formulário de ajuda;
-// Shopee/TikTok/Amazon ficam registrados pra abrir na mão (sem API).
-// Regras e textos: apps/api services/chamados_atraso.
+// impressão → conferência por loja (cada pedido com marcado/desmarcado,
+// motivo fila/energia/etiqueta/outro e texto editável) → um chamado por
+// loja. ML sai pelo robô do formulário de ajuda; Shopee/TikTok/Amazon ficam
+// registrados pra abrir na mão (sem API). Regras e textos: apps/api
+// services/chamados_atraso.
 type ChamadoAtrasoInfo = {
   chamado_id: string
   chamado: string | null
@@ -1224,13 +1225,17 @@ type ChamadoAtrasoInfo = {
   status: string | null
   motivo: string | null
 }
-type AtrasoMotivo = 'fila' | 'energia'
+type AtrasoMotivo = 'fila' | 'energia' | 'etiqueta' | 'outro'
 type AtrasoPedido = {
   pedido_bling: string
   pedido_marketplace: string | null
-  corte: string
-  postagem: string
-  atraso_min: number
+  corte: string | null
+  postagem: string | null
+  etiqueta_em: string | null
+  etiqueta_gerada: boolean
+  atraso_min: number | null
+  situacao: string
+  incluir: boolean
   motivo: AtrasoMotivo
 }
 type AtrasoGrupo = {
@@ -1240,6 +1245,7 @@ type AtrasoGrupo = {
   conta: string | null
   canal: 'robo' | 'manual'
   pedidos: AtrasoPedido[]
+  motivo_outro: string
   texto: string
   _editado?: boolean
 }
@@ -1261,30 +1267,59 @@ const atraso = reactive({
   excluidos: [] as AtrasoExcluido[],
   abertos: null as AtrasoAberto[] | null,
 })
-const ATRASO_EXCLUSAO: Record<string, string> = {
+const ATRASO_MOTIVO_LABEL: Record<AtrasoMotivo, string> = {
+  fila: 'fila na postagem',
+  energia: 'queda de energia',
+  etiqueta: 'problema na emissão da etiqueta',
+  outro: 'outro (escrever o motivo)',
+}
+// O que a regra concluiu pro pedido que entra DESMARCADO (a pessoa decide).
+const ATRASO_SITUACAO: Record<string, string> = {
   no_prazo: 'postado dentro do prazo',
-  dia_seguinte: 'postado em outro dia — fora da regra',
-  nao_postado: 'postagem ainda não confirmada — use o botão de pedido parado',
+  dia_seguinte: 'postado em outro dia',
+  corte_futuro: 'corte só amanhã ou depois',
   sem_corte: 'sem horário de corte capturado',
+  etiqueta_gerada: 'não postado, mas a etiqueta já foi gerada',
+}
+// Pedido que não entra de jeito nenhum.
+const ATRASO_EXCLUSAO: Record<string, string> = {
   sem_numero_marketplace: 'sem nº do pedido na plataforma',
   ja_tem_chamado: 'já tem chamado de atraso aberto',
   fora_da_sua_tag: 'pedido de outra operação',
   pedido_nao_encontrado: 'pedido não encontrado',
+  motivo_outro_obrigatorio: 'escreva o motivo do chamado (opção "outro")',
 }
 const _DATA_HORA_BRT = new Intl.DateTimeFormat('pt-BR', {
   timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
 })
-function fmtDataHoraBrt(iso: string) {
-  return _DATA_HORA_BRT.format(new Date(iso))
+function fmtDataHoraBrt(iso: string | null) {
+  return iso ? _DATA_HORA_BRT.format(new Date(iso)) : '—'
 }
-function fmtAtraso(min: number) {
+function fmtAtraso(min: number | null) {
+  if (min === null || min === undefined) return '—'
+  if (min <= 0) return 'no prazo'
   return min < 60 ? `${min} min` : `${Math.floor(min / 60)}h${String(min % 60).padStart(2, '0')}`
 }
+// Espelho de services/chamados_atraso.motivos_permitidos: postado → fila/
+// energia/outro; não postado sem etiqueta → etiqueta/outro; com etiqueta
+// gerada → só outro (Eduardo: "com etiqueta gerada não deixa, trava").
+function motivosPermitidos(p: AtrasoPedido): AtrasoMotivo[] {
+  if (p.postagem) return ['fila', 'energia', 'outro']
+  if (p.etiqueta_gerada) return ['outro']
+  return ['etiqueta', 'outro']
+}
+function grupoPrecisaMotivoOutro(g: AtrasoGrupo): boolean {
+  return g.pedidos.some(p => p.incluir && p.motivo === 'outro')
+}
+const atrasoGruposComPedidos = computed(() => atraso.grupos.filter(g => g.pedidos.some(p => p.incluir)))
+const atrasoFaltaMotivoOutro = computed(() =>
+  atraso.grupos.some(g => grupoPrecisaMotivoOutro(g) && !g.motivo_outro.trim()),
+)
 function chamadoAtrasoErro(e: any): string {
   const detail = e?.data?.detail
   const code = detail?.code as string | undefined
   if (e?.status === 403 || e?.statusCode === 403) return 'Sem permissão: é preciso poder editar chamados.'
-  return (code && CHAMADO_ERROS[code]) || detail?.message || 'Não deu para montar os chamados agora. Tente de novo em instantes.'
+  return (code && (ATRASO_EXCLUSAO[code] || CHAMADO_ERROS[code])) || detail?.message || 'Não deu para montar os chamados agora. Tente de novo em instantes.'
 }
 async function prepararChamadosAtraso() {
   const pedidos = pedidosComEtiqueta.value.filter(p => etiquetasSel.value.has(p))
@@ -1308,37 +1343,57 @@ async function prepararChamadosAtraso() {
     atraso.loading = false
   }
 }
-// Trocou o motivo de um pedido: refaz o texto padrão do grupo — a não ser que
-// a pessoa já tenha mexido no texto à mão.
-async function mudarMotivoAtraso(grupo: AtrasoGrupo, pedido: AtrasoPedido, motivo: AtrasoMotivo) {
-  pedido.motivo = motivo
+// Mudou marcado/motivo/texto livre: refaz o texto padrão do grupo — a não
+// ser que a pessoa já tenha mexido no texto à mão.
+let atrasoRegerarTimer: number | null = null
+function regerarTextoAtraso(grupo: AtrasoGrupo) {
   if (grupo._editado) return
-  try {
-    const res = await api<{ grupos: AtrasoGrupo[] }>('/api/estoque/pedidos/chamados-atraso/preview', {
-      method: 'POST',
-      body: {
-        pedidos: grupo.pedidos.map(p => p.pedido_bling),
-        motivos: Object.fromEntries(grupo.pedidos.map(p => [p.pedido_bling, p.motivo])),
-      },
-    })
-    const novo = res.grupos.find(g => g.chave === grupo.chave)
-    if (novo) grupo.texto = novo.texto
-  } catch {
-    // mantém o texto atual
-  }
+  if (atrasoRegerarTimer !== null) window.clearTimeout(atrasoRegerarTimer)
+  atrasoRegerarTimer = window.setTimeout(async () => {
+    try {
+      const res = await api<{ grupos: AtrasoGrupo[] }>('/api/estoque/pedidos/chamados-atraso/preview', {
+        method: 'POST',
+        body: {
+          pedidos: grupo.pedidos.map(p => p.pedido_bling),
+          motivos: Object.fromEntries(grupo.pedidos.map(p => [p.pedido_bling, p.motivo])),
+          incluir: Object.fromEntries(grupo.pedidos.map(p => [p.pedido_bling, p.incluir])),
+          motivo_outro: { [grupo.chave]: grupo.motivo_outro },
+        },
+      })
+      const novo = res.grupos.find(g => g.chave === grupo.chave)
+      if (novo && !grupo._editado) grupo.texto = novo.texto
+    } catch {
+      // mantém o texto atual
+    }
+  }, 350)
+}
+function mudarMotivoAtraso(grupo: AtrasoGrupo, pedido: AtrasoPedido, motivo: AtrasoMotivo) {
+  pedido.motivo = motivo
+  regerarTextoAtraso(grupo)
+}
+function mudarIncluirAtraso(grupo: AtrasoGrupo, pedido: AtrasoPedido, incluir: boolean) {
+  pedido.incluir = incluir
+  // Marcou um que a regra deixou de fora sem motivo válido: cai em "outro".
+  if (incluir && !motivosPermitidos(pedido).includes(pedido.motivo)) pedido.motivo = motivosPermitidos(pedido)[0]
+  regerarTextoAtraso(grupo)
 }
 async function confirmarChamadosAtraso() {
-  if (atraso.enviando || atraso.loading || !atraso.grupos.length) return
+  if (atraso.enviando || atraso.loading || !atrasoGruposComPedidos.value.length) return
+  if (atrasoFaltaMotivoOutro.value) {
+    atraso.erro = ATRASO_EXCLUSAO.motivo_outro_obrigatorio
+    return
+  }
   atraso.enviando = true
   atraso.erro = null
   try {
     const res = await api<{ abertos: AtrasoAberto[] }>('/api/estoque/pedidos/chamados-atraso', {
       method: 'POST',
       body: {
-        grupos: atraso.grupos.map(g => ({
+        grupos: atrasoGruposComPedidos.value.map(g => ({
           chave: g.chave,
           texto: g.texto,
-          pedidos: g.pedidos.map(p => ({ pedido_bling: p.pedido_bling, motivo: p.motivo })),
+          motivo_outro: g.motivo_outro,
+          pedidos: g.pedidos.map(p => ({ pedido_bling: p.pedido_bling, motivo: p.motivo, incluir: p.incluir })),
         })),
       },
     })
@@ -2538,12 +2593,12 @@ async function conferirTodos() {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       @click.self="fecharAtraso"
     >
-      <div class="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border bg-background shadow-2xl">
+      <div class="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border bg-background shadow-2xl">
         <div class="flex items-start justify-between gap-3 border-b px-5 py-3">
           <div>
             <div class="text-base font-semibold">Chamados de atraso na postagem</div>
             <div class="text-xs text-muted-foreground">
-              Um chamado por loja. Até 60 min depois do corte = fila na postagem; mais que isso, no mesmo dia = queda de energia. Confira e ajuste antes de enviar.
+              Um chamado por loja. Postado até 60 min depois do corte = fila na postagem; mais que isso, no mesmo dia = queda de energia; ainda não postado e sem etiqueta = problema na emissão da etiqueta. O que a regra deixou de fora aparece desmarcado: marque e escolha o motivo se quiser incluir. Confira e ajuste o texto antes de enviar.
             </div>
           </div>
           <button type="button" class="rounded-md border px-2 py-1 text-xs hover:bg-muted" @click="fecharAtraso">fechar</button>
@@ -2572,12 +2627,12 @@ async function conferirTodos() {
 
           <template v-else-if="!atraso.loading">
             <div v-if="!atraso.grupos.length && !atraso.erro" class="text-muted-foreground">
-              Nenhum dos pedidos selecionados se encaixa na regra. Veja abaixo o motivo de cada um.
+              Nenhum dos pedidos selecionados pode entrar. Veja abaixo o motivo de cada um.
             </div>
             <div v-for="g in atraso.grupos" :key="g.chave" class="rounded-md border">
               <div class="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-3 py-2">
                 <span class="font-semibold">{{ g.loja }}</span>
-                <span class="text-xs text-muted-foreground">{{ g.pedidos.length }} pedido(s)</span>
+                <span class="text-xs text-muted-foreground">{{ g.pedidos.filter(p => p.incluir).length }} de {{ g.pedidos.length }} pedido(s) no chamado</span>
                 <span
                   class="ml-auto rounded px-1.5 py-0.5 text-[11px]"
                   :class="g.canal === 'robo' ? 'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'"
@@ -2588,42 +2643,69 @@ async function conferirTodos() {
               <table class="w-full text-xs">
                 <thead>
                   <tr class="text-[10px] uppercase tracking-wide text-muted-foreground">
-                    <th class="px-3 py-1 text-left">Pedido</th>
+                    <th class="px-2 py-1 text-center">incluir</th>
+                    <th class="px-2 py-1 text-left">Pedido</th>
                     <th class="px-2 py-1 text-left">Corte</th>
+                    <th class="px-2 py-1 text-left">Etiqueta</th>
                     <th class="px-2 py-1 text-left">Postagem</th>
                     <th class="px-2 py-1 text-right">Atraso</th>
                     <th class="px-2 py-1 text-left">Motivo</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="p in g.pedidos" :key="p.pedido_bling" class="border-t">
-                    <td class="px-3 py-1 font-mono">{{ p.pedido_marketplace || p.pedido_bling }}</td>
+                  <tr v-for="p in g.pedidos" :key="p.pedido_bling" class="border-t" :class="{ 'opacity-60': !p.incluir }">
+                    <td class="px-2 py-1 text-center">
+                      <input type="checkbox" class="cursor-pointer" :checked="p.incluir" @change="(e) => mudarIncluirAtraso(g, p, (e.target as HTMLInputElement).checked)" />
+                    </td>
+                    <td class="px-2 py-1">
+                      <div class="font-mono">{{ p.pedido_marketplace || p.pedido_bling }}</div>
+                      <div v-if="ATRASO_SITUACAO[p.situacao]" class="text-[10px] text-muted-foreground">{{ ATRASO_SITUACAO[p.situacao] }}</div>
+                    </td>
                     <td class="px-2 py-1">{{ fmtDataHoraBrt(p.corte) }}</td>
-                    <td class="px-2 py-1">{{ fmtDataHoraBrt(p.postagem) }}</td>
+                    <td class="px-2 py-1">
+                      <span v-if="p.etiqueta_em">{{ fmtDataHoraBrt(p.etiqueta_em) }}</span>
+                      <span v-else-if="p.etiqueta_gerada">gerada</span>
+                      <span v-else class="text-muted-foreground">sem etiqueta</span>
+                    </td>
+                    <td class="px-2 py-1">
+                      <span v-if="p.postagem">{{ fmtDataHoraBrt(p.postagem) }}</span>
+                      <span v-else class="text-red-600 dark:text-red-400">não postado</span>
+                    </td>
                     <td class="px-2 py-1 text-right tabular-nums">{{ fmtAtraso(p.atraso_min) }}</td>
                     <td class="px-2 py-1">
                       <select
                         :value="p.motivo"
-                        class="h-7 rounded border bg-background px-1 text-xs"
+                        :disabled="!p.incluir"
+                        class="h-7 rounded border bg-background px-1 text-xs disabled:opacity-50"
                         @change="(e) => mudarMotivoAtraso(g, p, (e.target as HTMLSelectElement).value as AtrasoMotivo)"
                       >
-                        <option value="fila">fila na postagem</option>
-                        <option value="energia">queda de energia</option>
+                        <option v-for="m in motivosPermitidos(p)" :key="m" :value="m">{{ ATRASO_MOTIVO_LABEL[m] }}</option>
                       </select>
                     </td>
                   </tr>
                 </tbody>
               </table>
+              <div v-if="grupoPrecisaMotivoOutro(g)" class="border-t px-3 py-2">
+                <div class="mb-1 text-[11px] font-medium">Descreva o motivo (vai no texto do chamado, no bloco "Outro motivo") <span class="text-red-500">*</span></div>
+                <textarea
+                  v-model="g.motivo_outro"
+                  rows="2"
+                  class="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                  :class="!g.motivo_outro.trim() ? 'ring-1 ring-red-500/60' : ''"
+                  placeholder="ex.: a transportadora não fez a coleta hoje; os pacotes já estão embalados e saem na próxima coleta"
+                  @input="regerarTextoAtraso(g)"
+                />
+              </div>
               <div class="border-t px-3 py-2">
                 <div class="mb-1 flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>Texto do chamado (pode editar)</span>
-                  <span v-if="g._editado">editado à mão — trocar o motivo não refaz o texto</span>
+                  <span v-if="g._editado">editado à mão — mudar motivo ou marcação não refaz o texto</span>
                 </div>
                 <textarea v-model="g.texto" rows="9" class="w-full rounded-md border bg-background px-2 py-1.5 font-mono text-xs" @input="g._editado = true" />
               </div>
             </div>
             <div v-if="atraso.excluidos.length" class="rounded-md border border-dashed px-3 py-2 text-xs">
-              <div class="mb-1 font-semibold">Ficam de fora ({{ atraso.excluidos.length }})</div>
+              <div class="mb-1 font-semibold">Não podem entrar ({{ atraso.excluidos.length }})</div>
               <ul class="space-y-0.5">
                 <li v-for="e in atraso.excluidos" :key="e.pedido_bling">
                   <span class="font-mono">{{ e.pedido_marketplace || e.pedido_bling }}</span> — {{ ATRASO_EXCLUSAO[e.motivo] || e.detalhe }}
@@ -2640,12 +2722,13 @@ async function conferirTodos() {
             v-if="!atraso.abertos"
             type="button"
             class="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-semibold text-primary-foreground disabled:opacity-50"
-            :disabled="atraso.enviando || atraso.loading || !atraso.grupos.length"
+            :disabled="atraso.enviando || atraso.loading || !atrasoGruposComPedidos.length || atrasoFaltaMotivoOutro"
+            :title="atrasoFaltaMotivoOutro ? 'Escreva o motivo do chamado (opção outro)' : ''"
             @click="confirmarChamadosAtraso"
           >
             <Loader2 v-if="atraso.enviando" class="size-4 animate-spin" />
             <LifeBuoy v-else class="size-4" />
-            Abrir {{ atraso.grupos.length }} chamado(s)
+            Abrir {{ atrasoGruposComPedidos.length }} chamado(s)
           </button>
         </div>
       </div>

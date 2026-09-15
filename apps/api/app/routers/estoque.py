@@ -1316,18 +1316,24 @@ async def abrir_chamado_pedido(
 
 class ChamadosAtrasoPreviewIn(BaseModel):
     pedidos: list[str] = Field(min_length=1, max_length=500)
-    # Escolha manual da tela (pedido → fila | energia) — vence o cálculo.
+    # Escolhas da tela, que vencem o cálculo quando permitidas: motivo por
+    # pedido (fila | energia | etiqueta | outro), marcado/desmarcado por pedido
+    # e o texto livre do motivo "outro" por loja (chave).
     motivos: dict[str, str] = Field(default_factory=dict)
+    incluir: dict[str, bool] = Field(default_factory=dict)
+    motivo_outro: dict[str, str] = Field(default_factory=dict)
 
 
 class ChamadoAtrasoPedidoIn(BaseModel):
     pedido_bling: str = Field(min_length=1)
     motivo: str | None = None
+    incluir: bool = True
 
 
 class ChamadoAtrasoGrupoIn(BaseModel):
     chave: str
     texto: str | None = None
+    motivo_outro: str | None = None
     pedidos: list[ChamadoAtrasoPedidoIn] = Field(min_length=1, max_length=500)
 
 
@@ -1349,7 +1355,12 @@ async def chamados_atraso_preview(
     from app.services import chamados_atraso
 
     return await chamados_atraso.montar(
-        session, body.pedidos, tags=_tags_pedidos(user, None), motivos=body.motivos
+        session,
+        body.pedidos,
+        tags=_tags_pedidos(user, None),
+        motivos=body.motivos,
+        incluir=body.incluir,
+        motivo_outro=body.motivo_outro,
     )
 
 
@@ -1366,12 +1377,16 @@ async def chamados_atraso_abrir(
     pronto pra abrir no Seller Center. Cada pedido fica ligado ao chamado."""
     from app.services import chamados_atraso
 
-    abertos = await chamados_atraso.abrir(
-        session,
-        [g.model_dump() for g in body.grupos],
-        user=user,
-        tags=_tags_pedidos(user, None),
-    )
+    try:
+        abertos = await chamados_atraso.abrir(
+            session,
+            [g.model_dump() for g in body.grupos],
+            user=user,
+            tags=_tags_pedidos(user, None),
+        )
+    except chamados_atraso.AtrasoError as e:
+        await session.rollback()
+        raise HTTPException(422, detail={"code": e.code, "chave": e.chave}) from e
     await session.commit()
     logger.info(
         "estoque_chamados_atraso",
