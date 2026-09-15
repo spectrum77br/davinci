@@ -13,8 +13,14 @@ import { log } from "./log";
  *
  * Regras (do próprio Melhor Envio): quanto antes, maior a chance; o frete não
  * volta; não dá pra desfazer. Por isso a TRAVA: sem MELHORENVIO_CALIBRATED=true
- * o fluxo roda em modo SECO — encontra o envio, abre as ações, acha os botões e
- * PARA antes do "Solicitar", devolvendo o que viu (pra calibrar os seletores).
+ * o fluxo roda em modo SECO — encontra o envio, abre as ações, LOCALIZA o botão
+ * "Suspender entrega" e PARA ANTES DE CLICAR NELE, devolvendo print e a lista
+ * de botões da tela (pra calibrar os seletores).
+ *
+ * A trava fica antes desse clique de propósito: ninguém verificou ainda que o
+ * Melhor Envio mostra uma confirmação depois dele. Se não mostrar, clicar JÁ É
+ * suspender. Calibrar a etapa final exige um humano fazendo uma vez, de olho,
+ * num envio que ele realmente queira suspender.
  *
  * Toda lógica de DOM vai como STRING pro page.evaluate (o tsx/esbuild
  * instrumenta funções com __name e quebra dentro do browser) — mesmo padrão
@@ -255,6 +261,36 @@ export async function suspenderEntrega(
       screenshot: shot,
     };
   }
+  // TRAVA — antes do clique, não depois.
+  //
+  // O modo seco clicava em "Suspender entrega" e só então checava a trava,
+  // parando na confirmação. Isso só é seguro se o Melhor Envio REALMENTE
+  // mostrar uma confirmação depois desse botão — e isso nunca foi verificado
+  // por ninguém: a fila `logistica_robo_comando` está vazia, o robô nunca
+  // rodou, e a afirmação vem de relato de segunda mão. Se não houver
+  // confirmação, o "teste seco" suspende a entrega de verdade, sem volta e sem
+  // devolução do frete. Enquanto um humano não confirmar a tela, o seco para
+  // AQUI: com o envio achado, o menu aberto e o botão localizado e fotografado
+  // — que é tudo que ele precisa entregar para calibrar os seletores.
+  if (!(opts.commit && cfg.melhorEnvioCalibrated)) {
+    const shotSeco = await screenshot(page, `seco-${rastreio}`);
+    const dSeco = await evalJS<any>(page, DUMP_JS);
+    await page.keyboard.press("Escape").catch(() => undefined);
+    return {
+      ok: true,
+      found: true,
+      requested: false,
+      dry: true,
+      reason: cfg.melhorEnvioCalibrated
+        ? `comando sem commit — parei antes de clicar em "${susp.text}"`
+        : `MODO SECO: achei o envio e o botão "${susp.text}", e parei ANTES de clicar nele `
+          + "(MELHORENVIO_CALIBRATED != true no executor)",
+      url: dSeco?.url,
+      buttons: dSeco?.buttons,
+      screenshot: shotSeco,
+    };
+  }
+
   await clickCenter(page, '[data-me-btn="1"]');
   await sleep(1200);
 
@@ -274,23 +310,8 @@ export async function suspenderEntrega(
       screenshot: shot,
     };
   }
-  if (!(opts.commit && cfg.melhorEnvioCalibrated)) {
-    const shot = await screenshot(page, `seco-${rastreio}`);
-    // Fecha a confirmação sem solicitar (Esc) — nada é pedido.
-    await page.keyboard.press("Escape").catch(() => undefined);
-    return {
-      ok: true,
-      found: true,
-      requested: false,
-      dry: true,
-      reason: cfg.melhorEnvioCalibrated
-        ? "comando sem commit"
-        : 'MODO SECO: achei tudo até o "Solicitar" (MELHORENVIO_CALIBRATED != true no executor)',
-      url: dModal?.url,
-      buttons: dModal?.buttons,
-      screenshot: shot,
-    };
-  }
+  // Chegou aqui = commit && calibrado (a trava ficou lá atrás). Ponto de não
+  // retorno: o Melhor Envio não desfaz e o frete não volta.
   await clickCenter(page, '[data-me-btn="1"]');
   await sleep(2500);
   const d2 = await evalJS<any>(page, DUMP_JS);
