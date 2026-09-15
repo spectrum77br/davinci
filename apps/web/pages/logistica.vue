@@ -1709,10 +1709,10 @@ async function aplicarStatusBling(c: Logistica) {
             <Megaphone class="size-4 mr-1" /> Informar
           </Button>
           <Button
-            v-if="isAdmin"
+            v-if="canInformarAmazon"
             size="sm"
             variant="outline"
-            title="Textos dos e-mails que o robô manda ao comprador da Amazon (problema, atraso, entrega)"
+            title="Textos dos e-mails que o robô manda ao comprador da Amazon (problema, atraso, entrega) e o envio de teste"
             @click="mensagensClienteOpen = true"
           >
             <Mail class="size-4 mr-1" /> Mensagens ao cliente
@@ -2900,7 +2900,7 @@ async function aplicarStatusBling(c: Logistica) {
     />
     <MensagensClienteModal
       :open="mensagensClienteOpen"
-      :pode-editar="isAdmin"
+      :pode-editar="canInformarAmazon"
       @close="mensagensClienteOpen = false"
     />
 

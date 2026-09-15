@@ -715,7 +715,7 @@ async def testar_mensagem_cliente(
 ) -> MensagemTesteOut:
     """Manda o texto do evento pra um e-mail seu, montado com um pedido real
     (ou exemplo) — pra ver o que o cliente receberia. Nunca vai pro cliente."""
-    if user.role != UserRole.ADMIN:
+    if not _pode_editar_mensagens(user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
     try:
         res = await logistica_cliente_mensagens.enviar_teste(
@@ -803,6 +803,17 @@ async def suspender_entrega(
 # ---- Mensagens ao comprador da Amazon (textos + estado do envio) ----
 
 
+def _pode_editar_mensagens(user: User) -> bool:
+    """Admin, ou o gerente liberado no Informar da Amazon/Margem (Vinicius
+    15/09: o login do dia a dia é o do gerente, sa.geral). Espelho no front:
+    canInformarAmazon em pages/logistica.vue."""
+    if user.role == UserRole.ADMIN:
+        return True
+    from app.routers.informar import _EMAILS_MARGEM
+
+    return (user.email or "").strip().lower() in _EMAILS_MARGEM
+
+
 def _mensagens_config_out(
     templates: dict[str, logistica_cliente_mensagens.Template],
 ) -> MensagensClienteConfigOut:
@@ -842,9 +853,9 @@ async def salvar_mensagem_cliente(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("logistica", "edit"))],
 ) -> MensagensClienteConfigOut:
-    """Edita o texto de um evento (admin). Recusa link, e-mail e HTML — a
-    Amazon bloquearia — e exige o `{pedido_amazon}` no corpo."""
-    if user.role != UserRole.ADMIN:
+    """Edita o texto de um evento (admin ou gerente). Recusa link, e-mail e
+    HTML — a Amazon bloquearia — e exige o `{pedido_amazon}` no corpo."""
+    if not _pode_editar_mensagens(user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
     try:
         await logistica_cliente_mensagens.salvar_template(
