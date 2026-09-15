@@ -411,7 +411,13 @@ async def resolver_incertos_pelo_extrato(session: AsyncSession) -> int:
     )).scalars().all()
     resolvidos = 0
     for m in incertos:
-        ini = m.updated_at - JANELA_EXTRATO_ANTES
+        # A janela tem que cobrir a hora da TENTATIVA, não a hora em que a linha
+        # foi marcada. Órfão (processo interrompido) só vira `incerto` 60 min
+        # depois, no sweep: centrar em `updated_at` deixava a janela inteira
+        # DEPOIS do lançamento real, e o órfão nunca conciliava — avisava pra
+        # sempre. `created_at` é gravado imediatamente antes do POST, então
+        # abrir a janela nele cobre os dois casos (órfão e erro de transporte).
+        ini = min(m.created_at, m.updated_at) - JANELA_EXTRATO_ANTES
         fim = m.updated_at + JANELA_EXTRATO_DEPOIS
         movs = (await session.execute(
             select(StockMovement.date).where(

@@ -443,3 +443,42 @@ async def test_5xx_vira_incerto_e_concilia_pelo_extrato(db: AsyncSession, monkey
     await prio.aplicar_prioridade_estoque(db, numeros=["297342"])
     assert (await _linhas(db, "297342"))[3].status == "incerto"
     assert await mov.resolver_incertos_pelo_extrato(db) == 0
+
+
+@pytest.mark.asyncio
+async def test_orfao_concilia_pela_hora_da_tentativa_nao_pela_do_aviso(db: AsyncSession):
+    """Caso real 15/09: um deploy reiniciou o worker entre gravar a linha e
+    lançar no Bling. A linha só vira `incerto` 60 min depois, no sweep — e a
+    janela de conferência era centrada nesse momento, toda DEPOIS do lançamento
+    real. O órfão nunca conciliava e avisava para sempre."""
+    agora = datetime.now(UTC)
+    tentativa = agora - timedelta(minutes=90)
+
+    linha = PrioridadeEstoqueMovimento(
+        pedido_bling="297415", sku="a001.ci", bling_product_id=301,
+        operacao="E", quantidade=1, status="pendente",
+    )
+    db.add(linha)
+    await db.flush()
+    linha_id = linha.id
+    await db.commit()
+    # A linha foi gravada na hora da tentativa, 90 min atrás.
+    await db.execute(update(PrioridadeEstoqueMovimento).where(
+        PrioridadeEstoqueMovimento.id == linha_id
+    ).values(created_at=tentativa))
+    await db.commit()
+
+    # O Bling registrou o movimento no mesmo minuto da tentativa.
+    db.add(StockMovement(bling_product_id=301, sku="a001.ci", date=tentativa,
+                         tipo="E", quantidade=1))
+    await db.commit()
+
+    # O sweep marca o órfão agora — `updated_at` fica 90 min depois do movimento.
+    assert await mov.marcar_pendentes_orfaos(db) == 1
+    db.expire_all()
+
+    assert await mov.resolver_incertos_pelo_extrato(db) == 1
+    db.expire_all()
+    r = await db.get(PrioridadeEstoqueMovimento, linha_id)
+    assert r.status == "ok"
+    assert "conciliado" in (r.erro or "")
