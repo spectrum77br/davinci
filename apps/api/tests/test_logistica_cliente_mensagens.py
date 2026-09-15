@@ -47,6 +47,7 @@ def _linha(**kw) -> Logistica:
         "rastreio": "AD912266053BR",
         "localizacao": "Aracaju/SE — Objeto em trânsito",
         "cliente_nome": "rosana vieira de melo",
+        "postagem_data": date(2026, 9, 14),
         "cliente_email": "n340cj40yxfjsq4@marketplace.amazon.com.br",
         "previsao_correios": date(2026, 9, 23),
         "prazo_entrega_amazon": date(2026, 10, 8),
@@ -94,10 +95,16 @@ def test_renderizar_preenche_campos_e_ignora_chave_desconhecida():
 
 
 def test_eventos_devidos():
-    assert msgs.eventos_devidos(_linha(), HOJE) == [msgs.EVENTO_PREVISAO]
+    # Postado (rastreio + saída + previsão do Bling) e previsão vencida em 05/10.
+    assert msgs.eventos_devidos(_linha(), HOJE) == [msgs.EVENTO_RASTREIO, msgs.EVENTO_PREVISAO]
+    # Antes da data de saída não avisa; sem previsão também não.
+    assert msgs.eventos_devidos(_linha(postagem_data=date(2026, 10, 9)), HOJE) == [
+        msgs.EVENTO_PREVISAO
+    ]
+    assert msgs.eventos_devidos(_linha(previsao_correios=None), HOJE) == []
     r = _linha(entregue_em=datetime.now(UTC), problema_correios="Objeto extraviado",
                problema_correios_em=datetime.now(UTC))
-    # Entregue não recebe "previsão vencida"; problema e entrega sim.
+    # Entregue não recebe "postado" nem "previsão vencida"; problema e entrega sim.
     assert msgs.eventos_devidos(r, HOJE) == [msgs.EVENTO_PROBLEMA, msgs.EVENTO_ENTREGUE]
     assert msgs.eventos_devidos(_linha(amazon_canal="dba"), HOJE) == []
 
@@ -143,18 +150,21 @@ async def test_run_manda_uma_vez_por_evento_e_registra(db: AsyncSession, ligado)
 
     out = await msgs.run(db, sender=sender, hoje=HOJE)
 
-    assert out["enviadas"] == 1 and out["devidas"] == 1
+    # Postado (aviso de rastreio) + previsão vencida: dois e-mails, uma vez cada.
+    assert out["enviadas"] == 2 and out["devidas"] == 2
     env = sender.enviados[0]
     assert env["to"] == "n340cj40yxfjsq4@marketplace.amazon.com.br"
     assert env["html"] == ""  # texto puro: a Amazon recusa HTML
-    assert "701-3967231-6921832" in env["text"] and "23/09/2026" in env["text"]
-    assert "Rosana" in env["text"]
+    assert "AD912266053BR" in env["text"] and "14/09/2026" in env["text"] and "SEDEX" in env["text"]
+    assert "701-3967231-6921832" in sender.enviados[1]["text"]
+    assert "23/09/2026" in sender.enviados[1]["text"] and "Rosana" in sender.enviados[1]["text"]
     hist = (await db.execute(select(LogisticaMensagemCliente))).scalars().all()
-    assert len(hist) == 1 and hist[0].evento == "previsao_vencida" and hist[0].enviado_em
+    assert sorted(h.evento for h in hist) == ["previsao_vencida", "rastreio"]
+    assert all(h.enviado_em for h in hist)
 
     # Segunda rodada: nada novo.
     out2 = await msgs.run(db, sender=sender, hoje=HOJE)
-    assert out2["devidas"] == 0 and len(sender.enviados) == 1
+    assert out2["devidas"] == 0 and len(sender.enviados) == 2
 
 
 @pytest.mark.asyncio
@@ -164,10 +174,13 @@ async def test_run_pula_evento_desligado_e_email_que_nao_e_relay(db: AsyncSessio
     await msgs.salvar_template(
         db, "previsao_vencida", assunto="x {pedido_amazon}", corpo="{pedido_amazon}", ativo=False
     )
+    await msgs.salvar_template(
+        db, "rastreio", assunto="x {pedido_amazon}", corpo="{pedido_amazon}", ativo=False
+    )
     sender = FakeSender()
     out = await msgs.run(db, sender=sender, hoje=HOJE)
-    # Só a linha com e-mail relay entra no alvo; o evento desligado é pulado.
-    assert out["pedidos"] == 1 and out["puladas"] == 1 and sender.enviados == []
+    # Só a linha com e-mail relay entra no alvo; os eventos desligados são pulados.
+    assert out["pedidos"] == 1 and out["puladas"] == 2 and sender.enviados == []
 
 
 @pytest.mark.asyncio
@@ -177,9 +190,9 @@ async def test_run_falha_registra_erro_e_retenta_ate_o_teto(db: AsyncSession, li
     ruim = FakeSender(falha=True)
     for _ in range(msgs.MAX_TENTATIVAS):
         out = await msgs.run(db, sender=ruim, hoje=HOJE)
-        assert out["falhas"] == 1
-    hist = (await db.execute(select(LogisticaMensagemCliente))).scalars().one()
-    assert hist.tentativas == msgs.MAX_TENTATIVAS and hist.erro and hist.enviado_em is None
+        assert out["falhas"] == 2  # rastreio + previsão vencida
+    for hist in (await db.execute(select(LogisticaMensagemCliente))).scalars().all():
+        assert hist.tentativas == msgs.MAX_TENTATIVAS and hist.erro and hist.enviado_em is None
     # Estourou o teto: não tenta mais.
     out = await msgs.run(db, sender=ruim, hoje=HOJE)
     assert out["devidas"] == 0

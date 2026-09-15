@@ -20,6 +20,10 @@ descarta. Por isso o envio nasce DESLIGADO (`amazon_mensagens_cliente=false`)
 e liga só quando o cadastro estiver feito.
 
 Eventos:
+- `rastreio`: pacote postado — código dos Correios + previsão (Vinicius
+  15/09: "vamos deixar esse aviso de rastreio também automático; a Amazon
+  manda, mas ficou muito bom assim"). A Amazon prefere que aviso de postagem
+  venha só dela; decisão do Vinicius, uma vez por pedido;
 - `problema_correios`: ocorrência grave lida pelo 17track (apreendido,
   extraviado, devolvido…);
 - `previsao_vencida`: previsão dos Correios (Bling) passou e não entregou;
@@ -41,17 +45,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import Logistica, LogisticaMensagemCliente, LogisticaMensagemTemplate
-from app.services import logistica_amazon_canal, logistica_rules
+from app.services import logistica_amazon_canal, logistica_rules, logistica_track
 
 logger = structlog.get_logger()
 
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
+EVENTO_RASTREIO = "rastreio"
 EVENTO_PROBLEMA = "problema_correios"
 EVENTO_PREVISAO = "previsao_vencida"
 EVENTO_ENTREGUE = "entregue"
-EVENTOS: tuple[str, ...] = (EVENTO_PROBLEMA, EVENTO_PREVISAO, EVENTO_ENTREGUE)
+EVENTOS: tuple[str, ...] = (EVENTO_RASTREIO, EVENTO_PROBLEMA, EVENTO_PREVISAO, EVENTO_ENTREGUE)
 EVENTO_LABELS_PT: dict[str, str] = {
+    EVENTO_RASTREIO: "Aviso de rastreio",
     EVENTO_PROBLEMA: "Problema na transportadora",
     EVENTO_PREVISAO: "Previsão da transportadora vencida",
     EVENTO_ENTREGUE: "Pacote entregue",
@@ -77,6 +83,18 @@ PLACEHOLDERS: dict[str, str] = {
 }
 
 TEMPLATES_PADRAO: dict[str, dict[str, str]] = {
+    EVENTO_RASTREIO: {
+        "assunto": "Pedido {pedido_amazon}: seu pacote está a caminho",
+        "corpo": (
+            "Olá, {cliente}.\n\n"
+            "Seu pedido {pedido_amazon} foi postado nos Correios em {postagem} pelo "
+            "serviço {servico}.\n"
+            "O código de rastreio é {rastreio} e a previsão de entrega da transportadora "
+            "é {previsao_correios}.\n\n"
+            "Se tiver qualquer dúvida sobre a entrega, é só responder esta mensagem.\n\n"
+            "Atenciosamente,\nequipe da loja"
+        ),
+    },
     EVENTO_PROBLEMA: {
         "assunto": "Pedido {pedido_amazon}: ocorrência no transporte",
         "corpo": (
@@ -253,6 +271,16 @@ def eventos_devidos(row: Logistica, hoje: date | None = None) -> list[str]:
         return []
     hoje = hoje or datetime.now(SAO_PAULO).date()
     out: list[str] = []
+    # Postado: o Bling já tem o código dos Correios, a data de saída e a
+    # previsão (objeto de postagem) e a data de saída não está no futuro.
+    if (
+        logistica_track.is_correios(row.rastreio)
+        and row.postagem_data is not None
+        and row.postagem_data <= hoje
+        and row.previsao_correios is not None
+        and row.entregue_em is None
+    ):
+        out.append(EVENTO_RASTREIO)
     if row.problema_correios_em is not None and row.problema_correios:
         out.append(EVENTO_PROBLEMA)
     if (
