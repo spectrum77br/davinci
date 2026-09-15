@@ -35,6 +35,7 @@ from app.services.marketplace_financials import (
     _rodar_lote,
     falha_transitoria,
     run_due_marketplace_financial_retries,
+    run_esteira_lenta_financials,
     run_ressuscitar_financials,
 )
 
@@ -456,3 +457,76 @@ async def test_depois_de_45_dias_de_api_fora_o_pedido_sai_da_fila(db, make_user)
 
     assert linha.espera_lenta is False
     assert linha.next_retry_at is None
+
+
+async def test_tiktok_lento_nao_monopoliza_a_esteira(db, make_user, monkeypatch):
+    """Medido em produção: uma consulta ao financeiro do TikTok leva ~37s e ele
+    sozinho tem mais de mil pedidos esperando settlement. Numa fila só por
+    antiguidade, a Shopee e o ML nunca chegavam a ser consultados."""
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    user = await make_user()
+    vencido = datetime.now(UTC) - timedelta(hours=2)
+
+    integs = {}
+    for plataforma, nome in (
+        (IntegrationPlatform.TIKTOK, "poofy-tt"),
+        (IntegrationPlatform.SHOPEE, "minas"),
+    ):
+        integ = Integration(
+            user_id=user.id, platform=plataforma, name=nome,
+            credentials=b"x", status="active",
+        )
+        db.add(integ)
+        await db.flush()
+        integs[plataforma] = integ
+
+    linhas = [
+        MarketplaceOrderFinancial(
+            platform=IntegrationPlatform.TIKTOK,
+            integration_id=integs[IntegrationPlatform.TIKTOK].id,
+            external_order_id=f"TT{i}",
+            bling_id=27000000000 + i,
+            status="pending",
+            espera_lenta=True,
+            # Mais antigos: numa fila por antiguidade viriam TODOS na frente.
+            next_retry_at=vencido - timedelta(days=5),
+            last_error="TikTok settlement not available yet",
+        )
+        for i in range(60)
+    ]
+    linhas += [
+        MarketplaceOrderFinancial(
+            platform=IntegrationPlatform.SHOPEE,
+            integration_id=integs[IntegrationPlatform.SHOPEE].id,
+            external_order_id=f"SP{i}",
+            bling_id=27100000000 + i,
+            status="error",
+            espera_lenta=True,
+            next_retry_at=vencido,
+            last_error="Client error '403 Forbidden' for url 'x'",
+        )
+        for i in range(60)
+    ]
+    db.add_all(linhas)
+    await db.commit()
+
+    vistos: list[int] = []
+
+    async def fake_sync(session, *, bling_order_id, **kw):
+        vistos.append(bling_order_id)
+        return {"ok": True, "status": "posted"}
+
+    monkeypatch.setattr(
+        "app.services.marketplace_financials.run_sync_marketplace_financials_for_bling_order",
+        fake_sync,
+    )
+
+    await run_esteira_lenta_financials(db, limit=40)
+
+    shopee_vistos = [b for b in vistos if b >= 27100000000]
+    tiktok_vistos = [b for b in vistos if b < 27100000000]
+    assert shopee_vistos, "Shopee ficou de fora — o TikTok monopolizou a esteira"
+    assert tiktok_vistos, "TikTok ficou de fora"
+    # E a Shopee aparece cedo, não depois de toda a fila do TikTok: se o job for
+    # cortado no meio, ela já foi atendida.
+    assert vistos.index(shopee_vistos[0]) <= 2

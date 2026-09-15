@@ -347,21 +347,45 @@ async def run_esteira_lenta_financials(
     Fila SEPARADA da rápida de propósito: durante a queda de setembro/2026
     juntaram-se ~3.900 pedidos nesse estado. Num único `order by next_retry_at`
     esse backlog comeria as 100 vagas do ciclo e os pedidos do dia ficariam sem
-    Frete/Taxa na Margem — exatamente o sintoma que se quer evitar."""
+    Frete/Taxa na Margem — exatamente o sintoma que se quer evitar.
+
+    Dentro da esteira as plataformas se REVEZAM, uma por vez. Medido em
+    produção: uma consulta ao financeiro do TikTok leva ~37s (a API responde
+    devagar e o cliente ainda repete no "too many requests"), contra poucos
+    segundos na Shopee e no ML. Como o TikTok sozinho tem mais de mil pedidos
+    esperando settlement, uma fila só por antiguidade gastava a janela inteira
+    nele e a Shopee e o ML nunca chegavam a ser consultados."""
     now = datetime.now(UTC)
-    rows = (
-        await session.execute(
-            select(MarketplaceOrderFinancial.bling_id)
-            .where(MarketplaceOrderFinancial.bling_id.is_not(None))
-            .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
-            .where(MarketplaceOrderFinancial.espera_lenta.is_(True))
-            .where(MarketplaceOrderFinancial.next_retry_at.is_not(None))
-            .where(MarketplaceOrderFinancial.next_retry_at <= now)
-            .order_by(MarketplaceOrderFinancial.next_retry_at.asc())
-            .limit(limit)
-        )
-    ).scalars().all()
-    return await _rodar_lote(session, list(rows), trigger="esteira_lenta")
+    plataformas = sorted(SUPPORTED_PLATFORMS, key=lambda p: p.value)
+    por_plataforma = max(1, limit // len(plataformas))
+
+    filas: list[list[int]] = []
+    for plataforma in plataformas:
+        rows = (
+            await session.execute(
+                select(MarketplaceOrderFinancial.bling_id)
+                .where(MarketplaceOrderFinancial.bling_id.is_not(None))
+                .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
+                .where(MarketplaceOrderFinancial.espera_lenta.is_(True))
+                .where(MarketplaceOrderFinancial.next_retry_at.is_not(None))
+                .where(MarketplaceOrderFinancial.next_retry_at <= now)
+                .where(MarketplaceOrderFinancial.platform == plataforma)
+                .order_by(MarketplaceOrderFinancial.next_retry_at.asc())
+                .limit(por_plataforma)
+            )
+        ).scalars().all()
+        if rows:
+            filas.append(list(rows))
+
+    # Intercala: se o job for cortado pelo timeout (ou por um deploy), todas as
+    # plataformas já terão sido atendidas, em vez de só a primeira da lista.
+    intercalado: list[int] = []
+    for i in range(max((len(f) for f in filas), default=0)):
+        for fila in filas:
+            if i < len(fila):
+                intercalado.append(fila[i])
+
+    return await _rodar_lote(session, intercalado, trigger="esteira_lenta")
 
 
 async def run_ressuscitar_financials(
