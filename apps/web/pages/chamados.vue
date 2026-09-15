@@ -1096,7 +1096,7 @@ async function reabrir(row: ChamadoRow) {
       </select>
       <select v-model="mostrar" class="h-9 rounded-md border bg-background px-2 text-sm">
         <option value="abertos">abertos</option>
-        <option value="resolvidos">resolvidos</option>
+        <option value="resolvidos">encerrados</option>
         <option value="todos">todos</option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">{{ rangeStart }}–{{ rangeEnd }} de {{ total }}</span>

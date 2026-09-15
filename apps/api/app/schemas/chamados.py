@@ -433,3 +433,35 @@ class AgentHistoricoOut(BaseModel):
     mensagem_id: UUID
     alterado: bool
 
+
+class AgentPagamentoMlIn(BaseModel):
+    """15/09: fatos do pagamento da venda no ML (liberação/estorno/envio) pro
+    agente de chamados decidir — e encerrar sozinho o que ficou sem prejuízo."""
+
+    pedidos_bling: list[str] = Field(min_length=1, max_length=50)
+
+
+class AgentPagamentoMlItem(BaseModel):
+    pedido_bling: str
+    ok: bool
+    erro: str | None = None
+    venda: str | None = None
+    conta: str | None = None
+    pedido_status: str | None = None
+    pagamento_status: str | None = None
+    pagamento_detalhe: str | None = None
+    valor_pago: float | None = None
+    pago_em: datetime | None = None
+    liberado_em: datetime | None = None
+    estorno_valor: float | None = None
+    estorno_em: datetime | None = None
+    estorno_fonte: str | None = None
+    envio_status: str | None = None
+    envio_substatus: str | None = None
+    sem_prejuizo: bool = False
+    resumo: str = ""
+
+
+class AgentPagamentoMlOut(BaseModel):
+    pedidos: list[AgentPagamentoMlItem]
+

@@ -55,6 +55,9 @@ from app.schemas.chamados import (
     AgentMensagemOut,
     AgentHistoricoIn,
     AgentHistoricoOut,
+    AgentPagamentoMlIn,
+    AgentPagamentoMlItem,
+    AgentPagamentoMlOut,
     AgentRecebidaIn,
     AgentRecebidaOut,
     AgentRegistrarIn,
@@ -875,6 +878,28 @@ async def agent_historico(
     await session.commit()
     await session.refresh(m)
     return AgentHistoricoOut(chamado_id=ch.id, mensagem_id=m.id, alterado=True)
+
+
+@agent_router.post("/pagamento-ml", response_model=AgentPagamentoMlOut, dependencies=_agent_dep)
+async def agent_pagamento_ml(
+    body: AgentPagamentoMlIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AgentPagamentoMlOut:
+    """15/09 (Eduardo: "sim dá para fazer"): pagamento da venda de cada pedido na API
+    do ML — aprovação, liberação pra loja, estorno (e QUEM pagou o estorno) e envio.
+    O agente usa pra responder com fato e pra encerrar sem prejuízo quando o ML
+    cobriu o comprador e o valor ficou com a loja (482061374 / 285250)."""
+    from app.services.chamados_pagamento_ml import pagamento_da_venda
+
+    clientes: dict = {}
+    itens: list[AgentPagamentoMlItem] = []
+    for pedido in dict.fromkeys(p.strip() for p in body.pedidos_bling if p and p.strip()):
+        try:
+            itens.append(AgentPagamentoMlItem(**(await pagamento_da_venda(session, pedido, clientes))))
+        except Exception as exc:  # noqa: BLE001 — um pedido com erro não derruba o lote
+            itens.append(AgentPagamentoMlItem(pedido_bling=pedido, ok=False, erro=f"{type(exc).__name__}: {str(exc)[:160]}"))
+    await session.commit()  # tokens do ML renovados durante as consultas
+    return AgentPagamentoMlOut(pedidos=itens)
 
 
 @agent_router.post("/lease", response_model=AgentLeaseOut, dependencies=_agent_dep)
