@@ -40,6 +40,11 @@ logger = structlog.get_logger()
 # em 08/09) ficaram com next_retry_at NULL no mesmo dia. Esta mensagem marca
 # "ainda não postou" pra esses ficarem numa esteira lenta e sem teto.
 AMAZON_AGUARDANDO_POSTAGEM = "Amazon finance transaction not posted yet"
+# Motivo gravado pelo sweep do unsettled: o número na tela é a estimativa
+# oficial do TikTok, o repasse real ainda não foi publicado. Precisa ficar
+# ESCRITO — uma linha com `last_error` vazio não é reconhecida como espera pela
+# API e volta a gastar o teto de tentativas (ver falha_transitoria).
+TIKTOK_AGUARDANDO_SETTLEMENT = "TikTok settlement not available yet (estimativa do unsettled)"
 # Até quando insistir num pedido Amazon que nunca posta (cancelado, devolvido):
 # 4x o pior caso observado.
 AMAZON_ESPERA_MAX_DIAS = 45
@@ -424,7 +429,15 @@ async def run_ressuscitar_financials(
     revividos = 0
     ignorados = 0
     for i, row in enumerate(rows):
-        if not falha_transitoria(row.last_error):
+        # Linha `pending`/`estimated` sem mensagem nenhuma é espera pela
+        # plataforma, não erro — o sweep do unsettled do TikTok apagava o motivo
+        # e deixava 122 linhas assim, que morriam na fila sem nunca terem
+        # falhado. `error` sem mensagem continua de fora: é erro desconhecido.
+        esperando_plataforma = not (row.last_error or "").strip() and row.status in {
+            "pending",
+            "estimated",
+        }
+        if not (falha_transitoria(row.last_error) or esperando_plataforma):
             ignorados += 1
             continue
         row.espera_lenta = True
@@ -586,7 +599,7 @@ async def run_tiktok_unsettled_sweep(
                 **(financial.raw or {}),
                 "unsettled_estimate": {**est, "fetched_at": now.isoformat()},
             }
-            financial.last_error = None
+            financial.last_error = TIKTOK_AGUARDANDO_SETTLEMENT
             financial.fetched_at = now
             updated += 1
 

@@ -530,3 +530,55 @@ async def test_tiktok_lento_nao_monopoliza_a_esteira(db, make_user, monkeypatch)
     # E a Shopee aparece cedo, não depois de toda a fila do TikTok: se o job for
     # cortado no meio, ela já foi atendida.
     assert vistos.index(shopee_vistos[0]) <= 2
+
+
+async def test_linha_esperando_a_plataforma_sem_mensagem_tambem_volta(db, make_user):
+    """O sweep do unsettled do TikTok zerava o `last_error` ao gravar a
+    estimativa. A linha ficava "esperando" sem nenhuma mensagem, não era
+    reconhecida como espera, gastava o teto de tentativas e morria na fila sem
+    nunca ter falhado — 122 linhas assim em produção."""
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user, platform=IntegrationPlatform.TIKTOK, nome="poofy-tt")
+
+    db.add_all(
+        [
+            MarketplaceOrderFinancial(
+                platform=IntegrationPlatform.TIKTOK,
+                integration_id=integ.id,
+                external_order_id="ESPERANDO",
+                bling_id=27200000001,
+                status="estimated",
+                attempts=8,
+                next_retry_at=None,
+                last_error=None,
+            ),
+            # Erro sem mensagem continua de fora: é erro desconhecido.
+            MarketplaceOrderFinancial(
+                platform=IntegrationPlatform.TIKTOK,
+                integration_id=integ.id,
+                external_order_id="ERRO-MUDO",
+                bling_id=27200000002,
+                status="error",
+                attempts=8,
+                next_retry_at=None,
+                last_error=None,
+            ),
+        ]
+    )
+    await db.commit()
+
+    resumo = await run_ressuscitar_financials(db)
+    assert resumo["revividos"] == 1
+
+    linhas = {
+        row.external_order_id: row
+        for row in (await db.execute(select(MarketplaceOrderFinancial))).scalars().all()
+    }
+    assert linhas["ESPERANDO"].next_retry_at is not None
+    assert linhas["ERRO-MUDO"].next_retry_at is None
+
+
+def test_motivo_da_espera_do_tiktok_e_reconhecido_como_transitorio():
+    from app.services.marketplace_financials import TIKTOK_AGUARDANDO_SETTLEMENT
+
+    assert falha_transitoria(TIKTOK_AGUARDANDO_SETTLEMENT) is True

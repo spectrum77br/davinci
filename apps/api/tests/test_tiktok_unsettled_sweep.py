@@ -21,6 +21,7 @@ from app.models import IntegrationPlatform
 from app.models.integration import Integration
 from app.models.marketplace_financial import MarketplaceOrderFinancial
 from app.services.marketplace_financials import (
+    TIKTOK_AGUARDANDO_SETTLEMENT,
     FinancialSnapshot,
     _persist_snapshot,
     _tiktok_unsettled_order_map,
@@ -140,7 +141,10 @@ async def test_sweep_pending_vira_estimated_sem_tocar_ciclo_de_retry(db, make_us
     # ciclo do settlement REAL fica intocado — o retry continua agendado
     assert row["attempts"] == 3
     assert row["next_retry_at"] is not None
-    assert row["last_error"] is None
+    # O motivo da espera fica ESCRITO. Zerar o last_error deixava a linha sem
+    # nenhuma mensagem: ela não era reconhecida como espera pela plataforma,
+    # gastava o teto de tentativas e morria na fila sem nunca ter falhado.
+    assert row["last_error"] == TIKTOK_AGUARDANDO_SETTLEMENT
     assert row["raw"]["unsettled_estimate"]["est_settlement_amount"] == "321.25"
     assert row["raw"]["unsettled_estimate"]["fetched_at"]
 
