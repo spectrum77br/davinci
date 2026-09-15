@@ -69,6 +69,10 @@ logger = structlog.get_logger()
 
 TIPO_ABERTURA = "abertura"
 ACAO_REVISAO = "return_review_fail"
+# Marcas na mensagem de abertura quando o chamado é encerrado pelo motivo
+# (Eduardo 15/09): a tela Devoluções mostra o que ainda falta fazer na mão.
+ERRO_RETIRAR_CONTESTACAO = "retirar_contestacao"  # enviada → retirar no painel
+ERRO_CONTESTACAO_CANCELADA = "contestacao_cancelada"  # pendente → saiu da fila
 
 PLAT_ML = "ml"
 PLAT_TIKTOK = "tiktok"
@@ -662,6 +666,7 @@ async def encerrar_chamado_por_motivo(
         plataforma_de(ch.plataforma) or "", (ch.plataforma or "a plataforma").strip()
     )
     if abertura is not None and abertura.status == "enviada":
+        abertura.erro = ERRO_RETIRAR_CONTESTACAO  # a tela Devoluções mostra o aviso
         session.add(
             chamados_svc.registrar_sistema(
                 ch,
@@ -673,7 +678,7 @@ async def encerrar_chamado_por_motivo(
         )
     elif abertura is not None and abertura.status == "pendente":
         abertura.status = "registrada"
-        abertura.erro = None
+        abertura.erro = ERRO_CONTESTACAO_CANCELADA
         session.add(
             chamados_svc.registrar_sistema(
                 ch, "A contestação ainda não tinha saído (estava pendente na fila) — cancelada."

@@ -1343,6 +1343,9 @@ async def test_motivo_limpo_encerra_chamado_e_avisa_da_contestacao(client, make_
     p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": None})
     assert p.status_code == 200, p.text
     assert p.json()["chamado_resolvido"] is True
+    # a tela Devoluções passa a mostrar "retirar a contestação no painel"
+    assert p.json()["chamado_ml_status"] == "enviada"
+    assert p.json()["chamado_ml_erro"] == "retirar_contestacao"
     ch = await _chamado_de(db, "293843")
     assert ch.resolvido is True and ch.auto_ligada is False and ch.valor_recuperado is None
     hist = [m["texto"] for m in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()]
@@ -1381,7 +1384,9 @@ async def test_motivo_que_nao_abre_chamado_encerra_e_abertura_pendente_sai_da_fi
     assert ch.resolvido is True
     msg = await _abertura(db, ch.id)
     await db.refresh(msg)
-    assert msg.status == "registrada" and msg.erro is None
+    assert msg.status == "registrada" and msg.erro == "contestacao_cancelada"
+    assert p.json()["chamado_ml_status"] == "registrada"
+    assert p.json()["chamado_ml_erro"] == "contestacao_cancelada"
     hist = [m["texto"] for m in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()]
     assert any('"Item Incorreto"' in t and "encerrado" in t for t in hist), hist
     assert any("pendente na fila" in t for t in hist), hist

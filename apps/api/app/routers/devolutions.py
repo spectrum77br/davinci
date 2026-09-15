@@ -374,7 +374,13 @@ def _aplica_chamado(
     out.chamado_plataforma = chamados_devolucao.plataforma_de(ch.plataforma)
     if abertura is not None:
         out.chamado_ml_status = abertura.status
-        out.chamado_ml_erro = abertura.erro if abertura.status != "enviada" else None
+        # `enviada` esconde erro de tentativas antigas — exceto a marca de
+        # "retirar a contestação no painel" (chamado encerrado pelo motivo).
+        mostra_erro = (
+            abertura.status != "enviada"
+            or abertura.erro == chamados_devolucao.ERRO_RETIRAR_CONTESTACAO
+        )
+        out.chamado_ml_erro = abertura.erro if mostra_erro else None
     return out
 
 

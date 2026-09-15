@@ -213,6 +213,9 @@ const ML_STATUS_ERROS: Record<string, string> = {
   shopee_motivo_indisponivel: 'Shopee não oferece esse motivo pra essa devolução',
   shopee_sem_email: 'sem e-mail do operador pra Shopee (DEVOLUCAO_DISPUTE_EMAIL)',
   plataforma_sem_api: 'sem API — abrir na mão na plataforma',
+  // chamado encerrado pelo motivo (15/09): o que ainda falta fazer na mão
+  retirar_contestacao: 'chamado encerrado aqui — retire a contestação no painel da plataforma',
+  contestacao_cancelada: 'contestação cancelada (chamado encerrado antes de ela sair)',
 }
 const PLAT_NOME: Record<string, string> = { ml: 'ML', tiktok: 'TikTok', shopee: 'Shopee', amazon: 'Amazon' }
 function platNome(row: DevolutionRow): string {
@@ -221,16 +224,29 @@ function platNome(row: DevolutionRow): string {
 }
 function mlStatusLabel(row: DevolutionRow): string {
   const st = row.chamado_ml_status
+  const erro = row.chamado_ml_erro || ''
   const plat = platNome(row)
-  if (st === 'enviada') return `${plat}: aberto`
-  if (st === 'pendente') return `${plat}: ${ML_STATUS_ERROS[row.chamado_ml_erro || ''] || 'pendente'}`
-  if (st === 'falhou') return `${plat}: falhou — ${ML_STATUS_ERROS[row.chamado_ml_erro || ''] || row.chamado_ml_erro || ''}`
-  if (st === 'registrada') return plat === 'Amazon' ? 'Amazon: SAFE-T só no Seller Central (sem API) — abrir na mão' : `${plat}: sem API — abrir na mão`
+  if (st === 'enviada') {
+    // Chamado encerrado pelo motivo com a contestação já enviada: a plataforma
+    // não tem API pra cancelar — lembra de retirar no painel.
+    if (erro === 'retirar_contestacao') return `${plat}: ${ML_STATUS_ERROS.retirar_contestacao}`
+    return row.chamado_resolvido ? `${plat}: contestação enviada` : `${plat}: aberto`
+  }
+  if (st === 'pendente') return `${plat}: ${ML_STATUS_ERROS[erro] || 'pendente'}`
+  if (st === 'falhou') return `${plat}: falhou — ${ML_STATUS_ERROS[erro] || erro}`
+  if (st === 'registrada') {
+    if (erro === 'contestacao_cancelada') return `${plat}: ${ML_STATUS_ERROS.contestacao_cancelada}`
+    return plat === 'Amazon' ? 'Amazon: SAFE-T só no Seller Central (sem API) — abrir na mão' : `${plat}: sem API — abrir na mão`
+  }
   return ''
 }
-function mlStatusClass(st: string | null | undefined): string {
+function mlStatusClass(row: DevolutionRow): string {
+  const st = row.chamado_ml_status
+  const erro = row.chamado_ml_erro || ''
+  if (st === 'enviada' && erro === 'retirar_contestacao') return 'text-amber-700 dark:text-amber-300 font-medium'
   if (st === 'enviada') return 'text-emerald-700 dark:text-emerald-300'
   if (st === 'falhou') return 'text-red-600 dark:text-red-400'
+  if (st === 'registrada' && erro === 'contestacao_cancelada') return 'text-muted-foreground'
   if (st === 'registrada') return 'text-sky-700 dark:text-sky-300'
   return 'text-amber-700 dark:text-amber-300'
 }
@@ -2244,7 +2260,7 @@ async function backfillAddresses() {
               <div
                 v-if="row.chamado_ml_status"
                 class="mt-0.5 max-w-[140px] whitespace-normal text-[10px] leading-tight"
-                :class="mlStatusClass(row.chamado_ml_status)"
+                :class="mlStatusClass(row)"
                 :title="mlStatusLabel(row)"
               >{{ mlStatusLabel(row) }}</div>
             </td>
