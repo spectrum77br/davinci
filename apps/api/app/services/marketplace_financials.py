@@ -283,31 +283,18 @@ async def run_due_marketplace_financial_retries(
         )
     ).scalars().all()
 
-    ok = error = 0
-    for bling_id in rows:
-        try:
-            result = await run_sync_marketplace_financials_for_bling_order(
-                session,
-                bling_order_id=int(bling_id),
-                trigger="retry",
-            )
-            if result.get("ok"):
-                ok += 1
-            else:
-                error += 1
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "marketplace_financials_retry_failed",
-                bling_id=bling_id,
-                error=str(e)[:500],
-            )
-            error += 1
-    return {"queued": len(rows), "ok": ok, "error": error}
+    return await _rodar_lote(session, list(rows), trigger="retry")
 
 
 async def _rodar_lote(
     session: AsyncSession, bling_ids: list[int], *, trigger: str
 ) -> dict[str, int]:
+    """Um commit POR PEDIDO, não um por lote.
+
+    Esta fila existe justamente para linhas que já falharam. Com um commit
+    único no fim, um erro de banco no 40º pedido derrubava a sessão e jogava
+    fora o trabalho dos 39 anteriores — e o lote seguinte tropeçaria nos
+    mesmos. Isolado por pedido, o problema fica contido em uma linha."""
     ok = error = 0
     for bling_id in bling_ids:
         try:
@@ -316,11 +303,13 @@ async def _rodar_lote(
                 bling_order_id=int(bling_id),
                 trigger=trigger,
             )
+            await session.commit()
             if result.get("ok"):
                 ok += 1
             else:
                 error += 1
         except Exception as e:  # noqa: BLE001
+            await session.rollback()
             logger.warning(
                 "marketplace_financials_lote_falhou",
                 trigger=trigger,

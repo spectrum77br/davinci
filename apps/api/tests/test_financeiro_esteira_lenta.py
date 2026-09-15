@@ -29,6 +29,7 @@ from app.services.marketplace_financials import (
     ESPERA_MAX_DIAS,
     FinancialSnapshot,
     _persist_snapshot,
+    _rodar_lote,
     falha_transitoria,
     run_due_marketplace_financial_retries,
     run_ressuscitar_financials,
@@ -302,3 +303,26 @@ async def test_ressurreicao_e_idempotente(db, make_user):
 
     assert (await run_ressuscitar_financials(db))["revividos"] == 1
     assert (await run_ressuscitar_financials(db))["revividos"] == 0
+
+
+async def test_um_pedido_com_erro_nao_derruba_o_resto_do_lote(db, make_user, monkeypatch):
+    """A fila existe para linhas que já falharam. Com um commit único no fim,
+    um erro no meio jogava fora o trabalho de todo o lote."""
+    await _integ(db, make_user)
+    vistos: list[int] = []
+
+    async def fake_sync(session, *, bling_order_id, **kw):
+        vistos.append(bling_order_id)
+        if bling_order_id == 2:
+            raise RuntimeError("banco caiu nesta linha")
+        return {"ok": True, "status": "posted"}
+
+    monkeypatch.setattr(
+        "app.services.marketplace_financials.run_sync_marketplace_financials_for_bling_order",
+        fake_sync,
+    )
+
+    resumo = await _rodar_lote(db, [1, 2, 3], trigger="esteira_lenta")
+
+    assert vistos == [1, 2, 3]
+    assert resumo == {"queued": 3, "ok": 2, "error": 1}
