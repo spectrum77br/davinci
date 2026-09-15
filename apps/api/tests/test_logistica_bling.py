@@ -1418,3 +1418,72 @@ async def test_vigia_avisa_so_quando_passa_do_limite(db: AsyncSession, make_user
     assert enviados and "recarregar" in enviados[0] and "Logística" in enviados[0]
     assert alertas and alertas[0]["dedupe_key"].startswith("logistica_vigia:")
     assert all(a["user_id"] is not None for a in alertas)
+
+
+@pytest.mark.asyncio
+async def test_sweep_ml_nao_marca_pedido_em_transito(db: AsyncSession, make_user, monkeypatch):
+    """A tag `not_delivered` do ML existe em TODO pedido ainda não entregue —
+    inclusive em trânsito. Antes, comparar com ship_status != not_delivered
+    marcava esses pedidos como "mudou" a cada rodada, para sempre (343 de
+    2.037 por passada). Agora ela só conta quando contradiz o local
+    ("entregue" que voltou a não-entregue)."""
+    from datetime import UTC, datetime
+
+    from app.models import Integration, IntegrationPlatform
+    from app.security.cipher import encrypt_json
+    from app.services import logistica_meli as meli_svc
+
+    dono = await make_user(email="sweep-ml@davinci-test.com")
+    integ = Integration(
+        platform=IntegrationPlatform.ML, name="conta-teste", status="active",
+        credentials=encrypt_json({"access_token": "x", "user_id": "1"}),
+        user_id=dono.id,
+    )
+    db.add(integ)
+
+    def _linha(numero: str, ship: str) -> Logistica:
+        return Logistica(
+            pedido_bling=numero, pedido_marketplace=f"MLB{numero}", plataforma="Mercado Livre",
+            conta="conta-teste", data=datetime.now(UTC).date(),
+            meli_status={"order_status": "paid", "ship_status": ship},
+        )
+
+    # 3 em trânsito (não podem ser marcados) + 1 entregue de verdade (deve ser)
+    # + 1 reversão (estava entregue e o ML diz não-entregue → deve ser).
+    em_transito = [_linha("9001", "shipped"), _linha("9002", "ready_to_ship"),
+                   _linha("9003", "pending")]
+    entrega_tardia = _linha("9004", "shipped")
+    reversao = _linha("9005", "delivered")
+    for linha in [*em_transito, entrega_tardia, reversao]:
+        db.add(linha)
+    await db.commit()
+
+    async def _integ(session, conta):
+        return integ
+
+    class _FakeClient:
+        async def search_orders_updated(self, *, seller_id, date_from, date_to, limit, offset):
+            if offset:
+                return {"results": [], "paging": {"total": 5}}
+            return {"results": [
+                # em trânsito: a tag not_delivered vem em TODOS, como o ML faz
+                {"id": "MLB9001", "status": "paid", "tags": ["not_delivered", "paid"]},
+                {"id": "MLB9002", "status": "paid", "tags": ["not_delivered", "paid"]},
+                {"id": "MLB9003", "status": "paid", "tags": ["not_delivered", "paid"]},
+                {"id": "MLB9004", "status": "paid", "tags": ["delivered", "paid"]},
+                {"id": "MLB9005", "status": "paid", "tags": ["not_delivered", "paid"]},
+            ], "paging": {"total": 5}}
+
+    monkeypatch.setattr(meli_svc, "_ml_integration_for_conta", _integ)
+    monkeypatch.setattr(meli_svc, "_build_ml_client", lambda session, integ: _FakeClient())
+    monkeypatch.setattr(
+        meli_svc, "decrypt_json", lambda _c: {"access_token": "x", "user_id": "1"}
+    )
+
+    out = await meli_svc.sweep_pos_venda(db)
+    marcados = {str(i) for i in out["ids"]}
+    assert str(entrega_tardia.id) in marcados, "entrega tardia tem que ser pega"
+    assert str(reversao.id) in marcados, "reversão (entregue → não entregue) tem que ser pega"
+    for linha in em_transito:
+        assert str(linha.id) not in marcados, "pedido em trânsito NÃO pode ser marcado"
+    assert out["hits"] == 2

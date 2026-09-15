@@ -723,9 +723,18 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
     Fonte barata: `/orders/search` do seller por `order.date_last_updated`
     (janela de 15d, 50 pedidos/página) — devolve `status` e `tags` (incl.
     "delivered"/"not_delivered") de quem MUDOU. Sinais contra o local:
-      - tag delivered   e ship_status local != delivered;
-      - tag not_delivered e ship_status local != not_delivered;
+      - tag delivered   e ship_status local != delivered  (entrega tardia);
+      - tag not_delivered e ship_status local == delivered (reversão: estava
+        entregue e voltou a não-entregue);
       - status do pedido  != order_status local.
+
+    CUIDADO com a tag `not_delivered` (Eduardo, 15/09): o ML a coloca em todo
+    pedido que AINDA não foi entregue — inclusive o que está simplesmente a
+    caminho. Comparar com `ship_status != "not_delivered"` marcava como
+    "mudou" todo pedido em trânsito, a cada rodada, para sempre: 343 de 2.037
+    linhas por passada (na conta marquezini, 96 falsos contra 1 verdadeiro),
+    ~8 mil chamadas/dia ao ML sem nenhuma mudança real — e era o que fazia a
+    varredura demorar dezenas de minutos quando ainda rodava dentro do motor.
 
     Diferente dos sweeps Shopee/TikTok, NÃO grava meli_status aqui: o search
     não traz a assinatura completa (substatus, claim, return). Só coleta ids;
@@ -816,7 +825,10 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                 st = str(o.get("status") or "").strip().lower()
                 if (
                     ("delivered" in tags and ship_local != "delivered")
-                    or ("not_delivered" in tags and ship_local != "not_delivered")
+                    # `not_delivered` só vale como sinal quando CONTRADIZ o que
+                    # temos: local "entregue" e o ML dizendo que não foi. Em
+                    # trânsito a tag está sempre lá — ver docstring.
+                    or ("not_delivered" in tags and ship_local == "delivered")
                     or (st and st != order_local)
                 ):
                     mudados.add(r.id)
