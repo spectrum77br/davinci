@@ -181,13 +181,25 @@ async def _registrar_resposta_da_loja(
         )
 
 
+def _destinos_do_aviso() -> list[str]:
+    """Quem recebe o aviso de loja muda: lista própria (é aviso TÉCNICO de
+    credencial, Eduardo 15/09 — não vai pra lista geral da operação) com a
+    lista geral como reserva pra quem não configurar."""
+    from app.config import get_settings
+    from app.services import threema
+
+    s = get_settings()
+    return threema.parse_recipients(
+        s.shipment_muda_threema_recipients or s.threema_recipients
+    )
+
+
 async def _avisar_threema(texto: str) -> None:
     """Melhor esforço: aviso não pode derrubar a varredura."""
     try:
-        from app.config import get_settings
         from app.services import threema
 
-        destinos = threema.parse_recipients(get_settings().threema_recipients)
+        destinos = _destinos_do_aviso()
         if destinos:
             await threema.ThreemaClient().send_to_all(texto, destinos)
     except Exception as e:  # noqa: BLE001

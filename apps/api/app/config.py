@@ -257,6 +257,10 @@ class Settings(BaseSettings):
     # (o sweep segue funcionando normal). Set via
     # NF_SEM_ESTOQUE_THREEMA_RECIPIENTS no .env.
     nf_sem_estoque_threema_recipients: str = ""
+    # Quem recebe o aviso "loja parou de responder sobre envio"
+    # (marketplace_shipment_check). Eduardo, 15/09: esse aviso é técnico — vai
+    # só pra ele, não pra lista geral de operação. Vazio = cai na lista geral.
+    shipment_muda_threema_recipients: str = ""
 
     # Threema IDs (vírgula) do vigia de importação (pedido PAGO no
     # marketplace que não caiu no Bling — services/vigia_importacao.py).
