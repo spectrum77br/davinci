@@ -753,3 +753,57 @@ def test_devolucao_manda_localizacao():
     assert g({}) is False
     assert g(None) is False
 
+
+@pytest.mark.asyncio
+async def test_build_enrichment_perna_da_devolucao_nao_depende_da_ordem():
+    # O ML devolve `shipments[]` em ordem aleatória entre chamadas (15/09, claim
+    # 5570239837): com `[0]` a coluna oscilava "loja" ↔ "galpão do ML" a cada
+    # passada. A perna da triagem (galpão → loja) é sempre a atual.
+    invertido = dict(_RETURNS_ENTREGUE_NA_LOJA)
+    invertido["shipments"] = list(reversed(_RETURNS_ENTREGUE_NA_LOJA["shipments"]))
+    for payload in (_RETURNS_ENTREGUE_NA_LOJA, invertido):
+        enr = await logistica_meli.build_enrichment(_pedido_devolvido(payload), "1")
+        assert enr["localizacao"] == "Devolvido → loja (Piracicaba/SP)"
+        assert enr["meli_status"]["return_status"] == "delivered"
+
+    # Triagem ainda parada no galpão: manda a perna da triagem (pendente), não
+    # a do comprador → galpão (entregue) — o produto NÃO chegou na loja.
+    triagem_pendente = {
+        "shipments": [
+            {
+                "shipment_id": 1,
+                "status": "delivered",
+                "destination": {"name": "warehouse", "shipping_address": {"city": "Cajamar"}},
+                "type": "return",
+            },
+            {
+                "shipment_id": 2,
+                "status": "pending",
+                "destination": {
+                    "name": "seller_address",
+                    "shipping_address": {"city": "Piracicaba"},
+                },
+                "type": "return_from_triage",
+            },
+        ]
+    }
+    enr = await logistica_meli.build_enrichment(_pedido_devolvido(triagem_pendente), "1")
+    assert enr["meli_status"]["return_status"] == "pending"
+    assert enr["localizacao"] == "Devolução aguardando envio → loja (Piracicaba)"
+
+
+def test_return_leg_prefere_triagem_e_depois_o_shipment_mais_novo():
+    legs = [
+        {"shipment_id": 10, "type": "return", "status": "delivered"},
+        {"shipment_id": 12, "type": "return", "status": "shipped"},
+        {"shipment_id": "s1", "type": "return", "status": "pending"},  # id não numérico
+    ]
+    assert logistica_meli._return_leg({"shipments": legs})["shipment_id"] == 12
+    legs.append({"shipment_id": 3, "type": "return_from_triage", "status": "pending"})
+    assert logistica_meli._return_leg({"shipments": legs})["shipment_id"] == 3
+    assert logistica_meli._return_leg([{"shipments": legs}])["shipment_id"] == 3
+    # Formato antigo (sem pernas): cai no `shipping.status`.
+    assert logistica_meli._return_leg({"shipping": {"status": "shipped"}}) is None
+    assert logistica_meli._extract_return_status({"shipping": {"status": "shipped"}}) == "shipped"
+    assert logistica_meli._extract_return_status(None) == ""
+

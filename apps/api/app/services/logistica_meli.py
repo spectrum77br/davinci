@@ -53,18 +53,57 @@ logger = structlog.get_logger()
 _ML_PLATAFORMAS = {"mercado livre", "mercadolivre", "ml"}
 
 
+def _return_obj(rets: Any) -> dict | None:
+    """O objeto da devolução: o payload de returns vem como objeto único OU
+    lista (formato solto do ML) — normaliza."""
+    if not rets:
+        return None
+    obj = rets[0] if isinstance(rets, list) and rets else rets
+    return obj if isinstance(obj, dict) else None
+
+
+# O ML devolve `shipments[]` em ORDEM ALEATÓRIA entre chamadas (visto 15/09 no
+# claim 5570239837: ora [return, return_from_triage], ora o inverso). Pegar
+# `[0]` fazia return_status e Localização oscilarem entre "galpão do ML" e
+# "loja" a cada passada. A perna da triagem (galpão → loja) só existe depois da
+# perna comprador → galpão, então é sempre a mais ATUAL; entre pernas do mesmo
+# tipo, o shipment_id maior (mais novo).
+_RETURN_LEG_PRIORIDADE = {"return_from_triage": 0, "return": 1}
+
+
+def _return_leg_rank(leg: dict) -> tuple[int, int]:
+    try:
+        sid = int(leg.get("shipment_id") or 0)
+    except (TypeError, ValueError):
+        sid = 0
+    return _RETURN_LEG_PRIORIDADE.get(str(leg.get("type") or "").strip(), 9), -sid
+
+
+def _return_leg(rets: Any) -> dict | None:
+    """A perna ATUAL do envio de devolução (item de `shipments[]`, formato
+    v2), escolhida de forma DETERMINÍSTICA; None quando o payload não traz
+    pernas (formato antigo: `shipping`/`status` no topo)."""
+    obj = _return_obj(rets)
+    if obj is None:
+        return None
+    shipments = obj.get("shipments")
+    legs = [s for s in shipments if isinstance(s, dict)] if isinstance(shipments, list) else []
+    if not legs:
+        return None
+    return min(legs, key=_return_leg_rank)
+
+
 def _extract_return_status(rets: Any) -> str:
     """Status do envio da devolução (`return_status`) do payload de returns do
-    claim (v2). Aceita objeto único OU lista; prioriza `shipments[0].status`
-    (formato v2) e cai em `shipping.status` / `status` (resiliência)."""
-    if not rets:
+    claim (v2). Aceita objeto único OU lista; prioriza a perna atual de
+    `shipments[]` (`_return_leg`) e cai em `shipping.status` / `status`
+    (resiliência)."""
+    obj = _return_obj(rets)
+    if obj is None:
         return ""
-    obj = rets[0] if isinstance(rets, list) and rets else rets
-    if not isinstance(obj, dict):
-        return ""
-    shipments = obj.get("shipments")
-    if isinstance(shipments, list) and shipments and isinstance(shipments[0], dict):
-        s = (shipments[0].get("status") or "").strip()
+    leg = _return_leg(rets)
+    if leg is not None:
+        s = (leg.get("status") or "").strip()
         if s:
             return s
     shp = obj.get("shipping") or {}
@@ -76,15 +115,13 @@ def _extract_return_status(rets: Any) -> str:
 
 def _return_em(rets: Any) -> Any:
     """Última mexida na devolução (estimativa da data do `return_status`).
-    Mesmo formato solto do `_extract_return_status`: objeto ou lista."""
-    if not rets:
+    Mesma perna do `_extract_return_status`; sem data na perna, a do objeto."""
+    obj = _return_obj(rets)
+    if obj is None:
         return None
-    obj = rets[0] if isinstance(rets, list) and rets else rets
-    if not isinstance(obj, dict):
-        return None
-    shipments = obj.get("shipments")
-    if isinstance(shipments, list) and shipments and isinstance(shipments[0], dict):
-        em = shipments[0].get("last_updated") or shipments[0].get("date_created")
+    leg = _return_leg(rets)
+    if leg is not None:
+        em = leg.get("last_updated") or leg.get("date_created")
         if em:
             return em
     return obj.get("last_updated") or obj.get("date_created")
@@ -114,19 +151,14 @@ def _ship_destino(sh: dict) -> str | None:
 
 
 def _return_destino(rets: Any) -> tuple[str | None, str | None]:
-    """(tipo, cidade/UF) do destino do envio de DEVOLUÇÃO — o MESMO
-    `shipments[0]` de onde sai o `return_status` (v2), pra localização e
-    status contarem a mesma perna. `destination.name` = `warehouse` (galpão do
-    ML, 1ª perna) ou `seller_address` (loja, depois da triagem)."""
-    if not rets:
+    """(tipo, cidade/UF) do destino do envio de DEVOLUÇÃO — a MESMA perna de
+    onde sai o `return_status` (`_return_leg`), pra localização e status
+    contarem a mesma história. `destination.name` = `warehouse` (galpão do ML,
+    1ª perna) ou `seller_address` (loja, depois da triagem)."""
+    leg = _return_leg(rets)
+    if leg is None:
         return None, None
-    obj = rets[0] if isinstance(rets, list) and rets else rets
-    if not isinstance(obj, dict):
-        return None, None
-    shipments = obj.get("shipments")
-    if not (isinstance(shipments, list) and shipments and isinstance(shipments[0], dict)):
-        return None, None
-    dest = shipments[0].get("destination") or {}
+    dest = leg.get("destination") or {}
     if not isinstance(dest, dict):
         return None, None
     tipo = str(dest.get("name") or "").strip() or None
