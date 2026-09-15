@@ -94,6 +94,8 @@ async def _seed_pedido(
     lucro: float | None = None,
     data: datetime | None = None,
     leaf_segment_id: object = None,
+    custo: float | None = None,
+    margem_null: bool = False,
 ) -> None:
     """Uma linha em bling_orders + uma linha-item no snapshot verificar_margem.
 
@@ -107,6 +109,8 @@ async def _seed_pedido(
     plataforma → 'amazon' por padrão (sujeita à triagem de saldo); use
     'ml'/'shopee' para exercitar a isenção do motivo saldo.
     data/leaf_segment_id → data do pedido e segmento (Datas Especiais).
+    custo → bling_custo_produtos (âncora Bling da margem — Amazon sem repasse).
+    margem_null → marketplace_margem NULL (sem repasse real, como em produção).
     """
     # Catálogo id→nome (merge = idempotente entre seeds do mesmo teste): os
     # espelhos de situação também gravam situacao_nome via subselect daqui.
@@ -135,7 +139,8 @@ async def _seed_pedido(
                 bling_valorbase_item,
                 marketplace_liquido_base_margem_item,
                 evento_frete_anuncio, marketplace_frete_real_cobrado_item,
-                data, pricing_leaf_segment_id
+                data, pricing_leaf_segment_id,
+                bling_custo_produtos
             )
             VALUES (
                 :id, :pedido, :bling_id, :sku,
@@ -145,7 +150,8 @@ async def _seed_pedido(
                 :valorbase,
                 :liquido,
                 :frete_anuncio, :frete_pago,
-                :data, :leaf_segment_id
+                :data, :leaf_segment_id,
+                :custo
             )
             """
         ),
@@ -160,7 +166,12 @@ async def _seed_pedido(
                 "12": "Cancelado",
             }.get(situacao, "Em aberto"),
             "status": status,
-            "margem": margem if margem is not None else (0.05 if margem_baixa else 0.5),
+            "margem": (
+                None
+                if margem_null
+                else margem if margem is not None else (0.05 if margem_baixa else 0.5)
+            ),
+            "custo": custo,
             "minima": minima,
             "lucro": lucro,
             "valorbase": 100 if (saldo_gap or saldo_aguardando) else None,
@@ -341,12 +352,15 @@ async def test_segura_pendente_gravado_sem_gatilho(db: AsyncSession):
 
 async def test_motivo_distingue_ramos_do_saldo(db: AsyncSession):
     """Gap real → "saldo divergente"; líquido ainda NULL → "aguardando saldo
-    da plataforma" (não acusa divergência que não existe)."""
+    da plataforma" (não acusa divergência que não existe). O 402 é Magalu:
+    Amazon deixou de esperar o repasse em 15/09 (teste
+    test_amazon_sem_repasse_decide_pela_margem_do_bling)."""
     await _seed_pedido(
         db, pedido="401", bling_id=401, margem_baixa=False, saldo_gap=True
     )
     await _seed_pedido(
-        db, pedido="402", bling_id=402, margem_baixa=False, saldo_aguardando=True
+        db, pedido="402", bling_id=402, margem_baixa=False, saldo_aguardando=True,
+        plataforma="magalu",
     )
     fake = FakeBling()
 
@@ -393,6 +407,49 @@ async def test_nao_segura_ml_shopee_tiktok_por_saldo(db: AsyncSession):
     assert res == {"held": 0, "reprovados": 1, "failed": 0, "alertas": 0}
     assert fake.situacao_calls == [(503, 83955)]
     assert "margem abaixo do mínimo" in fake.put_bodies[0][1]["observacoes"]
+
+
+async def test_amazon_sem_repasse_decide_pela_margem_do_bling(db: AsyncSession):
+    """Amazon só publica o repasse DEPOIS do envio (marketplace_financials:
+    3-4 dias), então em triagem o líquido real nunca existe — antes, todo
+    pedido Amazon era segurado por "aguardando saldo da plataforma" e
+    liberado na mão (caso 297371, 15/09). Agora líquido NULL não é pendência
+    na Amazon: a margem decide pela âncora Bling (valor_base − frete − taxa
+    + reembolso vs custo) — saudável passa sem hold, abaixo da mínima reprova
+    direto (regra de 11/09). Divergência com repasse REAL presente continua
+    segurando (ramo b)."""
+    # 601: saldo Bling 100, custo 80 → 25% ≥ 10%: passa, sem hold.
+    await _seed_pedido(
+        db, pedido="601", bling_id=601, margem_null=True, saldo_aguardando=True,
+        custo=80,
+    )
+    # 602: saldo Bling 100, custo 95 → 5,3% < 10%: reprova direto pelo Bling.
+    await _seed_pedido(
+        db, pedido="602", bling_id=602, margem_null=True, saldo_aguardando=True,
+        custo=95,
+    )
+    # 603: repasse real presente e divergente (100 vs 80) → segura (b).
+    await _seed_pedido(
+        db, pedido="603", bling_id=603, margem_baixa=False, saldo_gap=True, custo=50
+    )
+    fake = FakeBling()
+
+    res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
+
+    assert res == {"held": 1, "reprovados": 1, "failed": 0, "alertas": 0}
+    assert sorted(fake.situacao_calls) == [(602, 83955), (603, 83955)]
+    obs = {bid: body["observacoes"] for bid, body in fake.put_bodies}
+    assert "margem abaixo do mínimo" in obs[602]
+    assert "aguardando" not in obs[602]
+    assert "saldo divergente" in obs[603]
+    # Só o 602 (reprovado) e o 603 (segurado) mudam de situação no espelho.
+    situacoes = {
+        r.numero: r.situacao
+        for r in (await db.execute(text("SELECT numero, situacao FROM bling_orders"))).all()
+    }
+    assert situacoes["601"] == "6"
+    assert situacoes["602"] == "83955"
+    assert situacoes["603"] == "83955"
 
 
 async def test_obs_rejeitada_pelo_bling_ainda_segura_o_pedido(db: AsyncSession):

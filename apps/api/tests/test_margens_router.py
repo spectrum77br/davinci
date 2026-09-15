@@ -697,6 +697,93 @@ async def test_marketplace_saldo_isenta_ml_shopee_e_ancora_efetivo_na_plataforma
         assert item["status"] == "Pendente"
 
 
+async def test_marketplace_amazon_sem_repasse_decide_pela_margem_bling(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Amazon: o repasse só é publicado DEPOIS do envio (3-4 dias), então em
+    triagem o líquido real nunca existe. Desde 15/09 (Vinicius: "aprovar sem
+    o valor da Amazon, somente o do Bling e o Efetivo") líquido NULL não é
+    pendência de saldo na Amazon — a margem decide pela âncora Bling:
+      - 100 − 0 − 0 vs custo 80 → 25% ≥ 10%: Aprovado, sem motivo;
+      - 100 vs custo 95 → 5,3% < 10%: Pendente por margem baixa;
+      - Magalu (fora da exceção) com líquido NULL: continua Pendente por
+        saldo (aguardando o repasse)."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    ok = BlingOrder(
+        bling_id=987700, numero="124000", item_codigo="sku-ok", item_index=0, situacao="6",
+    )
+    baixa = BlingOrder(
+        bling_id=987701, numero="124001", item_codigo="sku-bx", item_index=0, situacao="6",
+    )
+    magalu = BlingOrder(
+        bling_id=987702, numero="124002", item_codigo="sku-mg", item_index=0, situacao="6",
+    )
+    db.add_all([ok, baixa, magalu])
+    await db.commit()
+    for o in (ok, baixa, magalu):
+        await db.refresh(o)
+    await db.execute(
+        text(
+            """
+            INSERT INTO verificar_margem (
+                bling_order_item_id, pedido_bling, bling_id, sku,
+                situacao, situacao_nome, plataforma_bling, item_proportion,
+                bling_valorbase_item, bling_custofrete_item, bling_taxacomissao_item,
+                bling_custo_produtos, margem_minima,
+                marketplace_liquido_base_margem_item, marketplace_margem,
+                bling_status_margem
+            )
+            VALUES
+                (:ok, '124000', 987700, 'sku-ok',
+                 '6', 'Em aberto', 'amazon', 1,
+                 100, 0, 0,
+                 80, 0.10,
+                 NULL, NULL,
+                 NULL),
+                (:bx, '124001', 987701, 'sku-bx',
+                 '6', 'Em aberto', 'amazon', 1,
+                 100, 0, 0,
+                 95, 0.10,
+                 NULL, NULL,
+                 NULL),
+                (:mg, '124002', 987702, 'sku-mg',
+                 '6', 'Em aberto', 'magalu', 1,
+                 100, 0, 0,
+                 80, 0.10,
+                 NULL, NULL,
+                 NULL)
+            """
+        ),
+        {"ok": str(ok.id), "bx": str(baixa.id), "mg": str(magalu.id)},
+    )
+    await db.commit()
+
+    aprovado = await client.get("/api/margens/marketplace?status=Aprovado")
+    assert aprovado.status_code == 200
+    por_pedido = {it["pedido_bling"]: it for it in aprovado.json()["items"]}
+    assert set(por_pedido) == {"124000"}
+    item = por_pedido["124000"]
+    assert item["attention_saldo"] is False
+    assert item["attention_margem"] is False
+    assert item["saldo_plataforma"] is None
+    assert item["saldo_efetivo"] == 100  # âncora Bling
+    assert item["saldo_final"] == 100
+    assert item["margem_pos_reembolso"] == 0.25
+
+    pendente = await client.get("/api/margens/marketplace?status=Pendente")
+    assert pendente.status_code == 200
+    por_pedido = {it["pedido_bling"]: it for it in pendente.json()["items"]}
+    assert set(por_pedido) == {"124001", "124002"}
+    assert por_pedido["124001"]["attention_margem"] is True
+    assert por_pedido["124001"]["attention_saldo"] is False
+    assert por_pedido["124002"]["attention_margem"] is False
+    assert por_pedido["124002"]["attention_saldo"] is True
+
+
 async def test_marketplace_margem_filter_excludes_aguardando_devolucao(
     client,
     db: AsyncSession,

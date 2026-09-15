@@ -173,6 +173,70 @@ _FRETE_RESULTADO_DISPLAY_SQL = (
     f"(({_FRETE_PLATAFORMA_DISPLAY_SQL}) - ({_FRETE_ANUNCIO_DISPLAY_SQL}))"
 )
 
+# Saldo "Bling" = líquido gravado no Bling (valor_base − frete − taxa). É a base
+# do Saldo Efetivo. Como a edição inline grava valorbase/zera taxa/frete no
+# snapshot (patch_financials_for_item), esta expressão recalcula sozinha após
+# editar — por isso o Efetivo é ancorado no Bling e não no líquido do
+# marketplace (que o patch não toca, ficando stale).
+_SALDO_BLING_SQL = (
+    "(v.bling_valorbase_item"
+    " - COALESCE(v.bling_custofrete_item, 0)"
+    " - COALESCE(v.bling_taxacomissao_item, 0))"
+)
+
+# Ajuste por item: SÓ o reembolso entra no Saldo Efetivo. O `prejuizo` da tabela
+# refunds é referência visual (base pra abrir o chamado de reembolso) e NUNCA
+# desconta do saldo/margem — inclusive porque o frete que o prejuizo de Logística
+# representa já está embutido no líquido do Bling (valor_base − frete − taxa), e
+# descontá-lo de novo contaria duas vezes. `v.ajustes` já é
+# SUM(refunds.reembolso) * item_proportion (migration 0079) e pode ser + ou −.
+# (NÃO usar v.saldo_final − saldo_plataforma: esse delta embute −prejuizo.)
+_REEMBOLSO_DELTA_SQL = "v.ajustes"
+
+# Saldo Final ancorado no Bling = Saldo Efetivo (Bling) + reembolso.
+# Recalcula após edição (o snapshot mantém ajustes, então o delta é estável, e
+# _SALDO_BLING_SQL reflete o valor recém-gravado).
+_SALDO_FINAL_BLING_SQL = (
+    f"({_SALDO_BLING_SQL} + COALESCE({_REEMBOLSO_DELTA_SQL}, 0))"
+)
+
+# Margem OFICIAL dos gatilhos (margem baixa / Condição Especial) = margem
+# sobre o líquido REAL da plataforma (v.marketplace_margem, view 0045).
+# EXCEÇÃO AMAZON (Vinicius, 15/09): a Amazon só publica as taxas do pedido
+# 3-4 dias DEPOIS do envio (marketplace_financials.AMAZON_AGUARDANDO_POSTAGEM),
+# então em triagem (Em aberto) o líquido real de um pedido Amazon NUNCA
+# existe. Resultado: todo pedido Amazon caía em "aguardando saldo da
+# plataforma", o robô o segurava no Bling e alguém aprovava na mão (13
+# pedidos em 8 dias, todos liberados a mão; caso 297371). Sem repasse, a
+# margem da Amazon é a do Saldo Efetivo — que na Amazon é a âncora Bling
+# (valor_base − frete − taxa + reembolso, sobre o custo): o mesmo número da
+# coluna Margem da aba e o mesmo critério da edição do Saldo Efetivo
+# (clears_minimum). Quando o real chega (pós-envio, já fora da triagem) ele
+# vence pelo COALESCE. Só Amazon: Magalu/AliExpress/etc. continuam
+# aguardando o repasse (_ATTENTION_SALDO_SQL, ramo a).
+_PLATAFORMAS_MARGEM_SEM_REPASSE_IN = "('amazon')"
+_MARGEM_SEM_REPASSE_SQL = (
+    "COALESCE(v.plataforma_bling, v.plataforma_financeiro, '') "
+    f"IN {_PLATAFORMAS_MARGEM_SEM_REPASSE_IN}"
+)
+_MARGEM_EFETIVA_BLING_SQL = (
+    "(CASE WHEN COALESCE(v.bling_custo_produtos, 0) > 0"
+    f"       AND {_SALDO_FINAL_BLING_SQL} IS NOT NULL"
+    f"      THEN ({_SALDO_FINAL_BLING_SQL} - v.bling_custo_produtos)"
+    "           / v.bling_custo_produtos"
+    "      ELSE NULL::numeric END)"
+)
+_MARGEM_OFICIAL_SQL = (
+    "COALESCE(v.marketplace_margem,"
+    f" CASE WHEN {_MARGEM_SEM_REPASSE_SQL} THEN {_MARGEM_EFETIVA_BLING_SQL} END)"
+)
+# Lucro na mesma âncora — só pras mensagens Threema (auto-hold e Informar).
+_LUCRO_OFICIAL_SQL = (
+    "COALESCE(v.marketplace_lucro,"
+    f" CASE WHEN {_MARGEM_SEM_REPASSE_SQL}"
+    f"      THEN ({_SALDO_FINAL_BLING_SQL} - v.bling_custo_produtos) END)"
+)
+
 # Datas Especiais (Eduardo, 01/09/2026): "em segmentos ... vamos colocar um
 # novo campo chamado datas especiais, que é a regra que vamos aprovar, para
 # exceção, por exemplo está com margem negativa, aprova". Cada janela
@@ -183,7 +247,7 @@ _FRETE_RESULTADO_DISPLAY_SQL = (
 # sem correlação com `v`, que só entra no WHERE externo do EXISTS).
 # sd.min_margin NULL = aprova qualquer margem no período; preenchido = piso
 # especial em FRAÇÃO (-0.15 = -15%), comparado direto com
-# v.marketplace_margem (mesma base do gatilho). Pedido sem segmento
+# _MARGEM_OFICIAL_SQL (mesma base do gatilho). Pedido sem segmento
 # (pricing_leaf_segment_id NULL) ou sem data nunca casa → sem exceção.
 # Também exposto na listagem como coluna `data_especial` (badge na UI) e no
 # recálculo pós-edição de Saldo Efetivo (clears_minimum). O auto-hold herda
@@ -216,7 +280,7 @@ _MARGEM_DATA_ESPECIAL_SQL = (
     f"        OR v.produto ILIKE '%' || {_ILIKE_ESC.format(col='de.nome_contem')} || '%')"
     "   AND (de.sku_contem IS NULL"
     f"        OR v.sku ILIKE '%' || {_ILIKE_ESC.format(col='de.sku_contem')} || '%')"
-    "   AND (de.min_margin IS NULL OR v.marketplace_margem >= de.min_margin)"
+    f"   AND (de.min_margin IS NULL OR {_MARGEM_OFICIAL_SQL} >= de.min_margin)"
     ")"
 )
 
@@ -225,9 +289,11 @@ _MARGEM_DATA_ESPECIAL_SQL = (
 # devolução, então margem baixa ali não é algo a triar. IS DISTINCT FROM
 # preserva linhas com situacao NULL (continuam contando como margem baixa).
 # Datas Especiais do segmento (bloco acima) suspendem o gatilho no período.
+# Margem = _MARGEM_OFICIAL_SQL: real da plataforma; Amazon sem repasse →
+# âncora Bling (bloco acima).
 _ATTENTION_MARGEM_SQL = (
-    f"(v.marketplace_margem IS NOT NULL AND v.margem_minima IS NOT NULL "
-    f" AND v.marketplace_margem < v.margem_minima "
+    f"({_MARGEM_OFICIAL_SQL} IS NOT NULL AND v.margem_minima IS NOT NULL "
+    f" AND {_MARGEM_OFICIAL_SQL} < v.margem_minima "
     f" AND v.situacao IS DISTINCT FROM '{SITUACAO_AGUARDANDO_DEVOLUCAO}' "
     f" AND NOT {_MARGEM_DATA_ESPECIAL_SQL})"
 )
@@ -254,7 +320,8 @@ _ATTENTION_FRETE_SQL = (
 # isso). Quando o real sincroniza (ML/Shopee: minutos-horas; TikTok:
 # settlement dias após a entrega), a linha aprova sozinha ou cai para "margem
 # baixa". "Divergente" segue não existindo aqui (vale a plataforma). Amazon
-# fica FORA: âncora no Bling e triagem de divergência normais. COALESCE(…,'')
+# fica FORA desta lista (âncora no Bling); desde 15/09 líquido NULL não a
+# segura — ver _MARGEM_OFICIAL_SQL. COALESCE(…,'')
 # preserva os gatilhos para linhas com plataforma NULL.
 _PLATAFORMAS_SALDO_CONFIAVEL_IN = "('ml', 'shopee', 'tiktok')"
 _SALDO_PLATAFORMA_CONFIAVEL_SQL = (
@@ -285,6 +352,12 @@ _SALDO_MANUAL_SQL = (
 #      antes de bater o repasse real do marketplace. Marketplaces como Amazon
 #      liquidam ~1-2 semanas após a entrega, então o pedido fica "divergente"
 #      (não resolvido) até o settlement chegar — aí vira mismatch (b) ou some.
+#      EXCEÇÃO Amazon (15/09): lá o repasse só existe DEPOIS do envio, então
+#      líquido NULL nunca resolveria em triagem — não é pendência; a margem
+#      decide pela âncora Bling (_MARGEM_OFICIAL_SQL). A divergência (b)
+#      continua valendo quando o real existir. O ramo (b) exige líquido
+#      presente de forma explícita: ABS(NULL) > 0,01 é NULL em SQL, e um
+#      NULL aqui tirava a linha das DUAS abas (NOT NULL também é NULL).
 #   b) Divergência real: |saldo_bling − saldo_plataforma| > R$0,01.
 # O alerta visual da UI continua exigindo Plataforma != null (não há o que
 # comparar quando nula): margem.vue saldoDivergente() = saldo_bling != null &&
@@ -300,13 +373,15 @@ _ATTENTION_SALDO_SQL = (
     " AND v.bling_valorbase_item IS NOT NULL "
     f" AND NOT ({_SALDO_PLATAFORMA_CONFIAVEL_SQL}) "
     " AND ("
-    "       v.marketplace_liquido_base_margem_item IS NULL "
-    "       OR ABS("
+    "       (v.marketplace_liquido_base_margem_item IS NULL"
+    f"        AND NOT {_MARGEM_SEM_REPASSE_SQL}) "
+    "       OR (v.marketplace_liquido_base_margem_item IS NOT NULL"
+    "           AND ABS("
     "            (v.bling_valorbase_item"
     "             - COALESCE(v.bling_custofrete_item, 0)"
     "             - COALESCE(v.bling_taxacomissao_item, 0))"
     "            - v.marketplace_liquido_base_margem_item"
-    "         ) > 0.01"
+    "         ) > 0.01)"
     " ))"
 )
 
@@ -350,17 +425,6 @@ _ATTENTION_TYPE_MAP = {
     "all":    NEEDS_ATTENTION_SQL,
 }
 
-# Saldo "Bling" = líquido gravado no Bling (valor_base − frete − taxa). É a base
-# do Saldo Efetivo. Como a edição inline grava valorbase/zera taxa/frete no
-# snapshot (patch_financials_for_item), esta expressão recalcula sozinha após
-# editar — por isso o Efetivo é ancorado no Bling e não no líquido do
-# marketplace (que o patch não toca, ficando stale).
-_SALDO_BLING_SQL = (
-    "(v.bling_valorbase_item"
-    " - COALESCE(v.bling_custofrete_item, 0)"
-    " - COALESCE(v.bling_taxacomissao_item, 0))"
-)
-
 # Saldo Plataforma = líquido reconciliado do marketplace, SEM projeção.
 # A projeção ≈ (valor da venda − frete projetado − comissão da conta,
 # adicionada em 31/08 e estendida em 01/09) foi RETIRADA em 01/09 à noite a
@@ -376,22 +440,6 @@ _SALDO_PLATAFORMA_SQL = "v.marketplace_liquido_base_margem_item"
 # Projeção retirada (01/09 à noite) — flag mantida no payload como FALSE para
 # não quebrar consumidores do shape; o frontend não exibe mais o "≈".
 _SALDO_PROJETADO_SQL = "FALSE"
-
-# Ajuste por item: SÓ o reembolso entra no Saldo Efetivo. O `prejuizo` da tabela
-# refunds é referência visual (base pra abrir o chamado de reembolso) e NUNCA
-# desconta do saldo/margem — inclusive porque o frete que o prejuizo de Logística
-# representa já está embutido no líquido do Bling (valor_base − frete − taxa), e
-# descontá-lo de novo contaria duas vezes. `v.ajustes` já é
-# SUM(refunds.reembolso) * item_proportion (migration 0079) e pode ser + ou −.
-# (NÃO usar v.saldo_final − saldo_plataforma: esse delta embute −prejuizo.)
-_REEMBOLSO_DELTA_SQL = "v.ajustes"
-
-# Saldo Final ancorado no Bling = Saldo Efetivo (Bling) + reembolso.
-# Recalcula após edição (o snapshot mantém ajustes, então o delta é estável, e
-# _SALDO_BLING_SQL reflete o valor recém-gravado).
-_SALDO_FINAL_BLING_SQL = (
-    f"({_SALDO_BLING_SQL} + COALESCE({_REEMBOLSO_DELTA_SQL}, 0))"
-)
 
 # Saldo Efetivo EXIBIDO/derivado. Regra geral: âncora no Bling (editável — a
 # edição inline grava valorbase e o valor digitado aparece na hora). EXCEÇÃO

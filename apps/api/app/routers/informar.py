@@ -349,7 +349,8 @@ async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
     WHERE da listagem com status=Pendente (routers/margens.py), agregado por
     pedido. O motivo por pedido usa as mesmas palavras do recado do auto-hold
     (`margem_auto_hold._motivo`), com "aguardando saldo da plataforma"
-    cobrindo tanto o líquido nulo das não-confiáveis (Amazon pré-settlement)
+    cobrindo tanto o líquido nulo das não-confiáveis (Magalu etc. pré-settlement
+    — Amazon decide pela âncora Bling desde 15/09, ver _MARGEM_OFICIAL_SQL)
     quanto o das confiáveis (ML/Shopee/TikTok). Os números por pedido: pior
     margem entre os itens que dispararam o gatilho (e a mínima exigida deles)
     + soma do lucro real de todos os itens."""
@@ -361,6 +362,8 @@ async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
         _ATTENTION_MARGEM_SQL,
         _ATTENTION_SALDO_AGUARDANDO_SQL,
         _ATTENTION_SALDO_SQL,
+        _LUCRO_OFICIAL_SQL,
+        _MARGEM_OFICIAL_SQL,
         _SITUACAO_TRIAGEM_SQL,
         NEEDS_ATTENTION_SQL,
         SITUACAO_REPROVADO,
@@ -380,12 +383,13 @@ async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
                        OR {_ATTENTION_SALDO_AGUARDANDO_SQL})
                                                 AS saldo_pendente,
                -- ×100: o snapshot guarda margens como FRAÇÃO (0.069 = 6,9%);
-               -- a mensagem mostra em % como a aba faz.
-               MIN(v.marketplace_margem)
+               -- a mensagem mostra em % como a aba faz. Margem/lucro
+               -- OFICIAIS: real da plataforma; Amazon sem repasse → Bling.
+               MIN({_MARGEM_OFICIAL_SQL})
                    FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS margem,
                MAX(v.margem_minima)
                    FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS minima,
-               SUM(v.marketplace_lucro)         AS lucro,
+               SUM({_LUCRO_OFICIAL_SQL})        AS lucro,
                string_agg(DISTINCT NULLIF(btrim(v.produto), ''), '; ')
                                                 AS produto
         FROM {SNAPSHOT_TABLE} v

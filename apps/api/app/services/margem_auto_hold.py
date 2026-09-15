@@ -29,6 +29,16 @@ segue isenta na origem (_ATTENTION_SALDO_SQL exclui as confiáveis). Margem
 baixa continua segurando ML/Shopee/TikTok normalmente — ela só existe com o
 líquido real presente (nunca vem de projeção).
 
+AMAZON SEM REPASSE (Vinicius, 15/09): a Amazon só publica as taxas 3-4 dias
+DEPOIS do envio, então em triagem o líquido real de um pedido Amazon nunca
+existe — todo pedido Amazon era segurado por "aguardando saldo da
+plataforma" e liberado na mão (13 em 8 dias; caso 297371). Agora líquido
+NULL não é pendência na Amazon: a margem oficial dos gatilhos
+(routers/margens._MARGEM_OFICIAL_SQL) cai na âncora Bling (valor_base −
+frete − taxa + reembolso, sobre o custo) — saudável passa sem hold, abaixo
+da mínima reprova direto como em qualquer plataforma. Divergência com
+repasse real presente segue segurando.
+
 Ordem das escritas por pedido: Observações primeiro (GET → compose → PUT,
 a mesma caneta do fluxo Logística — preserva o texto existente e não duplica
 a linha do dia), situação depois. Se um passo falhar por erro transiente
@@ -148,6 +158,8 @@ def _candidatos_sql() -> str:
         _ATTENTION_MARGEM_SQL,
         _ATTENTION_SALDO_AGUARDANDO_SQL,
         _ATTENTION_SALDO_SQL,
+        _LUCRO_OFICIAL_SQL,
+        _MARGEM_OFICIAL_SQL,
         NEEDS_ATTENTION_SQL,
     )
 
@@ -172,12 +184,13 @@ def _candidatos_sql() -> str:
                        AND v.marketplace_liquido_base_margem_item IS NULL)
                                                 AS saldo_pendente,
                -- ×100: o snapshot guarda margens como FRAÇÃO (0.069 = 6,9%);
-               -- a mensagem mostra em % como a aba faz.
-               MIN(v.marketplace_margem)
+               -- a mensagem mostra em % como a aba faz. Margem/lucro
+               -- OFICIAIS: real da plataforma; Amazon sem repasse → Bling.
+               MIN({_MARGEM_OFICIAL_SQL})
                    FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS margem,
                MAX(v.margem_minima)
                    FILTER (WHERE {_ATTENTION_MARGEM_SQL}) * 100 AS minima,
-               SUM(v.marketplace_lucro)         AS lucro,
+               SUM({_LUCRO_OFICIAL_SQL})        AS lucro,
                string_agg(DISTINCT NULLIF(btrim(v.produto), ''), '; ')
                                                 AS produto
         FROM {SNAPSHOT_TABLE} v
