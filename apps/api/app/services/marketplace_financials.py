@@ -85,6 +85,22 @@ _RX_FALHA_TRANSITORIA = re.compile(
 )
 
 
+# Todo campo de valor do snapshot. Serve pra reconhecer uma busca que voltou
+# VAZIA (a API recusou) e não confundir com uma busca que voltou dizendo
+# "este pedido não teve frete".
+_CAMPOS_DINHEIRO = (
+    "gross_amount",
+    "fee_amount",
+    "freight_amount",
+    "rebate_amount",
+    "discount_amount",
+    "refund_amount",
+    "tax_amount",
+    "adjustment_amount",
+    "net_amount",
+)
+
+
 def falha_transitoria(erro: str | None) -> bool:
     """True quando a falha é da API (fora do ar, sem token, limite estourado)
     ou é um dado que a plataforma ainda não publicou — e não um erro do pedido."""
@@ -704,23 +720,55 @@ async def _persist_snapshot(
     transitoria = snapshot.status in RETRYABLE_STATUSES and falha_transitoria(snapshot.error)
     idade_dias = (now - (financial.created_at or now)).days
     esteira_lenta = transitoria and idade_dias < ESPERA_MAX_DIAS
-    attempts = int(financial.attempts or 0) + (0 if transitoria else 1)
+    # `attempts` conta FALHAS SEGUIDAS, não sincronizações. Antes subia também
+    # no sucesso e nunca zerava: um pedido re-sincronizado 8 vezes (churn de
+    # webhook é comum) chegava no teto sem nunca ter falhado, e morria na fila
+    # no primeiro erro. Sucesso zera; falha da API não conta; erro de verdade
+    # soma 1.
+    if snapshot.status not in RETRYABLE_STATUSES:
+        attempts = 0
+    elif transitoria:
+        attempts = int(financial.attempts or 0)
+    else:
+        attempts = int(financial.attempts or 0) + 1
+
+    # Busca que voltou VAZIA (a API recusou) não pode apagar o que já foi
+    # coletado. Antes todo 403 zerava gross/fee/freight/net e APAGAVA os
+    # eventos — e a tela de Margem, que soma os eventos, trocava um Frete de
+    # R$ 23,87 por R$ 0,00. Não é "não preencheu": era dado bom destruído.
+    # Só vale quando já havia leitura anterior; pedido novo segue como antes.
+    busca_vazia = (
+        snapshot.status == "error"
+        and not snapshot.events
+        and all(getattr(snapshot, campo) is None for campo in _CAMPOS_DINHEIRO)
+    )
+    preservar = busca_vazia and financial.fetched_at is not None
+
     financial.store_id = store.id if store else financial.store_id
     financial.bling_id = bling_id
     financial.pedido_bling = pedido_bling
     financial.status = snapshot.status
-    financial.currency = snapshot.currency or financial.currency or "BRL"
-    financial.gross_amount = snapshot.gross_amount
-    financial.fee_amount = snapshot.fee_amount
-    financial.freight_amount = snapshot.freight_amount
-    financial.rebate_amount = snapshot.rebate_amount
-    financial.discount_amount = snapshot.discount_amount
-    financial.refund_amount = snapshot.refund_amount
-    financial.tax_amount = snapshot.tax_amount
-    financial.adjustment_amount = snapshot.adjustment_amount
-    financial.net_amount = snapshot.net_amount
-    financial.raw = snapshot.raw or {}
-    financial.fetched_at = now
+    if not preservar:
+        financial.currency = snapshot.currency or financial.currency or "BRL"
+        financial.gross_amount = snapshot.gross_amount
+        financial.fee_amount = snapshot.fee_amount
+        financial.freight_amount = snapshot.freight_amount
+        financial.rebate_amount = snapshot.rebate_amount
+        financial.discount_amount = snapshot.discount_amount
+        financial.refund_amount = snapshot.refund_amount
+        financial.tax_amount = snapshot.tax_amount
+        financial.adjustment_amount = snapshot.adjustment_amount
+        financial.net_amount = snapshot.net_amount
+        financial.raw = snapshot.raw or {}
+        financial.fetched_at = now
+    else:
+        # `fetched_at` continua marcando QUANDO O VALOR foi coletado; a hora da
+        # tentativa que falhou fica no raw, sem derrubar o payload anterior.
+        financial.raw = {
+            **(financial.raw or {}),
+            "ultima_falha": (snapshot.error or "")[:500],
+            "ultima_falha_em": now.isoformat(),
+        }
     financial.attempts = attempts
     financial.last_error = snapshot.error
     financial.espera_lenta = esteira_lenta
@@ -730,7 +778,11 @@ async def _persist_snapshot(
     if keep_estimate:
         financial.status = "estimated"
         financial.net_amount = _money(estimate.get("est_settlement_amount"))
-        financial.raw = {**(snapshot.raw or {}), "unsettled_estimate": estimate}
+        financial.raw = {**(financial.raw or {}), "unsettled_estimate": estimate}
+
+    if preservar:
+        await session.flush()
+        return financial
 
     await session.execute(
         delete(MarketplaceFinancialEvent).where(

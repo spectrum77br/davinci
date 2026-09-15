@@ -23,7 +23,10 @@ from sqlalchemy import select, text
 
 from app.models import IntegrationPlatform
 from app.models.integration import Integration
-from app.models.marketplace_financial import MarketplaceOrderFinancial
+from app.models.marketplace_financial import (
+    MarketplaceFinancialEvent,
+    MarketplaceOrderFinancial,
+)
 from app.services.marketplace_financials import (
     ESPERA_INTERVALO_HORAS,
     ESPERA_MAX_DIAS,
@@ -326,3 +329,98 @@ async def test_um_pedido_com_erro_nao_derruba_o_resto_do_lote(db, make_user, mon
 
     assert vistos == [1, 2, 3]
     assert resumo == {"queued": 3, "ok": 2, "error": 1}
+
+
+async def _persistir_sucesso(db, integ, *, external_order_id, bling_id, frete, taxa):
+    from decimal import Decimal
+
+    from app.services.marketplace_financials import FinancialEventDraft
+
+    return await _persist_snapshot(
+        db,
+        FinancialSnapshot(
+            status="posted",
+            raw={"escrow": "ok"},
+            error=None,
+            gross_amount=Decimal("1000.00"),
+            fee_amount=Decimal(str(taxa)),
+            freight_amount=Decimal(str(frete)),
+            net_amount=Decimal("900.00"),
+            events=[
+                FinancialEventDraft(event_type="freight", amount=Decimal(str(frete))),
+                FinancialEventDraft(event_type="fee", amount=Decimal(str(taxa))),
+            ],
+        ),
+        platform=integ.platform,
+        integration=integ,
+        store=None,
+        bling_id=bling_id,
+        pedido_bling=str(bling_id),
+        external_order_id=external_order_id,
+    )
+
+
+async def test_403_nao_apaga_o_frete_que_ja_estava_na_tela(db, make_user):
+    """O pior sintoma do incidente: não era 'não preencheu', era dado bom
+    destruído. Um pedido que mostrava Frete R$ 23,87 passou a mostrar R$ 0,00
+    depois que a Shopee recusou."""
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user)
+
+    linha = await _persistir_sucesso(
+        db, integ, external_order_id="COM-FRETE", bling_id=26930000001,
+        frete="23.87", taxa="120.00",
+    )
+    await db.commit()
+    assert float(linha.freight_amount) == 23.87
+
+    # Agora a Shopee cai.
+    linha = await _persistir(
+        db, integ, external_order_id="COM-FRETE", bling_id=26930000001,
+        erro="Client error '403 Forbidden' for url 'https://partner.shopeemobile.com/x'",
+    )
+    await db.commit()
+
+    # O valor continua na tela; só o status e o erro mudam.
+    assert float(linha.freight_amount) == 23.87
+    assert float(linha.fee_amount) == 120.00
+    assert float(linha.net_amount) == 900.00
+    assert linha.status == "error"
+    assert linha.espera_lenta is True
+    assert (linha.raw or {}).get("ultima_falha", "").startswith("Client error")
+    # E os eventos, que são o que a tela de Margem soma, seguem lá.
+    eventos = (
+        await db.execute(
+            select(MarketplaceFinancialEvent).where(
+                MarketplaceFinancialEvent.order_financial_id == linha.id
+            )
+        )
+    ).scalars().all()
+    assert len(eventos) == 2
+
+
+async def test_tentativas_contam_falha_seguida_e_nao_sincronizacao(db, make_user):
+    """Antes `attempts` subia também no sucesso e nunca zerava: pedido
+    re-sincronizado 8 vezes chegava no teto sem nunca ter falhado, e morria na
+    fila no primeiro erro de verdade."""
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user)
+
+    linha = None
+    for _ in range(9):
+        linha = await _persistir_sucesso(
+            db, integ, external_order_id="SAUDAVEL", bling_id=26940000001,
+            frete="10.00", taxa="50.00",
+        )
+    await db.commit()
+    assert linha is not None
+    assert linha.attempts == 0
+
+    # Primeiro erro DE VERDADE: ainda tem fila, não morre de cara.
+    linha = await _persistir(
+        db, integ, external_order_id="SAUDAVEL", bling_id=26940000001,
+        erro="Client error '400 Bad Request' for url 'x'",
+    )
+    await db.commit()
+    assert linha.attempts == 1
+    assert linha.next_retry_at is not None
