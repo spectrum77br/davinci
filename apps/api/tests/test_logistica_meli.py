@@ -612,3 +612,144 @@ async def test_enviar_chamado_sem_acao_de_mediador(monkeypatch):
     assert ei.value.code == "logistica_reclamacao_sem_acao"
     assert fake.disputed == []
     assert fake.messages == []
+
+
+# ---- devolução manda na localização ----
+
+# Payload v2 de /claims/{id}/returns como o ML devolveu em 15/09 (293519):
+# shipments[0] = perna da triagem → loja; shipments[1] = comprador → galpão.
+_RETURNS_ENTREGUE_NA_LOJA = {
+    "id": 167062195,
+    "last_updated": "2026-09-14T13:02:48.052+00:00",
+    "shipments": [
+        {
+            "shipment_id": 47995606806,
+            "status": "delivered",
+            "tracking_number": "DOHSCH5GXBLONBGU6O6NFVXIKA",
+            "destination": {
+                "name": "seller_address",
+                "shipping_address": {
+                    "city": {"id": "BR-SP-20", "name": "Piracicaba"},
+                    "state": {"id": "BR-SP", "name": "São Paulo"},
+                },
+            },
+            "type": "return_from_triage",
+        },
+        {
+            "shipment_id": 47961622960,
+            "status": "delivered",
+            "tracking_number": "MEL47961622960FMDOR01",
+            "destination": {
+                "name": "warehouse",
+                "shipping_address": {
+                    "city": {"id": "QlItU1BDYWphbWFy", "name": "Cajamar"},
+                    "state": {"id": "BR-SP", "name": "São Paulo"},
+                },
+            },
+            "type": "return",
+        },
+    ],
+}
+
+
+def _pedido_devolvido(returns):
+    return FakeML(
+        order={
+            "status": "cancelled",
+            "cancel_detail": {"group": "mediations"},
+            "shipping": {"id": 47900305340},
+            "mediations": [{"id": 5573328694}],
+        },
+        shipment={
+            "status": "delivered",
+            "tracking_number": "75MFOYB4V5NY3NBGNBSAPHS2ZA",
+            "receiver_address": {"city": {"name": "Jaraguá do Sul"}, "state": {"id": "BR-SC"}},
+        },
+        claim={
+            "stage": "recontact",
+            "status": "closed",
+            "resolution": {"benefited": ["complainant"]},
+        },
+        returns=returns,
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_enrichment_localizacao_conta_a_devolucao_entregue_na_loja():
+    # Caso real (Vinicius, 15/09, 293519): ida entregue em Jaraguá do Sul e a
+    # devolução JÁ na loja em Piracicaba. A coluna mostrava "Entregue → Jaraguá
+    # do Sul/SC" — parecia que o produto seguia com o comprador.
+    client = _pedido_devolvido(_RETURNS_ENTREGUE_NA_LOJA)
+    enr = await logistica_meli.build_enrichment(client, "2000018212582238")
+    assert enr["meli_status"]["return_status"] == "delivered"
+    assert enr["localizacao"] == "Devolvido → loja (Piracicaba/SP)"
+    assert enr["localizacao_devolucao"] is True
+    # O rastreio continua sendo o da ida (a devolução tem os dela no ML).
+    assert enr["rastreio"] == "75MFOYB4V5NY3NBGNBSAPHS2ZA"
+
+
+@pytest.mark.asyncio
+async def test_build_enrichment_localizacao_devolucao_a_caminho_do_galpao():
+    returns = {
+        "shipments": [
+            {
+                "status": "shipped",
+                "destination": {
+                    "name": "warehouse",
+                    "shipping_address": {"city": {"name": "Cajamar"}, "state": {"id": "BR-SP"}},
+                },
+                "type": "return",
+            }
+        ]
+    }
+    enr = await logistica_meli.build_enrichment(_pedido_devolvido(returns), "1")
+    assert enr["meli_status"]["return_status"] == "shipped"
+    assert enr["localizacao"] == "Devolução a caminho → galpão do ML (Cajamar/SP)"
+    assert enr["localizacao_devolucao"] is True
+
+
+@pytest.mark.asyncio
+async def test_build_enrichment_devolucao_cancelada_volta_pro_envio_de_ida():
+    # Devolução cancelada = produto ficou com o comprador: vale a ida.
+    returns = {"shipments": [{"status": "cancelled", "destination": {"name": "warehouse"}}]}
+    enr = await logistica_meli.build_enrichment(_pedido_devolvido(returns), "1")
+    assert enr["meli_status"]["return_status"] == "cancelled"
+    assert enr["localizacao"] == "Entregue → Jaraguá do Sul/SC"
+    assert enr["localizacao_devolucao"] is False
+
+
+@pytest.mark.asyncio
+async def test_build_enrichment_sem_devolucao_nao_marca_devolucao():
+    enr = await logistica_meli.build_enrichment(_pedido_devolvido(None), "1")
+    assert "return_status" not in enr["meli_status"]
+    assert enr["localizacao"] == "Entregue → Jaraguá do Sul/SC"
+    assert enr["localizacao_devolucao"] is False
+
+
+def test_localizacao_devolucao_variantes():
+    f = logistica_rules.localizacao_devolucao
+    assert (
+        f("delivered", destino_tipo="seller_address", destino="Piracicaba/SP")
+        == "Devolvido → loja (Piracicaba/SP)"
+    )
+    assert f("shipped", destino_tipo="warehouse") == "Devolução a caminho → galpão do ML"
+    assert f("pending", destino="Cajamar/SP") == "Devolução aguardando envio → Cajamar/SP"
+    assert f("ready_to_ship") == "Devolução aguardando envio"
+    assert f("not_delivered") == "Devolução não entregue"
+    assert f("delivered") == "Devolvido"
+    # Token novo do ML não some: aparece cru.
+    assert f("in_review", destino_tipo="depot") == "Devolução in_review → depot"
+    assert f("cancelled", destino_tipo="warehouse", destino="Cajamar/SP") == ""
+    assert f("") == ""
+    assert f(None) == ""
+
+
+def test_devolucao_manda_localizacao():
+    g = logistica_rules.devolucao_manda_localizacao
+    assert g({"return_status": "shipped"}) is True
+    assert g({"return_status": "delivered"}) is True
+    assert g({"return_status": "cancelled"}) is False
+    assert g({"ship_status": "delivered"}) is False
+    assert g({}) is False
+    assert g(None) is False
+

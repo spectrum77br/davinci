@@ -723,6 +723,60 @@ def localizacao_completa(
     return out
 
 
+# Localização quando o pedido tem DEVOLUÇÃO: a coluna passa a descrever a VOLTA
+# do produto, não a ida. Antes ela ficava congelada na última cena do envio de
+# ida ("Entregue → Jaraguá do Sul/SC") mesmo com a devolução já entregue na
+# loja — parecia que o produto seguia com o comprador (Vinicius, 15/09, Air
+# Fryer 293220/293519). Chaveado pelo `return_status` cru do ML.
+RETURN_LOCALIZACAO_PT: dict[str, str] = {
+    "pending": "Devolução aguardando envio",
+    "ready_to_ship": "Devolução aguardando envio",
+    "shipped": "Devolução a caminho",
+    "delivered": "Devolvido",
+    "not_delivered": "Devolução não entregue",
+}
+# Devolução cancelada = o produto ficou com o comprador; volta a valer a ida.
+_RETURN_SEM_LOCALIZACAO = frozenset({"cancelled"})
+# `destination.name` do envio de devolução (v2): o ML manda primeiro pro
+# galpão dele (triagem) e só depois pra loja — importa dizer ONDE chegou.
+RETURN_DESTINO_PT: dict[str, str] = {
+    "seller_address": "loja",
+    "warehouse": "galpão do ML",
+}
+
+
+def localizacao_devolucao(
+    return_status: str | None,
+    *,
+    destino_tipo: str | None = None,
+    destino: str | None = None,
+) -> str:
+    """Localização proxy da DEVOLUÇÃO: status da volta em PT + pra onde
+    (`loja`/`galpão do ML`) + cidade/UF — `Devolvido → loja (Piracicaba/SP)`,
+    `Devolução a caminho → galpão do ML (Cajamar/SP)`. Partes ausentes são
+    omitidas. Vazio quando não há devolução em curso (sem status ou cancelada):
+    aí a localização do envio de ida continua valendo."""
+    rs = (return_status or "").strip()
+    if not rs or rs in _RETURN_SEM_LOCALIZACAO:
+        return ""
+    out = RETURN_LOCALIZACAO_PT.get(rs) or f"Devolução {rs}"
+    tipo = RETURN_DESTINO_PT.get((destino_tipo or "").strip(), (destino_tipo or "").strip())
+    d = (destino or "").strip()
+    if tipo and d:
+        alvo = f"{tipo} ({d})"
+    else:
+        alvo = tipo or d
+    return f"{out} → {alvo}" if alvo else out
+
+
+def devolucao_manda_localizacao(meli_status: dict[str, str] | None) -> bool:
+    """True quando a linha tem devolução em curso/finalizada — a Localização
+    descreve a volta e a leitura física dos Correios (do envio de ida) não
+    deve sobrescrevê-la."""
+    m = meli_status or {}
+    return bool(localizacao_devolucao(m.get("return_status")))
+
+
 # Trechos da descrição dos Correios (17track) que indicam ENTREGA ao
 # destinatário — o sinal físico de que o cliente recebeu o pacote.
 _CORREIOS_ENTREGUE = ("entregue ao destinat",)

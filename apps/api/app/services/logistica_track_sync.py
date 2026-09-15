@@ -317,6 +317,11 @@ def aplicar_leitura(
     que conta como "atualizado" nos resumos."""
     agora = agora or datetime.now(UTC)
     mudou = False
+    if loc and logistica_rules.devolucao_manda_localizacao(row.meli_status):
+        # Pedido com devolução: a Localização descreve a VOLTA do produto (vem
+        # do ML). A leitura dos Correios é do envio de ida, que já terminou —
+        # não sobrescreve (senão volta o "Entregue → cidade do comprador").
+        loc = None
     if loc and loc != row.localizacao:
         # Evento grave (apreensão, extravio, roubo…) não pode ficar esperando
         # alguém olhar a tela — vira aviso no Threema (Eduardo, 10/09,

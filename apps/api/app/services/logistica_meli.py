@@ -90,11 +90,10 @@ def _return_em(rets: Any) -> Any:
     return obj.get("last_updated") or obj.get("date_created")
 
 
-def _ship_destino(sh: dict) -> str | None:
-    """Cidade/UF de destino do shipment (`receiver_address`). `city`/`state`
-    podem vir como string ou objeto `{id, name}`; `state.id` costuma ser
-    `BR-SP` → extrai o `SP`."""
-    addr = sh.get("receiver_address") or {}
+def _endereco_cidade_uf(addr: dict | None) -> str | None:
+    """Cidade/UF de um endereço do ML. `city`/`state` podem vir como string ou
+    objeto `{id, name}`; `state.id` costuma ser `BR-SP` → extrai o `SP`."""
+    addr = addr or {}
     city = addr.get("city")
     if isinstance(city, dict):
         city = city.get("name")
@@ -107,6 +106,31 @@ def _ship_destino(sh: dict) -> str | None:
         uf = uf.rsplit("-", 1)[-1]
     where = "/".join(p for p in (city, uf) if p)
     return where or None
+
+
+def _ship_destino(sh: dict) -> str | None:
+    """Cidade/UF de destino do shipment (`receiver_address`)."""
+    return _endereco_cidade_uf(sh.get("receiver_address"))
+
+
+def _return_destino(rets: Any) -> tuple[str | None, str | None]:
+    """(tipo, cidade/UF) do destino do envio de DEVOLUÇÃO — o MESMO
+    `shipments[0]` de onde sai o `return_status` (v2), pra localização e
+    status contarem a mesma perna. `destination.name` = `warehouse` (galpão do
+    ML, 1ª perna) ou `seller_address` (loja, depois da triagem)."""
+    if not rets:
+        return None, None
+    obj = rets[0] if isinstance(rets, list) and rets else rets
+    if not isinstance(obj, dict):
+        return None, None
+    shipments = obj.get("shipments")
+    if not (isinstance(shipments, list) and shipments and isinstance(shipments[0], dict)):
+        return None, None
+    dest = shipments[0].get("destination") or {}
+    if not isinstance(dest, dict):
+        return None, None
+    tipo = str(dest.get("name") or "").strip() or None
+    return tipo, _endereco_cidade_uf(dest.get("shipping_address"))
 
 
 # Status de envio já finalizados — não têm previsão de entrega futura.
@@ -238,6 +262,7 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
     rastreio: str | None = None
     destino: str | None = None
     previsao: str | None = None
+    loc_devolucao: str | None = None
     order = await _fetch_order(client, str(order_id))
 
     cancel_detail = order.get("cancel_detail") or {}
@@ -353,21 +378,36 @@ async def build_enrichment(client: MercadoLivreClient, order_id: str) -> dict[st
             logistica_datas.propor(
                 datas, "return_status", _return_em(rets) or claim_em, logistica_datas.FONTE_APROX
             )
+            # Com devolução, a Localização conta a VOLTA do produto (pra onde e
+            # em que pé), não a ida — que já terminou.
+            dev_tipo, dev_destino = _return_destino(rets)
+            loc_devolucao = (
+                logistica_rules.localizacao_devolucao(
+                    rstatus, destino_tipo=dev_tipo, destino=dev_destino
+                )
+                or None
+            )
 
     # Mantém só campos conhecidos (defesa contra tokens estranhos entrando).
     meli = {f: out[f] for f in logistica_rules.FIELD_ORDER if out.get(f)}
     datas = {f: datas[f] for f in meli if f in datas}
     # Localização = proxy do "último local" (substatus/status do envio em PT) +
     # destino (cidade/UF) + previsão de entrega; o ML não dá o local físico da
-    # rede própria.
-    status_pt = logistica_rules.localizacao_pt(meli)
-    localizacao = (
-        logistica_rules.localizacao_completa(status_pt, destino=destino, previsao=previsao) or None
-    )
+    # rede própria. Devolução em curso/finalizada sobrepõe tudo isso.
+    if loc_devolucao:
+        localizacao: str | None = loc_devolucao
+    else:
+        status_pt = logistica_rules.localizacao_pt(meli)
+        localizacao = (
+            logistica_rules.localizacao_completa(status_pt, destino=destino, previsao=previsao)
+            or None
+        )
     return {
         "meli_status": meli,
         "rastreio": rastreio,
         "localizacao": localizacao,
+        # True = a localização descreve a devolução (não o envio de ida).
+        "localizacao_devolucao": bool(loc_devolucao),
         "datas": datas,
     }
 
@@ -466,6 +506,15 @@ async def enrich_row(
     # escrevia congelava para sempre. Foi o que travou o 291809 em "Aguardando
     # NF → Rio de Janeiro/RJ · previsão 25/08" (Eduardo, 04/09).
     new_loc = enr.get("localizacao")
+    if new_loc and enr.get("localizacao_devolucao"):
+        # Devolução em curso/finalizada: a coluna descreve a volta do produto.
+        # A leitura física dos Correios era do envio de ida, que já acabou —
+        # sai o carimbo (senão a tela mostra "Correios · lido há X" ao lado de
+        # "Devolvido → loja") e não há físico pra cruzar com o ML.
+        row.localizacao = new_loc
+        row.localizacao_at = None
+        row.divergencia = None
+        return True
     if new_loc and not (logistica_track.is_correios(row.rastreio) and row.localizacao_at):
         row.localizacao = new_loc
     # Divergência ML × físico: só faz sentido pros Correios (onde o 17track dá o
