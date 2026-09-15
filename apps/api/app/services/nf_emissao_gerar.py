@@ -398,6 +398,23 @@ def _faturador_do_pedido(itens_rows: list) -> UUID | None:
     return base
 
 
+async def faturador_pede_duimp(session: AsyncSession, numero: str) -> bool:
+    """15/09 (Eduardo: "celular 1% não vai DUIMP"): a DUIMP só entra na etiqueta
+    quando o FATURADOR do pedido (o mesmo que decide 1% × nota cheia, por loja e
+    por tipo de produto) tem `observacao_duimp` — a mesma regra da observação
+    da NF. Pedido sem itens/faturador → False."""
+    rows = (
+        await session.execute(_ITENS_SQL, {"numeros": [numero]})
+    ).mappings().all()
+    if not rows:
+        return False
+    fid = _faturador_do_pedido(list(rows))
+    if fid is None:
+        return False
+    fat = (await _carregar_faturadores(session, {fid})).get(fid)
+    return bool(fat and fat.observacao_duimp)
+
+
 async def _carregar_faturadores(
     session: AsyncSession, ids: set
 ) -> dict:

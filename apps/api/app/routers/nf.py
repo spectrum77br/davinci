@@ -1783,6 +1783,10 @@ async def _duimp_do_pedido(session: AsyncSession, numero: str | None) -> str | N
     item importado → None (etiqueta sai sem a linha)."""
     if not numero:
         return None
+    # 15/09: só faturador de nota cheia (observacao_duimp) leva DUIMP na etiqueta;
+    # celular a 1% (Correios) sai sem a linha, mesmo com DUIMP cadastrada no SKU.
+    if not await nf_emissao_gerar.faturador_pede_duimp(session, numero):
+        return None
     rows = (
         await session.execute(
             select(BlingOrder.item_codigo)
