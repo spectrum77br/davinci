@@ -13,8 +13,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0273_logistica_status_lido_em"
-down_revision: str | None = "0272_logistica_amazon_prazos_mensagens"
+revision: str = "0274_logistica_status_lido_em"
+down_revision: str | None = "0273_logistica_amazon_canal_backfill"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
