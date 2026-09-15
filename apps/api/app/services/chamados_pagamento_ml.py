@@ -106,7 +106,13 @@ async def pagamento_da_venda(session: AsyncSession, pedido_bling: str, clientes:
 
     agora = datetime.now(UTC)
     liberado = bool(liberado_em and liberado_em <= agora)
-    sem_prejuizo = bool(pago_em and col.get("status") == "refunded" and pelo_ml and liberado)
+    # A loja só FICOU com o dinheiro se ele foi liberado bem ANTES do estorno (285250:
+    # liberado 29/07, estorno 24/08). Liberação no mesmo instante do estorno (291874,
+    # retido pela Receita: estorno 14:49:23, "liberação" 14:49:31) é o próprio
+    # movimento do estorno — não prova que o valor ficou com a loja.
+    loja_ficou = bool(pelo_ml and liberado and estorno_em and liberado_em
+                      and (estorno_em - liberado_em).total_seconds() >= 3600)
+    sem_prejuizo = bool(pago_em and col.get("status") == "refunded" and loja_ficou)
 
     partes = [f"Pagamento da venda {venda} no Mercado Livre (dados da API do ML):"]
     if pago_em:
@@ -117,8 +123,9 @@ async def pagamento_da_venda(session: AsyncSession, pedido_bling: str, clientes:
     else:
         partes.append(f"pagamento não aprovado (status {col.get('status') or '?'})")
     if estornos or col.get("status") in ("refunded", "partially_refunded"):
-        quem = ("pago pelo programa de proteção do Mercado Livre — NÃO saiu da conta da loja" if pelo_ml
-                else "debitado da loja")
+        quem = ("pago pelo programa de proteção do Mercado Livre — NÃO saiu da conta da loja" if loja_ficou
+                else "registrado pelo programa de proteção do Mercado Livre (não dá pra afirmar que o valor ficou com a loja)" if pelo_ml
+                else f"sem cobertura do programa de proteção do ML (fonte: {', '.join(sorted(f for f in fontes if f)) or '?'})")
         partes.append(f"estorno ao comprador de {_moeda(estorno_valor)} em {_data(estorno_em)}, {quem}")
     else:
         partes.append("sem estorno registrado")
