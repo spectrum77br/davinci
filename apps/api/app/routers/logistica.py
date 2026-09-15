@@ -83,7 +83,7 @@ from app.services import (
     logistica_track_sync,
     threema,
 )
-from app.worker_pool import get_arq_pool
+from app.worker_pool import get_arq_marketplace_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/logistica", tags=["logistica"])
@@ -228,6 +228,7 @@ def _to_out(
         localizacao=c.localizacao,
         localizacao_at=c.localizacao_at,
         rastreio_lido_em=c.rastreio_lido_em,
+        status_lido_em=c.status_lido_em,
         divergencia=c.divergencia,
         status_bling=c.status_bling,
         chamado=c.chamado,
@@ -762,7 +763,10 @@ async def recarregar(
     aba Status). Roda em background porque pode passar do timeout do Cloudflare.
     O front acompanha pelo `job_id` (GET /recarregar/{job_id}) e repuxa a lista
     enquanto isso."""
-    pool = await get_arq_pool()
+    # O motor roda no worker de marketplace (fila própria, sem disputar com os
+    # syncs financeiros do default — 15/09); o job_id precisa ser lido na
+    # mesma fila.
+    pool = await get_arq_marketplace_pool()
     job = await pool.enqueue_job("logistica_recarregar")
     job_id = job.job_id if job else None
     logger.info("logistica_recarregar_enqueued", job_id=job_id)
@@ -780,7 +784,7 @@ async def recarregar_status(
     pra mostrar o resumo no toast. `failed` = o job rodou e estourou; que não
     aconteça — mas se acontecer o operador fica sabendo em vez de olhar um
     spinner mudo."""
-    pool = await get_arq_pool()
+    pool = await get_arq_marketplace_pool()
     job = Job(job_id, pool)
     st = await job.status()
     if st == JobStatus.complete:

@@ -78,6 +78,13 @@ class Logistica(Base, TimestampMixin):
     rastreio_lido_em: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Quando o Status Plataforma foi LIDO pela última vez (enrich/sweep), mesmo
+    # sem mudança. `status_datas` guarda quando cada campo MUDOU — a tela
+    # mostrava isso como se fosse a última consulta e parecia que o motor
+    # tinha parado (Eduardo, 15/09).
+    status_lido_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Explicação da divergência entre o status do ML e o rastreio físico dos
     # Correios (auto-calculada; vazia quando batem). Ver logistica_rules.
     divergencia: Mapped[str | None] = mapped_column(Text, nullable=True)

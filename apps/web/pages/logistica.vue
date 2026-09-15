@@ -89,6 +89,7 @@ type Logistica = {
   // Quando PERGUNTAMOS os Correios (mesmo sem evento novo) — é isto que
   // prova que o robô está vivo enquanto o pacote está parado.
   rastreio_lido_em?: string | null
+  status_lido_em?: string | null
   divergencia: string | null
   status_bling: string | null
   chamado: string | null
@@ -1822,6 +1823,13 @@ async function aplicarStatusBling(c: Logistica) {
                       v-if="statusResumoData(c)"
                       class="block text-[10px] text-muted-foreground/80 mt-0.5 whitespace-nowrap"
                     >{{ statusResumoData(c) }}</span>
+                    <!-- Última consulta ao marketplace (o motor lê a cada 5 min
+                         mesmo sem mudança) — prova de que está automático. -->
+                    <span
+                      v-if="c.status_lido_em"
+                      class="block text-[10px] text-muted-foreground/60 whitespace-nowrap"
+                      :title="'Última consulta ao marketplace: ' + fmtDataHora(c.status_lido_em)"
+                    >lido {{ fmtDesde(c.status_lido_em) }}</span>
                   </span>
                   <button
                     v-if="assinatura(c)"
@@ -2038,6 +2046,10 @@ async function aplicarStatusBling(c: Logistica) {
                 v-if="statusResumoData(c)"
                 class="block text-[10px] text-muted-foreground/80 mt-0.5"
               >{{ statusResumoData(c) }}</span>
+              <span
+                v-if="c.status_lido_em"
+                class="block text-[10px] text-muted-foreground/60 whitespace-nowrap"
+              >lido {{ fmtDesde(c.status_lido_em) }}</span>
             </span>
             <button class="shrink-0 hover:text-foreground" title="Copiar chave" @click.stop="copiarChave(c)">
               <Copy class="size-3.5" />

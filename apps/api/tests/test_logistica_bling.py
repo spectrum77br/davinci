@@ -1052,7 +1052,8 @@ async def test_recarregar_enfileira_job(
 
     import app.routers.logistica as lr
 
-    monkeypatch.setattr(lr, "get_arq_pool", _fake_pool)
+    # O motor vive na fila de marketplace desde 15/09 (não disputa com os syncs).
+    monkeypatch.setattr(lr, "get_arq_marketplace_pool", _fake_pool)
     r = await client.post("/api/logistica/recarregar")
     assert r.status_code == 200, r.text
     assert r.json()["enqueued"] is True
@@ -1107,3 +1108,130 @@ async def test_sync_status_bling_row_best_effort_sem_pedido(
     nome = await logistica_bling.sync_status_bling_row(db, row)
     assert nome is None
     assert row.status_bling == "Em aberto"
+
+
+# ── motor rápido × sweeps (15/09) ─────────────────────────────────────────
+#
+# Eduardo: "não está atualizando 100% automático, tem que ficar atualizando
+# na mão". Causa: o motor de 5 min fazia os 4 sweeps de pós-venda (todas as
+# linhas de 45 dias) ANTES das pendentes — dezenas de minutos por rodada,
+# morria em deploy e ficava na fila do worker default. Agora `recarregar_ml`
+# é só o rápido e `sweeps_pos_venda` é o job irmão.
+
+
+@pytest.mark.asyncio
+async def test_recarregar_ml_nao_faz_sweeps(db: AsyncSession, monkeypatch):
+    from app.services import (
+        logistica_amazon,
+        logistica_ingest,
+        logistica_meli,
+        logistica_shopee,
+        logistica_tiktok,
+    )
+
+    async def _boom(session):  # sweep chamado = falha do teste
+        raise AssertionError("sweep não pode rodar no motor rápido")
+
+    for mod in (logistica_shopee, logistica_tiktok, logistica_meli, logistica_amazon):
+        monkeypatch.setattr(mod, "sweep_pos_venda", _boom)
+
+    chamadas: dict[str, list] = {"enrich": [], "aplicar": []}
+
+    async def _enrich(session, *, ids, only_empty=False):
+        chamadas["enrich"].append(list(ids))
+        return {"seen": len(ids), "updated": 0, "skipped": 0, "failed": 0}
+
+    async def _aplicar(session, ids):
+        chamadas["aplicar"].append(list(ids))
+        return {"aplicados": 0, "pulados": 0, "falhas": 0}
+
+    async def _vazio(session, ids):
+        return {}
+
+    async def _nada(session):
+        return {}
+
+    for mod in (logistica_meli, logistica_shopee, logistica_tiktok, logistica_amazon):
+        monkeypatch.setattr(mod, "enrich_recent", _enrich)
+    monkeypatch.setattr(logistica_meli, "abrir_chamados_em_lote", _vazio)
+    monkeypatch.setattr(logistica_bling, "enviar_threema_em_lote", _vazio)
+    monkeypatch.setattr(logistica_bling, "aplicar_status_em_lote", _aplicar)
+    monkeypatch.setattr(logistica_ingest, "_amazon_bling_best_effort", _nada)
+
+    async def _sem_mudanca(session):  # SQL cru com schema fixo — fora do banco de teste
+        return []
+
+    async def _zero(session):
+        return 0
+
+    monkeypatch.setattr(logistica_ingest, "refresh_status_bling", _sem_mudanca)
+    monkeypatch.setattr(logistica_ingest, "cleanup_finalizados", _zero)
+
+    out = await logistica_ingest.recarregar_ml(db)
+    assert "status_refresh" in out and "cleanup" in out
+    assert len(chamadas["enrich"]) == 4 and len(chamadas["aplicar"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_sweeps_pos_venda_so_enriquece_quem_mudou(db: AsyncSession, monkeypatch):
+    from uuid import uuid4
+
+    from app.services import (
+        logistica_amazon,
+        logistica_ingest,
+        logistica_meli,
+        logistica_shopee,
+        logistica_tiktok,
+    )
+
+    mudou_shopee, mudou_ml = uuid4(), uuid4()
+
+    def _sweep(ids):
+        async def _f(session):
+            return {"ids": list(ids), "visto": 1}
+        return _f
+
+    monkeypatch.setattr(logistica_shopee, "sweep_pos_venda", _sweep([mudou_shopee]))
+    monkeypatch.setattr(logistica_tiktok, "sweep_pos_venda", _sweep([]))
+    monkeypatch.setattr(logistica_meli, "sweep_pos_venda", _sweep([mudou_ml]))
+    monkeypatch.setattr(logistica_amazon, "sweep_pos_venda", _sweep([]))
+
+    visto: dict[str, list] = {}
+
+    def _enrich_de(nome):
+        async def _f(session, *, ids, only_empty=False):
+            visto[nome] = list(ids)
+            return {"seen": len(ids), "updated": len(ids), "skipped": 0, "failed": 0}
+        return _f
+
+    for nome, mod in (("ml", logistica_meli), ("shopee", logistica_shopee),
+                      ("tiktok", logistica_tiktok), ("amazon", logistica_amazon)):
+        monkeypatch.setattr(mod, "enrich_recent", _enrich_de(nome))
+    aplicados: list = []
+
+    async def _aplicar(session, ids):
+        aplicados.extend(ids)
+        return {"aplicados": 0, "pulados": 0, "falhas": 0}
+
+    async def _vazio(session, ids):
+        return {}
+
+    async def _nada(session):
+        return {}
+
+    monkeypatch.setattr(logistica_meli, "abrir_chamados_em_lote", _vazio)
+    monkeypatch.setattr(logistica_bling, "enviar_threema_em_lote", _vazio)
+    monkeypatch.setattr(logistica_bling, "aplicar_status_em_lote", _aplicar)
+    monkeypatch.setattr(logistica_ingest, "_amazon_bling_best_effort", _nada)
+
+    out = await logistica_ingest.sweeps_pos_venda(db)
+    assert out["sweep_shopee"] == 1 and out["sweep_ml"] == 1 and out["sweep_tiktok"] == 0
+    assert visto == {"ml": [mudou_ml], "shopee": [mudou_shopee], "tiktok": [], "amazon": []}
+    assert sorted(aplicados, key=str) == sorted([mudou_shopee, mudou_ml], key=str)
+
+    # Nada mudou em nenhum sweep → não chama enrich nem executores.
+    for mod in (logistica_shopee, logistica_tiktok, logistica_meli, logistica_amazon):
+        monkeypatch.setattr(mod, "sweep_pos_venda", _sweep([]))
+    visto.clear()
+    out = await logistica_ingest.sweeps_pos_venda(db)
+    assert visto == {} and "enrich_seen" not in out

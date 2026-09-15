@@ -187,6 +187,7 @@ async def enrich_row(
     # Antes de trocar o status: o carimbo compara o valor velho com o novo.
     row.status_datas = logistica_datas.aplicar(row, meli, enr.get("datas"))
     row.meli_status = meli
+    row.status_lido_em = datetime.now(UTC)
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]
     # Envio por Correios com evento real do 17track (`localizacao_at`) não é
@@ -277,6 +278,7 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                 )
                 r.status_datas = logistica_datas.aplicar(r, meli, datas)
                 r.meli_status = meli
+                r.status_lido_em = datetime.now(UTC)
                 mudados.add(r.id)
                 n_status += 1
 
@@ -320,6 +322,7 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                 )
                 r.status_datas = logistica_datas.aplicar(r, meli, datas_ret)
                 r.meli_status = meli
+                r.status_lido_em = datetime.now(UTC)
                 mudados.add(r.id)
                 n_returns += 1
 

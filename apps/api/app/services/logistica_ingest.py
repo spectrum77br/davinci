@@ -482,61 +482,12 @@ async def _ids_pendentes(
     return pend
 
 
-async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
-    """Recarga sob demanda do botão "recarregar" das abas de marketplace.
-
-    Num clique cobre os três lados — situação no Bling, Status Bling e Status
-    Plataforma — mas SÓ das linhas que realmente mexeram, não das ~9 mil. O alvo
-    é a união de:
-
-    - as linhas cuja situação no Bling mudou agora (o `refresh_status_bling`
-      devolve exatamente essas — é um UPDATE barato, sem chamada de API);
-    - as pendentes do painel (o que o operador está olhando).
-
-    Varrer tudo custava ~55min mesmo com a rajada concorrente do
-    `logistica_enrich`; o delta resolve em segundos. O preço: uma linha JÁ
-    resolvida (escondida) cujo status mudou só do lado do MARKETPLACE, sem mexer
-    na situação do Bling, não entra sozinha — pra essas continua valendo o ⟳ da
-    linha.
-
-    Roda em background (arq) porque ainda pode passar dos 100s do Cloudflare.
-    """
-    mudaram = await refresh_status_bling(session)
-    # Quem acabou de virar Cancelado/Resolvido/Perdimento (ou Entregue velho)
-    # sai daqui mesmo — o _ids_pendentes só considera linhas existentes, então
-    # os ids apagados em `mudaram` não voltam.
-    removed = await cleanup_finalizados(session)
-    # Pós-venda que muda DEPOIS da entrega (devolução, entrega tardia) não
-    # aparece nas pendentes do painel (a linha "Concluído"/"Em trânsito" fica
-    # escondida como resolvida): os sweeps Shopee/TikTok/ML/Amazon re-olham as
-    # escondidas em lote e devolvem quem mudou de vida — esses ids entram como
-    # extras e furam o escondimento. (Na Amazon o cego era a própria ENTREGA:
-    # "Enviado | Coletado" resolvido como Em andamento nunca mais era
-    # consultado e o pedido não virava Entregue no Bling.)
-    sweep = await logistica_shopee.sweep_pos_venda(session)
-    sweep_tk = await logistica_tiktok.sweep_pos_venda(session)
-    sweep_ml = await logistica_meli.sweep_pos_venda(session)
-    sweep_amz = await logistica_amazon.sweep_pos_venda(session)
-    alvo = await _ids_pendentes(
-        session,
-        extras=[
-            *mudaram,
-            *sweep["ids"],
-            *sweep_tk["ids"],
-            *sweep_ml["ids"],
-            *sweep_amz["ids"],
-        ],
-    )
-    logger.info(
-        "logistica_recarregar_inicio",
-        status_refresh=len(mudaram),
-        cleanup=removed,
-        sweep_shopee=len(sweep["ids"]),
-        sweep_tiktok=len(sweep_tk["ids"]),
-        sweep_ml=len(sweep_ml["ids"]),
-        sweep_amazon=len(sweep_amz["ids"]),
-        **{f"alvo_{k}": len(v) for k, v in alvo.items()},
-    )
+async def _enriquecer_e_aplicar(
+    session: AsyncSession, alvo: dict[str, list[UUID]], *, origem: str
+) -> dict[str, int]:
+    """Miolo comum do motor e dos sweeps: re-enriquece o Status Plataforma das
+    linhas de `alvo` (por plataforma) e roda os executores da aba Status
+    (chamado ML, Threema, situação no Bling) sobre elas."""
     enr = await logistica_meli.enrich_recent(session, ids=alvo["ml"], only_empty=False)
     enr_shopee = await logistica_shopee.enrich_recent(
         session, ids=alvo["shopee"], only_empty=False
@@ -559,19 +510,7 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     chamados = await logistica_meli.abrir_chamados_em_lote(session, ids_alvo)
     threema_lote = await logistica_bling.enviar_threema_em_lote(session, ids_alvo)
     lote = await logistica_bling.aplicar_status_em_lote(session, ids_alvo)
-    logger.info(
-        "logistica_recarregar_ml",
-        **{f"enrich_{k}": v for k, v in enr.items()},
-        **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
-        **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
-        **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
-        **{f"chamado_{k}": v for k, v in chamados.items()},
-        **{f"threema_{k}": v for k, v in threema_lote.items()},
-        **lote,
-    )
-    return {
-        "status_refresh": len(mudaram),
-        "cleanup": removed,
+    resumo = {
         **{f"enrich_{k}": v for k, v in enr.items()},
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
@@ -581,3 +520,71 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
         **{f"threema_{k}": v for k, v in threema_lote.items()},
         **{f"status_{k}": v for k, v in lote.items()},
     }
+    logger.info(f"logistica_{origem}_aplicado", **resumo)
+    return resumo
+
+
+async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
+    """Motor RÁPIDO da Logística — cron de 5 min e botão "recarregar".
+
+    Cobre os três lados — situação no Bling, Status Bling e Status Plataforma
+    — SÓ das linhas que importam agora, não das ~13 mil:
+
+    - as linhas cuja situação no Bling mudou agora (o `refresh_status_bling`
+      devolve exatamente essas — é um UPDATE barato, sem chamada de API);
+    - as pendentes do painel (o que o operador está olhando).
+
+    Até 15/09 este job também fazia os 4 sweeps de pós-venda (todas as linhas
+    de 45 dias, ~8 mil, em lote) ANTES de chegar nas pendentes: cada rodada
+    levava dezenas de minutos, morria em cada deploy (worker reiniciado) e
+    ficava presa na fila do worker default atrás dos syncs financeiros — na
+    prática a tela só atualizava quando alguém clicava (Eduardo: "tem que
+    ficar atualizando na mão"). Os sweeps agora são o job irmão
+    `sweeps_pos_venda` (cron de 30 min, worker default); este roda no worker
+    de marketplace, leve, em 1-3 min.
+    """
+    mudaram = await refresh_status_bling(session)
+    # Quem acabou de virar Cancelado/Resolvido/Perdimento (ou Entregue velho)
+    # sai daqui mesmo — o _ids_pendentes só considera linhas existentes, então
+    # os ids apagados em `mudaram` não voltam.
+    removed = await cleanup_finalizados(session)
+    alvo = await _ids_pendentes(session, extras=list(mudaram))
+    logger.info(
+        "logistica_recarregar_inicio",
+        status_refresh=len(mudaram),
+        cleanup=removed,
+        **{f"alvo_{k}": len(v) for k, v in alvo.items()},
+    )
+    resumo = await _enriquecer_e_aplicar(session, alvo, origem="recarregar")
+    return {"status_refresh": len(mudaram), "cleanup": removed, **resumo}
+
+
+async def sweeps_pos_venda(session: AsyncSession) -> dict[str, int]:
+    """Job irmão do motor (cron de 30 min): pós-venda que muda DEPOIS da
+    entrega (devolução, entrega tardia) não aparece nas pendentes do painel —
+    a linha "Concluído"/"Em trânsito" fica escondida como resolvida. Os sweeps
+    Shopee/TikTok/ML/Amazon re-olham as escondidas em lote (janela de 45 dias)
+    e devolvem quem mudou de vida; só essas linhas são re-enriquecidas e
+    passam pelos executores da aba Status. (Na Amazon o cego era a própria
+    ENTREGA: "Enviado | Coletado" resolvido como Em andamento nunca mais era
+    consultado e o pedido não virava Entregue no Bling.)"""
+    sweep = await logistica_shopee.sweep_pos_venda(session)
+    sweep_tk = await logistica_tiktok.sweep_pos_venda(session)
+    sweep_ml = await logistica_meli.sweep_pos_venda(session)
+    sweep_amz = await logistica_amazon.sweep_pos_venda(session)
+    alvo: dict[str, list[UUID]] = {
+        "shopee": list(sweep["ids"]),
+        "tiktok": list(sweep_tk["ids"]),
+        "ml": list(sweep_ml["ids"]),
+        "amazon": list(sweep_amz["ids"]),
+    }
+    logger.info(
+        "logistica_sweeps_inicio",
+        **{f"sweep_{k}": len(v) for k, v in alvo.items()},
+    )
+    resumo: dict[str, int] = {f"sweep_{k}": len(v) for k, v in alvo.items()}
+    if any(alvo.values()):
+        resumo.update(await _enriquecer_e_aplicar(session, alvo, origem="sweeps"))
+    return resumo
+
+

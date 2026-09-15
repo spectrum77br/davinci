@@ -455,6 +455,7 @@ async def enrich_row(
     # Antes de trocar o status: o carimbo compara o valor velho com o novo.
     row.status_datas = logistica_datas.aplicar(row, enr["meli_status"], enr.get("datas"))
     row.meli_status = enr["meli_status"]
+    row.status_lido_em = datetime.now(UTC)
     if enr.get("rastreio"):
         row.rastreio = enr["rastreio"]
     # Localização: pra Correios (...BR) o físico do 17track manda — não deixa o

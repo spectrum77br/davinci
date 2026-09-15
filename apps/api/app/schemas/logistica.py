@@ -92,6 +92,8 @@ class LogisticaOut(BaseModel):
     # que está na coluna ainda é o proxy do marketplace, não o físico. Só leitura.
     localizacao_at: datetime | None = None
     rastreio_lido_em: datetime | None = None
+    # Última LEITURA do Status Plataforma (enrich/sweep), mesmo sem mudança.
+    status_lido_em: datetime | None = None
     # Divergência ML × rastreio físico dos Correios (auto-calculada; só leitura).
     divergencia: str | None = None
     status_bling: str | None = None

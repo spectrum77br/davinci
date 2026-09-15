@@ -55,6 +55,7 @@ from app.services.logistica_ingest import (
     recarregar_ml,
     run_ingest_marketplaces_daily,
     run_ingest_ml_daily,
+    sweeps_pos_venda,
 )
 from app.services.marketplace_financials import (
     run_due_marketplace_financial_retries,
@@ -1007,6 +1008,36 @@ async def logistica_recarregar(ctx: dict) -> dict[str, int]:
                 await redis.delete(_LOGISTICA_RECARREGAR_LOCK_KEY)
             except Exception:  # noqa: BLE001 — o TTL solta a trava sozinho
                 logger.warning("logistica_recarregar_lock_release_falhou")
+
+
+_LOGISTICA_SWEEPS_LOCK_KEY = "davinci:lock:logistica_sweeps"
+_LOGISTICA_SWEEPS_LOCK_TTL_S = 3600
+
+
+async def logistica_sweeps_pos_venda(ctx: dict) -> dict[str, int]:
+    """Varreduras de pós-venda (Shopee/TikTok/ML/Amazon, janela de 45 dias):
+    quem mudou de vida depois de escondido volta pro motor. Era parte do
+    `logistica_recarregar` e o deixava lento demais (dezenas de minutos a
+    cada 5 min); desde 15/09 roda sozinho, 2×/hora, no worker default."""
+    redis = ctx.get("redis")
+    if redis is not None:
+        got = await redis.set(
+            _LOGISTICA_SWEEPS_LOCK_KEY, "1", nx=True, ex=_LOGISTICA_SWEEPS_LOCK_TTL_S
+        )
+        if not got:
+            logger.info("logistica_sweeps_pulado", reason="ja_em_andamento")
+            return {"pulado_ja_rodando": 1}
+    try:
+        async with session_scope() as s:
+            summary = await sweeps_pos_venda(s)
+        logger.info("logistica_sweeps_done", **summary)
+        return summary
+    finally:
+        if redis is not None:
+            try:
+                await redis.delete(_LOGISTICA_SWEEPS_LOCK_KEY)
+            except Exception:  # noqa: BLE001 — o TTL solta a trava sozinho
+                logger.warning("logistica_sweeps_lock_release_falhou")
 
 
 async def _refresh_tokens_for(platform: IntegrationPlatform, *, expiring_within_s: int) -> None:
@@ -2138,7 +2169,7 @@ class WorkerSettings:
         # Escopo normal (pendentes do painel) termina em minutos, mas se a fila
         # de pendências crescer o 1800s global mataria o job de novo — foi
         # exatamente o que aconteceu em 12-13/ago com o escopo antigo.
-        func(logistica_recarregar, timeout=10800),
+        func(logistica_sweeps_pos_venda, timeout=3600),
         nf_auto_enfileirar_tick,
         nf_recuperar_tick,
         prioridade_estoque_tick,
@@ -2195,14 +2226,11 @@ class WorkerSettings:
         # Plataforma dos pendentes do painel, aplica no Bling as situações com
         # regra e limpa finalizados. É o MESMO job do botão "recarregar" — a
         # trava no redis (dentro do próprio job) impede dois ao mesmo tempo.
-        # Timeout 3h igual ao do botão: recarga longa estourou os 1800s globais
-        # em 12-13/ago. Pedido do usuário 26/08 ("isso precisa ser instantâneo").
-        cron(
-            logistica_recarregar,
-            minute={2, 7, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57},
-            run_at_startup=False,
-            timeout=10800,
-        ),
+        # Varreduras de pós-venda (todas as linhas de 45 dias, em lote): 2×/hora
+        # em :09/:39. Eram parte do motor de 5 min e o deixavam com dezenas de
+        # minutos por rodada (15/09). O motor rápido agora vive no worker de
+        # marketplace (WorkerSettingsMarketplace).
+        cron(logistica_sweeps_pos_venda, minute={9, 39}, run_at_startup=False, timeout=3600),
         # Rastreio do pacote que VOLTA (Acompanhamento de Devoluções), a cada
         # 30 min (:10/:40 — fora dos slots dos ingests e do recarregar).
         cron(devolucao_rastreio_sync, minute={10, 40}, run_at_startup=False, timeout=1500),
@@ -2450,8 +2478,20 @@ class WorkerSettingsMarketplace:
     redis_settings = RedisSettings.from_dsn(_settings.arq_redis_url)
     functions = [
         check_marketplace_shipped_orders,
+        # Motor rápido da Logística (pendentes do painel + regras da aba
+        # Status). Saiu do worker default em 15/09: lá ficava na fila atrás dos
+        # syncs financeiros (10 slots) e morria em cada deploy — a tela só
+        # atualizava quando alguém clicava. 15 min de timeout por função (o
+        # global de 120s é curto pra 100 linhas × 4 marketplaces).
+        func(logistica_recarregar, timeout=900),
     ]
     cron_jobs = [
+        cron(
+            logistica_recarregar,
+            minute={2, 7, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57},
+            run_at_startup=False,
+            timeout=900,
+        ),
         # A CADA MINUTO (era a cada 5). O operador reclamava que o pedido
         # já aparecia enviado no marketplace e só entrava no Controle de
         # Estoque "muito tempo depois": os 5 min de cron eram o piso, e o
