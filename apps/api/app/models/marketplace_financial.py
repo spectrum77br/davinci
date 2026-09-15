@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -50,6 +51,12 @@ class MarketplaceOrderFinancial(Base, TimestampMixin):
             "next_retry_at",
             postgresql_where=text("next_retry_at IS NOT NULL"),
         ),
+        Index(
+            "ix_marketplace_order_financials_esteira",
+            "espera_lenta",
+            "next_retry_at",
+            postgresql_where=text("next_retry_at IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -89,6 +96,14 @@ class MarketplaceOrderFinancial(Base, TimestampMixin):
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # True = a última falha foi da API (fora do ar, sem token, limite estourado)
+    # ou o dado ainda não foi publicado pela plataforma. Essas linhas saem do
+    # backoff normal e vão pra ESTEIRA LENTA: 2×/dia, sem gastar o teto de
+    # tentativas, até ESPERA_MAX_DIAS. Fila separada pra um backlog antigo
+    # nunca roubar a vez dos pedidos de hoje. Ver services/marketplace_financials.py.
+    espera_lenta: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
 
 class MarketplaceFinancialEvent(Base, TimestampMixin):

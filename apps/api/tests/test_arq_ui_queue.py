@@ -23,6 +23,18 @@ from app.worker_pool import (
 )
 
 
+def _nomes(fns) -> set[str]:
+    """arq aceita a função crua OU embrulhada em `func(fn, timeout=...)`.
+    Comparar por identidade quebra quando alguém só acrescenta um timeout —
+    o que já aconteceu duas vezes. Compara por nome."""
+    nomes = set()
+    for f in fns:
+        nome = getattr(f, "name", None) or getattr(f, "__name__", None)
+        if nome:
+            nomes.add(nome)
+    return nomes
+
+
 def test_filas_separadas():
     """Default, UI e Marketplace usam queue names distintos."""
     assert ARQ_DEFAULT_QUEUE != ARQ_UI_QUEUE
@@ -37,11 +49,11 @@ def test_worker_ui_so_tem_jobs_ui():
     por click do operador). Webhooks/syncs/crons NÃO devem rodar nele pra não
     bloquear. Hoje são 3: criar produto no Bling, criar kit e push de lote de
     estoque."""
-    fns = WorkerSettingsUI.functions
-    assert len(fns) == 3
-    assert sync_import_product_to_bling_job in fns
-    assert create_bling_kit_for_mark_job in fns
-    assert push_lote_stock_to_bling_job in fns
+    nomes = _nomes(WorkerSettingsUI.functions)
+    assert len(WorkerSettingsUI.functions) == 3
+    assert sync_import_product_to_bling_job.__name__ in nomes
+    assert create_bling_kit_for_mark_job.__name__ in nomes
+    assert push_lote_stock_to_bling_job.__name__ in nomes
 
 
 def test_worker_ui_consome_da_fila_correta():
@@ -76,12 +88,12 @@ def test_worker_default_ainda_tem_os_2_jobs():
 # ── WorkerSettingsMarketplace ────────────────────────────────────────
 
 
-def test_worker_marketplace_so_tem_check_shipped():
-    """Worker marketplace registra APENAS check_marketplace_shipped_orders.
-    Outros crons/syncs ficam no default."""
-    fns = WorkerSettingsMarketplace.functions
-    assert len(fns) == 1
-    assert check_marketplace_shipped_orders in fns
+def test_worker_marketplace_tem_check_shipped_e_o_motor_da_logistica():
+    """Worker marketplace roda o check de envio E o motor rápido da Logística
+    (movido pra cá em 15/09/2026 pra não disputar slot com os webhooks da fila
+    default). Nada além disso — sync/cron pesado fica no default."""
+    nomes = _nomes(WorkerSettingsMarketplace.functions)
+    assert nomes == {check_marketplace_shipped_orders.__name__, "logistica_recarregar"}
 
 
 def test_worker_marketplace_queue_correta():
@@ -92,9 +104,9 @@ def test_worker_marketplace_tem_cron_a_cada_5min():
     """O cron tem que estar registrado AQUI (não no default). Padrão
     `minute=_FIVE_MIN` = {0,5,10,...,55}."""
     crons = WorkerSettingsMarketplace.cron_jobs
-    assert len(crons) == 1
-    # Cron do arq usa `coroutine` attr pra função; o name expõe o fn.
-    assert "check_marketplace_shipped_orders" in (crons[0].name or "")
+    nomes = {c.name or "" for c in crons}
+    assert any("check_marketplace_shipped_orders" in n for n in nomes)
+    assert any("logistica_recarregar" in n for n in nomes)
 
 
 def test_worker_marketplace_timeouts_e_concorrencia():

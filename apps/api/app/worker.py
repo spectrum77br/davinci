@@ -1285,6 +1285,34 @@ async def marketplace_financials_retry(ctx: dict) -> None:
     logger.info("marketplace_financials_retry_done", **result)
 
 
+async def marketplace_financials_esteira_lenta(ctx: dict) -> None:
+    """Fila dos pedidos cujo financeiro esbarrou na API (403/429/5xx/sem token)
+    ou num repasse que a plataforma ainda não publicou.
+
+    Separada da fila rápida de propósito: na queda de setembro/2026 ~3.900
+    pedidos entraram nesse estado, e num único backoff esse backlog comeria as
+    vagas do ciclo e os pedidos do DIA ficariam sem Frete/Taxa na Margem."""
+    from app.services.marketplace_financials import run_esteira_lenta_financials
+
+    async with session_scope() as s:
+        result = await run_esteira_lenta_financials(s, limit=80)
+    logger.info("marketplace_financials_esteira_lenta_done", **result)
+
+
+async def marketplace_financials_ressuscitar(ctx: dict) -> None:
+    """Reabre a fila dos pedidos que morreram por falha de API.
+
+    `next_retry_at = NULL` num status retentável = linha fora da fila pra
+    sempre. Depois de qualquer queda de token isso deixava a Margem em branco
+    mesmo com a API de volta. Este tick devolve essas linhas à esteira lenta,
+    escalonadas — o sistema se recupera sozinho, sem UPDATE manual no banco."""
+    from app.services.marketplace_financials import run_ressuscitar_financials
+
+    async with session_scope() as s:
+        result = await run_ressuscitar_financials(s, limit=400)
+    logger.info("marketplace_financials_ressuscitar_done", **result)
+
+
 async def tiktok_unsettled_sweep(ctx: dict) -> None:
     """Estimativa oficial pré-liquidação do TikTok (a mesma da Central do
     Vendedor) para os financeiros ainda sem settlement real — 1-2 chamadas
@@ -2439,6 +2467,21 @@ class WorkerSettings:
         cron(ml_token_refresh, minute={0, 30}, run_at_startup=False),
         cron(tiktok_token_refresh, hour={0, 6, 12, 18}, minute=45, run_at_startup=False),
         cron(marketplace_financials_retry, minute={10, 40}, run_at_startup=False),
+        # Esteira lenta: backlog de falha de API. Fila e teto próprios pra não
+        # competir com o retry dos pedidos do dia.
+        cron(
+            marketplace_financials_esteira_lenta,
+            minute={5, 20, 35, 50},
+            run_at_startup=False,
+            timeout=900,
+        ),
+        # Reabre a fila do que morreu por queda de API (ver a função).
+        cron(
+            marketplace_financials_ressuscitar,
+            minute={2},
+            run_at_startup=True,
+            timeout=300,
+        ),
         # A cada 10min ("pegar isso estantaneo", 01/09): o TikTok libera a
         # estimativa ~30-60min após a venda (caso 293707, medido ao vivo) e o
         # tick de 30min somava até mais meia hora em cima. 10min × 8 lojas ×
@@ -2854,6 +2897,8 @@ __all__ = [
     "ml_backfill_run",
     "ml_token_refresh",
     "marketplace_financials_retry",
+    "marketplace_financials_esteira_lenta",
+    "marketplace_financials_ressuscitar",
     "tiktok_unsettled_sweep",
     "tiktok_unsettled_fast_lane",
     "refunds_freight_backfill",

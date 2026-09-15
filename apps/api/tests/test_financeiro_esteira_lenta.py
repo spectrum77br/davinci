@@ -1,0 +1,304 @@
+"""Queda de API não pode apagar a Margem para sempre.
+
+Eduardo, 15/09/2026: "margem e logistica tinham parado de popular, porque tinha
+parado as apis". Nove contas Shopee com 403, a Amazon com o LWA vencido e o
+Mercado Livre recusando o refresh deixaram as plataformas fora do ar por dias.
+Cada tentativa falha gastava uma das 8 do backoff, então ~3.900 pedidos
+terminaram com `next_retry_at = NULL` — fora da fila para sempre. Quando os
+tokens voltaram, o Frete/Taxa desses pedidos continuou em branco porque nada no
+sistema reabria a linha.
+
+Aqui ficam as três garantias da correção:
+  1. falha de API é classificada como transitória;
+  2. transitória vai pra esteira lenta e NÃO gasta tentativa;
+  3. quem já morreu volta sozinho pela ressurreição, e só quem merece.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import select, text
+
+from app.models import IntegrationPlatform
+from app.models.integration import Integration
+from app.models.marketplace_financial import MarketplaceOrderFinancial
+from app.services.marketplace_financials import (
+    ESPERA_INTERVALO_HORAS,
+    ESPERA_MAX_DIAS,
+    FinancialSnapshot,
+    _persist_snapshot,
+    falha_transitoria,
+    run_due_marketplace_financial_retries,
+    run_ressuscitar_financials,
+)
+
+pytestmark = pytest.mark.asyncio
+
+
+# Mensagens REAIS colhidas em produção em 15/09/2026.
+TRANSITORIAS = [
+    "Client error '403 ' for url 'https://sellingpartnerapi-na.amazon.com/finances/x'",
+    "Client error '403 Forbidden' for url 'https://partner.shopeemobile.com/api/v2/x'",
+    "Client error '429 Too Many Requests' for url 'https://api.mercadolibre.com/orders/1'",
+    'ml_refresh_failed status=400 body={"message":"invalid client_id or client_secret"}',
+    "missing refresh_token",
+    'TikTok finance error: {"code":36009002,"message":"Too many requests"}',
+    "TikTok settlement not available yet",
+    "ML billing detail not posted yet",
+    "Amazon finance transaction not posted yet",
+    "Server error '503 Service Unavailable' for url 'x'",
+    "ReadTimeout",
+    "Connection reset by peer",
+]
+
+DEFINITIVAS = [
+    "Client error '400 Bad Request' for url 'https://api.mercadolibre.com/billing/x'",
+    "Client error '404 Not Found' for url 'x'",
+    "financial adapter not implemented for magalu",
+    "",
+    None,
+]
+
+
+def test_classifica_falha_de_api_como_transitoria():
+    for erro in TRANSITORIAS:
+        assert falha_transitoria(erro) is True, erro
+    for erro in DEFINITIVAS:
+        assert falha_transitoria(erro) is False, erro
+
+
+async def _integ(db, make_user, platform=IntegrationPlatform.SHOPEE, nome="poofy") -> Integration:
+    user = await make_user()
+    integ = Integration(
+        user_id=user.id,
+        platform=platform,
+        name=nome,
+        credentials=b"x",
+        status="active",
+    )
+    db.add(integ)
+    await db.flush()
+    return integ
+
+
+async def _persistir(db, integ, *, external_order_id, bling_id, erro, status="error"):
+    return await _persist_snapshot(
+        db,
+        FinancialSnapshot(status=status, raw={}, error=erro),
+        platform=integ.platform,
+        integration=integ,
+        store=None,
+        bling_id=bling_id,
+        pedido_bling=str(bling_id),
+        external_order_id=external_order_id,
+    )
+
+
+async def test_403_nao_gasta_tentativa_e_vai_pra_esteira_lenta(db, make_user):
+    """O sintoma original: oito 403 seguidos matavam o pedido."""
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user)
+
+    linha = None
+    for _ in range(10):
+        linha = await _persistir(
+            db,
+            integ,
+            external_order_id="2609165JTSF5WS",
+            bling_id=26900000001,
+            erro="Client error '403 Forbidden' for url 'https://partner.shopeemobile.com/x'",
+        )
+    await db.commit()
+
+    assert linha is not None
+    # Dez quedas da API e o contador segue zerado: o teto de 8 fica intacto
+    # para erro de verdade.
+    assert linha.attempts == 0
+    assert linha.espera_lenta is True
+    # Continua na fila, em ritmo lento — nunca com next_retry_at nulo.
+    assert linha.next_retry_at is not None
+    horas = (linha.next_retry_at - datetime.now(UTC)).total_seconds() / 3600
+    assert ESPERA_INTERVALO_HORAS - 1 < horas <= ESPERA_INTERVALO_HORAS
+
+
+async def test_erro_de_verdade_continua_morrendo_na_oitava(db, make_user):
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user)
+
+    linha = None
+    for _ in range(8):
+        linha = await _persistir(
+            db,
+            integ,
+            external_order_id="2609165G1DATXB",
+            bling_id=26900000002,
+            erro="Client error '400 Bad Request' for url 'x'",
+        )
+    await db.commit()
+
+    assert linha is not None
+    assert linha.attempts == 8
+    assert linha.espera_lenta is False
+    assert linha.next_retry_at is None
+
+
+async def test_backlog_nao_rouba_a_vez_dos_pedidos_do_dia(db, make_user, monkeypatch):
+    """A razão de existirem duas filas: 3.900 linhas velhas não podem ocupar as
+    vagas do ciclo e deixar o pedido de hoje sem Frete na Margem."""
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user)
+    vencido = datetime.now(UTC) - timedelta(hours=2)
+
+    db.add_all(
+        [
+            MarketplaceOrderFinancial(
+                platform=IntegrationPlatform.SHOPEE,
+                integration_id=integ.id,
+                external_order_id=f"BACKLOG{i}",
+                bling_id=26800000000 + i,
+                status="error",
+                attempts=0,
+                espera_lenta=True,
+                next_retry_at=vencido,
+                last_error="Client error '403 Forbidden' for url 'x'",
+            )
+            for i in range(200)
+        ]
+    )
+    db.add(
+        MarketplaceOrderFinancial(
+            platform=IntegrationPlatform.SHOPEE,
+            integration_id=integ.id,
+            external_order_id="PEDIDO-DE-HOJE",
+            bling_id=26999999999,
+            status="pending",
+            attempts=1,
+            espera_lenta=False,
+            next_retry_at=vencido,
+            last_error="Shopee net payout not available yet",
+        )
+    )
+    await db.commit()
+
+    chamados: list[int] = []
+
+    async def fake_sync(session, *, bling_order_id, **kw):
+        chamados.append(bling_order_id)
+        return {"status": "pending"}
+
+    monkeypatch.setattr(
+        "app.services.marketplace_financials.run_sync_marketplace_financials_for_bling_order",
+        fake_sync,
+    )
+
+    rapida = await run_due_marketplace_financial_retries(db, limit=100)
+
+    assert rapida["queued"] == 1
+    assert chamados == [26999999999]
+
+
+async def test_ressuscita_so_quem_morreu_por_falha_de_api(db, make_user):
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user)
+
+    db.add_all(
+        [
+            # Morto por queda da API, recente: volta.
+            MarketplaceOrderFinancial(
+                platform=IntegrationPlatform.SHOPEE,
+                integration_id=integ.id,
+                external_order_id="VOLTA",
+                bling_id=26910000001,
+                status="error",
+                attempts=8,
+                next_retry_at=None,
+                last_error="Client error '403 Forbidden' for url 'x'",
+            ),
+            # Erro de verdade: fica fora.
+            MarketplaceOrderFinancial(
+                platform=IntegrationPlatform.SHOPEE,
+                integration_id=integ.id,
+                external_order_id="FICA-FORA",
+                bling_id=26910000002,
+                status="error",
+                attempts=8,
+                next_retry_at=None,
+                last_error="Client error '404 Not Found' for url 'x'",
+            ),
+            # Já resolvido: não é status de retry, fica fora.
+            MarketplaceOrderFinancial(
+                platform=IntegrationPlatform.SHOPEE,
+                integration_id=integ.id,
+                external_order_id="JA-PAGO",
+                bling_id=26910000003,
+                status="posted",
+                attempts=1,
+                next_retry_at=None,
+                last_error=None,
+            ),
+        ]
+    )
+    await db.commit()
+
+    # Pedido antigo demais (fora da janela) não volta: envelheceu o created_at
+    # direto no banco porque a coluna é server_default now().
+    velho = MarketplaceOrderFinancial(
+        platform=IntegrationPlatform.SHOPEE,
+        integration_id=integ.id,
+        external_order_id="ANTIGO",
+        bling_id=26910000004,
+        status="error",
+        attempts=8,
+        next_retry_at=None,
+        last_error="Client error '403 Forbidden' for url 'x'",
+    )
+    db.add(velho)
+    await db.commit()
+    await db.execute(
+        text(
+            "UPDATE marketplace_order_financials SET created_at = now() - "
+            "make_interval(days => :dias) WHERE external_order_id = 'ANTIGO'"
+        ),
+        {"dias": ESPERA_MAX_DIAS + 10},
+    )
+    await db.commit()
+
+    resumo = await run_ressuscitar_financials(db)
+
+    assert resumo["revividos"] == 1
+
+    linhas = {
+        row.external_order_id: row
+        for row in (
+            await db.execute(select(MarketplaceOrderFinancial))
+        ).scalars().all()
+    }
+    assert linhas["VOLTA"].next_retry_at is not None
+    assert linhas["VOLTA"].espera_lenta is True
+    assert linhas["FICA-FORA"].next_retry_at is None
+    assert linhas["JA-PAGO"].next_retry_at is None
+    assert linhas["ANTIGO"].next_retry_at is None
+
+
+async def test_ressurreicao_e_idempotente(db, make_user):
+    """Roda de hora em hora: o segundo tick não pode reempurrar o que já voltou."""
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user)
+    db.add(
+        MarketplaceOrderFinancial(
+            platform=IntegrationPlatform.SHOPEE,
+            integration_id=integ.id,
+            external_order_id="UNICO",
+            bling_id=26920000001,
+            status="error",
+            attempts=8,
+            next_retry_at=None,
+            last_error="Client error '403 Forbidden' for url 'x'",
+        )
+    )
+    await db.commit()
+
+    assert (await run_ressuscitar_financials(db))["revividos"] == 1
+    assert (await run_ressuscitar_financials(db))["revividos"] == 0

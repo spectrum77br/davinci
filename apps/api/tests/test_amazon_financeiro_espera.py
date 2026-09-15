@@ -20,9 +20,10 @@ from app.models.integration import Integration
 from app.models.marketplace_financial import MarketplaceOrderFinancial
 from app.services.marketplace_financials import (
     AMAZON_AGUARDANDO_POSTAGEM,
-    AMAZON_ESPERA_INTERVALO_HORAS,
+    ESPERA_INTERVALO_HORAS,
     _next_retry_at,
     run_due_marketplace_financial_retries,
+    run_esteira_lenta_financials,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -35,11 +36,11 @@ def test_espera_da_amazon_nao_gasta_o_teto_de_tentativas():
     assert _next_retry_at("error", 8, AGORA) is None
     assert _next_retry_at("pending", 20, AGORA) is None
     # Só esperando a Amazon postar: continua na fila, em ritmo lento.
-    esperado = AGORA + timedelta(hours=AMAZON_ESPERA_INTERVALO_HORAS)
-    assert _next_retry_at("pending", 20, AGORA, aguardando_amazon=True) == esperado
-    assert _next_retry_at("pending", 1, AGORA, aguardando_amazon=True) == esperado
+    esperado = AGORA + timedelta(hours=ESPERA_INTERVALO_HORAS)
+    assert _next_retry_at("pending", 20, AGORA, esteira_lenta=True) == esperado
+    assert _next_retry_at("pending", 1, AGORA, esteira_lenta=True) == esperado
     # Status que não é de retry (posted) continua fora.
-    assert _next_retry_at("posted", 1, AGORA, aguardando_amazon=True) is None
+    assert _next_retry_at("posted", 1, AGORA, esteira_lenta=True) is None
 
 
 async def _integ(db, make_user) -> Integration:
@@ -57,8 +58,9 @@ async def _integ(db, make_user) -> Integration:
 
 
 async def test_fila_pega_o_pedido_amazon_que_estourou_as_tentativas(db, make_user, monkeypatch):
-    """O pedido com 14 tentativas esperando a Amazon volta pra fila; o que
-    estourou por erro de verdade fica fora."""
+    """O pedido com 14 tentativas esperando a Amazon volta pra fila — agora pela
+    ESTEIRA LENTA, que é a fila dos que dependem da plataforma/API. O que
+    estourou por erro de verdade continua fora das duas filas."""
     await db.execute(text("DELETE FROM marketplace_order_financials"))
     integ = await _integ(db, make_user)
     ontem = datetime.now(UTC) - timedelta(hours=13)
@@ -72,6 +74,7 @@ async def test_fila_pega_o_pedido_amazon_que_estourou_as_tentativas(db, make_use
                 status="pending",
                 attempts=14,
                 next_retry_at=ontem,
+                espera_lenta=True,
                 last_error=AMAZON_AGUARDANDO_POSTAGEM,
             ),
             MarketplaceOrderFinancial(
@@ -82,7 +85,7 @@ async def test_fila_pega_o_pedido_amazon_que_estourou_as_tentativas(db, make_use
                 status="error",
                 attempts=88,
                 next_retry_at=ontem,
-                last_error="Client error '403 ' for url ...",
+                last_error="Client error '404 Not Found' for url ...",
             ),
         ]
     )
@@ -99,7 +102,13 @@ async def test_fila_pega_o_pedido_amazon_que_estourou_as_tentativas(db, make_use
         fake_sync,
     )
 
-    resumo = await run_due_marketplace_financial_retries(db)
+    # Fila rápida não pega nenhum dos dois: um está na esteira lenta, o outro
+    # estourou o teto de tentativas com erro de verdade.
+    rapida = await run_due_marketplace_financial_retries(db)
+    assert rapida["queued"] == 0
+    assert chamados == []
+
+    resumo = await run_esteira_lenta_financials(db)
 
     assert chamados == [26806865006]
     assert resumo["queued"] == 1

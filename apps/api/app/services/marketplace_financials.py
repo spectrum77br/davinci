@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -9,7 +10,7 @@ from typing import Any
 
 import httpx
 import structlog
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -44,6 +45,53 @@ AMAZON_AGUARDANDO_POSTAGEM = "Amazon finance transaction not posted yet"
 AMAZON_ESPERA_MAX_DIAS = 45
 # Ritmo da esteira lenta: 2x por dia é de sobra pra um evento que leva dias.
 AMAZON_ESPERA_INTERVALO_HORAS = 12
+
+# --- Esteira lenta: falha da API não pode matar a linha ------------------
+# O backoff comum desiste na 8ª tentativa e zera o next_retry_at — a linha some
+# da fila PARA SEMPRE, e o Frete/Taxa daquele pedido nunca mais é buscado. Isso
+# é certo pra erro de verdade (pedido que não existe, resposta 400), mas é
+# desastroso quando a culpa é da API: na queda de setembro/2026 (9 contas Shopee
+# com 403, Amazon com LWA vencido, ML com refresh recusado) ~3.900 pedidos
+# morreram na fila e a Margem ficou em branco mesmo depois de os tokens
+# voltarem, porque nada no sistema ressuscitava a linha.
+#
+# Falha transitória = API fora, sem token, limite estourado, ou dado que a
+# plataforma ainda não publicou. Nesses casos a linha vai pra ESTEIRA LENTA:
+# tenta de novo 2×/dia, NÃO gasta o teto de tentativas, e só desiste depois de
+# ESPERA_MAX_DIAS. Quando o token volta, a própria esteira reenche a Margem.
+ESPERA_INTERVALO_HORAS = AMAZON_ESPERA_INTERVALO_HORAS
+ESPERA_MAX_DIAS = AMAZON_ESPERA_MAX_DIAS
+
+_RX_FALHA_TRANSITORIA = re.compile(
+    r"""(
+        error\s+.?(401|403|408|409|425|429|5\d\d)   # httpx: Client error '403 Forbidden'
+      | status\s*[=:]\s*(401|403|408|429|5\d\d)\b   # ml_refresh_failed status=403
+      | too\s+many\s+request
+      | rate[\s_-]?limit
+      | invalid_grant
+      | invalid\s+client_id
+      | refresh[_\s]failed
+      | missing\s+refresh_token
+      | tim(e|ed)\s*out
+      | timeout
+      | connect(ion)?\s*(error|reset|refused|aborted|timeout)
+      | temporarily\s+unavailable
+      | service\s+unavailable
+      | not\s+available\s+yet
+      | not\s+posted\s+yet
+      | cloudflare
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def falha_transitoria(erro: str | None) -> bool:
+    """True quando a falha é da API (fora do ar, sem token, limite estourado)
+    ou é um dado que a plataforma ainda não publicou — e não um erro do pedido."""
+    if not erro:
+        return False
+    return _RX_FALHA_TRANSITORIA.search(erro) is not None
+
 
 RETRYABLE_STATUSES = {"pending", "estimated", "error"}
 SUPPORTED_PLATFORMS = {
@@ -225,14 +273,11 @@ async def run_due_marketplace_financial_retries(
             .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
             .where(MarketplaceOrderFinancial.next_retry_at.is_not(None))
             .where(MarketplaceOrderFinancial.next_retry_at <= now)
-            # O teto de tentativas vale pra ERRO. Pedido Amazon só esperando a
-            # transação ser postada continua na fila (ver _next_retry_at).
-            .where(
-                or_(
-                    MarketplaceOrderFinancial.attempts < max_attempts,
-                    MarketplaceOrderFinancial.last_error == AMAZON_AGUARDANDO_POSTAGEM,
-                )
-            )
+            # Fila RÁPIDA: só pedido recém-falhado. O backlog de falha de API
+            # tem esteira própria (run_esteira_lenta_financials) pra nunca
+            # roubar a vez dos pedidos de hoje.
+            .where(MarketplaceOrderFinancial.espera_lenta.is_(False))
+            .where(MarketplaceOrderFinancial.attempts < max_attempts)
             .order_by(MarketplaceOrderFinancial.next_retry_at.asc())
             .limit(limit)
         )
@@ -258,6 +303,114 @@ async def run_due_marketplace_financial_retries(
             )
             error += 1
     return {"queued": len(rows), "ok": ok, "error": error}
+
+
+async def _rodar_lote(
+    session: AsyncSession, bling_ids: list[int], *, trigger: str
+) -> dict[str, int]:
+    ok = error = 0
+    for bling_id in bling_ids:
+        try:
+            result = await run_sync_marketplace_financials_for_bling_order(
+                session,
+                bling_order_id=int(bling_id),
+                trigger=trigger,
+            )
+            if result.get("ok"):
+                ok += 1
+            else:
+                error += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "marketplace_financials_lote_falhou",
+                trigger=trigger,
+                bling_id=bling_id,
+                error=str(e)[:500],
+            )
+            error += 1
+    return {"queued": len(bling_ids), "ok": ok, "error": error}
+
+
+async def run_esteira_lenta_financials(
+    session: AsyncSession,
+    *,
+    limit: int = 80,
+) -> dict[str, int]:
+    """Fila dos pedidos cujo financeiro esbarrou na API (403/429/5xx/sem token)
+    ou num valor que a plataforma ainda não publicou.
+
+    Fila SEPARADA da rápida de propósito: durante a queda de setembro/2026
+    juntaram-se ~3.900 pedidos nesse estado. Num único `order by next_retry_at`
+    esse backlog comeria as 100 vagas do ciclo e os pedidos do dia ficariam sem
+    Frete/Taxa na Margem — exatamente o sintoma que se quer evitar."""
+    now = datetime.now(UTC)
+    rows = (
+        await session.execute(
+            select(MarketplaceOrderFinancial.bling_id)
+            .where(MarketplaceOrderFinancial.bling_id.is_not(None))
+            .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
+            .where(MarketplaceOrderFinancial.espera_lenta.is_(True))
+            .where(MarketplaceOrderFinancial.next_retry_at.is_not(None))
+            .where(MarketplaceOrderFinancial.next_retry_at <= now)
+            .order_by(MarketplaceOrderFinancial.next_retry_at.asc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return await _rodar_lote(session, list(rows), trigger="esteira_lenta")
+
+
+async def run_ressuscitar_financials(
+    session: AsyncSession,
+    *,
+    limit: int = 400,
+    intervalo_minutos: int = 2,
+) -> dict[str, int]:
+    """Traz de volta pra fila os pedidos que MORRERAM por falha de API.
+
+    `next_retry_at IS NULL` num status retentável = linha fora da fila pra
+    sempre. Antes disso acontecia por acidente: cada 403 gastava uma das 8
+    tentativas, então um fim de semana com a API fora enterrava o pedido e o
+    Frete/Taxa nunca mais era buscado — a Margem ficava em branco mesmo depois
+    de o token voltar (setembro/2026: ~3.900 pedidos).
+
+    Este tick reabre a fila desses pedidos, escalonando o `next_retry_at` em
+    blocos pra não despejar tudo na API de uma vez. Só mexe em linha cuja última
+    falha foi transitória e que ainda está dentro de ESPERA_MAX_DIAS — pedido
+    velho ou com erro de verdade continua fora. Sem UPDATE manual em produção:
+    o próprio sistema se recupera depois de qualquer queda."""
+    now = datetime.now(UTC)
+    corte = now - timedelta(days=ESPERA_MAX_DIAS)
+    rows = (
+        await session.execute(
+            select(MarketplaceOrderFinancial)
+            .where(MarketplaceOrderFinancial.bling_id.is_not(None))
+            .where(MarketplaceOrderFinancial.status.in_(RETRYABLE_STATUSES))
+            .where(MarketplaceOrderFinancial.next_retry_at.is_(None))
+            .where(MarketplaceOrderFinancial.created_at >= corte)
+            .order_by(MarketplaceOrderFinancial.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    revividos = 0
+    ignorados = 0
+    for i, row in enumerate(rows):
+        if not falha_transitoria(row.last_error):
+            ignorados += 1
+            continue
+        row.espera_lenta = True
+        # Escalona: no máximo ~30 por bloco de `intervalo_minutos`.
+        row.next_retry_at = now + timedelta(minutes=intervalo_minutos * (i // 30))
+        revividos += 1
+    if revividos:
+        await session.commit()
+    logger.info(
+        "marketplace_financials_ressuscitar",
+        vistos=len(rows),
+        revividos=revividos,
+        ignorados=ignorados,
+    )
+    return {"vistos": len(rows), "revividos": revividos, "ignorados": ignorados}
 
 
 def _tiktok_unsettled_order_map(pages: list[dict]) -> dict[str, dict]:
@@ -556,8 +709,13 @@ async def _persist_snapshot(
         and _money(estimate.get("est_settlement_amount")) is not None
     )
 
-    attempts = int(financial.attempts or 0) + 1
     now = datetime.now(UTC)
+    # Falha da API não gasta tentativa: senão um dia de 403 queima o teto de 8 e
+    # o pedido some da fila pra sempre (ver ESPERA_INTERVALO_HORAS).
+    transitoria = snapshot.status in RETRYABLE_STATUSES and falha_transitoria(snapshot.error)
+    idade_dias = (now - (financial.created_at or now)).days
+    esteira_lenta = transitoria and idade_dias < ESPERA_MAX_DIAS
+    attempts = int(financial.attempts or 0) + (0 if transitoria else 1)
     financial.store_id = store.id if store else financial.store_id
     financial.bling_id = bling_id
     financial.pedido_bling = pedido_bling
@@ -576,13 +734,9 @@ async def _persist_snapshot(
     financial.fetched_at = now
     financial.attempts = attempts
     financial.last_error = snapshot.error
-    aguardando_amazon = (
-        integration.platform == IntegrationPlatform.AMAZON
-        and snapshot.error == AMAZON_AGUARDANDO_POSTAGEM
-        and (now - (financial.created_at or now)).days < AMAZON_ESPERA_MAX_DIAS
-    )
+    financial.espera_lenta = esteira_lenta
     financial.next_retry_at = _next_retry_at(
-        snapshot.status, attempts, now, aguardando_amazon=aguardando_amazon
+        snapshot.status, attempts, now, esteira_lenta=esteira_lenta
     )
     if keep_estimate:
         financial.status = "estimated"
@@ -1762,15 +1916,15 @@ def _integration_platform(raw: str) -> IntegrationPlatform | None:
 
 
 def _next_retry_at(
-    status: str, attempts: int, now: datetime, *, aguardando_amazon: bool = False
+    status: str, attempts: int, now: datetime, *, esteira_lenta: bool = False
 ) -> datetime | None:
     if status not in RETRYABLE_STATUSES:
         return None
-    # Esperar a Amazon postar não é falha: não gasta o teto de tentativas, senão
-    # o pedido morre na fila dias antes de a transação existir (ver
-    # AMAZON_AGUARDANDO_POSTAGEM).
-    if aguardando_amazon:
-        return now + timedelta(hours=AMAZON_ESPERA_INTERVALO_HORAS)
+    # Esteira lenta: API fora / sem token / limite estourado / dado ainda não
+    # publicado. Não gasta o teto de tentativas — senão o pedido morre na fila
+    # dias antes de o valor existir, e não volta nem quando a API volta.
+    if esteira_lenta:
+        return now + timedelta(hours=ESPERA_INTERVALO_HORAS)
     if attempts >= 8:
         return None
     if attempts <= 1:
