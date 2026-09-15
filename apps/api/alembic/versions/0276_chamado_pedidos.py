@@ -19,8 +19,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0272_chamado_pedidos"
-down_revision: str | None = "0271_situacao_bling_lista_manual"
+revision: str = "0276_chamado_pedidos"
+down_revision: str | None = "0275_logistica_robo_comando"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

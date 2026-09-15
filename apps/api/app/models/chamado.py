@@ -198,7 +198,7 @@ class ChamadoPedido(Base, TimestampMixin):
     todos, com o motivo do atraso de cada um (`fila` = poucos minutos depois
     do corte, `energia` = horas depois, no mesmo dia), pra aba Pedidos do
     Controle de Estoque mostrar o chamado em cada linha e não abrir duas vezes.
-    Ver migration 0272 e services/chamados_atraso."""
+    Ver migration 0276 e services/chamados_atraso."""
 
     __tablename__ = "chamado_pedidos"
     __table_args__ = (
