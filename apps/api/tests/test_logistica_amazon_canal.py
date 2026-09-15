@@ -61,3 +61,10 @@ def test_eh_email_relay_amazon():
     assert not canal.eh_email_relay_amazon("rosana@gmail.com")
     assert not canal.eh_email_relay_amazon("")
     assert not canal.eh_email_relay_amazon(None)
+
+
+def test_canal_exibido_sem_sinal_e_dba():
+    # Vinicius 15/09: "esses sem classificação era DBA" — sem sinal = DBA.
+    assert canal.canal_exibido(None) == "dba"
+    assert canal.canal_exibido("proprio") == "proprio"
+    assert canal.canal_exibido("fba") == "fba"

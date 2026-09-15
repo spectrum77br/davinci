@@ -22,6 +22,11 @@ from datetime import date, timedelta
 CANAL_DBA = "dba"
 CANAL_PROPRIO = "proprio"
 CANAL_FBA = "fba"
+# Sem sinal nenhum (Amazon não devolveu o pedido e o Bling não tem serviço no
+# volume) o pedido é tratado como DBA: é o normal da operação (Vinicius,
+# 15/09: "esses sem classificação era DBA"). Envio próprio é a exceção e é
+# sempre identificado positivamente (MFN sem EasyShip ou serviço dos Correios).
+CANAL_PADRAO = CANAL_DBA
 
 CANAL_LABELS_PT: dict[str, str] = {
     CANAL_DBA: "Amazon DBA",
@@ -60,6 +65,11 @@ def classificar(meli_status: dict | None, servico_envio: str | None = None) -> s
         # DBA recém-criado, antes de a Amazon preencher o EasyShip).
         return pelo_bling or CANAL_PROPRIO
     return pelo_bling
+
+
+def canal_exibido(canal: str | None) -> str:
+    """Canal pra tela e pros filtros: o persistido/deduzido ou o padrão (DBA)."""
+    return canal or CANAL_PADRAO
 
 
 def dias_uteis_apos(inicio: date, dias: int) -> date:

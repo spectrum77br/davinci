@@ -44,15 +44,13 @@ const tab = ref<PlataformaTab | 'status'>('ml')
 // Aba Amazon: a Amazon trata "Delivery by Amazon" (DBA) e "Envio próprio" como
 // dois painéis (Seller Central › Gerenciar pedidos › Logística pelo vendedor),
 // então aqui também. O canal vem do backend (`amazon_canal`: dba/proprio/fba;
-// FBA fica junto do DBA — a Amazon entrega). Linha ainda sem sinal cai em
-// "Sem classificação", que só aparece enquanto existir alguma.
-type AmazonSub = 'dba' | 'proprio' | 'sem'
+// FBA fica junto do DBA — a Amazon entrega). Sem sinal nenhum é DBA, o normal
+// da operação (Vinicius 15/09); Envio próprio é sempre identificado de forma
+// positiva (MFN sem EasyShip ou serviço dos Correios no Bling).
+type AmazonSub = 'dba' | 'proprio'
 const amazonSub = ref<AmazonSub>('dba')
 function amazonSubDe(c: { amazon_canal?: string | null }): AmazonSub {
-  const canal = c.amazon_canal || ''
-  if (canal === 'dba' || canal === 'fba') return 'dba'
-  if (canal === 'proprio') return 'proprio'
-  return 'sem'
+  return c.amazon_canal === 'proprio' ? 'proprio' : 'dba'
 }
 
 type MeliStatus = Record<string, string>
@@ -390,7 +388,7 @@ function limparFiltros() {
 
 // Contadores das sub-abas da Amazon (mesma base do painel: respeita "Mostrar tudo").
 const amazonCounts = computed(() => {
-  const n: Record<AmazonSub, number> = { dba: 0, proprio: 0, sem: 0 }
+  const n: Record<AmazonSub, number> = { dba: 0, proprio: 0 }
   for (const c of rows.value) {
     if (!mostrarTudo.value && c.acao_resolvido && !c.acao_monitorar) continue
     n[amazonSubDe(c)]++
@@ -1642,16 +1640,6 @@ async function aplicarStatusBling(c: Logistica) {
               @click="amazonSub = 'proprio'"
             >
               Envio próprio <span class="opacity-70">({{ amazonCounts.proprio }})</span>
-            </button>
-            <button
-              v-if="amazonCounts.sem"
-              type="button"
-              class="px-3 py-1.5 border-l"
-              :class="amazonSub === 'sem' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
-              title="Pedidos que a Amazon e o Bling ainda não classificaram"
-              @click="amazonSub = 'sem'"
-            >
-              Sem classificação <span class="opacity-70">({{ amazonCounts.sem }})</span>
             </button>
           </div>
           <Button

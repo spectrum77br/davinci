@@ -4,7 +4,9 @@ Vinicius, 15/09/2026: a aba Amazon mostrava pedidos antigos em "Sem
 classificação" porque o canal só era persistido quando o enrich passava de
 novo pela linha (e o robô do Bling lê 40 por rodada, mais recentes primeiro).
 A regra é a mesma de services/logistica_amazon_canal.classificar: EasyShip
-presente = DBA; AFN = FBA; MFN sem EasyShip = Envio próprio. Idempotente.
+presente = DBA; AFN = FBA; MFN sem EasyShip = Envio próprio — e quem não tem
+sinal nenhum vira DBA, o padrão da operação ("esses sem classificação era
+DBA", Vinicius 15/09). Idempotente (só linhas ainda sem canal).
 """
 
 from collections.abc import Sequence
@@ -32,13 +34,10 @@ def upgrade() -> None:
                           THEN 'fba'
                      WHEN upper(coalesce(meli_status->>'fulfillment_channel', '')) = 'MFN'
                           THEN 'proprio'
+                     ELSE 'dba'
                    END
              WHERE lower(trim(coalesce(plataforma, ''))) = 'amazon'
                AND amazon_canal IS NULL
-               AND (
-                     coalesce(meli_status->>'easyship_status', '') <> ''
-                  OR upper(coalesce(meli_status->>'fulfillment_channel', '')) IN ('AFN', 'MFN')
-               )
             """  # noqa: S608
         )
     )

@@ -210,8 +210,9 @@ def _to_out(
     rule = logistica_match.regra_ativa(rules, c.status_bling)
     # Canal Amazon: o persistido ou, enquanto o enrich não passou, o que dá pra
     # deduzir agora da assinatura + serviço do Bling.
-    canal = c.amazon_canal or logistica_amazon_canal.classificar(
-        c.meli_status or {}, c.servico_envio
+    canal = logistica_amazon_canal.canal_exibido(
+        c.amazon_canal
+        or logistica_amazon_canal.classificar(c.meli_status or {}, c.servico_envio)
     )
     return LogisticaOut(
         id=c.id,
