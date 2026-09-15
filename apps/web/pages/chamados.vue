@@ -635,11 +635,13 @@ const bolhas = computed<Bolha[]>(() => {
     })
   }
   // 1º o histórico completo: as falas dele viram a referência de "já mostrado"
+  const falasHistInteiras: string[] = []
   for (const m of hist.mensagens) {
     if (m.tipo !== 'historico') continue
     const falas = partirThread(m.texto)
     falas.forEach((f, i) => {
       corposHist.add(normTxt(f.corpo).slice(0, 100))
+      falasHistInteiras.push(normTxt(f.corpo))
       pushFala(m, f, i, false)
     })
   }
@@ -659,10 +661,16 @@ const bolhas = computed<Bolha[]>(() => {
     }
     const falas = partirThread(m.texto)
     if (!falas.length) {
+      // 15/09: resposta do ML gravada pelo e-mail vem sem o cumprimento (começa no
+      // meio da fala: "Sobre o pedido de protocolo…") — conta como já mostrada se
+      // o começo dela está DENTRO de alguma fala da conversa completa.
+      const inicio = normTxt(m.texto.replace(RE_CAB_FALA, ''))
+      const trecho = inicio.slice(0, 60)
       const jaNaConversa = corposHist.size > 0
         && m.tipo !== 'analise'
         && (m.direcao === 'recebida' || m.status === 'enviada')
-        && corposHist.has(normTxt(m.texto.replace(RE_CAB_FALA, '')).slice(0, 100))
+        && (corposHist.has(inicio.slice(0, 100))
+          || (trecho.length >= 30 && falasHistInteiras.some(c => c.includes(trecho))))
       if (jaNaConversa) continue
       itens.push({
         t, ord: ord++,
