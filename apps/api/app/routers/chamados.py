@@ -426,6 +426,43 @@ async def delete_chamado(
     await session.commit()
 
 
+# 15/09 (Eduardo, consulta 478705311): a MESMA consulta do ML fica ligada a vários
+# pedidos (uma linha da aba por pedido). O leitor grava a resposta numa linha só
+# (o 1º pedido do grupo) e o histórico ficava picado — o pedido certo aparecia
+# vazio. Aqui o histórico é do CASO: todas as linhas da conta com o mesmo
+# protocolo NUMÉRICO (texto livre tipo "Disputa na venda" não agrupa), sem repetir
+# a mensagem gravada em todas as linhas (mesmo tipo e texto em até 2 min).
+async def _mensagens_do_caso(session: AsyncSession, ch: Chamado, *, com_anexos: bool = False) -> list[ChamadoMensagem]:
+    protocolo = (ch.chamado or "").strip()
+    if protocolo.isdigit() and len(protocolo) >= 6:
+        ids = (
+            await session.execute(
+                select(Chamado.id).where(
+                    Chamado.chamado == protocolo,
+                    func.lower(func.coalesce(Chamado.conta, "")) == (ch.conta or "").strip().lower(),
+                )
+            )
+        ).scalars().all() or [ch.id]
+    else:
+        ids = [ch.id]
+    q = select(ChamadoMensagem).where(ChamadoMensagem.chamado_id.in_(ids))
+    if com_anexos:
+        q = q.options(selectinload(ChamadoMensagem.anexos))
+    rows = (await session.execute(q.order_by(ChamadoMensagem.created_at, ChamadoMensagem.id))).scalars().all()
+    if len(ids) == 1:
+        return list(rows)
+    vistos: dict[tuple, object] = {}
+    out: list[ChamadoMensagem] = []
+    for m in rows:
+        chave = (m.direcao, m.tipo, (m.texto or "").strip())
+        ant = vistos.get(chave)
+        if ant is not None and m.created_at and ant and abs((m.created_at - ant).total_seconds()) <= 120:
+            continue
+        vistos[chave] = m.created_at
+        out.append(m)
+    return out
+
+
 # ------------------------------------------------------------- histórico / réplica
 
 
@@ -435,19 +472,8 @@ async def list_mensagens(
     session: Annotated[AsyncSession, Depends(get_session)],
     _user: Annotated[User, Depends(require_permission("chamados", "view"))],
 ) -> list[ChamadoMensagemOut]:
-    await _get(session, chamado_id)
-    rows = (
-        (
-            await session.execute(
-                select(ChamadoMensagem)
-                .options(selectinload(ChamadoMensagem.anexos))
-                .where(ChamadoMensagem.chamado_id == chamado_id)
-                .order_by(ChamadoMensagem.created_at)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    ch = await _get(session, chamado_id)
+    rows = await _mensagens_do_caso(session, ch, com_anexos=True)
     return [_mensagem_out(m) for m in rows]
 
 
@@ -1055,13 +1081,7 @@ async def agent_analisar(
     ).scalars().all()
     out: list[AgentChamadoAnaliseOut] = []
     for ch in rows:
-        msgs = (
-            await session.execute(
-                select(ChamadoMensagem)
-                .where(ChamadoMensagem.chamado_id == ch.id)
-                .order_by(ChamadoMensagem.created_at, ChamadoMensagem.id)
-            )
-        ).scalars().all()
+        msgs = await _mensagens_do_caso(session, ch)
         anexos = await _anexos_da_abertura(session, ch)
         out.append(
             AgentChamadoAnaliseOut(
