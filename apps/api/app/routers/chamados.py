@@ -73,6 +73,7 @@ from app.schemas.chamados import (
     ResolverIn,
     SituacoesOut,
 )
+from app.services.texto_html import limpar_html
 from app.services import chamados as svc
 from app.services import chamados_juridico
 
@@ -104,7 +105,7 @@ def _mensagem_out(m: ChamadoMensagem) -> ChamadoMensagemOut:
         chamado_id=m.chamado_id,
         direcao=m.direcao,
         tipo=m.tipo,
-        texto=m.texto,
+        texto=limpar_html(m.texto),
         canal=m.canal,
         status=m.status,
         erro=m.erro,
@@ -857,7 +858,7 @@ async def agent_lease(
                     plataforma=c.plataforma,
                     chamado=c.chamado,
                     chamado_url=c.chamado_url,
-                    texto=m.texto,
+                    texto=limpar_html(m.texto),
                     anexos=anexos,
                 )
             )
@@ -940,6 +941,8 @@ async def agent_recebida(
     texto = body.texto.strip()
     if body.resumo:
         texto = f"{body.resumo.strip()}\n\n{texto}"
+    bruto = texto
+    texto = limpar_html(texto)
     # Idempotente: o monitor relê a caixa a cada rodada — a mesma resposta do
     # ML (mesmo texto) não entra duas vezes no histórico.
     dup = (
@@ -948,7 +951,7 @@ async def agent_recebida(
             .where(
                 ChamadoMensagem.chamado_id == ch.id,
                 ChamadoMensagem.direcao == "recebida",
-                ChamadoMensagem.texto == texto,
+                ChamadoMensagem.texto.in_({texto, bruto}),
             )
             .order_by(ChamadoMensagem.created_at.desc())
             .limit(1)
@@ -1083,7 +1086,7 @@ async def agent_analisar(
                         status=m.status,
                         autor_nome=m.autor_nome,
                         created_at=m.created_at,
-                        texto=m.texto,
+                        texto=limpar_html(m.texto),
                     )
                     for m in msgs
                 ],

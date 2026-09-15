@@ -34,6 +34,7 @@ from app.models import Chamado, ChamadoMensagem, Devolution
 from app.services import chamados as chamados_svc
 from app.services import chamados_devolucao as cd
 from app.services.devolucao_returns import epoch_to_dt, iso_to_dt
+from app.services.texto_html import limpar_html
 
 logger = structlog.get_logger()
 
@@ -112,8 +113,13 @@ async def _ja_tem(session: AsyncSession, ch: Chamado, texto: str) -> bool:
 
 async def registrar_recebida(session: AsyncSession, ch: Chamado, plat: str, texto: str) -> bool:
     """Grava a resposta da plataforma no histórico (uma vez por texto)."""
-    texto = (texto or "").strip()
+    bruto = (texto or "").strip()
+    # 15/09: mediador do ML vem em HTML — grava legível. O dedupe olha as duas
+    # formas: as mensagens antigas ficaram gravadas cruas e não podem duplicar.
+    texto = limpar_html(bruto)
     if not texto or await _ja_tem(session, ch, texto):
+        return False
+    if bruto != texto and await _ja_tem(session, ch, bruto):
         return False
     msg = chamados_svc.nova_mensagem(
         ch,
