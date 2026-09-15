@@ -61,6 +61,9 @@ from app.schemas.logistica import (
     OpcoesOut,
     RecarregarOut,
     RecarregarStatusOut,
+    RoboLeaseIn,
+    RoboLeaseOut,
+    RoboResultadoIn,
     StatusBlingOut,
     StatusBlingPreviewOut,
     StatusDetalheOut,
@@ -76,6 +79,7 @@ from app.services import (
     logistica_datas,
     logistica_match,
     logistica_meli,
+    logistica_robo,
     logistica_rules,
     logistica_shopee,
     logistica_tiktok,
@@ -250,6 +254,9 @@ def _to_out(
         aviso_prazo_amazon_3d_at=c.aviso_prazo_amazon_3d_at,
         aviso_prazo_amazon_vencido_at=c.aviso_prazo_amazon_vencido_at,
         mensagens_cliente=mensagens or [],
+        suspensao_status=c.suspensao_status,
+        suspensao_em=c.suspensao_em,
+        suspensao_detalhe=c.suspensao_detalhe,
         acao_match=rule is not None,
         acao_status_id=rule.id if rule is not None else None,
         acao_resumo=logistica_match.resumo_acoes(rule),
@@ -695,6 +702,75 @@ async def list_logistica(
             )
         )
     return out
+
+
+# ---- Robô da Logística (executor local): suspender entrega no Melhor Envio ----
+#
+# /agent/* são M2M: o executor se identifica pelo mesmo X-Agent-Token da
+# Marketing (settings.marketing_agent_token) — é o mesmo processo no Mac.
+# Declarados ANTES das rotas /{logistica_id}/… por clareza.
+
+
+def _require_agent_token_logistica():
+    from app.routers.marketing import _require_agent_token
+
+    return _require_agent_token
+
+
+@router.post("/agent/lease", response_model=RoboLeaseOut)
+async def robo_lease(
+    body: RoboLeaseIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _tok: Annotated[None, Depends(_require_agent_token_logistica())],
+) -> RoboLeaseOut:
+    """Executor puxa os comandos pendentes do robô da Logística (hoje:
+    `melhorenvio_suspender`) e eles viram `claimed`."""
+    return RoboLeaseOut(comandos=await logistica_robo.lease(session, limit=body.limit))
+
+
+@router.post("/agent/comandos/{comando_id}/resultado")
+async def robo_resultado(
+    comando_id: UUID,
+    body: RoboResultadoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _tok: Annotated[None, Depends(_require_agent_token_logistica())],
+) -> dict:
+    """Executor devolve o desfecho; a linha da Logística reflete
+    (solicitada | falhou + detalhe)."""
+    try:
+        cmd = await logistica_robo.registrar_resultado(
+            session, comando_id, status=body.status, result=body.result
+        )
+    except logistica_robo.RoboError as e:
+        raise HTTPException(404, detail={"code": e.code}) from e
+    return {"ok": True, "status": cmd.status}
+
+
+@router.post("/{logistica_id}/suspender-entrega", response_model=LogisticaOut)
+async def suspender_entrega(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> LogisticaOut:
+    """Botão "Suspender entrega" (Amazon Envio próprio com rastreio dos
+    Correios, ainda não entregue): enfileira o comando pro robô clicar no
+    painel do Melhor Envio. Irreversível lá; o frete não volta."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    try:
+        await logistica_robo.solicitar_suspensao(session, c, user_id=user.id)
+    except logistica_robo.RoboError as e:
+        raise HTTPException(422, detail={"code": e.code}) from e
+    await session.refresh(c)
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+    )
 
 
 # ---- Mensagens ao comprador da Amazon (textos + estado do envio) ----

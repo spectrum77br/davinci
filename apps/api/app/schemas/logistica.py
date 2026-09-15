@@ -124,6 +124,11 @@ class LogisticaOut(BaseModel):
     aviso_prazo_amazon_vencido_at: datetime | None = None
     # Mensagens mandadas ao comprador (histórico; só leitura).
     mensagens_cliente: list[MensagemClienteOut] = Field(default_factory=list)
+    # Suspensão de entrega no Melhor Envio pelo robô: pendente | solicitada |
+    # falhou (+ quando foi pedida e o detalhe do robô). Só leitura.
+    suspensao_status: str | None = None
+    suspensao_em: datetime | None = None
+    suspensao_detalhe: str | None = None
     # Casador da aba Status: regra que casa com a chave (status_plataforma)
     # deste pedido. `acao_match`=achou regra; `acao_status_id`=id da linha da
     # aba Status que casou; `acao_resumo`=o que o sistema faria (só leitura,
@@ -139,6 +144,32 @@ class LogisticaOut(BaseModel):
     created_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class RoboLeaseIn(BaseModel):
+    """Executor local pedindo trabalho (X-Agent-Token)."""
+
+    limit: int = Field(default=5, ge=1, le=20)
+
+
+class RoboComandoOut(BaseModel):
+    id: UUID
+    logistica_id: UUID
+    acao: str
+    payload: dict = Field(default_factory=dict)
+    attempts: int = 0
+
+
+class RoboLeaseOut(BaseModel):
+    comandos: list[RoboComandoOut] = Field(default_factory=list)
+
+
+class RoboResultadoIn(BaseModel):
+    """Desfecho de um comando: done (o robô clicou em Solicitar) ou failed
+    (não achou o envio, sem login, tela mudou…). `result` é o detalhe."""
+
+    status: str = Field(pattern="^(done|failed)$")
+    result: str | None = None
 
 
 class AtualizarRastreioOut(BaseModel):

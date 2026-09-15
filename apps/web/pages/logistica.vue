@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail, Ban } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -118,6 +118,10 @@ type Logistica = {
     erro: string | null
     tentativas: number
   }>
+  // Suspensão de entrega no Melhor Envio pelo robô: pendente | solicitada | falhou.
+  suspensao_status?: string | null
+  suspensao_em?: string | null
+  suspensao_detalhe?: string | null
   observacao: string | null
   // Casador da aba Status (backend): regra que casa com a chave deste pedido.
   acao_match: boolean
@@ -901,6 +905,58 @@ async function atualizarLocalizacao(c: Logistica) {
   }
 }
 
+// Botão "Suspender entrega" (Amazon Envio próprio, rastreio dos Correios,
+// ainda não entregue): pede ao robô (executor local, perfil logado no Melhor
+// Envio) que clique em Meus envios › Ações do envio › Suspender entrega.
+// Irreversível no Melhor Envio e o frete não volta — por isso a confirmação.
+const suspendendo = ref<Set<string>>(new Set())
+function podeSuspender(c: Logistica): boolean {
+  return (
+    canEdit.value &&
+    c.amazon_canal === 'proprio' &&
+    ehCorreios(c.rastreio) &&
+    !c.entregue_em &&
+    !['pendente', 'solicitada'].includes(c.suspensao_status || '')
+  )
+}
+function suspensaoResumo(c: Logistica): string {
+  if (!c.suspensao_status) return ''
+  if (c.suspensao_status === 'pendente') return 'suspensão: na fila do robô'
+  if (c.suspensao_status === 'solicitada') return `suspensão solicitada ${fmtQuando(c.suspensao_em)}`
+  return `suspensão falhou: ${resumoDetalheRobo(c.suspensao_detalhe)}`
+}
+// O robô devolve um JSON com o que viu; pra tela basta o motivo.
+function resumoDetalheRobo(raw: string | null | undefined): string {
+  if (!raw) return 'sem detalhe'
+  try {
+    const j = JSON.parse(raw)
+    return String(j.reason || j.detail || raw).slice(0, 160)
+  } catch {
+    return raw.slice(0, 160)
+  }
+}
+async function suspenderEntrega(c: Logistica) {
+  const ok = window.confirm(
+    `Pedir ao Melhor Envio a suspensão da entrega do pedido ${c.pedido_bling || ''} (rastreio ${c.rastreio})?\n\n` +
+      'O pacote volta para você quando chegar na agência de destino. No Melhor Envio isso não pode ser desfeito e o frete não é devolvido.',
+  )
+  if (!ok) return
+  suspendendo.value = new Set(suspendendo.value).add(c.id)
+  try {
+    const updated = await api<Logistica>(`/api/logistica/${c.id}/suspender-entrega`, { method: 'POST' })
+    const i = rows.value.findIndex((x) => x.id === c.id)
+    if (i >= 0) rows.value[i] = updated
+    toasts.success('Suspensão enviada ao robô', 'O executor vai clicar no Melhor Envio e a linha mostra o resultado.')
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    toasts.error('Não foi possível pedir a suspensão', code)
+  } finally {
+    const s = new Set(suspendendo.value)
+    s.delete(c.id)
+    suspendendo.value = s
+  }
+}
+
 // Puxa o status do pedido Amazon (OrderStatus + EasyShip) pra uma linha.
 async function atualizarAmazon(c: Logistica) {
   refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
@@ -1036,6 +1092,7 @@ function autoRefreshTick() {
   if (
     refreshingMeli.value.size > 0 ||
     refreshingRastreio.value.size > 0 ||
+    suspendendo.value.size > 0 ||
     sendingChamado.value.size > 0 ||
     aplicandoBling.value.size > 0 ||
     aplicandoStatus.value.size > 0 ||
@@ -1747,12 +1804,14 @@ async function aplicarStatusBling(c: Logistica) {
               <th class="px-3 py-2">Status Plataforma</th>
               <th class="px-3 py-2">Rastreio</th>
               <th class="px-3 py-2">Localização</th>
-              <template v-if="tab === 'amazon'">
+              <!-- Só no Envio próprio: no DBA a Amazon entrega e responde pelo prazo. -->
+              <template v-if="tab === 'amazon' && amazonSub === 'proprio'">
                 <th class="px-3 py-2" title="Previsão de entrega da transportadora (objeto de postagem do Bling)">Previsão transportadora</th>
                 <th class="px-3 py-2" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até (Amazon)</th>
               </template>
               <th class="px-3 py-2">Divergência</th>
               <th class="px-3 py-2">Status Bling</th>
+              <th v-if="tab === 'amazon' && amazonSub === 'proprio'" class="px-3 py-2" title="Pede ao Melhor Envio a suspensão da entrega (o pacote volta)">Suspensão</th>
               <th class="px-3 py-2">Chamado</th>
             </tr>
           </thead>
@@ -1903,7 +1962,7 @@ async function aplicarStatusBling(c: Logistica) {
                   </template>
                 </div>
               </td>
-              <template v-if="tab === 'amazon'">
+              <template v-if="tab === 'amazon' && amazonSub === 'proprio'">
                 <td class="px-3 py-2 whitespace-nowrap text-xs">
                   <span
                     v-if="c.entregue_em"
@@ -1970,6 +2029,25 @@ async function aplicarStatusBling(c: Logistica) {
                   </button>
                 </div>
               </td>
+              <td v-if="tab === 'amazon' && amazonSub === 'proprio'" class="px-3 py-2 text-xs">
+                <button
+                  v-if="podeSuspender(c)"
+                  class="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-700 dark:text-rose-400 dark:hover:bg-rose-950/40 whitespace-nowrap"
+                  title="Pede ao robô que solicite no Melhor Envio a suspensão da entrega (o pacote volta). Irreversível; o frete não é devolvido."
+                  :disabled="suspendendo.has(c.id)"
+                  @click.stop="suspenderEntrega(c)"
+                >
+                  <Ban class="size-3" :class="suspendendo.has(c.id) ? 'animate-pulse' : ''" />
+                  {{ c.suspensao_status === 'falhou' ? 'tentar de novo' : 'Suspender entrega' }}
+                </button>
+                <div
+                  v-if="suspensaoResumo(c)"
+                  class="text-[11px] whitespace-normal max-w-[200px]"
+                  :class="c.suspensao_status === 'solicitada' ? 'text-emerald-700 dark:text-emerald-400' : c.suspensao_status === 'falhou' ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'"
+                  :title="c.suspensao_detalhe || ''"
+                >{{ suspensaoResumo(c) }}</div>
+                <span v-if="!podeSuspender(c) && !suspensaoResumo(c)" class="text-muted-foreground">—</span>
+              </td>
               <td class="px-3 py-2 whitespace-nowrap">
                 <div class="flex items-center gap-1.5">
                   <span class="flex-1">{{ c.chamado || '—' }}</span>
@@ -1995,7 +2073,7 @@ async function aplicarStatusBling(c: Logistica) {
               </td>
             </tr>
             <tr v-if="!loading && filteredRows.length === 0">
-              <td :colspan="tab === 'amazon' ? 15 : 13" class="px-3 py-6 text-center text-muted-foreground">
+              <td :colspan="tab === 'amazon' && amazonSub === 'proprio' ? 16 : 13" class="px-3 py-6 text-center text-muted-foreground">
                 {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
               </td>
             </tr>
@@ -2071,7 +2149,7 @@ async function aplicarStatusBling(c: Logistica) {
               </template>
             </div>
             <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || '—' }}</div>
-            <template v-if="tab === 'amazon'">
+            <template v-if="tab === 'amazon' && amazonSub === 'proprio'">
               <div>
                 <span class="text-muted-foreground">Previsão transportadora:</span>
                 <span v-if="c.entregue_em" class="text-emerald-700 dark:text-emerald-400">entregue {{ fmtQuando(c.entregue_em) }}</span>
@@ -2083,8 +2161,18 @@ async function aplicarStatusBling(c: Logistica) {
                 <span v-if="c.prazo_entrega_amazon && !c.entregue_em" class="text-muted-foreground"> · {{ prazoResumo(c) }}</span>
               </div>
               <div v-if="mensagensResumo(c)" class="col-span-2 text-sky-700 dark:text-sky-400">✉ cliente: {{ mensagensResumo(c) }}</div>
+              <div v-if="suspensaoResumo(c)" class="col-span-2" :class="c.suspensao_status === 'solicitada' ? 'text-emerald-700 dark:text-emerald-400' : c.suspensao_status === 'falhou' ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'">{{ suspensaoResumo(c) }}</div>
             </template>
           </div>
+          <button
+            v-if="tab === 'amazon' && amazonSub === 'proprio' && podeSuspender(c)"
+            class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-700 dark:text-rose-400"
+            :disabled="suspendendo.has(c.id)"
+            @click.stop="suspenderEntrega(c)"
+          >
+            <Ban class="size-3" :class="suspendendo.has(c.id) ? 'animate-pulse' : ''" />
+            Suspender entrega
+          </button>
           <div
             v-if="c.divergencia"
             class="text-xs text-amber-700 dark:text-amber-400 border border-amber-300 dark:border-amber-700 rounded px-2 py-1"

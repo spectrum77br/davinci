@@ -70,6 +70,7 @@ from app.models.logistica import (
     Logistica,
     LogisticaMensagemCliente,
     LogisticaMensagemTemplate,
+    LogisticaRoboComando,
     LogisticaStatus,
     LogisticaStatusAnexo,
 )
@@ -189,6 +190,7 @@ __all__ = [
     "Logistica",
     "LogisticaMensagemCliente",
     "LogisticaMensagemTemplate",
+    "LogisticaRoboComando",
     "LogisticaStatus",
     "LogisticaStatusAnexo",
     "MARKETPLACES",

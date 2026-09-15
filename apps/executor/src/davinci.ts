@@ -16,6 +16,16 @@ export interface LeasedCommand {
   campaign_external_id: string | null;
 }
 
+/** Comando do robô da Logística (/api/logistica/agent/lease): hoje só
+ *  `melhorenvio_suspender` — suspender a entrega de um envio postado. */
+export interface LeasedLogisticaCommand {
+  id: string;
+  logistica_id: string;
+  acao: string;
+  payload: Record<string, unknown>;
+  attempts: number;
+}
+
 export interface HeartbeatPayload {
   agent_name: string;
   version?: string;
@@ -67,6 +77,26 @@ export async function reportResult(
   result?: string
 ): Promise<void> {
   await post(`/api/marketing/agent/commands/${commandId}/result`, {
+    status,
+    result: result ?? null,
+  });
+}
+
+/** Comandos pendentes do robô da Logística (mesmo token M2M). */
+export async function leaseLogistica(limit: number): Promise<LeasedLogisticaCommand[]> {
+  const data = await post<{ comandos: LeasedLogisticaCommand[] }>(
+    "/api/logistica/agent/lease",
+    { limit }
+  );
+  return data.comandos ?? [];
+}
+
+export async function reportLogistica(
+  commandId: string,
+  status: "done" | "failed",
+  result?: string
+): Promise<void> {
+  await post(`/api/logistica/agent/comandos/${commandId}/resultado`, {
     status,
     result: result ?? null,
   });

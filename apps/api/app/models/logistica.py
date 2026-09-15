@@ -149,6 +149,12 @@ class Logistica(Base, TimestampMixin):
     bling_enriquecido_em: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Suspensão de entrega no Melhor Envio pelo robô (logistica_robo_comando):
+    # 'pendente' (na fila do executor) | 'solicitada' (o robô clicou) |
+    # 'falhou' (detalhe explica). `suspensao_em` = quando o operador pediu.
+    suspensao_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suspensao_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspensao_detalhe: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
@@ -205,6 +211,37 @@ class LogisticaMensagemCliente(Base, TimestampMixin):
     tentativas: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     logistica: Mapped["Logistica"] = relationship(back_populates="mensagens_cliente")
+
+
+class LogisticaRoboComando(Base, TimestampMixin):
+    """Fila do robô da Logística (executor local, apps/executor): hoje só
+    `melhorenvio_suspender` — suspender a entrega de um envio postado pelo
+    Melhor Envio, que não tem API pra isso. Mesmo ciclo da Marketing:
+    pending → claimed (lease) → done/failed (resultado)."""
+
+    __tablename__ = "logistica_robo_comando"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    logistica_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("logistica.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    acao: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending", server_default="pending", index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class LogisticaStatus(Base, TimestampMixin):

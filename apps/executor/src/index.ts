@@ -23,8 +23,9 @@ import { log } from "./log";
 import * as adspower from "./adspower";
 import * as shopee from "./shopee";
 import * as flashsale from "./flashsale";
+import * as melhorenvio from "./melhorenvio";
 import * as davinci from "./davinci";
-import type { LeasedCommand } from "./davinci";
+import type { LeasedCommand, LeasedLogisticaCommand } from "./davinci";
 
 const VERSION = "1.0.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -127,18 +128,89 @@ async function processCommand(cmd: LeasedCommand): Promise<void> {
   }
 }
 
-/** Um ciclo de trabalho: puxa a fila e drena SERIALMENTE (um perfil por vez). */
+/** Robô da Logística: "Suspender entrega" no painel do Melhor Envio (perfil
+ *  AdsPower logado lá, MELHORENVIO_ADSPOWER_USER_ID). Modo seco enquanto
+ *  MELHORENVIO_CALIBRATED != true: devolve o que achou, sem clicar em Solicitar. */
+async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<void> {
+  if (cmd.acao !== "melhorenvio_suspender") {
+    await davinci.reportLogistica(cmd.id, "failed", `ação não suportada pelo executor: ${cmd.acao}`);
+    return;
+  }
+  const userId = cfg.melhorEnvioAdspowerUserId;
+  const rastreio = String((cmd.payload || {}).rastreio || "").trim();
+  if (!userId) {
+    await davinci.reportLogistica(
+      cmd.id,
+      "failed",
+      "MELHORENVIO_ADSPOWER_USER_ID vazio no executor (perfil do Melhor Envio não configurado)"
+    );
+    return;
+  }
+  if (!rastreio) {
+    await davinci.reportLogistica(cmd.id, "failed", "comando sem rastreio");
+    return;
+  }
+  let session: melhorenvio.Session | null = null;
+  try {
+    const ws = await adspower.start(userId);
+    session = await melhorenvio.connect(ws);
+    const r = await melhorenvio.suspenderEntrega(session.page, {
+      rastreio,
+      commit: (cmd.payload || {}).commit === true,
+    });
+    await davinci.reportLogistica(cmd.id, r.ok && r.requested ? "done" : "failed", JSON.stringify(r));
+    log.info(
+      `ME suspender ${rastreio} → ok=${r.ok} found=${r.found} requested=${r.requested} dry=${r.dry}` +
+        (r.reason ? ` (${r.reason})` : "")
+    );
+  } catch (err: any) {
+    if (err instanceof melhorenvio.NeedsManualLogin || err?.name === "NeedsManualLogin") {
+      log.warn(`ME: precisa de login manual no perfil do Melhor Envio (needs_manual_login)`);
+      await davinci.reportLogistica(cmd.id, "failed", "needs_manual_login: entre no Melhor Envio no perfil do AdsPower");
+    } else {
+      const msg = String(err?.message || err);
+      log.error(`ME suspender ${rastreio} falhou: ${msg}`);
+      await davinci.reportLogistica(cmd.id, "failed", msg.slice(0, 2000));
+    }
+  } finally {
+    if (session) {
+      try {
+        await melhorenvio.disconnect(session);
+      } catch {
+        /* ignora */
+      }
+    }
+    try {
+      await adspower.stop(userId);
+    } catch (e) {
+      log.error(`falha ao fechar profile ${userId}: ${String(e)}`);
+    }
+  }
+}
+
+/** Um ciclo de trabalho: puxa as filas e drena SERIALMENTE (um perfil por vez). */
 async function tick(): Promise<void> {
   if (ticking) return; // sem reentrância — um AdsPower de cada vez
   ticking = true;
   try {
     const commands = await davinci.lease(cfg.leaseLimit);
-    if (commands.length === 0) return;
-    log.info(`lease: ${commands.length} comando(s) para executar`);
+    if (commands.length) log.info(`lease: ${commands.length} comando(s) para executar`);
     for (let i = 0; i < commands.length; i++) {
       await processCommand(commands[i]);
       // Espaça os perfis (rate-limit ~1 req/s da Local API do AdsPower).
       if (i < commands.length - 1) await sleep(cfg.profileGapMs);
+    }
+    // Fila do robô da Logística (Melhor Envio) — mesmo laço serial.
+    let logistica: LeasedLogisticaCommand[] = [];
+    try {
+      logistica = await davinci.leaseLogistica(cfg.logisticaLeaseLimit);
+    } catch (err: any) {
+      log.warn(`lease logística falhou: ${String(err?.message || err)}`);
+    }
+    if (logistica.length) log.info(`lease logística: ${logistica.length} comando(s)`);
+    for (let i = 0; i < logistica.length; i++) {
+      if (commands.length || i > 0) await sleep(cfg.profileGapMs);
+      await processLogisticaCommand(logistica[i]);
     }
   } catch (err: any) {
     log.error(`tick falhou: ${String(err?.message || err)}`);

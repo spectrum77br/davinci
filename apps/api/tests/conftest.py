@@ -383,6 +383,7 @@ _CLEANUP_TABLES = (
     "automacoes",
     "logistica_status_anexo",
     "logistica_status",
+    "logistica_robo_comando",
     "logistica_mensagem_cliente",
     "logistica_mensagem_template",
     "logistica",

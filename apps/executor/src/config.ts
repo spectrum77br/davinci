@@ -25,6 +25,11 @@ export interface Config {
   defaultMode: "manual" | "gmvmax";
   defaultScope: "all" | "ids" | "names";
   calibrated: boolean;
+  // Melhor Envio (robô "Suspender entrega" da Logística)
+  melhorEnvioAdspowerUserId: string;
+  melhorEnvioUrl: string;
+  melhorEnvioCalibrated: boolean;
+  logisticaLeaseLimit: number;
 }
 
 const modeRaw = str("EXECUTOR_DEFAULT_MODE", "manual");
@@ -46,4 +51,8 @@ export const cfg: Config = {
   defaultMode,
   defaultScope,
   calibrated: str("SELECTORS_CALIBRATED") === "true",
+  melhorEnvioAdspowerUserId: str("MELHORENVIO_ADSPOWER_USER_ID"),
+  melhorEnvioUrl: str("MELHORENVIO_ENVIOS_URL", "https://app.melhorenvio.com.br/envios/postados"),
+  melhorEnvioCalibrated: str("MELHORENVIO_CALIBRATED") === "true",
+  logisticaLeaseLimit: int("LOGISTICA_LEASE_LIMIT", 5),
 };
