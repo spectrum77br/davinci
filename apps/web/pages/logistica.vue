@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail } from 'lucide-vue-next'
 
 definePageMeta({
   middleware: ['permission'],
@@ -17,6 +17,18 @@ const toasts = useToasts()
 const mostrarTudo = ref(false)
 // Modal do botão INFORMAR (admin-only) — relatório via Threema.
 const informarOpen = ref(false)
+// Aba Amazon: Informar (lista de Envio próprio em trânsito + quem recebe os
+// avisos do robô) e Mensagens ao cliente (textos dos e-mails ao comprador).
+const informarAmazonOpen = ref(false)
+const mensagensClienteOpen = ref(false)
+// "Igual ao Margem": admins + o gerente. Espelha _EMAILS_EXTRAS['logistica_amazon']
+// no backend (routers/informar.py) — mudou lá, muda aqui.
+const _auth = useAuthStore()
+const INFORMAR_AMAZON_USERS = ['sa.geral@tutamail.com']
+const canInformarAmazon = computed(() => {
+  const email = _auth.user?.email?.toLowerCase()
+  return isAdmin.value || (!!email && INFORMAR_AMAZON_USERS.includes(email))
+})
 
 // Abas por marketplace + a aba Status (playbook único, compartilhado). A chave
 // (Status Plataforma) é a mesma pra todas — só o ML enriquece a assinatura hoje.
@@ -28,6 +40,20 @@ const PLATAFORMA_TABS = [
 ] as const
 type PlataformaTab = (typeof PLATAFORMA_TABS)[number]['key']
 const tab = ref<PlataformaTab | 'status'>('ml')
+
+// Aba Amazon: a Amazon trata "Delivery by Amazon" (DBA) e "Envio próprio" como
+// dois painéis (Seller Central › Gerenciar pedidos › Logística pelo vendedor),
+// então aqui também. O canal vem do backend (`amazon_canal`: dba/proprio/fba;
+// FBA fica junto do DBA — a Amazon entrega). Linha ainda sem sinal cai em
+// "Sem classificação", que só aparece enquanto existir alguma.
+type AmazonSub = 'dba' | 'proprio' | 'sem'
+const amazonSub = ref<AmazonSub>('dba')
+function amazonSubDe(c: { amazon_canal?: string | null }): AmazonSub {
+  const canal = c.amazon_canal || ''
+  if (canal === 'dba' || canal === 'fba') return 'dba'
+  if (canal === 'proprio') return 'proprio'
+  return 'sem'
+}
 
 type MeliStatus = Record<string, string>
 
@@ -70,6 +96,29 @@ type Logistica = {
   // e motivo da recusa do ML (vazio = nunca tentou / abriu). Só leitura.
   chamado_auto_at: string | null
   chamado_auto_erro: string | null
+  // ---- Amazon (projeto de 15/09/2026) ----
+  amazon_canal?: 'dba' | 'proprio' | 'fba' | null
+  amazon_canal_label?: string
+  servico_envio?: string | null
+  postagem_data?: string | null
+  // Previsão dos Correios (Bling) e data máxima da Amazon (LatestDeliveryDate).
+  previsao_correios?: string | null
+  prazo_entrega_amazon?: string | null
+  entregue_em?: string | null
+  problema_correios?: string | null
+  cliente_nome?: string | null
+  cliente_email?: string | null
+  aviso_previsao_correios_at?: string | null
+  aviso_prazo_amazon_3d_at?: string | null
+  aviso_prazo_amazon_vencido_at?: string | null
+  mensagens_cliente?: Array<{
+    evento: string
+    evento_label: string
+    assunto: string
+    enviado_em: string | null
+    erro: string | null
+    tentativas: number
+  }>
   observacao: string | null
   // Casador da aba Status (backend): regra que casa com a chave deste pedido.
   acao_match: boolean
@@ -299,6 +348,8 @@ const filteredRows = computed(() => {
     // Bling (resolvido) E a regra casada não pede monitoramento — nada a fazer.
     // "Mostrar tudo" ligado ignora essa regra e exibe também os escondidos.
     if (!mostrarTudo.value && c.acao_resolvido && !c.acao_monitorar) return false
+    // Aba Amazon: só a sub-aba escolhida (DBA / Envio próprio / sem classificação).
+    if (tab.value === 'amazon' && amazonSubDe(c) !== amazonSub.value) return false
     if (contaFilter.value !== 'all' && (c.conta || '') !== contaFilter.value) return false
     if (statusBlingFilter.value !== 'all' && (c.status_bling || '') !== statusBlingFilter.value) return false
     if (di && (!c.data || c.data < di)) return false
@@ -314,6 +365,8 @@ const filteredRows = computed(() => {
         c.divergencia,
         c.status_bling,
         c.status_plataforma,
+        c.cliente_nome,
+        c.servico_envio,
         // Busca também por produto: nome e SKU dos itens do pedido.
         ...(c.produtos || []).flatMap((p) => [p.nome, p.sku]),
       ]
@@ -334,6 +387,73 @@ function limparFiltros() {
   dataFimFilter.value = ''
 }
 
+// Contadores das sub-abas da Amazon (mesma base do painel: respeita "Mostrar tudo").
+const amazonCounts = computed(() => {
+  const n: Record<AmazonSub, number> = { dba: 0, proprio: 0, sem: 0 }
+  for (const c of rows.value) {
+    if (!mostrarTudo.value && c.acao_resolvido && !c.acao_monitorar) continue
+    n[amazonSubDe(c)]++
+  }
+  return n
+})
+
+// ---- Prazos da Amazon (só leitura) ----
+// Datas "YYYY-MM-DD" comparadas em dia local (sem fuso): quantos dias faltam.
+function diasAte(dia: string | null | undefined): number | null {
+  if (!dia) return null
+  const [y, m, d] = dia.slice(0, 10).split('-').map(Number)
+  if (!y || !m || !d) return null
+  const alvo = new Date(y, m - 1, d)
+  const hoje = new Date()
+  const base = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate())
+  return Math.round((alvo.getTime() - base.getTime()) / 86400000)
+}
+function fmtDia(dia: string | null | undefined): string {
+  if (!dia) return ''
+  const [y, m, d] = dia.slice(0, 10).split('-')
+  return y && m && d ? `${d}/${m}/${y}` : dia
+}
+// ISO-datetime → "dd/mm" (fmtDate só entende data pura "YYYY-MM-DD").
+function fmtQuando(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
+}
+function previsaoVencida(c: Logistica): boolean {
+  if (c.entregue_em) return false
+  const dias = diasAte(c.previsao_correios)
+  return dias !== null && dias < 0
+}
+function prazoVencido(c: Logistica): boolean {
+  if (c.entregue_em) return false
+  const dias = diasAte(c.prazo_entrega_amazon)
+  return dias !== null && dias < 0
+}
+// "faltam 3 dias" / "vence hoje" / "vencido há 2 dias" — depois disso a Amazon
+// reembolsa o cliente, por isso o vermelho.
+function prazoResumo(c: Logistica): string {
+  const dias = diasAte(c.prazo_entrega_amazon)
+  if (dias === null) return ''
+  if (dias < 0) return dias === -1 ? 'vencido há 1 dia' : `vencido há ${-dias} dias`
+  if (dias === 0) return 'vence hoje'
+  return dias === 1 ? 'falta 1 dia' : `faltam ${dias} dias`
+}
+function avisosResumo(c: Logistica): string {
+  const partes: string[] = []
+  if (c.aviso_previsao_correios_at) partes.push(`previsão vencida ${fmtQuando(c.aviso_previsao_correios_at)}`)
+  if (c.aviso_prazo_amazon_3d_at) partes.push(`3 dias ${fmtQuando(c.aviso_prazo_amazon_3d_at)}`)
+  if (c.aviso_prazo_amazon_vencido_at) partes.push(`vencido ${fmtQuando(c.aviso_prazo_amazon_vencido_at)}`)
+  return partes.length ? `Threema: ${partes.join(' · ')}` : ''
+}
+function mensagensResumo(c: Logistica): string {
+  const ms = c.mensagens_cliente || []
+  if (!ms.length) return ''
+  return ms
+    .map((m) => (m.enviado_em ? `${m.evento_label} ${fmtQuando(m.enviado_em)}` : `${m.evento_label} (falhou)`))
+    .join(' · ')
+}
+
 // ---- Paginação (client-side, 50 por página; muitas linhas travam o DOM) ----
 const PAGE_SIZE = 50
 const page = ref(1)
@@ -349,7 +469,7 @@ function goToPage(p: number) {
   page.value = Math.min(Math.max(1, p), totalPages.value)
 }
 // Filtros mudaram → volta pra 1ª página.
-watch([search, contaFilter, statusBlingFilter, dataInicioFilter, dataFimFilter], () => {
+watch([search, contaFilter, statusBlingFilter, dataInicioFilter, dataFimFilter, amazonSub], () => {
   page.value = 1
 })
 // Recarregou dados / página ficou fora do intervalo → corrige.
@@ -862,7 +982,7 @@ let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 function autoRefreshTick() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
-  if (recarregando.value || modalOpen.value || informarOpen.value) return
+  if (recarregando.value || modalOpen.value || informarOpen.value || informarAmazonOpen.value || mensagensClienteOpen.value) return
   // Alguma ação por linha em andamento (enviar chamado, aplicar no Bling,
   // atualizar status, salvar campo da aba Status)? Deixa pro próximo tick.
   if (
@@ -1451,6 +1571,57 @@ async function aplicarStatusBling(c: Logistica) {
           <MapPin class="size-4 mr-1" :class="atualizandoRastreio ? 'animate-pulse' : ''" />
           {{ atualizandoRastreio ? 'Buscando…' : 'Atualizar Correios' }}
         </Button>
+        <!-- Amazon: DBA × Envio próprio (dois painéis, como no Seller Central) -->
+        <template v-if="tab === 'amazon'">
+          <div class="flex items-center rounded-md border overflow-hidden text-sm" role="tablist">
+            <button
+              type="button"
+              class="px-3 py-1.5"
+              :class="amazonSub === 'dba' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
+              title="Delivery by Amazon: a Amazon coleta e entrega"
+              @click="amazonSub = 'dba'"
+            >
+              Amazon DBA <span class="opacity-70">({{ amazonCounts.dba }})</span>
+            </button>
+            <button
+              type="button"
+              class="px-3 py-1.5 border-l"
+              :class="amazonSub === 'proprio' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
+              title="Envio próprio: postamos nos Correios e respondemos pela entrega"
+              @click="amazonSub = 'proprio'"
+            >
+              Envio próprio <span class="opacity-70">({{ amazonCounts.proprio }})</span>
+            </button>
+            <button
+              v-if="amazonCounts.sem"
+              type="button"
+              class="px-3 py-1.5 border-l"
+              :class="amazonSub === 'sem' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
+              title="Pedidos que a Amazon e o Bling ainda não classificaram"
+              @click="amazonSub = 'sem'"
+            >
+              Sem classificação <span class="opacity-70">({{ amazonCounts.sem }})</span>
+            </button>
+          </div>
+          <Button
+            v-if="canInformarAmazon"
+            size="sm"
+            variant="outline"
+            title="Quem recebe no Threema os avisos de prazo do Envio próprio (3 dias antes da data máxima da Amazon, previsão dos Correios vencida, prazo vencido) — e manda agora a lista dos pedidos em trânsito"
+            @click="informarAmazonOpen = true"
+          >
+            <Megaphone class="size-4 mr-1" /> Informar
+          </Button>
+          <Button
+            v-if="isAdmin"
+            size="sm"
+            variant="outline"
+            title="Textos dos e-mails que o robô manda ao comprador da Amazon (problema, atraso, entrega)"
+            @click="mensagensClienteOpen = true"
+          >
+            <Mail class="size-4 mr-1" /> Mensagens ao cliente
+          </Button>
+        </template>
         <Button v-if="canEdit" size="sm" class="ml-auto" @click="openNew">
           <Plus class="size-4 mr-1" /> Novo caso
         </Button>
@@ -1537,6 +1708,10 @@ async function aplicarStatusBling(c: Logistica) {
               <th class="px-3 py-2">Status Plataforma</th>
               <th class="px-3 py-2">Rastreio</th>
               <th class="px-3 py-2">Localização</th>
+              <template v-if="tab === 'amazon'">
+                <th class="px-3 py-2" title="Previsão de entrega dos Correios (objeto de postagem do Bling)">Previsão Correios</th>
+                <th class="px-3 py-2" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até (Amazon)</th>
+              </template>
               <th class="px-3 py-2">Divergência</th>
               <th class="px-3 py-2">Status Bling</th>
               <th class="px-3 py-2">Chamado</th>
@@ -1670,6 +1845,36 @@ async function aplicarStatusBling(c: Logistica) {
                   </template>
                 </div>
               </td>
+              <template v-if="tab === 'amazon'">
+                <td class="px-3 py-2 whitespace-nowrap text-xs">
+                  <span
+                    v-if="c.entregue_em"
+                    class="text-emerald-700 dark:text-emerald-400"
+                    :title="`Entrega registrada em ${fmtDataHora(c.entregue_em)}`"
+                  >entregue {{ fmtQuando(c.entregue_em) }}</span>
+                  <template v-else-if="c.previsao_correios">
+                    <span
+                      :class="previsaoVencida(c) ? 'text-rose-700 dark:text-rose-400 font-medium' : ''"
+                      :title="c.postagem_data ? `Postado em ${fmtDia(c.postagem_data)}${c.servico_envio ? ' · ' + c.servico_envio : ''}` : ''"
+                    >{{ fmtDia(c.previsao_correios) }}</span>
+                    <div v-if="previsaoVencida(c)" class="text-[11px] text-rose-700 dark:text-rose-400">previsão vencida</div>
+                  </template>
+                  <span v-else class="text-muted-foreground">—</span>
+                </td>
+                <td class="px-3 py-2 whitespace-nowrap text-xs">
+                  <template v-if="c.prazo_entrega_amazon">
+                    <span :class="prazoVencido(c) ? 'text-rose-700 dark:text-rose-400 font-medium' : ''">{{ fmtDia(c.prazo_entrega_amazon) }}</span>
+                    <div
+                      v-if="!c.entregue_em"
+                      class="text-[11px]"
+                      :class="prazoVencido(c) ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'"
+                    >{{ prazoResumo(c) }}</div>
+                  </template>
+                  <span v-else class="text-muted-foreground">—</span>
+                  <div v-if="avisosResumo(c)" class="text-[11px] text-muted-foreground whitespace-normal max-w-[220px]" :title="avisosResumo(c)">{{ avisosResumo(c) }}</div>
+                  <div v-if="mensagensResumo(c)" class="text-[11px] text-sky-700 dark:text-sky-400 whitespace-normal max-w-[220px]" :title="mensagensResumo(c)">✉ cliente: {{ mensagensResumo(c) }}</div>
+                </td>
+              </template>
               <td class="px-3 py-2 text-xs max-w-[280px] break-words">
                 <span v-if="c.divergencia" class="text-amber-700 dark:text-amber-400" :title="c.divergencia">{{ c.divergencia }}</span>
                 <span v-else class="text-muted-foreground">—</span>
@@ -1732,7 +1937,7 @@ async function aplicarStatusBling(c: Logistica) {
               </td>
             </tr>
             <tr v-if="!loading && filteredRows.length === 0">
-              <td colspan="13" class="px-3 py-6 text-center text-muted-foreground">
+              <td :colspan="tab === 'amazon' ? 15 : 13" class="px-3 py-6 text-center text-muted-foreground">
                 {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
               </td>
             </tr>
@@ -1795,6 +2000,19 @@ async function aplicarStatusBling(c: Logistica) {
               </template>
             </div>
             <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || '—' }}</div>
+            <template v-if="tab === 'amazon'">
+              <div>
+                <span class="text-muted-foreground">Previsão Correios:</span>
+                <span v-if="c.entregue_em" class="text-emerald-700 dark:text-emerald-400">entregue {{ fmtQuando(c.entregue_em) }}</span>
+                <span v-else :class="previsaoVencida(c) ? 'text-rose-700 dark:text-rose-400 font-medium' : ''">{{ fmtDia(c.previsao_correios) || '—' }}</span>
+              </div>
+              <div>
+                <span class="text-muted-foreground">Amazon até:</span>
+                <span :class="prazoVencido(c) ? 'text-rose-700 dark:text-rose-400 font-medium' : ''">{{ fmtDia(c.prazo_entrega_amazon) || '—' }}</span>
+                <span v-if="c.prazo_entrega_amazon && !c.entregue_em" class="text-muted-foreground"> · {{ prazoResumo(c) }}</span>
+              </div>
+              <div v-if="mensagensResumo(c)" class="col-span-2 text-sky-700 dark:text-sky-400">✉ cliente: {{ mensagensResumo(c) }}</div>
+            </template>
           </div>
           <div
             v-if="c.divergencia"
@@ -2511,6 +2729,21 @@ async function aplicarStatusBling(c: Logistica) {
         </div>
       </div>
     </div>
+
+    <!-- Aba Amazon: Informar (avisos de prazo do robô + lista sob demanda) -->
+    <InformarThreemaModal
+      :open="informarAmazonOpen"
+      contexto="logistica_amazon"
+      contexto-auto="logistica_amazon_auto"
+      enviar-com-auto
+      descricao="Quem está marcado recebe no Threema os avisos automáticos do Envio próprio da Amazon: previsão dos Correios vencida, 3 dias antes da data máxima da Amazon e data máxima vencida sem entrega. 'Enviar agora' manda a lista dos pedidos de Envio próprio em trânsito. A seleção fica salva."
+      @close="informarAmazonOpen = false"
+    />
+    <MensagensClienteModal
+      :open="mensagensClienteOpen"
+      :pode-editar="isAdmin"
+      @close="mensagensClienteOpen = false"
+    />
 
     <!-- Modal do botão INFORMAR (admin-only) -->
     <InformarThreemaModal

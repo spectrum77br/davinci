@@ -47,15 +47,17 @@ class MailjetEmailSender:
 
     async def send(self, *, to: str, subject: str, html: str, text: str) -> None:
         from_addr, from_name = _parse_from(_settings.email_from, _settings.email_from_name)
-        payload = {
-            "Messages": [{
-                "From": {"Email": from_addr, "Name": from_name},
-                "To": [{"Email": to}],
-                "Subject": subject,
-                "TextPart": text,
-                "HTMLPart": html,
-            }]
+        message: dict = {
+            "From": {"Email": from_addr, "Name": from_name},
+            "To": [{"Email": to}],
+            "Subject": subject,
+            "TextPart": text,
         }
+        # Mensagem ao comprador da Amazon vai em texto puro (a Amazon recusa
+        # HTML): sem html, o e-mail sai só com TextPart.
+        if html:
+            message["HTMLPart"] = html
+        payload = {"Messages": [message]}
         auth_raw = f"{_settings.mailjet_api_key}:{_settings.mailjet_secret_key}".encode()
         headers = {
             "Authorization": f"Basic {b64encode(auth_raw).decode()}",

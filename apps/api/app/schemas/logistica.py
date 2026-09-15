@@ -28,6 +28,46 @@ class LogisticaProdutoOut(BaseModel):
     quantidade: int | None = None
 
 
+class MensagemClienteOut(BaseModel):
+    """Uma mensagem mandada (ou tentada) ao comprador da Amazon pelo robô.
+    `enviado_em` vazio + `erro` = falhou; o robô retenta até 3 vezes."""
+
+    evento: str
+    evento_label: str = ""
+    assunto: str = ""
+    enviado_em: datetime | None = None
+    erro: str | None = None
+    tentativas: int = 0
+
+
+class MensagemTemplateOut(BaseModel):
+    """Texto de um evento da mensagem ao cliente (tela Logística › Mensagens ao
+    cliente). `padrao`=True quando ainda é o texto do código (sem linha no banco)."""
+
+    evento: str
+    label: str
+    assunto: str
+    corpo: str
+    ativo: bool = True
+    padrao: bool = True
+
+
+class MensagemTemplateIn(BaseModel):
+    assunto: str
+    corpo: str
+    ativo: bool = True
+
+
+class MensagensClienteConfigOut(BaseModel):
+    """Estado do envio ao cliente: a chave global (.env) + os textos + os campos
+    que o texto pode usar entre chaves."""
+
+    envio_ligado: bool
+    remetente: str
+    placeholders: dict[str, str] = Field(default_factory=dict)
+    templates: list[MensagemTemplateOut] = Field(default_factory=list)
+
+
 class LogisticaOut(BaseModel):
     id: UUID
     data: date | None = None
@@ -61,6 +101,27 @@ class LogisticaOut(BaseModel):
     # motivo da recusa (só leitura; vazio = nunca tentou / abriu).
     chamado_auto_at: datetime | None = None
     chamado_auto_erro: str | None = None
+    # ---- Amazon (projeto de 15/09/2026) ----
+    # 'dba' | 'proprio' | 'fba' | None — separa as abas "Amazon DBA" e "Envio
+    # próprio" (services/logistica_amazon_canal). Só leitura.
+    amazon_canal: str | None = None
+    amazon_canal_label: str = ""
+    servico_envio: str | None = None
+    postagem_data: date | None = None
+    # Previsão de entrega dos Correios (objeto de postagem do Bling) e data
+    # máxima de entrega da Amazon (LatestDeliveryDate). Só leitura.
+    previsao_correios: date | None = None
+    prazo_entrega_amazon: date | None = None
+    entregue_em: datetime | None = None
+    problema_correios: str | None = None
+    cliente_nome: str | None = None
+    cliente_email: str | None = None
+    # Carimbos dos avisos Threema do robô (um por tipo).
+    aviso_previsao_correios_at: datetime | None = None
+    aviso_prazo_amazon_3d_at: datetime | None = None
+    aviso_prazo_amazon_vencido_at: datetime | None = None
+    # Mensagens mandadas ao comprador (histórico; só leitura).
+    mensagens_cliente: list[MensagemClienteOut] = Field(default_factory=list)
     # Casador da aba Status: regra que casa com a chave (status_plataforma)
     # deste pedido. `acao_match`=achou regra; `acao_status_id`=id da linha da
     # aba Status que casou; `acao_resumo`=o que o sistema faria (só leitura,

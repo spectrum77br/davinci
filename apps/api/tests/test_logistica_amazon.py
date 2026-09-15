@@ -82,7 +82,35 @@ async def test_build_enrichment_preserva_afn_para_confirmacao_sem_mudar_assinatu
 async def test_build_enrichment_pedido_ausente_fica_vazio():
     client = FakeAmazon({})
     enr = await logistica_amazon.build_enrichment(client, "000")
-    assert enr == {"meli_status": {}, "rastreio": None, "localizacao": None, "datas": {}}
+    assert enr == {
+        "meli_status": {},
+        "rastreio": None,
+        "localizacao": None,
+        "datas": {},
+        "prazo_entrega": None,
+        "entregue": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_enrichment_prazo_de_entrega_em_brasilia_e_entrega():
+    # Pedido do print (15/09/2026): LatestDeliveryDate 2026-10-09T02:59:59Z =
+    # 08/10 23:59 em Brasília = "Prazo para entrega: qui., 8 de out." no Seller Central.
+    client = FakeAmazon(
+        {
+            "X": {
+                "order_status": "Shipped",
+                "fulfillment_channel": "MFN",
+                "latest_delivery_date": "2026-10-09T02:59:59Z",
+            },
+            "Y": {"order_status": "Shipped", "easyship_status": "Delivered"},
+        }
+    )
+    enr = await logistica_amazon.build_enrichment(client, "X")
+    assert str(enr["prazo_entrega"]) == "2026-10-08"
+    assert enr["entregue"] is False
+    enr_y = await logistica_amazon.build_enrichment(client, "Y")
+    assert enr_y["entregue"] is True and enr_y["prazo_entrega"] is None
 
 
 def test_assinatura_amazon_traduz():

@@ -881,6 +881,31 @@ async def logistica_track_forcar(ctx: dict) -> None:
     logger.info("logistica_track_forcar_job_done", **summary)
 
 
+async def logistica_amazon_avisos(ctx: dict) -> None:
+    """08:06 e 16:06 (Brasília): avisos Threema do Envio próprio da Amazon —
+    previsão dos Correios vencida, faltam 3 dias para a data máxima da Amazon,
+    data máxima vencida (Vinicius 15/09: passado o prazo a Amazon reembolsa o
+    cliente e não dá tempo de acionar os Correios). Um aviso por pedido e
+    tipo; quem recebe é o cadastro do botão Informar da aba Amazon."""
+    from app.services import logistica_amazon_avisos as svc  # tardio: models
+
+    async with session_scope() as s:
+        summary = await svc.run(s)
+    logger.info("logistica_amazon_avisos_done", **summary)
+
+
+async def logistica_cliente_mensagens(ctx: dict) -> None:
+    """A cada 15 min (:08/:23/:38/:53): manda ao comprador da Amazon, por
+    e-mail pro endereço de retransmissão, o que ainda não foi mandado —
+    problema nos Correios, previsão vencida, entrega. No-op enquanto
+    `amazon_mensagens_cliente` estiver desligado no .env."""
+    from app.services import logistica_cliente_mensagens as svc  # tardio: models
+
+    async with session_scope() as s:
+        summary = await svc.run(s)
+    logger.info("logistica_cliente_mensagens_done", **summary)
+
+
 async def chamados_replica_automatica(ctx: dict) -> None:
     """De hora em hora (:25): réplica automática dos Chamados (reenvia a
     mensagem cadastrada a cada N dias enquanto ligada) + monitoramento (fecha
@@ -2210,6 +2235,17 @@ class WorkerSettings:
             timeout=900,
         ),
         cron(logistica_track_forcar, hour=19, minute=31, run_at_startup=False, timeout=900),
+        # Amazon Envio próprio: avisos Threema de prazo (08:06 e 16:06 BRT).
+        cron(logistica_amazon_avisos, hour={11, 19}, minute=6, run_at_startup=False, timeout=600),
+        # Mensagens ao comprador da Amazon a cada 15 min (:08/:23/:38/:53 —
+        # depois do sync do 17track de :05/:20/:35/:50, que é quem carimba
+        # entrega e ocorrência grave).
+        cron(
+            logistica_cliente_mensagens,
+            minute={8, 23, 38, 53},
+            run_at_startup=False,
+            timeout=600,
+        ),
         cron(bling_token_refresh, minute={15}, run_at_startup=False),
         # Contas de NF (bling_notas): AT dura 6h, refresh a cada 5h. Gaps
         # 5/5/5/5/4h — sempre abaixo da expiração. minute=45 evita colidir

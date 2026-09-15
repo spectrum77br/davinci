@@ -76,8 +76,22 @@ router = APIRouter(prefix="/api/informar", tags=["informar"])
 # com tempo parado e última localização.
 # `juridico` (Eduardo 04/09): destinatários do "Encaminhar ao jurídico" da aba
 # Chamados — só cadastro aqui; o envio sai de POST /api/chamados/{id}/juridico.
-_CONTEXTOS = ("logistica", "controle_estoque", "margem", "margem_auto", "devolucoes", "juridico")
-_CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes")
+# `logistica_amazon` / `logistica_amazon_auto` (Vinicius 15/09, projeto Amazon):
+# botão Informar da aba Amazon da Logística. O manual manda a lista dos
+# pedidos de Envio próprio em trânsito (previsão dos Correios + data máxima
+# da Amazon); o `_auto` é quem recebe os avisos do robô (3 dias antes do
+# prazo, previsão vencida, prazo vencido — services/logistica_amazon_avisos).
+_CONTEXTOS = (
+    "logistica",
+    "controle_estoque",
+    "margem",
+    "margem_auto",
+    "devolucoes",
+    "juridico",
+    "logistica_amazon",
+    "logistica_amazon_auto",
+)
+_CONTEXTOS_ENVIO = ("logistica", "controle_estoque", "margem", "devolucoes", "logistica_amazon")
 
 # Não-admins liberados POR CONTEXTO (e-mail minúsculo). Só a Margem tem
 # exceção: o gerente (Cairo) vê e usa o botão de lá (incluindo o cadastro do
@@ -88,6 +102,11 @@ _EMAILS_MARGEM = frozenset({"sa.geral@tutamail.com"})
 _EMAILS_EXTRAS: dict[str, frozenset[str]] = {
     "margem": _EMAILS_MARGEM,
     "margem_auto": _EMAILS_MARGEM,
+    # Aba Amazon da Logística: "igual ao Margem" (Vinicius 15/09) — o gerente
+    # também vê e cadastra. Espelho no front: INFORMAR_AMAZON_USERS em
+    # pages/logistica.vue.
+    "logistica_amazon": _EMAILS_MARGEM,
+    "logistica_amazon_auto": _EMAILS_MARGEM,
 }
 
 
@@ -229,6 +248,15 @@ async def _linhas_logistica(session: AsyncSession) -> list[str]:
         .all()
     )
     return informar.linhas_logistica(rows)
+
+
+async def _linhas_logistica_amazon(session: AsyncSession) -> list[str]:
+    """Pedidos Amazon de ENVIO PRÓPRIO em trânsito (o que a aba "Envio
+    próprio" mostra), data máxima da Amazon mais próxima primeiro."""
+    from app.services import logistica_amazon_avisos
+
+    rows = await logistica_amazon_avisos.pedidos_em_transito(session)
+    return logistica_amazon_avisos.linhas_informar(rows)
 
 
 async def _linhas_estoque(session: AsyncSession) -> list[str]:
@@ -399,6 +427,7 @@ async def _pedidos_margem(session: AsyncSession) -> list[informar.MargemPedido]:
 
 _CABECALHOS = {
     "logistica": "DaVinci — Logística: pedidos acompanhados",
+    "logistica_amazon": "DaVinci — Amazon Envio próprio: pedidos em trânsito",
     "controle_estoque": (
         "DaVinci — Controle de Estoque: Aguardando Cancelamento por falta de estoque"
     ),
@@ -407,6 +436,7 @@ _CABECALHOS = {
 }
 _VAZIO = {
     "logistica": "DaVinci — Logística: nenhum pedido acompanhado no momento.",
+    "logistica_amazon": "DaVinci — Amazon Envio próprio: nenhum pedido em trânsito no momento.",
     "controle_estoque": (
         "DaVinci — Controle de Estoque: nenhum pedido em Aguardando Cancelamento"
         " por falta de estoque no momento."
@@ -417,6 +447,7 @@ _VAZIO = {
 
 _LINHAS = {
     "logistica": _linhas_logistica,
+    "logistica_amazon": _linhas_logistica_amazon,
     "controle_estoque": _linhas_estoque,
     "devolucoes": _linhas_devolucoes,
 }

@@ -92,6 +92,13 @@ class Settings(BaseSettings):
     logi_17track_token: str = ""
     logi_17track_webhook_secret: str = ""
 
+    # Mensagens ao comprador da Amazon (e-mail pro endereço de retransmissão
+    # …@marketplace.amazon.com.br): problema nos Correios, previsão vencida e
+    # entrega. Nasce DESLIGADO — só ligar depois de cadastrar `email_from`
+    # como remetente aprovado no Seller Central de cada conta (sem isso a
+    # Amazon descarta o e-mail). Ver services/logistica_cliente_mensagens.
+    amazon_mensagens_cliente: bool = False
+
     # Melhor Envio — confere o frete da impressão tipo "próprio" (só Amazon).
     # `melhor_envio_token`: Bearer token OAuth2 da conta ME (calcula frete).
     # `melhor_envio_sandbox`: usa o ambiente de testes do ME quando True.

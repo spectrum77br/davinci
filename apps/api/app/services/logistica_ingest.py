@@ -29,6 +29,7 @@ from app.config import get_settings
 from app.models import Logistica, LogisticaStatus
 from app.services import (
     logistica_amazon,
+    logistica_amazon_bling,
     logistica_bling,
     logistica_match,
     logistica_meli,
@@ -401,12 +402,28 @@ async def run_ingest_marketplaces_daily(
     enr_amazon = await logistica_amazon.enrich_recent(
         session, limit=enrich_limit, only_empty=True
     )
+    bling_amz = await _amazon_bling_best_effort(session)
     return {
         **out,
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
         **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
+        **{f"amazon_bling_{k}": v for k, v in bling_amz.items()},
     }
+
+
+async def _amazon_bling_best_effort(session: AsyncSession) -> dict[str, int]:
+    """Amazon × Bling (canal, rastreio dos Correios, previsão de entrega,
+    contato): roda junto do motor, mas Bling fora do ar não pode derrubá-lo."""
+    try:
+        return await logistica_amazon_bling.enrich_pendentes(session)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("logistica_amazon_bling_falhou", err=str(e)[:200])
+        try:
+            await session.rollback()
+        except Exception as e2:  # noqa: BLE001
+            logger.warning("logistica_amazon_bling_rollback_falhou", err=str(e2)[:120])
+        return {"falhou": 1}
 
 
 async def _ids_pendentes(
@@ -530,6 +547,9 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
     enr_amazon = await logistica_amazon.enrich_recent(
         session, ids=alvo["amazon"], only_empty=False
     )
+    # Amazon × Bling: serviço (DBA × Envio próprio), rastreio dos Correios,
+    # previsão de entrega e contato — o que a SP-API não dá (projeto Amazon).
+    bling_amz = await _amazon_bling_best_effort(session)
     ids_alvo = [i for ids in alvo.values() for i in ids]
     # Executores da aba Status (Eduardo 07/09: "não está abrindo chamado
     # automático e nem mandando a mensagem no Threema"): abrir chamado (ML) e
@@ -556,6 +576,7 @@ async def recarregar_ml(session: AsyncSession) -> dict[str, int]:
         **{f"shopee_enrich_{k}": v for k, v in enr_shopee.items()},
         **{f"tiktok_enrich_{k}": v for k, v in enr_tiktok.items()},
         **{f"amazon_enrich_{k}": v for k, v in enr_amazon.items()},
+        **{f"amazon_bling_{k}": v for k, v in bling_amz.items()},
         **{f"chamado_{k}": v for k, v in chamados.items()},
         **{f"threema_{k}": v for k, v in threema_lote.items()},
         **{f"status_{k}": v for k, v in lote.items()},

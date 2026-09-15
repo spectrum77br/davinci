@@ -17,7 +17,7 @@ type EnviarOut = { pedidos: number; mensagens: number; sent: string[]; failed: s
 
 const props = defineProps<{
   open: boolean
-  contexto: 'logistica' | 'controle_estoque' | 'margem' | 'devolucoes' | 'juridico'
+  contexto: 'logistica' | 'controle_estoque' | 'margem' | 'devolucoes' | 'juridico' | 'logistica_amazon'
   // Só cadastro de destinatários (sem 'Enviar agora'): o envio sai de outro lugar
   // (jurídico: POST /api/chamados/{id}/juridico).
   somenteCadastro?: boolean
@@ -25,6 +25,9 @@ const props = defineProps<{
   descricao: string
   // Cadastro do aviso automático (ex.: 'margem_auto') — liga o modo automático.
   contextoAuto?: string
+  // Aba Amazon da Logística: a MESMA lista recebe os avisos do robô E o
+  // relatório sob demanda — mantém o "Enviar agora" mesmo no modo automático.
+  enviarComAuto?: boolean
 }>()
 
 const emit = defineEmits<{ (e: 'close'): void }>()
@@ -163,9 +166,10 @@ async function enviar() {
         >
           {{ salvando ? 'Salvando…' : 'Salvar' }}
         </Button>
-        <!-- Modo automático: quem envia é o robô — não existe "Enviar agora". -->
+        <!-- Modo automático: quem envia é o robô — não existe "Enviar agora"
+             (salvo quando a mesma lista também recebe o relatório manual). -->
         <Button
-          v-if="!contextoAuto && !somenteCadastro"
+          v-if="(!contextoAuto || enviarComAuto) && !somenteCadastro"
           :disabled="loading || salvando || enviando || !selecionados.size"
           @click="enviar"
         >

@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Collection
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import Text, cast, func, or_, select
@@ -28,7 +29,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Logistica
 from app.security.cipher import decrypt_json, encrypt_json
-from app.services import logistica_datas, logistica_enrich, logistica_rules, logistica_track
+from app.services import (
+    logistica_amazon_canal,
+    logistica_datas,
+    logistica_enrich,
+    logistica_rules,
+    logistica_track,
+)
 from app.services.marketplaces.amazon import AmazonClient
 
 logger = structlog.get_logger()
@@ -38,6 +45,22 @@ _AMAZON_PLATAFORMAS = logistica_rules._AMAZON_PLATAFORMAS
 # A SP-API é a mais restrita das quatro (Orders ~0,5 req/s por conta) — a rajada
 # aqui é menor que a das outras. São poucas centenas de linhas, não é gargalo.
 _CONCURRENCY = 2
+
+_BRT = ZoneInfo("America/Sao_Paulo")
+
+
+def _iso_para_data_brt(raw: str | None) -> date | None:
+    """ISO da SP-API (UTC, ex. `2026-10-09T02:59:59Z`) → data em Brasília
+    (08/10). É o "Prazo para entrega" que o Seller Central mostra."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(_BRT).date()
 
 
 def _amazon_destino(status: dict) -> str | None:
@@ -55,7 +78,11 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
     localização proxy.
 
     Retorna `{"meli_status": {"order_status": ..., "easyship_status": ...} | {},
-    "rastreio": str | None, "localizacao": str | None, "datas": {...}}`.
+    "rastreio": str | None, "localizacao": str | None, "datas": {...},
+    "prazo_entrega": date | None, "entregue": bool}`.
+
+    `prazo_entrega` = LatestDeliveryDate em Brasília ("Prazo para entrega" do
+    Seller Central); `entregue` = EasyShip "Delivered" (pedido DBA entregue).
 
     Rastreio vem da Easy Ship API — hoje 403 sem o papel de shipping aprovado
     (fica None), popula sozinho quando o papel for liberado.
@@ -98,6 +125,8 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
         "rastreio": rastreio,
         "localizacao": localizacao,
         "datas": {f: datas[f] for f in meli if f in datas},
+        "prazo_entrega": _iso_para_data_brt(st.get("latest_delivery_date")),
+        "entregue": (meli.get("easyship_status") or "").strip().upper() == "DELIVERED",
     }
 
 
@@ -193,6 +222,14 @@ async def enrich_row(
     row.divergencia = logistica_rules.detectar_divergencia_amazon(
         row.meli_status, row.localizacao
     )
+    # Projeto Amazon (15/09/2026): data máxima de entrega, canal e entrega.
+    if enr.get("prazo_entrega"):
+        row.prazo_entrega_amazon = enr["prazo_entrega"]
+    canal = logistica_amazon_canal.classificar(row.meli_status, row.servico_envio)
+    if canal:
+        row.amazon_canal = canal
+    if enr.get("entregue") and row.entregue_em is None:
+        row.entregue_em = datetime.now(UTC)
     return True
 
 

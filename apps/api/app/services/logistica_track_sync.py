@@ -131,10 +131,20 @@ PULL_APOS_HORAS = 6
 PLATAFORMAS_VARREDURA = frozenset({"mercado livre", "meli", "mercadolivre"})
 SITUACOES_VARREDURA = frozenset({"em andamento"})
 
+# Amazon Envio próprio (projeto Amazon, 15/09/2026): o vendedor posta nos
+# Correios e responde pela entrega, então o pacote entra na varredura em
+# QUALQUER situação do Bling que não seja final — o pedido do print (296762)
+# estava "Em digitação" por causa da Margem e mesmo assim já viajava. DBA nunca
+# tem `…BR` (a Amazon entrega), então `is_correios` já o deixa de fora.
+PLATAFORMAS_AMAZON = frozenset(logistica_rules._AMAZON_PLATAFORMAS)
+SITUACOES_ENCERRADAS_AMAZON = frozenset({"entregue", "cancelado", "resolvido", "perdimento"})
+
 
 def _na_varredura(row: Logistica) -> bool:
     plat = (row.plataforma or "").strip().lower()
     sit = (row.status_bling or "").strip().lower()
+    if plat in PLATAFORMAS_AMAZON:
+        return sit not in SITUACOES_ENCERRADAS_AMAZON and row.entregue_em is None
     return plat in PLATAFORMAS_VARREDURA and sit in SITUACOES_VARREDURA
 
 
@@ -292,7 +302,39 @@ async def _run(
     return resumo
 
 
-async def _avisar_graves(graves: list[tuple[str, str, str]]) -> None:
+def aplicar_leitura(
+    row: Logistica,
+    loc: str | None,
+    *,
+    entregue: bool = False,
+    agora: datetime | None = None,
+) -> bool:
+    """Aplica na linha uma leitura dos Correios (push do webhook OU pull do
+    17track): localização + carimbo, divergência pela regra da plataforma,
+    entrega (`entregue_em`, uma vez) e ocorrência grave (`problema_correios`,
+    na primeira vez que aparece). Devolve True se a LOCALIZAÇÃO mudou — é o
+    que conta como "atualizado" nos resumos."""
+    agora = agora or datetime.now(UTC)
+    mudou = False
+    if loc and loc != row.localizacao:
+        # Evento grave (apreensão, extravio, roubo…) não pode ficar esperando
+        # alguém olhar a tela — vira aviso no Threema (Eduardo, 10/09,
+        # pedido 295070) e, na Amazon, mensagem ao cliente.
+        if logistica_track.evento_grave(loc) and not logistica_track.evento_grave(row.localizacao):
+            row.problema_correios = loc
+            row.problema_correios_em = agora
+        row.localizacao = loc
+        row.localizacao_at = agora
+        row.divergencia = logistica_rules.detectar_divergencia_por_plataforma(
+            row.plataforma, row.meli_status, loc
+        )
+        mudou = True
+    if entregue and row.entregue_em is None:
+        row.entregue_em = agora
+    return mudou
+
+
+async def avisar_graves(graves: list[tuple[str, str, str]]) -> None:
     """Melhor esforço: aviso não pode derrubar a varredura."""
     linhas = [f"• Pedido {p} ({conta}) — {loc}" for p, conta, loc in graves[:15]]
     texto = (
@@ -311,33 +353,34 @@ async def _avisar_graves(graves: list[tuple[str, str, str]]) -> None:
 
 
 async def _aplicar_localizacoes(
-    session: AsyncSession, linhas: list[Logistica], eventos: list[tuple[str, str]]
+    session: AsyncSession, linhas: list[Logistica], eventos: list[tuple]
 ) -> int:
     """Grava nas linhas a localização que veio do 17track (só o que mudou),
-    recalculando a divergência ML × físico. Devolve quantas mudaram."""
-    por_numero = {_num(n): loc for n, loc in eventos}
+    recalculando a divergência ML × físico, e carimba entrega ("Delivered")
+    e ocorrência grave. `eventos` = [(numero, localizacao[, status])].
+    Devolve quantas mudaram de localização."""
+    por_numero: dict[str, tuple[str, str]] = {}
+    for ev in eventos:
+        n, loc = ev[0], ev[1]
+        st = str(ev[2]) if len(ev) > 2 and ev[2] else ""
+        por_numero[_num(n)] = (loc, st)
     agora = datetime.now(UTC)
     atualizados = 0
     graves: list[tuple[str, str, str]] = []
     for r in linhas:
-        loc = por_numero.get(_num(r.rastreio_17track))
-        if not loc or loc == r.localizacao:
+        ev = por_numero.get(_num(r.rastreio_17track))
+        if not ev:
             continue
-        # Evento grave (apreensão, extravio, roubo…) não pode ficar esperando
-        # alguém olhar a tela — vira aviso no Threema (Eduardo, 10/09,
-        # pedido 295070 apreendido pela Secretaria da Fazenda).
-        if logistica_track.evento_grave(loc) and not logistica_track.evento_grave(r.localizacao):
-            graves.append((r.pedido_bling or "?", r.conta or "?", loc))
-        r.localizacao = loc
-        r.localizacao_at = agora
-        r.divergencia = logistica_rules.detectar_divergencia_por_plataforma(
-            r.plataforma, r.meli_status, loc
-        )
-        atualizados += 1
-    if atualizados:
+        loc, st = ev
+        grave_antes = r.problema_correios_em
+        if aplicar_leitura(r, loc, entregue=(st == "Delivered"), agora=agora):
+            atualizados += 1
+            if r.problema_correios_em is not None and r.problema_correios_em != grave_antes:
+                graves.append((r.pedido_bling or "?", r.conta or "?", loc))
+    if atualizados or any(r.entregue_em == agora for r in linhas):
         await session.commit()
     if graves:
-        await _avisar_graves(graves)
+        await avisar_graves(graves)
     return atualizados
 
 

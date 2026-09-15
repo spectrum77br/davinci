@@ -383,6 +383,8 @@ _CLEANUP_TABLES = (
     "automacoes",
     "logistica_status_anexo",
     "logistica_status",
+    "logistica_mensagem_cliente",
+    "logistica_mensagem_template",
     "logistica",
     "threema_informar_config",
     "user_settings",

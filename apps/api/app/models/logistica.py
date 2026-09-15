@@ -1,7 +1,17 @@
 from datetime import date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, LargeBinary, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -90,11 +100,104 @@ class Logistica(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     chamado_auto_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ---- Amazon (projeto de 15/09/2026, ver services/logistica_amazon_canal) ----
+    # Canal de envio persistido: 'dba' (Delivery by Amazon — EasyShip presente
+    # ou serviço "Logistica Amazon Dba" no Bling), 'proprio' (MFN sem EasyShip —
+    # o vendedor posta nos Correios) ou 'fba' (AFN). NULL = ainda sem sinal.
+    amazon_canal: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    # Objeto de postagem do Bling: serviço ("SEDEX", "Logistica Amazon Dba"),
+    # data de saída e previsão de entrega (dataSaida + prazoEntregaPrevisto em
+    # dias úteis — é a "Data de entrega" que o Bling mostra na cotação).
+    servico_envio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    postagem_data: Mapped[date | None] = mapped_column(Date, nullable=True)
+    previsao_correios: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # LatestDeliveryDate da SP-API = "Prazo para entrega" do Seller Central
+    # (data em Brasília). Depois dela a Amazon reembolsa o cliente.
+    prazo_entrega_amazon: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Entrega confirmada: 17track "Delivered" (Correios) ou EasyShip "Delivered".
+    entregue_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Ocorrência grave dos Correios (apreendido, extraviado, devolvido…): o
+    # texto do evento e quando o DaVinci viu — dispara a mensagem ao cliente.
+    problema_correios: Mapped[str | None] = mapped_column(Text, nullable=True)
+    problema_correios_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Contato do pedido no Bling: nome e o e-mail de retransmissão da Amazon
+    # (…@marketplace.amazon.com.br). Só esse endereço recebe mensagem — e-mail
+    # real de cliente NUNCA é guardado aqui (política da Amazon).
+    cliente_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cliente_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Carimbos dos avisos Threema do robô (services/logistica_amazon_avisos):
+    # cada um sai UMA vez por pedido.
+    aviso_previsao_correios_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    aviso_prazo_amazon_3d_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    aviso_prazo_amazon_vencido_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Última leitura do pedido/objeto de postagem no Bling (throttle do enrich).
+    bling_enriquecido_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+
+    mensagens_cliente: Mapped[list["LogisticaMensagemCliente"]] = relationship(
+        back_populates="logistica",
+        cascade="all, delete-orphan",
+        order_by="LogisticaMensagemCliente.created_at",
+    )
+
+
+class LogisticaMensagemTemplate(Base, TimestampMixin):
+    """Texto editável (tela Logística › Mensagens ao cliente) de cada evento
+    que o DaVinci manda ao comprador da Amazon: `problema_correios`,
+    `previsao_vencida`, `entregue`. Sem linha = texto padrão do código
+    (services/logistica_cliente_mensagens.TEMPLATES_PADRAO). `ativo=false`
+    desliga o evento sem apagar o texto."""
+
+    __tablename__ = "logistica_mensagem_template"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    evento: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    assunto: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    corpo: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    ativo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+
+
+class LogisticaMensagemCliente(Base, TimestampMixin):
+    """Histórico das mensagens mandadas ao comprador (e-mail pro endereço de
+    retransmissão da Amazon). UMA por pedido × evento — é o que garante que o
+    cliente não recebe o mesmo aviso duas vezes. `enviado_em` vazio + `erro`
+    = falhou (o robô retenta até `tentativas` estourar)."""
+
+    __tablename__ = "logistica_mensagem_cliente"
+    __table_args__ = (UniqueConstraint("logistica_id", "evento"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    logistica_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("logistica.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    evento: Mapped[str] = mapped_column(Text, nullable=False)
+    destinatario: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    assunto: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    corpo: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    enviado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tentativas: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    logistica: Mapped["Logistica"] = relationship(back_populates="mensagens_cliente")
 
 
 class LogisticaStatus(Base, TimestampMixin):

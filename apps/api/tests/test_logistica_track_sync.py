@@ -768,7 +768,7 @@ async def test_evento_grave_vira_aviso(db: AsyncSession, fake_17track, monkeypat
     async def fake_aviso(graves):
         avisos.append(graves)
 
-    monkeypatch.setattr(logistica_track_sync, "_avisar_graves", fake_aviso)
+    monkeypatch.setattr(logistica_track_sync, "avisar_graves", fake_aviso)
 
     row = Logistica(
         pedido_bling="295070",
@@ -806,7 +806,7 @@ async def test_evento_normal_nao_gera_aviso(db: AsyncSession, fake_17track, monk
     async def fake_aviso(graves):
         avisos.append(graves)
 
-    monkeypatch.setattr(logistica_track_sync, "_avisar_graves", fake_aviso)
+    monkeypatch.setattr(logistica_track_sync, "avisar_graves", fake_aviso)
 
     row = Logistica(
         pedido_bling="295071",

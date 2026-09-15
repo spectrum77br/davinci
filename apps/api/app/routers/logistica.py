@@ -31,10 +31,12 @@ from app.deps.team_scope import TeamScope, resolve_team_scope
 from app.models import (
     BlingOrder,
     Logistica,
+    LogisticaMensagemCliente,
     LogisticaStatus,
     LogisticaStatusAnexo,
     SituacaoBling,
     User,
+    UserRole,
 )
 from app.config import get_settings
 from app.schemas.logistica import (
@@ -51,6 +53,10 @@ from app.schemas.logistica import (
     LogisticaStatusPatch,
     MensagemBlingOut,
     MensagemBlingPreviewOut,
+    MensagemClienteOut,
+    MensagemTemplateIn,
+    MensagemTemplateOut,
+    MensagensClienteConfigOut,
     OpcoesOut,
     RecarregarOut,
     RecarregarStatusOut,
@@ -63,7 +69,9 @@ from app.schemas.logistica import (
 )
 from app.services import (
     logistica_amazon,
+    logistica_amazon_canal,
     logistica_bling,
+    logistica_cliente_mensagens,
     logistica_datas,
     logistica_match,
     logistica_meli,
@@ -151,16 +159,57 @@ async def _produtos_for(session: AsyncSession, c: Logistica) -> list[LogisticaPr
     return m.get(c.pedido_bling, [])
 
 
+def _mensagem_out(m: LogisticaMensagemCliente) -> MensagemClienteOut:
+    return MensagemClienteOut(
+        evento=m.evento,
+        evento_label=logistica_cliente_mensagens.EVENTO_LABELS_PT.get(m.evento, m.evento),
+        assunto=m.assunto or "",
+        enviado_em=m.enviado_em,
+        erro=m.erro,
+        tentativas=m.tentativas or 0,
+    )
+
+
+async def _mensagens_map(
+    session: AsyncSession, ids: set[UUID]
+) -> dict[UUID, list[MensagemClienteOut]]:
+    """Histórico de mensagens ao cliente de todos os pedidos da página, numa
+    query só (só linhas Amazon têm; as outras voltam vazias)."""
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(LogisticaMensagemCliente)
+            .where(LogisticaMensagemCliente.logistica_id.in_(list(ids)))
+            .order_by(LogisticaMensagemCliente.created_at)
+        )
+    ).scalars().all()
+    out: dict[UUID, list[MensagemClienteOut]] = {}
+    for m in rows:
+        out.setdefault(m.logistica_id, []).append(_mensagem_out(m))
+    return out
+
+
+async def _mensagens_for(session: AsyncSession, c: Logistica) -> list[MensagemClienteOut]:
+    return (await _mensagens_map(session, {c.id})).get(c.id, [])
+
+
 def _to_out(
     c: Logistica,
     rules: list[LogisticaStatus] | None = None,
     produtos: list[LogisticaProdutoOut] | None = None,
+    mensagens: list[MensagemClienteOut] | None = None,
 ) -> LogisticaOut:
     """`rules` = candidatas da aba Status que casam a chave deste pedido (máquina
     de estados). A regra ATIVA (desambiguada pela situação atual do Bling) alimenta
     match/setinha/resumo; o conjunto alimenta monitorar/resolvido."""
     rules = rules or []
     rule = logistica_match.regra_ativa(rules, c.status_bling)
+    # Canal Amazon: o persistido ou, enquanto o enrich não passou, o que dá pra
+    # deduzir agora da assinatura + serviço do Bling.
+    canal = c.amazon_canal or logistica_amazon_canal.classificar(
+        c.meli_status or {}, c.servico_envio
+    )
     return LogisticaOut(
         id=c.id,
         data=c.data,
@@ -182,6 +231,20 @@ def _to_out(
         observacao=c.observacao,
         chamado_auto_at=c.chamado_auto_at,
         chamado_auto_erro=c.chamado_auto_erro,
+        amazon_canal=canal,
+        amazon_canal_label=logistica_amazon_canal.CANAL_LABELS_PT.get(canal or "", ""),
+        servico_envio=c.servico_envio,
+        postagem_data=c.postagem_data,
+        previsao_correios=c.previsao_correios,
+        prazo_entrega_amazon=c.prazo_entrega_amazon,
+        entregue_em=c.entregue_em,
+        problema_correios=c.problema_correios,
+        cliente_nome=c.cliente_nome,
+        cliente_email=c.cliente_email,
+        aviso_previsao_correios_at=c.aviso_previsao_correios_at,
+        aviso_prazo_amazon_3d_at=c.aviso_prazo_amazon_3d_at,
+        aviso_prazo_amazon_vencido_at=c.aviso_prazo_amazon_vencido_at,
+        mensagens_cliente=mensagens or [],
         acao_match=rule is not None,
         acao_status_id=rule.id if rule is not None else None,
         acao_resumo=logistica_match.resumo_acoes(rule),
@@ -603,14 +666,87 @@ async def list_logistica(
     status_rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
     # Nome + SKU dos itens de todos os pedidos da página, numa query só.
     produtos_map = await _produtos_map(session, {c.pedido_bling for c in rows})
+    # Histórico de mensagens ao cliente (só existe em linha Amazon).
+    mensagens_map = await _mensagens_map(
+        session,
+        {
+            c.id
+            for c in rows
+            if (c.plataforma or "").strip().lower() in logistica_rules._AMAZON_PLATAFORMAS
+        },
+    )
     out: list[LogisticaOut] = []
     for c in rows:
         assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
         cands = logistica_match.find_matching_rules(
             status_rows, assinatura=assinatura, plataforma=c.plataforma
         )
-        out.append(_to_out(c, cands, produtos=produtos_map.get(c.pedido_bling or "")))
+        out.append(
+            _to_out(
+                c,
+                cands,
+                produtos=produtos_map.get(c.pedido_bling or ""),
+                mensagens=mensagens_map.get(c.id),
+            )
+        )
     return out
+
+
+# ---- Mensagens ao comprador da Amazon (textos + estado do envio) ----
+
+
+def _mensagens_config_out(
+    templates: dict[str, logistica_cliente_mensagens.Template],
+) -> MensagensClienteConfigOut:
+    settings = get_settings()
+    return MensagensClienteConfigOut(
+        envio_ligado=bool(settings.amazon_mensagens_cliente),
+        remetente=settings.email_from,
+        placeholders=dict(logistica_cliente_mensagens.PLACEHOLDERS),
+        templates=[
+            MensagemTemplateOut(
+                evento=t.evento,
+                label=logistica_cliente_mensagens.EVENTO_LABELS_PT.get(t.evento, t.evento),
+                assunto=t.assunto,
+                corpo=t.corpo,
+                ativo=t.ativo,
+                padrao=t.padrao,
+            )
+            for t in (templates[e] for e in logistica_cliente_mensagens.EVENTOS)
+        ],
+    )
+
+
+@router.get("/mensagens-cliente", response_model=MensagensClienteConfigOut)
+async def mensagens_cliente_config(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> MensagensClienteConfigOut:
+    """Textos das mensagens ao comprador da Amazon (problema, previsão vencida,
+    entrega) + se o envio está ligado no servidor."""
+    return _mensagens_config_out(await logistica_cliente_mensagens.carregar_templates(session))
+
+
+@router.put("/mensagens-cliente/{evento}", response_model=MensagensClienteConfigOut)
+async def salvar_mensagem_cliente(
+    evento: str,
+    body: MensagemTemplateIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> MensagensClienteConfigOut:
+    """Edita o texto de um evento (admin). Recusa link, e-mail e HTML — a
+    Amazon bloquearia — e exige o `{pedido_amazon}` no corpo."""
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": "admin_only"})
+    try:
+        await logistica_cliente_mensagens.salvar_template(
+            session, evento, assunto=body.assunto, corpo=body.corpo, ativo=body.ativo
+        )
+    except logistica_cliente_mensagens.TemplateInvalidoError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": e.code}
+        ) from e
+    return _mensagens_config_out(await logistica_cliente_mensagens.carregar_templates(session))
 
 
 @router.post("/recarregar", response_model=RecarregarOut)
@@ -687,7 +823,12 @@ async def create_logistica(
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_created", id=str(c.id), pedido_bling=c.pedido_bling)
-    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+    )
 
 
 @router.post("/{logistica_id}/atualizar-meli", response_model=LogisticaOut)
@@ -717,7 +858,12 @@ async def atualizar_meli(
         logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+    )
 
 
 @router.post("/{logistica_id}/atualizar-shopee", response_model=LogisticaOut)
@@ -746,7 +892,12 @@ async def atualizar_shopee(
         logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+    )
 
 
 @router.post("/{logistica_id}/atualizar-tiktok", response_model=LogisticaOut)
@@ -776,7 +927,12 @@ async def atualizar_tiktok(
         logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+    )
 
 
 @router.post("/{logistica_id}/atualizar-amazon", response_model=LogisticaOut)
@@ -806,7 +962,12 @@ async def atualizar_amazon(
         logger.warning("logistica_sync_status_bling_falhou", id=str(logistica_id), err=str(e)[:200])
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+    )
 
 
 @router.post("/{logistica_id}/enviar-threema", response_model=EnviarThreemaOut)
@@ -919,7 +1080,12 @@ async def enviar_chamado(
     await session.commit()
     await session.refresh(c)
     logger.info("logistica_chamado_enviado", id=str(logistica_id), chamado=c.chamado)
-    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+    )
 
 
 @router.post("/{logistica_id}/mensagem-bling/preview", response_model=MensagemBlingPreviewOut)
@@ -1069,7 +1235,12 @@ async def patch_logistica(
 
     await session.commit()
     await session.refresh(c)
-    return _to_out(c, await _match_rules(session, c), produtos=await _produtos_for(session, c))
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+    )
 
 
 @router.delete("/{logistica_id}", status_code=status.HTTP_204_NO_CONTENT)

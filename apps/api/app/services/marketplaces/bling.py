@@ -320,6 +320,24 @@ class BlingClient:
         r.raise_for_status()
         return r.json().get("data") or {}
 
+    async def get_logistica_objeto(self, objeto_id: int) -> dict:
+        """Objeto de postagem (`GET /logisticas/objetos/{id}`; o id vem de
+        `pedido.transporte.volumes[].id`): serviço, rastreio (`rastreamento.
+        codigo/descricao/ultimaAlteracao`), `dataSaida` e `prazoEntregaPrevisto`
+        (dias úteis) — é a "Data de entrega" que o Bling mostra na cotação do
+        Melhor Envio. Verificado em 15/09/2026 (objeto 16221786970)."""
+        r = await self._request("GET", f"/logisticas/objetos/{objeto_id}")
+        r.raise_for_status()
+        return r.json().get("data") or {}
+
+    async def get_contato(self, contato_id: int) -> dict:
+        """Cadastro do contato (`GET /contatos/{id}`): nome, e-mail, telefone…
+        Em pedido Amazon o `email` é o endereço de retransmissão da Amazon
+        (`…@marketplace.amazon.com.br`) — único canal de mensagem ao comprador."""
+        r = await self._request("GET", f"/contatos/{contato_id}")
+        r.raise_for_status()
+        return r.json().get("data") or {}
+
     async def list_situacoes_modulos(self) -> list[dict]:
         """Módulos do Bling que têm situações (GET /situacoes/modulos):
         `{id, nome, criarSituacoes}`. O dos pedidos de venda chama-se "Vendas".

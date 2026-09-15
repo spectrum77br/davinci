@@ -209,6 +209,12 @@ class AmazonClient:
             "last_update_date": payload.get("LastUpdateDate"),
             # "Despachar até" (ISO) — horário de corte do pedido na aba Pedidos.
             "latest_ship_date": payload.get("LatestShipDate"),
+            # Janela de entrega prometida ao cliente (ISO) — "Prazo para
+            # entrega" do Seller Central. Só vem em pedido do vendedor já
+            # fora de Pending/Canceled. Depois de LatestDeliveryDate a Amazon
+            # reembolsa o comprador (projeto Amazon, 15/09/2026).
+            "earliest_delivery_date": payload.get("EarliestDeliveryDate"),
+            "latest_delivery_date": payload.get("LatestDeliveryDate"),
             # Destino (best-effort; a Amazon costuma redigir sem RDT — fica vazio).
             "ship_city": addr.get("City"),
             "ship_state": addr.get("StateOrRegion"),

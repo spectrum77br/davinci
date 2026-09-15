@@ -158,8 +158,10 @@ async def register(numbers: list[str]) -> dict[str, Any]:
 _FETCH_BATCH = 40
 
 
-async def fetch(numbers: list[str]) -> list[tuple[str, str]]:
-    """Consulta o 17track e devolve [(numero, localizacao)] dos que já têm evento.
+async def fetch(numbers: list[str]) -> list[tuple[str, str, str]]:
+    """Consulta o 17track e devolve [(numero, localizacao, status)] dos que já
+    têm evento. `status` é o `latest_status.status` do 17track ("InTransit",
+    "Delivered", "Exception"…) — "Delivered" carimba a entrega na linha.
 
     É a rede de segurança do push: o webhook dá o tempo real, mas se ele estiver
     fora do ar (ou nem configurado no painel do 17track) a Localização
@@ -169,7 +171,7 @@ async def fetch(numbers: list[str]) -> list[tuple[str, str]]:
     nums = sorted({(n or "").strip() for n in numbers if (n or "").strip()})
     if not nums:
         return []
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     async with httpx.AsyncClient(timeout=40.0) as c:
         for i in range(0, len(nums), _FETCH_BATCH):
             chunk = nums[i : i + _FETCH_BATCH]
@@ -188,9 +190,11 @@ async def fetch(numbers: list[str]) -> list[tuple[str, str]]:
                 if not isinstance(it, dict):
                     continue
                 num = (it.get("number") or "").strip()
-                loc = _fmt_from_track_info(it.get("track_info") or {})
+                ti = it.get("track_info") or {}
+                loc = _fmt_from_track_info(ti)
                 if num and loc:
-                    out.append((num, loc))
+                    st = str(((ti.get("latest_status") or {}).get("status")) or "").strip()
+                    out.append((num, loc, st))
             logger.info(
                 "logistica_17track_fetch", n=len(chunk), status=r.status_code, com_evento=len(out)
             )

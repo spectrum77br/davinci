@@ -66,7 +66,13 @@ from app.models.importacao import (
 from app.models.informar import ThreemaInformarConfig
 from app.models.integration import Integration, OAuthState
 from app.models.listing import Listing, ListingRequest
-from app.models.logistica import Logistica, LogisticaStatus, LogisticaStatusAnexo
+from app.models.logistica import (
+    Logistica,
+    LogisticaMensagemCliente,
+    LogisticaMensagemTemplate,
+    LogisticaStatus,
+    LogisticaStatusAnexo,
+)
 from app.models.margem_audit import MargemAudit
 from app.models.prioridade_estoque_movimento import PrioridadeEstoqueMovimento
 from app.models.margem_saldo_manual import MargemSaldoManual
@@ -181,6 +187,8 @@ __all__ = [
     "ListingRequestStatus",
     "ListingStatus",
     "Logistica",
+    "LogisticaMensagemCliente",
+    "LogisticaMensagemTemplate",
     "LogisticaStatus",
     "LogisticaStatusAnexo",
     "MARKETPLACES",
