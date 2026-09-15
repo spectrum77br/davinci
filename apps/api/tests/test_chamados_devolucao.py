@@ -12,12 +12,14 @@ import pytest
 from sqlalchemy import select
 
 from app.models import (
+    Alert,
     BlingOrder,
     Chamado,
     ChamadoAnexo,
     ChamadoMensagem,
     DevolucaoAnexo,
     Devolution,
+    Refund,
     StoreInfo,
 )
 from app.services import chamados_devolucao as svc
@@ -1277,3 +1279,185 @@ async def test_ml_claim_encerrado_e_texto_manual_no_chamado(client, make_user, a
     assert ml.reviews[-1][0] == "ret-777"
     await db.refresh(ch)
     assert ch.chamado == "777"
+
+
+# ------------------------------------------------- produto chegou depois (Eduardo 15/09, caso 293843)
+# Lançado Extraviado + Não recebido → chamado/contestação + Problemas no Bling +
+# reembolso automático. O pacote chegou: a operadora vira Novo e limpa o motivo.
+# O chamado encerra pelo motivo (mesma regra que o abre), o reembolso Extraviado
+# zerado some e o Bling segue o fluxo normal (já coberto pelos testes de situação).
+
+
+async def _chamado_de(db, pedido: str) -> Chamado:
+    ch = (
+        await db.execute(
+            select(Chamado).where(Chamado.origem == "devolucao", Chamado.pedido_bling == pedido)
+        )
+    ).scalar_one()
+    await db.refresh(ch)
+    return ch
+
+
+async def _refunds_de(db, pedido: str) -> list[Refund]:
+    # populate_existing: relê do banco o que a API mudou por outra sessão (sem
+    # expire_all — isso expiraria o `user` do auth_as e quebraria a request).
+    return list(
+        (
+            await db.execute(
+                select(Refund)
+                .where(Refund.pedido_bling == pedido)
+                .order_by(Refund.prejuizo)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def test_motivo_limpo_encerra_chamado_e_avisa_da_contestacao(client, make_user, auth_as, db, ml):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="293843", numeroloja="2609020KA93B41")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "293843", "pedido_marketplace": "2609020KA93B41",
+              "condicao_produto": "Extraviado", "link_abertura": "http://x",
+              "motivo_devolucao": "Não recebido", "custo_produto": 120, "reembolso": True},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "enviada"
+    did = r.json()["id"]
+    refunds = await _refunds_de(db, "293843")
+    assert len(refunds) == 1 and refunds[0].tipo == "Extraviado" and float(refunds[0].prejuizo) == 120
+
+    # 1) Extraviado → Novo: o reembolso automático (ainda zerado) some e a flag desliga;
+    #    o chamado continua, porque o motivo ainda pede chamado.
+    p = await client.patch(f"/api/devolutions/{did}", json={"condicao_produto": "Novo"})
+    assert p.status_code == 200, p.text
+    assert p.json()["reembolso"] is False
+    assert await _refunds_de(db, "293843") == []
+    assert p.json()["chamado_resolvido"] is False
+
+    # 2) motivo limpo → chamado encerra, com o aviso da contestação já enviada
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": None})
+    assert p.status_code == 200, p.text
+    assert p.json()["chamado_resolvido"] is True
+    ch = await _chamado_de(db, "293843")
+    assert ch.resolvido is True and ch.auto_ligada is False and ch.valor_recuperado is None
+    hist = [m["texto"] for m in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()]
+    assert any('"Não recebido"' in t and '"—"' in t and "encerrado" in t for t in hist), hist
+    assert any("desista dela" in t and "Mercado Livre" in t for t in hist), hist
+
+    # 3) salvar de novo sem mudar o motivo (o front manda o motivo em todo save) não repete nada
+    p = await client.patch(
+        f"/api/devolutions/{did}", json={"motivo_devolucao": None, "observacao": "ok"}
+    )
+    assert p.status_code == 200, p.text
+    assert len((await client.get(f"/api/chamados/{ch.id}/mensagens")).json()) == len(hist)
+
+
+async def test_motivo_que_nao_abre_chamado_encerra_e_abertura_pendente_sai_da_fila(
+    client, make_user, auth_as, db, ml
+):
+    ml.acao = False  # ML ainda não liberou a revisão → abertura fica pendente
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="293844", numeroloja="2609020KA93B42")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "293844", "pedido_marketplace": "2609020KA93B42",
+              "condicao_produto": "Extraviado", "link_abertura": "http://x",
+              "motivo_devolucao": "Não recebido"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "pendente"
+    did = r.json()["id"]
+
+    p = await client.patch(f"/api/devolutions/{did}", json={"motivo_devolucao": "Item Incorreto"})
+    assert p.status_code == 200, p.text
+    assert p.json()["chamado_resolvido"] is True
+    ch = await _chamado_de(db, "293844")
+    assert ch.resolvido is True
+    msg = await _abertura(db, ch.id)
+    await db.refresh(msg)
+    assert msg.status == "registrada" and msg.erro is None
+    hist = [m["texto"] for m in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()]
+    assert any('"Item Incorreto"' in t and "encerrado" in t for t in hist), hist
+    assert any("pendente na fila" in t for t in hist), hist
+
+
+async def test_kit_parcial_mantem_chamado_e_encerra_com_a_ultima_linha(
+    client, make_user, auth_as, db, ml
+):
+    """Kit = várias linhas, 1 chamado. Chegou só um item: o chamado segue pelos
+    outros (anota no histórico); o reembolso apagado é o daquele item (casa
+    pelo custo). Chegou o último: encerra."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="293845", numeroloja="2609020KA93B43")
+    base = {"conta": "aguiar", "pedido_bling": "293845", "pedido_marketplace": "2609020KA93B43",
+            "condicao_produto": "Extraviado", "link_abertura": "http://x",
+            "motivo_devolucao": "Não recebido", "link_envio": "http://envio"}  # mala exige link
+    r1 = await client.post("/api/devolutions", json={**base, "sku": "b001.26", "custo_produto": 10})
+    r2 = await client.post("/api/devolutions", json={**base, "sku": "a001", "custo_produto": 20})
+    assert r1.status_code == 201 and r2.status_code == 201, (r1.text, r2.text)
+    chamados = (
+        await db.execute(select(Chamado).where(Chamado.pedido_bling == "293845"))
+    ).scalars().all()
+    assert len(chamados) == 1
+    assert [float(x.prejuizo) for x in await _refunds_de(db, "293845")] == [10, 20]
+
+    # chegou o a001 (custo 20): chamado segue aberto, some só o reembolso de 20
+    p = await client.patch(
+        f"/api/devolutions/{r2.json()['id']}",
+        json={"condicao_produto": "Novo", "motivo_devolucao": None},
+    )
+    assert p.status_code == 200, p.text
+    assert p.json()["chamado_resolvido"] is False
+    assert [float(x.prejuizo) for x in await _refunds_de(db, "293845")] == [10]
+    ch = await _chamado_de(db, "293845")
+    assert ch.resolvido is False
+    hist = [m["texto"] for m in (await client.get(f"/api/chamados/{ch.id}/mensagens")).json()]
+    assert any("a001" in t and "continua pelos outros 1 item" in t for t in hist), hist
+
+    # chegou o último: encerra e limpa o reembolso que faltava
+    p = await client.patch(
+        f"/api/devolutions/{r1.json()['id']}",
+        json={"condicao_produto": "Novo", "motivo_devolucao": None},
+    )
+    assert p.status_code == 200, p.text
+    assert p.json()["chamado_resolvido"] is True
+    assert await _refunds_de(db, "293845") == []
+    ch = await _chamado_de(db, "293845")
+    assert ch.resolvido is True
+
+
+async def test_reembolso_com_valor_lancado_fica_e_avisa(client, make_user, auth_as, db, ml):
+    """A agência já lançou valor no reembolso Extraviado: sair da condição não
+    apaga — mantém e avisa no sino pra revisar."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    await _seed_pedido(db, user, numero="293846", numeroloja="2609020KA93B44")
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "aguiar", "pedido_bling": "293846", "pedido_marketplace": "2609020KA93B44",
+              "condicao_produto": "Extraviado", "link_abertura": "http://x",
+              "custo_produto": 50, "reembolso": True},
+    )
+    assert r.status_code == 201, r.text
+    refund = (await _refunds_de(db, "293846"))[0]
+    refund.reembolso = 30
+    await db.commit()
+
+    p = await client.patch(f"/api/devolutions/{r.json()['id']}", json={"condicao_produto": "Novo"})
+    assert p.status_code == 200, p.text
+    assert p.json()["reembolso"] is True  # flag não mexe: o reembolso ficou
+    mantidos = await _refunds_de(db, "293846")
+    assert len(mantidos) == 1 and float(mantidos[0].reembolso) == 30
+    alerta = (
+        await db.execute(
+            select(Alert).where(Alert.dedupe_key == f"devolucao_refund_revisar:{refund.id}")
+        )
+    ).scalar_one_or_none()
+    assert alerta is not None and "revisar" in alerta.title

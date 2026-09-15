@@ -43,7 +43,9 @@ from app.schemas.devolutions import (
     SkuSuffixVariant,
     StockCorrectionIn,
 )
+from app.models.enums import AlertSeverity, AlertType
 from app.services import chamados_devolucao
+from app.services.alerts import emit_alert
 from app.services.devolution_stock_return import (
     _STOCK_TRIGGER_CONDICOES,
     _SUFFIX_TAGS,
@@ -63,6 +65,10 @@ router = APIRouter(prefix="/api/devolutions", tags=["devolutions"])
 # estoque e patcha a situação do pedido já no add — só que pra PERDIMENTO
 # (83956), não pra Extraviado (services/devolution_stock_return).
 _REFUND_CONDICOES = {"Extraviado", "Sucata", "Manutenção"}
+# Condições cujo reembolso automático é DESFEITO quando a linha sai delas (o
+# produto apareceu / voltou inteiro). Manutenção fica de fora: o refund dela
+# acompanha o custo do reparo, que continua valendo depois do conserto.
+_REFUND_REVERSIVEIS = {"Extraviado", "Sucata"}
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 
@@ -90,6 +96,69 @@ def _maybe_create_refund(session: AsyncSession, row: Devolution, condicao: str) 
     )
     session.add(refund)
     logger.info("refund_auto_created", pedido_bling=row.pedido_bling, tipo=condicao)
+
+
+async def _desfazer_refund_auto(
+    session: AsyncSession, row: Devolution, condicao_anterior: str, actor_id: UUID
+) -> str | None:
+    """Ao SAIR de Extraviado/Sucata (Eduardo 15/09, caso 293843: lançado
+    Extraviado, o pacote chegou e virou Novo) o reembolso automático daquela
+    condição — prejuízo = custo do produto — perde o sentido: apaga se a agência
+    ainda não lançou valor nele; se já lançou, mantém e avisa no sino/Telegram
+    pra revisar. Devolve "apagado" | "mantido" | None (não achou). NÃO commita."""
+    conds = [
+        Refund.tipo == condicao_anterior,
+        func.btrim(Refund.conta) == (row.conta or "").strip(),
+    ]
+    if row.pedido_bling:
+        conds.append(Refund.pedido_bling == row.pedido_bling)
+    elif row.pedido_marketplace:
+        conds.append(Refund.pedido_marketplace == row.pedido_marketplace)
+    else:
+        return None
+    refunds = list(
+        (await session.execute(select(Refund).where(*conds).order_by(desc(Refund.created_at))))
+        .scalars()
+        .all()
+    )
+    if not refunds:
+        return None
+    # Kit: um refund por linha, sem ligação com a linha — casa pelo custo do
+    # item (prejuízo = custo_produto no auto-create); senão o mais recente.
+    custo = float(row.custo_produto or 0)
+    refund = next(
+        (r for r in refunds if abs(float(r.prejuizo or 0) - custo) < 0.005), refunds[0]
+    )
+    pedido = row.pedido_bling or row.pedido_marketplace or ""
+    if not refund.reembolso:
+        await session.delete(refund)
+        logger.info(
+            "refund_auto_removed",
+            refund_id=str(refund.id),
+            pedido_bling=row.pedido_bling,
+            tipo=condicao_anterior,
+            nova_condicao=row.condicao_produto,
+        )
+        return "apagado"
+    try:
+        await emit_alert(
+            session,
+            user_id=actor_id,
+            type=AlertType.GENERIC,
+            severity=AlertSeverity.WARNING,
+            title=f"Pedido {pedido}: reembolso {condicao_anterior} já tem valor — revisar",
+            message=(
+                f"A devolução do pedido {pedido} saiu de {condicao_anterior} para "
+                f"{row.condicao_produto or '—'} (o produto apareceu), mas o reembolso "
+                f"{condicao_anterior} já tem R$ {float(refund.reembolso):.2f} lançado. "
+                "Confira na tela de Reembolso se ele ainda vale."
+            ),
+            dedupe_key=f"devolucao_refund_revisar:{refund.id}",
+            payload={"refund_id": str(refund.id), "pedido_bling": row.pedido_bling},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("refund_auto_alert_failed", refund_id=str(refund.id))
+    return "mantido"
 
 
 async def _sync_manutencao_to_refund(
@@ -1560,6 +1629,7 @@ async def patch_devolution(
         raise HTTPException(422, detail={"code": "conta_required"})
 
     prev_condicao = row.condicao_produto
+    prev_motivo = row.motivo_devolucao
     prev_devolver_estoque = row.devolver_estoque
     prev_custo_manutencao = row.custo_manutencao
     for key, value in data.items():
@@ -1585,6 +1655,12 @@ async def patch_devolution(
 
     if new_condicao in _REFUND_CONDICOES and new_condicao != prev_condicao:
         _maybe_create_refund(session, row, new_condicao)
+    # Saiu de Extraviado/Sucata (o produto apareceu — Eduardo 15/09, caso
+    # 293843): o reembolso automático daquela condição perde o sentido.
+    if prev_condicao in _REFUND_REVERSIVEIS and new_condicao != prev_condicao:
+        desfeito = await _desfazer_refund_auto(session, row, prev_condicao, user.id)
+        if desfeito == "apagado":
+            row.reembolso = False
 
     # Carimba a data quando o toggle "devolver estoque" passa a TRUE.
     if row.devolver_estoque and (not prev_devolver_estoque or row.data_devolvido_estoque is None):
@@ -1615,6 +1691,28 @@ async def patch_devolution(
     # helper — repetir o PATCH não duplica).
     if "motivo_devolucao" in data or "link_envio" in data:
         await _chamado_devolucao_apos_commit(session, row)
+    # Motivo limpo ou trocado por um que NÃO abre chamado → encerra o chamado
+    # da devolução (Eduardo 15/09: "hoje o sistema verifica o motivo para
+    # abrir; encerrar do mesmo jeito"). Caso 293843: o pacote chegou depois.
+    # Só na TRANSIÇÃO (o front manda o motivo em todo save): antes pedia
+    # chamado, agora não.
+    motivo_anterior_pedia = (
+        (prev_motivo or "").strip().lower() in chamados_devolucao.chamados_svc.MOTIVOS_ABREM_CHAMADO
+    )
+    if (
+        "motivo_devolucao" in data
+        and motivo_anterior_pedia
+        and not chamados_devolucao.chamados_svc.motivo_pede_chamado(row)
+    ):
+        desfecho = await chamados_devolucao.encerrar_chamado_por_motivo(
+            session,
+            row,
+            motivo_anterior=prev_motivo,
+            autor_nome=f"Devoluções ({(user.name or user.email or '').strip() or 'usuário'})",
+        )
+        if desfecho is not None:
+            await session.commit()
+            await session.refresh(row)
 
     # Variação do custo de manutenção é refletida como débito no reembolso do refund
     # de Manutenção (subtrai a diferença, preservando o que já estava lá).

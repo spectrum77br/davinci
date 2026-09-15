@@ -1347,6 +1347,19 @@ async function saveRow(row: DevolutionRow) {
     const idx = items.value.findIndex((i) => i.id === row.id)
     // PATCH não devolve `cliente` (só a listagem preenche) — preserva o da linha.
     if (idx >= 0) items.value[idx] = { ...updated, cliente: updated.cliente ?? row.cliente }
+    // Motivo limpo/trocado por um que não abre chamado encerrou o chamado da
+    // devolução (15/09): a contestação já enviada na plataforma não é
+    // cancelável pela API — lembra de retirar na mão.
+    if (row.tem_chamado && !row.chamado_resolvido && updated.chamado_resolvido) {
+      pushToast({
+        kind: 'warning',
+        title: 'Chamado encerrado',
+        lines: [
+          'O motivo não pede mais chamado, então o chamado da devolução foi encerrado.',
+          'Se a contestação já tinha sido enviada na plataforma, desista dela no painel da plataforma.',
+        ],
+      }, 9000)
+    }
     clearDirty(row.id)
     // Reembolso/condição podem mudar quais linhas entram nos filtros e cards.
     void refreshTotals()

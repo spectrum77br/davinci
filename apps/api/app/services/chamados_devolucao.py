@@ -587,6 +587,109 @@ async def garantir_chamado(session: AsyncSession, dev: Devolution) -> Chamado | 
     return ch
 
 
+_NOME_PLATAFORMA = {
+    PLAT_ML: "Mercado Livre",
+    PLAT_TIKTOK: "TikTok Shop",
+    PLAT_SHOPEE: "Shopee",
+    PLAT_AMAZON: "Amazon",
+}
+
+
+async def encerrar_chamado_por_motivo(
+    session: AsyncSession,
+    dev: Devolution,
+    *,
+    motivo_anterior: str | None,
+    autor_nome: str | None = None,
+) -> str | None:
+    """Espelho do `garantir_chamado` — Eduardo 15/09: "encerrar chamado quando
+    o motivo for limpo ou for para um motivo que não abre chamado, pois hoje o
+    sistema verifica o motivo para abrir". Caso real 293843: lançado Extraviado
+    + Não recebido, o pacote chegou depois; a operadora troca a condição pra
+    Novo e limpa o motivo, e a contestação aberta não faz mais sentido.
+
+    Kit (várias linhas, 1 chamado): só encerra quando NENHUMA linha do pedido
+    ainda tem motivo que pede chamado; enquanto isso só anota no histórico que
+    o item chegou e o chamado segue pelos outros. Ao encerrar: evento no
+    histórico; se a contestação já tinha sido ENVIADA na plataforma, aviso pra
+    desistir dela no painel (nenhuma das APIs tem "cancelar disputa"); se ainda
+    estava pendente na fila, sai da fila (`registrada`). Não mexe no Valor do
+    chamado. Devolve "encerrado", "kit_parcial" ou None (nada a fazer). NÃO
+    commita."""
+    if chamados_svc.motivo_pede_chamado(dev):
+        return None
+    ch = await chamados_svc.chamado_da_devolucao(session, dev)
+    if ch is None or ch.resolvido:
+        return None
+    de = (motivo_anterior or "").strip() or "—"
+    para = (dev.motivo_devolucao or "").strip() or "—"
+    outras = [
+        o
+        for o in await _linhas_do_pedido(session, dev)
+        if o.id != dev.id and chamados_svc.motivo_pede_chamado(o)
+    ]
+    if outras:
+        item = " ".join(
+            x for x in ((dev.sku or "").strip(), (dev.produtos or "").strip()) if x
+        ) or "item"
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch,
+                f"Item {item}: motivo mudou de \"{de}\" para \"{para}\". O chamado "
+                f"continua pelos outros {len(outras)} item(ns) do kit que ainda pedem "
+                "chamado.",
+            )
+        )
+        logger.info(
+            "chamado_devolucao_kit_parcial",
+            chamado_id=str(ch.id),
+            devolution_id=str(dev.id),
+            pedido_bling=dev.pedido_bling,
+            restam=len(outras),
+        )
+        return "kit_parcial"
+    quem = autor_nome or chamados_svc.AUTOR_SISTEMA
+    session.add(chamados_svc.marcar_resolvido(ch, True, autor_nome=quem))
+    session.add(
+        chamados_svc.registrar_sistema(
+            ch,
+            f"Motivo da devolução mudou de \"{de}\" para \"{para}\" (não pede mais "
+            "chamado): chamado encerrado pela tela Devoluções",
+        )
+    )
+    abertura = await mensagem_abertura(session, ch)
+    nome = _NOME_PLATAFORMA.get(
+        plataforma_de(ch.plataforma) or "", (ch.plataforma or "a plataforma").strip()
+    )
+    if abertura is not None and abertura.status == "enviada":
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch,
+                f"Atenção: a contestação já tinha sido enviada na plataforma ({nome}"
+                f"{', ' + _fmt_brt(abertura.enviada_at) if abertura.enviada_at else ''}). "
+                "Se ela ainda estiver aberta lá, desista dela no painel da plataforma — "
+                "o DaVinci não tem como cancelar pela API.",
+            )
+        )
+    elif abertura is not None and abertura.status == "pendente":
+        abertura.status = "registrada"
+        abertura.erro = None
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch, "A contestação ainda não tinha saído (estava pendente na fila) — cancelada."
+            )
+        )
+    logger.info(
+        "chamado_devolucao_encerrado_por_motivo",
+        chamado_id=str(ch.id),
+        devolution_id=str(dev.id),
+        pedido_bling=dev.pedido_bling,
+        de=de,
+        para=para,
+    )
+    return "encerrado"
+
+
 def _fmt_brt(v: object) -> str:
     """dd/mm HH:MM em São Paulo a partir de epoch (int/str) ou ISO 8601; "" se
     não der pra ler."""
