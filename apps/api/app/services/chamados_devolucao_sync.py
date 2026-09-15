@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Chamado, ChamadoMensagem, Devolution
@@ -399,9 +399,21 @@ async def sync_respostas(session: AsyncSession) -> dict:
                 Chamado.canal == "api",
                 Chamado.resolvido.is_(False),
                 Chamado.origem != "devolucao",
-                Chamado.chamado.op("~")(r"^\d{10}$"),
-                func.lower(func.coalesce(Chamado.plataforma, "")).in_(
-                    ("ml", "mercado livre", "mercadolivre", "meli")
+                or_(
+                    and_(
+                        Chamado.chamado.op("~")(r"^\d{10}$"),
+                        func.lower(func.coalesce(Chamado.plataforma, "")).in_(
+                            ("ml", "mercado livre", "mercadolivre", "meli")
+                        ),
+                    ),
+                    # 15/09 (Eduardo: "as consultas manuais têm que ser feitas também"):
+                    # disputa de devolução do TikTok aberta fora da devolução (origem
+                    # logística) com o return_id no lugar do protocolo — `_sync_tiktok`
+                    # lê status, arbitragem e a linha do tempo pela API.
+                    and_(
+                        Chamado.chamado.op("~")(r"^\d{15,}$"),
+                        func.lower(func.coalesce(Chamado.plataforma, "")) == "tiktok",
+                    ),
                 ),
             )
         )
