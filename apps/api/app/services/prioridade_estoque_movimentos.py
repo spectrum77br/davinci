@@ -22,12 +22,17 @@ Regras (revisões de 14/09):
   * Entradas primeiro, em ordem. A partir do primeiro problema, as linhas
     seguintes NÃO são lançadas (ficam `falhou` na fila) — nunca deixa o
     componente novo baixado sem a entrada no antigo.
-  * `falhou` = o Bling respondeu erro (4xx/5xx, 429/Cloudflare) → o sweep
-    retenta em ordem, até MAX_TENTATIVAS, só enquanto as linhas anteriores
-    do pedido estiverem `ok`. `incerto` = transporte/timeout: não dá pra
-    saber se entrou → nunca retenta sozinho, só avisa. `pendente` órfão
-    (processo interrompido entre gravar e lançar) vira `incerto` após 60
-    min. Aviso Threema uma vez por linha (grupo nf_sem_estoque), só se
+  * `falhou` = o Bling RECUSOU (4xx, 429/Cloudflare) → o sweep retenta em
+    ordem, até MAX_TENTATIVAS, só enquanto as linhas anteriores do pedido
+    estiverem `ok`. `incerto` = não dá pra saber se entrou: transporte/
+    timeout OU 5xx (caso real 15/09: HTTP 504 do gateway e o Bling tinha
+    processado — retentar teria baixado 2x). `incerto` nunca é relançado
+    às cegas: o sweep concilia pelo EXTRATO do Bling (webhook →
+    stock_movements): se no intervalo da tentativa há mais movimentos
+    daquele produto/operação/quantidade do que linhas `ok` nossas, o
+    lançamento entrou → vira `ok`; senão fica `incerto` e avisa. `pendente`
+    órfão (processo interrompido entre gravar e lançar) vira `incerto` após
+    60 min. Aviso Threema uma vez por linha (grupo nf_sem_estoque), só se
     alguém recebeu.
   * Estorno: pedido em Cancelado (12) ou excluído no Bling que NÃO saiu
     (sem 21→15 na trilha, sem rastreio na Logística) → lança o oposto de
@@ -51,7 +56,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import session_scope
-from app.models import BlingOrder, Logistica, MargemAudit, PrioridadeEstoqueMovimento
+from app.models import (
+    BlingOrder,
+    Logistica,
+    MargemAudit,
+    PrioridadeEstoqueMovimento,
+    StockMovement,
+)
 from app.services import nf_emissao_gerar, threema
 from app.services.bling_situacoes import SITUACAO_CANCELADO
 from app.services.marketplaces.bling import BlingCloudflareError
@@ -92,8 +103,11 @@ def plano_do_pedido(trocas: list[tuple[str, str, int]]) -> list[tuple[str, str, 
 
 
 def _transporte(exc: Exception) -> bool:
-    """Erro em que NÃO dá pra saber se o Bling processou o POST."""
-    return isinstance(exc, (httpx.TransportError, httpx.TimeoutException))
+    """Erro em que NÃO dá pra saber se o Bling processou o POST: rede/timeout
+    ou 5xx do gateway (caso real 15/09: 504 com o Bling tendo processado)."""
+    if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
 
 
 async def _produto_id(client, sku: str, cache: dict) -> int | None:
@@ -143,15 +157,19 @@ async def _lancar(client, m: PrioridadeEstoqueMovimento) -> str:
         )
     except Exception as exc:  # noqa: BLE001 — classificado abaixo
         if _transporte(exc):
-            await _gravar(
-                m.id, status="incerto", tentativas=m.tentativas + 1, erro=str(exc)[:300]
+            # Pode ter entrado (504 do gateway com o Bling processando — 15/09).
+            erro = (
+                f"HTTP {exc.response.status_code}: {(exc.response.text or '')[:200]}"
+                if isinstance(exc, httpx.HTTPStatusError)
+                else str(exc)[:300]
             )
+            await _gravar(m.id, status="incerto", tentativas=m.tentativas + 1, erro=erro)
             logger.warning(
                 "prioridade_estoque_movimento_incerto", pedido=m.pedido_bling, sku=m.sku,
                 operacao=m.operacao, erro=str(exc)[:200],
             )
             return "incerto"
-        # Bling respondeu (4xx/5xx, 429/Cloudflare, token em cooldown): não entrou → retenta.
+        # Bling recusou (4xx, 429/Cloudflare, token em cooldown): não entrou → retenta.
         if isinstance(exc, httpx.HTTPStatusError):
             erro = f"HTTP {exc.response.status_code}: {(exc.response.text or '')[:200]}"
         else:
@@ -373,6 +391,65 @@ async def estornar_cancelados(client, session: AsyncSession) -> dict:
     return resumo
 
 
+JANELA_EXTRATO_ANTES = timedelta(minutes=3)
+JANELA_EXTRATO_DEPOIS = timedelta(minutes=20)
+
+
+async def resolver_incertos_pelo_extrato(session: AsyncSession) -> int:
+    """Linha `incerto` (sem lancado_at): olha o extrato do Bling (webhook →
+    stock_movements) na janela da tentativa. Movimentos do mesmo produto/
+    operação/quantidade que EXCEDEM as linhas `ok` nossas na mesma janela =
+    o lançamento incerto entrou → `ok`. Só resolve a favor com evidência;
+    na dúvida fica `incerto` (aviso). Devolve quantos resolveu."""
+    incertos = (await session.execute(
+        select(PrioridadeEstoqueMovimento).where(
+            PrioridadeEstoqueMovimento.status == "incerto",
+            PrioridadeEstoqueMovimento.lancado_at.is_(None),
+            PrioridadeEstoqueMovimento.revertido_at.is_(None),
+            PrioridadeEstoqueMovimento.bling_product_id.is_not(None),
+        ).order_by(PrioridadeEstoqueMovimento.updated_at)
+    )).scalars().all()
+    resolvidos = 0
+    for m in incertos:
+        ini = m.updated_at - JANELA_EXTRATO_ANTES
+        fim = m.updated_at + JANELA_EXTRATO_DEPOIS
+        movs = (await session.execute(
+            select(StockMovement.date).where(
+                StockMovement.bling_product_id == int(m.bling_product_id),
+                StockMovement.tipo == m.operacao,
+                StockMovement.quantidade == int(m.quantidade),
+                StockMovement.date >= ini,
+                StockMovement.date <= fim,
+            ).order_by(StockMovement.date)
+        )).scalars().all()
+        if not movs:
+            continue
+        ok_na_janela = (await session.execute(
+            select(PrioridadeEstoqueMovimento.id).where(
+                PrioridadeEstoqueMovimento.bling_product_id == int(m.bling_product_id),
+                PrioridadeEstoqueMovimento.operacao == m.operacao,
+                PrioridadeEstoqueMovimento.quantidade == int(m.quantidade),
+                PrioridadeEstoqueMovimento.status == "ok",
+                PrioridadeEstoqueMovimento.lancado_at >= ini,
+                PrioridadeEstoqueMovimento.lancado_at <= fim,
+            )
+        )).scalars().all()
+        if len(movs) <= len(ok_na_janela):
+            continue  # todos os movimentos já têm dono
+        await _gravar(
+            m.id, status="ok", lancado_at=movs[-1],
+            erro=(
+                f"conciliado pelo extrato do Bling ({movs[-1]:%d/%m %H:%M}); antes: {m.erro}"
+            )[:300],
+        )
+        resolvidos += 1
+        logger.info(
+            "prioridade_estoque_incerto_conciliado", pedido=m.pedido_bling, sku=m.sku,
+            operacao=m.operacao,
+        )
+    return resolvidos
+
+
 async def marcar_pendentes_orfaos(session: AsyncSession, *, minutos: int = ORFAO_MINUTOS) -> int:
     """`pendente` esquecido (processo interrompido entre gravar e lançar)
     vira `incerto` — nunca é relançado sozinho; entra no aviso."""
@@ -440,9 +517,12 @@ async def avisar_falhas(session: AsyncSession) -> int:
 
 async def manutencao_movimentos_sweep() -> dict:
     """Cron do worker (:16/:46): órfãos → retenta falhas → estorna cancelados → avisa."""
-    resumo: dict = {"orfaos": 0, "retentados": 0, "falhas": 0, "estornados": 0, "avisados": 0}
+    resumo: dict = {
+        "orfaos": 0, "conciliados": 0, "retentados": 0, "falhas": 0, "estornados": 0, "avisados": 0,
+    }
     async with session_scope() as s:
         resumo["orfaos"] = await marcar_pendentes_orfaos(s)
+        resumo["conciliados"] = await resolver_incertos_pelo_extrato(s)
         client = await nf_emissao_gerar._bling_client_opt(s)
         if client is None:
             logger.warning("prioridade_estoque_manutencao_sem_bling")

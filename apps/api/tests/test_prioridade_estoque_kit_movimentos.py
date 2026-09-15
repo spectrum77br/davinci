@@ -29,7 +29,13 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder, Logistica, MargemAudit, PrioridadeEstoqueMovimento
+from app.models import (
+    BlingOrder,
+    Logistica,
+    MargemAudit,
+    PrioridadeEstoqueMovimento,
+    StockMovement,
+)
 from app.services import nf_emissao_gerar
 from app.services import prioridade_estoque as prio
 from app.services import prioridade_estoque_movimentos as mov
@@ -253,7 +259,7 @@ async def test_trava_nao_lanca_duas_vezes(db: AsyncSession, monkeypatch):
 @pytest.mark.asyncio
 async def test_sweep_retenta_em_ordem_e_para_se_anterior_nao_esta_ok(db, monkeypatch):
     await _pedido(db, "297600", [("dg053.ci+a001.ci", 1)])
-    client = FakeBling(falha={"dg053.ci": _http_error(500)})
+    client = FakeBling(falha={"dg053.ci": _http_error(400)})
     _arma(monkeypatch, client, "297600", [("dg053.ci+a001.ci", 1)])
     await prio.aplicar_prioridade_estoque(db, numeros=["297600"])
     assert _ops(client) == [("E", 102, 1)]
@@ -323,7 +329,7 @@ async def test_estorno_so_de_pedido_morto_que_nao_saiu(db: AsyncSession, monkeyp
     for numero in ("297700", "297701", "297702", "297703", "297704"):
         await _linha_ok(db, numero, "dg053.ci", 101, "E", 0)
         await _linha_ok(db, numero, "dg053.sp", 201, "S", 1)
-    client = FakeBling(falha={"dg053.sp": _http_error(500)})  # 1ª S recusada (limpa carimbo)
+    client = FakeBling(falha={"dg053.sp": _http_error(400)})  # 1ª S recusada (limpa carimbo)
 
     resumo = await mov.estornar_cancelados(client, db)
     assert resumo == {"estornados": 3, "falhas": 1}
@@ -404,3 +410,36 @@ async def test_indice_unico_parcial_existe_no_schema_de_teste(db: AsyncSession):
         "select count(*) from pg_indexes where indexname = 'uq_prioridade_estoque_mov_vivo'"
     ))).scalar_one()
     assert n == 1
+
+
+@pytest.mark.asyncio
+async def test_5xx_vira_incerto_e_concilia_pelo_extrato(db: AsyncSession, monkeypatch):
+    # Caso real 15/09: HTTP 504 do gateway e o Bling processou a saída. Retentar
+    # baixaria 2x — então 5xx é `incerto` e o sweep confere no extrato.
+    await _pedido(db, "297341", [("dg053.ci+a001.ci", 1)])
+    client = FakeBling(falha={"dg053.sp": _http_error(504)})
+    _arma(monkeypatch, client, "297341", [("dg053.ci+a001.ci", 1)])
+    await prio.aplicar_prioridade_estoque(db, numeros=["297341"])
+    regs = await _linhas(db, "297341")
+    assert [(r.sku, r.status) for r in regs][3] == ("dg053.sp", "incerto")
+    assert "HTTP 504" in regs[3].erro
+    # Retry NÃO mexe em incerto.
+    assert await mov.retentar_falhas(client, db) == {"retentados": 0, "falhas": 0}
+
+    # Sem movimento no extrato → continua incerto.
+    assert await mov.resolver_incertos_pelo_extrato(db) == 0
+    # O extrato mostra a saída de dg053.sp (produto 201) na janela → conciliado.
+    db.add(StockMovement(bling_product_id=201, sku="dg053.sp", date=datetime.now(UTC),
+                         tipo="S", quantidade=1))
+    await db.commit()
+    assert await mov.resolver_incertos_pelo_extrato(db) == 1
+    r = (await _linhas(db, "297341"))[3]
+    assert r.status == "ok" and r.lancado_at is not None and "conciliado" in r.erro
+
+    # Movimento que já pertence a uma linha ok da mesma janela NÃO resolve outro incerto.
+    await _pedido(db, "297342", [("dg053.ci+a001.ci", 1)])
+    client2 = FakeBling(falha={"dg053.sp": _http_error(502)})
+    _arma(monkeypatch, client2, "297342", [("dg053.ci+a001.ci", 1)])
+    await prio.aplicar_prioridade_estoque(db, numeros=["297342"])
+    assert (await _linhas(db, "297342"))[3].status == "incerto"
+    assert await mov.resolver_incertos_pelo_extrato(db) == 0
