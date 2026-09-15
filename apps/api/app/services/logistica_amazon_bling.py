@@ -23,6 +23,7 @@ derruba o motor.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 
@@ -40,9 +41,12 @@ logger = structlog.get_logger()
 _AMAZON_PLATAFORMAS = logistica_rules._AMAZON_PLATAFORMAS
 
 JANELA_DIAS = 60
-# Teto por rodada: até 4 GETs por pedido; 40 pedidos ≈ 160 requisições, bem
-# dentro do que o limiter compartilhado do Bling deixa passar num minuto.
-MAX_POR_RODADA = 40
+# Teto por rodada: até 4 GETs por pedido. 20 pedidos por rodada de 5 min
+# (≈ 80 requisições) com uma pausa entre pedidos: o limite real do Bling é
+# 3 req/s e os outros jobs (ingest de pedidos, NF) já disputam essa cota —
+# com 40 por rodada a primeira passada choveu 429 (15/09).
+MAX_POR_RODADA = 20
+PAUSA_ENTRE_PEDIDOS_S = 0.5
 # Pedido já lido mas ainda incompleto (etiqueta gerada depois, contato sem
 # e-mail…) só é relido depois deste intervalo.
 RELER_APOS = timedelta(hours=1)
@@ -247,6 +251,7 @@ async def enrich_pendentes(
         resumo["lidos"] += 1
         if mudou:
             resumo["mudados"] += 1
+        await asyncio.sleep(PAUSA_ENTRE_PEDIDOS_S)
     await session.commit()
     logger.info("logistica_amazon_bling_enrich", **resumo)
     return resumo

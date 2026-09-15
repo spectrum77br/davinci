@@ -29,6 +29,7 @@ Sem saldo no 17track nada disso funciona — `sem_quota` no resumo é o aviso.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -350,6 +351,142 @@ async def avisar_graves(graves: list[tuple[str, str, str]]) -> None:
             await threema.ThreemaClient().send_to_all(texto, destinos)
     except Exception as e:  # noqa: BLE001
         logger.warning("logistica_track_aviso_grave_falhou", err=str(e)[:200])
+
+
+# ---- botão ⟳ da Localização (uma linha, na hora) ------------------------------
+#
+# Vinicius, 15/09: "a localização vem do 17track e não está atualizada — coloca
+# um botãozinho igual ao do Status Plataforma". O 17track só pergunta aos
+# Correios de 6 em 6 a 12 em 12 horas; o botão força a consulta AGORA (mesmo
+# mecanismo do `forcar_reconsulta`: parar + retomar é grátis uma vez por número,
+# depois só apagar + registrar, 1 crédito) e espera a resposta por até
+# ESPERA_BOTAO_S. Se não vier a tempo, o push do webhook completa o serviço.
+ESPERA_BOTAO_S = 40
+INTERVALO_BOTAO_S = 8
+
+
+def _aplicar_info(row: Logistica, info: dict[str, Any], agora: datetime) -> bool:
+    return aplicar_leitura(
+        row,
+        info.get("localizacao"),
+        entregue=(info.get("status") == "Delivered"),
+        agora=agora,
+    )
+
+
+async def _forcar_um(num: str) -> tuple[str, str]:
+    """Faz o 17track ir aos Correios agora por UM número já registrado.
+    Devolve (resultado, modo): resultado 'ok' | 'sem_quota' | 'recusado';
+    modo 'retomado' (grátis) | 'reregistrado' (1 crédito)."""
+    estado = (await logistica_track.estado_numeros([num])).get(num) or {}
+    parado = estado.get("tracking_status") == "Stopped"
+    if not estado.get("is_retracked"):
+        r = (
+            await logistica_track.retomar_parados([num])
+            if parado
+            else await logistica_track.parar_e_retomar([num])
+        )
+        if num in r["retomados"]:
+            return "ok", "retomado"
+        if num not in r["ja_retomados"]:
+            return "recusado", "retomar"
+    # O retomar gratuito já foi usado: apagar + registrar (1 crédito).
+    r2 = await logistica_track.reregistrar([num])
+    if r2.get("sem_quota"):
+        await marcar_sem_quota(True)
+        return "sem_quota", "reregistrar"
+    if num in {_num(n) for n in r2.get("ok", [])}:
+        return "ok", "reregistrado"
+    return "recusado", "reregistrar"
+
+
+async def atualizar_linha(
+    session: AsyncSession,
+    row: Logistica,
+    *,
+    esperar_s: float = ESPERA_BOTAO_S,
+    intervalo_s: float = INTERVALO_BOTAO_S,
+) -> dict[str, Any]:
+    """Atualiza AGORA a localização de uma linha pelo 17track: registra o número
+    se ainda não está lá, força a consulta aos Correios e espera a leitura nova.
+
+    `resultado`: 'atualizado' (leitura nova aplicada) | 'consultando' (o 17track
+    foi acionado; a leitura chega pelo push em instantes) | 'encerrado' (o
+    17track já fechou o rastreio — entregue/expirado) | 'sem_quota' |
+    'recusado' | '17track_indisponivel' | 'sem_rastreio_correios'."""
+    num = _num(row.rastreio)
+    if not logistica_track.is_correios(num):
+        return {"resultado": "sem_rastreio_correios"}
+    agora = datetime.now(UTC)
+    try:
+        det = await logistica_track.fetch_detalhado([num])
+    except logistica_track.Track17Error as e:
+        return {"resultado": "17track_indisponivel", "detalhe": str(e)[:160]}
+    info_antes = det["info"].get(num)
+    desconhecido = num in det["desconhecidos"]
+
+    if desconhecido or _num(row.rastreio_17track) != num:
+        # Registrar já faz o 17track buscar nos Correios em seguida.
+        res = await logistica_track.register([num])
+        await marcar_sem_quota(bool(res.get("sem_quota")))
+        if res.get("sem_quota"):
+            return {"resultado": "sem_quota"}
+        if num not in {_num(n) for n in res.get("ok", [])}:
+            return {"resultado": "recusado", "detalhe": "17track não aceitou o número"}
+        row.rastreio_17track = num
+        row.rastreio_17track_at = agora
+        modo = "registrado"
+    elif logistica_track.encerrado(info_antes):
+        mudou = _aplicar_info(row, info_antes or {}, agora)
+        row.rastreio_lido_em = agora
+        await session.commit()
+        return {"resultado": "encerrado", "mudou": mudou}
+    else:
+        resultado, modo = await _forcar_um(num)
+        if resultado != "ok":
+            return {"resultado": resultado, "detalhe": modo}
+        row.rastreio_17track_at = agora
+    await session.commit()
+
+    sync_antes = (info_antes or {}).get("sync_at")
+    fim = time.monotonic() + esperar_s
+    info: dict[str, Any] | None = None
+    while True:
+        await asyncio.sleep(intervalo_s)
+        try:
+            info = (await logistica_track.fetch_detalhado([num]))["info"].get(num)
+        except logistica_track.Track17Error:
+            info = None
+        sync = (info or {}).get("sync_at")
+        if info and sync and (sync_antes is None or sync > sync_antes):
+            agora2 = datetime.now(UTC)
+            grave_antes = row.problema_correios_em
+            mudou = _aplicar_info(row, info, agora2)
+            row.rastreio_lido_em = agora2
+            await session.commit()
+            if row.problema_correios_em is not None and row.problema_correios_em != grave_antes:
+                await avisar_graves(
+                    [(row.pedido_bling or "?", row.conta or "?", row.localizacao or "")]
+                )
+            logger.info(
+                "logistica_track_botao_atualizado",
+                pedido=row.pedido_bling,
+                numero=num,
+                modo=modo,
+                mudou=mudou,
+            )
+            return {"resultado": "atualizado", "mudou": mudou, "modo": modo}
+        if time.monotonic() >= fim:
+            break
+    # Não veio a tempo: aplica o que o 17track já tinha (pode ser igual) e
+    # devolve "consultando" — o push do webhook completa quando chegar.
+    ultimo = info or info_antes
+    if ultimo:
+        _aplicar_info(row, ultimo, datetime.now(UTC))
+    row.rastreio_lido_em = datetime.now(UTC)
+    await session.commit()
+    logger.info("logistica_track_botao_consultando", pedido=row.pedido_bling, numero=num, modo=modo)
+    return {"resultado": "consultando", "modo": modo}
 
 
 async def _aplicar_localizacoes(

@@ -41,6 +41,7 @@ from app.models import (
 from app.config import get_settings
 from app.schemas.logistica import (
     AnexoOut,
+    AtualizarRastreioOut,
     CandidatoOut,
     EnviarThreemaIn,
     EnviarThreemaOut,
@@ -78,6 +79,8 @@ from app.services import (
     logistica_rules,
     logistica_shopee,
     logistica_tiktok,
+    logistica_track,
+    logistica_track_sync,
     threema,
 )
 from app.worker_pool import get_arq_pool
@@ -967,6 +970,43 @@ async def atualizar_amazon(
         await _match_rules(session, c),
         produtos=await _produtos_for(session, c),
         mensagens=await _mensagens_for(session, c),
+    )
+
+
+@router.post("/{logistica_id}/atualizar-rastreio", response_model=AtualizarRastreioOut)
+async def atualizar_rastreio(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> AtualizarRastreioOut:
+    """Botão ⟳ da coluna Localização: consulta os Correios AGORA pelo 17track
+    (registra o número se preciso, força a releitura e espera até ~40 s). Só
+    vale pra rastreio dos Correios (`…BR`); pode gastar 1 crédito do 17track
+    quando o "retomar" gratuito daquele número já foi usado."""
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    if not logistica_track.is_correios(c.rastreio):
+        raise HTTPException(422, detail={"code": "logistica_sem_rastreio_correios"})
+    try:
+        res = await logistica_track_sync.atualizar_linha(session, c)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "logistica_atualizar_rastreio_falhou", id=str(logistica_id), err=str(e)[:200]
+        )
+        raise HTTPException(502, detail={"code": "logistica_17track_erro"}) from e
+    await session.refresh(c)
+    return AtualizarRastreioOut(
+        resultado=str(res.get("resultado")),
+        detalhe=res.get("detalhe"),
+        linha=_to_out(
+            c,
+            await _match_rules(session, c),
+            produtos=await _produtos_for(session, c),
+            mensagens=await _mensagens_for(session, c),
+        ),
     )
 
 

@@ -111,7 +111,7 @@ def _dias_restantes(prazo: date | None, hoje: date) -> str:
 
 
 def linha_informar(row: Logistica, hoje: date | None = None) -> str:
-    """`pedido amazon - conta - rastreio (serviço) - Correios: previsão dd/mm -
+    """`pedido amazon - conta - rastreio (serviço) - Transportadora: previsão dd/mm -
     Amazon até dd/mm (faltam N dias) - última posição`."""
     hoje = hoje or hoje_brt()
     pedido = (row.pedido_marketplace or "").strip() or (row.pedido_bling or "").strip() or "-"
@@ -122,7 +122,7 @@ def linha_informar(row: Logistica, hoje: date | None = None) -> str:
         pedido,
         (row.conta or "").strip() or "-",
         rastreio,
-        f"Correios: previsão {_fmt(row.previsao_correios)}",
+        f"Transportadora: previsão {_fmt(row.previsao_correios)}",
         f"Amazon até {_fmt(row.prazo_entrega_amazon)} "
         f"({_dias_restantes(row.prazo_entrega_amazon, hoje)})",
     ]
@@ -165,7 +165,7 @@ def avisos_devidos(row: Logistica, hoje: date | None = None) -> list[str]:
 def _cabecalho(tipo: str, row: Logistica, hoje: date) -> str:
     if tipo == TIPO_PREVISAO:
         return (
-            "⚠️ DaVinci — Amazon Envio próprio: previsão dos Correios passou "
+            "⚠️ DaVinci — Amazon Envio próprio: previsão da transportadora passou "
             "e o pacote não chegou"
         )
     if tipo == TIPO_PRAZO_VENCIDO:
@@ -197,7 +197,7 @@ def mensagem_aviso(row: Logistica, tipo: str, hoje: date | None = None) -> str:
     linhas.append(f"Rastreio: {rastreio}")
     linhas.append(f"Correios: {correios}")
     linhas.append(
-        f"Previsão Correios: {_fmt(row.previsao_correios)} · Entregar até (Amazon): "
+        f"Previsão transportadora: {_fmt(row.previsao_correios)} · Entregar até (Amazon): "
         f"{_fmt(row.prazo_entrega_amazon)} · ainda não entregue"
     )
     if tipo == TIPO_PRAZO_VENCIDO:

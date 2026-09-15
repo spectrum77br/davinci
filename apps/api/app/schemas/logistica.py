@@ -139,6 +139,16 @@ class LogisticaOut(BaseModel):
     updated_at: datetime
 
 
+class AtualizarRastreioOut(BaseModel):
+    """Botão ⟳ da Localização: `resultado` = atualizado | consultando |
+    encerrado | sem_quota | recusado | 17track_indisponivel; `linha` = a linha
+    já com o que o 17track devolveu."""
+
+    resultado: str
+    detalhe: str | None = None
+    linha: LogisticaOut
+
+
 class LogisticaCreate(BaseModel):
     data: date | None = None
     pedido_bling: str | None = None

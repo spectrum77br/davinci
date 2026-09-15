@@ -853,6 +853,55 @@ async function atualizarTiktok(c: Logistica) {
   }
 }
 
+// Botão ⟳ da coluna Localização: consulta os Correios AGORA pelo 17track
+// (registra o número se preciso, força a releitura e espera até ~40 s). O
+// 17track sozinho só pergunta aos Correios de 6 em 6 a 12 em 12 horas.
+const refreshingRastreio = ref<Set<string>>(new Set())
+async function atualizarLocalizacao(c: Logistica) {
+  refreshingRastreio.value = new Set(refreshingRastreio.value).add(c.id)
+  try {
+    const r = await api<{ resultado: string; detalhe: string | null; linha: Logistica }>(
+      `/api/logistica/${c.id}/atualizar-rastreio`,
+      { method: 'POST' },
+    )
+    const i = rows.value.findIndex((x) => x.id === c.id)
+    if (i >= 0) rows.value[i] = r.linha
+    switch (r.resultado) {
+      case 'atualizado':
+        toasts.success('Localização atualizada', r.linha.localizacao || '')
+        break
+      case 'consultando':
+        toasts.info(
+          'Consultando os Correios',
+          'O 17track foi acionado agora. A linha atualiza sozinha em instantes.',
+        )
+        break
+      case 'encerrado':
+        toasts.info(
+          'Rastreio encerrado',
+          'O 17track já fechou este rastreio (entregue ou expirado); não virá leitura nova.',
+        )
+        break
+      case 'sem_quota':
+        correiosSemSaldo.value = true
+        toasts.error('Correios sem saldo no 17track', SEM_SALDO_TEXTO)
+        break
+      case 'recusado':
+        toasts.error('O 17track recusou este número', r.detalhe || 'Confira se o rastreio está certo.')
+        break
+      default:
+        toasts.error('17track fora do ar', r.detalhe || 'Tente de novo em instantes.')
+    }
+  } catch (e: any) {
+    const code = e?.data?.detail?.code || e?.message || 'erro'
+    toasts.error('Não foi possível atualizar a localização', code)
+  } finally {
+    const s = new Set(refreshingRastreio.value)
+    s.delete(c.id)
+    refreshingRastreio.value = s
+  }
+}
+
 // Puxa o status do pedido Amazon (OrderStatus + EasyShip) pra uma linha.
 async function atualizarAmazon(c: Logistica) {
   refreshingMeli.value = new Set(refreshingMeli.value).add(c.id)
@@ -987,6 +1036,7 @@ function autoRefreshTick() {
   // atualizar status, salvar campo da aba Status)? Deixa pro próximo tick.
   if (
     refreshingMeli.value.size > 0 ||
+    refreshingRastreio.value.size > 0 ||
     sendingChamado.value.size > 0 ||
     aplicandoBling.value.size > 0 ||
     aplicandoStatus.value.size > 0 ||
@@ -1709,7 +1759,7 @@ async function aplicarStatusBling(c: Logistica) {
               <th class="px-3 py-2">Rastreio</th>
               <th class="px-3 py-2">Localização</th>
               <template v-if="tab === 'amazon'">
-                <th class="px-3 py-2" title="Previsão de entrega dos Correios (objeto de postagem do Bling)">Previsão Correios</th>
+                <th class="px-3 py-2" title="Previsão de entrega da transportadora (objeto de postagem do Bling)">Previsão transportadora</th>
                 <th class="px-3 py-2" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até (Amazon)</th>
               </template>
               <th class="px-3 py-2">Divergência</th>
@@ -1822,7 +1872,19 @@ async function aplicarStatusBling(c: Logistica) {
               <td class="px-3 py-2 whitespace-nowrap">{{ c.rastreio || '—' }}</td>
               <td class="px-3 py-2 whitespace-nowrap">
                 <div class="leading-tight">
-                  <div>{{ c.localizacao || '—' }}</div>
+                  <div class="flex items-start gap-1.5">
+                    <span class="flex-1">{{ c.localizacao || '—' }}</span>
+                    <!-- Consulta os Correios agora (só rastreio …BR; pode gastar 1 crédito do 17track). -->
+                    <button
+                      v-if="canEdit && ehCorreios(c.rastreio)"
+                      class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                      title="Consultar os Correios agora pelo 17track (pode gastar 1 crédito)"
+                      :disabled="refreshingRastreio.has(c.id)"
+                      @click.stop="atualizarLocalizacao(c)"
+                    >
+                      <RefreshCw class="size-3.5" :class="refreshingRastreio.has(c.id) ? 'animate-spin' : ''" />
+                    </button>
+                  </div>
                   <!-- A segunda linha só aparece pra envio dos CORREIOS: nas
                        outras (Full, Flex, SPX…) nunca haverá leitura física, e o
                        selo viraria ruído em milhares de linhas. -->
@@ -1997,12 +2059,21 @@ async function aplicarStatusBling(c: Logistica) {
                   · Correios, lido {{ fmtDesde(c.localizacao_at) }}
                 </span>
                 <span v-else class="text-muted-foreground">· sem leitura dos Correios ainda</span>
+                <button
+                  v-if="canEdit"
+                  class="ml-1 inline-flex align-middle text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  title="Consultar os Correios agora pelo 17track (pode gastar 1 crédito)"
+                  :disabled="refreshingRastreio.has(c.id)"
+                  @click.stop="atualizarLocalizacao(c)"
+                >
+                  <RefreshCw class="size-3.5" :class="refreshingRastreio.has(c.id) ? 'animate-spin' : ''" />
+                </button>
               </template>
             </div>
             <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || '—' }}</div>
             <template v-if="tab === 'amazon'">
               <div>
-                <span class="text-muted-foreground">Previsão Correios:</span>
+                <span class="text-muted-foreground">Previsão transportadora:</span>
                 <span v-if="c.entregue_em" class="text-emerald-700 dark:text-emerald-400">entregue {{ fmtQuando(c.entregue_em) }}</span>
                 <span v-else :class="previsaoVencida(c) ? 'text-rose-700 dark:text-rose-400 font-medium' : ''">{{ fmtDia(c.previsao_correios) || '—' }}</span>
               </div>

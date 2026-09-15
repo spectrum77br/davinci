@@ -52,8 +52,8 @@ EVENTO_PREVISAO = "previsao_vencida"
 EVENTO_ENTREGUE = "entregue"
 EVENTOS: tuple[str, ...] = (EVENTO_PROBLEMA, EVENTO_PREVISAO, EVENTO_ENTREGUE)
 EVENTO_LABELS_PT: dict[str, str] = {
-    EVENTO_PROBLEMA: "Problema nos Correios",
-    EVENTO_PREVISAO: "Previsão dos Correios vencida",
+    EVENTO_PROBLEMA: "Problema na transportadora",
+    EVENTO_PREVISAO: "Previsão da transportadora vencida",
     EVENTO_ENTREGUE: "Pacote entregue",
 }
 
@@ -68,12 +68,12 @@ PLACEHOLDERS: dict[str, str] = {
     "pedido_bling": "número do pedido no Bling",
     "rastreio": "código de rastreio dos Correios",
     "servico": "serviço de envio (SEDEX, PAC…)",
-    "localizacao": "última posição informada pelos Correios",
+    "localizacao": "última posição informada pela transportadora",
     "postagem": "data de postagem",
-    "previsao_correios": "previsão de entrega dos Correios",
+    "previsao_correios": "previsão de entrega da transportadora",
     "prazo_amazon": "data máxima de entrega da Amazon",
-    "entregue_em": "data em que os Correios registraram a entrega",
-    "ocorrencia": "texto da ocorrência dos Correios",
+    "entregue_em": "data em que a transportadora registrou a entrega",
+    "ocorrencia": "texto da ocorrência da transportadora",
 }
 
 TEMPLATES_PADRAO: dict[str, dict[str, str]] = {
@@ -81,9 +81,9 @@ TEMPLATES_PADRAO: dict[str, dict[str, str]] = {
         "assunto": "Pedido {pedido_amazon}: ocorrência no transporte",
         "corpo": (
             "Olá, {cliente}.\n\n"
-            "Os Correios registraram uma ocorrência no transporte do seu pedido "
+            "A transportadora registrou uma ocorrência no transporte do seu pedido "
             "{pedido_amazon}: \"{ocorrencia}\".\n\n"
-            "Já estamos acompanhando junto aos Correios para resolver o mais rápido "
+            "Já estamos acompanhando junto à transportadora para resolver o mais rápido "
             "possível. Se precisar de algo, é só responder esta mensagem.\n\n"
             "Código de rastreio: {rastreio}\n\n"
             "Atenciosamente,\nequipe da loja"
@@ -93,20 +93,20 @@ TEMPLATES_PADRAO: dict[str, dict[str, str]] = {
         "assunto": "Pedido {pedido_amazon}: atualização sobre a entrega",
         "corpo": (
             "Olá, {cliente}.\n\n"
-            "A previsão de entrega dos Correios para o seu pedido {pedido_amazon} era "
+            "A previsão de entrega da transportadora para o seu pedido {pedido_amazon} era "
             "{previsao_correios} e o pacote ainda está a caminho. Última posição "
-            "informada pelos Correios: {localizacao}.\n\n"
-            "Estamos acompanhando junto aos Correios. A data máxima de entrega do "
+            "informada pela transportadora: {localizacao}.\n\n"
+            "Estamos acompanhando junto à transportadora. A data máxima de entrega do "
             "pedido é {prazo_amazon}. Se tiver qualquer dúvida, responda esta mensagem.\n\n"
             "Código de rastreio: {rastreio}\n\n"
             "Atenciosamente,\nequipe da loja"
         ),
     },
     EVENTO_ENTREGUE: {
-        "assunto": "Pedido {pedido_amazon}: entrega registrada pelos Correios",
+        "assunto": "Pedido {pedido_amazon}: entrega registrada pela transportadora",
         "corpo": (
             "Olá, {cliente}.\n\n"
-            "Os Correios registraram a entrega do seu pedido {pedido_amazon} em "
+            "A transportadora registrou a entrega do seu pedido {pedido_amazon} em "
             "{entregue_em}.\n\n"
             "Se você não recebeu o pacote, responda esta mensagem que vamos resolver.\n\n"
             "Obrigado pela compra!\nequipe da loja"

@@ -85,7 +85,7 @@ def test_mensagem_aviso_traz_o_essencial():
     assert "faltam 3 dia(s)" in txt
     assert "296762 (kia)" in txt and "701-3967231-6921832" in txt
     assert "AD912266053BR (SEDEX)" in txt
-    assert "Previsão Correios: 23/09" in txt and "Entregar até (Amazon): 08/10" in txt
+    assert "Previsão transportadora: 23/09" in txt and "Entregar até (Amazon): 08/10" in txt
     assert "Rosana" in txt
     assert "Acione os Correios" in txt
 
@@ -93,7 +93,7 @@ def test_mensagem_aviso_traz_o_essencial():
 def test_linha_informar_formato():
     linha = avisos.linha_informar(_linha(), HOJE)
     assert linha == (
-        "701-3967231-6921832 - kia - AD912266053BR (SEDEX) - Correios: previsão 23/09 - "
+        "701-3967231-6921832 - kia - AD912266053BR (SEDEX) - Transportadora: previsão 23/09 - "
         "Amazon até 08/10 (faltam 3 dia(s)) - última posição: Aracaju/SE — Objeto em trânsito"
     )
 
