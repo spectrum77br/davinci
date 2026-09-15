@@ -719,7 +719,12 @@ async def _persist_snapshot(
     # o pedido some da fila pra sempre (ver ESPERA_INTERVALO_HORAS).
     transitoria = snapshot.status in RETRYABLE_STATUSES and falha_transitoria(snapshot.error)
     idade_dias = (now - (financial.created_at or now)).days
-    esteira_lenta = transitoria and idade_dias < ESPERA_MAX_DIAS
+    # Passou de ESPERA_MAX_DIAS insistindo contra a mesma parede: desiste de
+    # vez. Sem esta saída o pedido velho voltaria pra fila RÁPIDA com o contador
+    # de tentativas baixo (falha de API não soma) e ficaria tentando de 30 em 30
+    # minutos pra sempre — justamente roubando a vez dos pedidos do dia.
+    espera_esgotada = transitoria and idade_dias >= ESPERA_MAX_DIAS
+    esteira_lenta = transitoria and not espera_esgotada
     # `attempts` conta FALHAS SEGUIDAS, não sincronizações. Antes subia também
     # no sucesso e nunca zerava: um pedido re-sincronizado 8 vezes (churn de
     # webhook é comum) chegava no teto sem nunca ter falhado, e morria na fila
@@ -772,8 +777,10 @@ async def _persist_snapshot(
     financial.attempts = attempts
     financial.last_error = snapshot.error
     financial.espera_lenta = esteira_lenta
-    financial.next_retry_at = _next_retry_at(
-        snapshot.status, attempts, now, esteira_lenta=esteira_lenta
+    financial.next_retry_at = (
+        None
+        if espera_esgotada
+        else _next_retry_at(snapshot.status, attempts, now, esteira_lenta=esteira_lenta)
     )
     if keep_estimate:
         financial.status = "estimated"

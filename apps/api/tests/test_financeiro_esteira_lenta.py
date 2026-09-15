@@ -424,3 +424,35 @@ async def test_tentativas_contam_falha_seguida_e_nao_sincronizacao(db, make_user
     await db.commit()
     assert linha.attempts == 1
     assert linha.next_retry_at is not None
+
+
+async def test_depois_de_45_dias_de_api_fora_o_pedido_sai_da_fila(db, make_user):
+    """Falha de API não gasta tentativa — então, sem uma saída explícita, o
+    pedido velho voltaria pra fila RÁPIDA com o contador baixo e tentaria de 30
+    em 30 minutos para sempre, roubando a vez dos pedidos do dia."""
+    await db.execute(text("DELETE FROM marketplace_order_financials"))
+    integ = await _integ(db, make_user)
+
+    linha = await _persistir(
+        db, integ, external_order_id="VELHO", bling_id=26950000001,
+        erro="Client error '403 Forbidden' for url 'x'",
+    )
+    await db.commit()
+    await db.execute(
+        text(
+            "UPDATE marketplace_order_financials SET created_at = now() - "
+            "make_interval(days => :dias) WHERE external_order_id = 'VELHO'"
+        ),
+        {"dias": ESPERA_MAX_DIAS + 3},
+    )
+    await db.commit()
+    await db.refresh(linha)
+
+    linha = await _persistir(
+        db, integ, external_order_id="VELHO", bling_id=26950000001,
+        erro="Client error '403 Forbidden' for url 'x'",
+    )
+    await db.commit()
+
+    assert linha.espera_lenta is False
+    assert linha.next_retry_at is None

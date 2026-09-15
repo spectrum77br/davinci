@@ -79,17 +79,24 @@ async def test_build_enrichment_preserva_afn_para_confirmacao_sem_mudar_assinatu
 
 
 @pytest.mark.asyncio
-async def test_build_enrichment_pedido_ausente_fica_vazio():
-    client = FakeAmazon({})
-    enr = await logistica_amazon.build_enrichment(client, "000")
-    assert enr == {
-        "meli_status": {},
-        "rastreio": None,
-        "localizacao": None,
-        "datas": {},
-        "prazo_entrega": None,
-        "entregue": False,
-    }
+async def test_amazon_sem_resposta_nao_vira_assinatura_vazia():
+    """A conta kfa ficou com o token LWA vencido em 14/09/2026 e a SP-API passou
+    a devolver 403. Antes, isso chegava aqui como `{}` e o chamador gravava a
+    assinatura VAZIA por cima: o Status Plataforma desses pedidos ficava em
+    branco no painel — dado bom destruído por uma API fora do ar. Agora a
+    leitura sem resposta levanta erro e a linha fica como estava."""
+    chamou_easyship = []
+
+    class FakeAmazonMudo(FakeAmazon):
+        async def get_easyship_tracking(self, order_id):
+            chamou_easyship.append(order_id)
+            return None
+
+    client = FakeAmazonMudo({})
+    with pytest.raises(logistica_amazon.AmazonSemRespostaError):
+        await logistica_amazon.build_enrichment(client, "000")
+    # E sai antes do EasyShip, que gastaria uma segunda chamada no mesmo 403.
+    assert chamou_easyship == []
 
 
 @pytest.mark.asyncio

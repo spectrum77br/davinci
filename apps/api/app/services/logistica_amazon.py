@@ -73,6 +73,18 @@ def _amazon_destino(status: dict) -> str | None:
     return city or uf or None
 
 
+class AmazonSemRespostaError(RuntimeError):
+    """A Amazon não devolveu o pedido (403/429/5xx/timeout).
+
+    Diferente de `AmazonEnrichError`, que é caso de negócio e conta como
+    "pulado": esta é falha de infraestrutura e precisa aparecer no contador de
+    erro do painel, senão uma conta com token vencido some do radar."""
+
+    def __init__(self, order_id: str):
+        self.order_id = order_id
+        super().__init__(f"amazon_sem_resposta pedido={order_id}")
+
+
 async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
     """Monta a assinatura da Amazon + rastreio (EasyShip, best-effort) +
     localização proxy.
@@ -91,7 +103,15 @@ async def build_enrichment(client: AmazonClient, order_id: str) -> dict:
     (`LastUpdateDate`), não cada campo — então os dois entram como estimativa e
     o DaVinci refina quando vê o valor mudar (ver logistica_datas)."""
     order_id = str(order_id)
-    st = await client.get_order_status(order_id) or {}
+    st = await client.get_order_status(order_id)
+    # Leitura SEM RESPOSTA não vira assinatura vazia. A conta kfa está com o
+    # token LWA vencido desde 14/09/2026 e a SP-API devolve 403: antes disso
+    # cair aqui como `{}`, o chamador gravava a assinatura vazia por cima e o
+    # Status Plataforma desses pedidos ficava EM BRANCO no painel — dado bom
+    # destruído por uma API fora do ar. Sai antes do EasyShip, que gastaria uma
+    # segunda chamada fadada ao mesmo 403.
+    if st is None:
+        raise AmazonSemRespostaError(order_id)
     meli: dict[str, str] = {}
     datas: dict[str, dict[str, str]] = {}
     atualizado_em = st.get("last_update_date")
