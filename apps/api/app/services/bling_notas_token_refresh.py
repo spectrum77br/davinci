@@ -12,7 +12,10 @@ então cada conta é commitada individualmente logo após o HTTP 200
 
 Contas recém-cadastradas (só `authorization_code`, sem tokens) fazem a
 troca inicial grant_type=authorization_code no mesmo tick; o code é de
-uso único e é limpo após sucesso.
+uso único e é limpo após sucesso. O código também é usado quando o
+refresh FALHA e existe um convite novo na linha — sem isso uma conta com
+refresh_token morto fica trancada para sempre, e colar um convite novo
+pela tela não surte efeito.
 """
 from __future__ import annotations
 
@@ -110,8 +113,8 @@ async def run_refresh_bling_notas_tokens(s: AsyncSession) -> dict:
     """Renova o token de cada conta `bling_notas` ativa.
 
     - `refresh_token` presente → grant_type=refresh_token
-    - só `authorization_code` (conta recém-cadastrada) → troca inicial
-      grant_type=authorization_code
+    - refresh falhou (ou não há RT) e há `authorization_code` → troca
+      grant_type=authorization_code, e o código é limpo no sucesso
     """
     rows = (
         (
@@ -142,16 +145,27 @@ async def run_refresh_bling_notas_tokens(s: AsyncSession) -> dict:
                 if not acquired:
                     skipped += 1
                     continue
+                erro_refresh: Exception | None = None
                 if rt:
-                    payload = await _post_oauth_token(
-                        basic_b64,
-                        {"grant_type": "refresh_token", "refresh_token": rt},
-                    )
-                    await _apply_token_payload(
-                        s, nota_id, payload, clear_code=False
-                    )
-                    refreshed += 1
-                else:
+                    try:
+                        payload = await _post_oauth_token(
+                            basic_b64,
+                            {"grant_type": "refresh_token", "refresh_token": rt},
+                        )
+                        await _apply_token_payload(
+                            s, nota_id, payload, clear_code=False
+                        )
+                        refreshed += 1
+                    except Exception as e:  # noqa: BLE001
+                        await s.rollback()
+                        erro_refresh = e
+                # Refresh falhou (o RT do Bling morre depois de um tempo sem
+                # uso) e existe um código de convite na linha: usa o código.
+                # Antes o `else` só rodava quando NÃO havia refresh_token, então
+                # uma conta com RT morto ficava trancada pra sempre — colar um
+                # convite novo pela tela não surtia efeito nenhum, que foi o que
+                # aconteceu com 13 das 14 contas de NF em setembro/2026.
+                if code and (erro_refresh is not None or not rt):
                     payload = await _post_oauth_token(
                         basic_b64,
                         {"grant_type": "authorization_code", "code": code},
@@ -160,6 +174,8 @@ async def run_refresh_bling_notas_tokens(s: AsyncSession) -> dict:
                         s, nota_id, payload, clear_code=True
                     )
                     exchanged += 1
+                elif erro_refresh is not None:
+                    raise erro_refresh
             logger.info("bling_nota_token_ok", nota=nome)
         except Exception as e:  # noqa: BLE001
             await s.rollback()
