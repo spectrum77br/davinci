@@ -588,48 +588,98 @@ const hist = reactive({
   erro: null as string | null,
 })
 
+// 15/09 (Eduardo: "preciso de todo o contexto da conversa"): a conversa COMPLETA
+// da página do caso (desde a abertura na plataforma) chega numa mensagem
+// `historico`. Cada fala entra na linha do tempo pela data dela, junto das notas
+// e análises do DaVinci; a mensagem solta igual a uma fala (última resposta do ML,
+// réplica já enviada) não aparece de novo.
+const normTxt = (t: string) => (t || '').replace(/\s+/g, ' ').trim().toLowerCase()
+const MESES: Record<string, number> = {
+  janeiro: 0, fevereiro: 1, 'março': 2, marco: 2, abril: 3, maio: 4, junho: 5,
+  julho: 6, agosto: 7, setembro: 8, outubro: 9, novembro: 10, dezembro: 11,
+}
+function dataDaFala(quando: string, ref: Date): number {
+  const m = /(\d{1,2}) de ([a-zç]+)(?: de (\d{4}))?/i.exec(quando || '')
+  const mes = m ? MESES[m[2].toLowerCase()] : undefined
+  if (!m || mes === undefined) return ref.getTime()
+  let ano = m[3] ? Number(m[3]) : ref.getFullYear()
+  if (!m[3] && mes > ref.getMonth()) ano -= 1
+  return new Date(ano, mes, Number(m[1])).getTime()
+}
+const RE_CAB_FALA = /^\s*(Mercado Livre|Mercado Pago|Você)\s+\d{1,2} de [a-zç]+(?: de \d{4})?\s*/i
+
 const bolhas = computed<Bolha[]>(() => {
-  const out: Bolha[] = []
+  const itens: { t: number; ord: number; b: Bolha }[] = []
   const vistas = new Set<string>()
+  const corposHist = new Set<string>()
+  const hoje = new Date()
+  let ord = 0
+  const pushFala = (m: Mensagem, f: { quem: string; quando: string; corpo: string }, i: number, ultima: boolean) => {
+    const chave = `${f.quem}|${f.quando}|${normTxt(f.corpo).slice(0, 120)}`
+    if (vistas.has(chave)) return
+    vistas.add(chave)
+    itens.push({
+      t: dataDaFala(f.quando, hoje),
+      ord: ord++,
+      b: {
+        chave: `${m.id}-${i}`,
+        lado: f.quem === 'Você' ? 'nos' : 'eles',
+        autor: f.quem === 'Você' ? 'nós' : f.quem,
+        quando: f.quando,
+        texto: f.corpo,
+        meta: m.tipo === 'historico' ? 'conversa na plataforma' : '',
+        status: ultima ? m.status : null,
+        erro: ultima ? m.erro : null,
+        anexos: ultima ? m.anexos : [],
+      },
+    })
+  }
+  // 1º o histórico completo: as falas dele viram a referência de "já mostrado"
   for (const m of hist.mensagens) {
+    if (m.tipo !== 'historico') continue
+    const falas = partirThread(m.texto)
+    falas.forEach((f, i) => {
+      corposHist.add(normTxt(f.corpo).slice(0, 100))
+      pushFala(m, f, i, false)
+    })
+  }
+  for (const m of hist.mensagens) {
+    if (m.tipo === 'historico') continue
+    const t = new Date(m.enviada_at || m.created_at).getTime()
     if (m.direcao === 'sistema') {
-      out.push({
-        chave: m.id, lado: 'sistema', autor: m.autor_nome || 'sistema',
-        quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'sistema',
-        status: null, erro: null, anexos: m.anexos,
+      itens.push({
+        t, ord: ord++,
+        b: {
+          chave: m.id, lado: 'sistema', autor: m.autor_nome || 'sistema',
+          quando: fmtDateTime(m.created_at), texto: m.texto, meta: 'sistema',
+          status: null, erro: null, anexos: m.anexos,
+        },
       })
       continue
     }
     const falas = partirThread(m.texto)
     if (!falas.length) {
-      out.push({
-        chave: m.id,
-        lado: m.direcao === 'recebida' ? 'eles' : 'nos',
-        autor: m.autor_nome || (m.direcao === 'recebida' ? 'plataforma' : 'nós'),
-        quando: fmtDateTime(m.enviada_at || m.created_at),
-        texto: m.texto, meta: rotuloTipo(m), status: m.status, erro: m.erro, anexos: m.anexos,
+      const jaNaConversa = corposHist.size > 0
+        && m.tipo !== 'analise'
+        && (m.direcao === 'recebida' || m.status === 'enviada')
+        && corposHist.has(normTxt(m.texto.replace(RE_CAB_FALA, '')).slice(0, 100))
+      if (jaNaConversa) continue
+      itens.push({
+        t, ord: ord++,
+        b: {
+          chave: m.id,
+          lado: m.direcao === 'recebida' ? 'eles' : 'nos',
+          autor: m.autor_nome || (m.direcao === 'recebida' ? 'plataforma' : 'nós'),
+          quando: fmtDateTime(m.enviada_at || m.created_at),
+          texto: m.texto, meta: rotuloTipo(m), status: m.status, erro: m.erro, anexos: m.anexos,
+        },
       })
       continue
     }
-    falas.forEach((f, i) => {
-      // O ML reenvia a thread toda a cada resposta: mostra a fala uma vez só.
-      const chave = `${f.quem}|${f.quando}|${f.corpo.slice(0, 120)}`
-      if (vistas.has(chave)) return
-      vistas.add(chave)
-      out.push({
-        chave: `${m.id}-${i}`,
-        lado: f.quem === 'Você' ? 'nos' : 'eles',
-        autor: f.quem === 'Você' ? 'nós' : 'Mercado Livre',
-        quando: f.quando,
-        texto: f.corpo,
-        meta: '',
-        status: i === falas.length - 1 ? m.status : null,
-        erro: i === falas.length - 1 ? m.erro : null,
-        anexos: i === falas.length - 1 ? m.anexos : [],
-      })
-    })
+    falas.forEach((f, i) => pushFala(m, f, i, i === falas.length - 1))
   }
-  return out
+  itens.sort((a, b) => a.t - b.t || a.ord - b.ord)
+  return itens.map(x => x.b)
 })
 
 async function openHistorico(row: ChamadoRow, focoReplica = false) {

@@ -53,6 +53,8 @@ from app.schemas.chamados import (
     AgentLeaseIn,
     AgentLeaseOut,
     AgentMensagemOut,
+    AgentHistoricoIn,
+    AgentHistoricoOut,
     AgentRecebidaIn,
     AgentRecebidaOut,
     AgentRegistrarIn,
@@ -134,7 +136,7 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
                     func.count(ChamadoMensagem.id),
                     func.max(ChamadoMensagem.created_at),
                 )
-                .where(ChamadoMensagem.chamado_id.in_(ids))
+                .where(ChamadoMensagem.chamado_id.in_(ids), ChamadoMensagem.tipo != TIPO_HISTORICO)
                 .group_by(ChamadoMensagem.chamado_id)
             )
         ).all()
@@ -425,6 +427,10 @@ async def delete_chamado(
     await session.delete(ch)
     await session.commit()
 
+
+# 15/09: conversa COMPLETA da página do caso (ver agent_historico). direcao=sistema →
+# o cérebro (/agent/analisar), a fila (/agent/lease) e os leitores (recebida) ignoram.
+TIPO_HISTORICO = "historico"
 
 # 15/09 (Eduardo, consulta 478705311): a MESMA consulta do ML fica ligada a vários
 # pedidos (uma linha da aba por pedido). O leitor grava a resposta numa linha só
@@ -820,6 +826,51 @@ async def agent_registrar(
         protocolo=ch.chamado,
     )
     return AgentRegistrarOut(chamado_id=ch.id, mensagem_id=msg.id if msg else None, criado=criado)
+
+
+@agent_router.post("/historico", response_model=AgentHistoricoOut, dependencies=_agent_dep)
+async def agent_historico(
+    body: AgentHistoricoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AgentHistoricoOut:
+    """Leitor da página do caso guarda a conversa COMPLETA (falas desde a abertura na
+    plataforma) numa mensagem só por chamado, atualizada quando muda. É contexto pra
+    quem analisa na aba — não é resposta nova: `direcao=sistema`, então o cérebro,
+    a fila de envio e a deduplicação dos leitores não enxergam."""
+    ch: Chamado | None = None
+    if body.chamado_id:
+        ch = await _get(session, body.chamado_id)
+    elif body.chamado:
+        q = select(Chamado).where(Chamado.chamado == body.chamado)
+        if body.pedido_bling:
+            q = q.where(Chamado.pedido_bling == body.pedido_bling)
+        ch = (
+            await session.execute(q.order_by(Chamado.created_at.desc()).limit(1))
+        ).scalar_one_or_none()
+    if ch is None:
+        raise HTTPException(404, detail={"code": "chamado_not_found"})
+    texto = limpar_html(body.texto.strip())
+    m = (
+        await session.execute(
+            select(ChamadoMensagem)
+            .where(ChamadoMensagem.chamado_id == ch.id, ChamadoMensagem.tipo == TIPO_HISTORICO)
+            .order_by(ChamadoMensagem.created_at)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if m is not None:
+        if (m.texto or "").strip() == texto:
+            return AgentHistoricoOut(chamado_id=ch.id, mensagem_id=m.id, alterado=False)
+        m.texto = texto
+    else:
+        m = svc.nova_mensagem(
+            ch, texto=texto, tipo=TIPO_HISTORICO, direcao="sistema",
+            autor_nome="página do caso", status="registrada",
+        )
+        session.add(m)
+    await session.commit()
+    await session.refresh(m)
+    return AgentHistoricoOut(chamado_id=ch.id, mensagem_id=m.id, alterado=True)
 
 
 @agent_router.post("/lease", response_model=AgentLeaseOut, dependencies=_agent_dep)

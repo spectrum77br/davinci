@@ -412,3 +412,24 @@ class AgentAnaliseOut(BaseModel):
     analise_id: UUID
     replica_id: UUID | None = None
     resolvido: bool
+
+
+class AgentHistoricoIn(BaseModel):
+    """15/09 (Eduardo: "preciso de todo o contexto da conversa"): conversa COMPLETA
+    da página do caso (todas as falas desde a abertura na plataforma), guardada à
+    parte como contexto pra quem analisa. Não é resposta nova — não passa pelo
+    cérebro. Identifica o chamado por id OU por (chamado[, pedido_bling])."""
+
+    chamado_id: UUID | None = None
+    pedido_bling: str | None = None
+    chamado: str | None = None
+    texto: str = Field(min_length=1)
+
+    _clean = field_validator("pedido_bling", "chamado", mode="before")(_clean_optional_text)
+
+
+class AgentHistoricoOut(BaseModel):
+    chamado_id: UUID
+    mensagem_id: UUID
+    alterado: bool
+
