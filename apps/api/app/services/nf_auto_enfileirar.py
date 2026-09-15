@@ -67,12 +67,23 @@ _PLATAFORMAS: tuple[str, ...] = ("shopee", "tiktok", "ml", "amazon")
 # ML e Amazon só entram no automático com a flag `nf_auto_ml_amazon` LIGADA
 # (usuário: "nao e para ativar mercado livre ainda... vamos testar de noite").
 # A flag é o interruptor mestre; QUANDO ligar, o horário de cada loja é quem
-# manda (ver `loja_emite_agora`).
+# manda (ver `loja_emite_agora`). `nf_auto_ml` liga SÓ o ML (Eduardo 15/09:
+# "vamos ligar o automático igual da Shopee") — Amazon continua fora.
 _PLATAFORMAS_JANELA: tuple[str, ...] = ("ml", "amazon")
 _TZ_BRT = ZoneInfo("America/Sao_Paulo")
 
 _DIA_SABADO = 5
 _DIA_DOMINGO = 6
+
+
+def _plataformas_ativas(*, ml_amazon: bool, so_ml: bool) -> tuple[str, ...]:
+    """Plataformas que o sweep varre com as flags dadas (ordem de _PLATAFORMAS)."""
+    liberadas = set(_PLATAFORMAS) - set(_PLATAFORMAS_JANELA)
+    if ml_amazon:
+        liberadas |= set(_PLATAFORMAS_JANELA)
+    if so_ml:
+        liberadas.add("ml")
+    return tuple(p for p in _PLATAFORMAS if p in liberadas)
 
 
 def _agora_brt() -> datetime:
@@ -716,11 +727,11 @@ async def _candidatos(session) -> list[str]:
     status_faturamento já registrado (tentativa única).
     """
     cutoff = datetime.now(UTC) - _CANDIDATE_WINDOW
-    # Flag mestre: com ela desligada o sweep segue só com Shopee/TikTok.
-    plataformas = (
-        _PLATAFORMAS
-        if get_settings().nf_auto_ml_amazon
-        else tuple(p for p in _PLATAFORMAS if p not in _PLATAFORMAS_JANELA)
+    # Flags: sem nenhuma, o sweep segue só com Shopee/TikTok; `nf_auto_ml`
+    # soma o ML; `nf_auto_ml_amazon` (mestre) soma ML e Amazon.
+    cfg = get_settings()
+    plataformas = _plataformas_ativas(
+        ml_amazon=bool(cfg.nf_auto_ml_amazon), so_ml=bool(getattr(cfg, "nf_auto_ml", False))
     )
     rows = (
         await session.execute(

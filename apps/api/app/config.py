@@ -245,6 +245,13 @@ class Settings(BaseSettings):
     # NF_AUTO_ML_AMAZON=true no .env.
     nf_auto_ml_amazon: bool = False
 
+    # Libera SÓ o Mercado Livre no sweep (Eduardo, 15/09: "vamos ligar o
+    # automático igual da Shopee" — só ML, Amazon continua fora). A
+    # `nf_auto_ml_amazon` acima segue valendo como interruptor dos dois. Ligar
+    # via NF_AUTO_ML=true no .env. Cada loja ML ainda precisa de faturador e
+    # do horário da tela Lojas (agência); correios é contínuo.
+    nf_auto_ml: bool = False
+
     # Threema IDs (vírgula) avisados quando o sweep move um pedido pra
     # Aguardando Cancelamento por estoque negativo. Vazio = aviso desligado
     # (o sweep segue funcionando normal). Set via

@@ -330,6 +330,57 @@ async def test_sweep_ml_amazon_entram_na_janela(
     assert summary14["candidatos"] == 0  # dedupe: já processados
 
 
+def test_plataformas_ativas_por_flag():
+    """Sem flag: só Shopee/TikTok. `nf_auto_ml`: soma o ML (Eduardo 15/09:
+    "ligar o automático igual da Shopee", Amazon fora). Mestre: os quatro."""
+    f = nf_auto_enfileirar._plataformas_ativas
+    assert f(ml_amazon=False, so_ml=False) == ("shopee", "tiktok")
+    assert f(ml_amazon=False, so_ml=True) == ("shopee", "tiktok", "ml")
+    assert f(ml_amazon=True, so_ml=False) == ("shopee", "tiktok", "ml", "amazon")
+    assert f(ml_amazon=True, so_ml=True) == ("shopee", "tiktok", "ml", "amazon")
+
+
+@pytest.mark.asyncio
+async def test_sweep_flag_so_ml_entra_ml_e_nao_amazon(
+    db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """NF_AUTO_ML ligada (e a mestre desligada): ML entra no horário da loja
+    com a checagem de estoque de sempre; Amazon continua fora."""
+    monkeypatch.setattr(get_settings(), "nf_auto_ml_amazon", False, raising=False)
+    monkeypatch.setattr(get_settings(), "nf_auto_ml", True, raising=False)
+    monkeypatch.setattr(
+        nf_auto_enfileirar, "_agora_brt", lambda: _BRT(2026, 8, 24, 10)  # segunda
+    )
+    await _seed_loja(
+        db, admin, plataforma="ml", bling_store_id="930003",
+        impressao="agencia", etiqueta_horarios="10:00, 14:00",
+    )
+    await _seed_loja(db, admin, plataforma="amazon", bling_store_id="930005")
+    await _seed_pedido(db, numero="830003", loja="930003", sku="a3")
+    await _seed_pedido(db, numero="830005", loja="930005", sku="a5")
+    await _seed_pedido(db, numero="830006", loja="930003", sku="a6")
+    db.add(Product(user_id=admin.id, sku="a3", name="A3", stock=3))
+    db.add(Product(user_id=admin.id, sku="a5", name="A5", stock=2))
+    db.add(Product(user_id=admin.id, sku="a6", name="A6", stock=-1))  # sem estoque
+    await db.commit()
+
+    summary = await run_auto_enfileirar_nf()
+    assert summary["candidatos"] == 2  # só os dois do ML
+    assert summary["enfileirados"] == 1
+    assert summary["sem_estoque"] == 1
+
+    db.expire_all()
+    cmds = (await db.execute(select(NfCommand))).scalars().all()
+    assert sorted(n for c in cmds for n in c.numeros) == ["830003"]
+    fats = {
+        f.pedido_bling: f
+        for f in (await db.execute(select(NfFaturamento))).scalars().all()
+    }
+    assert fats["830003"].status_faturamento == "processando"
+    assert fats["830006"].status_faturamento == "sem_estoque"
+    assert "830005" not in fats  # Amazon fora
+
+
 @pytest.mark.asyncio
 async def test_sweep_ml_agencia_fora_do_horario_da_loja(
     db: AsyncSession, admin: User, monkeypatch: pytest.MonkeyPatch
